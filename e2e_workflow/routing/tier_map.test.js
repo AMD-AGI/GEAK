@@ -16,24 +16,26 @@ function ok_(name, cond) { n++; const ok = !!cond; console.log(`${ok ? 'PASS' : 
 
 // --- labelPrefix: static prefix, colon kept, first space splits -------------------
 eq('labelPrefix keeps whole static colon label',
-   R.labelPrefix('file_writer:persist:workflow-return'), 'file_writer:persist:workflow-return');
+   R.labelPrefix('a:b:c'), 'a:b:c');
 eq('labelPrefix strips dynamic tag after space', R.labelPrefix('clock r1'), 'clock');
 eq('labelPrefix strips reclaim round', R.labelPrefix('storage:reclaim r3'), 'storage:reclaim');
 eq('labelPrefix empty on null', R.labelPrefix(null), '');
 
 // --- routeFor: OFF by default (byte-identical) ------------------------------------
+// NOTE: the scope label is the ACTUAL call-site literal 'persist-workflow-return'
+// (e2e_workflow.js), not a role:sub_phase string — the map keys on what the call passes.
 eq('routing disabled -> undefined for a mapped scope',
-   R.routeFor({ phase: 'Validate', label: 'file_writer:persist:workflow-return' },
+   R.routeFor({ phase: 'Validate', label: 'persist-workflow-return' },
               { enabled: false }),
    undefined);
 eq('env without GEAK_ROUTING -> disabled -> undefined',
-   R.routeFor({ phase: 'Validate', label: 'file_writer:persist:workflow-return' },
+   R.routeFor({ phase: 'Validate', label: 'persist-workflow-return' },
               { env: {} }),
    undefined);
 
 // --- routeFor: ON, only allowlisted scopes get the cheap model --------------------
 eq('enabled + mapped workflow-return -> Sonnet',
-   R.routeFor({ phase: 'Validate', label: 'file_writer:persist:workflow-return' },
+   R.routeFor({ phase: 'Validate', label: 'persist-workflow-return' },
               { enabled: true }),
    'claude-sonnet-5');
 eq('enabled + mapped record-measurements -> Sonnet',
@@ -45,7 +47,7 @@ eq('enabled + UN-mapped reasoning role -> undefined (pinned)',
               { enabled: true }),
    undefined);
 eq('enabled + right label but WRONG phase -> undefined (scope key is phase+label)',
-   R.routeFor({ phase: 'Optimize', label: 'file_writer:persist:workflow-return' },
+   R.routeFor({ phase: 'Optimize', label: 'persist-workflow-return' },
               { enabled: true }),
    undefined);
 eq('enabled + mapped label carrying dynamic suffix still matches on static prefix',
@@ -60,10 +62,10 @@ eq('strong tier -> no override (fall through to pinned)',
    undefined);
 
 // --- decideFor: returns model + validator for a mapped scope ----------------------
-const dec = R.decideFor({ phase: 'Validate', label: 'file_writer:persist:workflow-return' }, { enabled: true });
+const dec = R.decideFor({ phase: 'Validate', label: 'persist-workflow-return' }, { enabled: true });
 ok_('decideFor mapped -> model+validator', dec && dec.model === 'claude-sonnet-5' && typeof dec.validate === 'function' && dec.kind === 'verbatim_write');
 eq('decideFor un-mapped -> null', R.decideFor({ phase: 'Optimize', label: 'director:plan' }, { enabled: true }), null);
-eq('decideFor disabled -> null', R.decideFor({ phase: 'Validate', label: 'file_writer:persist:workflow-return' }, { enabled: false }), null);
+eq('decideFor disabled -> null', R.decideFor({ phase: 'Validate', label: 'persist-workflow-return' }, { enabled: false }), null);
 
 // --- checkVerbatimWrite: artifact oracle ------------------------------------------
 const PROMPT_JSON =
@@ -134,7 +136,7 @@ eq('validator: host expected + differing bytes -> fail',
 
 // --- escalate(): cheap-first, strong-fallback, all attempts recorded ---------------
 async function runEscalationTests() {
-  const decision = R.decideFor({ phase: 'Validate', label: 'file_writer:persist:workflow-return' }, { enabled: true });
+  const decision = R.decideFor({ phase: 'Validate', label: 'persist-workflow-return' }, { enabled: true });
   const EXPECTED = { path: '/tmp/eval/workflow_return.json', content: '{\n  "a": 1\n}' };
 
   // (A) cheap writes correct bytes -> accepted at cheap, ONE attempt, no escalation.
@@ -143,7 +145,7 @@ async function runEscalationTests() {
     const attempts = [];
     let disk = null;
     const run = async (p, o) => { calls.push(o.model); disk = EXPECTED.content; return { written: true, path: EXPECTED.path }; };
-    const out = await R.escalate('p', { phase: 'Validate', label: 'file_writer:persist:workflow-return' }, decision, run,
+    const out = await R.escalate('p', { phase: 'Validate', label: 'persist-workflow-return' }, decision, run,
       { readFile: () => disk, expected: EXPECTED, record: a => attempts.push(a) });
     ok_('escalate: cheap-correct accepted at cheap', out.accepted === 'cheap');
     ok_('escalate: cheap-correct made ONE call (no fallback)', calls.length === 1 && calls[0] === 'claude-sonnet-5');
@@ -161,7 +163,7 @@ async function runEscalationTests() {
       disk = (o.model === R.MODEL_STRONG) ? EXPECTED.content : '{\n  "a": 999\n}'; // cheap writes wrong, strong writes right
       return { written: true, path: EXPECTED.path };
     };
-    const out = await R.escalate('p', { phase: 'Validate', label: 'file_writer:persist:workflow-return' }, decision, run,
+    const out = await R.escalate('p', { phase: 'Validate', label: 'persist-workflow-return' }, decision, run,
       { readFile: () => disk, expected: EXPECTED, record: a => attempts.push(a) });
     ok_('escalate: cheap-wrong -> accepted at strong', out.accepted === 'strong');
     ok_('escalate: exactly 2 calls, cheap then strong', calls.length === 2 && calls[0] === 'claude-sonnet-5' && calls[1] === R.MODEL_STRONG);
@@ -173,7 +175,7 @@ async function runEscalationTests() {
     const calls = [];
     const attempts = [];
     const run = async (p, o) => { calls.push(o.model); return { written: true, path: EXPECTED.path }; }; // disk never matches (null read)
-    const out = await R.escalate('p', { phase: 'Validate', label: 'file_writer:persist:workflow-return' }, decision, run,
+    const out = await R.escalate('p', { phase: 'Validate', label: 'persist-workflow-return' }, decision, run,
       { readFile: () => null, expected: EXPECTED, record: a => attempts.push(a) });
     ok_('escalate: both fail -> strong-unverified', out.accepted === 'strong-unverified');
     ok_('escalate: capped at 2 attempts even on double-fail', calls.length === 2 && attempts.length === 2);
