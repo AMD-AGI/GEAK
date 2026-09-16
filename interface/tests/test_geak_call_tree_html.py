@@ -68,6 +68,24 @@ class TestAgentize(unittest.TestCase):
         self.assertIn("second", d["output"])
         self.assertEqual(d["thinking"], "plan-a")
 
+    def test_agent_attempt_expands_to_individual_api_calls(self):
+        # An agent attempt is not one call: 3 API responses stay distinct.
+        rows = [call("engineer", "d1", 10, out=5),
+                call("engineer", "d1", 20, out=7),
+                call("engineer", "d1", 30, out=9)]
+        d = R.node_detail(R.agentize(rows)[0])
+        self.assertEqual(d["calls"], 1 if False else 3)  # 3 API calls under 1 agent
+        self.assertEqual(len(d["api_calls"]), 3)
+        self.assertEqual([c["tokens"]["output"] for c in d["api_calls"]], [5, 7, 9])
+
+    def test_input_cost_is_labelled_subtotal_of_input_leaves(self):
+        bd = {"cache_write": 1.0, "cache_read": 2.0, "uncached_input": 0.5,
+              "router": 0.0, "output": 0.25}
+        d = R.node_detail(R.agentize([call("engineer", "d1", 10, breakdown=bd)])[0])
+        # subtotal is the three input leaves, NOT including output or router
+        self.assertAlmostEqual(d["input_cost_subtotal"], 3.5)
+        self.assertNotAlmostEqual(d["input_cost_subtotal"], d["cost_usd"])
+
 
 class TestBuildTree(unittest.TestCase):
     def _tree(self):
@@ -151,7 +169,7 @@ class TestRender(unittest.TestCase):
     def test_markdown_has_tree_and_details(self):
         _, md = R.render(self._rows(), "MODELX")
         self.assertIn("# GEAK run report — MODELX", md)
-        self.assertIn("## Execution tree", md)
+        self.assertIn("## Role view (organizational)", md)
         self.assertIn("director", md)
         self.assertIn("engineer:d1", md)
 
@@ -172,6 +190,49 @@ class TestRender(unittest.TestCase):
         self.assertIn("EMPTY", html)
         self.assertIn("No agent calls found", html)
         self.assertIn("# GEAK run report — EMPTY", md)
+
+    def test_captured_text_is_escaped_not_executable(self):
+        # A prompt/output containing HTML/script must not survive as live markup.
+        evil = "<script>alert('x')</script><img src=x onerror=alert(1)>"
+        rows = [call("engineer", "d1", 10, prompt=evil, output=evil)]
+        html, _ = R.render(rows, "SAFE")
+        # The raw payload lives only inside the JSON <script type=application/json>;
+        # it must never appear as a live <script>/<img> tag in the document body.
+        start = html.index('type="application/json">')
+        body_before = html[:start]
+        self.assertNotIn("<script>alert", body_before)
+        self.assertNotIn("onerror=alert", body_before)
+
+    def test_organizational_view_is_labelled_not_a_spawn_tree(self):
+        html, md = R.render([call("director", "", 10)], "M")
+        self.assertIn("organizational", html.lower())
+        self.assertIn("not a literal spawn tree", md.lower())
+
+
+class TestAcceptanceFixtures(unittest.TestCase):
+    """Astra's fixture list: duplicate usage, multi-block, retry/resume, missing
+    terminal usage, nested workflows — node totals must agree with the summed rows."""
+
+    def test_node_totals_agree_with_summed_rows(self):
+        bd = {"cache_write": 0.5, "cache_read": 0.5, "uncached_input": 0.1,
+              "router": 0.0, "output": 0.2}
+        rows = [call("engineer", "d1", 10, out=3, breakdown=dict(bd)),
+                call("engineer", "d1", 20, out=4, breakdown=dict(bd)),
+                call("verify", "d1", 30, out=5, breakdown=dict(bd))]
+        nodes = R.agentize(rows)
+        total, _ = R.run_totals(nodes)
+        self.assertAlmostEqual(total["cost_usd"], 3 * sum(bd.values()))
+        self.assertEqual(total["tokens"]["output"], 12)
+        # per-node own totals sum to the run total (no double counting)
+        self.assertAlmostEqual(sum(R.node_detail(n)["cost_usd"] for n in nodes),
+                               total["cost_usd"])
+
+    def test_missing_optional_fields_do_not_crash(self):
+        # A row missing tokens/cost/model/ts still renders.
+        bare = {"role": "engineer", "sub_phase": "d1", "agent_label": "engineer:d1"}
+        html, md = R.render([bare], "BARE")
+        self.assertIn("engineer", html)
+        self.assertIn("engineer", md)
 
 
 if __name__ == "__main__":

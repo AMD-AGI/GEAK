@@ -38,6 +38,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -115,6 +116,51 @@ def _write_per_call_artifacts(calls_path, out_dir):
     return n
 
 
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_manifest(root, dirs, model, n_art):
+    """A manifest so a shared export is self-describing: what the dollars mean,
+    what the prompt text is (a snippet, not the wire prompt), and a hash per file
+    so the archive is verifiable. Costs are estimated from a fixed rate card, not
+    an invoice."""
+    files = {}
+    for name, d in dirs.items():
+        for fn in sorted(os.listdir(d)):
+            fp = os.path.join(d, fn)
+            if os.path.isfile(fp):
+                files["%s/%s" % (name, fn)] = {"sha256": _sha256(fp),
+                                               "bytes": os.path.getsize(fp)}
+    manifest = {
+        "model": model,
+        "layout": list(PERSIST_SUBDIRS),
+        "per_call_artifacts": n_art,
+        "basis": {
+            "cost": "ESTIMATED from token buckets against a fixed rate card "
+                    "(DEFAULT_RATES in e2e_workflow/scripts/llm_ledger.py); not an "
+                    "SDK total and not a provider invoice. Excludes parent "
+                    "driver/resume/monitor scope not present in the transcripts.",
+            "tokens": "Merged per message.id from the transcripts by the canonical "
+                      "ledger (keeps the complete/final usage record).",
+            "prompt": "A transcript snippet of the role prompt — NOT the full wire "
+                      "prompt (system/tool definitions are not included).",
+            "billed_span": "Sum of per-call observed durations, not true API "
+                           "request wall-time.",
+            "output": "Captured assistant text; output tokens also include thinking "
+                      "and tool arguments. Redacted/unavailable fields are labelled, "
+                      "not inferred as zero.",
+        },
+        "files": files,
+    }
+    with open(os.path.join(root, "_manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+
+
 def _persist(eval_dir, calls_path, report_dir, model, persist_root):
     """Copy ledger + per-call JSON + report into the shared per-model layout."""
     root = os.path.join(persist_root, model)
@@ -134,6 +180,7 @@ def _persist(eval_dir, calls_path, report_dir, model, persist_root):
         src = os.path.join(report_dir, fn)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(dirs["report"], fn))
+    _write_manifest(root, dirs, model, n_art)
     return root, n_art
 
 

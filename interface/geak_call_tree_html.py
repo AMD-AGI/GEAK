@@ -123,6 +123,7 @@ def agentize(rows):
                 "prompt": r.get("prompt") or "",
                 "outputs": [],
                 "thinkings": [],
+                "api_calls": [],   # the individual provider responses under this agent
             }
             nodes[key] = node
             order.append(key)
@@ -146,6 +147,23 @@ def agentize(rows):
             node["outputs"].append(r["output"])
         if r.get("thinking"):
             node["thinkings"].append(r["thinking"])
+        # Keep every API response distinct — an agent attempt is not one call.
+        cw = int(_num(r.get("cache_write_5m_tokens"))) + int(_num(r.get("cache_write_1h_tokens")))
+        node["api_calls"].append({
+            "ts": r.get("ts"),
+            "model": r.get("model") or "",
+            "duration_ms": _num(r.get("duration_ms")),
+            "stop_reason": r.get("stop_reason") or "",
+            "message_id": r.get("message_id") or "",
+            "tokens": {"uncached_input": int(_num(r.get("input_tokens"))),
+                       "cache_read": int(_num(r.get("cache_read_input_tokens"))),
+                       "cache_write": cw,
+                       "output": int(_num(r.get("output_tokens")))},
+            "cost_usd": _num(r.get("cost_usd")),
+            "cost": {k: _num((r.get("cost_breakdown") or {}).get(k)) for k, _ in COST_BUCKETS},
+            "output": r.get("output") or "",
+            "thinking": r.get("thinking") or "",
+        })
     return [nodes[k] for k in order]
 
 
@@ -217,7 +235,12 @@ def node_detail(node):
         "tokens": {"uncached_input": tk["input"], "cache_read": tk["cache_read"],
                    "cache_write": cw, "output": tk["output"], "total_input": total_in},
         "cost": {k: node["cost"][k] for k, _ in COST_BUCKETS},
+        # input-token cost is the SUM of the three input leaves, shown as a
+        # subtotal — not a separate additive charge (would double-count).
+        "input_cost_subtotal": (node["cost"]["cache_write"] + node["cost"]["cache_read"]
+                                + node["cost"]["uncached_input"]),
         "cost_usd": node["cost_usd"],
+        "api_calls": node["api_calls"],
         "prompt": node["prompt"],
         "output": "\n\n".join(node["outputs"]),
         "thinking": "\n\n".join(node["thinkings"]),
@@ -266,12 +289,17 @@ def render_markdown(nodes, root, model):
     for m, pm in sorted(per_model.items(), key=lambda kv: -kv[1]["cost_usd"]):
         out.append("| %s | %s | %s |" % (m, _n(pm["calls"]), _usd(pm["cost_usd"])))
 
-    out += ["", "## Execution tree", ""]
+    out += ["", "## Role view (organizational)", "",
+            "> Nesting is by role rank + execution order, not a literal spawn tree "
+            "(transcripts carry no cross-agent spawn edge). Each node is one agent "
+            "attempt; counts/time/cost are that agent's **own** API calls, exclusive "
+            "of children. \"Billed span\" is Σ per-call observed durations, not true "
+            "request wall-time.", ""]
 
     def walk(node, depth):
         if not node.get("_root"):
             d = node_detail(node)
-            out.append("%s- **%s** — %s calls · %s · %s"
+            out.append("%s- **%s** — %s API calls · %s billed · %s (own)"
                        % ("  " * depth, d["title"], _n(d["calls"]),
                           _hms(d["llm_ms"]), _usd(d["cost_usd"])))
         for c in node.get("children", []):
@@ -374,11 +402,14 @@ _HTML_TEMPLATE = r"""<!doctype html>
   details { margin:8px 0; border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:var(--card); }
   details summary { cursor:pointer; color:var(--muted); }
   pre { white-space:pre-wrap; word-break:break-word; margin:8px 0 0; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; max-height:340px; overflow:auto; }
+  table.api { border-collapse:collapse; width:100%; font-size:12px; margin-top:6px; }
+  table.api th, table.api td { border-bottom:1px solid var(--line); padding:3px 8px; text-align:left; white-space:nowrap; }
+  table.api th { color:var(--muted); font-weight:600; }
   .empty { color:var(--muted); padding:24px; }
 </style></head>
 <body>
 <header><h1>__TITLE__</h1>
-<div class="sub">Role-execution tree — click any agent to see its cost, time, tokens, prompt and output. Cost is derived from transcript token buckets, not an SDK total.</div></header>
+<div class="sub">Role view (organizational) — nesting is by role rank + execution order, <b>not</b> a literal spawn tree; transcripts carry no cross-agent spawn edge. Each node is one <b>agent attempt</b>; click it to expand its individual <b>API calls</b> and see cost / time / tokens / prompt / output. Node totals are that agent's <b>own</b> calls (exclusive of children). Cost is derived from transcript token buckets against a fixed rate card, not an SDK total.</div></header>
 <div class="totals" id="totals"></div>
 <div class="wrap">
   <div class="tree"><ul class="t root" id="tree"></ul></div>
@@ -415,27 +446,41 @@ _HTML_TEMPLATE = r"""<!doctype html>
       return '<div class="bar"><div class="lab">'+esc(b.label)+'</div><div class="track"><div class="fill" style="width:'+w.toFixed(1)+'%"></div></div><div class="val">'+usd(v)+'</div></div>';
     }).join('');
     var tk=d.tokens;
+    var api=d.api_calls||[];
     var h=''
       +'<h2>'+esc(d.title)+'</h2>'
       +'<dl class="kv">'
       +'<dt>role</dt><dd>'+esc(d.role)+(d.sub_phase?(' · '+esc(d.sub_phase)):'')+'</dd>'
       +'<dt>phase</dt><dd>'+esc(d.phase||'—')+'</dd>'
       +'<dt>models</dt><dd>'+esc((d.models||[]).join(', ')||'—')+'</dd>'
-      +'<dt>calls</dt><dd>'+n(d.calls)+'</dd>'
-      +'<dt>LLM time</dt><dd>'+hms(d.llm_ms)+'</dd>'
-      +'<dt>total cost</dt><dd>'+usd(d.cost_usd)+'</dd>'
+      +'<dt>API calls</dt><dd>'+n(d.calls)+' (this agent, exclusive of children)</dd>'
+      +'<dt>billed span</dt><dd>'+hms(d.llm_ms)+' <span style="color:var(--muted)">(Σ per-call observed durations, not true request wall-time)</span></dd>'
+      +'<dt>own cost</dt><dd>'+usd(d.cost_usd)+'</dd>'
       +'</dl>'
-      +'<div class="bars"><div class="sub" style="color:var(--muted);font-size:12px;margin-bottom:4px">Cost by bucket</div>'+bars+'</div>'
+      +'<div class="bars"><div class="sub" style="color:var(--muted);font-size:12px;margin-bottom:4px">Cost by bucket (disjoint leaves)</div>'+bars+'</div>'
       +'<dl class="kv">'
+      +'<dt>input cost (subtotal)</dt><dd>'+usd(d.input_cost_subtotal)+' <span style="color:var(--muted)">= cache-write + cache-read + uncached; not additive</span></dd>'
       +'<dt>uncached-input tok</dt><dd>'+n(tk.uncached_input)+'</dd>'
       +'<dt>cache-read tok</dt><dd>'+n(tk.cache_read)+'</dd>'
       +'<dt>cache-write tok</dt><dd>'+n(tk.cache_write)+'</dd>'
-      +'<dt>output tok</dt><dd>'+n(tk.output)+'</dd>'
+      +'<dt>output tok</dt><dd>'+n(tk.output)+' <span style="color:var(--muted)">(incl. thinking + tool args)</span></dd>'
       +'<dt>total input tok</dt><dd>'+n(tk.total_input)+'</dd>'
       +'</dl>';
     if(d.attribution) h+='<div class="sub" style="color:var(--muted);font-size:12px">attribution: '+esc(d.attribution)+'</div>';
-    h+='<details><summary>Input prompt</summary><pre>'+esc(d.prompt||'(none captured)')+'</pre></details>';
-    h+='<details><summary>Thinking</summary><pre>'+esc(d.thinking||'(none captured)')+'</pre></details>';
+    // Per-API-call table: an agent attempt expands to its provider responses.
+    if(api.length){
+      var rows=api.map(function(c,i){
+        return '<tr><td>'+(i+1)+'</td><td>'+esc(c.model.replace('claude-',''))+'</td><td>'+hms(c.duration_ms)+'</td>'
+          +'<td style="text-align:right">'+n(c.tokens.output)+'</td>'
+          +'<td style="text-align:right">'+usd(c.cost_usd)+'</td>'
+          +'<td>'+esc(c.stop_reason||'')+'</td></tr>';
+      }).join('');
+      h+='<details open><summary>API calls ('+api.length+')</summary>'
+        +'<div style="overflow-x:auto"><table class="api"><thead><tr><th>#</th><th>model</th><th>span</th><th>out tok</th><th>cost</th><th>stop</th></tr></thead><tbody>'
+        +rows+'</tbody></table></div></details>';
+    }
+    h+='<details><summary>Input prompt <span style="color:var(--muted)">(transcript snippet — not the full wire prompt/system/tool defs)</span></summary><pre>'+esc(d.prompt||'(none captured)')+'</pre></details>';
+    h+='<details><summary>Thinking <span style="color:var(--muted)">(when captured; may be redacted/unavailable)</span></summary><pre>'+esc(d.thinking||'(none captured)')+'</pre></details>';
     h+='<details><summary>Output (response)</summary><pre>'+esc(d.output||'(none captured)')+'</pre></details>';
     return h;
   }
