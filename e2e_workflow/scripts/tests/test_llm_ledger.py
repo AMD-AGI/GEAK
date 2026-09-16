@@ -677,14 +677,23 @@ class TestOutputs(LedgerTestBase):
 # runner, so this is the one property of that edit a machine can check here --
 # and an unbalanced paren is exactly what wrapping a call in a helper risks.
 # --------------------------------------------------------------------------- #
+# A '/' starts a regex only where a value cannot already stand -- i.e. right after an
+# operator, an opener, a separator, or nothing at all. After a name, ')' , ']' or a
+# literal it is division. `None` covers the start of file / start of a fresh expression.
+_REGEX_OK = set("([{,;=:!?&|+-*%^~<>") | {None}
+
+
 def js_balanced(src):
-    i, n, stack, tmpl, line = 0, len(src), [], [], 1
+    i, n, stack, tmpl, line, last_sig = 0, len(src), [], [], 1, None
     while i < n:
         c = src[i]
         if c == "\n":
             line += 1
             i += 1
             continue
+        if c in " \t\r":
+            i += 1
+            continue  # whitespace never changes last_sig (comments don't either)
         if c == "/" and i + 1 < n and not tmpl:
             if src[i + 1] == "/":
                 j = src.find("\n", i)
@@ -697,6 +706,28 @@ def js_balanced(src):
                 line += src.count("\n", i, j)
                 i = j + 2
                 continue
+            if last_sig in _REGEX_OK:
+                # Regex literal: consume to the closing unescaped '/', treating
+                # '/' inside a [...] char-class as literal.
+                i += 1
+                in_class = False
+                while i < n:
+                    ch = src[i]
+                    if ch == "\\":
+                        i += 2
+                        continue
+                    if ch == "\n":
+                        break  # unterminated regex -- leave it; not our failure mode
+                    if ch == "[":
+                        in_class = True
+                    elif ch == "]":
+                        in_class = False
+                    elif ch == "/" and not in_class:
+                        i += 1
+                        break
+                    i += 1
+                last_sig = "/"  # a regex is a value; a following '/' is division
+                continue
         if c in "'\"":
             q, i = c, i + 1
             while i < n and src[i] != q:
@@ -706,6 +737,7 @@ def js_balanced(src):
                     break
                 i += 1
             i += 1
+            last_sig = c
             continue
         if c == "`":
             tmpl.append(0)
@@ -726,6 +758,7 @@ def js_balanced(src):
                 elif ch == "`" and tmpl[-1] > 0:
                     tmpl.append(0)
                 i += 1
+            last_sig = "`"
             continue
         if c in "([{":
             stack.append((c, line))
@@ -733,6 +766,7 @@ def js_balanced(src):
             if not stack or stack[-1][0] != {")": "(", "]": "[", "}": "{"}[c]:
                 return False, "unbalanced '%s' at line %d" % (c, line)
             stack.pop()
+        last_sig = c
         i += 1
     if stack:
         return False, "unclosed '%s' opened at line %d" % (stack[-1][0], stack[-1][1])
