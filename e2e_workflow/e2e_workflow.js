@@ -44,21 +44,27 @@ const A = _rawArgs || {};
 const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
 const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'e2e_workflow', events: [], nested: [] };
 const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
-function tlAgent(prompt, o, attempt, ok) {
-  if (!LLM_STATS) return;
+// Called AT DISPATCH (before the await), so LLM_TL.events is in dispatch order, not completion
+// order. Two same-key agents that finish out of order no longer swap identities under the parser's
+// positional join. Returns the event so the caller flips `ok` once the attempt resolves (null when
+// off). Even an attempt that hangs or throws is recorded, because the record predates the await.
+function tlAgent(prompt, o, attempt) {
+  if (!LLM_STATS) return null;
   // Identity comes from the PROMPT, not opts.label: labels are free-form display strings. The
   // prompt's opening line always carries `You are the <role>. PHASE=<sub_phase>.`, the same line the
   // transcript records, so the ledger folds this call under its own agent instead of its predecessor.
   const m = TL_ROLE_RE.exec(String(prompt || ''));
-  LLM_TL.events.push({
+  const e = {
     seq: LLM_TL.events.length,
     phase: (o && o.phase) || '',
     label: (o && o.label) || 'agent',
     role: m ? m[1] : '',
     sub_phase: m ? m[2] : '',
     attempt: attempt,
-    ok: !!ok,
-  });
+    ok: false,
+  };
+  LLM_TL.events.push(e);
+  return e;
 }
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
@@ -100,7 +106,15 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 // fails if a `scriptPath: KERNEL_WF_SCRIPT` call is added that does not route through this.
 // GEAK-ABLATION-ARMS-v2: ablLaneArgs() forwards the arm to the nested kernel lane.
 // Without it B6 was staged in the parent and silently never activated in the child.
-const laneArgs = (wfArgs) => ({ use_learned_kb: LANE_USE_LEARNED_KB, ...ablLaneArgs(), ...wfArgs });
+// llm_stats is forwarded ONLY when the parent was given one explicitly, so an unset parent keeps the
+// original argument shape (child defaults on) and a parent opt-out (`llm_stats:"false"`) reaches the
+// lane instead of silently reverting to the lane's default. wfArgs spreads last so a per-call override wins.
+const laneArgs = (wfArgs) => ({
+  use_learned_kb: LANE_USE_LEARNED_KB,
+  ...ablLaneArgs(),
+  ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
+  ...wfArgs,
+});
 
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
@@ -1330,15 +1344,15 @@ async function safeAgent(prompt, opts, tries = 3) {
       const p2 = (ABL('B5') && i > 0 && typeof prompt === 'string')
         ? prompt + `\n\n## PREVIOUS ATTEMPT FAILED — do not repeat it\nA cheaper-effort attempt at this exact task failed with:\n\`\`\`\n${String(lastErr).slice(0, 2000)}\n\`\`\`\nDiagnose that failure before acting.\n`
         : prompt;
+      const ev = tlAgent(prompt, opts, i + 1);   // record AT DISPATCH; ok=false until it resolves
       const r = await agentBounded(p2, opts, i);
       if (r) {
         if (r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
-        tlAgent(prompt, opts, i + 1, true);
+        if (ev) ev.ok = true;
         return r;
       }
-      tlAgent(prompt, opts, i + 1, false);
       lastErr = 'null/empty result';
-    } catch (e) { tlAgent(prompt, opts, i + 1, false); lastErr = String(e); }
+    } catch (e) { lastErr = String(e); }
     log(`agent[${(opts && opts.label) || '?'}] attempt ${i + 1}/${tries} failed: ${String(lastErr).slice(0, 160)}`);
   }
   log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null after ${tries} tries (${String(lastErr).slice(0, 120)})`);
@@ -5177,7 +5191,10 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
 // best-effort: accounting must never fail a run that produced a real speedup.
 if (EVAL_DIR && LLM_STATS) {
   try {
-    const tlJson = JSON.stringify(LLM_TL);
+    // `instance` = this run's eval dir: a stable per-run identity so the parser can dedupe a
+    // nested timeline reached twice (parent-merge + glob) WITHOUT collapsing two distinct lanes
+    // that happen to share a shape. Unique per run, and available with no Date/random.
+    const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
     const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
     await safeAgent(
       `You are the file_writer. PHASE=persist_llm_stats.\n` +

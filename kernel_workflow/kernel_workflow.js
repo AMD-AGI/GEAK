@@ -162,25 +162,30 @@ const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_ret
 const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
 const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_workflow', events: [], nested: [] };
 const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
-function tlAgent(prompt, o, attempt, ok) {
-  if (!LLM_STATS) return;
+// Called AT DISPATCH (before the await) so LLM_TL.events is in dispatch order, not completion order.
+// Returns the event so the caller flips `ok` once the attempt resolves (null when off).
+function tlAgent(prompt, o, attempt) {
+  if (!LLM_STATS) return null;
   const m = TL_ROLE_RE.exec(String(prompt || ''));
-  LLM_TL.events.push({
+  const e = {
     seq: LLM_TL.events.length,
     phase: (o && o.phase) || '',
     label: (o && o.label) || 'agent',
     role: m ? m[1] : '',
     sub_phase: m ? m[2] : '',
     attempt: attempt,
-    ok: !!ok,
-  });
+    ok: false,
+  };
+  LLM_TL.events.push(e);
+  return e;
 }
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
+    const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
       if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
-        const r0 = await agent(p, o); tlAgent(p, o, attempt, !!r0); return r0;
+        const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
       const guard = new Promise((resolve) => {
@@ -193,10 +198,9 @@ async function agentT(p, o) {
         agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
-      tlAgent(p, o, attempt, !!r);
+      if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
-      tlAgent(p, o, attempt, false);
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
         log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} error (${msg}) — retrying.`);
@@ -415,11 +419,17 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // this one does not), so anything omitted here silently reverts to the lane's default — a
       // caller asking for a KB-off bakeoff would have got eight KB-on lanes and no error.
       use_learned_kb: A.use_learned_kb != null ? String(A.use_learned_kb) : 'true',
+      // This explicit arg object drops nothing load-bearing that the parent set: forward llm_stats
+      // when supplied so a parent opt-out reaches each lane (unset stays absent -> lane default on).
+      ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',
       warm_start: WARM_START, kb_artifacts_dir: KB_ARTIFACTS_DIR, ...KB_PLANE_ARGS,
     });
+    // Absorb this lane's own agent timeline so the dispatcher's returned timeline accounts for every
+    // lane's attempts (kernel lanes never persist their own trace file, so this is the only path).
+    if (LLM_STATS && r && r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
     const speedup = primSpeedup(r);
     log(`lane ${l.key}:${l.mode} -> ${speedup ? speedup.toFixed(2) + 'x' : 'no result'} (${r ? r.validation_status : 'null'})`);
     return { lane: l, r, speedup };
@@ -549,7 +559,9 @@ if (winner && winner.speedup > 1.0) {
 
 return {
   mode: MODE,
-  llm_timeline: LLM_STATS ? LLM_TL : undefined,
+  // `instance` = this run's eval dir: a stable identity so the parser dedupes a timeline reached
+  // twice without collapsing two distinct same-shape lanes.
+  llm_timeline: LLM_STATS ? { ...LLM_TL, instance: EVAL_DIR } : undefined,
   task_dir: oracle.task_dir,
   eval_dir: EVAL_DIR,
   baseline_ms: bake.baseline_ms != null ? bake.baseline_ms : (bake.best_known_ms != null ? bake.best_known_ms : null),

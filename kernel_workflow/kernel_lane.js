@@ -657,27 +657,32 @@ function ablDrainPrelude() {
 const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
 const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_lane', events: [], nested: [] };
 const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
-function tlAgent(prompt, o, attempt, ok) {
-  if (!LLM_STATS) return;
+// Called AT DISPATCH (before the await) so LLM_TL.events is in dispatch order, not completion order.
+// Returns the event so the caller flips `ok` once the attempt resolves (null when off).
+function tlAgent(prompt, o, attempt) {
+  if (!LLM_STATS) return null;
   const m = TL_ROLE_RE.exec(String(prompt || ''));
-  LLM_TL.events.push({
+  const e = {
     seq: LLM_TL.events.length,
     phase: (o && o.phase) || '',
     label: (o && o.label) || 'agent',
     role: m ? m[1] : '',
     sub_phase: m ? m[2] : '',
     attempt: attempt,
-    ok: !!ok,
-  });
+    ok: false,
+  };
+  LLM_TL.events.push(e);
+  return e;
 }
 
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
   if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
+    const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
       if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
-        const r0 = await agent(p, o); tlAgent(p, o, attempt, !!r0); return r0;
+        const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
       const guard = new Promise((resolve) => {
@@ -691,10 +696,9 @@ async function agentT(p, o) {
         agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
-      tlAgent(p, o, attempt, !!r);
+      if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
-      tlAgent(p, o, attempt, false);
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
         log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);
@@ -1811,7 +1815,9 @@ const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
 
 return {
   mode: MODE,
-  llm_timeline: LLM_STATS ? LLM_TL : undefined,
+  // `instance` = this lane's eval dir: a stable identity so the parser dedupes a timeline reached
+  // twice (parent-merge + glob) without collapsing two distinct lanes that share a shape.
+  llm_timeline: LLM_STATS ? { ...LLM_TL, instance: EVAL_DIR } : undefined,
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
