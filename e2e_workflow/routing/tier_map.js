@@ -132,9 +132,14 @@ const VALIDATORS = { verbatim_write: checkVerbatimWrite };
 
 // ---- Escalation core --------------------------------------------------------------------
 // Cheap attempt -> deterministic gate -> ONE strong fallback that BYPASSES the cheap map. Fixed
-// cap of 2 attempts (1 cheap + 1 strong). EVERY attempt recorded via deps.record. `run(prompt,
-// opts)->Promise<result>` is injected. deps.expected (optional host-held {path,content}) is
-// passed to the validator as authoritative. Returns { result, accepted, attempts }.
+// cap of 2 attempts (1 cheap + 1 strong; a throw on the cheap attempt propagates and the strong
+// one is never made, so 2 is a ceiling never exceeded). EVERY physical dispatch is recorded via
+// deps.record -- INCLUDING one that throws: a rejected run() would otherwise leave no attempt row
+// and the cascade would under-report the calls it made. On a throw we record the exception CLASS
+// and a correlation id only (never the message: it can carry prompt text / credentials), then
+// re-throw so the caller's transport-retry policy is preserved. `run(prompt, opts)->Promise<result>`
+// is injected. deps.expected (optional host-held {path,content}) is passed to the validator as
+// authoritative. Returns { result, accepted, attempts }.
 async function escalate(prompt, opts, decision, run, deps) {
   deps = deps || {};
   const readFile = deps.readFile || null;
@@ -144,10 +149,25 @@ async function escalate(prompt, opts, decision, run, deps) {
   const lbl = (opts && opts.label) || 'agent';
   const ph = (opts && opts.phase) || '';
   const attempts = [];
+  let seq = 0;
+
+  // One physical dispatch. Records + re-throws on rejection so a thrown attempt is never silent.
+  const dispatch = async (p, o, attempt, extra) => {
+    const cid = `${ph || 'wf'}:${lbl}:a${attempt}#${++seq}`;
+    try {
+      return await run(p, o);
+    } catch (e) {
+      const cls = (e && e.name) || (e && e.constructor && e.constructor.name) || 'Error';
+      const a = Object.assign({ label: lbl, phase: ph, model: o.model, attempt: attempt, ok: false,
+        verified: false, reason: `dispatch threw (${cls})`, cid: cid, threw: true }, extra || {});
+      attempts.push(a); record(a);
+      throw e;
+    }
+  };
 
   const cheapOpts = Object.assign({}, opts, { model: decision.model });
   log(`  [route] ${lbl} @${ph} -> ${decision.model} (cheap attempt 1/2)`);
-  const r1 = await run(prompt, cheapOpts);
+  const r1 = await dispatch(prompt, cheapOpts, 1);
   const v1 = decision.validate ? decision.validate(prompt, r1, readFile, expected)
                                : { ok: !!r1, verified: false, reason: r1 ? 'nonempty (no validator)' : 'empty' };
   const a1 = { label: lbl, phase: ph, model: decision.model, attempt: 1, ok: !!v1.ok, verified: !!v1.verified, reason: v1.reason };
@@ -156,7 +176,7 @@ async function escalate(prompt, opts, decision, run, deps) {
 
   const strongOpts = Object.assign({}, opts, { model: MODEL_STRONG });
   log(`  [route] ${lbl} cheap failed gate (${v1.reason}) — escalating to ${MODEL_STRONG} (attempt 2/2, bypassing cheap map)`);
-  const r2 = await run(prompt, strongOpts);
+  const r2 = await dispatch(prompt, strongOpts, 2, { escalated: true });
   const v2 = decision.validate ? decision.validate(prompt, r2, readFile, expected)
                                : { ok: !!r2, verified: false, reason: r2 ? 'nonempty (no validator)' : 'empty' };
   const a2 = { label: lbl, phase: ph, model: MODEL_STRONG, attempt: 2, ok: !!v2.ok, verified: !!v2.verified, reason: v2.reason, escalated: true };
