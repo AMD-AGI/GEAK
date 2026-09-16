@@ -903,6 +903,37 @@ class TestDispatchOrderAmbiguity(LedgerTestBase):
         matched = [a for a in agent_rows if a["api_calls"] > 0]
         self.assertTrue(all(a["attribution"] == "timeline" for a in matched),
                         [a["attribution"] for a in matched])
+        # Both attempts have transcripts -> the retry outcomes are carried faithfully.
+        by_attempt = {a["attempt"]: a for a in matched}
+        self.assertIs(by_attempt[1]["ok"], False)
+        self.assertIs(by_attempt[2]["ok"], True)
+
+    def test_incomplete_retry_mapping_is_inferred_not_a_guessed_outcome(self):
+        """Regression (Astra Finding 1): timeline records TWO attempts (1 failed, 2 ok) but
+        only the SECOND produced a transcript. The lone conversation is slotted positionally
+        onto attempt-1 -- an outcome it did not have. The join must ADMIT the guess
+        (`inferred`) and must NOT report the recorded attempt-1 `ok=False` (nor a hardcoded
+        `ok=True`) as if the mapping were known: the outcome is unknown, so `ok` is None.
+        The retry itself stays visible via the timeline-only leftover row."""
+        self.put_timeline(timeline([
+            ev("Profile", "profiler:baseline", attempt=1, ok=False),
+            ev("Profile", "profiler:baseline", attempt=2, ok=True),
+        ]))
+        # Only ONE transcript (cf. test_retries_consume_successive_timeline_slots which has two).
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("profiler", "baseline", self.eval_dir), 0),
+            asst_rec(1, "m1", read=100, out=1),
+        ])
+        _, agent_rows, agg, _ = self.build()
+        matched = [a for a in agent_rows if a["api_calls"] > 0]
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(matched[0]["attribution"], "inferred")
+        self.assertIsNone(matched[0]["ok"])            # not the guessed attempt's outcome, not True
+        # The other recorded attempt is still surfaced, with its own outcome intact.
+        silent = [a for a in agent_rows if a["api_calls"] == 0]
+        self.assertEqual(len(silent), 1)
+        self.assertIn("no transcript", silent[0]["attribution"])
+        self.assertEqual(agg["total"]["agent_attempts_failed"], 1)
 
 
 class TestInstanceDedup(LedgerTestBase):
