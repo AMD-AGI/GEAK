@@ -152,6 +152,39 @@ def _text_of(message):
     return ""
 
 
+def _content_parts(message):
+    """Split an assistant message into (response_text, thinking_text).
+
+    An assistant turn is a list of typed blocks: ``text`` blocks are the reply
+    the user (or the next tool) sees, ``thinking``/``redacted_thinking`` blocks
+    are the model's reasoning. The ledger records only the input prompt today;
+    capturing both output halves here is what lets a report show what a call
+    produced, not just what it was asked. ``tool_use`` blocks are left out —
+    their inputs are captured as tools elsewhere and can be large/binary.
+    """
+    if not isinstance(message, dict):
+        return "", ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content, ""
+    resp, think = [], []
+    if isinstance(content, list):
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            t = b.get("type")
+            if t == "text" and isinstance(b.get("text"), str):
+                resp.append(b["text"])
+            elif t in ("thinking", "redacted_thinking"):
+                # The reasoning text lives under "thinking"; redacted blocks have
+                # no readable text but are still worth marking as present.
+                if isinstance(b.get("thinking"), str):
+                    think.append(b["thinking"])
+                elif t == "redacted_thinking":
+                    think.append("[redacted]")
+    return "\n".join(resp), "\n".join(think)
+
+
 def read_jsonl(path):
     """Yield objects from a JSONL file, skipping anything unparseable.
 
@@ -310,6 +343,7 @@ def calls_of(group, source):
         usage = msg.get("usage") or {}
         key = msg.get("id") or rec.get("requestId") or rec.get("uuid")
         cache = usage.get("cache_creation") or {}
+        resp_text, think_text = _content_parts(msg)
         row = {
             "ts_ms": ts,
             "duration_ms": (ts - prev_ts) if (ts is not None and prev_ts is not None and ts >= prev_ts) else None,
@@ -324,6 +358,8 @@ def calls_of(group, source):
             "cache_write_5m_tokens": int(cache.get("ephemeral_5m_input_tokens") or 0),
             "cache_write_1h_tokens": int(cache.get("ephemeral_1h_input_tokens") or 0),
             "output_tokens": int(usage.get("output_tokens") or 0),
+            "output": resp_text,
+            "thinking": think_text,
             "role": group["role"],
             "sub_phase": group["subphase"],
             "source": source,
@@ -358,6 +394,32 @@ def cost_of(row, rates):
             + row["cache_write_5m_tokens"] * r["cache_write_5m"]
             + row["cache_write_1h_tokens"] * r["cache_write_1h"]
             + row["output_tokens"] * r["output"]) / 1e6
+
+
+def cost_breakdown(row, rates):
+    """The same ``cost_of`` total, split into the buckets a report shows.
+
+    Keys mirror the question "where did this call's dollars go?":
+      - ``uncached_input``  fresh context billed at the full input rate. Anthropic
+                            already nets cache out of ``input_tokens``, so this IS
+                            the "uncached-context" line — no further subtraction.
+      - ``cache_read``      re-sent text served from cache (the tenth-price bucket).
+      - ``cache_write``     text stored this call (5-minute + 1-hour writes summed).
+      - ``output``          generated text (thinking + response bill the same).
+      - ``router``          routing-time LLM cost. 0.0 for the static deterministic
+                            router (no routing-time call); a labelled hook for a
+                            future dynamic router that would spend to choose a model.
+    The five values sum to ``cost_of(row, rates)`` by construction; a test pins that.
+    """
+    r = rates.get(row.get("model") or "", rates["_default"])
+    return {
+        "uncached_input": row["input_tokens"] * r["input"] / 1e6,
+        "cache_read": row["cache_read_input_tokens"] * r["cache_read"] / 1e6,
+        "cache_write": (row["cache_write_5m_tokens"] * r["cache_write_5m"]
+                        + row["cache_write_1h_tokens"] * r["cache_write_1h"]) / 1e6,
+        "output": row["output_tokens"] * r["output"] / 1e6,
+        "router": 0.0,
+    }
 
 
 def list_cost_of(row, rates):
@@ -799,8 +861,10 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
             c["agent_label"] = g["label"]
             c["attribution"] = g["attribution"]
             c["transcript"] = os.path.basename(g["transcript"])
+            c["prompt"] = g.get("prompt", "")
             c["total_input_tokens"] = total_input(c)
             c["cost_usd"] = round(cost_of(c, rates), 6)
+            c["cost_breakdown"] = {k: round(v, 6) for k, v in cost_breakdown(c, rates).items()}
             c["ts"] = _ms_to_iso(c["ts_ms"])
             rows.append(c)
     rows.sort(key=lambda r: (r["ts_ms"] is None, r["ts_ms"] or 0))
