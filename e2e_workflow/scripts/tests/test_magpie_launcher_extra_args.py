@@ -35,6 +35,7 @@ FAKE_SCRIPT = """#!/usr/bin/env bash
 {{
   printf 'EXTRA_VLLM_ARGS=%s\\n'      "${{EXTRA_VLLM_ARGS-<unset>}}"
   printf 'EXTRA_SGLANG_ARGS=%s\\n'    "${{EXTRA_SGLANG_ARGS-<unset>}}"
+  printf 'EXTRA_ATOM_ARGS=%s\\n'      "${{EXTRA_ATOM_ARGS-<unset>}}"
   printf 'ROCR_VISIBLE_DEVICES=%s\\n' "${{ROCR_VISIBLE_DEVICES-<unset>}}"
   printf 'HIP_VISIBLE_DEVICES=%s\\n'  "${{HIP_VISIBLE_DEVICES-<unset>}}"
   printf 'CUDA_VISIBLE_DEVICES=%s\\n' "${{CUDA_VISIBLE_DEVICES-<unset>}}"
@@ -92,7 +93,8 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
         env = dict(os.environ)
         for k in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
                   "CUDA_VISIBLE_DEVICES", "RECIPE_ENV_FILE",
-                  "EXTRA_VLLM_ARGS", "EXTRA_SGLANG_ARGS", "EXTRA_ENV",
+                  "EXTRA_ATOM_ARGS", "EXTRA_VLLM_ARGS", "EXTRA_SGLANG_ARGS",
+                  "EXTRA_ENV",
                   "PYTHONPATH", "OVERLAY_PYTHONPATH"):
             env.pop(k, None)
         env.update(
@@ -155,6 +157,20 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
         cap, _ = self._launch(backend="sglang", extra_server_args="--geak-y",
                               recipe=recipe)
         self.assertEqual(cap["EXTRA_SGLANG_ARGS"], "--mem-fraction-static 0.8 --geak-y")
+
+    def test_atom_backend_uses_extra_atom_args(self):
+        recipe = self._recipe_file([
+            ("EXTRA_ATOM_ARGS", "--kv_cache_dtype fp8 --block-size 16"),
+        ])
+        cap, _ = self._launch(
+            backend="atom",
+            extra_server_args="--max-num-seqs 8",
+            recipe=recipe,
+        )
+        self.assertEqual(
+            cap["EXTRA_ATOM_ARGS"],
+            "--kv_cache_dtype fp8 --block-size 16 --max-num-seqs 8",
+        )
 
     # ---- GPU-pinning shapes ------------------------------------------------------
 

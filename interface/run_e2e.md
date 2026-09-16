@@ -426,12 +426,12 @@ The workflow must measure on the **same口径** as the caller's official baselin
 
 ### Bench-CLIENT adapter (closes the last口径 residual)
 
-The serving stack is always launched by the **backend** adapter
-(`adapters/sglang.sh` / `vllm.sh`). The **client** that drives the timed bench is
+The serving stack is launched through the selected backend adapter
+(`adapters/sglang.sh`, `vllm.sh`, or `atom.sh`). The **client** that drives the timed bench is
 selected independently by `BENCH_CLIENT`:
 
 * `native` (default standalone) — each backend's built-in bench
-  (`sglang.bench_serving` / vLLM). Small cross-harness差异 may remain.
+  (SGLang, vLLM, or ATOM). Small cross-harness差异 may remain.
 * `inferencex` — `adapters/clients/inferencex.sh` redefines `adapter_bench` to
   call **Hyperloom/Magpie's own** `InferenceX/utils/bench_serving/benchmark_serving.py`
   (`--backend vllm --dataset-name random --request-rate inf --ignore-eos
@@ -471,9 +471,9 @@ that degrade explicitly and is the escape hatch.
 
 `MAX_MODEL_LEN` is forwarded to the script on the `magpie` path only, because
 the script's own default (4096) has nothing to do with the run and the
-orchestrator overrode it by env when it measured the reference. gpu-mem-util is
-deliberately *not* forwarded: no handoff carries `mem_fraction`, and the
-script's 0.95 default is the recipe being matched. The script writes the server
+orchestrator overrode it by env when it measured the reference. GEAK does not
+invent a separate gpu-mem-util value on this path; the selected SGLang/vLLM/ATOM
+recipe script and its recorded `EXTRA_<BACKEND>_ARGS` remain authoritative. The script writes the server
 to `$LOG` and its own trace to `magpie_launch.log` next to it, because the
 script's redirect truncates `$LOG` and would otherwise destroy anything the
 adapter wrote there.
