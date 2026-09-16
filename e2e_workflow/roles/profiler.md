@@ -188,7 +188,23 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
 3. Run the standardized parser:
    ```bash
    PDIR="$EVAL_DIR/profile/round_${ROUND}/profile"
-   TRACE=$(ls -t "$PDIR"/*.json.gz "$PDIR"/*.json 2>/dev/null | head -1)
+   if [ "$BACKEND" = atom ]; then
+     # ATOM writes one recursive trace per TP rank. Its adapter emits this manifest only after every
+     # expected rank has finalized a gzip; a missing/incomplete manifest is a failed profile, never a
+     # rank-0-only fallback.
+     python3 - "$PDIR/atom_profile_manifest.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+assert d.get("status") == "complete", d
+assert len(d.get("completed_ranks", [])) >= int(d.get("expected_ranks", 1)), d
+PY
+     TRACE=$(find "$PDIR/rank_0" "$PDIR/dp0_tp0" -type f -name '*.trace.json.gz' \
+       -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+   else
+     TRACE=$(ls -t "$PDIR"/*.json.gz "$PDIR"/*.json 2>/dev/null | head -1)
+   fi
+   [ -n "$TRACE" ] || { echo "No complete torch trace found under $PDIR" >&2; exit 1; }
    # CAPTURE_SIZES: the server's cudagraph_capture_sizes (grep server.log "cudagraph_capture_sizes");
    # CHUNK: max_num_batched_tokens (grep server.log "Chunked prefill is enabled with ...").
    python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$TRACE" \

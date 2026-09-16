@@ -169,7 +169,41 @@ def _load_model_quant(model_config_path):
     return {"method": method or "fp8", "weight_dtype": wdt, "block_size": block, "fmt": fmt}
 
 
-def parse_regime(server_args, model_config_path="", server_script="", backend=""):
+def _read_server_log_state(server_log):
+    """Return compile/cudagraph facts printed by the live server, when available.
+
+    ATOM prints a multiline ``CompilationConfig`` whose level/use_inductor and
+    use_cudagraph fields are more authoritative than launch-flag inference.  Keep
+    this parser deliberately narrow: an unrelated occurrence of "compile" in a
+    package path must not change the regime.
+    """
+    if not server_log or not os.path.isfile(server_log):
+        return {}
+    try:
+        with open(server_log, errors="replace") as fh:
+            text = fh.read()
+    except Exception:
+        return {}
+
+    blocks = re.findall(r"CompilationConfig\s*\((.*?)\)", text, flags=re.I | re.S)
+    if not blocks:
+        return {}
+    block = blocks[-1]
+    state = {}
+    level = re.search(r"\blevel\s*=\s*(\d+)", block, flags=re.I)
+    inductor = re.search(r"\buse_inductor\s*=\s*(true|false)", block, flags=re.I)
+    cudagraph = re.search(r"\buse_cudagraph\s*=\s*(true|false)", block, flags=re.I)
+    if level or inductor:
+        state["compile"] = (
+            (int(level.group(1)) > 0 if level else False)
+            or (inductor.group(1).lower() == "true" if inductor else False)
+        )
+    if cudagraph:
+        state["cuda_graph"] = cudagraph.group(1).lower() == "true"
+    return state
+
+
+def parse_regime(server_args, model_config_path="", server_script="", backend="", server_log=""):
     # Launch-script flags fill the base; the live --server-args string overrides on overlap.
     flags = {**_read_script_flags(server_script), **_tokenize(server_args)}
     notes = []
@@ -227,19 +261,28 @@ def parse_regime(server_args, model_config_path="", server_script="", backend=""
                      "replay), so eager IS the faithful baseline for this regime — NOT a strawman.")
 
     # ---- compile / fusion state (the baseline-relevant axis) ----
-    # Explicit opt-in flags always win. Otherwise vLLM V1 compiles the backbone BY DEFAULT (opt-OUT via
-    # --enforce-eager), so an ABSENT --enable-torch-compile does NOT mean eager — the old flag-only check
-    # mis-reported eager and made GEMM harnesses time a naked-eager baseline. Infer compile-on for vLLM
-    # unless enforce_eager; sglang has no default torch.compile. The extractor still CONFIRMS from the
-    # server log and the log wins (kernel_extractor.md). ----
+    # Explicit opt-in flags always win. Otherwise vLLM V1 and ATOM compile by default (ATOM's default
+    # ``--level 3`` enables inductor); both opt out through enforce-eager, and ATOM also accepts
+    # ``--level 0``. An absent compile flag therefore does NOT imply eager for either backend. ----
     explicit_compile = bool(flags.get("enable-torch-compile") or flags.get("enable_torch_compile")
                             or flags.get("torch-compile"))
     is_vllm = backend_resolved == "vllm"
-    compile_on = explicit_compile or (is_vllm and not enforce_eager)
+    is_atom = backend_resolved == "atom"
+    atom_level = flags.get("level", 3)
+    try:
+        atom_level = int(atom_level)
+    except (TypeError, ValueError):
+        atom_level = 3
+        notes.append("ATOM --level was unreadable -> using ATOM's default compile level 3; server log wins.")
+    compile_on = explicit_compile or ((is_vllm or (is_atom and atom_level > 0)) and not enforce_eager)
     compile_state = "torch_compile" if compile_on else "eager"
     if compile_on and not explicit_compile:
-        notes.append("vLLM V1 compiles the backbone by default (no --enforce-eager) -> compile=torch_compile; "
-                     "confirm via server log compilation_config (log wins).")
+        if is_atom:
+            notes.append(f"ATOM compile level {atom_level} (default 3) with no --enforce-eager "
+                         "-> compile=torch_compile; live CompilationConfig in the server log wins.")
+        else:
+            notes.append("vLLM V1 compiles the backbone by default (no --enforce-eager) -> "
+                         "compile=torch_compile; confirm via server log compilation_config (log wins).")
     # Consistency invariant: on vLLM, enforce_eager=false CANNOT coexist with compile=eager (no
     # --enforce-eager => VLLM_COMPILE is on). Repair defensively so a backend mis-detect can never
     # re-introduce the (enforce_eager=false, compile=eager) contradiction that timed a naked-eager baseline.
@@ -250,6 +293,21 @@ def parse_regime(server_args, model_config_path="", server_script="", backend=""
 
     # ---- cuda graph: on unless the baseline is forced eager (same flags as enforce_eager) ----
     cuda_graph = not enforce_eager
+
+    # A live CompilationConfig is the strongest source. This catches backend-version defaults and
+    # wrapper-injected settings that are absent from the launch script handed to the extractor.
+    log_state = _read_server_log_state(server_log) if is_atom else {}
+    if "compile" in log_state:
+        logged = "torch_compile" if log_state["compile"] else "eager"
+        if logged != compile_state:
+            notes.append(f"server log CompilationConfig overrides inferred compile={compile_state} "
+                         f"-> {logged}.")
+        compile_state = logged
+    if "cuda_graph" in log_state:
+        if log_state["cuda_graph"] != cuda_graph:
+            notes.append(f"server log CompilationConfig overrides inferred cuda_graph={cuda_graph} "
+                         f"-> {log_state['cuda_graph']}.")
+        cuda_graph = log_state["cuda_graph"]
 
     attn = flags.get("attention-backend") or flags.get("attention_backend") or ""
     if attn is True:
@@ -284,9 +342,12 @@ def main():
                     help="serving backend (vllm|sglang|atom); the strongest signal for the compile "
                          "default. When omitted it is auto-detected from the serve command / framework "
                          "tag / launch flags (robust to a recipe path that lacks the backend name).")
+    ap.add_argument("--server-log", default="",
+                    help="optional live server log; its CompilationConfig overrides flag/default inference")
     ap.add_argument("--out", default="", help="write regime json here (also printed to stdout)")
     args = ap.parse_args()
-    regime = parse_regime(args.server_args, args.model_config, args.server_script, args.backend)
+    regime = parse_regime(args.server_args, args.model_config, args.server_script, args.backend,
+                          args.server_log)
     js = json.dumps(regime, indent=2)
     if args.out:
         with open(args.out, "w") as fh:

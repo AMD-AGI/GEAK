@@ -245,6 +245,34 @@ class TestParseRegimeFromSources(_TmpFileMixin, unittest.TestCase):
         self.assertFalse(got["enforce_eager"])
         self.assertIn("compiles the backbone by default", got["notes"])
 
+    def test_atom_compiles_by_default_at_level_three(self):
+        got = pr.parse_regime("", backend="atom")
+        self.assertEqual(got["compile"], "torch_compile")
+        self.assertTrue(got["cuda_graph"])
+        self.assertIn("ATOM compile level 3", got["notes"])
+
+    def test_atom_level_zero_is_eager(self):
+        got = pr.parse_regime("--level 0", backend="atom")
+        self.assertEqual(got["compile"], "eager")
+
+    def test_atom_live_compilation_config_overrides_flags(self):
+        log = self._write(
+            "Engine kwargs: compilation_config=CompilationConfig("
+            "level=3, use_cudagraph=True, use_inductor=True)\n"
+        )
+        got = pr.parse_regime("--level 0", backend="atom", server_log=log)
+        self.assertEqual(got["compile"], "torch_compile")
+        self.assertTrue(got["cuda_graph"])
+        self.assertIn("server log CompilationConfig overrides", got["notes"])
+
+    def test_atom_live_eager_config_overrides_default(self):
+        log = self._write(
+            "CompilationConfig(level=0, use_cudagraph=False, use_inductor=False)\n"
+        )
+        got = pr.parse_regime("", backend="atom", server_log=log)
+        self.assertEqual(got["compile"], "eager")
+        self.assertFalse(got["cuda_graph"])
+
     def test_enforce_eager_makes_eager_the_faithful_baseline(self):
         got = pr.parse_regime("--enforce-eager", backend="vllm")
         self.assertTrue(got["enforce_eager"])

@@ -39,6 +39,9 @@
 #                                      /start_profile has no step count, so start->sleep->stop). If
 #                                      undefined, the PROFILE step falls back to a (less faithful)
 #                                      saturated PROF=1 bench.
+#   adapter_prepare_measurement     -> OPTIONAL. Called after untimed warmup and before RESULT_JSONL
+#                                      is cleared/timed. Return nonzero when backend JIT/compile state
+#                                      cannot be proven stable; timed measurements then fail closed.
 #
 # KEY OUTPUTS (written to $OUT_DIR):
 #   server_start.json      {status, reason, phase_hint, wait_sec, ceiling_sec, ...} — ALWAYS
@@ -751,6 +754,16 @@ else
       echo "!!! Full outer warmup failed; isolated replica is invalid." >&2
       exit 2
     fi
+  fi
+fi
+
+# ATOM may become HTTP-healthy before request-triggered JIT has settled. Verify its backend-specific
+# ready state after warmup without changing the measurement lifecycle of other serving backends.
+if [ "$BACKEND" = "atom" ] && declare -F adapter_prepare_measurement >/dev/null; then
+  echo ">>> Verifying ATOM is measurement-ready after warmup ..."
+  if ! adapter_prepare_measurement; then
+    echo "!!! Backend did not reach a stable measurement-ready state; refusing to time it." >&2
+    exit 2
   fi
 fi
 # the warmup line should not pollute the timed results

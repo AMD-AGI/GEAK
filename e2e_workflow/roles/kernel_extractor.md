@@ -94,6 +94,7 @@ python3 "$SKILL_DIR/scripts/parse_regime.py" \
   --server-args "$CURRENT_FLAGS" --model-config "$MODEL_PATH/config.json" \
   --server-script "$EVAL_DIR/launch_baseline.sh" \
   --backend "$BACKEND" \
+  --server-log "<current benchmark server.log>" \
   --out "<task_dir>/regime.json"
 # then merge regime.json into meta.json under the "regime" key
 # (--server-script carries flags EXTRA_SERVER_ARGS omits, notably the chunked-prefill budget that
@@ -682,6 +683,7 @@ python3 "$SKILL_DIR/scripts/parse_regime.py" \
   --server-args "$CURRENT_FLAGS" --model-config "$MODEL_PATH/config.json" \
   --server-script "$EVAL_DIR/launch_baseline.sh" \
   --backend "$BACKEND" \
+  --server-log "<current benchmark server.log>" \
   --out "<task_dir>/regime.json"
 # then merge regime.json into meta.json under the "regime" key
 # (--server-script carries flags EXTRA_SERVER_ARGS omits, notably the chunked-prefill budget that

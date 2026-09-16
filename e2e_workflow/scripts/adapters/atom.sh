@@ -127,6 +127,63 @@ adapter_launch() {
 
 adapter_health() { curl -sf "${BASE_URL}/health" >/dev/null 2>&1; }
 
+# ATOM can answer /health before request-triggered Triton/aiter JIT work has quiesced. The dispatcher
+# calls this after its untimed warmup. Isolated replicas intentionally skip that outer warmup, so give
+# ATOM one explicit untimed request round here; the native client's own warmups are not a readiness
+# proof because they happen inside the later timed invocation.
+adapter_prepare_measurement() {
+  local stable_sec="${ATOM_READY_STABLE_SEC:-10}"
+  local timeout_sec="${ATOM_READY_TIMEOUT_SEC:-600}"
+  local poll_sec="${ATOM_READY_POLL_SEC:-2}"
+  local start now last_change last_sig sig
+
+  _atom_jit_signature() {
+    # Ignore access logs produced by our own /health polling. Only activity that can change the
+    # generated kernel/graph state resets the stability window.
+    grep -E '\[aiter\] (import|compile)|Using cache directory:.*torch_compile|compiled graph|Capturing bs=|cudagraph capture|warmup_model|Model warmup done' \
+      "$LOG" 2>/dev/null | cksum | awk '{print $1 ":" $2}'
+  }
+
+  adapter_health || { echo "!!! atom readiness: /health failed after warmup" >&2; return 1; }
+  if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ]; then
+    echo ">>> atom readiness: running an untimed request warmup for the isolated replica ..."
+    adapter_bench "${ATOM_READY_WARMUP_PROMPTS:-$CONC}" "$CONC" 0 >/dev/null 2>&1 || {
+      echo "!!! atom readiness: request warmup failed" >&2
+      return 1
+    }
+  fi
+
+  # A positive engine-ready marker proves /health belongs to a fully initialized ATOM engine. Then
+  # require compile/JIT log activity to remain unchanged for a bounded interval so asynchronous
+  # imports/captures triggered by warmup cannot overlap the first timed request.
+  if ! grep -Eq 'All( [0-9]+)? EngineCores.*initialized and ready|Server started successfully and ready' "$LOG" 2>/dev/null; then
+    echo "!!! atom readiness: no fully-initialized engine marker in $LOG" >&2
+    return 1
+  fi
+  start=$(date +%s); last_change=$start
+  last_sig=$(_atom_jit_signature)
+  while :; do
+    sleep "$poll_sec"
+    adapter_health || { echo "!!! atom readiness: /health failed while waiting for JIT" >&2; return 1; }
+    now=$(date +%s)
+    sig=$(_atom_jit_signature)
+    if [ -z "$sig" ]; then
+      echo "!!! atom readiness: cannot stat $LOG" >&2
+      return 1
+    fi
+    if [ "$sig" != "$last_sig" ]; then
+      last_sig="$sig"; last_change=$now
+    elif [ $((now - last_change)) -ge "$stable_sec" ]; then
+      echo ">>> atom readiness: engine healthy and compile/JIT activity stable for ${stable_sec}s."
+      return 0
+    fi
+    if [ $((now - start)) -ge "$timeout_sec" ]; then
+      echo "!!! atom readiness: compile/JIT activity did not stabilize within ${timeout_sec}s" >&2
+      return 1
+    fi
+  done
+}
+
 # adapter_bench NUM_PROMPTS MAX_CONC PROFILE_FLAG
 # ATOM ships a vllm-derived client at atom.benchmarks.benchmark_serving with the same flag surface
 # (verified via --help), including --num-warmups and --random-range-ratio. This is the NATIVE bench;
@@ -171,28 +228,38 @@ adapter_bench() {
 #
 # TWO ATOM-SPECIFIC HAZARDS, both observed on this box:
 #
-#  1. FINISHED vs IN-PROGRESS. ATOM's _on_trace_ready writes `<name>.pt.trace.json.tmp` and only
-#     renames it to `.pt.trace.json.gz` once the gzip completes. A glob like '*.trace.json*' matches
-#     the .tmp too, so counting it declares victory while the trace is still being written — teardown
-#     then kills the server mid-gzip and the trace is LOST. Only finalized .gz files count here.
-#  2. SIZE. ATOM_PROFILER_MORE=1 turns on with_stack + profile_memory as well as record_shapes, so the
-#     per-second trace cost is far higher than vllm/sglang: a 23s window produced a 5.5 GiB trace for
-#     rank_0 ALONE (~44 GiB across TP=8), and gzipping that outlives any sane timeout. The dispatcher
-#     sizes PROFILE_WINDOW_SEC for a cheap profiler, so clamp it here; a few seconds of steady-state
-#     decode is already thousands of steps at conc=4. Raise ATOM_PROFILE_WINDOW_MAX_SEC to override.
+#  1. FINISHED vs IN-PROGRESS. ATOM may leave `.tmp`, uncompressed `.trace.json`, or a still-growing
+#     `.trace.json.gz` while asynchronous finalization runs. A filename alone is not completion; gzip
+#     integrity must pass before a rank counts.
+#  2. ALL RANKS. /stop_profile fans out to TP workers. One early rank is not a usable distributed trace;
+#     wait for every expected rank before returning and allowing teardown.
 adapter_profile_window() {
-  local before after wsec
-  # Only FINALIZED traces count (see hazard 1).
-  _atom_count_traces() { find "$PROFILE_DIR" -name '*.trace.json.gz' 2>/dev/null | wc -l; }
-  _atom_count_partial() { find "$PROFILE_DIR" -name '*.trace.json.tmp' 2>/dev/null | wc -l; }
-  before=$(_atom_count_traces)
+  local wsec marker expected manifest
+  marker="$PROFILE_DIR/.atom_profile_started.$$"
+  manifest="$PROFILE_DIR/atom_profile_manifest.json"
+  : > "$marker"
 
-  wsec="${PROFILE_WINDOW_SEC:-20}"
+  # ATOM_PROFILER_MORE enables record_shapes together with expensive stack/memory capture. Keep the
+  # backend-specific size guard: a long TP trace can consume tens of GiB and take longer to finalize
+  # than the benchmark itself. Operators may raise the cap after checking local disk/RAM headroom.
+  wsec="${ATOM_PROFILE_WINDOW_SEC:-${PROFILE_WINDOW_SEC:-20}}"
   local wmax="${ATOM_PROFILE_WINDOW_MAX_SEC:-6}"
   if [ "$wsec" -gt "$wmax" ] 2>/dev/null; then
-    echo ">>> atom: clamping PROFILE_WINDOW_SEC ${wsec}->${wmax}s (ATOM_PROFILER_MORE traces are ~240 MiB/s/rank)"
+    echo ">>> atom: clamping profile window ${wsec}->${wmax}s (set ATOM_PROFILE_WINDOW_MAX_SEC to override)"
     wsec="$wmax"
   fi
+  expected="${ATOM_PROFILE_EXPECTED_RANKS:-${TP:-1}}"
+  case "$expected" in ''|*[!0-9]*|0) echo "!!! atom: invalid expected profiler rank count '$expected'" >&2; return 1 ;; esac
+
+  _atom_write_complete_ranks() {
+    : > "$marker.ranks"
+    while IFS= read -r -d '' _trace; do
+      if gzip -t "$_trace" >/dev/null 2>&1; then
+        dirname "$_trace"
+      fi
+    done < <(find "$PROFILE_DIR" -type f -newer "$marker" -name '*.trace.json.gz' -print0 2>/dev/null) \
+      | sed -nE 's#^.*/(rank_[0-9]+|dp[0-9]+_tp[0-9]+)$#\1#p' | sort -u > "$marker.ranks"
+  }
 
   if ! curl -sf -X POST "${BASE_URL}/start_profile" >/dev/null 2>&1; then
     echo "!!! /start_profile request failed (ATOM torch profiler not enabled at launch? needs --torch-profiler-dir)" >&2
@@ -203,18 +270,31 @@ adapter_profile_window() {
   curl -s --max-time "${PROFILE_WINDOW_TIMEOUT:-180}" -X POST "${BASE_URL}/stop_profile" \
     >/dev/null 2>&1 || echo "!!! /stop_profile request errored (checking for a trace anyway)" >&2
 
-  # Wait for a NEW finalized .gz. While a .tmp is still growing the gzip is alive, so keep extending
-  # patience rather than timing out on a trace that IS being written -- returning early here is what
-  # lets teardown destroy it.
+  # Wait for one NEW finalized gzip per expected rank. Returning after rank 0 lets teardown truncate
+  # the other TP workers, which leaves an unusable and biased profile.
   local hard=$(( $(date +%s) + ${ATOM_PROFILE_FINALIZE_TIMEOUT:-900} ))
   local quiet=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
-  local last_sz=-1 sz
+  local last_sz=-1 sz count
   while [ "$(date +%s)" -lt "$hard" ]; do
-    after=$(_atom_count_traces)
-    [ "$after" -gt "$before" ] && return 0
-    if [ "$(_atom_count_partial)" -gt 0 ]; then
-      # a .tmp exists: extend the quiet deadline as long as it keeps growing
-      sz=$(find "$PROFILE_DIR" -name '*.trace.json.tmp' -printf '%s\n' 2>/dev/null | sort -rn | head -1)
+    _atom_write_complete_ranks
+    count=$(wc -l < "$marker.ranks")
+    if [ "$count" -ge "$expected" ]; then
+      python3 - "$marker.ranks" "$manifest" "$expected" "$wsec" <<'PY'
+import json, sys
+ranks_path, out_path, expected, window = sys.argv[1:]
+ranks = [line.strip() for line in open(ranks_path) if line.strip()]
+with open(out_path, "w") as fh:
+    json.dump({"status": "complete", "expected_ranks": int(expected),
+               "completed_ranks": ranks, "window_sec": float(window)}, fh, indent=2)
+PY
+      rm -f "$marker" "$marker.ranks"
+      return 0
+    fi
+    if find "$PROFILE_DIR" -type f -newer "$marker" \( -name '*.trace.json.tmp' -o -name '*.trace.json' -o -name '*.trace.json.gz' \) \
+         -print -quit 2>/dev/null | grep -q .; then
+      # Any trace artifact exists: extend the quiet deadline while the largest one keeps growing.
+      sz=$(find "$PROFILE_DIR" -type f -newer "$marker" \( -name '*.trace.json.tmp' -o -name '*.trace.json' -o -name '*.trace.json.gz' \) \
+        -printf '%s\n' 2>/dev/null | sort -rn | head -1)
       if [ "${sz:-0}" != "$last_sz" ]; then
         last_sz="${sz:-0}"; quiet=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
       fi
@@ -222,10 +302,24 @@ adapter_profile_window() {
     [ "$(date +%s)" -ge "$quiet" ] && break
     sleep 5
   done
-  after=$(_atom_count_traces)
-  if [ "$after" -le "$before" ] && [ "$(_atom_count_partial)" -gt 0 ]; then
-    echo "!!! atom: profiler left only an unfinished .tmp trace (gzip did not complete in time)." >&2
-    echo "    Lower PROFILE_WINDOW_SEC / ATOM_PROFILE_WINDOW_MAX_SEC, or set ATOM_PROFILER_MORE=0 to drop with_stack." >&2
-  fi
-  [ "$after" -gt "$before" ]
+  _atom_write_complete_ranks
+  count=$(wc -l < "$marker.ranks")
+  echo "!!! atom: profiler finalized ${count}/${expected} expected rank traces; refusing partial profile." >&2
+  find "$PROFILE_DIR" -type f -newer "$marker" \( -name '*.trace.json.tmp' -o -name '*.trace.json' \) \
+    -print 2>/dev/null | sed 's/^/    unfinished: /' >&2
+  python3 - "$marker.ranks" "$manifest" "$expected" "$wsec" <<'PY'
+import json, sys
+ranks_path, out_path, expected, window = sys.argv[1:]
+ranks = [line.strip() for line in open(ranks_path) if line.strip()]
+with open(out_path, "w") as fh:
+    json.dump({"status": "incomplete", "expected_ranks": int(expected),
+               "completed_ranks": ranks, "window_sec": float(window)}, fh, indent=2)
+PY
+  # Preserve partial evidence without leaving a normal *.trace.json.gz that the Profiler could pick
+  # up as if the distributed capture had succeeded.
+  while IFS= read -r -d '' _trace; do
+    mv "$_trace" "${_trace}.PARTIAL_missing_ranks" 2>/dev/null || true
+  done < <(find "$PROFILE_DIR" -type f -newer "$marker" -name '*.trace.json.gz' -print0 2>/dev/null)
+  rm -f "$marker" "$marker.ranks"
+  return 1
 }
