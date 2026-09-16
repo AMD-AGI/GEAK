@@ -374,6 +374,10 @@
         ]
       ],
       "_vgpr_occupancy_basis": "compiler-derived (same sweep, measured on gfx1151 itself).",
+      "lds_per_wgp_kib": 128,
+      "lds_banks": 32,
+      "dynamic_vgpr": false,
+      "mfma_valu_coexec": false,
       "isa_types": [
         "WMMA"
       ],
