@@ -29,10 +29,12 @@ the class of mistake that wrapping a call in a helper introduces.
 
 Stdlib only, no GPU, no network -- everything is driven from synthetic transcripts in tempdirs.
 """
+import glob as _glob
 import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -681,6 +683,33 @@ class TestOutputs(LedgerTestBase):
 # operator, an opener, a separator, or nothing at all. After a name, ')' , ']' or a
 # literal it is division. `None` covers the start of file / start of a fresh expression.
 _REGEX_OK = set("([{,;=:!?&|+-*%^~<>") | {None}
+# ...and after a keyword that expects a value, e.g. `return /re/`, the char before '/' is a
+# letter yet it is still a regex. This lookbehind is why the fallback handles the common
+# keyword-context case; it is NOT a general parser (node --check is the authority above).
+_VALUE_KEYWORDS = frozenset((
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+    "do", "else", "yield", "await", "case", "throw"))
+
+
+def _prev_word(src, i):
+    """The identifier immediately before position i, skipping whitespace. '' if none."""
+    j = i - 1
+    while j >= 0 and src[j] in " \t\r\n":
+        j -= 1
+    end = j + 1
+    while j >= 0 and (src[j].isalnum() or src[j] in "_$"):
+        j -= 1
+    return src[j + 1:end]
+
+
+def _find_node():
+    """A node runtime if one is discoverable -- the syntax AUTHORITY. None on a bare CI box."""
+    n = shutil.which("node")
+    if n:
+        return n
+    cands = sorted(_glob.glob(os.path.expanduser(
+        "~/.cursor-server/bin/linux-x64/*/node")), reverse=True)
+    return cands[0] if cands else None
 
 
 def js_balanced(src):
@@ -706,7 +735,7 @@ def js_balanced(src):
                 line += src.count("\n", i, j)
                 i = j + 2
                 continue
-            if last_sig in _REGEX_OK:
+            if last_sig in _REGEX_OK or _prev_word(src, i) in _VALUE_KEYWORDS:
                 # Regex literal: consume to the closing unescaped '/', treating
                 # '/' inside a [...] char-class as literal.
                 i += 1
@@ -779,13 +808,20 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
              "kernel_workflow/kernel_workflow.js")
 
     def test_brackets_balance(self):
+        node = _find_node()
         for rel in self.FILES:
             path = os.path.join(GEAK_ROOT, rel)
             if not os.path.isfile(path):
                 self.skipTest("%s not present" % rel)
-            with open(path, encoding="utf-8") as fh:
-                ok, why = js_balanced(fh.read())
-            self.assertTrue(ok, "%s: %s" % (rel, why))
+            if node:
+                # node --check is the syntax AUTHORITY wherever a runtime exists; js_balanced
+                # is only the no-node fallback (its known limits are pinned separately below).
+                r = subprocess.run([node, "--check", path], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, "%s: %s" % (rel, r.stderr.strip()))
+            else:
+                with open(path, encoding="utf-8") as fh:
+                    ok, why = js_balanced(fh.read())
+                self.assertTrue(ok, "%s: %s" % (rel, why))
 
     def test_each_workflow_records_a_timeline(self):
         """Every LLM chokepoint must feed the ledger, or a whole layer goes uncounted."""
@@ -806,6 +842,130 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
             src = fh.read()
         self.assertIn("A.llm_stats", src)
         self.assertIn("if (EVAL_DIR && LLM_STATS)", src)
+
+    def test_opt_out_is_forwarded_to_child_lanes(self):
+        """A parent llm_stats opt-out must reach the nested lane, or the "workflow-wide"
+        opt-out silently reverts to the child's default -- the funnels drop it otherwise."""
+        for rel in ("e2e_workflow/e2e_workflow.js", "kernel_workflow/kernel_workflow.js"):
+            path = os.path.join(GEAK_ROOT, rel)
+            if not os.path.isfile(path):
+                self.skipTest("%s not present" % rel)
+            with open(path, encoding="utf-8") as fh:
+                self.assertIn("llm_stats: String(A.llm_stats)", fh.read(), rel)
+
+
+class TestDispatchOrderAmbiguity(LedgerTestBase):
+    """The timeline is recorded at DISPATCH; the parser fills its slots positionally by
+    first-response order. When two same-key agents run concurrently (both attempt 1) the
+    ledger cannot know which transcript is which, so the join is a guess -- it must SAY so
+    (attribution="inferred") while still assigning the phase, not silently claim "timeline"."""
+
+    def _two_concurrent_bakeoffs(self):
+        # Same key op_benchmarker:bakeoff, two distinct attempt-1 dispatches -> ambiguous.
+        self.put_timeline(timeline([
+            ev("HeadKernel", "op_benchmarker:bakeoff:h0"),
+            ev("Milestone", "op_benchmarker:bakeoff:k1"),
+        ]))
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("op_benchmarker", "bakeoff", self.eval_dir), 0),
+            asst_rec(1, "m1", read=100, out=1),
+        ])
+        write_transcript(os.path.join(self.tdir, "b.jsonl"), [
+            user_rec(prompt_for("op_benchmarker", "bakeoff", self.eval_dir), 100),
+            asst_rec(101, "m2", read=200, out=2),
+        ])
+
+    def test_concurrent_same_key_agents_are_marked_inferred_not_timeline(self):
+        self._two_concurrent_bakeoffs()
+        rows, agent_rows, _, meta = self.build()
+        # The run still HAS a timeline, so the run-level mode stays "timeline"...
+        self.assertEqual(meta["attribution_mode"], "timeline")
+        # ...but each individually-guessed row admits the guess.
+        matched = [a for a in agent_rows if a["api_calls"] > 0]
+        self.assertEqual(len(matched), 2)
+        self.assertTrue(all(a["attribution"] == "inferred" for a in matched),
+                        [a["attribution"] for a in matched])
+        # The phase is still assigned -- honesty about the join must not cost attribution.
+        self.assertEqual({r["phase"] for r in rows}, {"HeadKernel", "Milestone"})
+
+    def test_a_lone_dispatch_with_retries_stays_timeline(self):
+        """attempts 1,2,3 of ONE agent are sequential, not concurrent -- unambiguous."""
+        self.put_timeline(timeline([
+            ev("Profile", "profiler:baseline", attempt=1, ok=False),
+            ev("Profile", "profiler:baseline", attempt=2, ok=True),
+        ]))
+        for i, name in enumerate(("a.jsonl", "b.jsonl")):
+            write_transcript(os.path.join(self.tdir, name), [
+                user_rec(prompt_for("profiler", "baseline", self.eval_dir), i * 100),
+                asst_rec(i * 100 + 1, "m%d" % i, read=100, out=1),
+            ])
+        _, agent_rows, _, _ = self.build()
+        matched = [a for a in agent_rows if a["api_calls"] > 0]
+        self.assertTrue(all(a["attribution"] == "timeline" for a in matched),
+                        [a["attribution"] for a in matched])
+
+
+class TestInstanceDedup(LedgerTestBase):
+    """A nested kernel timeline is reachable both through the parent's merge and through the
+    glob. Dedup must key on the run's stable `instance`, so the SAME run reached twice is
+    collapsed while two DISTINCT lanes that share a shape are BOTH kept."""
+
+    @staticmethod
+    def _kernel_node(instance):
+        node = timeline([ev("Setup", "director:setup")], workflow="kernel_lane")
+        node["instance"] = instance
+        return node
+
+    def _count_kernel_setup(self):
+        loaded = L.load_timeline(self.eval_dir)
+        return sum(1 for e in loaded["events"]
+                   if e["workflow"] == "kernel_lane" and e["key"] == "director:setup")
+
+    def test_same_instance_reached_twice_is_deduped(self):
+        node = self._kernel_node("run-1")
+        # Parent merge carries it, AND it shows up standalone through the glob.
+        self.put_timeline(timeline([ev("Setup", "director:setup")], nested=[node]))
+        self.put_timeline(node, sub=os.path.join(self.eval_dir, "kernels", "_exp", "team_k1"))
+        self.assertEqual(self._count_kernel_setup(), 1)
+
+    def test_two_distinct_lanes_of_the_same_shape_are_both_kept(self):
+        self.put_timeline(timeline([ev("Setup", "director:setup")],
+                                    nested=[self._kernel_node("run-1"),
+                                            self._kernel_node("run-2")]))
+        self.assertEqual(self._count_kernel_setup(), 2)
+
+    def test_legacy_timelines_without_instance_fall_back_to_shape(self):
+        """Pre-`instance` timelines keep the old shape fingerprint -- two identical shapes
+        collapse. Documented so the fallback is a known limitation, not a silent regression."""
+        legacy = timeline([ev("Setup", "director:setup")], workflow="kernel_lane")  # no instance
+        self.put_timeline(timeline([ev("Setup", "director:setup")],
+                                    nested=[legacy, dict(legacy)]))
+        self.assertEqual(self._count_kernel_setup(), 1)
+
+
+class TestJsBalancedFallbackLimits(unittest.TestCase):
+    """js_balanced is a heuristic used ONLY when no node runtime is discoverable (node --check
+    is the authority in test_brackets_balance). These fixtures pin what the fallback does and does
+    NOT handle, so nobody mistakes it for a sound JavaScript parser and over-trusts a green run."""
+
+    def test_regex_after_a_value_keyword_is_not_read_as_division(self):
+        # Without the keyword lookbehind the char before '/' is a letter, so the '/' would be
+        # read as division and the char-class brackets would look unbalanced. `return`/`typeof`
+        # are the cases that actually occur in the instrumented files' neighbourhood.
+        self.assertEqual(js_balanced("function f() { return /[)]/; }")[0], True)
+        self.assertEqual(js_balanced("const r = typeof x === 'string' ? /[(]/ : 0;")[0], True)
+
+    def test_division_after_a_value_is_still_division(self):
+        self.assertEqual(js_balanced("const a = (b) / c / d;")[0], True)
+        self.assertEqual(js_balanced("const q = arr[0] / 2;")[0], True)
+
+    def test_documented_limitation_not_every_context_is_covered(self):
+        # The lookbehind covers keyword contexts, not the full grammar. A regex opened right
+        # after a `)` that closes an `if (...)` head is valid JS but the heuristic reads the
+        # '/' as division -- documented here so the limit is explicit, not a surprise. node
+        # --check (preferred whenever available) does not share this blind spot.
+        ok, _ = js_balanced("if (x) /[)]/.test(y);")
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":

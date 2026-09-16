@@ -526,9 +526,15 @@ def load_timeline(eval_dir):
             wf = node.get("workflow") or "?"
             evs = node.get("events") or []
             # A nested timeline can be reachable both through the parent's merge
-            # and through the glob; identify a node by its shape and skip repeats.
-            fp = (wf, len(evs), evs[0].get("label") if evs else None,
-                  evs[-1].get("label") if evs else None)
+            # and through the glob. Identify a node by its stable `instance` (the
+            # producing run's eval dir) so the SAME run is deduped while two DISTINCT
+            # runs that happen to share a shape are BOTH kept -- a bare shape
+            # fingerprint silently dropped the second of two same-shape lanes. Older
+            # timelines predate `instance`; fall back to the shape fingerprint for them.
+            inst = node.get("instance")
+            fp = ("i", wf, inst) if inst else (
+                "s", wf, len(evs), evs[0].get("label") if evs else None,
+                evs[-1].get("label") if evs else None)
             if fp in seen_nodes:
                 continue
             seen_nodes.add(fp)
@@ -605,6 +611,17 @@ def attribute(groups, timeline):
         by_wf[e["workflow"]][key].append(e)
         labels_of_wf[e["workflow"]].add(key)
 
+    # A (wf, key) bucket with >= 2 independent dispatches (>= 2 attempt-1 events) is
+    # positionally ambiguous: the timeline is recorded in DISPATCH order, but the Nth
+    # dispatch need not be the Nth conversation in first-response order -- concurrent
+    # same-key agents can answer out of order. Such a match still gets a best-effort
+    # phase/label, but is labelled `inferred`, never claimed as exact `timeline`. A lone
+    # dispatch (with or without sequential retries -> attempts 1,2,3) stays unambiguous.
+    ambiguous = {}
+    for wf, keys in by_wf.items():
+        for key, slots in keys.items():
+            ambiguous[(wf, key)] = sum(1 for e in slots if (e.get("attempt") or 1) == 1) > 1
+
     ordered = sorted(groups, key=lambda g: (g["t0_ms"] is None, g["t0_ms"] or 0))
     cursor = defaultdict(int)
     for g in ordered:
@@ -632,7 +649,7 @@ def attribute(groups, timeline):
                 g["label"] = e["label"]
                 g["workflow"] = e["workflow"]
                 g["attempt"] = e["attempt"]
-                g["attribution"] = "timeline"
+                g["attribution"] = "inferred" if ambiguous.get((wf, key)) else "timeline"
                 break
         else:
             # No timeline slot: group by the agent's own identity rather than dumping
