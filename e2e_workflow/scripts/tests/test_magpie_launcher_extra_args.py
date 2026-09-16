@@ -172,6 +172,65 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
             "--kv_cache_dtype fp8 --block-size 16 --max-num-seqs 8",
         )
 
+    def test_atom_server_is_wrapped_and_reaped_after_leader_term(self):
+        """Magpie must retain ATOM's native worker-safe teardown property."""
+        live_script = os.path.join(self.tmp, "live_atom_magpie.sh")
+        with open(live_script, "w", encoding="utf-8") as fh:
+            fh.write("""#!/usr/bin/env bash
+setsid bash -c 'exec -a atom-server sleep 300' &
+server_pid=$!
+printf '%s\n' "$server_pid" > "$MAGPIE_SERVER_PID_FILE"
+disown "$server_pid" 2>/dev/null || true
+exit 0
+""")
+        os.chmod(live_script, 0o755)
+        state = os.path.join(self.tmp, "atom_reaper_state.txt")
+        driver = os.path.join(self.tmp, "atom_reaper_driver.sh")
+        with open(driver, "w", encoding="utf-8") as fh:
+            fh.write(f"""#!/usr/bin/env bash
+set -uo pipefail
+source "{MAGPIE}"
+adapter_launch
+printf '%s %s\n' "$SERVER_PID" "$MAGPIE_INNER_SERVER_PID" > "{state}"
+_inner_start=$(awk '{{print $22}}' "/proc/$MAGPIE_INNER_SERVER_PID/stat")
+kill -TERM "-$SERVER_PID"
+for _i in $(seq 1 50); do
+  kill -0 "$SERVER_PID" 2>/dev/null || break
+  sleep 0.1
+done
+wait "$SERVER_PID" 2>/dev/null || true
+for _i in $(seq 1 50); do
+  kill -0 "$MAGPIE_INNER_SERVER_PID" 2>/dev/null || exit 0
+  _state=$(awk '{{print $3}}' "/proc/$MAGPIE_INNER_SERVER_PID/stat" 2>/dev/null || true)
+  case "$_state" in Z*) exit 0 ;; esac
+  _now_start=$(awk '{{print $22}}' "/proc/$MAGPIE_INNER_SERVER_PID/stat" 2>/dev/null || true)
+  [ -n "$_now_start" ] && [ "$_now_start" != "$_inner_start" ] && exit 0
+  sleep 0.1
+done
+kill -KILL "-$MAGPIE_INNER_SERVER_PID" 2>/dev/null || true
+exit 9
+""")
+        os.chmod(driver, 0o755)
+        env = dict(os.environ)
+        for key in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
+                    "CUDA_VISIBLE_DEVICES", "SERVER_GROUP_UNVERIFIED"):
+            env.pop(key, None)
+        env.update(
+            BACKEND="atom", MODEL=os.path.join(self.tmp, "model"), TP="1",
+            PORT="18080", GPU="1", OUT_DIR=self.out,
+            LOG=os.path.join(self.out, "server.log"), PROFILE="0",
+            MAGPIE_LAUNCH_SCRIPT=live_script, EXTRA_SERVER_ARGS="",
+        )
+        proc = subprocess.run(
+            [BASH, driver], env=env, cwd=self.tmp,
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        with open(state, encoding="utf-8") as fh:
+            supervisor_pid, inner_pid = fh.read().split()
+        self.assertNotEqual(supervisor_pid, inner_pid)
+        self.assertIn("wrapped by supervisor", proc.stdout)
+
     # ---- GPU-pinning shapes ------------------------------------------------------
 
     def test_bare_box_pins_rocr_only(self):

@@ -37,6 +37,38 @@
 # adapter_health is inherited from the BACKEND adapter (curl $BASE_URL/health),
 # which works regardless of who launched the server, so it is NOT redefined.
 
+# ATOM's multiprocessing leader can exit promptly on SIGTERM while rank workers
+# remain alive in its process group and keep all GPU memory allocated.  The
+# native ATOM adapter prevents that with its own long-lived supervisor, but a
+# Magpie launch bypasses that adapter_launch implementation.  Wrap the verified
+# Magpie ATOM process group in a small GEAK-owned supervisor: GEAK tears down the
+# supervisor, and its TERM trap drains the external ATOM group through SIGKILL
+# even when the original leader has already exited.
+_MAGPIE_ATOM_SUPERVISOR='
+_server_pid="$1"
+_server_pgid="$2"
+_grace="${3:-5}"
+case "$_grace" in ""|*[!0-9]*) _grace=5 ;; esac
+_group_alive() { kill -0 "-$_server_pgid" 2>/dev/null; }
+_stop_group() {
+  trap - TERM INT
+  kill -TERM "-$_server_pgid" 2>/dev/null || kill -TERM "$_server_pid" 2>/dev/null || true
+  _i=0
+  while _group_alive && [ "$_i" -lt "$_grace" ]; do
+    sleep 1
+    _i=$((_i + 1))
+  done
+  _group_alive && kill -KILL "-$_server_pgid" 2>/dev/null || true
+  exit 0
+}
+trap _stop_group TERM INT
+while kill -0 "$_server_pid" 2>/dev/null; do sleep 1; done
+# A crashed/exited ATOM leader can leave reparented workers in the group.  Reap
+# that group before the supervisor exits so bench_e2e observes a clean failure.
+_group_alive && _stop_group
+exit 0
+'
+
 adapter_launch() {
   local backend_uc script var_script
   backend_uc="$(printf '%s' "${BACKEND:-sglang}" | tr '[:lower:]' '[:upper:]')"
@@ -303,7 +335,8 @@ PY
   # own group, and a stale file can name a pid that now belongs to someone else
   # entirely (worst case: the caller's orchestrator). Either case must DISABLE group
   # teardown here, at launch, rather than be discovered by a kill that already fired.
-  local _mp_pgid _mp_args
+  local _mp_pgid _mp_args _mp_server_pid _mp_atom_wrapped=0
+  _mp_server_pid="$SERVER_PID"
   _mp_pgid="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
   _mp_args="$(ps -o args= -p "$SERVER_PID" 2>/dev/null)"
   if [ "$_mp_pgid" != "$SERVER_PID" ]; then
@@ -322,6 +355,26 @@ PY
            "PORT='$PORT' (args='$(printf '%s' "$_mp_args" | cut -c1-120)') — stale pid file?" \
            "group teardown disabled for this launch." >&2 ;;
   esac
+
+  # Magpie's ATOM script returns the real multiprocessing leader.  Preserve it
+  # for evidence, but expose a GEAK-owned supervisor as SERVER_PID so teardown
+  # cannot lose the rank workers when that leader exits before the grace window.
+  if [ "$backend_uc" = "ATOM" ] && [ "$_mp_pgid" = "$_mp_server_pid" ] && \
+     [ "${SERVER_GROUP_UNVERIFIED:-0}" != "1" ] && command -v setsid >/dev/null 2>&1; then
+    setsid bash -c "$_MAGPIE_ATOM_SUPERVISOR" atom-magpie-supervisor \
+      "$_mp_server_pid" "$_mp_pgid" "${ATOM_MAGPIE_STOP_GRACE_S:-5}" &
+    SERVER_PID=$!
+    MAGPIE_INNER_SERVER_PID="$_mp_server_pid"
+    export MAGPIE_INNER_SERVER_PID
+    _mp_atom_wrapped=1
+    echo ">>> magpie launcher: ATOM server pid=$_mp_server_pid wrapped by" \
+         "supervisor pid=$SERVER_PID for worker-safe teardown."
+  fi
   export SERVER_GROUP_UNVERIFIED
-  echo ">>> magpie launcher: $BACKEND server up (pid $SERVER_PID, pgid=${_mp_pgid:-?}) via $(basename "$script")."
+  if [ "$_mp_atom_wrapped" = "1" ]; then
+    echo ">>> magpie launcher: $BACKEND server up (pid $SERVER_PID," \
+         "inner_pid=$_mp_server_pid, inner_pgid=${_mp_pgid:-?}) via $(basename "$script")."
+  else
+    echo ">>> magpie launcher: $BACKEND server up (pid $SERVER_PID, pgid=${_mp_pgid:-?}) via $(basename "$script")."
+  fi
 }

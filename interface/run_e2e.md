@@ -455,6 +455,11 @@ overlay prepended to `PYTHONPATH` (which the orchestrator's own path cannot do),
 so recipe parity and overlay application coexist. One adapter serves every
 backend, because the scripts share one server-phase contract.
 
+ATOM additionally keeps a GEAK-owned supervisor around the process group returned
+by the Magpie script. ATOM's multiprocessing leader can exit before its rank workers
+on SIGTERM; the supervisor drains that external group through SIGKILL when necessary,
+preserving the native ATOM adapter's worker-safe teardown behavior.
+
 The script itself is resolved most-explicit-first: `handoff.bench_launcher` /
 `$BENCH_LAUNCHER` decide the launcher, then the script comes from
 `handoff.launch_server_script`, `$MAGPIE_LAUNCH_SCRIPT`,
