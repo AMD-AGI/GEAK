@@ -47,8 +47,9 @@ function scopeKey(phase, label) {
 // verbatim-write helper. Seeded narrowest with TWO e2e entries.
 const TIER_MAP = Object.freeze((() => {
   const m = {};
-  // e2e_workflow.js:5240 — persists canonical workflow_return.json (non-fatal; run_e2e recovers).
-  m[scopeKey('Validate', 'file_writer:persist:workflow-return')] = { tier: 'cheap', kind: 'verbatim_write' };
+  // e2e_workflow.js persists canonical workflow_return.json (non-fatal; run_e2e recovers). The label
+  // MUST match the actual call site's label literal ('persist-workflow-return') or the scope never fires.
+  m[scopeKey('Validate', 'persist-workflow-return')] = { tier: 'cheap', kind: 'verbatim_write' };
   // e2e_workflow.js:3085 — writes measured_on_this_box.md, verbatim markdown table.
   m[scopeKey('WarmStart', 'warm_start:record-measurements')] = { tier: 'cheap', kind: 'verbatim_write' };
   return m;
