@@ -12,8 +12,16 @@ adapter_default_port() { echo 30000; }
 # bypass it. Auto-detected; override/disable with SGLANG_SRC_PYTHONPATH=... (empty to disable). Harmless
 # when the dir is absent (non-sglang images).
 _SGL_PP="${SGLANG_SRC_PYTHONPATH-/sgl-workspace/sglang/python}"; [ -d "$_SGL_PP" ] || _SGL_PP=""
+_SGL_SOURCE_PATHS="$(dirname -- "${BASH_SOURCE[0]}")/../source_paths.sh"
 
 adapter_launch() {
+  local _server_pythonpath="${_SGL_PP:+$_SGL_PP:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}"
+  local -a _source_env=()
+  if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
+    source "$_SGL_SOURCE_PATHS" || return 2
+    _server_pythonpath="$(geak_source_pythonpath "$_SGL_PP")" || return 2
+    _source_env=(OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-}" PYTHONDONTWRITEBYTECODE=1)
+  fi
   # Raise the scheduler watchdog by default: an authored/JIT kernel (FlyDSL/triton-author) overlaid on
   # the path JIT-compiles on first prefill, which can exceed sglang's default watchdog and kill the
   # server before CUDA-graph capture. Harmless for stock runs. Only add it if the caller didn't already
@@ -35,7 +43,8 @@ adapter_launch() {
     ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     SGLANG_TORCH_PROFILER_DIR="$PROFILE_DIR" \
-    PYTHONPATH="${_SGL_PP:+$_SGL_PP:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
+    "${_source_env[@]}" \
+    PYTHONPATH="$_server_pythonpath" \
     python -m sglang.launch_server \
       --model-path "$MODEL" \
       --host "$HOST" --port "$PORT" \

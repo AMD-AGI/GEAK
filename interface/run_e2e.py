@@ -399,6 +399,11 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
 def map_args(h: dict, timeout_s: int | None = None) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
+    baseline_spec = h.get("baseline_env_spec")
+    if isinstance(baseline_spec, dict) and (
+        baseline_spec.get("source_snapshots") or baseline_spec.get("source_materialization") is not None
+    ) and int(h.get("schema_version", 1) or 1) < 2:
+        raise SourceMaterializationError("source_requires_handoff_schema_v2")
     effective = None
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict

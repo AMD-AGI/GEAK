@@ -247,7 +247,7 @@ def test_complete_tree_can_include_unchanged_tooling_and_executable_mode(bundle)
     ("native", "unsupported_runtime_artifact"),
     ("bytecode", "unsupported_runtime_artifact"),
     ("top_level", "unsupported_top_level_module"),
-    ("ownership", "ambiguous_package_ownership"),
+    ("ownership", "ambiguous_import_ownership"),
     ("empty_directory", "unlisted_bundle_directory"),
     ("directory_symlink", "symlink_in_bundle"),
     ("package_deletion", "unsupported_package_deletion"),
@@ -340,3 +340,149 @@ def test_interface_reports_unresolved_source_before_workflow_dispatch(tmp_path):
     assert value["status"] == "error"
     assert value["error_class"] == "unresolved_baseline_source"
     assert "missing_or_invalid_descriptor" in value["error"]
+
+
+@pytest.mark.parametrize("filename", ["kernel.hsaco", "kernel.SO", "kernel.so.1.2", "kernel.pyd",
+                                     "kernel.DLL", "kernel.o", "kernel.a", "kernel.CO"])
+def test_native_artifact_spellings_cannot_be_accepted_as_package_data(bundle, filename):
+    baseline, manifest, root = bundle
+    _add_file(root, manifest, "trees/a/python/alpha/" + filename)
+    seal(baseline, manifest)
+    with pytest.raises(SourceMaterializationError, match="unsupported_runtime_artifact"):
+        validate_source_materialization(baseline)
+
+
+@pytest.mark.parametrize("filename", ["sitecustomize.py", "usercustomize.py",
+                                     "sitecustomize.pyc", "sitecustomize/__init__.py"])
+def test_bundle_cannot_install_unrecorded_interpreter_startup_hooks(bundle, filename):
+    baseline, manifest, root = bundle
+    _add_file(root, manifest, "trees/a/python/" + filename)
+    seal(baseline, manifest)
+    with pytest.raises(SourceMaterializationError, match="unsupported_startup_hook"):
+        validate_source_materialization(baseline)
+
+
+@pytest.mark.parametrize("kind,reason", [
+    ("deleted_namespace", "unsupported_namespace_package"),
+    ("deleted_package_replacement", "ambiguous_module_ownership"),
+    ("live_module_package_collision", "ambiguous_module_ownership"),
+    ("empty_tree", "tree_without_source_modules"),
+])
+def test_remaining_false_ready_boundaries(bundle, kind, reason):
+    baseline, manifest, root = bundle
+    if kind == "deleted_namespace":
+        manifest["deleted_paths"].append("trees/a/python/alpha/gone/old.py")
+        manifest["deleted_modules"].append("alpha.gone.old")
+    elif kind == "deleted_package_replacement":
+        _add_file(root, manifest, "trees/a/python/alpha/old/__init__.py")
+    elif kind == "live_module_package_collision":
+        _add_file(root, manifest, "trees/a/python/alpha/first/__init__.py")
+    elif kind == "empty_tree":
+        baseline["source_snapshots"].append({"id": "empty"})
+        baseline["source_materialization"]["required_layer_ids"].append("empty")
+        baseline["source_materialization"]["pythonpath_prefixes"].append("trees/empty")
+        manifest["required_layer_ids"].append("empty")
+        manifest["pythonpath_prefixes"].append("trees/empty")
+        manifest["trees"].append({"tree_id": "empty", "root": "trees/empty",
+                                  "accepted_commit": "c" * 40, "layer_ids": ["empty"]})
+        (root / "trees/empty").mkdir()
+    seal(baseline, manifest)
+    with pytest.raises(SourceMaterializationError, match=reason):
+        validate_source_materialization(baseline)
+
+
+def test_source_bearing_legacy_schema_cannot_bypass_source_validation(bundle, tmp_path):
+    from interface import run_e2e
+
+    baseline, _, _ = bundle
+    handoff = {"schema_version": 1, "model_path": "/models/model",
+               "exp_root": str(tmp_path / "geak"), "baseline_env_spec": baseline}
+    with pytest.raises(SourceMaterializationError, match="source_requires_handoff_schema_v2"):
+        run_e2e.map_args(handoff)
+
+
+@pytest.mark.parametrize("suffix", ["support/__init__.py", "support/value.py", "support.py", "setup.py"])
+def test_unchanged_dependency_collisions_between_roots_are_unresolved(bundle, suffix):
+    baseline, manifest, root = bundle
+    for prefix in manifest["pythonpath_prefixes"]:
+        _add_file(root, manifest, prefix + "/" + suffix, b"VALUE='different-under-each-root'\n")
+    seal(baseline, manifest)
+    with pytest.raises(SourceMaterializationError, match="ambiguous_import_ownership"):
+        validate_source_materialization(baseline)
+
+
+@pytest.mark.parametrize("route", ["sglang", "vllm", "magpie"])
+@pytest.mark.parametrize("authored_overlay", [False, True])
+def test_real_launcher_imports_materialized_source_before_stock(bundle, tmp_path, route, authored_overlay):
+    """Actual adapters execute Python children; no GPU/framework is required."""
+    baseline, manifest, root = bundle
+    scripts = Path(__file__).resolve().parents[1] / "e2e_workflow" / "scripts"
+    code = b"""import importlib.util,json
+from alpha import first,second
+from beta import other
+print(json.dumps({'values':[first.VALUE,second.VALUE,other.VALUE],
+'origins':[first.__file__,second.__file__,other.__file__],
+'deleted_absent':importlib.util.find_spec('alpha.old') is None}))
+"""
+    backend = "vllm" if route == "vllm" else "sglang"
+    entry = "__main__.py" if backend == "vllm" else "launch_server.py"
+    _add_file(root, manifest, f"trees/a/python/{backend}/__init__.py")
+    _add_file(root, manifest, f"trees/a/python/{backend}/{entry}", code)
+    seal(baseline, manifest)
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"schema_version": 1, **baseline}))
+
+    stock = tmp_path / "stock"
+    (stock / backend).mkdir(parents=True)
+    (stock / backend / "__init__.py").write_text("")
+    (stock / backend / entry).write_text("raise RuntimeError('stock server selected')\n")
+    (stock / "alpha").mkdir()
+    (stock / "alpha/__init__.py").write_text("")
+    (stock / "alpha/old.py").write_text("VALUE='stock'\n")
+    overlay = tmp_path / "overlay"
+    if authored_overlay:
+        patch = tmp_path / "authored_first.py"
+        patch.write_text("VALUE='authored-first'\n")
+        subprocess.run([sys.executable, str(scripts / "overlay_setup.py"), "add-module",
+                        "--overlay", str(overlay), "--module", "alpha.first",
+                        "--patched-file", str(patch)], check=True, capture_output=True, timeout=10)
+
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    (binary / "python").symlink_to(sys.executable)
+    vllm = binary / "vllm"
+    vllm.write_text('#!/bin/bash\nexec "$TEST_PYTHON" -m vllm "$@"\n')
+    vllm.chmod(0o755)
+    magpie = tmp_path / "magpie.sh"
+    # This fixture completes its import before returning. Keep the launcher's
+    # parent shell as a live diagnostic PID; no serving identity is claimed by
+    # this test (the source-runtime suite owns that separate contract).
+    magpie.write_text('#!/bin/bash\nset -e\npython -m sglang.launch_server > "$SERVER_LOG" 2>&1\necho "$PPID" > "$MAGPIE_SERVER_PID_FILE"\n')
+    output = tmp_path / "out"
+    output.mkdir()
+    log = output / "server.log"
+    adapter = scripts / "adapters" / ("launchers/magpie.sh" if route == "magpie" else route + ".sh")
+    env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ["PATH"],
+               TEST_PYTHON=sys.executable, PYTHONPATH=str(stock),
+               PYTHONDONTWRITEBYTECODE="1", GEAK_SOURCE_REQUEST=str(request),
+               SGLANG_SRC_PYTHONPATH=str(stock), GPU_ARCHS="gfx000", GPU="0",
+               MODEL="unused-model", HOST="127.0.0.1", PORT="39999", TP="1",
+               MEM_FRACTION="0.8", EXTRA_SERVER_ARGS="", EXTRA_ENV="", PROFILE="0",
+               PROFILE_DIR="", OUT_DIR=str(output), LOG=str(log), BACKEND=backend,
+               OVERLAY_PYTHONPATH=str(overlay) if authored_overlay else "",
+               MAGPIE_LAUNCH_SCRIPT=str(magpie), ADAPTER=str(adapter))
+    for name in ("RECIPE_ENV_FILE", "SERVER_LAUNCH_PREFIX", "GEAK_SOURCE_BOOTSTRAP_PYTHONPATH"):
+        env.pop(name, None)
+    driver = 'set -eu\nsource "$ADAPTER"\nadapter_launch\n'
+    if route != "magpie":
+        driver += 'wait "$SERVER_PID"\n'
+    subprocess.run(["bash", "-c", driver], env=env, cwd=tmp_path,
+                   text=True, capture_output=True, timeout=15, check=True)
+    observed = json.loads(log.read_text().splitlines()[-1])
+    assert observed["values"] == ["authored-first" if authored_overlay else "accepted-first",
+                                   "accepted-second", "accepted-other"]
+    assert observed["deleted_absent"]
+    assert Path(observed["origins"][1]).is_relative_to(root)
+    assert Path(observed["origins"][2]).is_relative_to(root)
+    # The real import did not dirty the materialized source with bytecode.
+    assert validate_source_materialization(baseline)

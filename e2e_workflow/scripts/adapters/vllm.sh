@@ -14,8 +14,16 @@
 # any needed EXTRA_SERVER_ARGS BEFORE the run relies on them. This adapter targets the current CLI.
 
 adapter_default_port() { echo 8000; }
+_VLLM_SOURCE_PATHS="$(dirname -- "${BASH_SOURCE[0]}")/../source_paths.sh"
 
 adapter_launch() {
+  local _server_pythonpath="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}"
+  local -a _source_env=()
+  if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
+    source "$_VLLM_SOURCE_PATHS" || return 2
+    _server_pythonpath="$(geak_source_pythonpath '')" || return 2
+    _source_env=(OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-}" PYTHONDONTWRITEBYTECODE=1)
+  fi
   # Pin GPU_ARCHS so aiter's JIT skips rocm_agent_enumerator/_detect_native (see sglang.sh / gpu_lock.sh).
   local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
   # Enable the server-side torch profiler version-portably. No PROFILE_DIR -> off. The ProfilerConfig
@@ -69,7 +77,8 @@ PY
     ${_ga:+GPU_ARCHS=$_ga} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     "${_prof_env[@]}" \
-    PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
+    "${_source_env[@]}" \
+    PYTHONPATH="$_server_pythonpath" \
     vllm serve "$MODEL" \
       --host "$HOST" --port "$PORT" \
       --tensor-parallel-size "$TP" \

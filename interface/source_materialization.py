@@ -12,6 +12,7 @@ import json
 import os
 import re
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -137,7 +138,10 @@ def validate_source_materialization(baseline: dict[str, Any]) -> MaterializedSou
     Raw sparse snapshots cannot establish coverage. A producer must provide a
     complete verified bundle even when the original accepted tree still exists.
     """
-    snapshots = baseline.get("source_snapshots") or []
+    snapshots = baseline.get("source_snapshots")
+    if snapshots is None:
+        snapshots = []
+    _require(isinstance(snapshots, list), "invalid_source_layers")
     descriptor = baseline.get("source_materialization")
     if not snapshots and descriptor is None:
         return None
@@ -147,6 +151,40 @@ def validate_source_materialization(baseline: dict[str, Any]) -> MaterializedSou
         raise
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise SourceMaterializationError("unreadable_or_invalid_bundle") from exc
+
+
+def read_source_request(path: str) -> MaterializedSource:
+    """Revalidate the per-run source request before each serving launch."""
+    try:
+        request = json.loads(_read_regular(Path(path), limit=1024 * 1024),
+                             object_pairs_hook=_json_object)
+        _keys(request, {"schema_version", "source_snapshots", "source_materialization"},
+              "invalid_source_request")
+        _require(type(request["schema_version"]) is int and request["schema_version"] == 1,
+                 "unsupported_source_request")
+        source = validate_source_materialization(request)
+        _require(source is not None, "empty_source_request")
+        return source
+    except SourceMaterializationError:
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        raise SourceMaterializationError("unreadable_source_request") from exc
+
+
+def compose_pythonpath(request: str, overlay: str, backend_defaults: str,
+                       inherited: str, bootstrap: str = "") -> str:
+    """Compose authored overlay, accepted source, defaults and inherited paths.
+
+    An optional verification bootstrap is first and contains no framework
+    packages. Empty path components are omitted so they cannot insert the CWD.
+    """
+    source = read_source_request(request)
+    paths = []
+    for group in (bootstrap, overlay, *source.pythonpath_prefixes, backend_defaults, inherited):
+        for path in group.split(os.pathsep):
+            if path and path not in paths:
+                paths.append(path)
+    return os.pathsep.join(paths)
 
 
 def _validate(snapshots: Any, descriptor: Any) -> MaterializedSource:
@@ -209,6 +247,9 @@ def _validate(snapshots: Any, descriptor: Any) -> MaterializedSource:
         _relative(prefix)
         _require(prefix in roots or bool(_under(prefix, roots)), "uncovered_import_prefix")
         _path(root, prefix, directory=True)
+    for tree in roots:
+        _require(any(prefix == tree or prefix.startswith(tree + "/") for prefix in prefixes),
+                 "tree_without_import_prefix")
     _require(not any(a != b and a.startswith(b + "/") for a in prefixes for b in prefixes),
              "overlapping_import_prefixes")
 
@@ -241,6 +282,16 @@ def _validate(snapshots: Any, descriptor: Any) -> MaterializedSource:
                 _path(root, relative)
                 inventory.add(relative)
     _require(inventory == set(files), "incomplete_file_inventory")
+    import_owners: dict[str, str] = {}
+    for prefix in prefixes:
+        for child in (root / prefix).iterdir():
+            # Directories can be namespace packages, including an otherwise
+            # ancillary tests/ tree. A second root must not change an unchanged
+            # dependency's meaning while touched module origins still match.
+            candidate = child.name if child.is_dir() else child.stem if child.suffix == ".py" else ""
+            if candidate.isidentifier():
+                _require(import_owners.setdefault(candidate, prefix) == prefix,
+                         "ambiguous_import_ownership")
     deleted = _strings(manifest["deleted_paths"], "invalid_deleted_paths", empty=True)
     for name in deleted:
         _relative(name)
@@ -267,6 +318,9 @@ def _validate(snapshots: Any, descriptor: Any) -> MaterializedSource:
     owners: dict[str, str] = {}
     source_paths = [row["path"] for row in modules]
     source_paths.extend(path for path in deleted if path.endswith(".py"))
+    for tree in roots:
+        _require(any(path.startswith(tree + "/") for path in source_paths),
+                 "tree_without_source_modules")
     for name in source_paths:
         prefix = _under(name, prefixes)
         parts = name[len(prefix) + 1:].split("/")
@@ -275,6 +329,14 @@ def _validate(snapshots: Any, descriptor: Any) -> MaterializedSource:
         _require(owners.setdefault(owner, prefix) == prefix, "ambiguous_package_ownership")
         _require(prefix + "/" + owner + "/__init__.py" in files,
                  "unsupported_namespace_package")
+        for count in range(1, len(parts)):
+            initializer = prefix + "/" + "/".join(parts[:count]) + "/__init__.py"
+            _require(initializer in files, "unsupported_namespace_package")
+        if name.endswith("/__init__.py"):
+            alternate = name[:-len("/__init__.py")] + ".py"
+        else:
+            alternate = name[:-3]
+        _require(not (root / alternate).exists(), "ambiguous_module_ownership")
         for other in prefixes:
             if other != prefix:
                 candidates = (root / other / owner, root / other / (owner + ".py"))
@@ -286,10 +348,15 @@ def _validate(snapshots: Any, descriptor: Any) -> MaterializedSource:
         prefix = matches[0]
         relative = name[len(prefix) + 1:]
         parts = relative.split("/")
+        _require(parts[0].split(".")[0] not in {"sitecustomize", "usercustomize"},
+                 "unsupported_startup_hook")
         if owners.get(parts[0]) != prefix:
             continue
         if not name.endswith(".py"):
-            _require(not name.endswith((".pyc", ".pyo", ".so", ".pyd", ".dylib")),
+            suffix_name = name.lower()
+            _require(not suffix_name.endswith((".pyc", ".pyo", ".so", ".pyd", ".dylib",
+                                               ".dll", ".a", ".o", ".co", ".hsaco")) and
+                     re.search(r"\.so(?:\.[0-9]+)+$", suffix_name) is None,
                      "unsupported_runtime_artifact")
             continue
         for count in range(1, len(parts)):
@@ -299,3 +366,13 @@ def _validate(snapshots: Any, descriptor: Any) -> MaterializedSource:
         _require("." in name and name.split(".")[0] in owners, "unsupported_package_deletion")
     return MaterializedSource(root, sha, tuple(required),
                               tuple(str(root / prefix) for prefix in prefixes), manifest)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 7 or sys.argv[1] != "--compose-pythonpath":
+        raise SystemExit("usage: source_materialization.py --compose-pythonpath REQUEST OVERLAY DEFAULTS INHERITED BOOTSTRAP")
+    try:
+        print(compose_pythonpath(*sys.argv[2:]))
+    except SourceMaterializationError as error:
+        sys.stderr.write(str(error) + "\n")
+        raise SystemExit(2)
