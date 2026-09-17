@@ -50,6 +50,7 @@ Steps:
    [ -n "$LAUNCH_SCRIPT" ] && cp "$LAUNCH_SCRIPT" "$EVAL_DIR/launch_baseline.sh"
    cp "$SKILL_DIR/scripts/bench_e2e.sh" "$EVAL_DIR/bench_e2e.sh"
    cp "$SKILL_DIR/scripts/bench_replica.sh" "$EVAL_DIR/bench_replica.sh"
+   cp "$SKILL_DIR/scripts/bench_lifecycle.py" "$EVAL_DIR/bench_lifecycle.py"   # optional caller-owned post-measurement callback protocol
    cp "$SKILL_DIR/scripts/server_teardown.sh" "$EVAL_DIR/server_teardown.sh"   # the server-kill contract; bench_e2e.sh REFUSES to run without it
    cp "$SKILL_DIR/scripts/bench_summarize.py" "$EVAL_DIR/bench_summarize.py"   # writes bench_summary.json; also refused without it
    cp -r "$SKILL_DIR/scripts/adapters" "$EVAL_DIR/adapters"   # bench_e2e.sh sources adapters/<backend>.sh next to itself

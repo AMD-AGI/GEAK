@@ -1,5 +1,8 @@
 # e2e_workflow — End-to-End LLM Inference-Throughput Optimizer (AMD Instinct MI GPUs)
 
+External replay callers can use the optional [post-measurement callback protocol](../docs/reference/post-measure-lifecycle.md)
+to collect fresh evidence on the measured server before teardown. Evaluator selection and quality policy remain caller-owned.
+
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that raises the **sglang/vllm
 serving throughput** of an LLM on AMD Instinct MI GPUs. It is a *system layer* built on top of — and recursively
 calling — the UNCHANGED single-kernel `kernel_workflow` (`../kernel_workflow/`). The single-kernel workflow's
