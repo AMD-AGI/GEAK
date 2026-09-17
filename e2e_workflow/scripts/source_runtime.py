@@ -12,6 +12,8 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import select
+import signal
 import socket
 import stat
 import struct
@@ -27,10 +29,16 @@ HERE = Path(__file__).resolve().parent
 MAX_JSON = 32 * 1024 * 1024
 LAUNCH_SCHEMA = "geak.source_runtime.launch.v1"
 PROCESS_SCHEMA = "geak.source_runtime.process.v1"
+CLEANUP_TERM_SEC = 0.5
+CLEANUP_TOTAL_SEC = 3.0
 
 
 class SourceRuntimeError(ValueError):
     """A source-bearing launch cannot establish its required runtime identity."""
+
+
+class SourceCleanupUnverified(SourceRuntimeError):
+    """A source launch must stop retrying until owned worker cleanup is known."""
 
 
 def require(condition, reason):
@@ -141,6 +149,7 @@ def source_cache_absent(path):
 
 
 def check_request_marker(request_path, marker):
+    check_cleanup_barrier(Path(marker).parent)
     with regular(marker) as stream:
         expected = stream.read(66)
     require(len(expected) == 65 and expected[-1:] == b"\n"
@@ -150,9 +159,16 @@ def check_request_marker(request_path, marker):
     require(source.manifest_sha256 == expected[:-1].decode(), "staged_source_manifest_mismatch")
 
 
+def check_cleanup_barrier(directory):
+    barrier = Path(directory) / "source_cleanup_unverified.json"
+    if barrier.exists() or barrier.is_symlink():
+        raise SourceCleanupUnverified("source_cleanup_unverified_barrier")
+
+
 def prepare(request_path, out, overlays):
     request_path = Path(request_path)
     require(request_path.is_absolute() and request_path.resolve() == request_path, "source_request_not_canonical")
+    check_cleanup_barrier(request_path.parent)
     request, request_sha = read_json(request_path, binding=True)
     require(set(request) == {"schema_version", "source_snapshots", "source_materialization"}, "source_request_fields")
     require(type(request.get("schema_version")) is int and request["schema_version"] == 1, "source_request_version")
@@ -400,8 +416,12 @@ class Observer:
                 challenge = read_json(self.out / "challenge.json")
                 if token != challenge["challenge_id"]:
                     continue
-                if challenge.get("phase") == "ready":
+                if challenge.get("phase") in ("ready", "cleanup"):
                     self.measurement_started = True
+                if challenge.get("phase") == "cleanup":
+                    self.channel.sendto((token + " frozen").encode(), challenge["reply_socket"])
+                    previous = token
+                    continue
                 receipt = self.snapshot(challenge)
                 path = self.out / f"process-{self.process['pid']}-{self.process['start_ticks']}-{token}.json"
                 write_json(path, receipt)
@@ -469,7 +489,7 @@ def group_members(pgid):
             if (row := proc(int(entry.name))) and row["pgid"] == pgid and row["state"] != "Z"}
 
 
-def reject_escaped_workers(out, launch, owner):
+def escaped_workers(out, launch, owner):
     processes = {row["pid"]: row for entry in Path("/proc").iterdir() if entry.name.isdigit()
                  if (row := proc(int(entry.name))) and row["state"] != "Z"}
     descendants = {owner["pid"]}
@@ -478,15 +498,180 @@ def reject_escaped_workers(out, launch, owner):
         if found <= descendants:
             break
         descendants.update(found)
-    for pid in descendants:
-        if pid in processes:
-            require(processes[pid]["pgid"] == owner["pgid"], "serving_worker_escaped_group")
+    owned = {pid: processes[pid] for pid in descendants if pid in processes and processes[pid]["pgid"] != owner["pgid"]}
+    unknown = {}
     for path in out.glob("registered-*.json"):
         row = read_json(path)
         current = processes.get(row.get("pid"))
         if (row.get("launch_nonce") == launch["launch_nonce"] and current
-                and current["start_ticks"] == row.get("start_ticks")):
-            require(current["pgid"] == owner["pgid"], "serving_worker_escaped_group")
+                and current["start_ticks"] == row.get("start_ticks")
+                and current["pgid"] != owner["pgid"] and current["pid"] not in owned):
+            unknown[current["pid"]] = current
+    return owned, unknown
+
+
+def descendant_ancestry(pid, owner):
+    chain, seen = [], set()
+    current = proc(pid)
+    while current is not None and current["pid"] not in seen:
+        seen.add(current["pid"])
+        chain.append({key: current[key] for key in ("pid", "ppid", "pgid", "start_ticks")})
+        if current["pid"] == owner["pid"]:
+            require(all(current[key] == value for key, value in owner.items()), "cleanup_owner_identity_changed")
+            return chain
+        parent = proc(current["ppid"])
+        again = proc(current["pid"])
+        require(again is not None and all(again[key] == current[key] for key in ("ppid", "start_ticks")),
+                "cleanup_ancestry_changed")
+        current = parent
+    raise SourceRuntimeError("cleanup_ancestry_unproven")
+
+
+def freeze_cleanup_parents(out, launch, owner):
+    """Acknowledge the Python topology freeze before cleanup can be confirmed."""
+    token = str(uuid.uuid4())
+    address = "\0geak-source-freeze-" + launch["launch_nonce"] + "-" + token
+    deadline = time.monotonic() + 1.0
+    acknowledged = set()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as channel:
+        channel.settimeout(.05)
+        channel.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        channel.bind(address)
+        write_json(out / "challenge.json", {"challenge_id": token, "phase": "cleanup", "reply_socket": address,
+                                            "created_at_ns": time.time_ns()})
+        while time.monotonic() < deadline:
+            require(identity(owner["pid"]) == owner, "cleanup_owner_identity_changed")
+            members = group_members(owner["pgid"])
+            for pid, row in members.items():
+                if (pid, row["start_ticks"]) not in acknowledged:
+                    try:
+                        channel.sendto(token.encode(), socket_name(launch, row))
+                    except OSError:
+                        pass
+            try:
+                data, credentials, _flags, _sender = channel.recvmsg(256, socket.CMSG_SPACE(12))
+            except OSError:
+                data, credentials = b"", []
+            for level, kind, value in credentials:
+                if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS and len(value) == 12:
+                    pid, uid, _gid = struct.unpack("3i", value)
+                    if pid in members and uid == os.getuid() and data == (token + " frozen").encode():
+                        current = proc(pid)
+                        if current and current["start_ticks"] == members[pid]["start_ticks"]:
+                            acknowledged.add((pid, current["start_ticks"]))
+            current_members = group_members(owner["pgid"])
+            if current_members and {(pid, row["start_ticks"]) for pid, row in current_members.items()} <= acknowledged:
+                return [{"pid": pid, "start_ticks": ticks} for pid, ticks in sorted(acknowledged)]
+    raise SourceCleanupUnverified("source_cleanup_parent_freeze_unconfirmed")
+
+
+def cleanup_escaped_workers(out, launch, owner, initial, unknown):
+    """Stop only descendants whose identity was captured under the live owner.
+
+    pidfds pin the process across PID reuse. Repeated ancestry discovery catches
+    descendants forked during shutdown. Any unsupported syscall, inaccessible
+    identity, unproven ancestry, or missing exit confirmation sets a persistent
+    request-directory barrier; ordinary process-group teardown runs afterward.
+    """
+    started = time.monotonic()
+    deadline = started + CLEANUP_TOTAL_SEC
+    records, handles = {}, {}
+    uncertain = bool(unknown)
+    pending = initial
+    stable = 0
+    frozen = []
+    try:
+        frozen = freeze_cleanup_parents(out, launch, owner)
+    except (OSError, ValueError):
+        uncertain = True
+    try:
+        while time.monotonic() < deadline:
+            for pid, row in pending.items():
+                key = (pid, row["start_ticks"])
+                if key in records:
+                    continue
+                record = {key: row[key] for key in ("pid", "ppid", "pgid", "start_ticks")}
+                record.update(ownership="descendant_of_live_owner", exit_confirmed=False, term_sent=False, kill_sent=False)
+                records[key] = record
+                try:
+                    before = identity(owner["pid"])
+                    require(before == owner, "cleanup_owner_identity_changed")
+                    fd = os.pidfd_open(pid, 0)
+                    handles[key] = fd
+                    current = proc(pid)
+                    if current is None or current["state"] == "Z" or current["start_ticks"] != row["start_ticks"]:
+                        record["exit_confirmed"] = True
+                        continue
+                    record["ancestry"] = descendant_ancestry(pid, owner)
+                    signal.pidfd_send_signal(fd, signal.SIGTERM)
+                    record["term_sent"] = True
+                except ProcessLookupError:
+                    record["exit_confirmed"] = True
+                except (OSError, ValueError, AttributeError) as exc:
+                    uncertain = True
+                    record["error"] = type(exc).__name__
+            for key, fd in handles.items():
+                record = records[key]
+                if record["exit_confirmed"] or record.get("error"):
+                    continue
+                try:
+                    if select.select([fd], [], [], 0)[0]:
+                        record["exit_confirmed"] = True
+                    elif time.monotonic() - started >= CLEANUP_TERM_SEC and not record["kill_sent"]:
+                        signal.pidfd_send_signal(fd, signal.SIGKILL)
+                        record["kill_sent"] = True
+                except ProcessLookupError:
+                    record["exit_confirmed"] = True
+                except OSError as exc:
+                    uncertain = True
+                    record["error"] = type(exc).__name__
+            try:
+                require(identity(owner["pid"]) == owner, "cleanup_owner_identity_changed")
+                pending, additional_unknown = escaped_workers(out, launch, owner)
+                unknown.update(additional_unknown)
+                uncertain = uncertain or bool(additional_unknown)
+                frozen_ids = {(row["pid"], row["start_ticks"]) for row in frozen}
+                uncertain = uncertain or not {(pid, row["start_ticks"]) for pid, row in group_members(owner["pgid"]).items()} <= frozen_ids
+            except (OSError, ValueError):
+                uncertain = True
+                break
+            if not pending and all(row["exit_confirmed"] for row in records.values()):
+                stable += 1
+                if stable >= 2:
+                    break
+            else:
+                stable = 0
+            time.sleep(0.05)
+    finally:
+        for fd in handles.values():
+            os.close(fd)
+    confirmed = not uncertain and stable >= 2 and all(row["exit_confirmed"] for row in records.values())
+    result = {"schema": "geak.source_runtime.cleanup.v1", "status": "confirmed" if confirmed else "unverified",
+              "launch_nonce": launch["launch_nonce"], "request_sha256": launch["request_sha256"],
+              "manifest_sha256": launch["manifest_sha256"], "server_identity": owner,
+              "frozen_parents": frozen, "freeze_transport": "unix_datagram_scm_credentials",
+              "processes": list(records.values()), "unproven_processes": list(unknown.values()), "observed_at_ns": time.time_ns()}
+    try:
+        if not confirmed:
+            write_json(Path(launch["request_path"]).parent / "source_cleanup_unverified.json", result)
+        write_json(out / "cleanup.json", result)
+    except OSError as exc:
+        try:
+            write_json(Path(launch["request_path"]).parent / "source_cleanup_unverified.json",
+                       {**result, "status": "unverified", "reason": "cleanup_evidence_unwritable"})
+        except OSError:
+            pass  # Exit 43 still tells the caller to stop the evaluation.
+        raise SourceCleanupUnverified("source_cleanup_evidence_unwritable") from exc
+    if not confirmed:
+        raise SourceCleanupUnverified("source_cleanup_unverified")
+    return result
+
+
+def reject_escaped_workers(out, launch, owner):
+    owned, unknown = escaped_workers(out, launch, owner)
+    if owned or unknown:
+        cleanup_escaped_workers(out, launch, owner, owned, unknown)
+        raise SourceRuntimeError("serving_worker_escaped_group_cleanup_confirmed")
 
 
 def listeners(members, base_url):
@@ -659,7 +844,7 @@ def main():
     except (OSError, ValueError, TypeError, KeyError) as exc:
         reason = exc.args[0] if isinstance(exc, SourceRuntimeError) else type(exc).__name__
         print(f"[FATAL] GEAK source runtime {args.command} failed: {reason}", file=sys.stderr)
-        return 3
+        return 43 if isinstance(exc, SourceCleanupUnverified) else 3
     return 0
 
 

@@ -924,3 +924,195 @@ def test_persistent_shell_worker_is_not_exempt_from_process_proof(launch_files, 
     with serving(launch_files, tmp_path, startup=startup) as (out, owner, endpoint, _), \
             pytest.raises(runtime.SourceRuntimeError, match="observation_timeout"):
         runtime.gate(out, owner, endpoint, "ready", .4)
+
+
+def update_source_request(request, root, path):
+    value = runtime.read_json(request)
+    manifest = runtime.read_json(root / "manifest.json")
+    next(row for row in manifest["files"] if root / row["path"] == path)["sha256"] = runtime.digest(path)
+    seal(value, manifest)
+    request.write_text(json.dumps(value))
+
+
+@pytest.mark.parametrize("ignore_term", [False, True])
+def test_real_bench_cleans_exact_escaped_worker_before_group_teardown(launch_files, tmp_path, ignore_term):
+    env = bench_fixture(launch_files, tmp_path, "sglang")
+    request, _, root = launch_files
+    marker = tmp_path / "escaped-worker"
+    worker = ("import os,signal,time\nfrom pathlib import Path\n"
+              + ("signal.signal(signal.SIGTERM,signal.SIG_IGN)\n" if ignore_term else "")
+              + f"Path({str(marker)!r}).write_text(str(os.getpid()))\ntime.sleep(60)")
+    path = root / "trees/a/python/sglang/launch_server.py"
+    code = path.read_text().replace("import argparse,os", "import argparse,os,subprocess,sys,time\nfrom pathlib import Path")
+    code = code.replace("class Handler", f"subprocess.Popen([sys.executable,'-S','-c',{worker!r}],start_new_session=True)\n"
+                        f"while not Path({str(marker)!r}).exists(): time.sleep(.01)\nclass Handler")
+    path.write_text(code)
+    update_source_request(request, root, path)
+    run = subprocess.run(["bash", str(SCRIPTS / "bench_e2e.sh")], env=env, text=True,
+                         capture_output=True, timeout=20, check=False)
+    assert run.returncode == 3, run.stdout + run.stderr
+    out = Path(env["OUT_DIR"])
+    cleanup = runtime.read_json(out / "source_runtime/cleanup.json")
+    assert cleanup["status"] == "confirmed"
+    assert len(cleanup["processes"]) == 1
+    row = cleanup["processes"][0]
+    assert row["pid"] == int(marker.read_text()) and row["exit_confirmed"]
+    assert row["kill_sent"] == ignore_term
+    current = runtime.proc(row["pid"])
+    assert current is None or current["state"] == "Z" or current["start_ticks"] != row["start_ticks"]
+    assert not runtime.group_members(cleanup["server_identity"]["pgid"])
+    assert not (out / "bench_summary.json").exists()
+    assert not (request.parent / "source_cleanup_unverified.json").exists()
+
+
+def test_shutdown_rediscovery_catches_worker_forked_from_term_handler(launch_files, tmp_path):
+    parent_file, child_file = tmp_path / "parent", tmp_path / "child"
+    worker = ("import os,signal,time\nfrom pathlib import Path\n"
+              "def terminate(*args):\n"
+              " if os.fork(): os._exit(0)\n"
+              " os.setsid()\n signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+              f" Path({str(child_file)!r}).write_text(str(os.getpid()))\n"
+              " time.sleep(60)\n"
+              "signal.signal(signal.SIGTERM,terminate)\n"
+              f"Path({str(parent_file)!r}).write_text(str(os.getpid()))\ntime.sleep(60)")
+    startup = f"subprocess.Popen([sys.executable,'-S','-c',{worker!r}],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"
+    with serving(launch_files, tmp_path, startup=startup) as (out, owner, endpoint, _):
+        wait_file(parent_file)
+        with pytest.raises(runtime.SourceRuntimeError, match="cleanup_confirmed"):
+            runtime.gate(out, owner, endpoint, "prepared", 1)
+        cleanup = runtime.read_json(out / "cleanup.json")
+        assert cleanup["status"] == "confirmed"
+        assert {row["pid"] for row in cleanup["processes"]} == {int(parent_file.read_text()), int(child_file.read_text())}
+        assert all(row["exit_confirmed"] for row in cleanup["processes"])
+
+
+def test_unavailable_pidfd_sets_persistent_barrier_and_reserved_exit(launch_files, tmp_path, monkeypatch):
+    child_file = tmp_path / "child"
+    worker = f"import os,time;from pathlib import Path;Path({str(child_file)!r}).write_text(str(os.getpid()));time.sleep(60)"
+    startup = f"subprocess.Popen([sys.executable,'-S','-c',{worker!r}],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"
+    with serving(launch_files, tmp_path, startup=startup) as (out, owner, endpoint, _):
+        pid = int(wait_file(child_file))
+        monkeypatch.setattr(runtime, "CLEANUP_TOTAL_SEC", .4)
+        monkeypatch.setattr(runtime.os, "pidfd_open", lambda *_args: (_ for _ in ()).throw(PermissionError("denied")))
+        try:
+            with pytest.raises(runtime.SourceCleanupUnverified, match="source_cleanup_unverified"):
+                runtime.gate(out, owner, endpoint, "prepared", 1)
+            cleanup = runtime.read_json(out / "cleanup.json")
+            assert cleanup["status"] == "unverified" and not cleanup["processes"][0]["exit_confirmed"]
+            assert runtime.proc(pid)["state"] != "Z"
+            assert (launch_files[0].parent / "source_cleanup_unverified.json").exists()
+            monkeypatch.setattr(sys, "argv", ["source_runtime.py", "prepare", "--request", str(launch_files[0]),
+                                             "--output-dir", str(tmp_path / "another-output")])
+            assert runtime.main() == 43
+        finally:
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_cleanup_never_signals_worker_without_owner_ancestry(launch_files, tmp_path):
+    with serving(launch_files, tmp_path) as (out, owner, _endpoint, _), \
+            subprocess.Popen([sys.executable, "-S", "-c", "import time;time.sleep(60)"], start_new_session=True) as foreign:
+        try:
+            row = runtime.proc(foreign.pid)
+            with pytest.raises(runtime.SourceCleanupUnverified):
+                runtime.cleanup_escaped_workers(out, runtime.capsule(out), owner, {}, {foreign.pid: row})
+            assert foreign.poll() is None
+            assert runtime.read_json(out / "cleanup.json")["unproven_processes"][0]["pid"] == foreign.pid
+        finally:
+            foreign.terminate()
+            foreign.wait(timeout=5)
+
+
+def test_cleanup_barrier_stops_isolated_retry_and_new_output_launch(launch_files, tmp_path):
+    env = bench_fixture(launch_files, tmp_path, "sglang")
+    env.update(GEAK_REPEAT_MODE="isolated_server", REPLICAS="2")
+    env.pop("REPEATS")
+    runtime.write_json(launch_files[0].parent / "source_cleanup_unverified.json", {"status": "unverified"})
+    run = subprocess.run(["bash", str(SCRIPTS / "bench_e2e.sh")], env=env, text=True,
+                         capture_output=True, timeout=10, check=False)
+    assert run.returncode == 43, run.stdout + run.stderr
+    assert "stopping isolated replicas without retry" in run.stderr
+    out = Path(env["OUT_DIR"])
+    assert not (out / "replica_001/attempt_2").exists()
+    assert not (out / "replica_002").exists()
+    assert not (out / "bench_summary.json").exists()
+    assert not list(out.rglob("server.log"))
+
+
+def test_pidfd_never_signals_a_process_whose_ancestry_does_not_match(launch_files, tmp_path, monkeypatch):
+    with serving(launch_files, tmp_path) as (out, owner, _endpoint, _), \
+            subprocess.Popen([sys.executable, "-S", "-c", "import time;time.sleep(60)"], start_new_session=True) as foreign:
+        monkeypatch.setattr(runtime, "CLEANUP_TOTAL_SEC", .1)
+        try:
+            with pytest.raises(runtime.SourceCleanupUnverified):
+                runtime.cleanup_escaped_workers(out, runtime.capsule(out), owner, {foreign.pid: runtime.proc(foreign.pid)}, {})
+            assert foreign.poll() is None
+            record = runtime.read_json(out / "cleanup.json")["processes"][0]
+            assert not record["term_sent"] and not record["kill_sent"]
+            assert record["error"] == "SourceRuntimeError"
+        finally:
+            foreign.terminate()
+            foreign.wait(timeout=5)
+
+
+def test_cleanup_freeze_requires_actual_parent_acknowledgment(launch_files, tmp_path):
+    marker = tmp_path / "unobserved-child"
+    worker = f"import os,time;from pathlib import Path;Path({str(marker)!r}).write_text(str(os.getpid()));time.sleep(60)"
+    startup = f"subprocess.Popen([sys.executable,'-S','-c',{worker!r}],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"
+    with serving(launch_files, tmp_path, observe=False, startup=startup) as (out, owner, endpoint, _):
+        child = int(wait_file(marker))
+        try:
+            with pytest.raises(runtime.SourceCleanupUnverified):
+                runtime.gate(out, owner, endpoint, "prepared", 1)
+            cleanup = runtime.read_json(out / "cleanup.json")
+            assert cleanup["status"] == "unverified"
+            assert cleanup["frozen_parents"] == []
+            assert cleanup["processes"][0]["exit_confirmed"]
+            assert (launch_files[0].parent / "source_cleanup_unverified.json").exists()
+        finally:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_launch_registered_outsider_remains_untouched_and_blocks_recovery(launch_files, tmp_path):
+    with serving(launch_files, tmp_path) as (out, owner, endpoint, env), \
+            subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"], env=env, start_new_session=True) as sibling:
+        try:
+            wait_file(out / f"registered-{sibling.pid}-{runtime.identity(sibling.pid)['start_ticks']}.json", sibling)
+            with pytest.raises(runtime.SourceCleanupUnverified):
+                runtime.gate(out, owner, endpoint, "prepared", 1)
+            assert sibling.poll() is None
+            cleanup = runtime.read_json(out / "cleanup.json")
+            assert cleanup["processes"] == []
+            assert cleanup["unproven_processes"][0]["pid"] == sibling.pid
+        finally:
+            sibling.terminate()
+            sibling.wait(timeout=5)
+
+
+@pytest.mark.parametrize("barrier_failure", [False, True])
+def test_cleanup_evidence_failure_keeps_reserved_hard_stop(launch_files, tmp_path, monkeypatch, barrier_failure):
+    with serving(launch_files, tmp_path) as (out, owner, _endpoint, _):
+        write = runtime.write_json
+
+        def deny(path, value, **kwargs):
+            if Path(path).name == "cleanup.json" or (barrier_failure and Path(path).name == "source_cleanup_unverified.json"):
+                raise PermissionError("evidence directory unavailable")
+            return write(path, value, **kwargs)
+
+        monkeypatch.setattr(runtime, "write_json", deny)
+        with pytest.raises(runtime.SourceCleanupUnverified, match="source_cleanup_evidence_unwritable"):
+            runtime.cleanup_escaped_workers(out, runtime.capsule(out), owner, {}, {})
+        assert (launch_files[0].parent / "source_cleanup_unverified.json").exists() != barrier_failure
+
+
+def test_cleanup_control_message_freezes_before_acknowledgment(observer):
+    runtime.write_json(observer.out / "challenge.json", {"challenge_id": "freeze", "phase": "cleanup", "reply_socket": "unused"})
+    tokens = iter([b"freeze", b"freeze"])
+    sent = []
+    observer.channel = SimpleNamespace(recv=lambda _size: next(tokens), close=lambda: None,
+                                       sendto=lambda *args: sent.append((observer.measurement_started, args)))
+    with pytest.raises(StopIteration):
+        observer.respond()
+    assert sent == [(True, (b"freeze frozen", "unused"))]

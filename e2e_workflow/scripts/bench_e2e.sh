@@ -92,12 +92,17 @@ _stage_lookup() {   # _stage_lookup NAME -> print the first copy that exists; rc
 # accepted manifest independently of environment forwarding.
 if [ -e "$HERE/source_manifest.sha256" ] || [ -L "$HERE/source_manifest.sha256" ]; then
   _source_marker_helper="$(_stage_lookup source_runtime.py)"
-  if [ -z "$_source_marker_helper" ] || ! python3 "$_source_marker_helper" check-request \
-      --request "${GEAK_SOURCE_REQUEST:-}" --expected-manifest "$HERE/source_manifest.sha256"; then
+  _source_marker_rc=3
+  if [ -n "$_source_marker_helper" ]; then
+    python3 "$_source_marker_helper" check-request --request "${GEAK_SOURCE_REQUEST:-}" \
+      --expected-manifest "$HERE/source_manifest.sha256"
+    _source_marker_rc=$?
+  fi
+  if [ "$_source_marker_rc" -ne 0 ]; then
     _source_failed_out="${OUT_DIR:-$(pwd)/e2e_bench_out}"
     rm -f "$_source_failed_out/bench_summary.json" "$_source_failed_out/source_runtime/measurement.json"
     echo '!!! staged_source_request_missing_or_mismatched' >&2
-    exit 3
+    exit "$_source_marker_rc"
   fi
 fi
 
@@ -229,6 +234,10 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
       OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
         bash "$_replica_runner"
       _rc=$?
+      if [ -n "${GEAK_SOURCE_REQUEST:-}" ] && [ "$_rc" -eq 43 ]; then
+        echo '!!! source_cleanup_unverified: stopping isolated replicas without retry.' >&2
+        exit 43
+      fi
       if [ "$_rc" -eq 0 ] && python3 - "$_attempt_dir/bench_summary.json" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
 import json, sys
 try:
@@ -628,7 +637,7 @@ if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
   export PYTHONDONTWRITEBYTECODE=1
   GEAK_ACCEPTED_SOURCE_PYTHONPATH=$(python3 "$SOURCE_RUNTIME" prepare \
     --request "$GEAK_SOURCE_REQUEST" --output-dir "$GEAK_SOURCE_OBSERVATION_DIR" \
-    --overlay-pythonpath "$OVERLAY_PYTHONPATH") || exit 3
+    --overlay-pythonpath "$OVERLAY_PYTHONPATH") || exit "$?"
   export GEAK_SOURCE_OBSERVATION_DIR GEAK_SOURCE_BOOTSTRAP_PYTHONPATH GEAK_ACCEPTED_SOURCE_PYTHONPATH
 fi
 source_runtime_gate() {
@@ -729,7 +738,7 @@ else
   echo ">>> Reusing warm server at $BASE_URL"
   adapter_health >/dev/null 2>&1 || { echo "!!! No healthy server at $BASE_URL"; exit 2; }
 fi
-source_runtime_gate prepared || exit 3
+source_runtime_gate prepared || exit "$?"
 
 # ---- overlay resident-memory parity guard (only when an overlay is active) ----
 # An authored kernel that builds a PERSISTENT dequant/shuffle cache inflates resident VRAM beyond the
@@ -806,7 +815,7 @@ fi
 : > "$RESULT_JSONL"
 
 # ---- timed repeats ----
-source_runtime_gate ready || exit 3
+source_runtime_gate ready || exit "$?"
 _bench_failed=0
 for r in $(seq 1 "$REPEATS"); do
   echo ">>> Bench repeat $r/$REPEATS ..."
@@ -904,7 +913,7 @@ PY
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
-source_runtime_gate finished || exit 3
+source_runtime_gate finished || exit "$?"
 python3 "$SUMMARIZE" from-runs "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL"
 _summary_rc=$?
 if [ -n "$SOURCE_RUNTIME" ]; then
