@@ -21,6 +21,7 @@ export const meta = {
 // Args + defaults. A JS workflow can't read its own path, so workflow_dir is passed in.
 // ---------------------------------------------------------------------------
 const A = args || {};
+const BASELINE_SOURCE_REQUEST = String(A.baseline_source_request_path || '');
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
   throw new Error('args.workflow_dir is required: absolute path to the dir holding e2e_workflow.js, ' +
@@ -48,7 +49,10 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 // be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
 // silently take the lane's own default (on) with nothing to catch it. test_e2e_lane_defaults.py
 // fails if a `scriptPath: KERNEL_WF_SCRIPT` call is added that does not route through this.
-const laneArgs = (wfArgs) => ({ use_learned_kb: LANE_USE_LEARNED_KB, ...wfArgs });
+const laneArgs = (wfArgs) => ({
+  use_learned_kb: LANE_USE_LEARNED_KB, ...wfArgs,
+  ...(BASELINE_SOURCE_REQUEST ? { baseline_source_request_path: BASELINE_SOURCE_REQUEST } : {}),
+});
 
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
@@ -669,6 +673,7 @@ const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${CAPTURE_BYTE_BUDGET} CAPTURE_
 const TASK = A.task || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
+const BASELINE_SOURCE_PYTHONPATH = String(A.baseline_source_pythonpath || '');
 const MODEL_NAME_HINT = (MODEL_PATH || KERNEL_PATH).replace(/\/+$/, '').split('/').pop();
 
 // ---------------------------------------------------------------------------
@@ -1116,6 +1121,23 @@ function warmStartBlock(role) {
       : '');
 }
 
+function sourceContractBlock(role) {
+  if (!BASELINE_SOURCE_REQUEST) return '';
+  return `
+## Accepted upstream source
+The caller has staged the accepted source and canonical benchmark helpers in ${EVAL_DIR_OVERRIDE}.
+Use that exact eval directory, preserving its helpers and source_manifest.sha256 marker.
+Export the exact GEAK_SOURCE_REQUEST value from Inputs, quoting it for the shell, for every
+benchmark including profiling, reference/candidate legs, final validation, and final_launch.sh.
+The benchmark verifies the serving processes before and after measurement. A source verification
+failure is an unavailable measurement; do not bypass it or reuse an unsealed summary.
+Keep GEAK_ACCEPTED_SOURCE_PYTHONPATH separate from the authored OVERLAY_PYTHONPATH: reference
+and candidate share the accepted upstream source. Only the candidate adds its authored overlay.
+Knowledge export is disabled for this source-bearing run. Keep observations and lessons inside
+EVAL_DIR; do not write or attest shared knowledge records or edit global learned cards.
+`;
+}
+
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
@@ -1123,6 +1145,10 @@ function roleAgent(role, phase, intro, inputs) {
     BACKEND, SERVING_TP, SERVING_GPU,
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
     EFFECTIVE_CONFIG_DIGEST,
+    ...(BASELINE_SOURCE_REQUEST ? {
+      GEAK_SOURCE_REQUEST: BASELINE_SOURCE_REQUEST,
+      GEAK_ACCEPTED_SOURCE_PYTHONPATH: BASELINE_SOURCE_PYTHONPATH,
+    } : {}),
     ...inputs,
   };
   const base = `You are the ${role}. PHASE=${phase}.
@@ -1149,7 +1175,7 @@ optimization-pool id for a serving launch — keep the two separate.
 ${cfg(inall)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role) + warmStartBlock(role);
+  return base + expertSkillsBlock(role) + warmStartBlock(role) + sourceContractBlock(role);
 }
 
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
@@ -2229,6 +2255,9 @@ if (want('setup')) {
     }),
     { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
   if (!setup || !setup.eval_dir) throw new Error('Setup failed: no eval_dir');
+  if (BASELINE_SOURCE_REQUEST && setup.eval_dir !== EVAL_DIR_OVERRIDE) {
+    throw new Error('unresolved_baseline_source:setup_changed_staged_eval_directory');
+  }
   EVAL_DIR = setup.eval_dir;
   MODEL_NAME = setup.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = setup.baseline_throughput_tok_s;
@@ -2823,7 +2852,7 @@ if (want('setup')) {
       const configHalfOnly = v => Array.isArray(v.accepted_kernels) && v.accepted_kernels.length > 0;
       const attestable = verdicts.filter(v => v.session_id &&
         ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
-      if (attestable.length) {
+      if (!BASELINE_SOURCE_REQUEST && attestable.length) {
         const cmds = attestable.map(v =>
           `python3 ${shq(E2E_STORE_SCRIPT)} attest ${kbIdentityFlags()} ${kbPlaneFlags()} ` +
           `--session-id ${shq(v.session_id)} ` +
@@ -3106,6 +3135,9 @@ if (want('setup')) {
 } else {
   // Load carried state from a prior phase invocation (args.state).
   EVAL_DIR = ST.eval_dir || EVAL_DIR_OVERRIDE;
+  if (BASELINE_SOURCE_REQUEST && EVAL_DIR !== EVAL_DIR_OVERRIDE) {
+    throw new Error('unresolved_baseline_source:resume_changed_staged_eval_directory');
+  }
   if (!EVAL_DIR) throw new Error('Non-setup phase requires args.state.eval_dir (or args.eval_dir)');
   MODEL_NAME = ST.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = ST.baseline_throughput_tok_s || 0;
@@ -3314,7 +3346,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
     log(`[kernel-kb] ${tuningUnattempted} recalled op(s) NOT attested: no artifact, engagement, or ` +
       `measurement, so they never reached the GPU — an offer nobody benched is not evidence.`);
   }
-  if (tuningRecalls.length) {
+  if (!BASELINE_SOURCE_REQUEST && tuningRecalls.length) {
     const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
     // One plane per verdict — `both` would count one attempt twice on two ledgers a curation pass
     // then compares. The plane that ANSWERED is not the one ASKED FOR (the tuning role retries a
@@ -3452,7 +3484,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
     // phase-level A/B measured. Best-effort — a failure here loses a record, never a measurement.
     const kernelKbOps = KB_DIMS && KB_DIMS.gfx ? tunedOps.filter((o) =>
       Number(o.isolated_speedup) > 1.0 && o.engaged === true && String(o.artifact || '').trim()) : [];
-    if (kernelKbOps.length) {
+    if (!BASELINE_SOURCE_REQUEST && kernelKbOps.length) {
       const storeScript = KERNEL_WF_DIR + '/scripts/experience_store.py';
       // `both` mirrors to the shared service; without a store dir there is nothing to mirror INTO,
       // so it degrades to the plain directory write rather than erroring. Same selection the kernel
@@ -4690,7 +4722,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   }
 
   // --- (d) Update the persistent experience library + in-run memory -------
-  const exp = await safeAgent(
+  const exp = BASELINE_SOURCE_REQUEST ? null : await safeAgent(
     roleAgent('system_architect', 'update_experience', 'Curate knowledge/learned/ (merge/insert >=2-star / archive contradicted) per learned/README.md.', {
       ROUND: milestone, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
       MILESTONE_RESULTS: history.ledger.slice(-cands.length),
@@ -4986,7 +5018,7 @@ if (want('final')) {
   // gated number (see the 20260812 Qwen3.5-27B run: the +16.1% head card was left
   // at "e2e transfer NOT yet gated"). Re-curate ONCE now, with the authoritative
   // post-Validate numbers, so finalize-gate confirmations are written back.
-  if (allAccepted.length) {
+  if (!BASELINE_SOURCE_REQUEST && allAccepted.length) {
     const verifiedTput = validatedOk ? validation.director_verified_throughput_tok_s : finalTput;
     await safeAgent(
       roleAgent('system_architect', 'update_experience',
@@ -5225,7 +5257,7 @@ if (EVAL_DIR) {
 // rounded to. `startsWith` also catches the `..._no_number_used_carried_ab` fallback spelling.
 const kbNoWinVerdict = ['validated_no_win', 'recovered_no_gain']
   .some((s) => String(wfReturn.validation_status || '').startsWith(s));
-if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
+if (!BASELINE_SOURCE_REQUEST && E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
     wfReturn.throughput_speedup > 1.0 && wfReturn.final_throughput_tok_s > 0 && !kbNoWinVerdict) {
   // Computed HERE, deterministically, from facts this script already holds — never asked of an
   // agent. `direction` is inside _content_digest, so a label that varies between two runs of the
@@ -5272,6 +5304,9 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
     wfReturn.kb_written = { ok: false, error: String(e).slice(0, 200) };
     log(`[kb] write failed (NON-FATAL — the run's own artifacts are unaffected): ${String(e)}`);
   }
+} else if (BASELINE_SOURCE_REQUEST) {
+  wfReturn.kb_written = { skipped: true, why: 'source_bound_export_unavailable' };
+  log('[kb] source-bearing run retained locally; shared source-bound export is unavailable.');
 } else if (E2E_WARM_START_ON && KB_DIMS) {
   const why = !KB_DIMS.gfx ? 'no gfx (an arch-less record is permanent and unattributable)'
     : !want('final') ? 'this is a phase-partial run, so the number is not final'

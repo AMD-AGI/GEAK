@@ -18,6 +18,7 @@ export const meta = {
 // (dispatcher=level0 -> worker=level1). The dispatcher never nests a second level.
 // ---------------------------------------------------------------------------
 const A = args || {};
+const BASELINE_SOURCE_REQUEST = String(A.baseline_source_request_path || '');
 if (!A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/op dir)');
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
@@ -193,6 +194,11 @@ function expertSkillsBlock(role) {
     `overriding your isolated A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
 
+function sourceContractBlock(role) {
+  if (!BASELINE_SOURCE_REQUEST) return '';
+  return '\nThis bake-off belongs to a source-bearing serving run. Keep all observations and lessons in its eval directory. Do not write or attest shared knowledge records or edit global learned cards.\n';
+}
+
 // Read a role file from an arbitrary roles/ dir (used for e2e's op_benchmarker referenced in place).
 function roleAgentFrom(dir, role, phaseName, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phaseName}.
@@ -204,7 +210,7 @@ Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 ${cfg(inputs)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role);
+  return base + expertSkillsBlock(role) + sourceContractBlock(role);
 }
 // This dispatcher's own roles (oracle_freezer) live under WORKFLOW_DIR/roles/.
 const roleAgent = (role, phaseName, intro, inputs) => roleAgentFrom(WORKFLOW_DIR, role, phaseName, intro, inputs);
@@ -394,6 +400,7 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',
       warm_start: WARM_START, kb_artifacts_dir: KB_ARTIFACTS_DIR, ...KB_PLANE_ARGS,
+      ...(BASELINE_SOURCE_REQUEST ? { baseline_source_request_path: BASELINE_SOURCE_REQUEST } : {}),
     });
     const speedup = primSpeedup(r);
     log(`lane ${l.key}:${l.mode} -> ${speedup ? speedup.toFixed(2) + 'x' : 'no result'} (${r ? r.validation_status : 'null'})`);
@@ -502,7 +509,7 @@ log(winner
 // update_experience=off): the reusable lesson is the cross-language routing outcome, which
 // no single lane can see. Sink is THIS workflow's knowledge/learned/ (see its README.md),
 // never e2e's. Only on a measured win, and ADD-only — a failed step is byte-neutral.
-if (winner && winner.speedup > 1.0) {
+if (!BASELINE_SOURCE_REQUEST && winner && winner.speedup > 1.0) {
   const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
   try {
     const ue = await agentT(
