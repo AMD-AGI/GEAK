@@ -74,6 +74,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Capability discovery does not enter the benchmark or acquire a GPU lock.
+if [ "${1:-}" = "--post-measure-capabilities" ]; then
+  exec python3 "$HERE/bench_lifecycle.py" capabilities
+fi
+
 # ---- staged siblings ----
 # This script is COPIED into $EVAL_DIR (roles/director.md), so its helper libraries resolve from $HERE
 # first, then the skill dir.  Both are resolved up here, before anything is launched: discovering a
@@ -112,6 +117,32 @@ if [ -n "${GEAK_VALIDATION_REPEAT_MODE:-}" ] \
   echo ">>> MEASUREMENT_PURPOSE=validation: pinning GEAK_REPEAT_MODE=${GEAK_VALIDATION_REPEAT_MODE}" \
        "(caller policy; the invocation asked for ${GEAK_REPEAT_MODE:-legacy})."
   GEAK_REPEAT_MODE="$GEAK_VALIDATION_REPEAT_MODE"
+fi
+
+# The caller owns the evaluator and its quality policy. GEAK owns only the
+# after-timing callback and its exact server/attempt association. Validate the
+# optional protocol BEFORE the profiling/capture carve-outs or any launch.
+POST_MEASURE_HELPER=""
+POST_MEASURE_CHILD_PID=""
+if [ -n "${GEAK_POST_MEASURE_REQUEST:-}" ]; then
+  POST_MEASURE_HELPER="$HERE/bench_lifecycle.py"
+  if [ ! -f "$POST_MEASURE_HELPER" ]; then
+    echo "!!! GEAK_POST_MEASURE_REQUEST requires staged bench_lifecycle.py." >&2
+    exit 3
+  fi
+  python3 "$POST_MEASURE_HELPER" prepare --request "$GEAK_POST_MEASURE_REQUEST" \
+    --output-dir "${OUT_DIR:-$(pwd)/e2e_bench_out}" --mode "$GEAK_REPEAT_MODE" || exit 3
+  _post_measure_signal() {
+    local _status="$1"
+    trap '' INT TERM
+    if [ -n "$POST_MEASURE_CHILD_PID" ]; then
+      kill -TERM "$POST_MEASURE_CHILD_PID" 2>/dev/null || true
+      wait "$POST_MEASURE_CHILD_PID" 2>/dev/null || true
+    fi
+    exit "$_status"
+  }
+  trap '_post_measure_signal 130' INT
+  trap '_post_measure_signal 143' TERM
 fi
 # ---- no-throughput carve-out ----
 # An invocation that produces no throughput number has no lifecycle to align, and the alignment
@@ -212,11 +243,28 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
       _attempt_dir="$_replica_dir/attempt_$_attempt"
       rm -f "$_attempt_dir/bench_summary.json"
       echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/2) ..."
-      OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
-        bash "$_replica_runner"
-      _rc=$?
-      if [ "$_rc" -eq 0 ] && python3 - "$_attempt_dir/bench_summary.json" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
-import json, sys
+      if [ -n "$POST_MEASURE_HELPER" ]; then
+        # An interruptible wait lets the leaf finish callback/server cleanup.
+        OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
+          bash "$_replica_runner" &
+        POST_MEASURE_CHILD_PID=$!
+        wait "$POST_MEASURE_CHILD_PID"; _rc=$?
+        POST_MEASURE_CHILD_PID=""
+      else
+        OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
+          bash "$_replica_runner"
+        _rc=$?
+      fi
+      _selection_summary="$_attempt_dir/bench_summary.json"
+      _selection_runs="$_attempt_dir/bench_runs.jsonl"
+      _measurement_seal=""
+      if [ -n "$POST_MEASURE_HELPER" ] && [ -f "$_attempt_dir/post_measure/measurement.json" ]; then
+        _measurement_seal="$_attempt_dir/post_measure/measurement.json"
+        _selection_summary="$_attempt_dir/post_measure/throughput/bench_summary.json"
+        _selection_runs="$_attempt_dir/post_measure/throughput/bench_runs.jsonl"
+      fi
+      if [ "$_rc" -eq 0 ] && python3 - "$_selection_summary" "${EFFECTIVE_CONFIG_DIGEST:-}" "$_measurement_seal" <<'PY'
+import hashlib, json, pathlib, sys
 try:
     summary = json.load(open(sys.argv[1]))
     value = summary.get("throughput_tok_s_median")
@@ -225,18 +273,28 @@ try:
     expected_digest = sys.argv[2]
     if expected_digest:
         ok = ok and summary.get("effective_config_digest") == expected_digest
-except (OSError, ValueError, TypeError):
+    if sys.argv[3]:
+        seal = json.load(open(sys.argv[3]))
+        expected = {item["path"]: item["sha256"] for item in seal["throughput_artifacts"]}
+        for name in ("bench_summary.json", "bench_runs.jsonl"):
+            saved = pathlib.Path(sys.argv[1]).parent / name
+            ok = ok and not saved.is_symlink() and hashlib.sha256(saved.read_bytes()).hexdigest() == expected[name]
+except (OSError, ValueError, TypeError, KeyError):
     ok = False
 raise SystemExit(0 if ok else 1)
 PY
       then
-        cp "$_attempt_dir/bench_summary.json" "$_replica_dir/selected_summary.json"
-        if [ -f "$_attempt_dir/bench_runs.jsonl" ]; then
-          cat "$_attempt_dir/bench_runs.jsonl" >> "$_aggregate_out/bench_runs.jsonl"
+        cp "$_selection_summary" "$_replica_dir/selected_summary.json"
+        if [ -f "$_selection_runs" ]; then
+          cat "$_selection_runs" >> "$_aggregate_out/bench_runs.jsonl"
         fi
         printf '%s\n' "$_attempt" > "$_replica_dir/selected_attempt"
         _replica_ok=1
         _successful=$((_successful + 1))
+        break
+      fi
+      if [ -n "$_measurement_seal" ]; then
+        echo "!!! Sealed throughput unavailable after callback; refusing a quality-driven retry." >&2
         break
       fi
       echo "!!! Isolated replica $_replica attempt $_attempt failed (rc=$_rc)." >&2
@@ -248,6 +306,10 @@ PY
 
   python3 "$SUMMARIZE" from-replicas "$_aggregate_out" "$_requested" "$_successful" \
     "$_purpose" "${EFFECTIVE_CONFIG_DIGEST:-}"
+  if [ -n "$POST_MEASURE_HELPER" ]; then
+    python3 "$POST_MEASURE_HELPER" aggregate --output-dir "$_aggregate_out" \
+      || echo "!!! Post-measurement manifest unavailable; caller must reject quality." >&2
+  fi
   echo ">>> Done. Summary: $_aggregate_out/bench_summary.json"
   # A degraded leg remains observable: callers consume status=incomplete and
   # the successful-replica median.  Only a leg with no measurement at all is a
@@ -591,6 +653,17 @@ fi
 # shellcheck disable=SC1090
 source "$TEARDOWN_LIB"
 trap server_teardown EXIT
+if [ -n "$POST_MEASURE_HELPER" ]; then
+  _post_measure_exit() {
+    local _status=$?
+    trap - EXIT
+    server_teardown
+    python3 "$POST_MEASURE_HELPER" observe-cleanup --output-dir "$OUT_DIR" \
+      || echo "!!! Post-measurement cleanup status unavailable." >&2
+    exit "$_status"
+  }
+  trap _post_measure_exit EXIT
+fi
 
 # ---- serving-GPU mutex ----
 # TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
@@ -626,6 +699,11 @@ if [ "$REUSE_SERVER" != "1" ]; then
   # Freeze the server's process identity NOW (pid, pgid, /proc start time) so the
   # EXIT teardown never has to ask "who owns this pid?" after the pid may be gone.
   server_record_identity "$SERVER_PID"
+  if [ -n "$POST_MEASURE_HELPER" ]; then
+    python3 "$POST_MEASURE_HELPER" record --output-dir "$OUT_DIR" \
+      --pid "$SERVER_PID" --pgid "$SERVER_PGID" --start-ticks "$SERVER_START_TICKS" \
+      --group-unverified "$SERVER_GROUP_UNVERIFIED" --protected-pgids "$SERVER_PROTECTED_PGIDS" || exit 3
+  fi
 
   echo ">>> Waiting for server health (stall window ${STALL_WINDOW_SEC}s, backstop ${CEILING}s) ..."
   _t0=$SECONDS; _last_tok=""; _last_change=$SECONDS
@@ -650,6 +728,10 @@ if [ "$REUSE_SERVER" != "1" ]; then
   _waited=$((SECONDS-_t0))
   if [ "$_up" = "1" ]; then
     echo ">>> Server up after ~${_waited}s."
+    if [ -n "$POST_MEASURE_HELPER" ]; then
+      python3 "$POST_MEASURE_HELPER" ready --output-dir "$OUT_DIR" --base-url "$BASE_URL" \
+        --replica-index "${REPLICA_INDEX:-0}" --replica-attempt "${REPLICA_ATTEMPT:-0}" || exit 3
+    fi
   else
     case "$_reason" in
       died_early|ceiling_exceeded|stalled)
@@ -853,5 +935,15 @@ fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
 python3 "$SUMMARIZE" from-runs "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL"
+
+if [ -n "$POST_MEASURE_HELPER" ]; then
+  # Quality failure is a SIDECAR, never an isolated throughput retry signal.
+  # The server and serving-GPU lock remain owned until this callback completes.
+  python3 "$POST_MEASURE_HELPER" run --output-dir "$OUT_DIR" &
+  POST_MEASURE_CHILD_PID=$!
+  wait "$POST_MEASURE_CHILD_PID" \
+    || echo "!!! Post-measurement receipt unavailable; caller must reject quality." >&2
+  POST_MEASURE_CHILD_PID=""
+fi
 
 echo ">>> Done. Summary: $OUT_DIR/bench_summary.json"
