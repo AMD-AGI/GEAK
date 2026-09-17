@@ -283,6 +283,15 @@ def completeness(rows, meta=None):
         "workflow_completion": {
             "complete": meta.get("complete") if meta else None,
             "attribution_mode": meta.get("attribution_mode"),
+            # How transcripts were selected: 'explicit' / 'run-scoped' /
+            # 'run-scoped-inferred' / 'partial' / 'substring-fallback' (see
+            # geak_report.run). A substring-fallback, partial, or inferred scope
+            # means the billed numbers may be over- or under-attributed; surface
+            # it, never hide it. ``transcript_scope_anchor`` (e.g.
+            # 'exp_root-ancestor') records HOW an inferred whole-run identity was
+            # established, so a containment-only match reads as unproven.
+            "transcript_scope": meta.get("transcript_scope"),
+            "transcript_scope_anchor": meta.get("transcript_scope_anchor"),
             "warnings": warnings,
         },
         "capture_completeness": {
@@ -332,10 +341,25 @@ def render_markdown(nodes, root, model, comp=None):
     if comp:
         cap = comp["capture_completeness"]
         wf = comp["workflow_completion"]
+        _scope = wf.get("transcript_scope")
+        _anchor = wf.get("transcript_scope_anchor")
+        _scope_note = {
+            "explicit": "caller-named transcripts",
+            "run-scoped": "scoped to this run's own transcripts",
+            "run-scoped-inferred": "INFERRED — enclosing run matched by exp_root "
+                                   "containment only; ownership not proven",
+            "partial": "PARTIAL — some lanes could not be established",
+            "substring-fallback": "FALLBACK — path-substring discovery; may include concurrent sessions",
+        }.get(_scope, _scope)
         out += ["## Completeness", "",
                 "- **workflow telemetry**: %s%s" % (
                     {True: "complete", False: "incomplete", None: "unknown"}[wf["complete"]],
                     (" — " + "; ".join(wf["warnings"])) if wf["warnings"] else ""),
+                "- **transcript scope**: %s%s%s" % (
+                    _scope or "unknown",
+                    (" (%s)" % _scope_note) if _scope_note and _scope_note != _scope else "",
+                    (" [anchor: %s]" % _anchor) if _anchor else ""),]
+        out += [
                 "- **capture**: %s/%s API responses have a terminal stop%s"
                 % (cap["api_calls"] - cap["incomplete_output"], cap["api_calls"],
                    "" if cap["complete"] else " (%d captured mid-flight — usage/output may be partial)" % cap["incomplete_output"]),
@@ -517,6 +541,14 @@ _HTML_TEMPLATE = r"""<!doctype html>
     var capTxt = (cap.api_calls-cap.incomplete_output)+'/'+cap.api_calls+' terminal'
       + (cap.complete?'':(' · '+cap.incomplete_output+' mid-flight'));
     b.appendChild(chip(wfTxt,'workflow telemetry'+((wf.warnings&&wf.warnings.length)?' ⚠':'')));
+    if(wf.transcript_scope){
+      var scp=wf.transcript_scope;
+      var scLbl={'explicit':'caller-named','run-scoped':'this run only',
+                 'run-scoped-inferred':'INFERRED ⚠','partial':'PARTIAL ⚠',
+                 'substring-fallback':'FALLBACK ⚠'}[scp]||scp;
+      if(wf.transcript_scope_anchor){ scLbl += ' · anchor: '+wf.transcript_scope_anchor; }
+      b.appendChild(chip(scp, 'transcript scope · '+scLbl));
+    }
     b.appendChild(chip(capTxt, cap.complete?'capture complete':'capture partial'));
     var cc=document.createElement('div'); cc.className='chip'; cc.style.maxWidth='420px';
     cc.innerHTML='<b>cost coverage</b><span>'+esc(C.cost_coverage)+'</span>';

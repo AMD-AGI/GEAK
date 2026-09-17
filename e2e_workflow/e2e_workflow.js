@@ -5186,9 +5186,10 @@ if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
   log(`[kb] not recording this run: ${why}.`);
 }
 
-// Persist the agent timeline so the ledger can attribute tokens/time to the right role. The script
-// has no filesystem access, so a tiny agent writes the file and re-runs the collector. Entirely
-// best-effort: accounting must never fail a run that produced a real speedup.
+// Persist the agent timeline so the ledger can attribute tokens/time to the right role, then render
+// the run report (ledger -> clickable role-execution-tree HTML + MD twin) as the very last step. The
+// script has no filesystem access, so a tiny agent writes the file and runs the report driver.
+// Entirely best-effort: accounting must never fail a run that produced a real speedup.
 if (EVAL_DIR && LLM_STATS) {
   try {
     // `instance` = this run's eval dir: a stable per-run identity so the parser can dedupe a
@@ -5202,15 +5203,16 @@ if (EVAL_DIR && LLM_STATS) {
       `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
       `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
       '```json\n' + tlJson + '\n```\n\n' +
-      `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false):\n` +
-      `   python3 "${WORKFLOW_DIR}/scripts/llm_ledger.py" --eval-dir "${EVAL_DIR}"\n\n` +
+      `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
+      `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
+      `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${EVAL_DIR}"\n\n` +
       `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
       { phase: 'Validate', label: 'file_writer:persist_llm_stats',
         schema: obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []) },
       2);
     const nestedNote = LLM_TL.nested.length ? ' plus ' + LLM_TL.nested.length + ' nested kernel run(s)' : '';
-    log(`LLM token+time ledger -> ${EVAL_DIR}/reports/trace/. ` +
-        `${LLM_TL.events.length} agent attempts recorded${nestedNote}.`);
+    log(`LLM token+time+cost ledger -> ${EVAL_DIR}/reports/trace/ and run report (HTML+MD) -> ` +
+        `${EVAL_DIR}/report/. ${LLM_TL.events.length} agent attempts recorded${nestedNote}.`);
   } catch (e) {
     log(`LLM stats emit failed (NON-FATAL — the run is unaffected): ${String(e)}`);
   }

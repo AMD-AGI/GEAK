@@ -476,6 +476,53 @@ class TestRunWindow(LedgerTestBase):
         self.assertEqual(agg["by_role"]["director"]["calls"], 1)
 
 
+class TestOwnedScopeWindow(LedgerTestBase):
+    """Fix 4 (Astra re-review): when the caller has ALREADY established the
+    transcripts as this run's own (run-scoped discovery), the window's inferred
+    lower bound must be lifted — an early OWNED call is real run work, not the
+    pre-run session history the inferred fence is meant to drop."""
+
+    def _owned_early_then_late(self):
+        # Both calls are the run's own; the first precedes the first role-agent
+        # user turn only because setup work runs before the director is prompted.
+        write_transcript(os.path.join(self.tdir, "own.jsonl"), [
+            asst_rec(10, "msg_owned_early", read=1000, out=10),
+            user_rec(prompt_for("director", "setup", self.eval_dir), 15),
+            asst_rec(20, "msg_director", read=2000, out=20),
+        ])
+
+    def test_owned_scope_keeps_the_early_owned_call(self):
+        self._owned_early_then_late()
+        rows, _, agg, meta = self.build(owned_scope=True)
+        # Both owned calls counted; nothing dropped as "before the run".
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(agg["total"]["cache_read_input_tokens"], 3000)
+        self.assertEqual(meta.get("calls_excluded_outside_window", 0), 0)
+
+    def test_unowned_scope_still_drops_the_early_call(self):
+        # Same transcript, but WITHOUT the owned-scope trust: the inferred fence
+        # still fires (substring discovery cannot vouch for the early call).
+        self._owned_early_then_late()
+        rows, _, _, meta = self.build()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(meta["calls_excluded_outside_window"], 1)
+
+    def test_owned_scope_records_the_scope_in_meta(self):
+        self._owned_early_then_late()
+        _, _, _, meta = self.build(owned_scope=True, scope="run-scoped")
+        self.assertEqual(meta["transcript_scope"], "run-scoped")
+
+    def test_scope_warnings_mark_the_run_incomplete(self):
+        # A partial-coverage caller passes a warning; it joins the ledger's own
+        # and flips complete -> False so the report never claims full coverage.
+        self._owned_early_then_late()
+        _, _, _, meta = self.build(
+            owned_scope=True, scope="partial",
+            scope_warnings=["lane laneB could not be established"])
+        self.assertFalse(meta["complete"])
+        self.assertTrue(any("laneB" in w for w in meta["warnings"]))
+
+
 class TestDiscovery(LedgerTestBase):
     def test_only_transcripts_mentioning_this_eval_dir_are_used(self):
         roots = os.path.join(self.tmp, "claude")

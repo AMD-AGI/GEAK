@@ -73,16 +73,87 @@ def _model_name(eval_dir, override=None):
         return base or "run"
 
 
-def _run_ledger(eval_dir, transcripts, rates_path):
-    """Invoke the in-repo ledger; returns the path to llm_calls.jsonl (or None)."""
+def _run_ledger(eval_dir, transcripts, rates_path, scope=None,
+                scope_warnings=(), owned=False, scope_anchor=None):
+    """Invoke the in-repo ledger; returns the path to llm_calls.jsonl (or None).
+
+    ``scope`` / ``scope_warnings`` / ``scope_anchor`` are threaded into the ledger
+    meta so the report — not just this function's return dict — records how
+    transcripts were selected and how a whole-run anchor was established (e.g. an
+    inferred ``exp_root-ancestor`` scope stays auditable in token_stats.json and
+    the Markdown). ``owned`` lifts the window's inferred lower bound (the run owns
+    its transcripts, so an early owned call must not be dropped as pre-run
+    contamination)."""
     argv = ["--eval-dir", eval_dir, "--quiet"]
     for glob in (transcripts or []):
         argv += ["--transcripts", glob]
     if rates_path:
         argv += ["--rates", rates_path]
+    if scope:
+        argv += ["--scope", scope]
+    if scope_anchor:
+        argv += ["--scope-anchor", scope_anchor]
+    for w in (scope_warnings or ()):
+        argv += ["--scope-warning", w]
+    if owned:
+        argv += ["--owned-scope"]
     llm_ledger.main(argv)
     calls = os.path.join(eval_dir, "reports", "trace", "llm_calls.jsonl")
     return calls if os.path.isfile(calls) else None
+
+
+def _nested_eval_dirs(eval_dir):
+    """The eval-dirs of this run's nested lanes, read from the persisted
+    ``agent_timeline.json`` (each ``nested[]`` entry carries the lane's own
+    ``instance``). Empty when the timeline is absent or has no nesting."""
+    tl = os.path.join(eval_dir, "reports", "trace", "agent_timeline.json")
+    try:
+        with open(tl, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    out, seen = [], set()
+
+    def walk(node):
+        for child in (node.get("nested") or []):
+            if not isinstance(child, dict):
+                continue
+            inst = child.get("instance")
+            if inst and inst not in seen:
+                seen.add(inst)
+                out.append(inst)
+            walk(child)
+
+    if isinstance(data, dict):
+        walk(data)
+    return out
+
+
+def _resolve_scope(eval_dir):
+    """Resolve THIS run's own transcript scope, with coverage, or ``None``.
+
+    Returns the structured dict from
+    ``claude_trace_mirror.resolve_run_scope`` — ``{globs, scope, complete,
+    requested, resolved, missing, warnings}`` — scoping to the run's own
+    ``subagents/workflows/<runId>/`` dir(s) so the ledger does not over-attribute
+    a concurrent session's transcripts that merely mention the eval-dir path.
+
+    Best-effort: any resolution failure returns ``None`` so the report still
+    builds the old way (substring discovery) rather than emitting an empty
+    ledger. A resolvable-but-``unresolved`` scope (no owning top-level record) is
+    returned as-is with ``globs == []`` so the caller records the fallback
+    explicitly instead of silently degrading."""
+    try:
+        import claude_trace_mirror as mirror
+    except Exception:
+        return None
+    try:
+        homes = mirror.candidate_homes()
+        return mirror.resolve_run_scope(
+            homes, eval_dir=eval_dir,
+            nested_eval_dirs=_nested_eval_dirs(eval_dir))
+    except Exception:
+        return None
 
 
 def _write_per_call_artifacts(calls_path, out_dir):
@@ -248,7 +319,48 @@ def run(eval_dir=None, transcripts=None, model=None, rates_path=None,
         tmp = tempfile.mkdtemp(prefix="geak_report_")
         eval_dir = tmp
     try:
-        calls = _run_ledger(eval_dir, transcripts, rates_path)
+        # Scope discovery to THIS run's own transcripts unless the caller named
+        # them explicitly. Without this the ledger finds transcripts by eval-dir
+        # path SUBSTRING across every session and over-attributes concurrent ones
+        # (a debugging session, a second workflow, the report driver) to this run.
+        #
+        # scope label semantics (surfaced in the report + ledger meta):
+        #   'explicit'            caller named the globs
+        #   'run-scoped'          top + every lane resolved to its own runId dir
+        #   'partial'             top resolved, but a lane could not be established
+        #   'substring-fallback'  no owning top-level record -> ledger path discovery
+        #                         (numbers may include concurrent sessions)
+        # 'owned' lifts the ledger window's inferred lower bound: when we scoped to
+        # the run's OWN dirs, an early owned call is real, not pre-run contamination.
+        used_transcripts = transcripts
+        scope_warnings = []
+        owned = False
+        top_anchor = None
+        if transcripts:
+            scope = "explicit"
+        else:
+            info = _resolve_scope(eval_dir)
+            if info and info.get("globs") and info.get("scope") in (
+                    "run-scoped", "run-scoped-inferred", "partial"):
+                scope = info["scope"]
+                used_transcripts = info["globs"]
+                scope_warnings = list(info.get("warnings") or [])
+                owned = True
+                top_anchor = info.get("top_anchor")
+            else:
+                # Unresolved top-level identity (or resolver unavailable): fall
+                # back to substring discovery, but record WHY explicitly.
+                scope = "substring-fallback"
+                if info:
+                    scope_warnings = list(info.get("warnings") or [])
+                scope_warnings.append(
+                    "transcript scope fell back to substring discovery — the run's "
+                    "own workflow record could not be resolved, so reported numbers "
+                    "may include concurrent sessions that touched the eval-dir")
+        anchor_for_meta = top_anchor if (top_anchor and top_anchor != "eval_dir") else None
+        calls = _run_ledger(eval_dir, used_transcripts, rates_path,
+                            scope=scope, scope_warnings=scope_warnings, owned=owned,
+                            scope_anchor=anchor_for_meta)
         if not calls:
             return {"status": "no-calls",
                     "reason": "ledger produced no llm_calls.jsonl (no transcripts?)"}
@@ -266,7 +378,15 @@ def run(eval_dir=None, transcripts=None, model=None, rates_path=None,
         report_dir = out_dir or os.path.join(eval_dir, "report")
         html_path, md_path = tree.write(calls, report_dir, name)
         result = {"status": "ok", "model": name, "calls": calls,
-                  "html": html_path, "md": md_path, "report_dir": report_dir}
+                  "html": html_path, "md": md_path, "report_dir": report_dir,
+                  "transcript_scope": scope}
+        # How a run-scoped anchor was established: the run's own ``eval_dir`` being
+        # on record, or (mid-run, before the dispatcher returns) its enclosing
+        # ``exp_root``. Surfaced so an exp_root-anchored scope is auditable.
+        if top_anchor and top_anchor != "eval_dir":
+            result["transcript_scope_anchor"] = top_anchor
+        if scope_warnings:
+            result["scope_warnings"] = scope_warnings
         if persist:
             root, n_art = _persist(eval_dir, calls, report_dir, name, persist_root)
             result["persisted_to"] = root
@@ -307,6 +427,12 @@ def main(argv=None):
         print("geak_report: %s — %s" % (res["status"], res.get("reason", "")), file=sys.stderr)
         return 1
     print("geak_report: wrote %s and %s" % (res["html"], res["md"]))
+    scope = res.get("transcript_scope")
+    if scope:
+        note = "" if scope in ("explicit", "run-scoped") else " (coverage may be incomplete — see warnings)"
+        print("geak_report: transcript scope = %s%s" % (scope, note))
+    for w in (res.get("scope_warnings") or []):
+        print("geak_report:   scope warning: %s" % w, file=sys.stderr)
     if res.get("persisted_to"):
         print("geak_report: persisted %s (%s per-call artifacts) to %s"
               % (res["model"], res.get("artifacts", 0), res["persisted_to"]))
