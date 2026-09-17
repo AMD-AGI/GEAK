@@ -182,8 +182,9 @@ def test_non_finite_divergence_inputs_are_unavailable(
     json.dumps(out, allow_nan=False)
 
 
+@pytest.mark.parametrize("dictionary_format", [False, True])
 def test_handoff_alignment_uses_setup_not_validate_base_and_verifies_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dictionary_format: bool
 ) -> None:
     """The late optimization denominator cannot overwrite the handoff verdict."""
     eval_dir = tmp_path / "e2e"
@@ -200,11 +201,16 @@ def test_handoff_alignment_uses_setup_not_validate_base_and_verifies_identity(
         json.dumps({"throughput_tok_s_median": 990.0}), encoding="utf-8"
     )
     server_log = eval_dir / "baseline" / "server.log"
-    server_log.write_text(
-        "server_args=ServerArgs(model_path='/models/qwen', tp_size=1, "
-        "mem_fraction_static=0.92, context_length=8192)\n",
-        encoding="utf-8",
+    server_args = {
+        "model_path": "/models/qwen",
+        "tp_size": 1,
+        "mem_fraction_static": 0.92,
+        "context_length": 8192,
+    }
+    record = repr(server_args) if dictionary_format else (
+        "ServerArgs(" + ", ".join(f"{key}={value!r}" for key, value in server_args.items()) + ")"
     )
+    server_log.write_text(f"server_args={record}\n", encoding="utf-8")
     monkeypatch.setenv("BENCH_LAUNCHER", "magpie")
     handoff = {
         "orchestrator_best_tput_same_config": 1000.0,
@@ -263,6 +269,84 @@ def test_handoff_identity_mismatch_is_exposed_with_its_evidence(
     assert out["server_identity"]["status"] == "mismatched"
     assert out["handoff_alignment"]["status"] == "identity_mismatch"
     assert out["server_identity"]["evidence_paths"] == [str(server_log)]
+
+
+def test_dictionary_server_args_preserve_literals_and_exclude_other_fields(
+    tmp_path: Path,
+) -> None:
+    server_log = tmp_path / "server.log"
+    server_log.write_text(
+        "INFO server_args = {\n"
+        "  'model_path': '/models/quoted\\\"{model}(v2)',\n"
+        "  'tp_size': 2, 'mem_fraction_static': 0.75,\n"
+        "  'disable_radix_cache': True, 'quantization': None,\n"
+        "  'port': 30000, 'api_key': 'not-exported',\n"
+        "  'unused': {'nested': [1, 2, ('quoted } )',)]},\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    observed, _ = rx._read_server_identity_evidence(server_log)
+
+    assert observed == {
+        "backend": "sglang",
+        "server_args": {
+            "model_path": '/models/quoted"{model}(v2)',
+            "tp_size": 2,
+            "mem_fraction_static": 0.75,
+            "disable_radix_cache": True,
+            "quantization": None,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        "server_args={'model_path': '/models/qwen'",
+        "server_args={'model_path': '/models/qwen'])",
+        "server_args={**{'model_path': '/models/qwen'}}",
+        "server_args={1: '/models/qwen'}",
+        "server_args={str('model_path'): '/models/qwen'}",
+        "server_args={'model_path': ['not', 'a', 'path']}",
+        "server_args={'model_path': __import__('os').getcwd()}",
+        "settings={'model_path': '/models/qwen'}",
+    ],
+)
+def test_dictionary_server_args_require_literal_named_identity_fields(record: str) -> None:
+    assert rx._parse_sglang_server_args(record) == {}
+
+
+def test_dictionary_server_args_do_not_execute_ignored_values(tmp_path: Path) -> None:
+    marker = tmp_path / "must-not-exist"
+    record = (
+        "server_args={'tp_size': 4, 'unrelated': "
+        f"__import__('pathlib').Path({str(marker)!r}).touch()}}"
+    )
+
+    assert rx._parse_sglang_server_args(record) == {"tp_size": 4}
+    assert not marker.exists()
+
+
+def test_dictionary_server_args_enforce_record_size_cap(tmp_path: Path) -> None:
+    server_log = tmp_path / "server.log"
+    server_log.write_text(
+        "server_args={'model_path': '" + "x" * rx._SERVER_ARGS_RECORD_MAX_CHARS + "'}\n",
+        encoding="utf-8",
+    )
+
+    assert rx._read_server_identity_evidence(server_log) == ({}, "")
+
+
+@pytest.mark.parametrize("dictionary_format", [False, True])
+def test_deep_server_args_expressions_remain_unavailable(dictionary_format: bool) -> None:
+    value = "+".join(["1"] * 10000)
+    record = (
+        "server_args={'tp_size': " + value + "}"
+        if dictionary_format else "ServerArgs(tp_size=" + value + ")"
+    )
+
+    assert rx._parse_sglang_server_args(record) == {}
 
 
 def test_alignment_report_is_same_config_first_and_idempotent(

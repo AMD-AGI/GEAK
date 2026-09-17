@@ -2549,15 +2549,22 @@ _SERVER_ARGS_IDENTITY_KEYS = (
     "disable_radix_cache",
     "trust_remote_code",
 )
+_SERVER_ARGS_RECORD_RE = re.compile(r"\bServerArgs\s*\(|\bserver_args\s*=\s*\{")
+_SERVER_ARGS_RECORD_MAX_CHARS = 65536
 
 
 def _balanced_server_args(text: str) -> str:
-    """Return one complete ``ServerArgs(...)`` expression from log text."""
-    start = text.find("ServerArgs(")
-    if start < 0:
+    """Return one complete SGLang startup argument expression from log text."""
+    match = _SERVER_ARGS_RECORD_RE.search(text)
+    if match is None:
         return ""
-    depth, quote, escaped = 0, "", False
-    for index, char in enumerate(text[start:], start):
+    opener = match.end() - 1
+    start = opener if text[opener] == "{" else match.start()
+    closers: list[str] = []
+    quote, escaped = "", False
+    for index, char in enumerate(text[opener:], opener):
+        if index - start >= _SERVER_ARGS_RECORD_MAX_CHARS:
+            return ""
         if quote:
             if escaped:
                 escaped = False
@@ -2568,11 +2575,12 @@ def _balanced_server_args(text: str) -> str:
             continue
         if char in ("'", '"'):
             quote = char
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
+        elif char in "({[":
+            closers.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif char in ")}]":
+            if not closers or closers.pop() != char:
+                return ""
+            if not closers:
                 return text[start : index + 1]
     return ""
 
@@ -2584,20 +2592,29 @@ def _parse_sglang_server_args(text: str) -> dict[str, Any]:
         return {}
     try:
         node = ast.parse(expression, mode="eval").body
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError):
         return {}
-    if not isinstance(node, ast.Call):
+    if isinstance(node, ast.Call):
+        fields = [(keyword.arg, keyword.value) for keyword in node.keywords]
+    elif isinstance(node, ast.Dict):
+        if any(
+            not isinstance(key, ast.Constant) or not isinstance(key.value, str)
+            for key in node.keys
+        ):
+            return {}
+        fields = [(key.value, value) for key, value in zip(node.keys, node.values)]
+    else:
         return {}
     observed: dict[str, Any] = {}
-    for keyword in node.keywords:
-        if keyword.arg not in _SERVER_ARGS_IDENTITY_KEYS:
+    for name, value_node in fields:
+        if name not in _SERVER_ARGS_IDENTITY_KEYS:
             continue
         try:
-            value = ast.literal_eval(keyword.value)
-        except (ValueError, TypeError):
+            value = ast.literal_eval(value_node)
+        except (ValueError, TypeError, RecursionError):
             continue
         if isinstance(value, (str, int, float, bool)) or value is None:
-            observed[keyword.arg] = value
+            observed[name] = value
     return observed
 
 
@@ -2607,14 +2624,17 @@ def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]
         with log_path.open(encoding="utf-8", errors="ignore") as handle:
             lines = iter(handle)
             for line in lines:
-                if "ServerArgs(" not in line:
+                if not _SERVER_ARGS_RECORD_RE.search(line):
                     continue
-                # SGLang normally emits one line. Permit a wrapped startup
-                # record too, but cap it so a malformed log cannot grow memory.
-                record = line
-                while not _balanced_server_args(record) and len(record) < 65536:
+                # Permit wrapped startup output while capping the accumulated
+                # record passed to the parser.
+                record = line[:_SERVER_ARGS_RECORD_MAX_CHARS]
+                while (
+                    not _balanced_server_args(record)
+                    and len(record) < _SERVER_ARGS_RECORD_MAX_CHARS
+                ):
                     try:
-                        record += next(lines)
+                        record += next(lines)[:_SERVER_ARGS_RECORD_MAX_CHARS - len(record)]
                     except StopIteration:
                         break
                 server_args = _parse_sglang_server_args(record)
