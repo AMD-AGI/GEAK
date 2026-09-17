@@ -348,6 +348,20 @@ class PostMeasureTest(unittest.TestCase):
         self.assertEqual(sum(e["event"] == "callback" for e in self.read_events()), 1)
         self.assertEqual(lifecycle._read(out / "post_measure_manifest.json")["selected"], [])
 
+    def test_without_request_custom_leaf_exit_42_retains_normal_failure_retry(self):
+        leaf = self.root / "custom_leaf.sh"
+        leaf.write_text(textwrap.dedent('''
+            mkdir -p "$OUT_DIR"
+            printf '{"event":"custom_leaf"}\\n' >> "$EVENT_LOG"
+            printf '{"throughput_tok_s_median":123,"effective_config_digest":"%s"}\\n' "$EFFECTIVE_CONFIG_DIGEST" > "$OUT_DIR/bench_summary.json"
+            exit 42
+        '''))
+        proc, out, _ = self.shell(mode="isolated_server", REPLICAS="1", GEAK_POST_MEASURE_REQUEST="", BENCH_E2E=str(leaf))
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(sum(e["event"] == "custom_leaf" for e in self.read_events()), 2)
+        self.assertFalse((out / "replica_1/selected_attempt").exists())
+        self.assertFalse((out / "post_measure_manifest.json").exists())
+
     def test_changed_request_and_stale_output_are_rejected(self):
         out, path, _, _ = self.live_context()
         with self.assertRaises(FileExistsError):

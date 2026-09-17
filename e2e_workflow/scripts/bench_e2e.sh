@@ -258,6 +258,10 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
       fi
       _selection_summary="$_attempt_dir/bench_summary.json"
       _selection_runs="$_attempt_dir/bench_runs.jsonl"
+      _callback_measured=0
+      if [ -n "$POST_MEASURE_HELPER" ] && [ "$_rc" -eq 42 ]; then
+        _callback_measured=1
+      fi
       _measurement_seal=""
       if [ -n "$POST_MEASURE_HELPER" ] && [ -f "$_attempt_dir/post_measure/measurement.json" ]; then
         _measurement_seal="$_attempt_dir/post_measure/measurement.json"
@@ -266,7 +270,7 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
       fi
       # 42 is an internal isolated-leaf outcome: throughput was valid BEFORE
       # evaluation. The leaf freezes it in shell memory, outside callback files.
-      if { [ "$_rc" -eq 0 ] || [ "$_rc" -eq 42 ]; } && python3 - "$_selection_summary" "${EFFECTIVE_CONFIG_DIGEST:-}" "$_measurement_seal" "$POST_MEASURE_HELPER" <<'PY'
+      if { [ "$_rc" -eq 0 ] || [ "$_callback_measured" -eq 1 ]; } && python3 - "$_selection_summary" "${EFFECTIVE_CONFIG_DIGEST:-}" "$_measurement_seal" "$POST_MEASURE_HELPER" <<'PY'
 import hashlib, json, os, pathlib, stat, sys
 def read_selection(path):
     if not sys.argv[4]:
@@ -307,7 +311,7 @@ PY
         _successful=$((_successful + 1))
         break
       fi
-      if [ "$_rc" -eq 42 ] || [ -n "$_measurement_seal" ]; then
+      if [ "$_callback_measured" -eq 1 ] || [ -n "$_measurement_seal" ]; then
         echo "!!! Sealed throughput unavailable after callback; refusing a quality-driven retry." >&2
         break
       fi
