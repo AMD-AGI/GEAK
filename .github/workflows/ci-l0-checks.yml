@@ -274,6 +274,10 @@ jobs:
       # The Python half is TestTheSharedFixtureHoldsOnThisSide in tests/test_kernel_selection.py.
       - name: kernel canonicalization JS/Python parity
         run: node e2e_workflow/scripts/test_kernel_canonicalization_parity.js
+      # Extractor verdicts may use upper-case PASS or a structured {result: PASS} wrapper.
+      # Accept only the exact pass token; mixed failure summaries must remain rejected.
+      - name: extractor PASS status normalization
+        run: node e2e_workflow/scripts/test_pass_status_normalization.js
       # Structural guard on the TuningSkillset phase: the accept bars, the overlay
       # carry-forward, and the deploy-bundle handoff to finalize. Node + git only.
       - name: tuning skillset phase regression
