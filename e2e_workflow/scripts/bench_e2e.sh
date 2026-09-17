@@ -87,6 +87,20 @@ _stage_lookup() {   # _stage_lookup NAME -> print the first copy that exists; rc
   return 1
 }
 
+# Staged source-bearing evaluations remain source-bearing even if a replayed
+# environment drops the request variable. This relocation-safe marker pins the
+# accepted manifest independently of environment forwarding.
+if [ -e "$HERE/source_manifest.sha256" ] || [ -L "$HERE/source_manifest.sha256" ]; then
+  _source_marker_helper="$(_stage_lookup source_runtime.py)"
+  if [ -z "$_source_marker_helper" ] || ! python3 "$_source_marker_helper" check-request \
+      --request "${GEAK_SOURCE_REQUEST:-}" --expected-manifest "$HERE/source_manifest.sha256"; then
+    _source_failed_out="${OUT_DIR:-$(pwd)/e2e_bench_out}"
+    rm -f "$_source_failed_out/bench_summary.json" "$_source_failed_out/source_runtime/measurement.json"
+    echo '!!! staged_source_request_missing_or_mismatched' >&2
+    exit 3
+  fi
+fi
+
 # Every lifecycle ends by writing bench_summary.json with bench_summarize.py.
 SUMMARIZE="$(_stage_lookup bench_summarize.py)"
 if [ -z "$SUMMARIZE" ]; then
@@ -592,6 +606,42 @@ fi
 source "$TEARDOWN_LIB"
 trap server_teardown EXIT
 
+# Source-bearing measurements require a fresh, owned serving group. Freeze the
+# request and authored overlay before launch; adapters prepend the generated
+# startup hook while retaining their ordinary package/overlay precedence.
+SOURCE_RUNTIME=""
+if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
+  # Invalidate old throughput eligibility even if this launch is refused before
+  # the observer can prepare a new capsule.
+  rm -f "$OUT_DIR/bench_summary.json" "$OUT_DIR/source_runtime/measurement.json"
+  if [ "$REUSE_SERVER" = "1" ]; then
+    echo '!!! source_runtime_reused_server_unsupported: source verification requires a fresh owned launch.' >&2
+    exit 3
+  fi
+  SOURCE_RUNTIME="$(_stage_lookup source_runtime.py)"
+  if [ -z "$SOURCE_RUNTIME" ]; then
+    echo '!!! source_runtime.py is required for source-bearing serving launches.' >&2
+    exit 3
+  fi
+  GEAK_SOURCE_OBSERVATION_DIR="$(cd "$OUT_DIR" && pwd)/source_runtime"
+  GEAK_SOURCE_BOOTSTRAP_PYTHONPATH="$GEAK_SOURCE_OBSERVATION_DIR/bootstrap"
+  export PYTHONDONTWRITEBYTECODE=1
+  GEAK_ACCEPTED_SOURCE_PYTHONPATH=$(python3 "$SOURCE_RUNTIME" prepare \
+    --request "$GEAK_SOURCE_REQUEST" --output-dir "$GEAK_SOURCE_OBSERVATION_DIR" \
+    --overlay-pythonpath "$OVERLAY_PYTHONPATH") || exit 3
+  export GEAK_SOURCE_OBSERVATION_DIR GEAK_SOURCE_BOOTSTRAP_PYTHONPATH GEAK_ACCEPTED_SOURCE_PYTHONPATH
+fi
+source_runtime_gate() {
+  [ -n "$SOURCE_RUNTIME" ] || return 0
+  if [ "${SERVER_GROUP_UNVERIFIED:-1}" != "0" ]; then
+    echo '!!! source_runtime_unverified_server_group' >&2
+    return 3
+  fi
+  python3 "$SOURCE_RUNTIME" gate --output-dir "$GEAK_SOURCE_OBSERVATION_DIR" \
+    --pid "$SERVER_PID" --pgid "$SERVER_PGID" --start-ticks "$SERVER_START_TICKS" \
+    --base-url "$BASE_URL" --phase "$1" --timeout-sec "${GEAK_SOURCE_GATE_TIMEOUT_SEC:-30}"
+}
+
 # ---- serving-GPU mutex ----
 # TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
 # Profiler / config-sweep / integrate ref·cand / validation all share it, so
@@ -679,6 +729,7 @@ else
   echo ">>> Reusing warm server at $BASE_URL"
   adapter_health >/dev/null 2>&1 || { echo "!!! No healthy server at $BASE_URL"; exit 2; }
 fi
+source_runtime_gate prepared || exit 3
 
 # ---- overlay resident-memory parity guard (only when an overlay is active) ----
 # An authored kernel that builds a PERSISTENT dequant/shuffle cache inflates resident VRAM beyond the
@@ -755,6 +806,7 @@ fi
 : > "$RESULT_JSONL"
 
 # ---- timed repeats ----
+source_runtime_gate ready || exit 3
 _bench_failed=0
 for r in $(seq 1 "$REPEATS"); do
   echo ">>> Bench repeat $r/$REPEATS ..."
@@ -852,6 +904,16 @@ PY
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
+source_runtime_gate finished || exit 3
 python3 "$SUMMARIZE" from-runs "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL"
+_summary_rc=$?
+if [ -n "$SOURCE_RUNTIME" ]; then
+  [ "$_summary_rc" = "0" ] || exit "$_summary_rc"
+  # Profile/capture-only invocations and cold diagnostic columns are not hot
+  # throughput measurements covered by the ready-to-finished interval.
+  if [ "$REPEATS" -gt 0 ]; then
+    python3 "$SOURCE_RUNTIME" seal-measurement --output-dir "$GEAK_SOURCE_OBSERVATION_DIR" || exit 3
+  fi
+fi
 
 echo ">>> Done. Summary: $OUT_DIR/bench_summary.json"
