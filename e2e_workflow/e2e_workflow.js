@@ -1096,12 +1096,13 @@ function warmStartBlock(role) {
   // flag, one meaning, whichever store the knowledge happens to sit in. Without this, "blind" would
   // have quietly stopped being blind the moment the two stores merged.
   if (role === 'tuning_specialist' && !TUNING_KB_ENABLED) return '';
-  return `\n\n## Warm start (a PRIOR run's record — already measured on this box)\n` +
+  return `\n\n## Warm start (references from PRIOR runs)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/warm_start.md and follow it. The knowledge base ` +
-    `offered prior configurations for this exact deployment; they are in ${KB_REF_DIR}/, and ` +
-    `${KB_REF_DIR}/measured_on_this_box.md records what happened when THIS run benched them — that ` +
-    `file OVERRIDES the stored claims in its siblings wherever the two disagree. A stored number is ` +
-    `a hypothesis; only the measured column is evidence.` +
+    `offered historical records in ${KB_REF_DIR}/; inspect each record's deployment match. ` +
+    `If ${KB_REF_DIR}/measured_on_this_box.md exists, read its per-entry verdicts: some offers may ` +
+    `be unmeasured references. An offer or verdict file alone does not establish a measurement or ` +
+    `adoption in THIS run. A stored number is a hypothesis; only this run's measured results are ` +
+    `current evidence. Use CURRENT_FLAGS, CURRENT_ENV and the current profile as your starting point.` +
     // The tuning track reads the same pages for a different purpose, so it gets the extra paragraph
     // here rather than a second block: the others are shopping for a CONFIG to adopt, it is checking
     // whether the search it is about to spend hours on has already been run to completion once.
@@ -2914,11 +2915,12 @@ if (want('setup')) {
         const notReproduced = verdicts.filter(
           v => v.outcome === 'not_reproduced' || v.outcome === 'inapplicable');
         const md = [
-          '# Warm start — MEASURED ON THIS BOX',
+          '# Warm start — current-run outcomes',
           '',
-          'This file OVERRIDES the stored claims in its sibling `e2e_reference_*.md` wherever the two',
-          'disagree. Those files record what another box reported; this one records what happened when',
-          'this run applied the same thing here, through the same gate a fresh idea faces.',
+          'This file records per-entry outcomes for the historical offers in its sibling',
+          '`e2e_reference_*.md` files. Some entries may be unmeasured or incomplete. Only current-run',
+          'measurements override stored claims; an offer or verdict alone establishes neither a',
+          'measurement nor adoption. Read each outcome before drawing a performance conclusion.',
           '',
           `- baseline: **${BASELINE_TPUT} tok/s** (noise band ${NOISE_BAND}%)`,
           `- serving: BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}, workload isl=${ISL} osl=${OSL} conc=${CONC}`,
@@ -2941,12 +2943,12 @@ if (want('setup')) {
           ...(verdicts.length ? verdicts.map(v =>
             `| ${v.direction || 'unlabeled'} | ${v.throughput_tok_s != null ? v.throughput_tok_s + ' tok/s' : '?'}` +
             `${v.speedup != null ? ` (${v.speedup}x)` : ''}` +
-            `${configHalfOnly(v) ? ` — WHOLE BUNDLE, incl. ${v.accepted_kernels.length} kernel(s); only the config half ran in this row` : ''} | ` +
+            `${configHalfOnly(v) ? ` — WHOLE BUNDLE, incl. ${v.accepted_kernels.length} kernel(s); this row concerns only the config half` : ''} | ` +
             `${v.baseline_throughput_tok_s != null ? v.baseline_throughput_tok_s + ' tok/s' : '—'} | ` +
             `${v.measured_tok_s != null ? v.measured_tok_s + ' tok/s' : 'not benched'} | ` +
             `${v.delta_pct != null ? (v.delta_pct >= 0 ? '+' : '') + v.delta_pct.toFixed(2) + '%' : '—'} | ` +
             `${v.parity || '—'} | **${v.outcome}** |`)
-            : ['| _(none offered)_ | | | | | | |']),
+            : ['| _(no configuration verdicts recorded)_ | | | | | | |']),
           '',
           '## Kernels',
           '',
@@ -2965,14 +2967,11 @@ if (want('setup')) {
           ...(notReproduced.length ? [
             '## REFERENCE ONLY — recalled but NOT reproduced here',
             '',
-            'These were offered by the store and benched on this box, and either produced no number',
-            'at all, never took effect (a flag renamed upstream is accepted silently and then',
-            "ignored), or collided with a knob this run's baseline already pins and could not be",
-            'applied here at all. They are NOT results — and the last of those is not evidence',
-            'against the record either, only against the pairing. They are the closest thing this',
-            'deployment has to a record of what someone else got working, and their material is',
-            'below so you can read',
-            'what they actually did rather than guess from a direction label.',
+            'These offers could not be reproduced here: a replay may have produced no usable number,',
+            'failed to take effect, or been inapplicable to the current baseline. Read each reason',
+            'below; an unmeasured outcome is not evidence of a throughput loss. The stored claims',
+            'remain historical leads. Inspect the attached material to understand the original',
+            'configuration, and validate any proposed change through the normal measurement gate.',
             '',
             ...notReproduced.flatMap(v => {
               const repro = (v.repro && typeof v.repro === 'object') ? v.repro : {};
@@ -3018,14 +3017,14 @@ if (want('setup')) {
           adoptedKer.length
             ? `${adoptedKer.length} recovered kernel(s) are already in the active overlay and already ` +
               `reflected in the profile you are routing from. Their ops are DONE; look elsewhere.`
-            : `No recovered kernel was adopted, so the overlay is empty and every op in the profile is ` +
-              `still open.`,
+            : `No recovered kernel was adopted. Continue from the current overlay and profile; ` +
+              `the baseline may already include an overlay.`,
           '',
           rejected.length
             ? `The ${rejected.length} rejected/unreplayed entries above are LEADS, not dead ends. A ` +
-              `rejection here means the whole compounded thing did not beat this baseline on this box — ` +
-              `it does NOT mean each knob inside it is worthless, and it does not mean the DIRECTION is ` +
-              `wrong. Do not re-propose any of them verbatim; do feel free to propose an individual axis ` +
+              `non-adoption may reflect a measured result, failed replay, or no replay; consult each ` +
+              `outcome and reason. An unmeasured entry establishes no throughput loss. Do not ` +
+              `re-propose any of them verbatim; do feel free to propose an individual axis ` +
               `from one, or the same idea approached differently.`
             : `Nothing was rejected.`,
           '',
@@ -3047,9 +3046,9 @@ if (want('setup')) {
           KB_REFERENCE_DIR: refsDir,
           KB_REFERENCE_VERDICT:
             `The knowledge base offered ${allVerdicts.length} prior result(s) for this deployment ` +
-            `(${resolved.canonical_id || '?'}, tier ${resolved.match_tier || '-'}). This run benched them ` +
-            `and recorded what actually happened in ${refsDir}/measured_on_this_box.md — read that file, ` +
-            `and treat it as overriding the stored claims in its siblings. ` +
+            `(${resolved.canonical_id || '?'}, tier ${resolved.match_tier || '-'}). Per-entry outcomes ` +
+            `are recorded in ${refsDir}/measured_on_this_box.md; some may be unmeasured. Read that file; ` +
+            `only current-run measurements override the stored claims in its siblings. ` +
             (adoptedCfg.length
               ? `ADOPTED config: ${adoptedCfg.map(v => v.direction || 'unlabeled').join(', ')} — it is ALREADY ` +
                 `in CURRENT_FLAGS/CURRENT_ENV, so propose only things that COMPOUND on top of it, never it again. `
@@ -3060,7 +3059,8 @@ if (want('setup')) {
               : `No stored kernel was adopted. `) +
             (rejected.length
               ? `REJECTED/unreplayed: ${rejected.map(v => v.direction || v.name || '?').join(', ')}. Do not ` +
-                `re-propose any of them verbatim — the compounded whole lost on this box. Their individual ` +
+                `re-propose any of them verbatim. Consult each outcome and reason; an unmeasured entry ` +
+                `establishes no throughput loss. Their individual ` +
                 `knobs may each still be a valid axis, and their declared directions are still legitimate ` +
                 `ideas to reach a different way.`
               : '') +
