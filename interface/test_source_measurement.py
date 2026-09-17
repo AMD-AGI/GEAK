@@ -4,12 +4,14 @@
 
 import hashlib
 import json
+import os
 import shutil
 import statistics
 from pathlib import Path
 
 import pytest
 
+from interface import source_measurement
 from interface.source_measurement import verify_normalized_source_measurements
 
 
@@ -502,3 +504,151 @@ def test_relocated_source_content_keeps_handoff_identity(source_request, tmp_pat
     assert (
         _verify(source_request, _pair(tmp_path, source_request))["status"] == "verified"
     )
+
+
+@pytest.mark.parametrize(
+    "kind", ["file", "symlink", "broken_symlink", "directory", "fifo"]
+)
+def test_cleanup_barrier_withholds_previously_valid_measurements(
+    source_request, tmp_path, kind
+):
+    evaluation = _pair(tmp_path, source_request)
+    assert _verify(source_request, evaluation)["status"] == "verified"
+    marker = source_request.parent / "source_cleanup_unverified.json"
+    if kind == "file":
+        marker.write_text("opaque marker, not trusted JSON")
+    elif kind == "symlink":
+        marker.symlink_to(source_request)
+    elif kind == "broken_symlink":
+        marker.symlink_to(tmp_path / "absent")
+    elif kind == "directory":
+        marker.mkdir()
+    else:
+        os.mkfifo(marker)
+    assert _verify(source_request, evaluation) == {
+        "status": "unavailable",
+        "reason": "source_cleanup_unverified",
+    }
+
+
+def test_cleanup_barrier_appearing_during_verification_refuses_success(
+    source_request, tmp_path, monkeypatch
+):
+    evaluation = _pair(tmp_path, source_request)
+    measurement = source_measurement._measurement
+
+    def check_then_mark(*args, **kwargs):
+        result = measurement(*args, **kwargs)
+        (source_request.parent / "source_cleanup_unverified.json").touch()
+        return result
+
+    monkeypatch.setattr(source_measurement, "_measurement", check_then_mark)
+    assert _verify(source_request, evaluation) == {
+        "status": "unavailable",
+        "reason": "source_cleanup_unverified",
+    }
+
+
+@pytest.mark.parametrize(
+    "role,relative",
+    [
+        ("setup", "baseline"),
+        ("baseline", "validation/base"),
+        ("final", "validation/final"),
+    ],
+)
+@pytest.mark.parametrize("phase", ["ready", "finished"])
+def test_selected_overlay_must_match_every_role_and_gate(
+    source_request, tmp_path, role, relative, phase
+):
+    evaluation = _pair(tmp_path, source_request)
+    overlay = tmp_path / "different-overlay"
+    overlay.mkdir()
+    _rewrite_gate(
+        evaluation / relative,
+        phase,
+        lambda row: row.update(overlay_roots=[str(overlay)]),
+        receipt=True,
+    )
+    assert _verify(source_request, evaluation, **{f"expected_{role}_overlay": ""}) == {
+        "status": "unavailable",
+        "reason": "selected_overlay_roots_mismatch",
+    }
+
+
+def test_selected_overlay_matches_resolved_ordered_roots(source_request, tmp_path):
+    evaluation = _pair(tmp_path, source_request)
+    overlays = [tmp_path / "authored-one", tmp_path / "authored-two"]
+    for path in overlays:
+        path.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(overlays[0], target_is_directory=True)
+    for phase in ("ready", "finished"):
+        _rewrite_gate(
+            evaluation / "validation/final",
+            phase,
+            lambda row: row.update(overlay_roots=list(map(str, overlays))),
+            receipt=True,
+        )
+    expected = os.pathsep.join(map(str, [alias, overlays[1], overlays[0]]))
+    result = _verify(
+        source_request,
+        evaluation,
+        expected_setup_overlay="",
+        expected_baseline_overlay="",
+        expected_final_overlay=expected,
+    )
+    assert result["status"] == "verified"
+    assert result["measurements"]["final"]["overlay_roots"] == list(map(str, overlays))
+    assert _verify(
+        source_request,
+        evaluation,
+        expected_final_overlay=os.pathsep.join(map(str, reversed(overlays))),
+    ) == {"status": "unavailable", "reason": "selected_overlay_roots_mismatch"}
+
+
+@pytest.mark.parametrize("expected", ["relative/path", ":/tmp", 42])
+def test_invalid_expected_overlay_is_explicitly_unavailable(
+    source_request, tmp_path, expected
+):
+    evaluation = _pair(tmp_path, source_request)
+    assert _verify(source_request, evaluation, expected_final_overlay=expected) == {
+        "status": "unavailable",
+        "reason": "invalid_expected_overlay",
+    }
+
+
+def test_overlay_expected_but_missing_is_not_source_module_evidence(
+    source_request, tmp_path
+):
+    evaluation = _pair(tmp_path, source_request)
+    overlay = tmp_path / "expected-overlay"
+    overlay.mkdir()
+    assert _verify(source_request, evaluation, expected_final_overlay=str(overlay)) == {
+        "status": "unavailable",
+        "reason": "selected_overlay_roots_mismatch",
+    }
+    overlay.rmdir()
+    assert _verify(source_request, evaluation, expected_final_overlay=str(overlay)) == {
+        "status": "unavailable",
+        "reason": "missing_expected_overlay",
+    }
+
+
+def test_each_selected_replica_requires_the_claimed_overlay(source_request, tmp_path):
+    evaluation = _pair(tmp_path, source_request)
+    final = evaluation / "validation/final"
+    shutil.rmtree(final)
+    _isolated(final, source_request, [110, 110])
+    overlay = tmp_path / "different-replica-overlay"
+    overlay.mkdir()
+    _rewrite_gate(
+        final / "replica_002/attempt_1",
+        "finished",
+        lambda row: row.update(overlay_roots=[str(overlay)]),
+        receipt=True,
+    )
+    assert _verify(source_request, evaluation, expected_final_overlay="") == {
+        "status": "unavailable",
+        "reason": "selected_overlay_roots_mismatch",
+    }

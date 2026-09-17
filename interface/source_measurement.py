@@ -114,6 +114,33 @@ def _bindings(
     )
 
 
+def _check_cleanup_barrier(request: Path) -> None:
+    try:
+        (request.parent / "source_cleanup_unverified.json").lstat()
+    except FileNotFoundError:
+        return
+    raise SourceMeasurementError("source_cleanup_unverified")
+
+
+def _expected_overlay_roots(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    _require(isinstance(value, str), "invalid_expected_overlay")
+    roots: list[str] = []
+    if not value:
+        return roots
+    for item in value.split(os.pathsep):
+        _require(bool(item) and Path(item).is_absolute(), "invalid_expected_overlay")
+        try:
+            path = Path(item).resolve(strict=True)
+        except FileNotFoundError:
+            raise SourceMeasurementError("missing_expected_overlay") from None
+        _require(path.is_dir(), "invalid_expected_overlay")
+        if str(path) not in roots:
+            roots.append(str(path))
+    return roots
+
+
 def _module_rows(rows: Any, source: Any, overlay_roots: Any) -> set[str]:
     _require(
         isinstance(rows, list)
@@ -176,6 +203,7 @@ def _gate(
     source: Any,
     request_sha: str,
     minimum_observed_at_ns: int = 0,
+    expected_overlay_roots: list[str] | None = None,
 ) -> dict[str, Any]:
     _require(
         isinstance(reference, dict)
@@ -243,6 +271,11 @@ def _gate(
         )
         receipt = _object(_hashed(directory / filename, process["sha256"]))
         _bindings(receipt, seal, request_sha, source.manifest_sha256)
+        if expected_overlay_roots is not None:
+            _require(
+                receipt.get("overlay_roots") == expected_overlay_roots,
+                "selected_overlay_roots_mismatch",
+            )
         _require(
             receipt.get("schema") == "geak.source_runtime.process.v1"
             and all(receipt.get(key) == value for key, value in identity.items())
@@ -281,7 +314,10 @@ def _gate(
 
 
 def _leaf(
-    directory: Path, source: Any, request_sha: str
+    directory: Path,
+    source: Any,
+    request_sha: str,
+    expected_overlay_roots: list[str] | None = None,
 ) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
     runtime = directory / "source_runtime"
     raw_seal = _read(runtime / "measurement.json")
@@ -300,7 +336,15 @@ def _leaf(
     gates = seal.get("gates")
     if not isinstance(gates, dict) or set(gates) != {"ready", "finished"}:
         raise SourceMeasurementError("incomplete_measurement_gates")
-    ready = _gate(runtime, "ready", gates["ready"], seal, source, request_sha)
+    ready = _gate(
+        runtime,
+        "ready",
+        gates["ready"],
+        seal,
+        source,
+        request_sha,
+        expected_overlay_roots=expected_overlay_roots,
+    )
     finished = _gate(
         runtime,
         "finished",
@@ -309,6 +353,7 @@ def _leaf(
         source,
         request_sha,
         ready["observed_at_ns"],
+        expected_overlay_roots,
     )
     _require(
         ready["boot_id"] == finished["boot_id"]
@@ -345,11 +390,18 @@ def _leaf(
     )
 
 
-def _measurement(directory: Path, source: Any, request_sha: str) -> dict[str, Any]:
+def _measurement(
+    directory: Path,
+    source: Any,
+    request_sha: str,
+    expected_overlay_roots: list[str] | None = None,
+) -> dict[str, Any]:
     raw_summary = _read(directory / "bench_summary.json")
     summary = _object(raw_summary)
     if summary.get("measurement_mode") != "isolated_server":
-        checked, _, evidence = _leaf(directory, source, request_sha)
+        checked, _, evidence = _leaf(
+            directory, source, request_sha, expected_overlay_roots
+        )
         _require(checked == summary, "measurement_changed_during_verification")
         return {
             **evidence,
@@ -381,7 +433,9 @@ def _measurement(directory: Path, source: Any, request_sha: str) -> dict[str, An
             "replica_selection_mismatch",
         )
         leaf_dir = selected / f"attempt_{attempt}"
-        leaf, leaf_runs, evidence = _leaf(leaf_dir, source, request_sha)
+        leaf, leaf_runs, evidence = _leaf(
+            leaf_dir, source, request_sha, expected_overlay_roots
+        )
         _require(
             _read(selected / "selected_summary.json")
             == _read(leaf_dir / "bench_summary.json"),
@@ -435,9 +489,15 @@ def verify_source_measurement(
     expected_manifest_sha256: str,
     expected_required_layer_ids: list[str] | tuple[str, ...],
     expected_throughput_tok_s: float,
+    expected_overlay: str | None = None,
 ) -> dict[str, Any]:
-    """Verify one explicitly selected measurement; never search for alternatives."""
+    """Verify an explicit measurement; an empty overlay requires no authored roots.
+
+    ``expected_overlay=None`` checks source alone. Normalization supplies the
+    selected overlay explicitly so every serving process must match its roots.
+    """
     request = Path(request_path)
+    _check_cleanup_barrier(request)
     request_raw = _read(request)
     source = read_source_request(str(request))
     _require(
@@ -447,11 +507,15 @@ def verify_source_measurement(
     )
     path = Path(summary_path)
     _require(path.name == "bench_summary.json", "unsupported_summary_path")
-    evidence = _measurement(path.parent, source, _digest(request_raw))
+    overlay_roots = _expected_overlay_roots(expected_overlay)
+    evidence = _measurement(path.parent, source, _digest(request_raw), overlay_roots)
+    if overlay_roots is not None:
+        evidence["overlay_roots"] = overlay_roots
     _same_value(evidence["throughput_tok_s"], expected_throughput_tok_s)
     _require(
         _read(request) == request_raw, "source_request_changed_during_verification"
     )
+    _check_cleanup_barrier(request)
     return evidence
 
 
@@ -466,6 +530,9 @@ def verify_normalized_source_measurements(
     final_tput: float,
     expected_manifest_sha256: str,
     expected_required_layer_ids: list[str] | tuple[str, ...],
+    expected_setup_overlay: str | None = None,
+    expected_baseline_overlay: str | None = None,
+    expected_final_overlay: str | None = None,
 ) -> dict[str, Any]:
     """Assess fixed normalized measurement provenance without changing results.
 
@@ -483,19 +550,21 @@ def verify_normalized_source_measurements(
             "unsupported_measurement_provenance",
         )
         selected = {
-            "setup": ("baseline", setup_tput),
-            "baseline": ("validation/base", baseline_tput),
-            "final": ("validation/final", final_tput),
+            "setup": ("baseline", setup_tput, expected_setup_overlay),
+            "baseline": ("validation/base", baseline_tput, expected_baseline_overlay),
+            "final": ("validation/final", final_tput, expected_final_overlay),
         }
         measurements = {}
-        for role, (relative, value) in selected.items():
+        for role, (relative, value, overlay) in selected.items():
             measurements[role] = verify_source_measurement(
                 request_path,
                 eval_dir / relative / "bench_summary.json",
                 expected_manifest_sha256=expected_manifest_sha256,
                 expected_required_layer_ids=expected_required_layer_ids,
                 expected_throughput_tok_s=value,
+                expected_overlay=overlay,
             )
+        _check_cleanup_barrier(Path(request_path))
         evidence = {
             "status": "verified",
             "reason": "sealed_selected_measurements",
