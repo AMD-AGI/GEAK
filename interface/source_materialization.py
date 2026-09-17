@@ -353,10 +353,9 @@ def _validate(snapshots: Any, descriptor: Any) -> MaterializedSource:
         if owners.get(parts[0]) != prefix:
             continue
         if not name.endswith(".py"):
-            suffix_name = name.lower()
-            _require(not suffix_name.endswith((".pyc", ".pyo", ".so", ".pyd", ".dylib",
-                                               ".dll", ".a", ".o", ".co", ".hsaco")) and
-                     re.search(r"\.so(?:\.[0-9]+)+$", suffix_name) is None,
+            runtime_suffixes = {".pyc", ".pyo", ".so", ".pyd", ".dylib",
+                                ".dll", ".a", ".o", ".co", ".hsaco"}
+            _require(not runtime_suffixes.intersection(PurePosixPath(name.lower()).suffixes),
                      "unsupported_runtime_artifact")
             continue
         for count in range(1, len(parts)):

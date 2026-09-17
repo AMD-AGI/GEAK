@@ -343,7 +343,8 @@ def test_interface_reports_unresolved_source_before_workflow_dispatch(tmp_path):
 
 
 @pytest.mark.parametrize("filename", ["kernel.hsaco", "kernel.SO", "kernel.so.1.2", "kernel.pyd",
-                                     "kernel.DLL", "kernel.o", "kernel.a", "kernel.CO"])
+                                     "kernel.DLL", "kernel.o", "kernel.a", "kernel.CO",
+                                     "kernel.so.debug", "kernel.dll.1"])
 def test_native_artifact_spellings_cannot_be_accepted_as_package_data(bundle, filename):
     baseline, manifest, root = bundle
     _add_file(root, manifest, "trees/a/python/alpha/" + filename)
