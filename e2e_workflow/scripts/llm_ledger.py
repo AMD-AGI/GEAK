@@ -888,7 +888,7 @@ def render_md(agg, meta):
 # --------------------------------------------------------------------------- #
 # Driver
 # --------------------------------------------------------------------------- #
-def run_window(groups, since_ms=None, until_ms=None):
+def run_window(groups, since_ms=None, until_ms=None, trust_scope=False):
     """When did this run actually happen?
 
     Mentioning the eval dir is necessary to find a transcript but not sufficient
@@ -902,8 +902,17 @@ def run_window(groups, since_ms=None, until_ms=None):
     roleAgent(), so the earliest such call is the earliest moment any of this
     could be GEAK's. Driver-session chatter before that point is somebody else's
     day. --since/--until override when a caller knows better.
+
+    ``trust_scope`` says the transcripts were already established as this run's
+    OWN files (an owned-workflow scope, e.g. its ``subagents/workflows/<runId>/``
+    dir) rather than found by an eval-dir substring across every session. In that
+    case there is no foreign launching session to fence out, and inferring a
+    lower bound would wrongly DROP the run's own early un-role-headed overhead —
+    a clock/storage helper or the driver's own first turn that ran before the
+    first role agent. So the inferred lower bound is skipped; an explicit
+    ``--since`` still applies, because a caller that names a bound means it.
     """
-    if since_ms is None:
+    if since_ms is None and not trust_scope:
         starts = [g["t0_ms"] for g in groups
                   if g["role"] != DRIVER and g["t0_ms"] is not None]
         since_ms = min(starts) if starts else None
@@ -911,10 +920,22 @@ def run_window(groups, since_ms=None, until_ms=None):
 
 
 def build(eval_dir, explicit_globs=None, rates=None, roots=None,
-          since_ms=None, until_ms=None):
-    """Build the whole ledger. Returns (rows, agent_rows, agg, meta)."""
+          since_ms=None, until_ms=None, scope=None, scope_warnings=(),
+          owned_scope=False, scope_anchor=None):
+    """Build the whole ledger. Returns (rows, agent_rows, agg, meta).
+
+    ``scope`` records HOW the transcripts were selected (``run-scoped`` /
+    ``run-scoped-inferred`` / ``partial`` / ``substring-fallback`` / ``explicit``),
+    surfaced in the meta so the report can show it. ``scope_anchor`` records how a
+    whole-run anchor was ESTABLISHED (e.g. ``exp_root-ancestor`` for an inferred,
+    unproven containment match) so the persisted meta — not just a caller's return
+    dict — reveals that the scope was inferred. ``scope_warnings`` are coverage
+    caveats the caller already knows (e.g. a nested lane whose transcripts could
+    not be resolved); they join the ledger's own warnings and mark the run
+    incomplete. ``owned_scope`` says the globs are this run's established own files,
+    which lifts the inferred run-window lower bound (see ``run_window``)."""
     rates = rates or DEFAULT_RATES
-    warnings = []
+    warnings = list(scope_warnings or [])
     timeline = load_timeline(eval_dir)
     if not timeline["sources"]:
         warnings.append("no agent_timeline.json — phases inferred, not recorded")
@@ -943,7 +964,7 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
 
     # Drop everything outside the run's own window BEFORE attributing, so a
     # launching session's unrelated history cannot be billed to this run.
-    win_t0, win_t1 = run_window(groups, since_ms, until_ms)
+    win_t0, win_t1 = run_window(groups, since_ms, until_ms, trust_scope=owned_scope)
     dropped = 0
     if win_t0 is not None or win_t1 is not None:
         for g in groups:
@@ -1019,6 +1040,8 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
         "transcripts": transcripts, "timeline_sources": timeline["sources"],
         "window_start": _ms_to_iso(win_t0), "window_end": _ms_to_iso(win_t1),
         "calls_excluded_outside_window": dropped,
+        "transcript_scope": scope,
+        "transcript_scope_anchor": scope_anchor,
         "warnings": warnings, "rates": rates, "complete": not warnings,
         "generated_at": _ms_to_iso(int(datetime.now(tz=timezone.utc).timestamp() * 1000)),
     }
@@ -1051,6 +1074,17 @@ def main(argv=None):
     ap.add_argument("--since", default=None,
                     help="ISO time; ignore calls before it. Default: the run's first role agent.")
     ap.add_argument("--until", default=None, help="ISO time; ignore calls after it")
+    ap.add_argument("--scope", default=None,
+                    help="how transcripts were selected (run-scoped/run-scoped-inferred/"
+                         "partial/substring-fallback/explicit); recorded in the meta")
+    ap.add_argument("--scope-anchor", default=None,
+                    help="how a whole-run anchor was established (e.g. exp_root-ancestor "
+                         "for an inferred containment match); recorded in the meta")
+    ap.add_argument("--scope-warning", action="append", default=None, dest="scope_warnings",
+                    help="a coverage caveat to record (repeatable); marks the run incomplete")
+    ap.add_argument("--owned-scope", action="store_true",
+                    help="the globs are this run's OWN files; lift the inferred run-window "
+                         "lower bound so the run's early un-role-headed calls are kept")
     ap.add_argument("--quiet", action="store_true", help="do not print the summary to stdout")
     args = ap.parse_args(argv)
 
@@ -1070,7 +1104,9 @@ def main(argv=None):
     try:
         rows, agent_rows, agg, meta = build(
             args.eval_dir, args.transcripts, rates,
-            since_ms=_iso_to_ms(args.since), until_ms=_iso_to_ms(args.until))
+            since_ms=_iso_to_ms(args.since), until_ms=_iso_to_ms(args.until),
+            scope=args.scope, scope_warnings=args.scope_warnings or (),
+            owned_scope=args.owned_scope, scope_anchor=args.scope_anchor)
         out_dir = write_outputs(args.eval_dir, rows, agent_rows, agg, meta)
     except Exception as exc:  # never fail the run that called us
         print("llm_ledger: FAILED (%s: %s) — run is unaffected" % (type(exc).__name__, exc), file=sys.stderr)
@@ -1081,6 +1117,10 @@ def main(argv=None):
         print("llm_ledger: %s API calls, %s in / %s out, $%.2f, wall %s -> %s"
               % (_n(t["calls"]), _n(t["total_input"]), _n(t["output_tokens"]),
                  t["cost"], _hms(t.get("wall_ms")), out_dir))
+        if meta.get("transcript_scope"):
+            print("llm_ledger: transcript scope = %s%s"
+                  % (meta["transcript_scope"],
+                     "" if meta.get("complete") else " (INCOMPLETE — see warnings)"))
         for w in meta["warnings"]:
             print("llm_ledger: incomplete — %s" % w, file=sys.stderr)
     return 0

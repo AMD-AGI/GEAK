@@ -32,6 +32,7 @@ recorded in the manifest and the run carries on.
 """
 from __future__ import annotations
 
+import glob as _glob
 import json
 import os
 import re
@@ -97,11 +98,47 @@ def candidate_homes(extra: Iterable[Path] = ()) -> list[Path]:
     return list(seen.values())
 
 
+# The two fields a record can name a run directory under. Provenance matters:
+# an ``exp_root`` that happens to equal another run's ``eval_dir`` is NOT that
+# run's identity — a child lane declaring ``exp_root == parent's eval_dir`` must
+# never be mistaken for the parent. So paths are carried tagged with their field.
+_FIELD_EVAL = "eval_dir"
+_FIELD_EXP = "exp_root"
+
+
+def record_paths_typed(record: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return ``(field, directory)`` pairs a workflow record names.
+
+    A Hyperloom-driven run is identified by ``eval_dir``; a standalone one by
+    ``exp_root``. Either can appear under ``args`` or under ``result``. The field
+    each directory came from is preserved so an exact ``exp_root`` match cannot
+    be confused with — or outrank — an exact ``eval_dir`` identity.
+
+    Args:
+        record: A parsed ``wf_*.json`` record.
+
+    Returns:
+        Distinct ``(field, directory)`` pairs, ``eval_dir`` entries before
+        ``exp_root`` entries.
+    """
+    found: list[tuple[str, str]] = []
+    for field in (_FIELD_EVAL, _FIELD_EXP):
+        for holder in (record.get("args"), record.get("result")):
+            if not isinstance(holder, dict):
+                continue
+            value = holder.get(field)
+            if isinstance(value, str) and value.strip():
+                pair = (field, value.strip().rstrip("/"))
+                if pair not in found:
+                    found.append(pair)
+    return found
+
+
 def record_paths(record: dict[str, Any]) -> list[str]:
     """Return the run directories a workflow record names, most specific first.
 
-    A Hyperloom-driven run is identified by ``eval_dir``; a standalone one by
-    ``exp_root``. Either can appear under ``args`` or under ``result``.
+    A thin, field-erased view of :func:`record_paths_typed` for callers (e.g.
+    the mirror manifest) that only need the distinct directory strings.
 
     Args:
         record: A parsed ``wf_*.json`` record.
@@ -110,15 +147,9 @@ def record_paths(record: dict[str, Any]) -> list[str]:
         Distinct directory strings, ``eval_dir`` before ``exp_root``.
     """
     found: list[str] = []
-    for key in ("eval_dir", "exp_root"):
-        for holder in (record.get("args"), record.get("result")):
-            if not isinstance(holder, dict):
-                continue
-            value = holder.get(key)
-            if isinstance(value, str) and value.strip():
-                cleaned = value.strip().rstrip("/")
-                if cleaned not in found:
-                    found.append(cleaned)
+    for _field, directory in record_paths_typed(record):
+        if directory not in found:
+            found.append(directory)
     return found
 
 
@@ -146,20 +177,66 @@ def iter_records(homes: Iterable[Path]) -> Iterator[tuple[Path, dict[str, Any]]]
                 yield path, record
 
 
-def _matches(record: dict[str, Any], wanted: str) -> bool:
+def _matches(
+    record: dict[str, Any], wanted: str, want_field: str | None = None
+) -> bool:
     """Report whether *record* names *wanted* (or a parent/child of it).
 
     Args:
         record: A parsed workflow record.
         wanted: A run directory, already stripped of a trailing slash.
+        want_field: The field *wanted* was requested as (``eval_dir`` or
+            ``exp_root``), used only to rank same-field vs other-field exact
+            matches; ``None`` disables the distinction.
 
     Returns:
         ``True`` when one of the record's directories relates to *wanted*.
     """
-    return any(
-        found == wanted or found.startswith(wanted + "/") or wanted.startswith(found + "/")
-        for found in record_paths(record)
-    )
+    return _match_rank(record, wanted, want_field) is not None
+
+
+# Ownership is not binary, and it is field-aware. An EXACT directory match may
+# identify a run, but ONLY when it comes from the same field the caller asked by:
+# a record whose ``exp_root`` equals the requested ``eval_dir`` is a child lane
+# announcing its experiment root, not the owner of that eval-dir. A mere shared
+# experiment-root ("both live under /exp") is weaker still. These ranks order a
+# record's best relation to *wanted*, smallest = most specific, so neither a
+# same-root sibling NOR a cross-field exact near-miss can outrank the run whose
+# own field IS *wanted*.
+_RANK_EXACT_SAME = 0    # exact match, from the SAME field the caller requested
+_RANK_EXACT_OTHER = 1   # exact match, but from the OTHER field (e.g. exp_root vs eval_dir)
+_RANK_CHILD = 2         # the record names a directory INSIDE *wanted* (a nested lane)
+_RANK_ANCESTOR = 3      # the record names an ancestor of *wanted* (e.g. its exp_root)
+
+
+def _match_rank(
+    record: dict[str, Any], wanted: str, want_field: str | None = None
+) -> int | None:
+    """The most specific relation *record* has to *wanted*, or ``None``.
+
+    ``None`` means no directory the record names relates to *wanted* at all.
+    A smaller number is a stronger claim to *own* *wanted* (see the rank
+    constants); this is what lets ``find_record`` prefer a same-field exact match
+    over a newer record that only shares an experiment root OR names *wanted*
+    through a different field. When *want_field* is ``None`` an exact match on
+    either field is treated as same-field (rank 0), preserving the older
+    field-agnostic behaviour for callers that do not care about provenance.
+    """
+    best: int | None = None
+    for field, found in record_paths_typed(record):
+        if found == wanted:
+            rank = (_RANK_EXACT_SAME
+                    if want_field is None or field == want_field
+                    else _RANK_EXACT_OTHER)
+        elif found.startswith(wanted + "/"):
+            rank = _RANK_CHILD
+        elif wanted.startswith(found + "/"):
+            rank = _RANK_ANCESTOR
+        else:
+            continue
+        if best is None or rank < best:
+            best = rank
+    return best
 
 
 def find_record(
@@ -187,21 +264,352 @@ def find_record(
         The best ``(path, record)`` match, or ``None``.
     """
     candidates = list(iter_records(homes))
-    for wanted in (eval_dir, exp_root):
+    for wanted, want_field in ((eval_dir, _FIELD_EVAL), (exp_root, _FIELD_EXP)):
         cleaned = (wanted or "").strip().rstrip("/")
         if not cleaned:
             continue
-        hits = [(p, r) for p, r in candidates if _matches(r, cleaned)]
+        hits = [(p, r) for p, r in candidates if _matches(r, cleaned, want_field)]
         if not hits:
             continue
         if session_id:
             narrowed = [(p, r) for p, r in hits if p.parent.parent.name == session_id]
             if narrowed:
                 hits = narrowed
-        # Among identity matches, the newest recorded timestamp is the live run.
-        hits.sort(key=lambda pr: str(pr[1].get("timestamp") or ""), reverse=True)
+        # Rank by ownership specificity FIRST — a SAME-FIELD exact match beats a
+        # record that names *cleaned* only through the other field (e.g. a child
+        # lane whose exp_root equals this eval-dir) or that merely shares an
+        # ancestor experiment root — and only then by newest recorded timestamp.
+        # Without the specificity key a newer sibling that happens to share
+        # exp_root, or a child announcing this dir as its exp_root, would outrank
+        # the run whose own eval-dir is exactly *cleaned*. (mtime is never used; a
+        # recorded timestamp is.)
+        hits.sort(key=lambda pr: (_match_rank(pr[1], cleaned, want_field),
+                                  _neg_ts(pr[1].get("timestamp"))))
         return hits[0]
     return None
+
+
+def _neg_ts(timestamp: Any) -> tuple[int, str]:
+    """A sort key that orders newer timestamps first under an ascending sort.
+
+    ISO-8601 stamps are lexically ordered, so inverting each character's code
+    point yields a descending order without parsing. A leading present/absent
+    flag (0 = present, 1 = missing) guarantees missing stamps sort LAST among
+    equal ranks: a single-character sentinel could not, since an inverted real
+    stamp can itself reach the top of the code-point range.
+    """
+    s = str(timestamp or "")
+    if not s:
+        return (1, "")                    # no stamp -> last among equal ranks
+    return (0, "".join(chr(0x10FFFF - ord(c)) for c in s))
+
+
+def _owns(record: dict[str, Any], eval_dir: str | None, exp_root: str | None) -> bool:
+    """Whether *record* names *eval_dir* or *exp_root* as a SAME-FIELD exact match.
+
+    Ownership is field-aware: a record owns the requested ``eval_dir`` only when
+    ITS OWN ``eval_dir`` equals it (rank 0), and the requested ``exp_root`` only
+    when its own ``exp_root`` equals it. A child lane whose ``exp_root`` merely
+    equals the requested ``eval_dir`` is an OTHER-FIELD match (rank 1) and does
+    NOT own it — so it can never be adopted as the parent's top-level identity.
+    A shared experiment root (an ANCESTOR match) is weaker still and never owns.
+    This is the guard that stops a sibling or child being selected for a run
+    whose own top-level record is absent.
+    """
+    for wanted, want_field in ((eval_dir, _FIELD_EVAL), (exp_root, _FIELD_EXP)):
+        cleaned = (wanted or "").strip().rstrip("/")
+        if cleaned and _match_rank(record, cleaned, want_field) == _RANK_EXACT_SAME:
+            return True
+    return False
+
+
+def _resolve_one(
+    homes: list[Path], eval_dir: str | None, exp_root: str | None,
+) -> tuple[str, bool] | None:
+    """Resolve one requested instance to its own ``agent-*.jsonl`` glob.
+
+    Returns ``(glob, files_exist)`` when a record EXACTLY owns the instance and
+    carries a ``runId``; ``None`` when no owning record exists. ``files_exist``
+    reflects ``glob.glob`` on disk, so the caller can flag a resolved-but-empty
+    lane rather than trust a nonempty glob STRING as proof of coverage.
+    """
+    rec = find_record(homes, eval_dir=eval_dir, exp_root=exp_root)
+    if not rec:
+        return None
+    record_path, record = rec
+    # find_record ranks exact over ancestor, but may still return an ancestor-only
+    # match when nothing exact exists (a sibling sharing exp_root). Require exact
+    # ownership here so such a near-miss is treated as unresolved, not adopted.
+    if not _owns(record, eval_dir, exp_root):
+        return None
+    return _glob_for_record(record_path, record)
+
+
+def _glob_for_record(
+    record_path: Path, record: dict[str, Any]
+) -> tuple[str, bool] | None:
+    """Build the ``agent-*.jsonl`` glob for *record*'s own run dir.
+
+    Returns ``(glob, files_exist)`` or ``None`` when the record has no ``runId``.
+    """
+    run_id = str(record.get("runId") or "")
+    if not run_id:
+        return None
+    session_dir = record_path.parent.parent
+    g = str(session_dir / "subagents" / "workflows" / run_id / "agent-*.jsonl")
+    return g, bool(_glob.glob(g))
+
+
+# Sentinel: more than one enclosing run could anchor a mid-run eval-dir, so we
+# refuse to guess rather than bill the wrong run's transcripts.
+_ANCHOR_AMBIGUOUS = "ambiguous"
+
+
+def _anchor_top_by_exp_root(
+    homes: list[Path], eval_dir: str | None,
+) -> tuple[str, bool] | str | None:
+    """Anchor a top-level run whose OWN ``eval_dir`` is not yet on record.
+
+    A dispatcher (e.g. ``kernel_workflow`` in optimize/author pass-through) emits
+    the run report from INSIDE itself, before it returns — so its record has an
+    ``args.exp_root`` but no ``result.eval_dir`` yet, and the report's
+    ``--eval-dir`` (the lane's generated dir) is not named by any record. The
+    dispatcher is still identifiable, though: its ``exp_root`` is a STRICT
+    ancestor of that lane eval-dir (``<exp_root>/team_task_*/task``). This finds
+    that enclosing dispatcher deliberately:
+
+    - Only a SAME-FIELD ``exp_root`` that is a *proper* prefix of *eval_dir*
+      qualifies. Equality does NOT (that is a child lane announcing its own
+      experiment root, not an enclosing run — see the missing-parent test), and
+      an ``eval_dir`` field never anchors here.
+    - A candidate whose OWN ``result.eval_dir`` is already on record and is
+      SOMETHING OTHER than the requested target is a completed SIBLING under the
+      shared ``exp_root``, not the enclosing dispatcher of *eval_dir*. Its known
+      identity contradicts the request, so it is rejected outright — a unique
+      visible ancestor is NOT proof of ownership when the target's own record is
+      absent (else one finished sibling would silently "own", and mis-bill, an
+      absent run). Only records that are genuinely args-only for the target
+      (no contradicting ``eval_dir``) may anchor, and even then the caller marks
+      the result INFERRED, never a proven whole-run identity.
+    - When several candidates nest, the MOST SPECIFIC (longest) ``exp_root``
+      wins — the immediate dispatcher, not a grandparent.
+    - If two DISTINCT runs tie at that most-specific depth, resolution is
+      ambiguous and we refuse (return ``_ANCHOR_AMBIGUOUS``) rather than pick one.
+
+    Returns ``(glob, files_exist)`` for a unique anchor, ``_ANCHOR_AMBIGUOUS`` on
+    a genuine tie, or ``None`` when nothing encloses *eval_dir*.
+    """
+    cleaned = (eval_dir or "").strip().rstrip("/")
+    if not cleaned:
+        return None
+    # (exp_root_len, record_path, record) for every record whose own exp_root is a
+    # strict ancestor of the requested eval-dir AND whose own known eval_dir does
+    # not contradict the request.
+    candidates: list[tuple[int, Path, dict[str, Any]]] = []
+    for record_path, record in iter_records(homes):
+        if not str(record.get("runId") or ""):
+            continue
+        typed = record_paths_typed(record)
+        # A record that KNOWS its own eval_dir, and it is not the target, is a
+        # sibling/unrelated run — never the enclosing dispatcher of *eval_dir*.
+        own_evals = [d for f, d in typed if f == _FIELD_EVAL]
+        if own_evals and cleaned not in own_evals:
+            continue
+        for field, directory in typed:
+            if field == _FIELD_EXP and cleaned.startswith(directory + "/"):
+                candidates.append((len(directory), record_path, record))
+                break
+    if not candidates:
+        return None
+    best_len = max(c[0] for c in candidates)
+    finalists = [c for c in candidates if c[0] == best_len]
+    distinct_runs = {str(c[2].get("runId")) for c in finalists}
+    if len(distinct_runs) > 1:
+        return _ANCHOR_AMBIGUOUS
+    _, record_path, record = finalists[0]
+    return _glob_for_record(record_path, record)
+
+
+def resolve_run_scope(
+    homes: Iterable[Path],
+    *,
+    eval_dir: str | None = None,
+    exp_root: str | None = None,
+    nested_eval_dirs: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Resolve the agent transcripts THIS run owns, with explicit coverage.
+
+    The ledger's default discovery finds transcripts by eval-dir path SUBSTRING
+    across every session under the Claude home, then bounds them by a day-window.
+    That over-attributes: any OTHER session (a human debugging the run, a second
+    workflow, the report driver itself) whose transcript merely mentions the
+    eval-dir path is billed to the run, and its late calls blow the window open.
+    Scoping instead to each instance's OWN ``subagents/workflows/<runId>/`` dir
+    removes that class of contamination by construction — a concurrent session
+    never writes into another run's workflow subdir.
+
+    Resolution is by identity, never mtime: the top-level run is matched EXACTLY
+    from *eval_dir* / *exp_root*; each nested lane is matched EXACTLY from its own
+    eval-dir, passed in via *nested_eval_dirs* (the ``instance`` field of the
+    timeline's ``nested[]`` entries — authoritative, because that is how the
+    dispatcher accounts for its lanes; we do not guess nesting from the
+    filesystem). A single-lane pass-through whose worker shares the parent
+    ``runId`` dir resolves to the same glob and is de-duplicated.
+
+    Globs ``agent-*.jsonl`` ONLY — never ``agent-*`` — so the sibling
+    ``agent-<id>.output`` symlinks (which point at the full transcript) are not
+    pulled in and double-counted.
+
+    Coverage is reported, not assumed. The returned dict carries:
+
+    - ``globs``:     the owned, file-backed glob patterns (empty on fallback)
+    - ``scope``:     ``run-scoped`` (top + every lane resolved with files),
+                     ``partial`` (top resolved, but a lane is missing/empty), or
+                     ``unresolved`` (no trustworthy top-level identity)
+    - ``complete``:  ``True`` only when nothing is missing
+    - ``requested`` / ``resolved`` / ``missing``: the instance labels in each state
+    - ``warnings``:  one human-readable line per missing/empty instance
+
+    A whole-run scope is NEVER claimed without a resolved, file-backed top-level
+    identity: when the top-level record is absent (or resolves to an empty dir),
+    ``globs`` is ``[]`` and ``scope`` is ``unresolved`` so the caller falls back
+    to substring discovery rather than billing a lane-only slice as the whole run.
+    A lane that cannot be established downgrades the run to ``partial`` — it is
+    never silently dropped while still calling the result complete.
+
+    KNOWN LIMITATION: an LLM call the dispatcher makes DIRECTLY in the parent
+    session context (outside ``subagents/``) is not in this set and is undercounted.
+    For the shipped modes the dispatcher only forwards, so this is ~nil; a future
+    mode that reasons in-parent would need its parent-scoped calls added back.
+    """
+    homes = list(homes)
+    # (kind, eval_dir, exp_root, label) — top-level first, then each nested lane.
+    requested: list[tuple[str, str | None, str | None, str]] = []
+    top_label = (eval_dir or exp_root or "").strip().rstrip("/")
+    if top_label:
+        requested.append(("top", eval_dir, exp_root, top_label))
+    for d in (nested_eval_dirs or []):
+        lbl = (d or "").strip().rstrip("/")
+        if lbl:
+            requested.append(("lane", d, None, lbl))
+
+    globs: list[str] = []
+    seen: set[str] = set()
+    resolved: list[str] = []
+    missing: list[str] = []
+    inferred: list[str] = []
+    warnings: list[str] = []
+    top_ok = False
+    top_anchor = "eval_dir"     # how the whole-run anchor was established
+
+    for kind, ev, ex, label in requested:
+        res = _resolve_one(homes, ev, ex)
+        if res is None and kind == "top":
+            # The run's OWN eval-dir may not be on record yet: a dispatcher emits
+            # its report before it returns, so ``result.eval_dir`` is unwritten
+            # and only ``args.exp_root`` (a STRICT ancestor of the lane eval-dir)
+            # identifies it. Anchor on that enclosing run deliberately — a unique
+            # most-specific exp_root only; a genuine tie stays unresolved.
+            anchored = _anchor_top_by_exp_root(homes, ev)
+            if anchored == _ANCHOR_AMBIGUOUS:
+                warnings.append(
+                    "top-level run identity %r matches more than one enclosing "
+                    "exp_root run — refusing to guess; falling back" % label)
+            elif anchored is not None:
+                # Containment is EVIDENCE, not proof: the enclosing run's exp_root
+                # nests the target, but no record positively ties it to this
+                # report's eval-dir (the target's own record is absent). Scope to
+                # it so we avoid the substring-discovery contamination, but mark
+                # the result INFERRED/incomplete — never a proven whole-run
+                # identity — and say so, so the report cannot read as authoritative.
+                res = anchored
+                top_anchor = "exp_root-ancestor"
+                inferred.append(label)
+                warnings.append(
+                    "top-level run identity %r resolved only by exp_root "
+                    "containment of an enclosing run (the run's own eval_dir is "
+                    "not on record) — scope INFERRED, ownership not proven" % label)
+        if res is None:
+            missing.append(label)
+            warnings.append(
+                "%s instance %r has no owning workflow record — excluded from scope"
+                % (kind, label))
+            continue
+        g, files_exist = res
+        if not files_exist:
+            missing.append(label)
+            warnings.append(
+                "%s instance %r resolved to %s but no agent-*.jsonl files exist"
+                % (kind, label, g))
+            continue
+        if kind == "top":
+            top_ok = True
+        if g not in seen:
+            seen.add(g)
+            globs.append(g)
+        resolved.append(label)
+
+    req_labels = [r[3] for r in requested]
+    if not top_ok:
+        # No trustworthy whole-run anchor: return no globs so the caller falls
+        # back to substring discovery instead of billing a lane-only slice.
+        if top_label:
+            warnings.append(
+                "top-level run identity %r unresolved — cannot claim a whole-run "
+                "scope; falling back to substring discovery" % top_label)
+        return {
+            "globs": [],
+            "scope": "unresolved",
+            "complete": False,
+            "requested": req_labels,
+            "resolved": resolved,
+            "missing": missing,
+            "inferred": inferred,
+            "warnings": warnings,
+            "top_anchor": None,
+        }
+
+    # An inferred (exp_root-containment) top is resolved enough to scope, but its
+    # ownership is unproven — so it is never ``complete`` and never a clean
+    # ``run-scoped``. It surfaces as ``run-scoped-inferred`` so the caller still
+    # uses the owned globs (avoiding substring contamination) while the report
+    # states plainly that the whole-run identity was inferred, not established.
+    complete = not missing and not inferred
+    if complete:
+        scope = "run-scoped"
+    elif inferred and not missing:
+        scope = "run-scoped-inferred"
+    else:
+        scope = "partial"
+    return {
+        "globs": globs,
+        "scope": scope,
+        "complete": complete,
+        "requested": req_labels,
+        "resolved": resolved,
+        "missing": missing,
+        "inferred": inferred,
+        "warnings": warnings,
+        "top_anchor": top_anchor,
+    }
+
+
+def run_transcript_globs(
+    homes: Iterable[Path],
+    *,
+    eval_dir: str | None = None,
+    exp_root: str | None = None,
+    nested_eval_dirs: Iterable[str] = (),
+) -> list[str]:
+    """Backward-compatible thin wrapper: the owned globs only (no coverage).
+
+    Prefer :func:`resolve_run_scope`, which also reports partial coverage and the
+    reason a slice is missing. Retained so existing callers keep resolving to the
+    run's own ``subagents/workflows/<runId>/`` dirs.
+    """
+    return resolve_run_scope(
+        homes, eval_dir=eval_dir, exp_root=exp_root,
+        nested_eval_dirs=nested_eval_dirs)["globs"]
 
 
 # --------------------------------------------------------------------------- #
