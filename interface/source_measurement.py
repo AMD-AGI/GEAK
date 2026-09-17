@@ -189,6 +189,10 @@ def _gate(
         and row.get("phase") == phase,
         "invalid_measurement_gate",
     )
+    _require(
+        row.get("transport") == "unix_datagram_scm_credentials",
+        "unverified_process_transport",
+    )
     _bindings(row, seal, request_sha, source.manifest_sha256)
     owner = _identity(row.get("server_identity"))
     _require(
@@ -249,7 +253,11 @@ def _gate(
             < receipt["observed_at_ns"]
             <= row["observed_at_ns"]
             and receipt.get("accepted_roots") == list(source.pythonpath_prefixes)
-            and receipt.get("guard") == "owned_module_specs_unchanged",
+            and receipt.get("guard") == "owned_module_specs_unchanged"
+            and receipt.get("worker_topology") == "frozen_after_ready"
+            and receipt.get("subreaper") is True
+            and receipt.get("cache_policy") == "source_bytecode_absent"
+            and receipt.get("overlay_inventory") == "exact_python_manifest_no_symlinks",
             "invalid_process_receipt",
         )
         resolved = receipt.get("resolved_modules")
@@ -280,6 +288,7 @@ def _leaf(
     seal = _object(raw_seal)
     _require(
         seal.get("schema") == "geak.source_runtime.measurement.v1"
+        and seal.get("measurement_scope") == "hot_timed_rounds"
         and isinstance(seal.get("launch_nonce"), str)
         and bool(seal["launch_nonce"])
         and isinstance(seal.get("base_url"), str)

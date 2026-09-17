@@ -113,12 +113,17 @@ def _leaf(directory, source_request, value, *, nonce=None):
             "resolved_modules": [row],
             "deleted_modules_absent": ["alpha.deleted"],
             "guard": "owned_module_specs_unchanged",
+            "worker_topology": "frozen_after_ready",
+            "subreaper": True,
+            "cache_policy": "source_bytecode_absent",
+            "overlay_inventory": "exact_python_manifest_no_symlinks",
         }
         receipt_digest = _write(runtime / name, receipt)
         gate = {
             "schema": "geak.source_runtime.gate.v1",
             **bindings,
             "phase": phase,
+            "transport": "unix_datagram_scm_credentials",
             "server_identity": owner,
             "boot_id": "boot",
             "base_url": "http://127.0.0.1:30000",
@@ -147,6 +152,7 @@ def _leaf(directory, source_request, value, *, nonce=None):
         runtime / "measurement.json",
         {
             "schema": "geak.source_runtime.measurement.v1",
+            "measurement_scope": "hot_timed_rounds",
             **bindings,
             "gates": gates,
             "server_identity": owner,
@@ -210,6 +216,43 @@ def test_exact_canonical_measurements_are_verified(source_request, tmp_path):
     assert {
         role: row["throughput_tok_s"] for role, row in result["measurements"].items()
     } == {"setup": 90, "baseline": 100, "final": 110}
+
+
+@pytest.mark.parametrize("phase", ["ready", "finished"])
+@pytest.mark.parametrize(
+    "field,receipt",
+    [
+        ("transport", False),
+        ("worker_topology", True),
+        ("subreaper", True),
+        ("cache_policy", True),
+        ("overlay_inventory", True),
+    ],
+)
+def test_rehashed_legacy_receipts_cannot_qualify(
+    source_request, tmp_path, phase, field, receipt
+):
+    evaluation = _pair(tmp_path, source_request)
+    _rewrite_gate(
+        evaluation / "validation/final",
+        phase,
+        lambda row: row.pop(field),
+        receipt=receipt,
+    )
+    assert _verify(source_request, evaluation)["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("scope", [None, "preparation", "profiling_only"])
+def test_only_hot_timed_rounds_seals_can_qualify(source_request, tmp_path, scope):
+    evaluation = _pair(tmp_path, source_request)
+    path = evaluation / "validation/final/source_runtime/measurement.json"
+    seal = json.loads(path.read_text())
+    if scope is None:
+        seal.pop("measurement_scope")
+    else:
+        seal["measurement_scope"] = scope
+    _write(path, seal)
+    assert _verify(source_request, evaluation)["status"] == "unavailable"
 
 
 @pytest.mark.parametrize(
