@@ -212,6 +212,16 @@ matter how much of the profile it owns. So after the Profiler emits the Top-N it
 The Architect then reports **both** orderings — by `%GPU` and by expected gain — and says which it
 followed; a disagreement between them is the useful signal, so it is never blended into one number.
 
+**One row per shape, folded by deployment time** (SKILL.md §3a). A kernel name is not an operating
+point: `base_latency_ms` is a phase mean over every shape the kernel ran, while the byte side is
+modelled from one representative shape, so the ratio mixed two operating points. The bias has a
+fixed sign — the modal shape is small, the mean is dragged up by the large chunks, so `roofline_pct`
+reads low and `attainable_speedup` reads **high**, i.e. phantom headroom, worst on the kernels with
+the widest shape spread. The skill now computes one row per `(shape, dtype)` case out of
+`profile_workload.json` and folds them weighted by `calls × latency`, which is not a heuristic but
+exactly `total bytes / total time / peak`. Rows are never folded across roof axes (different peaks),
+never weighted by a unit test's replay count, and never folded when they have no verdict.
+
 **Roofline is advisory and can never prune a candidate.** Same doctrine as the TraceLens prior: the
 measured `pct_gpu_time` is the judge. Confidence is staged — profile-time shape estimates are `low`
 (display only, not ranked on), real extracted shapes are `medium`, rocprofv3 counter measurements

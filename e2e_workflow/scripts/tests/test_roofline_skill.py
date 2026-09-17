@@ -478,6 +478,147 @@ class TestAssumedDistributionCounterExample(unittest.TestCase):
         self.assertIn("Do not read the two columns as the same measurement", text)
 
 
+class TestPerShapeFold(unittest.TestCase):
+    """SKILL.md 3a: one row per operating point, folded by deployment time.
+
+    The defect this closes is arithmetic, not stylistic. `base_latency_ms` is `total_us / count`
+    over a whole phase (`parse_profile.py:199`) while the byte side is modelled from one
+    representative shape (`_est_shape`, `parse_profile.py:203`), so numerator and denominator
+    described different operating points. The resulting bias has a FIXED SIGN -- the modal shape is
+    small, the phase mean is dragged up by the large chunks, so `roofline_pct` reads low and
+    `attainable_speedup = target_eff / roofline_pct` reads high. Phantom headroom, worst on exactly
+    the kernels whose shape spread is widest, and `expected_e2e_gain_pct` then spends budget on it.
+    """
+
+    #: A prefill distribution with the shape that makes the single-row treatment wrong: the modal
+    #: chunk is small and frequent, the large chunks are rare and set the phase mean.
+    SHAPES = ((1936, 90), (8192, 14), (32768, 10))
+    H = 6144
+
+    def _rows(self, effs):
+        """One memory-bound row per shape, each at its own efficiency `eff` of the HBM roof.
+
+        Deliberately an elementwise residual+norm, not a GEMM: at these N/K a bf16 GEMM has an
+        arithmetic intensity far above the ridge, so it walks toward the COMPUTE roof and a
+        bytes-derived time would be rejected as infeasible by L3. The memory-axis fold needs an op
+        that is genuinely on the memory roof.
+        """
+        p = _peaks()
+        pk, pf = p["hbm_bw_bytes_s"], rt.peak_flops_for(p, "bf16")
+        out = []
+        for (m, calls), eff in zip(self.SHAPES, effs):
+            by = 3.0 * m * self.H * rt.dtype_bytes("bf16")     # read x, read residual, write y
+            out.append({"name": "M%d" % m, "m": m, "calls": calls, "row": rt.roofline_metrics(
+                by, 4.0 * m * self.H, by / (eff * pk), pk, pf, rt.TARGET_EFF["elementwise"],
+                pct_gpu_time=6.98, bytes_measured=True, flops_measured=True)})
+        return out
+
+    @staticmethod
+    def _axis(fold, name="memory"):
+        return [a for a in fold["axes"] if a["roof_axis"] == name][0]
+
+    def test_time_weighting_is_the_aggregate_not_an_approximation(self):
+        """Sum(w_i*pct_i)/sum(w_i) == total bytes / total time / peak, exactly.
+
+        This is the identity SKILL.md 3a claims. If it ever stops holding, the weight is wrong --
+        weighting by call count alone would let a shape that runs often but briefly outvote the one
+        actually consuming the wall clock.
+        """
+        rows = self._rows((0.55, 0.55, 0.55))
+        fold = rt.fold_cases(rows, rt.TARGET_EFF["elementwise"], pct_gpu_time=6.98)
+        pk = _peaks()["hbm_bw_bytes_s"]
+        agg = (sum(c["calls"] * c["row"]["bytes_est"] for c in rows)
+               / (sum(c["calls"] * c["row"]["t_ms"] * 1e-3 for c in rows) * pk))
+        mem = self._axis(fold)
+        self.assertAlmostEqual(mem["roofline_pct"], agg, places=12)
+        self.assertAlmostEqual(mem["roofline_pct"], 0.55, places=12)
+        self.assertEqual(fold["excluded"]["n"], 0)
+        self.assertAlmostEqual(mem["weight_share"], 1.0, places=12)
+
+    def test_the_fold_moves_the_answer_off_the_modal_shape(self):
+        """A kernel that is poor when small and good when large: 30% modal vs 52% folded.
+
+        The point of the section is that this gap is not noise -- it is a 1.74x overstatement of
+        headroom, and it lands on whichever kernels have the widest shape distribution.
+        """
+        rows = self._rows((0.30, 0.60, 0.80))
+        mem = self._axis(rt.fold_cases(rows, rt.TARGET_EFF["elementwise"], pct_gpu_time=6.98))
+        modal = rows[0]["row"]["roofline_pct"]
+        self.assertAlmostEqual(modal, 0.30, places=6)
+        self.assertGreater(mem["roofline_pct"], modal * 1.3)
+        overstatement = (rt.TARGET_EFF["elementwise"] / modal) / mem["attainable_speedup"]
+        self.assertGreater(overstatement, 1.5)
+
+    def test_rows_without_a_verdict_are_excluded_and_their_share_reported(self):
+        """Folding a dispatch-bound row at its clamped value manufactures saturation.
+
+        A zero-`calls` row is excluded rather than defaulted to 1: a silent default would flatten
+        the very distribution this section exists to respect.
+        """
+        rows = self._rows((0.55, 0.55, 0.55))
+        p = _peaks()
+        bad = rows + [
+            {"name": "dispatch_bound", "calls": 500, "row": rt.roofline_metrics(
+                1024, 1024, 1e-6, p["hbm_bw_bytes_s"], rt.peak_flops_for(p, "bf16"),
+                rt.TARGET_EFF["elementwise"], bytes_measured=True, flops_measured=True)},
+            {"name": "no_calls", "calls": 0, "row": rows[0]["row"]},
+        ]
+        fold = rt.fold_cases(bad, rt.TARGET_EFF["elementwise"], pct_gpu_time=6.98)
+        self.assertEqual(fold["excluded"]["n"], 2)
+        self.assertEqual({e["case"]["name"] for e in fold["excluded"]["cases"]},
+                         {"dispatch_bound", "no_calls"})
+        mem = self._axis(fold)
+        self.assertAlmostEqual(mem["roofline_pct"], 0.55, places=12)   # bad rows did not move it
+        self.assertLess(mem["weight_share"], 1.0)
+        self.assertGreater(fold["excluded"]["weight_share"], 0.0)
+
+    def test_axes_are_never_combined_and_the_gpu_budget_is_conserved(self):
+        """roofline_pct is achieved/peak on ONE roof; averaging across roofs divides by two peaks.
+
+        Each axis may also claim only the slice of the kernel's GPU time its weight accounts for,
+        or every axis would separately promise the whole kernel's e2e gain.
+        """
+        p = _peaks()
+        rows = self._rows((0.55, 0.55, 0.55))[:1] + [
+            {"name": "compute_heavy", "calls": 50, "row": rt.roofline_metrics(
+                1e6, 8e11, 1e-3, p["hbm_bw_bytes_s"], rt.peak_flops_for(p, "bf16"),
+                rt.TARGET_EFF["elementwise"], pct_gpu_time=6.98,
+                bytes_measured=True, flops_measured=True)}]
+        fold = rt.fold_cases(rows, rt.TARGET_EFF["elementwise"], pct_gpu_time=6.98)
+        self.assertEqual({a["roof_axis"] for a in fold["axes"]}, {"memory", "compute"})
+        self.assertAlmostEqual(sum(a["pct_gpu_time_share"] for a in fold["axes"]), 6.98, places=9)
+
+    def test_roof_axis_is_recorded_separately_from_bound_type(self):
+        """`bound_type` can read 'latency' while the ratio still sits on the memory roof.
+
+        `fold_cases` groups on `roof_axis` precisely because `bound_type` is not a safe proxy for
+        which denominator the ratio was taken against.
+        """
+        row = _attn_metrics()
+        self.assertEqual(row["bound_type"], "latency")
+        self.assertEqual(row["roof_axis"], "memory")
+
+    def test_degradation_is_non_fatal(self):
+        self.assertIsNone(rt.fold_cases([], rt.TARGET_EFF["elementwise"]))
+        self.assertIsNone(rt.fold_cases(None, 0))
+        self.assertIsNone(rt.fold_cases(self._rows((0.55, 0.55, 0.55)), 0))
+        # A row that is not a dict, and a case that is not a dict, are skipped rather than raising.
+        self.assertIsNone(rt.fold_cases(["not a dict", {"calls": 3, "row": None}],
+                                        rt.TARGET_EFF["elementwise"]))
+
+    def test_section_3a_is_written_down(self):
+        with open(os.path.join(os.path.dirname(PEAKS_MD), "SKILL.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("## 3a.", text)
+        self.assertIn("profile_workload.json", text)
+        # The three constraints that make the identity hold must survive future edits.
+        self.assertIn("Never fold across `roof_axis`", text)
+        self.assertIn("must come from the deployment trace", text)
+        self.assertIn("Fold only rows that have a verdict", text)
+        # And the reason counters alone do not close it.
+        self.assertIn("Counters do not fix this", text)
+
+
 class TestSkillDocConsistency(unittest.TestCase):
     """The helper's priors must not drift from the SKILL.md table that documents them."""
 
