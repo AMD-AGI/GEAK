@@ -48,8 +48,16 @@ from typing import Any
 try:
     # Package import under pytest / module use.
     from interface.effective_config import resolve_effective_config
+    from interface.source_materialization import (
+        SourceMaterializationError,
+        validate_source_materialization,
+    )
 except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
     from effective_config import resolve_effective_config
+    from source_materialization import (
+        SourceMaterializationError,
+        validate_source_materialization,
+    )
 
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
@@ -414,19 +422,12 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         else (h.get("accepted_env", "") or "")
     )
     initial_overlay = ""
+    materialized_source = None
     if effective is not None:
-        # Prefer a materialized aggregate overlay.  When Hyperloom only emitted
-        # source snapshots, later accepted snapshots precede earlier ones so
-        # Python resolves the newest current-best source first.
-        overlay_parts = [effective.base_overlay_pythonpath]
-        overlay_parts.extend(
-            str(snapshot.get("snapshot_dir") or "")
-            for snapshot in reversed(effective.source_snapshots)
-            if isinstance(snapshot, dict) and snapshot.get("reproducible")
-        )
-        initial_overlay = ":".join(
-            dict.fromkeys(part for part in overlay_parts if part)
-        )
+        # Source snapshots are sparse provenance, not import roots. Keep their
+        # complete materialization separate from authored startup overlays.
+        materialized_source = validate_source_materialization(h["baseline_env_spec"])
+        initial_overlay = effective.base_overlay_pythonpath
     # gpu_ids is the optimization-parallelism pool AND the serving device set.
     # Default to 0..tp-1 so serving honours the requested tensor-parallel size.
     gpu_ids = h.get("gpu_ids") or ",".join(str(i) for i in range(max(tp, 1)))
@@ -567,6 +568,15 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         run_id = uuid.uuid4().hex[:8]
         eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}_{run_id}Z")
     ps_args["eval_dir"] = eval_dir
+    if materialized_source is not None:
+        ps_args["baseline_source_request"] = {
+            "schema_version": 1,
+            "source_snapshots": [{"id": item} for item in materialized_source.required_layer_ids],
+            "source_materialization": h["baseline_env_spec"]["source_materialization"],
+        }
+        ps_args["baseline_source_pythonpath"] = os.pathsep.join(
+            materialized_source.pythonpath_prefixes
+        )
     # Keep the JS live-path implausible-speedup guard and THIS runner's recovery
     # path on ONE margin: forward the (validated) Python value so the workflow's
     # A.implausible_speedup_margin can never silently drift from the constant the
@@ -6575,7 +6585,24 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"empty/invalid handoff: {handoff_path}\n")
         return 2
 
-    ps_args = map_args(h, timeout_s)
+    try:
+        ps_args = map_args(h, timeout_s)
+        if ps_args.get("baseline_source_request") and "--dry-run" not in flags:
+            # The new descriptor is not advertised until the serving-process
+            # verifier is integrated. A development checkout must not silently
+            # benchmark source it has only validated on disk.
+            raise SourceMaterializationError("source_runtime_not_integrated")
+    except SourceMaterializationError as exc:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=result_path.parent,
+                                         encoding="utf-8", delete=False) as stream:
+            json.dump({"schema_version": SCHEMA_VERSION, "status": "error",
+                       "error_class": "unresolved_baseline_source", "error": str(exc)}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(stream.name, result_path)
+        sys.stderr.write(str(exc) + "\n")
+        return 1
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]
