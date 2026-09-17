@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -79,12 +80,21 @@ class PostMeasureTest(unittest.TestCase):
                 if mode == "invalid":
                     (output / "native_receipt.json").write_text("not JSON")
                     sys.exit(0)
+                if mode == "fifo":
+                    os.mkfifo(output / "native_receipt.json")
+                    sys.exit(0)
+                if mode == "fifo_sealed_summary":
+                    sealed = output.parent / "throughput/bench_summary.json"
+                    sealed.unlink()
+                    os.mkfifo(sealed)
                 if mode == "mutate":
                     (output.parents[1] / "bench_summary.json").write_text('{"throughput_tok_s_median": 999}')
-                if mode == "replace":
+                if mode in ("replace", "remove_seal"):
                     summary = output.parents[1] / "bench_summary.json"
                     summary.unlink()
                     summary.mkdir()
+                    if mode == "remove_seal":
+                        (output.parent / "measurement.json").unlink()
                 (output / "native_receipt.json").write_text(json.dumps({"schema": "cpu-fixture.v1", "context_sha256": hashlib.sha256(pathlib.Path(args.launch_context).read_bytes()).hexdigest()}))
         ''').lstrip())
         self.adapter = self.root / "adapter.sh"
@@ -178,8 +188,10 @@ class PostMeasureTest(unittest.TestCase):
         self.cli("record", "--output-dir", out, "--pid", args.pid, "--pgid", args.pgid,
                  "--start-ticks", args.start_ticks, "--protected-pgids", "1")
         self.cli("ready", "--output-dir", out, "--base-url", args.base_url)
-        (out / "bench_summary.json").write_text('{"throughput_tok_s_median":123,"runs":1}')
+        (out / "bench_summary.json").write_text(json.dumps({"throughput_tok_s_median": 123, "runs": 1,
+                                                            "effective_config_digest": "a" * 64}))
         (out / "bench_runs.jsonl").write_text('{"output_throughput":123}\n')
+        self.cli("measurement-valid", "--output-dir", out)
         return out, request_path, request, proc
 
     def test_warm_callback_follows_all_timed_rounds_on_the_same_live_server(self):
@@ -267,7 +279,8 @@ class PostMeasureTest(unittest.TestCase):
             proc.communicate(timeout=3)
 
     def test_missing_invalid_and_failed_callback_results_remain_explicit(self):
-        for mode, status in (("missing", "missing_result"), ("invalid", "invalid_result_or_context"), ("fail", "failed")):
+        for mode, status in (("missing", "missing_result"), ("invalid", "invalid_result_or_context"),
+                             ("fifo", "invalid_result_or_context"), ("fail", "failed")):
             with self.subTest(mode=mode):
                 out, _, _, _ = self.live_context()
                 with patch.dict(os.environ, {"CALLBACK_MODE": mode}):
@@ -313,6 +326,28 @@ class PostMeasureTest(unittest.TestCase):
         self.assertEqual(selected["attempt"], 1)
         self.assertEqual(lifecycle._read(out / selected["receipt"]["path"])["status"], "throughput_restore_failed")
 
+    def test_missing_seal_and_failed_restore_cannot_purchase_another_attempt(self):
+        proc, out, _ = self.shell(mode="isolated_server", callback="remove_seal", REPLICAS="1")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(sum(e["event"] == "launch" for e in self.read_events()), 1)
+        self.assertEqual(sum(e["event"] == "callback" for e in self.read_events()), 1)
+        self.assertEqual(lifecycle._read(out / "post_measure_manifest.json")["selected"], [])
+
+    def test_fifo_and_device_artifacts_are_rejected_without_blocking(self):
+        fifo = self.root / "result.fifo"
+        os.mkfifo(fifo)
+        for path in (fifo, Path("/dev/null")):
+            for reader in (lifecycle._read, lifecycle._digest):
+                with self.subTest(path=path, reader=reader.__name__), self.assertRaisesRegex(ValueError, "regular file"):
+                    reader(path)
+
+    def test_fifo_sealed_summary_does_not_block_selection_or_buy_retry(self):
+        proc, out, _ = self.shell(mode="isolated_server", callback="fifo_sealed_summary", REPLICAS="1")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(sum(e["event"] == "launch" for e in self.read_events()), 1)
+        self.assertEqual(sum(e["event"] == "callback" for e in self.read_events()), 1)
+        self.assertEqual(lifecycle._read(out / "post_measure_manifest.json")["selected"], [])
+
     def test_changed_request_and_stale_output_are_rejected(self):
         out, path, _, _ = self.live_context()
         with self.assertRaises(FileExistsError):
@@ -345,6 +380,47 @@ class PostMeasureTest(unittest.TestCase):
                 lifecycle._listener(owner, f"http://{host}:1234")
         self.assertIsNone(first_server.poll())
         self.assertIsNone(second_server.poll())
+
+    @unittest.skipUnless(hasattr(socket, "SO_REUSEPORT"), "requires SO_REUSEPORT")
+    def test_endpoint_allows_same_group_listeners_but_rejects_foreign_reuseport(self):
+        code = textwrap.dedent('''
+            import pathlib, signal, socket, sys
+            port, count = int(sys.argv[2]), int(sys.argv[3])
+            listeners = []
+            for _ in range(count):
+                sock = socket.socket()
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                sock.bind(("127.0.0.1", port))
+                port = sock.getsockname()[1]
+                sock.listen()
+                listeners.append(sock)
+            pathlib.Path(sys.argv[1]).write_text(str(port))
+            signal.pause()
+        ''')
+
+        def start_listener(port, count):
+            ready = self.root / uuid.uuid4().hex
+            proc = subprocess.Popen([sys.executable, "-c", code, str(ready), str(port), str(count)],
+                                    start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.addCleanup(proc.wait, timeout=3)
+            self.addCleanup(proc.terminate)
+            for _ in range(200):
+                if ready.exists() and ready.stat().st_size:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+            return proc, int(ready.read_text())
+
+        server, port = start_listener(0, 2)
+        current = lifecycle._proc(server.pid)
+        owner = lifecycle._identity(server.pid, server.pid, current["start_ticks"], [1, os.getpgrp()])
+        endpoint = f"http://127.0.0.1:{port}"
+        self.assertEqual(len(lifecycle._listener(owner, endpoint)["listeners"]), 2)
+        foreign, _ = start_listener(port, 1)
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            lifecycle._listener(owner, endpoint)
+        self.assertIsNone(server.poll())
+        self.assertIsNone(foreign.poll())
 
     def test_outer_cleanup_reuses_frozen_identity_after_owner_shell_is_gone(self):
         out, _, request, server = self.live_context()
@@ -403,6 +479,7 @@ class PostMeasureTest(unittest.TestCase):
 
     def test_invalid_summary_and_oversized_artifact_do_not_start_callback(self):
         for filename, payload in (("bench_summary.json", '{"throughput_tok_s_median":0}'),
+                                  ("bench_summary.json", '{"throughput_tok_s_median":123,"effective_config_digest":"wrong"}'),
                                   ("bench_runs.jsonl", "x" * (8 * lifecycle.MAX_JSON_BYTES + 1))):
             with self.subTest(filename=filename):
                 out, _, _, _ = self.live_context()

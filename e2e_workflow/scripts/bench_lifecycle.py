@@ -11,10 +11,12 @@ import json
 import math
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -24,9 +26,20 @@ MAX_JSON_BYTES = 1024 * 1024
 HERE = Path(__file__).resolve().parent
 
 
+@contextmanager
+def _regular_file(path):
+    # Callback-owned artifacts can be FIFOs or devices. A nonblocking open and
+    # descriptor check avoid waiting beyond the callback's execution deadline.
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError("expected a regular file")
+        yield handle
+
+
 def _digest(path):
     digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
+    with _regular_file(path) as handle:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -46,7 +59,7 @@ def _reject_constant(value):
 
 
 def _read(path, *, with_digest=False):
-    with Path(path).open("rb") as handle:
+    with _regular_file(path) as handle:
         raw = handle.read(MAX_JSON_BYTES + 1)
     if len(raw) > MAX_JSON_BYTES:
         raise ValueError("JSON exceeds size limit")
@@ -229,6 +242,7 @@ def _listener(owner, base_url):
         address, port = fields[1].split(":")
         if fields[3] == "0A" and int(port, 16) == endpoint.port and address in ("0100007F", "00000000"):
             inodes.add(fields[9])
+    owned = {}
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
@@ -241,11 +255,19 @@ def _listener(owner, base_url):
                 after = _proc(current["pid"])
                 same = after and after["state"] != "Z" and all(after[key] == current[key] for key in ("pid", "pgid", "start_ticks"))
                 if target.startswith("socket:[") and target[8:-1] in inodes and same:
-                    return {"binding": "owned_process_group_listener", "port": endpoint.port,
-                            "pid": current["pid"], "start_ticks": current["start_ticks"]}
+                    candidate = {"pid": current["pid"], "start_ticks": current["start_ticks"]}
+                    inode = target[8:-1]
+                    if inode not in owned or candidate["pid"] < owned[inode]["pid"]:
+                        owned[inode] = candidate
         except (OSError, ValueError):
             continue
-    raise ValueError("endpoint listener does not belong to the recorded server group")
+    if not inodes or inodes - owned.keys():
+        # SO_REUSEPORT can route the same endpoint to a different process group.
+        # Every eligible listener must be attributable to this launch.
+        raise ValueError("endpoint listener ownership is absent or ambiguous")
+    listeners = [{"inode": inode, **owned[inode]} for inode in sorted(inodes)]
+    return {"binding": "owned_process_group_listener", "port": endpoint.port,
+            **owned[min(inodes)], "listeners": listeners}
 
 
 def _observation(owner, base_url):
@@ -296,6 +318,16 @@ def supervise(out):
         signal.pause()
 
 
+def measurement_valid(out):
+    summary = _read(out / "bench_summary.json")
+    value = summary.get("throughput_tok_s_median")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError("no valid measured throughput")
+    expected = os.environ.get("EFFECTIVE_CONFIG_DIGEST")
+    if expected and summary.get("effective_config_digest") != expected:
+        raise ValueError("throughput config does not match the requested measurement")
+
+
 def run_callback(out):
     capsule = _capsule(out)
     request = capsule["request"]
@@ -315,10 +347,7 @@ def run_callback(out):
                 for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
         summary_path = out / "bench_summary.json"
-        summary = _read(summary_path)
-        value = summary.get("throughput_tok_s_median")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-            raise ValueError("no valid measured throughput")
+        measurement_valid(out)
         receipt["throughput_artifacts"] = [_artifact(summary_path, out), _artifact(out / "bench_runs.jsonl", out)]
         for artifact in receipt["throughput_artifacts"]:
             path = out / artifact["path"]
@@ -451,7 +480,7 @@ def aggregate(out):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("capabilities", "prepare", "record", "ready", "run", "aggregate", "cleanup", "observe-cleanup", "supervise"))
+    parser.add_argument("command", choices=("capabilities", "prepare", "record", "ready", "measurement-valid", "run", "aggregate", "cleanup", "observe-cleanup", "supervise"))
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--request")
     parser.add_argument("--mode")
@@ -478,6 +507,8 @@ def main():
             record(out, args)
         elif args.command == "ready":
             ready(out, args)
+        elif args.command == "measurement-valid":
+            measurement_valid(out)
         elif args.command == "run":
             run_callback(out)
         elif args.command == "supervise":

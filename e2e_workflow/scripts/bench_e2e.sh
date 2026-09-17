@@ -124,6 +124,7 @@ fi
 # optional protocol BEFORE the profiling/capture carve-outs or any launch.
 POST_MEASURE_HELPER=""
 POST_MEASURE_CHILD_PID=""
+POST_MEASURE_THROUGHPUT_VALID=0
 if [ -n "${GEAK_POST_MEASURE_REQUEST:-}" ]; then
   POST_MEASURE_HELPER="$HERE/bench_lifecycle.py"
   if [ ! -f "$POST_MEASURE_HELPER" ]; then
@@ -263,10 +264,23 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
         _selection_summary="$_attempt_dir/post_measure/throughput/bench_summary.json"
         _selection_runs="$_attempt_dir/post_measure/throughput/bench_runs.jsonl"
       fi
-      if [ "$_rc" -eq 0 ] && python3 - "$_selection_summary" "${EFFECTIVE_CONFIG_DIGEST:-}" "$_measurement_seal" <<'PY'
-import hashlib, json, pathlib, sys
+      # 42 is an internal isolated-leaf outcome: throughput was valid BEFORE
+      # evaluation. The leaf freezes it in shell memory, outside callback files.
+      if { [ "$_rc" -eq 0 ] || [ "$_rc" -eq 42 ]; } && python3 - "$_selection_summary" "${EFFECTIVE_CONFIG_DIGEST:-}" "$_measurement_seal" "$POST_MEASURE_HELPER" <<'PY'
+import hashlib, json, os, pathlib, stat, sys
+def read_selection(path):
+    if not sys.argv[4]:
+        return pathlib.Path(path).read_bytes()
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError("selection artifact is not a regular file")
+        raw = handle.read(8 * 1024 * 1024 + 1)
+        if len(raw) > 8 * 1024 * 1024:
+            raise ValueError("selection artifact exceeds sealing limit")
+        return raw
 try:
-    summary = json.load(open(sys.argv[1]))
+    summary = json.loads(read_selection(sys.argv[1]))
     value = summary.get("throughput_tok_s_median")
     ok = isinstance(value, (int, float)) and not isinstance(value, bool)
     ok = ok and int(summary.get("runs", 0)) == 1
@@ -274,11 +288,11 @@ try:
     if expected_digest:
         ok = ok and summary.get("effective_config_digest") == expected_digest
     if sys.argv[3]:
-        seal = json.load(open(sys.argv[3]))
+        seal = json.loads(read_selection(sys.argv[3]))
         expected = {item["path"]: item["sha256"] for item in seal["throughput_artifacts"]}
         for name in ("bench_summary.json", "bench_runs.jsonl"):
             saved = pathlib.Path(sys.argv[1]).parent / name
-            ok = ok and not saved.is_symlink() and hashlib.sha256(saved.read_bytes()).hexdigest() == expected[name]
+            ok = ok and not saved.is_symlink() and hashlib.sha256(read_selection(saved)).hexdigest() == expected[name]
 except (OSError, ValueError, TypeError, KeyError):
     ok = False
 raise SystemExit(0 if ok else 1)
@@ -293,7 +307,7 @@ PY
         _successful=$((_successful + 1))
         break
       fi
-      if [ -n "$_measurement_seal" ]; then
+      if [ "$_rc" -eq 42 ] || [ -n "$_measurement_seal" ]; then
         echo "!!! Sealed throughput unavailable after callback; refusing a quality-driven retry." >&2
         break
       fi
@@ -660,6 +674,9 @@ if [ -n "$POST_MEASURE_HELPER" ]; then
     server_teardown
     python3 "$POST_MEASURE_HELPER" observe-cleanup --output-dir "$OUT_DIR" \
       || echo "!!! Post-measurement cleanup status unavailable." >&2
+    if [ "$POST_MEASURE_THROUGHPUT_VALID" = "1" ]; then
+      _status=42  # private leaf/dispatcher contract, never a quality decision
+    fi
     exit "$_status"
   }
   trap _post_measure_exit EXIT
@@ -939,6 +956,10 @@ python3 "$SUMMARIZE" from-runs "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$C
 if [ -n "$POST_MEASURE_HELPER" ]; then
   # Quality failure is a SIDECAR, never an isolated throughput retry signal.
   # The server and serving-GPU lock remain owned until this callback completes.
+  if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ] \
+      && python3 "$POST_MEASURE_HELPER" measurement-valid --output-dir "$OUT_DIR"; then
+    POST_MEASURE_THROUGHPUT_VALID=1
+  fi
   python3 "$POST_MEASURE_HELPER" run --output-dir "$OUT_DIR" &
   POST_MEASURE_CHILD_PID=$!
   wait "$POST_MEASURE_CHILD_PID" \
