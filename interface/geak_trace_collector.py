@@ -302,9 +302,9 @@ def _input_blocks_from_user(rec):
             shown, trunc, total = preview(content)
             out.append({"kind": "text", "text": shown,
                         "truncated": trunc, "bytes_total": total,
-                        "source_uuid": rec.get("uuid")})
+                        "source_uuid": rec.get("uuid"), "source_pos": 0})
         return out
-    for b in content or []:
+    for _pos, b in enumerate(content or []):
         if not isinstance(b, dict):
             continue
         if b.get("type") == "text" and isinstance(b.get("text"), str):
@@ -312,7 +312,7 @@ def _input_blocks_from_user(rec):
                 shown, trunc, total = preview(b["text"])
                 out.append({"kind": "text", "text": shown,
                             "truncated": trunc, "bytes_total": total,
-                            "source_uuid": rec.get("uuid")})
+                            "source_uuid": rec.get("uuid"), "source_pos": _pos})
         elif b.get("type") == "tool_result":
             body = b.get("content")
             if isinstance(body, list):
@@ -329,7 +329,7 @@ def _input_blocks_from_user(rec):
                 if omitted:
                     body += "\n[omitted non-text blocks: %s]" % ", ".join(omitted)
             shown, trunc, total = preview(body, RESULT_PREVIEW_BYTES)
-            out.append({"kind": "tool_result",
+            out.append({"kind": "tool_result", "source_pos": _pos,
                         "tool_use_id": b.get("tool_use_id"),
                         "is_error": bool(b.get("is_error")),
                         "text": shown, "truncated": trunc,
@@ -1120,11 +1120,37 @@ def merge_traces(previous, current):
                 e.get("event_id") or e.get("spawn_event_id"))
     cur_edges = {_ekey(e): e for e in (current.get("edges") or [])}
     # Identities the CURRENT read reports as contradicted must stay unusable.
+    # Conflict state is CUMULATIVE. Consuming only the current pass let a
+    # contradicted edge come back as proven as soon as a later read happened not
+    # to contain the contradicting record.
     linkage_now = (current.get("run") or {}).get("linkage") or {}
+    linkage_prev = (previous.get("run") or {}).get("linkage") or {}
     invalidated = set()
-    for item in (linkage_now.get("invalidated") or []):
-        if isinstance(item, (list, tuple)):
-            invalidated.add(tuple(item))
+    for holder in (linkage_prev, linkage_now):
+        for item in (holder.get("invalidated") or []):
+            if isinstance(item, (list, tuple)):
+                invalidated.add(tuple(item))
+
+    # A previously captured edge that CONTRADICTS the current one under the same
+    # identity invalidates both: neither is established any more.
+    prev_by_key = {_ekey(e): e for e in (previous.get("edges") or [])}
+    for key, cur_e in list((_ekey(e), e) for e in (current.get("edges") or [])):
+        old_e = prev_by_key.get(key)
+        if not old_e:
+            continue
+        if _rc is not None and any(old_e.get(f) != cur_e.get(f)
+                                   for f in _rc.EDGE_IDENTITY_FIELDS):
+            invalidated.add(key)
+    if invalidated:
+        current.setdefault("run", {}).setdefault("linkage", {})
+        current["run"]["linkage"]["invalidated"] = [list(k) for k in sorted(invalidated)]
+        current["edges"] = [e for e in (current.get("edges") or [])
+                            if _ekey(e) not in invalidated]
+        current.setdefault("warnings", []).append(
+            "%d linkage relationship(s) remain invalidated by contradictory "
+            "evidence seen in this or an earlier pass; they are not shown as "
+            "proven." % len(invalidated))
+        current["run"]["linkage"]["complete"] = False
     added = 0
     for edge in previous.get("edges") or []:
         key = _ekey(edge)
@@ -1454,6 +1480,32 @@ def mirror_sources(workflow_dir, dest_dir, max_bytes=None):
             owner = (json.load(fh) or {}).get("run_id")
     except Exception:
         owner = None
+    if owner is None:
+        # A destination written before owner markers existed carries no marker,
+        # but its mirrored run record still identifies whose it is. Ignoring that
+        # let a second run import into it.
+        try:
+            with open(os.path.join(dest_dir, "run_record.json"), "r",
+                      encoding="utf-8") as fh:
+                owner = (json.load(fh) or {}).get("runId")
+        except Exception:
+            owner = None
+    if owner is None:
+        # Non-empty destination whose ownership cannot be established: refuse
+        # rather than adopt it.
+        try:
+            existing = [f for f in os.listdir(dest_dir)
+                        if f.endswith((".jsonl", ".meta.json"))
+                        or ".gen" in f]
+        except OSError:
+            existing = []
+        if existing:
+            manifest["error"] = (
+                "mirror directory already holds %d captured file(s) but its "
+                "owning run cannot be established; refusing to mirror run %s "
+                "into it. Use a per-run destination." % (len(existing), run_id_now))
+            manifest["complete"] = False
+            return manifest
     if owner and owner != run_id_now:
         manifest["error"] = (
             "mirror directory is owned by run %s; refusing to mirror run %s into "
