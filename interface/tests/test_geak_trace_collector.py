@@ -854,12 +854,26 @@ class ProspectiveIdentityTest(unittest.TestCase):
         self.assertIn("requires a supported invocation identity", info["error"])
         self.assertIn("integration_gap", info)
 
-    def test_args_fingerprint_identifies_this_launch(self):
-        """The runtime-supplied join: the record carries the hook's own args."""
+    def test_args_without_a_nonce_do_not_identify_a_launch(self):
+        """Astra R8: a relaunch may reuse every argument, so equality is not identity."""
         import unittest.mock as mock
         now = int(time.time() * 1000)
-        mine = {"exp_root": "/exp/shared", "kernel_path": "/k", "deadline_epoch": 111}
-        other = {"exp_root": "/exp/shared", "kernel_path": "/k", "deadline_epoch": 222}
+        same = {"exp_root": "/exp/shared", "kernel_path": "/k", "deadline_epoch": 111}
+        recs = [self._rec("wf_old", "running", now - 90_000, args=same)]
+        with mock.patch.dict(sys.modules,
+                             {"claude_trace_mirror": self._fake_mirror(recs)}):
+            wf, info = C.resolve_workflow_dir(exp_root="/exp/shared",
+                                              require_live=True, prospective=True,
+                                              identity_args=same)
+        self.assertIsNone(wf, "reused args adopted a prior run")
+        self.assertIn("no launch nonce", info["identity_gap"])
+
+    def test_launch_nonce_identifies_this_launch(self):
+        """A nonce is unique BY CONSTRUCTION, unlike argument equality."""
+        import unittest.mock as mock
+        now = int(time.time() * 1000)
+        mine = {"exp_root": "/exp/shared", "geak_launch_nonce": "nonce-mine"}
+        other = {"exp_root": "/exp/shared", "geak_launch_nonce": "nonce-other"}
         recs = [self._rec("wf_other", "running", now - 90_000, args=other),
                 self._rec("wf_mine", "running", now - 1_000, args=mine)]
         with mock.patch.dict(sys.modules,
@@ -868,26 +882,39 @@ class ProspectiveIdentityTest(unittest.TestCase):
                                               require_live=True, prospective=True,
                                               identity_args=mine)
         self.assertEqual(info["run_id"], "wf_mine")
-        self.assertEqual(info["identity"], "args-fingerprint")
-        self.assertEqual(info["args_mismatch_records"], ["wf_other"])
+        self.assertEqual(info["identity"], "launch-nonce")
 
-    def test_fingerprint_with_no_match_stays_unresolved(self):
+    def test_nonce_reader_accepts_the_supported_keys(self):
+        for key in C.LAUNCH_NONCE_KEYS:
+            self.assertEqual(C.launch_nonce({key: "abc"}), "abc")
+        self.assertIsNone(C.launch_nonce({"exp_root": "/x"}))
+
+    def test_fingerprint_helper_is_order_independent(self):
+        """Kept as a hashing utility; it is NOT used as invocation identity."""
+        self.assertEqual(C.args_fingerprint({"b": 2, "a": 1}),
+                         C.args_fingerprint({"a": 1, "b": 2}))
+        self.assertNotEqual(C.args_fingerprint({"a": 1}),
+                            C.args_fingerprint({"a": 2}))
+
+    def test_nonce_with_no_matching_record_stays_unresolved(self):
         import unittest.mock as mock
         now = int(time.time() * 1000)
         recs = [self._rec("wf_other", "running", now - 1_000,
-                          args={"exp_root": "/exp/shared", "deadline_epoch": 9})]
+                          args={"exp_root": "/exp/shared",
+                                "geak_launch_nonce": "other"})]
         with mock.patch.dict(sys.modules,
                              {"claude_trace_mirror": self._fake_mirror(recs)}):
             wf, info = C.resolve_workflow_dir(
                 exp_root="/exp/shared", require_live=True, prospective=True,
-                identity_args={"exp_root": "/exp/shared", "deadline_epoch": 1})
+                identity_args={"exp_root": "/exp/shared",
+                               "geak_launch_nonce": "mine"})
         self.assertIsNone(wf)
         self.assertIn("rejected on args fingerprint", info["error"])
 
     def test_identical_launches_are_ambiguous_not_picked(self):
         import unittest.mock as mock
         now = int(time.time() * 1000)
-        same = {"exp_root": "/exp/shared", "deadline_epoch": 5}
+        same = {"exp_root": "/exp/shared", "geak_launch_nonce": "dup"}
         recs = [self._rec("wf_a", "running", now - 2_000, args=same),
                 self._rec("wf_b", "running", now - 1_000, args=same)]
         with mock.patch.dict(sys.modules,

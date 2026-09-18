@@ -138,9 +138,13 @@ def read_journal(workflow_dir):
     ordinal is the journal's own event order, which IS authoritative even though
     the journal carries no timestamps.
     """
-    path = os.path.join(workflow_dir, "journal.jsonl")
+    import glob as _g
+    base = os.path.join(workflow_dir, "journal.jsonl")
+    # Retained generations hold journal events a later rewrite replaced; reading
+    # only the current file loses agents/returns the mirror deliberately kept.
+    paths = sorted(_g.glob(base + ".gen*")) + [base]
     started, results, launched, ordinals = [], {}, False, {}
-    for rec in iter_jsonl_tolerant(path):
+    for rec in (r for p_ in paths for r in iter_jsonl_tolerant(p_)):
         kind = rec.get("type")
         if kind == "launched":
             launched = True
@@ -1304,6 +1308,23 @@ def _next_generation(dest):
     return "%s.gen%d" % (dest, n)
 
 
+def _copy_bounded(src, dest_fh, limit, src_offset=0):
+    """Copy at most ``limit`` bytes. A source can grow between the size check
+    and the copy, so an unbounded copyfileobj can write far more than the budget
+    admitted and then under-report it."""
+    written = 0
+    with open(src, "rb") as fh_in:
+        if src_offset:
+            fh_in.seek(src_offset)
+        while written < limit:
+            chunk = fh_in.read(min(1024 * 1024, limit - written))
+            if not chunk:
+                break
+            dest_fh.write(chunk)
+            written += len(chunk)
+    return written
+
+
 def _mirror_one(src, dest, max_bytes_left):
     """Copy one source file durably, incrementally, and VERIFIED BY CONTENT.
 
@@ -1325,10 +1346,10 @@ def _mirror_one(src, dest, max_bytes_left):
     if dest_size is None:
         if src_size > max_bytes_left:
             return "skipped_budget", 0, {"needed": src_size}
-        with open(src, "rb") as fh_in, open(dest + ".part", "wb") as fh_out:
-            shutil.copyfileobj(fh_in, fh_out)
+        with open(dest + ".part", "wb") as fh_out:
+            n = _copy_bounded(src, fh_out, src_size)
         os.replace(dest + ".part", dest)
-        return "copied", src_size, {"sha256": _sha256_of(dest)}
+        return "copied", n, {"sha256": _sha256_of(dest)}
 
     dest_hash = _sha256_of(dest)
 
@@ -1341,10 +1362,10 @@ def _mirror_one(src, dest, max_bytes_left):
             return "skipped_budget", 0, {"needed": src_size}
         gen = _next_generation(dest)
         shutil.copy2(dest, gen)
-        with open(src, "rb") as a, open(dest + ".part", "wb") as b:
-            shutil.copyfileobj(a, b)
+        with open(dest + ".part", "wb") as b:
+            n = _copy_bounded(src, b, src_size)
         os.replace(dest + ".part", dest)
-        return ("rewritten_same_size_previous_kept", src_size,
+        return ("rewritten_same_size_previous_kept", n,
                 {"generation": os.path.basename(gen), "sha256": _sha256_of(dest)})
 
     if src_size < dest_size:
@@ -1353,12 +1374,15 @@ def _mirror_one(src, dest, max_bytes_left):
         # too, because it is newly observed content we have not stored.
         if _sha256_of(src, src_size) != _sha256_of(dest, src_size):
             if src_size > max_bytes_left:
-                return ("source_shrank_mirror_retained", 0,
-                        {"divergent": True, "skipped_budget": True})
+                # Denied by budget: this must count as a SKIP, or coverage would
+                # report complete while newly observed content was never stored.
+                return ("skipped_budget", 0,
+                        {"divergent": True, "needed": src_size,
+                         "note": "divergent shorter source not retained"})
             gen = _next_generation(dest)
-            with open(src, "rb") as a, open(gen, "wb") as b:
-                shutil.copyfileobj(a, b)
-            return ("source_shrank_divergent_both_kept", src_size,
+            with open(gen, "wb") as b:
+                n = _copy_bounded(src, b, src_size)
+            return ("source_shrank_divergent_both_kept", n,
                     {"generation": os.path.basename(gen)})
         return "source_shrank_mirror_retained", 0, {}
 
@@ -1368,13 +1392,12 @@ def _mirror_one(src, dest, max_bytes_left):
         if delta > max_bytes_left:
             return "skipped_budget", 0, {"needed": delta}
         try:
-            with open(src, "rb") as fh_in, open(dest, "r+b") as fh_out:
-                fh_in.seek(dest_size)
+            with open(dest, "r+b") as fh_out:
                 fh_out.seek(dest_size)
-                shutil.copyfileobj(fh_in, fh_out)
+                n = _copy_bounded(src, fh_out, delta, src_offset=dest_size)
         except OSError:
             return "error", 0, {}
-        return "appended", delta, {"sha256": _sha256_of(dest)}
+        return "appended", n, {"sha256": _sha256_of(dest)}
 
     # Longer, but the prefix differs: a rewrite, not an append. Budget must be
     # checked against the ACTUAL copy size (the whole replacement), not a delta.
@@ -1382,10 +1405,10 @@ def _mirror_one(src, dest, max_bytes_left):
         return "skipped_budget", 0, {"needed": src_size}
     gen = _next_generation(dest)
     shutil.copy2(dest, gen)
-    with open(src, "rb") as a, open(dest + ".part", "wb") as b:
-        shutil.copyfileobj(a, b)
+    with open(dest + ".part", "wb") as b:
+        n = _copy_bounded(src, b, src_size)
     os.replace(dest + ".part", dest)
-    return ("rewritten_previous_kept", src_size,
+    return ("rewritten_previous_kept", n,
             {"generation": os.path.basename(gen), "sha256": _sha256_of(dest)})
 
 
@@ -1419,6 +1442,36 @@ def mirror_sources(workflow_dir, dest_dir, max_bytes=None):
         manifest["error"] = "cannot create mirror dir: %s" % exc
         return manifest
 
+    # Destination ownership. A mirror directory belongs to ONE run; reusing it
+    # for another would overwrite its run record and rebuild both runs' calls
+    # under the later identity. Refuse before mutating anything.
+    owner_path = os.path.join(dest_dir, "mirror_owner.json")
+    rec_now, _ = read_run_record(workflow_dir)
+    run_id_now = (rec_now or {}).get("runId") or os.path.basename(
+        os.path.abspath(workflow_dir))
+    try:
+        with open(owner_path, "r", encoding="utf-8") as fh:
+            owner = (json.load(fh) or {}).get("run_id")
+    except Exception:
+        owner = None
+    if owner and owner != run_id_now:
+        manifest["error"] = (
+            "mirror directory is owned by run %s; refusing to mirror run %s into "
+            "it. Use a per-run destination." % (owner, run_id_now))
+        manifest["complete"] = False
+        manifest["owner"] = owner
+        return manifest
+    if not owner:
+        try:
+            tmp = owner_path + ".tmp.%d" % os.getpid()
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"run_id": run_id_now,
+                           "source": os.path.abspath(workflow_dir)}, fh)
+            os.replace(tmp, owner_path)
+        except OSError:
+            pass
+    manifest["owner"] = run_id_now
+
     names = []
     for pattern in _MIRROR_PATTERNS:
         names.extend(os.path.basename(p)
@@ -1430,7 +1483,9 @@ def mirror_sources(workflow_dir, dest_dir, max_bytes=None):
     except OSError:
         pass
 
-    names = [n for n in names if ".gen" not in n and not n.endswith(".part")]
+    names = [n for n in names
+             if ".gen" not in n and not n.endswith(".part")
+             and n not in ("mirror_owner.json", "mirror_manifest.json")]
     for name in sorted(set(names)):
         action, copied, extra = _mirror_one(os.path.join(workflow_dir, name),
                                             os.path.join(dest_dir, name),
@@ -1622,6 +1677,24 @@ def watch(workflow_dir, out_path, interval=20.0, max_seconds=None,
         time.sleep(interval)
 
 
+#: Args key a launcher allocates per invocation. A nonce is unique BY
+#: CONSTRUCTION, which argument equality never is: a new run may legitimately
+#: reuse every argument of an earlier one. Only this (or an explicit run id)
+#: establishes which launch a record belongs to.
+LAUNCH_NONCE_KEYS = ("geak_launch_nonce", "launch_nonce", "invocation_id")
+
+
+def launch_nonce(args):
+    """The launch token in an args object, if the launcher supplied one."""
+    if not isinstance(args, dict):
+        return None
+    for key in LAUNCH_NONCE_KEYS:
+        val = args.get(key)
+        if isinstance(val, (str, int)) and str(val).strip():
+            return str(val).strip()
+    return None
+
+
 def args_fingerprint(args):
     """Stable fingerprint of a workflow's invocation arguments.
 
@@ -1698,8 +1771,18 @@ def resolve_workflow_dir(exp_root=None, eval_dir=None, script_dir=None,
         info["error"] = "record scan failed: %s" % exc
         return None, info
 
+    want_nonce = launch_nonce(identity_args)
     identity_fp = args_fingerprint(identity_args) if identity_args is not None else None
     info["identity_fingerprint"] = identity_fp
+    info["launch_nonce"] = want_nonce
+    if identity_args is not None and want_nonce is None:
+        # Args were supplied but carry no launch token. Argument EQUALITY is not
+        # invocation identity -- a relaunch may reuse every argument, and the
+        # intended run may not have registered yet -- so this does not qualify.
+        info["identity_gap"] = (
+            "invocation args supplied but they contain no launch nonce (%s); "
+            "argument equality cannot identify a launch"
+            % "/".join(LAUNCH_NONCE_KEYS))
     eligible, skipped_terminal, near_misses = [], 0, []
     for rec_path, record in records:
         if not mirror._owns(record, eval_dir, exp_root):
@@ -1713,9 +1796,8 @@ def resolve_workflow_dir(exp_root=None, eval_dir=None, script_dir=None,
                 continue
         if run_id and record.get("runId") != run_id:
             continue
-        if identity_fp is not None:
-            rec_fp = args_fingerprint(record.get("args"))
-            if rec_fp != identity_fp:
+        if want_nonce is not None:
+            if launch_nonce(record.get("args")) != want_nonce:
                 near_misses.append(record.get("runId"))
                 continue
         if require_live and str(record.get("status") or "").lower() in _TERMINAL_STATUSES:
@@ -1750,21 +1832,25 @@ def resolve_workflow_dir(exp_root=None, eval_dir=None, script_dir=None,
     # used at all. Nor is "the only owning record" a substitute: the sole record
     # under a directory may simply be an unrelated run. Prospective attachment
     # therefore requires a supported identity, or it stays unresolved.
-    if prospective and not run_id and identity_fp is None:
+    if prospective and not run_id and want_nonce is None:
         info["ambiguous"] = len(eligible)
         info["error"] = (
             "prospective attachment requires a supported invocation identity "
-            "(--run-id, or --identity-args matching the run record's own args). "
+            "(--run-id, or --identity-args carrying a launcher-allocated "
+            "nonce; argument equality is NOT identity). "
             "%d owning record(s) found, but none is PROVEN to be this launch, so "
             "attachment is left unresolved rather than guessed." % len(eligible))
         info["integration_gap"] = (
-            "The launch hook supplied no runtime invocation identity. Pass "
-            "--identity-args with the workflow's own args object, or --run-id.")
+            "No launch token is available. The launcher must place a unique "
+            "nonce in the workflow's args (one of %s) so the runtime records it, "
+            "or --run-id must be passed. Until then prospective attachment stays "
+            "unresolved rather than adopting a neighbouring run."
+            % "/".join(LAUNCH_NONCE_KEYS))
         return None, info
     if prospective and not run_id and len(eligible) > 1:
         info["ambiguous"] = len(eligible)
         info["error"] = (
-            "%d records match this identity; the launches are indistinguishable. "
+            "%d records carry the same launch nonce; identity is not unique. "
             "Attachment left unresolved rather than guessed." % len(eligible))
         return None, info
 
@@ -1791,8 +1877,8 @@ def resolve_workflow_dir(exp_root=None, eval_dir=None, script_dir=None,
     hit = "owns:" + ",".join(owned_fields or ["unknown"])
     if run_id:
         info["identity"] = "explicit-run-id"
-    elif identity_fp is not None:
-        info["identity"] = "args-fingerprint"
+    elif want_nonce is not None:
+        info["identity"] = "launch-nonce"
     else:
         info["identity"] = "retrospective"
     info["owned_fields"] = owned_fields
