@@ -264,8 +264,24 @@ def test_concurrent_identical_stagers_reuse_complete_publication(
             )
             for _ in range(8)
         ]
-        results = [job.result(timeout=20) for job in jobs]
+        results = []
+        for job in jobs:
+            try:
+                results.append(job.result(timeout=20))
+            except SourceMaterializationError as exc:
+                # NFS callers can observe the exclusive creator's incomplete
+                # claim, including stale directory inventory during publication.
+                assert exc.reason in {
+                    "incomplete_staged_materialization",
+                    "incomplete_file_inventory",
+                }
+    assert results
     assert all(result == results[0] for result in results)
+    for _ in jobs:
+        assert (
+            source_bundle.stage_source_bundle(_request(baseline), target, assets)
+            == results[0]
+        )
     assert read_source_request(results[0]["request_path"])
     assert not list(target.rglob(".source-stage-*"))
     assert not list(target.rglob(".materializing-*"))
@@ -450,6 +466,38 @@ def test_concurrent_claim_cannot_publish_until_manifest_is_complete(
         source_bundle.stage_source_bundle(_request(baseline), target, assets) == result
     )
     assert read_source_request(result["request_path"])
+
+
+def test_completed_claim_is_reusable_after_creator_fails_before_request(
+    bundle, assets, tmp_path, monkeypatch, claim_publication
+):
+    baseline, _, _ = bundle
+    target = tmp_path / "run"
+    claimed = (
+        target
+        / "source_materializations"
+        / baseline["source_materialization"]["manifest_sha256"]
+    )
+    publish = source_bundle._publish_claimed_file
+
+    def failed_after_manifest(path, *args):
+        identity = publish(path, *args)
+        if path == claimed and args[2] == "manifest.json":
+            raise OSError(errno.EIO, "creator stopped after manifest publication")
+        return identity
+
+    monkeypatch.setattr(source_bundle, "_publish_claimed_file", failed_after_manifest)
+    with pytest.raises(
+        SourceMaterializationError, match="source_bundle_staging_failed"
+    ):
+        source_bundle.stage_source_bundle(_request(baseline), target, assets)
+    assert (claimed / "manifest.json").is_file()
+    assert not (target / "source_requests").exists()
+    before = _inventory(claimed)
+    monkeypatch.setattr(source_bundle, "_publish_claimed_file", publish)
+    result = source_bundle.stage_source_bundle(_request(baseline), target, assets)
+    assert read_source_request(result["request_path"])
+    assert _inventory(claimed) == before
 
 
 def test_killed_claim_creator_leaves_no_ready_request_and_retry_refuses(
