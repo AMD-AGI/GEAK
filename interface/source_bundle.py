@@ -213,6 +213,8 @@ def _publish_tree(parent: int, temporary: str, destination: str) -> None:
     rename.restype = ctypes.c_int
     if rename(parent, os.fsencode(temporary), parent, os.fsencode(destination), 1):
         code = ctypes.get_errno()
+        if code in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+            raise SourceMaterializationError("atomic_source_publication_unavailable")
         raise OSError(code, os.strerror(code))
 
 
