@@ -854,6 +854,13 @@ def write_trace(trace, out_path):
     return out_path
 
 
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import geak_trace_reconcile as _rc
+except Exception:  # pragma: no cover - reconciliation is required in practice
+    _rc = None
+
+
 def _richness(call):
     """Ordering key for "how much of this call did we actually capture".
 
@@ -921,15 +928,34 @@ def _merge_call(prev, new):
                 act["args_bytes_total"] = pa.get("args_bytes_total")
             out_acts[key] = act
         merged["actions"] = [out_acts[k] for k in order]
-    # Inputs: compare retained PAYLOAD, not block count. An identical count whose
-    # text shrank is a loss, not a no-op.
-    def _inbytes(side):
-        return sum(len((b.get("text") or "")) for b in ((side or {}).get("blocks") or []))
+    # Inputs reconcile PER BLOCK by source identity. Aggregate byte totals let
+    # one block's growth mask another block's loss, which is exactly the defect
+    # this replaces.
     p_in, n_in = prev.get("input") or {}, new.get("input") or {}
-    if (len(p_in.get("blocks") or []) > len(n_in.get("blocks") or [])
-            or _inbytes(p_in) > _inbytes(n_in)):
-        merged["input"] = p_in
-        merged["retained_input_from_earlier_capture"] = True
+    if _rc is not None and (p_in.get("blocks") or n_in.get("blocks")):
+        cid = new.get("call_id")
+        store, seen, order = _rc.Reconciled(), set(), []
+        for i, blk in enumerate(n_in.get("blocks") or []):
+            key = _rc.block_key(cid, blk, i)
+            seen.add(key)
+            if key not in store.items:
+                order.append(key)
+            store.absorb(key, blk, merge=_rc.merge_block)
+        for i, blk in enumerate(p_in.get("blocks") or []):
+            key = _rc.block_key(cid, blk, i)
+            if key in store.items:
+                store.absorb(key, blk, merge=_rc.merge_block)
+            else:
+                order.append(key)
+                store.absorb(key, blk, seen_now=False)
+        retained = store.retain_missing(seen)
+        usable = dict(store.usable())
+        blocks = [usable[k] for k in order if k in usable]
+        base = dict(n_in if n_in.get("blocks") else p_in)
+        base["blocks"] = blocks
+        merged["input"] = base
+        if retained or any(b.get("retained_from_earlier_capture") for b in blocks):
+            merged["retained_input_from_earlier_capture"] = True
     pr, nr = prev.get("reasoning") or {}, new.get("reasoning") or {}
     if len(pr.get("text") or "") > len(nr.get("text") or "") or \
             (pr.get("blocks") or 0) > (nr.get("blocks") or 0):
@@ -1008,25 +1034,28 @@ def merge_traces(previous, current):
             by_id[cid] = merged_call
             if before is not None and merged_call.get("capture_note"):
                 downgraded += 1
-        if len(by_id) > len(new_calls) or downgraded:
-            retained_calls += (len(by_id) - len(new_calls)) + downgraded
+        # ALWAYS install the reconciled calls. Gating installation on a count
+        # or a note is the same defect as gating on a score: a reconciliation
+        # that preserved a block or a tool result would be silently discarded.
+        merged_calls = sorted(by_id.values(),
+                              key=lambda c: (c.get("ts_ms") is None, c.get("ts_ms") or 0))
+        for i, call in enumerate(merged_calls):
+            call["index"] = i
+        agent["calls"] = merged_calls
+        agent["totals"] = _totals_of(merged_calls)
+        ts = [c.get("ts_ms") for c in merged_calls if c.get("ts_ms") is not None]
+        if ts:
+            agent["first_ts_ms"] = min(ts)
+            agent["last_ts_ms"] = max(ts)
+        gained = len(by_id) - len(new_calls)
+        if gained or downgraded:
+            retained_calls += gained + downgraded
             retained_agents += 1
-            merged = sorted(by_id.values(),
-                            key=lambda c: (c.get("ts_ms") is None, c.get("ts_ms") or 0))
-            for i, call in enumerate(merged):
-                call["index"] = i
-            agent["calls"] = merged
-            agent["totals"] = _totals_of(merged)
             agent["capture_note"] = (
-                "Includes %d call(s) retained and %d call(s) whose richer earlier "
-                "capture was kept; the transcript has since shrunk or been removed."
-                % (len(by_id) - len(new_calls), downgraded))
+                "Includes %d call(s) retained and %d call(s) whose earlier capture "
+                "supplied fields a later read omitted." % (gained, downgraded))
             if agent.get("transcript_status") == "missing":
                 agent["transcript_status"] = "missing_source_retained_capture"
-            ts = [c.get("ts_ms") for c in merged if c.get("ts_ms") is not None]
-            if ts:
-                agent["first_ts_ms"] = min(ts)
-                agent["last_ts_ms"] = max(ts)
 
     if retained_agents:
         current.setdefault("warnings", []).append(
@@ -1080,20 +1109,36 @@ def merge_traces(previous, current):
         return (e.get("type"), e.get("from"), e.get("to"),
                 e.get("event_id") or e.get("spawn_event_id"))
     cur_edges = {_ekey(e): e for e in (current.get("edges") or [])}
+    # Identities the CURRENT read reports as contradicted must stay unusable.
+    linkage_now = (current.get("run") or {}).get("linkage") or {}
+    invalidated = set()
+    for item in (linkage_now.get("invalidated") or []):
+        if isinstance(item, (list, tuple)):
+            invalidated.add(tuple(item))
     added = 0
     for edge in previous.get("edges") or []:
         key = _ekey(edge)
         prior_here = cur_edges.get(key)
+        if key in invalidated:
+            # This relationship has been contradicted by later evidence. It does
+            # not become true again just because an older capture still asserts
+            # it; the disputed record is kept for inspection, not as proof.
+            continue
         if prior_here is None:
             cur_edges[key] = edge
             added += 1
-        elif (edge.get("attempts") and not prior_here.get("attempts")):
-            # A spawn re-read without its return must not lose the recorded
-            # attempt/outcome just because the edge itself still exists.
-            prior_here["attempts"] = edge["attempts"]
-            prior_here["return_status"] = edge.get("return_status")
-            prior_here["retained_from_earlier_capture"] = True
-            added += 1
+        else:
+            # Attempts reconcile individually: preserving them only when the new
+            # list is EMPTY discards history on a partial re-read.
+            if _rc is not None and (edge.get("attempts") or prior_here.get("attempts")):
+                atts, outcome, _summary = _rc.reconcile_attempts(
+                    edge.get("attempts"), prior_here.get("attempts"),
+                    prior_here.get("spawn_event_id") or key[3])
+                if len(atts) > len(prior_here.get("attempts") or []):
+                    prior_here["retained_from_earlier_capture"] = True
+                    added += 1
+                prior_here["attempts"] = atts
+                prior_here["return_status"] = outcome
     if added:
         current["edges"] = list(cur_edges.values())
         current.setdefault("warnings", []).append(

@@ -107,7 +107,7 @@ class EdgeBuildTest(unittest.TestCase):
         return out
 
     def test_result_supplied_edge_is_proven_and_carries_refs(self):
-        edges, unresolved, stats = E.build_edges(
+        edges, unresolved, stats, _inv = E.build_edges(
             self._val([supplied(forwarding=E.FORWARD_LITERAL)]), {"p1", "c1"})
         self.assertEqual(stats["result_supplied_edges"], 1)
         edge = edges[0]
@@ -117,14 +117,14 @@ class EdgeBuildTest(unittest.TestCase):
         self.assertEqual(edge["consumer_input_ref"], "dispatch.prompt#offset=120")
 
     def test_unknown_invocation_is_unresolved_not_a_new_node(self):
-        edges, unresolved, stats = E.build_edges(
+        edges, unresolved, stats, _inv = E.build_edges(
             self._val([supplied(consumer_invocation_id="ghost")]), {"p1"})
         self.assertEqual(edges, [])
         self.assertEqual(stats["unresolved"], 1)
         self.assertIn("not present", unresolved[0]["reason"])
 
     def test_spawn_and_return_join_into_one_edge(self):
-        edges, _, stats = E.build_edges(self._val([spawn(), ret()]), {"p1", "c1"})
+        edges, _, stats, _inv = E.build_edges(self._val([spawn(), ret()]), {"p1", "c1"})
         self.assertEqual(stats["spawn_edges"], 1)
         edge = edges[0]
         self.assertEqual(edge["from"], "agent:p1")
@@ -133,7 +133,7 @@ class EdgeBuildTest(unittest.TestCase):
         self.assertEqual(edge["spawn_tool_call_id"], "toolu_1")
 
     def test_spawn_without_return_is_flagged_unmatched(self):
-        edges, unresolved, stats = E.build_edges(self._val([spawn()]), {"p1", "c1"})
+        edges, unresolved, stats, _inv = E.build_edges(self._val([spawn()]), {"p1", "c1"})
         self.assertEqual(edges[0]["return_status"], "unmatched")
         self.assertEqual(stats["spawns_without_return"], 1)
         self.assertTrue(any("no matching return" in u["reason"] for u in unresolved))
@@ -142,7 +142,7 @@ class EdgeBuildTest(unittest.TestCase):
         events = self._val([spawn(),
                             ret(attempt_id="a1", status="error", error="boom"),
                             ret(attempt_id="a2", status="returned")])
-        edges, _, _ = E.build_edges(events, {"p1", "c1"})
+        edges, _a, _b, _inv = E.build_edges(events, {"p1", "c1"})
         attempts = edges[0]["attempts"]
         self.assertEqual([a["attempt_id"] for a in attempts], ["a1", "a2"])
         self.assertEqual([a["status"] for a in attempts], ["error", "returned"])
@@ -153,31 +153,31 @@ class EdgeBuildTest(unittest.TestCase):
                                   spawn_tool_call_id="toolu_2"),
                             ret(spawn_event_id="s1", child_invocation_id="c1"),
                             ret(spawn_event_id="s2", child_invocation_id="c2")])
-        edges, _, stats = E.build_edges(events, {"p1", "c1", "c2"})
+        edges, _, stats, _inv = E.build_edges(events, {"p1", "c1", "c2"})
         self.assertEqual(stats["spawn_edges"], 2)
         self.assertEqual({e["to"] for e in edges}, {"agent:c1", "agent:c2"})
 
     def test_duplicate_replayed_spawn_is_idempotent(self):
-        edges, _, stats = E.build_edges(self._val([spawn(), spawn()]), {"p1", "c1"})
+        edges, _, stats, _inv = E.build_edges(self._val([spawn(), spawn()]), {"p1", "c1"})
         self.assertEqual(stats["spawn_edges"], 1)
 
     def test_conflicting_duplicate_spawn_invalidates_the_join(self):
         """Astra R7: the first record must not stay proven."""
         events = self._val([spawn(), spawn(child_invocation_id="other")])
-        edges, unresolved, _ = E.build_edges(events, {"p1", "c1", "other"})
+        edges, unresolved, _s, _inv = E.build_edges(events, {"p1", "c1", "other"})
         self.assertEqual(edges, [], "a conflicted spawn must not remain proven")
         self.assertTrue(any("join invalidated" in u["reason"] for u in unresolved))
 
     def test_conflicting_parent_is_not_silently_ignored(self):
         events = self._val([spawn(), spawn(parent_invocation_id="other_parent")])
-        edges, unresolved, _ = E.build_edges(events, {"p1", "c1", "other_parent"})
+        edges, unresolved, _s, _inv = E.build_edges(events, {"p1", "c1", "other_parent"})
         self.assertEqual(edges, [])
         self.assertTrue(any("join invalidated" in u["reason"] for u in unresolved))
 
     def test_return_naming_a_different_child_does_not_join(self):
         events = self._val([spawn(child_invocation_id="c1"),
                             ret(child_invocation_id="c2")])
-        edges, unresolved, _ = E.build_edges(events, {"p1", "c1", "c2"})
+        edges, unresolved, _s, _inv = E.build_edges(events, {"p1", "c1", "c2"})
         self.assertEqual(edges, [], "a return for another child must not join")
         self.assertTrue(any("names child c2" in u["reason"] for u in unresolved))
 
@@ -189,33 +189,33 @@ class EdgeBuildTest(unittest.TestCase):
 
     def test_empty_known_set_means_nothing_is_joinable(self):
         """Astra R7: an empty observed set must not disable the check."""
-        edges, unresolved, _ = E.build_edges(self._val([supplied(), spawn(), ret()]),
+        edges, unresolved, _s, _inv = E.build_edges(self._val([supplied(), spawn(), ret()]),
                                              set())
         self.assertEqual(edges, [], "ghost edges were created to absent invocations")
         self.assertTrue(unresolved)
 
     def test_identical_return_replays_are_idempotent(self):
         events = self._val([spawn(), ret(), ret()])
-        edges, _, _ = E.build_edges(events, {"p1", "c1"})
+        edges, _a, _b, _inv = E.build_edges(events, {"p1", "c1"})
         self.assertEqual(len(edges[0]["attempts"]), 1,
                          "a replay was counted as a second attempt")
 
     def test_contradictory_status_for_one_attempt_invalidates(self):
         events = self._val([spawn(), ret(attempt_id="a1", status="returned"),
                             ret(attempt_id="a1", status="error", error="boom")])
-        edges, unresolved, _ = E.build_edges(events, {"p1", "c1"})
+        edges, unresolved, _s, _inv = E.build_edges(events, {"p1", "c1"})
         self.assertEqual(edges, [])
         self.assertTrue(any("contradictory return" in u["reason"] for u in unresolved))
 
     def test_identical_transfer_replays_are_one_edge(self):
-        edges, _, stats = E.build_edges(self._val([supplied(), supplied()]),
+        edges, _, stats, _inv = E.build_edges(self._val([supplied(), supplied()]),
                                         {"p1", "c1"})
         self.assertEqual(stats["result_supplied_edges"], 1)
 
     def test_conflicting_transfer_for_one_event_id_invalidates(self):
         events = self._val([supplied(),
                             supplied(consumer_input_ref="dispatch.prompt#offset=999")])
-        edges, unresolved, _ = E.build_edges(events, {"p1", "c1"})
+        edges, unresolved, _s, _inv = E.build_edges(events, {"p1", "c1"})
         self.assertEqual(edges, [])
         self.assertTrue(any("conflicting transfer" in u["reason"] for u in unresolved))
 
@@ -223,17 +223,17 @@ class EdgeBuildTest(unittest.TestCase):
         events = self._val([supplied(event_id="t1"),
                             supplied(event_id="t2",
                                      producer_result_ref="result.other")])
-        edges, _, stats = E.build_edges(events, {"p1", "c1"})
+        edges, _, stats, _inv = E.build_edges(events, {"p1", "c1"})
         self.assertEqual(stats["result_supplied_edges"], 2)
         self.assertEqual({e["event_id"] for e in edges}, {"t1", "t2"})
 
     def test_orphan_return_is_reported(self):
-        edges, unresolved, stats = E.build_edges(self._val([ret()]), {"p1", "c1"})
+        edges, unresolved, stats, _inv = E.build_edges(self._val([ret()]), {"p1", "c1"})
         self.assertEqual(stats["orphan_returns"], 1)
         self.assertTrue(any("no spawn event" in u["reason"] for u in unresolved))
 
     def test_no_edge_is_ever_built_without_an_event(self):
-        edges, _, stats = E.build_edges([], {"p1", "c1"})
+        edges, _, stats, _inv = E.build_edges([], {"p1", "c1"})
         self.assertEqual(edges, [])
         self.assertEqual(stats["result_supplied_edges"], 0)
         self.assertEqual(stats["spawn_edges"], 0)
@@ -292,3 +292,41 @@ class ReadAndAttachTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ConflictPersistenceTest(unittest.TestCase):
+    """Astra R8 #4: a contradicted relationship must not come back as proven."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-conf-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, "events.jsonl")
+
+    def _write(self, rows):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    def _trace(self):
+        return {"schema": "geak.trace/1", "run": {"run_id": "wf_c"},
+                "agents": [{"agent_id": "p1"}, {"agent_id": "c1"}],
+                "edges": [], "warnings": []}
+
+    def test_conflicting_transformation_is_not_an_exact_replay(self):
+        self._write([supplied(forwarding=E.FORWARD_TRANSFORMED,
+                              transformation="json path"),
+                     supplied(forwarding=E.FORWARD_TRANSFORMED,
+                              transformation="something entirely different")])
+        trace = E.attach(self._trace(), self.path)
+        self.assertEqual([e for e in trace["edges"]], [])
+        self.assertTrue(any("conflicting transfer" in u["reason"]
+                            for u in trace["run"]["linkage"]["unresolved"]))
+
+    def test_invalidated_identities_are_published_for_retention(self):
+        self._write([supplied(),
+                     supplied(consumer_input_ref="dispatch.prompt#offset=999")])
+        trace = E.attach(self._trace(), self.path)
+        inv = trace["run"]["linkage"]["invalidated"]
+        self.assertTrue(inv, "invalidated identities were not published")
+        self.assertEqual(inv[0][0], "result_supplied_to_dispatch")
+        self.assertEqual(inv[0][3], "transfer-1")

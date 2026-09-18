@@ -1525,3 +1525,90 @@ class WorkflowTimelinePhaseTest(unittest.TestCase):
         trace = C.build_trace(dest)
         self.assertEqual([a.get("timeline_phase") for a in trace["agents"]],
                          ["Setup", "Analyze", "Benchmark"])
+
+
+class IdentityFirstReconcileTest(unittest.TestCase):
+    """Astra R8 #5: per-identity reconciliation, not aggregates or empty-lists."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-idfirst-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.wf = os.path.join(self.dir, "sess", "subagents", "workflows", "wf_i")
+        os.makedirs(self.wf)
+        rd = os.path.join(self.dir, "sess", "workflows")
+        os.makedirs(rd)
+        with open(os.path.join(rd, "wf_i.json"), "w", encoding="utf-8") as fh:
+            json.dump({"runId": "wf_i", "status": "running"}, fh)
+        with open(os.path.join(self.wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_rec(type="launched") + "\n")
+            fh.write(_rec(type="started", key="k", agentId="a1",
+                          label="eng", phase="P") + "\n")
+        self.out = os.path.join(self.dir, "t.json")
+
+    def _two_blocks(self, first, second):
+        lines = [
+            _rec(type="user", timestamp="2026-09-16T19:39:01.000Z", uuid="u-one",
+                 message={"content": [{"type": "text", "text": first}]}),
+            _rec(type="user", timestamp="2026-09-16T19:39:02.000Z", uuid="u-two",
+                 message={"content": [{"type": "text", "text": second}]}),
+            _asst("m1", [{"type": "text", "text": "ok"}], usage={"output_tokens": 5}),
+        ]
+        with open(os.path.join(self.wf, "agent-a1.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    def test_one_block_growing_does_not_mask_another_shrinking(self):
+        """Aggregate byte totals hid this: block one shrank while two grew."""
+        self._two_blocks("block one original content", "b2")
+        first = C.collect_once(self.wf, self.out)
+        self._two_blocks("x", "block two is now much longer than before")
+        second = C.collect_once(self.wf, self.out, previous=first)
+        texts = [b.get("text") for b in
+                 second["agents"][0]["calls"][0]["input"]["blocks"]]
+        self.assertTrue(any("block one original content" in (t or "") for t in texts),
+                        "block one's captured content was lost")
+        self.assertTrue(any("much longer than before" in (t or "") for t in texts),
+                        "block two's newer content was lost")
+
+    def test_partial_attempt_loss_is_reconciled_not_discarded(self):
+        import geak_trace_reconcile as rc
+        prev = [{"attempt_id": "a1", "status": "error"},
+                {"attempt_id": "a2", "status": "returned"}]
+        new = [{"attempt_id": "a1", "status": "error"}]
+        merged, outcome, _ = rc.reconcile_attempts(new, prev, "s1")
+        self.assertEqual({a["attempt_id"] for a in merged}, {"a1", "a2"},
+                         "a partially re-read attempt list discarded history")
+
+    def test_attempt_outcome_is_not_guessed_from_id_sort(self):
+        """z-first=error then a-final=returned must not yield 'error'."""
+        import geak_trace_reconcile as rc
+        atts = [{"attempt_id": "z-first", "status": "error"},
+                {"attempt_id": "a-final", "status": "returned"}]
+        _merged, outcome, _ = rc.reconcile_attempts(atts, [], "s1")
+        self.assertEqual(outcome, "unknown",
+                         "an attempt id was treated as a chronology")
+
+    def test_attempt_outcome_uses_an_authoritative_sequence(self):
+        import geak_trace_reconcile as rc
+        atts = [{"attempt_id": "z", "status": "error", "seq": 0},
+                {"attempt_id": "a", "status": "returned", "seq": 1}]
+        _merged, outcome, _ = rc.reconcile_attempts(atts, [], "s1")
+        self.assertEqual(outcome, "returned")
+
+    def test_contradicted_attempt_is_conflicted_not_arbitrated(self):
+        import geak_trace_reconcile as rc
+        _m, outcome, summary = rc.reconcile_attempts(
+            [{"attempt_id": "a1", "status": "returned"}],
+            [{"attempt_id": "a1", "status": "error"}], "s1")
+        self.assertEqual(outcome, "conflicted")
+        self.assertEqual(summary["conflicted"], 1)
+
+    def test_conflict_state_is_sticky(self):
+        import geak_trace_reconcile as rc
+        store = rc.Reconciled()
+        store.absorb("k", {"ref": "A"}, identity_fields=("ref",))
+        store.absorb("k", {"ref": "B"}, identity_fields=("ref",))
+        self.assertEqual(store.states["k"], rc.CONFLICTED)
+        store.absorb("k", {"ref": "A"}, identity_fields=("ref",))
+        self.assertEqual(store.states["k"], rc.CONFLICTED,
+                         "a contradicted claim became proven again")
+        self.assertEqual(store.usable(), [])
