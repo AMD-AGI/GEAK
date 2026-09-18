@@ -119,6 +119,45 @@ const laneArgs = (wfArgs) => ({
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
+// ---- Live execution tracker (read-only observer; see interface/geak_trace_collector.py) ----
+// Started HERE, at the earliest point the run has a durable identity, so the
+// delegation graph/timeline is being recorded from the first agent rather than
+// reconstructed only at the end. It resolves its own workflow run from EXP_ROOT
+// via the runtime's workflow record (no eval-dir substring matching), polls the
+// journal + transcripts, and republishes a snapshot atomically.
+//
+// It is detached, read-only, and strictly non-fatal: it never influences model
+// choice, prompts, budgets or optimization decisions, and any failure to start
+// is logged and ignored. Set GEAK_LIVE_TRACE=0 to disable.
+startLiveTracker(EXP_ROOT, WORKFLOW_DIR);
+function startLiveTracker(expRoot, wfDir) {
+  try {
+    if (String(process.env.GEAK_LIVE_TRACE || '1') === '0') return;
+    const { spawn } = require('child_process');
+    const interval = String(process.env.GEAK_LIVE_TRACE_INTERVAL_S || '30');
+    const child = spawn('python3', [
+      '-B', `${wfDir}/../interface/geak_trace_collector.py`,
+      '--exp-root', expRoot,
+      '--script-dir', wfDir,
+      // Per-run filename: two runs under one exp_root must not overwrite each other.
+      '--out-dir', expRoot,
+      '--watch', '--interval', interval,
+      '--resolve-timeout', '600',
+      '--max-seconds', String(process.env.GEAK_LIVE_TRACE_MAX_S || '172800'),
+    ], { detached: true, stdio: 'ignore' });
+    // spawn reports a missing executable ASYNCHRONOUSLY: try/catch cannot see it,
+    // and without this listener the ENOENT is an unhandled error event.
+    child.on('error', (err) => {
+      try { log(`Live execution tracker failed to start (non-fatal): ${err && err.message}`); }
+      catch (_) {}
+    });
+    child.unref();
+    log(`Live execution tracker started -> ${expRoot}/geak_trace_<runId>.json`);
+  } catch (e) {
+    log(`Live execution tracker not started (non-fatal): ${e && e.message}`);
+  }
+}
+
 // ---- Profile-analysis skill (OPTIONAL, pluggable; see knowledge/analysis_skills/INDEX.md) ----
 // After parse_profile.py emits the standardized Top-N, the Profiler may run ONE analysis skill to
 // enrich it with a headroom estimate the Architect can route on. Default `roofline`: per-kernel % of
