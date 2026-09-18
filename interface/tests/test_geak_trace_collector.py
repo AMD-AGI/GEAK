@@ -1962,3 +1962,32 @@ class LegacyPositionMigrationTest(unittest.TestCase):
         self.assertTrue(all(b.get("legacy_position_unresolved") for b in migrated))
         self.assertTrue(all(b.get("source_pos") is None for b in migrated),
                         "a position was assigned despite ambiguity")
+
+    def test_unresolved_is_sticky_across_polls(self):
+        """A shrinking candidate set is not new evidence of correspondence."""
+        import geak_trace_reconcile as rc
+        prev = [{"kind": "text", "text": "A" * 60, "source_uuid": "s", "source_pos": 0},
+                {"kind": "text", "text": "B", "source_uuid": "s", "source_pos": 1},
+                {"kind": "text", "text": "A" * 60, "source_uuid": "s",
+                 "legacy_position_unresolved": True}]
+        current = [{"kind": "text", "text": "B", "source_uuid": "s", "source_pos": 1}]
+        migrated = rc.migrate_blocks(prev, current)
+        legacy = [b for b in migrated if b.get("legacy_position_unresolved")]
+        self.assertEqual(len(legacy), 1)
+        self.assertIsNone(legacy[0].get("source_pos"),
+                          "an unresolved block was remapped onto another identity")
+        self.assertFalse(legacy[0].get("legacy_position_resolved"),
+                         "a block was marked both resolved and unresolved")
+        # B keeps its own identity and is not displaced by the longer legacy A.
+        self.assertTrue(any(b.get("source_pos") == 1 and b["text"] == "B"
+                            for b in migrated), "the current block was displaced")
+
+    def test_a_position_held_by_a_known_block_is_not_a_free_candidate(self):
+        import geak_trace_reconcile as rc
+        prev = [{"kind": "text", "text": "B", "source_uuid": "s", "source_pos": 1},
+                {"kind": "text", "text": "A" * 40, "source_uuid": "s"}]
+        current = [{"kind": "text", "text": "B", "source_uuid": "s", "source_pos": 1}]
+        migrated = rc.migrate_blocks(prev, current)
+        legacy = [b for b in migrated if b.get("source_pos") is None]
+        self.assertEqual(len(legacy), 1)
+        self.assertTrue(legacy[0]["legacy_position_unresolved"])
