@@ -121,8 +121,11 @@ def block_key(call_id, block, position):
     # made the same block look like a new one and left duplicates behind.
     within = block.get("source_pos")
     if within is None:
-        # A capture written before source positions existed, re-read now: fall
-        # back to the flattened index so an upgrade does not duplicate blocks.
+        # An unresolved legacy block: keep it on its OWN identity rather than
+        # claiming a raw position it may not have had.
+        if block.get("legacy_position_unresolved"):
+            return (call_id, block.get("source_uuid"), block.get("kind"),
+                    "#legacy-unresolved-%s" % position)
         within = position
     source = block.get("source_uuid")
     if source is None:
@@ -206,27 +209,55 @@ def normalize_invalidation_key(item):
     return None
 
 
-def migrate_blocks(blocks):
-    """Fill in source positions on captures written before they existed.
+def migrate_blocks(blocks, current=None):
+    """Resolve legacy blocks that predate recorded source positions.
 
-    A legacy block has a source uuid but no position, so it fell back to the
-    FLATTENED index while its re-read used the per-source index -- the same
-    block keyed two ways and duplicated on upgrade. Positions are reassigned by
-    each block's ordinal within its own source record, which is what the reader
-    records today.
+    ``source_pos`` is the block's index in the source record's ORIGINAL content
+    array. A legacy capture only tells us which blocks SURVIVED filtering, and
+    those are not the same whenever the source contained an omitted entry (an
+    image, an empty text block): counting survivors invents a position that can
+    name a different block, which duplicates it against its own re-read.
+
+    So no position is manufactured. A legacy block is matched against the
+    current capture as evidence, and only where the correspondence is
+    unambiguous -- exactly one current block from the same source record and of
+    the same kind. Otherwise it keeps a distinct, explicitly unresolved identity
+    so it is retained rather than silently merged onto the wrong block.
     """
-    seen = {}
-    out = []
-    for blk in blocks or []:
+    if not blocks:
+        return []
+    by_source = {}
+    for blk in (current or []):
+        if isinstance(blk, dict) and blk.get("source_uuid") is not None:
+            by_source.setdefault((blk.get("source_uuid"), blk.get("kind")), []).append(blk)
+
+    # Correspondence must be one-to-one across BOTH sets. A single candidate on
+    # the current side is not a match if several legacy blocks compete for it:
+    # assigning them all the same position collapses distinct captured blocks
+    # into one and silently drops the others.
+    legacy_counts = {}
+    for blk in blocks:
         if isinstance(blk, dict) and blk.get("source_pos") is None \
                 and blk.get("source_uuid") is not None:
-            src = blk.get("source_uuid")
-            blk = dict(blk)
-            blk["source_pos"] = seen.get(src, 0)
-            seen[src] = seen.get(src, 0) + 1
-        elif isinstance(blk, dict) and blk.get("source_uuid") is not None:
-            src = blk.get("source_uuid")
-            seen[src] = max(seen.get(src, 0), (blk.get("source_pos") or 0) + 1)
+            key = (blk.get("source_uuid"), blk.get("kind"))
+            legacy_counts[key] = legacy_counts.get(key, 0) + 1
+
+    out = []
+    for blk in blocks:
+        if not isinstance(blk, dict) or blk.get("source_pos") is not None \
+                or blk.get("source_uuid") is None:
+            out.append(blk)
+            continue
+        key = (blk.get("source_uuid"), blk.get("kind"))
+        candidates = by_source.get(key) or []
+        blk = dict(blk)
+        if (len(candidates) == 1 and legacy_counts.get(key) == 1
+                and candidates[0].get("source_pos") is not None):
+            blk["source_pos"] = candidates[0]["source_pos"]
+            blk["legacy_position_resolved"] = True
+        else:
+            # Ambiguous on either side, or absent: do NOT guess a raw position.
+            blk["legacy_position_unresolved"] = True
         out.append(blk)
     return out
 
