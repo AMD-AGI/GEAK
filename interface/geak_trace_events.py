@@ -210,7 +210,7 @@ def build_edges(events, known_invocations=None):
             continue
         if _same(prior, ev, ("producer_invocation_id", "producer_result_ref",
                              "consumer_invocation_id", "consumer_input_ref",
-                             "forwarding")):
+                             "forwarding", "transformation")):
             continue  # exact replay: idempotent
         conflicted.add(key)
         unjoinable(ev, "conflicting transfer record for event_id %s; "
@@ -281,6 +281,22 @@ def build_edges(events, known_invocations=None):
     for ret in orphans:
         unjoinable(ret, "return references a spawn_event_id with no spawn event")
 
+    # Identity keys of every relationship a contradiction invalidated. Callers
+    # must keep these unusable: a claim does not become true again because a
+    # later pass no longer sees the contradicting record.
+    invalidated_keys = []
+    for key in conflicted:
+        for ev in list(transfers.values()) + list(spawns.values()):
+            if ev.get("event_id") == key:
+                invalidated_keys.append(
+                    ["result_supplied_to_dispatch",
+                     "agent:%s" % ev.get("producer_invocation_id"),
+                     "agent:%s" % ev.get("consumer_invocation_id"), key])
+            elif ev.get("spawn_event_id") == key:
+                invalidated_keys.append(
+                    ["agent_spawn", "agent:%s" % ev.get("parent_invocation_id"),
+                     "agent:%s" % ev.get("child_invocation_id"), key])
+
     stats = {
         "result_supplied_edges": sum(1 for e in edges
                                      if e["type"] == "result_supplied_to_dispatch"),
@@ -291,7 +307,7 @@ def build_edges(events, known_invocations=None):
         "spawns_without_return": sum(1 for e in edges if e["type"] == "agent_spawn"
                                      and e["return_status"] == "unmatched"),
     }
-    return edges, unresolved, stats
+    return edges, unresolved, stats, invalidated_keys
 
 
 def attach(trace, events_path):
@@ -311,11 +327,12 @@ def attach(trace, events_path):
         }
         return trace
 
-    edges, unresolved, stats = build_edges(events, known)
+    edges, unresolved, stats, invalidated = build_edges(events, known)
     trace.setdefault("edges", []).extend(edges)
     trace.setdefault("run", {})["linkage"] = {
         "source": events_path, "present": True, "events_read": len(events),
         "malformed": len(problems), "stats": stats,
+        "invalidated": invalidated,
         "complete": not problems and not unresolved,
     }
     trace["run"]["linkage"]["unresolved"] = unresolved[:50]
