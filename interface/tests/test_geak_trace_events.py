@@ -20,7 +20,8 @@ import geak_trace_events as E  # noqa: E402
 
 
 def supplied(**kw):
-    base = {"type": E.RESULT_SUPPLIED, "producer_invocation_id": "p1",
+    base = {"type": E.RESULT_SUPPLIED, "event_id": "transfer-1",
+            "producer_invocation_id": "p1",
             "producer_result_ref": "result.directions[0]",
             "consumer_invocation_id": "c1",
             "consumer_input_ref": "dispatch.prompt#offset=120"}
@@ -38,7 +39,7 @@ def spawn(**kw):
 
 def ret(**kw):
     base = {"type": E.SPAWN_RETURN, "spawn_event_id": "s1",
-            "child_invocation_id": "c1", "status": "returned"}
+            "child_invocation_id": "c1", "attempt_id": "a1", "status": "returned"}
     base.update(kw)
     return base
 
@@ -50,7 +51,7 @@ class ValidationTest(unittest.TestCase):
         self.assertEqual(norm["forwarding"], E.FORWARD_UNKNOWN)
 
     def test_every_required_field_is_required(self):
-        for field in ("producer_invocation_id", "producer_result_ref",
+        for field in ("event_id", "producer_invocation_id", "producer_result_ref",
                       "consumer_invocation_id", "consumer_input_ref"):
             ev = supplied()
             del ev[field]
@@ -80,7 +81,8 @@ class ValidationTest(unittest.TestCase):
             E.validate(supplied(forwarding="probably"))
 
     def test_spawn_requires_parent_event_and_child(self):
-        for field in ("parent_invocation_id", "spawn_event_id", "child_invocation_id"):
+        for field in ("parent_invocation_id", "spawn_event_id",
+                      "spawn_tool_call_id", "child_invocation_id"):
             ev = spawn()
             del ev[field]
             with self.assertRaises(E.EventError, msg=field):
@@ -147,7 +149,8 @@ class EdgeBuildTest(unittest.TestCase):
 
     def test_parallel_children_produce_distinct_edges(self):
         events = self._val([spawn(spawn_event_id="s1", child_invocation_id="c1"),
-                            spawn(spawn_event_id="s2", child_invocation_id="c2"),
+                            spawn(spawn_event_id="s2", child_invocation_id="c2",
+                                  spawn_tool_call_id="toolu_2"),
                             ret(spawn_event_id="s1", child_invocation_id="c1"),
                             ret(spawn_event_id="s2", child_invocation_id="c2")])
         edges, _, stats = E.build_edges(events, {"p1", "c1", "c2"})
@@ -158,11 +161,71 @@ class EdgeBuildTest(unittest.TestCase):
         edges, _, stats = E.build_edges(self._val([spawn(), spawn()]), {"p1", "c1"})
         self.assertEqual(stats["spawn_edges"], 1)
 
-    def test_conflicting_duplicate_spawn_is_unresolved_not_overwritten(self):
+    def test_conflicting_duplicate_spawn_invalidates_the_join(self):
+        """Astra R7: the first record must not stay proven."""
         events = self._val([spawn(), spawn(child_invocation_id="other")])
         edges, unresolved, _ = E.build_edges(events, {"p1", "c1", "other"})
-        self.assertEqual(len(edges), 1)
-        self.assertTrue(any("conflicting child" in u["reason"] for u in unresolved))
+        self.assertEqual(edges, [], "a conflicted spawn must not remain proven")
+        self.assertTrue(any("join invalidated" in u["reason"] for u in unresolved))
+
+    def test_conflicting_parent_is_not_silently_ignored(self):
+        events = self._val([spawn(), spawn(parent_invocation_id="other_parent")])
+        edges, unresolved, _ = E.build_edges(events, {"p1", "c1", "other_parent"})
+        self.assertEqual(edges, [])
+        self.assertTrue(any("join invalidated" in u["reason"] for u in unresolved))
+
+    def test_return_naming_a_different_child_does_not_join(self):
+        events = self._val([spawn(child_invocation_id="c1"),
+                            ret(child_invocation_id="c2")])
+        edges, unresolved, _ = E.build_edges(events, {"p1", "c1", "c2"})
+        self.assertEqual(edges, [], "a return for another child must not join")
+        self.assertTrue(any("names child c2" in u["reason"] for u in unresolved))
+
+    def test_spawn_without_tool_reference_is_rejected(self):
+        ev = spawn()
+        del ev["spawn_tool_call_id"]
+        with self.assertRaises(E.EventError):
+            E.validate(ev)
+
+    def test_empty_known_set_means_nothing_is_joinable(self):
+        """Astra R7: an empty observed set must not disable the check."""
+        edges, unresolved, _ = E.build_edges(self._val([supplied(), spawn(), ret()]),
+                                             set())
+        self.assertEqual(edges, [], "ghost edges were created to absent invocations")
+        self.assertTrue(unresolved)
+
+    def test_identical_return_replays_are_idempotent(self):
+        events = self._val([spawn(), ret(), ret()])
+        edges, _, _ = E.build_edges(events, {"p1", "c1"})
+        self.assertEqual(len(edges[0]["attempts"]), 1,
+                         "a replay was counted as a second attempt")
+
+    def test_contradictory_status_for_one_attempt_invalidates(self):
+        events = self._val([spawn(), ret(attempt_id="a1", status="returned"),
+                            ret(attempt_id="a1", status="error", error="boom")])
+        edges, unresolved, _ = E.build_edges(events, {"p1", "c1"})
+        self.assertEqual(edges, [])
+        self.assertTrue(any("contradictory return" in u["reason"] for u in unresolved))
+
+    def test_identical_transfer_replays_are_one_edge(self):
+        edges, _, stats = E.build_edges(self._val([supplied(), supplied()]),
+                                        {"p1", "c1"})
+        self.assertEqual(stats["result_supplied_edges"], 1)
+
+    def test_conflicting_transfer_for_one_event_id_invalidates(self):
+        events = self._val([supplied(),
+                            supplied(consumer_input_ref="dispatch.prompt#offset=999")])
+        edges, unresolved, _ = E.build_edges(events, {"p1", "c1"})
+        self.assertEqual(edges, [])
+        self.assertTrue(any("conflicting transfer" in u["reason"] for u in unresolved))
+
+    def test_distinct_transfers_between_same_agents_are_separate_edges(self):
+        events = self._val([supplied(event_id="t1"),
+                            supplied(event_id="t2",
+                                     producer_result_ref="result.other")])
+        edges, _, stats = E.build_edges(events, {"p1", "c1"})
+        self.assertEqual(stats["result_supplied_edges"], 2)
+        self.assertEqual({e["event_id"] for e in edges}, {"t1", "t2"})
 
     def test_orphan_return_is_reported(self):
         edges, unresolved, stats = E.build_edges(self._val([ret()]), {"p1", "c1"})

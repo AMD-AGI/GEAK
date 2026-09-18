@@ -49,6 +49,10 @@ const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() |
     const child = spawn('python3', [
       '-B', `${WORKFLOW_DIR}/../interface/geak_trace_collector.py`,
       '--exp-root', expRoot,
+      // Runtime-supplied invocation identity: the wf_*.json record carries this
+      // same args object, so matching it identifies THIS launch deterministically
+      // instead of guessing from timing or from being the only run around.
+      '--identity-args', JSON.stringify(A),
       '--script-dir', WORKFLOW_DIR,
       // Per-run filename: two runs under one exp_root must not overwrite each other.
       '--out-dir', expRoot,
