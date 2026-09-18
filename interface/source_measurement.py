@@ -141,6 +141,67 @@ def _expected_overlay_roots(value: str | None) -> list[str] | None:
     return roots
 
 
+def _overlay_inventory(roots: list[str]) -> dict[str, str]:
+    files: dict[str, str] = {}
+    for name in roots:
+        root = Path(name)
+        _require(root.is_dir() and root.resolve() == root, "invalid_overlay_inventory")
+        for path in root.rglob("*"):
+            _require(not path.is_symlink(), "symlink_in_overlay_inventory")
+            _require(
+                path.suffix.lower() not in {".pyc", ".pyo"}, "source_bytecode_present"
+            )
+            if path.suffix == ".py" or path.name == "_overlay_manifest.json":
+                files[str(path)] = _digest(_read(path))
+    return files
+
+
+def _launch_capsule(
+    runtime: Path,
+    seal: dict[str, Any],
+    source: Any,
+    request_sha: str,
+    request_path: Path,
+    expected_overlay_roots: list[str] | None,
+) -> tuple[dict[str, Any], bytes]:
+    reference = seal.get("launch_capsule")
+    _require(
+        isinstance(reference, dict)
+        and set(reference) == {"path", "sha256"}
+        and reference.get("path") == "launch.json",
+        "invalid_launch_capsule_reference",
+    )
+    raw = _hashed(runtime / "launch.json", reference["sha256"])
+    capsule = _object(raw)
+    _require(
+        capsule.get("schema") == "geak.source_runtime.launch.v1"
+        and capsule.get("launch_nonce") == seal["launch_nonce"]
+        and capsule.get("request_sha256") == request_sha
+        and capsule.get("manifest_sha256") == source.manifest_sha256
+        and capsule.get("request_path") == str(request_path)
+        and capsule.get("request") == _object(_hashed(request_path, request_sha))
+        and capsule.get("accepted_roots") == list(source.pythonpath_prefixes)
+        and type(capsule.get("created_at_ns")) is int
+        and capsule["created_at_ns"] > 0,
+        "launch_capsule_binding_mismatch",
+    )
+    roots = capsule.get("overlay_roots")
+    _require(
+        isinstance(roots, list)
+        and all(isinstance(root, str) and Path(root).is_absolute() for root in roots)
+        and len(set(roots)) == len(roots),
+        "invalid_overlay_inventory",
+    )
+    if expected_overlay_roots is not None:
+        _require(roots == expected_overlay_roots, "selected_overlay_roots_mismatch")
+    _require(
+        isinstance(capsule.get("overlay_files"), dict)
+        and _overlay_inventory(roots) == capsule["overlay_files"],
+        "sealed_overlay_inventory_mismatch",
+    )
+    return capsule, raw
+
+
 def _module_rows(rows: Any, source: Any, overlay_roots: Any) -> set[str]:
     _require(
         isinstance(rows, list)
@@ -318,6 +379,8 @@ def _leaf(
     source: Any,
     request_sha: str,
     expected_overlay_roots: list[str] | None = None,
+    *,
+    request_path: Path,
 ) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
     runtime = directory / "source_runtime"
     raw_seal = _read(runtime / "measurement.json")
@@ -333,6 +396,9 @@ def _leaf(
     )
     _bindings(seal, seal, request_sha, source.manifest_sha256)
     _identity(seal.get("server_identity"))
+    capsule, raw_capsule = _launch_capsule(
+        runtime, seal, source, request_sha, request_path, expected_overlay_roots
+    )
     gates = seal.get("gates")
     if not isinstance(gates, dict) or set(gates) != {"ready", "finished"}:
         raise SourceMeasurementError("incomplete_measurement_gates")
@@ -343,7 +409,7 @@ def _leaf(
         seal,
         source,
         request_sha,
-        expected_overlay_roots=expected_overlay_roots,
+        expected_overlay_roots=capsule["overlay_roots"],
     )
     finished = _gate(
         runtime,
@@ -353,13 +419,18 @@ def _leaf(
         source,
         request_sha,
         ready["observed_at_ns"],
-        expected_overlay_roots,
+        capsule["overlay_roots"],
     )
     _require(
         ready["boot_id"] == finished["boot_id"]
         and ready["observed_at_ns"] < finished["observed_at_ns"]
         and ready["challenge_id"] != finished["challenge_id"],
         "measurement_gate_order_mismatch",
+    )
+    _require(
+        capsule.get("boot_id") == ready["boot_id"]
+        and capsule["created_at_ns"] < ready["observed_at_ns"],
+        "launch_capsule_gate_mismatch",
     )
     artifacts = seal.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != {
@@ -377,6 +448,14 @@ def _leaf(
         bool(runs.strip()) and type(summary.get("runs")) is int and summary["runs"] > 0,
         "empty_sealed_measurement",
     )
+    _require(
+        _read(runtime / "launch.json") == raw_capsule,
+        "launch_capsule_changed_during_verification",
+    )
+    _require(
+        _overlay_inventory(capsule["overlay_roots"]) == capsule["overlay_files"],
+        "sealed_overlay_inventory_mismatch",
+    )
     return (
         summary,
         runs,
@@ -384,6 +463,8 @@ def _leaf(
             "summary_path": str(directory / "bench_summary.json"),
             "summary_sha256": artifacts["bench_summary.json"],
             "seal_sha256": _digest(raw_seal),
+            "launch_capsule_sha256": _digest(raw_capsule),
+            "overlay_roots": capsule["overlay_roots"],
             "launch_nonce": seal["launch_nonce"],
             "server_identity": seal["server_identity"],
         },
@@ -395,12 +476,18 @@ def _measurement(
     source: Any,
     request_sha: str,
     expected_overlay_roots: list[str] | None = None,
+    *,
+    request_path: Path,
 ) -> dict[str, Any]:
     raw_summary = _read(directory / "bench_summary.json")
     summary = _object(raw_summary)
     if summary.get("measurement_mode") != "isolated_server":
         checked, _, evidence = _leaf(
-            directory, source, request_sha, expected_overlay_roots
+            directory,
+            source,
+            request_sha,
+            expected_overlay_roots,
+            request_path=request_path,
         )
         _require(checked == summary, "measurement_changed_during_verification")
         return {
@@ -434,7 +521,11 @@ def _measurement(
         )
         leaf_dir = selected / f"attempt_{attempt}"
         leaf, leaf_runs, evidence = _leaf(
-            leaf_dir, source, request_sha, expected_overlay_roots
+            leaf_dir,
+            source,
+            request_sha,
+            expected_overlay_roots,
+            request_path=request_path,
         )
         _require(
             _read(selected / "selected_summary.json")
@@ -508,7 +599,9 @@ def verify_source_measurement(
     path = Path(summary_path)
     _require(path.name == "bench_summary.json", "unsupported_summary_path")
     overlay_roots = _expected_overlay_roots(expected_overlay)
-    evidence = _measurement(path.parent, source, _digest(request_raw), overlay_roots)
+    evidence = _measurement(
+        path.parent, source, _digest(request_raw), overlay_roots, request_path=request
+    )
     if overlay_roots is not None:
         evidence["overlay_roots"] = overlay_roots
     _same_value(evidence["throughput_tok_s"], expected_throughput_tok_s)

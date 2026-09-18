@@ -79,7 +79,7 @@ def source_request(tmp_path):
     return path
 
 
-def _leaf(directory, source_request, value, *, nonce=None):
+def _leaf(directory, source_request, value, *, nonce=None, overlays=()):
     descriptor = json.loads(source_request.read_text())["source_materialization"]
     root = Path(descriptor["bundle_root"])
     manifest = json.loads((root / "manifest.json").read_text())
@@ -109,7 +109,7 @@ def _leaf(directory, source_request, value, *, nonce=None):
             "challenge_id": challenge,
             "observed_at_ns": when - 10,
             "accepted_roots": [str(root / "trees/0/python")],
-            "overlay_roots": [],
+            "overlay_roots": list(map(str, overlays)),
             "sys_path_sha256": "b" * 64,
             "loaded_modules": [row],
             "resolved_modules": [row],
@@ -150,6 +150,29 @@ def _leaf(directory, source_request, value, *, nonce=None):
     (directory / "bench_runs.jsonl").write_text(
         json.dumps({"output_throughput": value}) + "\n"
     )
+    capsule_sha = _write(
+        runtime / "launch.json",
+        {
+            "schema": "geak.source_runtime.launch.v1",
+            "launch_nonce": bindings["launch_nonce"],
+            "created_at_ns": 1,
+            "boot_id": "boot",
+            "request": json.loads(source_request.read_text()),
+            "request_path": str(source_request),
+            "request_sha256": bindings["request_sha256"],
+            "manifest_sha256": bindings["manifest_sha256"],
+            "accepted_roots": [str(root / "trees/0/python")],
+            "overlay_roots": list(map(str, overlays)),
+            "overlay_files": {
+                str(path): _sha(path)
+                for overlay in overlays
+                for path in Path(overlay).rglob("*")
+                if path.suffix == ".py" or path.name == "_overlay_manifest.json"
+            },
+            "helper_sha256": "c" * 64,
+            "validator_sha256": "d" * 64,
+        },
+    )
     _write(
         runtime / "measurement.json",
         {
@@ -157,6 +180,7 @@ def _leaf(directory, source_request, value, *, nonce=None):
             "measurement_scope": "hot_timed_rounds",
             **bindings,
             "gates": gates,
+            "launch_capsule": {"path": "launch.json", "sha256": capsule_sha},
             "server_identity": owner,
             "base_url": "http://127.0.0.1:30000",
             "artifacts": {
@@ -207,6 +231,16 @@ def _rewrite_gate(directory, phase, mutate, *, receipt=False):
     else:
         mutate(gate)
     seal["gates"][phase]["sha256"] = _write(gate_path, gate)
+    _write(runtime / "measurement.json", seal)
+
+
+def _rewrite_capsule(directory, mutate):
+    runtime = directory / "source_runtime"
+    path = runtime / "launch.json"
+    capsule = json.loads(path.read_text())
+    mutate(capsule)
+    seal = json.loads((runtime / "measurement.json").read_text())
+    seal["launch_capsule"]["sha256"] = _write(path, capsule)
     _write(runtime / "measurement.json", seal)
 
 
@@ -583,13 +617,7 @@ def test_selected_overlay_matches_resolved_ordered_roots(source_request, tmp_pat
         path.mkdir()
     alias = tmp_path / "alias"
     alias.symlink_to(overlays[0], target_is_directory=True)
-    for phase in ("ready", "finished"):
-        _rewrite_gate(
-            evaluation / "validation/final",
-            phase,
-            lambda row: row.update(overlay_roots=list(map(str, overlays))),
-            receipt=True,
-        )
+    _leaf(evaluation / "validation/final", source_request, 110, overlays=overlays)
     expected = os.pathsep.join(map(str, [alias, overlays[1], overlays[0]]))
     result = _verify(
         source_request,
@@ -652,3 +680,127 @@ def test_each_selected_replica_requires_the_claimed_overlay(source_request, tmp_
         "status": "unavailable",
         "reason": "selected_overlay_roots_mismatch",
     }
+
+
+@pytest.mark.parametrize("damage", ["missing", "path", "hash", "symlink"])
+def test_launch_capsule_must_be_sealed_with_each_measurement(
+    source_request, tmp_path, damage
+):
+    evaluation = _pair(tmp_path, source_request)
+    runtime = evaluation / "validation/final/source_runtime"
+    seal = json.loads((runtime / "measurement.json").read_text())
+    if damage == "missing":
+        seal.pop("launch_capsule")
+    elif damage == "path":
+        seal["launch_capsule"]["path"] = "../launch.json"
+    elif damage == "hash":
+        seal["launch_capsule"]["sha256"] = "0" * 64
+    else:
+        original = runtime / "launch.json"
+        moved = runtime / "saved-launch.json"
+        original.rename(moved)
+        original.symlink_to(moved)
+    _write(runtime / "measurement.json", seal)
+    assert _verify(source_request, evaluation)["status"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schema", "legacy"),
+        ("launch_nonce", "other-launch"),
+        ("request_sha256", "0" * 64),
+        ("manifest_sha256", "0" * 64),
+        ("request_path", "/another/request.json"),
+        ("request", {}),
+        ("accepted_roots", []),
+        ("boot_id", "other-boot"),
+        ("created_at_ns", 200),
+        ("overlay_files", {"/unrecorded/helper.py": "0" * 64}),
+    ],
+)
+def test_rehashed_launch_capsule_cannot_change_source_or_launch_identity(
+    source_request, tmp_path, field, value
+):
+    evaluation = _pair(tmp_path, source_request)
+    _rewrite_capsule(
+        evaluation / "validation/final", lambda row: row.update({field: value})
+    )
+    assert _verify(source_request, evaluation)["status"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "manifest",
+        "startup_hook",
+        "unowned_helper",
+        "added_file",
+        "removed_file",
+        "file_symlink",
+        "directory_symlink",
+        "bytecode",
+    ],
+)
+def test_same_overlay_path_requires_the_complete_measured_content(
+    source_request, tmp_path, damage
+):
+    evaluation = _pair(tmp_path, source_request)
+    overlay = tmp_path / "measured-overlay"
+    overlay.mkdir()
+    contents = {
+        "sitecustomize.py": "# measured startup hook\n",
+        "_overlay_manifest.json": '{"modules":{"alpha.changed":"patched.py"}}\n',
+        "patched.py": "VALUE='measured-authored'\n",
+        "helper.py": "VALUE='unowned-measured-helper'\n",
+    }
+    for name, content in contents.items():
+        (overlay / name).write_text(content)
+    _leaf(evaluation / "validation/final", source_request, 110, overlays=[overlay])
+    assert (
+        _verify(source_request, evaluation, expected_final_overlay=str(overlay))[
+            "status"
+        ]
+        == "verified"
+    )
+    if damage == "manifest":
+        (overlay / "_overlay_manifest.json").write_text('{"modules":{}}\n')
+    elif damage == "startup_hook":
+        (overlay / "sitecustomize.py").write_text(
+            "# startup behavior changed after timing\n"
+        )
+    elif damage == "unowned_helper":
+        (overlay / "helper.py").write_text("VALUE='changed-helper'\n")
+    elif damage == "added_file":
+        (overlay / "later.py").write_text("# absent during timing\n")
+    elif damage == "removed_file":
+        (overlay / "helper.py").unlink()
+    elif damage == "file_symlink":
+        (overlay / "linked.data").symlink_to(source_request)
+    elif damage == "directory_symlink":
+        (overlay / "linked-directory").symlink_to(
+            tmp_path / "eval", target_is_directory=True
+        )
+    else:
+        (overlay / "cached.pyc").write_bytes(b"bytecode")
+    result = _verify(source_request, evaluation, expected_final_overlay=str(overlay))
+    assert result["status"] == "unavailable"
+    expected = (
+        "symlink_in_overlay_inventory"
+        if damage in {"file_symlink", "directory_symlink"}
+        else "source_bytecode_present"
+        if damage == "bytecode"
+        else "sealed_overlay_inventory_mismatch"
+    )
+    assert result["reason"] == expected
+
+
+def test_capsule_overlay_inventory_is_required_for_every_selected_replica(
+    source_request, tmp_path
+):
+    evaluation = _pair(tmp_path, source_request)
+    final = evaluation / "validation/final"
+    shutil.rmtree(final)
+    _isolated(final, source_request, [110, 110])
+    (final / "replica_002/attempt_1/source_runtime/launch.json").write_text("{}\n")
+    assert _verify(source_request, evaluation)["status"] == "unavailable"
