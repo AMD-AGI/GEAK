@@ -359,7 +359,6 @@ def test_map_args_consumes_schema_v2_effective_config(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     overlay = tmp_path / "base-overlay"
-    snapshot = tmp_path / "snapshot"
     h = {
         "schema_version": 2,
         "model_path": "/models/gemma",
@@ -381,12 +380,6 @@ def test_map_args_consumes_schema_v2_effective_config(tmp_path: Path) -> None:
                 "extra_envs": {"SGLANG_USE_AITER": "1"},
             },
             "overlay_pythonpath": str(overlay),
-            "source_snapshots": [
-                {
-                    "snapshot_dir": str(snapshot),
-                    "reproducible": True,
-                }
-            ],
         },
     }
 
@@ -397,7 +390,7 @@ def test_map_args_consumes_schema_v2_effective_config(tmp_path: Path) -> None:
     assert "13312" not in flags
     assert "--disable-radix-cache" in flags
     assert "SGLANG_USE_AITER=1" in ps["initial_extra_env"]
-    assert ps["initial_overlay_pythonpath"] == f"{overlay}:{snapshot}"
+    assert ps["initial_overlay_pythonpath"] == str(overlay)
     assert len(ps["effective_config_digest"]) == 64
     # ONE lifecycle for the whole run, and it is Hyperloom's: 1 boot per leg, a discarded
     # full warmup round, then the timed round -- exactly two client passes with the second

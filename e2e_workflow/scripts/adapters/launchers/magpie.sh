@@ -37,7 +37,22 @@
 # adapter_health is inherited from the BACKEND adapter (curl $BASE_URL/health),
 # which works regardless of who launched the server, so it is NOT redefined.
 
+_MAGPIE_SOURCE_PATHS="$(dirname -- "${BASH_SOURCE[0]}")/../../source_paths.sh"
+
 adapter_launch() {
+  local _server_pythonpath="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}"
+  local -a _source_env=()
+  if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
+    source "$_MAGPIE_SOURCE_PATHS" || return 2
+    _server_pythonpath="$(geak_source_pythonpath '')" || return 2
+    _source_env=(
+      OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-}" PYTHONDONTWRITEBYTECODE=1
+      GEAK_SOURCE_REQUEST="$GEAK_SOURCE_REQUEST"
+      GEAK_ACCEPTED_SOURCE_PYTHONPATH="${GEAK_ACCEPTED_SOURCE_PYTHONPATH:-}"
+      GEAK_SOURCE_OBSERVATION_DIR="${GEAK_SOURCE_OBSERVATION_DIR:-}"
+      GEAK_SOURCE_BOOTSTRAP_PYTHONPATH="${GEAK_SOURCE_BOOTSTRAP_PYTHONPATH:-}"
+    )
+  fi
   local backend_uc script var_script
   backend_uc="$(printf '%s' "${BACKEND:-sglang}" | tr '[:lower:]' '[:upper:]')"
 
@@ -182,7 +197,7 @@ adapter_launch() {
     _prof_fields="$(env -- \
       ${_recipe_env[@]+"${_recipe_env[@]}"} \
       ${_extra_env[@]+"${_extra_env[@]}"} \
-      PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
+      PYTHONPATH="$_server_pythonpath" \
       python3 - <<'PY' 2>/dev/null
 names = set()
 try:
@@ -266,7 +281,8 @@ PY
   env "${_env_unset[@]}" -- \
     ${_recipe_env[@]+"${_recipe_env[@]}"} ${_extra_env[@]+"${_extra_env[@]}"} \
     "${_gpu_env[@]}" \
-    PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
+    "${_source_env[@]}" \
+    PYTHONPATH="$_server_pythonpath" \
     MAGPIE_RUN_PHASE=server \
     MAGPIE_SERVER_PID_FILE="$_pidfile" \
     MODEL="$MODEL" \

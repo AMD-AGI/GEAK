@@ -376,6 +376,7 @@ async function main() {
       const calls = [];
       const deps = {
         tuning: tuningResult,
+        BASELINE_SOURCE_REQUEST: '',
         KB_DIMS: kbDims === undefined ? { gfx: 'gfx950', framework_version: 'sglang-1.2.3' } : kbDims,
         log: (m) => logs.push(String(m)),
         shq: (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'",

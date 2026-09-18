@@ -410,6 +410,11 @@ def resolve_effective_config(
         "source_snapshots": snapshots,
         "conflicts": conflicts,
     }
+    source = baseline.get("source_materialization")
+    if schema_version >= 2 and isinstance(source, dict):
+        # Declaration only: run_e2e separately validates the materialized
+        # contents, and the serving process must establish observed identity.
+        manifest["source_materialization_sha256"] = source.get("manifest_sha256")
     digest = hashlib.sha256(
         json.dumps(
             manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False

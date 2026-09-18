@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -754,7 +755,13 @@ def _run_main(monkeypatch, tmp_path, eval_dir, *, invoke, handoff_extra=None):
     handoff = _handoff(eval_dir)
     handoff.update(handoff_extra or {})
     hp.write_text(json.dumps(handoff), encoding="utf-8")
-    rc = rx.main([str(hp), str(rp)])
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    try:
+        rc = rx.main([str(hp), str(rp)])
+    finally:
+        # main's final flush ignores SIGTERM; subprocesses in later tests must
+        # inherit the original disposition, not this in-process CLI's state.
+        signal.signal(signal.SIGTERM, previous_sigterm)
     return rc, rp
 
 
