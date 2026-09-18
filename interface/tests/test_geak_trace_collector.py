@@ -1737,3 +1737,68 @@ class R11RemainingTest(unittest.TestCase):
         keys = [(b.get("source_uuid"), b.get("source_pos")) for b in blocks]
         self.assertEqual(len(keys), len(set(keys)), "duplicate retained blocks: %r" % keys)
         self.assertEqual(set(k[0] for k in keys), {"uuid-one", "uuid-two"})
+
+
+class R12StructuralTest(unittest.TestCase):
+    """Astra R12: relationship identity, late filtering, ties, source fallback."""
+
+    def _edge(self, eid, to, ref):
+        return {"type": "result_supplied_to_dispatch", "from": "agent:p1", "to": to,
+                "event_id": eid, "proven": True, "producer_result_ref": "r.x",
+                "consumer_input_ref": ref}
+
+    def _trace(self, edges):
+        return {"schema": C.SCHEMA, "run": {"run_id": "wf_s", "linkage": {}},
+                "agents": [{"agent_id": "p1", "calls": [], "totals": {},
+                            "result_status": "x"}],
+                "edges": edges, "warnings": []}
+
+    def test_retention_of_another_edge_does_not_restore_an_invalidated_one(self):
+        first = self._trace([self._edge("t1", "agent:c1", "d#1"),
+                             self._edge("t-keep", "agent:c9", "d#9")])
+        second = self._trace([self._edge("t1", "agent:c1", "d#999")])
+        merged = C.merge_traces(first, second)
+        proven = {e["event_id"] for e in merged["edges"] if e.get("proven")}
+        self.assertNotIn("t1", proven, "invalidated edge restored by retention")
+        self.assertIn("t-keep", proven, "unrelated retained edge was lost")
+
+    def test_same_event_id_new_endpoint_contradicts_rather_than_duplicates(self):
+        merged = C.merge_traces(self._trace([self._edge("t1", "agent:c1", "d#1")]),
+                                self._trace([self._edge("t1", "agent:c2", "d#1")]))
+        proven = [e for e in merged["edges"] if e.get("proven")]
+        self.assertEqual(proven, [], "one event id produced two proven edges")
+
+    def test_edge_identity_excludes_endpoints(self):
+        import geak_trace_reconcile as rc
+        a = rc.edge_key(self._edge("t1", "agent:c1", "d#1"))
+        b = rc.edge_key(self._edge("t1", "agent:c2", "d#1"))
+        self.assertEqual(a, b, "endpoints must not create a new identity")
+
+    def test_tied_sequence_leaves_the_outcome_unknown(self):
+        import geak_trace_reconcile as rc
+        _m, outcome, _s = rc.reconcile_attempts(
+            [{"attempt_id": "z", "status": "error", "seq": 1},
+             {"attempt_id": "a", "status": "returned", "seq": 1}], [], "s1")
+        self.assertEqual(outcome, "unknown", "a tie was resolved by id order")
+
+    def test_unique_sequence_still_decides(self):
+        import geak_trace_reconcile as rc
+        _m, outcome, _s = rc.reconcile_attempts(
+            [{"attempt_id": "z", "status": "error", "seq": 1},
+             {"attempt_id": "a", "status": "returned", "seq": 2}], [], "s1")
+        self.assertEqual(outcome, "returned")
+
+    def test_blocks_without_a_source_uuid_do_not_collapse(self):
+        import geak_trace_reconcile as rc
+        store = rc.Reconciled()
+        for i, text in enumerate(("one", "two")):
+            blk = {"kind": "text", "text": text, "source_uuid": None}
+            store.absorb(rc.block_key("m1", blk, i), blk, merge=rc.merge_block)
+        self.assertEqual(len(store.usable()), 2, "distinct sources collapsed")
+
+    def test_pre_r12_block_without_source_pos_still_matches(self):
+        """An upgrade must not duplicate: old blocks lack source_pos."""
+        import geak_trace_reconcile as rc
+        old = {"kind": "text", "text": "x", "source_uuid": "u1"}          # pre-R12
+        new = {"kind": "text", "text": "x", "source_uuid": "u1", "source_pos": 0}
+        self.assertEqual(rc.block_key("m1", old, 0), rc.block_key("m1", new, 0))
