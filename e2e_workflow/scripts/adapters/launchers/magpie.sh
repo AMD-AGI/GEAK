@@ -45,7 +45,13 @@ adapter_launch() {
   if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
     source "$_MAGPIE_SOURCE_PATHS" || return 2
     _server_pythonpath="$(geak_source_pythonpath '')" || return 2
-    _source_env=(OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-}" PYTHONDONTWRITEBYTECODE=1)
+    _source_env=(
+      OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-}" PYTHONDONTWRITEBYTECODE=1
+      GEAK_SOURCE_REQUEST="$GEAK_SOURCE_REQUEST"
+      GEAK_ACCEPTED_SOURCE_PYTHONPATH="${GEAK_ACCEPTED_SOURCE_PYTHONPATH:-}"
+      GEAK_SOURCE_OBSERVATION_DIR="${GEAK_SOURCE_OBSERVATION_DIR:-}"
+      GEAK_SOURCE_BOOTSTRAP_PYTHONPATH="${GEAK_SOURCE_BOOTSTRAP_PYTHONPATH:-}"
+    )
   fi
   local backend_uc script var_script
   backend_uc="$(printf '%s' "${BACKEND:-sglang}" | tr '[:lower:]' '[:upper:]')"

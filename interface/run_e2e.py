@@ -48,16 +48,23 @@ from typing import Any
 try:
     # Package import under pytest / module use.
     from interface.effective_config import resolve_effective_config
+    from interface.source_bundle import (
+        stage_source_bundle,
+        stage_source_replay_launcher,
+    )
     from interface.source_materialization import (
         SourceMaterializationError,
         validate_source_materialization,
     )
+    from interface.source_measurement import verify_normalized_source_measurements
 except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
     from effective_config import resolve_effective_config
+    from source_bundle import stage_source_bundle, stage_source_replay_launcher
     from source_materialization import (
         SourceMaterializationError,
         validate_source_materialization,
     )
+    from source_measurement import verify_normalized_source_measurements
 
 SCHEMA_VERSION = 2
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
@@ -599,6 +606,49 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     return ps_args
 
 
+_SOURCE_RUN_ENV = frozenset({
+    "GEAK_SOURCE_REQUEST", "GEAK_SOURCE_OBSERVATION_DIR",
+    "GEAK_SOURCE_BOOTSTRAP_PYTHONPATH", "GEAK_ACCEPTED_SOURCE_PYTHONPATH",
+})
+
+
+def prepare_baseline_source(ps_args: dict) -> dict:
+    """Stage an exact helper/source closure before any agent can benchmark."""
+    for key in _SOURCE_RUN_ENV:
+        os.environ.pop(key, None)
+    request = ps_args.get("baseline_source_request")
+    if request is None:
+        return {}
+    ps_args["eval_dir"] = str(Path(ps_args["eval_dir"]).absolute())
+    names = (
+        "bench_e2e.sh", "bench_replica.sh", "server_teardown.sh", "bench_summarize.py",
+        "source_paths.sh", "source_runtime.py", "parse_profile.py",
+        "adapters/sglang.sh", "adapters/vllm.sh",
+        "adapters/clients/inferencex.sh", "adapters/clients/agentx.sh", "adapters/launchers/magpie.sh",
+    )
+    assets = {name: BENCH_SCRIPT.parent / name for name in names}
+    assets["source_materialization.py"] = INTERFACE_DIR / "source_materialization.py"
+    staged = stage_source_bundle(request, Path(ps_args["eval_dir"]), assets)
+    os.environ["GEAK_SOURCE_REQUEST"] = staged["request_path"]
+    os.environ["GEAK_ACCEPTED_SOURCE_PYTHONPATH"] = staged["pythonpath"]
+    ps_args["baseline_source_request_path"] = staged["request_path"]
+    ps_args["baseline_source_pythonpath"] = staged["pythonpath"]
+    return staged
+
+
+def _emit_source_preparation_error(result_path: Path, error: Exception) -> int:
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=result_path.parent,
+                                     encoding="utf-8", delete=False) as stream:
+        json.dump({"schema_version": SCHEMA_VERSION, "status": "error",
+                   "error_class": "unresolved_baseline_source", "error": str(error)}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(stream.name, result_path)
+    sys.stderr.write(str(error) + "\n")
+    return 1
+
+
 # ---------------------------------------------------------------------------
 # TraceLens / kernel-agent artifact discovery.
 # ---------------------------------------------------------------------------
@@ -915,7 +965,7 @@ _RECIPE_ENV_GEAK_OWNED = frozenset({
     # an outer ROCR mask is already set — see magpie.sh).
     "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
     "VLLM_TORCH_PROFILER_DIR", "SGLANG_TORCH_PROFILER_DIR",
-})
+}) | _SOURCE_RUN_ENV
 
 
 # A shell environment-variable name: a leading letter/underscore then word
@@ -3650,6 +3700,49 @@ def normalize_result(h: dict, wf: dict) -> dict:
     tuning_section = _tuning_skillset_section(wf, eval_dir)
     if tuning_section is not None:
         result["tuning_skillset"] = tuning_section
+    baseline_spec = h.get("baseline_env_spec") or {}
+    if baseline_spec.get("source_materialization") or baseline_spec.get("source_snapshots"):
+        descriptor = baseline_spec.get("source_materialization") or {}
+        source_evidence = verify_normalized_source_measurements(
+            h.get("_geak_source_request_path", ""),
+            eval_dir=eval_dir,
+            result_source=result_source,
+            baseline_basis_source=baseline_basis_source,
+            setup_tput=setup_baseline,
+            baseline_tput=geak_baseline,
+            final_tput=final_tput_out,
+            expected_manifest_sha256=descriptor.get("manifest_sha256"),
+            expected_required_layer_ids=descriptor.get("required_layer_ids"),
+            expected_setup_overlay=str(baseline_spec.get("overlay_pythonpath") or ""),
+            expected_baseline_overlay=str(baseline_spec.get("overlay_pythonpath") or ""),
+            expected_final_overlay=result["final_overlay"],
+        )
+        if source_evidence["status"] == "verified" and result["status"] == "ok":
+            try:
+                result["final_launch_script"] = stage_source_replay_launcher(
+                    Path(h["_geak_source_request_path"]), eval_dir, Path(final_launch)
+                )
+                source_evidence["replay_status"] = "staged"
+            except SourceMaterializationError as exc:
+                source_evidence["replay_status"] = "unavailable"
+                source_evidence["replay_error"] = str(exc)
+        if source_evidence["status"] != "verified" or source_evidence.get("replay_status") == "unavailable":
+            # Retain the exact diagnostic result, including negative outcomes,
+            # without exposing any of its measurements as eligible for adoption.
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "status": "error",
+                "error_class": "unresolved_baseline_source",
+                "error": source_evidence.get("replay_error") or source_evidence["reason"],
+                "eval_dir": str(eval_dir),
+                "source_measurement": source_evidence,
+                "unverified_source_result": result,
+            }
+        result["source_measurement"] = source_evidence
+        result["source_attribution"] = {
+            "status": "unavailable",
+            "reason": "per_candidate_source_measurements_not_bound",
+        }
     return result
 
 
@@ -6356,8 +6449,16 @@ def _write_kernel_journey(eval_dir: Path, wf: dict | None, normalized: dict) -> 
     ``kernel_journey_error`` instead of letting it pass silently.
     """
     try:
-        journey = build_kernel_journey(wf, normalized) if wf is not None \
+        journey = build_kernel_journey(wf, normalized) if (
+            wf is not None and normalized.get("error_class") != "unresolved_baseline_source"
+            and not normalized.get("source_measurement")
+        ) \
             else _empty_journey(eval_dir, normalized)
+        if normalized.get("source_measurement"):
+            journey["source_attribution"] = {
+                "status": "unavailable",
+                "reason": "per_candidate_source_measurements_not_bound",
+            }
     except Exception:  # full build failed: degrade to a valid empty journey.
         journey = _empty_journey(eval_dir, normalized)
     eval_dir.mkdir(parents=True, exist_ok=True)
@@ -6377,6 +6478,32 @@ def _md_table(rows: list[tuple[str, Any]]) -> str:
     return "\n".join(out)
 
 
+def _source_measurement_report_section(normalized: dict) -> str:
+    source = normalized.get("source_measurement") or {}
+    if not source:
+        return ""
+    eligible = (
+        source.get("status") == "verified"
+        and normalized.get("status") in {"ok", "no_gain"}
+        and source.get("replay_status") != "unavailable"
+    )
+    return "\n".join([
+        "<!-- GEAK_SOURCE_MEASUREMENT_BEGIN -->",
+        "## Accepted-source verification", "",
+        ("The selected hot measurement rounds have verified source observations."
+         if eligible else
+         "**No gain is eligible for adoption: source measurement or replay verification is unavailable.**"),
+        "",
+        f"- Serving-source measurement: `{source.get('status')}`",
+        f"- Replay: `{source.get('replay_status') or 'not required'}`",
+        f"- Detail: `{source.get('replay_error') or source.get('reason')}`",
+        ("- Proof covers the selected hot rounds and observed guarded Python processes."
+         if eligible else
+         "- Claimed measurements and configuration remain in `unverified_source_result` as diagnostics."),
+        "<!-- GEAK_SOURCE_MEASUREMENT_END -->",
+    ])
+
+
 def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
     """Render a final report from the normalized result + on-disk recovery.
 
@@ -6384,6 +6511,12 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
     budget left is the flush grace, so it must never hang. A dump of recovered
     numbers, not an analysis — the banner says so.
     """
+    if normalized.get("error_class") == "unresolved_baseline_source":
+        return (
+            "# GEAK e2e — source verification unavailable\n\n"
+            + _source_measurement_report_section(normalized)
+            + "\n\nRaw workflow artifacts are preserved. No accepted gain or kernel attribution is published.\n"
+        )
     status = str(normalized.get("status") or "unknown")
     speedup = normalized.get("throughput_speedup")
     kernels = normalized.get("accepted_kernels") or []
@@ -6475,12 +6608,23 @@ def _write_final_report_fallback(eval_dir: Path, normalized: dict,
     existing path — the architect's report is never overwritten.
     """
     existing = _existing_report_path(eval_dir)
-    if existing:
+    source_section = _source_measurement_report_section(normalized)
+    if existing and not source_section:
         return existing
-    path = eval_dir / FINAL_REPORT_FILE
+    path = Path(existing) if existing else eval_dir / FINAL_REPORT_FILE
     eval_dir.mkdir(parents=True, exist_ok=True)
+    original = path.read_text(encoding="utf-8") if existing else ""
+    text = original if existing else _render_synthesized_final_report(normalized, wf)
+    if source_section:
+        text = _upsert_marked_markdown_section(
+            text, source_section,
+            begin_marker="<!-- GEAK_SOURCE_MEASUREMENT_BEGIN -->",
+            end_marker="<!-- GEAK_SOURCE_MEASUREMENT_END -->",
+        )
+    if existing and text == original:
+        return existing
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(_render_synthesized_final_report(normalized, wf), encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)  # atomic: a kill mid-write never yields a partial file
     return str(path)
 
@@ -6589,25 +6733,18 @@ def main(argv: list[str]) -> int:
     if not h:
         sys.stderr.write(f"empty/invalid handoff: {handoff_path}\n")
         return 2
+    # The runner binds this private value only after its own successful staging.
+    h.pop("_geak_source_request_path", None)
 
     try:
         ps_args = map_args(h, timeout_s)
-        if ps_args.get("baseline_source_request") and "--dry-run" not in flags:
-            # The new descriptor is not advertised until the serving-process
-            # verifier is integrated. A development checkout must not silently
-            # benchmark source it has only validated on disk.
-            raise SourceMaterializationError("source_runtime_not_integrated")
+        if ps_args.get("baseline_source_request"):
+            # Recipe export prefers h.eval_dir. Canonicalize both owners before
+            # export so changing into the workflow/evaluation directory cannot
+            # silently make the recorded recipe environment disappear.
+            h["eval_dir"] = ps_args["eval_dir"] = str(Path(ps_args["eval_dir"]).absolute())
     except SourceMaterializationError as exc:
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode="w", dir=result_path.parent,
-                                         encoding="utf-8", delete=False) as stream:
-            json.dump({"schema_version": SCHEMA_VERSION, "status": "error",
-                       "error_class": "unresolved_baseline_source", "error": str(exc)}, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(stream.name, result_path)
-        sys.stderr.write(str(exc) + "\n")
-        return 1
+        return _emit_source_preparation_error(result_path, exc)
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]
@@ -6625,6 +6762,14 @@ def main(argv: list[str]) -> int:
     workload_preflight = agentx_preflight(h)
     bench_protocol = apply_bench_protocol(h)
     alignment_flags = apply_alignment_flags(h)
+    if "--dry-run" not in flags:
+        try:
+            staged_source = prepare_baseline_source(ps_args)
+            if staged_source:
+                h["_geak_source_request_path"] = staged_source["request_path"]
+                os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
+        except SourceMaterializationError as exc:
+            return _emit_source_preparation_error(result_path, exc)
     prompt = build_prompt(ps_args)
 
     if "--dry-run" in flags:
@@ -6694,6 +6839,16 @@ def main(argv: list[str]) -> int:
                 "error_class": "normalize_failed",
                 "error": f"{type(norm_exc).__name__}: {norm_exc}",
             }
+        source_bound = bool(ps_args.get("baseline_source_request"))
+        if source_bound:
+            out.setdefault("source_measurement", {
+                "status": "unavailable", "reason": "source_normalization_unavailable",
+            })
+            # Per-op/tuning recovery does not yet bind each of its own legs to
+            # serving-source observations. Keep that knowledge local, including
+            # on a run whose final Director pair is independently verified.
+            out["kb_write"] = {"skipped": True, "why": "source_bound_export_unavailable"}
+            out["kb_write_tuned"] = {"skipped": True, "why": "source_bound_export_unavailable"}
         # kernel_journey.json is a GUARANTEED interface file too (same contract as
         # result.json). Resolve eval_dir even on the error path (eval_dir_hint is
         # this run's pinned dir) so the journey always has a home, persist the
@@ -6752,7 +6907,7 @@ def main(argv: list[str]) -> int:
         # means a KB stall costs the record, never the interface files. Then result.json
         # is rewritten with the receipt — best-effort, atomic, and if that second write
         # loses a race the file from the first one is still correct.
-        if _emit_state["done"] and wf is not None and eval_dir_str:
+        if _emit_state["done"] and wf is not None and eval_dir_str and not source_bound:
             try:
                 receipt = _kb_write_back(Path(eval_dir_str), wf, ps_args)
                 if receipt and not receipt.get("skipped"):
@@ -6769,7 +6924,7 @@ def main(argv: list[str]) -> int:
         # proven tuning A/B on disk and no workflow return at all, and that table is still knowledge
         # about that op. Runs after the deployment record for the same ordering reason — result.json
         # first, network second.
-        if _emit_state["done"] and eval_dir_str:
+        if _emit_state["done"] and eval_dir_str and not source_bound:
             try:
                 tuned = _kb_write_tuned_ops(Path(eval_dir_str))
                 if tuned and not tuned.get("skipped"):

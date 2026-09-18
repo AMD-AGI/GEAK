@@ -22,7 +22,13 @@ adapter_launch() {
   if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
     source "$_VLLM_SOURCE_PATHS" || return 2
     _server_pythonpath="$(geak_source_pythonpath '')" || return 2
-    _source_env=(OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-}" PYTHONDONTWRITEBYTECODE=1)
+    _source_env=(
+      OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-}" PYTHONDONTWRITEBYTECODE=1
+      GEAK_SOURCE_REQUEST="$GEAK_SOURCE_REQUEST"
+      GEAK_ACCEPTED_SOURCE_PYTHONPATH="${GEAK_ACCEPTED_SOURCE_PYTHONPATH:-}"
+      GEAK_SOURCE_OBSERVATION_DIR="${GEAK_SOURCE_OBSERVATION_DIR:-}"
+      GEAK_SOURCE_BOOTSTRAP_PYTHONPATH="${GEAK_SOURCE_BOOTSTRAP_PYTHONPATH:-}"
+    )
   fi
   # Pin GPU_ARCHS so aiter's JIT skips rocm_agent_enumerator/_detect_native (see sglang.sh / gpu_lock.sh).
   local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"

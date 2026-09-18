@@ -43,17 +43,23 @@ Steps:
 1. Collision-proof run id: `TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}`.
 2. Decide `EVAL_DIR`: if `EVAL_DIR_OVERRIDE` set use it; else
    `EXP_ROOT/e2e_${MODEL_NAME}_${TS}`. If it exists & non-empty, append `_${RANDOM}` until fresh.
+   Exception for a source-bearing handoff (`GEAK_SOURCE_REQUEST` input is set): the caller has
+   already staged source and canonical helpers. Use the exact `EVAL_DIR_OVERRIDE` even though
+   it is non-empty. Preserve its helpers, `source_manifest.sha256`, and `source_requests/`;
+   never select another directory or overwrite measurements from an earlier phase.
 3. Build the layout and copy the launch script in (never edit the original):
    ```bash
    mkdir -p "$EVAL_DIR"/{baseline,profile,overlay,kernels,config,logs}
    echo "$MODEL_PATH" > "$EVAL_DIR/model_path.txt"
    [ -n "$LAUNCH_SCRIPT" ] && cp "$LAUNCH_SCRIPT" "$EVAL_DIR/launch_baseline.sh"
-   cp "$SKILL_DIR/scripts/bench_e2e.sh" "$EVAL_DIR/bench_e2e.sh"
-   cp "$SKILL_DIR/scripts/bench_replica.sh" "$EVAL_DIR/bench_replica.sh"
-   cp "$SKILL_DIR/scripts/server_teardown.sh" "$EVAL_DIR/server_teardown.sh"   # the server-kill contract; bench_e2e.sh REFUSES to run without it
-   cp "$SKILL_DIR/scripts/bench_summarize.py" "$EVAL_DIR/bench_summarize.py"   # writes bench_summary.json; also refused without it
-   cp -r "$SKILL_DIR/scripts/adapters" "$EVAL_DIR/adapters"   # bench_e2e.sh sources adapters/<backend>.sh next to itself
-   cp "$SKILL_DIR/scripts/parse_profile.py" "$EVAL_DIR/parse_profile.py"
+   if [ -z "${GEAK_SOURCE_REQUEST:-}" ]; then
+     cp "$SKILL_DIR/scripts/bench_e2e.sh" "$EVAL_DIR/bench_e2e.sh"
+     cp "$SKILL_DIR/scripts/bench_replica.sh" "$EVAL_DIR/bench_replica.sh"
+     cp "$SKILL_DIR/scripts/server_teardown.sh" "$EVAL_DIR/server_teardown.sh"
+     cp "$SKILL_DIR/scripts/bench_summarize.py" "$EVAL_DIR/bench_summarize.py"
+     cp -r "$SKILL_DIR/scripts/adapters" "$EVAL_DIR/adapters"
+     cp "$SKILL_DIR/scripts/parse_profile.py" "$EVAL_DIR/parse_profile.py"
+   fi
    ```
    - If `LAUNCH_SCRIPT` is empty, the baseline is the stack's default config + `MODEL_PATH` +
      `WORKLOAD` (bench_e2e.sh needs no model default — `MODEL` is passed). Record the resolved server

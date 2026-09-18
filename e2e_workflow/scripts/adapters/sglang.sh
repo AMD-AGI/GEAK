@@ -20,7 +20,13 @@ adapter_launch() {
   if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
     source "$_SGL_SOURCE_PATHS" || return 2
     _server_pythonpath="$(geak_source_pythonpath "$_SGL_PP")" || return 2
-    _source_env=(OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-}" PYTHONDONTWRITEBYTECODE=1)
+    _source_env=(
+      OVERLAY_PYTHONPATH="${OVERLAY_PYTHONPATH:-}" PYTHONDONTWRITEBYTECODE=1
+      GEAK_SOURCE_REQUEST="$GEAK_SOURCE_REQUEST"
+      GEAK_ACCEPTED_SOURCE_PYTHONPATH="${GEAK_ACCEPTED_SOURCE_PYTHONPATH:-}"
+      GEAK_SOURCE_OBSERVATION_DIR="${GEAK_SOURCE_OBSERVATION_DIR:-}"
+      GEAK_SOURCE_BOOTSTRAP_PYTHONPATH="${GEAK_SOURCE_BOOTSTRAP_PYTHONPATH:-}"
+    )
   fi
   # Raise the scheduler watchdog by default: an authored/JIT kernel (FlyDSL/triton-author) overlaid on
   # the path JIT-compiles on first prefill, which can exceed sglang's default watchdog and kill the

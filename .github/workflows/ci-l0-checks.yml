@@ -125,6 +125,11 @@ jobs:
             kb/tests/test_identity.py \
             kernel_workflow/scripts/tests/test_kb_loop_offline.py \
             interface/test_effective_config.py \
+            interface/test_source_materialization.py \
+            interface/test_source_bundle.py \
+            interface/test_source_measurement.py \
+            interface/test_run_e2e_source.py \
+            e2e_workflow/scripts/tests/test_source_runtime.py \
             e2e_workflow/scripts/tests/test_bench_replica_lifecycle.py \
             e2e_workflow/scripts/tests/test_bench_summarize.py \
             e2e_workflow/scripts/tests/test_inferencex_client_warmup_parity.py \
@@ -283,6 +288,8 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      - name: accepted-source knowledge export guards
+        run: node e2e_workflow/scripts/test_source_write_guards.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest
