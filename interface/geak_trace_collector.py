@@ -739,6 +739,12 @@ def build_trace(workflow_dir, run_status=None, price=True, rates_path=None,
                 agent["timeline_sub_phase"] = ev.get("sub_phase") or None
                 agent["timeline_seq"] = ev.get("seq")
                 agent["phase_provenance"] = "workflow_timeline"
+                # The timeline records label/seq/attempt but NO runtime agent id,
+                # so when a label occurs more than once the match is by position,
+                # not by an established join. Say so rather than presenting a
+                # candidate phase as settled.
+                if len(evs) > 1:
+                    agent["timeline_attribution_ambiguous"] = True
                 joined += 1
             else:
                 unjoined.append(agent.get("label"))
@@ -1259,7 +1265,7 @@ _APPEND_PROBE = 4096
 #: The run-owned artifacts. Everything the trace is built from, so a rebuild can
 #: run entirely off the mirror once the container-local originals are gone.
 _MIRROR_PATTERNS = ("journal.jsonl", "agent-*.jsonl", "agent-*.meta.json",
-                    "linkage_events.jsonl")
+                    "linkage_events.jsonl", "agent_timeline.json")
 
 
 def _sha256_of(path, length=None):
@@ -1445,6 +1451,20 @@ def mirror_sources(workflow_dir, dest_dir, max_bytes=None):
 
     # The lifecycle record lives outside the workflow dir; copy it in so the
     # mirror is self-contained and a rebuild keeps the real run status.
+    # A file-backed timeline lives outside the workflow dir; copy it in so a
+    # rebuild keeps its phases when the originals are gone.
+    tl, tl_src = read_agent_timeline(workflow_dir)
+    if tl is not None and tl_src and tl_src != "run_record.result.llm_timeline":
+        try:
+            tmp = os.path.join(dest_dir, "agent_timeline.json.tmp.%d" % os.getpid())
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(tl, fh, ensure_ascii=False, indent=1, default=str)
+            os.replace(tmp, os.path.join(dest_dir, "agent_timeline.json"))
+            manifest["files"]["agent_timeline.json"] = {
+                "action": "copied", "bytes": 0, "from": tl_src}
+        except OSError:
+            manifest["errors"] += 1
+
     record, record_path = read_run_record(workflow_dir)
     if record is not None:
         try:
