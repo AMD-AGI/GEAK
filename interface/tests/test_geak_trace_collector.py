@@ -1881,7 +1881,7 @@ class GraphSurvivesRecollectionTest(unittest.TestCase):
                   {"kind": "text", "text": "two", "source_uuid": "u2"}]
         current = [{"kind": "text", "text": "one", "source_uuid": "u1", "source_pos": 0},
                    {"kind": "text", "text": "two", "source_uuid": "u2", "source_pos": 0}]
-        migrated = rc.migrate_blocks(legacy)
+        migrated = rc.migrate_blocks(legacy, current)
         self.assertEqual(
             {rc.block_key("m1", b, i) for i, b in enumerate(migrated)},
             {rc.block_key("m1", b, i) for i, b in enumerate(current)})
@@ -1901,3 +1901,64 @@ class GraphSurvivesRecollectionTest(unittest.TestCase):
         three = C.merge_traces(two, tr("returned"))
         self.assertEqual([e for e in three["edges"] if e.get("proven")], [],
                          "a contradicted attempt flipped back to proven")
+
+
+class LegacyPositionMigrationTest(unittest.TestCase):
+    """Astra R14: a legacy position must never be inferred from survivor order.
+
+    source_pos is an index into the source record's ORIGINAL content array; a
+    legacy capture only shows which blocks survived filtering. Counting
+    survivors invents a position that can name a different block.
+    """
+
+    def test_omitted_block_does_not_duplicate_on_upgrade(self):
+        import geak_trace_reconcile as rc
+        # source content was [image(omitted), text] -> fresh block is at pos 1
+        legacy = [{"kind": "text", "text": "one observed instruction",
+                   "source_uuid": "source-uuid"}]
+        fresh = [{"kind": "text", "text": "one observed instruction",
+                  "source_uuid": "source-uuid", "source_pos": 1}]
+        migrated = rc.migrate_blocks(legacy, fresh)
+        self.assertEqual(
+            {rc.block_key("m1", b, i) for i, b in enumerate(migrated)},
+            {rc.block_key("m1", b, i) for i, b in enumerate(fresh)},
+            "the instruction would appear twice")
+        self.assertTrue(migrated[0]["legacy_position_resolved"])
+
+    def test_ambiguous_correspondence_is_left_unresolved(self):
+        import geak_trace_reconcile as rc
+        migrated = rc.migrate_blocks(
+            [{"kind": "text", "text": "x", "source_uuid": "u"}],
+            [{"kind": "text", "text": "x", "source_uuid": "u", "source_pos": 0},
+             {"kind": "text", "text": "y", "source_uuid": "u", "source_pos": 2}])
+        self.assertTrue(migrated[0]["legacy_position_unresolved"])
+        self.assertIsNone(migrated[0].get("source_pos"),
+                          "a raw array position was manufactured")
+
+    def test_unresolved_legacy_block_keeps_its_own_identity(self):
+        import geak_trace_reconcile as rc
+        blk = {"kind": "text", "text": "x", "source_uuid": "u",
+               "legacy_position_unresolved": True}
+        other = {"kind": "text", "text": "x", "source_uuid": "u", "source_pos": 0}
+        self.assertNotEqual(rc.block_key("m1", blk, 0), rc.block_key("m1", other, 0))
+
+    def test_fresh_captures_are_never_rewritten(self):
+        import geak_trace_reconcile as rc
+        fresh = [{"kind": "text", "text": "a", "source_uuid": "u", "source_pos": 3}]
+        self.assertEqual(rc.migrate_blocks(fresh, fresh)[0]["source_pos"], 3)
+
+    def test_competing_legacy_blocks_do_not_collapse(self):
+        """One current candidate is not a match if two legacy blocks want it."""
+        import geak_trace_reconcile as rc
+        legacy = [{"kind": "text", "source_uuid": "same-source",
+                   "text": "first previously captured instruction, longer"},
+                  {"kind": "text", "source_uuid": "same-source",
+                   "text": "second input"}]
+        current = [{"kind": "text", "source_uuid": "same-source",
+                    "text": "second input", "source_pos": 0}]
+        migrated = rc.migrate_blocks(legacy, current)
+        keys = [rc.block_key("m1", b, i) for i, b in enumerate(migrated)]
+        self.assertEqual(len(set(keys)), 2, "distinct legacy blocks collapsed")
+        self.assertTrue(all(b.get("legacy_position_unresolved") for b in migrated))
+        self.assertTrue(all(b.get("source_pos") is None for b in migrated),
+                        "a position was assigned despite ambiguity")
