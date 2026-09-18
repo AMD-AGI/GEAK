@@ -388,7 +388,12 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     return obs_isl, obs_osl, "agentx_observed"
 
 
-def map_args(h: dict, timeout_s: int | None = None) -> dict:
+def map_args(
+    h: dict,
+    timeout_s: int | None = None,
+    *,
+    artifact_cutoff_ts: float | None = None,
+) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
     effective = None
@@ -577,7 +582,23 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # (not just the driver prompt) so the JS Profile/Strategize/Extract phases can
     # use them as a prior. Only non-null paths are forwarded; when nothing is found
     # the key is omitted entirely, so a tracelens-less run is byte-identical.
-    tl = resolve_tracelens_report(h.get("exp_root", ""))
+    tl = resolve_tracelens_report(
+        h.get("exp_root", ""),
+        not_after=artifact_cutoff_ts,
+        expected_trace_config={
+            "framework": ps_args["backend"],
+            "model_path": ps_args["model_path"],
+            "tp": ps_args["tp"],
+            "isl": ps_args["isl"],
+            "osl": ps_args["osl"],
+            "conc": ps_args["conc"],
+            "server_args": ps_args["initial_extra_server_args"],
+            # Compare only the caller's accepted optimization env. The full
+            # replay env also contains measurement controls such as
+            # NUM_PROMPTS, which a profiling run intentionally overrides.
+            "env": h.get("accepted_env") or "",
+        },
+    )
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
@@ -598,6 +619,10 @@ _TRACELENS_ARTIFACT_PATTERNS = {
     "trace_file": "runs/roofline/**/torch_trace",
 }
 
+_BENCHMARK_TIMESTAMP_RE = re.compile(
+    r"(?:^|/)benchmark_[^/]+_(\d{8}_\d{6})(?:/|$)"
+)
+
 
 def _experiment_root_from_exp_root(exp_root: str) -> str:
     """Return the experiment root (the directory that CONTAINS ``geak``).
@@ -611,17 +636,191 @@ def _experiment_root_from_exp_root(exp_root: str) -> str:
     return norm
 
 
-def _find_latest_artifact(root: str, pattern: str) -> str | None:
-    """Return the latest match for ``pattern`` under ``root`` (or None).
+def _artifact_timestamp(path: str) -> float:
+    """Return an artifact's chronological timestamp.
 
-    Matches are sorted for determinism; the timestamps embedded in the run
-    directory names sort chronologically, so the last entry is the most recent.
+    Roofline paths put a random run id before ``benchmark_<backend>_<UTC>``;
+    sorting the full path therefore orders by that random id, not by time. Use
+    the embedded benchmark timestamp when present. For other artifacts, and
+    legacy layouts without that component, fall back to the artifact mtime.
+    A trace directory is dated by its newest top-level trace file so touching
+    unrelated files below the run directory does not make an old trace newest.
     """
-    matches = sorted(glob.glob(os.path.join(root, pattern), recursive=True))
-    return matches[-1] if matches else None
+    match = _BENCHMARK_TIMESTAMP_RE.search(path)
+    if match:
+        parsed = datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+        return parsed.replace(tzinfo=timezone.utc).timestamp()
+
+    candidate = Path(path)
+    if candidate.is_dir():
+        trace_files = []
+        for trace_pattern in (
+            "*.pt.trace.json.gz",
+            "*.trace.json.gz",
+            "*.json.gz",
+        ):
+            trace_files.extend(candidate.glob(trace_pattern))
+        if trace_files:
+            return max(item.stat().st_mtime for item in trace_files)
+    return candidate.stat().st_mtime
 
 
-def resolve_tracelens_report(exp_root: str) -> dict:
+def _find_latest_artifact(
+    root: str,
+    pattern: str,
+    *,
+    not_after: float | None = None,
+    accept=None,
+) -> str | None:
+    """Return the newest acceptable artifact under ``root`` (or ``None``).
+
+    ``not_after`` freezes discovery at the handoff boundary, preventing a
+    resumed GEAK run from consuming artifacts written later into the same
+    experiment directory. ``accept`` provides fail-closed provenance checks
+    for artifact types such as roofline traces.
+    """
+    candidates: list[tuple[float, str]] = []
+    for path in glob.glob(os.path.join(root, pattern), recursive=True):
+        try:
+            timestamp = _artifact_timestamp(path)
+        except (OSError, ValueError):
+            continue
+        if not_after is not None and timestamp > not_after:
+            continue
+        if accept is not None and not accept(path):
+            continue
+        candidates.append((timestamp, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item[0], item[1]))[1]
+
+
+def _parse_server_arg_map(text: str) -> dict[str, str | None] | None:
+    """Parse server arguments for exact flag/value subset comparison."""
+    try:
+        tokens = shlex.split(str(text or ""))
+    except ValueError:
+        return None
+
+    parsed: dict[str, str | None] = {}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-" or not token.startswith("-"):
+            return None
+        if "=" in token:
+            name, value = token.split("=", 1)
+        else:
+            name, value = token, None
+            if index + 1 < len(tokens):
+                following = tokens[index + 1]
+                is_flag = following.startswith("-")
+                if is_flag:
+                    try:
+                        float(following)
+                    except ValueError:
+                        pass
+                    else:
+                        is_flag = False
+                if not is_flag:
+                    value = following
+                    index += 1
+        parsed[name] = value
+        index += 1
+    return parsed
+
+
+def _parse_expected_env_map(value: Any) -> dict[str, str] | None:
+    """Parse shell-style ``KEY=value`` assignments for subset comparison."""
+    if isinstance(value, dict):
+        return {str(key): str(item) for key, item in value.items()}
+    try:
+        tokens = shlex.split(str(value or ""))
+    except ValueError:
+        return None
+    parsed: dict[str, str] = {}
+    for token in tokens:
+        key, separator, value = token.partition("=")
+        if not separator or not key:
+            return None
+        parsed[key] = value
+    return parsed
+
+
+def _roofline_trace_matches_config(trace_dir: str, expected: dict) -> bool:
+    """Verify that a roofline trace represents the handed-off serving stack.
+
+    Profiling adds its own flags and environment, so the handed-off server args
+    and env are required to be exact subsets rather than exact full strings.
+    Missing or malformed provenance fails closed and makes GEAK recapture.
+    """
+    config_path = Path(trace_dir).parent.parent / "baseline_config.with_envs.yaml"
+    try:
+        import yaml
+    except ImportError:
+        return False
+    try:
+        document = yaml.load(
+            config_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+        )
+        benchmark = document["benchmark"]
+        envs = benchmark["envs"]
+    except (OSError, UnicodeError, KeyError, TypeError, yaml.YAMLError):
+        return False
+    if not isinstance(benchmark, dict) or not isinstance(envs, dict):
+        return False
+
+    if str(benchmark.get("framework") or "").strip().lower() != str(
+        expected.get("framework") or ""
+    ).strip().lower():
+        return False
+    if os.path.realpath(str(benchmark.get("model") or "")) != os.path.realpath(
+        str(expected.get("model_path") or "")
+    ):
+        return False
+
+    for env_name, expected_key in (
+        ("TP", "tp"),
+        ("ISL", "isl"),
+        ("OSL", "osl"),
+        ("CONC", "conc"),
+    ):
+        if str(envs.get(env_name) or "") != str(expected.get(expected_key) or ""):
+            return False
+
+    required_flags = _parse_server_arg_map(str(expected.get("server_args") or ""))
+    backend_arg_env = {
+        "sglang": "EXTRA_SGLANG_ARGS",
+        "vllm": "EXTRA_VLLM_ARGS",
+    }.get(str(expected.get("framework") or "").strip().lower())
+    if backend_arg_env is None:
+        return False
+    actual_flags = _parse_server_arg_map(str(envs.get(backend_arg_env) or ""))
+    if required_flags is None or actual_flags is None:
+        return False
+    if any(
+        name not in actual_flags or actual_flags[name] != value
+        for name, value in required_flags.items()
+    ):
+        return False
+
+    required_env = _parse_expected_env_map(expected.get("env") or "")
+    if required_env is None:
+        return False
+    if any(
+        name not in envs or str(envs[name]) != value
+        for name, value in required_env.items()
+    ):
+        return False
+    return True
+
+
+def resolve_tracelens_report(
+    exp_root: str,
+    *,
+    not_after: float | None = None,
+    expected_trace_config: dict | None = None,
+) -> dict:
     """Resolve the four TraceLens artifacts beside the handoff's ``geak``.
 
     Returns a dict with ``search_root`` plus the four artifact paths
@@ -631,7 +830,17 @@ def resolve_tracelens_report(exp_root: str) -> dict:
     root = _experiment_root_from_exp_root(exp_root)
     report: dict = {"search_root": root}
     for key, pattern in _TRACELENS_ARTIFACT_PATTERNS.items():
-        report[key] = _find_latest_artifact(root, pattern) if root else None
+        accept = None
+        if key == "trace_file" and expected_trace_config is not None:
+            accept = lambda path: _roofline_trace_matches_config(
+                path, expected_trace_config
+            )
+        report[key] = (
+            _find_latest_artifact(
+                root, pattern, not_after=not_after, accept=accept
+            )
+            if root else None
+        )
     return report
 
 
@@ -657,13 +866,13 @@ PROCESS_SAFETY = (
 
 def build_prompt(ps_args: dict) -> str:
     eval_dir = ps_args.get("eval_dir", "")
-    # Locate the upstream TraceLens / kernel-agent artifacts (analysis.md,
-    # kernel_candidates.json, tracelens_report.json) plus the roofline torch
-    # trace, and surface them to the agent as a single tracelens_report block.
-    tracelens_report = resolve_tracelens_report(ps_args.get("exp_root", ""))
-    # The prompt only needs the four artifact paths, not the internal search_root.
+    # Artifact discovery is frozen once in map_args. Re-scanning here can pick
+    # files written after the handoff and make the prompt disagree with the
+    # actual Workflow args.
+    resolved_tracelens = ps_args.get("tracelens") or {}
     tracelens_prompt_payload = {
-        k: v for k, v in tracelens_report.items() if k != "search_root"
+        key: resolved_tracelens.get(key)
+        for key in _TRACELENS_ARTIFACT_PATTERNS
     }
     tracelens_block = (
         "\n\ntracelens_report (upstream kernel-agent / roofline artifacts; "
@@ -6575,7 +6784,15 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"empty/invalid handoff: {handoff_path}\n")
         return 2
 
-    ps_args = map_args(h, timeout_s)
+    try:
+        artifact_cutoff_ts = handoff_path.stat().st_mtime
+    except OSError:
+        artifact_cutoff_ts = None
+    ps_args = map_args(
+        h,
+        timeout_s,
+        artifact_cutoff_ts=artifact_cutoff_ts,
+    )
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]
