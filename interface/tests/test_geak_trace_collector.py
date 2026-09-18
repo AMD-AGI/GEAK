@@ -801,7 +801,7 @@ class ProspectiveIdentityTest(unittest.TestCase):
                     parent=types.SimpleNamespace(name="sess"))
 
         def owns(rec, ed, er):
-            return bool(er) and er.rstrip("/") == rec["args"]["exp_root"]
+            return bool(er) and er.rstrip("/") == rec["args"].get("exp_root")
 
         return types.SimpleNamespace(
             candidate_homes=lambda: [],
@@ -809,9 +809,10 @@ class ProspectiveIdentityTest(unittest.TestCase):
             _owns=owns,
             record_paths_typed=lambda r: [("exp_root", r["args"]["exp_root"])])
 
-    def _rec(self, rid, status, start_ms, exp="/exp/shared"):
+    def _rec(self, rid, status, start_ms, exp="/exp/shared", args=None):
         return {"runId": rid, "status": status, "startTime": start_ms,
-                "args": {"exp_root": exp}, "result": {}}
+                "args": args if args is not None else {"exp_root": exp},
+                "result": {}}
 
     def test_neighbour_makes_attachment_unresolved_not_guessed(self):
         """A recent neighbour must NOT be adopted via a time window."""
@@ -825,7 +826,7 @@ class ProspectiveIdentityTest(unittest.TestCase):
                                               require_live=True, prospective=True)
         self.assertIsNone(wf, "must refuse rather than pick one on timing")
         self.assertEqual(info["ambiguous"], 2)
-        self.assertIn("cannot be identified", info["error"])
+        self.assertIn("requires a supported invocation identity", info["error"])
 
     def test_explicit_run_id_is_proof_and_resolves(self):
         import unittest.mock as mock
@@ -840,8 +841,8 @@ class ProspectiveIdentityTest(unittest.TestCase):
         self.assertEqual(info["run_id"], "wf_mine")
         self.assertEqual(info["identity"], "explicit-run-id")
 
-    def test_sole_owning_record_is_labelled_not_asserted(self):
-        """One candidate: attachment involves no choice, but is not proof."""
+    def test_sole_owning_record_is_NOT_enough_for_prospective(self):
+        """Astra R7: one candidate is not proof it is THIS launch."""
         import unittest.mock as mock
         now = int(time.time() * 1000)
         recs = [self._rec("wf_only", "running", now - 90_000)]
@@ -849,16 +850,66 @@ class ProspectiveIdentityTest(unittest.TestCase):
                              {"claude_trace_mirror": self._fake_mirror(recs)}):
             wf, info = C.resolve_workflow_dir(exp_root="/exp/shared",
                                               require_live=True, prospective=True)
-        self.assertEqual(info["run_id"], "wf_only")
-        self.assertEqual(info["identity"], "sole-owning-record")
-        self.assertIn("not proof", info["identity_caveat"])
+        self.assertIsNone(wf, "a sole owning record must not be adopted")
+        self.assertIn("requires a supported invocation identity", info["error"])
+        self.assertIn("integration_gap", info)
+
+    def test_args_fingerprint_identifies_this_launch(self):
+        """The runtime-supplied join: the record carries the hook's own args."""
+        import unittest.mock as mock
+        now = int(time.time() * 1000)
+        mine = {"exp_root": "/exp/shared", "kernel_path": "/k", "deadline_epoch": 111}
+        other = {"exp_root": "/exp/shared", "kernel_path": "/k", "deadline_epoch": 222}
+        recs = [self._rec("wf_other", "running", now - 90_000, args=other),
+                self._rec("wf_mine", "running", now - 1_000, args=mine)]
+        with mock.patch.dict(sys.modules,
+                             {"claude_trace_mirror": self._fake_mirror(recs)}):
+            wf, info = C.resolve_workflow_dir(exp_root="/exp/shared",
+                                              require_live=True, prospective=True,
+                                              identity_args=mine)
+        self.assertEqual(info["run_id"], "wf_mine")
+        self.assertEqual(info["identity"], "args-fingerprint")
+        self.assertEqual(info["args_mismatch_records"], ["wf_other"])
+
+    def test_fingerprint_with_no_match_stays_unresolved(self):
+        import unittest.mock as mock
+        now = int(time.time() * 1000)
+        recs = [self._rec("wf_other", "running", now - 1_000,
+                          args={"exp_root": "/exp/shared", "deadline_epoch": 9})]
+        with mock.patch.dict(sys.modules,
+                             {"claude_trace_mirror": self._fake_mirror(recs)}):
+            wf, info = C.resolve_workflow_dir(
+                exp_root="/exp/shared", require_live=True, prospective=True,
+                identity_args={"exp_root": "/exp/shared", "deadline_epoch": 1})
+        self.assertIsNone(wf)
+        self.assertIn("rejected on args fingerprint", info["error"])
+
+    def test_identical_launches_are_ambiguous_not_picked(self):
+        import unittest.mock as mock
+        now = int(time.time() * 1000)
+        same = {"exp_root": "/exp/shared", "deadline_epoch": 5}
+        recs = [self._rec("wf_a", "running", now - 2_000, args=same),
+                self._rec("wf_b", "running", now - 1_000, args=same)]
+        with mock.patch.dict(sys.modules,
+                             {"claude_trace_mirror": self._fake_mirror(recs)}):
+            wf, info = C.resolve_workflow_dir(exp_root="/exp/shared",
+                                              require_live=True, prospective=True,
+                                              identity_args=same)
+        self.assertIsNone(wf)
+        self.assertEqual(info["ambiguous"], 2)
+
+    def test_fingerprint_is_order_independent(self):
+        a = C.args_fingerprint({"b": 2, "a": 1})
+        b = C.args_fingerprint({"a": 1, "b": 2})
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, C.args_fingerprint({"a": 1, "b": 3}))
 
     def test_no_time_window_is_used_at_all(self):
         """A record with no usable timestamp must not be admitted by timing."""
         import inspect
         src = inspect.getsource(C.resolve_workflow_dir)
         self.assertNotIn("not_before_ms", src)
-        self.assertIn("A time window cannot establish identity", src)
+        self.assertIn("A time window cannot establish it", src)
 
     def test_two_concurrent_live_runs_refuse_rather_than_guess(self):
         import unittest.mock as mock
@@ -1059,7 +1110,7 @@ class MirrorTest(unittest.TestCase):
         self.assertEqual(man["files"]["agent-a1.jsonl"]["action"],
                          "rewritten_previous_kept")
         self.assertTrue(os.path.exists(
-            os.path.join(self.dest, "agent-a1.jsonl.superseded")))
+            os.path.join(self.dest, "agent-a1.jsonl.gen1")))
 
     def test_budget_is_reported_not_silently_truncated(self):
         man = C.mirror_sources(self.wf, self.dest, max_bytes=1)
@@ -1174,3 +1225,303 @@ class IdentityMergeRegressionTest(unittest.TestCase):
         self.assertEqual(second["run"]["agents_returned"], 1)
         self.assertTrue(any("retained from earlier passes" in w
                             for w in second["warnings"]))
+
+
+class RebuildIdentityTest(unittest.TestCase):
+    """A rebuild from a mirror must keep the ORIGINAL run id."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-rebuildid-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.wf = os.path.join(self.dir, "sess", "subagents", "workflows", "wf_real")
+        os.makedirs(self.wf)
+        rd = os.path.join(self.dir, "sess", "workflows")
+        os.makedirs(rd)
+        with open(os.path.join(self.wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_rec(type="launched") + "\n")
+            fh.write(_rec(type="started", key="k", agentId="a1",
+                          label="eng", phase="P") + "\n")
+        with open(os.path.join(self.wf, "agent-a1.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_asst("m1", [{"type": "text", "text": "x"}],
+                           usage={"output_tokens": 3}) + "\n")
+        with open(os.path.join(rd, "wf_real.json"), "w", encoding="utf-8") as fh:
+            json.dump({"runId": "wf_real", "status": "completed"}, fh)
+
+    def test_mirror_rebuild_keeps_the_original_run_id(self):
+        dest = os.path.join(self.dir, "geak_trace_sources_wf_real")
+        C.mirror_sources(self.wf, dest)
+        trace = C.build_trace(dest)
+        self.assertEqual(trace["run"]["run_id"], "wf_real",
+                         "the mirror folder name must not become the run id")
+        self.assertEqual(trace["run"]["source_dir_name"], "geak_trace_sources_wf_real")
+        self.assertTrue(any("identity restored" in w for w in trace["warnings"]))
+
+    def test_graph_run_node_uses_the_real_run_id(self):
+        dest = os.path.join(self.dir, "geak_trace_sources_wf_real")
+        C.mirror_sources(self.wf, dest)
+        trace = C.build_trace(dest)
+        froms = {e["from"] for e in trace["edges"] if e["type"] == "orchestration"}
+        self.assertEqual(froms, {"run:wf_real"})
+
+    def test_rebuilt_trace_reconciles_with_its_original_capture(self):
+        """Identity preservation is what lets the retention guard accept it."""
+        out = os.path.join(self.dir, "t.json")
+        original = C.collect_once(self.wf, out)
+        dest = os.path.join(self.dir, "geak_trace_sources_wf_real")
+        C.mirror_sources(self.wf, dest)
+        rebuilt = C.build_trace(dest)
+        merged = C.merge_traces(original, rebuilt)
+        self.assertFalse(any("belongs to run" in w for w in merged["warnings"]),
+                         "rebuilt trace was rejected as a different run")
+
+
+class MirrorExactnessTest(unittest.TestCase):
+    """Astra R7: append eligibility must be verified by content, and each
+    superseded generation must be retained separately and reconciled."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-exact-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.wf = os.path.join(self.dir, "sess", "subagents", "workflows", "wf_e")
+        os.makedirs(self.wf)
+        rd = os.path.join(self.dir, "sess", "workflows")
+        os.makedirs(rd)
+        with open(os.path.join(rd, "wf_e.json"), "w", encoding="utf-8") as fh:
+            json.dump({"runId": "wf_e", "status": "running"}, fh)
+        with open(os.path.join(self.wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_rec(type="launched") + "\n")
+            fh.write(_rec(type="started", key="k", agentId="a1",
+                          label="eng", phase="P") + "\n")
+        self.src = os.path.join(self.wf, "agent-a1.jsonl")
+        self.dest = os.path.join(self.dir, "mirror")
+
+    def _write(self, mids, filler="y"):
+        with open(self.src, "w", encoding="utf-8") as fh:
+            for m in mids:
+                fh.write(_asst(m, [{"type": "text", "text": filler * 40}],
+                               usage={"output_tokens": 5}) + "\n")
+
+    def test_same_size_rewrite_is_detected_not_called_unchanged(self):
+        self._write(["m1"])
+        C.mirror_sources(self.wf, self.dest)
+        self._write(["m2"])  # same byte length, different content
+        man = C.mirror_sources(self.wf, self.dest)
+        self.assertEqual(man["files"]["agent-a1.jsonl"]["action"],
+                         "rewritten_same_size_previous_kept")
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "agent-a1.jsonl.gen1")))
+
+    def test_changed_early_bytes_are_not_reported_as_append(self):
+        """A boundary sample cannot establish whole-prefix identity."""
+        self._write(["m1"], filler="a")
+        C.mirror_sources(self.wf, self.dest)
+        # rewrite the EARLY content, then append a new call
+        self._write(["m1", "m2"], filler="b")
+        man = C.mirror_sources(self.wf, self.dest)
+        self.assertEqual(man["files"]["agent-a1.jsonl"]["action"],
+                         "rewritten_previous_kept")
+        mirrored = C.build_agent_calls(os.path.join(self.dest, "agent-a1.jsonl"))
+        source = C.build_agent_calls(self.src)
+        self.assertEqual([c["output_text"] for c in mirrored],
+                         [c["output_text"] for c in source])
+
+    def test_each_generation_is_kept_separately(self):
+        for filler in ("a", "b", "c"):
+            self._write(["m1"], filler=filler)
+            C.mirror_sources(self.wf, self.dest)
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "agent-a1.jsonl.gen1")))
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "agent-a1.jsonl.gen2")))
+
+    def test_rebuild_reconciles_calls_across_generations(self):
+        self._write(["m1"])
+        C.mirror_sources(self.wf, self.dest)
+        self._write(["m2"])          # replaces m1 entirely, same size
+        C.mirror_sources(self.wf, self.dest)
+        trace = C.build_trace(self.dest)
+        ids = {c["call_id"] for a in trace["agents"] for c in a["calls"]}
+        self.assertEqual(ids, {"m1", "m2"}, "a retained generation was ignored")
+
+    def test_rewrite_budget_uses_the_actual_copy_size(self):
+        self._write(["m1"])
+        C.mirror_sources(self.wf, self.dest)
+        before = os.path.getsize(os.path.join(self.dest, "agent-a1.jsonl"))
+        self._write(["m1", "m2"], filler="z")  # rewrite + growth
+        man = C.mirror_sources(self.wf, self.dest, max_bytes=1)
+        self.assertEqual(man["files"]["agent-a1.jsonl"]["action"], "skipped_budget")
+        self.assertEqual(man["bytes_copied"], 0)
+        self.assertFalse(man["complete"])
+        self.assertEqual(os.path.getsize(os.path.join(self.dest, "agent-a1.jsonl")),
+                         before)
+
+    def test_divergent_shrink_keeps_both(self):
+        self._write(["m1", "m2"])
+        C.mirror_sources(self.wf, self.dest)
+        self._write(["m3"])  # shorter AND different
+        man = C.mirror_sources(self.wf, self.dest)
+        self.assertEqual(man["files"]["agent-a1.jsonl"]["action"],
+                         "source_shrank_divergent_both_kept")
+        trace = C.build_trace(self.dest)
+        ids = {c["call_id"] for a in trace["agents"] for c in a["calls"]}
+        self.assertEqual(ids, {"m1", "m2", "m3"})
+
+    def test_generations_are_not_themselves_mirrored_as_sources(self):
+        self._write(["m1"])
+        C.mirror_sources(self.wf, self.dest)
+        self._write(["m2"])
+        man = C.mirror_sources(self.wf, self.dest)
+        self.assertFalse(any(".gen" in n for n in man["files"]))
+
+
+class RetentionPayloadTest(unittest.TestCase):
+    """Astra R7 #5: retained payloads must not shrink or collapse."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-payload-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.wf = os.path.join(self.dir, "sess", "subagents", "workflows", "wf_p")
+        os.makedirs(self.wf)
+        rd = os.path.join(self.dir, "sess", "workflows")
+        os.makedirs(rd)
+        with open(os.path.join(rd, "wf_p.json"), "w", encoding="utf-8") as fh:
+            json.dump({"runId": "wf_p", "status": "running"}, fh)
+        with open(os.path.join(self.wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_rec(type="launched") + "\n")
+            fh.write(_rec(type="started", key="k", agentId="a1",
+                          label="eng", phase="P") + "\n")
+        self.out = os.path.join(self.dir, "t.json")
+
+    def _tr(self, result_text, input_text="previously captured input"):
+        lines = [_user([{"type": "text", "text": input_text}]),
+                 _asst("m1", [{"type": "tool_use", "id": "t1", "name": "Bash",
+                               "input": {"c": "ls"}}], stop="tool_use",
+                       usage={"output_tokens": 10}),
+                 _user([{"type": "tool_result", "tool_use_id": "t1",
+                         "content": result_text}])]
+        with open(os.path.join(self.wf, "agent-a1.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    def test_shrinking_but_ok_tool_result_is_not_lost(self):
+        self._tr("captured tool output")
+        first = C.collect_once(self.wf, self.out)
+        self._tr("x")  # same ok status, much shorter payload
+        second = C.collect_once(self.wf, self.out, previous=first)
+        res = second["agents"][0]["calls"][0]["actions"][0]["result"]
+        self.assertIn("captured tool output", res["preview"])
+
+    def test_same_count_input_payload_is_not_lost(self):
+        self._tr("out", input_text="previously captured input")
+        first = C.collect_once(self.wf, self.out)
+        self._tr("out", input_text="x")  # one block either way, shorter text
+        second = C.collect_once(self.wf, self.out, previous=first)
+        blocks = second["agents"][0]["calls"][0]["input"]["blocks"]
+        self.assertTrue(any("previously captured input" in (b.get("text") or "")
+                            for b in blocks))
+
+    def test_distinct_transfer_edges_do_not_collapse(self):
+        prev = {"schema": C.SCHEMA, "run": {"run_id": "wf_p"}, "agents": [],
+                "edges": [
+                    {"type": "result_supplied_to_dispatch", "from": "agent:p",
+                     "to": "agent:c", "event_id": "t1"},
+                    {"type": "result_supplied_to_dispatch", "from": "agent:p",
+                     "to": "agent:c", "event_id": "t2"}],
+                "warnings": []}
+        cur = {"schema": C.SCHEMA, "run": {"run_id": "wf_p"},
+               "agents": [{"agent_id": "x", "calls": [], "totals": {},
+                           "result_status": "pending_or_absent"}],
+               "edges": [{"type": "result_supplied_to_dispatch", "from": "agent:p",
+                          "to": "agent:c", "event_id": "t1"}],
+               "warnings": []}
+        merged = C.merge_traces(prev, cur)
+        ids = {e.get("event_id") for e in merged["edges"]}
+        self.assertEqual(ids, {"t1", "t2"}, "distinct transfers collapsed")
+
+    def test_spawn_edge_keeps_its_attempts_when_return_disappears(self):
+        prev = {"schema": C.SCHEMA, "run": {"run_id": "wf_p"}, "agents": [],
+                "edges": [{"type": "agent_spawn", "from": "agent:p", "to": "agent:c",
+                           "spawn_event_id": "s1", "return_status": "returned",
+                           "attempts": [{"attempt_id": "a1", "status": "returned"}]}],
+                "warnings": []}
+        cur = {"schema": C.SCHEMA, "run": {"run_id": "wf_p"},
+               "agents": [{"agent_id": "x", "calls": [], "totals": {},
+                           "result_status": "pending_or_absent"}],
+               "edges": [{"type": "agent_spawn", "from": "agent:p", "to": "agent:c",
+                          "spawn_event_id": "s1", "return_status": "unmatched",
+                          "attempts": []}],
+               "warnings": []}
+        merged = C.merge_traces(prev, cur)
+        edge = next(e for e in merged["edges"] if e["type"] == "agent_spawn")
+        self.assertEqual(edge["return_status"], "returned")
+        self.assertEqual(len(edge["attempts"]), 1)
+
+
+class WorkflowTimelinePhaseTest(unittest.TestCase):
+    """A nested lane's phases survive via the workflow's own recorded timeline."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-tl-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.wf = os.path.join(self.dir, "sess", "subagents", "workflows", "wf_t")
+        os.makedirs(self.wf)
+        self.rd = os.path.join(self.dir, "sess", "workflows")
+        os.makedirs(self.rd)
+        lines = [_rec(type="launched")]
+        for aid, label in (("a1", "director:setup"), ("a2", "tech_lead:analyze"),
+                           ("a3", "benchmark_engineer")):
+            # The parent journal collapses a nested lane to ONE phase.
+            lines.append(_rec(type="started", key="k" + aid, agentId=aid,
+                              label=label, phase="▸ kernel-lane"))
+        with open(os.path.join(self.wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    def _record(self, events):
+        doc = {"runId": "wf_t", "status": "completed",
+               "result": {"llm_timeline": {"schema": "geak.agent_timeline/1",
+                                           "workflow": "kernel_lane",
+                                           "events": events, "nested": []}}}
+        with open(os.path.join(self.rd, "wf_t.json"), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+
+    def test_recorded_timeline_supplies_the_real_phases(self):
+        self._record([{"seq": 0, "phase": "Setup", "label": "director:setup"},
+                      {"seq": 1, "phase": "Analyze", "label": "tech_lead:analyze"},
+                      {"seq": 2, "phase": "Benchmark", "label": "benchmark_engineer"}])
+        trace = C.build_trace(self.wf)
+        phases = [a.get("timeline_phase") for a in trace["agents"]]
+        self.assertEqual(phases, ["Setup", "Analyze", "Benchmark"])
+        self.assertTrue(all(a.get("phase_provenance") == "workflow_timeline"
+                            for a in trace["agents"]))
+        self.assertTrue(any("workflow's OWN recorded timeline" in w
+                            for w in trace["warnings"]))
+
+    def test_repeated_labels_join_in_dispatch_order(self):
+        with open(os.path.join(self.wf, "journal.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(_rec(type="started", key="k4", agentId="a4",
+                          label="director:setup", phase="x") + "\n")
+        self._record([{"seq": 0, "phase": "Setup", "label": "director:setup"},
+                      {"seq": 1, "phase": "Analyze", "label": "tech_lead:analyze"},
+                      {"seq": 2, "phase": "Benchmark", "label": "benchmark_engineer"},
+                      {"seq": 3, "phase": "Finalize", "label": "director:setup"}])
+        trace = C.build_trace(self.wf)
+        by_id = {a["agent_id"]: a for a in trace["agents"]}
+        self.assertEqual(by_id["a1"]["timeline_phase"], "Setup")
+        self.assertEqual(by_id["a4"]["timeline_phase"], "Finalize")
+
+    def test_agents_without_a_timeline_entry_are_reported(self):
+        self._record([{"seq": 0, "phase": "Setup", "label": "director:setup"}])
+        trace = C.build_trace(self.wf)
+        self.assertTrue(any("no timeline entry" in w for w in trace["warnings"]))
+
+    def test_absent_timeline_falls_back_without_inventing(self):
+        with open(os.path.join(self.rd, "wf_t.json"), "w", encoding="utf-8") as fh:
+            json.dump({"runId": "wf_t", "status": "completed"}, fh)
+        trace = C.build_trace(self.wf)
+        self.assertTrue(all(a.get("timeline_phase") is None for a in trace["agents"]))
+
+    def test_timeline_survives_a_mirror_rebuild(self):
+        self._record([{"seq": 0, "phase": "Setup", "label": "director:setup"},
+                      {"seq": 1, "phase": "Analyze", "label": "tech_lead:analyze"},
+                      {"seq": 2, "phase": "Benchmark", "label": "benchmark_engineer"}])
+        dest = os.path.join(self.dir, "mirror")
+        C.mirror_sources(self.wf, dest)
+        trace = C.build_trace(dest)
+        self.assertEqual([a.get("timeline_phase") for a in trace["agents"]],
+                         ["Setup", "Analyze", "Benchmark"])

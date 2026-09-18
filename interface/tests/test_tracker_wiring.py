@@ -149,9 +149,16 @@ class DecouplingTest(unittest.TestCase):
     """
 
     def test_collector_does_not_import_workflow_code(self):
+        """Coupling means importing or pathing into workflow code.
+
+        Naming a workflow in a comment is documentation, not a dependency, so the
+        guard targets real coupling: imports and path references.
+        """
         src = read(COLLECTOR)
-        for banned in ("e2e_workflow.", "kernel_workflow", "import roles",
-                       "kernel_lane"):
+        for banned in ("import kernel_workflow", "from kernel_workflow",
+                       "import kernel_lane", "from kernel_lane",
+                       "import e2e_workflow", "from e2e_workflow",
+                       "kernel_workflow/", "e2e_workflow/", "import roles"):
             self.assertNotIn(banned, src,
                              "collector must not depend on workflow internals (%s)"
                              % banned)

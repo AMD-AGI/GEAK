@@ -104,12 +104,21 @@ def group_phases(agents):
     Grouping is by CONTIGUOUS run in journal order, so a phase that recurs later
     in the run becomes a second group rather than being folded into the first.
     """
+    # Preference: the workflow's OWN recorded per-agent phase (survives nesting,
+    # which collapses a nested lane's phases in the parent journal), then the
+    # journal phase when it distinguishes anything, then label inference.
+    tl_phases = {(a.get("timeline_phase") or "") for a in agents
+                 if a.get("timeline_phase")}
+    use_timeline = len(tl_phases) > 1
     distinct = {(a.get("journal_phase") or "") for a in agents}
-    use_journal = len(distinct) > 1
+    use_journal = (not use_timeline) and len(distinct) > 1
 
     groups, seen_round = [], False
     for agent in agents:
-        if use_journal:
+        if use_timeline:
+            name = agent.get("timeline_phase") or "(no phase recorded)"
+            provenance = "workflow_timeline"
+        elif use_journal:
             name = agent.get("journal_phase") or "(no phase recorded)"
             provenance = "journal"
         else:
@@ -145,6 +154,9 @@ def build_view(trace):
             "result_truncated": agent.get("result_truncated"),
             "spawn_depth": agent.get("spawn_depth"),
             "transcript_status": agent.get("transcript_status"),
+            "timeline_phase": agent.get("timeline_phase"),
+            "timeline_sub_phase": agent.get("timeline_sub_phase"),
+            "phase_provenance": agent.get("phase_provenance"),
             "start_off": (None if (first is None or origin is None) else first - origin),
             "end_off": (None if (last is None or origin is None) else last - origin),
             "dur": (None if (first is None or last is None) else last - first),
@@ -207,6 +219,7 @@ def build_view(trace):
         "phases": phases,
         "agents": nodes,
         "edges": trace.get("edges") or [],
+        "linkage": (trace.get("run") or {}).get("linkage"),
         "warnings": warnings,
         "totals": totals,
     }
@@ -481,6 +494,8 @@ function renderGraph(){
     + 'drawn as an agent-to-agent spawn edge.</div>';
   h += '<div class="gnode" style="margin-top:8px"><b>'+esc(run)+'</b>'
     + '<span class="chip">workflow orchestrator</span></div>';
+  const recorded = (D.edges||[]).filter(e =>
+    e.type==='result_supplied_to_dispatch' || e.type==='agent_spawn');
   D.agents.forEach((a,i)=>{
     const last = i===D.agents.length-1;
     h += '<div class="gnode"><span class="gline">'+(last?' └─':' ├─')+'▶ </span>'
@@ -492,6 +507,51 @@ function renderGraph(){
           : '<span class="chip warnc">no result</span>')
       + '</div>';
   });
+  // Recorded linkage: transfer and spawn edges, shown as a SEPARATE relationship
+  // from the workflow's orchestration, with their references inspectable.
+  const link = D.linkage;
+  h += '<h3>Recorded linkage</h3>';
+  if(!link || !link.present){
+    h += '<div class="marker">'+esc((link&&link.note) ||
+      'No recorded linkage events for this run.')+'</div>';
+  } else if(!recorded.length){
+    h += '<div class="marker">Linkage events were recorded but none resolved to an '
+      + 'edge in this trace.</div>';
+  } else {
+    if(link.complete===false)
+      h += '<div class="marker">Linkage coverage is INCOMPLETE — some events were '
+        + 'malformed or unresolved; missing edges mean unrecorded, not absent.</div>';
+    recorded.forEach(e=>{
+      const from=(e.from||'').replace('agent:',''), to=(e.to||'').replace('agent:','');
+      const nm=id=>{const a=byId[id]; return a?a.label:id;};
+      if(e.type==='result_supplied_to_dispatch'){
+        h += '<div class="gnode"><span class="chip ok">result supplied</span>'
+          + '<span class="lb" style="cursor:pointer" onclick="select(\''+from+'\')">'
+          + esc(nm(from))+'</span><span class="gline"> ──▶ </span>'
+          + '<span class="lb" style="cursor:pointer" onclick="select(\''+to+'\')">'
+          + esc(nm(to))+'</span></div>'
+          + '<div class="tool"><div>from <code>'+esc(e.producer_result_ref)+'</code>'
+          + ' into <code>'+esc(e.consumer_input_ref)+'</code></div>'
+          + '<div class="trunc">forwarding: '+esc(e.forwarding)
+          + (e.forwarding==='transformed' && !e.transformation_known
+              ? ' (transformation not described — unknown)' : '')
+          + (e.transformation? ' — '+esc(e.transformation):'')+'</div></div>';
+      } else {
+        const st=e.return_status||'unmatched';
+        h += '<div class="gnode"><span class="chip '
+          + (st==='returned'?'ok':(st==='unmatched'?'warnc':'errc'))+'">spawn</span>'
+          + '<span class="lb" style="cursor:pointer" onclick="select(\''+from+'\')">'
+          + esc(nm(from))+'</span><span class="gline"> ──▶ </span>'
+          + '<span class="lb" style="cursor:pointer" onclick="select(\''+to+'\')">'
+          + esc(nm(to))+'</span>'
+          + '<span class="chip">return: '+esc(st)+'</span></div>'
+          + '<div class="tool"><div class="trunc">via tool call '
+          + esc(e.spawn_tool_call_id||'—')+'; attempts: '
+          + ((e.attempts||[]).map(a=>esc(a.attempt_id)+'='+esc(a.status)).join(', ')
+             || 'none recorded')+'</div></div>';
+      }
+    });
+  }
   document.getElementById('graph').innerHTML = h;
 }
 
@@ -585,7 +645,8 @@ def render_markdown(view):
         for w in view["warnings"]:
             add("- %s" % w)
 
-    recorded = any(p.get("provenance") == "journal" for p in view["phases"])
+    recorded = any(p.get("provenance") in ("journal", "workflow_timeline")
+                   for p in view["phases"])
     add("\n## Phase tree (%s)\n"
         % ("recorded journal phases" if recorded
            else "phases inferred from journal labels"))
@@ -621,6 +682,35 @@ def render_markdown(view):
         add("| %d | %s | %d | %s |"
             % (a["ordinal"], a["label"], len(a["calls"]),
                "yes" if a["result_status"] == "returned_to_workflow" else "no"))
+
+    link = (view.get("run") or {}).get("linkage") or {}
+    recorded = [e for e in view["edges"]
+                if e.get("type") in ("result_supplied_to_dispatch", "agent_spawn")]
+    add("\n## Recorded linkage\n")
+    if not link.get("present"):
+        add("_%s_\n" % (link.get("note")
+                         or "No recorded linkage events for this run."))
+    elif not recorded:
+        add("_Linkage events were recorded but none resolved to an edge._\n")
+    else:
+        if link.get("complete") is False:
+            add("> Coverage INCOMPLETE — some events were malformed or unresolved; "
+                "missing edges mean unrecorded, not absent.\n")
+        add("| Kind | From | To | Reference | Detail |")
+        add("| --- | --- | --- | --- | --- |")
+        names = {a["id"]: a["label"] for a in view["agents"]}
+        for e in recorded:
+            f = names.get((e.get("from") or "").replace("agent:", ""), e.get("from"))
+            t = names.get((e.get("to") or "").replace("agent:", ""), e.get("to"))
+            if e["type"] == "result_supplied_to_dispatch":
+                add("| result supplied | %s | %s | `%s` -> `%s` | forwarding: %s |"
+                    % (f, t, e.get("producer_result_ref"), e.get("consumer_input_ref"),
+                       e.get("forwarding")))
+            else:
+                att = ", ".join("%s=%s" % (a.get("attempt_id"), a.get("status"))
+                                for a in (e.get("attempts") or [])) or "none recorded"
+                add("| spawn | %s | %s | tool `%s` | return: %s; attempts: %s |"
+                    % (f, t, e.get("spawn_tool_call_id"), e.get("return_status"), att))
 
     add("\n## Per-agent API calls\n")
     add("Full input excerpts, reasoning markers, outputs and tool results are in the "

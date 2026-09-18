@@ -37,6 +37,7 @@ failure to collect is reported, never raised into the caller's workflow.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -194,6 +195,51 @@ def read_run_record(workflow_dir):
 #: an absent record) leaves the trace non-terminal.
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "canceled",
                                 "error", "aborted", "timeout"})
+
+
+def read_agent_timeline(workflow_dir):
+    """Per-agent phases as the WORKFLOW itself recorded them, or None.
+
+    A nested lane's phases are collapsed in the parent journal to a single
+    "> <lane>" group, so the journal cannot describe a kernel run's real
+    pipeline. The workflow records them itself though: kernel_lane builds a
+    ``geak.agent_timeline/1`` timeline at dispatch, with the phase, label, role
+    and sub_phase of every agent, and it is carried in the run record's
+    ``result.llm_timeline``. That is a recorded source, not an inference.
+
+    Preference order: the run record (always present once the run returns), then
+    a persisted ``agent_timeline.json`` beside the run's other trace artifacts.
+    """
+    record, _ = read_run_record(workflow_dir)
+    for holder in ((record or {}).get("result"), record or {}):
+        if isinstance(holder, dict):
+            tl = holder.get("llm_timeline")
+            if isinstance(tl, dict) and isinstance(tl.get("events"), list):
+                return tl, "run_record.result.llm_timeline"
+    eval_dir = eval_dir_of_run(workflow_dir)
+    for cand in ([os.path.join(eval_dir, "reports", "trace", "agent_timeline.json")]
+                 if eval_dir else []) + [
+                 os.path.join(workflow_dir, "agent_timeline.json")]:
+        try:
+            with open(cand, "r", encoding="utf-8") as fh:
+                tl = json.load(fh)
+            if isinstance(tl, dict) and isinstance(tl.get("events"), list):
+                return tl, cand
+        except Exception:
+            continue
+    return None, None
+
+
+def _timeline_index(timeline):
+    """Map label -> ordered timeline events, so repeats join by dispatch order."""
+    by_label = {}
+    for ev in (timeline or {}).get("events") or []:
+        if not isinstance(ev, dict):
+            continue
+        by_label.setdefault(ev.get("label"), []).append(ev)
+    for evs in by_label.values():
+        evs.sort(key=lambda e: e.get("seq") if isinstance(e.get("seq"), int) else 0)
+    return by_label
 
 
 def read_meta(workflow_dir, agent_id):
@@ -561,7 +607,9 @@ def build_trace(workflow_dir, run_status=None, price=True, rates_path=None,
                         "or this directory is not a workflow run.")
 
     agents, edges = [], []
-    run_node = "run:%s" % os.path.basename(workflow_dir)
+    _rec_early, _ = read_run_record(workflow_dir)
+    run_node = "run:%s" % ((_rec_early or {}).get("runId")
+                           or os.path.basename(workflow_dir))
     origin_ms, end_ms = None, None
     journal_has_ts = False
 
@@ -571,6 +619,24 @@ def build_trace(workflow_dir, run_status=None, price=True, rates_path=None,
         tpath = os.path.join(workflow_dir, "agent-%s.jsonl" % aid)
         has_transcript = os.path.exists(tpath)
         calls = build_agent_calls(tpath, rates, cost_fns) if has_transcript else []
+        # Retained generations hold content a later rewrite replaced. Reading only
+        # the current file would silently drop calls the mirror deliberately kept.
+        import glob as _g
+        gens = sorted(_g.glob(tpath + ".gen*"))
+        if gens:
+            by_id = {c.get("call_id"): c for c in calls}
+            for gen in gens:
+                for call in build_agent_calls(gen, rates, cost_fns):
+                    cid = call.get("call_id")
+                    by_id[cid] = _merge_call(by_id.get(cid), call)
+            calls = sorted(by_id.values(),
+                           key=lambda c: (c.get("ts_ms") is None, c.get("ts_ms") or 0))
+            for i, c in enumerate(calls):
+                c["index"] = i
+            has_transcript = True
+            warnings.append(
+                "agent %s: reconciled %d retained source generation(s) with the "
+                "current transcript." % (aid, len(gens)))
 
         ts_list = [c["ts_ms"] for c in calls if c.get("ts_ms") is not None]
         first_ms = min(ts_list) if ts_list else None
@@ -656,6 +722,34 @@ def build_trace(workflow_dir, run_status=None, price=True, rates_path=None,
     except Exception:
         _events = None
 
+    # Real phases, when the workflow recorded them. Joined by label; repeated
+    # labels are consumed in dispatch order rather than guessed between.
+    timeline, tl_source = read_agent_timeline(workflow_dir)
+    if timeline:
+        tl_index = _timeline_index(timeline)
+        used, joined, unjoined = {}, 0, []
+        for agent in agents:
+            evs = tl_index.get(agent.get("label")) or []
+            i = used.get(agent.get("label"), 0)
+            if i < len(evs):
+                ev = evs[i]
+                used[agent.get("label")] = i + 1
+                agent["timeline_phase"] = ev.get("phase") or None
+                agent["timeline_role"] = ev.get("role") or None
+                agent["timeline_sub_phase"] = ev.get("sub_phase") or None
+                agent["timeline_seq"] = ev.get("seq")
+                agent["phase_provenance"] = "workflow_timeline"
+                joined += 1
+            else:
+                unjoined.append(agent.get("label"))
+        warnings.append(
+            "Phases for %d of %d agent(s) come from the workflow's OWN recorded "
+            "timeline (%s), not from labels." % (joined, len(agents), tl_source))
+        if unjoined:
+            warnings.append(
+                "%d agent(s) had no timeline entry and fall back to label-derived "
+                "grouping: %s" % (len(unjoined), ", ".join(sorted(set(unjoined))[:6])))
+
     n_done = sum(1 for a in agents if a["status"] == "completed")
 
     # Lifecycle: completion comes from the run record, never from the fact that
@@ -696,10 +790,22 @@ def build_trace(workflow_dir, run_status=None, price=True, rates_path=None,
                 "%d owning record(s) were skipped as pre-existing runs that started "
                 "before this observer." % resolver_info["skipped_started_before_observer"])
 
+    # Identity must survive a rebuild from a mirror. The mirror's folder name is
+    # not a run id, and treating it as one silently renames the run, breaks the
+    # graph's run node, and defeats the cross-run retention guard when a rebuilt
+    # trace is reconciled with its original capture.
+    _dir_name = os.path.basename(os.path.abspath(workflow_dir))
+    _true_run_id = (record or {}).get("runId") or _dir_name
+    if _true_run_id != _dir_name:
+        warnings.append(
+            "Rebuilt from a directory named %r; run identity restored from the "
+            "mirrored run record as %s." % (_dir_name, _true_run_id))
+
     trace_out = {
         "schema": SCHEMA,
         "run": {
-            "run_id": os.path.basename(workflow_dir),
+            "run_id": _true_run_id,
+            "source_dir_name": _dir_name,
             "resolver": (dict(resolver_info) if resolver_info else None),
             "workflow_dir": workflow_dir,
             "status": status,
@@ -798,11 +904,16 @@ def _merge_call(prev, new):
                 out_acts[key] = dict(pa, retained_from_earlier_capture=True)
                 continue
             act = dict(na)
-            pres = (pa.get("result") or {}).get("status")
-            nres = (act.get("result") or {}).get("status")
-            # A recorded ok/error result is never replaced by "missing".
+            pr, nr = (pa.get("result") or {}), (act.get("result") or {})
+            pres, nres = pr.get("status"), nr.get("status")
+            # A recorded ok/error result is never replaced by "missing" -- and a
+            # result that KEEPS its status must not silently shrink either: a
+            # shorter re-read of the same result is not new information.
             if nres == "missing" and pres in ("ok", "error"):
-                act["result"] = pa["result"]
+                act["result"] = pr
+                act["retained_from_earlier_capture"] = True
+            elif len(pr.get("preview") or "") > len(nr.get("preview") or ""):
+                act["result"] = pr
                 act["retained_from_earlier_capture"] = True
             if len(pa.get("args_preview") or "") > len(act.get("args_preview") or ""):
                 act["args_preview"] = pa.get("args_preview")
@@ -810,9 +921,14 @@ def _merge_call(prev, new):
                 act["args_bytes_total"] = pa.get("args_bytes_total")
             out_acts[key] = act
         merged["actions"] = [out_acts[k] for k in order]
-    if len((prev.get("input") or {}).get("blocks") or []) > \
-            len((new.get("input") or {}).get("blocks") or []):
-        merged["input"] = prev.get("input")
+    # Inputs: compare retained PAYLOAD, not block count. An identical count whose
+    # text shrank is a loss, not a no-op.
+    def _inbytes(side):
+        return sum(len((b.get("text") or "")) for b in ((side or {}).get("blocks") or []))
+    p_in, n_in = prev.get("input") or {}, new.get("input") or {}
+    if (len(p_in.get("blocks") or []) > len(n_in.get("blocks") or [])
+            or _inbytes(p_in) > _inbytes(n_in)):
+        merged["input"] = p_in
         merged["retained_input_from_earlier_capture"] = True
     pr, nr = prev.get("reasoning") or {}, new.get("reasoning") or {}
     if len(pr.get("text") or "") > len(nr.get("text") or "") or \
@@ -869,11 +985,12 @@ def merge_traces(previous, current):
             "not %s. Retention applies only within a run." % (prev_id, cur_id))
         return current
     prev_agents = {a.get("agent_id"): a for a in (previous.get("agents") or [])}
-    if not prev_agents:
-        return current
+    # NOTE: no early return when there are no previous AGENTS. A previous trace
+    # can still carry edges and linkage that must be reconciled, and bailing out
+    # here silently dropped them.
 
     retained_agents, retained_calls = 0, 0
-    for agent in current.get("agents") or []:
+    for agent in (current.get("agents") or []) if prev_agents else []:
         old = prev_agents.get(agent.get("agent_id"))
         if not old:
             continue
@@ -956,13 +1073,26 @@ def merge_traces(previous, current):
 
     # Journal loss must not silently drop the proven graph or zero the headers
     # while retained agents are still being reported.
-    cur_edges = {(e.get("type"), e.get("from"), e.get("to")): e
-                 for e in (current.get("edges") or [])}
+    # Edge identity includes the EVENT id: two distinct transfers between the
+    # same pair of agents are different edges, and keying on endpoints alone
+    # collapses them when the source loses one.
+    def _ekey(e):
+        return (e.get("type"), e.get("from"), e.get("to"),
+                e.get("event_id") or e.get("spawn_event_id"))
+    cur_edges = {_ekey(e): e for e in (current.get("edges") or [])}
     added = 0
     for edge in previous.get("edges") or []:
-        key = (edge.get("type"), edge.get("from"), edge.get("to"))
-        if key not in cur_edges:
+        key = _ekey(edge)
+        prior_here = cur_edges.get(key)
+        if prior_here is None:
             cur_edges[key] = edge
+            added += 1
+        elif (edge.get("attempts") and not prior_here.get("attempts")):
+            # A spawn re-read without its return must not lose the recorded
+            # attempt/outcome just because the edge itself still exists.
+            prior_here["attempts"] = edge["attempts"]
+            prior_here["return_status"] = edge.get("return_status")
+            prior_here["retained_from_earlier_capture"] = True
             added += 1
     if added:
         current["edges"] = list(cur_edges.values())
@@ -1087,62 +1217,125 @@ _MIRROR_PATTERNS = ("journal.jsonl", "agent-*.jsonl", "agent-*.meta.json",
                     "linkage_events.jsonl")
 
 
-def _mirror_one(src, dest, max_bytes_left):
-    """Copy one source file durably and incrementally.
+def _sha256_of(path, length=None):
+    """SHA-256 of a file, or of its first ``length`` bytes. None if unreadable."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            remaining = length
+            while True:
+                chunk = fh.read(1024 * 1024 if remaining is None
+                                else min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                h.update(chunk)
+                if remaining is not None:
+                    remaining -= len(chunk)
+                    if remaining <= 0:
+                        break
+        if length is not None and remaining and remaining > 0:
+            return None  # source shorter than requested prefix
+        return h.hexdigest()
+    except OSError:
+        return None
 
-    Append-only growth is the normal case, so only the delta is copied, after
-    confirming the bytes already mirrored still match the source at that offset.
-    A source that SHRANK or was rewritten never truncates the mirror: the mirrored
-    copy is what survives, because it is the only remaining record of what was
-    there. Returns ``(action, bytes_copied)``.
+
+def _next_generation(dest):
+    """Path for the next retained generation of ``dest``.
+
+    Each superseded version gets its OWN name. Reusing one ``.superseded`` path
+    destroys the previous retained generation on the next rewrite, which loses
+    exactly the history the mirror exists to keep.
+    """
+    n = 1
+    while os.path.exists("%s.gen%d" % (dest, n)):
+        n += 1
+    return "%s.gen%d" % (dest, n)
+
+
+def _mirror_one(src, dest, max_bytes_left):
+    """Copy one source file durably, incrementally, and VERIFIED BY CONTENT.
+
+    Append eligibility is decided by hashing the whole already-mirrored prefix
+    against the source, never by a sampled boundary or by equal length: a change
+    earlier in the file, or a same-size replacement, must not be reported as
+    unchanged. A source that shrank or vanished never truncates the mirror, and
+    a rewrite retains the previous content as its own numbered generation.
+
+    Returns ``(action, bytes_copied, info)``.
     """
     try:
         src_size = os.path.getsize(src)
     except OSError:
-        return ("source_missing_mirror_retained" if os.path.exists(dest)
-                else "source_missing"), 0
+        return (("source_missing_mirror_retained" if os.path.exists(dest)
+                 else "source_missing"), 0, {})
     dest_size = os.path.getsize(dest) if os.path.exists(dest) else None
 
     if dest_size is None:
         if src_size > max_bytes_left:
-            return "skipped_budget", 0
+            return "skipped_budget", 0, {"needed": src_size}
         with open(src, "rb") as fh_in, open(dest + ".part", "wb") as fh_out:
             shutil.copyfileobj(fh_in, fh_out)
         os.replace(dest + ".part", dest)
-        return "copied", src_size
+        return "copied", src_size, {"sha256": _sha256_of(dest)}
+
+    dest_hash = _sha256_of(dest)
 
     if src_size == dest_size:
-        return "unchanged", 0
+        # Equal length is NOT equal content: a same-size replacement would be
+        # invisible. Compare the bytes.
+        if _sha256_of(src) == dest_hash:
+            return "unchanged", 0, {"sha256": dest_hash}
+        if src_size > max_bytes_left:
+            return "skipped_budget", 0, {"needed": src_size}
+        gen = _next_generation(dest)
+        shutil.copy2(dest, gen)
+        with open(src, "rb") as a, open(dest + ".part", "wb") as b:
+            shutil.copyfileobj(a, b)
+        os.replace(dest + ".part", dest)
+        return ("rewritten_same_size_previous_kept", src_size,
+                {"generation": os.path.basename(gen), "sha256": _sha256_of(dest)})
 
     if src_size < dest_size:
-        # Pruned, rotated or truncated at the source. Keep what we already have.
-        return "source_shrank_mirror_retained", 0
+        # Pruned, rotated or truncated at the source. Keep what we already have;
+        # if the shorter source is NOT a prefix of it, retain it as a generation
+        # too, because it is newly observed content we have not stored.
+        if _sha256_of(src, src_size) != _sha256_of(dest, src_size):
+            if src_size > max_bytes_left:
+                return ("source_shrank_mirror_retained", 0,
+                        {"divergent": True, "skipped_budget": True})
+            gen = _next_generation(dest)
+            with open(src, "rb") as a, open(gen, "wb") as b:
+                shutil.copyfileobj(a, b)
+            return ("source_shrank_divergent_both_kept", src_size,
+                    {"generation": os.path.basename(gen)})
+        return "source_shrank_mirror_retained", 0, {}
 
-    delta = src_size - dest_size
-    if delta > max_bytes_left:
-        return "skipped_budget", 0
-    probe = min(_APPEND_PROBE, dest_size)
-    try:
-        with open(src, "rb") as fh_in, open(dest, "r+b") as fh_out:
-            if probe:
-                fh_in.seek(dest_size - probe)
-                head = fh_in.read(probe)
-                fh_out.seek(dest_size - probe)
-                if fh_out.read(probe) != head:
-                    # Same path, different content: not an append. Preserve the
-                    # old capture beside the fresh one rather than overwrite it.
-                    fh_out.close()
-                    shutil.copy2(dest, dest + ".superseded")
-                    with open(src, "rb") as a, open(dest + ".part", "wb") as b:
-                        shutil.copyfileobj(a, b)
-                    os.replace(dest + ".part", dest)
-                    return "rewritten_previous_kept", src_size
-            fh_in.seek(dest_size)
-            fh_out.seek(dest_size)
-            shutil.copyfileobj(fh_in, fh_out)
-        return "appended", delta
-    except OSError:
-        return "error", 0
+    # src_size > dest_size: only an append if the WHOLE mirrored prefix matches.
+    if _sha256_of(src, dest_size) == dest_hash:
+        delta = src_size - dest_size
+        if delta > max_bytes_left:
+            return "skipped_budget", 0, {"needed": delta}
+        try:
+            with open(src, "rb") as fh_in, open(dest, "r+b") as fh_out:
+                fh_in.seek(dest_size)
+                fh_out.seek(dest_size)
+                shutil.copyfileobj(fh_in, fh_out)
+        except OSError:
+            return "error", 0, {}
+        return "appended", delta, {"sha256": _sha256_of(dest)}
+
+    # Longer, but the prefix differs: a rewrite, not an append. Budget must be
+    # checked against the ACTUAL copy size (the whole replacement), not a delta.
+    if src_size > max_bytes_left:
+        return "skipped_budget", 0, {"needed": src_size}
+    gen = _next_generation(dest)
+    shutil.copy2(dest, gen)
+    with open(src, "rb") as a, open(dest + ".part", "wb") as b:
+        shutil.copyfileobj(a, b)
+    os.replace(dest + ".part", dest)
+    return ("rewritten_previous_kept", src_size,
+            {"generation": os.path.basename(gen), "sha256": _sha256_of(dest)})
 
 
 def mirror_sources(workflow_dir, dest_dir, max_bytes=None):
@@ -1186,11 +1379,17 @@ def mirror_sources(workflow_dir, dest_dir, max_bytes=None):
     except OSError:
         pass
 
+    names = [n for n in names if ".gen" not in n and not n.endswith(".part")]
     for name in sorted(set(names)):
-        action, copied = _mirror_one(os.path.join(workflow_dir, name),
-                                     os.path.join(dest_dir, name),
-                                     budget - manifest["bytes_copied"])
-        manifest["files"][name] = {"action": action, "bytes": copied}
+        action, copied, extra = _mirror_one(os.path.join(workflow_dir, name),
+                                            os.path.join(dest_dir, name),
+                                            budget - manifest["bytes_copied"])
+        entry = {"action": action, "bytes": copied}
+        entry.update(extra or {})
+        manifest["files"][name] = entry
+        if entry.get("generation"):
+            manifest.setdefault("generations", []).append(
+                {"file": name, "kept_as": entry["generation"]})
         manifest["bytes_copied"] += copied
         if action.endswith("retained"):
             manifest["retained"] += 1
@@ -1358,6 +1557,25 @@ def watch(workflow_dir, out_path, interval=20.0, max_seconds=None,
         time.sleep(interval)
 
 
+def args_fingerprint(args):
+    """Stable fingerprint of a workflow's invocation arguments.
+
+    This is the identity join the runtime actually supplies: the ``wf_*.json``
+    record carries the SAME ``args`` object the launch hook was invoked with
+    (kernel_path, gpu_ids, budget, deadline_epoch, ...), so matching it is a
+    property of the recorded data rather than a guess about timing. Two distinct
+    launches differ in at least ``deadline_epoch``; two launches that are
+    byte-identical in every argument are genuinely indistinguishable and are
+    reported as ambiguous rather than picked.
+    """
+    try:
+        return hashlib.sha256(
+            json.dumps(args, sort_keys=True, separators=(",", ":"),
+                       default=str).encode("utf-8")).hexdigest()
+    except Exception:
+        return None
+
+
 def _record_start_ms(record):
     """Epoch-ms this run started, from whichever field the record carries."""
     for key in ("startTime", "timestamp"):
@@ -1373,7 +1591,8 @@ def _record_start_ms(record):
 
 def resolve_workflow_dir(exp_root=None, eval_dir=None, script_dir=None,
                          session_id=None, require_live=False, run_id=None,
-                         allow_ambiguous=False, prospective=False):
+                         allow_ambiguous=False, prospective=False,
+                         identity_args=None):
     """Find the run's ``subagents/workflows/<runId>/`` directory at launch.
 
     The Claude Code runtime writes a ``wf_*.json`` record whose ``args`` block
@@ -1414,7 +1633,9 @@ def resolve_workflow_dir(exp_root=None, eval_dir=None, script_dir=None,
         info["error"] = "record scan failed: %s" % exc
         return None, info
 
-    eligible, skipped_terminal, skipped_older = [], 0, 0  # skipped_older: unused
+    identity_fp = args_fingerprint(identity_args) if identity_args is not None else None
+    info["identity_fingerprint"] = identity_fp
+    eligible, skipped_terminal, near_misses = [], 0, []
     for rec_path, record in records:
         if not mirror._owns(record, eval_dir, exp_root):
             continue
@@ -1427,6 +1648,11 @@ def resolve_workflow_dir(exp_root=None, eval_dir=None, script_dir=None,
                 continue
         if run_id and record.get("runId") != run_id:
             continue
+        if identity_fp is not None:
+            rec_fp = args_fingerprint(record.get("args"))
+            if rec_fp != identity_fp:
+                near_misses.append(record.get("runId"))
+                continue
         if require_live and str(record.get("status") or "").lower() in _TERMINAL_STATUSES:
             # A finished run is not this launch's run. Skipping it here (rather
             # than after picking a winner) is what lets a still-registering new
@@ -1439,33 +1665,42 @@ def resolve_workflow_dir(exp_root=None, eval_dir=None, script_dir=None,
 
     info["candidates"] = len(eligible)
     info["skipped_terminal"] = skipped_terminal
-    info["skipped_started_before_observer"] = skipped_older
+    info["args_mismatch_records"] = [r for r in near_misses if r][:10]
     if not eligible:
         info["error"] = (
             "no record OWNS this directory (same-field exact match)%s"
             % (("; %d owning record(s) skipped as already terminal" % skipped_terminal)
                if skipped_terminal else "")
-            + (("; %d skipped as started before this observer" % skipped_older)
-               if skipped_older else ""))
+            + (("; %d owning record(s) rejected on args fingerprint" % len(near_misses))
+               if near_misses else ""))
         return None, info
 
     def _stamp(pair):
         rec = pair[1]
         return str(rec.get("timestamp") or rec.get("startTime") or "")
 
-    # Invocation identity. An explicit run_id is proof. Without one, a SINGLE
-    # owning record is the only case where attachment involves no choice -- and
-    # even then it is not proof that this record is THIS launch, so it is
-    # labelled, not asserted. A time window cannot establish identity: any slack
-    # admits a recent neighbour, observer start is not workflow start, and a
-    # record with no usable timestamp would be accepted regardless. So no time
-    # filter is used at all.
+    # Invocation identity. A time window cannot establish it: any slack admits a
+    # recent neighbour, observer start is not workflow start, and a record with
+    # no usable timestamp would be admitted regardless -- so no time filter is
+    # used at all. Nor is "the only owning record" a substitute: the sole record
+    # under a directory may simply be an unrelated run. Prospective attachment
+    # therefore requires a supported identity, or it stays unresolved.
+    if prospective and not run_id and identity_fp is None:
+        info["ambiguous"] = len(eligible)
+        info["error"] = (
+            "prospective attachment requires a supported invocation identity "
+            "(--run-id, or --identity-args matching the run record's own args). "
+            "%d owning record(s) found, but none is PROVEN to be this launch, so "
+            "attachment is left unresolved rather than guessed." % len(eligible))
+        info["integration_gap"] = (
+            "The launch hook supplied no runtime invocation identity. Pass "
+            "--identity-args with the workflow's own args object, or --run-id.")
+        return None, info
     if prospective and not run_id and len(eligible) > 1:
         info["ambiguous"] = len(eligible)
         info["error"] = (
-            "%d owning record(s) and no explicit --run-id: this launch cannot be "
-            "identified. Attachment left unresolved rather than guessed."
-            % len(eligible))
+            "%d records match this identity; the launches are indistinguishable. "
+            "Attachment left unresolved rather than guessed." % len(eligible))
         return None, info
 
     eligible.sort(key=_stamp, reverse=True)
@@ -1491,12 +1726,8 @@ def resolve_workflow_dir(exp_root=None, eval_dir=None, script_dir=None,
     hit = "owns:" + ",".join(owned_fields or ["unknown"])
     if run_id:
         info["identity"] = "explicit-run-id"
-    elif prospective:
-        info["identity"] = "sole-owning-record"
-        info["identity_caveat"] = (
-            "Attached to the only record owning this directory. That is not proof "
-            "it is THIS invocation: the runtime exposes no launch token to the "
-            "hook, so a pre-existing run under the same root would look identical.")
+    elif identity_fp is not None:
+        info["identity"] = "args-fingerprint"
     else:
         info["identity"] = "retrospective"
     info["owned_fields"] = owned_fields
@@ -1514,7 +1745,8 @@ def resolve_workflow_dir(exp_root=None, eval_dir=None, script_dir=None,
 
 
 def _await_workflow_dir(exp_root, eval_dir, script_dir, timeout_s, interval,
-                        require_live=True, run_id=None, prospective=True):
+                        require_live=True, run_id=None, prospective=True,
+                        identity_args=None):
     """Poll for THIS launch's run record; a workflow takes a moment to register.
 
     ``require_live`` defaults True here because this is the prospective path: a
@@ -1527,7 +1759,8 @@ def _await_workflow_dir(exp_root, eval_dir, script_dir, timeout_s, interval,
         wf_dir, info = resolve_workflow_dir(exp_root=exp_root, eval_dir=eval_dir,
                                             script_dir=script_dir,
                                             require_live=require_live,
-                                            run_id=run_id, prospective=prospective)
+                                            run_id=run_id, prospective=prospective,
+                                            identity_args=identity_args)
         if wf_dir:
             return wf_dir, info
         if time.time() >= deadline:
@@ -1562,6 +1795,10 @@ def main(argv=None):
                          "(default: <out-dir>/geak_trace_sources_<runId>)")
     ap.add_argument("--no-mirror", dest="mirror", action="store_false", default=True,
                     help="Do not mirror the run-owned sources")
+    ap.add_argument("--identity-args",
+                    help="JSON of the workflow's own invocation args, as the launch "
+                         "hook received them. Matched against the run record's args "
+                         "block -- a runtime-supplied join, not a timing guess.")
     ap.add_argument("--run-id",
                     help="Explicit workflow runId to attach to. This is the only "
                          "PROOF of invocation identity; without it attachment is "
@@ -1581,6 +1818,14 @@ def main(argv=None):
     if not (args.out or args.out_dir):
         ap.error("give --out or --out-dir")
 
+    identity = None
+    if args.identity_args:
+        try:
+            identity = json.loads(args.identity_args)
+        except ValueError as exc:
+            sys.stderr.write("geak_trace_collector: --identity-args is not JSON (%s); "
+                             "prospective attachment will be unresolved\n" % exc)
+
     wf_dir, resolved_info = args.workflow_dir, None
     if not wf_dir:
         if not (args.exp_root or args.eval_dir):
@@ -1594,7 +1839,8 @@ def main(argv=None):
                                            args.resolve_timeout, args.interval,
                                            require_live=args.prospective,
                                            run_id=args.run_id,
-                                           prospective=args.prospective)
+                                           prospective=args.prospective,
+                                           identity_args=identity)
         if not wf_dir:
             # Not an error: a run that never registered leaves nothing to track,
             # and the observer must never fail the workflow it is observing. It

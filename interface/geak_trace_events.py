@@ -48,10 +48,16 @@ FORWARD_TRANSFORMED = "transformed"
 FORWARD_UNKNOWN = "unknown"
 
 _REQUIRED = {
-    RESULT_SUPPLIED: ("producer_invocation_id", "producer_result_ref",
+    # event_id is required: without a stable identity a replay cannot be told
+    # from a second, genuinely distinct transfer.
+    RESULT_SUPPLIED: ("event_id", "producer_invocation_id", "producer_result_ref",
                       "consumer_invocation_id", "consumer_input_ref"),
-    SPAWN: ("parent_invocation_id", "spawn_event_id", "child_invocation_id"),
-    SPAWN_RETURN: ("spawn_event_id", "child_invocation_id"),
+    # spawn_tool_call_id is required: the agreed contract is parent + the ACTUAL
+    # spawning tool event + child. A spawn with no tool reference is not joined.
+    SPAWN: ("parent_invocation_id", "spawn_event_id", "spawn_tool_call_id",
+            "child_invocation_id"),
+    # attempt_id is required: repetition is not evidence of a retry.
+    SPAWN_RETURN: ("spawn_event_id", "child_invocation_id", "attempt_id"),
 }
 
 
@@ -130,102 +136,159 @@ def read_events(path):
     return validated, problems
 
 
+def _same(a, b, fields):
+    return all(a.get(f) == b.get(f) for f in fields)
+
+
 def build_edges(events, known_invocations=None):
     """Turn validated events into edges, reporting what could not be joined.
 
-    ``known_invocations`` is the set of invocation ids the trace actually
-    observed. An event referring to an invocation that is not in the trace is
-    left UNRESOLVED rather than creating a node for it -- a dangling reference is
-    a coverage gap, not evidence of a hidden agent.
+    Joins are by stable identity and every identity-defining field is checked.
+    A contradiction INVALIDATES the affected join rather than selecting the
+    first or last record seen: a conflicting parent, child, destination or
+    outcome means we do not know the relationship, which is not the same as
+    knowing one of the two candidates. Replays of an identical record are
+    idempotent.
 
-    Returns ``(edges, unresolved, stats)``.
+    ``known_invocations`` is the set of invocation ids the trace observed. An
+    EMPTY set means nothing is joinable -- it must not disable the check and let
+    edges be built to invocations that were never seen.
     """
     known = set(known_invocations or ())
-    spawns, returns = {}, {}
     edges, unresolved = [], []
+    conflicted = set()
 
+    def unjoinable(ev, reason):
+        unresolved.append({"event": ev, "reason": reason})
+
+    def refs_present(ev, *ids):
+        absent = [r for r in ids if r not in known]
+        return absent
+
+    # ---- spawns: identity is spawn_event_id; every field must agree ----------
+    spawns = {}
     for ev in events:
-        kind = ev.get("_kind")
-        if kind == SPAWN:
-            key = ev["spawn_event_id"]
-            if key in spawns:
-                # Duplicate/replayed record: same id must describe the same spawn.
-                if spawns[key]["child_invocation_id"] != ev["child_invocation_id"]:
-                    unresolved.append({"event": ev, "reason":
-                                       "conflicting child for spawn_event_id"})
-                continue
+        if ev.get("_kind") != SPAWN:
+            continue
+        key = ev["spawn_event_id"]
+        prior = spawns.get(key)
+        if prior is None:
             spawns[key] = ev
-        elif kind == SPAWN_RETURN:
-            returns.setdefault(ev["spawn_event_id"], []).append(ev)
+            continue
+        if _same(prior, ev, ("parent_invocation_id", "child_invocation_id",
+                             "spawn_tool_call_id")):
+            continue  # exact replay: idempotent
+        conflicted.add(key)
+        unjoinable(ev, "conflicting spawn record for spawn_event_id %s "
+                       "(parent/child/tool disagree); join invalidated" % key)
 
+    # ---- returns: identity is (spawn_event_id, attempt_id) ------------------
+    returns = {}
+    for ev in events:
+        if ev.get("_kind") != SPAWN_RETURN:
+            continue
+        key = (ev["spawn_event_id"], ev["attempt_id"])
+        prior = returns.get(key)
+        if prior is None:
+            returns[key] = ev
+            continue
+        if _same(prior, ev, ("child_invocation_id", "status", "result_ref", "error")):
+            continue  # exact replay: idempotent
+        conflicted.add(ev["spawn_event_id"])
+        unjoinable(ev, "contradictory return for attempt %s of spawn %s; "
+                       "join invalidated" % (ev["attempt_id"], ev["spawn_event_id"]))
+
+    # ---- transfers: identity is event_id ------------------------------------
+    transfers = {}
     for ev in events:
         if ev.get("_kind") != RESULT_SUPPLIED:
             continue
-        missing = [r for r in (ev["producer_invocation_id"], ev["consumer_invocation_id"])
-                   if known and r not in known]
-        if missing:
-            unresolved.append({"event": ev,
-                               "reason": "invocation(s) not present in this trace: %s"
-                                         % ", ".join(missing)})
+        key = ev["event_id"]
+        prior = transfers.get(key)
+        if prior is None:
+            transfers[key] = ev
+            continue
+        if _same(prior, ev, ("producer_invocation_id", "producer_result_ref",
+                             "consumer_invocation_id", "consumer_input_ref",
+                             "forwarding")):
+            continue  # exact replay: idempotent
+        conflicted.add(key)
+        unjoinable(ev, "conflicting transfer record for event_id %s; "
+                       "join invalidated" % key)
+
+    for key, ev in transfers.items():
+        if key in conflicted:
+            continue
+        absent = refs_present(ev, ev["producer_invocation_id"],
+                              ev["consumer_invocation_id"])
+        if absent:
+            unjoinable(ev, "invocation(s) not present in this trace: %s"
+                           % ", ".join(absent))
             continue
         edges.append({
             "type": "result_supplied_to_dispatch",
             "from": "agent:%s" % ev["producer_invocation_id"],
             "to": "agent:%s" % ev["consumer_invocation_id"],
-            "provenance": "recorded_event",
-            "proven": True,
+            "event_id": key,
+            "provenance": "recorded_event", "proven": True,
             "producer_result_ref": ev["producer_result_ref"],
             "consumer_input_ref": ev["consumer_input_ref"],
             "forwarding": ev.get("forwarding", FORWARD_UNKNOWN),
             "transformation": ev.get("transformation"),
             "transformation_known": ev.get("transformation_known", False),
-            "event_id": ev.get("event_id"),
         })
 
     for key, ev in spawns.items():
-        parent, child = ev["parent_invocation_id"], ev["child_invocation_id"]
-        absent = [r for r in (parent, child) if known and r not in known]
-        if absent:
-            unresolved.append({"event": ev,
-                               "reason": "invocation(s) not present in this trace: %s"
-                                         % ", ".join(absent)})
+        if key in conflicted:
             continue
-        rets = returns.get(key) or []
-        # Several returns for one spawn are retries/attempts; each keeps its own
-        # attempt identity rather than being collapsed into "the" return.
-        attempts = [{"attempt_id": r.get("attempt_id"), "status": r["status"],
-                     "result_ref": r.get("result_ref"), "error": r.get("error")}
-                    for r in rets]
+        parent, child = ev["parent_invocation_id"], ev["child_invocation_id"]
+        absent = refs_present(ev, parent, child)
+        if absent:
+            unjoinable(ev, "invocation(s) not present in this trace: %s"
+                           % ", ".join(absent))
+            continue
+        attempts, mismatched = [], False
+        for (skey, attempt_id), ret in sorted(returns.items()):
+            if skey != key:
+                continue
+            # A return must name the SAME child as its spawn.
+            if ret["child_invocation_id"] != child:
+                mismatched = True
+                unjoinable(ret, "return names child %s but spawn %s declares child "
+                                "%s; join invalidated"
+                                % (ret["child_invocation_id"], key, child))
+                continue
+            attempts.append({"attempt_id": attempt_id, "status": ret["status"],
+                             "result_ref": ret.get("result_ref"),
+                             "error": ret.get("error")})
+        if mismatched:
+            continue
         edges.append({
             "type": "agent_spawn",
-            "from": "agent:%s" % parent,
-            "to": "agent:%s" % child,
-            "provenance": "recorded_event",
-            "proven": True,
+            "from": "agent:%s" % parent, "to": "agent:%s" % child,
             "spawn_event_id": key,
-            "spawn_tool_call_id": ev.get("spawn_tool_call_id"),
+            "spawn_tool_call_id": ev["spawn_tool_call_id"],
+            "provenance": "recorded_event", "proven": True,
             "attempts": attempts,
-            "return_status": ("unmatched" if not attempts else
-                              attempts[-1]["status"]),
+            "return_status": ("unmatched" if not attempts
+                              else attempts[-1]["status"]),
         })
         if not attempts:
-            unresolved.append({"event": ev, "reason":
-                               "spawn has no matching return event (child may still "
-                               "be running, or the return was never recorded)"})
+            unjoinable(ev, "spawn has no matching return event (child may still be "
+                           "running, or the return was never recorded)")
 
-    orphan_returns = [r for key, rs in returns.items() if key not in spawns for r in rs]
-    for ret in orphan_returns:
-        unresolved.append({"event": ret, "reason":
-                           "return references a spawn_event_id with no spawn event"})
+    orphans = [r for (skey, _), r in returns.items() if skey not in spawns]
+    for ret in orphans:
+        unjoinable(ret, "return references a spawn_event_id with no spawn event")
 
     stats = {
         "result_supplied_edges": sum(1 for e in edges
                                      if e["type"] == "result_supplied_to_dispatch"),
         "spawn_edges": sum(1 for e in edges if e["type"] == "agent_spawn"),
         "unresolved": len(unresolved),
-        "orphan_returns": len(orphan_returns),
-        "spawns_without_return": sum(1 for e in edges
-                                     if e["type"] == "agent_spawn"
+        "orphan_returns": len(orphans),
+        "conflicts": len(conflicted),
+        "spawns_without_return": sum(1 for e in edges if e["type"] == "agent_spawn"
                                      and e["return_status"] == "unmatched"),
     }
     return edges, unresolved, stats
