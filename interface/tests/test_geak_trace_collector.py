@@ -1802,3 +1802,102 @@ class R12StructuralTest(unittest.TestCase):
         old = {"kind": "text", "text": "x", "source_uuid": "u1"}          # pre-R12
         new = {"kind": "text", "text": "x", "source_uuid": "u1", "source_pos": 0}
         self.assertEqual(rc.block_key("m1", old, 0), rc.block_key("m1", new, 0))
+
+
+class GraphSurvivesRecollectionTest(unittest.TestCase):
+    """The regression that unchanged totals hid: edges must survive a re-merge.
+
+    Counts, phases, costs and input blocks were all identical while the whole
+    delegation graph was being deleted, so asserting totals was not enough.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-graph-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.wf = os.path.join(self.dir, "sess", "subagents", "workflows", "wf_g")
+        os.makedirs(self.wf)
+        rd = os.path.join(self.dir, "sess", "workflows")
+        os.makedirs(rd)
+        lines = [_rec(type="launched")]
+        for aid in ("a1", "a2"):
+            lines.append(_rec(type="started", key="k" + aid, agentId=aid,
+                              label="eng " + aid, phase="P"))
+            lines.append(_rec(type="result", key="k" + aid, agentId=aid,
+                              result={"ok": aid}))
+            with open(os.path.join(self.wf, "agent-%s.jsonl" % aid), "w",
+                      encoding="utf-8") as fh:
+                fh.write(_asst("m-" + aid, [{"type": "text", "text": aid}],
+                               usage={"output_tokens": 3}) + "\n")
+        with open(os.path.join(self.wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        with open(os.path.join(rd, "wf_g.json"), "w", encoding="utf-8") as fh:
+            json.dump({"runId": "wf_g", "status": "completed"}, fh)
+
+    def test_baseline_edges_survive_an_identical_second_collection(self):
+        out = os.path.join(self.dir, "t.json")
+        first = C.collect_once(self.wf, out)
+        self.assertEqual(len(first["edges"]), 4)
+        second = C.collect_once(self.wf, out, previous=first)
+        self.assertEqual(len(second["edges"]), 4,
+                         "the delegation graph was deleted on re-collection")
+        self.assertEqual(
+            sorted((e["type"], e["from"], e["to"]) for e in second["edges"]),
+            sorted((e["type"], e["from"], e["to"]) for e in first["edges"]))
+
+    def test_baseline_edges_are_not_flagged_invalidated(self):
+        out = os.path.join(self.dir, "t.json")
+        first = C.collect_once(self.wf, out)
+        second = C.collect_once(self.wf, out, previous=first)
+        inv = (second["run"].get("linkage") or {}).get("invalidated") or []
+        self.assertEqual(inv, [], "journal edges were treated as contradictory")
+
+    def test_journal_edges_keep_per_invocation_identity(self):
+        import geak_trace_reconcile as rc
+        a = rc.edge_key({"type": "orchestration", "from": "run:w", "to": "agent:a1"})
+        b = rc.edge_key({"type": "orchestration", "from": "run:w", "to": "agent:a2"})
+        self.assertNotEqual(a, b, "different agents collapsed to one identity")
+
+    def test_linkage_types_still_key_by_event_id(self):
+        import geak_trace_reconcile as rc
+        a = rc.edge_key({"type": "result_supplied_to_dispatch", "from": "agent:p",
+                         "to": "agent:c1", "event_id": "t1"})
+        b = rc.edge_key({"type": "result_supplied_to_dispatch", "from": "agent:p",
+                         "to": "agent:c2", "event_id": "t1"})
+        self.assertEqual(a, b, "an endpoint change must contradict, not duplicate")
+
+    def test_old_four_part_invalidation_key_still_matches(self):
+        import geak_trace_reconcile as rc
+        self.assertEqual(
+            rc.normalize_invalidation_key(
+                ["result_supplied_to_dispatch", "agent:p", "agent:c", "t1"]),
+            ("result_supplied_to_dispatch", "t1"))
+        self.assertEqual(
+            rc.normalize_invalidation_key(["orchestration", "run:w", "agent:a1", None]),
+            ("orchestration", "run:w", "agent:a1"))
+
+    def test_legacy_two_source_blocks_migrate_without_duplicating(self):
+        import geak_trace_reconcile as rc
+        legacy = [{"kind": "text", "text": "one", "source_uuid": "u1"},
+                  {"kind": "text", "text": "two", "source_uuid": "u2"}]
+        current = [{"kind": "text", "text": "one", "source_uuid": "u1", "source_pos": 0},
+                   {"kind": "text", "text": "two", "source_uuid": "u2", "source_pos": 0}]
+        migrated = rc.migrate_blocks(legacy)
+        self.assertEqual(
+            {rc.block_key("m1", b, i) for i, b in enumerate(migrated)},
+            {rc.block_key("m1", b, i) for i, b in enumerate(current)})
+
+    def test_attempt_conflict_persists_across_passes(self):
+        def tr(status):
+            return {"schema": C.SCHEMA, "run": {"run_id": "w", "linkage": {}},
+                    "agents": [{"agent_id": "p1", "calls": [], "totals": {},
+                                "result_status": "x"}],
+                    "edges": [{"type": "agent_spawn", "from": "agent:p1",
+                               "to": "agent:c1", "spawn_event_id": "s1",
+                               "proven": True, "return_status": status,
+                               "attempts": [{"attempt_id": "a1", "status": status}]}],
+                    "warnings": []}
+        one = tr("returned")
+        two = C.merge_traces(one, tr("error"))
+        three = C.merge_traces(two, tr("returned"))
+        self.assertEqual([e for e in three["edges"] if e.get("proven")], [],
+                         "a contradicted attempt flipped back to proven")

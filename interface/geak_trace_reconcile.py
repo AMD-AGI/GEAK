@@ -164,16 +164,71 @@ def attempt_key(spawn_event_id, attempt):
     return (spawn_event_id, attempt.get("attempt_id"))
 
 
-def edge_key(edge):
-    """Identity is the RELATIONSHIP id, never its endpoints.
+#: Relationship types that carry an explicit recorded event id. ONLY these may
+#: be keyed by that id; the baseline journal edges have none.
+LINKAGE_TYPES = ("result_supplied_to_dispatch", "agent_spawn", "agent_spawn_return")
 
-    Including from/to made a changed consumer a NEW identity, so the same
-    event_id pointing somewhere else became a second independent proven edge
-    instead of contradicting the first. Endpoints are compared fields (see
-    EDGE_IDENTITY_FIELDS), not part of the key.
+
+def edge_key(edge):
+    """Identity of a relationship.
+
+    For the explicit linkage contracts, identity is the recorded event id and
+    endpoints are compared fields -- so the same event pointing somewhere else
+    CONTRADICTS rather than becoming a second claim.
+
+    The baseline journal edges (workflow -> agent, agent -> workflow) carry no
+    event id, so they must keep their per-invocation identity. Keying them by id
+    collapsed every orchestration edge onto (orchestration, None) and every
+    return onto (return, None), making different agents' endpoints look like
+    contradictions and deleting the whole graph on the next pass.
     """
-    return (edge.get("type"),
-            edge.get("event_id") or edge.get("spawn_event_id"))
+    kind = edge.get("type")
+    eid = edge.get("event_id") or edge.get("spawn_event_id")
+    if kind in LINKAGE_TYPES and eid:
+        return (kind, eid)
+    return (kind, edge.get("from"), edge.get("to"))
+
+
+def normalize_invalidation_key(item):
+    """Accept persisted keys from older formats and return the current shape.
+
+    An earlier format wrote [type, from, to, event_id]; comparing that against
+    the current key silently un-invalidated a relationship on upgrade.
+    """
+    if isinstance(item, (list, tuple)):
+        parts = list(item)
+        if len(parts) == 4:
+            kind, frm, to, eid = parts
+            if kind in LINKAGE_TYPES and eid:
+                return (kind, eid)
+            return (kind, frm, to)
+        return tuple(parts)
+    return None
+
+
+def migrate_blocks(blocks):
+    """Fill in source positions on captures written before they existed.
+
+    A legacy block has a source uuid but no position, so it fell back to the
+    FLATTENED index while its re-read used the per-source index -- the same
+    block keyed two ways and duplicated on upgrade. Positions are reassigned by
+    each block's ordinal within its own source record, which is what the reader
+    records today.
+    """
+    seen = {}
+    out = []
+    for blk in blocks or []:
+        if isinstance(blk, dict) and blk.get("source_pos") is None \
+                and blk.get("source_uuid") is not None:
+            src = blk.get("source_uuid")
+            blk = dict(blk)
+            blk["source_pos"] = seen.get(src, 0)
+            seen[src] = seen.get(src, 0) + 1
+        elif isinstance(blk, dict) and blk.get("source_uuid") is not None:
+            src = blk.get("source_uuid")
+            seen[src] = max(seen.get(src, 0), (blk.get("source_pos") or 0) + 1)
+        out.append(blk)
+    return out
 
 
 #: Fields whose disagreement contradicts the relationship an edge asserts.
