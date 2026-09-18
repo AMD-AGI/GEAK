@@ -103,7 +103,12 @@ def _identity(value: Any) -> dict[str, int]:
 
 
 def _bindings(
-    row: dict[str, Any], seal: dict[str, Any], request_sha: str, manifest_sha: str
+    row: dict[str, Any],
+    seal: dict[str, Any],
+    request_sha: str,
+    manifest_sha: str,
+    *,
+    launch_capsule_sha256: str | None = None,
 ) -> None:
     _require(
         row.get("status") == "verified"
@@ -112,6 +117,11 @@ def _bindings(
         and row.get("launch_nonce") == seal.get("launch_nonce"),
         "source_measurement_binding_mismatch",
     )
+    if launch_capsule_sha256 is not None:
+        _require(
+            row.get("launch_capsule_sha256") == launch_capsule_sha256,
+            "observation_launch_capsule_binding_mismatch",
+        )
 
 
 def _check_cleanup_barrier(request: Path) -> None:
@@ -283,7 +293,13 @@ def _gate(
         row.get("transport") == "unix_datagram_scm_credentials",
         "unverified_process_transport",
     )
-    _bindings(row, seal, request_sha, source.manifest_sha256)
+    _bindings(
+        row,
+        seal,
+        request_sha,
+        source.manifest_sha256,
+        launch_capsule_sha256=seal["launch_capsule"]["sha256"],
+    )
     owner = _identity(row.get("server_identity"))
     _require(
         owner == seal.get("server_identity") and owner["pid"] == owner["pgid"] > 1,
@@ -332,7 +348,13 @@ def _gate(
             "invalid_process_receipt_path",
         )
         receipt = _object(_hashed(directory / filename, process["sha256"]))
-        _bindings(receipt, seal, request_sha, source.manifest_sha256)
+        _bindings(
+            receipt,
+            seal,
+            request_sha,
+            source.manifest_sha256,
+            launch_capsule_sha256=seal["launch_capsule"]["sha256"],
+        )
         if expected_overlay_roots is not None:
             _require(
                 receipt.get("overlay_roots") == expected_overlay_roots,

@@ -91,6 +91,29 @@ def _leaf(directory, source_request, value, *, nonce=None, overlays=()):
         "request_sha256": _sha(source_request),
         "manifest_sha256": descriptor["manifest_sha256"],
     }
+    capsule_sha = _write(
+        runtime / "launch.json",
+        {
+            "schema": "geak.source_runtime.launch.v1",
+            "launch_nonce": bindings["launch_nonce"],
+            "created_at_ns": 1,
+            "boot_id": "boot",
+            "request": json.loads(source_request.read_text()),
+            "request_path": str(source_request),
+            "request_sha256": bindings["request_sha256"],
+            "manifest_sha256": bindings["manifest_sha256"],
+            "accepted_roots": [str(root / "trees/0/python")],
+            "overlay_roots": list(map(str, overlays)),
+            "overlay_files": {
+                str(path): _sha(path)
+                for overlay in overlays
+                for path in Path(overlay).rglob("*")
+                if path.suffix == ".py" or path.name == "_overlay_manifest.json"
+            },
+            "helper_sha256": "c" * 64,
+            "validator_sha256": "d" * 64,
+        },
+    )
     gates = {}
     for phase, when in (("ready", 100), ("finished", 300)):
         challenge = phase + "-challenge"
@@ -105,6 +128,7 @@ def _leaf(directory, source_request, value, *, nonce=None, overlays=()):
             "schema": "geak.source_runtime.process.v1",
             **bindings,
             **owner,
+            "launch_capsule_sha256": capsule_sha,
             "boot_id": "boot",
             "challenge_id": challenge,
             "observed_at_ns": when - 10,
@@ -124,6 +148,7 @@ def _leaf(directory, source_request, value, *, nonce=None, overlays=()):
         gate = {
             "schema": "geak.source_runtime.gate.v1",
             **bindings,
+            "launch_capsule_sha256": capsule_sha,
             "phase": phase,
             "transport": "unix_datagram_scm_credentials",
             "server_identity": owner,
@@ -149,29 +174,6 @@ def _leaf(directory, source_request, value, *, nonce=None, overlays=()):
     )
     (directory / "bench_runs.jsonl").write_text(
         json.dumps({"output_throughput": value}) + "\n"
-    )
-    capsule_sha = _write(
-        runtime / "launch.json",
-        {
-            "schema": "geak.source_runtime.launch.v1",
-            "launch_nonce": bindings["launch_nonce"],
-            "created_at_ns": 1,
-            "boot_id": "boot",
-            "request": json.loads(source_request.read_text()),
-            "request_path": str(source_request),
-            "request_sha256": bindings["request_sha256"],
-            "manifest_sha256": bindings["manifest_sha256"],
-            "accepted_roots": [str(root / "trees/0/python")],
-            "overlay_roots": list(map(str, overlays)),
-            "overlay_files": {
-                str(path): _sha(path)
-                for overlay in overlays
-                for path in Path(overlay).rglob("*")
-                if path.suffix == ".py" or path.name == "_overlay_manifest.json"
-            },
-            "helper_sha256": "c" * 64,
-            "validator_sha256": "d" * 64,
-        },
     )
     _write(
         runtime / "measurement.json",
@@ -252,6 +254,41 @@ def test_exact_canonical_measurements_are_verified(source_request, tmp_path):
     assert {
         role: row["throughput_tok_s"] for role, row in result["measurements"].items()
     } == {"setup": 90, "baseline": 100, "final": 110}
+
+
+@pytest.mark.parametrize("phase", ["ready", "finished"])
+@pytest.mark.parametrize("receipt", [False, True])
+@pytest.mark.parametrize("digest", [None, "0" * 64])
+def test_every_observation_requires_the_original_launch_capsule(
+    source_request, tmp_path, phase, receipt, digest
+):
+    evaluation = _pair(tmp_path, source_request)
+
+    def mutate(row):
+        if digest is None:
+            row.pop("launch_capsule_sha256")
+        else:
+            row["launch_capsule_sha256"] = digest
+
+    _rewrite_gate(evaluation / "validation/final", phase, mutate, receipt=receipt)
+    assert _verify(source_request, evaluation) == {
+        "status": "unavailable",
+        "reason": "observation_launch_capsule_binding_mismatch",
+    }
+
+
+def test_replaced_capsule_cannot_reuse_original_process_observations(
+    source_request, tmp_path
+):
+    evaluation = _pair(tmp_path, source_request)
+    _rewrite_capsule(
+        evaluation / "validation/final",
+        lambda row: row.update(helper_sha256="e" * 64),
+    )
+    assert _verify(source_request, evaluation) == {
+        "status": "unavailable",
+        "reason": "observation_launch_capsule_binding_mismatch",
+    }
 
 
 @pytest.mark.parametrize("phase", ["ready", "finished"])
