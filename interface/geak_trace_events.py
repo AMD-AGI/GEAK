@@ -110,10 +110,17 @@ def read_events(path):
     A malformed or partial line is a reported problem, never a silent skip: the
     whole point is that coverage of these edges is auditable.
     """
+    import glob as _glob
     validated, problems = [], []
-    if not path or not os.path.exists(path):
+    if not path:
         return validated, problems
-    try:
+    # Retained generations hold linkage events a later rewrite replaced; reading
+    # only the current file loses events the mirror deliberately kept.
+    paths = sorted(_glob.glob(path + ".gen*")) + ([path] if os.path.exists(path) else [])
+    if not paths:
+        return validated, problems
+    for path in paths:
+      try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for lineno, line in enumerate(fh, 1):
                 line = line.strip()
@@ -131,7 +138,7 @@ def read_events(path):
                     continue
                 norm["_kind"] = kind
                 validated.append(norm)
-    except OSError as exc:
+      except OSError as exc:
         problems.append({"line": None, "error": "unreadable: %s" % exc})
     return validated, problems
 
@@ -140,7 +147,7 @@ def _same(a, b, fields):
     return all(a.get(f) == b.get(f) for f in fields)
 
 
-def build_edges(events, known_invocations=None):
+def build_edges(events, known_invocations=None, tool_calls_by_invocation=None):
     """Turn validated events into edges, reporting what could not be joined.
 
     Joins are by stable identity and every identity-defining field is checked.
@@ -155,6 +162,10 @@ def build_edges(events, known_invocations=None):
     edges be built to invocations that were never seen.
     """
     known = set(known_invocations or ())
+    # invocation -> tool_use ids actually captured on it. A spawn must name one
+    # of the parent's REAL actions; a non-empty string is not a join, and a
+    # parent with no captured actions cannot have spawned anything we can prove.
+    tool_calls = tool_calls_by_invocation if tool_calls_by_invocation is not None else None
     edges, unresolved = [], []
     conflicted = set()
 
@@ -247,6 +258,15 @@ def build_edges(events, known_invocations=None):
             unjoinable(ev, "invocation(s) not present in this trace: %s"
                            % ", ".join(absent))
             continue
+        if tool_calls is not None:
+            parent_tools = tool_calls.get(parent) or set()
+            if ev["spawn_tool_call_id"] not in parent_tools:
+                unjoinable(ev, "spawning tool call %s is not among the parent's "
+                               "captured actions (%d recorded); the spawn is not "
+                               "joined to a real event"
+                               % (ev["spawn_tool_call_id"], len(parent_tools)))
+                continue
+
         attempts, mismatched = [], False
         for (skey, attempt_id), ret in sorted(returns.items()):
             if skey != key:
@@ -317,6 +337,16 @@ def attach(trace, events_path):
     and is reported as such -- NOT as "no relationships exist".
     """
     known = {a.get("agent_id") for a in (trace.get("agents") or [])}
+    # The parent's captured tool actions are the evidence a spawn reference is
+    # joined against.
+    tool_calls = {}
+    for agent in (trace.get("agents") or []):
+        ids = set()
+        for call in (agent.get("calls") or []):
+            for act in (call.get("actions") or []):
+                if act.get("tool_use_id"):
+                    ids.add(act["tool_use_id"])
+        tool_calls[agent.get("agent_id")] = ids
     events, problems = read_events(events_path)
     if not events and not problems:
         trace.setdefault("run", {})["linkage"] = {
@@ -327,7 +357,7 @@ def attach(trace, events_path):
         }
         return trace
 
-    edges, unresolved, stats, invalidated = build_edges(events, known)
+    edges, unresolved, stats, invalidated = build_edges(events, known, tool_calls)
     trace.setdefault("edges", []).extend(edges)
     trace.setdefault("run", {})["linkage"] = {
         "source": events_path, "present": True, "events_read": len(events),
