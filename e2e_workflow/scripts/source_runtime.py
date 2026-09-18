@@ -396,6 +396,7 @@ class Observer:
                 require(result is not None, "required_module_unresolved")
                 resolved.append(result)
         return {"schema": PROCESS_SCHEMA, **self.process, "boot_id": boot_id(),
+                "launch_capsule_sha256": digest(self.out / "launch.json"),
                 "status": "verified", "launch_nonce": current["launch_nonce"],
                 "request_sha256": current["request_sha256"], "manifest_sha256": current["manifest_sha256"],
                 "challenge_id": challenge["challenge_id"], "observed_at_ns": time.time_ns(),
@@ -565,7 +566,7 @@ def freeze_cleanup_parents(out, launch, owner):
     raise SourceCleanupUnverified("source_cleanup_parent_freeze_unconfirmed")
 
 
-def cleanup_escaped_workers(out, launch, owner, initial, unknown):
+def cleanup_escaped_workers(out, launch, owner, initial, unknown, *, teardown=False):
     """Stop only descendants whose identity was captured under the live owner.
 
     pidfds pin the process across PID reuse. Repeated ancestry discovery catches
@@ -579,9 +580,18 @@ def cleanup_escaped_workers(out, launch, owner, initial, unknown):
     uncertain = bool(unknown)
     pending = initial
     stable = 0
+    descendants_stable = 0
+    owner_released = False
     frozen = []
     try:
         frozen = freeze_cleanup_parents(out, launch, owner)
+        if teardown:
+            # A process may setsid after acknowledging. Its pidfd must still
+            # cover it, even when it has left the group before this scan.
+            for member in frozen:
+                current = proc(member["pid"])
+                if current and current["start_ticks"] == member["start_ticks"]:
+                    pending[current["pid"]] = current
     except (OSError, ValueError):
         uncertain = True
     try:
@@ -603,18 +613,25 @@ def cleanup_escaped_workers(out, launch, owner, initial, unknown):
                         record["exit_confirmed"] = True
                         continue
                     record["ancestry"] = descendant_ancestry(pid, owner)
-                    signal.pidfd_send_signal(fd, signal.SIGTERM)
-                    record["term_sent"] = True
                 except ProcessLookupError:
                     record["exit_confirmed"] = True
                 except (OSError, ValueError, AttributeError) as exc:
                     uncertain = True
                     record["error"] = type(exc).__name__
-            for key, fd in handles.items():
+            # Pin the complete initial cohort before any signal. Keep the
+            # subreaper owner alive until descendants have exited, including
+            # children created by unobserved workers' termination handlers.
+            for key in sorted(handles, key=lambda item: item[0] == owner["pid"]):
+                fd = handles[key]
                 record = records[key]
                 if record["exit_confirmed"] or record.get("error"):
                     continue
+                if teardown and key[0] == owner["pid"] and not owner_released:
+                    continue
                 try:
+                    if not record["term_sent"]:
+                        signal.pidfd_send_signal(fd, signal.SIGTERM)
+                        record["term_sent"] = True
                     if select.select([fd], [], [], 0)[0]:
                         record["exit_confirmed"] = True
                     elif time.monotonic() - started >= CLEANUP_TERM_SEC and not record["kill_sent"]:
@@ -626,8 +643,16 @@ def cleanup_escaped_workers(out, launch, owner, initial, unknown):
                     uncertain = True
                     record["error"] = type(exc).__name__
             try:
-                require(identity(owner["pid"]) == owner, "cleanup_owner_identity_changed")
-                pending, additional_unknown = escaped_workers(out, launch, owner)
+                if teardown and owner_released:
+                    # Its descendants are already confirmed gone. The pinned
+                    # pidfd now proves owner exit without racing a live /proc
+                    # identity lookup against our own termination signal.
+                    pending, additional_unknown = {}, {}
+                else:
+                    require(identity(owner["pid"]) == owner, "cleanup_owner_identity_changed")
+                    pending, additional_unknown = escaped_workers(out, launch, owner)
+                    if teardown:
+                        pending.update(group_members(owner["pgid"]))
                 unknown.update(additional_unknown)
                 uncertain = uncertain or bool(additional_unknown)
                 frozen_ids = {(row["pid"], row["start_ticks"]) for row in frozen}
@@ -635,7 +660,13 @@ def cleanup_escaped_workers(out, launch, owner, initial, unknown):
             except (OSError, ValueError):
                 uncertain = True
                 break
-            if not pending and all(row["exit_confirmed"] for row in records.values()):
+            live_pending = {pid: row for pid, row in pending.items() if not records.get((pid, row["start_ticks"]), {}).get("exit_confirmed")}
+            if teardown and not owner_released:
+                descendants_done = (not (set(live_pending) - {owner["pid"]})
+                                    and all(row["exit_confirmed"] for key, row in records.items() if key[0] != owner["pid"]))
+                descendants_stable = descendants_stable + 1 if descendants_done else 0
+                owner_released = descendants_stable >= 2
+            if not live_pending and all(row["exit_confirmed"] for row in records.values()):
                 stable += 1
                 if stable >= 2:
                     break
@@ -647,15 +678,17 @@ def cleanup_escaped_workers(out, launch, owner, initial, unknown):
             os.close(fd)
     confirmed = not uncertain and stable >= 2 and all(row["exit_confirmed"] for row in records.values())
     result = {"schema": "geak.source_runtime.cleanup.v1", "status": "confirmed" if confirmed else "unverified",
+              "scope": "owned_cohort_teardown" if teardown else "escaped_descendants",
               "launch_nonce": launch["launch_nonce"], "request_sha256": launch["request_sha256"],
               "manifest_sha256": launch["manifest_sha256"], "server_identity": owner,
               "frozen_parents": frozen, "freeze_transport": "unix_datagram_scm_credentials",
               "processes": list(records.values()), "unproven_processes": list(unknown.values()), "observed_at_ns": time.time_ns()}
     try:
+        result["launch_capsule_sha256"] = digest(out / "launch.json")
         if not confirmed:
             write_json(Path(launch["request_path"]).parent / "source_cleanup_unverified.json", result)
-        write_json(out / "cleanup.json", result)
-    except OSError as exc:
+        write_json(out / ("teardown.json" if teardown else "cleanup.json"), result)
+    except (OSError, SourceRuntimeError) as exc:
         try:
             write_json(Path(launch["request_path"]).parent / "source_cleanup_unverified.json",
                        {**result, "status": "unverified", "reason": "cleanup_evidence_unwritable"})
@@ -672,6 +705,19 @@ def reject_escaped_workers(out, launch, owner):
     if owned or unknown:
         cleanup_escaped_workers(out, launch, owner, owned, unknown)
         raise SourceRuntimeError("serving_worker_escaped_group_cleanup_confirmed")
+
+
+def teardown_source(out, request, owner):
+    require(owner["pid"] > 1 and owner["pid"] == owner["pgid"] and owner["pgid"] != os.getpgrp(), "unverified_server_group")
+    require(identity(owner["pid"]) == owner, "source_teardown_owner_identity_changed")
+    # Cleanup must still work after source/request content changes caused the
+    # measurement to fail. The launch capsule retains ownership, not authority
+    # to publish throughput; use its original request-directory binding only.
+    launch = read_json(out / "launch.json")
+    require(launch.get("schema") == LAUNCH_SCHEMA and launch.get("request_path") == str(request), "invalid_cleanup_launch")
+    owned, unknown = escaped_workers(out, launch, owner)
+    owned.update(group_members(owner["pgid"]))
+    return cleanup_escaped_workers(out, launch, owner, owned, unknown, teardown=True)
 
 
 def listeners(members, base_url):
@@ -709,6 +755,7 @@ def listeners(members, base_url):
 
 def gate(out, owner, endpoint, phase, timeout):
     launch = capsule(out)
+    launch_sha = digest(out / "launch.json")
     require(owner["pid"] > 1 and owner["pid"] == owner["pgid"] and owner["pgid"] != os.getpgrp(), "unverified_server_group")
     require(identity(owner["pid"]) == owner, "server_identity_changed")
     challenge = {"challenge_id": str(uuid.uuid4()), "created_at_ns": time.time_ns(), "phase": phase}
@@ -760,6 +807,7 @@ def gate(out, owner, endpoint, phase, timeout):
                             or receipt.get("launch_nonce") != launch["launch_nonce"]
                             or receipt.get("request_sha256") != launch["request_sha256"]
                             or receipt.get("manifest_sha256") != launch["manifest_sha256"]
+                            or receipt.get("launch_capsule_sha256") != launch_sha
                             or receipt.get("boot_id") != boot_id()
                             or receipt.get("observed_at_ns", 0) < challenge["created_at_ns"]
                             or any(receipt.get(key) != value for key, value in member.items())
@@ -775,6 +823,7 @@ def gate(out, owner, endpoint, phase, timeout):
                 result = {"schema": "geak.source_runtime.gate.v1", "status": "verified", "phase": phase,
                           "transport": "unix_datagram_scm_credentials",
                           "launch_nonce": launch["launch_nonce"], "request_sha256": launch["request_sha256"],
+                          "launch_capsule_sha256": launch_sha,
                           "manifest_sha256": launch["manifest_sha256"], "server_identity": owner,
                           "boot_id": boot_id(), "base_url": endpoint,
                           "challenge_id": challenge["challenge_id"], "observed_at_ns": time.time_ns(),
@@ -788,6 +837,7 @@ def gate(out, owner, endpoint, phase, timeout):
 def seal_measurement(out):
     """Bind published throughput to both actual-process observation phases."""
     launch = capsule(out)
+    launch_sha = digest(out / "launch.json")
     gates = {}
     for phase in ("ready", "finished"):
         path = out / f"gate-{phase}.json"
@@ -796,6 +846,7 @@ def seal_measurement(out):
                 and row.get("phase") == phase and row.get("launch_nonce") == launch["launch_nonce"]
                 and row.get("request_sha256") == launch["request_sha256"]
                 and row.get("manifest_sha256") == launch["manifest_sha256"], "invalid_measurement_gate")
+        require(row.get("launch_capsule_sha256") == launch_sha, "measurement_capsule_changed")
         gates[phase] = {"path": path.name, "sha256": digest(path)}
     ready, finished = (read_json(out / gates[phase]["path"]) for phase in ("ready", "finished"))
     require(ready["server_identity"] == finished["server_identity"]
@@ -805,6 +856,7 @@ def seal_measurement(out):
             and ready["challenge_id"] != finished["challenge_id"], "measurement_gate_identity_changed")
     value = {"schema": "geak.source_runtime.measurement.v1", "status": "verified",
              "measurement_scope": "hot_timed_rounds",
+             "launch_capsule": {"path": "launch.json", "sha256": launch_sha},
              "launch_nonce": launch["launch_nonce"], "request_sha256": launch["request_sha256"],
              "manifest_sha256": launch["manifest_sha256"], "gates": gates,
              "server_identity": finished["server_identity"], "base_url": finished["base_url"],
@@ -815,7 +867,7 @@ def seal_measurement(out):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "gate", "seal-measurement", "check-request"))
+    parser.add_argument("command", choices=("prepare", "gate", "seal-measurement", "check-request", "teardown"))
     parser.add_argument("--request", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--expected-manifest", type=Path)
@@ -838,13 +890,22 @@ def main():
             print(prepare(args.request, out, args.overlay_pythonpath))
         elif args.command == "seal-measurement":
             seal_measurement(out)
+        elif args.command == "teardown":
+            teardown_source(out, args.request, {"pid": args.pid, "pgid": args.pgid, "start_ticks": args.start_ticks})
         else:
             require(args.timeout_sec > 0 and args.timeout_sec <= 300, "invalid_gate_timeout")
             gate(out, {"pid": args.pid, "pgid": args.pgid, "start_ticks": args.start_ticks}, args.base_url, args.phase, args.timeout_sec)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         reason = exc.args[0] if isinstance(exc, SourceRuntimeError) else type(exc).__name__
         print(f"[FATAL] GEAK source runtime {args.command} failed: {reason}", file=sys.stderr)
-        return 43 if isinstance(exc, SourceCleanupUnverified) else 3
+        if args.command == "teardown":
+            try:
+                require(args.request is not None and args.request.is_absolute(), "cleanup_request_missing")
+                write_json(args.request.parent / "source_cleanup_unverified.json",
+                           {"schema": "geak.source_runtime.cleanup.v1", "status": "unverified", "reason": reason})
+            except (OSError, ValueError):
+                pass
+        return 43 if isinstance(exc, SourceCleanupUnverified) or args.command == "teardown" else 3
     return 0
 
 

@@ -119,10 +119,12 @@ def test_actual_serving_process_receipts_bind_two_phases_and_measurement(launch_
         assert ready["challenge_id"] != finished["challenge_id"]
         assert ready["processes"][0]["receipt"] != finished["processes"][0]["receipt"]
         for gate in (ready, finished):
+            assert gate["launch_capsule_sha256"] == runtime.digest(out / "launch.json")
             proof = gate["processes"][0]
             receipt = runtime.read_json(out / proof["receipt"])
             assert runtime.digest(out / proof["receipt"]) == proof["sha256"]
             assert receipt["pid"] == owner["pid"]
+            assert receipt["launch_capsule_sha256"] == gate["launch_capsule_sha256"]
             assert "dependency" in {row["name"] for row in receipt["loaded_modules"]}
             assert "alpha.second" not in {row["name"] for row in receipt["loaded_modules"]}
             assert "alpha.second" in {row["name"] for row in receipt["resolved_modules"]}
@@ -132,6 +134,7 @@ def test_actual_serving_process_receipts_bind_two_phases_and_measurement(launch_
         sealed = runtime.seal_measurement(out)
         assert sealed["artifacts"]["bench_summary.json"] == runtime.digest(out.parent / "bench_summary.json")
         assert sealed["gates"]["ready"]["sha256"] == runtime.digest(out / "gate-ready.json")
+        assert sealed["launch_capsule"] == {"path": "launch.json", "sha256": runtime.digest(out / "launch.json")}
     assert not list(launch_files[2].rglob("*.pyc"))
 
 
@@ -326,6 +329,7 @@ def test_real_bench_adapters_publish_bound_source_measurement(launch_files, tmp_
     names = {row["name"] for row in receipt["loaded_modules"]}
     assert ("vllm.__main__" if route == "vllm" else "sglang.launch_server") in names
     assert not runtime.group_members(gate["server_identity"]["pgid"])
+    assert runtime.read_json(out / "teardown.json")["status"] == "confirmed"
 
 
 def test_bench_post_measure_source_damage_preserves_raw_runs_without_seal(launch_files, tmp_path):
@@ -340,6 +344,7 @@ def test_bench_post_measure_source_damage_preserves_raw_runs_without_seal(launch
     assert not (out / "source_runtime/measurement.json").exists()
     gate = runtime.read_json(out / "source_runtime/gate-ready.json")
     assert not runtime.group_members(gate["server_identity"]["pgid"])
+    assert runtime.read_json(out / "source_runtime/teardown.json")["status"] == "confirmed"
 
 
 def test_bench_source_reuse_refused_before_launch(launch_files, tmp_path):
@@ -907,6 +912,7 @@ def test_sibling_cannot_forge_serving_pid_by_binding_its_socket_name(launch_file
             path = out / f"process-{owner['pid']}-{owner['start_ticks']}-{token}.json"
             runtime.write_json(path, {"schema": runtime.PROCESS_SCHEMA, "status": "verified", **owner,
                                       "challenge_id": token, "launch_nonce": launch["launch_nonce"],
+                                      "launch_capsule_sha256": runtime.digest(out / "launch.json"),
                                       "request_sha256": launch["request_sha256"], "manifest_sha256": launch["manifest_sha256"],
                                       "boot_id": runtime.boot_id(), "observed_at_ns": time.time_ns()})
             sibling.sendto((token + " " + runtime.digest(path)).encode(), challenge["reply_socket"])
@@ -965,7 +971,8 @@ def test_real_bench_cleans_exact_escaped_worker_before_group_teardown(launch_fil
     assert not (request.parent / "source_cleanup_unverified.json").exists()
 
 
-def test_shutdown_rediscovery_catches_worker_forked_from_term_handler(launch_files, tmp_path):
+@pytest.mark.parametrize("teardown", [False, True])
+def test_shutdown_rediscovery_catches_worker_forked_from_term_handler(launch_files, tmp_path, teardown):
     parent_file, child_file = tmp_path / "parent", tmp_path / "child"
     worker = ("import os,signal,time\nfrom pathlib import Path\n"
               "def terminate(*args):\n"
@@ -978,11 +985,15 @@ def test_shutdown_rediscovery_catches_worker_forked_from_term_handler(launch_fil
     startup = f"subprocess.Popen([sys.executable,'-S','-c',{worker!r}],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"
     with serving(launch_files, tmp_path, startup=startup) as (out, owner, endpoint, _):
         wait_file(parent_file)
-        with pytest.raises(runtime.SourceRuntimeError, match="cleanup_confirmed"):
-            runtime.gate(out, owner, endpoint, "prepared", 1)
-        cleanup = runtime.read_json(out / "cleanup.json")
+        if teardown:
+            runtime.teardown_source(out, launch_files[0], owner)
+        else:
+            with pytest.raises(runtime.SourceRuntimeError, match="cleanup_confirmed"):
+                runtime.gate(out, owner, endpoint, "prepared", 1)
+        cleanup = runtime.read_json(out / ("teardown.json" if teardown else "cleanup.json"))
         assert cleanup["status"] == "confirmed"
-        assert {row["pid"] for row in cleanup["processes"]} == {int(parent_file.read_text()), int(child_file.read_text())}
+        expected = {int(parent_file.read_text()), int(child_file.read_text())} | ({owner["pid"]} if teardown else set())
+        assert {row["pid"] for row in cleanup["processes"]} == expected
         assert all(row["exit_confirmed"] for row in cleanup["processes"])
 
 
@@ -1116,3 +1127,212 @@ def test_cleanup_control_message_freezes_before_acknowledgment(observer):
     with pytest.raises(StopIteration):
         observer.respond()
     assert sent == [(True, (b"freeze frozen", "unused"))]
+
+
+def moving_worker(marker, moved):
+    return ("import os,signal,time\nfrom pathlib import Path\n"
+            "def leave_group(*args):\n os.setsid()\n"
+            f" Path({str(moved)!r}).write_text(str(os.getpgrp()))\n"
+            "signal.signal(signal.SIGUSR1,leave_group)\n"
+            f"Path({str(marker)!r}).write_text(str(os.getpid()))\ntime.sleep(60)")
+
+
+def kill_fixture_process(pid):
+    current = runtime.proc(pid)
+    if current is not None and current["state"] != "Z":
+        os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("escape_phase", ["after_finished", "after_freeze"])
+def test_teardown_pins_worker_that_leaves_group_after_observation(launch_files, tmp_path, monkeypatch, escape_phase):
+    marker, moved = tmp_path / "worker", tmp_path / "moved"
+    startup = f"subprocess.Popen([sys.executable,'-c',{moving_worker(marker, moved)!r}],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"
+    with serving(launch_files, tmp_path, startup=startup) as (out, owner, endpoint, _), \
+            subprocess.Popen([sys.executable, "-S", "-c", "import time;time.sleep(60)"], start_new_session=True) as foreign:
+        pid = int(wait_file(marker))
+        try:
+            for phase in ("prepared", "ready", "finished"):
+                assert len(runtime.gate(out, owner, endpoint, phase, 3)["processes"]) == 2
+
+            def move():
+                os.kill(pid, signal.SIGUSR1)
+                assert int(wait_file(moved)) == pid
+
+            if escape_phase == "after_finished":
+                move()
+            else:
+                freeze = runtime.freeze_cleanup_parents
+
+                def freeze_then_move(*args):
+                    result = freeze(*args)
+                    move()
+                    return result
+
+                monkeypatch.setattr(runtime, "freeze_cleanup_parents", freeze_then_move)
+            cleanup = runtime.teardown_source(out, launch_files[0], owner)
+            assert cleanup["status"] == "confirmed" and cleanup["scope"] == "owned_cohort_teardown"
+            assert cleanup["launch_capsule_sha256"] == runtime.digest(out / "launch.json")
+            assert {row["pid"] for row in cleanup["processes"]} == {owner["pid"], pid}
+            assert all(row["exit_confirmed"] for row in cleanup["processes"])
+            assert runtime.proc(pid) is None or runtime.proc(pid)["state"] == "Z"
+            assert foreign.poll() is None
+            assert not (launch_files[0].parent / "source_cleanup_unverified.json").exists()
+        finally:
+            kill_fixture_process(pid)
+            foreign.terminate()
+            foreign.wait(timeout=5)
+
+
+@pytest.mark.parametrize("exit_status", [0, 7])
+def test_bench_exit_cleans_worker_moved_by_post_summary_callback(launch_files, tmp_path, exit_status):
+    env = bench_fixture(launch_files, tmp_path, "sglang")
+    request, _, root = launch_files
+    marker, moved = tmp_path / "callback-worker", tmp_path / "callback-moved"
+    path = root / "trees/a/python/sglang/launch_server.py"
+    code = path.read_text().replace("import argparse,os", "import argparse,os,subprocess,sys,time\nfrom pathlib import Path")
+    code = code.replace("class Handler", f"subprocess.Popen([sys.executable,'-c',{moving_worker(marker, moved)!r}])\n"
+                        f"while not Path({str(marker)!r}).exists(): time.sleep(.01)\nclass Handler")
+    path.write_text(code)
+    update_source_request(request, root, path)
+    # A staged callback after the real script's final seal models the native
+    # post-measure callback position without replacing the real EXIT handler.
+    staged = tmp_path / "bench_e2e.sh"
+    staged.write_text((SCRIPTS / "bench_e2e.sh").read_text() + '\n'
+                      'test -f "$OUT_DIR/source_runtime/measurement.json" || exit 98\n'
+                      'kill -USR1 "$(cat "$TEST_WORKER")"\n'
+                      'for _poll in $(seq 1 100); do [ -f "$TEST_MOVED" ] && break; sleep .02; done\n'
+                      '[ -f "$TEST_MOVED" ] || exit 99\n'
+                      f'exit {exit_status}\n')
+    env.update(SKILL_DIR=str(SCRIPTS.parent), TEST_WORKER=str(marker), TEST_MOVED=str(moved))
+    try:
+        run = subprocess.run(["bash", str(staged)], env=env, text=True, capture_output=True, timeout=20, check=False)
+        assert run.returncode == exit_status, run.stdout + run.stderr
+        out = Path(env["OUT_DIR"]) / "source_runtime"
+        cleanup = runtime.read_json(out / "teardown.json")
+        pid = int(marker.read_text())
+        assert int(moved.read_text()) == pid
+        assert cleanup["status"] == "confirmed"
+        assert pid in {row["pid"] for row in cleanup["processes"] if row["exit_confirmed"]}
+        assert runtime.proc(pid) is None or runtime.proc(pid)["state"] == "Z"
+        assert (out / "measurement.json").exists()
+        assert not (request.parent / "source_cleanup_unverified.json").exists()
+    finally:
+        if marker.exists():
+            kill_fixture_process(int(marker.read_text()))
+
+
+@pytest.mark.parametrize("failure", ["health", "launch", "unobserved"])
+def test_bench_launch_failures_cannot_skip_source_teardown(launch_files, tmp_path, failure):
+    env = bench_fixture(launch_files, tmp_path, "sglang")
+    adapter = Path(env["ADAPTER"])
+    if failure == "launch":
+        suffix = 'adapter_launch() { return 1; }\n'
+    else:
+        suffix = 'adapter_health() { return 1; }\n'
+        env["SERVER_STARTUP_TIMEOUT_SEC"] = "0"
+        if failure == "unobserved":
+            suffix += ('adapter_launch() { ${SERVER_LAUNCH_PREFIX:-} "$TEST_PYTHON" -S -c "import time;time.sleep(60)" '
+                       '> "$LOG" 2>&1 & SERVER_PID=$!; }\n')
+    with adapter.open("a") as stream:
+        stream.write(suffix)
+    run = subprocess.run(["bash", str(SCRIPTS / "bench_e2e.sh")], env=env, text=True,
+                         capture_output=True, timeout=15, check=False)
+    assert run.returncode == (2 if failure == "health" else 43), run.stdout + run.stderr
+    out = Path(env["OUT_DIR"])
+    assert not (out / "bench_summary.json").exists()
+    barrier = launch_files[0].parent / "source_cleanup_unverified.json"
+    assert barrier.exists() == (failure != "health")
+    if failure != "launch":
+        assert runtime.read_json(out / "server_start.json")["status"] == "failed"
+        cleanup = runtime.read_json(out / "source_runtime/teardown.json")
+        assert cleanup["status"] == ("confirmed" if failure == "health" else "unverified")
+        assert not runtime.group_members(cleanup["server_identity"]["pgid"])
+
+
+def test_teardown_registered_foreign_worker_stays_alive_and_sets_barrier(launch_files, tmp_path):
+    with serving(launch_files, tmp_path) as (out, owner, _endpoint, env), \
+            subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"], env=env, start_new_session=True) as sibling:
+        try:
+            wait_file(out / f"registered-{sibling.pid}-{runtime.identity(sibling.pid)['start_ticks']}.json", sibling)
+            with pytest.raises(runtime.SourceCleanupUnverified):
+                runtime.teardown_source(out, launch_files[0], owner)
+            assert sibling.poll() is None
+            cleanup = runtime.read_json(out / "teardown.json")
+            assert cleanup["unproven_processes"][0]["pid"] == sibling.pid
+            assert {row["pid"] for row in cleanup["processes"]} == {owner["pid"]}
+            assert (launch_files[0].parent / "source_cleanup_unverified.json").exists()
+        finally:
+            sibling.terminate()
+            sibling.wait(timeout=5)
+
+
+@pytest.mark.parametrize("damage", ["gate_digest", "capsule_bytes", "overlay_manifest"])
+def test_seal_refuses_changed_capsule_or_overlay_binding(launch_files, tmp_path, damage):
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    manifest = overlay / "_overlay_manifest.json"
+    manifest.write_text('{"modules":{}}\n')
+    with serving(launch_files, tmp_path, overlay=str(overlay)) as (out, owner, endpoint, _):
+        runtime.gate(out, owner, endpoint, "ready", 3)
+        runtime.gate(out, owner, endpoint, "finished", 3)
+        (out.parent / "bench_runs.jsonl").write_text('{"output_throughput":17}\n')
+        (out.parent / "bench_summary.json").write_text('{"median":17}\n')
+        sealed = runtime.seal_measurement(out)
+        assert sealed["launch_capsule"]["sha256"] == runtime.digest(out / "launch.json")
+        if damage == "gate_digest":
+            gate = runtime.read_json(out / "gate-ready.json")
+            gate["launch_capsule_sha256"] = "0" * 64
+            runtime.write_json(out / "gate-ready.json", gate)
+        elif damage == "capsule_bytes":
+            with (out / "launch.json").open("a") as stream:
+                stream.write(" ")
+        else:
+            manifest.write_text('{"modules":{"injected":"different"}}\n')
+            # The unchanged capsule permanently retains the original inventory;
+            # both a new gate and a verifier replay must observe this mismatch.
+            assert runtime.capsule(out)["overlay_files"][str(manifest)] != runtime.digest(manifest)
+            with pytest.raises(runtime.SourceRuntimeError, match="serving_process_reported_source_failure"):
+                runtime.gate(out, owner, endpoint, "finished", 1)
+            assert runtime.read_json(next(out.glob("fatal-*.json")))["reason"] == "authored_overlay_changed"
+            return
+        with pytest.raises(runtime.SourceRuntimeError, match="measurement_capsule_changed"):
+            runtime.seal_measurement(out)
+
+
+@pytest.mark.parametrize("barrier_writable", [False, True])
+def test_invalid_teardown_identity_always_returns_reserved_hard_stop(launch_files, monkeypatch, barrier_writable):
+    request, out, _ = launch_files
+    runtime.prepare(request, out, "")
+    if not barrier_writable:
+        monkeypatch.setattr(runtime, "write_json", lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")))
+    monkeypatch.setattr(sys, "argv", ["source_runtime.py", "teardown", "--request", str(request), "--output-dir", str(out),
+                                     "--pid", "0", "--pgid", "0", "--start-ticks", "0"])
+    assert runtime.main() == 43
+    assert (request.parent / "source_cleanup_unverified.json").exists() == barrier_writable
+
+
+def test_teardown_confirms_pidfd_exit_when_owner_proc_lookup_races_term(launch_files, tmp_path, monkeypatch):
+    with serving(launch_files, tmp_path) as (out, owner, _endpoint, _):
+        original_identity, original_proc = runtime.identity, runtime.proc
+        original_signal = runtime.signal.pidfd_send_signal
+        owner_row = original_proc(owner["pid"])
+        term_sent = False
+
+        def send(fd, sig):
+            nonlocal term_sent
+            original_signal(fd, sig)
+            term_sent = True
+
+        def lookup(pid=None):
+            if term_sent and pid == owner["pid"]:
+                raise runtime.SourceRuntimeError("process_not_live")
+            return original_identity(pid)
+
+        # Model the owner exiting between two /proc reads after TERM, while a
+        # pidfd remains reliable. Stale group membership must not skip fd exit.
+        monkeypatch.setattr(runtime.signal, "pidfd_send_signal", send)
+        monkeypatch.setattr(runtime, "identity", lookup)
+        monkeypatch.setattr(runtime, "proc", lambda pid: owner_row if term_sent and pid == owner["pid"] else original_proc(pid))
+        result = runtime.teardown_source(out, launch_files[0], owner)
+        assert result["status"] == "confirmed"
+        assert result["processes"][0]["term_sent"] and result["processes"][0]["exit_confirmed"]

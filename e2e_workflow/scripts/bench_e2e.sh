@@ -619,6 +619,9 @@ trap server_teardown EXIT
 # request and authored overlay before launch; adapters prepend the generated
 # startup hook while retaining their ordinary package/overlay precedence.
 SOURCE_RUNTIME=""
+SOURCE_SERVER_LAUNCH_ATTEMPTED=0
+SOURCE_SERVER_CLEANUP_DONE=0
+SOURCE_SERVER_CLEANUP_RC=0
 if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
   # Invalidate old throughput eligibility even if this launch is refused before
   # the observer can prepare a new capsule.
@@ -650,6 +653,30 @@ source_runtime_gate() {
     --pid "$SERVER_PID" --pgid "$SERVER_PGID" --start-ticks "$SERVER_START_TICKS" \
     --base-url "$BASE_URL" --phase "$1" --timeout-sec "${GEAK_SOURCE_GATE_TIMEOUT_SEC:-30}"
 }
+source_runtime_teardown() {
+  if [ -n "$SOURCE_RUNTIME" ] && [ "$SOURCE_SERVER_LAUNCH_ATTEMPTED" = "1" ] \
+     && [ "$SOURCE_SERVER_CLEANUP_DONE" = "0" ]; then
+    SOURCE_SERVER_CLEANUP_DONE=1
+    local _pid="${SERVER_PID:-0}" _pgid="${SERVER_PGID:-0}" _ticks="${SERVER_START_TICKS:-0}"
+    case "$_pid" in ''|*[!0-9]*) _pid=0 ;; esac
+    case "$_pgid" in ''|*[!0-9]*) _pgid=0 ;; esac
+    case "$_ticks" in ''|*[!0-9]*) _ticks=0 ;; esac
+    python3 "$SOURCE_RUNTIME" teardown --request "$GEAK_SOURCE_REQUEST" \
+      --output-dir "$GEAK_SOURCE_OBSERVATION_DIR" --pid "$_pid" --pgid "$_pgid" --start-ticks "$_ticks" \
+      || SOURCE_SERVER_CLEANUP_RC=43
+    if [ "$SOURCE_SERVER_CLEANUP_RC" -ne 0 ]; then
+      rm -f "$OUT_DIR/bench_summary.json" "$GEAK_SOURCE_OBSERVATION_DIR/measurement.json"
+    fi
+  fi
+  server_teardown
+  return "$SOURCE_SERVER_CLEANUP_RC"
+}
+source_runtime_exit_cleanup() {
+  local _original=$?
+  source_runtime_teardown || exit 43
+  exit "$_original"
+}
+[ -z "$SOURCE_RUNTIME" ] || trap source_runtime_exit_cleanup EXIT
 
 # ---- serving-GPU mutex ----
 # TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
@@ -680,6 +707,7 @@ if [ "$REUSE_SERVER" != "1" ]; then
 
   _up=0; _reason=""
   echo ">>> Launching $BACKEND server (log: $LOG) ..."
+  SOURCE_SERVER_LAUNCH_ATTEMPTED=1
   adapter_launch
   if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
   # Freeze the server's process identity NOW (pid, pgid, /proc start time) so the
@@ -719,7 +747,8 @@ if [ "$REUSE_SERVER" != "1" ]; then
         fi ;;
     esac
     echo "!!! Server did not come up (reason=$_reason) after ~${_waited}s. Last log:"; tail -n 60 "$LOG"
-    server_teardown; SERVER_PID=""
+    source_runtime_teardown || true
+    SERVER_PID=""
   fi
   # Structured outcome, ALWAYS written (success too), so a failed start is a REASON downstream can
   # read rather than an empty task dir that looks like "authored and found no gain".
@@ -732,6 +761,7 @@ if [ "$REUSE_SERVER" != "1" ]; then
     echo "!!! Server start FAILED (reason=$_reason) — see $OUT_DIR/server_start.json" >&2
     [ "$_reason" = "ceiling_exceeded" ] && \
       echo "    Still progressing at the ${CEILING}s backstop; raise it with SERVER_STARTUP_TIMEOUT_SEC." >&2
+    [ "$SOURCE_SERVER_CLEANUP_RC" -eq 0 ] || exit 43
     exit 2
   fi
 else
