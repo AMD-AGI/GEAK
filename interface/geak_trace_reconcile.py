@@ -116,8 +116,14 @@ def block_key(call_id, block, position):
     """Input blocks are identified by their SOURCE record, not their position
     in a list: a list index shifts when a sibling changes, and comparing total
     bytes lets one block's growth mask another block's loss."""
+    # Position WITHIN the source record, never the flattened list index: the
+    # flattened index shifts when an earlier source record goes missing, which
+    # made the same block look like a new one and left duplicates behind.
+    within = block.get("source_pos")
+    if within is None:
+        within = position
     return (call_id, block.get("source_uuid"), block.get("kind"),
-            block.get("tool_use_id") or position)
+            block.get("tool_use_id") or within)
 
 
 def merge_block(prev, new):

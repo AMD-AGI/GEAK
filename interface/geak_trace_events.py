@@ -31,6 +31,13 @@ ever synthesised here.
 
 import json
 import os
+import sys
+
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import geak_trace_reconcile as _rc
+except Exception:  # pragma: no cover
+    _rc = None
 
 SCHEMA = "geak.trace.events/1"
 
@@ -278,11 +285,23 @@ def build_edges(events, known_invocations=None, tool_calls_by_invocation=None):
                                 "%s; join invalidated"
                                 % (ret["child_invocation_id"], key, child))
                 continue
+            # Preserve the RECORDED order marker. Dropping it here forced the
+            # outcome to be taken from sorted ids on the first build, and made an
+            # identical second pass disagree with the first.
             attempts.append({"attempt_id": attempt_id, "status": ret["status"],
                              "result_ref": ret.get("result_ref"),
-                             "error": ret.get("error")})
+                             "error": ret.get("error"),
+                             "seq": ret.get("seq")})
         if mismatched:
             continue
+        # Same ordering rule as every later pass: a recorded sequence decides the
+        # outcome, otherwise it is unknown -- an attempt id is not a chronology.
+        if _rc is not None:
+            attempts, return_status, _sum = _rc.reconcile_attempts(attempts, [], key)
+        elif len(attempts) == 1:
+            return_status = attempts[0]["status"]
+        else:
+            return_status = "unknown"
         edges.append({
             "type": "agent_spawn",
             "from": "agent:%s" % parent, "to": "agent:%s" % child,
@@ -290,8 +309,7 @@ def build_edges(events, known_invocations=None, tool_calls_by_invocation=None):
             "spawn_tool_call_id": ev["spawn_tool_call_id"],
             "provenance": "recorded_event", "proven": True,
             "attempts": attempts,
-            "return_status": ("unmatched" if not attempts
-                              else attempts[-1]["status"]),
+            "return_status": ("unmatched" if not attempts else return_status),
         })
         if not attempts:
             unjoinable(ev, "spawn has no matching return event (child may still be "

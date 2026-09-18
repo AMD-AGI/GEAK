@@ -1639,3 +1639,101 @@ class IdentityFirstReconcileTest(unittest.TestCase):
         self.assertEqual(store.states["k"], rc.CONFLICTED,
                          "a contradicted claim became proven again")
         self.assertEqual(store.usable(), [])
+
+
+class R11RemainingTest(unittest.TestCase):
+    """Astra R11: the four remaining cases, through the real collect path."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-r11-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def _run(self, rid, call_id="m1"):
+        wf = os.path.join(self.dir, rid, "sess", "subagents", "workflows", rid)
+        os.makedirs(wf, exist_ok=True)
+        rd = os.path.join(self.dir, rid, "sess", "workflows")
+        os.makedirs(rd, exist_ok=True)
+        with open(os.path.join(wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_rec(type="launched") + "\n")
+            fh.write(_rec(type="started", key="k", agentId="a1",
+                          label="eng", phase="P") + "\n")
+        with open(os.path.join(wf, "agent-a1.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_asst(call_id, [{"type": "text", "text": rid}],
+                           usage={"output_tokens": 5}) + "\n")
+        with open(os.path.join(rd, rid + ".json"), "w", encoding="utf-8") as fh:
+            json.dump({"runId": rid, "status": "completed"}, fh)
+        return wf
+
+    # -- 1: conflict state persists across passes ---------------------------
+    def _trace_with_edge(self, input_ref):
+        return {"schema": C.SCHEMA, "run": {"run_id": "wf_x", "linkage": {}},
+                "agents": [{"agent_id": "p1", "calls": [], "totals": {},
+                            "result_status": "x"}],
+                "edges": [{"type": "result_supplied_to_dispatch", "from": "agent:p1",
+                           "to": "agent:c1", "event_id": "t1", "proven": True,
+                           "producer_result_ref": "r.x",
+                           "consumer_input_ref": input_ref}],
+                "warnings": []}
+
+    def test_contradiction_between_passes_invalidates_both(self):
+        """collect A then only B: B must not be proven despite contradicting A."""
+        first = self._trace_with_edge("d.prompt#1")
+        second = self._trace_with_edge("d.prompt#999")
+        merged = C.merge_traces(first, second)
+        self.assertEqual([e for e in merged["edges"] if e.get("proven")], [],
+                         "a contradicting later claim was published as proven")
+        self.assertFalse(merged["run"]["linkage"]["complete"])
+
+    def test_invalidation_survives_a_later_clean_pass(self):
+        """A -> A+B(conflict) -> A alone must NOT resurrect the edge."""
+        first = self._trace_with_edge("d.prompt#1")
+        conflicted = C.merge_traces(first, self._trace_with_edge("d.prompt#999"))
+        third = self._trace_with_edge("d.prompt#1")
+        merged = C.merge_traces(conflicted, third)
+        self.assertEqual([e for e in merged["edges"] if e.get("proven")], [],
+                         "conflict state was forgotten on a later pass")
+        self.assertTrue(merged["run"]["linkage"]["invalidated"])
+
+    # -- 3: legacy mirror without an owner marker ---------------------------
+    def test_legacy_mirror_without_marker_refuses_a_second_run(self):
+        dest = os.path.join(self.dir, "legacy")
+        C.mirror_sources(self._run("wf_one"), dest)
+        os.remove(os.path.join(dest, "mirror_owner.json"))  # pre-R11 shape
+        man = C.mirror_sources(self._run("wf_two", "m2"), dest)
+        self.assertIn("error", man)
+        self.assertIn("wf_one", man["error"])
+        with open(os.path.join(dest, "run_record.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["runId"], "wf_one",
+                             "the owning run's record was overwritten")
+
+    def test_unattributable_nonempty_destination_is_refused(self):
+        dest = os.path.join(self.dir, "mystery")
+        os.makedirs(dest)
+        with open(os.path.join(dest, "agent-zz.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        man = C.mirror_sources(self._run("wf_three"), dest)
+        self.assertIn("error", man)
+        self.assertFalse(man["complete"])
+
+    # -- 4: input identity is per-source, not flattened ---------------------
+    def test_missing_earlier_source_does_not_duplicate_blocks(self):
+        wf = self._run("wf_blk")
+        tp = os.path.join(wf, "agent-a1.jsonl")
+        def write(uuids):
+            lines = [_rec(type="user", timestamp="2026-09-16T19:39:0%d.000Z" % (i + 1),
+                          uuid=u, message={"content": [{"type": "text",
+                                                        "text": "from " + u}]})
+                     for i, u in enumerate(uuids)]
+            lines.append(_asst("m1", [{"type": "text", "text": "ok"}],
+                               usage={"output_tokens": 5}))
+            with open(tp, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+        out = os.path.join(self.dir, "t.json")
+        write(["uuid-one", "uuid-two"])
+        first = C.collect_once(wf, out)
+        write(["uuid-two"])                      # the earlier source record is gone
+        second = C.collect_once(wf, out, previous=first)
+        blocks = second["agents"][0]["calls"][0]["input"]["blocks"]
+        keys = [(b.get("source_uuid"), b.get("source_pos")) for b in blocks]
+        self.assertEqual(len(keys), len(set(keys)), "duplicate retained blocks: %r" % keys)
+        self.assertEqual(set(k[0] for k in keys), {"uuid-one", "uuid-two"})
