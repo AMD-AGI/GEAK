@@ -464,6 +464,18 @@ def test_fold_uses_sglang_flag_names(tmp_path: Path) -> None:
     assert "--gpu-memory-utilization" not in flags
 
 
+def test_fold_uses_atom_flag_names(tmp_path: Path) -> None:
+    """ATOM receives fidelity knobs using the flags supported by its adapter."""
+    h = _fidelity_handoff(
+        tmp_path, framework="atom", accepted_flags="--block-size 16",
+        max_model_len=10240, mem_fraction=0.9,
+    )
+    flags = rx.map_args(h)["initial_extra_server_args"]
+    assert "--block-size 16" in flags
+    assert "--max-model-len 10240" in flags
+    assert "--gpu-memory-utilization 0.9" in flags
+
+
 def test_fold_respects_explicit_caller_flag(tmp_path: Path) -> None:
     """A knob the caller already set in accepted_flags is never overridden."""
     h = _fidelity_handoff(

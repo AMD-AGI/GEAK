@@ -233,6 +233,7 @@ DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 _SERVING_FIDELITY_FLAGS: dict[str, dict[str, str]] = {
     "vllm": {"max_model_len": "--max-model-len", "mem_fraction": "--gpu-memory-utilization"},
     "sglang": {"max_model_len": "--context-length", "mem_fraction": "--mem-fraction-static"},
+    "atom": {"max_model_len": "--max-model-len", "mem_fraction": "--gpu-memory-utilization"},
 }
 
 

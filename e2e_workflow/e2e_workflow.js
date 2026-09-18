@@ -621,13 +621,14 @@ const VALIDATION_MEASUREMENT_MODE = String(A.validation_measurement_mode || 'war
 // what buys extra samples, and it already has `validation_replicas` to size them.
 const VALIDATION_SAMPLES = VALIDATION_MEASUREMENT_MODE === 'warm_server' ? 1 : VALIDATION_REPLICAS;
 // CUDA/HIP-graph deployment requirement (general; derived from the serving config, NOT hardcoded).
-// vllm/sglang capture the steady-state decode path into a FULL CUDA graph UNLESS --enforce-eager is set.
+// vllm/sglang/atom capture the steady-state decode path into a FULL CUDA/HIP graph UNLESS --enforce-eager
+// is set (ATOM exposes both --enforce-eager and --cudagraph-capture-sizes, so it belongs in this set).
 // A kernel that wins only via its OWN per-call graph-capture+replay wrapper falls back to eager inside the
 // server's graph, so the isolated win evaporates e2e (observed on M3: MoE 1.22x isolated -> 0% e2e). When
 // graphs are on we inject an EXPLICIT requirement into every kernel-optimize task: the win must be intrinsic
 // and graph-capture-safe. Detection is config-driven (enforce-eager absent + graph-capable backend), so it
 // auto-disables for an enforce-eager run and applies to any future graph-capturing backend.
-const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang') && !/enforce[-_]eager/i.test(INIT_FLAGS);
+const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang' || BACKEND === 'atom') && !/enforce[-_]eager/i.test(INIT_FLAGS);
 const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   ' DEPLOYMENT REQUIREMENT — the server captures the steady-state decode path into a FULL CUDA/HIP graph, ' +
   'so this kernel runs INSIDE that captured graph. Your speedup MUST be INTRINSIC: better tiles/algorithm, ' +

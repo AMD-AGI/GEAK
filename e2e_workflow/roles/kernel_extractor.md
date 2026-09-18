@@ -812,6 +812,14 @@ force real compact-operand compute:
      (the OUTER leaf described above — engages on ALL gfx and subsumes aiter tuned_gemm; confirm the symbol
      imports in the serving venv before trusting it).
    - **vLLM · unquantized bf16/fp16 · CUDA** → `torch.nn.functional:linear`.
+   - **ATOM · fp8 a8w8 blockscale dense GEMM · ROCm (gfx950)** → seed the live-seam search with
+     `atom.model_ops.linear:gemm_a8w8_blockscale_preshuffle_impl`.
+   - **ATOM · DeepSeek-V2/R1 fused QKV-A projection** → seed the live-seam search with
+     `atom.models.deepseek_v2:_fuse_qkv_a_proj_reduce_rmsnorm_quant_fp8`.
+     These ATOM entries are **version/model-specific candidates, not an authority**: confirm that the
+     symbol imports in the serving environment, prove `engagement_hits>0`, and require the normal
+     `deepest_verified:true` device-kernel correlation. If either check fails, discover and certify the
+     live seam from the installed ATOM version instead of forcing the recorded name.
    - **fp8/quantized · non-vLLM backend (sglang/atom) · attention · MoE** → do NOT guess a seam (a wrong
      fp8/attn seam is just another dead rebind). GREP the live server for the actual quant-apply / backend
      forward and use that verbatim; for attention the seam is the backend forward you captured.
