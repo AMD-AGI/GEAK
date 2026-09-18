@@ -238,9 +238,19 @@ def migrate_blocks(blocks, current=None):
     legacy_counts = {}
     for blk in blocks:
         if isinstance(blk, dict) and blk.get("source_pos") is None \
-                and blk.get("source_uuid") is not None:
+                and blk.get("source_uuid") is not None \
+                and not blk.get("legacy_position_unresolved"):
             key = (blk.get("source_uuid"), blk.get("kind"))
             legacy_counts[key] = legacy_counts.get(key, 0) + 1
+
+    # Positions already held by known blocks are NOT free candidates. Without
+    # this, a legacy block could be handed the identity of a block that is still
+    # present, replacing it in the field merge.
+    claimed = set()
+    for blk in blocks:
+        if isinstance(blk, dict) and blk.get("source_pos") is not None \
+                and blk.get("source_uuid") is not None:
+            claimed.add((blk.get("source_uuid"), blk.get("source_pos")))
 
     out = []
     for blk in blocks:
@@ -248,11 +258,18 @@ def migrate_blocks(blocks, current=None):
                 or blk.get("source_uuid") is None:
             out.append(blk)
             continue
-        key = (blk.get("source_uuid"), blk.get("kind"))
-        candidates = by_source.get(key) or []
         blk = dict(blk)
-        if (len(candidates) == 1 and legacy_counts.get(key) == 1
-                and candidates[0].get("source_pos") is not None):
+        # Unresolved is STICKY. A candidate set that shrank because another
+        # block disappeared is not new evidence of correspondence; re-resolving
+        # on a later poll would attach this block to a different identity.
+        if blk.get("legacy_position_unresolved"):
+            out.append(blk)
+            continue
+        key = (blk.get("source_uuid"), blk.get("kind"))
+        candidates = [c for c in (by_source.get(key) or [])
+                      if c.get("source_pos") is not None
+                      and (c.get("source_uuid"), c.get("source_pos")) not in claimed]
+        if len(candidates) == 1 and legacy_counts.get(key) == 1:
             blk["source_pos"] = candidates[0]["source_pos"]
             blk["legacy_position_resolved"] = True
         else:
