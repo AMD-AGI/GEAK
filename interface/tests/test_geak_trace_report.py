@@ -228,3 +228,64 @@ class WriteReportsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class RecordedLinkageRenderTest(unittest.TestCase):
+    """Astra R7 #6: validated transfer/spawn edges must actually be rendered."""
+
+    def _trace_with_links(self):
+        t = _trace([_agent("p1", "tech_lead:plan r1", 0),
+                    _agent("c1", "eng r1_d0:compute", 1)])
+        t["run"]["linkage"] = {"present": True, "complete": True}
+        t["edges"] += [
+            {"type": "result_supplied_to_dispatch", "from": "agent:p1",
+             "to": "agent:c1", "event_id": "t1", "proven": True,
+             "producer_result_ref": "result.directions[0]",
+             "consumer_input_ref": "dispatch.prompt#offset=120",
+             "forwarding": "literal", "transformation": None,
+             "transformation_known": False},
+            {"type": "agent_spawn", "from": "agent:p1", "to": "agent:c1",
+             "spawn_event_id": "s1", "spawn_tool_call_id": "toolu_9",
+             "proven": True, "return_status": "returned",
+             "attempts": [{"attempt_id": "a1", "status": "returned"}]},
+        ]
+        return t
+
+    def test_html_renders_both_recorded_edge_types(self):
+        out = R.render_html(R.build_view(self._trace_with_links()))
+        self.assertIn("Recorded linkage", out)
+        self.assertIn("result supplied", out)
+        self.assertIn("spawn", out)
+
+    def test_html_carries_the_inspectable_references(self):
+        view = R.build_view(self._trace_with_links())
+        payload = json.loads(R.render_html(view)
+                             .split("window.__TRACE__ = ", 1)[1]
+                             .rsplit(";</script>", 1)[0])
+        kinds = {e["type"] for e in payload["edges"]}
+        self.assertIn("result_supplied_to_dispatch", kinds)
+        self.assertIn("agent_spawn", kinds)
+        transfer = next(e for e in payload["edges"]
+                        if e["type"] == "result_supplied_to_dispatch")
+        self.assertEqual(transfer["producer_result_ref"], "result.directions[0]")
+        self.assertEqual(payload["linkage"]["present"], True)
+
+    def test_markdown_lists_recorded_edges_with_references(self):
+        md = R.render_markdown(R.build_view(self._trace_with_links()))
+        self.assertIn("## Recorded linkage", md)
+        self.assertIn("result.directions[0]", md)
+        self.assertIn("toolu_9", md)
+        self.assertIn("a1=returned", md)
+
+    def test_absent_linkage_says_not_recorded_not_none_exist(self):
+        t = _trace([_agent()])
+        t["run"]["linkage"] = {"present": False,
+                               "note": "No recorded linkage events for this run."}
+        md = R.render_markdown(R.build_view(t))
+        self.assertIn("No recorded linkage events", md)
+
+    def test_incomplete_coverage_is_surfaced(self):
+        t = self._trace_with_links()
+        t["run"]["linkage"]["complete"] = False
+        md = R.render_markdown(R.build_view(t))
+        self.assertIn("INCOMPLETE", md)
