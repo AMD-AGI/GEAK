@@ -281,6 +281,7 @@ def build_edges(events, known_invocations=None, tool_calls_by_invocation=None):
             # A return must name the SAME child as its spawn.
             if ret["child_invocation_id"] != child:
                 mismatched = True
+                conflicted.add(key)
                 unjoinable(ret, "return names child %s but spawn %s declares child "
                                 "%s; join invalidated"
                                 % (ret["child_invocation_id"], key, child))
@@ -322,18 +323,14 @@ def build_edges(events, known_invocations=None, tool_calls_by_invocation=None):
     # Identity keys of every relationship a contradiction invalidated. Callers
     # must keep these unusable: a claim does not become true again because a
     # later pass no longer sees the contradicting record.
+    # Keys are the RELATIONSHIP identity (type + event id), endpoints excluded,
+    # so a contradiction invalidates the claim wherever its endpoints now point.
     invalidated_keys = []
-    for key in conflicted:
-        for ev in list(transfers.values()) + list(spawns.values()):
-            if ev.get("event_id") == key:
-                invalidated_keys.append(
-                    ["result_supplied_to_dispatch",
-                     "agent:%s" % ev.get("producer_invocation_id"),
-                     "agent:%s" % ev.get("consumer_invocation_id"), key])
-            elif ev.get("spawn_event_id") == key:
-                invalidated_keys.append(
-                    ["agent_spawn", "agent:%s" % ev.get("parent_invocation_id"),
-                     "agent:%s" % ev.get("child_invocation_id"), key])
+    for key in sorted(conflicted):
+        if key in transfers:
+            invalidated_keys.append(["result_supplied_to_dispatch", key])
+        if key in spawns:
+            invalidated_keys.append(["agent_spawn", key])
 
     stats = {
         "result_supplied_edges": sum(1 for e in edges

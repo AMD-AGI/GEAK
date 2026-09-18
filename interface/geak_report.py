@@ -359,7 +359,11 @@ def _write_execution_trace(eval_dir, report_dir, rates_path=None):
         # report after a transcript was pruned must not overwrite the history
         # captured while that transcript still existed -- the workflow directory
         # still resolving is exactly the case the unresolved-fallback misses.
-        trace = collector.collect_once(wf_dir, trace_path, rates_path=rates_path)
+        # Mirror the run-owned sources beside the report, so the trace stays
+        # rebuildable after the container-local originals are pruned.
+        mirror_dir = os.path.join(report_dir, "geak_trace_sources")
+        trace = collector.collect_once(wf_dir, trace_path, rates_path=rates_path,
+                                       mirror_dir=mirror_dir)
         out = trace_report.write_reports(trace, report_dir)
         return {"status": "ok", "run_id": info.get("run_id"),
                 "run_status": trace["run"].get("status"),
