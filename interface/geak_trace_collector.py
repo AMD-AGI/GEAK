@@ -945,13 +945,13 @@ def _merge_call(prev, new):
     if _rc is not None and (p_in.get("blocks") or n_in.get("blocks")):
         cid = new.get("call_id")
         store, seen, order = _rc.Reconciled(), set(), []
-        for i, blk in enumerate(n_in.get("blocks") or []):
+        for i, blk in enumerate(_rc.migrate_blocks(n_in.get("blocks") or [])):
             key = _rc.block_key(cid, blk, i)
             seen.add(key)
             if key not in store.items:
                 order.append(key)
             store.absorb(key, blk, merge=_rc.merge_block)
-        for i, blk in enumerate(p_in.get("blocks") or []):
+        for i, blk in enumerate(_rc.migrate_blocks(p_in.get("blocks") or [])):
             key = _rc.block_key(cid, blk, i)
             if key in store.items:
                 store.absorb(key, blk, merge=_rc.merge_block)
@@ -1130,8 +1130,10 @@ def merge_traces(previous, current):
     invalidated = set()
     for holder in (linkage_prev, linkage_now):
         for item in (holder.get("invalidated") or []):
-            if isinstance(item, (list, tuple)):
-                invalidated.add(tuple(item))
+            key = (_rc.normalize_invalidation_key(item) if _rc is not None
+                   else (tuple(item) if isinstance(item, (list, tuple)) else None))
+            if key:
+                invalidated.add(key)
 
     # A previously captured edge that CONTRADICTS the current one under the same
     # identity invalidates both: neither is established any more.
@@ -1162,9 +1164,14 @@ def merge_traces(previous, current):
             # Attempts reconcile individually: preserving them only when the new
             # list is EMPTY discards history on a partial re-read.
             if _rc is not None and (edge.get("attempts") or prior_here.get("attempts")):
+                sid = prior_here.get("spawn_event_id") or edge.get("spawn_event_id")
                 atts, outcome, _summary = _rc.reconcile_attempts(
-                    edge.get("attempts"), prior_here.get("attempts"),
-                    prior_here.get("spawn_event_id") or key[3])
+                    edge.get("attempts"), prior_here.get("attempts"), sid)
+                if _summary.get("conflicted"):
+                    # A contradicted attempt is evidence about the RELATIONSHIP.
+                    # Dropping it from usable history left the next pass with
+                    # nothing to compare, so the outcome flipped back.
+                    invalidated.add(key)
                 if len(atts) > len(prior_here.get("attempts") or []):
                     prior_here["retained_from_earlier_capture"] = True
                     added += 1
