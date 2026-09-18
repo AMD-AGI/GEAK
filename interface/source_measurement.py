@@ -168,8 +168,7 @@ def _launch_capsule(
     if not isinstance(reference, dict):
         raise SourceMeasurementError("invalid_launch_capsule_reference")
     _require(
-        set(reference) == {"path", "sha256"}
-        and reference.get("path") == "launch.json",
+        set(reference) == {"path", "sha256"} and reference.get("path") == "launch.json",
         "invalid_launch_capsule_reference",
     )
     raw = _hashed(runtime / "launch.json", reference["sha256"])
