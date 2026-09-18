@@ -3,6 +3,7 @@
 """Source-bearing results require the exact selected measurements' receipts."""
 import json
 import os
+import signal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,8 +20,12 @@ raw_source_request = measurements.source_request
 def preserve_environment():
     # The real dispatcher exports protocol/source variables. Keep those exports
     # real within each test and restore newly introduced names afterward too.
-    with patch.dict(os.environ):
-        yield
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    try:
+        with patch.dict(os.environ):
+            yield
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 @pytest.fixture
@@ -211,6 +216,88 @@ def test_source_relative_eval_dir_is_absolute_before_recipe_export(raw_source_re
     assert output["mapped_args"]["eval_dir"] == str(tmp_path / "relative-evaluation")
     monkeypatch.chdir(tmp_path / "relative-evaluation")
     assert recipe.read_bytes() == b"SGLANG_USE_AITER=1\0"
+
+
+@pytest.mark.parametrize("outcome", ["verified", "missing_seal", "workflow_error"])
+def test_main_binds_staged_source_to_result_without_global_exports(
+    raw_source_request, tmp_path, monkeypatch, outcome,
+):
+    handoff = _handoff(raw_source_request)
+    handoff.update(schema_version=2, model_path="/models/example", exp_root=str(tmp_path),
+                   eval_dir=str(tmp_path / "eval"))
+    # Caller-provided private state must not substitute for the runner's stage.
+    handoff["_geak_source_request_path"] = str(tmp_path / "untrusted-request.json")
+    handoff_path, result_path = tmp_path / "handoff.json", tmp_path / "result.json"
+    handoff_path.write_text(json.dumps(handoff))
+    invoked = []
+
+    def invoke(_prompt, _timeout, evaluation, ps_args=None):
+        request = Path(ps_args["baseline_source_request_path"])
+        invoked.append(request)
+        assert request.parent == Path(evaluation) / "source_requests"
+        assert os.environ["GEAK_SOURCE_REQUEST"] == str(request)
+        assert request != raw_source_request
+        assert Path(json.loads(request.read_text())["source_materialization"]["bundle_root"]).is_dir()
+        if outcome == "workflow_error":
+            raise RuntimeError("controlled workflow failure before measurement")
+        measured = measurements._pair(tmp_path, request)
+        workflow = _workflow(measured)
+        if outcome == "missing_seal":
+            (measured / "validation/final/source_runtime/measurement.json").unlink()
+        return workflow
+
+    def unexpected_export(*_args, **_kwargs):
+        pytest.fail("source-bound measurements must not enter global knowledge")
+
+    monkeypatch.setattr(run_e2e, "apply_bench_launcher", lambda _handoff: "native")
+    monkeypatch.setattr(run_e2e, "invoke_workflow", invoke)
+    monkeypatch.setattr(run_e2e, "_kb_write_back", unexpected_export)
+    monkeypatch.setattr(run_e2e, "_kb_write_tuned_ops", unexpected_export)
+    assert run_e2e.main([str(handoff_path), str(result_path)]) == (0 if outcome == "verified" else 1)
+    assert len(invoked) == 1
+    result = json.loads(result_path.read_text())
+    assert result["kb_write"]["why"] == "source_bound_export_unavailable"
+    assert result["kb_write_tuned"]["why"] == "source_bound_export_unavailable"
+    assert json.loads(Path(result["kernel_journey_path"]).read_text())["kernels"] == []
+    if outcome == "verified":
+        assert result["status"] == "ok"
+        assert result["source_measurement"]["status"] == "verified"
+        assert result["source_measurement"]["replay_status"] == "staged"
+        assert Path(result["final_launch_script"]).is_file()
+    else:
+        assert result["status"] == "error"
+        assert result["source_measurement"]["status"] == "unavailable"
+        assert "throughput_speedup" not in result
+        assert "accepted_config" not in result
+
+
+@pytest.mark.parametrize("damage", ["malformed_materialization", "conflicting_helper"])
+def test_main_source_preparation_refusal_prevents_workflow_launch(
+    raw_source_request, tmp_path, monkeypatch, damage,
+):
+    handoff = _handoff(raw_source_request)
+    evaluation = tmp_path / "eval"
+    handoff.update(schema_version=2, model_path="/models/example", exp_root=str(tmp_path),
+                   eval_dir=str(evaluation))
+    if damage == "malformed_materialization":
+        handoff["baseline_env_spec"]["source_materialization"]["manifest_sha256"] = "0" * 64
+    else:
+        evaluation.mkdir()
+        (evaluation / "bench_e2e.sh").write_text("conflicting helper\n")
+    handoff_path, result_path = tmp_path / "handoff.json", tmp_path / "result.json"
+    handoff_path.write_text(json.dumps(handoff))
+
+    def unexpected_launch(*_args, **_kwargs):
+        pytest.fail("unresolved source must not launch the workflow")
+
+    monkeypatch.setattr(run_e2e, "apply_bench_launcher", lambda _handoff: "native")
+    monkeypatch.setattr(run_e2e, "invoke_workflow", unexpected_launch)
+    assert run_e2e.main([str(handoff_path), str(result_path)]) == 1
+    result = json.loads(result_path.read_text())
+    assert result["status"] == "error"
+    assert result["error_class"] == "unresolved_baseline_source"
+    assert "throughput_speedup" not in result
+    assert not list(evaluation.glob("source_requests/*.json"))
 
 
 @pytest.mark.parametrize("existing", [False, True])

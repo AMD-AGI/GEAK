@@ -761,10 +761,21 @@ def test_unobserved_detached_worker_is_retained_and_refused(launch_files, tmp_pa
 def test_renamed_unobserved_python_cannot_hide_as_nonpython_worker(launch_files, tmp_path):
     executable = tmp_path / "engine-worker"
     shutil.copy2(Path(sys.executable).resolve(), executable)
-    startup = f"subprocess.Popen([{str(executable)!r},'-S','-c','import time;time.sleep(60)'])"
-    with serving(launch_files, tmp_path, startup=startup) as (out, owner, endpoint, _), \
-            pytest.raises(runtime.SourceRuntimeError, match="observation_timeout"):
-        runtime.gate(out, owner, endpoint, "ready", .5)
+    marker = tmp_path / "renamed-worker-ready"
+    worker = ("import os,time\nfrom pathlib import Path\n"
+              f"Path({str(marker)!r}).write_text(str(os.getpid()))\ntime.sleep(60)")
+    # Relocatable interpreters lose their stdlib search prefix when copied.
+    # Preserve this installation only for the deliberately unobserved child.
+    pythonhome = os.pathsep.join((sys.base_prefix, sys.base_exec_prefix))
+    startup = (f"subprocess.Popen([{str(executable)!r},'-S','-c',{worker!r}],"
+               f"env=dict(os.environ,PYTHONHOME={pythonhome!r}))")
+    with serving(launch_files, tmp_path, startup=startup) as (out, owner, endpoint, _):
+        pid = int(wait_file(marker))
+        child = runtime.proc(pid)
+        assert child is not None and child["state"] != "Z" and child["pgid"] == owner["pgid"]
+        assert Path(f"/proc/{pid}/exe").resolve() == executable
+        with pytest.raises(runtime.SourceRuntimeError, match="observation_timeout"):
+            runtime.gate(out, owner, endpoint, "ready", .5)
 
 
 def test_marker_prevents_environment_drop_from_becoming_no_source(launch_files, tmp_path):
