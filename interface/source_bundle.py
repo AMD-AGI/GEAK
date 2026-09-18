@@ -49,6 +49,10 @@ def _file_identity(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _directory_identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
 def _directory_fd(path: Path, *, create: bool = False) -> int:
     if not path.is_absolute() or ".." in path.parts:
         raise SourceMaterializationError("unsafe_staging_directory")
@@ -159,42 +163,60 @@ def _check_at(parent: int, name: str, data: bytes, mode: int) -> bool:
     return True
 
 
+def _publish_at(
+    parent: int, name: str, data: bytes, mode: int, *, exclusive: bool = False
+) -> None:
+    if _check_at(parent, name, data, mode):
+        if exclusive:
+            raise SourceMaterializationError("conflicting_staged_asset")
+        return
+    temporary = ".source-stage-" + uuid.uuid4().hex
+    fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=parent,
+    )
+    temporary_identity = _directory_identity(os.fstat(fd))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
+        if (
+            _directory_identity(
+                os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+            )
+            != temporary_identity
+        ):
+            raise SourceMaterializationError("staged_asset_disappeared")
+        try:
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=parent,
+                dst_dir_fd=parent,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            if exclusive:
+                raise SourceMaterializationError("conflicting_staged_asset") from None
+        if not _check_at(parent, name, data, mode):
+            raise SourceMaterializationError("staged_asset_disappeared")
+    finally:
+        try:
+            current = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+            if _directory_identity(current) == temporary_identity:
+                os.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+
+
 def _publish_file(path: Path, data: bytes, mode: int) -> None:
     with _opened_directory(path.parent, create=True) as parent:
-        if _check_at(parent, path.name, data, mode):
-            _same_directory(path.parent, parent)
-            return
-        temporary = ".source-stage-" + uuid.uuid4().hex
-        fd = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=parent,
-        )
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fchmod(stream.fileno(), mode)
-                os.fsync(stream.fileno())
-            try:
-                os.link(
-                    temporary,
-                    path.name,
-                    src_dir_fd=parent,
-                    dst_dir_fd=parent,
-                    follow_symlinks=False,
-                )
-            except FileExistsError:
-                pass
-            if not _check_at(parent, path.name, data, mode):
-                raise SourceMaterializationError("staged_asset_disappeared")
-            _same_directory(path.parent, parent)
-        finally:
-            try:
-                os.unlink(temporary, dir_fd=parent)
-            except FileNotFoundError:
-                pass
+        _publish_at(parent, path.name, data, mode)
+        _same_directory(path.parent, parent)
 
 
 def _publish_tree(parent: int, temporary: str, destination: str) -> None:
@@ -202,7 +224,7 @@ def _publish_tree(parent: int, temporary: str, destination: str) -> None:
     # no-replace publication even when a conflicting stager left no files yet.
     rename = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
     if rename is None:
-        raise SourceMaterializationError("atomic_source_publication_unavailable")
+        raise OSError(errno.ENOSYS, "renameat2 unavailable")
     rename.argtypes = (
         ctypes.c_int,
         ctypes.c_char_p,
@@ -213,26 +235,152 @@ def _publish_tree(parent: int, temporary: str, destination: str) -> None:
     rename.restype = ctypes.c_int
     if rename(parent, os.fsencode(temporary), parent, os.fsencode(destination), 1):
         code = ctypes.get_errno()
-        if code in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
-            raise SourceMaterializationError("atomic_source_publication_unavailable")
         raise OSError(code, os.strerror(code))
 
 
-def _remove_tree(parent: int, name: str) -> None:
+@contextmanager
+def _claimed_parent(
+    root: int,
+    parts: tuple[str, ...],
+    directories: dict[tuple[str, ...], tuple[int, int]],
+):
+    """Traverse only directories created by this claim, rooted at its held fd."""
+    fd = os.dup(root)
+    try:
+        for index, name in enumerate(parts):
+            relative = parts[: index + 1]
+            if relative not in directories:
+                # Existing unknown directories cannot belong to this creator.
+                os.mkdir(name, 0o755, dir_fd=fd)
+            child = os.open(
+                name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+            )
+            os.close(fd)
+            fd = child
+            identity = _directory_identity(os.fstat(fd))
+            if relative in directories and directories[relative] != identity:
+                raise SourceMaterializationError("staging_directory_changed")
+            directories[relative] = identity
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _claim_and_publish_tree(
+    parent: int,
+    temporary: Path,
+    destination: Path,
+    files: list[dict],
+) -> tuple[int, int]:
+    """NFS fallback: exclusive claim, complete files, then atomic manifest.
+
+    Only mkdir's winner can populate this directory. An interrupted claim is
+    intentionally retained; another caller may validate a complete tree but
+    must never repair or overwrite a partial one.
+    """
+    os.mkdir(destination.name, 0o700, dir_fd=parent)
+    root = os.open(
+        destination.name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=parent,
+    )
+    directories: dict[tuple[str, ...], tuple[int, int]] = {}
+    try:
+        for row in [*files, {"path": "manifest.json", "mode": 0o644}]:
+            _publish_claimed_file(
+                destination,
+                root,
+                directories,
+                row["path"],
+                _read_regular(temporary / row["path"]),
+                row["mode"],
+            )
+        return _directory_identity(os.fstat(root))
+    finally:
+        os.close(root)
+
+
+def _publish_claimed_file(
+    path: Path,
+    root: int,
+    directories: dict[tuple[str, ...], tuple[int, int]],
+    relative: str,
+    data: bytes,
+    mode: int,
+) -> tuple[int, ...]:
+    _same_directory(path, root)
+    parts = _relative(relative).parts
+    with _claimed_parent(root, parts[:-1], directories) as target:
+        _publish_at(target, parts[-1], data, mode, exclusive=True)
+        identity = _file_identity(
+            os.stat(parts[-1], dir_fd=target, follow_symlinks=False)
+        )
+    # Held fds cannot redirect writes after a rename; reopening detects changes
+    # to any recorded nested directory before this publication can qualify.
+    with _claimed_parent(root, parts[:-1], directories):
+        pass
+    _same_directory(path, root)
+    return identity
+
+
+def _validate_staged(request: dict):
+    try:
+        return validate_source_materialization(request)
+    except FileNotFoundError as exc:
+        raise SourceMaterializationError("incomplete_staged_materialization") from exc
+    except SourceMaterializationError as exc:
+        if exc.reason == "missing_bundle_path":
+            raise SourceMaterializationError(
+                "incomplete_staged_materialization"
+            ) from exc
+        raise
+
+
+def _remove_owned_tree(
+    parent: int,
+    name: str,
+    expected: tuple[int, int],
+    directories: dict[tuple[str, ...], tuple[int, int]],
+    files: dict[tuple[str, ...], tuple[int, ...]],
+    prefix: tuple[str, ...] = (),
+) -> bool:
     try:
         fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
     except FileNotFoundError:
-        return
+        return True
     try:
-        with os.scandir(fd) as entries:
-            for entry in entries:
-                if entry.is_dir(follow_symlinks=False):
-                    _remove_tree(fd, entry.name)
-                else:
-                    os.unlink(entry.name, dir_fd=fd)
+        if _directory_identity(os.fstat(fd)) != expected:
+            # A pathname is not ownership. Preserve a replacement directory.
+            return False
+        with os.scandir(fd) as scan:
+            entries = list(scan)
+        for entry in entries:
+            relative = prefix + (entry.name,)
+            info = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                if directories.get(relative) != _directory_identity(info):
+                    return False
+            elif files.get(relative) != _file_identity(info):
+                return False
+        for entry in entries:
+            relative = prefix + (entry.name,)
+            if entry.is_dir(follow_symlinks=False):
+                if not _remove_owned_tree(
+                    fd, entry.name, directories[relative], directories, files, relative
+                ):
+                    return False
+            else:
+                current = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+                if files[relative] != _file_identity(current):
+                    return False
+                os.unlink(entry.name, dir_fd=fd)
     finally:
         os.close(fd)
+    current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if _directory_identity(current) != expected:
+        return False
     os.rmdir(name, dir_fd=parent)
+    return True
 
 
 def stage_source_bundle(
@@ -275,62 +423,106 @@ def stage_source_bundle(
         destination = materializations / source.manifest_sha256
         staged_request = copy.deepcopy(request)
         staged_request["source_materialization"]["bundle_root"] = str(destination)
+        published_identity = None
         with _opened_directory(materializations, create=True) as parent:
             if destination.exists() or destination.is_symlink():
-                validate_source_materialization(staged_request)
+                _validate_staged(staged_request)
             else:
                 temporary_name = ".materializing-" + uuid.uuid4().hex
                 os.mkdir(temporary_name, 0o700, dir_fd=parent)
                 temporary = materializations / temporary_name
+                temporary_fd = os.open(
+                    temporary_name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=parent,
+                )
+                temporary_identity = _directory_identity(os.fstat(temporary_fd))
+                directories: dict[tuple[str, ...], tuple[int, int]] = {}
+                files: dict[tuple[str, ...], tuple[int, ...]] = {}
                 try:
-                    for row in source.manifest["files"]:
-                        _publish_file(
-                            temporary / row["path"],
+                    for row in [
+                        *source.manifest["files"],
+                        {"path": "manifest.json", "mode": 0o644},
+                    ]:
+                        files[_relative(row["path"]).parts] = _publish_claimed_file(
+                            temporary,
+                            temporary_fd,
+                            directories,
+                            row["path"],
                             _read_regular(source.bundle_root / row["path"]),
                             row["mode"],
                         )
-                    _publish_file(
-                        temporary / "manifest.json",
-                        _read_regular(source.bundle_root / "manifest.json"),
-                        0o644,
-                    )
                     check = copy.deepcopy(staged_request)
                     check["source_materialization"]["bundle_root"] = str(temporary)
                     validate_source_materialization(check)
+                    _same_directory(temporary, temporary_fd)
                     _same_directory(materializations, parent)
                     try:
                         _publish_tree(parent, temporary_name, destination.name)
+                        published_identity = temporary_identity
                     except OSError as exc:
-                        if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                        if exc.errno in {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}:
+                            try:
+                                published_identity = _claim_and_publish_tree(
+                                    parent,
+                                    temporary,
+                                    destination,
+                                    source.manifest["files"],
+                                )
+                            except FileExistsError:
+                                _validate_staged(staged_request)
+                        elif exc.errno in {errno.EEXIST, errno.ENOTEMPTY}:
+                            _validate_staged(staged_request)
+                        else:
                             raise
-                        validate_source_materialization(staged_request)
                     _same_directory(materializations, parent)
                 finally:
-                    _remove_tree(parent, temporary_name)
-        staged_source = validate_source_materialization(staged_request)
-        for name, (data, mode) in payloads.items():
-            _publish_file(_target(eval_dir, name), data, mode)
+                    try:
+                        _remove_owned_tree(
+                            parent,
+                            temporary_name,
+                            temporary_identity,
+                            directories,
+                            files,
+                        )
+                    finally:
+                        os.close(temporary_fd)
+        with _opened_directory(destination) as published:
+            if (
+                published_identity is not None
+                and _directory_identity(os.fstat(published)) != published_identity
+            ):
+                raise SourceMaterializationError("staging_directory_changed")
+            staged_source = _validate_staged(staged_request)
+            for name, (data, mode) in payloads.items():
+                _publish_file(_target(eval_dir, name), data, mode)
 
-        request_bytes = (
-            json.dumps(staged_request, sort_keys=True, separators=(",", ":")) + "\n"
-        ).encode()
-        request_sha = _sha(request_bytes)
-        request_path = eval_dir / "source_requests" / (request_sha + ".json")
-        _publish_file(request_path, request_bytes, 0o600)
-        receipt = {
-            "schema": "geak.source_bundle.v1",
-            "status": "staged",
-            "request_path": str(request_path.relative_to(eval_dir)),
-            "request_sha256": request_sha,
-            "manifest_sha256": staged_source.manifest_sha256,
-            "assets": {
-                name: {"sha256": _sha(data), "mode": mode}
-                for name, (data, mode) in payloads.items()
-            },
-        }
-        receipt_bytes = (json.dumps(receipt, sort_keys=True) + "\n").encode()
-        receipt_path = eval_dir / "source_requests" / (request_sha + ".staging.json")
-        _publish_file(receipt_path, receipt_bytes, 0o600)
+            request_bytes = (
+                json.dumps(staged_request, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            request_sha = _sha(request_bytes)
+            request_path = eval_dir / "source_requests" / (request_sha + ".json")
+            _same_directory(destination, published)
+            _validate_staged(staged_request)
+            _publish_file(request_path, request_bytes, 0o600)
+            _same_directory(destination, published)
+            receipt = {
+                "schema": "geak.source_bundle.v1",
+                "status": "staged",
+                "request_path": str(request_path.relative_to(eval_dir)),
+                "request_sha256": request_sha,
+                "manifest_sha256": staged_source.manifest_sha256,
+                "assets": {
+                    name: {"sha256": _sha(data), "mode": mode}
+                    for name, (data, mode) in payloads.items()
+                },
+            }
+            receipt_bytes = (json.dumps(receipt, sort_keys=True) + "\n").encode()
+            receipt_path = (
+                eval_dir / "source_requests" / (request_sha + ".staging.json")
+            )
+            _publish_file(receipt_path, receipt_bytes, 0o600)
+            _same_directory(destination, published)
         return {
             "request_path": str(request_path),
             "request_sha256": request_sha,

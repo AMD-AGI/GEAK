@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Staging owns complete copies and never replaces conflicting old helpers."""
 
+import errno
 import hashlib
 import json
 import os
@@ -9,6 +10,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -44,9 +47,20 @@ def _request(baseline):
     return {"schema_version": 1, **baseline}
 
 
+@pytest.fixture
+def claim_publication(monkeypatch):
+    def unsupported(*_args):
+        raise OSError(errno.EOPNOTSUPP, "filesystem lacks renameat2 no-replace")
+
+    monkeypatch.setattr(source_bundle, "_publish_tree", unsupported)
+
+
+@pytest.mark.parametrize("publication", ["rename", "claim"])
 def test_staging_keeps_working_after_original_source_is_removed(
-    bundle, assets, tmp_path
+    bundle, assets, tmp_path, request, publication
 ):
+    if publication == "claim":
+        request.getfixturevalue("claim_publication")
     baseline, _, original = bundle
     target = tmp_path / "run"
     result = source_bundle.stage_source_bundle(_request(baseline), target, assets)
@@ -84,9 +98,12 @@ def test_staging_keeps_working_after_original_source_is_removed(
     assert source_bundle.stage_source_bundle(staged_request, target, assets) == result
 
 
+@pytest.mark.parametrize("publication", ["rename", "claim"])
 def test_relocation_preserves_old_request_bytes_and_creates_new_location_binding(
-    bundle, assets, tmp_path
+    bundle, assets, tmp_path, request, publication
 ):
+    if publication == "claim":
+        request.getfixturevalue("claim_publication")
     baseline, _, original = bundle
     first = tmp_path / "first"
     initial = source_bundle.stage_source_bundle(_request(baseline), first, assets)
@@ -343,6 +360,246 @@ def test_concurrent_materialization_winner_requires_complete_exact_source(
     if not identical:
         assert list(winner.iterdir()) == []
     assert not list(materializations.glob(".materializing-*"))
+
+
+def _inventory(root):
+    return {
+        str(path.relative_to(root)): (
+            path.stat().st_ino,
+            path.read_bytes() if path.is_file() else None,
+        )
+        for path in root.rglob("*")
+    }
+
+
+def test_claim_interruption_preserves_unready_source_and_never_repairs_it(
+    bundle, assets, tmp_path, monkeypatch, claim_publication
+):
+    baseline, _, _ = bundle
+    target = tmp_path / "run"
+    claimed = (
+        target
+        / "source_materializations"
+        / baseline["source_materialization"]["manifest_sha256"]
+    )
+    publish = source_bundle._publish_claimed_file
+
+    def interrupted(path, *args):
+        if path == claimed and args[2].endswith("second.py"):
+            raise OSError("simulated interrupted NFS copy")
+        return publish(path, *args)
+
+    monkeypatch.setattr(source_bundle, "_publish_claimed_file", interrupted)
+    with pytest.raises(
+        SourceMaterializationError, match="source_bundle_staging_failed"
+    ):
+        source_bundle.stage_source_bundle(_request(baseline), target, assets)
+    assert claimed.is_dir() and list(claimed.rglob("*.py"))
+    assert not (claimed / "manifest.json").exists()
+    assert not (target / "source_requests").exists()
+    assert not (target / "bench_e2e.sh").exists()
+    assert not list(target.rglob(".materializing-*"))
+    before = _inventory(claimed)
+    monkeypatch.setattr(source_bundle, "_publish_claimed_file", publish)
+    with pytest.raises(
+        SourceMaterializationError, match="incomplete_staged_materialization"
+    ):
+        source_bundle.stage_source_bundle(_request(baseline), target, assets)
+    assert _inventory(claimed) == before
+
+
+def test_concurrent_claim_cannot_publish_until_manifest_is_complete(
+    bundle, assets, tmp_path, monkeypatch, claim_publication
+):
+    baseline, manifest, _ = bundle
+    target = tmp_path / "run"
+    claimed = (
+        target
+        / "source_materializations"
+        / baseline["source_materialization"]["manifest_sha256"]
+    )
+    publish = source_bundle._publish_claimed_file
+    waiting, resume = threading.Event(), threading.Event()
+
+    def paused(path, *args):
+        if path == claimed and args[2] == "manifest.json":
+            waiting.set()
+            assert resume.wait(10)
+        return publish(path, *args)
+
+    monkeypatch.setattr(source_bundle, "_publish_claimed_file", paused)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        owner = pool.submit(
+            source_bundle.stage_source_bundle, _request(baseline), target, assets
+        )
+        try:
+            assert waiting.wait(10)
+            assert all((claimed / row["path"]).is_file() for row in manifest["files"])
+            assert not (claimed / "manifest.json").exists()
+            before = _inventory(claimed)
+            with pytest.raises(
+                SourceMaterializationError, match="incomplete_staged_materialization"
+            ):
+                source_bundle.stage_source_bundle(_request(baseline), target, assets)
+            assert _inventory(claimed) == before
+            assert not (target / "source_requests").exists()
+        finally:
+            resume.set()
+        result = owner.result(timeout=10)
+    assert (
+        source_bundle.stage_source_bundle(_request(baseline), target, assets) == result
+    )
+    assert read_source_request(result["request_path"])
+
+
+def test_killed_claim_creator_leaves_no_ready_request_and_retry_refuses(
+    bundle, assets, tmp_path
+):
+    baseline, _, _ = bundle
+    target = tmp_path / "run"
+    marker = tmp_path / "waiting-for-manifest"
+    code = """
+import errno, json, sys, time
+from pathlib import Path
+from interface import source_bundle
+request, assets = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+target, marker = Path(sys.argv[3]), Path(sys.argv[4])
+claimed = target / 'source_materializations' / request['source_materialization']['manifest_sha256']
+def unavailable(*args):
+    raise OSError(errno.EOPNOTSUPP, 'force NFS publication')
+source_bundle._publish_tree = unavailable
+publish = source_bundle._publish_claimed_file
+def paused(path, *args):
+    if path == claimed and args[2] == 'manifest.json':
+        marker.touch()
+        time.sleep(60)
+    return publish(path, *args)
+source_bundle._publish_claimed_file = paused
+source_bundle.stage_source_bundle(request, target, {key: Path(value) for key, value in assets.items()})
+"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            code,
+            json.dumps(_request(baseline)),
+            json.dumps({name: str(path) for name, path in assets.items()}),
+            str(target),
+            str(marker),
+        ],
+        cwd=Path(source_bundle.__file__).resolve().parents[1],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while (
+            not marker.exists()
+            and time.monotonic() < deadline
+            and process.poll() is None
+        ):
+            time.sleep(0.02)
+        assert marker.exists()
+        assert not (target / "source_requests").exists()
+    finally:
+        process.kill()
+        process.communicate(timeout=5)
+    before = _inventory(target)
+    with pytest.raises(
+        SourceMaterializationError, match="incomplete_staged_materialization"
+    ):
+        source_bundle.stage_source_bundle(_request(baseline), target, assets)
+    assert _inventory(target) == before
+
+
+@pytest.mark.parametrize("level", ["root", "nested"])
+@pytest.mark.parametrize("replacement", ["directory", "symlink"])
+def test_claim_writes_stay_in_owned_directories_after_replacement(
+    bundle, assets, tmp_path, monkeypatch, claim_publication, level, replacement
+):
+    baseline, _, _ = bundle
+    target = tmp_path / "run"
+    claimed = (
+        target
+        / "source_materializations"
+        / baseline["source_materialization"]["manifest_sha256"]
+    )
+    changed = claimed if level == "root" else claimed / "trees/a/python/alpha"
+    parked, outside = tmp_path / "parked", tmp_path / "outside"
+    outside.mkdir()
+    link = os.link
+
+    def replaced(src, dst, **kwargs):
+        parent = Path(os.readlink(f"/proc/self/fd/{kwargs['dst_dir_fd']}"))
+        if dst == "first.py" and parent.is_relative_to(claimed):
+            changed.rename(parked)
+            if replacement == "directory":
+                changed.mkdir()
+            else:
+                changed.symlink_to(outside, target_is_directory=True)
+        return link(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "link", replaced)
+    with pytest.raises(SourceMaterializationError):
+        source_bundle.stage_source_bundle(_request(baseline), target, assets)
+    assert list(changed.iterdir()) == []
+    assert list(outside.iterdir()) == []
+    assert not (target / "source_requests").exists()
+
+
+@pytest.mark.parametrize("level", ["root", "nested"])
+def test_temporary_cleanup_preserves_replaced_directories(
+    bundle, assets, tmp_path, monkeypatch, level
+):
+    baseline, _, _ = bundle
+    target = tmp_path / "run"
+    parked = tmp_path / "parked"
+    replacements = []
+
+    def failed(parent, temporary, destination):
+        changed = target / "source_materializations" / temporary
+        if level == "nested":
+            changed /= "trees/a/python/alpha"
+        changed.rename(parked)
+        changed.mkdir()
+        (changed / "unowned.txt").write_text("preserve this replacement\n")
+        replacements.append(changed)
+        raise OSError(errno.EIO, "simulated publication failure")
+
+    monkeypatch.setattr(source_bundle, "_publish_tree", failed)
+    with pytest.raises(
+        SourceMaterializationError, match="source_bundle_staging_failed"
+    ):
+        source_bundle.stage_source_bundle(_request(baseline), target, assets)
+    assert (
+        replacements[0] / "unowned.txt"
+    ).read_text() == "preserve this replacement\n"
+    assert not (target / "source_requests").exists()
+
+
+def test_regular_file_cleanup_preserves_a_replaced_temporary(
+    bundle, assets, tmp_path, monkeypatch
+):
+    baseline, _, _ = bundle
+    target = tmp_path / "run"
+    replacements = []
+
+    def replaced(src, dst, **kwargs):
+        parent = kwargs["src_dir_fd"]
+        os.rename(src, src + "-parked", src_dir_fd=parent, dst_dir_fd=parent)
+        fd = os.open(src, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(b"unowned replacement temporary\n")
+        replacements.append(Path(os.readlink(f"/proc/self/fd/{parent}")) / src)
+        raise OSError(errno.EIO, "simulated failed link")
+
+    monkeypatch.setattr(os, "link", replaced)
+    with pytest.raises(
+        SourceMaterializationError, match="source_bundle_staging_failed"
+    ):
+        source_bundle.stage_source_bundle(_request(baseline), target, assets)
+    assert replacements[0].read_bytes() == b"unowned replacement temporary\n"
+    assert not (target / "source_requests").exists()
 
 
 @pytest.mark.parametrize("phase", ["mkdir", "link"])
