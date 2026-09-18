@@ -238,6 +238,38 @@ class TestMapArgs(_RunE2ECase):
         h.update(extra)
         return h
 
+    def _write_roofline_trace(
+        self,
+        root: Path,
+        run_id: str,
+        timestamp: str,
+        *,
+        flags: str = "",
+        framework: str = "sglang",
+        model: str = "/models/fake-8b",
+        tp: int = 4,
+        isl: int = 2048,
+        osl: int = 256,
+        conc: int = 8,
+    ) -> Path:
+        run_dir = root / "runs" / "roofline" / run_id
+        trace_dir = run_dir / f"benchmark_{framework}_{timestamp}" / "torch_trace"
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        (trace_dir / "1-TP-0.trace.json.gz").write_text("x", encoding="utf-8")
+        (run_dir / "baseline_config.with_envs.yaml").write_text(
+            "benchmark:\n"
+            f"  framework: {framework}\n"
+            f"  model: {model}\n"
+            "  envs:\n"
+            f"    TP: '{tp}'\n"
+            f"    ISL: '{isl}'\n"
+            f"    OSL: '{osl}'\n"
+            f"    CONC: '{conc}'\n"
+            f"    EXTRA_SGLANG_ARGS: '{flags}'\n",
+            encoding="utf-8",
+        )
+        return trace_dir
+
     def test_optional_workflow_knobs_are_forwarded_verbatim(self):
         """launch_recipe / phases / carried state are the resume channel:
         dropping one silently re-runs a phase the caller pinned.
@@ -319,10 +351,12 @@ class TestMapArgs(_RunE2ECase):
         analysis = root / "kernel-agent" / "r1" / "tracelens" / "analysis.md"
         cands = root / "kernel-agent" / "r1" / "kernel_candidates.json"
         report = root / "kernel-agent" / "r1" / "tracelens" / "tracelens_report.json"
-        trace = root / "runs" / "roofline" / "r9" / "torch_trace"
-        for p in (analysis, cands, report, trace):
+        for p in (analysis, cands, report):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("x", encoding="utf-8")
+        trace = self._write_roofline_trace(
+            root, "synthetic-run", "20260102_020202"
+        )
         ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
         self.assertEqual(ps["tracelens"], {
             "analysis_md": str(analysis),
@@ -331,6 +365,57 @@ class TestMapArgs(_RunE2ECase):
             "trace_file": str(trace),
         })
         self.assertNotIn("search_root", ps["tracelens"])
+
+    def test_roofline_trace_orders_by_benchmark_time_not_random_run_id(self):
+        root = self.tmp / "exp"
+        oldest = self._write_roofline_trace(
+            root, "ffffffffffffffffffffffffffffffff", "20260101_010101"
+        )
+        newest = self._write_roofline_trace(
+            root, "11111111111111111111111111111111", "20260102_020202"
+        )
+        report = rx.resolve_tracelens_report(str(root / "geak"))
+        self.assertNotEqual(str(oldest), str(newest))
+        self.assertEqual(report["trace_file"], str(newest))
+
+    def test_roofline_trace_respects_handoff_cutoff_and_config(self):
+        root = self.tmp / "exp"
+        self._write_roofline_trace(
+            root, "ffffffffffffffffffffffffffffffff", "20260101_010101",
+            flags="--context-length 4096",
+        )
+        expected = self._write_roofline_trace(
+            root, "11111111111111111111111111111111", "20260102_020202",
+            flags="--context-length 8192 --cuda-graph-max-bs 32",
+        )
+        self._write_roofline_trace(
+            root, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "20260103_030303",
+            flags="--context-length 8192 --cuda-graph-max-bs 32",
+        )
+        cutoff = rx.datetime.strptime(
+            "20260102_030000", "%Y%m%d_%H%M%S"
+        ).replace(tzinfo=rx.timezone.utc).timestamp()
+        handoff = self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"),
+            framework="sglang",
+            accepted_flags="--context-length 8192 --cuda-graph-max-bs 32",
+        )
+        ps = rx.map_args(handoff, artifact_cutoff_ts=cutoff)
+        self.assertEqual(ps["tracelens"]["trace_file"], str(expected))
+
+    def test_roofline_trace_mismatch_fails_closed(self):
+        root = self.tmp / "exp"
+        self._write_roofline_trace(
+            root, "only", "20260102_020202",
+            flags="--context-length 4096",
+        )
+        handoff = self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"),
+            framework="sglang",
+            accepted_flags="--context-length 8192",
+        )
+        ps = rx.map_args(handoff)
+        self.assertNotIn("tracelens", ps)
 
     def test_tracelens_key_omitted_when_nothing_discoverable(self):
         ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_x")))
@@ -358,6 +443,21 @@ class TestMapArgs(_RunE2ECase):
         self.assertIn("tracelens_report", prompt)
         # search_root is internal bookkeeping and must never reach the agent.
         self.assertNotIn("search_root", prompt)
+
+    def test_build_prompt_uses_frozen_tracelens_without_rescanning(self):
+        frozen = {
+            "analysis_md": "/frozen/analysis.md",
+            "trace_file": "/frozen/torch_trace",
+        }
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_prompt")))
+        ps["tracelens"] = frozen
+        self.patch_rx(
+            "resolve_tracelens_report",
+            lambda *_args, **_kwargs: self.fail("build_prompt rescanned artifacts"),
+        )
+        prompt = rx.build_prompt(ps)
+        self.assertIn("/frozen/analysis.md", prompt)
+        self.assertIn("/frozen/torch_trace", prompt)
 
     def test_build_prompt_leads_with_process_safety(self):
         """The driver agent holds Bash under bypassPermissions as a direct child of
