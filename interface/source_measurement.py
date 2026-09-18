@@ -397,6 +397,53 @@ def _gate(
     return row
 
 
+def _teardown(
+    runtime: Path,
+    seal: dict[str, Any],
+    request_sha: str,
+    manifest_sha: str,
+    finished_at_ns: int,
+) -> bytes:
+    raw = _read(runtime / "teardown.json")
+    teardown = _object(raw)
+    _require(
+        teardown.get("schema") == "geak.source_runtime.cleanup.v1"
+        and teardown.get("status") == "confirmed"
+        and teardown.get("scope") == "owned_cohort_teardown"
+        and teardown.get("freeze_transport") == "unix_datagram_scm_credentials"
+        and teardown.get("launch_nonce") == seal["launch_nonce"]
+        and teardown.get("launch_capsule_sha256") == seal["launch_capsule"]["sha256"]
+        and teardown.get("request_sha256") == request_sha
+        and teardown.get("manifest_sha256") == manifest_sha
+        and teardown.get("server_identity") == seal["server_identity"]
+        and type(teardown.get("observed_at_ns")) is int
+        and teardown["observed_at_ns"] > finished_at_ns
+        and teardown.get("unproven_processes") == [],
+        "unconfirmed_source_teardown",
+    )
+    processes = teardown.get("processes")
+    if not isinstance(processes, list) or not processes:
+        raise SourceMeasurementError("unconfirmed_source_teardown")
+    seen = set()
+    owner_confirmed = False
+    for process in processes:
+        _require(
+            isinstance(process, dict)
+            and process.get("exit_confirmed") is True
+            and not process.get("error"),
+            "unconfirmed_source_teardown",
+        )
+        identity = _identity(
+            {key: process.get(key) for key in ("pid", "pgid", "start_ticks")}
+        )
+        key = identity["pid"], identity["start_ticks"]
+        _require(key not in seen, "invalid_teardown_process_membership")
+        seen.add(key)
+        owner_confirmed = owner_confirmed or identity == seal["server_identity"]
+    _require(owner_confirmed, "missing_owner_teardown_evidence")
+    return raw
+
+
 def _leaf(
     directory: Path,
     source: Any,
@@ -455,6 +502,13 @@ def _leaf(
         and capsule["created_at_ns"] < ready["observed_at_ns"],
         "launch_capsule_gate_mismatch",
     )
+    raw_teardown = _teardown(
+        runtime,
+        seal,
+        request_sha,
+        source.manifest_sha256,
+        finished["observed_at_ns"],
+    )
     artifacts = seal.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != {
         "bench_runs.jsonl",
@@ -476,6 +530,10 @@ def _leaf(
         "launch_capsule_changed_during_verification",
     )
     _require(
+        _read(runtime / "teardown.json") == raw_teardown,
+        "source_teardown_changed_during_verification",
+    )
+    _require(
         _overlay_inventory(capsule["overlay_roots"]) == capsule["overlay_files"],
         "sealed_overlay_inventory_mismatch",
     )
@@ -487,6 +545,7 @@ def _leaf(
             "summary_sha256": artifacts["bench_summary.json"],
             "seal_sha256": _digest(raw_seal),
             "launch_capsule_sha256": _digest(raw_capsule),
+            "teardown_sha256": _digest(raw_teardown),
             "overlay_roots": capsule["overlay_roots"],
             "launch_nonce": seal["launch_nonce"],
             "server_identity": seal["server_identity"],

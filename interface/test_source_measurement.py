@@ -191,6 +191,21 @@ def _leaf(directory, source_request, value, *, nonce=None, overlays=()):
             },
         },
     )
+    _write(
+        runtime / "teardown.json",
+        {
+            "schema": "geak.source_runtime.cleanup.v1",
+            **bindings,
+            "status": "confirmed",
+            "scope": "owned_cohort_teardown",
+            "freeze_transport": "unix_datagram_scm_credentials",
+            "launch_capsule_sha256": capsule_sha,
+            "server_identity": owner,
+            "observed_at_ns": 400,
+            "processes": [{**owner, "exit_confirmed": True}],
+            "unproven_processes": [],
+        },
+    )
 
 
 def _pair(tmp_path, source_request):
@@ -289,6 +304,63 @@ def test_replaced_capsule_cannot_reuse_original_process_observations(
         "status": "unavailable",
         "reason": "observation_launch_capsule_binding_mismatch",
     }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schema", "legacy"),
+        ("status", "unverified"),
+        ("scope", "escaped_descendants"),
+        ("freeze_transport", "files"),
+        ("launch_nonce", "another-launch"),
+        ("launch_capsule_sha256", "0" * 64),
+        ("request_sha256", "0" * 64),
+        ("manifest_sha256", "0" * 64),
+        ("server_identity", {}),
+        ("observed_at_ns", 300),
+        ("unproven_processes", [9999]),
+        ("processes", []),
+    ],
+)
+def test_persisted_measurement_requires_confirmed_launch_bound_teardown(
+    source_request, tmp_path, field, value
+):
+    evaluation = _pair(tmp_path, source_request)
+    path = evaluation / "validation/final/source_runtime/teardown.json"
+    row = json.loads(path.read_text())
+    row[field] = value
+    _write(path, row)
+    assert _verify(source_request, evaluation) == {
+        "status": "unavailable",
+        "reason": "unconfirmed_source_teardown",
+    }
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing", "symlink", "unexited", "missing_owner", "duplicate"]
+)
+def test_crash_or_incomplete_cleanup_cannot_leave_an_eligible_measurement(
+    source_request, tmp_path, damage
+):
+    evaluation = _pair(tmp_path, source_request)
+    path = evaluation / "validation/final/source_runtime/teardown.json"
+    if damage == "missing":
+        path.unlink()
+    elif damage == "symlink":
+        saved = path.with_name("saved-teardown.json")
+        path.rename(saved)
+        path.symlink_to(saved)
+    else:
+        row = json.loads(path.read_text())
+        if damage == "unexited":
+            row["processes"][0]["exit_confirmed"] = False
+        elif damage == "missing_owner":
+            row["processes"][0]["pid"] += 1
+        else:
+            row["processes"].append(dict(row["processes"][0]))
+        _write(path, row)
+    assert _verify(source_request, evaluation)["status"] == "unavailable"
 
 
 @pytest.mark.parametrize("phase", ["ready", "finished"])
