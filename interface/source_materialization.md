@@ -54,6 +54,16 @@ does not replace conflicting helpers, bundles or old measurement evidence.
 A moved run can stage a new location-bound request while preserving its old
 request bytes.
 
+Where supported, a complete temporary bundle is published with an atomic
+no-replace directory rename. On NFS and other filesystems without that operation,
+the creator exclusively claims the destination directory, writes through pinned
+directory handles without replacing existing files, and publishes the manifest
+last. The complete bundle is validated before its request is published. A
+concurrent caller may refuse an incomplete claim; it can reuse the bundle after
+publication completes. An interrupted incomplete claim stays unusable and is
+never repaired or overwritten by another caller. Cleanup preserves replacement
+directories and any content the caller did not create.
+
 ## Launch and measurement
 
 The serving import order is verification bootstrap, authored overlay,

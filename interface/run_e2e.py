@@ -67,6 +67,9 @@ except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
     from source_measurement import verify_normalized_source_measurements
 
 SCHEMA_VERSION = 2
+# Literal capability read by upstream callers before sending accepted source.
+# Version 1 includes staging, guarded measurement, teardown proof and replay.
+SOURCE_MATERIALIZATION_SCHEMA_VERSION = 1
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
 E2E_CHECKPOINT_SCHEMA_VERSION = 2
 E2E_CHECKPOINT_FILE = "e2e_validation.json"
