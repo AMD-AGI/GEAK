@@ -111,23 +111,35 @@ def group_phases(agents):
                  if a.get("timeline_phase")}
     use_timeline = len(tl_phases) > 1
     distinct = {(a.get("journal_phase") or "") for a in agents}
-    use_journal = (not use_timeline) and len(distinct) > 1
+    journal_distinguishes = len(distinct) > 1
+
+    def resolve(agent, seen_round):
+        """Phase source is resolved PER AGENT, not globally.
+
+        A global switch to the timeline stranded agents that had no timeline
+        entry in "(no phase recorded)" even though their journal phase was
+        known. Order: recorded timeline attribution, then recorded journal
+        phase, then explicitly inferred labels.
+        """
+        if agent.get("timeline_phase"):
+            prov = ("workflow_timeline_ambiguous"
+                    if agent.get("timeline_attribution_ambiguous")
+                    else "workflow_timeline")
+            return agent["timeline_phase"], prov, seen_round
+        if journal_distinguishes and agent.get("journal_phase"):
+            return agent["journal_phase"], "journal", seen_round
+        name, rank = phase_of(agent, seen_round)
+        if 0 <= rank < 10 ** 5:
+            seen_round = True
+        return name, "inferred", seen_round
 
     groups, seen_round = [], False
     for agent in agents:
-        if use_timeline:
-            name = agent.get("timeline_phase") or "(no phase recorded)"
-            provenance = "workflow_timeline"
-        elif use_journal:
-            name = agent.get("journal_phase") or "(no phase recorded)"
-            provenance = "journal"
-        else:
-            name, rank = phase_of(agent, seen_round)
-            if 0 <= rank < 10 ** 5:
-                seen_round = True
-            provenance = "inferred"
+        name, provenance, seen_round = resolve(agent, seen_round)
         if groups and groups[-1]["name"] == name:
             groups[-1]["agents"].append(agent["agent_id"])
+            if groups[-1]["provenance"] != provenance:
+                groups[-1]["provenance"] = "mixed"
         else:
             groups.append({"name": name, "provenance": provenance,
                            "agents": [agent["agent_id"]]})
@@ -155,6 +167,8 @@ def build_view(trace):
             "spawn_depth": agent.get("spawn_depth"),
             "transcript_status": agent.get("transcript_status"),
             "timeline_phase": agent.get("timeline_phase"),
+            "timeline_attribution_ambiguous":
+                agent.get("timeline_attribution_ambiguous"),
             "timeline_sub_phase": agent.get("timeline_sub_phase"),
             "phase_provenance": agent.get("phase_provenance"),
             "start_off": (None if (first is None or origin is None) else first - origin),
@@ -170,7 +184,13 @@ def build_view(trace):
     # a bucket that only exists because nothing matched is a signal, not a fact.
     phases = group_phases(agents)
     warnings = list(trace.get("warnings") or [])
-    inferred = [p for p in phases if p.get("provenance") == "inferred"]
+    inferred = [p for p in phases if p.get("provenance") in ("inferred", "mixed")]
+    ambiguous = [a for a in agents if a.get("timeline_attribution_ambiguous")]
+    if ambiguous:
+        warnings.append(
+            "%d agent(s) have a timeline phase attributed by LABEL position "
+            "because the timeline records no runtime agent id; that attribution "
+            "is not an established join." % len(ambiguous))
     unparsed = next((p for p in phases if p["name"] == "Between rounds"), None)
     if unparsed:
         warnings.append(
@@ -187,10 +207,13 @@ def build_view(trace):
             "Every agent fell into a single phase bucket (%s); the label-derived "
             "phase grouping may no longer match this workflow's labels."
             % phases[0]["name"])
-    if agents and not inferred:
+    provs = {p.get("provenance") for p in phases}
+    if agents and provs and provs <= {"journal", "workflow_timeline"}:
         warnings.append(
-            "Phases below are the workflow's OWN recorded journal phases, not "
-            "inferred from labels.")
+            "Phases below come from %s, not inferred from labels."
+            % (" and ".join(sorted(
+                {"workflow_timeline": "the workflow's own recorded timeline",
+                 "journal": "recorded journal phases"}[p] for p in provs))))
 
     totals = {
         "agents": len(nodes),
@@ -452,8 +475,15 @@ function renderDetail(){
 function renderTree(){
   let h = '';
   D.phases.forEach(p=>{
-    const badge = p.provenance === 'journal'
-      ? '<span class="chip ok" style="margin-left:6px">recorded phase</span>'
+    // The badge must name the ACTUAL source. Recognising only 'journal' printed
+    // "inferred from labels" over phases that were recorded by the workflow.
+    const LABELS = {
+      workflow_timeline: 'recorded phase (workflow timeline)',
+      journal: 'recorded phase (journal)',
+      mixed: 'mixed sources — see per-agent',
+    };
+    const badge = LABELS[p.provenance]
+      ? '<span class="chip ok" style="margin-left:6px">'+LABELS[p.provenance]+'</span>'
       : '<span class="inferred">inferred from labels</span>';
     h += '<div class="phase"><div class="ph">'+esc(p.name)+badge+'</div>';
     p.agents.forEach(id=>{
