@@ -1116,8 +1116,10 @@ def merge_traces(previous, current):
     # same pair of agents are different edges, and keying on endpoints alone
     # collapses them when the source loses one.
     def _ekey(e):
-        return (e.get("type"), e.get("from"), e.get("to"),
-                e.get("event_id") or e.get("spawn_event_id"))
+        # Relationship identity, endpoints excluded -- see reconcile.edge_key.
+        if _rc is not None:
+            return _rc.edge_key(e)
+        return (e.get("type"), e.get("event_id") or e.get("spawn_event_id"))
     cur_edges = {_ekey(e): e for e in (current.get("edges") or [])}
     # Identities the CURRENT read reports as contradicted must stay unusable.
     # Conflict state is CUMULATIVE. Consuming only the current pass let a
@@ -1141,16 +1143,9 @@ def merge_traces(previous, current):
         if _rc is not None and any(old_e.get(f) != cur_e.get(f)
                                    for f in _rc.EDGE_IDENTITY_FIELDS):
             invalidated.add(key)
-    if invalidated:
-        current.setdefault("run", {}).setdefault("linkage", {})
-        current["run"]["linkage"]["invalidated"] = [list(k) for k in sorted(invalidated)]
-        current["edges"] = [e for e in (current.get("edges") or [])
-                            if _ekey(e) not in invalidated]
-        current.setdefault("warnings", []).append(
-            "%d linkage relationship(s) remain invalidated by contradictory "
-            "evidence seen in this or an earlier pass; they are not shown as "
-            "proven." % len(invalidated))
-        current["run"]["linkage"]["complete"] = False
+    # NOTE: the filter is applied to the FINAL canonical edge list below, after
+    # retention has rebuilt it. Filtering here instead let the retention step
+    # repopulate an invalidated edge from the pre-filter mapping.
     added = 0
     for edge in previous.get("edges") or []:
         key = _ekey(edge)
@@ -1188,6 +1183,20 @@ def merge_traces(previous, current):
     run["agents_started"] = len(agents_now)
     run["agents_returned"] = sum(
         1 for a in agents_now if a.get("result_status") == "returned_to_workflow")
+    # Invalidation is enforced HERE, on the canonical edge list, after retention
+    # has finished rebuilding it.
+    if invalidated:
+        kept = [e for e in (current.get("edges") or []) if _ekey(e) not in invalidated]
+        dropped = len(current.get("edges") or []) - len(kept)
+        current["edges"] = kept
+        link = current.setdefault("run", {}).setdefault("linkage", {})
+        link["invalidated"] = [list(k) for k in sorted(invalidated)]
+        link["complete"] = False
+        current.setdefault("warnings", []).append(
+            "%d linkage relationship(s) are invalidated by contradictory evidence "
+            "seen in this or an earlier pass and are withheld (%d edge(s) removed "
+            "after retention)." % (len(invalidated), dropped))
+
     firsts = [a.get("first_ts_ms") for a in agents_now if a.get("first_ts_ms") is not None]
     lasts = [a.get("last_ts_ms") for a in agents_now if a.get("last_ts_ms") is not None]
     if firsts:

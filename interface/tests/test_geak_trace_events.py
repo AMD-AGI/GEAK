@@ -331,8 +331,8 @@ class ConflictPersistenceTest(unittest.TestCase):
         trace = E.attach(self._trace(), self.path)
         inv = trace["run"]["linkage"]["invalidated"]
         self.assertTrue(inv, "invalidated identities were not published")
-        self.assertEqual(inv[0][0], "result_supplied_to_dispatch")
-        self.assertEqual(inv[0][3], "transfer-1")
+        self.assertEqual(inv[0], ["result_supplied_to_dispatch", "transfer-1"],
+                         "identity must be type+event id, endpoints excluded")
 
 
 class ParentToolJoinTest(unittest.TestCase):

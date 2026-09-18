@@ -27,6 +27,8 @@ from __future__ import annotations
 import atexit
 import glob
 import json
+import uuid as _uuid
+import datetime as _dt
 import math
 import os
 import re
@@ -451,6 +453,14 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
         "apply_to_original": "true",
         "exp_root": h["exp_root"],
     }
+    # Launch identity for the execution tracker. A nonce allocated HERE -- before
+    # the workflow is invoked -- is unique by construction, so the runtime records
+    # it in the run's own args and the tracker can join THIS launch. Argument
+    # equality cannot do that: a relaunch may legitimately reuse every argument.
+    # Without it the tracker refuses to attach rather than guess, so tracking is
+    # simply unavailable.
+    ps_args["geak_launch_nonce"] = "geak-%s-%s" % (
+        _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S%f"), _uuid.uuid4().hex[:12])
     if effective is not None:
         ps_args["effective_config_digest"] = effective.digest
     # Forward the orchestrator's HARD wall-clock budget (the same timeout_s this

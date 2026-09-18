@@ -121,8 +121,15 @@ def block_key(call_id, block, position):
     # made the same block look like a new one and left duplicates behind.
     within = block.get("source_pos")
     if within is None:
+        # A capture written before source positions existed, re-read now: fall
+        # back to the flattened index so an upgrade does not duplicate blocks.
         within = position
-    return (call_id, block.get("source_uuid"), block.get("kind"),
+    source = block.get("source_uuid")
+    if source is None:
+        # No source identity at all. Distinct records must NOT collapse into one,
+        # so fall back to the flattened position, which is unique per capture.
+        return (call_id, "#nosource", block.get("kind"), position)
+    return (call_id, source, block.get("kind"),
             block.get("tool_use_id") or within)
 
 
@@ -158,13 +165,20 @@ def attempt_key(spawn_event_id, attempt):
 
 
 def edge_key(edge):
-    return (edge.get("type"), edge.get("from"), edge.get("to"),
+    """Identity is the RELATIONSHIP id, never its endpoints.
+
+    Including from/to made a changed consumer a NEW identity, so the same
+    event_id pointing somewhere else became a second independent proven edge
+    instead of contradicting the first. Endpoints are compared fields (see
+    EDGE_IDENTITY_FIELDS), not part of the key.
+    """
+    return (edge.get("type"),
             edge.get("event_id") or edge.get("spawn_event_id"))
 
 
 #: Fields whose disagreement contradicts the relationship an edge asserts.
-EDGE_IDENTITY_FIELDS = ("producer_result_ref", "consumer_input_ref", "forwarding",
-                        "transformation", "spawn_tool_call_id")
+EDGE_IDENTITY_FIELDS = ("from", "to", "producer_result_ref", "consumer_input_ref",
+                        "forwarding", "transformation", "spawn_tool_call_id")
 
 #: Fields whose disagreement contradicts what an attempt records.
 ATTEMPT_IDENTITY_FIELDS = ("status", "result_ref", "error")
@@ -194,9 +208,15 @@ def reconcile_attempts(prev_attempts, new_attempts, spawn_event_id):
 
     merged = [v for _k, v in store.usable()]
     ordered = [a for a in merged if isinstance(a.get("seq"), int)]
-    if ordered and len(ordered) == len(merged):
+    seqs = [a["seq"] for a in ordered]
+    if ordered and len(ordered) == len(merged) and len(set(seqs)) == len(seqs):
+        # A unique final position is required. A TIE provides no evidence of
+        # which attempt was last, and sorting it would silently inherit the
+        # attempt-id ordering -- the guess this rule exists to prevent.
         merged.sort(key=lambda a: a["seq"])
         outcome = merged[-1].get("status")
+    elif ordered and len(set(seqs)) != len(seqs):
+        outcome = "unknown"
     elif len(merged) == 1:
         outcome = merged[0].get("status")
     else:
