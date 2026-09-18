@@ -311,6 +311,65 @@ def _persist(eval_dir, calls_path, report_dir, model, persist_root):
     return root, n_art
 
 
+def _write_execution_trace(eval_dir, report_dir, rates_path=None):
+    """Collect and render this run's execution trace beside the ledger report.
+
+    Resolves the run's own ``subagents/workflows/<runId>/`` directory from the
+    workflow record (never by eval-dir substring), snapshots the journal, agent
+    metadata and transcripts into ``reports/trace/geak_trace.json``, and renders
+    the graph/timeline/drill-down report into the report directory.
+
+    Returns a summary dict, or None when there is nothing to trace. Every failure
+    path is swallowed: the execution trace is additive to the ledger report.
+    """
+    try:
+        import geak_trace_collector as collector
+        import geak_trace_report as trace_report
+    except Exception:
+        return None
+    try:
+        wf_dir, info = collector.resolve_workflow_dir(eval_dir=eval_dir)
+        if not wf_dir:
+            # The live sources are gone or unresolvable. If the tracker captured
+            # this run while it was alive, its trace is still a complete record —
+            # render the report from that rather than reporting nothing.
+            tracked = os.path.join(report_dir, "geak_trace.json")
+            if os.path.isfile(tracked):
+                with open(tracked, "r", encoding="utf-8") as fh:
+                    trace = json.load(fh)
+                out = trace_report.write_reports(trace, report_dir)
+                return {"status": "ok-from-tracked-data",
+                        "reason": "workflow sources unavailable (%s); rendered from "
+                                  "the trace captured during the run"
+                                  % (info.get("error") or "unresolved"),
+                        "run_id": (trace.get("run") or {}).get("run_id"),
+                        "run_status": (trace.get("run") or {}).get("status"),
+                        "trace_json": tracked, "html": out["html"], "md": out["md"],
+                        "agents": out["totals"]["agents"],
+                        "calls": out["totals"]["calls"],
+                        "actions": out["totals"]["actions"]}
+            return {"status": "no-workflow-record",
+                    "reason": info.get("error") or "no workflow run resolved for this eval-dir"}
+        # Kept beside the rendered report so --out-dir redirects the whole set.
+        trace_path = os.path.join(report_dir, "geak_trace.json")
+        # No run_status override: completion is the collector's to establish from
+        # the run record. Forcing "complete" here would claim the workflow ended
+        # merely because a report was generated -- which also happens mid-run.
+        # Retention applies HERE too, not only in the watcher. Regenerating a
+        # report after a transcript was pruned must not overwrite the history
+        # captured while that transcript still existed -- the workflow directory
+        # still resolving is exactly the case the unresolved-fallback misses.
+        trace = collector.collect_once(wf_dir, trace_path, rates_path=rates_path)
+        out = trace_report.write_reports(trace, report_dir)
+        return {"status": "ok", "run_id": info.get("run_id"),
+                "run_status": trace["run"].get("status"),
+                "trace_json": trace_path, "html": out["html"], "md": out["md"],
+                "agents": out["totals"]["agents"], "calls": out["totals"]["calls"],
+                "actions": out["totals"]["actions"]}
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)}
+
+
 def run(eval_dir=None, transcripts=None, model=None, rates_path=None,
         out_dir=None, persist=False, persist_root=PERSIST_ROOT_DEFAULT):
     """Build the report; optionally persist to the shared layout. Returns a dict."""
@@ -380,6 +439,12 @@ def run(eval_dir=None, transcripts=None, model=None, rates_path=None,
         result = {"status": "ok", "model": name, "calls": calls,
                   "html": html_path, "md": md_path, "report_dir": report_dir,
                   "transcript_scope": scope}
+        # Execution trace: the delegation graph, timeline and per-call drill-down,
+        # joined from the workflow journal + agent metadata + transcripts. This is
+        # additive -- a failure here must never cost the caller its ledger report.
+        trace_info = _write_execution_trace(eval_dir, report_dir, rates_path)
+        if trace_info:
+            result["trace"] = trace_info
         # How a run-scoped anchor was established: the run's own ``eval_dir`` being
         # on record, or (mid-run, before the dispatcher returns) its enclosing
         # ``exp_root``. Surfaced so an exp_root-anchored scope is auditable.
