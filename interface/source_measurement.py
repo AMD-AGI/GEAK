@@ -165,9 +165,10 @@ def _launch_capsule(
     expected_overlay_roots: list[str] | None,
 ) -> tuple[dict[str, Any], bytes]:
     reference = seal.get("launch_capsule")
+    if not isinstance(reference, dict):
+        raise SourceMeasurementError("invalid_launch_capsule_reference")
     _require(
-        isinstance(reference, dict)
-        and set(reference) == {"path", "sha256"}
+        set(reference) == {"path", "sha256"}
         and reference.get("path") == "launch.json",
         "invalid_launch_capsule_reference",
     )
@@ -186,9 +187,10 @@ def _launch_capsule(
         "launch_capsule_binding_mismatch",
     )
     roots = capsule.get("overlay_roots")
+    if not isinstance(roots, list):
+        raise SourceMeasurementError("invalid_overlay_inventory")
     _require(
-        isinstance(roots, list)
-        and all(isinstance(root, str) and Path(root).is_absolute() for root in roots)
+        all(isinstance(root, str) and Path(root).is_absolute() for root in roots)
         and len(set(roots)) == len(roots),
         "invalid_overlay_inventory",
     )
