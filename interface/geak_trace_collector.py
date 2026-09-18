@@ -945,13 +945,14 @@ def _merge_call(prev, new):
     if _rc is not None and (p_in.get("blocks") or n_in.get("blocks")):
         cid = new.get("call_id")
         store, seen, order = _rc.Reconciled(), set(), []
-        for i, blk in enumerate(_rc.migrate_blocks(n_in.get("blocks") or [])):
+        for i, blk in enumerate(n_in.get("blocks") or []):
             key = _rc.block_key(cid, blk, i)
             seen.add(key)
             if key not in store.items:
                 order.append(key)
             store.absorb(key, blk, merge=_rc.merge_block)
-        for i, blk in enumerate(_rc.migrate_blocks(p_in.get("blocks") or [])):
+        for i, blk in enumerate(_rc.migrate_blocks(p_in.get("blocks") or [],
+                                                   n_in.get("blocks") or [])):
             key = _rc.block_key(cid, blk, i)
             if key in store.items:
                 store.absorb(key, blk, merge=_rc.merge_block)
