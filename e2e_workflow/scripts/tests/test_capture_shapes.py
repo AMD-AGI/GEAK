@@ -1539,5 +1539,221 @@ class TestByteBudgetAndReclaim(_RecorderTestCase):
         self.assertEqual(leftovers, [])
 
 
+# --------------------------------------------------------------------------- #
+# _positional_share_key / _tensor_fingerprint -- the CAPTURE_SHARE_POSITIONS
+# mutable-buffer correctness fix. The stub torch above has no content surface
+# (no data_ptr/reshape/sum/index_select), so these run against REAL torch on CPU
+# and reproduce the reported failure: a pointer-stable tensor mutated in place
+# between calls must NOT collapse onto the first case's snapshot.
+# --------------------------------------------------------------------------- #
+try:
+    import torch as _real_torch  # noqa: E402
+    _HAS_REAL_TORCH = True
+except Exception:                # pragma: no cover - env without torch
+    _real_torch = None
+    _HAS_REAL_TORCH = False
+
+
+@unittest.skipUnless(_HAS_REAL_TORCH, "positional-share correctness needs real torch (CPU)")
+class TestPositionalShareMutableBuffer(unittest.TestCase):
+    """Address is not proof of value: an in-place-mutated buffer must snapshot per case."""
+
+    def setUp(self):
+        # cs._torch() returns sys.modules["torch"]; point it at the real CPU torch for these tests.
+        self._prev_torch = sys.modules.get("torch", _MISSING)
+        sys.modules["torch"] = _real_torch
+        self.addCleanup(self._restore_torch)
+        # _snapshot_args only shares positions opted in via this env var; opt position 0 in.
+        self._prev_pos = os.environ.get("CAPTURE_SHARE_POSITIONS", _MISSING)
+        os.environ["CAPTURE_SHARE_POSITIONS"] = "0"
+        self.addCleanup(self._restore_pos)
+
+    def _restore_pos(self):
+        if self._prev_pos is _MISSING:
+            os.environ.pop("CAPTURE_SHARE_POSITIONS", None)
+        else:
+            os.environ["CAPTURE_SHARE_POSITIONS"] = self._prev_pos
+
+    def _restore_torch(self):
+        if self._prev_torch is _MISSING:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = self._prev_torch
+
+    @staticmethod
+    def _resolve(snap_entry, shared_store):
+        key = snap_entry["__shared__"]
+        return key, shared_store[key]
+
+    def test_inplace_mutation_gets_its_own_snapshot(self):
+        """A pointer-stable tensor mutated between calls yields TWO keys and TWO distinct values."""
+        buf = _real_torch.zeros(4096, dtype=_real_torch.float32)  # stable data_ptr across mutation
+        ptr_before = buf.data_ptr()
+        shared_store = {}
+
+        snap1, _added1, keys1 = cs._snapshot_args((buf,), shared_store, "share_large", 0)
+        key1, val1 = self._resolve(snap1[0], shared_store)
+
+        buf.add_(1.0)  # in-place: same storage, new contents (the KV-cache write pattern)
+        self.assertEqual(buf.data_ptr(), ptr_before, "precondition: pointer stayed stable")
+
+        snap2, _added2, keys2 = cs._snapshot_args((buf,), shared_store, "share_large", 0)
+        key2, val2 = self._resolve(snap2[0], shared_store)
+
+        self.assertNotEqual(key1, key2, "mutated buffer must not reuse the first case's key")
+        self.assertEqual(len(shared_store), 2, "each content must have its own shared entry")
+        # _snapshot wraps the clone under ["data"]; the snapshots are independent clones:
+        # case 0 stayed all-zero, case 1 is all-one.
+        self.assertTrue(bool((val1["data"] == 0).all()), "first snapshot must retain pre-mutation content")
+        self.assertTrue(bool((val2["data"] == 1).all()), "second snapshot must capture post-mutation content")
+
+    def test_static_weight_still_dedups(self):
+        """An unmutated (static-weight) tensor collapses to ONE shared entry -- de-dup preserved."""
+        weight = _real_torch.arange(4096, dtype=_real_torch.float32)
+        shared_store = {}
+
+        snap1, _a1, _k1 = cs._snapshot_args((weight,), shared_store, "share_large", 0)
+        snap2, _a2, _k2 = cs._snapshot_args((weight,), shared_store, "share_large", 0)
+
+        key1 = snap1[0]["__shared__"]
+        key2 = snap2[0]["__shared__"]
+        self.assertEqual(key1, key2, "identical content must produce one identity")
+        self.assertEqual(len(shared_store), 1, "static weight must be stored exactly once")
+
+    def test_equal_sum_unsampled_mutation_still_separates(self):
+        """Astra's adversarial case: a fingerprint COLLISION must not cause stale reuse.
+
+        The fingerprint samples strided (even) indices, so mutating two UNSAMPLED (odd) positions by
+        +d/-d leaves the whole-tensor sum and every sampled statistic identical -- a genuine
+        fingerprint collision. Content-verified sharing must still store two distinct snapshots.
+        """
+        n = 20000  # > 8192 so step=2 and odd indices are never sampled
+        buf = _real_torch.arange(n, dtype=_real_torch.float32)
+        shared_store = {}
+
+        snap1, _a1, _k1 = cs._snapshot_args((buf,), shared_store, "share_large", 0)
+        key1 = snap1[0]["__shared__"]
+        fp_before = cs._tensor_fingerprint(buf)
+
+        buf[1] += 5.0   # unsampled (odd) position
+        buf[3] -= 5.0   # unsampled (odd) position: net sum change 0, sampled stats unchanged
+        fp_after = cs._tensor_fingerprint(buf)
+        self.assertEqual(fp_before, fp_after,
+                         "precondition: constructed a genuine fingerprint collision")
+
+        snap2, added2, _k2 = cs._snapshot_args((buf,), shared_store, "share_large", 0)
+        key2 = snap2[0]["__shared__"]
+        self.assertNotEqual(key1, key2,
+                            "equal fingerprint but UNEQUAL content must not be shared (verify-on-collision)")
+        self.assertEqual(len(shared_store), 2, "the colliding-but-different content needs its own snapshot")
+        self.assertGreater(added2, 0, "the second, distinct snapshot must be charged its bytes")
+        # The two stored snapshots differ exactly at the mutated positions.
+        self.assertFalse(cs._snapshots_equal(shared_store[key1], shared_store[key2]))
+        self.assertEqual(float(shared_store[key1]["data"][1]), 1.0)
+        self.assertEqual(float(shared_store[key2]["data"][1]), 6.0)
+
+    def test_fingerprint_is_deterministic_and_mutation_sensitive(self):
+        """est and snapshot share the key fn, so identical content -> identical fingerprint."""
+        t = _real_torch.ones(4096, dtype=_real_torch.float32)
+        fp_a = cs._tensor_fingerprint(t)
+        fp_b = cs._tensor_fingerprint(t)
+        self.assertIsNotNone(fp_a)
+        self.assertEqual(fp_a, fp_b, "same content must fingerprint identically (est/snapshot parity)")
+        t.mul_(3.0)
+        self.assertNotEqual(cs._tensor_fingerprint(t), fp_a, "mutation must change the fingerprint")
+
+    def test_unfingerprintable_tensor_never_shares(self):
+        """When fingerprinting fails, each occurrence gets a unique key -> degrade to never-share."""
+        orig = cs._tensor_fingerprint
+        cs._tensor_fingerprint = lambda value: None  # force the un-fingerprintable branch
+        self.addCleanup(setattr, cs, "_tensor_fingerprint", orig)
+        buf = _real_torch.zeros(4096, dtype=_real_torch.float32)
+        k1 = cs._positional_share_key(0, buf)
+        k2 = cs._positional_share_key(0, buf)
+        self.assertNotEqual(k1, k2, "un-fingerprintable tensors must not share on address alone")
+        self.assertIn("nofp", k1)
+
+
+@unittest.skipUnless(_HAS_REAL_TORCH, "budget admission on collisions needs real torch (CPU)")
+class TestPositionalShareBudgetAdmission(unittest.TestCase):
+    """End-to-end `_wrapper` budget enforcement when a fingerprint collision retains new bytes.
+
+    Astra's R1 blocker: admission estimated positional sharing via prefilter-key membership, which on
+    a collision matched the prior entry and discounted the whole tensor -- yet commit then stored a
+    distinct `#dup` snapshot the budget never saw, so a cap was silently exceeded. The plan is now
+    staged and its real new-byte count drives admission, so an over-cap collision is rejected with the
+    store left intact.
+    """
+
+    def setUp(self):
+        self._prev_torch = sys.modules.get("torch", _MISSING)
+        sys.modules["torch"] = _real_torch
+        self.addCleanup(self._restore_torch)
+        _reset_state(cs)
+        self.addCleanup(_reset_state, cs)
+        self.addCleanup(atexit.unregister, cs._flush)
+        self.out_dir = tempfile.mkdtemp(prefix="capture_shapes_budget_")
+        self.addCleanup(shutil.rmtree, self.out_dir, True)
+
+    def _restore_torch(self):
+        if self._prev_torch is _MISSING:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = self._prev_torch
+
+    def _install(self, name):
+        """Install the recorder over a stub op with Astra's repro budget config; return the module."""
+        mod = types.ModuleType(name)
+        mod.op = lambda *a, **k: "OUT"
+        sys.modules[name] = mod
+        self.addCleanup(sys.modules.pop, name, None)
+        with _stderr():
+            cs.install(f"{name}:op", self.out_dir, max_cases=5)
+        return mod
+
+    # Astra's fixture: 80000-byte tensor, 120000-byte total cap. A second RETAINED copy (160000) must
+    # not fit; a de-duped reuse (still 80000) must.
+    _ENV = dict(
+        CAPTURE_SHARE_POSITIONS="0", CAPTURE_PERSIST_POLICY="share_large",
+        CAPTURE_SHARE_MIN_BYTES="1", CAPTURE_BYTE_BUDGET="120000",
+        CAPTURE_CASE_BYTE_LIMIT="100000", CAPTURE_DECODE_LEAD_MAX="0",
+    )
+
+    def test_collision_exceeding_cap_is_rejected_no_orphan(self):
+        """A colliding, content-different second case must be REJECTED and leave the store intact."""
+        with _env(**self._ENV):
+            mod = self._install("fake_budget_collision")
+            buf = _real_torch.arange(20000, dtype=_real_torch.float32)  # 80000 bytes
+            with _stderr():
+                mod.op(buf, 0)                 # case 0: admitted, one shared snapshot
+            buf[1] += 5.0                      # equal-sum, unsampled -> fingerprint COLLISION
+            buf[3] -= 5.0
+            with _stderr():
+                mod.op(buf, 1)                 # case 1: distinct content, would push 160000 > 120000
+
+        s = cs._STATE
+        self.assertEqual(len(s["records"]), 1, "the over-cap collision case must not be recorded")
+        self.assertEqual(len(s["shared_tensors"]), 1, "no orphan #dup snapshot may be retained")
+        self.assertFalse(any("#dup" in k for k in s["shared_tensors"]), "no #dup entry may be committed")
+        self.assertTrue(s["budget_exceeded"], "budget must be flagged exceeded")
+        self.assertEqual(s["budget_skip_count"], 1, "exactly one case skipped for budget")
+        self.assertLessEqual(int(s["shared_bytes_est"]), 80000, "retained bytes must stay within the cap")
+
+    def test_static_weight_reuse_admitted_at_the_limit(self):
+        """An unmutated tensor de-dupes, so a second case is admitted even though a fresh copy wouldn't fit."""
+        with _env(**self._ENV):
+            mod = self._install("fake_budget_reuse")
+            buf = _real_torch.arange(20000, dtype=_real_torch.float32)  # 80000 bytes
+            with _stderr():
+                mod.op(buf, 0)                 # case 0: admitted
+                mod.op(buf, 1)                 # case 1: identical content -> de-dupe, 0 new bytes
+
+        s = cs._STATE
+        self.assertEqual(len(s["records"]), 2, "the de-duped case fits and must be recorded")
+        self.assertEqual(len(s["shared_tensors"]), 1, "identical content stays a single shared entry")
+        self.assertFalse(s["budget_exceeded"], "a de-duped reuse must not trip the budget")
+        self.assertEqual(int(s["shared_bytes_est"]), 80000, "reuse charges the shared bytes only once")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
