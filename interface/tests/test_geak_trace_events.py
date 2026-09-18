@@ -252,10 +252,13 @@ class ReadAndAttachTest(unittest.TestCase):
             if raw_extra:
                 fh.write(raw_extra)
 
-    def _trace(self, agent_ids=("p1", "c1")):
+    def _trace(self, agent_ids=("p1", "c1"), parent_tools=("toolu_1",)):
+        agents = []
+        for a in agent_ids:
+            acts = ([{"tool_use_id": t} for t in parent_tools] if a == "p1" else [])
+            agents.append({"agent_id": a, "calls": [{"actions": acts}]})
         return {"schema": "geak.trace/1", "run": {"run_id": "wf_e"},
-                "agents": [{"agent_id": a} for a in agent_ids],
-                "edges": [], "warnings": []}
+                "agents": agents, "edges": [], "warnings": []}
 
     def test_malformed_line_is_reported_not_skipped(self):
         self._write([supplied()], raw_extra='{"type": "agent_spawn"\n')
@@ -330,3 +333,65 @@ class ConflictPersistenceTest(unittest.TestCase):
         self.assertTrue(inv, "invalidated identities were not published")
         self.assertEqual(inv[0][0], "result_supplied_to_dispatch")
         self.assertEqual(inv[0][3], "transfer-1")
+
+
+class ParentToolJoinTest(unittest.TestCase):
+    """Astra R8: a spawn must name one of the parent's CAPTURED tool actions."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-tooljoin-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, "events.jsonl")
+
+    def _write(self, rows):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    def _trace(self, parent_tools):
+        return {"schema": "geak.trace/1", "run": {"run_id": "wf_j"},
+                "agents": [{"agent_id": "p1",
+                            "calls": [{"actions": [{"tool_use_id": t}
+                                                   for t in parent_tools]}]},
+                           {"agent_id": "c1", "calls": []}],
+                "edges": [], "warnings": []}
+
+    def test_spawn_naming_a_real_parent_action_joins(self):
+        self._write([spawn(spawn_tool_call_id="toolu_real"), ret()])
+        trace = E.attach(self._trace(["toolu_real"]), self.path)
+        self.assertEqual([e["type"] for e in trace["edges"]], ["agent_spawn"])
+
+    def test_nonexistent_spawning_tool_is_rejected(self):
+        self._write([spawn(spawn_tool_call_id="does-not-exist"), ret()])
+        trace = E.attach(self._trace(["toolu_real"]), self.path)
+        self.assertEqual(trace["edges"], [], "an unjoined spawn was proven")
+        self.assertTrue(any("not among the parent's captured actions" in u["reason"]
+                            for u in trace["run"]["linkage"]["unresolved"]))
+
+    def test_parent_with_no_captured_actions_cannot_prove_a_spawn(self):
+        self._write([spawn(spawn_tool_call_id="toolu_x"), ret()])
+        trace = E.attach(self._trace([]), self.path)
+        self.assertEqual(trace["edges"], [])
+        self.assertFalse(trace["run"]["linkage"]["complete"])
+
+
+class LinkageGenerationTest(unittest.TestCase):
+    """Retained linkage generations must participate in a rebuild."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-linkgen-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, "linkage_events.jsonl")
+
+    def test_events_in_a_retained_generation_are_read(self):
+        with open(self.path + ".gen1", "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(supplied(event_id="t1")) + "\n")
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(supplied(event_id="t2")) + "\n")
+        events, problems = E.read_events(self.path)
+        self.assertEqual({e["event_id"] for e in events}, {"t1", "t2"})
+        self.assertEqual(problems, [])
+
+    def test_absent_everything_is_still_empty(self):
+        events, problems = E.read_events(os.path.join(self.dir, "nope.jsonl"))
+        self.assertEqual((events, problems), ([], []))
