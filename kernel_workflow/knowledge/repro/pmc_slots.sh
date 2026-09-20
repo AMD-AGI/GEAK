@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # How many hardware counters does rocprofv3 accept in ONE pass on this part?
 #
-# Ships with amd_rdna.md section 7 item 5. That item claims 1, 2 and 3 simple
-# raw counters succeed and 4 aborts with "error code 38: Request exceeds the
-# capabilities of the hardware to collect"; this script has to actually
-# demonstrate that range, so it sweeps 1..5 rather than bisecting.
+# Ships with amd_rdna.md section 7 item 5. That item reports this cumulative set
+# getting three deep and aborting on the fourth with "error code 38: Request
+# exceeds the capabilities of the hardware to collect"; this script has to
+# actually demonstrate that, so it sweeps 1..5 rather than bisecting.
 #
 # Two things it deliberately does NOT claim:
-#   * that three of ANYTHING is safe -- these are simple raw counters. A DERIVED
-#     metric can expand into several hardware counters, so three derived metrics
-#     may still exceed the budget. Probe the set you actually want.
+#   * that three of ANYTHING is safe. The sweep is cumulative over ONE ordered
+#     set, so the result describes that set. A metric named in a `pmc:` line is
+#     not necessarily one hardware counter -- some expand into several -- so a
+#     different trio can exceed the same budget. Probe the set you want.
 #   * that the ~85 s per invocation is a rocprofv3 cost. It is a fresh-process
 #     cost: every iteration starts a new python3 that imports torch and
 #     initialises HIP. Inside a warm harness the same passes cost ~5 s each.
@@ -28,7 +29,7 @@ PY="${PYTHON:-python3}"
 "$PY" -c "import torch; assert torch.cuda.is_available()" 2>/dev/null \
   || { echo "error: no usable GPU for ${PY}" >&2; exit 1; }
 
-# Simple raw counters only, cheapest first.
+# One cumulative set, cheapest first. Not a claim that these are atomic.
 ALL="SQ_WAVES GRBM_GUI_ACTIVE FETCH_SIZE WRITE_SIZE GL2C_HIT"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT

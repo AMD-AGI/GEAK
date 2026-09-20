@@ -17,7 +17,7 @@ Triton kernels are fundamentally block-based. The tiling scheme determines perfo
 
 **Key decisions:**
 - Choose block dimensions that maximize data reuse
-- Ensure BLOCK_SIZE is a multiple of the wavefront size — **64 on CDNA, 32 on RDNA** (`gfx10`/`gfx11`/`gfx12`). Do not hardcode 64: on a wave32 part it doubles the tile for no reason.
+- **Where the thread mapping depends on whole-wave cooperation** (wave-level reductions, shuffles, matrix-instruction tiles), align BLOCK_SIZE to the **compiled** wave size — 64 on CDNA, 32 on RDNA, and RDNA can be either. Do not hardcode 64, and do not treat the alignment as unconditional: a small reduction, a masked kernel or an unusual mapping can legitimately use a smaller tile.
 - Balance tile size vs register pressure vs shared memory usage
 
 ```python
