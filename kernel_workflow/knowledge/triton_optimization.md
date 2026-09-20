@@ -1,5 +1,13 @@
 # Triton Kernel Optimization Patterns
 
+> **Arch guard — this file is written for CDNA.** It names MFMA throughout and
+> assumes a 64-wide wavefront. On an RDNA part (`wave32`, e.g. `gfx1151` /
+> Strix Halo) there is **no MFMA at all** — the matrix path is WMMA
+> (`__builtin_amdgcn_wmma_*`), there are no AGPRs, and the wavefront is 32, so
+> tile and block sizes derived from 64 are wrong by 2x. Read
+> `knowledge/amd_rdna.md` first on those parts; the Triton-level advice here
+> that is not phrased in terms of MFMA or wave64 still applies.
+
 Patterns ranked by priority. Higher priority (P0) = higher expected impact.
 
 ## P0: Algorithm & Tiling Design
@@ -9,7 +17,7 @@ Triton kernels are fundamentally block-based. The tiling scheme determines perfo
 
 **Key decisions:**
 - Choose block dimensions that maximize data reuse
-- Ensure BLOCK_SIZE is a multiple of 64 (AMD wavefront size)
+- Ensure BLOCK_SIZE is a multiple of the wavefront size — **64 on CDNA, 32 on RDNA** (`gfx10`/`gfx11`/`gfx12`). Do not hardcode 64: on a wave32 part it doubles the tile for no reason.
 - Balance tile size vs register pressure vs shared memory usage
 
 ```python

@@ -1,5 +1,18 @@
 # Profiling Analysis Guide
 
+> **Arch guard — check the wavefront size before using the numbers below.**
+> This guide's metric names and its bandwidth language assume a CDNA Instinct
+> part: it talks about MFMA utilisation and about HBM bandwidth. On an RDNA
+> part (`wave32`, e.g. `gfx1151` / Strix Halo) **neither exists** — there is no
+> MFMA at all (the matrix path is WMMA) and the memory is LPDDR5X shared with
+> the CPU, not HBM. Three further limits change how you profile there: at most
+> **3 PMC counters per rocprofv3 pass**, **no `TCP_`/`TCC_`/`TD_` counters** (so
+> L1/L2 hit rate is simply unobtainable, report it as unavailable rather than
+> 0), and `rocprof-compute` leaves `$max_mclk` unpopulated so its roofline
+> metrics are wrong without `--specs-correction`. Read
+> `knowledge/amd_rdna.md` first on those parts; the profiler-selection and
+> dispatch-count parts of this guide still apply unchanged.
+
 ## Reading the raw profiler dump (START HERE — the script does NOT parse for you)
 
 `scripts/profile_kernel.sh` is intentionally thin: it warms up, picks the best available profiler, runs
