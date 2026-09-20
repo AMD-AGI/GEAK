@@ -1,7 +1,7 @@
 # Reproduction scripts for `amd_rdna.md`
 
 These scripts re-take **some** of the `[measured]` claims in `../amd_rdna.md` on
-an `xconucstrhalo25`-class box (Radeon 8060S / gfx1151 / RDNA 3.5, ROCm 7.2.3),
+a Strix Halo box (Radeon 8060S / gfx1151 / RDNA 3.5, ROCm 7.2.3),
 inside a `rocm/vllm-dev` container. They are small and standalone on purpose:
 a reader who doubts one of the covered numbers should be able to re-take it in
 minutes.
