@@ -388,7 +388,12 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     return obs_isl, obs_osl, "agentx_observed"
 
 
-def map_args(h: dict, timeout_s: int | None = None) -> dict:
+def map_args(
+    h: dict,
+    timeout_s: int | None = None,
+    *,
+    artifact_cutoff_ts: float | None = None,
+) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
     effective = None
@@ -577,7 +582,10 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # (not just the driver prompt) so the JS Profile/Strategize/Extract phases can
     # use them as a prior. Only non-null paths are forwarded; when nothing is found
     # the key is omitted entirely, so a tracelens-less run is byte-identical.
-    tl = resolve_tracelens_report(h.get("exp_root", ""))
+    tl = resolve_tracelens_report(
+        h.get("exp_root", ""),
+        not_after=artifact_cutoff_ts,
+    )
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
@@ -598,6 +606,10 @@ _TRACELENS_ARTIFACT_PATTERNS = {
     "trace_file": "runs/roofline/**/torch_trace",
 }
 
+_BENCHMARK_TIMESTAMP_RE = re.compile(
+    r"(?:^|/)benchmark_[^/]+_(\d{8}_\d{6})(?:/|$)"
+)
+
 
 def _experiment_root_from_exp_root(exp_root: str) -> str:
     """Return the experiment root (the directory that CONTAINS ``geak``).
@@ -611,17 +623,53 @@ def _experiment_root_from_exp_root(exp_root: str) -> str:
     return norm
 
 
-def _find_latest_artifact(root: str, pattern: str) -> str | None:
-    """Return the latest match for ``pattern`` under ``root`` (or None).
+def _artifact_timestamp(path: str) -> float:
+    """Return an artifact's chronological timestamp.
 
-    Matches are sorted for determinism; the timestamps embedded in the run
-    directory names sort chronologically, so the last entry is the most recent.
+    Roofline paths put a random run id before ``benchmark_<backend>_<UTC>``;
+    sorting the full path therefore orders by that random id, not by time. Use
+    the embedded benchmark timestamp when present. For other artifacts, and
+    legacy layouts without that component, fall back to the artifact mtime.
     """
-    matches = sorted(glob.glob(os.path.join(root, pattern), recursive=True))
-    return matches[-1] if matches else None
+    match = _BENCHMARK_TIMESTAMP_RE.search(path)
+    if match:
+        parsed = datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+        return parsed.replace(tzinfo=timezone.utc).timestamp()
+
+    return Path(path).stat().st_mtime
 
 
-def resolve_tracelens_report(exp_root: str) -> dict:
+def _find_latest_artifact(
+    root: str,
+    pattern: str,
+    *,
+    not_after: float | None = None,
+) -> str | None:
+    """Return the newest artifact under ``root`` at the cutoff (or ``None``).
+
+    ``not_after`` freezes discovery at the handoff boundary, preventing a
+    resumed GEAK run from consuming artifacts written later into the same
+    experiment directory.
+    """
+    candidates: list[tuple[float, str]] = []
+    for path in glob.glob(os.path.join(root, pattern), recursive=True):
+        try:
+            timestamp = _artifact_timestamp(path)
+        except (OSError, ValueError):
+            continue
+        if not_after is not None and timestamp > not_after:
+            continue
+        candidates.append((timestamp, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item[0], item[1]))[1]
+
+
+def resolve_tracelens_report(
+    exp_root: str,
+    *,
+    not_after: float | None = None,
+) -> dict:
     """Resolve the four TraceLens artifacts beside the handoff's ``geak``.
 
     Returns a dict with ``search_root`` plus the four artifact paths
@@ -631,7 +679,10 @@ def resolve_tracelens_report(exp_root: str) -> dict:
     root = _experiment_root_from_exp_root(exp_root)
     report: dict = {"search_root": root}
     for key, pattern in _TRACELENS_ARTIFACT_PATTERNS.items():
-        report[key] = _find_latest_artifact(root, pattern) if root else None
+        report[key] = (
+            _find_latest_artifact(root, pattern, not_after=not_after)
+            if root else None
+        )
     return report
 
 
@@ -657,13 +708,13 @@ PROCESS_SAFETY = (
 
 def build_prompt(ps_args: dict) -> str:
     eval_dir = ps_args.get("eval_dir", "")
-    # Locate the upstream TraceLens / kernel-agent artifacts (analysis.md,
-    # kernel_candidates.json, tracelens_report.json) plus the roofline torch
-    # trace, and surface them to the agent as a single tracelens_report block.
-    tracelens_report = resolve_tracelens_report(ps_args.get("exp_root", ""))
-    # The prompt only needs the four artifact paths, not the internal search_root.
+    # Artifact discovery is frozen once in map_args. Re-scanning here can pick
+    # files written after the handoff and make the prompt disagree with the
+    # actual Workflow args.
+    resolved_tracelens = ps_args.get("tracelens") or {}
     tracelens_prompt_payload = {
-        k: v for k, v in tracelens_report.items() if k != "search_root"
+        key: resolved_tracelens.get(key)
+        for key in _TRACELENS_ARTIFACT_PATTERNS
     }
     tracelens_block = (
         "\n\ntracelens_report (upstream kernel-agent / roofline artifacts; "
@@ -6575,7 +6626,15 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"empty/invalid handoff: {handoff_path}\n")
         return 2
 
-    ps_args = map_args(h, timeout_s)
+    try:
+        artifact_cutoff_ts = handoff_path.stat().st_mtime
+    except OSError:
+        artifact_cutoff_ts = None
+    ps_args = map_args(
+        h,
+        timeout_s,
+        artifact_cutoff_ts=artifact_cutoff_ts,
+    )
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]
