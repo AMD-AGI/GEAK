@@ -136,7 +136,8 @@ see the disagreement rather than a single blended number that hides it.
    - **Infeasible** — `roofline_pct` outside `(0,1]`. That is the byte/FLOP model being wrong, not the
      kernel being at the wall. **A clamped 100% must NEVER be reported as `saturated`** — that turns a
      modelling failure into a routing decision. A compute-axis ratio above 1.0 is most often an
-     **unvalidated peak** (the BF16 MFMA microbench commonly reads ~2× low; see §4). See §6 L3.
+     **unvalidated peak** — on gfx95x, rocprof-compute below 3.6.0 reads BF16/FP16/INT8 MFMA 2–4× low
+     and drives ratios like 196%; see §4 and `peaks.md`. See §6 L3.
 
    `bound_type` is a CLOSED set: `memory | compute | latency | unknown`. If none fits, emit `unknown`
    — never invent a category the consumer has no routing rule for.
@@ -155,12 +156,17 @@ dtype. Only count HBM traffic — a tensor re-read within one launch and small e
 (`l2_bytes`) counts once.
 
 **Trust the memory axis over the compute axis, especially at decode.** The compute peaks in `peaks.md`
-are validated for fp8, but empirical MFMA peaks are not always right — the BF16 microbench commonly
-reads ~2× low, which makes a BF16 `compute_util` read ~2× high (and can push `roofline_pct` above 1.0,
-where §6 L3 catches it as `suspect`). A decode workload is memory-bound anyway, so prefer `hbm_util`;
-only rank on a compute-axis `roofline_pct` after the peak for that dtype has been validated (§8 rule:
-BF16 and FP16 MFMA run at the same rate, so those two peaks must be equal — if they are not, the peak
-is mis-calibrated and the compute-axis number is not usable).
+are datasheet figures, but an *empirical* peak substituted for one is not always right — on gfx95x,
+rocprof-compute **below 3.6.0** reads BF16/FP16/INT8 MFMA 2–4× low (it issues CDNA3 MFMA instructions
+on CDNA4 silicon), which makes a BF16 `compute_util` read that much too high and can push
+`roofline_pct` above 1.0, where §6 L3 catches it as `suspect`. If you source peaks from
+rocprof-compute on a gfx95x part, **require ≥ 3.6.0**; otherwise take the `peaks.md` values. Root
+cause, measured before/after table, and the unaffected-dtype control are in `peaks.md`.
+
+A decode workload is memory-bound anyway, so prefer `hbm_util`; only rank on a compute-axis
+`roofline_pct` after the peak for that dtype has passed the §8 check (BF16 and FP16 MFMA run at the
+same rate, so those two peaks must be equal — if they are not, the peak is mis-calibrated and the
+compute-axis number is not usable).
 
 ### dense GEMM `[M,K]×[K,N]`
 ```
@@ -300,11 +306,14 @@ make the kernel move **fewer bytes for the same work**:
 ## 8. Guarding against being wrong
 
 1. **Sanity band** — §6 L3.
-2. **Validate the peak before believing a `roofline_pct`.** The peaks are empirical microbench
-   results, not spec figures. The load-bearing cross-check: BF16 and FP16 MFMA run at the same rate on
-   these parts, so their peaks must be equal — when they are not, the compute-axis number is inflated
-   (a "kernel at 85%" may really be at 43%). Trivial streaming also tops out near ~0.85 of the HBM pin
-   rate, which is why the memory `target_eff` is 0.90, not 1.0.
+2. **Validate the peak before believing a `roofline_pct`.** The peaks in `peaks.md` are datasheet
+   figures; an empirical microbench result substituted for one must be checked first. The load-bearing
+   cross-check: BF16 and FP16 MFMA run at the same rate on these parts, so their peaks must be equal —
+   when they are not, the compute-axis number is inflated (a "kernel at 85%" may really be at 43%).
+   That check is what caught the gfx95x microbench bug now fixed in rocprof-compute 3.6.0 — if you are
+   taking empirical peaks from rocprof-compute on gfx95x, **require ≥ 3.6.0** (`peaks.md`). Keep the
+   check anyway: it is the general guard, not a workaround for one bug. Trivial streaming also tops
+   out near ~0.85 of the HBM pin rate, which is why the memory `target_eff` is 0.90, not 1.0.
 3. **Two noise bands, not one.** An **isolated-kernel** speedup is real only if it clears the
    isolated repeat band (**~3.4%** on identical reruns here — much wider than people assume), while an
    **e2e serving** delta uses the serving band (~0.5%). Do not judge an isolated kernel win against the
