@@ -1,9 +1,27 @@
 # AMD RDNA (Radeon / Ryzen AI APU) Hardware Reference — DETECT THE BOX FIRST
 
-This file covers **RDNA** parts — currently validated on **RDNA 3.5** (`gfx1151`, Strix Halo /
-Ryzen AI MAX+ 395 w/ Radeon 8060S). RDNA is **not** a smaller CDNA: different wavefront size,
-different matrix instruction, no AGPRs, a large last-level cache, and an order of magnitude less
-memory bandwidth. **If the box is `gfx9xx`, use `amd_instinct.md` instead — do not mix the two.**
+This file covers **RDNA** parts, validated on **RDNA 3.5** (`gfx1151`, Strix Halo / Ryzen AI
+MAX+ 395 w/ Radeon 8060S). RDNA is **not** a smaller CDNA: different matrix instruction, no AGPRs,
+a different occupancy model.
+
+**Two kinds of claim live here — do not promote one to the other:**
+
+* **RDNA family invariants** — true across `gfx10`/`gfx11`/`gfx12`: WMMA rather than MFMA (and
+  `gfx10` has neither), no AGPRs, 2 SIMDs/CU, the VGPR/occupancy model in section 2.
+* **`gfx1151` APU profile** — `[measured]` on this part and **not** portable to other RDNA parts:
+  40 CU, a 32 MB last-level cache, LPDDR5X **shared with the CPU** (UMA, so the "VRAM" is a
+  carve-out of system RAM), 229-233 GB/s streaming DRAM. A discrete `gfx1100` has its own GDDR6 and
+  a different cache hierarchy; **sections 3, 4 and 7 are about this APU**, not about RDNA.
+
+**Routing — decide by architecture family, not by wave size:**
+
+1. **gfx prefix decides the file.** `gfx9xx` → `amd_instinct.md`. `gfx10/11/12` → this file.
+2. **Capability decides the strategy.** Ask what the matrix path *is* — `mfma`, `wmma`, or `none`
+   (`gfx10` is RDNA with no matrix instruction, so "RDNA implies WMMA" is also wrong).
+3. **Wave mode is a check, not the decision.** RDNA supports wave32 **and** wave64; a wave64 kernel
+   on `gfx11` is not a CDNA kernel. Use the compiled wave size to size tiles and to catch a
+   contradiction — if the family and the wave mode disagree with each other, stop and re-detect
+   rather than guessing.
 
 Every number tagged `[measured]` was taken on `gfx1151` with the scripts named beside it. Numbers
 tagged `[vendor]` are datasheet figures and are **known to overstate** what you can reach.
@@ -88,31 +106,48 @@ number from this table.
 | DRAM, achievable streaming | **229-233 GB/s** | `[measured]` `bw.py` |
 | DRAM, real KV-streaming kernel | 222 GB/s | `[measured]` llama.cpp hip-ep PR #675, RGP |
 | LLC (≤32 MB working set) | ~790 GB/s | `[measured]` `bw.py` |
-| fp16 GEMM 2048³, naive Triton | **24.99 TFLOP/s** | `[measured]` `wmma_check.py` |
-| fp16 GEMM 2048³, hipBLASLt | 12.60 TFLOP/s | `[measured]` — see §5 |
+| fp16 GEMM 2048³, naive Triton | **23.59 TFLOP/s** | `[measured]` `wmma_check.py`, median of 40 interleaved rounds |
+| fp16 GEMM 2048³, `torch.mm` | **27.52 TFLOP/s** | `[measured]` same run — the vendor path wins here; see the retraction in §5 |
 
 **Build roofline on the measured number, never on 256 GB/s.** A kernel already at ~90% of the
 practical 222-233 GB/s wall looks like it still has ~20% headroom against the paper figure. Chasing
 that is wasted budget.
 
-## 5. Where the vendor library is weak -- and where it is not
+## 5. Vendor-library coverage: uneven, and not predictable from the architecture
 
 `[measured]` This is **shape-dependent in both directions**. Do not carry a blanket "hipBLASLt is
 weak on RDNA" prior; check the regime.
 
 | shape / regime | naive Triton vs hipBLASLt | after tuning |
 |---|---|---|
-| large square, 2048^3 fp16 | Triton **1.98x faster** (24.99 vs 12.60 TFLOP/s), untuned | -- |
+| large square, 2048^3 fp16 | `torch.mm` **1.16x faster** (27.52 vs 23.59 TFLOP/s) -- see the retraction note below | -- |
 | small square, 128/256/512^3 | hipBLASLt **1.6-2.1x faster** than naive Triton | a tuned kernel beats it **1.51x / 1.83x** at 128^3 / 256^3 but still **loses 13%** (0.87x) at 512^3 |
 | skinny / decode, M<=32, N=K=4096 | Triton **~1.8x faster** than `torch.mm` | -- |
 | short-K (`shortk_512`) | Triton **0.32x** -- the library wins outright | -- |
 
-Read that as: hipBLASLt on `gfx1151` is tuned for **mid-size square** shapes and is genuinely hard
-to beat there -- a tuned kernel still lost at 512^3 -- while it leaves large-square and
-skinny/decode shapes on the table. The part is a second-class math-library target overall, so a
-generated kernel *can* win outright, but **measure the specific shape first, in either direction**.
-The honest rule is not "the library is weak"; it is "the coverage here is uneven, so the claim that
-the library already does this must be verified per shape".
+> **Retraction.** An earlier version of this table claimed the opposite at 2048^3 -- "naive Triton
+> 1.98x faster (24.99 vs 12.60 TFLOP/s)". That came from an unfair benchmark in `repro/wmma_check.py`:
+> the vendor side allocated a fresh output tensor every iteration and got no warm-up, while Triton
+> wrote into a pre-allocated buffer after five warm-up launches, and the two ran in sequence rather
+> than interleaved. With both sides pre-allocated and warmed, interleaved, timed with GPU events and
+> taken as a median of 40 rounds, the vendor path is **faster**. The script now does it that way.
+> Caveat on any number from this box: round-to-round spread was 16.7% (Triton) and 34.0% (torch),
+> consistent with the cpufreq governor sitting at `powersave`; and `torch.backends` reports the
+> backend only as `Cublas`, so calling it "hipBLASLt" specifically is not verified here.
+
+Read that as: **the vendor path wins in three of the four regimes here**, and is genuinely hard to
+beat at square shapes -- a *tuned* Triton kernel still lost 13% at 512^3. The one regime where a
+generated kernel clearly wins is **skinny / decode-shaped** GEMM, which is the shape that matters
+most for token generation, so this is not a small exception. But note the asymmetry in evidence:
+that row is one of the ones with **no repro script** (see `repro/README.md`), while the row that
+did get a careful re-measurement is the one that flipped against Triton. Re-take the skinny number
+before building a plan on it.
+
+The honest rule is therefore **not** "the library is weak on RDNA" -- an earlier version of this
+file said that, and the one claim of it that was rigorously re-measured collapsed. It is: **coverage
+here is uneven and the direction is not predictable from the architecture, so measure the specific
+shape, dtype and call path, in both directions, before assuming either that the library is a floor
+or that it is beatable.**
 
 ## 6. Triton on RDNA — verified working
 
@@ -134,12 +169,13 @@ is expected and is not a fallback.
    name silently find nothing.
 4. `rocprofv3` itself is fine — `[measured]` it captures dispatches with correct grid/workgroup/
    timestamps on this part.
-5. **PMC: the limit is a hardware-counter BUDGET, not a metric count.** `[measured]` With *simple
-   raw* counters (`SQ_WAVES`, `GRBM_GUI_ACTIVE`, `FETCH_SIZE`, `WRITE_SIZE`) 1, 2 and 3 succeed and a
-   4-counter `pmc:` line aborts with `error code 38: Request exceeds the capabilities of the hardware
-   to collect`. Do not read that as "three metrics is always safe": a **derived** metric can expand
-   into several hardware counters, so three derived metrics can exceed the same budget. **Probe the
-   specific set you want.** CDNA parts take many more, so a CDNA-derived counter list WILL fail here.
+5. **PMC: the limit is a hardware-counter BUDGET, not a metric count.** `[measured]` For the one
+   cumulative set that was swept -- `SQ_WAVES`, then `+ GRBM_GUI_ACTIVE`, then `+ FETCH_SIZE` -- all
+   three combinations succeeded; adding `WRITE_SIZE` aborted with `error code 38: Request exceeds the
+   capabilities of the hardware to collect`. **That result is about that set, not about the number
+   three.** A metric named in a `pmc:` line is not necessarily one hardware counter: some expand into
+   several, so a different trio can exceed the same budget while a larger set of cheaper counters
+   fits. **Probe the specific set you want** rather than budgeting by list length. CDNA parts take many more, so a CDNA-derived counter list WILL fail here.
    Note what is *not* missing: the raw `TCP_`/`TCC_`/`TD_` **names** are unavailable, but the
    RDNA-native **`GL2C_HIT` / `GL2C_MISS` are collectable** and give L2 hit rate directly -- a real
    run measured **GL2 hit 50.37%** on this part. **Split into groups that fit and run one pass per
@@ -175,12 +211,18 @@ is expected and is not a fallback.
 
 ## Critical Rules
 
-1. **Detect wave size first.** wave32 → this file. wave64 → `amd_instinct.md`. Never mix.
-2. **WMMA, not MFMA. No AGPRs.** Translate or discard any MFMA/AGPR-phrased strategy.
-3. **Check the 32 MB LLC boundary before anything else.** Getting the working set under it is worth
+1. **Route on gfx family, not wave size.** `gfx9xx` → `amd_instinct.md`; `gfx10/11/12` → this
+   file. RDNA can run wave64, so wave size is a *check* on the decision, never the decision.
+2. **WMMA, not MFMA. No AGPRs.** Translate or discard any MFMA/AGPR-phrased strategy. (`gfx10` is
+   RDNA with no matrix instruction at all — check the capability, do not infer it from the family.)
+3. **Check the 32 MB LLC boundary before anything else** (`gfx1151` figure — re-measure on any
+   other RDNA part). Getting the working set under it is worth
    3.4x and is usually the biggest single lever on this part.
-4. **Roofline on 229-233 GB/s measured, never 256 GB/s paper.**
-5. **Do not assume the vendor library is a hard floor** — a naive Triton GEMM already beats
-   hipBLASLt 2x here.
+4. **Roofline on 229-233 GB/s measured, never the 256 GB/s paper figure** — and note this is the `gfx1151` DRAM number, not an RDNA one.
+5. **Vendor coverage here is uneven — measure both directions, fairly.** Do not assume the vendor
+   path is a hard floor *or* that it is beatable: for the exact shape, dtype and call path, measure
+   both. The first claim in this file that a naive Triton GEMM beat it 2x at 2048^3 **was a
+   measurement artifact** and reversed to 0.86x once both sides were pre-allocated, warmed and
+   interleaved. Pre-allocate outputs on both sides, warm both, interleave, and use GPU events.
 6. **Re-measure, never port CDNA numbers.** This part has ~1/25th the memory bandwidth and a
    completely different cache hierarchy; CDNA intuitions about what is memory-bound are wrong.

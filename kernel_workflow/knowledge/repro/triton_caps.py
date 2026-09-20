@@ -1,3 +1,5 @@
+import sys
+
 import torch, triton, triton.language as tl, traceback, time
 dev='cuda'
 print("triton", triton.__version__, "| arch", torch.cuda.get_device_properties(0).gcnArchName)
@@ -100,4 +102,17 @@ def _():
 
 for n,(s,m) in R.items():
     print(f"  {n:24} {s}  {m}")
-print("SUMMARY: %d PASS / %d FAIL" % (sum(1 for s,_ in R.values() if s=="PASS"), sum(1 for s,_ in R.values() if s=="FAIL")))
+
+_p = sum(1 for s,_ in R.values() if s == "PASS")
+_f = sum(1 for s,_ in R.values() if s == "FAIL")
+print("SUMMARY: %d PASS / %d FAIL" % (_p, _f))
+
+# Exit status has to agree with the summary, or a caller checking $? reads a
+# failing capability probe as a green one.
+if _f:
+    print("FAIL: %d Triton capability case(s) failed on this part" % _f)
+    sys.exit(1)
+if not _p:
+    print("FAIL: no capability case ran at all")
+    sys.exit(1)
+sys.exit(0)
