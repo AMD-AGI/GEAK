@@ -188,6 +188,55 @@ GEAK/
 └── exp/                 # Experiment outputs (timestamped per run)
 ```
 
+## Running GEAK on the codex CLI
+
+GEAK also runs on the **codex CLI**, with the same `.js` workflows unmodified.
+
+### 1. Install
+
+```bash
+node -v                            # need Node.js v20+
+npm i -g @openai/codex@0.146.1     # pin 0.146.1 -- 0.147 breaks with gateways
+codex --version                    # expect 0.146.1
+node interface/runtime/engine/selftest.mjs  # optional: runtime checks, needs no GPU and no key
+```
+
+### 2. Configure
+
+One variable is the whole configuration: it **selects codex** *and* **configures its provider**.
+
+```bash
+export OPENAI_API_KEY=sk-...        # -> OpenAI official (api.openai.com)
+# export GEAK_AMDKEY=<32hex>        # -> AMD gateway (llm-api.amd.com/Unified)
+# export OPENAI_BASE_URL=...        # -> any other OpenAI-compatible endpoint; wins over both
+```
+
+### 3. Run
+
+Natural-language launch is **not wired up for codex yet**, so drive it from the command line —
+`run_e2e.py` for a whole model, `run_workflow.mjs` for a single kernel:
+
+```bash
+# e2e (whole-model serving throughput). A JSON says WHAT to optimize -- the same information the
+# natural-language example above carries. Filename is yours -- it is just the first argument.
+cat > run_spec.json <<'JSON'
+{ "schema_version": 2,
+  "model_path": "/models/Qwen3.5-27B-FP8",
+  "framework": "sglang", "tp": 1, "gpu_ids": "0",
+  "workload": { "isl": 1024, "osl": 1024, "conc": 64 },
+  "exp_root": "/abs/work/geak" }
+JSON
+# required: model_path, exp_root (basename MUST be `geak`); rest has defaults -- interface/run_e2e.md
+python interface/run_e2e.py run_spec.json result.json    # auto-routes to the codex runtime
+
+# single kernel:
+node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.js --agent codex \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"'"$PWD"'/kernel_workflow","budget":6}'
+```
+
+Going further: [`interface/runtime/SETUP.md`](interface/runtime/SETUP.md),
+[`interface/run_e2e.md`](interface/run_e2e.md).
+
 ## Approaches compared
 
 How the workflows in this repo relate to the GEAK_v3 baseline:

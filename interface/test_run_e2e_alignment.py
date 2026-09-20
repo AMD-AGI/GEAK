@@ -182,6 +182,89 @@ def test_non_finite_divergence_inputs_are_unavailable(
     json.dumps(out, allow_nan=False)
 
 
+def test_handoff_alignment_uses_setup_not_validate_base_and_verifies_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The late optimization denominator cannot overwrite the handoff verdict."""
+    eval_dir = tmp_path / "e2e"
+    (eval_dir / "validation" / "base").mkdir(parents=True)
+    (eval_dir / "validation" / "final").mkdir(parents=True)
+    (eval_dir / "baseline").mkdir()
+    (eval_dir / "baseline" / "bench_summary.json").write_text(
+        json.dumps({"throughput_tok_s_median": 1000.0}), encoding="utf-8"
+    )
+    (eval_dir / "validation" / "base" / "bench_summary.json").write_text(
+        json.dumps({"throughput_tok_s_median": 900.0}), encoding="utf-8"
+    )
+    (eval_dir / "validation" / "final" / "bench_summary.json").write_text(
+        json.dumps({"throughput_tok_s_median": 990.0}), encoding="utf-8"
+    )
+    server_log = eval_dir / "baseline" / "server.log"
+    server_log.write_text(
+        "server_args=ServerArgs(model_path='/models/qwen', tp_size=1, "
+        "mem_fraction_static=0.92, context_length=8192)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BENCH_LAUNCHER", "magpie")
+    handoff = {
+        "orchestrator_best_tput_same_config": 1000.0,
+        "same_config_observed_identity": {
+            "backend": "sglang",
+            "server_args": {
+                "model_path": "/models/qwen",
+                "tp_size": 1,
+                "mem_fraction_static": 0.92,
+            },
+        },
+    }
+
+    out = rx.normalize_result(
+        handoff, _wf(eval_dir, base=1000.0, final=990.0, speedup=1.1)
+    )
+
+    assert out["baseline_throughput_tok_s"] == 900.0
+    assert out["throughput_speedup"] == pytest.approx(1.1)
+    assert out["handoff_alignment"]["status"] == "aligned"
+    assert out["handoff_alignment"]["divergence_pct"] == 0.0
+    assert out["server_identity"]["status"] == "matched"
+    assert out["server_identity"]["observed"]["server_args"]["context_length"] == 8192
+    assert out["server_identity"]["evidence_paths"] == [str(server_log)]
+    # Validation's -10% movement is a separate diagnostic, not handoff evidence.
+    assert out["measurement_drift"]["status"] == "measured"
+    assert out["measurement_drift"]["drift_pct"] == -10.0
+    assert out["baseline_alignment"]["divergence_pct"] == 0.0
+
+
+def test_handoff_identity_mismatch_is_exposed_with_its_evidence(
+    tmp_path: Path,
+) -> None:
+    eval_dir = tmp_path / "e2e"
+    (eval_dir / "baseline").mkdir(parents=True)
+    (eval_dir / "baseline" / "bench_summary.json").write_text(
+        json.dumps({"throughput_tok_s_median": 1000.0}), encoding="utf-8"
+    )
+    server_log = eval_dir / "baseline" / "server.log"
+    server_log.write_text(
+        "server_args=ServerArgs(model_path='/models/qwen', tp_size=1)\n",
+        encoding="utf-8",
+    )
+
+    out = rx.normalize_result(
+        {
+            "orchestrator_best_tput_same_config": 1000.0,
+            "observed_server_identity": {
+                "backend": "sglang",
+                "server_args": {"model_path": "/models/qwen", "tp_size": 2},
+            },
+        },
+        _wf(eval_dir, base=1000.0, final=1000.0, speedup=1.0),
+    )
+
+    assert out["server_identity"]["status"] == "mismatched"
+    assert out["handoff_alignment"]["status"] == "identity_mismatch"
+    assert out["server_identity"]["evidence_paths"] == [str(server_log)]
+
+
 def test_alignment_report_is_same_config_first_and_idempotent(
     tmp_path: Path,
 ) -> None:

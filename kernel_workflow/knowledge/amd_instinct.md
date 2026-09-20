@@ -10,9 +10,12 @@ values + your measured benchmark over any number written here (this table is a d
 reference material in this workflow):
 
 ```bash
-rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+'          # arch id: gfx942 (CDNA3) | gfx950 (CDNA4)
-rocminfo 2>/dev/null | grep -m1 -iE 'Compute Unit'          # CU count on THIS device
-rocm-smi --showproductname 2>/dev/null | grep -iE 'MI3'     # marketing name (MI300X/325X/350X/355X/...)
+# rocminfo lists the CPU agent FIRST, so a bare `grep -m1 'Compute Unit'` returns the CPU CORE
+# COUNT, not the GPU's. Scope every field to the gfx agent:
+rocminfo 2>/dev/null | awk '/^ *Name: *gfx/{print $2; exit}'                        # gfx target
+rocminfo 2>/dev/null | awk '/Name:.*gfx/{f=1} f&&/Compute Unit:/{print $3; exit}'   # CU count
+rocminfo 2>/dev/null | awk '/Name:.*gfx/{f=1} f&&/Wavefront Size:/{print $3; exit}' # wavefront
+rocminfo 2>/dev/null | awk '/Name:.*gfx/{f=1} f&&/Marketing Name:/{$1=$2=""; print; exit}'
 rocm-smi --showmeminfo vram 2>/dev/null | head              # HBM capacity
 ```
 - The `gfx` id is what matters for code paths (fp8 format, MFMA shapes, MX support). The CU count is

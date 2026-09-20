@@ -15,6 +15,7 @@ _SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(_SCRIPTS)))              # repo root, for `kb`
 sys.path.insert(0, _SCRIPTS)
 import e2e_store                                                            # noqa: E402
+from kb.attest import should_retire                                          # noqa: E402
 from kb.retract import is_retired, retracted_document, retraction_ok        # noqa: E402
 from kb.store_local import KBStoreError, LocalKBStore                       # noqa: E402
 
@@ -200,3 +201,78 @@ def test_a_dry_run_writes_nothing_and_shows_the_document(tmp_path):
     assert all(not r["rewritten"] for r in out["rungs"])
     assert out["rungs"][0]["would_write"]["value"]["retired_reason"] == "wrong"
     assert _run("resolve", "--store", str(tmp_path / "store"))["candidates"] != []
+
+
+# -- retirement across a re-measurement -------------------------------------------------------
+#
+# Session ids are content-addressed off the CONFIG (`_content_digest`), so re-benching a retracted
+# configuration lands on the retracted session and REPLACES it. `_record_state` writes
+# `retained: True` unconditionally — correctly, it has never seen the previous document — which
+# meant any rewrite silently resurrected a tombstone, ranking scalars and all.
+
+
+def _session(tmp_path, sid, cid=CID):
+    return LocalKBStore(str(tmp_path / "store"), "throughput_tok_s").get_session(cid, sid)
+
+
+def test_a_rewrite_that_did_not_win_keeps_the_tombstone(tmp_path):
+    sid = _write(tmp_path, "r", 1000.0, "kernels")
+    _run("retract", "--store", str(tmp_path / "store"), "--session-id", sid,
+         "--reason", "measured on a box it never fit", "--apply")
+    # Same config, same session id — and this time the run did not clear the gate.
+    assert _write(tmp_path, "r2", 1000.0, "kernels", status="no_gain", parity="n/a") == sid
+    value = _session(tmp_path, sid)["value"]
+    assert is_retired(value) and value["retired_reason"] == "measured on a box it never fit"
+
+
+def test_the_carried_tombstone_re_zeroes_the_scalars(tmp_path):
+    """The whole point of retraction being a rewrite. `retained: False` on a document that still
+    carries a real throughput is inert against every reader that ranks on the scalar, so carrying
+    the FLAG alone would leave the record retracted and still winning the page."""
+    sid = _write(tmp_path, "r", 1000.0, "kernels")
+    _run("retract", "--store", str(tmp_path / "store"), "--session-id", sid,
+         "--reason", "wrong", "--apply")
+    _write(tmp_path, "r2", 1000.0, "kernels", status="no_gain", parity="n/a")
+    knowledge = _session(tmp_path, sid)
+    assert knowledge["throughput_tok_s"] == 0.0 and knowledge["speedup"] == 0.0
+    assert knowledge["value"]["withdrawn_scores"]["throughput_tok_s"] == 1000.0
+
+
+def test_a_re_measured_win_lifts_the_retraction(tmp_path):
+    """Retracting rather than deleting exists so a record CAN come back. The record was declared
+    wrong on the evidence available; evidence is the only thing that should overturn it, and the
+    bar is the write-time gate (`validated_win` AND parity pass), not merely "did not lose"."""
+    sid = _write(tmp_path, "r", 1000.0, "kernels")
+    _run("retract", "--store", str(tmp_path / "store"), "--session-id", sid,
+         "--reason", "nobody could reproduce it", "--apply")
+    assert _write(tmp_path, "r2", 1000.0, "kernels") == sid
+    knowledge = _session(tmp_path, sid)
+    value = knowledge["value"]
+    assert not is_retired(value) and value["lifecycle"] == "active"
+    assert knowledge["throughput_tok_s"] == 1000.0            # ranked again
+    assert value["unretired_from_reason"] == "nobody could reproduce it"
+    assert value["unretired_at"]
+
+
+def test_the_reprieve_is_counted_as_the_validation_it_is(tmp_path):
+    """Without it the next curation sweep retracts the record on the very negatives the win just
+    answered, and it oscillates forever. `should_retire` already vetoes on `validations`, so the
+    win that lifted the retraction only has to be written down."""
+    sid = _write(tmp_path, "r", 1000.0, "kernels")
+    for who in ("boxA", "boxB"):
+        _run("attest", "--store", str(tmp_path / "store"), "--session-id", sid,
+             "--outcome", "failed", "--measured-by", who, "--apply")
+    _run("retract", "--store", str(tmp_path / "store"), "--session-id", sid,
+         "--reason", "twice tried, never won", "--apply")
+    _write(tmp_path, "r2", 1000.0, "kernels")
+    value = _session(tmp_path, sid)["value"]
+    assert value["attestations"]["validations"] == 1
+    assert value["attestations"]["failures"] == 2             # the evidence is kept, not erased
+    assert should_retire(value) == ""
+
+
+def test_an_ordinary_rewrite_of_a_live_record_is_untouched(tmp_path):
+    sid = _write(tmp_path, "r", 1000.0, "kernels")
+    _write(tmp_path, "r2", 1000.0, "kernels")
+    value = _session(tmp_path, sid)["value"]
+    assert value["retained"] is True and "unretired_at" not in value

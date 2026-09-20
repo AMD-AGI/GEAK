@@ -1034,6 +1034,17 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
           caller does not trust an unmeasured 1.0x (re-measure per-bucket ms in a fresh subprocess under
           the deployment graph/compile — see kernel_extractor.md).
 
+    Do NOT amortize a prefill bucket over OSL here. It reads like an omission — a prefill pass is paid
+    once per request and should be spread over the OSL tokens it precedes — but (2) already did it:
+    `analytic_calls` puts both regimes on one per-wave basis, so `weighted` (a RATIO) is already
+    `b_d*OSL : b_p*calls_p`. Dividing prefill by OSL again makes it `b_d*OSL^2 : b_p*calls_p`, i.e.
+    prefill under-weighted by a factor of OSL (typically 1024x) — enough to flip the PRIMARY gate's
+    sign: at OSL=1024/CONC=64/ISL=4096/chunk=2048 with prefill 0.98x and decode 1.02x, the correct
+    0.9818 (regression) is reported as 1.0192 (a "win"). This was shipped once, in `35d8f491`, and
+    reverted; the entire 327-test suite passed both with and without it, so tests will not catch it.
+    If a workload ever genuinely needs a different basis, change `_analytic_calls_from_meta` /
+    `attribute_weights` (which own the per-wave basis) and ship a mixed prefill+decode regression test.
+
     `per_case`: list of {sig|name, regime, m?, baseline_ms, optimized_ms?|speedup?}. speedup is derived
     from baseline_ms/optimized_ms when both present (preferred), else the passed `speedup` is used.
     Returns {weighted, geomean, primary, included, dropped_unserved, suspect_identity, per_case, reason}."""
