@@ -115,15 +115,20 @@ that is wasted budget.
 
 ## 5. Vendor-library coverage: uneven, and not predictable from the architecture
 
-`[measured]` This is **shape-dependent in both directions**. Do not carry a blanket "hipBLASLt is
-weak on RDNA" prior; check the regime.
+`[measured]` This is **shape-dependent in both directions**. Do not carry a blanket "the vendor
+library is weak on RDNA" prior; check the regime — and check *which* vendor library you reached,
+because on this box `torch` defaults to rocBLAS and never touches hipBLASLt.
 
-| shape / regime | naive Triton vs hipBLASLt | after tuning |
+| shape / regime | naive Triton vs the vendor path | after tuning |
 |---|---|---|
 | large square, 2048^3 fp16 | `torch.mm` **1.16x faster** (27.52 vs 23.59 TFLOP/s) -- see the retraction note below | -- |
-| small square, 128/256/512^3 | hipBLASLt **1.6-2.1x faster** than naive Triton | a tuned kernel beats it **1.51x / 1.83x** at 128^3 / 256^3 but still **loses 13%** (0.87x) at 512^3 |
+| small square, 128/256/512^3 | vendor path **1.6-2.1x faster** than naive Triton | a tuned kernel beats it **1.51x / 1.83x** at 128^3 / 256^3 but still **loses 13%** (0.87x) at 512^3 |
 | skinny / decode, M<=32, N=K=4096 | Triton **~1.8x faster** than `torch.mm` | -- |
-| short-K (`shortk_512`) | Triton **0.32x** -- the library wins outright | -- |
+| short-K (`shortk_512`) | Triton **0.32x** -- the vendor path wins outright | -- |
+
+> These three rows say "vendor path", not a library name, on purpose: only the 2048^3 row was
+> re-measured with the backend checked. Which library the others actually reached is unverified,
+> and on this box the default is rocBLAS rather than hipBLASLt.
 
 > **Retraction.** An earlier version of this table claimed the opposite at 2048^3 -- "naive Triton
 > 1.98x faster (24.99 vs 12.60 TFLOP/s)". That came from an unfair benchmark in `repro/wmma_check.py`:
@@ -132,8 +137,14 @@ weak on RDNA" prior; check the regime.
 > than interleaved. With both sides pre-allocated and warmed, interleaved, timed with GPU events and
 > taken as a median of 40 rounds, the vendor path is **faster**. The script now does it that way.
 > Caveat on any number from this box: round-to-round spread was 16.7% (Triton) and 34.0% (torch),
-> consistent with the cpufreq governor sitting at `powersave`; and `torch.backends` reports the
-> backend only as `Cublas`, so calling it "hipBLASLt" specifically is not verified here.
+> consistent with the cpufreq governor sitting at `powersave`.
+>
+> **And the vendor library was misnamed.** `torch.backends.cuda.preferred_blas_library()` reports
+> `_BlasBackend.Cublas`, which on ROCm is **rocBLAS** — hipBLASLt would report `Cublaslt`. So the
+> comparison never ran against hipBLASLt at all, even though ROCm 7.2 ships `gfx1151`-tuned
+> hipBLASLt kernels. The withdrawn claim was therefore wrong twice: unfair harness, wrong opponent.
+> **Check which BLAS you are actually calling before attributing a result to a library**, and note
+> that a `torch.mm` result on this part says nothing about hipBLASLt.
 
 Read that as: **the vendor path wins in three of the four regimes here**, and is genuinely hard to
 beat at square shapes -- a *tuned* Triton kernel still lost 13% at 512^3. The one regime where a
