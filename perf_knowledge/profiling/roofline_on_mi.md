@@ -15,9 +15,11 @@ sources:
 The roofline plots **achieved FLOP/s vs arithmetic intensity (FLOP/byte)**. Two ceilings: a sloped
 **BW roof** (HBM/L2/Infinity-Cache lines) and a flat **compute roof** (per-dtype peak FLOP/s). A
 kernel left of the **ridge point** is BW-bound; right of it, compute-bound. On Instinct, build it
-**empirically** with `rocprof-compute --roof-only`
-([`rocprof_compute_workflow.md`](rocprof_compute_workflow.md)) — the tool runs microbenchmarks to
-measure the *real* peaks of your box, not datasheet numbers.
+with `rocprof-compute --roof-only` ([`rocprof_compute_workflow.md`](rocprof_compute_workflow.md)),
+which runs on-device microbenchmarks for the **empirical** peaks. Carry the datasheet peaks
+alongside them and reconcile the two — an empirical roof is a measurement and can be wrong (see
+[`kernel_roofline.md`](kernel_roofline.md)). To turn a point into a single efficiency number per
+kernel, continue in [`kernel_roofline.md`](kernel_roofline.md).
 
 ## Build it
 ```bash
@@ -68,14 +70,20 @@ Use the matching `--roofline-data-type`: an FP8 GEMM compared against the FP32 r
 looks artificially terrible. Pick the roof for the kernel's actual MFMA dtype.
 
 ## Pitfalls
-- Quoting the **datasheet** roof as achievable — always compare to the *empirical* `roofline.csv` roof
-  and remember HBM achievable (~4.3 TB/s) < peak (5.325 TB/s).
+- Quoting the **datasheet** roof as achievable — compare to the *empirical* `roofline.csv` roof and
+  remember HBM achievable (~4.3 TB/s) < peak (5.325 TB/s).
+- The mirror-image pitfall: quoting the **empirical** roof without checking it. On gfx950 with
+  rocprof-compute < 3.6.0 the BF16/FP16/INT8 microbench peaks read 2–4× low, which inflates every
+  efficiency computed against them; below that version use the datasheet peaks instead. Check
+  BF16 == FP16 on any empirical table — they run at the same rate in hardware.
+  See [`kernel_roofline.md`](kernel_roofline.md).
 - Drawing the FP32 roof for a low-precision kernel.
 - Forgetting cache roofs: a "BW-bound" verdict against the HBM roof may actually be L2/L3-resident.
 
 ## Verify
-`roofline.csv` exists and the empirical compute roof is within a sane fraction (not above) the datasheet
-peak; the kernel marker sits where its measured AI predicts.
+`roofline.csv` exists and the empirical compute roof is **both** below the datasheet peak *and* within
+a sane fraction of it — a one-sided "not above" check passes a roof that is 4× too low; the empirical
+BF16 and FP16 roofs agree within ~10%; the kernel marker sits where its measured AI predicts.
 
 ## Sources
 - `--roof-only`, empirical microbench roofs, `roofline.csv`/PDF, `--roofline-data-type`: ROCm Compute Profiler profile-mode docs.
