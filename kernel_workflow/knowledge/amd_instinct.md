@@ -1,5 +1,11 @@
 # AMD Instinct (MI-series) Hardware Reference — DETECT THE BOX FIRST
 
+> **STOP — wrong file if this box is not CDNA.** Run
+> `rocminfo 2>/dev/null | awk '/^ *Name: *gfx/{print $2; exit}'` first.
+> If the gfx target is `gfx11xx` / `gfx12xx` (RDNA — e.g. `gfx1151` Strix Halo / Radeon 8060S),
+> **use `amd_rdna.md` instead and ignore everything below**: RDNA is wave32 with WMMA, no AGPRs,
+> a large Infinity Cache, and ~an order of magnitude less memory bandwidth. Only `gfx9xx` uses this file.
+
 This workflow runs on AMD Instinct MI-series accelerators — **CDNA 3** (MI300X / MI300A / MI308X /
 MI325X, `gfx942`) and **CDNA 4** (MI350X / MI355X, `gfx950`). They differ in CU count, HBM bandwidth,
 peak FLOPS, and — critically for quantized kernels — the **fp8 number format**. Do NOT assume MI300X.
