@@ -6,10 +6,16 @@
 > part (`wave32`, e.g. `gfx1151` / Strix Halo) **neither exists** — there is no
 > MFMA at all (the matrix path is WMMA) and the memory is LPDDR5X shared with
 > the CPU, not HBM. Three further limits change how you profile there: at most
-> **3 PMC counters per rocprofv3 pass**, **no `TCP_`/`TCC_`/`TD_` counters** (so
-> L1/L2 hit rate is simply unobtainable, report it as unavailable rather than
-> 0), and `rocprof-compute` leaves `$max_mclk` unpopulated so its roofline
-> metrics are wrong without `--specs-correction`. Read
+> roughly **3 simple raw counters per rocprofv3 pass** (a *derived* metric can
+> expand into several hardware counters, so three of those may still exceed the
+> budget -- probe, do not assume); the raw `TCP_`/`TCC_`/`TD_` **names** are not
+> exposed, but **`GL2C_HIT` / `GL2C_MISS` are**, and are how you get L2 hit rate
+> here -- a real run on this part measured **GL2 hit 50.37%** alongside
+> `FETCH_SIZE` -- so reach for the `GL2C_*` family rather than concluding the
+> cache counters are unavailable; and `rocprof-compute` leaves `$max_mclk`
+> unpopulated so its roofline metrics are wrong without `--specs-correction`.
+> When something genuinely is unavailable, report it as unavailable with a
+> reason rather than as 0. Read
 > `knowledge/amd_rdna.md` first on those parts; the profiler-selection and
 > dispatch-count parts of this guide still apply unchanged.
 
