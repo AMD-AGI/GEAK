@@ -134,10 +134,16 @@ is expected and is not a fallback.
    name silently find nothing.
 4. `rocprofv3` itself is fine — `[measured]` it captures dispatches with correct grid/workgroup/
    timestamps on this part.
-5. **PMC: gfx1151 collects at most THREE counters per pass.** `[measured]` A 4-counter `pmc:` line
-   aborts with `error code 38: Request exceeds the capabilities of the hardware to collect`; 1, 2 and
-   3 all succeed. CDNA parts take many more, so a CDNA-derived counter list WILL fail here. **Split
-   the set into groups of <=3 and run one rocprofv3 pass per group** -- that works and is cheap
+5. **PMC: the limit is a hardware-counter BUDGET, not a metric count.** `[measured]` With *simple
+   raw* counters (`SQ_WAVES`, `GRBM_GUI_ACTIVE`, `FETCH_SIZE`, `WRITE_SIZE`) 1, 2 and 3 succeed and a
+   4-counter `pmc:` line aborts with `error code 38: Request exceeds the capabilities of the hardware
+   to collect`. Do not read that as "three metrics is always safe": a **derived** metric can expand
+   into several hardware counters, so three derived metrics can exceed the same budget. **Probe the
+   specific set you want.** CDNA parts take many more, so a CDNA-derived counter list WILL fail here.
+   Note what is *not* missing: the raw `TCP_`/`TCC_`/`TD_` **names** are unavailable, but the
+   RDNA-native **`GL2C_HIT` / `GL2C_MISS` are collectable** and give L2 hit rate directly -- a real
+   run measured **GL2 hit 50.37%** on this part. **Split into groups that fit and run one pass per
+   group** -- that works and is cheap
    (`[measured]` 5 counters in 5 single-counter passes = 27 s total **in a warm harness
    process**; a cold process start costs ~85 s *per pass* -- see item 6). Do not spend agent turns
    rediscovering this: it cost 31 min of one 50 min run.
