@@ -16,8 +16,12 @@ bench_summary.json shapes with nothing to catch it.
 
 Throughput basis: OUTPUT-only tok/s by default, matching the Hyperloom orchestrator's
 baseline/explore collectors (they read output_throughput).  E2E_METRIC=total switches to total
-(input+output).  Baseline and candidate read the same key, so the accept RATIO is basis-consistent;
-metric_basis records which was used.  Values are aggregate, NOT divided by TP.
+(input+output), E2E_METRIC=intvty to the AgentX interactivity axis.  Baseline and candidate read
+the same key, so the accept RATIO is basis-consistent; metric_basis records which was used.
+Values are aggregate, NOT divided by TP.
+
+``throughput_tok_s_median`` carries whichever axis was selected, so on the interactivity axis it
+is not a tok/s figure at all -- read it with metric_basis, never by its name alone.
 """
 import argparse
 import glob
@@ -28,11 +32,41 @@ import sys
 
 TOTAL_KEYS = ("total_token_throughput", "total_throughput", "total_token_throughput_tok_s")
 OUTPUT_KEYS = ("output_throughput", "output_token_throughput", "output_throughput_tok_s")
+#: AgentX interactivity: aiperf's summary P10 of the per-request rate OSL/E2EL_s -- the slow-tail
+#: request's own token rate. Higher is better, as on both throughput axes, so the accept ratio
+#: keeps its direction and no gate needs to know which axis it is comparing.
+INTVTY_KEYS = ("e2e_norm_intvty_p90",)
+
+OUTPUT_BASIS = "aggregate_output_tok_s"
+TOTAL_BASIS = "aggregate_total_token_tok_s"
+INTVTY_BASIS = "e2e_norm_intvty_p90"
+
+#: E2E_METRIC value -> (rows to read, metric_basis to record). Spelled in Hyperloom's axis
+#: vocabulary so the handoff and this summary can be compared as strings on both sides.
+_BASES = {
+    "output": (OUTPUT_KEYS, OUTPUT_BASIS),
+    "total": (TOTAL_KEYS, TOTAL_BASIS),
+    "total_token": (TOTAL_KEYS, TOTAL_BASIS),
+    "total_throughput": (TOTAL_KEYS, TOTAL_BASIS),
+    "intvty": (INTVTY_KEYS, INTVTY_BASIS),
+    "interactivity": (INTVTY_KEYS, INTVTY_BASIS),
+    "e2e_norm_intvty_p90": (INTVTY_KEYS, INTVTY_BASIS),
+}
 
 
-def _is_total():
-    return (os.environ.get("E2E_METRIC") or "output").strip().lower() in (
-        "total", "total_token", "total_throughput")
+def _basis():
+    """``(keys, metric_basis)`` for E2E_METRIC; an unknown axis is fatal, not a silent default.
+
+    Falling back to output here would be the expensive failure: an orchestrator that asks for an
+    axis this build cannot measure would get a summary labelled with the axis it did NOT request,
+    and accept candidates graded against a reference read on another one.
+    """
+    raw = (os.environ.get("E2E_METRIC") or "output").strip().lower()
+    try:
+        return _BASES[raw]
+    except KeyError:
+        raise SystemExit("bench_summarize: E2E_METRIC=%r is not an axis this build measures "
+                         "(known: %s)" % (raw, ", ".join(sorted(_BASES))))
 
 
 def _num(d, *keys):
@@ -74,7 +108,8 @@ def _emit(summary, out_path, tail):
 
 
 def from_runs(args):
-    keys = TOTAL_KEYS if _is_total() else OUTPUT_KEYS
+    keys, basis = _basis()
+    is_output, is_intvty = basis == OUTPUT_BASIS, basis == INTVTY_BASIS
 
     def read(path):
         xs = []
@@ -95,7 +130,7 @@ def from_runs(args):
             pass
         return xs
 
-    tps, ttft, tpot = [], [], []
+    tps, ttft, tpot, guard = [], [], [], []
     with open(args.runs) as fh:
         for line in fh:
             line = line.strip()
@@ -108,6 +143,10 @@ def from_runs(args):
             v = _num(d, *keys)
             if v is not None:
                 tps.append(v)
+            if is_intvty:
+                g = _num(d, *TOTAL_KEYS)
+                if g is not None:
+                    guard.append(g)
             for src, dst in ((("median_ttft_ms", "mean_ttft_ms"), ttft),
                              (("median_tpot_ms", "mean_tpot_ms"), tpot)):
                 x = _num(d, *src)
@@ -115,15 +154,20 @@ def from_runs(args):
                     dst.append(x)
     cold = read(args.cold) if args.cold else []
     med, spread = _med3(tps), _spread_pct(tps)
-    total = _is_total()
     summary = {
         # Canonical, metric-neutral throughput of the SELECTED basis. Downstream reads this +
         # metric_basis. The output_*-named pair below is a legacy alias, populated ONLY in output
         # mode so nobody silently reads total throughput under an "output" name.
         "throughput_tok_s_median": med,
         "throughput_tok_s_spread_pct": spread,
-        "output_throughput_tok_s_median": None if total else med,
-        "output_throughput_tok_s_spread_pct": None if total else spread,
+        "output_throughput_tok_s_median": med if is_output else None,
+        "output_throughput_tok_s_spread_pct": spread if is_output else None,
+        # AgentX grades interactivity against a total-throughput guard, so a candidate that buys
+        # tail latency by shedding throughput is not a win. Carried only on that axis: the two
+        # throughput bases keep their exact field set, and there the objective IS the guard.
+        **({"guard_total_tok_s_median": _med3(guard),
+            "guard_total_tok_s_spread_pct": _spread_pct(guard),
+            "guard_basis": TOTAL_BASIS} if is_intvty else {}),
         "ttft_ms_median": _med3(ttft),
         "tpot_ms_median": _med3(tpot),
         "runs": len(tps),
@@ -132,7 +176,7 @@ def from_runs(args):
         # JIT/graph-capture costs included, same metric basis as the hot median. None by default.
         "cold_output_throughput_tok_s": _med3(cold),
         "cold_runs": len(cold),
-        "metric_basis": "aggregate_total_token_tok_s" if total else "aggregate_output_tok_s",
+        "metric_basis": basis,
         "measurement_mode": ("isolated_server_replica"
                              if os.environ.get("GEAK_ISOLATED_REPLICA") == "1"
                              else "legacy_same_server"),
@@ -186,7 +230,8 @@ def from_replicas(args):
     med, spread = _med3(tps), _spread_pct(tps)
     bases = {s.get("metric_basis") for s in summaries if s.get("metric_basis")}
     basis = next(iter(bases)) if len(bases) == 1 else None
-    is_output = basis == "aggregate_output_tok_s"
+    is_output, is_intvty = basis == OUTPUT_BASIS, basis == INTVTY_BASIS
+    guard = col("guard_total_tok_s_median") if is_intvty else []
     summary = {
         "requested": args.requested,
         "successful": args.successful,
@@ -199,6 +244,9 @@ def from_replicas(args):
         "throughput_tok_s_spread_pct": spread,
         "output_throughput_tok_s_median": med if is_output else None,
         "output_throughput_tok_s_spread_pct": spread if is_output else None,
+        **({"guard_total_tok_s_median": _med3(guard),
+            "guard_total_tok_s_spread_pct": _spread_pct(guard),
+            "guard_basis": TOTAL_BASIS} if is_intvty else {}),
         "ttft_ms_median": _med3(col("ttft_ms_median")),
         "tpot_ms_median": _med3(col("tpot_ms_median")),
         "runs": args.successful,

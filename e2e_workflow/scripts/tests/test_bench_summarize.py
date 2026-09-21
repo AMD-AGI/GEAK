@@ -77,6 +77,7 @@ class FromRunsTest(unittest.TestCase):
             for i, t in enumerate(tputs):
                 fh.write(json.dumps({"output_throughput": t,
                                      "total_token_throughput": t * 9,
+                                     "e2e_norm_intvty_p90": t / 2,
                                      "median_ttft_ms": 40.0 + i,
                                      "median_tpot_ms": 8.0 + i}) + "\n")
             # A malformed tail must be skipped, not abort the summary: losing the whole
@@ -118,6 +119,34 @@ class FromRunsTest(unittest.TestCase):
         self.assertIsNone(s["output_throughput_tok_s_median"])
         self.assertIsNone(s["output_throughput_tok_s_spread_pct"])
         self.assertIn("aggregate_total_token_tok_s=945.0", line)
+
+    def test_intvty_metric_selects_the_interactivity_axis(self):
+        """AgentX is graded on interactivity, so GEAK must be able to measure it."""
+        s, line = self.summarize([100.0, 110.0], env={"E2E_METRIC": "intvty"})
+        self.assertEqual(s["metric_basis"], "e2e_norm_intvty_p90")
+        self.assertEqual(s["throughput_tok_s_median"], 52.5)
+        self.assertIsNone(s["output_throughput_tok_s_median"])
+        self.assertIsNone(s["output_throughput_tok_s_spread_pct"])
+        self.assertIn("e2e_norm_intvty_p90=52.5", line)
+
+    def test_intvty_metric_carries_the_throughput_guard(self):
+        """Interactivity bought by shedding throughput is not a win; the guard must be readable."""
+        s, _ = self.summarize([100.0, 110.0], env={"E2E_METRIC": "intvty"})
+        self.assertEqual(s["guard_total_tok_s_median"], 945.0)
+        self.assertEqual(s["guard_basis"], "aggregate_total_token_tok_s")
+
+    def test_throughput_axes_do_not_grow_a_guard_field(self):
+        """On a throughput basis the objective IS the guard; a second copy would invite drift."""
+        for metric in ("output", "total"):
+            s, _ = self.summarize([100.0], env={"E2E_METRIC": metric})
+            self.assertNotIn("guard_total_tok_s_median", s, metric)
+            self.assertNotIn("guard_basis", s, metric)
+
+    def test_an_unknown_axis_is_fatal_rather_than_silently_output(self):
+        """Falling back would label the summary with an axis the caller did not ask for."""
+        with self.assertRaises(SystemExit) as caught:
+            self.summarize([100.0], env={"E2E_METRIC": "latency"})
+        self.assertIn("not an axis this build measures", str(caught.exception))
 
     def test_a_missing_cold_file_does_not_abort_the_summary(self):
         """The cold round is discarded evidence; losing it must not cost the timed rounds."""
@@ -191,7 +220,8 @@ class FromReplicasTest(unittest.TestCase):
         os.makedirs(rdir, exist_ok=True)
         with open(os.path.join(rdir, "selected_summary.json"), "w", encoding="utf-8") as fh:
             json.dump({"throughput_tok_s_median": tput, "ttft_ms_median": 40.0 + index,
-                       "tpot_ms_median": 8.0 + index, "metric_basis": basis}, fh)
+                       "tpot_ms_median": 8.0 + index, "metric_basis": basis,
+                       "guard_total_tok_s_median": tput * 9}, fh)
         with open(os.path.join(rdir, "selected_attempt"), "w", encoding="utf-8") as fh:
             fh.write(str(attempt))
 
@@ -240,6 +270,16 @@ class FromReplicasTest(unittest.TestCase):
         s, _ = self.summarize(3, 3)
         self.assertIsNone(s["metric_basis"])
         self.assertIsNone(s["output_throughput_tok_s_median"])
+
+    def test_intvty_leg_aggregates_the_guard_across_replicas(self):
+        for i, t in enumerate([104.0, 108.0, 112.0], start=1):
+            self.add(i, t, basis="e2e_norm_intvty_p90")
+        s, line = self.summarize(3, 3)
+        self.assertEqual(s["metric_basis"], "e2e_norm_intvty_p90")
+        self.assertEqual(s["throughput_tok_s_median"], 108.0)
+        self.assertEqual(s["guard_total_tok_s_median"], 972.0)
+        self.assertIsNone(s["output_throughput_tok_s_median"])
+        self.assertIn("e2e_norm_intvty_p90=108.0", line)
 
     def test_no_replicas_at_all(self):
         s, _ = self.summarize(3, 0)
