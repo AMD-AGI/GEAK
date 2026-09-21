@@ -91,17 +91,25 @@ Corollary for roofline analysis: there are **two** rooflines on this part, not o
 regime the kernel is in before computing headroom.
 
 > **This is a BANDWIDTH lever, and it does nothing for compute-bound work.** `[measured]`
-> `rdna_roofline.py`, fp16 square GEMM: 1024^3 (6.3 MB, deep in LLC) reaches 35.16 TFLOP/s, while
-> 3072^3 (56.6 MB, well into the DRAM regime) still reaches **34.13** — a 3% difference, not 3.4x.
-> At those shapes the arithmetic intensity is ~683 FLOP/byte, so even the DRAM roof
-> (683 x 230 GB/s = 157 TFLOP/s) sits far above the compute roof and bandwidth never binds.
+> `rdna_roofline.py`, fp16 square GEMM: 1024^3 (6.3 MB, deep in LLC) reaches ~35.1 TFLOP/s while
+> 3072^3 (56.6 MB, well into the DRAM regime) reaches **~38.4** — the DRAM-regime shape is about
+> **10% faster**, not 3.4x slower. At those shapes arithmetic intensity is ~683 FLOP/byte, so even
+> the DRAM roof (683 x 230 GB/s = 157 TFLOP/s) sits far above the 59.4 TFLOP/s compute roof and
+> bandwidth never binds; what varies is compute efficiency at different tile counts.
+>
+> **The LLC-vs-DRAM choice only changes a bound/not-bound verdict for AI between ~75 and ~258
+> FLOP/byte** (`59.4e12 / 790e9` and `59.4e12 / 230e9`). Above that window both roofs clear the
+> compute roof and the choice is irrelevant; below it, both bind and the kernel is memory-bound
+> either way. Compute the window before arguing about which bandwidth to use.
 > **Check which roof binds before spending effort on cache residency**: for high-AI kernels the
 > 32 MB boundary is worth nothing, and the lever is real only for bandwidth-bound work — weight
 > streaming in decode, elementwise, norms, low-reuse attention.
 >
-> The LLC roof is also **not a step function at 32 MB**: 6.3 MB gives 35.16 TFLOP/s but 25.2 MB —
-> still nominally LLC-resident — gives 28.53. It degrades as the working set approaches capacity,
-> so "under 32 MB" is not the same as "at the 790 GB/s roof".
+> Nor is "LLC-resident" a single performance class: 6.3 MB gives ~35.1 TFLOP/s but 25.2 MB — still
+> nominally LLC-resident — gives ~28.4. So "under 32 MB" is not the same as "at the 790 GB/s roof".
+> Note these are *compute* numbers on a compute-bound shape, so the variation is tile/occupancy
+> efficiency rather than the cache roof itself; a bandwidth-bound sweep would be needed to say where
+> the 790 GB/s figure starts to degrade, and that has not been measured.
 
 **The 790 GB/s figure is READ-READ-WRITE. A pure-read stream goes higher.** `[measured by
 ablation]` A same-grid / same-byte-stream kernel with the math deleted reached **782 / 913 / 945
@@ -120,8 +128,14 @@ absolute terms.
 | | fp16 / bf16 WMMA |
 |---|---|
 | datasheet peak | **59.4 TFLOP/s** (40 CU x 64 lanes x 2 x 2.9 GHz x 4) |
-| empirical peak | **35.16 TFLOP/s** — best any kernel reached here (`torch.mm` @ 1024^3) |
-| empirical / datasheet | **59.2%** |
+| empirical peak | **38.35 – 38.52 TFLOP/s**, median 38.46 — best any kernel reached, over 3 sweeps |
+| winning kernel | `torch.mm` @ 3072^3, stable across all 3 sweeps, spread 0.4% |
+| empirical / datasheet | **64.7%** |
+
+The winner's matrix path is established, not assumed: rocprofv3 names it
+`Cijk_Ailk_Bljk_HHS_BH_MT128x128x16_**MI16x16x16x1**_..._**ISA1151**_...`, i.e. a gfx1151 Tensile
+kernel on a 16x16x16 matrix instruction. A peak whose instruction cannot be identified this way is
+reported as ISA-UNVERIFIED instead of being trusted.
 
 **Report both.** The empirical column is a *floor* on the true peak: nothing measured here saturated
 the WMMA units, so a kernel scored against it looks better than it is, and a kernel scored against
@@ -130,10 +144,13 @@ a tuning effort ends up aimed at the wrong ceiling.
 
 Per-kernel efficiency at 2048^3 fp16 (working set 25.2 MB, LLC-resident, AI 683 FLOP/byte):
 
-| kernel | achieved | vs empirical | vs datasheet |
-|---|---|---|---|
-| naive Triton `tl.dot` | 24.72 TFLOP/s | 70.3% | 41.6% |
-| `torch.mm` (rocBLAS) | 28.53 TFLOP/s | 81.1% | 48.0% |
+| kernel | achieved | true efficiency is **bracketed** by |
+|---|---|---|
+| naive Triton `tl.dot` | 24.36 TFLOP/s | 41.0% (vs datasheet) .. 63.3% (vs empirical) |
+| `torch.mm` (Tensile) | 28.38 TFLOP/s | 47.8% (vs datasheet) .. 73.8% (vs empirical) |
+
+Quote the **bracket**, not either column. The datasheet end assumes a peak this part may never
+reach; the empirical end is a floor on the true peak, so scoring against it flatters the kernel.
 
 **This shape is compute-bound, by 9x** — the memory roof is 539 TFLOP/s against a 59.4 TFLOP/s
 compute roof. So the whole section 5 argument about which library wins is an argument about
@@ -145,6 +162,23 @@ is wrong.** Treat it as a failed measurement and re-derive the peak. (Discipline
 `perf_knowledge/profiling/kernel_roofline.md`, which is CDNA-scoped and refuses RDNA outright
 because it drives `rocprof-compute --roof-only`; that tool's roofline mode does not support
 gfx10/11/12, so the terms here are measured a different way.)
+
+**These are calibration constants, not a scoring gate.** `rdna_roofline.py` prints this at the end
+of every run and it belongs here too: the empirical peak is a max-of-sweep, which is biased high
+even when stable; and the **hierarchical** roofline is not implemented. Selecting one bandwidth by
+"does the total working set fit in 32 MB" is a simplification — the honest form needs traffic
+measured at each level,
+
+```
+attainable = min(P_compute, AI_DRAM x BW_DRAM, AI_LLC x BW_LLC, AI_L2 x BW_L2)
+```
+
+and this part has **three** memory levels to account for, not two: L1 32 KB, **L2 2 MB**, and the
+32 MB Infinity Cache (section 6). A kernel whose hot set fits L2 is in a different regime again, and
+the same working set behaves differently warm versus cold — the cold/warm gap on real decode weights
+is 3-4x (section 3b's own opbench figures). `GL2C_HIT` / `GL2C_MISS` are collectable on this part
+(see section 7), so the per-level traffic this needs is measurable; it just is not wired up. Until it is, use the numbers above to calibrate expectations, and do not wire them to
+an automatic keep/reject decision.
 
 **Pick the compute peak by the matrix instruction the kernel issues, not by its tensor dtype.** On
 RDNA that is WMMA; `rdna_roofline.py` disassembles first and refuses to score anything if it sees
