@@ -97,6 +97,12 @@ jobs:
             interface/test_run_e2e_kb_write_tuned.py \
             interface/test_run_e2e_trace_mirror.py \
             interface/test_geak_outcome_report.py \
+            interface/tests/test_geak_call_tree_html.py \
+            interface/tests/test_geak_report.py \
+            interface/tests/test_geak_trace_collector.py \
+            interface/tests/test_geak_trace_events.py \
+            interface/tests/test_geak_trace_report.py \
+            interface/tests/test_tracker_wiring.py \
             e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
             e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
@@ -105,6 +111,7 @@ jobs:
             e2e_workflow/scripts/tests/test_gsm8k_eval.py \
             e2e_workflow/scripts/tests/test_parse_profile.py \
             e2e_workflow/scripts/tests/test_capture_shapes.py \
+            e2e_workflow/scripts/tests/test_llm_ledger.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
