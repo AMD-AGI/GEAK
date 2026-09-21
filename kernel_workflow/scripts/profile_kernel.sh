@@ -97,9 +97,33 @@ emit_profiler_failure() {  # <tool> <exit_code> <override_env_var> <raw_log>
     } >> "$REPORT"
 }
 
+# gfx950 ships a broken L2->HBM read-bytes formula (TCC_BUBBLE counted as 128B reads), so
+# SoL "L2-Fabric Read BW" -- what the engineer reads as effective HBM bandwidth -- and, when
+# the roofline block is collected, HBM Bandwidth / AI HBM come out ~25% low WITHOUT any error.
+# Absorb the upstream fix (ROCm/rocm-systems aa5dfb9, released in rocprof-compute 3.5.0) into
+# the install before profiling, and record the outcome so a report always carries its
+# measurement basis. Purely advisory to the run: rc is ignored, GEAK_ROCPROF_AUTOPATCH=off
+# reduces it to a report, =check skips patching but still records the status.
+preflight_rocprof_compute() {  # <tool>
+    local mode="${GEAK_ROCPROF_AUTOPATCH:-auto}"
+    local script="$SCRIPT_DIR/rocprof_compute_env.py"
+    [ -f "$script" ] || return 0
+    local flag="--apply"
+    case "$mode" in
+        off)   return 0 ;;
+        check) flag="--check" ;;
+    esac
+    {
+        python3 "$script" "$flag" --tool "$1" \
+            --json "$OUTPUT_DIR/rocprof_compute_env.json" 2>&1 || true
+        echo ""
+    } >> "$REPORT"
+}
+
 run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump the FULL analyze text.
     local tool="$1"
     local workload="$OUTPUT_DIR/${tool}_workload"
+    preflight_rocprof_compute "$tool"
     # NO `rm` (prompts + blocks autonomous runs): move any stale profiler dir aside, then make fresh.
     [ -e "$workload" ] && mv "$workload" "${workload}.old_$(date +%s)_$$" 2>/dev/null || true
     mkdir -p "$workload"

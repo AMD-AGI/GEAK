@@ -31,6 +31,12 @@ key and the measurement remains the judge. This skill may never prune a candidat
 - The model's `config.json` — layer count, expert count, hidden/intermediate sizes, head counts
   (optional but needed for a good MoE/attention byte model).
 - `peaks.md` — hardware denominators, keyed by `gfx`.
+- `profile/round_<R>/profile_workload.json` — the per-`(shape, dtype)` breakdown (**strongly
+  recommended**; see §3a). Written by the *same* `parse_profile.py` run that produces
+  `profile_topN.json`, so it costs no extra collection. Each case carries its own
+  `baseline_latency_ms`, its own `count`, and `weight = count × latency`. Without it, every
+  `roofline_pct` below is computed from a phase-averaged latency against a single representative
+  shape, which is a **systematically biased** number, not merely a coarse one.
 - Optionally, captured shapes from the Kernel Extractor and/or rocprofv3 counters (stage B/C, §5).
 
 ## 2. Output artifact
@@ -62,10 +68,31 @@ Write `profile/round_<R>/profile_roofline.json` and a human-readable `profile_ro
     "attainable_speedup": 1.023,
     "expected_e2e_gain_pct": 0.59,
     "headroom_class": "underperforming|moderate|saturated|unknown",
-    "confidence": "low|medium|high",
+    "measurement_basis": "counters|mixed|model",  // where the ACHIEVED side came from
+    "bytes_measured": false, "flops_measured": false,
+    "rankable": false,                  // true only when the verdict's own axis was counted (§5)
+    "confidence": "low|medium|high",    // DERIVED from the basis, not self-reported
     "suspect": false,
     "byte_reduction_levers": ["..."],   // populated only when headroom_class=saturated
-    "notes": "assumptions made, what would sharpen this"
+    "notes": "assumptions made, what would sharpen this",
+
+    // --- §3a. One row per OPERATING POINT. This is the primary result; the fields above are a
+    // summary OF it, not an independent estimate. Present whenever profile_workload.json is.
+    "cases": [{
+      "name": "M1936", "shape": {"m": 1936}, "dtype": "bf16",
+      "calls": 90,                      // DEPLOYMENT calls for this shape, never a test's reps
+      "t_ms": 0.0201,                   // THIS shape's own latency, not the phase mean
+      "weight_ms": 1.809,               // calls x t_ms
+      "roofline_pct": 0.30, "roof_axis": "memory|compute",
+      "bound_type": "...", "rankable": true, "confidence": "high", "suspect": false
+    }],
+    // One summary PER ROOF AXIS. Never one number across axes -- see §3a.
+    "folded": { "axes": [{
+        "roof_axis": "memory", "n_cases": 3, "weight_share": 0.91,
+        "roofline_pct": 0.52, "attainable_speedup": 1.68,
+        "pct_gpu_time_share": 6.35, "expected_e2e_gain_pct": 2.57,
+        "headroom_class": "moderate", "rankable": true }],
+      "excluded": {"n": 2, "weight_share": 0.088, "cases": ["..."]} }
   }],
   "ranking_by_pct": ["..."],            // BOTH rankings are emitted, side by side
   "ranking_by_expected_gain": ["..."],
@@ -87,8 +114,13 @@ see the disagreement rather than a single blended number that hides it.
 1. Resolve peaks for `gfx` from `peaks.md`. Not found → derive from device props, set
    `peaks.confidence="low"` (§6 L1).
 2. For each selected entry, pick the **e2e-critical regime** — the one carrying the launches
-   (`serving.n_decode_steps` vs `n_prefill_steps`; a decode-dominated run means decode). Use that
-   regime's `base_latency_ms` as `t_ms`.
+   (`serving.n_decode_steps` vs `n_prefill_steps`; a decode-dominated run means decode). Then take
+   the per-shape cases for that regime from `profile_workload.json` and run steps 3–7 **once per
+   case**, using that case's own `baseline_latency_ms` as `t_ms` — see §3a, which is not optional
+   advice but the condition under which step 5 is arithmetically valid. Only when
+   `profile_workload.json` is absent may you fall back to the regime's phase-averaged
+   `base_latency_ms`, and that fallback carries `confidence: "low"` (§6 L1) because numerator and
+   denominator then describe different operating points.
 3. Classify `op_class` from `name`/`classification`/shapes.
 4. Apply the §4 byte/FLOP model for that class. Cannot model it → §6 L2 (degrade this entry only).
 5. Compute:
@@ -147,6 +179,84 @@ a logical op is split across several launches (e.g. a fused-MoE layer issuing a 
 kernel), sum the launches for one logical unit and compare against the summed time. Getting this
 factor wrong is the single most common way to produce a nonsense `roofline_pct` — state in `notes`
 which unit you used.
+
+## 3a. One row per shape, then fold by deployment time
+
+**A kernel name is not an operating point.** The rule directly above says compare ONE launch's bytes
+against ONE launch's time. For several releases this skill then violated its own rule, because the
+input it was handed could not satisfy it:
+
+- the time came from `base_latency_ms`, which `parse_profile.py:199` defines as `total_us / count`
+  over an entire phase — the **mean over every shape** the kernel ran;
+- the bytes came from `_est_shape` (`parse_profile.py:203`), a **single representative shape**.
+
+Numerator and denominator therefore described different operating points, and nothing flagged it.
+
+**The bias has a fixed sign, which is what makes it actionable rather than merely imprecise.** A
+prefill phase is typically a few very large chunks plus many small remainders: the modal shape is
+small while the mean time is dragged up by the large ones. `bytes(small) / mean_time(dragged up)`
+understates achieved bandwidth → `roofline_pct` reads low → `attainable_speedup = target_eff /
+roofline_pct` reads **high**. The skill systematically reports *phantom headroom*, worst on exactly
+the kernels whose shape distribution is widest, and `expected_e2e_gain_pct` then allocates
+optimisation budget by it. This is §9.1's own complaint — a modelling failure turning into a plan —
+arriving by a second route. The self-test case measures the magnitude: a kernel running at 30/60/80%
+of roofline across three shapes reads as 30% from the modal shape alone against 52% folded, a
+**1.74× overstatement** of its headroom.
+
+Decode is often fine: `cudagraph_capture_sizes` pins the batch to a handful of values, so the phase
+mean is close to each member. Prefill with chunked prefill is where this breaks. Do not assume;
+check the spread in `profile_workload.json`.
+
+### The rule
+
+1. **One row per `(shape, dtype)` case**, each pairing that case's OWN bytes with that case's OWN
+   `baseline_latency_ms`. This is the primary result. Steps 3–7 apply unchanged per row — the
+   feasibility band (§6 L3), the dispatch floor, and per-axis `rankable` are all per-row.
+2. **Fold only if a single number is needed**, weighting each row by `weight = calls × latency`
+   (already computed in `profile_workload.json`). `roofline_tools.fold_cases()` does this.
+3. **Fold decode and prefill separately.** They have different shape distributions and different
+   `target_eff` relevance; a combined number describes neither.
+
+### Why `calls × latency` is the right weight — and the only one
+
+It is not a heuristic. With `pct_i = bytes_i / (t_i × peak)` and `w_i = calls_i × t_i`:
+
+```
+Σ(w_i · pct_i) / Σ(w_i)  =  Σ(calls_i · bytes_i) / (peak · Σ(calls_i · t_i))
+```
+
+The right-hand side is total bytes over total time over peak — the true aggregate achieved ratio.
+Time-weighting the percentages **is** the aggregate; it is not an approximation of one. (Weighting by
+call count alone is *not* — it would let a shape that runs often but briefly outvote the one actually
+consuming the wall clock.)
+
+### Three constraints that make the identity hold
+
+- **Never fold across `roof_axis`.** The identity holds only while `peak` is common to every term. A
+  memory-side ratio and a compute-side ratio have different denominators; averaging them produces a
+  number with no physical meaning. The same kernel routinely lands on different roofs at different
+  shapes — small `M` memory- or latency-bound, large `M` compute-bound. Mixed input yields **several
+  summaries, one per axis**, reported side by side, mirroring the existing per-axis `rankable`.
+- **`calls` must come from the deployment trace**, never from the number of replays a unit test
+  performed. Weighting by a harness's loop count lets the test configuration decide the production
+  verdict. Rows without a positive deployment `calls` are excluded, not defaulted to 1 — a silent
+  default would flatten the very distribution this section exists to respect.
+- **Fold only rows that have a verdict.** Dispatch-bound rows and L3-infeasible rows carry
+  `headroom_class="unknown"` precisely because their ratio is not evidence about the kernel. Folding
+  them at their clamped value manufactures saturation out of a measurement failure. Report the
+  excluded share (`folded.excluded.weight_share`): a summary resting on 60% of the traffic must not
+  be readable as one resting on all of it.
+
+`attainable_speedup` and `expected_e2e_gain_pct` contain `1/pct` and are **not linear** in the ratio.
+Recompute them from the folded value; folding them directly gives a different and wrong number. Split
+`pct_gpu_time` across axes in proportion to the weight each carries, so the per-axis gains sum within
+the kernel's real budget instead of each axis claiming the whole of it.
+
+**Counters do not fix this.** Stage C (§5) makes the *bytes* a measurement. If the denominator is
+still a phase mean, the mismatch survives intact — a counted numerator over a mis-specified
+denominator is a more confident wrong answer. §9.1 already states the principle ("the achieved side
+depends on the operating point … counted per measurement"); this section is that principle applied to
+the *denominator* as well.
 
 ## 4. Byte / FLOP models by op class
 
@@ -213,11 +323,30 @@ Do not guess. Emit `modeled: false` and degrade this entry (§6 L2).
 | **B** after extract | the REAL shapes/dtypes the Kernel Extractor captured for the unittest | `medium` | rank as a secondary key |
 | **C** after op_bench | rocprofv3 counters on the isolated op (measured bytes/FLOPs) | `high` | rank as a secondary key; may be cited in the report |
 
+**The achieved side must be COUNTED, and the tool now says whether it was.** Real shapes (stage B)
+still only buy you a better *estimate*: `2·M·N·K` is the cost of the arithmetic you assume the kernel
+performs, and `experts_hit` is an expected value over a routing distribution nobody observed. Neither
+is a measurement. `roofline_metrics` therefore carries `bytes_measured` / `flops_measured` — both
+**default to false**, because a caller that says nothing about provenance is reporting an estimate —
+and derives `measurement_basis`, `confidence` and `rankable` from them instead of trusting a
+self-reported `confidence`.
+
+`rankable` is decided **per axis**: `roofline_pct` is achieved/peak on ONE roof, so the quantity that
+roof is made of has to be real — bytes for a memory-side verdict, FLOPs for a compute-side one.
+Counting traffic does not license a compute-bound claim. A `suspect` or no-verdict row is never
+rankable however it was obtained.
+
 Stage A is inherently coarse: at profile time the exact operand shapes have not been captured yet.
 **Re-run this skill at stage B/C and overwrite the artifact.** Because the decision to spend the *next*
 budget unit happens after the *previous* kernel's extract, refined numbers arrive in time to matter.
 
 ### Stage C — counter measurement (rocprofv3)
+Feed the counters straight in with `roofline_tools.roofline_metrics_from_counters(counters, t, ...)`:
+it builds the achieved side from them, falls back to your `bytes_est` / `flops_est` for whichever
+side the collection is missing, and marks each side accordingly — so a partial collection still
+produces a row, and the row still says which half of it was counted. It returns `None` when neither
+side is usable, which means "stay at stage A/B" and is visible to you, not a silent zero.
+
 Measure on the ISOLATED op (the Op Benchmarker already has it isolated — no extra server run):
 - bytes: `FETCH_SIZE` + `WRITE_SIZE` (both in **KiB**) → `(FETCH_SIZE + WRITE_SIZE) · 1024`
 - FLOPs: `MfmaFlops`, or `MfmaFlopsBF16`/`F16`/`F32`/`F64` per dtype
@@ -341,3 +470,64 @@ headroom puts attention first. The run that produced these numbers spent its bud
 measured **−0.064% e2e** (isolated 1.047×, predicted 1.023× ✅); the attention kernel it reached later
 yielded **1.56× isolated** (predicted 1.7× ✅). Both predictions were calibrated — and the MoE was
 correctly identified as needing a byte-reduction lever, not another tuning pass.
+
+## 9.1 Worked counter-example — what an assumed distribution costs (real run)
+
+§9 is the case where the byte model happened to be right. This is the case where it was not, and it
+is why §5 makes the achieved side declare its provenance.
+
+**Qwen3.8-2.4T-A95B-MXFP4, gfx950, sglang, TP8, isl/osl 8k/1k, conc 64** — decode-dominated.
+`mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256_pm1_async_v32`, the **largest kernel in the run at
+20.6% of GPU time**. 512 experts, top_k=10, M=64 ⇒ 640 (token, expert) pairs, so
+`experts_hit = 512·(1−(1−1/512)^640) = 365.5`. At 2.228 MB of fp4 weights + e8m0 scales per expert
+that is **815.5 MB per launch**, against a measured 69.86 µs.
+
+The modelled row is not merely imprecise, it is **impossible**: 11.67 TB/s, or **1.459× of peak HBM**.
+`bytes_upper_bound` — the most the kernel could have moved in its own measured 69.86 µs at 8 TB/s — is
+558.9 MB against the model's 815.5 MB, so the estimate is over by **≥1.46×** on the artifact's own
+arithmetic, before anyone profiles anything. The §6 L3 ladder caught it and refused a verdict, which
+is the ladder working. But refusing a verdict on the biggest kernel in the run means the analysis
+produced **no routing signal at all** for 20.6% of GPU time. Stage-2 of the same op failed identically
+at 1.203×.
+
+**And the prose went on to route it anyway.** The entry concluded *"the kernel is AT or very near the
+memory roof, so the lever is BYTE REDUCTION"* — inferred from the direction of an infeasible number,
+because a byte model that overshoots feels like evidence of saturation. It is not. Four byte-reduction
+levers were enumerated underneath it. That is a modelling failure turning into a plan.
+
+### What the counted traffic says
+
+`rocprofv3 --pmc FETCH_SIZE / WRITE_SIZE` on the task package's decode M=64 case, through
+`roofline_metrics_from_counters`:
+
+| | bytes modelled (serving run) | bytes counted (task package) |
+|---|---|---|
+| bytes / dispatch | 815.5 MB *(assumed)* | 326.8 MiB *(counted)* |
+| achieved HBM BW | 11.67 TB/s | 2.41 TB/s |
+| `hbm_util` vs the 8 TB/s table peak | **1.459** | 0.301 |
+| `bound_type` | memory | **latency** |
+| `headroom_class` | **unknown** | underperforming |
+| `attainable_speedup` | — | **2.99×** |
+| `measurement_basis` / `rankable` | `model` / **false** | `mixed` / **true** |
+
+The measured point is nowhere near the memory roof — both utilisations are far below 0.60, so it is
+**latency/occupancy-bound**, and per §7 the lever is occupancy and dependency chains, *not* the byte
+reduction the modelled row prescribed. The two rows do not merely differ in precision; they route to
+opposite tracks.
+
+**Do not read the two columns as the same measurement.** The task package dispatches at E=256 /
+inter=2048 and resolves to the CK `ck::kernel_moe_mxgemm` family, while the serving run profiled
+E=512 / inter-per-rank=512 and named the AITER ASM symbol. The campaign's own audit of the ASM kernel
+at its decode M=64 case lands at 0.66 of the same table peak. Three points, three answers — which is
+the argument: the achieved side depends on the operating point and the dispatched backend, so it has
+to be **counted per measurement**, not modelled once and reused. What survives every reading is that
+the counted numbers are feasible and rankable while the modelled one was neither.
+
+**Quote which roof.** That 2.41 TB/s is 0.301 of the 8 TB/s *table* peak and 0.382 of this box's
+~6.31 TB/s *empirical* microbenchmark peak; the campaign's head-kernel table reports the ASM kernel
+against a third reference again (73.05%). Same class of measurement, three denominators (§8.2).
+
+*Sources: modelled side — `profile_roofline.json` round 0 of run `20260907T031112Z-58636ae3`. Counted
+side — rocprofv3 1.1.0 on MI355X / ROCm 7.2.0, median of 4 dispatches, FETCH_SIZE and WRITE_SIZE
+collected in separate passes because the pair overflows the hardware counter slots in one
+(`error code 38`); full provenance in `roofline-autit/moe_measured_0915/MEASUREMENT.md`.*

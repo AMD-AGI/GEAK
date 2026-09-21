@@ -61,6 +61,12 @@ UTIL_BOUND_THRESHOLD = 0.60
 #: to "unknown" rather than inventing a category the consumer has no routing rule for.
 BOUND_TYPES = ("memory", "compute", "latency", "unknown")
 
+#: How the ACHIEVED side of the ratio was obtained. Only hardware counters are a measurement:
+#: `2*M*N*K` is what the op would cost if the kernel did exactly the arithmetic we assume, and
+#: `experts_hit` is an expected value over a routing distribution nobody observed. Both are useful
+#: priors and neither is a result. `mixed` = one axis counted, the other modelled.
+MEASUREMENT_BASES = ("counters", "mixed", "model")
+
 
 def select_entries(entries, min_pct_gpu=DEFAULT_MIN_PCT_GPU, top_n=DEFAULT_TOP_N):
     """Head-scoped selection: the entries worth a roofline estimate, biggest first.
@@ -185,6 +191,11 @@ def experts_hit(num_experts, pairs):
     """Expected number of DISTINCT experts touched by `pairs` = M*top_k routed token-expert pairs.
 
     E*(1-(1-1/E)^pairs). At decode this is what decides MoE weight traffic.
+
+    This is an EXPECTED VALUE over an assumed-uniform router, not an observation: a router with any
+    real skew touches fewer experts, and one batch is not its mean. Bytes derived from it therefore
+    go into `roofline_metrics` with `bytes_measured=False`, which is the default -- the resulting
+    row is an annotation, and only `roofline_metrics_from_counters` can make it rankable.
     """
     try:
         E, n = float(num_experts), float(pairs)
@@ -197,9 +208,50 @@ def experts_hit(num_experts, pairs):
 
 # ---------------------------------------------------------------- the metric
 
+def _tag_basis(out, roof_axis, bytes_measured, flops_measured):
+    """Record how the achieved side was obtained, and whether that makes the row rankable.
+
+    Rankability is decided per AXIS, not per row: `roofline_pct` is achieved/peak on ONE roof, so
+    what has to be counted is the quantity that roof is made of -- bytes for a memory-side verdict,
+    FLOPs for a compute-side one. A memory-bound row whose bytes came from FETCH_SIZE/WRITE_SIZE is
+    a measurement even if nobody counted its FLOPs; a compute-side row resting on `2*M*N*K` is not,
+    however plausible the arithmetic looks.
+    """
+    out["bytes_measured"] = bool(bytes_measured)
+    out["flops_measured"] = bool(flops_measured)
+    if bytes_measured and flops_measured:
+        out["measurement_basis"] = "counters"
+    elif bytes_measured or flops_measured:
+        out["measurement_basis"] = "mixed"
+    else:
+        out["measurement_basis"] = "model"
+    axis_measured = flops_measured if roof_axis == "compute" else bytes_measured
+    out["confidence"] = (
+        "high" if out["measurement_basis"] == "counters"
+        else "medium" if axis_measured else "low"
+    )
+    out["rankable"] = bool(
+        axis_measured and not out.get("suspect") and out.get("headroom_class") != "unknown"
+    )
+    if not axis_measured:
+        out["basis_note"] = (
+            "achieved %s is an ESTIMATE, not a measurement -- display and annotate only, do not "
+            "rank on it (SKILL.md section 5). Re-run with rocprofv3 counters via "
+            "roofline_metrics_from_counters() to make this row rankable."
+            % ("FLOPs" if roof_axis == "compute" else "bytes")
+        )
+    return out
+
+
 def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_eff,
-                     pct_gpu_time=0.0, launch_overhead_s=LAUNCH_OVERHEAD_S):
+                     pct_gpu_time=0.0, launch_overhead_s=LAUNCH_OVERHEAD_S,
+                     bytes_measured=False, flops_measured=False):
     """Core arithmetic of SKILL.md section 3 step 5. Returns a dict, or None on unusable input.
+
+    `bytes_measured` / `flops_measured` state where the ACHIEVED side came from, and they default
+    to False because an un-migrated caller is telling us nothing -- and "nothing" must read as an
+    estimate, not as a measurement. They set `measurement_basis`, `confidence` and `rankable`; see
+    `_tag_basis`. Prefer `roofline_metrics_from_counters`, which sets them from the counters.
 
     Two outcomes deliberately produce NO verdict (`headroom_class="unknown"`), because in both the
     ratio is not evidence about the kernel:
@@ -235,6 +287,10 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
         "hbm_util": hbm_util, "compute_util": compute_util,
         "arithmetic_intensity": ai, "ridge_point": ridge,
         "roofline_pct_raw": raw_pct, "target_eff": tgt, "suspect": False,
+        # Which roof `roofline_pct` is measured against. `bound_type` is NOT a substitute: it can
+        # read "latency" while the ratio is still taken on the memory or compute roof, and
+        # `fold_cases` must not average two ratios that have different denominators.
+        "roof_axis": roof_axis,
     }
 
     # (1) Dispatch-bound by time: the launch is timed by scheduling overhead, not by its own transfer
@@ -245,7 +301,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
                    headroom_class="unknown",
                    note="per-launch time is within launch-overhead scale -> dispatch-bound; "
                         "roofline not applicable, lever is fusion / graph capture")
-        return out
+        return _tag_basis(out, roof_axis, bytes_measured, flops_measured)
 
     # (2) Infeasible: raw_pct outside (0,1] means the byte/FLOP model is wrong, NOT that the kernel is
     # at the wall -- so it must not yield a verdict. (A compute-axis >100% is usually an unvalidated
@@ -259,7 +315,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
                    note="model infeasible (raw %.3f outside (0,1]) -> NOT a saturation verdict; "
                         "re-estimate with a tighter model or measure with counters (stage C)"
                         % raw_pct)
-        return out
+        return _tag_basis(out, roof_axis, bytes_measured, flops_measured)
 
     # (3) True limiter by utilization. If NEITHER roof is near its ceiling (and we already ruled out
     # the dispatch floor), the kernel is latency/occupancy-bound. It still has recoverable headroom --
@@ -275,7 +331,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     out.update(bound_type=bound, roofline_pct=raw_pct, attainable_speedup=attainable,
                expected_e2e_gain_pct=float(pct_gpu_time or 0.0) * (1.0 - 1.0 / attainable),
                headroom_class=classify_headroom(raw_pct, tgt))
-    return out
+    return _tag_basis(out, roof_axis, bytes_measured, flops_measured)
 
 
 def classify_headroom(roofline_pct, target_eff):
@@ -296,6 +352,178 @@ def classify_headroom(roofline_pct, target_eff):
     if p >= 0.6 * t:
         return "moderate"
     return "underperforming"
+
+
+# ---------------------------------------------------------------- per-shape fold
+
+def fold_cases(cases, target_eff, pct_gpu_time=0.0, min_axis_share=0.0):
+    """Fold per-SHAPE rows of one kernel into per-axis summaries, weighted by deployment time.
+
+    Why this exists
+    ---------------
+    A kernel name is not an operating point. `roofline_metrics` answers a question about ONE
+    launch at ONE shape, and section 3 step 5 says so: "Compare bytes for ONE launch against ONE
+    launch's `base_latency_ms`." But the input the skill was given violates that -- the profile's
+    `base_latency_ms` is `total_us / count` over a whole phase (`parse_profile.py:199`), i.e. the
+    mean over every shape the kernel ran, while the byte side is modelled from ONE representative
+    shape (`_est_shape`, `parse_profile.py:203`). Numerator and denominator come from different
+    operating points.
+
+    The error has a FIXED SIGN, which is what makes it dangerous rather than merely imprecise. A
+    prefill phase is typically a few very large chunks plus many small remainders: the modal shape
+    is small, the mean time is dragged up by the large ones. Bytes(small) / mean_time(dragged up)
+    understates achieved bandwidth, so `roofline_pct` reads low, so
+    `attainable_speedup = target_eff / roofline_pct` reads HIGH. The skill systematically reports
+    phantom headroom on exactly the kernels whose shape distribution is widest -- and
+    `expected_e2e_gain_pct` then ranks optimisation budget by it. That is section 9.1's own
+    complaint ("a modelling failure turning into a plan") arriving by a second route.
+
+    So: compute one row per shape, each with its own bytes AND its own time, then fold here.
+
+    The weighting is exact, not a heuristic
+    ---------------------------------------
+    With `pct_i = bytes_i / (t_i * peak)` and weight `w_i = calls_i * t_i`:
+
+        sum(w_i * pct_i) / sum(w_i) = sum(calls_i * bytes_i) / (peak * sum(calls_i * t_i))
+
+    The right-hand side is total bytes over total time over peak -- the true aggregate achieved
+    ratio. Time-weighting the percentages IS the aggregate; it is not an approximation of it.
+
+    That identity holds only while `peak` is common to every term, which is why rows are grouped by
+    `roof_axis` and never folded across it. A memory-side ratio and a compute-side ratio have
+    different denominators; averaging them yields a number with no physical meaning. Mixed input
+    therefore returns SEVERAL summaries, one per axis, and the caller reports them side by side --
+    the same shape as the skill's existing per-axis `rankable`.
+
+    `calls` must come from the deployment trace
+    -------------------------------------------
+    It is the number of times the SERVER runs that shape, never the number of replays a unit test
+    happened to do. Weighting by a test's own loop count would let the harness's configuration
+    decide the production verdict. Rows without a positive `calls` are dropped and counted in
+    `excluded`, because a silent default of 1 would quietly flatten the distribution this function
+    exists to respect.
+
+    Only rows with a verdict may be folded
+    --------------------------------------
+    Dispatch-bound rows and L3-infeasible rows carry `headroom_class="unknown"` precisely because
+    their ratio is not evidence about the kernel. Folding them in at their clamped value would
+    manufacture saturation out of a measurement failure. They are excluded and their share of the
+    weight is reported, so a summary resting on 40% of the traffic cannot be mistaken for one
+    resting on all of it.
+
+    Parameters
+    ----------
+    cases : iterable of dicts, each `{"row": <roofline_metrics output>, "calls": <int>, ...}`.
+        Any other keys (e.g. "name", "m") are carried through to the summary's `members`.
+    target_eff : the class target, as passed to `roofline_metrics`.
+    pct_gpu_time : the kernel's share of GPU time. Split across axes in proportion to the weight
+        each axis carries, so the per-axis `expected_e2e_gain_pct` sum stays within the kernel's
+        actual budget instead of each axis claiming all of it.
+    min_axis_share : drop axis groups holding less than this fraction of the total weight (0..1).
+
+    Returns `{"axes": [...], "excluded": {...}, "total_weight_ms": float}`, or None on bad input.
+    """
+    try:
+        tgt = float(target_eff or 0)
+        pct = float(pct_gpu_time or 0)
+    except (TypeError, ValueError):
+        return None
+    if tgt <= 0:
+        return None
+
+    kept, excluded = [], []
+    total_w = 0.0
+    for c in (cases or []):
+        if not isinstance(c, dict):
+            continue
+        row = c.get("row")
+        try:
+            calls = float(c.get("calls") or 0)
+            t_ms = float((row or {}).get("t_ms") or 0)
+        except (TypeError, ValueError, AttributeError):
+            calls, t_ms = 0.0, 0.0
+        w = calls * t_ms
+        if not isinstance(row, dict) or calls <= 0 or t_ms <= 0:
+            excluded.append({"case": {k: v for k, v in c.items() if k != "row"},
+                             "weight_ms": max(w, 0.0),
+                             "reason": "no deployment calls" if calls <= 0 else "no per-shape time"})
+            total_w += max(w, 0.0)
+            continue
+        total_w += w
+        if row.get("headroom_class") == "unknown" or row.get("suspect"):
+            excluded.append({"case": {k: v for k, v in c.items() if k != "row"}, "weight_ms": w,
+                             "reason": row.get("note") or "no verdict (%s)" % row.get("headroom_class")})
+            continue
+        kept.append((c, row, w))
+
+    if total_w <= 0:
+        return None
+
+    axes = {}
+    for c, row, w in kept:
+        ax = row.get("roof_axis") or ("compute" if row.get("bound_type") == "compute" else "memory")
+        g = axes.setdefault(ax, {"w": 0.0, "wp": 0.0, "bytes": 0.0, "flops": 0.0,
+                                 "t_ms": 0.0, "calls": 0.0, "members": []})
+        g["w"] += w
+        g["wp"] += w * float(row.get("roofline_pct") or 0.0)
+        calls = float(c.get("calls") or 0)
+        g["bytes"] += calls * float(row.get("bytes_est") or 0.0)
+        g["flops"] += calls * float(row.get("flops_est") or 0.0)
+        g["t_ms"] += w
+        g["calls"] += calls
+        g["members"].append({
+            **{k: v for k, v in c.items() if k != "row"},
+            "roofline_pct": row.get("roofline_pct"), "bound_type": row.get("bound_type"),
+            "t_ms": row.get("t_ms"), "weight_ms": w,
+            "rankable": row.get("rankable"), "confidence": row.get("confidence"),
+        })
+
+    out_axes = []
+    for ax, g in sorted(axes.items(), key=lambda kv: -kv[1]["w"]):
+        share = g["w"] / total_w
+        if share < float(min_axis_share or 0.0):
+            continue
+        folded = g["wp"] / g["w"]
+        # attainable_speedup and expected_e2e_gain_pct contain 1/pct, so they are NOT linear in the
+        # ratio and must be recomputed from the folded value -- folding them directly would be a
+        # different (and wrong) number. Same reason `classify_headroom` is re-run rather than voted.
+        attainable = max(1.0, tgt / folded) if folded > 0 else 1.0
+        # Each axis may only claim the slice of the kernel's GPU time it actually accounts for.
+        pct_here = pct * share
+        out_axes.append({
+            "roof_axis": ax,
+            "n_cases": len(g["members"]),
+            "weight_ms": g["w"],
+            "weight_share": share,
+            "deployment_calls": g["calls"],
+            "roofline_pct": folded,
+            "target_eff": tgt,
+            "attainable_speedup": attainable,
+            "pct_gpu_time_share": pct_here,
+            "expected_e2e_gain_pct": pct_here * (1.0 - 1.0 / attainable),
+            "headroom_class": classify_headroom(folded, tgt),
+            "rankable": all(m.get("rankable") for m in g["members"]),
+            "confidence": ("high" if all(m.get("confidence") == "high" for m in g["members"])
+                           else "low" if any(m.get("confidence") == "low" for m in g["members"])
+                           else "medium"),
+            "aggregate_bytes": g["bytes"],
+            "aggregate_flops": g["flops"],
+            "members": sorted(g["members"], key=lambda m: -m["weight_ms"]),
+        })
+
+    ex_w = sum(e["weight_ms"] for e in excluded)
+    return {
+        "axes": out_axes,
+        "total_weight_ms": total_w,
+        "excluded": {
+            "n": len(excluded),
+            "weight_ms": ex_w,
+            "weight_share": ex_w / total_w,
+            "cases": excluded,
+        },
+        "note": ("folded per shape, weighted by deployment calls x per-shape time; axes are NOT "
+                 "combined because roofline_pct is a ratio against a different peak on each"),
+    }
 
 
 # ---------------------------------------------------------------- counters (stage C)
@@ -361,6 +589,35 @@ def flops_from_counters(counters, mfma_flops_per_mop_f8=512.0):
     return None
 
 
+def roofline_metrics_from_counters(counters, t_seconds, peak_bw, peak_flops, target_eff,
+                                   pct_gpu_time=0.0, mfma_flops_per_mop_f8=512.0,
+                                   launch_overhead_s=LAUNCH_OVERHEAD_S,
+                                   bytes_est=None, flops_est=None):
+    """Stage C: the same metric, with the achieved side COUNTED instead of assumed.
+
+    This is the path SKILL.md section 5 calls the high-confidence one, and until now nothing
+    connected the counter helpers above to the metric below them -- so every published row was an
+    estimate wearing a measurement's clothes.
+
+    Whichever side the counters do not carry falls back to `bytes_est` / `flops_est` (the analytic
+    model) and is marked unmeasured, so a partial collection still yields a row and the row still
+    says which half of it was counted. Returns None when neither side is usable at all, which is a
+    caller-visible "stay at stage A/B", not a silent zero.
+    """
+    measured_bytes = bytes_from_counters(counters)
+    measured_flops = flops_from_counters(counters, mfma_flops_per_mop_f8)
+    b = measured_bytes if measured_bytes is not None else bytes_est
+    f = measured_flops if measured_flops is not None else flops_est
+    if not b and not f:
+        return None
+    return roofline_metrics(
+        b or 0.0, f or 0.0, t_seconds, peak_bw, peak_flops, target_eff,
+        pct_gpu_time=pct_gpu_time, launch_overhead_s=launch_overhead_s,
+        bytes_measured=measured_bytes is not None,
+        flops_measured=measured_flops is not None,
+    )
+
+
 # ---------------------------------------------------------------- self-test
 
 def _selftest():
@@ -415,6 +672,102 @@ def _selftest():
     assert allx["suspect"] and allx["roofline_pct"] <= 1.0, allx
     print("L3    : all-expert bytes -> raw %.2f clamped to %.2f, suspect=True  OK"
           % (allx["roofline_pct_raw"], allx["roofline_pct"]))
+
+    # Basis: the two rows above are analytic (2*M*N*K + an assumed router), so neither may rank.
+    assert moe["measurement_basis"] == "model" and moe["rankable"] is False, moe
+    assert attn["measurement_basis"] == "model" and attn["rankable"] is False, attn
+    # The same MoE launch with its traffic actually counted: memory-side verdict, bytes measured.
+    ctr = {"FETCH_SIZE": wbytes / 1024.0, "WRITE_SIZE": 0.0}
+    measured = roofline_metrics_from_counters(
+        ctr, t_layer, peaks["hbm_bw_bytes_s"], peak_flops_for(peaks, "fp8"), TARGET_EFF["moe"],
+        pct_gpu_time=26.45, flops_est=2 * M * tk * (2 * I * H + H * I))
+    assert measured["bytes_measured"] and not measured["flops_measured"], measured
+    assert measured["measurement_basis"] == "mixed" and measured["bound_type"] == "memory"
+    assert measured["rankable"] is True and measured["confidence"] == "medium", measured
+    ok &= abs(measured["roofline_pct"] - moe["roofline_pct"]) < 1e-9   # same number, now earned
+    print("Basis : modelled MoE/Attn rankable=False; counted MoE rankable=True (%s, %s)  OK"
+          % (measured["measurement_basis"], measured["confidence"]))
+    assert roofline_metrics_from_counters({}, t_layer, peaks["hbm_bw_bytes_s"], 1e15, 0.9) is None
+
+    # ---- per-shape fold (section 3a)
+    # A GEMM whose prefill M spans 1936..32768: the modal shape is the small one, the mean time is
+    # set by the large one. This is the distribution that makes the single-row treatment wrong.
+    # The op is a memory-bound fused residual+norm over M rows, NOT the GEMM: at N=2624/K=6144 a
+    # bf16 GEMM has AI ~940 against a ridge of 312, so it walks toward the COMPUTE roof and a
+    # bytes-derived time drives it past the FLOP peak -- correctly rejected as infeasible (L3).
+    # Testing the memory-axis fold needs an op that is genuinely on the memory roof; the compute
+    # roof gets its own case in (d).
+    pk, pf = peaks["hbm_bw_bytes_s"], peak_flops_for(peaks, "bf16")
+    shapes = [(1936, 90), (8192, 14), (32768, 10)]              # (M, deployment calls)
+    H, eb = 6144, dtype_bytes("bf16")
+    fold_in = []
+    for m, calls in shapes:
+        by = 3.0 * m * H * eb                                   # read x, read residual, write y
+        fl = 4.0 * m * H                                        # AI ~0.67, well under the ridge
+        t = by / (0.55 * pk)                                    # a fixed 55% of peak at every shape
+        r = roofline_metrics(by, fl, t, pk, pf, TARGET_EFF["elementwise"], pct_gpu_time=6.98,
+                             bytes_measured=True, flops_measured=True)
+        fold_in.append({"name": "M%d" % m, "m": m, "calls": calls, "row": r})
+    fold = fold_cases(fold_in, TARGET_EFF["elementwise"], pct_gpu_time=6.98)
+    mem = [a for a in fold["axes"] if a["roof_axis"] == "memory"][0]
+    # (a) EXACTNESS: the call-weighted mean of the per-shape ratios equals total bytes / total time
+    #     / peak. This is the identity the docstring claims; if it ever stops holding, the weight is
+    #     wrong, not the arithmetic.
+    agg = sum(c["calls"] * c["row"]["bytes_est"] for c in fold_in) / (
+        sum(c["calls"] * c["row"]["t_ms"] * 1e-3 for c in fold_in) * pk)
+    assert abs(mem["roofline_pct"] - agg) < 1e-9, (mem["roofline_pct"], agg)
+    assert abs(mem["roofline_pct"] - 0.55) < 1e-9, mem["roofline_pct"]
+    assert mem["weight_share"] == 1.0 and fold["excluded"]["n"] == 0
+    print("Fold  : 3 shapes M=1936/8192/32768 -> %.4f folded == %.4f aggregate bytes/time  OK"
+          % (mem["roofline_pct"], agg))
+
+    # (b) the fold must MOVE the answer away from the modal-shape-only reading. Same weights, but a
+    #     kernel that is efficient when large and poor when small: one row per shape says 45%, the
+    #     modal shape alone says 30% -- a 1.5x difference in reported headroom.
+    skew = []
+    for (m, calls), eff in zip(shapes, (0.30, 0.60, 0.80)):
+        by = 3.0 * m * H * eb
+        r = roofline_metrics(by, 4.0 * m * H, by / (eff * pk), pk, pf, TARGET_EFF["elementwise"],
+                             pct_gpu_time=6.98, bytes_measured=True, flops_measured=True)
+        skew.append({"name": "M%d" % m, "calls": calls, "row": r})
+    sk = [a for a in fold_cases(skew, TARGET_EFF["elementwise"], pct_gpu_time=6.98)["axes"]
+          if a["roof_axis"] == "memory"][0]
+    modal = skew[0]["row"]["roofline_pct"]
+    ok &= sk["roofline_pct"] > modal * 1.3
+    print("Fold  : modal-shape-only %.0f%% vs folded %.0f%% -> single-row reading overstates "
+          "headroom by %.2fx  OK" % (100 * modal, 100 * sk["roofline_pct"],
+                                     (TARGET_EFF["elementwise"] / modal) / sk["attainable_speedup"]))
+
+    # (c) no-verdict rows are EXCLUDED and their share reported, never folded at their clamped value
+    with_bad = list(fold_in) + [
+        {"name": "dispatch_bound", "calls": 500,
+         "row": roofline_metrics(1024, 1024, 1e-6, pk, pf, TARGET_EFF["elementwise"],
+                                 bytes_measured=True, flops_measured=True)},
+        {"name": "no_calls", "calls": 0, "row": fold_in[0]["row"]},
+    ]
+    fb = fold_cases(with_bad, TARGET_EFF["elementwise"], pct_gpu_time=6.98)
+    assert fb["excluded"]["n"] == 2, fb["excluded"]
+    assert {e["case"]["name"] for e in fb["excluded"]["cases"]} == {"dispatch_bound", "no_calls"}
+    memb = [a for a in fb["axes"] if a["roof_axis"] == "memory"][0]
+    assert abs(memb["roofline_pct"] - 0.55) < 1e-9        # the bad rows did not move the ratio
+    assert memb["weight_share"] < 1.0 and fb["excluded"]["weight_share"] > 0
+    print("Fold  : dispatch-bound + zero-calls rows excluded (%.1f%% of weight), ratio unmoved  OK"
+          % (100 * fb["excluded"]["weight_share"]))
+
+    # (d) axes are NEVER combined: a compute-bound shape and a memory-bound shape come back as two
+    #     summaries. Averaging them would divide by two different peaks in one number.
+    mix = [fold_in[0], {"name": "compute_heavy", "calls": 50,
+                        "row": roofline_metrics(1e6, 8e11, 1e-3, pk, pf, TARGET_EFF["elementwise"],
+                                                pct_gpu_time=6.98, bytes_measured=True,
+                                                flops_measured=True)}]
+    mx = fold_cases(mix, TARGET_EFF["elementwise"], pct_gpu_time=6.98)
+    assert {a["roof_axis"] for a in mx["axes"]} == {"memory", "compute"}, mx["axes"]
+    assert abs(sum(a["pct_gpu_time_share"] for a in mx["axes"]) - 6.98) < 1e-9   # budget conserved
+    ok &= len(mx["axes"]) == 2
+    print("Fold  : mixed roofs -> %d separate axis summaries, pct_gpu_time split %s, never averaged"
+          "  OK" % (len(mx["axes"]), "/".join("%.2f" % a["pct_gpu_time_share"] for a in mx["axes"])))
+    assert fold_cases([], TARGET_EFF["elementwise"]) is None
+    assert fold_cases(None, 0) is None
 
     # degradation: unusable inputs return None instead of raising
     for bad in [(0, 0, 1e-6, 1e12, 1e15, 0.9), (1, 1, 0, 1e12, 1e15, 0.9), (None, None, None, None, None, None)]:
