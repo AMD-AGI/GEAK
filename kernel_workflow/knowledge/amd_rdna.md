@@ -90,6 +90,19 @@ and it should be considered before any instruction-level tuning.
 Corollary for roofline analysis: there are **two** rooflines on this part, not one. Decide which
 regime the kernel is in before computing headroom.
 
+> **This is a BANDWIDTH lever, and it does nothing for compute-bound work.** `[measured]`
+> `rdna_roofline.py`, fp16 square GEMM: 1024^3 (6.3 MB, deep in LLC) reaches 35.16 TFLOP/s, while
+> 3072^3 (56.6 MB, well into the DRAM regime) still reaches **34.13** — a 3% difference, not 3.4x.
+> At those shapes the arithmetic intensity is ~683 FLOP/byte, so even the DRAM roof
+> (683 x 230 GB/s = 157 TFLOP/s) sits far above the compute roof and bandwidth never binds.
+> **Check which roof binds before spending effort on cache residency**: for high-AI kernels the
+> 32 MB boundary is worth nothing, and the lever is real only for bandwidth-bound work — weight
+> streaming in decode, elementwise, norms, low-reuse attention.
+>
+> The LLC roof is also **not a step function at 32 MB**: 6.3 MB gives 35.16 TFLOP/s but 25.2 MB —
+> still nominally LLC-resident — gives 28.53. It degrades as the working set approaches capacity,
+> so "under 32 MB" is not the same as "at the 790 GB/s roof".
+
 **The 790 GB/s figure is READ-READ-WRITE. A pure-read stream goes higher.** `[measured by
 ablation]` A same-grid / same-byte-stream kernel with the math deleted reached **782 / 913 / 945
 GB/s** for LLC-resident pure-read working sets. So do **not** declare a read-dominated kernel
@@ -97,6 +110,45 @@ finished at 790 GB/s -- one GQA decode kernel that was called "saturated" agains
 at 83-86% of its real ceiling, with ~17% left. **Measure the ceiling for YOUR access mix by
 ablation** (keep the grid and the byte stream, delete the math, time that) rather than taking a
 number from this table.
+
+## 3b. The compute roofline — and how far real kernels sit from it
+
+`[measured]` `repro/rdna_roofline.py`. Section 3 gives `Peak_BW`; this gives the other half of
+`attainable = min(Peak_Compute[dtype], AI x Peak_BW)`, without which no kernel can be scored in
+absolute terms.
+
+| | fp16 / bf16 WMMA |
+|---|---|
+| datasheet peak | **59.4 TFLOP/s** (40 CU x 64 lanes x 2 x 2.9 GHz x 4) |
+| empirical peak | **35.16 TFLOP/s** — best any kernel reached here (`torch.mm` @ 1024^3) |
+| empirical / datasheet | **59.2%** |
+
+**Report both.** The empirical column is a *floor* on the true peak: nothing measured here saturated
+the WMMA units, so a kernel scored against it looks better than it is, and a kernel scored against
+the datasheet may be chasing a number this part cannot reach. Quoting one without the other is how
+a tuning effort ends up aimed at the wrong ceiling.
+
+Per-kernel efficiency at 2048^3 fp16 (working set 25.2 MB, LLC-resident, AI 683 FLOP/byte):
+
+| kernel | achieved | vs empirical | vs datasheet |
+|---|---|---|---|
+| naive Triton `tl.dot` | 24.72 TFLOP/s | 70.3% | 41.6% |
+| `torch.mm` (rocBLAS) | 28.53 TFLOP/s | 81.1% | 48.0% |
+
+**This shape is compute-bound, by 9x** — the memory roof is 539 TFLOP/s against a 59.4 TFLOP/s
+compute roof. So the whole section 5 argument about which library wins is an argument about
+*compute* efficiency, and neither contender is above half the datasheet peak. That is where the
+headroom is, not in cache residency.
+
+**An efficiency above 100% of the empirical peak is not a fast kernel — it is proof the denominator
+is wrong.** Treat it as a failed measurement and re-derive the peak. (Discipline borrowed from
+`perf_knowledge/profiling/kernel_roofline.md`, which is CDNA-scoped and refuses RDNA outright
+because it drives `rocprof-compute --roof-only`; that tool's roofline mode does not support
+gfx10/11/12, so the terms here are measured a different way.)
+
+**Pick the compute peak by the matrix instruction the kernel issues, not by its tensor dtype.** On
+RDNA that is WMMA; `rdna_roofline.py` disassembles first and refuses to score anything if it sees
+`v_mfma` or no `v_wmma`, because a CDNA peak table applied here would be silently wrong.
 
 ## 4. Bandwidth and FLOPS reality check
 
