@@ -81,7 +81,7 @@ Do this instead of the optimize-mode steps below:
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
    done
    cd "$EVAL_DIR/workspace"
-   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
@@ -131,7 +131,7 @@ Steps:
    [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
-   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
    # Avoid git hangs/failures in non-interactive agents: no pager, no prompts, and ALWAYS pass an
    # identity (the machine may have no global git user). Fresh repo (the source .git was never copied
    # in) so HEAD is exactly this baseline.
@@ -242,6 +242,13 @@ Inputs: `KERNEL_PATH_ORIG`, `EVAL_DIR`, `WORKSPACE` (=EVAL_DIR/workspace), `SKIL
 baseline latencies recorded at benchmark setup).
 
 **Do NOT trust the TechLead's reported speedup — reproduce it from the TRUE baseline.**
+
+Source-binding failures (`GEAK_SOURCE_INVALID`, exit 86, or `invalid_measurement` in round results)
+are invalid experiments, not evidence of no improvement. Review the affected Engineer workspace's
+`.geak/invalid_measurements.jsonl` even if the final patch is empty. If that candidate was not validly
+remeasured after repair, report `validation_status:"flagged"`, `correctness:"not_checked"` and explain
+the unresolved build defect in `arbitration_note`; do not report an accepted speedup or a validated
+no-op. A clean benchmark of the reverted original does not validate the discarded candidate.
 
 1. Read `EVAL_DIR/COMMANDMENT.md` for the exact correctness + full-benchmark commands.
 2. Build a fresh validation workspace from the ORIGINAL path:
