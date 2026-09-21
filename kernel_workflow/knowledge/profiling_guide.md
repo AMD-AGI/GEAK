@@ -1,5 +1,25 @@
 # Profiling Analysis Guide
 
+> **Arch guard — check the wavefront size before using the numbers below.**
+> This guide's metric names and its bandwidth language assume a CDNA Instinct
+> part: it talks about MFMA utilisation and about HBM bandwidth. On an RDNA
+> part (`wave32`, e.g. `gfx1151` / Strix Halo) **neither exists** — there is no
+> MFMA at all (the matrix path is WMMA) and the memory is LPDDR5X shared with
+> the CPU, not HBM. Three further limits change how you profile there: at most
+> a small **hardware-counter budget** per rocprofv3 pass -- one swept set got
+> `SQ_WAVES + GRBM_GUI_ACTIVE + FETCH_SIZE` through and failed on a fourth, but
+> that is a fact about that set, not about the number three: a named metric is
+> not necessarily one hardware counter, so probe the set you actually want; the raw `TCP_`/`TCC_`/`TD_` **names** are not
+> exposed, but **`GL2C_HIT` / `GL2C_MISS` are**, and are how you get L2 hit rate
+> here -- a real run on this part measured **GL2 hit 50.37%** alongside
+> `FETCH_SIZE` -- so reach for the `GL2C_*` family rather than concluding the
+> cache counters are unavailable; and `rocprof-compute` leaves `$max_mclk`
+> unpopulated so its roofline metrics are wrong without `--specs-correction`.
+> When something genuinely is unavailable, report it as unavailable with a
+> reason rather than as 0. Read
+> `knowledge/amd_rdna.md` first on those parts; the profiler-selection and
+> dispatch-count parts of this guide still apply unchanged.
+
 ## Reading the raw profiler dump (START HERE — the script does NOT parse for you)
 
 `scripts/profile_kernel.sh` is intentionally thin: it warms up, picks the best available profiler, runs
