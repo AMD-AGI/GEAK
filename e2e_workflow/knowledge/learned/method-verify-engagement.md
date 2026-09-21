@@ -4,7 +4,7 @@ type: method
 confidence: ★★★
 confirms: 5
 effect: turns "did my kernel actually run live?" from a guess into proof — and, when the banner also prints the TUNED VALUES, turns a null e2e delta into a one-A/B corrective fix (a -0.222% reject became a +1.2249% accept)
-last_seen: 2026-09-11
+last_seen: 2026-08-24
 ---
 # Prove the optimized kernel ran on the LIVE serving path (don't infer it from an e2e wiggle)
 
@@ -23,22 +23,6 @@ last_seen: 2026-09-11
   (`max_rel_err == 0.0`) against a LIVE baseline is itself the reliable tell of a silent fallback. Make
   the fail-closed engagement assert UNCONDITIONAL — an assert gated on an env var the verify harness
   never sets protects nothing (two rounds shipped a no-op that passed correctness).
-- caution: also verify MODULE-INJECTION and BRANCH-EXECUTION separately, and count the marker across
-  boot + graph capture + the discarded warmup + the timed round. On a graph-replayed decode path a host
-  heuristic runs only at capture, so an injected module whose fast path is guarded on a runtime-varying
-  condition can report N injection hits and ZERO execution markers — a fully provenance-clean A/B that
-  silently measures stock against stock (gfx950 sglang unified_attention 3d, 2026-09-10: 4 injects,
-  0 markers, +0.186% e2e, inside both the noise band and its own Amdahl ceiling). Put the marker on the
-  optimized BRANCH, not on module import, and treat 0 marker hits as REJECT before spending a parity or
-  accuracy gate. See [[method-cudagraph-safe-integration]].
-- also verify (the POSITIVE form of the same check): when the optimization is a HOST-side launcher
-  decision (tile/warps/split-K picked in Python), the proof is a per-call config line printed by that
-  launcher and counted INSIDE the `Capturing CUDA graphs` window, with the distinct configs it chose
-  visible (e.g. 35 prefill-geometry lines + 19 decode-geometry lines, zero in the reference). Lines
-  printed only before capture prove nothing about what the replayed graph runs.
-- source: exp/e2e_*Qwen3-14B-FP8*/ 2026-09-11 (vLLM fp8 quant/act-mul launcher retune: 54 in-capture
-  config lines in cand, 0 in ref, +1.60% e2e).
-- source: exp/e2e_*gpt-oss-120b*/ 2026-09-10 (unified_attention 3d re-authoring, zero-marker null).
 - caution: also verify the overlay FORK you inherited implements the manifest entry you need. A "lazy"
   sitecustomize variant (a meta-path finder that applies rebinds at real-import time — written to dodge a
   startup import that blows the TP rendezvous) may implement ONLY `rebinds`, with no add-module and no

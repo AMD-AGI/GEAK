@@ -2,15 +2,12 @@
 key: e2e A/B measurement · any gfx · sglang/vllm
 type: method
 confidence: ★★★
-effect: stops false wins — a positive median inside the noise band is a NULL, not a win; and picks the right correctness gate when byte parity is unavailable; and stops UNMEASURABLE rounds — a candidate whose Amdahl ceiling is below the box's session spread cannot be resolved in either direction, so the A/B buys noise
-confirms: 4
-last_seen: 2026-09-09
+effect: stops false wins — a positive median inside the noise band is a NULL, not a win; and stops
+  UNMEASURABLE rounds — a candidate whose Amdahl ceiling is below the box's session spread cannot be
+  resolved in either direction, so the A/B buys noise
+confirms: 8
+last_seen: 2026-08-24
 ---
-
-> MERGE PROVENANCE (unresolved): the two parent histories record different confirmation
-> counts for this card — tracker `4`, main `8`. They are NOT summed,
-> maxed or date-selected here. The frontmatter retains the tracker value pending a
-> deduplicated reconstruction from distinct evidence identities.
 # Honest e2e A/B: tight interleave + non-overlap gate (not just a positive median)
 - lever: run a tight INTERLEAVED A/B (REF, CAND, REF, CAND, …) on a SINGLE GPU with a PINNED port, then
   gate on BOTH `delta_med > noise_band` AND non-overlapping distributions (`cand_min > ref_max`). The
@@ -20,19 +17,6 @@ last_seen: 2026-09-09
   the TRUE baseline (small real wins only count when stacked).
 - verify: sglang derives `grpc_port = port + 10000` and rejects >65535 → an OS ephemeral port >55535
   crashes launch; ALWAYS pin PORT to a low value. Budget for grpc-port-flake retries.
-- source: exp/e2e_*Qwen3.5-27B*/ 2026-06-07 / 06-09
-- caution (also verify): **byte parity is not always an available gate.** On gfx950 fp8 serving, two
-  FRESH no-overlay TRUE-baseline servers with identical flags/env at greedy `temp=0 seed=0` produced
-  **0/12 byte-exact completions** — the baseline itself is non-deterministic across launches, so a
-  candidate's byte divergence proves nothing. When that is the case, gate on TASK ACCURACY instead:
-  a fixed seed-pinned subset, same n for both legs, and McNemar on the discordant pairs rather than a
-  raw accuracy delta (e.g. gsm8k n=800 0.9113 vs 0.9025, 21 vs 14 flips, p=0.31 → unchanged). Prove
-  the baseline's non-determinism first; do not merely assert it.
-- caution (also verify): a delta below the run's own MEASURED across-restart floor is not bankable even
-  when the two legs do not overlap — measure that floor from repeated reference-leg server lifetimes,
-  never from the configured noise band (a baseline of n=1 reports a degenerate 0.0 spread).
-- source: exp/e2e_*Qwen3-14B-FP8*/ 2026-09-09 (fp8 parity non-determinism + accuracy gate)
-
 - caution (also verify the DENOMINATOR, not just the candidate): a stored baseline goes stale. A run
   whose finalize bench divided by a ~22-h-old baseline reported **+0.86%**; re-measuring the identical
   no-overlay config in the same session gave a 13%-lower reference and the same final stack scored

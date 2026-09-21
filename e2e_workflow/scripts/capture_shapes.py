@@ -25,7 +25,7 @@ Then launch the server with PYTHONPATH=<overlay>:$PYTHONPATH and run a short ben
 Anti-cheating: the oracle is captured from the UNMODIFIED baseline kernel. The optimizer later must
 match it. The unittest + this file's outputs must not be edited during optimization.
 """
-import atexit, functools, importlib, itertools, json, os, re, shutil, sys, threading
+import atexit, functools, importlib, json, os, re, shutil, sys, threading
 
 # Issue #429: process-local MXFP4 MoE oracles can retain multi-GiB tensors per rank/retry until the
 # workspace is evicted. Defaults bound heavy oracle persistence; set CAPTURE_BYTE_BUDGET=0 for unlimited.
@@ -475,239 +475,13 @@ def _is_weight_key(key):
 
 
 def _should_share_kwarg(key, value, policy, share_min_bytes):
-    """Whether this kwarg should be stored once in the oracle's shared pool (not per-case).
-
-    KNOWN SIBLING RISK (unfixed, deliberately out of scope here): the kwarg sharing path in
-    ``_snapshot_kwargs`` de-dupes by kwarg NAME across cases, which -- like the old positional
-    address-only key -- assumes a stable name implies stable content. A mutable tensor passed under
-    a fixed kwarg name (e.g. an in-place KV cache) would collide the same way the positional bug did.
-    The reported/reproduced regression is the POSITIONAL path, fixed via content-verified sharing
-    (`_store_shared_positional`); this function is left byte-for-byte unchanged to preserve kwarg
-    behavior. If the kwarg path is ever made content-safe, extend it explicitly with its own
-    regression coverage rather than silently reusing the positional helper."""
+    """Whether this kwarg should be stored once in the oracle's shared pool (not per-case)."""
     nbytes = _estimate_object_bytes(value)
     if policy in ("moe_slim", "share_large") and _is_weight_key(key) and nbytes >= (1 << 20):
         return True
     if policy == "share_large" and nbytes >= share_min_bytes:
         return True
     return False
-
-
-def _share_positions():
-    """Positional-arg indices whose LARGE tensors go into the oracle shared pool (opt-in).
-
-    ``share_large`` only ever de-duplicated KWARGS, because that is how every seam captured so far
-    was called. A seam reached with positional weights (aiter ``fused_moe_2stages(hidden_states,
-    w1, w2, ...)``) therefore paid the full multi-GiB expert weights ONCE PER CASE, and the issue
-    #429 byte budget then skipped exactly the cases the extraction needed (the decode M=CONC batch).
-    Opt in per capture with ``CAPTURE_SHARE_POSITIONS="1,2"``; unset keeps the old behaviour byte for
-    byte, so no other extraction changes.
-    """
-    raw = (os.environ.get("CAPTURE_SHARE_POSITIONS") or "").strip()
-    out = []
-    for part in raw.replace(",", " ").split():
-        try:
-            out.append(int(part))
-        except ValueError:
-            continue
-    return out
-
-
-# Monotonic tag handed to positional tensors we cannot fingerprint, so each occurrence gets a
-# UNIQUE share key and is snapshotted per case rather than shared on the strength of address alone.
-_FINGERPRINT_FAIL = itertools.count()
-
-
-def _tensor_fingerprint(value):
-    """A cheap, mutation-sensitive content signature for a large tensor, or ``None``.
-
-    A storage address is NOT proof of value. An in-place-mutated buffer -- e.g. a KV cache written
-    per decode step -- keeps its ``data_ptr`` while its contents change from case to case. Keying a
-    shared snapshot on address alone therefore collapses every later case onto the FIRST case's
-    clone (the observed rel_err ~0.998 "static-weight sharing misapplied to mutable KV"). Folding
-    this fingerprint into the share key gives a genuine static weight ONE identity (its content is
-    invariant) while a mutable buffer earns a NEW identity whenever its content changes -- so each
-    case snapshots its own values.
-
-    Aims to be frugal on multi-GiB tensors: the whole-tensor sum is accumulated in fp64
-    (bandwidth-bound, allocates only a scalar -- no full upcast copy) and the discriminating bits come
-    from a bounded strided sample (<=8k elements). NOTE: ``reshape(-1)`` returns a view only when the
-    tensor is contiguous; for a non-contiguous tensor it materializes a flattened copy, so the "no
-    materialization" saving is best-effort, not guaranteed. It is a prefilter regardless -- the
-    authoritative equality check is ``_snapshots_equal`` on the persisted snapshots. Returns ``None``
-    when the tensor cannot be fingerprinted at all, so the caller falls back to never sharing it --
-    correctness over the de-dup saving.
-    """
-    torch = _torch()
-    try:
-        flat = value.detach().reshape(-1)
-        n = int(flat.numel())
-    except Exception:
-        return None
-    if n == 0:
-        return "n0"
-    parts = [str(n)]
-    have_sum = False
-    try:
-        parts.append("%.6e" % float(flat.sum(dtype=torch.float64).item()))
-        have_sum = True
-    except Exception:
-        parts.append("s?")   # dtype without dtype= sum support (e.g. fp8) -> lean on the sample
-    try:
-        k = 8192
-        step = max(1, n // k)
-        idx = torch.arange(0, n, step, device=flat.device)[:k]
-        sample = flat.index_select(0, idx).to(torch.float64)
-        parts.append("%.6e" % float(sample.sum().item()))
-        parts.append("%.6e" % float((sample * sample).sum().item()))
-    except Exception:
-        if not have_sum:
-            return None      # no whole-tensor sum AND no sample -> no content signal at all
-    return "|".join(parts)
-
-
-def _positional_share_key(index, value):
-    """Fast PREFILTER key for a shared positional tensor -- NOT a proof of content equality.
-
-    Keyed by (index, dtype, shape, storage address, content FINGERPRINT). The address alone is not
-    enough: a persistent model weight keeps its address AND its value, but a mutable buffer (an
-    in-place KV cache) keeps its address while its value changes -- and address-only keying then
-    shares the first case's snapshot for every case (rel_err ~1.0). The fingerprint separates most
-    of those cheaply: distinct fingerprints => provably distinct content, so a mutable buffer that
-    actually changed lands on a new key without any tensor comparison.
-
-    But a fingerprint is lossy -- two elements outside the strided sample can move by +d/-d and
-    leave the whole-tensor sum and every sampled statistic identical. So a fingerprint MATCH is only
-    a candidate: `_store_shared_positional` confirms it with exact captured-content equality before
-    de-duping, and stores a fresh snapshot when equality can't be proven. A tensor we cannot
-    fingerprint gets a unique per-occurrence key so it is never even a de-dup candidate. The
-    (dtype, shape, ptr) terms still guard the aliasing trap where a freed address is reused at a
-    different shape/dtype.
-    """
-    try:
-        ptr = int(value.data_ptr())
-    except Exception:
-        ptr = 0
-    fp = _tensor_fingerprint(value)
-    if fp is None:
-        fp = "nofp%d" % next(_FINGERPRINT_FAIL)
-    return f"__pos{index}__{value.dtype}_{tuple(value.shape)}_{ptr}_{fp}"
-
-
-def _snapshots_equal(a, b):
-    """Exact content equality of two ``_snapshot`` results; False when it cannot be proven.
-
-    This is the authoritative check that lets a shared snapshot be reused: only identical dtype,
-    shape, AND element-for-element equal data de-dupe. ``torch.equal`` treats NaN as unequal and may
-    raise on exotic dtypes -- both degrade to "not equal", i.e. a fresh per-case snapshot, which is
-    the safe direction (correctness over de-dup)."""
-    torch = _torch()
-    if not (isinstance(a, dict) and isinstance(b, dict)):
-        return False
-    if a.get("dtype") != b.get("dtype") or a.get("shape") != b.get("shape"):
-        return False
-    ta, tb = a.get("data"), b.get("data")
-    try:
-        if not (torch.is_tensor(ta) and torch.is_tensor(tb)):
-            return False
-        return bool(torch.equal(ta, tb))
-    except Exception:
-        return False
-
-
-def _plan_shared_positional(args, shared_store, policy, share_min_bytes):
-    """Resolve opted-in positional sharing WITHOUT mutating ``shared_store`` (staging for admission).
-
-    The byte budget is decided BEFORE a case is admitted, so the pre-admission estimate must equal the
-    bytes actually retained on commit. The old prefilter-membership estimate broke exactly on a
-    fingerprint collision: the prefilter key matched the prior entry (discounting the whole tensor),
-    yet commit then stored a distinct ``#dup`` snapshot the budget never saw -- so a cap could be
-    exceeded with no signal. This planner resolves each shared position against committed AND
-    same-call staged entries via the same exact-content equality used on commit, and reports the REAL
-    new bytes.
-
-    It also avoids materializing tensors an over-budget case would only discard: a distinct-fingerprint
-    tensor is provably new with no clone (its snapshot is deferred to commit), so a clone happens only
-    when content must actually be compared (a de-dup candidate or a genuine collision).
-
-    Returns a plan dict:
-      ``resolved``       -- {arg_index: shared_key} for every shared position;
-      ``staged``         -- ordered [(key, entry)] of NEW entries to commit iff admitted, where
-                            ``entry`` is a mutable ``[value, cand_or_None]`` (cand filled on commit);
-      ``new_bytes``      -- actual retained bytes of the staged entries (collision ``#dup`` counted);
-      ``eligible_bytes`` -- total bytes of all shared-eligible positions (netted out of per-case bytes).
-    """
-    plan = {"resolved": {}, "staged": [], "new_bytes": 0, "eligible_bytes": 0}
-    positions = _share_positions()
-    if policy == "full" or not positions or not isinstance(args, (list, tuple)):
-        return plan
-    torch = _torch()
-    staged = {}  # key -> [value, cand_or_None]; genuinely-new entries staged this call
-    for index, value in enumerate(args):
-        if not (index in positions and torch.is_tensor(value)
-                and _estimate_object_bytes(value) >= share_min_bytes):
-            continue
-        nbytes = _estimate_object_bytes(value)
-        plan["eligible_bytes"] += nbytes
-        prefilter = _positional_share_key(index, value)
-        cand = None                                   # snapshot of `value`, made only to compare
-        key = prefilter
-        dup = 0
-        while True:
-            committed = shared_store.get(key)
-            staged_entry = staged.get(key)
-            if committed is None and staged_entry is None:
-                new_entry = [value, cand]              # cand may be None -> snapshotted on commit
-                staged[key] = new_entry
-                plan["staged"].append((key, new_entry))
-                plan["new_bytes"] += nbytes
-                plan["resolved"][index] = key
-                break
-            if cand is None:
-                cand = _snapshot(value)               # need this content to prove (in)equality
-            if staged_entry is not None and staged_entry[1] is None:
-                staged_entry[1] = _snapshot(staged_entry[0])
-            other = staged_entry[1] if staged_entry is not None else committed
-            if _snapshots_equal(other, cand):
-                plan["resolved"][index] = key         # proven identical -> de-dupe, no new bytes
-                break
-            dup += 1
-            key = "%s#dup%d" % (prefilter, dup)
-    return plan
-
-
-def _commit_positional_plan(plan, shared_store):
-    """Persist a plan's staged entries into ``shared_store`` (call only once a case is admitted)."""
-    for key, entry in plan["staged"]:
-        if entry[1] is None:
-            entry[1] = _snapshot(entry[0])
-        shared_store[key] = entry[1]
-
-
-def _build_snap_args(args, resolved):
-    """Assemble the recorded ``args`` snapshot: a shared position becomes a ``{"__shared__": key}``
-    leaf; every other positional value is snapshotted per case."""
-    snap = []
-    for index, value in enumerate(args):
-        key = resolved.get(index)
-        snap.append({"__shared__": key} if key is not None else _snapshot(value))
-    return tuple(snap)
-
-
-def _snapshot_args(args, shared_store, policy, share_min_bytes):
-    """Snapshot positional args; opted-in large tensors are stored once under content-verified keys.
-
-    Plan-then-commit wrapper for callers that do not gate on a byte budget; ``_wrapper`` drives the
-    plan/commit halves separately so it can validate the budget against ``new_bytes`` before committing.
-    """
-    positions = _share_positions()
-    if policy == "full" or not positions or not isinstance(args, (list, tuple)):
-        return _snapshot(args), 0, []
-    plan = _plan_shared_positional(args, shared_store, policy, share_min_bytes)
-    _commit_positional_plan(plan, shared_store)
-    snap_args = _build_snap_args(args, plan["resolved"])
-    shared_keys = [plan["resolved"][i] for i in sorted(plan["resolved"])]
-    return snap_args, plan["new_bytes"], shared_keys
 
 
 def _snapshot_kwargs(kwargs, shared_store, policy, share_min_bytes):
@@ -818,15 +592,6 @@ def _wrapper(*args, **kwargs):
                             est_case -= nbytes
                             if key not in shared_store:
                                 est_shared_add += nbytes
-                # Positional sharing is resolved into a STAGED plan here, before the budget decision,
-                # so admission sees the bytes that will actually be retained -- including a collision's
-                # distinct #dup snapshot, which the old prefilter-membership estimate silently discounted
-                # (a cap could be exceeded with no signal). The plan is committed only if admitted below.
-                pos_plan = None
-                if policy != "full":
-                    pos_plan = _plan_shared_positional(args, shared_store, policy, share_min)
-                    est_case -= pos_plan["eligible_bytes"]
-                    est_shared_add += pos_plan["new_bytes"]
                 effective_need = max(0, est_case) + est_shared_add
                 if case_limit > 0 and effective_need > case_limit:
                     s["seen"].add(sig)
@@ -865,24 +630,12 @@ def _wrapper(*args, **kwargs):
                 else:
                     snap_kwargs, shared_added, shared_keys = _snapshot_kwargs(
                         kwargs, shared_store, policy, share_min)
-                    if pos_plan is not None:
-                        # Commit the SAME plan the budget was validated against: retained bytes match
-                        # the admitted estimate exactly, and a rejected case above left the store untouched.
-                        _commit_positional_plan(pos_plan, shared_store)
-                        snap_args = _build_snap_args(args, pos_plan["resolved"])
-                        pos_shared_added = pos_plan["new_bytes"]
-                        pos_shared_keys = [pos_plan["resolved"][i] for i in sorted(pos_plan["resolved"])]
-                    else:
-                        snap_args, pos_shared_added, pos_shared_keys = _snapshot_args(
-                            args, shared_store, policy, share_min)
-                    shared_added += pos_shared_added
-                    shared_keys = list(shared_keys) + list(pos_shared_keys)
                     s["seen"].add(sig)
                     s["regime_seen"].add(regime)
                     s["records"].append({
                         "sig": sig,
                         "regime": regime,
-                        "args": snap_args,
+                        "args": _snapshot(args),
                         "kwargs": snap_kwargs,
                         "output": _snapshot(out),
                         "shared_keys": shared_keys,
