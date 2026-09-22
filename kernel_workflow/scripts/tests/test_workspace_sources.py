@@ -89,6 +89,71 @@ def test_materialized_builder_compiles_candidate_across_generations(
     assert (parent / "quant_kernels.cu").read_bytes() == original
 
 
+def test_wrong_candidate_false_pass_becomes_real_correctness_failure(
+    tmp_path, compiler
+):
+    """The same faulty builder must execute the bad candidate after relocation.
+
+    Unlike a #error probe, both sources compile successfully. The independent
+    oracle must fail on 3*x; the old copied link silently executes the correct 2*x.
+    """
+    fixture = Path(__file__).parent / "fixtures/source_binding"
+    vendor = tmp_path / "vendor"
+    parent = tmp_path / "parent"
+    shutil.copytree(fixture, vendor)
+    shutil.copytree(fixture, parent)
+    source = "scale_kernel.cu"
+    original = (parent / source).read_text()
+    bad = original.replace("return x * 2.0f;", "return x * 3.0f;")
+    assert bad != original
+
+    def measure(workspace):
+        result = run(
+            sys.executable,
+            workspace / "harness.py",
+            "--compiler",
+            compiler,
+            "--vendor",
+            vendor,
+            cwd=workspace,
+        )
+        assert (workspace / "build/kernel").exists(), result.stderr
+        return result.returncode, json.loads(
+            (workspace / "build/result.json").read_text()
+        )
+
+    assert measure(parent)[0] == 0  # Creates the original absolute overlay link.
+    old = tmp_path / "old"
+    shutil.copytree(parent, old, symlinks=True, ignore=shutil.ignore_patterns("build"))
+    (old / source).write_text(bad)
+    rc, old_report = measure(old)
+    assert rc == 0
+    assert old_report["correctness"] == "pass"
+    assert old_report["candidate_sha256"] != old_report["input_sha256"]
+    assert old_report["resolved_input"] == str(parent / source)
+
+    fixed = materialize(parent, tmp_path / "fixed")
+    (fixed / source).write_text(bad)
+    verify = materialize(fixed, tmp_path / "verify")
+    for workspace in (fixed, verify):
+        rc, report = measure(workspace)
+        assert rc == 1
+        assert report["correctness"] == "fail"
+        assert report["benchmark_eligible"] is False
+        assert report["output"] == [3.0, 6.0, -9.0, 1.5]
+        assert report["candidate_sha256"] == old_report["candidate_sha256"]
+        assert report["input_sha256"] == report["candidate_sha256"]
+        assert report["resolved_input"] == str(workspace / source)
+        assert (workspace / "harness.py").read_bytes() == (
+            parent / "harness.py"
+        ).read_bytes()
+
+    # A repaired candidate passes through the same builder and oracle again.
+    (fixed / source).write_text(original)
+    assert measure(fixed)[0] == 0
+    assert (parent / source).read_text() == original
+
+
 @pytest.mark.parametrize(
     "kind", ["relative", "directory", "chain", "dangling", "prefix"]
 )
