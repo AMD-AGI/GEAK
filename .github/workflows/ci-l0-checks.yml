@@ -95,6 +95,7 @@ jobs:
             interface/test_run_e2e_margin.py \
             interface/test_run_e2e_measurement_basis.py \
             interface/test_run_e2e_kb_write_tuned.py \
+            interface/test_run_e2e_search_termination.py \
             e2e_workflow/scripts/tests/test_atom_adapter_lifecycle.py \
             e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
             e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
@@ -287,6 +288,11 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # The snapshot is only meaningful if it is taken BEFORE finalization timers
+      # move the clock, so the guard is positional as well as arithmetic — a later
+      # edit that relocates it past phase('Finalize') fails here.
+      - name: search termination snapshot regression
+        run: node e2e_workflow/scripts/test_search_termination.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest

@@ -4712,6 +4712,19 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
 // PHASE: Finalize + Report + Validate  (gated)
 // ===========================================================================
 let allAccepted = acceptedHeads.concat(acceptedKernels);
+// Freeze the search outcome before finalization timers can change its meaning.
+const searchTermination = {
+  reason: (TIME_DEADLINE_HIT || (FAST_MODE && FAST_DEADLINE_HIT) || (DEEP_MODE && DEEP_DEADLINE_HIT))
+    ? 'dispatch_cutoff' : 'completed',
+  budget_s: TIME_BUDGET_MS == null ? null : TIME_BUDGET_MS / 1000,
+  dispatch_cutoff_s: TIME_HEAD_DEADLINE_MS == null ? null : Math.min(
+    TIME_HEAD_DEADLINE_MS,
+    FAST_MODE ? FAST_HEAD_DEADLINE_MS : Infinity,
+    DEEP_MODE ? DEEP_HEAD_BUDGET_MS : Infinity,
+  ) / 1000,
+  elapsed_s: TIME_BUDGET_MS == null ? null : ELAPSED_MS / 1000,
+  remaining_s: TIME_BUDGET_MS == null ? null : remainingMs() / 1000,
+};
 let finalize = null, report = null, validation = null;
 let finalTput = curTput, finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
 let validatedOk = false;   // did the independent Validate produce a usable (positive) number?
@@ -4926,7 +4939,10 @@ if (want('final')) {
   report = await safeAgent(
     roleAgent('system_architect', 'report',
       'Write architect_report.md AND the full final_report.md in English (with the Phases tree + ' +
-      'artifacts tree modules). final_report.md MUST contain a "## Knowledge-base recall" section ' +
+      'artifacts tree modules). Report SEARCH_TERMINATION separately from performance: ' +
+      'dispatch_cutoff means new work was stopped early, not that the hard budget expired ' +
+      'or that useful work was exhausted. Include its remaining_s when available. ' +
+      'final_report.md MUST contain a "## Knowledge-base recall" section ' +
       'built from KB_RECALL — see your role file. Write it even when nothing was recalled: report ' +
       'the exact canonical ids that were tried and the read_reason. On an exact-lookup store a miss ' +
       'and a never-recorded page are the same 404, so the address asked is the finding, and a reader ' +
@@ -4937,6 +4953,7 @@ if (want('final')) {
       KB_RECALL,
       ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
+      SEARCH_TERMINATION: searchTermination,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
       ...ANALYSIS_SKILL_INPUTS, ...TUNING_REPORT_INPUTS,
     }),
@@ -5101,6 +5118,7 @@ function tuningReturn() {
 }
 
 const wfReturn = {
+  search_termination: searchTermination,
   // schema_version pins the CONTRACT shape run_e2e.py reads. Bump only on a
   // breaking change to the keys below; run_e2e.py keys its canonical-artifact
   // read off this so it never silently mis-parses a future shape.

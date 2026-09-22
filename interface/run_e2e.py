@@ -3606,6 +3606,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "result_source": result_source,
+        "search_termination": wf.get("search_termination") or {"reason": "unknown"},
         "eval_dir": str(eval_dir),
         "baseline_throughput_tok_s": geak_baseline,
         # Promoted final is ALWAYS the HOT median (see the final-basis selection
