@@ -1,46 +1,23 @@
 ---
-key: fp8 serving launch · gfx950 · vLLM 0.29.0 torch.compile · enforce-eager workaround
+key: fp8 serving launch · gfx950 · vLLM 0.29.0 — intermittent EngineCore startup loss; --enforce-eager workaround
 type: method
-confidence: ★★★
-effect: a GPU-INDEPENDENT server-launch killer — fp8 model init C++-aborts EngineCore before any bench; swapping GPUs never helps; `--enforce-eager` clears it
-confirms: 4
+confidence: ★★
+effect: intermittent EngineCore startup loss at conc=64 (isl4096/osl32), seen in BOTH eager and compile launches; the eager workaround produced a completing 1728 tok/s baseline (320/320), but eager also failed and compile also succeeded — no per-mode fix
+confirms_cited: 0
+confirms_blind: 0
+attempts: 8
 last_seen: 2026-09-22
+name: fp8 intermittent EngineCore startup failure — enforce-eager workaround (gfx950/vLLM 0.29.0)
+description: intermittent EngineCore startup failure on gfx950 vLLM 0.29.0 fp8 TP1, in BOTH eager and compile; --enforce-eager is an observed (not guaranteed) workaround
+keywords: [fp8, enforce-eager, EngineCore, startup-failure, intermittent, TritonFp8BlockScaledMM, torch.compile, gfx950, vllm]
+platforms: [gfx950, vLLM-0.29.0, ROCm-7.2.3, torch-2.12]
+kernel_class: fp8-linear
+regime: serving-startup
+lifecycle: active
 ---
-# fp8 + torch.compile aborts EngineCore at model load on gfx950 (vLLM 0.29.0) — launch `--enforce-eager` to escape
-- symptom: `vllm serve` of an fp8 (a8w8 block-scale) model on gfx950 / vLLM 0.29.0 dies during EngineCore
-  init with a **C++-level abort and NO Python traceback**, immediately after the line
-  `Selected TritonFp8BlockScaledMMKernel for Fp8LinearMethod`. Server never becomes healthy → preflight
-  blocks → ZERO bench samples. Model used in the confirms: `Qwen3-14B-FP8` (TP1).
-- **it is NOT what it looks like.** Ruled out on clean idle GPUs, pristine env, fresh JIT caches, stock
-  `/usr/local/bin/vllm`: NOT the container/image (stock serve launches the SAME fp8 model fine in eager),
-  NOT the GPU (reproduces across GPUs; a compile-path abort at init is GPU-independent by construction —
-  it happens before real device work, so **moving to a fresh GPU changes nothing**), NOT the torch
-  profiler (`--profiler-config` in eager launches fine), NOT OTel (`otlp_traces_endpoint=None` in the
-  crash; the `vllm/tracing/otel.py` frames are an always-applied passthrough decorator, not active
-  tracing), NOT the osl/decode operating point.
-- root cause: a vLLM torch.compile bug triggered ONLY when `enforce_eager=False` — i.e. the fp8 compile
-  path is live (`compilation_config.custom_ops:['+quant_fp8', ...]`, `pass_config.fuse_norm_quant=True`,
-  `fuse_act_quant=True`, `CompilationMode.VLLM_COMPILE`, `FULL_AND_PIECEWISE` cudagraph). Eager
-  (`CompilationMode.NONE`) selects the **same** TritonFp8BlockScaledMM kernel but skips the crashing
-  compile/fusion build.
-- decisive isolation (back-to-back, same box/model/session — only `enforce_eager` differs):
-  · `vllm serve` (compile, `enforce_eager=False`)         → log dead-ends at `Selected TritonFp8BlockScaledMMKernel`, abort
-  · `vllm serve --enforce-eager` (`enforce_eager=True`)    → `Application startup complete.`, /health=200
-  · `vllm serve --enforce-eager` + harness torch profiler  → `Application startup complete.`, /health=200
-- apply (workaround): launch the server `--enforce-eager`. In the e2e_workflow, pass the first-class arg
-  `initial_extra_server_args: "--enforce-eager"` — it seeds `EXTRA_SERVER_ARGS` on EVERY launch
-  (baseline / sweep / head-kernel / validation), and the workflow is eager-aware (it auto-disables the
-  CUDA-graph deploy requirement when the flag is present, so no graph-safety requirement is injected into
-  kernel tasks). Confirmed carrying a full run: baseline cleared at ~1728 tok/s, then Profile.
-- **caution, don't foreclose (per README rule 3):** eager DISABLES torch.compile fusions, so the run
-  optimizes the **eager fp8 path** — a valid, COMPLETING run, but it forgoes the compile tuning surface.
-  It is a workaround, not a fix. Also **verify** compile mode still aborts before assuming it: the crash
-  is **FLAKY** — the same model's bare (non-eager) preflight smoke has launched fine at least once. So if
-  a run genuinely needs the compile path, re-probe a bare launch rather than treating the abort as
-  deterministic; the durable fix is either the operator patching vLLM or a workflow auto-retry that
-  detects this signature and relaunches `--enforce-eager`.
-- source: 2026-09-22 controlled smokes on idle GPUs (`/tmp/fp8_stock_smoke.sh` eager=OK,
-  `/tmp/fp8_compile_smoke.sh` non-eager=CRASH, `/tmp/fp8_prof_smoke.sh` eager+profiler=OK) + three
-  independent sessions with the same signature: `Qwen3-14B-FP8-vllm/...045621` (`server_launch_failure.json`
-  verdict=block), `Qwen3-14B-FP8-routing-vllm/...110329` (smoke_default2 abort vs smoke_eager `Application
-  startup complete.`), `Qwen3-14B-FP8-compaction-vllm`. Relaxes the OTel/profiler/image false leads.
+# fp8 intermittent EngineCore startup failure on gfx950 (vLLM 0.29.0) — try `--enforce-eager` as a workaround
+- lever: on gfx950 / vLLM-0.29.0 fp8 (a8w8 block-scale) TP1, EngineCore can fail during startup (Python `RuntimeError: Engine core initialization failed`, after real device work e.g. a FillFunctor hipLaunchKernel) — retrying with `--enforce-eager` has brought the server up, including a measured baseline; treat it as a workaround to try, not a diagnosis.
+- apply: in e2e_workflow pass `initial_extra_server_args: "--enforce-eager"` — it seeds baseline/config/validation launches (INIT_FLAGS→curFlags→EXTRA_SERVER_ARGS) and auto-drops the CUDA-graph deploy requirement (e2e_workflow.js:739); it does NOT cover the bare preflight parity smoke, which launches compiled and has also come up fine.
+- verify: eager and compile both select the same TritonFp8BlockScaledMM kernel, so the kernel is equivalent but the whole path is not; confirm /health=200 per launch and keep the mode consistent across reference vs candidate legs (eager disables torch.compile fusions AND HIP graphs, a different operating point).
+- caution: also verify the failure still reproduces before assuming it — cause is unresolved and the signature is intermittent: eager launches have ALSO failed and compiled launches have ALSO succeeded, so re-probe compiled mode when it works, preserve failure artifacts for diagnosis, and read this as a per-launch retry rather than a compile-only or GPU-independent fix.
+- source: 2026-09-22 run logs — eager fail vllm_launch_debug_default.log (enforce_eager=True/NONE → EngineCore init failed) and vllm_launch_debug_attn_triton.log (device FillFunctor before failure); compile OK preflight_smoke/server.log (enforce_eager=False → Application startup complete); eager baseline 1728 tok/s (isl4096/osl32/conc64, 320/320); Astra peer-review 20260922.
