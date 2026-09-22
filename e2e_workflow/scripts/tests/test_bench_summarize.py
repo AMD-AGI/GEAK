@@ -79,7 +79,10 @@ class FromRunsTest(unittest.TestCase):
                                      "total_token_throughput": t * 9,
                                      "e2e_norm_intvty_p90": t / 2,
                                      "median_ttft_ms": 40.0 + i,
-                                     "median_tpot_ms": 8.0 + i}) + "\n")
+                                     "median_tpot_ms": 8.0 + i,
+                                     # Deliberately unrelated to e2e_norm_intvty_p90 above, so a
+                                     # test reading one axis cannot pass on the other's number.
+                                     "p90_tpot_ms": 10.0 + i}) + "\n")
             # A malformed tail must be skipped, not abort the summary: losing the whole
             # measurement to one truncated line is the expensive failure here.
             fh.write("\n{not json}\n")
@@ -134,6 +137,52 @@ class FromRunsTest(unittest.TestCase):
         s, _ = self.summarize([100.0, 110.0], env={"E2E_METRIC": "intvty"})
         self.assertEqual(s["guard_total_tok_s_median"], 945.0)
         self.assertEqual(s["guard_basis"], "aggregate_total_token_tok_s")
+
+    def test_inferencex_intvty_axis_is_the_reciprocal_of_p90_itl(self):
+        """The axis InferenceX's pareto plots: 1000 / P90(ITL), derived as its ingestion does."""
+        s, line = self.summarize([100.0, 110.0],
+                                 env={"E2E_METRIC": "p90_intvty_inferencex"})
+        self.assertEqual(s["metric_basis"], "p90_intvty_inferencex")
+        # p90_tpot_ms 10.0 and 11.0 -> 100.0 and 90.909 tok/s/user.
+        self.assertEqual(s["throughput_tok_s_median"], 95.455)
+        self.assertIsNone(s["output_throughput_tok_s_median"])
+        self.assertIn("p90_intvty_inferencex=95.455", line)
+
+    def test_the_two_interactivity_axes_are_not_the_same_number(self):
+        """Same rows, two tokens. They must not collapse onto one value or one basis string."""
+        norm, _ = self.summarize([100.0, 110.0], env={"E2E_METRIC": "intvty"})
+        infx, _ = self.summarize([100.0, 110.0],
+                                 env={"E2E_METRIC": "p90_intvty_inferencex"})
+        self.assertNotEqual(norm["metric_basis"], infx["metric_basis"])
+        self.assertNotEqual(norm["throughput_tok_s_median"],
+                            infx["throughput_tok_s_median"])
+
+    def test_inferencex_intvty_carries_the_throughput_guard(self):
+        """Both interactivity axes need the guard; neither is a throughput measure."""
+        s, _ = self.summarize([100.0, 110.0],
+                              env={"E2E_METRIC": "p90_intvty_inferencex"})
+        self.assertEqual(s["guard_total_tok_s_median"], 945.0)
+        self.assertEqual(s["guard_basis"], "aggregate_total_token_tok_s")
+
+    def test_spread_is_expressed_in_the_graded_units(self):
+        """Transforming per row, not after the median, keeps spread in the compared units."""
+        s, _ = self.summarize([100.0, 110.0],
+                              env={"E2E_METRIC": "p90_intvty_inferencex"})
+        self.assertEqual(s["all_throughput"], [100.0, 90.909090909090909])
+        self.assertEqual(s["throughput_tok_s_spread_pct"], 9.52)
+
+    def test_a_nonpositive_p90_itl_is_no_reading_not_an_infinite_rate(self):
+        """A zero latency row must drop out rather than divide through to infinity."""
+        with open(self.runs, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"p90_tpot_ms": 0.0, "total_token_throughput": 900.0}) + "\n")
+            fh.write(json.dumps({"p90_tpot_ms": 10.0, "total_token_throughput": 900.0}) + "\n")
+        line = _run(["from-runs", self.runs, self.out],
+                    {"E2E_METRIC": "p90_intvty_inferencex"})
+        with open(self.out, encoding="utf-8") as fh:
+            s = json.load(fh)
+        self.assertEqual(s["all_throughput"], [100.0])
+        self.assertEqual(s["runs"], 1)
+        self.assertIn("p90_intvty_inferencex=100.0", line)
 
     def test_throughput_axes_do_not_grow_a_guard_field(self):
         """On a throughput basis the objective IS the guard; a second copy would invite drift."""
@@ -280,6 +329,16 @@ class FromReplicasTest(unittest.TestCase):
         self.assertEqual(s["guard_total_tok_s_median"], 972.0)
         self.assertIsNone(s["output_throughput_tok_s_median"])
         self.assertIn("e2e_norm_intvty_p90=108.0", line)
+
+    def test_inferencex_intvty_leg_also_aggregates_the_guard(self):
+        """The replica path keys off the basis string, so the new axis must be in that set too."""
+        for i, t in enumerate([104.0, 108.0, 112.0], start=1):
+            self.add(i, t, basis="p90_intvty_inferencex")
+        s, line = self.summarize(3, 3)
+        self.assertEqual(s["metric_basis"], "p90_intvty_inferencex")
+        self.assertEqual(s["guard_total_tok_s_median"], 972.0)
+        self.assertIsNone(s["output_throughput_tok_s_median"])
+        self.assertIn("p90_intvty_inferencex=108.0", line)
 
     def test_no_replicas_at_all(self):
         s, _ = self.summarize(3, 0)

@@ -16,12 +16,14 @@ bench_summary.json shapes with nothing to catch it.
 
 Throughput basis: OUTPUT-only tok/s by default, matching the Hyperloom orchestrator's
 baseline/explore collectors (they read output_throughput).  E2E_METRIC=total switches to total
-(input+output), E2E_METRIC=intvty to the AgentX interactivity axis.  Baseline and candidate read
-the same key, so the accept RATIO is basis-consistent; metric_basis records which was used.
-Values are aggregate, NOT divided by TP.
+(input+output).  TWO interactivity axes exist and are NOT interchangeable: E2E_METRIC=intvty is
+the TTFT-inclusive one Hyperloom grades on today, E2E_METRIC=p90_intvty_inferencex is the
+decode-only one the InferenceX pareto publishes.  See the _BASES block below before using
+either.  Baseline and candidate read the same key, so the accept RATIO is basis-consistent;
+metric_basis records which was used.  Values are aggregate, NOT divided by TP.
 
-``throughput_tok_s_median`` carries whichever axis was selected, so on the interactivity axis it
-is not a tok/s figure at all -- read it with metric_basis, never by its name alone.
+``throughput_tok_s_median`` carries whichever axis was selected, so on either interactivity axis
+it is not a tok/s figure at all -- read it with metric_basis, never by its name alone.
 """
 import argparse
 import glob
@@ -32,30 +34,63 @@ import sys
 
 TOTAL_KEYS = ("total_token_throughput", "total_throughput", "total_token_throughput_tok_s")
 OUTPUT_KEYS = ("output_throughput", "output_token_throughput", "output_throughput_tok_s")
-#: AgentX interactivity: aiperf's summary P10 of the per-request rate OSL/E2EL_s -- the slow-tail
-#: request's own token rate. Higher is better, as on both throughput axes, so the accept ratio
-#: keeps its direction and no gate needs to know which axis it is comparing.
+#: TWO DIFFERENT INTERACTIVITY AXES, and they are NOT interchangeable. Both are "tok/s/user",
+#: both higher-is-better, and on the GLM-5.2-MXFP4 AgentX trace they read 81.9 and 119.7 -- a
+#: factor of 1.46. Never compare a candidate read on one against a reference read on the other.
+#:
+#:   intvty  ->  ``e2e_norm_intvty_p90``, i.e. 1 / P90(E2EL/OSL): aiperf's summary P10 of the
+#:       per-request rate OSL/E2EL_s, the slow-tail request's own token rate. TTFT and queue
+#:       wait are INSIDE the window. This is InferenceX's ``e2e_norm_intvty`` field, and it is
+#:       the axis Hyperloom grades AgentX on today (``GRADED_INTVTY``). Hyperloom computes the
+#:       value; this script only selects which already-computed field to read.
+#:
+#:   p90_intvty_inferencex  ->  1000 / P90(ITL), decode only. TTFT and queue wait are OUTSIDE
+#:       the window. This is InferenceX's ``intvty`` field -- the axis its public pareto plots
+#:       as "P90 Interactivity (tok/s/user)" -- and it is derived here exactly as InferenceX's
+#:       own ingestion derives it (``infx/results/fixed_sequence.py``: p90_tpot_ms is mapped
+#:       through ``1000.0 / p90_tpot_ms``). Derived from a field the rows already carry, so it
+#:       costs no extra measurement.
+#:
+#: Hyperloom is expected to move its objective onto the InferenceX definition. Until that lands,
+#: ``intvty`` keeps naming the axis Hyperloom actually grades, so GEAK's accept gate and
+#: Hyperloom's KEEP gate cannot drift apart in the interim. When it lands, the handoff selects
+#: the new token and nothing in this file has to change.
 INTVTY_KEYS = ("e2e_norm_intvty_p90",)
+P90_INTVTY_KEYS = ("p90_tpot_ms", "tpot_p90_ms")
 
 OUTPUT_BASIS = "aggregate_output_tok_s"
 TOTAL_BASIS = "aggregate_total_token_tok_s"
 INTVTY_BASIS = "e2e_norm_intvty_p90"
+P90_INTVTY_BASIS = "p90_intvty_inferencex"
 
-#: E2E_METRIC value -> (rows to read, metric_basis to record). Spelled in Hyperloom's axis
-#: vocabulary so the handoff and this summary can be compared as strings on both sides.
+
+def _recip_ms_to_rate(ms):
+    """P90 ITL in ms -> the InferenceX per-user token rate. Non-positive is no reading."""
+    return 1000.0 / ms if ms > 0 else None
+
+
+#: E2E_METRIC value -> (rows to read, metric_basis to record, per-row transform or None).
+#: Spelled in Hyperloom's axis vocabulary so the handoff and this summary can be compared as
+#: strings on both sides. The two interactivity axes carry DIFFERENT basis strings on purpose:
+#: a summary read on one can then never be mistaken for the other downstream.
 _BASES = {
-    "output": (OUTPUT_KEYS, OUTPUT_BASIS),
-    "total": (TOTAL_KEYS, TOTAL_BASIS),
-    "total_token": (TOTAL_KEYS, TOTAL_BASIS),
-    "total_throughput": (TOTAL_KEYS, TOTAL_BASIS),
-    "intvty": (INTVTY_KEYS, INTVTY_BASIS),
-    "interactivity": (INTVTY_KEYS, INTVTY_BASIS),
-    "e2e_norm_intvty_p90": (INTVTY_KEYS, INTVTY_BASIS),
+    "output": (OUTPUT_KEYS, OUTPUT_BASIS, None),
+    "total": (TOTAL_KEYS, TOTAL_BASIS, None),
+    "total_token": (TOTAL_KEYS, TOTAL_BASIS, None),
+    "total_throughput": (TOTAL_KEYS, TOTAL_BASIS, None),
+    "intvty": (INTVTY_KEYS, INTVTY_BASIS, None),
+    "interactivity": (INTVTY_KEYS, INTVTY_BASIS, None),
+    "e2e_norm_intvty_p90": (INTVTY_KEYS, INTVTY_BASIS, None),
+    "p90_intvty_inferencex": (P90_INTVTY_KEYS, P90_INTVTY_BASIS, _recip_ms_to_rate),
 }
+
+#: The axes that measure interactivity rather than throughput. They carry the total-throughput
+#: guard, and their ``throughput_tok_s_median`` is not a tok/s figure.
+_INTVTY_BASES = frozenset({INTVTY_BASIS, P90_INTVTY_BASIS})
 
 
 def _basis():
-    """``(keys, metric_basis)`` for E2E_METRIC; an unknown axis is fatal, not a silent default.
+    """``(keys, metric_basis, transform)`` for E2E_METRIC; an unknown axis is fatal.
 
     Falling back to output here would be the expensive failure: an orchestrator that asks for an
     axis this build cannot measure would get a summary labelled with the axis it did NOT request,
@@ -74,6 +109,19 @@ def _num(d, *keys):
         if k in d and isinstance(d[k], (int, float)):
             return float(d[k])
     return None
+
+
+def _axis_num(d, keys, transform):
+    """The selected axis's value for one row, transformed into the graded units.
+
+    Transforming per row rather than after the median keeps ``_spread_pct`` expressed in the
+    units the accept gate compares; the median itself is unaffected either way, the transform
+    being monotone.
+    """
+    v = _num(d, *keys)
+    if v is None:
+        return None
+    return transform(v) if transform else v
 
 
 def _med3(xs):
@@ -108,8 +156,8 @@ def _emit(summary, out_path, tail):
 
 
 def from_runs(args):
-    keys, basis = _basis()
-    is_output, is_intvty = basis == OUTPUT_BASIS, basis == INTVTY_BASIS
+    keys, basis, transform = _basis()
+    is_output, is_intvty = basis == OUTPUT_BASIS, basis in _INTVTY_BASES
 
     def read(path):
         xs = []
@@ -123,7 +171,7 @@ def from_runs(args):
                         d = json.loads(line)
                     except ValueError:
                         continue
-                    v = _num(d, *keys)
+                    v = _axis_num(d, keys, transform)
                     if v is not None:
                         xs.append(v)
         except FileNotFoundError:
@@ -140,7 +188,7 @@ def from_runs(args):
                 d = json.loads(line)
             except ValueError:
                 continue
-            v = _num(d, *keys)
+            v = _axis_num(d, keys, transform)
             if v is not None:
                 tps.append(v)
             if is_intvty:
@@ -230,7 +278,7 @@ def from_replicas(args):
     med, spread = _med3(tps), _spread_pct(tps)
     bases = {s.get("metric_basis") for s in summaries if s.get("metric_basis")}
     basis = next(iter(bases)) if len(bases) == 1 else None
-    is_output, is_intvty = basis == OUTPUT_BASIS, basis == INTVTY_BASIS
+    is_output, is_intvty = basis == OUTPUT_BASIS, basis in _INTVTY_BASES
     guard = col("guard_total_tok_s_median") if is_intvty else []
     summary = {
         "requested": args.requested,
