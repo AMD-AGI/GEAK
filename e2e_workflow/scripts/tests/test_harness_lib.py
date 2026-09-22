@@ -46,6 +46,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest.mock import patch
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -272,6 +273,14 @@ class _T:
     def _reduce(self, fn):
         return _T((), [fn(self.tolist())], dtype=self.dtype, device=self.device)
 
+    def sum(self):
+        """Short-circuits the lazy fill: flush_cache reduces a 512MB buffer, and going through
+        `_reduce` would materialize 134M floats and hang the suite. Returns a _T, not a float, so it
+        mirrors the real thing -- a device tensor that costs nothing on the host until `.item()`."""
+        if self._data is None:
+            return _T((), [self._fill * self.numel()], dtype=self.dtype, device=self.device)
+        return self._reduce(sum)
+
     def mean(self):
         return self._reduce(lambda v: sum(v) / len(v))
 
@@ -437,7 +446,7 @@ class _Stack:
             is_available=_is_available, synchronize=_synchronize,
             get_device_properties=_get_device_properties, Event=_Event, Stream=_Stream,
             current_stream=lambda: default_stream, stream=_stream_ctx,
-            CUDAGraph=_CUDAGraph, graph=_graph_ctx)
+            CUDAGraph=_CUDAGraph, graph=_graph_ctx, current_device=lambda: 0)
         torch.finfo = lambda dt: types.SimpleNamespace(max=dt.max, min=-dt.max)
         torch.iinfo = lambda dt: types.SimpleNamespace(max=dt.max, min=-dt.max - 1)
         torch.Generator = _Generator
@@ -517,8 +526,9 @@ class _HarnessTestCase(unittest.TestCase):
         self.clock = _Clock(_wall_deltas(self.WALL_MS) if self.WALL_MS else (0.001,))
         self.addCleanup(setattr, hl, "time", hl.time)
         hl.time = self.clock
-        hl._CACHE_FLUSH_BUF = None
-        self.addCleanup(setattr, hl, "_CACHE_FLUSH_BUF", None)
+        for g in ("_CACHE_FLUSH_BUF", "_CACHE_FLUSH_SINK", "_CACHE_FLUSH_DEV"):
+            setattr(hl, g, None)
+            self.addCleanup(setattr, hl, g, None)
 
     def _restore_torch(self):
         if self._prev_torch is _MISSING:
@@ -968,15 +978,59 @@ class TestTimeOpEvents(_CudaTestCase):
         self.assertAlmostEqual(got["wall_ms"], 10.0)
         self.assertAlmostEqual(got["host_ms"], 1.0)         # eager call() is one launch -> no division
 
-    def test_the_cache_is_flushed_once_per_sample_outside_the_event_window(self):
-        hl.time_op(lambda: None, warmup=1, repeats=3)
-        self.assertIsNotNone(hl._CACHE_FLUSH_BUF)
+    def test_the_cache_is_prepared_once_per_sample_outside_the_event_window(self):
+        reads, real_sum = [], _T.sum
+
+        def read(buf):
+            reads.append(len(self.stack.events))
+            return real_sum(buf)
+
+        with patch.object(_T, "sum", read), _env(HARNESS_CACHE_MODE="none"):
+            got = hl.time_op(lambda: None, warmup=1, repeats=3, detail=True)
+        # One actual read before each sample's start event; the removed env switch cannot skip it.
+        self.assertEqual(reads, [0, 3, 6])
+        self.assertEqual(got["cache_condition"]["mode"], "read-evict")
         # sync() before each sample, the post-warmup sync, and the host probe's own two
         self.assertEqual(self.stack.syncs, 6)
 
-    def test_flush_can_be_disabled_for_a_deliberately_hot_measurement(self):
-        hl.time_op(lambda: None, warmup=1, repeats=2, flush_cache=False)
-        self.assertIsNone(hl._CACHE_FLUSH_BUF)
+    def test_the_receipt_reports_which_cache_condition_produced_the_number(self):
+        with _env(HARNESS_CACHE_FLUSH_MB="64"):
+            got = hl.time_op(lambda: None, warmup=1, repeats=3, detail=True)
+        self.assertEqual(got["cache_condition"]["mode"], "read-evict")
+        self.assertEqual(got["cache_condition"]["bytes"], 64 << 20)
+        self.assertFalse(got["cache_condition"]["deployment_calibrated"])
+        self.assertIn("primed", got)                        # and the timing receipt is still intact
+
+    def test_the_removed_switch_cannot_change_the_measurement_policy(self):
+        for value in (True, False, None):
+            with self.subTest(value=value), self.assertRaises(TypeError):
+                hl.time_op(lambda: None, flush_cache=value)
+        # The old positional switch must not silently become the detail argument.
+        with self.assertRaises(TypeError):
+            hl.time_op(lambda: None, 1, 2, 1, False, False)
+
+    def test_a_bad_buffer_size_is_a_configuration_error_before_the_call_runs(self):
+        box, call = self._counting_call()
+        with _env(HARNESS_CACHE_FLUSH_MB="0"), self.assertRaises(ValueError):
+            hl.time_op(call)
+        self.assertEqual(box["n"], 0)
+
+    def test_the_buffer_size_is_fixed_before_warmup_even_if_the_environment_changes(self):
+        def call():
+            os.environ["HARNESS_CACHE_FLUSH_MB"] = "0"
+
+        with _env(HARNESS_CACHE_FLUSH_MB="8"):
+            got = hl.time_op(call, warmup=1, repeats=3, detail=True)
+        self.assertEqual(got["cache_condition"]["bytes"], 8 << 20)
+        self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), (8 << 20) // 4)
+
+    def test_the_buffer_is_allocated_before_warmup_not_inside_a_sample(self):
+        # A 512MB allocation inside the timed loop would land between the flush and the kernel.
+        allocs = []
+        real_ones = self.torch.ones
+        self.torch.ones = lambda *a, **k: (allocs.append(len(self.stack.events)), real_ones(*a, **k))[1]
+        hl.time_op(lambda: None, warmup=1, repeats=3)
+        self.assertEqual(allocs, [0])                       # once, before any event was recorded
 
     def test_each_sample_records_start_and_end_and_waits_on_the_end_event(self):
         # Pinned deliberately: a batched variant dropping these syncs measured WORSE per-window overhead
@@ -1054,9 +1108,18 @@ class TestTimeOpGraph(_CudaTestCase):
         # 3 failed-capture warmups + 2 warmup + 3 samples + the host probe's warmups and launches
         self.assertEqual(box["n"], 8 + 3 + hl._HOST_PROBE_LAUNCHES)
 
-    def test_graph_replay_can_also_be_timed_hot(self):
-        hl.time_op(lambda: None, warmup=1, repeats=2, graph=True, flush_cache=False)
-        self.assertIsNone(hl._CACHE_FLUSH_BUF)
+    def test_graph_replay_reads_the_buffer_before_each_sample_outside_capture(self):
+        reads, real_sum = [], _T.sum
+
+        def read(buf):
+            reads.append((len(self.stack.events), self.stack.capturing))
+            return real_sum(buf)
+
+        with patch.object(_T, "sum", read), _env(HARNESS_CACHE_MODE="write-evict"):
+            got = hl.time_op(lambda: None, warmup=1, repeats=2, graph=True, detail=True)
+        self.assertEqual(reads, [(0, False), (3, False)])
+        self.assertEqual(got["cache_condition"]["mode"], "read-evict")
+        self.assertEqual(hl._CACHE_FLUSH_BUF.tolist()[:4], [1.0] * 4)
 
 
 class TestTimingResult(unittest.TestCase):
@@ -1075,6 +1138,19 @@ class TestTimingResult(unittest.TestCase):
                           "host_ms": 0.5, "primed": True})
         self.assertEqual(set(hl._timing_result(1.5, 2.25, "cuda_event", True, None, True)),
                          {"ms", "wall_ms", "timer"})
+
+    def test_the_cache_condition_rides_the_receipt_and_is_independent_of_the_host_keys(self):
+        policy = {"mode": "read-evict", "bytes": 1 << 20}
+        got = hl._timing_result(1.5, 2.25, "cuda_event", True, 0.5, True, policy)
+        self.assertEqual(got["cache_condition"], policy)
+        self.assertEqual(got["primed"], True)                       # the fix must not cost the old keys
+        self.assertEqual(set(hl._timing_result(1.5, 2.25, "wall", True, policy=policy)),
+                         {"ms", "wall_ms", "timer", "cache_condition"})
+
+    def test_an_absent_cache_condition_is_left_absent_so_old_receipts_stay_identifiable(self):
+        # director.md reads ABSENCE as "frozen under the unconditional write-evict". Emitting a default
+        # here would make every stale task claim it had been measured under the new policy.
+        self.assertNotIn("cache_condition", hl._timing_result(1.5, 2.25, "cuda_event", True, 0.5, True))
 
     def test_primed_is_serialized_as_a_real_bool_for_the_receipt_json(self):
         # The receipt is a JSON line the gate parses; an int here serializes as 0/1 and misses `=== true`.
@@ -1097,6 +1173,17 @@ class TestFlushCache(_HarnessTestCase):
         hl.flush_cache(self.torch)
         self.assertIsNone(hl._CACHE_FLUSH_BUF)
 
+    def test_read_evict_on_a_cpu_box_does_not_allocate_or_reduce(self):
+        hl.flush_cache(self.torch)
+        self.assertIsNone(hl._CACHE_FLUSH_BUF)
+        self.assertIsNone(hl._CACHE_FLUSH_SINK)
+
+    def test_the_wall_fallback_still_reports_the_cache_condition_it_could_not_apply(self):
+        got = hl.time_op(lambda: None, warmup=1, repeats=2, detail=True)
+        self.assertEqual(got["timer"], "wall")
+        self.assertEqual(got["cache_condition"]["mode"], "read-evict")
+        self.assertNotIn("primed", got)                     # no CUDA -> the timer still cannot tell
+
 
 class TestFlushCacheOnDevice(_CudaTestCase):
     def test_the_default_buffer_is_larger_than_mi300_s_infinity_cache(self):
@@ -1116,24 +1203,74 @@ class TestFlushCacheOnDevice(_CudaTestCase):
             hl.flush_cache(self.torch, mb=8)
         self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), (8 << 20) // 4)
 
-    def test_a_zero_size_still_allocates_something_writable(self):
-        hl.flush_cache(self.torch, mb=0)
-        self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), 1)
+    def test_a_nonpositive_size_is_rejected_rather_than_silently_evicting_nothing(self):
+        """mb=0 used to allocate a 1-element buffer: a flush that evicts nothing while still reporting
+        that the sample was prepared. The read eviction must have a positive buffer size."""
+        for mb in (0, -1):
+            with self.subTest(mb=mb), self.assertRaises(ValueError):
+                hl.flush_cache(self.torch, mb=mb)
+        self.assertIsNone(hl._CACHE_FLUSH_BUF)
 
-    def test_a_big_enough_buffer_is_reused_and_only_rezeroed(self):
+    def test_the_removed_mode_argument_cannot_disable_or_switch_eviction(self):
+        for mode in ("none", "write-evict", "read-evict"):
+            with self.subTest(mode=mode), self.assertRaises(TypeError):
+                hl.flush_cache(self.torch, mode=mode)
+
+    def test_a_same_size_buffer_is_reused_and_read_again(self):
         hl.flush_cache(self.torch, mb=8)
         first = hl._CACHE_FLUSH_BUF
-        first.overwrite_([1.0] * 4)                          # pretend a prior flush left data behind
-        hl.flush_cache(self.torch, mb=4)
+        first_sum = hl._CACHE_FLUSH_SINK
+        hl.flush_cache(self.torch, mb=8)
         self.assertIs(hl._CACHE_FLUSH_BUF, first)
-        self.assertEqual(first.tolist()[:4], [0.0, 0.0, 0.0, 0.0])
+        self.assertIsNot(hl._CACHE_FLUSH_SINK, first_sum)
+        self.assertEqual(first.tolist()[:4], [1.0] * 4)
 
-    def test_a_larger_request_reallocates(self):
+    def test_read_evict_reduces_the_buffer_instead_of_dirtying_it(self):
+        """The whole point of the fix: same traffic, no dirty lines for the NEXT (timed) kernel to
+        contend with. The buffer must come back untouched and the reduction must be kept alive."""
+        hl.flush_cache(self.torch, mb=8)
+        buf = hl._CACHE_FLUSH_BUF
+        n = (8 << 20) // 4
+        self.assertEqual(buf.numel(), n)
+        self.assertEqual(buf.tolist()[:4], [1.0, 1.0, 1.0, 1.0])   # ones, NOT zeroed
+        self.assertIsNotNone(hl._CACHE_FLUSH_SINK)
+        self.assertEqual(hl._CACHE_FLUSH_SINK.item(), float(n))
+
+    def test_a_different_size_reallocates_in_either_direction(self):
+        """Exact size, not `>=`: reusing a stale oversized buffer would evict more than was asked for
+        and the receipt's `bytes` would be a lie."""
         hl.flush_cache(self.torch, mb=4)
         first = hl._CACHE_FLUSH_BUF
         hl.flush_cache(self.torch, mb=8)
         self.assertIsNot(hl._CACHE_FLUSH_BUF, first)
         self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), (8 << 20) // 4)
+        hl.flush_cache(self.torch, mb=4)
+        self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), (4 << 20) // 4)
+
+
+class TestCachePolicy(_HarnessTestCase):
+    def test_the_policy_is_read_evict(self):
+        p = hl.cache_policy()
+        self.assertEqual(p["mode"], "read-evict")
+        self.assertEqual(p["preparation"], "float32-sum")
+        self.assertEqual(p["bytes"], 512 << 20)
+
+    def test_the_removed_environment_switch_cannot_change_the_policy(self):
+        for mode in ("none", "write-evict", "read-evict", "cold"):
+            with self.subTest(mode=mode), _env(HARNESS_CACHE_MODE=mode):
+                p = hl.cache_policy()
+                self.assertEqual((p["mode"], p["preparation"], p["bytes"]),
+                                 ("read-evict", "float32-sum", 512 << 20))
+
+    def test_the_policy_never_claims_the_deployed_cache_state_was_reproduced(self):
+        p = hl.cache_policy()
+        self.assertFalse(p["deployment_calibrated"])
+        self.assertTrue(p["outside_timing"])
+
+    def test_eviction_with_a_nonpositive_budget_is_rejected(self):
+        for size in ("0", "-1"):
+            with self.subTest(size=size), _env(HARNESS_CACHE_FLUSH_MB=size), self.assertRaises(ValueError):
+                hl.cache_policy()
 
 
 # --------------------------------------------------------------------------- #

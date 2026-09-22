@@ -23,6 +23,83 @@ Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
 
+### Agent backend (swappable: Claude Code ↔ codex)
+
+By default `run_e2e.py` drives the JS workflow through **Claude Code's `Workflow`
+tool** (SDK preferred, `claude -p` CLI fallback). The SAME workflow can run on the
+**standalone Node runtime** (`interface/runtime/engine/run_workflow.mjs`) against the
+codex CLI instead — the runtime re-implements the Workflow globals
+(`agent/parallel/pipeline/phase/workflow`) and dispatches each `agent()` to a
+one-shot backend process, so the agent CLI itself does NOT need to support
+parallel/nested subagents.
+
+**Two orthogonal axes**, defined in `interface/runtime/engine/registry.json`:
+`agents` (how to drive a CLI: `claude` / `codex`) × `models` (an endpoint). A
+`profile` pins one `(agent, model)` combo. Adding a third agent is a data change
+— a new `agents` entry plus a passing `conformance.mjs --agent <name>`; see
+`runtime/SETUP.md` for the R1–R7 bring-up checklist.
+
+| Selection (flag or env) | Effect |
+| --- | --- |
+| *(none, no provider key)* | Native Claude Code `Workflow` tool — unchanged |
+| *(none, only `GEAK_AMDKEY` or `OPENAI_API_KEY` set)* | runtime on codex — **setting the key is the selection** |
+| `GEAK_AGENT_PROFILE=codex-gpt56` | runtime, profile's agent+model |
+| `GEAK_AGENT_BACKEND=codex` | runtime, agent `codex` (back-compat alias for `--agent`) |
+| `GEAK_MODEL=<name>` | override the model axis (registry `models` key) |
+
+Precedence: CLI flag (`--profile`/`--agent`/`--model`) > env > key-based
+auto-selection > `registry.default_profile`. A key only selects codex while no
+`ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN` is also set, so exporting a gateway key
+next to an existing Claude setup does not hijack it; `GEAK_AGENT_AUTO=0` turns
+key-based selection off entirely.
+
+Env knobs (all optional):
+
+| Env | Meaning | Default |
+| --- | --- | --- |
+| `GEAK_AGENT_PROFILE` | registry profile = (agent, model) | unset (native) |
+| `GEAK_AGENT_BACKEND` | agent name (alias for `--agent`) | unset |
+| `GEAK_MODEL` | model name (registry `models` key) | unset |
+| `GEAK_REGISTRY` | path to a custom registry.json | shipped one |
+| `GEAK_NODE_BIN` | node binary for the runtime | `node` |
+| `GEAK_CONCURRENCY` | max concurrent agent subprocesses | `min(16, cpus-2)` |
+| `GEAK_AGENT_TIMEOUT_MS` | per-agent hard timeout | `3600000` |
+| `GEAK_SCHEMA_RETRIES` | in-call structured-output retries | `2` |
+| `GEAK_<CLI>_BIN` / `GEAK_<CLI>_MODEL` | per-CLI binary / model override | registry |
+| `GEAK_<CLI>_APPROVE` / `GEAK_<CLI>_EXTRA_ARGS` | auto-approve flag / extra CLI args | registry |
+| `GEAK_AMDKEY` | AMD gateway key; also selects codex. `GEAK_`-prefixed so it survives hyperloom's `.env` allowlist — see SETUP.md | inherited |
+| `OPENAI_BASE_URL` / `OPENAI_API_KEY` | OpenAI-compatible provider auth (codex); the key also selects codex | inherited |
+| `ANTHROPIC_BASE_URL` / `ANTHROPIC_*` | Anthropic provider auth (claude) | inherited |
+| `GEAK_AGENT_AUTO` | `0` disables key-based backend selection | `1` |
+
+Prereqs for the non-native backend: Node 20+ on `PATH` (the runtime itself needs
+only 18; the codex CLI needs 20), plus `npm i -g @openai/codex@0.146.1` and a
+reachable endpoint. The two `.js` workflows, `roles/`, `knowledge/`, and
+`scripts/` are used **unmodified** on every backend. Full setup, knobs and
+troubleshooting: `runtime/SETUP.md`.
+
+The single-kernel `kernel_workflow.js` has no Python wrapper; run it on the
+runtime directly:
+
+```bash
+node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.js \
+  --agent codex \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"/abs/kernel_workflow","budget":6}'
+```
+
+**Controlled (agent × model) experiments** are built in:
+
+```bash
+node interface/runtime/engine/experiment.mjs \
+  --script kernel_workflow/kernel_workflow.js \
+  --args '{"kernel_path":"/abs/knn","workflow_dir":"/abs/kernel_workflow","budget":6}' \
+  --agents claude,codex --models default --repeats 3 --out ./exp_compare
+# -> results.jsonl + summary.md/csv (speedup / success-rate / wall / schema-fails; no token/cost)
+```
+
+Runtime primitives + config resolution can be smoke-tested with no CLI/network/GPU:
+`node interface/runtime/engine/selftest.mjs`. See `runtime/SETUP.md` for the full picture.
+
 The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 (`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).
 

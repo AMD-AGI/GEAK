@@ -138,6 +138,75 @@ WORKFLOW_SETTINGS = os.environ.get(
 # GEAK_CLAUDE_BIN to pin a specific build (e.g. an older native version).
 CLAUDE_BIN = os.environ.get("GEAK_CLAUDE_BIN", "").strip()
 
+# --- Swappable agent backend (standalone runtime) --------------------------
+# When a backend is selected — explicitly via GEAK_AGENT_BACKEND (e.g. "codex")
+# or derived from a configured provider key (see _derive_agent_from_env below) —
+# the JS workflow is NOT run through Claude Code's Workflow tool. Instead it runs
+# on the standalone Node runtime (interface/runtime/engine/run_workflow.mjs), which
+# re-implements the Workflow globals (agent/parallel/pipeline/phase/workflow)
+# itself and dispatches each agent() call to the named backend's one-shot CLI
+# (codex exec / claude -p). This is what lets GEAK use a CLI that cannot itself
+# orchestrate parallel/nested subagents — the runtime does all of that.
+# With no backend selected AND no provider key configured, the original
+# Claude/Workflow path below runs byte-for-byte unchanged.
+AGENT_BACKEND = os.environ.get("GEAK_AGENT_BACKEND", "").strip()   # == --agent (back-compat alias)
+AGENT_PROFILE = os.environ.get("GEAK_AGENT_PROFILE", "").strip()   # a registry profile = (agent, model)
+AGENT_MODEL = os.environ.get("GEAK_MODEL", "").strip()             # override the model axis
+RUNTIME_SCRIPT = INTERFACE_DIR / "runtime" / "engine" / "run_workflow.mjs"
+RUNTIME_REGISTRY = INTERFACE_DIR / "runtime" / "engine" / "registry.json"
+NODE_BIN = os.environ.get("GEAK_NODE_BIN", "node")
+
+
+# Credential-derived backend, mirroring deriveAgentFromEnv() in runtime/engine/config.mjs:
+# configuring a provider key is by itself enough to select the CLI that key
+# belongs to, so a key-only setup does not additionally have to set
+# GEAK_AGENT_BACKEND. Both the trigger names and the per-agent credential sides
+# are read from registry.json — the same data the JS side uses — so the two can
+# never disagree about which keys mean what. A key selects its own agent only
+# when no OTHER agent's side is configured (hyperloom's is_openai_only() shape
+# test); an ambiguous environment keeps the native Claude path rather than
+# hijacking it. GEAK_AGENT_AUTO=0 opts out.
+def _side_env_names(agent: dict) -> list[str]:
+    triggers = [(p or {}).get("trigger_env") for p in agent.get("provider_autoselect") or []]
+    return [*(agent.get("credential_env") or []), *[t for t in triggers if t]]
+
+
+def _derive_agent_from_env() -> str:
+    if os.environ.get("GEAK_AGENT_AUTO", "1").strip().lower() in {"0", "false", "no"}:
+        return ""
+    if AGENT_BACKEND or AGENT_PROFILE:      # explicit selection always wins
+        return ""
+    try:
+        reg = json.loads(RUNTIME_REGISTRY.read_text())
+    except Exception:
+        return ""                            # no registry -> native Claude path
+    agents = (reg.get("agents") or {}).items()
+    configured = {
+        name for name, agent in agents
+        if any(os.environ.get(v, "").strip() for v in _side_env_names(agent))
+    }
+    triggered = next(
+        (
+            name for name, agent in agents
+            for prov in agent.get("provider_autoselect") or []
+            if (prov or {}).get("trigger_env")
+            and os.environ.get(prov["trigger_env"], "").strip()
+        ),
+        "",
+    )
+    if not triggered:
+        return ""
+    return triggered if configured <= {triggered} else ""
+
+
+AUTO_BACKEND = _derive_agent_from_env()
+# The backend actually used, however it was chosen. Passed to run_workflow.mjs as
+# an explicit --agent so the JS layer never re-derives and lands somewhere else.
+EFFECTIVE_BACKEND = AGENT_BACKEND or AUTO_BACKEND
+# Take the standalone-runtime path when an agent (explicit or derived) or a
+# profile is selected.
+USE_RUNTIME = bool(EFFECTIVE_BACKEND or AGENT_PROFILE)
+
 # Background-task completion race (see _invoke_via_sdk completion gate):
 # when the SDK turn "looks done" (a background task notified terminal + the
 # main turn produced a ResultMessage) but the workflow has NOT yet written its
@@ -281,7 +350,50 @@ def _as_bool(v) -> bool:
     return bool(v)
 
 
-def map_args(h: dict, timeout_s: int | None = None) -> dict:
+def _targeting_shape(h: dict) -> tuple[int, int, str]:
+    """Resolve the ISL/OSL the KERNEL agents should optimize against.
+
+    The bench client no longer measures with these -- an AgentX handoff drives
+    aiperf's trace replay, which owns the sequence lengths. But the agents still
+    read isl/osl as the analytic serving call model when they synthesize
+    GEMM/attention shapes, so on a trace replay the synthetic 1024/1024
+    defaults would aim the whole search two orders of magnitude below the real
+    load (the corpus averages ~112k input tokens per request).
+
+    ``workload_spec.observed_isl/observed_osl`` carry the shape the orchestrator
+    MEASURED on its own baseline. Prefer them; fall back to the synthetic
+    workload block when they are absent so non-AgentX runs are untouched.
+
+    Returns ``(isl, osl, provenance)``.
+    """
+    workload = h.get("workload") or {}
+    syn_isl = int(workload.get("isl", 1024) or 1024)
+    syn_osl = int(workload.get("osl", 1024) or 1024)
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return syn_isl, syn_osl, "handoff_workload"
+    try:
+        obs_isl = int(spec.get("observed_isl") or 0)
+        obs_osl = int(spec.get("observed_osl") or 0)
+    except (TypeError, ValueError):
+        obs_isl = obs_osl = 0
+    if obs_isl <= 0 or obs_osl <= 0:
+        sys.stderr.write(
+            "!!! AgentX workload carries no observed_isl/observed_osl; kernel "
+            f"targeting falls back to the synthetic {syn_isl}/{syn_osl}, which "
+            "is far below the real replay shape. Kernel choices may be aimed at "
+            "the wrong regime (the MEASUREMENT is unaffected).\n"
+        )
+        return syn_isl, syn_osl, "synthetic_fallback_on_agentx"
+    return obs_isl, obs_osl, "agentx_observed"
+
+
+def map_args(
+    h: dict,
+    timeout_s: int | None = None,
+    *,
+    artifact_cutoff_ts: float | None = None,
+) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
     effective = None
@@ -323,14 +435,18 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # gpu_ids is the optimization-parallelism pool AND the serving device set.
     # Default to 0..tp-1 so serving honours the requested tensor-parallel size.
     gpu_ids = h.get("gpu_ids") or ",".join(str(i) for i in range(max(tp, 1)))
+    target_isl, target_osl, shape_provenance = _targeting_shape(h)
     ps_args = {
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
         "backend": h.get("framework", "sglang"),
         "tp": tp,
         "gpu_ids": str(gpu_ids),
-        "isl": int(workload.get("isl", 1024)),
-        "osl": int(workload.get("osl", 1024)),
+        # On an AgentX handoff these describe the shape the agents OPTIMIZE for,
+        # not the shape anything is measured at (see _targeting_shape).
+        "isl": target_isl,
+        "osl": target_osl,
+        "workload_shape_provenance": shape_provenance,
         "conc": int(workload.get("conc", 64)),
         # Seed the baseline with Hyperloom's accepted best config so the
         # baseline == Hyperloom best config (fair engagement start).
@@ -466,7 +582,10 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # (not just the driver prompt) so the JS Profile/Strategize/Extract phases can
     # use them as a prior. Only non-null paths are forwarded; when nothing is found
     # the key is omitted entirely, so a tracelens-less run is byte-identical.
-    tl = resolve_tracelens_report(h.get("exp_root", ""))
+    tl = resolve_tracelens_report(
+        h.get("exp_root", ""),
+        not_after=artifact_cutoff_ts,
+    )
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
@@ -487,6 +606,10 @@ _TRACELENS_ARTIFACT_PATTERNS = {
     "trace_file": "runs/roofline/**/torch_trace",
 }
 
+_BENCHMARK_TIMESTAMP_RE = re.compile(
+    r"(?:^|/)benchmark_[^/]+_(\d{8}_\d{6})(?:/|$)"
+)
+
 
 def _experiment_root_from_exp_root(exp_root: str) -> str:
     """Return the experiment root (the directory that CONTAINS ``geak``).
@@ -500,17 +623,53 @@ def _experiment_root_from_exp_root(exp_root: str) -> str:
     return norm
 
 
-def _find_latest_artifact(root: str, pattern: str) -> str | None:
-    """Return the latest match for ``pattern`` under ``root`` (or None).
+def _artifact_timestamp(path: str) -> float:
+    """Return an artifact's chronological timestamp.
 
-    Matches are sorted for determinism; the timestamps embedded in the run
-    directory names sort chronologically, so the last entry is the most recent.
+    Roofline paths put a random run id before ``benchmark_<backend>_<UTC>``;
+    sorting the full path therefore orders by that random id, not by time. Use
+    the embedded benchmark timestamp when present. For other artifacts, and
+    legacy layouts without that component, fall back to the artifact mtime.
     """
-    matches = sorted(glob.glob(os.path.join(root, pattern), recursive=True))
-    return matches[-1] if matches else None
+    match = _BENCHMARK_TIMESTAMP_RE.search(path)
+    if match:
+        parsed = datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+        return parsed.replace(tzinfo=timezone.utc).timestamp()
+
+    return Path(path).stat().st_mtime
 
 
-def resolve_tracelens_report(exp_root: str) -> dict:
+def _find_latest_artifact(
+    root: str,
+    pattern: str,
+    *,
+    not_after: float | None = None,
+) -> str | None:
+    """Return the newest artifact under ``root`` at the cutoff (or ``None``).
+
+    ``not_after`` freezes discovery at the handoff boundary, preventing a
+    resumed GEAK run from consuming artifacts written later into the same
+    experiment directory.
+    """
+    candidates: list[tuple[float, str]] = []
+    for path in glob.glob(os.path.join(root, pattern), recursive=True):
+        try:
+            timestamp = _artifact_timestamp(path)
+        except (OSError, ValueError):
+            continue
+        if not_after is not None and timestamp > not_after:
+            continue
+        candidates.append((timestamp, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item[0], item[1]))[1]
+
+
+def resolve_tracelens_report(
+    exp_root: str,
+    *,
+    not_after: float | None = None,
+) -> dict:
     """Resolve the four TraceLens artifacts beside the handoff's ``geak``.
 
     Returns a dict with ``search_root`` plus the four artifact paths
@@ -520,7 +679,10 @@ def resolve_tracelens_report(exp_root: str) -> dict:
     root = _experiment_root_from_exp_root(exp_root)
     report: dict = {"search_root": root}
     for key, pattern in _TRACELENS_ARTIFACT_PATTERNS.items():
-        report[key] = _find_latest_artifact(root, pattern) if root else None
+        report[key] = (
+            _find_latest_artifact(root, pattern, not_after=not_after)
+            if root else None
+        )
     return report
 
 
@@ -546,13 +708,13 @@ PROCESS_SAFETY = (
 
 def build_prompt(ps_args: dict) -> str:
     eval_dir = ps_args.get("eval_dir", "")
-    # Locate the upstream TraceLens / kernel-agent artifacts (analysis.md,
-    # kernel_candidates.json, tracelens_report.json) plus the roofline torch
-    # trace, and surface them to the agent as a single tracelens_report block.
-    tracelens_report = resolve_tracelens_report(ps_args.get("exp_root", ""))
-    # The prompt only needs the four artifact paths, not the internal search_root.
+    # Artifact discovery is frozen once in map_args. Re-scanning here can pick
+    # files written after the handoff and make the prompt disagree with the
+    # actual Workflow args.
+    resolved_tracelens = ps_args.get("tracelens") or {}
     tracelens_prompt_payload = {
-        k: v for k, v in tracelens_report.items() if k != "search_root"
+        key: resolved_tracelens.get(key)
+        for key in _TRACELENS_ARTIFACT_PATTERNS
     }
     tracelens_block = (
         "\n\ntracelens_report (upstream kernel-agent / roofline artifacts; "
@@ -594,18 +756,26 @@ def build_prompt(ps_args: dict) -> str:
 def apply_bench_client(h: dict) -> str:
     """Decide + export the bench CLIENT so workflow bench_e2e.sh calls inherit it.
 
-    handoff.bench_client: "auto" (default) | "inferencex" | "native".
-    "auto" => use InferenceX's benchmark_serving.py (measurement-protocol-identical to the
-    caller's Magpie harness) when an InferenceX checkout is discoverable, else
-    fall back to each backend's native client. The value is exported into the
-    environment so every ``bench_e2e.sh`` invocation the agents make inherits it.
+    handoff.bench_client: "auto" (default) | "inferencex" | "native" | "agentx".
+    "auto" => when ``workload_spec.kind`` is AgentX trace replay, select the
+    aiperf client; else use InferenceX's benchmark_serving.py when an InferenceX
+    checkout is discoverable, else fall back to each backend's native client.
+    The value is exported into the environment so every ``bench_e2e.sh``
+    invocation the agents make inherits it.
     """
     requested = str(h.get("bench_client", "auto") or "auto").strip().lower()
     ix_path = str(h.get("inferencex_path") or os.environ.get("INFERENCEX_PATH", "")).strip()
     if ix_path:
         os.environ["INFERENCEX_PATH"] = ix_path
+    spec = h.get("workload_spec")
+    spec_kind = str(spec.get("kind") or "").strip() if isinstance(spec, dict) else ""
     if requested == "auto":
-        client = "inferencex" if ix_path else "native"
+        if spec_kind == WORKLOAD_KIND_AGENTX:
+            client = AGENTX_BENCH_CLIENT
+        elif ix_path:
+            client = "inferencex"
+        else:
+            client = "native"
     else:
         client = requested
     if client == "inferencex" and not ix_path:
@@ -614,8 +784,116 @@ def apply_bench_client(h: dict) -> str:
             "falling back to native client (measurement protocol NOT aligned).\n"
         )
         client = "native"
+    # AgentX workloads must never silently fall back to a synthetic client: the
+    # handoff's isl/osl are placeholders and a synthetic sweep would produce a
+    # plausible-looking number on the wrong load (measured ~2.76x on Kimi-K3).
+    if (
+        spec_kind == WORKLOAD_KIND_AGENTX
+        and client != AGENTX_BENCH_CLIENT
+        and os.environ.get("GEAK_ALLOW_SYNTHETIC_ON_AGENTX", "").strip().lower()
+        not in ("1", "true", "yes", "on")
+    ):
+        sys.stderr.write(
+            f"bench_client={client!r} requested on an AgentX handoff "
+            f"(workload_spec.kind={spec_kind!r}); forcing bench_client="
+            f"{AGENTX_BENCH_CLIENT!r}. Set GEAK_ALLOW_SYNTHETIC_ON_AGENTX=1 to "
+            "opt into a synthetic client for debugging only.\n"
+        )
+        client = AGENTX_BENCH_CLIENT
     os.environ["BENCH_CLIENT"] = client
     return client
+
+
+def apply_workload_spec(h: dict) -> dict:
+    """Export AgentX workload identity so bench_e2e.sh drives the trace replay.
+
+    Only fires when ``handoff.workload_spec.kind`` is ``agentx_trace_replay``.
+    Absence preserves today's synthetic ISL/OSL path exactly. When active, marks
+    fixed ISL/OSL as inactive so adapters refuse to treat them as the served load.
+    """
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return {}
+    exported: dict[str, str] = {}
+    os.environ["GEAK_WORKLOAD_KIND"] = WORKLOAD_KIND_AGENTX
+    os.environ["GEAK_ISL_OSL_INACTIVE"] = "1"
+    # Long agentic windows: one repeat unless the caller explicitly overrides.
+    if "REPEATS" not in os.environ:
+        os.environ["REPEATS"] = "1"
+        exported["REPEATS"] = "1"
+    mapping = (
+        ("scenario", "GEAK_AGENTX_SCENARIO"),
+        ("corpus", "AGENTX_DATASET"),
+        ("canonical_corpus", "AGENTX_CANONICAL_DATASET"),
+        ("num_entries", "AGENTX_NUM_ENTRIES"),
+        ("duration_s", "GEAK_AGENTX_DURATION_S"),
+        ("geak_loop_duration_s", "GEAK_AGENTX_LOOP_DURATION_S"),
+        ("warmup_requests_per_lane", "AGENTX_WARMUP_REQUESTS_PER_LANE"),
+        ("warmup_grace_period_s", "AGENTX_WARMUP_GRACE_PERIOD"),
+        ("failed_request_threshold", "AGENTX_FAILED_REQUEST_THRESHOLD"),
+    )
+    for spec_key, env_key in mapping:
+        val = spec.get(spec_key)
+        if val is None or str(val).strip() == "":
+            continue
+        os.environ[env_key] = str(val)
+        exported[env_key] = str(val)
+    conc = spec.get("concurrency")
+    if conc is not None and str(conc).strip():
+        os.environ["CONC"] = str(conc)
+        exported["CONC"] = str(conc)
+    metric_basis = str(spec.get("metric_basis") or "").strip()
+    if metric_basis:
+        os.environ["GEAK_METRIC_BASIS"] = metric_basis
+        exported["GEAK_METRIC_BASIS"] = metric_basis
+    return exported
+
+
+def agentx_preflight(h: dict) -> list[str]:
+    """Report missing AgentX prerequisites BEFORE the run burns a server launch.
+
+    aiperf is not in the base serving image -- the orchestrator pip-installs it
+    into its own environment as part of enabling AgentX. When GEAK is dispatched
+    into a container that never ran that install, the client adapter cannot
+    discover the gap until it has already launched and warmed a server, which on
+    this model is a ~20 minute detour to reach a one-line error. This states the
+    gap at dispatch instead.
+
+    Returns human-readable problem strings (empty when the run can proceed).
+    Deliberately NON-fatal: PATH inside the bench subprocess is not always the
+    PATH here, so a hard abort could refuse a run that would have worked.
+    """
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return []
+    problems: list[str] = []
+    aiperf_bin = os.environ.get("AIPERF_BIN", "").strip() or "aiperf"
+    if not (
+        shutil.which(aiperf_bin)
+        or (os.path.isabs(aiperf_bin) and os.access(aiperf_bin, os.X_OK))
+    ):
+        problems.append(
+            f"aiperf not found on PATH (looked for {aiperf_bin!r}); the AgentX "
+            "client cannot replay traces. Install the AgentX-capable aiperf "
+            "into this environment, or set AIPERF_BIN to its path."
+        )
+    ix_root = os.environ.get("INFERENCEX_PATH", "").strip()
+    if not ix_root:
+        problems.append(
+            "INFERENCEX_PATH is unset, so map_aiperf.py cannot be located to "
+            "convert the aiperf export into a canonical result."
+        )
+    elif not any(
+        os.path.isfile(os.path.join(ix_root, rel))
+        for rel in ("benchmarks/map_aiperf.py", "assets/agentx/map_aiperf.py")
+    ):
+        problems.append(
+            f"map_aiperf.py not found under INFERENCEX_PATH={ix_root!r} "
+            "(expected benchmarks/ or assets/agentx/)."
+        )
+    for problem in problems:
+        sys.stderr.write(f"!!! AgentX preflight: {problem}\n")
+    return problems
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +909,24 @@ _MAGPIE_BACKENDS = {"sglang", "vllm"}
 # ``envs:`` mapping: these fields are optional launch-discovery hints, whereas
 # malformed environment replay must follow the strict fail-closed path.
 _RECIPE_KEYS = ("inferencex_path", "benchmark_script", "framework", "runner_type")
+
+# A cross-harness ratio only means something when both sides measured the same
+# WORKLOAD, and the way that breaks is silent. In the orchestrator's AgentX mode
+# the served load is a replay of real agentic traces (p50 ~89k input tokens, p99
+# past 500k) while the handoff still carries the CLI's synthetic isl/osl
+# defaults of 1024/1024 -- roughly two orders of magnitude apart. A GEAK run that
+# takes those defaults at face value measures a ~1k-token synthetic sweep and
+# then divides it into an agentic denominator. Measured on Kimi-K3: 465.7
+# synthetic tok/s over the 169.0 tok/s agentic baseline presents as a 2.76x win
+# with no kernel changed at all.
+#
+# The KIND of workload is the discriminator, not metric_basis -- both sides
+# report aggregate_output_tok_s, so the bases match while the loads do not.
+AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
+AGENTX_BENCH_CLIENT = "agentx"
+WORKLOAD_KIND_AGENTX = "agentx_trace_replay"
+WORKLOAD_KIND_SYNTHETIC = "synthetic_isl_osl"
+WORKLOAD_KIND_UNKNOWN = "unknown"
 
 # Names the recipe may carry that GEAK must nevertheless own, because they
 # address THIS run's resources rather than the served configuration. Replaying
@@ -1451,19 +1747,10 @@ def apply_bench_protocol(h: dict) -> dict:
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
     ):
-        # Warm-server parity: one server per leg, a discarded full warmup round, then the timed
-        # round(s) on that hot server -- Hyperloom's warmup_round/measure_round lifecycle.
-        # InferenceX still receives 2*concurrency internal warmups, which repeat prompt[0] to warm
-        # kernels/graphs; the outer full round is what populates the prefix cache.
-        # Some historical handoffs recorded an older small NUM_WARMUPS value;
-        # keep the observed 2*concurrency client behavior while changing only
-        # whether the separate outer full replay runs.
-        workload = h.get("workload") or {}
-        conc = max(1, int(workload.get("conc", 1) or 1))
+        # Warm-server parity -- one server per leg, a discarded full warmup round, then the
+        # timed round(s) on that hot server (Hyperloom's warmup_round/measure_round
+        # lifecycle) -- is about the SERVER lifecycle, so it holds for either workload kind.
         aligned = {
-            "NUM_WARMUPS": str(2 * conc),
-            "SEED": "0",
-            "RANDOM_RANGE_RATIO": "1",
             "GEAK_REPEAT_MODE": "warm_server",
             # Pinned as env too (bench_e2e.sh honours it for MEASUREMENT_PURPOSE=validation only)
             # so pinning measurement_mode=isolated_server for search cannot drag validation off
@@ -1471,23 +1758,43 @@ def apply_bench_protocol(h: dict) -> dict:
             "GEAK_VALIDATION_REPEAT_MODE": "warm_server",
             "REPLICA_RETRIES": "1",
         }
-        # NUM_PROMPTS was the one protocol knob this block did not align, and
-        # the two sides disagree by default: bench_e2e.sh falls back to Magpie's
-        # fixed CONC*10, while the caller's own materializer scales the count
-        # DOWN as the per-request sequence cost grows
-        # ({<=1024:10, <=4096:5, <=16384:3, else 2} * CONC -- Hyperloom
-        # ``_workload_envs.py``). At ISL+OSL=2048 that is 5*CONC there against
-        # 10*CONC here: a different saturation regime, so a different tok/s,
-        # measured under a header claiming the protocols match.
-        #
-        # bench_e2e.sh already implements that exact table (same thresholds,
-        # same max(CONC*factor, CONC) clamp) behind NUM_PROMPTS_ADAPTIVE, so
-        # aligning means switching it on rather than restating the arithmetic
-        # in a second place that can drift. Only when the handoff did NOT pin a
-        # count: an explicit num_prompts is the caller telling us what it
-        # measured, and it still wins.
-        if not str(protocol.get("num_prompts") or "").strip():
-            aligned["NUM_PROMPTS_ADAPTIVE"] = "1"
+        # The remaining knobs shape a SYNTHETIC prompt sweep and only mean
+        # something when both sides measured one. AgentX replays a fixed trace
+        # corpus with its own seed and warmup contract, so fabricating prompt
+        # counts or a range ratio for it would describe a workload nobody ran.
+        if _baseline_workload_kind(h)[0] != WORKLOAD_KIND_AGENTX:
+            # NUM_PROMPTS was the one protocol knob this block did not align, and
+            # the two sides disagree by default: bench_e2e.sh falls back to Magpie's
+            # fixed CONC*10, while the caller's own materializer scales the count
+            # DOWN as the per-request sequence cost grows
+            # ({<=1024:10, <=4096:5, <=16384:3, else 2} * CONC -- Hyperloom
+            # ``_workload_envs.py``). At ISL+OSL=2048 that is 5*CONC there against
+            # 10*CONC here: a different saturation regime, so a different tok/s,
+            # measured under a header claiming the protocols match.
+            #
+            # bench_e2e.sh already implements that exact table (same thresholds,
+            # same max(CONC*factor, CONC) clamp) behind NUM_PROMPTS_ADAPTIVE, so
+            # aligning means switching it on rather than restating the arithmetic
+            # in a second place that can drift. Only when the handoff did NOT pin a
+            # count: an explicit num_prompts is the caller telling us what it
+            # measured, and it still wins.
+            if not str(protocol.get("num_prompts") or "").strip():
+                aligned["NUM_PROMPTS_ADAPTIVE"] = "1"
+            # InferenceX still receives 2*concurrency internal warmups, which
+            # repeat prompt[0] to warm kernels/graphs; the outer full round is
+            # what populates the prefix cache.
+            # Some historical handoffs recorded an older small NUM_WARMUPS value;
+            # keep the observed 2*concurrency client behavior while changing only
+            # whether the separate outer full replay runs.
+            workload = h.get("workload") or {}
+            conc = max(1, int(workload.get("conc", 1) or 1))
+            aligned.update(
+                {
+                    "NUM_WARMUPS": str(2 * conc),
+                    "SEED": "0",
+                    "RANDOM_RANGE_RATIO": "1",
+                }
+            )
         for env_var, value in aligned.items():
             os.environ[env_var] = value
             exported[env_var] = value
@@ -1756,8 +2063,113 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
     return out
 
 
-def invoke_workflow(prompt: str, timeout_s: int, eval_dir: str | None = None) -> dict:
-    """Run the JS workflow and return its parsed JSON return value."""
+def _runtime_selection_args() -> list[str]:
+    """The agent/model selection flags passed to run_workflow.mjs.
+
+    Precedence mirrors the runtime: a profile (agent+model combo) OR an explicit
+    agent, plus an optional model override. A credential-derived agent is passed
+    explicitly too, so the runtime resolves the same backend this process decided
+    on instead of re-deriving it from its own view of the environment.
+    """
+    sel: list[str] = []
+    if AGENT_PROFILE:
+        sel += ["--profile", AGENT_PROFILE]
+    if EFFECTIVE_BACKEND:
+        sel += ["--agent", EFFECTIVE_BACKEND]
+    if AGENT_MODEL:
+        sel += ["--model", AGENT_MODEL]
+    return sel
+
+
+def runtime_combo_label() -> str:
+    parts = []
+    if AGENT_PROFILE:
+        parts.append(f"profile={AGENT_PROFILE}")
+    if EFFECTIVE_BACKEND:
+        parts.append(f"agent={EFFECTIVE_BACKEND}"
+                     + (" (from key)" if AUTO_BACKEND and not AGENT_BACKEND else ""))
+    if AGENT_MODEL:
+        parts.append(f"model={AGENT_MODEL}")
+    return " ".join(parts) or "native (claude/Workflow)"
+
+
+def _invoke_via_runtime(
+    ps_args: dict, timeout_s: int, eval_dir: str | None = None
+) -> dict:
+    """Run the JS workflow on the standalone Node runtime with a swappable backend.
+
+    Bypasses Claude Code's Workflow tool entirely: the runtime provides the
+    Workflow globals and dispatches agent() calls to the selected agent CLI
+    (claude | codex) via the config registry. The workflow's
+    top-level return value is captured from the runtime's ``--result-file`` (most
+    robust); we fall back to parsing stdout and finally to the on-disk
+    ``workflow_return.json`` the JS also writes.
+    """
+    result_file = None
+    metrics_file = None
+    if eval_dir:
+        result_file = str(Path(eval_dir) / "runtime_result.json")
+        metrics_file = str(Path(eval_dir) / "runtime_metrics.json")
+    cmd = [
+        NODE_BIN, str(RUNTIME_SCRIPT), str(E2E_SCRIPT),
+        "--args", json.dumps(ps_args),
+        *_runtime_selection_args(),
+    ]
+    if result_file:
+        cmd += ["--result-file", result_file]
+    if metrics_file:
+        cmd += ["--metrics-file", metrics_file]
+    # The JS enforces the wall-clock budget internally (args.time_budget_s); give
+    # the wrapper a margin so a graceful finalize is never killed prematurely.
+    wrap_timeout = (timeout_s + 900) if timeout_s else None
+    proc = subprocess.run(
+        cmd, cwd=str(E2E_DIR), env=dict(os.environ), capture_output=True,
+        text=True, timeout=wrap_timeout,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"runtime (node, {runtime_combo_label()}) failed (rc={proc.returncode}): "
+            f"{proc.stderr[-2000:]}"
+        )
+    # 1) result-file (authoritative top-level return).
+    if result_file and Path(result_file).exists():
+        try:
+            obj = json.loads(Path(result_file).read_text())
+            if isinstance(obj, dict) and obj.get("eval_dir"):
+                return obj
+        except (json.JSONDecodeError, OSError):
+            pass
+    # 2) stdout "WORKFLOW_RESULT <json>" line.
+    try:
+        return _parse_last_json_line(proc.stdout)
+    except WorkflowParseError:
+        pass
+    # 3) on-disk workflow_return.json the JS persists as its final act.
+    if eval_dir:
+        wr = Path(eval_dir) / "workflow_return.json"
+        if wr.exists():
+            obj = _read_json(wr)
+            if obj.get("eval_dir"):
+                return obj
+    raise WorkflowParseError(
+        "runtime produced no parseable workflow return (with eval_dir). "
+        f"Last 2000 chars of stdout:\n{(proc.stdout or '')[-2000:]}"
+    )
+
+
+def invoke_workflow(
+    prompt: str, timeout_s: int, eval_dir: str | None = None,
+    ps_args: dict | None = None,
+) -> dict:
+    """Run the JS workflow and return its parsed JSON return value.
+
+    Dispatches on GEAK_AGENT_BACKEND / GEAK_AGENT_PROFILE: when either is set
+    (and ps_args available), runs on the standalone Node runtime with the selected
+    agent/model; otherwise the original Claude/Workflow path (SDK preferred, CLI
+    fallback).
+    """
+    if USE_RUNTIME and ps_args is not None:
+        return _invoke_via_runtime(ps_args, timeout_s, eval_dir)
     try:
         import claude_agent_sdk  # noqa: F401
         raw = _invoke_via_sdk(prompt, timeout_s, eval_dir)
@@ -2007,6 +2419,79 @@ def _state_op_names(wf: dict, queue: str) -> set[str]:
         if isinstance(op, dict) and op.get("short_name"):
             names.add(str(op["short_name"]))
     return names
+
+
+def _baseline_workload_kind(h: dict) -> tuple[str, str]:
+    """Classify the WORKLOAD the orchestrator's baseline number was measured on.
+
+    Preference order matters. ``workload_spec.kind`` is the orchestrator stating
+    its own workload explicitly and is therefore authoritative whenever present.
+    Older handoffs (every one written before that field existed, including the
+    Kimi-K3 campaign's) carry no such statement, so fall back to the one signal
+    they do carry: AgentX mode is what rewrites the recipe's ``benchmark_script``
+    to the aiperf CLIENT, which is the same sentinel the orchestrator's own
+    launcher resolver keys on.
+
+    Returns (kind, source). ``unknown`` means the handoff said nothing either
+    way and callers must NOT infer a mismatch from it -- see
+    :func:`_workload_comparability`.
+    """
+    spec = h.get("workload_spec")
+    if isinstance(spec, dict):
+        kind = str(spec.get("kind") or "").strip()
+        if kind:
+            return kind, "handoff.workload_spec.kind"
+    recipe_script = str(
+        _recipe_fields(str(h.get("launch_recipe") or "")).get("benchmark_script", "")
+    ).strip()
+    if recipe_script:
+        if os.path.basename(recipe_script) == AGENTX_CLIENT_SCRIPT:
+            return WORKLOAD_KIND_AGENTX, "launch_recipe.benchmark_script"
+        return WORKLOAD_KIND_SYNTHETIC, "launch_recipe.benchmark_script"
+    return WORKLOAD_KIND_UNKNOWN, "unavailable"
+
+
+def _geak_workload_kind() -> str:
+    """Classify the workload GEAK itself measured, from the bench client used."""
+    client = os.environ.get("BENCH_CLIENT", "native").strip().lower()
+    if client == AGENTX_BENCH_CLIENT:
+        return WORKLOAD_KIND_AGENTX
+    return WORKLOAD_KIND_SYNTHETIC
+
+
+def _workload_comparability(h: dict) -> dict:
+    """Decide whether GEAK's numbers may be divided into the orchestrator's.
+
+    The rule is deliberately asymmetric: suppress ONLY on a positive mismatch
+    between two KNOWN kinds. An unknown baseline kind keeps today's behaviour
+    exactly, which is what lets this guard ship without touching the established
+    fixed-ISL/OSL path -- those handoffs classify as ``synthetic_isl_osl`` (or
+    ``unknown`` on older writers) and GEAK's synthetic client agrees, so every
+    cross-harness field they publish today keeps its value.
+    """
+    baseline_kind, baseline_source = _baseline_workload_kind(h)
+    geak_kind = _geak_workload_kind()
+    both_known = WORKLOAD_KIND_UNKNOWN not in (baseline_kind, geak_kind)
+    comparable = (not both_known) or baseline_kind == geak_kind
+    if comparable:
+        reason = None
+    else:
+        reason = (
+            f"orchestrator baseline measured '{baseline_kind}' but GEAK measured "
+            f"'{geak_kind}'; a ratio between them would report a workload "
+            f"difference as a kernel speedup"
+        )
+    return {
+        "comparable": comparable,
+        "orchestrator_workload_kind": baseline_kind,
+        "orchestrator_workload_kind_source": baseline_source,
+        "geak_workload_kind": geak_kind,
+        # metric_basis is NOT the discriminator: an agentic replay and a
+        # synthetic sweep both report aggregate_output_tok_s, so matching bases
+        # say nothing about whether the underlying loads were the same.
+        "metric_basis_discriminates": False,
+        "suppressed_reason": reason,
+    }
 
 
 def _divergence_pct(measured: Any, reference: Any) -> float | None:
@@ -2788,6 +3273,21 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # zero-percent observation.
     validation_base_for_drift = _positive_finite_float(same_session_base)
 
+    # ── workload comparability gate ───────────────────────────────────────────
+    # Everything that divides a GEAK measurement by an ORCHESTRATOR measurement
+    # is only defined when both measured the same workload. When they did not,
+    # publish None rather than a number: a suppressed field forces a reviewer to
+    # look, whereas a plausible-looking ratio invites the exact false claim this
+    # guard exists to prevent. The raw inputs on both sides stay published for
+    # audit, and every WITHIN-GEAK ratio (hot_geak_speedup, cold_geak_speedup,
+    # baseline_drift_pct, the cold penalties) is untouched -- those compare two
+    # GEAK legs measured on the same workload and remain valid regardless.
+    workload_comparability = _workload_comparability(h)
+    cross_harness_ok = bool(workload_comparability["comparable"])
+    if not cross_harness_ok:
+        raw_session_divergence_pct = None
+        same_config_divergence_pct = None
+
     # ── serving-stack provenance ─────────────────────────────────────────────
     # WHO launched the server, and WHAT kernels it selected. A cross-harness
     # comparison only means something when both sides served the same stack, and
@@ -2876,8 +3376,11 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Gain measured against the ORCHESTRATOR baseline (what Hyperloom sees end-to-end).
         "gain_vs_orchestrator_baseline": (
             round(geak_final / orch_baseline, 4)
-            if (geak_final > 0 and orch_baseline > 0) else None
+            if (cross_harness_ok and geak_final > 0 and orch_baseline > 0) else None
         ),
+        # Why the cross-harness fields above hold numbers or None. Always
+        # published, so "comparable" is an asserted fact rather than an absence.
+        "workload_comparability": workload_comparability,
         # Measurement-protocol provenance so the comparison is self-describing.
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
         "bench_protocol": h.get("bench_protocol") or {},
@@ -2951,7 +3454,12 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "orchestrator_baseline_lifecycle": orch_baseline_lifecycle,
         # The same anchor, exposed only when it is provably a hot measure round.
         "orchestrator_hot_baseline_tok_s": orch_hot_baseline or None,
-        "hot_speedup": _safe_ratio(geak_hot_final, orch_hot_baseline),
+        # The cross-harness ratios here are gated on workload comparability; the
+        # within-GEAK ones beside them are not, because both of their legs
+        # were measured by the same client on the same workload.
+        "hot_speedup": (
+            _safe_ratio(geak_hot_final, orch_hot_baseline) if cross_harness_ok else None
+        ),
         # WHOSE gain hot_speedup contains. Its denominator is Hyperloom's RAW
         # session baseline, which predates the config Hyperloom itself accepted
         # before handing GEAK the seed. So whenever the orchestrator did not
@@ -2966,10 +3474,15 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # The same hot-to-hot ratio against the orchestrator's throughput on
         # GEAK's OWN seed config -- the only pairing in this block whose
         # numerator and denominator share a config. None when the orchestrator
-        # never verified that reference.
-        "hot_speedup_same_config": _safe_ratio(geak_hot_final, orch_same_cfg),
+        # never verified that reference. Still divides a GEAK measurement by an
+        # orchestrator one, so it is gated on comparability like hot_speedup.
+        "hot_speedup_same_config": (
+            _safe_ratio(geak_hot_final, orch_same_cfg) if cross_harness_ok else None
+        ),
         "hot_geak_speedup": _safe_ratio(geak_hot_final, geak_hot_baseline),
-        "cold_speedup": _safe_ratio(geak_cold_final, orch_baseline),
+        "cold_speedup": (
+            _safe_ratio(geak_cold_final, orch_baseline) if cross_harness_ok else None
+        ),
         "cold_geak_speedup": _safe_ratio(geak_cold_final, geak_cold_baseline),
         # Which two rounds cold_geak_speedup divides: "same_session" is a valid
         # A/B, "setup_vs_validate" is a comparison across thermal states and the
@@ -6113,7 +6626,15 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"empty/invalid handoff: {handoff_path}\n")
         return 2
 
-    ps_args = map_args(h, timeout_s)
+    try:
+        artifact_cutoff_ts = handoff_path.stat().st_mtime
+    except OSError:
+        artifact_cutoff_ts = None
+    ps_args = map_args(
+        h,
+        timeout_s,
+        artifact_cutoff_ts=artifact_cutoff_ts,
+    )
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]
@@ -6127,6 +6648,8 @@ def main(argv: list[str]) -> int:
     _publish_protected_pgids()
     bench_client = apply_bench_client(h)
     bench_launcher = apply_bench_launcher(h)
+    workload_exports = apply_workload_spec(h)
+    workload_preflight = agentx_preflight(h)
     bench_protocol = apply_bench_protocol(h)
     alignment_flags = apply_alignment_flags(h)
     prompt = build_prompt(ps_args)
@@ -6134,6 +6657,8 @@ def main(argv: list[str]) -> int:
     if "--dry-run" in flags:
         print(json.dumps({"mapped_args": ps_args, "bench_client": bench_client,
                           "bench_launcher": bench_launcher,
+                          "workload_spec_exports": workload_exports,
+                          "agentx_preflight_problems": workload_preflight,
                           "magpie_launch_script": os.environ.get("MAGPIE_LAUNCH_SCRIPT", ""),
                           "magpie_launch_script_source": os.environ.get("MAGPIE_LAUNCH_SCRIPT_SOURCE", ""),
                           "recipe_env_file": os.environ.get("RECIPE_ENV_FILE", ""),
@@ -6143,6 +6668,9 @@ def main(argv: list[str]) -> int:
                           "bench_protocol": bench_protocol,
                           "alignment_flags": alignment_flags,
                           "inferencex_path": os.environ.get("INFERENCEX_PATH", ""),
+                          "agent_backend": runtime_combo_label(),
+                          "runtime_selection": _runtime_selection_args() if USE_RUNTIME else None,
+                          "runtime_script": str(RUNTIME_SCRIPT) if USE_RUNTIME else None,
                           "prompt": prompt, "e2e_script": str(E2E_SCRIPT)}, indent=2))
         return 0
 
@@ -6323,7 +6851,7 @@ def main(argv: list[str]) -> int:
     err: object = None
     err_class: str | None = None
     try:
-        wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"])
+        wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args)
     except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
         err = e
         err_class = _classify_error(e)
