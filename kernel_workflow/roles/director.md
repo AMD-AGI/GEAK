@@ -345,6 +345,23 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
      normal shape of the default mode.
    Whatever the outcome, `timing_basis` is REQUIRED in `director_validation.json`, and any campaign summary
    that quotes the speedup must carry it — an unlabelled number is read as a clean device-time win.
+
+   Read `cache_condition` out of the same receipt and copy its `mode` into `director_validation.json` as
+   `cache_basis`. It says which cache preparation produced BOTH legs:
+   - `"read-evict"` (the current default) → the intended basis. Nothing to flag.
+   - `"write-evict"` → the legacy pass. Its dirty lines write back while the timed kernel runs and steal
+     its HBM bandwidth, so the ratio is inflated in favour of whichever leg reads less HBM. Measured on
+     MI355X against the GLM-5.2 fused-MoE seam, a decode-weighted 1.12 read as 1.40. Set
+     `status: "flagged"`; prefill-only tasks are largely immune but must still carry the label.
+   - `"none"` → no eviction: both legs may be running on lines the previous sample left resident, which
+     a decode server never gets. Flag it the same way.
+   - ABSENT → the task was frozen against a `harness_lib.py` older than this policy, which means an
+     UNCONDITIONAL `write-evict`. `cache_basis: "unknown_write_evict"`, `status: "flagged"`. Absence is
+     NOT "no cache preparation" — read it as the worst case above. Like `timer_unprimed`, there is no
+     correction factor: the inflation depends on each leg's HBM traffic, so it moves different cases by
+     different amounts. Re-freezing against a current `$HARNESS_LIB` is the only fix.
+   A cache_basis that is not `read-evict` also makes the number incomparable to any other task's — never
+   fold two different bases into one campaign-level speedup.
    `not_applicable` is a label, not a pass: the number is this lane's own baseline ratio, not a
    receipt-backed device-time claim, and a cross-lane comparison must not treat it as one.
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:
