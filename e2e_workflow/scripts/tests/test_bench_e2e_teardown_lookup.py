@@ -26,6 +26,7 @@ import unittest
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH = os.path.join(SCRIPTS_DIR, "bench_e2e.sh")
 LIB = os.path.join(SCRIPTS_DIR, "server_teardown.sh")
+SUMMARIZE = os.path.join(SCRIPTS_DIR, "bench_summarize.py")
 ADAPTERS = os.path.join(SCRIPTS_DIR, "adapters")
 
 BASH = shutil.which("bash")
@@ -42,6 +43,7 @@ class BenchTeardownLookupTest(unittest.TestCase):
         # Stage exactly what roles/director.md stages, minus the file under test.
         shutil.copy(BENCH, os.path.join(self.eval_dir, "bench_e2e.sh"))
         shutil.copytree(ADAPTERS, os.path.join(self.eval_dir, "adapters"))
+        shutil.copy(SUMMARIZE, os.path.join(self.eval_dir, "bench_summarize.py"))
 
         # A stub backend adapter (sourced at the top, long before the gate) so a run
         # that gets PAST the gate stops immediately at the launch instead of spending
@@ -71,6 +73,10 @@ class BenchTeardownLookupTest(unittest.TestCase):
             OUT_DIR=os.path.join(self.tmp, "out"),
             REPEATS="1",
             PROFILE="0",
+            # The two cases that get past the gate walk on into the serving-GPU mutex, which is
+            # a real /tmp lock shared with whatever benchmark is live on this box -- without this
+            # the suite blocks for SERVING_LOCK_WAIT behind an unrelated run and reads as a hang.
+            SERVING_GPU_LOCK_DISABLE="1",
         )
         run_env.update(env)
         return subprocess.run(
@@ -105,6 +111,17 @@ class BenchTeardownLookupTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, MISSING_LIB_RC, proc.stderr[-2000:])
         self.assertIn("teardown contract:", proc.stdout + proc.stderr)
         self.assertIn("STUB_LAUNCH_REACHED", proc.stdout, "never reached the launch")
+
+    def test_missing_summarizer_refuses_before_the_launch(self):
+        """Same staging rule for the summary emitter: a run that cannot RECORD its
+        measurement must not spend a server booting to take one."""
+        self.stage_lib(self.eval_dir)
+        os.remove(os.path.join(self.eval_dir, "bench_summarize.py"))
+        proc = self.run_bench()
+        self.assertEqual(proc.returncode, MISSING_LIB_RC, proc.stderr[-2000:])
+        self.assertIn("bench_summarize.py not found", proc.stderr)
+        self.assertIn("cp ", proc.stderr)
+        self.assertNotIn("STUB_LAUNCH_REACHED", proc.stdout, "launched anyway")
 
     def test_empty_skill_dir_does_not_resolve_to_an_absolute_path(self):
         """With SKILL_DIR="" the candidate degrades to /scripts/server_teardown.sh; a

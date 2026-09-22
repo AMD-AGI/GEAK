@@ -50,7 +50,8 @@ from kb.store_local import KBStoreError
 # The four things that can happen when a record is taken off the shelf and run. They are counted
 # separately because they mean opposite things to a retire pass: `failed` says the claim did not
 # hold HERE (the record may still be right elsewhere), while `not_reproduced` says the record could
-# not even be applied — a much stronger signal that it is missing something it promised.
+# not even be applied — a much stronger signal that it is missing something it promised. A patch
+# that ran and returned the WRONG ANSWER is `failed` too: it was applied and it did not deliver.
 #
 # `inapplicable` splits a case that used to be spelled `not_reproduced` and does not belong there.
 # A stored e2e config is a WHOLE launch configuration, and it is replayed on top of whatever
@@ -84,6 +85,21 @@ _EVIDENCE_KEYS = ("measured_tok_s", "baseline_tok_s", "delta_pct", "measured_spe
 # `attestations_of` reads as 0 forever, and one missing from `carry_attestations`'s emptiness test
 # drops a whole ledger on the next rewrite.
 BUCKETS = ("validations", "failures", "not_reproduced", "inapplicable")
+
+# How many negative attempts, with no validation among them, make a record a retraction CANDIDATE.
+# Two, not one: a single box can be wrong about anything. Not three: the negatives that reach this
+# counter are the ones where the record actually took effect (an `inapplicable` read never does),
+# and waiting costs a known-bad record one more full run in its direction slot. Overridable per
+# sweep (`curate --threshold`).
+RETIRE_THRESHOLD = 2
+
+# How far back "recently" reaches. Verdicts are read as a SLIDING WINDOW rather than as lifetime
+# totals, because a lifetime `validations > 0` veto is permanent — a record that won once and has
+# lost ever since stays immune forever. Three, not two: a window equal to the retire threshold would
+# let a stale win be pushed out by the very two losses that then fire the hint, with no grace, and
+# three gives a reprieved record (e2e_store.py:_carrying_ledger) room before the window can turn
+# again. Widened to `threshold` when a sweep asks for a higher bar; see `_retire_reason`.
+RECENT_WINDOW = 3
 
 
 def empty_attestations() -> dict:
@@ -170,27 +186,85 @@ def record_attestation(value: dict, outcome: str, *, actor: str = "", evidence=N
     return updated
 
 
+def recent_verdicts(ledger: dict, window: int = RECENT_WINDOW):
+    """The last `window` attempts that actually TESTED this record, oldest first.
+
+    `inapplicable` entries are skipped, as they are in the lifetime arithmetic below: such a read
+    never got the stored configuration onto the box, so it judges the PAIRING, not the record.
+    Letting one occupy a window slot would push a real verdict out of view.
+
+    Empty when the ledger carries no usable history (hand-backfilled, or written before `history`
+    existed); callers fall back to the lifetime counters there.
+    """
+    tested = [str(h.get("outcome") or "").strip().lower() for h in (ledger.get("history") or [])]
+    tested = [o for o in tested if o in (VALIDATED, FAILED, NOT_REPRODUCED)]
+    return tested[-max(1, int(window)):]
+
+
+def _retire_reason(value, threshold: int) -> str:
+    """Shared predicate behind `retire_hint` and `should_retire`. Reads a WINDOW, not a lifetime.
+
+    The bar: among the last few attempts that ran the record, none reproduced a win and at least
+    `threshold` of them came back negative.
+
+    Recency rather than totals is the point: a lifetime `validations > 0` veto is permanent, so a
+    record that won once and has lost ever since could never be curated out. A window asks what a
+    reader wants to know — does this still work HERE, NOW. Still a veto and not a ratio: one win
+    anywhere inside the window clears the record outright.
+
+    The window widens to `threshold` when a sweep asks for a bar above RECENT_WINDOW, so
+    `curate --threshold 5` is not unreachable by construction.
+    """
+    ledger = attestations_of(value)
+    threshold = max(1, int(threshold))
+    recent = recent_verdicts(ledger, max(RECENT_WINDOW, threshold))
+    if recent:
+        if VALIDATED in recent:
+            return ""
+        if len(recent) < threshold:
+            return ""
+        return ("the last %d attempts that ran it all came back negative (%s) and none of them "
+                "reproduced a win — policy threshold is %d"
+                % (len(recent), ", ".join(recent), threshold))
+    # No history to read. Fall back to the lifetime counters, `inapplicable` excluded exactly as
+    # `recent_verdicts` excludes it: a record must never be retired for the machines it was read on.
+    negatives = ledger["failures"] + ledger["not_reproduced"]
+    if ledger["validations"] or negatives < threshold:
+        return ""
+    return ("%d attempts ran it and none won (%d failed, %d could not be reproduced), and nothing "
+            "has ever validated it — policy threshold is %d"
+            % (negatives, ledger["failures"], ledger["not_reproduced"], threshold))
+
+
 def retire_hint(value) -> str:
     """Why a curation pass might want to look at this record, or "". Advisory, never enforced.
 
-    Deliberately conservative and deliberately not a boolean: this is read by an agent prompt and
-    by a human running a curation sweep, and both need to know WHICH pattern fired. Nothing in the
-    read path filters on it — a record with a hint is still offered, still ranked, still adoptable.
+    Deliberately not a boolean: this is read by an agent prompt and by a human running a curation
+    sweep, and both need to know WHICH pattern fired.
+
+    The read path DEMOTES on this, it does not filter on it: a hinted record sorts behind every
+    unhinted one in its group (kb/curate.py:demote_hinted), because the direction collapse keeps
+    only the first entry and a hinted record ranking first was evicting every good alternative.
+    It stays on the page, offered and adoptable; only `retract` removes it from a read.
+
+    Fires on the same evidence as `should_retire` at the default threshold, deliberately — the hint
+    must never be the LATER signal. There is still a real window between them: the demotion is
+    immediate, while the retraction waits for a human to run `curate --apply`.
     """
-    ledger = attestations_of(value)
-    # Attempts that TESTED THE RECORD. An `inapplicable` read never got as far as putting the
-    # stored configuration on the box — the box's own baseline pinned a knob the record also pins,
-    # and the pair is what failed. Leaving those in the denominator meant a record could be retired
-    # for being read on the wrong machines, which is the opposite of what the counter is for.
-    tried = ledger["recalls"] - ledger["inapplicable"]
-    if tried <= 0:
-        return ""
-    if ledger["not_reproduced"] >= 2 and not ledger["validations"]:
-        return ("%d attempts could not reproduce it at all and none ever succeeded — the record is "
-                "probably missing something it promised" % ledger["not_reproduced"])
-    if tried >= 3 and not ledger["validations"]:
-        return ("tried %d times, never reproduced a win" % tried)
-    return ""
+    return _retire_reason(value, RETIRE_THRESHOLD)
+
+
+def should_retire(value, *, threshold: int = RETIRE_THRESHOLD) -> str:
+    """Why POLICY says this record has earned a retraction, or "". Still only a judgement.
+
+    Same predicate as `retire_hint`, with the sweep's own threshold instead of the default — see
+    `_retire_reason` for the window and why it is a window.
+
+    NEVER acts. Returning a reason is not retracting — `retract_session` zeroes ranking scalars and
+    re-points the champion, and the caller (`e2e_store.py curate`) is a dry run unless a human
+    passes --apply.
+    """
+    return _retire_reason(value, threshold)
 
 
 def attested_document(knowledge: dict, outcome: str, *, actor: str = "", evidence=None) -> dict:
@@ -253,6 +327,8 @@ def attestation_ok(reports, applied: bool) -> bool:
     return bool(found) and all(r.get("rewritten") for r in found)
 
 
-__all__ = ["FAILED", "HISTORY_LIMIT", "NOT_REPRODUCED", "OUTCOMES", "VALIDATED",
+__all__ = ["BUCKETS", "FAILED", "HISTORY_LIMIT", "INAPPLICABLE", "NOT_REPRODUCED",
+           "OUTCOMES", "RECENT_WINDOW", "RETIRE_THRESHOLD", "VALIDATED",
            "attest_session", "attestation_ok", "attestations_of", "attested_document",
-           "carry_attestations", "empty_attestations", "record_attestation", "retire_hint"]
+           "carry_attestations", "empty_attestations", "record_attestation", "recent_verdicts",
+           "retire_hint", "should_retire"]

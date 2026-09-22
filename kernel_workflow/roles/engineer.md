@@ -82,6 +82,13 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
 6. Preserve the kernel's external interface (signature, semantics) so the wrapper/tests still work.
 7. Hipify safety (HIP): never put `<<<>>>` launches inside a macro if/else or ternary — use template
    dispatch functions. See `hip_optimization.md` → Hipify Safety Rules.
+8. **Invalid source binding is not a failed optimization.** Exit 86 / `GEAK_SOURCE_INVALID` from
+   gpu_lock or the builder invalidates ALL correctness/timing output from that invocation. Preserve
+   the edited candidate; do not revert it, rank it, or conclude "no improvement" using those numbers.
+   Report the build defect for repair, then rerun correctness and performance on that SAME candidate.
+   Do not edit the frozen harness yourself. Keep `.geak/invalid_measurements.jsonl` as the audit trail.
+   If unresolved, save the candidate diff as `best_patch.diff` for recovery, return
+   `status:"invalid_measurement"`, `measurement_valid:false`, zero speedups and no per-case timings.
 
 ## Workflow
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record
@@ -124,7 +131,8 @@ JSON substitutes for the return — the lane does not read `worker_result.json`,
   "speedup_arithmetic": 0.0,
   "speedup_weighted": 0.0,
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0, "weight": 0.0}],
-  "status": "success|partial|failed",
+  "status": "success|partial|failed|invalid_measurement",
+  "measurement_valid": true,
   "patch_file": "best_patch.diff",
   "strategies_tried": ["..."],
   "notes": "what worked / what didn't — written for the TechLead's insight log"
@@ -132,6 +140,10 @@ JSON substitutes for the return — the lane does not read `worker_result.json`,
 ```
 `OUTPUT_DIR/report.md` — brief: task, approach, per-case results table, geomean, what worked, what
 didn't. (This is your required mini-report.)
+
+`measurement_valid` is true only when the result used current-candidate sources and both the source
+checks and measurement commands succeeded. An unresolved invalid measurement uses the status and
+recovery rules above, even if no patch remains; never label it a measured no-op.
 
 If you achieved no speedup (or correctness could not be fixed), still submit with `status` =
 `failed`/`partial`, NO patch_file, and notes explaining why — that is valuable signal for the ledger.

@@ -56,11 +56,30 @@ adapter_bench() {
   local res_name="ix_bench_$$_${RANDOM}"
   local num_warmups="${NUM_WARMUPS:-$(( MAXC < 8 ? MAXC : 8 ))}"
   local bench_seed="${SEED:-0}"
-  if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ]; then
-    # The measurement protocol applies identically to both client calls in an
-    # isolated replica: the discarded full outer round and the measured round.
+  if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ] || [ -n "${WARM_SERVER_ROUNDS:-}" ]; then
+    # The measurement protocol applies identically to every client call in a
+    # Hyperloom-aligned lifecycle: the discarded full outer round and each timed
+    # round. Both lifecycles qualify -- isolated_server sets
+    # GEAK_ISOLATED_REPLICA=1, warm_server sets it to 0 (its outer warmup MUST
+    # run) and announces itself with WARM_SERVER_ROUNDS instead. Gating on the
+    # replica flag alone silently dropped warm_server back to the 8-request
+    # default whenever the caller did not export NUM_WARMUPS -- which the
+    # orchestrated path does, but a direct bench_e2e.sh invocation does not.
     num_warmups=$((2 * MAXC))
     bench_seed=0
+  fi
+
+  # This client loads the model's tokenizer itself, so it has to trust the same
+  # remote code as the server it measures. bench_e2e.sh already resolves that
+  # across the recipe env and EXTRA_SERVER_ARGS and exports
+  # BENCH_TRUST_REMOTE_CODE; only the flag was missing here, so a
+  # custom-tokenizer model (Kimi-K3, DeepSeek) died in the client at
+  # transformers' resolve_trust_remote_code while the server ran fine. Pass the
+  # bare BooleanOptionalAction spelling: the client rejects
+  # --trust-remote-code=true/false.
+  local -a trust_args=()
+  if [ "${BENCH_TRUST_REMOTE_CODE:-0}" = "1" ]; then
+    trust_args=(--trust-remote-code)
   fi
 
   # --backend vllm: OpenAI-compatible client regardless of the actual serving
@@ -82,6 +101,7 @@ adapter_bench() {
     --num-warmups "$num_warmups" \
     --percentile-metrics "ttft,tpot,itl,e2el" \
     --seed "$bench_seed" \
+    ${trust_args[@]+"${trust_args[@]}"} \
     --save-result \
     --result-dir "$res_dir" \
     --result-filename "${res_name}.json" || return $?

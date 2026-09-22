@@ -23,6 +23,83 @@ Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
 
+### Agent backend (swappable: Claude Code ↔ codex)
+
+By default `run_e2e.py` drives the JS workflow through **Claude Code's `Workflow`
+tool** (SDK preferred, `claude -p` CLI fallback). The SAME workflow can run on the
+**standalone Node runtime** (`interface/runtime/engine/run_workflow.mjs`) against the
+codex CLI instead — the runtime re-implements the Workflow globals
+(`agent/parallel/pipeline/phase/workflow`) and dispatches each `agent()` to a
+one-shot backend process, so the agent CLI itself does NOT need to support
+parallel/nested subagents.
+
+**Two orthogonal axes**, defined in `interface/runtime/engine/registry.json`:
+`agents` (how to drive a CLI: `claude` / `codex`) × `models` (an endpoint). A
+`profile` pins one `(agent, model)` combo. Adding a third agent is a data change
+— a new `agents` entry plus a passing `conformance.mjs --agent <name>`; see
+`runtime/SETUP.md` for the R1–R7 bring-up checklist.
+
+| Selection (flag or env) | Effect |
+| --- | --- |
+| *(none, no provider key)* | Native Claude Code `Workflow` tool — unchanged |
+| *(none, only `GEAK_AMDKEY` or `OPENAI_API_KEY` set)* | runtime on codex — **setting the key is the selection** |
+| `GEAK_AGENT_PROFILE=codex-gpt56` | runtime, profile's agent+model |
+| `GEAK_AGENT_BACKEND=codex` | runtime, agent `codex` (back-compat alias for `--agent`) |
+| `GEAK_MODEL=<name>` | override the model axis (registry `models` key) |
+
+Precedence: CLI flag (`--profile`/`--agent`/`--model`) > env > key-based
+auto-selection > `registry.default_profile`. A key only selects codex while no
+`ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN` is also set, so exporting a gateway key
+next to an existing Claude setup does not hijack it; `GEAK_AGENT_AUTO=0` turns
+key-based selection off entirely.
+
+Env knobs (all optional):
+
+| Env | Meaning | Default |
+| --- | --- | --- |
+| `GEAK_AGENT_PROFILE` | registry profile = (agent, model) | unset (native) |
+| `GEAK_AGENT_BACKEND` | agent name (alias for `--agent`) | unset |
+| `GEAK_MODEL` | model name (registry `models` key) | unset |
+| `GEAK_REGISTRY` | path to a custom registry.json | shipped one |
+| `GEAK_NODE_BIN` | node binary for the runtime | `node` |
+| `GEAK_CONCURRENCY` | max concurrent agent subprocesses | `min(16, cpus-2)` |
+| `GEAK_AGENT_TIMEOUT_MS` | per-agent hard timeout | `3600000` |
+| `GEAK_SCHEMA_RETRIES` | in-call structured-output retries | `2` |
+| `GEAK_<CLI>_BIN` / `GEAK_<CLI>_MODEL` | per-CLI binary / model override | registry |
+| `GEAK_<CLI>_APPROVE` / `GEAK_<CLI>_EXTRA_ARGS` | auto-approve flag / extra CLI args | registry |
+| `GEAK_AMDKEY` | AMD gateway key; also selects codex. `GEAK_`-prefixed so it survives hyperloom's `.env` allowlist — see SETUP.md | inherited |
+| `OPENAI_BASE_URL` / `OPENAI_API_KEY` | OpenAI-compatible provider auth (codex); the key also selects codex | inherited |
+| `ANTHROPIC_BASE_URL` / `ANTHROPIC_*` | Anthropic provider auth (claude) | inherited |
+| `GEAK_AGENT_AUTO` | `0` disables key-based backend selection | `1` |
+
+Prereqs for the non-native backend: Node 20+ on `PATH` (the runtime itself needs
+only 18; the codex CLI needs 20), plus `npm i -g @openai/codex@0.146.1` and a
+reachable endpoint. The two `.js` workflows, `roles/`, `knowledge/`, and
+`scripts/` are used **unmodified** on every backend. Full setup, knobs and
+troubleshooting: `runtime/SETUP.md`.
+
+The single-kernel `kernel_workflow.js` has no Python wrapper; run it on the
+runtime directly:
+
+```bash
+node interface/runtime/engine/run_workflow.mjs kernel_workflow/kernel_workflow.js \
+  --agent codex \
+  --args '{"kernel_path":"/abs/kernel","workflow_dir":"/abs/kernel_workflow","budget":6}'
+```
+
+**Controlled (agent × model) experiments** are built in:
+
+```bash
+node interface/runtime/engine/experiment.mjs \
+  --script kernel_workflow/kernel_workflow.js \
+  --args '{"kernel_path":"/abs/knn","workflow_dir":"/abs/kernel_workflow","budget":6}' \
+  --agents claude,codex --models default --repeats 3 --out ./exp_compare
+# -> results.jsonl + summary.md/csv (speedup / success-rate / wall / schema-fails; no token/cost)
+```
+
+Runtime primitives + config resolution can be smoke-tested with no CLI/network/GPU:
+`node interface/runtime/engine/selftest.mjs`. See `runtime/SETUP.md` for the full picture.
+
 The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 (`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).
 
@@ -42,6 +119,10 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "launch_recipe": "/path/baseline_config.with_envs.yaml",  // optional launch script/recipe
   "raw_baseline_tput": 1485.4,           // caller's pre-change session baseline (audit reference)
   "orchestrator_best_tput_same_config": 1550.8, // caller best measured with accepted_flags/env
+  "same_config_observed_identity": {     // optional observed upstream server facts
+    "backend": "sglang",
+    "server_args": { "model_path": "/models/Qwen-Qwen3.5-27B", "tp_size": 8 }
+  },
   "exp_root": "/work/experiment/geak",   // basename MUST be `geak`; the timestamped run dir is created here
   "bench_client": "auto",                // auto|inferencex|native — see口径 alignment below
   "inferencex_path": "/opt/InferenceX",  // optional; else taken from $INFERENCEX_PATH
@@ -81,6 +162,7 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | `launch_recipe` | `launch_script` | optional |
 | `raw_baseline_tput` | result audit metadata | pre-change session baseline; never used as the measurement-alignment signal |
 | `orchestrator_best_tput_same_config` | result alignment metadata | caller throughput on the accepted config GEAK uses for its baseline |
+| `same_config_observed_identity` | result identity metadata | optional upstream observed server facts; compared to GEAK's Setup `ServerArgs` / Magpie launch evidence |
 | `exp_root` | `exp_root` | run dir root |
 | (derived from `exp_root`) | `tracelens` | auto-discovered upstream TraceLens / kernel-agent artifacts (see below); only non-null paths forwarded; key omitted entirely when none found |
 | `bench_client` / `inferencex_path` | env `BENCH_CLIENT` + `INFERENCEX_PATH` | exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
@@ -152,17 +234,37 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
     "orchestrator_baseline_tok_s": 1485.4,
     "raw_session_baseline_divergence_pct": 4.44, // audit only; includes accepted config gain
     "orchestrator_best_tput_same_config": 1550.8,
-    "current_best_same_config_divergence_pct": 0.04, // primary alignment metric
+    "current_best_same_config_divergence_pct": 0.04, // Setup seed vs upstream same-config reference
     "measurement_divergence_pct": 0.04 // backward-compatible alias
   },
   "baseline_alignment": {
+    // compatibility alias: numeric Setup-seed comparison only
     "status": "aligned | warning | warning_recipe_unaligned | unavailable",
-    "primary_metric": "current_best_same_config_divergence_pct",
+    "primary_metric": "setup_seed_same_config_divergence_pct",
     "divergence_pct": 0.04,
     "warning_threshold_pct": 3.0,
     "raw_session_divergence_is_measurement_signal": false,
     "recipe_aligned_with_orchestrator": true   // false => the two harnesses served different stacks
   },
+  "handoff_alignment": {                // authoritative cross-handoff verdict
+    "status": "aligned | warning | warning_recipe_unaligned | identity_mismatch | unverified | unavailable",
+    "metric_status": "aligned | warning | warning_recipe_unaligned | unavailable",
+    "primary_metric": "setup_seed_same_config_divergence_pct",
+    "server_identity": {
+      "expected": { /* upstream handoff observation */ },
+      "observed": { /* GEAK Setup ServerArgs or Magpie identity */ },
+      "status": "matched | mismatched | unverified | unavailable",
+      "evidence_paths": [".../baseline/server.log", ".../baseline/magpie_launch.log"]
+    }
+  },
+  "measurement_drift": {                // Setup vs Validate/base, never cross-handoff alignment
+    "status": "measured | unavailable",
+    "setup_baseline_tok_s": 1498.2,
+    "validation_base_tok_s": 1551.4,
+    "drift_pct": 3.55,
+    "evidence_paths": [".../baseline/bench_summary.json", ".../validation/base/bench_summary.json"]
+  },
+  "server_identity": { /* same identity block as handoff_alignment.server_identity */ },
   "serving_stack": {                       // WHO launched the servers, and what they picked
     "launcher": "magpie | native",
     "launch_script": "/.../benchmarks/vllm_mi355x.sh",  // "" on the native path
@@ -297,16 +399,28 @@ no extra steps.** Applying `final_patch` by hand also requires the `cache_invali
 `in_final_bundle: false` means Finalize could not get the tuning into the bundle — the headline number
 will not reproduce from it.
 
-`raw_session_baseline_divergence_pct` compares GEAK's accepted-config baseline
+`raw_session_baseline_divergence_pct` compares GEAK's Setup seed baseline
 with the caller's pre-change session baseline. It is audit-only because it
 includes configuration gains accepted before GEAK started.
 
-`current_best_same_config_divergence_pct` compares the same accepted
-configuration in both harnesses and is the primary alignment metric.
+`current_best_same_config_divergence_pct` compares the Setup seed and the same
+accepted configuration in both harnesses. It is the numeric compatibility
+metric for the cross-handoff comparison; `handoff_alignment` is the
+authoritative verdict and is `unverified` until actual Setup launch evidence
+matches an upstream observed identity. GEAK reads that evidence from
+`baseline/server.log` (parsed SGLang `ServerArgs`) or
+`baseline/magpie_launch.log` (an emitted launch identity) and records every
+existing evidence path in `server_identity.evidence_paths`.
 `measurement_divergence_pct` remains an exact compatibility alias for existing
 callers. If the handoff omits `orchestrator_best_tput_same_config`, both
-same-config fields are `null` and `baseline_alignment.status` is `unavailable`;
+same-config fields are `null` and `handoff_alignment.status` is `unavailable`;
 GEAK never falls back to the raw-session divergence as a drift signal.
+
+`measurement_drift` separately compares the Setup baseline with the
+Validate/base leg. It is `unavailable`, not zero, when Validate did not
+re-measure a base leg. The Validate/base → final pair remains the optimization
+metric and the source of the headline `throughput_speedup`; it cannot replace
+the Setup-derived handoff verdict.
 
 ### Same config is not the same stack
 

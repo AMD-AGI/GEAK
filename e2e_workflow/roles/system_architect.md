@@ -596,6 +596,17 @@ attempt, win or not. REQUIRED sections, in order:
      `match_tier`, which plane answered (`read_plane`), and the candidate count. For the kernel plane:
      one row per lane from `KB_RECALL.kernel` with its `slug`, `read_reason`, `match_tier` and count.
      If `read_reason` is `missing_arch`, say plainly that no lookup was performed and why.
+   - **What the page held vs what survived the floors** — a zero candidate count does NOT mean the page
+     was empty, and reporting it as if it did is how a live record gets buried. Read
+     `KB_RECALL.e2e.curation`: when `scanned` > 0 the page WAS found and had records, and
+     `retired` / `same_direction_collapsed` / `below_min_speedup` say which stage dropped them. Name the
+     stage and the count, and give both floors — `read_min_speedup` (what a record must clear to be
+     shown at all) and `bench_min_speedup` (what it must clear to be worth a 20-40min server launch).
+     A record that cleared the read floor but not the bench floor is an `outcome: skipped` row below,
+     offered as a reference; say so rather than letting it read as a failure. The curation block
+     carries its own `read_plane`, which need NOT be the plane named by `read_plane` at the top level:
+     a `both` read tries the service first and keeps descending past a rung it found records on. Quote
+     the curation's own, or you will file the service's page under the mirror's name.
    - **Configurations recalled** — table
      `stored direction | session | stored claim | re-measured here | Δ vs baseline | parity | outcome`,
      one row per `KB_RECALL.e2e.configs[]`. Outcomes are `adopted` / `rejected` / `not_reproduced` /

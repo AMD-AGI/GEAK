@@ -26,6 +26,29 @@ set -euo pipefail
 GPU_SPEC="${1:?Usage: gpu_lock.sh <gpu_id|pool> <command...>   (pool = comma list of the GPUs THIS run was allocated)}"
 shift
 
+# Source provenance is checked before executing any command and again on exit:
+# generated builders can recreate a stale overlay during the command itself.
+# Exit 86 invalidates all output from that invocation, even if it printed PASS.
+SOURCE_GUARD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/workspace_sources.py"
+SOURCE_WORKSPACE="$PWD"
+python3 "$SOURCE_GUARD" check --workspace "$SOURCE_WORKSPACE"
+_source_audit_size=$(stat -c %s "$SOURCE_WORKSPACE/.geak/invalid_measurements.jsonl" 2>/dev/null || echo 0)
+_check_sources_on_exit() {
+    local command_status=$?
+    trap - EXIT
+    python3 "$SOURCE_GUARD" check --workspace "$SOURCE_WORKSPACE" || exit 86
+    # A builder may catch a check-input failure and continue, or repair the link
+    # later in the same command. Neither makes that invocation's output valid.
+    local audit_size
+    audit_size=$(stat -c %s "$SOURCE_WORKSPACE/.geak/invalid_measurements.jsonl" 2>/dev/null || echo 0)
+    if [ "$audit_size" != "$_source_audit_size" ]; then
+        echo "GEAK_SOURCE_INVALID: source validation failed during this command; discard all measurement output." >&2
+        exit 86
+    fi
+    exit "$command_status"
+}
+trap _check_sources_on_exit EXIT
+
 LOCK_DIR="/tmp/team_gpu_locks"
 mkdir -p "$LOCK_DIR"
 

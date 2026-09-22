@@ -167,6 +167,7 @@ values are regenerated from the recorded seed on every run.
     ms      = d["ms"]
     primed  = d.get("primed")                           # True | False | absent — three states, see below
     host_ms = d.get("host_ms")
+    cache   = (d.get("cache_condition") or {}).get("mode")   # read-evict in the current harness
     ```
     **The baseline leg is ALWAYS `meta.baseline_callable` / `baseline_src/`** — `speedup = baseline_ms /
     current_ms`, so a Triton/HIP/CK/FlyDSL port always competes against the real input kernel, never its
@@ -179,20 +180,31 @@ values are regenerated from the recorded seed on every run.
     that true and then reports whether it actually held. Throw the receipt away and you are back to
     asserting a guarantee you never checked — which is the hole a candidate exploits by collapsing dispatch
     instead of shortening the kernel. Read `primed` as THREE states, never as a bool:
-    - `True` → every event window brackets kernel time only. Score normally.
+    - `True` → dispatch is cheaper than the kernel, so the number is dominated by device work. Score
+      normally. NOT a claim the window is overhead-free: a window costs a few us beyond the kernel —
+      nothing for a 100us GEMM, most of the number for a 5us op. Raise `inner` if the op is that small;
+      the overhead is per-window, so it divides away.
     - `False` → this op dispatches slower than it computes even at full run-ahead. `ms` is a HOST-BOUND
       latency, not a kernel time. Still print it, but mark that case `host_bound`.
-    - **absent** → the vendored `harness_lib.py` predates priming, so every number in this run carries a
-      dispatch bubble whose SIGN is not knowable from the number alone (it inflates whichever leg is
-      relatively smaller). Mark that case `timer_unprimed`.
+    - **absent** → the vendored `harness_lib.py` predates the receipt (or there is no CUDA device), so
+      every number in this run carries a dispatch component whose SIGN is not knowable from the number
+      alone (it inflates whichever leg is relatively smaller). Mark that case `timer_unprimed`.
     Do NOT collapse absent into `False`: "this op is host-bound" and "this timer cannot tell" call for
     different fixes — accept the label vs. re-freeze against a current `$HARNESS_LIB`.
   - Print ONE machine-readable receipt line after the score lines, covering BOTH legs of EVERY case:
     ```
-    GEAK_TIMING_RECEIPT: {"all_primed": <bool>, "timer_unprimed": <bool>,
+    GEAK_TIMING_RECEIPT: {"all_primed": <bool>, "timer_unprimed": <bool>, "cache_mode": "<mode>",
                           "cases": {"<case>": {"baseline": {"primed": ..., "host_ms": ...},
                                                "current":  {"primed": ..., "host_ms": ...}}}}
     ```
+    `cache_mode` is the `cache_condition.mode` shared by every leg — the cache preparation that produced
+    the ratio. The current harness always uses `"read-evict"`; there is no mode switch. Preserve any
+    historical mode when reading an older harness's receipt. Emit the literal string
+    `"unknown_write_evict"` when `cache_condition` is absent: the
+    vendored `harness_lib.py` then predates the policy, which means an unconditional `write-evict`, whose
+    dirty-line writeback contends with the timed kernel and inflated a measured GLM-5.2 decode A/B from
+    1.12 to 1.40. Absence is NOT "no cache preparation". `director.md` turns this into `cache_basis`.
+    If the legs somehow disagree, that is a fault, not a value to average — fail the freeze.
     `all_primed` is the AND over both legs of every case. When it is false the printed speedup is NOT a
     clean device-time ratio, and every downstream consumer has to say so rather than quote it bare — see
     `director.md` step 6.
