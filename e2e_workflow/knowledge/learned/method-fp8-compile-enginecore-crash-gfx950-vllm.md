@@ -7,12 +7,12 @@ confirms_cited: 0
 confirms_blind: 0
 attempts: 8
 last_seen: 2026-09-22
-name: fp8 intermittent EngineCore startup failure — enforce-eager workaround (gfx950/vLLM 0.29.0)
+name: method-fp8-compile-enginecore-crash-gfx950-vllm
 description: intermittent EngineCore startup failure on gfx950 vLLM 0.29.0 fp8 TP1, in BOTH eager and compile; --enforce-eager is an observed (not guaranteed) workaround
-keywords: [fp8, enforce-eager, EngineCore, startup-failure, intermittent, TritonFp8BlockScaledMM, torch.compile, gfx950, vllm]
-platforms: [gfx950, vLLM-0.29.0, ROCm-7.2.3, torch-2.12]
-kernel_class: fp8-linear
-regime: serving-startup
+keywords: [fp8, enforce-eager, enginecore, startup-failure, intermittent, triton-fp8-blockscale-mm, torch-compile, gfx950, vllm]
+platforms: [gfx950]
+kernel_class: method
+regime: n/a
 lifecycle: active
 ---
 # fp8 intermittent EngineCore startup failure on gfx950 (vLLM 0.29.0) — try `--enforce-eager` as a workaround
