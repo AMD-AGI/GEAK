@@ -3,7 +3,7 @@ key: fp8 a8w8 blockscale GEMM · gfx950 · sglang (ROCm>=7.2) prefill+decode
 type: lever
 confidence: ★★★
 effect: bpreshuffle CK per-shape tune DB → iso 1.46× geomean (per-shape 1.01–2.28×, no regressions); e2e VERIFIED +20.91% (Qwen3-14B-FP8 TP1, Director validated_win, 5046.9→6102.0 tok/s, byte-identical parity 8/8, TPOT −17.5%) at a 53.51% head — i.e. AT the Amdahl ceiling.
-last_seen: 2026-08-17
+last_seen: 2026-09-21
 ---
 # gfx950 sglang fp8 a8w8 blockscale — the live kernel is CK **bpreshuffle**, so tune THAT DB
 
@@ -36,3 +36,9 @@ last_seen: 2026-08-17
   ckProfiler, and Triton is unlikely to beat tuned CK bpreshuffle.
 - source: exp/e2e_*Qwen3-14B-FP8*_sglang_*/ 2026-08-17 (bakeoff + tuned CSV in `ck_tune/`; 34/36 shapes
   updated, all correct; Director validated_win +20.91%, non-overlapping, gsm8k unchanged).
+- source: exp/e2e_*Qwen3-14B-FP8*_sglang_*/ 2026-09-21 (ROCm 7.2.4, ISL/OSL/conc 8192/1024/64) —
+  DIAGNOSTIC re-confirm only (win NOT re-measured this round): the stock server log again imports the CK
+  `module_gemm_a8w8_blockscale_bpreshuffle.so` and every one of the four head GEMM families logs
+  `not found tuned config ... will use default config!` ⇒ the "ZERO shipped coverage at a ~53% head"
+  signature reproduces on a fresh ROCm 7.2.4 image. The tune+A/B did not re-run (extraction serialized
+  behind a shared-GPU serving lock), so this confirms the DISPATCH/coverage diagnosis, not the +20.91%.
