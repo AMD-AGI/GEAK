@@ -79,10 +79,11 @@ def _time_call(fn, warmup, repeats):
     """Return (event_ms, wall_ms): the PRIMARY metric is CUDA-EVENT DEVICE time (GPU-timeline duration,
     excludes host dispatch); wall-clock is a REFERENCE (host+device). Timed via harness_lib.time_op under
     the deployment graph context (_GRAPH_MODE) and with one eviction pass over the last-level cache before
-    each sample (harness_lib.cache_policy; default read-evict), so a candidate cannot win by collapsing
+    each sample (harness_lib.cache_policy; always read-evict), so a candidate cannot win by collapsing
     Python launch overhead (device time already excludes it) and a memory-bound kernel is not measured on
     lines the previous sample left resident. The pass is a READ: the write it replaced left dirty lines
-    whose writeback contended with the timed kernel and inflated a decode A/B 3.4x. Falls back to a naive wall-clock loop (event_ms==wall_ms)
+    whose writeback contended with the timed kernel and inflated a decode speedup from 1.12 to 1.40.
+    Falls back to a naive wall-clock loop (event_ms==wall_ms)
     only if harness_lib is absent. Returns (None, None) if `fn` raises."""
     if _hlib is not None:
         r = _hlib.time_op(fn, warmup=warmup, repeats=repeats, graph=_GRAPH_MODE, detail=True)

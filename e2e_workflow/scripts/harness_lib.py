@@ -306,7 +306,7 @@ def compiled_op(fn, regime, *, fullgraph=True, dynamic=False, mode=None):
         return fn
 
 
-def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=None, detail=False):
+def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False):
     """Median PER-CALL milliseconds. PRIMARY metric = CUDA-EVENT DEVICE time; wall-clock is a reference.
 
     `call` is a zero-arg closure that issues ONE op launch (its return is ignored for timing).
@@ -320,11 +320,10 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=None,
     CACHE CONDITION. Before each timed sample the harness runs one eviction pass over a buffer larger
     than the last-level cache (default 512MB > MI300's 256MB Infinity Cache), so a memory-bound decode
     kernel does not read weights that the previous sample left resident — the live server evicts them
-    between decode steps. Which pass is used matters and is REPORTED, never assumed: see `cache_policy`
-    for the measurement showing that the old write pass inflated a decode A/B by 3.4x through writeback
-    contention. Default 'read-evict' (HARNESS_CACHE_MODE / HARNESS_CACHE_FLUSH_MB); `flush_cache=False`
-    still selects 'none' and `True` still selects the legacy 'write-evict'. Runs OUTSIDE the event
-    window. `detail=True` carries the resolved policy back as `cache_condition`; its
+    between decode steps. The pass always READS the buffer with a float32 sum: the old write pass
+    inflated a measured decode speedup from 1.12 to 1.40 through writeback contention. Buffer size is
+    configured by HARNESS_CACHE_FLUSH_MB; the preparation cannot be disabled or switched to writes.
+    Runs OUTSIDE the event window. `detail=True` carries the policy back as `cache_condition`; its
     `deployment_calibrated: False` is literal — this is a sensitivity condition, not a residency proof.
 
     `graph=True` times a captured CUDA-graph replay (the decode deployment context) with the same
@@ -343,7 +342,7 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=None,
     Returns median device ms (float), or {ms, wall_ms, timer} when detail=True — plus {primed, host_ms}
     whenever the timer can produce them. None if `call` raises. On a box without CUDA, device time is
     unavailable so ms == wall_ms and timer='wall'."""
-    policy = cache_policy(flush_cache)   # outside the try: a bad mode must raise, not read as "call raised"
+    policy = cache_policy()   # outside the try: a bad size must raise, not read as "call raised"
     torch = _torch()
     inner = max(1, int(inner))
     try:
@@ -351,7 +350,7 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=None,
     except Exception:
         have_cuda = False
     try:
-        if have_cuda and policy["mode"] != "none":
+        if have_cuda:
             _flush_buffer(torch, policy["bytes"])   # allocate once BEFORE warmup, never inside a sample
         if have_cuda and graph:
             g = _try_capture(torch, call, inner)
@@ -376,7 +375,7 @@ def _timing_result(dev_ms, wall_ms, timer, detail, host_ms=None, primed=None, po
         return dev_ms
     d = {"ms": dev_ms, "wall_ms": wall_ms, "timer": timer}
     if policy is not None:
-        # ABSENT means the measurement predates the three-state cache policy, i.e. it was taken under an
+        # ABSENT means the measurement predates the cache receipt, i.e. it was taken under an
         # unconditional write-evict -- see director.md. Never read absence as "no cache preparation".
         d["cache_condition"] = policy
     if host_ms is not None:
@@ -417,42 +416,23 @@ def _host_dispatch_ms(torch, call):
     return ms
 
 
-CACHE_MODES = ("none", "read-evict", "write-evict")
-DEFAULT_CACHE_MODE = "read-evict"
 _CACHE_FLUSH_BUF = None
 _CACHE_FLUSH_SINK = None
 _CACHE_FLUSH_DEV = None
 
 
-def cache_policy(legacy_flush=None):
-    """Resolve the cache condition prepared before each timed sample, as a THREE-state mode.
+def cache_policy():
+    """Describe the fixed read eviction performed before each timed GPU sample.
 
-    'write-evict' (a 512MB `zero_()`) was the only behaviour until it was measured: the dirty lines it
-    leaves in the last-level cache are written back WHILE the next, timed kernel runs, stealing the HBM
-    bandwidth that kernel needs. That does not show up as extra measured time (the flush is outside the
-    event window) — it shows up as a systematically inflated A/B, because any candidate that reads less
-    HBM is flattered by the contention. Measured on MI355X against the GLM-5.2 fused-MoE seam
-    (2 independent runs per arm, per-bucket MDE 0.2-2.6%): the decode-weighted speedup read 1.408/1.395
-    under write-evict but 1.121/1.129 under read-evict and 1.104/1.117 with no flush at all — read-evict
-    and no-flush land together, so the 3.4x amplification came from the writeback storm, not from cache
-    temperature. Prefill buckets were immune (long kernels amortize the writeback).
-
-    'read-evict' therefore replaces it as the default: same eviction traffic, no dirty lines.
-    'none' is the honest way to disable preparation — it allocates nothing and launches nothing.
-
-    `legacy_flush` is the back-compatible bridge for callers still passing a bool: True -> write-evict,
-    False -> none. Env override: HARNESS_CACHE_MODE; buffer size HARNESS_CACHE_FLUSH_MB (MB)."""
-    mode = os.environ.get("HARNESS_CACHE_MODE", DEFAULT_CACHE_MODE)
-    if legacy_flush is not None:
-        mode = "write-evict" if legacy_flush else "none"
-    if mode not in CACHE_MODES:
-        raise ValueError(f"Unknown HARNESS_CACHE_MODE: {mode!r} (expected one of {CACHE_MODES})")
+    The old 512 MiB `zero_()` left dirty cache lines whose later writeback competed with the timed
+    kernel for HBM bandwidth. On MI355X / GLM-5.2 fused-MoE, decode-weighted speedups were 1.408/1.395
+    with write eviction, 1.121/1.129 with read eviction, and 1.104/1.117 without eviction. An absolute-
+    time probe also confirmed that reading evicts cached data, supporting read eviction as the single
+    measurement policy. Only the buffer size is configurable, via HARNESS_CACHE_FLUSH_MB (MiB)."""
     mb = int(os.environ.get("HARNESS_CACHE_FLUSH_MB", "512"))
-    if mode != "none" and mb <= 0:
-        raise ValueError("Eviction requires positive HARNESS_CACHE_FLUSH_MB; use mode=none to disable")
-    return {"mode": mode, "bytes": 0 if mode == "none" else mb * (1 << 20),
-            "preparation": {"none": "no-op", "read-evict": "float32-sum",
-                            "write-evict": "float32-zero"}[mode],
+    if mb <= 0:
+        raise ValueError("Eviction requires positive HARNESS_CACHE_FLUSH_MB")
+    return {"mode": "read-evict", "bytes": mb * (1 << 20), "preparation": "float32-sum",
             # The preparation runs outside both the event and the reference wall window. It is a
             # sensitivity condition, NOT a proof that the deployed cache state was reproduced.
             "outside_timing": True, "deployment_calibrated": False}
@@ -484,36 +464,20 @@ def _flush_buffer(torch, size):
     return _CACHE_FLUSH_BUF
 
 
-def flush_cache(torch=None, mb=None, mode=None):
-    """Prepare the cache condition named by `mode` (default: the resolved `cache_policy()` mode).
+def flush_cache(torch=None, mb=None):
+    """Read an eviction buffer with a float32 sum, without dirtying its cache lines.
 
     Never claims a particular hardware residency — see `cache_policy` for why the preparation method is
     part of the measurement and is reported in the timing receipt."""
-    policy = cache_policy()
-    if mode is not None:
-        if mode not in CACHE_MODES:
-            raise ValueError(f"Unknown cache mode: {mode!r} (expected one of {CACHE_MODES})")
-        policy["mode"] = mode
-    if policy["mode"] == "none":
-        return          # no allocation, no zero_, no reduction, no launch
-    size = policy["bytes"] if mb is None else int(mb) * (1 << 20)
+    size = cache_policy()["bytes"] if mb is None else int(mb) * (1 << 20)
     if size <= 0:
-        raise ValueError("Eviction buffer must be positive; use mode='none' to disable preparation")
+        raise ValueError("Eviction buffer must be positive")
     torch = torch or _torch()
     buf = _flush_buffer(torch, size)
     if buf is None:
         return          # no CUDA
-    if policy["mode"] == "write-evict":
-        buf.zero_()
-    else:
-        global _CACHE_FLUSH_SINK
-        _CACHE_FLUSH_SINK = buf.sum()   # kept alive so the reduction cannot be optimized away
-
-
-def _prepare_cache(torch, policy):
-    """Per-sample cache preparation. Takes the already-resolved policy so the env is read once."""
-    if policy["mode"] != "none":
-        flush_cache(torch, mb=policy["bytes"] // (1 << 20), mode=policy["mode"])
+    global _CACHE_FLUSH_SINK
+    _CACHE_FLUSH_SINK = buf.sum()   # kept alive so the reduction cannot be optimized away
 
 
 def _time_events(torch, call, warmup, repeats, inner, policy):
@@ -534,7 +498,7 @@ def _time_events(torch, call, warmup, repeats, inner, policy):
     end = torch.cuda.Event(enable_timing=True)
     dev, wall = [], []
     for _ in range(max(1, repeats)):
-        _prepare_cache(torch, policy)
+        flush_cache(torch, mb=policy["bytes"] // (1 << 20))
         sync(torch)
         t0 = time.perf_counter()
         start.record()
@@ -586,8 +550,8 @@ def _try_capture(torch, call, inner):
 
 def _time_graph(torch, g, warmup, repeats, policy):
     """Median (device_ms, wall_ms) of a captured-graph replay, device via cuda.Event, with `policy`'s
-    cache preparation before each sample (replay reuses static buffers, so with mode='none' the weights
-    stay resident across samples — unrepresentative of cold decode)."""
+    read eviction before each sample so replay's static buffers do not keep weights resident across
+    samples."""
     graph, inner = g
     for _ in range(max(1, warmup)):
         graph.replay()
@@ -596,7 +560,7 @@ def _time_graph(torch, g, warmup, repeats, policy):
     end = torch.cuda.Event(enable_timing=True)
     dev, wall = [], []
     for _ in range(max(1, repeats)):
-        _prepare_cache(torch, policy)
+        flush_cache(torch, mb=policy["bytes"] // (1 << 20))
         sync(torch)
         t0 = time.perf_counter()
         start.record()

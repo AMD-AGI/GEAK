@@ -207,8 +207,8 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    > **`ms` is CUDA-EVENT DEVICE time (GPU-timeline duration); `wall_ms` is host+device REFERENCE.** The
    > winner and `isolated_speedup` are scored on `ms`, timed with one eviction pass over the L2/Infinity
    > cache before each sample so the number is not read off lines the previous sample left resident. The
-   > pass is a READ (`harness_lib.cache_policy`, default `read-evict`); it does not assert a particular
-   > residency, and the receipt says which pass was used. Consequence for what you optimize: (1) device time already EXCLUDES host launch/dispatch,
+   > pass is always a READ (`harness_lib.cache_policy`, fixed `read-evict`); it does not assert a particular
+   > residency, and the receipt records the preparation. Consequence for what you optimize: (1) device time already EXCLUDES host launch/dispatch,
    > so shaving Python/dispatch overhead earns ZERO here — real wins come from cutting HBM traffic (memory-
    > bound decode) or MFMA/compute work (compute-bound prefill), NOT launch-overhead tricks (those only pay
    > off in the server via its decode CUDA graph, which already collapses dispatch). (2) A large `wall_ms ≫

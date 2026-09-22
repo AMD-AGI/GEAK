@@ -125,7 +125,7 @@ def main():
                         "ms": (r or {}).get("ms"), "wall_ms": (r or {}).get("wall_ms"),
                         "timer": (r or {}).get("timer"),
                         # Which cache condition produced `ms`. A decode A/B read under 'write-evict' is
-                        # not comparable to one read under 'read-evict' (up to 3.4x apart on MI355X --
+                        # not comparable to one read under 'read-evict' (1.40 vs 1.12 on MI355X --
                         # see harness_lib.cache_policy), so the two must never be folded together.
                         "cache_condition": (r or {}).get("cache_condition")})
         print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))

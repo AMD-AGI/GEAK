@@ -46,6 +46,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest.mock import patch
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -978,32 +979,50 @@ class TestTimeOpEvents(_CudaTestCase):
         self.assertAlmostEqual(got["host_ms"], 1.0)         # eager call() is one launch -> no division
 
     def test_the_cache_is_prepared_once_per_sample_outside_the_event_window(self):
-        for mode in ("read-evict", "write-evict"):
-            with self.subTest(mode=mode), _env(HARNESS_CACHE_MODE=mode):
-                self.setUp()                                # fresh stack: syncs is cumulative
-                hl.time_op(lambda: None, warmup=1, repeats=3)
-                self.assertIsNotNone(hl._CACHE_FLUSH_BUF)
-                # sync() before each sample, the post-warmup sync, and the host probe's own two
-                self.assertEqual(self.stack.syncs, 6)
+        reads, real_sum = [], _T.sum
 
-    def test_preparation_can_be_disabled_for_a_deliberately_hot_measurement(self):
-        hl.time_op(lambda: None, warmup=1, repeats=2, flush_cache=False)
-        self.assertIsNone(hl._CACHE_FLUSH_BUF)
-        with _env(HARNESS_CACHE_MODE="none"):               # the env spelling of the same thing
-            hl.time_op(lambda: None, warmup=1, repeats=2)
-        self.assertIsNone(hl._CACHE_FLUSH_BUF)
+        def read(buf):
+            reads.append(len(self.stack.events))
+            return real_sum(buf)
+
+        with patch.object(_T, "sum", read), _env(HARNESS_CACHE_MODE="none"):
+            got = hl.time_op(lambda: None, warmup=1, repeats=3, detail=True)
+        # One actual read before each sample's start event; the removed env switch cannot skip it.
+        self.assertEqual(reads, [0, 3, 6])
+        self.assertEqual(got["cache_condition"]["mode"], "read-evict")
+        # sync() before each sample, the post-warmup sync, and the host probe's own two
+        self.assertEqual(self.stack.syncs, 6)
 
     def test_the_receipt_reports_which_cache_condition_produced_the_number(self):
-        with _env(HARNESS_CACHE_MODE="read-evict", HARNESS_CACHE_FLUSH_MB="64"):
+        with _env(HARNESS_CACHE_FLUSH_MB="64"):
             got = hl.time_op(lambda: None, warmup=1, repeats=3, detail=True)
         self.assertEqual(got["cache_condition"]["mode"], "read-evict")
         self.assertEqual(got["cache_condition"]["bytes"], 64 << 20)
         self.assertFalse(got["cache_condition"]["deployment_calibrated"])
         self.assertIn("primed", got)                        # and the timing receipt is still intact
 
-    def test_the_legacy_true_still_gets_the_old_write_evict_so_a_rerun_is_comparable(self):
-        got = hl.time_op(lambda: None, warmup=1, repeats=3, flush_cache=True, detail=True)
-        self.assertEqual(got["cache_condition"]["mode"], "write-evict")
+    def test_the_removed_switch_cannot_change_the_measurement_policy(self):
+        for value in (True, False, None):
+            with self.subTest(value=value), self.assertRaises(TypeError):
+                hl.time_op(lambda: None, flush_cache=value)
+        # The old positional switch must not silently become the detail argument.
+        with self.assertRaises(TypeError):
+            hl.time_op(lambda: None, 1, 2, 1, False, False)
+
+    def test_a_bad_buffer_size_is_a_configuration_error_before_the_call_runs(self):
+        box, call = self._counting_call()
+        with _env(HARNESS_CACHE_FLUSH_MB="0"), self.assertRaises(ValueError):
+            hl.time_op(call)
+        self.assertEqual(box["n"], 0)
+
+    def test_the_buffer_size_is_fixed_before_warmup_even_if_the_environment_changes(self):
+        def call():
+            os.environ["HARNESS_CACHE_FLUSH_MB"] = "0"
+
+        with _env(HARNESS_CACHE_FLUSH_MB="8"):
+            got = hl.time_op(call, warmup=1, repeats=3, detail=True)
+        self.assertEqual(got["cache_condition"]["bytes"], 8 << 20)
+        self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), (8 << 20) // 4)
 
     def test_the_buffer_is_allocated_before_warmup_not_inside_a_sample(self):
         # A 512MB allocation inside the timed loop would land between the flush and the kernel.
@@ -1089,9 +1108,18 @@ class TestTimeOpGraph(_CudaTestCase):
         # 3 failed-capture warmups + 2 warmup + 3 samples + the host probe's warmups and launches
         self.assertEqual(box["n"], 8 + 3 + hl._HOST_PROBE_LAUNCHES)
 
-    def test_graph_replay_can_also_be_timed_hot(self):
-        hl.time_op(lambda: None, warmup=1, repeats=2, graph=True, flush_cache=False)
-        self.assertIsNone(hl._CACHE_FLUSH_BUF)
+    def test_graph_replay_reads_the_buffer_before_each_sample_outside_capture(self):
+        reads, real_sum = [], _T.sum
+
+        def read(buf):
+            reads.append((len(self.stack.events), self.stack.capturing))
+            return real_sum(buf)
+
+        with patch.object(_T, "sum", read), _env(HARNESS_CACHE_MODE="write-evict"):
+            got = hl.time_op(lambda: None, warmup=1, repeats=2, graph=True, detail=True)
+        self.assertEqual(reads, [(0, False), (3, False)])
+        self.assertEqual(got["cache_condition"]["mode"], "read-evict")
+        self.assertEqual(hl._CACHE_FLUSH_BUF.tolist()[:4], [1.0] * 4)
 
 
 class TestTimingResult(unittest.TestCase):
@@ -1145,14 +1173,10 @@ class TestFlushCache(_HarnessTestCase):
         hl.flush_cache(self.torch)
         self.assertIsNone(hl._CACHE_FLUSH_BUF)
 
-    def test_read_evict_on_a_cpu_box_no_ops_exactly_as_write_evict_always_did(self):
-        # The eviction modes allocate and reduce where the old one only allocated and zeroed; without
-        # the is_available guard read-evict would raise on a box where the old harness ran clean.
-        for mode in ("read-evict", "write-evict"):
-            with self.subTest(mode=mode):
-                hl.flush_cache(self.torch, mode=mode)
-                self.assertIsNone(hl._CACHE_FLUSH_BUF)
-                self.assertIsNone(hl._CACHE_FLUSH_SINK)
+    def test_read_evict_on_a_cpu_box_does_not_allocate_or_reduce(self):
+        hl.flush_cache(self.torch)
+        self.assertIsNone(hl._CACHE_FLUSH_BUF)
+        self.assertIsNone(hl._CACHE_FLUSH_SINK)
 
     def test_the_wall_fallback_still_reports_the_cache_condition_it_could_not_apply(self):
         got = hl.time_op(lambda: None, warmup=1, repeats=2, detail=True)
@@ -1179,33 +1203,32 @@ class TestFlushCacheOnDevice(_CudaTestCase):
             hl.flush_cache(self.torch, mb=8)
         self.assertEqual(hl._CACHE_FLUSH_BUF.numel(), (8 << 20) // 4)
 
-    def test_a_zero_size_is_rejected_rather_than_silently_evicting_nothing(self):
+    def test_a_nonpositive_size_is_rejected_rather_than_silently_evicting_nothing(self):
         """mb=0 used to allocate a 1-element buffer: a flush that evicts nothing while still reporting
-        that the sample was prepared. Disabling preparation has a name, and it is mode='none'."""
-        with self.assertRaises(ValueError):
-            hl.flush_cache(self.torch, mb=0)
+        that the sample was prepared. The read eviction must have a positive buffer size."""
+        for mb in (0, -1):
+            with self.subTest(mb=mb), self.assertRaises(ValueError):
+                hl.flush_cache(self.torch, mb=mb)
         self.assertIsNone(hl._CACHE_FLUSH_BUF)
 
-    def test_mode_none_is_the_way_to_disable_preparation_and_allocates_nothing(self):
-        hl.flush_cache(self.torch, mode="none")
-        self.assertIsNone(hl._CACHE_FLUSH_BUF)
+    def test_the_removed_mode_argument_cannot_disable_or_switch_eviction(self):
+        for mode in ("none", "write-evict", "read-evict"):
+            with self.subTest(mode=mode), self.assertRaises(TypeError):
+                hl.flush_cache(self.torch, mode=mode)
 
-    def test_an_unknown_mode_is_rejected(self):
-        with self.assertRaises(ValueError):
-            hl.flush_cache(self.torch, mode="read_evict")    # underscore, not the hyphen we accept
-
-    def test_a_same_size_buffer_is_reused_and_rezeroed_under_write_evict(self):
-        hl.flush_cache(self.torch, mb=8, mode="write-evict")
+    def test_a_same_size_buffer_is_reused_and_read_again(self):
+        hl.flush_cache(self.torch, mb=8)
         first = hl._CACHE_FLUSH_BUF
-        first.overwrite_([1.0] * 4)                          # pretend a prior flush left data behind
-        hl.flush_cache(self.torch, mb=8, mode="write-evict")
+        first_sum = hl._CACHE_FLUSH_SINK
+        hl.flush_cache(self.torch, mb=8)
         self.assertIs(hl._CACHE_FLUSH_BUF, first)
-        self.assertEqual(first.tolist()[:4], [0.0, 0.0, 0.0, 0.0])
+        self.assertIsNot(hl._CACHE_FLUSH_SINK, first_sum)
+        self.assertEqual(first.tolist()[:4], [1.0] * 4)
 
     def test_read_evict_reduces_the_buffer_instead_of_dirtying_it(self):
         """The whole point of the fix: same traffic, no dirty lines for the NEXT (timed) kernel to
         contend with. The buffer must come back untouched and the reduction must be kept alive."""
-        hl.flush_cache(self.torch, mb=8, mode="read-evict")
+        hl.flush_cache(self.torch, mb=8)
         buf = hl._CACHE_FLUSH_BUF
         n = (8 << 20) // 4
         self.assertEqual(buf.numel(), n)
@@ -1226,40 +1249,28 @@ class TestFlushCacheOnDevice(_CudaTestCase):
 
 
 class TestCachePolicy(_HarnessTestCase):
-    def test_the_default_is_read_evict_not_the_write_that_inflated_decode(self):
+    def test_the_policy_is_read_evict(self):
         p = hl.cache_policy()
         self.assertEqual(p["mode"], "read-evict")
         self.assertEqual(p["preparation"], "float32-sum")
         self.assertEqual(p["bytes"], 512 << 20)
 
-    def test_each_mode_names_its_own_preparation(self):
-        for mode, prep, size in (("none", "no-op", 0),
-                                 ("read-evict", "float32-sum", 512 << 20),
-                                 ("write-evict", "float32-zero", 512 << 20)):
-            with _env(HARNESS_CACHE_MODE=mode):
+    def test_the_removed_environment_switch_cannot_change_the_policy(self):
+        for mode in ("none", "write-evict", "read-evict", "cold"):
+            with self.subTest(mode=mode), _env(HARNESS_CACHE_MODE=mode):
                 p = hl.cache_policy()
-            self.assertEqual((p["mode"], p["preparation"], p["bytes"]), (mode, prep, size))
+                self.assertEqual((p["mode"], p["preparation"], p["bytes"]),
+                                 ("read-evict", "float32-sum", 512 << 20))
 
     def test_the_policy_never_claims_the_deployed_cache_state_was_reproduced(self):
         p = hl.cache_policy()
         self.assertFalse(p["deployment_calibrated"])
         self.assertTrue(p["outside_timing"])
 
-    def test_an_unknown_env_mode_is_rejected_rather_than_falling_back(self):
-        with _env(HARNESS_CACHE_MODE="cold"):
-            with self.assertRaises(ValueError):
+    def test_eviction_with_a_nonpositive_budget_is_rejected(self):
+        for size in ("0", "-1"):
+            with self.subTest(size=size), _env(HARNESS_CACHE_FLUSH_MB=size), self.assertRaises(ValueError):
                 hl.cache_policy()
-
-    def test_the_legacy_bool_still_selects_what_it_always_selected(self):
-        with _env(HARNESS_CACHE_MODE="none"):       # the bool must WIN over the env, as it did before
-            self.assertEqual(hl.cache_policy(True)["mode"], "write-evict")
-            self.assertEqual(hl.cache_policy(False)["mode"], "none")
-
-    def test_eviction_with_a_zero_budget_is_a_contradiction_and_is_rejected(self):
-        with _env(HARNESS_CACHE_FLUSH_MB="0"):
-            with self.assertRaises(ValueError):
-                hl.cache_policy()
-            self.assertEqual(hl.cache_policy(False)["mode"], "none")    # ...but none is still fine
 
 
 # --------------------------------------------------------------------------- #

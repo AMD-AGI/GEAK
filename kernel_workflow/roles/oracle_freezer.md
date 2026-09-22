@@ -167,7 +167,7 @@ values are regenerated from the recorded seed on every run.
     ms      = d["ms"]
     primed  = d.get("primed")                           # True | False | absent — three states, see below
     host_ms = d.get("host_ms")
-    cache   = (d.get("cache_condition") or {}).get("mode")   # read-evict | write-evict | none | absent
+    cache   = (d.get("cache_condition") or {}).get("mode")   # read-evict in the current harness
     ```
     **The baseline leg is ALWAYS `meta.baseline_callable` / `baseline_src/`** — `speedup = baseline_ms /
     current_ms`, so a Triton/HIP/CK/FlyDSL port always competes against the real input kernel, never its
@@ -198,7 +198,9 @@ values are regenerated from the recorded seed on every run.
                                                "current":  {"primed": ..., "host_ms": ...}}}}
     ```
     `cache_mode` is the `cache_condition.mode` shared by every leg — the cache preparation that produced
-    the ratio. Emit the literal string `"unknown_write_evict"` when `cache_condition` is absent: the
+    the ratio. The current harness always uses `"read-evict"`; there is no mode switch. Preserve any
+    historical mode when reading an older harness's receipt. Emit the literal string
+    `"unknown_write_evict"` when `cache_condition` is absent: the
     vendored `harness_lib.py` then predates the policy, which means an unconditional `write-evict`, whose
     dirty-line writeback contends with the timed kernel and inflated a measured GLM-5.2 decode A/B from
     1.12 to 1.40. Absence is NOT "no cache preparation". `director.md` turns this into `cache_basis`.
