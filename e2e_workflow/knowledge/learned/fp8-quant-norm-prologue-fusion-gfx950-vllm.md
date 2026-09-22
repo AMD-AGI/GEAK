@@ -45,6 +45,15 @@ last_seen: 2026-09-11
   and came back −2.1% / +2.2%, i.e. noise. A kernel already at the floor is launch-count-bound: no
   rewrite can win, only removing launches can. Also verify the ACCURACY gate rather than byte parity
   (see `method-e2e-ab-harness.md`): the fp8 baseline is not byte-reproducible across server launches.
+- caution (standalone rebind is a no-op — the win is FUSION, not a swap): a candidate that rebinds the
+  dynamic per-1x128 group quant to `aiter.ops.quant.per_group_quant_hip` (group_size=128) is IDENTITY —
+  that IS already the live op, so its isolated speedup is ~1.0 and it can never move e2e. Do NOT route the
+  prologue as a single-op standalone swap; bid for the whole ring as ONE fused module overlay (this card's
+  lever 1). Holds cross-framework: observed on sglang Qwen3-14B-FP8 fp8-block128, where the extracted
+  standalone quant seam collapsed onto the same live aiter op (iso ~1.0, e2e never reached). Source below.
+- source: exp/e2e_*Qwen3-14B-FP8*_sglang_*/ 2026-09-21 (ROUND=1, sglang TP1, isl/osl/conc 8192/1024/64) —
+  standalone dynamic-group-quant extraction rebound onto the live `per_group_quant_hip` (iso ~1.0);
+  extraction incomplete, e2e UNMEASURED. Recorded as the identity-rebind caution above, not as an e2e result.
 - source: exp/e2e_*Qwen3-14B-FP8*/ 2026-09-11 (ROUND=1, vLLM TP1, isl/osl/conc 1024/1024/64; launch-
   geometry retune, overlay `cand_fp8_quant_norm_prologue_cluster`, profile `round_head` -> `round_1`;
   ref 6369.3 -> cand 6471.2 tok/s).
