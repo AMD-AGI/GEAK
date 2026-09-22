@@ -239,6 +239,44 @@ def test_materialize_accepts_a_bare_session_id(tmp_path):
     assert os.path.isfile(os.path.join(bundle, "files", "patch.diff"))
 
 
+def test_materialize_keys_the_recipe_scalar_by_this_store_metric(tmp_path):
+    """A non-speedup store must not label its ranking scalar `speedup`.
+
+    The e2e lane's exact-workload rung ranks on absolute `throughput_tok_s`, so Candidate.speedup
+    there holds tokens/sec. Writing it into the bundle under the literal `speedup` hands the next
+    reader a four-digit ratio for a run that recorded no ratio at all.
+    """
+    store = LocalKBStore(tmp_path / "store", metric="throughput_tok_s", promote_floor=0.0)
+    store.write(CID, "sid-1", {"schema": "geak.e2e.v1", "throughput_tok_s": 4321.0,
+                               "value": {"direction": "tp8"}}, artifacts(tmp_path, "a"))
+    bundle = store.materialize(CID, store.candidates(CID, limit=1)[0], str(tmp_path / "cache"))
+    recipe = json.loads(open(os.path.join(bundle, "recipe.json")).read())
+    assert recipe["throughput_tok_s"] == 4321.0
+    assert "speedup" not in recipe
+
+
+def test_materialize_by_bare_session_id_reads_this_store_metric(tmp_path):
+    """The bare-id path builds its own Candidate; it has to rank it the way candidates() does."""
+    store = LocalKBStore(tmp_path / "store", metric="throughput_tok_s", promote_floor=0.0)
+    store.write(CID, "sid-1", {"schema": "geak.e2e.v1", "throughput_tok_s": 4321.0,
+                               "value": {"direction": "tp8"}}, artifacts(tmp_path, "a"))
+    bundle = store.materialize(CID, "sid-1", str(tmp_path / "cache"))
+    recipe = json.loads(open(os.path.join(bundle, "recipe.json")).read())
+    assert recipe["throughput_tok_s"] == 4321.0
+    assert "speedup" not in recipe
+
+
+def test_materialize_still_carries_speedup_on_a_speedup_ranked_store(tmp_path):
+    """The kernel lane's default is unchanged: a document with no scalar gets the ranked one."""
+    store = LocalKBStore(tmp_path / "store")
+    document = knowledge()
+    document.pop("speedup")
+    store.write(CID, "sid-1", document, artifacts(tmp_path, "a"))
+    bundle = store.materialize(CID, "sid-1", str(tmp_path / "cache"))
+    recipe = json.loads(open(os.path.join(bundle, "recipe.json")).read())
+    assert recipe["speedup"] is None
+
+
 def test_materialize_refuses_a_candidate_that_is_not_there(tmp_path):
     with pytest.raises(KBStoreError):
         LocalKBStore(tmp_path / "store").materialize(CID, "sid-missing", str(tmp_path / "cache"))
