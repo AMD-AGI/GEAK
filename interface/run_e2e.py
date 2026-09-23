@@ -357,8 +357,10 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     aiperf's trace replay, which owns the sequence lengths. But the agents still
     read isl/osl as the analytic serving call model when they synthesize
     GEMM/attention shapes, so on a trace replay the synthetic 1024/1024
-    defaults would aim the whole search two orders of magnitude below the real
-    load (the corpus averages ~112k input tokens per request).
+    defaults would aim the whole search orders of magnitude below the real load
+    (a trace corpus's average input length dwarfs a synthetic prompt). The real
+    figure is deliberately not quoted here: it moves with the corpus, the
+    tokenizer and the window, so it is measured, never asserted.
 
     ``workload_spec.observed_isl/observed_osl`` carry the shape the orchestrator
     MEASURED on its own baseline. Prefer them; fall back to the synthetic
@@ -378,13 +380,18 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     except (TypeError, ValueError):
         obs_isl = obs_osl = 0
     if obs_isl <= 0 or obs_osl <= 0:
+        # Not an error, and no longer a dead end: the workflow measures the shape
+        # it actually served off its own baseline and adopts it before any kernel
+        # work is scheduled (adoptMeasuredShape). So the honest label here is
+        # "pending", which the workflow reads as "you may replace me", not
+        # "synthetic_fallback", which reads as a decision already made.
         sys.stderr.write(
-            "!!! AgentX workload carries no observed_isl/observed_osl; kernel "
-            f"targeting falls back to the synthetic {syn_isl}/{syn_osl}, which "
-            "is far below the real replay shape. Kernel choices may be aimed at "
-            "the wrong regime (the MEASUREMENT is unaffected).\n"
+            "note: AgentX workload carries no observed_isl/observed_osl, so the "
+            f"kernel-targeting shape starts at the synthetic {syn_isl}/{syn_osl} "
+            "and is replaced by what the baseline actually serves. Pass "
+            "observed_isl/observed_osl only to target a regime deliberately.\n"
         )
-        return syn_isl, syn_osl, "synthetic_fallback_on_agentx"
+        return syn_isl, syn_osl, "agentx_pending_baseline"
     return obs_isl, obs_osl, "agentx_observed"
 
 
@@ -448,6 +455,20 @@ def map_args(
         "osl": target_osl,
         "workload_shape_provenance": shape_provenance,
         "conc": int(workload.get("conc", 64)),
+        # Forward the workload declaration into the workflow rather than relying
+        # only on the environment exported below. It is the SAME mechanism the
+        # standalone entry point uses, which is the point: one declaration, one
+        # set of defaults, one place where roles are told what they are
+        # measuring. The workflow's own channel assigns nothing that is already
+        # exported, so everything set here still wins -- this only closes the gap
+        # where a bench runs in a context that did not inherit the environment.
+        # Absent/synthetic workload_spec => omitted, and the args are unchanged.
+        **(
+            {"workload_spec": h["workload_spec"]}
+            if isinstance(h.get("workload_spec"), dict)
+            and str(h["workload_spec"].get("kind") or "") == WORKLOAD_KIND_AGENTX
+            else {}
+        ),
         # Seed the baseline with Hyperloom's accepted best config so the
         # baseline == Hyperloom best config (fair engagement start).
         "initial_extra_server_args": initial_server_args,
@@ -846,6 +867,19 @@ def apply_workload_spec(h: dict) -> dict:
     if metric_basis:
         os.environ["GEAK_METRIC_BASIS"] = metric_basis
         exported["GEAK_METRIC_BASIS"] = metric_basis
+        # GEAK_METRIC_BASIS records the DECLARED basis; it is not what selects
+        # the axis. bench_e2e.sh medians whichever throughput E2E_METRIC names
+        # and defaults it to "output". Under Hyperloom that variable arrives in
+        # our own environment (the orchestrator injects it), which is why this
+        # was never noticed -- but nothing inside GEAK was setting it, so a run
+        # driven from a handoff alone graded a 140:1 prefill-heavy trace on the
+        # output axis, where a large change in total work barely moves the
+        # number. Derive it here, and never overwrite an inherited value so the
+        # orchestrator stays authoritative over its own runs.
+        if "E2E_METRIC" not in os.environ:
+            axis = "total" if "total" in metric_basis else "output"
+            os.environ["E2E_METRIC"] = axis
+            exported["E2E_METRIC"] = axis
     return exported
 
 
@@ -877,19 +911,22 @@ def agentx_preflight(h: dict) -> list[str]:
             "client cannot replay traces. Install the AgentX-capable aiperf "
             "into this environment, or set AIPERF_BIN to its path."
         )
+    # The mapper is only a real gap when the vendored fallback is missing too.
+    # GEAK ships a copy beside the client adapter precisely so a run without an
+    # InferenceX checkout is not a failure; reporting its absence as a problem
+    # would send an operator hunting for a checkout they do not need.
+    vendored_mapper = E2E_DIR / "scripts" / "adapters" / "clients" / "map_aiperf.py"
     ix_root = os.environ.get("INFERENCEX_PATH", "").strip()
-    if not ix_root:
-        problems.append(
-            "INFERENCEX_PATH is unset, so map_aiperf.py cannot be located to "
-            "convert the aiperf export into a canonical result."
-        )
-    elif not any(
+    ix_mapper = ix_root and any(
         os.path.isfile(os.path.join(ix_root, rel))
         for rel in ("benchmarks/map_aiperf.py", "assets/agentx/map_aiperf.py")
-    ):
+    )
+    if not ix_mapper and not vendored_mapper.is_file():
         problems.append(
-            f"map_aiperf.py not found under INFERENCEX_PATH={ix_root!r} "
-            "(expected benchmarks/ or assets/agentx/)."
+            "no map_aiperf.py to convert the aiperf export into a canonical "
+            f"result: INFERENCEX_PATH={ix_root or '<unset>'} has none (expected "
+            f"benchmarks/ or assets/agentx/) and the vendored copy at "
+            f"{vendored_mapper} is missing."
         )
     for problem in problems:
         sys.stderr.write(f"!!! AgentX preflight: {problem}\n")
@@ -1806,6 +1843,37 @@ def apply_bench_protocol(h: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Invocation: SDK preferred, CLI fallback.
 # ---------------------------------------------------------------------------
+# Everything the agent says is CAPTURED for the life of the run: the SDK path
+# accumulates fragments and joins them at the end, and the CLI path asks for
+# --output-format json, which emits one blob on exit. Either way a multi-hour run
+# prints nothing to its container log, so the workflow's own log() lines -- the
+# phase transitions, and the "Kernel-targeting shape measured" line that says
+# whether kernel work is aimed at the right regime -- are unreadable until it is
+# over. Both consumption paths funnel through _iter_message_text(), so teeing
+# there makes a run watchable with one write and no change to what is returned.
+# Unset GEAK_LIVE_LOG => byte-identical behaviour.
+_LIVE_LOG_PATH = os.environ.get("GEAK_LIVE_LOG", "")
+_LIVE_LOG_BROKEN = False
+
+
+def _live_log(texts: list[str]) -> None:
+    """Append streamed agent text to a watchable file. Never raises.
+
+    Observability must not be able to fail a run, so the first write error
+    disables the tee for good rather than retrying on every message.
+    """
+    global _LIVE_LOG_BROKEN
+    if not _LIVE_LOG_PATH or _LIVE_LOG_BROKEN or not texts:
+        return
+    try:
+        with open(_LIVE_LOG_PATH, "a", encoding="utf-8", errors="replace") as fh:
+            for text in texts:
+                fh.write(text if text.endswith("\n") else text + "\n")
+            fh.flush()
+    except Exception:
+        _LIVE_LOG_BROKEN = True
+
+
 def _iter_message_text(msg: Any) -> list[str]:
     """Best-effort extraction of every text fragment from one SDK message.
 
@@ -1848,6 +1916,7 @@ def _iter_message_text(msg: Any) -> list[str]:
     if isinstance(msg, dict):
         _take(msg.get("text"))
         _take(msg.get("result"))
+    _live_log(out)
     return out
 
 

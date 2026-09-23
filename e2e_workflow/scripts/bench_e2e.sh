@@ -74,6 +74,28 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ---- per-run workload env (the caller-less channel) ----
+# A workload whose identity cannot be expressed as ISL/OSL/CONC -- an AgentX
+# trace replay -- needs BENCH_CLIENT/E2E_METRIC/AGENTX_* set on EVERY bench in
+# the run, including the ones the role prompts issue.  Under an orchestrator
+# those arrive in the inherited environment (interface/run_e2e.py exports them).
+# Standalone there is no such parent, so the workflow drops ONE file next to the
+# copied bench script and every invocation picks it up here.
+#
+# Contract, in this order of authority:
+#   1. the real environment (an orchestrator's export ALWAYS wins),
+#   2. this file (the standalone declaration),
+#   3. the defaults further down (synthetic ISL/OSL sweep).
+# The file must therefore only ever assign with `: "${VAR:=...}"`, never `VAR=`.
+# When it does not exist NOTHING here runs, so a synthetic run is byte-identical
+# to one from before this channel existed.
+BENCH_ENV_FILE="${BENCH_ENV_FILE:-$HERE/bench_env.sh}"
+if [ -f "$BENCH_ENV_FILE" ]; then
+  echo ">>> sourcing per-run workload env: $BENCH_ENV_FILE"
+  # shellcheck source=/dev/null
+  . "$BENCH_ENV_FILE"
+fi
+
 # ---- staged siblings ----
 # This script is COPIED into $EVAL_DIR (roles/director.md), so its helper libraries resolve from $HERE
 # first, then the skill dir.  Both are resolved up here, before anything is launched: discovering a
@@ -123,6 +145,7 @@ fi
 # outranks the validation pin above: run_e2e.py pins GEAK_REPEAT_MODE into os.environ for the whole
 # process tree, so in an orchestrated run the mode is ALWAYS already set and a default-only
 # carve-out was a no-op exactly where it was needed.
+# Reads PROFILE/REPEATS, which standalone arrive from bench_env.sh -- hence its sourcing stays above.
 if [ "${PROFILE:-0}" = "1" ] && [ "${GEAK_REPEAT_MODE:-legacy}" != "legacy" ]; then
   echo ">>> PROFILE=1: using the single-server profiling lifecycle (not a timed measurement;" \
        "was ${GEAK_REPEAT_MODE})."
@@ -194,6 +217,28 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
     echo "!!! REUSE_SERVER=1 is incompatible with GEAK_REPEAT_MODE=isolated_server; timed replicas must fresh-launch." >&2
     exit 4
   fi
+  # Attempts per replica. Two (one retry) is right for the fixed-shape workloads,
+  # whose launches do not fault on their own, and stays their default.
+  #
+  # The agentx trace replay is the exception, so it gets three. It drives ~113k-token
+  # contexts for an hour at a time, and the HSA queue abort that comes with it
+  # (HSA_STATUS_ERROR_EXCEPTION 0x1016) has now reproduced on three separate nodes,
+  # which makes it a property of this workload on this stack rather than of one box
+  # or one candidate. Two attempts is one too few against a fault that is independent
+  # of the config being measured: on the 20260909 run both baseline attempts faulted
+  # 30 minutes apart, and exhausting the budget cost the entire Setup phase.
+  #
+  # A rejected value falls back to the workload's default rather than failing the
+  # measurement.
+  case "${GEAK_WORKLOAD_KIND:-}" in
+    agentx_trace_replay) _attempts_default=3 ;;
+    *) _attempts_default=2 ;;
+  esac
+  _max_attempts="${BENCH_MAX_ATTEMPTS:-$_attempts_default}"
+  case "$_max_attempts" in
+    ''|*[!0-9]*) _max_attempts="$_attempts_default" ;;
+    *) [ "$_max_attempts" -ge 1 ] || _max_attempts="$_attempts_default" ;;
+  esac
   _purpose="${MEASUREMENT_PURPOSE:-search}"
   _resolve_samples 3 "isolated replica" isolated-server
   _requested="$_samples"
@@ -208,10 +253,10 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
     mkdir -p "$_replica_dir"
     rm -f "$_replica_dir/selected_summary.json" "$_replica_dir/selected_attempt"
     _replica_ok=0
-    for _attempt in 1 2; do
+    for ((_attempt=1; _attempt<=_max_attempts; _attempt++)); do
       _attempt_dir="$_replica_dir/attempt_$_attempt"
       rm -f "$_attempt_dir/bench_summary.json"
-      echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/2) ..."
+      echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/$_max_attempts) ..."
       OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
         bash "$_replica_runner"
       _rc=$?
@@ -242,7 +287,7 @@ PY
       echo "!!! Isolated replica $_replica attempt $_attempt failed (rc=$_rc)." >&2
     done
     if [ "$_replica_ok" != "1" ]; then
-      echo "!!! Isolated replica $_replica failed after one retry; continuing without same-server fallback." >&2
+      echo "!!! Isolated replica $_replica failed after $_max_attempts attempt(s); continuing without same-server fallback." >&2
     fi
   done
 
@@ -533,6 +578,19 @@ PROFILE_TARGET_STEPS=$(python3 -c "import math;print(math.ceil($CONC*$ISL/max(${
 # profiler after N worker steps; default to the workload target clamped to the step cap (bounds the buffer).
 PROFILE_MAX_ITERS=${PROFILE_MAX_ITERS:-$(( PROFILE_TARGET_STEPS < PROFILE_NUM_STEPS_MAX ? PROFILE_TARGET_STEPS : PROFILE_NUM_STEPS_MAX ))}
 PROFILE_DELAY_ITERS=${PROFILE_DELAY_ITERS:-0}       # steps to skip before arming; 0 keeps the prefill burst
+# Window placement. 0 arms the profiler at load start, which is what a synthetic
+# sweep wants (the initial prefill burst stays in the trace). A client that owns
+# its own load has a ramp of its own -- corpus resolve, per-lane warmup, drain --
+# and arming at load start would capture that instead of steady state, so it may
+# publish adapter_profile_warmup_s() to place the window itself. An explicit
+# PROFILE_WARMUP_SEC from the caller always wins; no hook => unchanged 0.
+if [ -z "${PROFILE_WARMUP_SEC:-}" ] && declare -F adapter_profile_warmup_s >/dev/null; then
+  PROFILE_WARMUP_SEC="$(adapter_profile_warmup_s 2>/dev/null || echo 0)"
+  case "$PROFILE_WARMUP_SEC" in
+    ''|*[!0-9]*) PROFILE_WARMUP_SEC=0 ;;
+  esac
+  echo ">>> profile window placed by the $BENCH_CLIENT client adapter: warmup ${PROFILE_WARMUP_SEC}s"
+fi
 PROFILE_WARMUP_SEC=${PROFILE_WARMUP_SEC:-0}         # 0 = arm at load start so prefill is captured too
 PROFILE_NUM_PROMPTS=${PROFILE_NUM_PROMPTS:-$((CONC * 4))}   # >CONC so the queue stays saturated
 PROFILE_REQUEST_RATE=${PROFILE_REQUEST_RATE:-}      # optional req/s to stagger arrivals; empty = inf
@@ -835,6 +893,17 @@ PY
     sleep "$PROFILE_WARMUP_SEC"
     if kill -0 "$_bg_load" 2>/dev/null; then
       adapter_profile_window || echo "!!! profile window failed"
+    elif [ "${GEAK_ISL_OSL_INACTIVE:-0}" = "1" ]; then
+      # The load this run measures is not expressible as ISL/OSL (a trace replay),
+      # so the usual fallback is not a degraded version of it -- it is a different
+      # workload. Writing its trace into this run's profile dir would hand every
+      # downstream consumer a profile of something the run never serves, and it
+      # would look exactly like a real one. No trace is the honest outcome.
+      echo "!!! the replay ended before the profile window opened (warmup ${PROFILE_WARMUP_SEC}s" \
+           "vs the leg's own duration) — NO trace captured." >&2
+      echo "!!! not substituting a synthetic ISL/OSL profile: it would describe a different workload." >&2
+      echo "!!! lower AGENTX_PROFILE_WARMUP_S, or profile a leg that runs the longer window" \
+           "(MEASUREMENT_PURPOSE=parity)." >&2
     else
       echo "!!! background load exited before the profile window (load too short?) — falling back"
       adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
