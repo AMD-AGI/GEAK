@@ -48,6 +48,11 @@ l2_bytes: 4194304
 gfx: gfx1151
 cu: 40
 hbm_bw_bytes_s: 256.0e9       # LPDDR5X-8000, 256-bit — pin rate, NOT HBM
+flops:                         # dense WMMA peaks, FLOP/s — theoretical
+  fp32: 3.0e13
+  bf16: 6.0e13
+  fp16: 6.0e13
+  int8: 6.0e13
 l2_bytes: 2097152
 mall_bytes: 33554432
 ```
