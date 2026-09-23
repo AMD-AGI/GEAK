@@ -102,9 +102,32 @@ def detect_arch(torch=None):
 
 
 def fp8_is_fnuz(arch):
-    """True if this arch uses the AMD fnuz fp8 (CDNA3/gfx942); False for CDNA4/OCP (gfx950) and others."""
+    """True if this arch uses the AMD fnuz fp8 (CDNA3/gfx942); False for CDNA4/OCP (gfx950) and others.
+
+    NOTE this is a question about the fp8 *encoding*, and it is only meaningful on a part that HAS an
+    fp8 matrix path. It answers False both for gfx950 (which has fp8, in OCP form) and for RDNA parts
+    (which have no fp8 matrix instruction at all) — ask `fp8_matrix_supported()` to tell those apart.
+    """
     a = (arch or "").lower()
     return any(a.startswith(p) for p in _FNUZ_ARCH_PREFIXES)
+
+
+def fp8_matrix_supported(arch):
+    """Does this arch have a HARDWARE fp8 matrix instruction?
+
+    Three-valued reality, and the two-valued version is expensive: `fp8_is_fnuz` returning False is NOT
+    evidence that fp8 works — on RDNA (gfx11xx/gfx12xx, e.g. gfx1151 Strix Halo) there is no fp8 matrix
+    instruction and no block-scaled FP4/FP6 either, so an fp8 candidate there does not fail loudly, it
+    silently runs an EMULATED path and costs performance while still passing correctness. Callers that
+    are choosing a *strategy* (quantize? author an fp8 GEMM?) must gate on this, not on the encoding.
+
+    Returns True for CDNA (gfx9xx), False for RDNA, and False for an unknown/empty arch — unknown is
+    treated as unsupported on purpose, so a missing probe cannot green-light an emulated path.
+    """
+    a = (arch or "").lower()
+    if a.startswith("gfx9"):
+        return True
+    return False
 
 
 def regime_dtype(name, torch=None, arch=None):

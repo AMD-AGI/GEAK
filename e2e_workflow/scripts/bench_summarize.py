@@ -276,6 +276,18 @@ def from_replicas(args):
 
     tps = col("throughput_tok_s_median")
     med, spread = _med3(tps), _spread_pct(tps)
+    # DISPERSION GATE -- isolated_server only, and only meaningful here. In warm_server the
+    # reported spread is within-server client noise across rounds of ONE boot, and at the default
+    # REPEATS=1 it is structurally 0.0, so no gate could ever fire there. isolated_server is the
+    # opposite: every replica is a cold boot, so spread IS the boot-to-boot variance, and a run
+    # whose replicas disagree by more than the effect being claimed cannot support that claim no
+    # matter how clean its median looks. Measured on gfx1151: a tuned arm returned
+    # 113.98 / 43.45 / 113.92 tok/s -- spread 61.91% -- and still reported
+    # usable_for_acceptance=true, which would have let a 9.7% median delta be accepted on evidence
+    # that contains a 62% hole. The gate is generous by design (it rejects broken measurement, not
+    # noisy hardware); tighten it per box via GEAK_MAX_REPLICA_SPREAD_PCT.
+    spread_gate = float(os.environ.get("GEAK_MAX_REPLICA_SPREAD_PCT", "15") or 15)
+    spread_ok = spread is None or spread <= spread_gate
     bases = {s.get("metric_basis") for s in summaries if s.get("metric_basis")}
     basis = next(iter(bases)) if len(bases) == 1 else None
     is_output, is_intvty = basis == OUTPUT_BASIS, basis in _INTVTY_BASES
@@ -284,7 +296,13 @@ def from_replicas(args):
         "requested": args.requested,
         "successful": args.successful,
         **_contract(args.requested, args.successful, med,
-                    args.successful == args.requested and med is not None),
+                    args.successful == args.requested and med is not None and spread_ok),
+        "spread_gate_pct": spread_gate,
+        "spread_gate_passed": spread_ok,
+        "unusable_reason": None if spread_ok else (
+            f"replica spread {spread}% exceeds GEAK_MAX_REPLICA_SPREAD_PCT={spread_gate}%: "
+            "boot-to-boot variance is larger than any effect this run could claim; "
+            "read the per-replica server logs before re-measuring"),
         "measurement_mode": "isolated_server",
         "measurement_purpose": args.purpose,
         "effective_config_digest": args.digest or None,

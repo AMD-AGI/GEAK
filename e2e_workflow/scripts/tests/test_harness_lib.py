@@ -589,9 +589,22 @@ class TestArch(_HarnessTestCase):
         for arch in ("gfx942", "gfx942:sramecc+", "gfx940", "gfx941", "gfx90a", "GFX942"):
             self.assertTrue(hl.fp8_is_fnuz(arch), arch)
 
-    def test_cdna4_and_unknown_archs_use_the_ocp_fp8(self):
+    def test_everything_that_is_not_cdna3_is_not_fnuz(self):
+        # Careful reading the RDNA/empty entries: False here means "not the fnuz ENCODING", which on
+        # those parts is not the same as "then it is OCP fp8" -- see the next two tests.
         for arch in ("gfx950", "gfx1100", "", None):
             self.assertFalse(hl.fp8_is_fnuz(arch), arch)
+
+    def test_cdna_has_a_hardware_fp8_matrix_path(self):
+        for arch in ("gfx942", "gfx950", "gfx90a", "GFX950:sramecc+"):
+            self.assertTrue(hl.fp8_matrix_supported(arch), arch)
+
+    def test_rdna_and_unknown_archs_have_no_fp8_matrix_path(self):
+        # gfx1151 (Strix Halo) has no fp8 matrix instruction and no block-scaled FP4/FP6: an fp8
+        # candidate there runs EMULATED -- correct but slower -- so it must never be auto-selected.
+        # Unknown/empty is deliberately also False: a missing probe must not green-light emulation.
+        for arch in ("gfx1151", "gfx1100", "gfx1201", "", None):
+            self.assertFalse(hl.fp8_matrix_supported(arch), arch)
 
 
 # --------------------------------------------------------------------------- #

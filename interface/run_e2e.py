@@ -466,7 +466,9 @@ def map_args(
         "measurement_mode": "warm_server",
         "parity_replicas": 1,
         "search_replicas": 1,
-        "validation_replicas": 3,
+        # Honor a handoff override so a short-budget run can trade boot-to-boot
+        # samples for wall clock; defaults to 3 when the handoff is silent.
+        "validation_replicas": int(h.get("validation_replicas", 3) or 3),
         # warm_server IS Hyperloom's protocol, not a truncation of a longer one: two client passes
         # on one server, report the second.  A 3-round median would be a different statistic from
         # the one it rebenches against, so the round count is not a knob here.
@@ -544,6 +546,32 @@ def map_args(
     # (per-op tuners -> tuned artifacts -> engagement proof), which upstream did
     # not do. So it stays enabled by default and is only overridden on request.
     # Omitted keys => the workflow's own defaults, byte-identical to a direct call.
+    # Head-track admission bar and queue depth (workflow defaults: 5% of GPU
+    # time, 3 ops). On a bandwidth-saturated APU every dense Linear sits at
+    # 85-91% of the DRAM pin, so nothing above the 5% bar is authorable, while
+    # the genuine authoring candidates -- attention (~3.9%) and the prefill FA
+    # kernel (~3.1%) -- fall just under it. The queue is Amdahl-ranked and then
+    # sliced to head_budget, so lowering the bar without also widening the slice
+    # still cannot reach them. Forwarded so a run can open both deliberately.
+    # Omitted keys => the workflow's own defaults, byte-identical to a direct call.
+    if h.get("head_threshold_pct") is not None:
+        ps_args["head_threshold_pct"] = float(h["head_threshold_pct"])
+    if h.get("head_budget") is not None:
+        ps_args["head_budget"] = int(h["head_budget"])
+    # Wall-clock / fan-out bounding for the head track. The workflow already owns
+    # these (fast_mode skips ConfigSweep+Milestone and caps each nested author
+    # workflow; head_author_max bounds how many languages are authored per op),
+    # but none of them were reachable from a handoff, so the only way to bound an
+    # authoring run was the outer --timeout-s -- which kills mid-flight instead of
+    # letting the workflow self-finalize. Forwarded so a SHORT validation run can
+    # exercise the full head->author->integrate gate chain on the real seam without
+    # paying the full search budget. Omitted keys => the workflow's own defaults,
+    # byte-identical to a direct call.
+    if h.get("fast_mode") is not None:
+        ps_args["fast_mode"] = "true" if _as_bool(h["fast_mode"]) else "false"
+    for _k in ("head_author_max", "fast_head_workflow_ms", "fast_head_deadline_ms"):
+        if h.get(_k) is not None:
+            ps_args[_k] = int(h[_k])
     if h.get("tuning_skillset") is not None:
         ps_args["tuning_skillset"] = "true" if _as_bool(h["tuning_skillset"]) else "false"
     # tuning-kb is the skillset's per-model ANSWER KEY: right for production, but it
@@ -734,6 +762,17 @@ def build_prompt(ps_args: dict) -> str:
         "JSON-encoded string. Do not wrap it in quotes or call json.dumps on it. "
         "If args arrives as a string the workflow cannot read args.workflow_dir "
         "and aborts immediately.\n"
+        "CRITICAL - STAY IN THE TURN: the Workflow tool runs in the BACKGROUND and "
+        "hands you a Task ID instead of the return value. That is expected - do NOT "
+        "pass `run_in_background`, which this build rejects as an unknown parameter. "
+        "It is YOUR job to stay in the same turn until the workflow is actually done: "
+        "immediately call TaskOutput with {task_id: <the id>, block: true, timeout: "
+        "600000} and, every time it comes back still running, call it AGAIN. This "
+        "workflow legitimately runs for HOURS, so expect to repeat that poll many "
+        "times; repeating it is correct, not a stall. Never end your turn while the "
+        "workflow is still running and never announce that you will wait: ending the "
+        "turn kills the workflow mid-flight and destroys the whole run. Only once "
+        "TaskOutput reports the workflow finished may you print the final JSON line.\n"
         "Run the full e2e pipeline (Setup -> Profile -> Strategize -> "
         "HeadKernel -> Milestone -> Finalize -> Report -> Validate). The workflow "
         f'persists its full return value to "{eval_dir}/workflow_return.json" as '
@@ -5692,10 +5731,20 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
     # ``apply_*`` (flat/nested-e2e schema) or ``accepted_*`` (summary schema).
     flags: list[str] = []
     env: list[str] = []
+    # ``*_addition`` is a THIRD spelling seen in the wild: the PHASE=integrate result
+    # schema documents ``accepted_overlay`` but no env field at all, while Finalize's
+    # inputs require "accepted config (flags/env)" — so an integrator whose overlay
+    # needs env to bind has no schema slot and invents one. Measured on gfx1151: the
+    # winning candidate recorded ``accepted_env_addition=GEAK_TUNED_GEMM_TABLE=...``,
+    # no reader looked for that key, and the win came back with env="" — accepted,
+    # but with nothing carried forward to actually bind it. Reading the alias costs
+    # nothing and turns that silent drop into a reproducible relaunch.
     for c in banked:
         for value, sink in (
-            (str(_ir_get(c["ir"], "apply_flags", "accepted_flags") or ""), flags),
-            (str(_ir_get(c["ir"], "apply_env", "accepted_env") or ""), env),
+            (str(_ir_get(c["ir"], "apply_flags", "accepted_flags",
+                         "accepted_flags_addition") or ""), flags),
+            (str(_ir_get(c["ir"], "apply_env", "accepted_env",
+                         "accepted_env_addition") or ""), env),
         ):
             if value and value not in sink:
                 sink.append(value)
@@ -5727,6 +5776,45 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
             baseline_out = cfg["baseline_tput"]
             speedup_out = final_tput / cfg["baseline_tput"]
             config_restacked = True
+    # A recovered win names a loadable overlay but Finalize never ran, so no
+    # ``final/final_launch.sh`` exists and the caller gets code on disk with no way
+    # to start it. Synthesize the launcher from what recovery actually knows: the
+    # overlay, the accepted flags/env, and the staged bench_e2e.sh next to eval_dir.
+    # The overlay rides OVERLAY_PYTHONPATH (the channel the launcher adapters honour
+    # and which PREPENDS) rather than being folded into accepted_config.env, which is
+    # a blind KEY=VAL list and would CLOBBER an inherited PYTHONPATH. Workload/model
+    # env is inherited from the caller, exactly as in the run that produced the win —
+    # recovery has no on-disk snapshot of it and must not invent one. Best-effort:
+    # any failure leaves final_launch_script "" and the old behaviour intact, and the
+    # path is returned ONLY if it was really written (normalize_result's rule: never
+    # advertise a path that does not exist).
+    launch_out = ""
+    bench_sh = eval_dir / "bench_e2e.sh"
+    if overlay_out and bench_sh.is_file():
+        try:
+            final_dir = eval_dir / "final"
+            final_dir.mkdir(parents=True, exist_ok=True)
+            launch_path = final_dir / "final_launch.sh"
+            extra_env = " ".join(env).strip()
+            extra_args = " ".join(flags).strip()
+            launch_path.write_text(
+                "#!/usr/bin/env bash\n"
+                "# AUTO-GENERATED by run_e2e recovery (recovered_intermediate): the run was cut\n"
+                "# short before Finalize, so this is the overlay + accepted config only -- there is\n"
+                "# no final_patch.diff here. Workload/model env (MODEL, BACKEND, ISL/OSL/CONC, the\n"
+                "# launcher+client adapter vars) is INHERITED from your environment; set it to the\n"
+                "# same values the winning A/B used.\n"
+                "set -euo pipefail\n"
+                'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+                f"export OVERLAY_PYTHONPATH={shlex.quote(overlay_out)}\n"
+                f"export EXTRA_ENV=\"${{EXTRA_ENV:-}} {extra_env}\"\n"
+                f"export EXTRA_SERVER_ARGS=\"${{EXTRA_SERVER_ARGS:-}} {extra_args}\"\n"
+                'exec bash "$SCRIPT_DIR/../bench_e2e.sh" "$@"\n'
+            )
+            launch_path.chmod(0o755)
+            launch_out = str(launch_path)
+        except OSError:
+            launch_out = ""
     return {
         "eval_dir": str(eval_dir),
         "throughput_speedup": speedup_out,
@@ -5743,7 +5831,7 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
         # The accepted candidate's overlay, or "" for a config-only win (applied
         # through env/flags, so there is no overlay to hand back).
         "final_overlay": overlay_out,
-        "final_launch_script": "",
+        "final_launch_script": launch_out,
         "accepted_config": {"flags": " ".join(flags), "env": " ".join(env)},
         "accepted_kernels": accepted_kernels,
         "accepted_heads": [],

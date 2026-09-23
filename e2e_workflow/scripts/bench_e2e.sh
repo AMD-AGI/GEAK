@@ -212,6 +212,15 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
       _attempt_dir="$_replica_dir/attempt_$_attempt"
       rm -f "$_attempt_dir/bench_summary.json"
       echo ">>> Isolated replica $_replica/$_requested (attempt $_attempt/2) ..."
+      # PER-REPLICA server log. A caller that exports LOG (the orchestrator does: one log per A/B
+      # arm) is right for every one-server lifecycle, but in THIS mode each replica cold-boots its
+      # own server, so a single shared path means replica N truncates replica N-1's log and only
+      # the last boot survives. That destroys exactly the evidence this mode exists to collect:
+      # boot-to-boot variance. Measured on gfx1151 -- a tuned arm produced 113.98 / 43.45 / 113.92
+      # tok/s and the 43.45 outlier (P90 TTFT 74 s against a normal 52.9 ms P90 ITL) had no server
+      # log left to explain it. Override inside the replica branch only; warm_server/legacy keep
+      # honouring the caller's LOG verbatim.
+      LOG="$_attempt_dir/server.log" \
       OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
         bash "$_replica_runner"
       _rc=$?

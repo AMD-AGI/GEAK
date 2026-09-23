@@ -1383,3 +1383,64 @@ def test_config_that_was_never_moved_is_not_a_direction(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ── recovered AUTHORED-overlay win: binding env + replayable launcher ───────
+
+def _make_authored_eval_dir(tmp_path: Path, *, with_bench: bool = True) -> Path:
+    """The gfx1151 shape: an ACCEPTED authored-overlay win whose binding env was
+    recorded under ``accepted_env_addition`` -- a spelling the PHASE=integrate
+    result schema does not define (it declares ``accepted_overlay`` but no env
+    field at all, while Finalize's inputs require one), so the integrator invented
+    it. Nothing read that key, and the win came back with env="" and no launcher.
+    """
+    eval_dir = tmp_path / "e2e_authored"
+    ov = eval_dir / "overlay" / "cand_o_proj_decode_gemm_iso"
+    ov.mkdir(parents=True)
+    if with_bench:
+        (eval_dir / "bench_e2e.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (ov / "sitecustomize.py").write_text("# overlay loader\n", encoding="utf-8")
+    (ov / "_overlay_manifest.json").write_text(
+        json.dumps({"modules": ["vllm.model_executor.layers.utils"]}), encoding="utf-8")
+    (ov / "integrate_result.json").write_text(json.dumps({
+        "short_name": "o_proj decode GEMM",
+        "isolated_speedup": 1.3057,
+        "ref_med": 115.624, "cand_med": 129.126,
+        "e2e_throughput_tok_s": 129.126, "e2e_delta_pct": 11.678,
+        "output_parity": "pass", "gate": "accepted",
+        "accepted_overlay": str(ov),
+        "accepted_env_addition": "GEAK_TUNED_GEMM_TABLE=/x/config/tuned_gemm_table.json",
+    }), encoding="utf-8")
+    return eval_dir
+
+
+def test_recovered_overlay_win_carries_its_binding_env(tmp_path):
+    """An overlay that needs env to bind must come back WITH that env."""
+    wf = rx._recover_best_intermediate_win(_make_authored_eval_dir(tmp_path))
+    assert wf is not None
+    assert "GEAK_TUNED_GEMM_TABLE" in wf["accepted_config"]["env"], (
+        "accepted_env_addition was dropped: the win is accepted but nothing "
+        "carries forward to actually bind the overlay")
+
+
+def test_recovered_overlay_win_writes_replayable_launcher(tmp_path):
+    """final_launch_script must name a file that EXISTS and wires the overlay."""
+    eval_dir = _make_authored_eval_dir(tmp_path)
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    launch = Path(wf["final_launch_script"])
+    assert launch.is_file(), "advertised a launcher path that does not exist"
+    body = launch.read_text(encoding="utf-8")
+    assert wf["final_overlay"] in body and "OVERLAY_PYTHONPATH" in body
+    assert "GEAK_TUNED_GEMM_TABLE" in body
+    # The overlay rides OVERLAY_PYTHONPATH, which PREPENDS. accepted_config.env is
+    # a blind KEY=VAL list applied as server env, so a PYTHONPATH= entry there
+    # would CLOBBER an inherited one and silently unload the rest of the stack.
+    assert "PYTHONPATH=" not in wf["accepted_config"]["env"]
+
+
+def test_recovered_launcher_absent_when_no_bench_script(tmp_path):
+    """No bench_e2e.sh to exec => no launcher claimed, rather than a dead path."""
+    eval_dir = _make_authored_eval_dir(tmp_path, with_bench=False)
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["final_launch_script"] == ""
+    assert not (eval_dir / "final" / "final_launch.sh").exists()

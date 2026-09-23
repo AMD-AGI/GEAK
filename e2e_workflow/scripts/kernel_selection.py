@@ -17,6 +17,7 @@ this contract and the binding contract pass.
 """
 
 import argparse
+import collections
 import gzip
 import json
 import os
@@ -161,13 +162,52 @@ def _template_arguments(value):
     return re.sub(r"[^a-z0-9]+", "_", text[start + 1:].lower()), False
 
 
-def kernel_matches(expected, observed):
+def _numeric_specialization_variants(expected, observed):
+    """True when two canonical names are one kernel under different numeric specialization.
+
+    Triton bakes its ``constexpr`` values into the symbol itself rather than into a ``<...>`` list,
+    so ``_gemm_a16_w16_kernel`` ships as ``..._BLOCK_SIZE_N_16_..._NUM_KSPLIT_2_...``. Those values
+    are an autotune choice made per launch shape, not a different kernel: the same aiter head was
+    refused at one M bucket (``matched_kernel_calls: 0``) while a sibling head matched the very same
+    base kernel spelled ``..._BLOCK_SIZE_N_128_..._NUM_KSPLIT_1_...``. Equality on the full symbol
+    therefore reads an autotune decision as "this callable never ran that kernel".
+
+    The test is deliberately strict rather than a prefix rule. Both symbols must tokenize to the
+    SAME LENGTH and may differ ONLY at positions where both sides are pure digits, so a genuinely
+    different kernel -- which differs in a name token, not a value -- is still refused. The leading
+    token must be identical and the agreeing tokens must not be outnumbered by the differing ones,
+    which keeps two short unrelated symbols from certifying each other on a single numeric tail.
+    """
+    want = canonical_kernel_name(expected).split("_")
+    got = canonical_kernel_name(observed).split("_")
+    if len(want) != len(got) or not want or want[0] != got[0]:
+        return False
+    differing = 0
+    for left, right in zip(want, got):
+        if left == right:
+            continue
+        if not (left.isdigit() and right.isdigit()):
+            return False
+        differing += 1
+    return 0 < differing <= len(want) - differing
+
+
+def kernel_match_kind(expected, observed):
+    """``''`` when the symbols are different kernels, else how they were reconciled.
+
+    Split out from :func:`kernel_matches` so a verdict can say WHICH rule admitted a kernel:
+    ``numeric_specialization`` is a weaker claim than ``exact`` and callers that record evidence
+    should be able to show that distinction rather than report a bare boolean.
+    """
     want = canonical_kernel_name(expected)
     got = canonical_kernel_name(observed)
     if not want or not got:
-        return False
+        return ""
+    kind = "exact"
     if want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want):
-        return False
+        if not _numeric_specialization_variants(expected, observed):
+            return ""
+        kind = "numeric_specialization"
     # The base token deliberately drops template arguments so a bare declared name can match its
     # decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
     # it certifies the wrong kernel: one capture here held 20 distinct kernels named
@@ -175,11 +215,17 @@ def kernel_matches(expected, observed):
     want_args, want_closed = _template_arguments(expected)
     got_args, got_closed = _template_arguments(observed)
     if not want_args or not got_args:
-        return True
+        return kind
     if want_closed and got_closed:
-        return want_args == got_args
+        return kind if want_args == got_args else ""
     # An elided list still has to agree as far as both sides actually spell it out.
-    return want_args.startswith(got_args) or got_args.startswith(want_args)
+    if want_args.startswith(got_args) or got_args.startswith(want_args):
+        return kind
+    return ""
+
+
+def kernel_matches(expected, observed):
+    return bool(kernel_match_kind(expected, observed))
 
 
 def _device_projection(event):
@@ -276,6 +322,13 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
         if corr is not None:
             related_correlations.add(corr)
     matched = []
+    # Every kernel the launch-causality bridge reached, matched or not. `device_kernel_not_under_
+    # target` used to be raised with no record of what WAS seen, and the traces behind it are
+    # reclaimed once the task finishes (one run discarded 235 MB), so the failure was unfalsifiable
+    # after the fact: a name-matching miss and a genuinely dead seam both surfaced as the same bare
+    # token. Counting the linked names makes the two distinguishable from the verdict alone.
+    observed = collections.Counter()
+    match_kinds = collections.Counter()
     for event in trace_events or []:
         if not isinstance(event, dict) or event.get("cat") != "kernel":
             continue
@@ -284,8 +337,14 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
         corr = args.get("correlation")
         linked = (ext is not None and ext in related_external_ids) or (
             corr is not None and corr in related_correlations)
-        if linked and kernel_matches(device_kernel, event.get("name")):
-            matched.append(str(event.get("name") or ""))
+        if not linked:
+            continue
+        name = str(event.get("name") or "")
+        observed[name] += 1
+        kind = kernel_match_kind(device_kernel, name)
+        if kind:
+            match_kinds[kind] += 1
+            matched.append(name)
     return {
         "target": target_callable,
         "marker": marker,
@@ -294,6 +353,8 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
         "related_external_ids": related_external_ids,
         "related_correlations": related_correlations,
         "matched": matched,
+        "observed": observed,
+        "match_kinds": match_kinds,
     }
 
 
@@ -354,6 +415,7 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
     selected_evidence = evidence.get(target_callable) or {
         "marker": MARKER_PREFIX + target_callable, "spans": [], "marker_calls": 0,
         "related_external_ids": set(), "related_correlations": set(), "matched": [],
+        "observed": collections.Counter(), "match_kinds": collections.Counter(),
     }
     marker = selected_evidence["marker"]
     spans = selected_evidence["spans"]
@@ -396,6 +458,15 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
         "target_marker_calls": selected_evidence["marker_calls"],
         "matched_kernel_calls": len(matched),
         "matched_kernel_names": sorted(set(matched)),
+        # How each admission was reached, so `numeric_specialization` is never mistaken for an
+        # exact identity match when this verdict is read back or audited.
+        "match_kinds": dict(selected_evidence.get("match_kinds") or {}),
+        # What the launch-causality bridge actually reached under the marker. Capped because a
+        # decode capture links thousands of launches and this file is read by an agent.
+        "observed_kernels_under_target": [
+            {"name": name, "calls": calls}
+            for name, calls in (selected_evidence.get("observed") or
+                                collections.Counter()).most_common(12)],
         "correlated_external_ids": len(related_external_ids),
         "correlated_launch_correlations": len(selected_evidence.get("related_correlations") or ()),
         "candidate_targets_tested": installed_candidates,
