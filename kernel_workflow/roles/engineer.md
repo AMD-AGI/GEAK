@@ -23,8 +23,16 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 
 ## Load only the knowledge for your specialty (keeps context focused)
 - algorithm  → `hip_optimization.md` (P0/P1) or `triton_optimization.md`, + `geomean_levers.md`
-- memory     → `hip_optimization.md` (P1/P2) or `triton_optimization.md`, + `amd_instinct.md`
-- compute    → `hip_optimization.md` (P3/P4) + `amd_instinct.md` (detect the card; occupancy/VGPR table)
+- memory     → `hip_optimization.md` (P1/P2) or `triton_optimization.md`, + the hardware file for THIS box
+- compute    → `hip_optimization.md` (P3/P4) + the hardware file for THIS box (occupancy/VGPR table)
+
+**"the hardware file for THIS box" is a lookup, not a constant.** Detect the arch first (`rocminfo` →
+gfx target; `rocm-smi --showproductname` → card), then read the file for that family: `gfx9xx` →
+`amd_instinct.md`, `gfx11xx`/`gfx12xx` (RDNA, e.g. `gfx1151` Strix Halo) → `amd_rdna.md`. Reading the
+Instinct file on an RDNA box is not a small error — the occupancy/VGPR table, the wave width, the
+matrix instruction and the bandwidth ceiling are all different numbers (wave32 vs wave64, WMMA vs
+MFMA, no AGPRs, 40 CU on ~229 GB/s shared LPDDR5X vs 256+ CU on HBM), so every sizing decision you
+derive from it will be wrong in a way that still compiles and still passes correctness.
 - host_runtime → `wrapper_optimization.md` + `geomean_levers.md` (dispatch collapse, native layout,
   allocation, CUDA graph). You MAY edit the Python wrapper AND the C++ binding, not just the kernel.
 
@@ -34,7 +42,10 @@ Always also read `SKILL_DIR/knowledge/self_monitoring.md` and follow its guard s
 When `KERNEL_KNOWLEDGE_DIR` is non-empty AND `KK_OPERATOR` is not null/empty, the kernel maps to an
 operator card in the AMD `perf_knowledge/` base. Use it to mine concrete SOTA techniques for THIS
 operator+language relevant to your `DIRECTION` — knobs, code skeletons, tiling/split-K/preshuffle,
-fusion patterns, MFMA/numerics pitfalls, alternative backends worth mimicking.
+fusion patterns, matrix-unit/numerics pitfalls (MFMA on CDNA, WMMA on RDNA), alternative backends
+worth mimicking. Note the cards themselves are CDNA evidence: a card listing `gfx1151` in `gens:` means
+its *source* is portable to RDNA, never that its numbers were measured there — read that card's
+"On gfx1151" section before trusting a tile shape or a knob default.
 
 Read, as reference (focused — start with the paths handed to you, don't crawl the whole base):
 - `KK_REFS` — the specific card paths the TechLead already picked for this kernel/direction.

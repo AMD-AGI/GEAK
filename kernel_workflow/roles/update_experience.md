@@ -76,6 +76,11 @@ fraction before it reaches the card), `CANDIDATES` (bake-off only), `OP_SPEC` (b
    (framework, dtype/quant format, shape regime): e.g. `bf16 fused-MoE grouped GEMM · gfx942/MI300X ·
    vLLM`, or `MXFP8 E8M0 dense linear, decode-bound · gfx950`. Do **not** reduce it to a bare
    `dense_gemm · gfx942 · decode` triple — that collapses genuinely different cards onto one key and
+   invites a wrong merge. **The arch term is load-bearing and must be the real gfx**, e.g.
+   `bf16 dense linear, decode-bound · gfx1151/Radeon 8060S (RDNA3.5 APU) · vLLM`. A card learned on
+   RDNA and one learned on CDNA are not the same lever even for the same op — wave32 vs wave64, WMMA vs
+   MFMA and shared LPDDR5X vs HBM change which knob wins — so a key that omits or guesses the arch
+   silently merges them and the merged card is then wrong on both boxes. That mis-merge
    invites a wrong merge; the machine-readable slots are the separate `kernel_class`/`platforms`/`regime`
    fields, which take their values from `WINNER` when present, else from the report.
    Reuse a `kernel_class` / `lever` id that already appears on the existing cards when one fits —

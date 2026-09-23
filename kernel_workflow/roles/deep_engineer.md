@@ -45,8 +45,11 @@ Read ALL of these before and during your work, and re-consult as the bottleneck 
   layout, graph capture). Re-read every time you re-profile.
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per the kernel's language.
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns (you own these too).
-- `SKILL_DIR/knowledge/amd_instinct.md` — DETECT the actual card (gfx942/gfx950) first, then use its
-  peaks for the roofline estimate (below).
+- **The hardware reference for THIS box — detect before you read one.** `rocminfo | awk '/^ *Name: *gfx/{print $2; exit}'`.
+  `gfx9xx` (CDNA, Instinct) → `SKILL_DIR/knowledge/amd_instinct.md`. `gfx11xx`/`gfx12xx` (RDNA — e.g.
+  `gfx1151` Strix Halo) → `SKILL_DIR/knowledge/amd_rdna.md`, and **the Instinct file does not apply**:
+  no MFMA, no AGPRs, wave32, and the memory system is shared LPDDR, not HBM. Use that file's peaks for
+  the roofline estimate (below).
 - `SKILL_DIR/knowledge/profiling_guide.md` — how to read whatever profiler is available.
 - `SKILL_DIR/knowledge/self_monitoring.md` — the guard signals (you raise the step caps, see below).
 
@@ -69,14 +72,27 @@ flydsl→`flydsl`, tilelang→`tilelang`; read `overview.md`/`patterns.md`/`knob
 
 ## Roofline targeting (how to know how far you really are)
 Your target may be expressed as "% of roofline". Estimate the ceiling, then drive toward it:
-0. **Detect the card first** (`amd_instinct.md` §0: `rocminfo` → gfx arch + CU count, `rocm-smi` → name)
-   and use ITS peaks below — never assume MI300X (gfx950/CDNA4 is much higher and uses OCP fp8 + MX).
+0. **Detect the card first** (`rocminfo` → gfx arch + CU count, `rocm-smi` → name), then open the
+   hardware file for THAT family — `amd_instinct.md` for `gfx9xx`, `amd_rdna.md` for `gfx11xx`/`gfx12xx`
+   — and use ITS peaks below. Never carry a peak across families or across cards in one family: a
+   denominator borrowed from MI300X is ~23× too large on `gfx1151` and will make a kernel that is
+   already at 90% of its real wall look like it has 20% of headroom left, which is a whole budget spent
+   on nothing.
 1. From the profile / per-case table, decide whether each case is **memory-bound** or **compute-bound**.
-2. **Memory-bound ceiling**: `min_time ≈ bytes_moved / HBM_BW` — use this card's achievable HBM
-   bandwidth (~0.7–0.85× nameplate; e.g. ≈5.3 TB/s on MI300X, ~6 on MI325X, ~8 on MI350/355; see
-   `amd_instinct.md`). Achieved % = that min_time / your measured time.
-3. **Compute-bound ceiling**: `min_time ≈ FLOPs / peak_FLOPS` for the dtype (use the MFMA peak for the
-   precision on THIS card from `amd_instinct.md`). Achieved % similarly.
+2. **Memory-bound ceiling**: `min_time ≈ bytes_moved / BW` — use this card's **achievable measured**
+   bandwidth (~0.7–0.85× nameplate; e.g. ≈5.3 TB/s on MI300X, ~6 on MI325X, ~8 on MI350/355; ≈229–233
+   GB/s `[measured]` on `gfx1151`, whose 256 GB/s nameplate is ~12% optimistic). Achieved % = that
+   min_time / your measured time.
+   **If the card has a large last-level cache, score against TWO roofs, not one.** On `gfx1151` the
+   32 MB MALL runs ≈790 GB/s `[measured]`, 3.4× DRAM — a working set that fits in it is nowhere near
+   the DRAM roof and grading it against DRAM alone reports a fake win. Which roof applies is decided by
+   the working set, not by the kernel's name.
+3. **Compute-bound ceiling**: `min_time ≈ FLOPs / peak_FLOPS` for the dtype — the **matrix-unit** peak
+   for that precision on THIS card (MFMA on CDNA, WMMA on RDNA), from that card's hardware file. Quote
+   the measured/datasheet bracket where the file gives one (on `gfx1151`, fp16 WMMA is 59.4 TFLOP/s
+   datasheet vs 38.35–38.52 measured). And do not assume a dtype has a hardware path at all: `gfx1151`
+   has **no fp8 matrix instruction and no block-scaled FP4/FP6**, so a "low-precision GEMM" there is
+   emulated and must be scored as such. Achieved % similarly.
 4. Report the achieved % per representative case in your notes. If you are far below the ceiling, the
    kernel still has headroom — keep going. If you are near it, the remaining wall-clock is likely the
    launch/host floor → switch to `geomean_levers.md` Levers 1–3/6 (dispatch collapse, native layout,

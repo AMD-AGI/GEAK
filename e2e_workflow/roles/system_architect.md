@@ -92,7 +92,12 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    **(i) Decide — does flydsl apply to any head?** Driven ENTIRELY by whether a **FlyDSL expert skill**
    (`apply_flydsl_moe_to_vllm` / `flydsl_rewrite_quantized_moe`) matches — its `match` block is the single
    source of truth (operator, dtype `int4_w4a16`/`fp8_e4m3_fnuz`, `gens` gfx942/950, `arch_class`,
-   `profile_signature`). Do NOT hand-write a separate arch/dtype/gfx condition. Two modes, differing ONLY
+   `profile_signature`). Do NOT hand-write a separate arch/dtype/gfx condition. **On a non-CDNA box the
+   `gens` term will simply not match, and that is the correct outcome, not a gap to route around** —
+   flydsl is importable on gfx1151 and `is_flydsl_available()` returns True there, but the reason it
+   leads on CDNA (it is aiter's SOTA DSL for fp8/A4W4/MXFP4 GEMM) evaporates on a part with no fp8
+   matrix instruction and no block-scaled FP4/FP6. Let the no-match stand and fall through to the
+   normal ladder; do not widen the skill's `gens` to make it fire. Two modes, differing ONLY
    in the profile term:
    - **profile Top-N populated** → skill must match its FULL `match` block incl. `profile_signature`
      (op-name regex + min %GPU). Precise.
@@ -560,6 +565,10 @@ attempt, win or not. REQUIRED sections, in order:
    - **Measurement discipline**: the noise floor used (`noise_floor_pct`) and whether the A/B was
      interleaved (`ab_interleaved`). On gfx950 a back-to-back A/B drifts far more than a real tuning win,
      so a non-interleaved result must be flagged as suspect rather than quoted as fact.
+     **`noise_floor_pct` is a per-box measurement, not a constant** — quote the one measured on THIS
+     box, not gfx950's. It moves by an order of magnitude across parts: on gfx1151/Strix Halo the
+     fresh-server floor measured **2σ = 0.4%**, so a delta that would be noise on an MI355X can be a
+     real, bankable win there. Re-measure it (repeat the baseline arm n≥3) before using it as a gate.
    - **Deployed artifacts + required env** (`artifacts`, `apply_env`, `apply_flags`) — and state plainly
      that these are folded into the accepted config, so every later phase (HeadKernel, Milestone,
      Finalize, Validate) was measured **on top of** the tuned stack. This is why head-kernel deltas in §3

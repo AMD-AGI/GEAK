@@ -1,6 +1,6 @@
 export const meta = {
   name: 'e2e-workflow',
-  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950, the target card is auto-detected on-box). The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm shipped; pass args.backend). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
+  description: 'End-to-end LLM inference-throughput optimizer for AMD GPUs (CDNA Instinct gfx942/gfx950 and RDNA gfx11xx/gfx12xx e.g. gfx1151 Strix Halo; the target card is auto-detected on-box and the authoring prompts route on it). The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm shipped; pass args.backend). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
   whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs. Pass args.model_path (required) + optional args.backend (sglang|vllm, default sglang) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the isolated eval dir + records baseline throughput' },
@@ -628,10 +628,32 @@ const VALIDATION_SAMPLES = VALIDATION_MEASUREMENT_MODE === 'warm_server' ? 1 : V
 // and graph-capture-safe. Detection is config-driven (enforce-eager absent + graph-capable backend), so it
 // auto-disables for an enforce-eager run and applies to any future graph-capturing backend.
 const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang') && !/enforce[-_]eager/i.test(INIT_FLAGS);
-const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
+// ---- ARCH ROUTING for prompt text -------------------------------------------------------------
+// Lazy on purpose: KB_DIMS is only populated once the Director has probed the box, which happens long
+// after this module is evaluated. Every consumer below is called from inside a phase, so reading
+// KB_DIMS at CALL time is what makes the routing real rather than always-unknown.
+// Route on the gfx PREFIX, never on wave size (RDNA *can* run wave64; the prefix is the fact).
+function archFamily() {
+  const g = String((typeof KB_DIMS !== 'undefined' && KB_DIMS && KB_DIMS.gfx) || '').trim().toLowerCase();
+  if (/^gfx1[12]\d\d/.test(g)) return 'rdna';   // gfx11xx/gfx12xx — WMMA, wave32, no AGPRs
+  if (/^gfx9/.test(g)) return 'cdna';           // gfx90a/gfx942/gfx950 — MFMA, wave64, HBM
+  return '';                                    // unknown: say nothing arch-specific
+}
+// Does this part have a HARDWARE fp8 matrix path at all? This is a three-valued question and the
+// wrong two-valued answer is expensive: gfx1151 has NO fp8 matrix instruction, so "fp8 vs which fp8
+// flavour" is the wrong question and any fp8 advice silently buys an emulated (slower) path.
+// Unknown arch => do not promise fp8; say "if this part has one".
+function hasFp8MatrixPath() { return archFamily() === 'cdna'; }
+// The "kill the dequant" lever, phrased for the part we are actually on.
+function fusedQuantClause() {
+  if (hasFp8MatrixPath()) return 'fused quant (one fp8 MFMA, kill the dequant)';
+  if (archFamily() === 'rdna') return 'folding the dequant into the main compute loop (this part has no fp8 matrix instruction — a low-precision GEMM here is emulated, so buy the win in BYTES MOVED and in dispatch count, not in a narrower matrix op)';
+  return 'folding the dequant into the main compute loop (only reach for a narrower matrix op if you have CONFIRMED this part has a hardware path for it)';
+}
+function GRAPH_REQ() { return CUDA_GRAPH_DEPLOY ? (
   ' DEPLOYMENT REQUIREMENT — the server captures the steady-state decode path into a FULL CUDA/HIP graph, ' +
   'so this kernel runs INSIDE that captured graph. Your speedup MUST be INTRINSIC: better tiles/algorithm, ' +
-  'fused quant (one fp8 MFMA, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ' +
+  `${fusedQuantClause()}, or fewer ops/launches that reduce work INSIDE the captured ` +
   'region. Do NOT rely on a per-call CUDA/HIP-graph capture+replay WRAPPER for the speedup — inside the ' +
   "server's graph that wrapper falls back to eager and the win vanishes, and the e2e integrate gate WILL " +
   'reject a wrapper-only win (this already happened: a 1.22x isolated MoE GEMM gave 0% e2e because only its ' +
@@ -639,7 +661,7 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   'host-sync-free (no .item()/.cpu()/.tolist()/.synchronize(), no Python branch on a GPU scalar), shape-stable, ' +
   'and prep/compile ONCE (cache by data_ptr) so the captured region only LAUNCHES the kernel. VERIFY your ' +
   'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
-) : '';
+) : ''; }
 // Acceptance noise band (%). Isolated-server ref/candidate measurements, non-overlap, and engagement
 // proof (see e2e_integrator) make a 0.5% default trustworthy. Prompt-tunable.
 const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
@@ -1351,10 +1373,34 @@ function templateArguments(value) {
   }
   return [fold(text.slice(start + 1)), false];
 }
+// True when two canonical names are one kernel under different numeric specialization. Triton bakes
+// its constexpr values into the symbol rather than into a `<...>` list, so `_gemm_a16_w16_kernel`
+// ships as `..._BLOCK_SIZE_N_16_..._NUM_KSPLIT_2_...`; those values are an autotune choice made per
+// launch shape, not a different kernel. Equality on the full symbol read that decision as "this
+// callable never ran that kernel" and refused a live head. Kept strict rather than a prefix rule:
+// both symbols must tokenize to the SAME LENGTH and may differ ONLY where both sides are pure
+// digits, so a genuinely different kernel -- which differs in a NAME token, not a value -- is still
+// refused (`_gemm_a8_w8_...`, `activation_RELU`, and Tensile `MT128x128x32` vs `MT256x128x32` all
+// stay refused). Must stay identical to `_numeric_specialization_variants` in kernel_selection.py:
+// the JS gate and that verdict compare the same two symbols, and a rule that drifted between them
+// would let a kernel pass one side and be refused by the other.
+function numericSpecializationVariants(a, b) {
+  const want = canonicalDeviceKernel(a).split('_'), got = canonicalDeviceKernel(b).split('_');
+  if (want.length !== got.length || !want.length || want[0] !== got[0]) return false;
+  const isDigits = (s) => s.length > 0 && /^[0-9]+$/.test(s);
+  let differing = 0;
+  for (let i = 0; i < want.length; i++) {
+    if (want[i] === got[i]) continue;
+    if (!isDigits(want[i]) || !isDigits(got[i])) return false;
+    differing++;
+  }
+  return differing > 0 && differing <= want.length - differing;
+}
 function kernelIdentitiesMatch(a, b) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   if (!x || !y) return false;
-  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
+  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)
+      && !numericSpecializationVariants(a, b)) return false;
   // The base token deliberately drops template arguments so a bare declared name can match its
   // decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
   // it certifies the wrong kernel: one capture here held 20 distinct kernels named
@@ -1831,7 +1877,7 @@ async function tryCorrectiveReauthor(spec) {
           task: `CORRECTIVE FIX — do NOT re-discover the algorithm; KEEP the ${(spec.isolated || 0).toFixed(2)}x isolated win. ` +
             `This kernel PASSED the isolated oracle and ENGAGED on all live workers but was REJECTED at the e2e serving gate ` +
             `for: "${reason}". ` + (fixClass === 'correctness' ? CORRECTNESS_FIX_TASK : INTEGRATION_FIX_TASK) +
-            ` Emit a fixed final_patch. ` + GRAPH_REQ + (TASK || ''),
+            ` Emit a fixed final_patch. ` + GRAPH_REQ() + (TASK || ''),
           apply_to_original: 'false',
         }, `${spec.short_name}:corrective`);
       } catch (e) { fix = { authored: false, validation_status: 'error', reason: String(e) }; }
@@ -3719,7 +3765,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         for (const l of otherLangs) lanesSpec.push({ key: l, lang: l, mode: (planLangs.find(x => x.lang === l) || {}).mode || 'author',
           steer: ` AUTHOR a ${l} implementation that beats the LIVE kernel (not just your own first port); read SHARED_KB + GLOBAL_KB and borrow the winning decomposition other lanes/kernels found.` });
         const extra = [
-          { key: `${liveLang}-fused`, lang: liveLang, mode: 'author', steer: ' DIRECTION=fused-author: author a fresh single-pass FUSED kernel (fold pre/post ops + scaling into the main MFMA core; epilogue-fuse activation). Beat the LIVE kernel.' },
+          { key: `${liveLang}-fused`, lang: liveLang, mode: 'author', steer: ' DIRECTION=fused-author: author a fresh single-pass FUSED kernel (fold pre/post ops + scaling into the main compute loop; epilogue-fuse activation). Beat the LIVE kernel.' },
           { key: `${liveLang}-splitk`, lang: liveLang, mode: 'author', steer: ' DIRECTION=split-K: author a split-K + accumulate variant for the large-M prefill shapes, with a per-shape launch selector that uses the non-split path for small-M decode.' },
           { key: `${liveLang}-deep`, lang: liveLang, mode: 'optimize', steer: ' DIRECTION=deep-explore: combine persistent kernel + epilogue fusion + grid swizzle + aggressive tiling in one coherent rewrite; push toward the roofline SOTA bar.' },
         ];
@@ -3731,7 +3777,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const opSpec = { op_kind: ext.op_kind, shapes: ext.shapes || {}, dtype: ext.dtype || 'bf16', regime: h.regime || 'both', cuda_graph_safe: true, ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) };
       const anchor = await safeAgent(
         `You are the ROOFLINE ANCHOR + shared-KB bootstrapper for DEEP cross-backend optimization of head op ${h.short_name} (${ext.op_kind}). ` +
-        `Inputs: OP_TASK_DIR=${ext.task_dir}; shapes=${JSON.stringify(ext.shapes || {})}; dtype=${ext.dtype || '?'}; read ${EVAL_DIR}/env_report.json for the on-box device peak (FLOP/s + HBM bandwidth). ` +
+        `Inputs: OP_TASK_DIR=${ext.task_dir}; shapes=${JSON.stringify(ext.shapes || {})}; dtype=${ext.dtype || '?'}; read ${EVAL_DIR}/env_report.json for the on-box device peak (FLOP/s + MEASURED memory bandwidth — use the measured figure as the roofline denominator, never a datasheet one, and on a part with a large last-level cache score against BOTH that roof and the DRAM roof). ` +
         `DO: (a) mkdir -p ${deepDir}; (b) compute the ROOFLINE ceiling per case (compute- vs memory-bound, target ms/case + an overall SOTA geomean ~80-90% of roofline); ` +
         `(c) bootstrap ${sharedKb} (markdown) with sections: Roofline target; Current best per backend (table backend|best geomean|technique|wave — empty now); Techniques that WORK (technique -> measured effect -> source); Dead-ends (scoped, evidence); Cross-backend assignments (borrow); Open hypotheses. Cite relevant ${KERNEL_KNOWLEDGE_DIR} cards (read INDEX in knowledge/learned/ first) for ${ext.op_kind}. ` +
         `Return {roofline_note, target_geomean}.`,
@@ -3926,23 +3972,51 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // ---- DEPTH: fresh authoring directions to RE-SEED a plateaued lane (so it keeps going DEEPER) ----
     // When a lane plateaus we don't abandon it (and its share of the budget) — we hand it a NEW direction
     // it hasn't tried, biased to the dominant-Amdahl head, so the search compounds depth instead of exiting.
+    //
+    // ARCH-ROUTED. A re-seed direction is an INSTRUCTION, not a hint: handing a plateaued lane
+    // `DIRECTION=mfma-layout` on a part where `v_mfma` does not exist spends a whole re-seed — and its
+    // share of the budget — on an impossible idea, and the lane reports a plateau rather than an error.
+    // Route on the gfx PREFIX, never on wave size (RDNA *can* run wave64; the prefix is the fact).
+    // When the Director established no gfx, use the arch-neutral set rather than guessing a family.
+    // Evaluated HERE (inside the phase) so KB_DIMS is already populated; see archFamily() above.
+    const ARCH_FAMILY = archFamily();
+    const STEERS_NEUTRAL = [
+      ' DIRECTION=new-decomposition: try a fundamentally different tiling/decomposition than your current best.',
+      ' DIRECTION=fuse-prologue-epilogue: fold the pre/post ops + scaling into the main compute kernel.',
+      ' DIRECTION=retune-shapes: per (N,K,M-bucket) re-search the launch-config space from scratch.',
+      ' DIRECTION=pipeline: add software pipelining / double buffering across the reduction loop.',
+    ];
+    const TRITON_STEERS_CDNA = [
+      ' DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with MFMA.',
+      ' DIRECTION=warp-specialization: split warps into a producer (async global->LDS copy) and a consumer (MFMA) for software pipelining.',
+      ' DIRECTION=epilogue-fusion: fuse the scale/activation/cast epilogue into the GEMM to remove a memory round-trip.',
+      ' DIRECTION=mfma-layout: re-tune matrix_instr_nonkdim / kpack / LDS swizzle / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).',
+      ' DIRECTION=double-buffer: deepen num_stages and LDS double-buffering to hide HBM latency on the K loop.',
+      ' DIRECTION=split-K-atomic: split the K reduction across CUs with atomic accumulate for the large-M prefill shapes; non-split for small-M decode.',
+      ' DIRECTION=fresh-rewrite: abandon the current tiling and try a fundamentally different decomposition than your best so far.',
+    ];
+    // RDNA (gfx11xx/gfx12xx). Every direction below is a lever MEASURED to win on gfx1151 — see
+    // kernel_workflow/knowledge/learned/ (the six gfx1151 cards) and knowledge/amd_rdna.md. Deliberately
+    // absent: MFMA/AGPR phrasing, `matrix_instr_nonkdim` (a CDNA-only Triton knob), and "HBM" (this part
+    // is LPDDR5X). Known DEAD END, do not re-add: restructuring GQA decode so K/V are read exactly once
+    // measured 1.8x SLOWER here — the residency ceiling, not the byte count, is the binding constraint.
+    const TRITON_STEERS_RDNA = [
+      ' DIRECTION=cta-count-tiling: re-tile for the NUMBER of workgroups rather than the work per workgroup. On a 40-CU part small shapes UNDERFILL the device and are latency-bound, not compute- or bandwidth-bound; measure device fill before touching the inner loop.',
+      ' DIRECTION=collapse-dispatches: fuse a multi-pass row/reduction structure into ONE dispatch (load once, reduce, write once) instead of one pass per statistic; the byte-traffic contract floor, not the math, is the target.',
+      ' DIRECTION=llc-residency: get the hot working set under the 32 MB last-level cache, which runs ~3.4x the DRAM bandwidth on this part, and keep write-once output OUT of it so it does not evict the stream you want resident.',
+      ' DIRECTION=finer-work-units: fill the residency ceiling with MORE, SMALLER work units (e.g. split the KV / reduction axis across more waves) rather than giving each wave more work.',
+      ' DIRECTION=epilogue-fusion: fuse the scale/activation/cast epilogue into the main kernel to remove a memory round-trip.',
+      ' DIRECTION=wave-mapping: fix the wave/lane->data mapping and num_warps against the actual row width FIRST — this is wave32, so a mapping inherited from a wave64 kernel idles half the lanes before any inner-loop algebra matters.',
+      ' DIRECTION=fresh-rewrite: abandon the current tiling and try a fundamentally different decomposition than your best so far.',
+    ];
     const DEEP_STEERS = {
-      triton: [
-        ' DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with MFMA.',
-        ' DIRECTION=warp-specialization: split warps into a producer (async global->LDS copy) and a consumer (MFMA) for software pipelining.',
-        ' DIRECTION=epilogue-fusion: fuse the scale/activation/cast epilogue into the GEMM to remove a memory round-trip.',
-        ' DIRECTION=mfma-layout: re-tune matrix_instr_nonkdim / kpack / LDS swizzle / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).',
-        ' DIRECTION=double-buffer: deepen num_stages and LDS double-buffering to hide HBM latency on the K loop.',
-        ' DIRECTION=split-K-atomic: split the K reduction across CUs with atomic accumulate for the large-M prefill shapes; non-split for small-M decode.',
-        ' DIRECTION=fresh-rewrite: abandon the current tiling and try a fundamentally different decomposition than your best so far.',
-      ],
-      _default: [
-        ' DIRECTION=new-decomposition: try a fundamentally different tiling/decomposition than your current best.',
-        ' DIRECTION=fuse-prologue-epilogue: fold the pre/post ops + scaling into the main compute kernel.',
-        ' DIRECTION=retune-shapes: per (N,K,M-bucket) re-search the launch-config space from scratch.',
-        ' DIRECTION=pipeline: add software pipelining / double buffering across the reduction loop.',
-      ],
+      triton: ARCH_FAMILY === 'rdna' ? TRITON_STEERS_RDNA
+            : ARCH_FAMILY === 'cdna' ? TRITON_STEERS_CDNA
+            : STEERS_NEUTRAL,
+      _default: STEERS_NEUTRAL,
     };
+    log(`[deep] re-seed directions: arch_family=${ARCH_FAMILY || 'unknown'} (gfx=${(KB_DIMS && KB_DIMS.gfx) || 'none'}) -> ` +
+        `triton lane uses the ${ARCH_FAMILY === 'rdna' ? 'RDNA' : ARCH_FAMILY === 'cdna' ? 'CDNA' : 'arch-neutral'} steer set.`);
     const nextSteer = (l) => { const lib = DEEP_STEERS[l.lang] || DEEP_STEERS._default; const s = lib[(l.steerIdx || 0) % lib.length]; l.steerIdx = (l.steerIdx || 0) + 1; return s; };
     // RE-SEED when all lanes parked but budget remains: revive lanes (dominant head first) with a FRESH
     // direction so deep optimization uses the FULL budget instead of exiting at the first global plateau.
@@ -3994,7 +4068,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           ...(gateFeedbackPath ? { e2e_feedback: gateFeedbackPath } : {}),
           ...(gateHarnessPath ? { harness_addendum: gateHarnessPath } : {}),
           exp_root: `${l.deepDir}/runs/${l.key}`, apply_to_original: 'false',
-          task: `deep lane '${l.key}' of ${l.head.short_name} (${l.ext.op_kind}), backend=${l.lang}, mode=${l.mode}.${l.steer} Build STRICTLY beyond this lane's cumulative best (vs-live ${l.best.toFixed(3)}x); roofline SOTA ~${(l.rooflineTarget || 0).toFixed(2)}x. Beat the LIVE kernel, not just your own first port. Read SHARED_KB + GLOBAL_KB and BORROW transferable techniques (incl. from OTHER kernels); write findings back.` + GRAPH_REQ + (TASK || ''),
+          task: `deep lane '${l.key}' of ${l.head.short_name} (${l.ext.op_kind}), backend=${l.lang}, mode=${l.mode}.${l.steer} Build STRICTLY beyond this lane's cumulative best (vs-live ${l.best.toFixed(3)}x); roofline SOTA ~${(l.rooflineTarget || 0).toFixed(2)}x. Beat the LIVE kernel, not just your own first port. Read SHARED_KB + GLOBAL_KB and BORROW transferable techniques (incl. from OTHER kernels); write findings back.` + GRAPH_REQ() + (TASK || ''),
         }, l.uid);
         return null;
       });
@@ -4124,9 +4198,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `This kernel will be overlaid onto the LIVE decode path (CUDA-graph captured): its STEADY-STATE hot path MUST be ` +
               `host-sync-free (NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize(), no Python branch on a GPU scalar). ` +
               `Cache any weight prep (transpose/requant/preshuffle) by weight.data_ptr() done ONCE, not per call. ` +
-              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, one fp8 MFMA ` +
-              `GEMM) and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion); the integrated kernel MUST fit at the ` +
-              `accepted config's mem-fraction. ` + GRAPH_REQ + (TASK || ''),
+              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: ${hasFp8MatrixPath()
+                 ? 'use the FUSED fp8 path (fold the block-scale into the operand scale, one fp8 MFMA GEMM) and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion)'
+                 : 'cache only the COMPACT (already-quantized/preshuffled) weights and never a bf16 expansion; fold the scale application into the main compute loop so the compact form is what is RESIDENT. Do NOT assume a hardware low-precision matrix path exists on this part — confirm it before making one the basis of the win'}; the integrated kernel MUST fit at the ` +
+              `accepted config's mem-fraction. ` + GRAPH_REQ() + (TASK || ''),
             apply_to_original: 'false',
           }, `${j.short_name}:${lang}`);
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
@@ -4335,10 +4410,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `Cache any weight prep (transpose/requant/preshuffle) by weight.data_ptr() done ONCE, not per call. ` +
               `MEMORY FOOTPRINT IS A HARD CONSTRAINT: the persistent weight cache is kept for ALL layers at once, so do NOT ` +
               `re-materialize full bf16 weights (raw+preshuffled bf16 across every layer = tens of GB → forces mem-fraction ` +
-              `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
-              `(fold the block-scale into the operand scale, run ONE fp8 MFMA GEMM — the "kill the dequant" lever) and cache ` +
-              `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
-              `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
+              `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). ${hasFp8MatrixPath()
+                 ? 'Use the FUSED fp8 path (fold the block-scale into the operand scale, run ONE fp8 MFMA GEMM — the "kill the dequant" lever) and cache only COMPACT fp8/preshuffled weights (~the model\'s own fp8 weight size), never a bf16 expansion.'
+                 : 'Fold the scale application into the main compute loop and cache ONLY the compact (already-quantized/preshuffled) weights (~the model\'s own quantized weight size), never a bf16 expansion — the "kill the dequant" lever here is the RESIDENT FOOTPRINT, not a narrower matrix instruction, which this part may not have in hardware at all.'} The integrated ` +
+              `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ() + (TASK || ''),
             apply_to_original: 'false',
           }, `${h.short_name}:${lang}`);
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
@@ -4588,7 +4663,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         ...KB_ARGS,
         budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
-          ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
+          ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ() + (TASK || ''),
         apply_to_original: 'false',
       }));
       noteKernelKB(r, String(c.short_name || ext.op_kind || 'milestone'));

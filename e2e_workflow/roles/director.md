@@ -135,7 +135,7 @@ Return JSON:
   "tp": 1,
   "workload": {"isl": 1024, "osl": 1024, "conc": 64},
   "bench_script": "<EVAL_DIR>/bench_e2e.sh",
-  "gfx": "<gfx target, e.g. gfx950 — from step 4, or \"\" if you could not detect it>",
+  "gfx": "<gfx target, from step 4 — e.g. gfx950 (CDNA4/MI355X) or gfx1151 (RDNA3.5/Strix Halo APU); \"\" if you could not detect it. Detect it, never default it: this string is what routes hardware knowledge, noise-floor priors and backend candidates downstream, so a guessed gfx routes the whole run to the wrong architecture>",
   "precision": "<serving precision, e.g. mxfp8 | fp8 | bf16 — or \"\" if not established>",
   "framework_version": "<BACKEND version, e.g. 0.26.0 — or \"\" if not established>",
   "rocm_version": "<ROCm <major>.<minor>, e.g. 7.2 — or \"\" if not established>",

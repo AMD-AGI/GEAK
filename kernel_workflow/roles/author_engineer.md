@@ -72,12 +72,19 @@ Read, as reference, before writing:
   attention_decode→`attention_decode_paged`, mla→`mla_attention`,
   linear_attention→`linear_attention_gated_delta`, moe→`fused_moe_grouped_gemm`/`grouped_gemm_moe`
   (else the closest dir under `operators/`).
-- **Hardware sanity (first cut only):** detect the arch with `rocminfo` and read
-  `SKILL_DIR/knowledge/amd_instinct.md` §3 for the arch-specific fp8 format + MFMA shapes —
-  **fp8 is FNUZ on gfx942 (CDNA3) but OCP on gfx950 (CDNA4), which also adds MXFP4/MXFP6**; picking the
-  wrong fp8 format silently fails correctness. Also `hardware/shared/matrix_core_mfma_smfmac.md` +
-  `dtype_numerics.md` for MFMA shape/dtype, and `quantization/fnuz_vs_ocp.md` /
-  `optimization/mfma_scheduling.md` (prefer `matrix_instr_nonkdim=16` on gfx942).
+- **Hardware sanity (first cut only):** detect the arch with `rocminfo` FIRST, then read the hardware
+  file for that family — `amd_instinct.md` for `gfx9xx`, `amd_rdna.md` for `gfx11xx`/`gfx12xx`.
+  - **Low precision is a three-valued question, not a two-valued one.** Before choosing an fp8/fp4
+    format, establish whether this card has a hardware path for it *at all*. On CDNA: **fp8 is FNUZ on
+    gfx942 (CDNA3) but OCP on gfx950 (CDNA4), which also adds MXFP4/MXFP6**, and picking the wrong
+    format silently fails correctness. On RDNA `gfx11xx` (e.g. `gfx1151`) there is **no fp8 matrix
+    instruction and no block-scaled FP4/FP6 at all** — "which fp8 flavour" is the wrong question, and
+    an fp8 path there is emulated, so it silently costs performance instead of silently failing
+    correctness. Buy the win in bytes moved and dispatch count instead.
+  - CDNA-only references (skip them on RDNA): `hardware/shared/matrix_core_mfma_smfmac.md` +
+    `dtype_numerics.md` for MFMA shape/dtype, `quantization/fnuz_vs_ocp.md`,
+    `optimization/mfma_scheduling.md` (prefer `matrix_instr_nonkdim=16` on gfx942 — this knob does not
+    exist on RDNA). The RDNA counterpart of all of these is `amd_rdna.md` (WMMA, wave32, no AGPRs).
 
 > **🔴 "Baseline" here means your CORRECT-FIRST SEED for the optimize loop — NOT the speedup
 > denominator.** The reported speedup is ALWAYS measured by the immutable `unittest.py` against the

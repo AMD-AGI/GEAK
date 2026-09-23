@@ -113,11 +113,19 @@ Honor every axis **generically** via the shared `harness_lib` primitives — do 
 - **Compile** (`regime.compile`): if `torch_compile`, baseline against the COMPILED/fused path, not
   unfused eager (else the speedup is a strawman). Enforce it via `h.compiled_op(fn, regime)` on BOTH the
   baseline and candidate before timing (no-op when the regime is eager) — see the timing rule in step 4.
-- **fp8 format is arch-specific** (the ONE hardware axis): MI300/MI325 (gfx942/CDNA3) use AMD `fnuz`
-  fp8; MI355 (gfx950/CDNA4) use OCP `fn` fp8. `h.regime_dtype("fp8")` picks the running GPU's variant
-  automatically (or pass `arch=` for offline cross-arch synth); an explicit `fp8_e4m3fnuz`/`fp8_e4m3fn`
-  from the checkpoint config wins. The layout (`h.pack_x`) is arch-independent — every fp8 is 1 byte →
-  `x=16` on both. So do NOT hardcode `float8_e4m3fnuz`.
+- **fp8 is arch-specific, and it is THREE-valued, not two** (the ONE hardware axis): MI300/MI325
+  (gfx942/CDNA3) use AMD `fnuz` fp8; MI355 (gfx950/CDNA4) use OCP `fn` fp8; **RDNA (`gfx11xx`/`gfx12xx`,
+  e.g. `gfx1151` Strix Halo) has NO fp8 matrix instruction at all**, and no block-scaled FP4/FP6 either.
+  `h.regime_dtype("fp8")` picks the running GPU's *encoding* (or pass `arch=` for offline cross-arch
+  synth); an explicit `fp8_e4m3fnuz`/`fp8_e4m3fn` from the checkpoint config wins. The layout
+  (`h.pack_x`) is arch-independent — every fp8 is 1 byte → `x=16` everywhere. So do NOT hardcode
+  `float8_e4m3fnuz`.
+  **The encoding question and the hardware question are different questions.** `h.fp8_is_fnuz(arch)`
+  returning False is NOT evidence that fp8 works here — on RDNA it just means "not the fnuz encoding".
+  Before *choosing* an fp8 regime (as opposed to reproducing one the checkpoint already dictates), gate
+  on `h.fp8_matrix_supported(arch)`, which is True only on CDNA and deliberately False for unknown
+  archs. Get this wrong and nothing fails loudly: the op runs an EMULATED fp8 path, passes the
+  correctness gate, and quietly extracts an oracle that can never be beaten on this box.
 If the live regime genuinely cannot be reproduced offline (op only exists fused in the compile graph,
 routing-dependent MoE token counts), say so in `notes` and report `editable:false`/drop rather than
 freeze an out-of-regime oracle nobody should trust.
@@ -803,6 +811,11 @@ force real compact-operand compute:
    and binding a candidate to `aiter.tuned_gemm:gemm_a16w16` rebinds a DEAD seam (`engagement_hits=0`,
    `rebound=0`, e2e no-op — the observed h0 failure). Rebinding the OUTER leaf instead engages on ALL arch
    and **SUBSUMES aiter tuned_gemm (does NOT remove it)** — on gfx950 the same leaf routes into aiter.
+   On **gfx1151/RDNA the same leaf is likewise the right seam, and there it is the ONLY one**: both
+   aiter legs are gated off (no `tgemm` outside gfx950; the per-shape DB has no gfx1151 rows and
+   `gradlib` is not even installed), so `rocm_unquantized_gemm_impl` falls through to torch/hipBLASLt.
+   Rebinding it is measured-live on that box — an aiter-Triton `gemm_a16w16` rerouted through this leaf
+   is where the +13.85% (and +24.37% over five heads with tuned tables) came from.
    > This is the AUTHORED-kernel rebind seam only. It does **not** touch the aiter per-shape GEMM DB-tune
    > lever (gradlib → `bf16_tuned_gemm.csv`): that is a separate Tier-A / config lever, probed independently
    > by `op_bench._aiter_gemm` and deployed via env + tuned CSV — it stays available.

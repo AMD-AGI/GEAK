@@ -63,12 +63,38 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
     at memory parity, OOMs at KV-cache init (op-level 1.5x but e2e-undeployable — the Integrator rejects
     it `mem_footprint_starves_kv`). Only pursue the fp8/quant author route (Tier C/D) when
     `ENABLE_FP8=true` AND it passes that memory-footprint gate.
-  - **For dense GEMM the tuning lever is aiter's per-shape DB** (`AITER_TUNE_GEMM=1` capture → gradlib
-    `gemm_tuner.py` → `AITER_CONFIG_GEMM_BF16` deploy; gradlib itself races hipBLASLt/asm/triton/skinny
-    solutions per shape, so one aiter tune covers per-backend GEMM tuning). Full recipe + gotchas:
-    `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`. **Do NOT use PyTorch TunableOp / `HIPBLASLT_TUNING_FILE`** —
-    on sglang/aiter they hook the PyTorch dispatch the live path bypasses (zero engagement). For attn,
-    Tier-B is the `--attention-backend` swap (a server flag the Config Tuner owns).
+  - **For dense GEMM the tuning lever depends on WHICH SEAM THE LIVE PATH GOES THROUGH — detect it, do
+    not assume it.** There are two different per-shape GEMM tuners and each is worthless on the other's
+    stack, so the choice is a measurement, not a default:
+    - **aiter's per-shape DB** (`AITER_TUNE_GEMM=1` capture → gradlib `gemm_tuner.py` →
+      `AITER_CONFIG_GEMM_BF16` deploy; gradlib itself races hipBLASLt/asm/triton/skinny solutions per
+      shape, so one aiter tune covers per-backend GEMM tuning). Full recipe + gotchas:
+      `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`. This is the lever **when aiter is present and
+      the live linear actually dispatches through it** (the sglang/vLLM+aiter CDNA case).
+    - **PyTorch TunableOp** (`PYTORCH_TUNABLEOP_ENABLED=1` + a per-shape BLAS table via
+      `PYTORCH_TUNABLEOP_FILENAME`). This hooks the PyTorch dispatch. On a stack where the live GEMM
+      bypasses that dispatch (sglang/aiter routes into aiter's own C++ path) it gets **zero engagement**
+      and is worthless. But on a stack where the linear DOES land on `torch.nn.functional.linear` /
+      `torch.matmul` — which is the case on **gfx1151 / Strix Halo, where vLLM's unquantized path goes
+      through `rocm_unquantized_gemm_impl`** — TunableOp is not merely valid, it is
+      the **measured winner: +11.31% median fresh-server end-to-end (n=3, per-round +10.40%..+11.45%)**.
+      Per-shape BLAS *mixing* (hipBLASLt for small/skinny, rocBLAS for large) measured **+14.3%**, while
+      forcing hipBLASLt globally measured **−8.2%** — so the per-shape table is the whole point; a global
+      backend flag is not a substitute.
+    **Decide by probing, never by this file's prose — and note that `import aiter` succeeding does NOT
+    mean the aiter DB lever exists.** The aiter route needs three separate things, and on gfx1151 the
+    first two are MEASURED MISSING even though `import aiter` and `import aiter.ops.flydsl` both succeed
+    and `is_flydsl_available()` returns True:
+    1. **`gradlib`** — the tuner driver. `import gradlib -> ModuleNotFoundError` on the strix image, so
+       the `AITER_TUNE_GEMM=1` → `gemm_tuner.py` → `AITER_CONFIG_GEMM_BF16` chain has no tuner at all.
+    2. **per-shape DB rows for this gfx.** The tuned CSVs are gfx-keyed (first column is `gfx`) and ship
+       gfx950/gfx942 rows; aiter's whole gfx1151 asset coverage is **1 file** (`gfx1151-MHA-DEFAULT.json`,
+       attention only) against **54** gfx942 files, and **zero** for GEMM.
+    3. the live linear actually dispatching into aiter's own path rather than torch's.
+    If any of the three is missing, the aiter DB lever does not exist on this box and TunableOp is the
+    dense-GEMM lever. Probe them; do not infer from importability. Verify whichever you pick actually
+    engaged (§ the SELF-VERIFY steps below) before returning it. For attn, Tier-B is the `--attention-backend` swap (a
+    server flag the Config Tuner owns).
   - **For an fp8 block-scale GEMM (`gemm_a8w8_blockscale` — the live op on an fp8 / a8w8_blockscale model;
     sglang+aiter routes it through the TRITON blockscale kernel by default, which runs the UNTUNED default
     config), the dense bf16 recipe above does NOT apply.**
@@ -151,9 +177,15 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
 - **Always emit an `author_plan` for the big head op** (`pct_gpu_time ≥ HEAD_THRESHOLD`): at minimum
   `{language: triton, route: author}` (route=`rewrite` if an editable impl already exists). This forces
   the orchestrator to run `kernel_workflow` and actually optimize a real kernel for the op — the whole
-  point of the head track. **For a GEMM head (especially fp8/quantized), add `{language: flydsl, route:
-  author}` and order it FIRST** (FlyDSL is the SOTA GEMM DSL on gfx942/950 and beats a from-scratch
-  Triton GEMM for this class). Add `hip`/`ck` too when headroom is large and the image supports them (the
+  point of the head track. **On CDNA (`gfx9xx`), for a GEMM head (especially fp8/quantized), add
+  `{language: flydsl, route: author}` and order it FIRST** — FlyDSL is the SOTA GEMM DSL on gfx942/950
+  and beats a from-scratch Triton GEMM for this class. **That ordering is gfx942/950-specific evidence
+  and does NOT carry to RDNA.** On gfx1151 flydsl *is* importable and `is_flydsl_available()` returns
+  True, so it stays a legal candidate — but the reason it is ranked first on CDNA evaporates: the part
+  has **no fp8 matrix instruction and no block-scaled FP4/FP6**, so the fp8/quantized GEMM class that
+  flydsl wins is emulated here, and flydsl's tuned-knob assets are gfx94x/gfx95x. Treat flydsl on RDNA
+  as an UNMEASURED candidate ranked below `triton`, not as the prior favourite; lead with `triton` and
+  buy the win in bytes moved / dispatch count. Add `hip`/`ck` too when headroom is large and the image supports them (the
   orchestrator caps at `HEAD_AUTHOR_MAX` — so put the highest-ROI language first). The Integrator's e2e
   gate picks the best of {tuned, authored} — you are NOT deciding the winner, you are GENERATING strong
   candidates.
@@ -209,8 +241,9 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    > cache before each sample so the number is not read off lines the previous sample left resident. The
    > pass is always a READ (`harness_lib.cache_policy`, fixed `read-evict`); it does not assert a particular
    > residency, and the receipt records the preparation. Consequence for what you optimize: (1) device time already EXCLUDES host launch/dispatch,
-   > so shaving Python/dispatch overhead earns ZERO here — real wins come from cutting HBM traffic (memory-
-   > bound decode) or MFMA/compute work (compute-bound prefill), NOT launch-overhead tricks (those only pay
+   > so shaving Python/dispatch overhead earns ZERO here — real wins come from cutting memory traffic
+   > (memory-bound decode) or matrix-unit/compute work (MFMA on CDNA, WMMA on RDNA; compute-bound prefill),
+   > NOT launch-overhead tricks (those only pay
    > off in the server via its decode CUDA graph, which already collapses dispatch). (2) A large `wall_ms ≫
    > ms` gap flags a host-bound op whose isolated device win won't transfer e2e — surface it. (3) Because
    > the cache is evicted between samples, a candidate that only wins hot (back-to-back same-buffer reuse)
@@ -219,6 +252,11 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    > WHILE the next, timed kernel ran — that contention inflated a measured GLM-5.2 decode A/B from 1.12
    > to 1.40, flattering every candidate that read less HBM. Any decode number quoted from a task frozen
    > before this change is on the old, inflated basis; do not compare the two.
+   > (5) **On a part with a small last-level cache, "evicted" is a claim about a SPECIFIC cache size.**
+   > The pass is sized by `HARNESS_CACHE_FLUSH_MB` (default 512 MiB, chosen for MI300's 256 MB Infinity
+   > Cache) — on gfx1151 the MALL is **32 MB**, so the default over-reads ~16× and, because the part is
+   > UMA (LPDDR5X shared with the CPU, ~229 GB/s measured), that surplus read is charged to the same bus
+   > the op is being timed on. Size the pass from the box's actual LLC and say which size you used.
    `amdahl_ceiling_e2e_pct` (the MAX e2e delta this isolated speedup can produce at the kernel's
    `pct_gpu_time` — op_bench computes it via `harness_lib.amdahl_ceiling`). Surface the ceiling in your
    report: if it is at/below `NOISE_BAND_PCT` (e.g. a 1.1x win on a 3%-GPU kernel → ~0.3% ceiling), the
@@ -262,8 +300,24 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    kernel is judged by the IMMUTABLE `unittest.py`, which is independent of this bake-off harness, so the
    head can still be optimized via the author route even if the bake-off probe could not measure a baseline.
 
-3. **Tier B per-backend tune (direct_light)** — for GEMM, run the **aiter DB tune** (see
-   `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`). **The tune input MUST come from a live `AITER_TUNE_GEMM=1`
+3. **Tier B per-backend tune (direct_light)** — for GEMM, run the per-shape tune **for the seam this box
+   actually uses** (see the two-tuner split under Tier B above; check `env_report` for aiter first).
+
+   **3-A. TunableOp route (the lever when aiter is absent, e.g. gfx1151/Strix Halo).** Capture with
+   `PYTORCH_TUNABLEOP_ENABLED=1 PYTORCH_TUNABLEOP_TUNING=1` on a warm server at the SAME ISL/OSL/conc,
+   then deploy the tuned table read-only (`PYTORCH_TUNABLEOP_TUNING=0`).
+   - ⚠️ **Deploy the INSTALLED cold-tuned table, never the raw hot intermediate.** Both files share the
+     same filename shape, so pointing at the wrong one fails as a *small positive*, not as an error:
+     measured **+1.65% (raw intermediate) vs +11.31% (installed table)** — both non-empty, both parsing,
+     both look like success. Record which artifact you deployed in `tuning_artifact`.
+   - **SELF-VERIFY engagement deterministically — a nonzero speedup is NOT proof.** Assert (a) the loaded
+     entry count is > 0, (b) the expected live shape keys are present in the table, and (c) runtime
+     hits/misses are being recorded against it. Return the counts in `reason`.
+   - Make the table **portable**: reference it `SCRIPT_DIR`-relative from the final bundle, never by an
+     absolute path that only exists in this eval dir.
+
+   **3-B. aiter DB route (the lever on an aiter stack).** Follow
+   `SKILL_DIR/knowledge/gemm_tuning/aiter_gemm_tuning.md`. **The tune input MUST come from a live `AITER_TUNE_GEMM=1`
    capture, NOT synthesized/profile-derived shapes.** ⚠️ Critical: the runtime lookup key includes the
    **`bias` flag** (and exact M/N/K/dtype). sglang issues most of these dense GEMMs with **`bias=False`**
    (bias is applied separately); if you synthesize the untuned set from the profile and guess `bias=True`,
@@ -279,11 +333,14 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
      `winner_kind=env` direct_light candidate with `apply_env` set.
    - **SELF-VERIFY engagement before returning**: do a tiny warm probe with the deploy env and
      `grep -c 'is tuned on cu_num' <server.log>`. If it's 0, the captured shapes/bias are wrong — fix the
-     capture (do NOT return a known-0-engagement env; it wastes the Integrator's gate). **Never TunableOp /
-     `HIPBLASLT_TUNING_FILE`** (zero engagement on this stack).
+     capture (do NOT return a known-0-engagement env; it wastes the Integrator's gate). On an aiter stack
+     TunableOp / `HIPBLASLT_TUNING_FILE` is the WRONG tuner (it hooks a dispatch the live path bypasses →
+     0 engagement); on a non-aiter stack it is the RIGHT one — see 3-A. The rule is engagement, measured,
+     not the tuner's name.
 4. **ALWAYS build `author_plan` for the head op (Tier C, the workflows route)** — at minimum
-   `{language: triton, route: author|rewrite, rationale}`. **For a GEMM head, add `{language: flydsl,
-   route: author}` and list it FIRST** (SOTA GEMM DSL; baseline reuses aiter's flydsl GEMM). Add
+   `{language: triton, route: author|rewrite, rationale}`. **On CDNA, for a GEMM head, add `{language:
+   flydsl, route: author}` and list it FIRST** (SOTA GEMM DSL; baseline reuses aiter's flydsl GEMM); on
+   RDNA lead with `triton` (see the arch note under DECIDE). Add
    `hip`/`ck` when headroom is large and the image supports them. `route=author` (no existing editable impl) → orchestrator runs `kernel_workflow`
    `mode=author target_language=<lang>` on the op task dir (writes a fresh baseline, then optimizes it
    against the immutable oracle); `route=rewrite` (existing editable impl) → `mode=optimize`. You do NOT
