@@ -902,6 +902,10 @@ const OPBENCH_SCHEMA = obj({
   per_backend: arrObj, parity_note: { type: 'string' },
   gate: { type: 'string', enum: ['have_winner', 'author_recommended', 'no_win', 'harness_error', 'tamper'] },
   harness_suspect: { type: 'boolean' }, reason: { type: 'string' },
+  // Cache residency op_bench.py reports for the numbers above. Optional: absent means the row was
+  // timed by something that does not state one, and the store treats unstated as comparable with
+  // everything rather than guessing.
+  measurement_mode: { type: 'string' },
 }, ['gate', 'isolated_speedup']);
 
 const EXTRACT_SCHEMA = obj({
@@ -3564,7 +3568,13 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
   --precision ${shq(KB_DIMS.precision || '')} --serving-framework ${shq(BACKEND)} \\
   --serving-framework-version ${shq(KB_DIMS.framework_version || '')} \\
   --direction ${shq('tuning-' + (String(o.backend || 'op').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-')))} \\
-  --eval-dir ${shq(EVAL_DIR)}${tuning.report_path ? ` --report ${shq(tuning.report_path)}` : ''}`;
+  --eval-dir ${shq(EVAL_DIR)}${tuning.report_path ? ` --report ${shq(tuning.report_path)}` : ''}${
+          // Residency, stated only when the row states it. `tuning_isolated` numbers come from
+          // op_bench, which evicts the last-level cache before each sample — but its naive fallback
+          // does not, so the word is COPIED from the row rather than assumed from the metric_kind.
+          // Omitted when absent, which is byte-for-byte the command this site emitted before.
+          String(o.measurement_mode || '').trim()
+            ? ` \\\n  --measurement-mode ${shq(String(o.measurement_mode).trim())}` : ''}`;
       });
       try {
         const kw = await safeAgent(

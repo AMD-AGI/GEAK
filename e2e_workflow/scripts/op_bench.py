@@ -865,6 +865,12 @@ def main():
         "baseline_backend": baseline["backend"] if baseline else None,
         "baseline_ms": baseline["ms"] if baseline else None,
         "measured": measured,
+        # Cache residency of every number above, read off the branch `_time_call` actually took
+        # rather than asserted: harness_lib evicts the last-level cache before each sample, the
+        # naive fallback does not. Stated because a consumer cannot recompute it from the numbers
+        # and the two are not interchangeable — the same kernel measured warm is the bigger number
+        # by construction, so a warm row filed next to cold ones outranks them for free.
+        "measurement_mode": "cold" if _hlib is not None else "warm",
         "isolated_speedup": round(speedup, 4) if speedup is not None else None,
         "pct_gpu_time": pct_gpu,
         "amdahl_ceiling_e2e_pct": amdahl_ceiling_pct,

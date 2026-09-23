@@ -369,6 +369,28 @@ def test_blank_upstream_values_are_omitted_not_sent_empty(tmp_path, rec, blank):
     assert "--precision" not in rec.cmd
 
 
+def test_residency_is_copied_from_the_op_row_not_from_the_metric_kind(tmp_path, rec):
+    """Every row this writer files is ``--metric-kind tuning_isolated``, and it would be easy to
+    conclude from that alone that the number is cold: op_bench evicts the last-level cache before
+    each sample. Its naive fallback does NOT, and only the row records which path ran. Deriving the
+    word from the metric kind would therefore file a warm number as cold — the one mislabel the
+    store's residency filter cannot see through, since a warm number is the bigger one by
+    construction and would outrank the cold entries it was filed beside."""
+    _write(tmp_path / rx.KB_IDENTITY_FILE, _identity())
+    _write(tmp_path / rx.TUNING_RESULT_FILE, _tuning(ops_tuned=[_op(measurement_mode="warm")]))
+    rx._kb_write_tuned_ops(tmp_path)
+    assert rec.flag("--metric-kind") == "tuning_isolated"
+    assert rec.flag("--measurement-mode") == "warm"
+
+
+def test_an_op_row_that_states_no_residency_sends_no_flag(eval_dir, rec):
+    """The migration guarantee at this call site. A row from a tuner that does not report residency
+    must produce the command this writer emitted before the flag existed — the store reads unstated
+    as comparable with everything, which is the honest answer, and a default would be a guess."""
+    rx._kb_write_tuned_ops(eval_dir)
+    assert "--measurement-mode" not in rec.cmd
+
+
 def test_upstream_never_enters_the_key(eval_dir, rec):
     """Precision is a FILTER. If it forked the address, every new dtype would start cold."""
     rx._kb_write_tuned_ops(eval_dir)

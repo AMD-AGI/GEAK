@@ -186,7 +186,8 @@ soon as the gate is decided, before writing the report — if you can only do on
     {"op": "...", "backend": "...", "tuner": "...", "shapes": "...", "isolated_speedup": 1.0,
      "artifact": "<EVAL_DIR>/tuning/...", "engaged": true, "note": "...",
      "source": "search|recall", "session_id": "<the recalled record's id, when source=recall>",
-     "read_plane": "<remote|local — which plane ANSWERED for this op, when source=recall>"}
+     "read_plane": "<remote|local — which plane ANSWERED for this op, when source=recall>",
+     "measurement_mode": "<copy op_bench.py's `measurement_mode` VERBATIM; omit if you did not measure with it>"}
   ],
   "deploy_bundle": "<EVAL_DIR>/tuning/deploy",
   "deploy_verified": true,
@@ -213,6 +214,14 @@ soon as the gate is decided, before writing the report — if you can only do on
   "reason": "for a non-accepted gate: why"
 }
 ```
+
+`measurement_mode` is COPIED, never decided. op_bench.py reports the cache residency it actually timed
+in (`cold` when harness_lib evicted the last-level cache before each sample, `warm` when the naive
+fallback ran), and that word is what the knowledge base filters on so a warm number is never ranked
+against cold ones — the same kernel measured warm is the bigger number by construction. If you timed
+the op some other way, leave the field out: an entry that states nothing is treated as comparable with
+everything, which is the honest answer, while a guessed word is a wrong ranking nothing downstream can
+detect.
 
 Gates — be strict, a soft accept here corrupts every downstream measurement:
 `accepted` (correctness passed, engagement proven, both A/B legs done, delta above the floor, deploy

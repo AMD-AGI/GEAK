@@ -4284,7 +4284,14 @@ def _kb_write_tuned_ops(eval_dir: Path) -> dict:
         # not underscored. Reading `framework_version` here would silently find nothing.
         for flag, value in (("--precision", dims.get("precision")),
                             ("--serving-framework", dims.get("framework")),
-                            ("--serving-framework-version", dims.get("framework-version"))):
+                            ("--serving-framework-version", dims.get("framework-version")),
+                            # Per-OP, not per-run: residency is a fact about how THIS op was timed.
+                            # Copied from the row op_bench filled, never inferred from the metric
+                            # kind — op_bench's harness_lib path evicts the last-level cache before
+                            # each sample and its naive fallback does not, and only the row knows
+                            # which ran. Absent stays absent: the store reads unstated as comparable
+                            # with everything, so omitting it leaves this command as it was.
+                            ("--measurement-mode", op.get("measurement_mode"))):
             if str(value or "").strip():
                 cmd += [flag, str(value).strip()]
         if str(tuning.get("report_path") or "").strip():
