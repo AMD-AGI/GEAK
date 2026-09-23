@@ -509,8 +509,9 @@ const ENG_SCHEMA = obj({
   // = Σ weight_i / Σ (weight_i / speedup_i). Omitted on unweighted runs.
   speedup_weighted: { type: 'number' },
   per_case: perCase, status: { type: 'string' }, patch_file: { type: 'string' },
+  measurement_valid: { type: 'boolean' },
   strategies_tried: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
-}, ['status', 'speedup_geomean']);
+}, ['status', 'speedup_geomean', 'measurement_valid']);
 
 const VERIFY_SCHEMA = obj({
   status: { type: 'string' }, correctness: { type: 'string' },
@@ -1423,7 +1424,9 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       // cannot stat the file from the workflow sandbox, so the "is there actually a patch" decision is
       // delegated to verify, which returns apply_failed on an absent/empty patch — dropped by the
       // `verified` filter below, i.e. the same outcome as skipping, but with no false loss.
-      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR);
+      // An invalid/missing source verdict must reach Verify, even after an empty-patch return.
+      const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR) &&
+        eng.status !== 'invalid_measurement' && eng.measurement_valid === true;
       if (trustworthyBelowBaseline) {
         return { d, eng, ver: null };
       }
@@ -1433,6 +1436,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       return agentT(
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
           CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
+          ENGINEER_WORKSPACE: `${d.out_dir}/workspace`,
           EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),

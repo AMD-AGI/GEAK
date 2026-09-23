@@ -96,6 +96,13 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 6. After editing sources, ninja auto-rebuilds. NEVER use `rm` (it prompts and blocks the run); your
    workspace is a fresh artifact-free copy. If you suspect a stale build (e.g. after editing headers),
    MOVE the cache aside: `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true`.
+7. Exit 86 / `GEAK_SOURCE_INVALID` is an **invalid measurement**: ignore all PASS/timing output from
+   that invocation, preserve the candidate and `.geak/invalid_measurements.jsonl`, and report the
+   build defect for repair. Do not revert or discard an idea based on invalid timings. Rerun the
+   same candidate after repair; do not edit the frozen harness yourself. If unresolved, save its diff
+   as `best_patch.diff` for recovery and return `status:"invalid_measurement"`, `measurement_valid:false`,
+   zero speedups and no per-case timings. Include `measurement_valid` in every return; true requires
+   successful current-source checks and measurement commands.
 
 ## Iteration protocol (you go deep — much longer than a specialist)
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record the
@@ -140,7 +147,8 @@ for the return.
   "speedup_geomean": 0.0,
   "speedup_arithmetic": 0.0,
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0}],
-  "status": "success|partial|failed",
+  "status": "success|partial|failed|invalid_measurement",
+  "measurement_valid": true,
   "patch_file": "best_patch.diff",
   "strategies_tried": ["the full exploration trace — what worked AND what didn't"],
   "notes": "roofline % achieved per representative case, where the remaining wall-clock sits (kernel vs floor), and what a follow-up could still attack — written for the TechLead's insight log"
