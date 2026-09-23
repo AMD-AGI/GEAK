@@ -323,6 +323,35 @@ function integAccepted(integ, pct_gpu_time, isolated) {
   return !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack')
     && !isImplausibleSpeedup(pct_gpu_time, isolated, integ));
 }
+// Fold the env/flags an ACCEPTED win needs in order to BIND into the running config.
+//
+// Why this is separate from the `winner_kind === 'env'` lines at the banking sites: those fold the
+// CANDIDATE's own lever, and only when the candidate IS an env/flag tweak. An authored kernel is
+// winner_kind 'patch' — so a patch whose overlay needs env to bind (a tuned-table path, a backend
+// selector) falls through BOTH branches and its env is silently dropped. The win is banked, the
+// overlay is carried, and nothing that makes it engage comes with it.
+//
+// Measured on gfx1151: an authoring run banked +10.40% e2e, and the binding
+// `GEAK_TUNED_GEMM_TABLE=...` never reached the launcher — accepted, with no way to start it.
+//
+// Additive by construction: integrators that report neither field (every pre-existing CDNA run —
+// the fields did not exist in INTEGRATE_SCHEMA until now) hit the empty-string guard and leave
+// curEnv/curFlags byte-identical. Dedupe because a stacked gate re-reports the same binding on each
+// accept and a flat KEY=VAL list must not accumulate duplicates.
+function bindAcceptedConfig(integ) {
+  if (!integ) return;
+  for (const [val, get, set] of [
+    [integ.accepted_env, () => curEnv, v => { curEnv = v; }],
+    [integ.accepted_flags, () => curFlags, v => { curFlags = v; }],
+  ]) {
+    const add = String(val || '').trim();
+    if (!add) continue;
+    const cur = String(get() || '');
+    const have = new Set(cur.split(/\s+/).filter(Boolean));
+    const fresh = add.split(/\s+/).filter(t => t && !have.has(t));
+    if (fresh.length) set((cur ? cur + ' ' : '') + fresh.join(' '));
+  }
+}
 // The reason string to feed the corrective loop: if the gate "passed" but the delta is impossible, emit
 // an implausible_speedup verdict (routes to the correctness corrective); else the integrator's own reason.
 function gateRejectReason(integ, pct_gpu_time, isolated) {
@@ -913,7 +942,17 @@ const INTEGRATE_SCHEMA = obj({
   // implausible-speedup guard only distrusts an 'accuracy'/soft accept; a byte_exact accept is trusted.
   parity_kind: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
-  accepted_overlay: { type: 'string' }, reason: { type: 'string' },
+  accepted_overlay: { type: 'string' },
+  // The env/flags the accepted win needs in order to BIND. These exist because FINALIZE_SCHEMA's
+  // accepted_config requires "accepted config (flags/env)" while this schema used to declare only
+  // accepted_overlay — leaving an integrator whose overlay needs env with no slot to write to, so it
+  // invented one. Measured across one gfx1151 authoring run: 5 of 6 artifacts said
+  // 'accepted_env_extra', 1 said 'accepted_env_addition', identical GEAK_TUNED_GEMM_TABLE payload,
+  // and no reader looked for either — the win came back with env:'' and no way to launch it.
+  // Flat KEY=VAL list applied verbatim by the launcher: do NOT restate PYTHONPATH here (it would
+  // clobber the inherited value); an overlay binds through the OVERLAY_PYTHONPATH prepend channel.
+  accepted_env: { type: 'string' }, accepted_flags: { type: 'string' },
+  reason: { type: 'string' },
 }, ['gate', 'e2e_throughput_tok_s']);
 
 const FINALIZE_SCHEMA = obj({
@@ -3909,6 +3948,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
         } else if (integAccepted(integ, c.head.pct_gpu_time, c.best) && integ.e2e_throughput_tok_s > curTput) {
           curOverlay = integ.accepted_overlay || curOverlay; curTput = integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
+          bindAcceptedConfig(integ);
           bankAccepted(acceptedHeads, { short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', ...e2eFrom(integ), isolated: c.best }, krOf(deepInputs));
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
@@ -3935,6 +3975,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           });
           if (dcorr.banked) {
             curOverlay = dcorr.integ.accepted_overlay || curOverlay; curTput = dcorr.integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
+            bindAcceptedConfig(dcorr.integ);
             bankAccepted(acceptedHeads, { short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', ...e2eFrom(dcorr.integ), isolated: dcorr.isolated, corrective: true, patch: dcorr.patch || '' }, krOf(deepInputs));
             log(`  [deep] ${c.uid}: ACCEPTED after corrective re-author. e2e now ${curTput} tok/s (+${dcorr.integ.e2e_delta_pct}%).`);
             history.ledger.push({ direction: c.uid, isolated_speedup: dcorr.isolated, e2e_delta_pct: dcorr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${dreason}` });
@@ -4265,6 +4306,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         `integrate ${h.short_name}`, 'HeadKernel');
       if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
         curOverlay = integ.accepted_overlay || curOverlay;
+        bindAcceptedConfig(integ);
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
         if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
         curTput = integ.e2e_throughput_tok_s;
@@ -4296,6 +4338,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           : { banked: false };
         if (corr.banked) {
           curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
+          bindAcceptedConfig(corr.integ);
           bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: st.ext.op_kind, backend: cand.source, kind: 'authored', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(headWinnerInputs));
           log(`  ${h.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
@@ -4508,6 +4551,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       // overlay (authored/patch) AND/OR config (env/flag) — capture both.
       const cand = bestPick.cand, integ = bestPick.integ;
       curOverlay = integ.accepted_overlay || curOverlay;
+      bindAcceptedConfig(integ);
       if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
       if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
       curTput = integ.e2e_throughput_tok_s;
@@ -4534,6 +4578,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           : { banked: false };
         if (corr.banked) {
           curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
+          bindAcceptedConfig(corr.integ);
           bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: 'authored', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(headIntegrateInputs));
           log(`  ${h.short_name}: ACCEPTED after corrective re-author (was crash/incomplete: ${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed crash: ${reason}` });
@@ -4561,6 +4606,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           : { banked: false };
         if (corr.banked) {
           curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
+          bindAcceptedConfig(corr.integ);
           bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: 'authored', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(headIntegrateInputs));
           log(`  ${h.short_name}: ACCEPTED after corrective re-author. e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
@@ -4712,6 +4758,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
     if (abDone && integAccepted(integ, c.pct_gpu_time, kl.final_geomean) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
+      bindAcceptedConfig(integ);
       curTput = integ.e2e_throughput_tok_s;
       bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: kl.final_geomean }, krOf(mileIntegrateInputs));
       milestoneImproved = true;
@@ -4733,6 +4780,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         : { banked: false };
       if (corr.banked) {
         curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
+        bindAcceptedConfig(corr.integ);
         bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(mileIntegrateInputs));
         milestoneImproved = true;
         log(`  ${c.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
@@ -4910,6 +4958,7 @@ if (want('final')) {
       `finish-integrate ${p.short_name}`, FINALIZE_GATE_PHASE);
     if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
+      bindAcceptedConfig(integ);
       if (p.track === 'head') {
         if (p.winner_kind === 'env' && p.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + p.apply_env;
         if (p.winner_kind === 'flag' && p.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + p.apply_flags;

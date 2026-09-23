@@ -372,9 +372,25 @@ Return JSON:
   "parity_kind": "byte_exact|accuracy|none",
   "gate": "accepted|stack|rejected|incomplete",
   "accepted_overlay": "<path to the overlay to carry forward>",
+  "accepted_env": "<KEY=VAL[ KEY=VAL...] the overlay needs to bind, or \"\">",
+  "accepted_flags": "<launcher flags the win needs, or \"\">",
   "reason": "why accepted/rejected/incomplete (cite Amdahl + measured delta vs noise band)"
 }
 ```
+
+> **Use exactly `accepted_env` / `accepted_flags`.** These two fields were missing from this schema
+> while PHASE=finalize (below) requires "accepted config (flags/env)" as an input. With no slot to
+> write to, integrators invented their own key names — measured across one gfx1151 authoring run,
+> 5 of 6 artifacts said `accepted_env_extra` and 1 said `accepted_env_addition`, carrying the
+> identical `GEAK_TUNED_GEMM_TABLE=...` payload. Nothing read either, so an accepted win came back
+> with `env=""`: the code was on disk with no way to launch it. The recovery path now also accepts
+> `{apply,accepted}_{env,flags}[_suffix]` as a fallback, but that is a net under the hole, not the
+> fix. An overlay that needs env to bind and reports it under any other name is a bug in this phase.
+>
+> Put **only** what the win needs. This is a flat `KEY=VAL` list that the launcher applies verbatim,
+> so it must not carry inherited-and-edited variables (`PYTHONPATH` in particular) — an overlay is
+> bound through the dedicated `OVERLAY_PYTHONPATH` prepend channel via `accepted_overlay`, never by
+> restating `PYTHONPATH` here, which would clobber the inherited value.
 
 ---
 
