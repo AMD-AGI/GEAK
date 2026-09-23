@@ -3,8 +3,12 @@ key: full attention (prefill) · gfx942 · sglang hybrid models
 type: lever
 confidence: ★★★
 effect: +~5% e2e (1546.7→~1623 tok/s same-session); also exposes an editable attention surface
-confirms: 2
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-06-09
+confirms: 2
 ---
 # `--attention-backend triton` — a cheap server-flag win on hybrid models
 - lever: switching sglang to the Triton attention backend is a cheap, real e2e win on hybrid-dense

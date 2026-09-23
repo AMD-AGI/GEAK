@@ -6,9 +6,9 @@ effect: 2.61x geomean isolated vs frozen baseline, non-overlapping (per-case 2.0
 confirms_cited: 1
 confirms_blind: 0
 losses: 1
-attempts: 3
+attempts: 4
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-18
 name: amortize-int4-dequant-across-m-blocks-instead-of-shrinking-i-moe-grouped-gemm-gfx950-both
 description: Amortize (do not shrink) int4 weight dequant in a MoE grouped GEMM: one dequantized B tile per several M blocks, tails split not padded; 2.61x geomean
 keywords: ['int4', 'w4a16', 'moe-grouped-gemm', 'dequant', 'amortization', 'triton', 'gfx950', 'bit-exact', 'tile-geometry']

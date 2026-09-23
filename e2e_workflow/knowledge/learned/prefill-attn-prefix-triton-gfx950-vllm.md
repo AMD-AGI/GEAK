@@ -2,9 +2,13 @@
 key: dense GQA chunked-prefill attention (prefix_prefill) · gfx950 · vLLM
 type: routing
 confidence: ★★★
-confirms: 8
 effect: no op-level env/flag lever exists — the live path already IS the editable in-tree Triton kernel, so Tier-C rewrite is the only route. Head 8.6–25% GPU across 6 models. FIRST e2e TRANSFER MEASURED (Mixtral-8x7B gfx950 TP8, 8.6% head): iso 1.45× and 1.35× IN SITU, yet e2e only +0.5% (marginal) — the head is prefill-only and the ISL=OSL=1024/conc=64 run is decode-dominated; and the split-KV rewrite that produced the speedup BROKE greedy byte-parity (7/12 prompts) and was rejected. 7th confirm (Qwen3-14B-FP8 TP1, 6.01% head) found the REAL, PARITY-SAFE lever: an XCD grid collision (grid dim0=batch varies fastest, but only prefill seqs work -> gcd(batch,num_xcd) XCDs; S=16/32/64 are 4-8x slower than S=15/17 at identical shape) -> remap the grid to active (seq,tile) pairs. Projected ~3.8x serving-wtd / +4.4% ceiling; MEASURED (e2e gate now CLOSED) iso 1.874x -> e2e +1.543% at the integrate gate, i.e. the projection was ~2x optimistic because the collided buckets only partly recover, but the lever is REAL and clears a 1% noise band at a 6% head. Accepted as STACK (cand_med > ref_med, ranges overlap at 2 repeats) into a stack that the Director validated same-session at 1.7706x / validated_win, parity pass. 8th confirm (Qwen3.5-122B-A10B-FP8 TP2, 6.21% head, NON-pow2 KV page 2096) is the SECOND e2e-accepted instance and it came from DELETING the `is_pow2` tile branch rather than from a new kernel: identical patch scored -0.222% (rejected) with the branch in place and +1.2249% (accepted, disjoint) with it removed, iso 2.579x at the LIVE page size vs 1.194x at the harness's pow2 default, inside a +3.95% ceiling, riding a Director-validated 1.2081x / validated_win.
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-08-24
+confirms: 8
 8th confirm ADDS THE PRE-FLIGHT EVERY TILE TUNE ON THIS OP NEEDS, **AND THE FIX**: `context_attention_fwd` picks its tiles from a HARD-CODED two-way branch on whether the KV-cache `block_size` (`v_cache.shape[3]`) is a power of two — pow2 -> BLOCK_M=128/BLOCK_N=64, non-pow2 (hybrid/Qwen3-next-class, e.g. 544 or 2096) -> BLOCK_M=32/BLOCK_N=32. A rewrite that ships tuned `BLOCK_M/BLOCK_N` constants is DEAD CODE on the non-pow2 branch (measured: e2e -0.22%, rejected). That branch is PERFORMANCE-ONLY — the paged loop always walks the cache in `TRITON_BLOCK_SIZE=32` token tiles and resolves each token by `//`/`%`, so the tile shape is correctness-independent of the page size — so **DELETE the branch and apply the tuned tile unconditionally**: same patch, same run, re-gated at **+1.2249% e2e (disjoint, ACCEPTED into a Director-validated_win 1.2081x stack)**. Read the live tile values off the in-worker banner before AND after.
 ---
 # vLLM V1 ROCM_ATTN chunked-prefill — the live path IS the editable Triton `_fwd_kernel`

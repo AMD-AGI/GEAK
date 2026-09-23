@@ -6,9 +6,9 @@ effect: +6.5% isolated vs frozen baseline from marking only the K fetch non-temp
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 3
 toolchain: unknown
-last_seen: 2026-08-17
+last_seen: 2026-09-20
 name: choose-the-non-temporal-hint-per-operand-not-per-kernel-attention-decode-gfx950-decode
 description: Non-temporal is a per-operand call in paged decode: nt on the K stream is +6.5%; nt on the re-touched V tile, on Q and on the output stores lose.
 keywords: ['attention-decode', 'paged-attention', 'paged-kv', 'non-temporal-loads', 'cache-modifier', 'kv-cache', 'isa-inspection', 'l2-residency', 'decode', 'gfx950']

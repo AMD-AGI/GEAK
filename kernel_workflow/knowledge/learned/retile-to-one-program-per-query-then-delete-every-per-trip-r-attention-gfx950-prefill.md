@@ -4,11 +4,11 @@ type: lever
 confidence: ★★
 effect: 6.90x time-weighted / 5.19x unweighted geomean isolated vs the frozen baseline (n=72 medians, non-overlapping 95% CIs); per case 7.06x on the long ragged prefill, 6.42x mid, 3.08x on the tiny kernel-bound case
 confirms_cited: 1
-confirms_blind: 0
+confirms_blind: 1
 losses: 0
-attempts: 1
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-17
+last_seen: 2026-09-17
 name: retile-to-one-program-per-query-then-delete-every-per-trip-r-attention-gfx950-prefill
 description: Gathered MLA sparse prefill attention on gfx950: one program per query position, then halve k-trips and delete each per-trip cross-warp reduce - 6.90x weighted
 keywords: ['attention', 'prefill', 'triton', 'top-k', 'tiling', 'tile-geometry', 'online-softmax', 'cross-workgroup', 'vgpr-pressure', 'num-warps', 'xcd-remap', 'l2-locality', 'unroll', 'gfx950']

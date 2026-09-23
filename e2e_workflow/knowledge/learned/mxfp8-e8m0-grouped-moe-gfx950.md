@@ -2,9 +2,13 @@
 key: mxfp8-e8m0-grouped-moe-gemm · gfx950 · both
 type: routing
 confidence: ★★★
-confirms: 3
 effect: no env/flag win exists (iso 1.0× against the immutable harness) — the author route is the only lever. Same seam and same verdict on BOTH the vLLM and sglang stacks.
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-08-14
+confirms: 3
 ---
 # MXFP8 (1×32 E8M0) grouped MoE expert GEMM — route to Tier-C author, not env
 

@@ -4,11 +4,11 @@ type: lever
 confidence: ★★
 effect: 2.29x geomean isolated vs frozen baseline, bit-exact; per-case 3.10x and 3.23x on the two large token-count cases, 1.19x on the tiny case; nameplate HBM utilisation ~22% -> ~62%
 confirms_cited: 1
-confirms_blind: 0
+confirms_blind: 1
 losses: 0
-attempts: 1
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-17
 name: reinterpret-a-frozen-launch-through-an-exported-wrapper-obje-quantize-cast-gfx950-memory-bound
 description: Export a launcher object with the runner's __getitem__(grid) shape to re-tile a frozen num_warps=1 launch: 2.29x geomean, bit-exact, on memory-bound fp8 quant
 keywords: ['launch-config', 'wrapper-relaunch', 'quantize-cast', 'fp8', 'memory-bound', 'num-warps', 'tiling', 'bit-exact', 'cache-modifier']

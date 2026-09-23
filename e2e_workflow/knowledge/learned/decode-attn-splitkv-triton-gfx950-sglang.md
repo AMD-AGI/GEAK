@@ -1,18 +1,22 @@
 ---
-name: sglang triton decode-attention split-KV over-splitting (hybrid SWA)
 key: grouped decode attention (`_fwd_grouped_kernel_stage1` + `_fwd_kernel_stage2`) · gfx950/MI355X · sglang bf16, hybrid sliding-window + full-attention
-description: On sglang/ROCm the triton decode backend over-splits KV for sliding-window layers because forward_decode never consumes the window_num_kv_splits it already computes; a 3-line launcher overlay fixes it (capping max_kv_splits via a flag is the cruder variant, and the obvious flag is dead on HIP).
-keywords: [decode attention, flash-decoding, split-kv, num_kv_splits, window_num_kv_splits, sliding window, hybrid SWA, triton_backend, launcher overlay, gfx950, sglang]
-kernels: [_fwd_grouped_kernel_stage1, _fwd_kernel_stage2, decode_attention_fwd, get_num_kv_splits_triton, TritonAttnBackend.forward_decode]
-platforms: [gfx950/MI355X, ROCm 7.2, sglang 0.5.17]
-kernel_class: attention-decode
-regime: decode, page_size=1, bf16 KV, TP=2, conc=64
 type: lever
 confidence: ★★★
 effect: ROOT CAUSE = forward_decode ignores window_num_kv_splits; overlay iso serving-wtd 1.10x with NO bucket regression, zero HBM, engagement verified. E2E VERDICT (now measured): the split-count overlay alone is SUB-NOISE (+0.19% vs a same-session paired ref, byte-exact -> `stack`); the REAL win on the same op was a BIT-NEUTRAL authored Triton rewrite (.cg cache_modifier + per-family LOOP_STAGES/waves_per_eu/schedule_hint) = iso 1.92x, **+20.53% e2e, byte-exact, ACCEPTED**. Stacked on that kernel the split lever decays 1.10 -> 1.07, and a batch-aware per-bucket split schedule tops out at 1.117.
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
+last_seen: 2026-08-21
+name: sglang triton decode-attention split-KV over-splitting (hybrid SWA)
+description: On sglang/ROCm the triton decode backend over-splits KV for sliding-window layers because forward_decode never consumes the window_num_kv_splits it already computes; a 3-line launcher overlay fixes it (capping max_kv_splits via a flag is the cruder variant, and the obvious flag is dead on HIP).
+keywords: ['decode attention', 'flash-decoding', 'split-kv', 'num_kv_splits', 'window_num_kv_splits', 'sliding window', 'hybrid SWA', 'triton_backend', 'launcher overlay', 'gfx950', 'sglang']
+kernels: ['_fwd_grouped_kernel_stage1', '_fwd_kernel_stage2', 'decode_attention_fwd', 'get_num_kv_splits_triton', 'TritonAttnBackend.forward_decode']
+platforms: ['gfx950/MI355X', 'ROCm 7.2', 'sglang 0.5.17']
+kernel_class: attention-decode
+regime: decode, page_size=1, bf16 KV, TP=2, conc=64
 confirms: 3
 lifecycle: active
-last_seen: 2026-08-21
 ---
 # sglang triton decode attention — the split-KV count is the op-level lever, and one flag is a trap
 

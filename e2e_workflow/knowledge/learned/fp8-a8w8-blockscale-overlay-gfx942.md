@@ -3,8 +3,12 @@ key: fp8_a8w8_blockscale dense GEMM · gfx942 · sglang Triton live path
 type: lever
 confidence: ★★★
 effect: iso ~1.06–1.16× prefill (Triton-overlay, DEPRECATED); CK-tuned KERNEL ~1.78× vs untuned Triton on the M=13645 head (kernel-level)
-confirms: 17
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-07-06
+confirms: 17
 status: DEPRECATED-FOR-THIS-EVAL
 ---
 > ✅ **17th confirm (2026-07-06, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, e2e_cycle0).**

@@ -1,18 +1,22 @@
 ---
-name: fp8-blockscale-dense-gemm-authored-triton-gfx950-vllm
-description: Tier-C authored Triton replacement of the aiter/CK fp8 128x128 block-scale dense GEMM, rebound by a sitecustomize overlay — iso 2.69x, Director-validated +15.7% e2e where the env CK tune of the SAME op returned +0.18%.
-keywords: [authored-triton, tier-c-author, fp8-blockscale, dense-gemm, sitecustomize-overlay, rebind-seam, accuracy-gate, amdahl, cudagraph-safe, split-k, lazy-import, launch-bound]
-kernels: [gemm_a8w8_blockscale, kernel_gemm_xdl_cshuffle_v3, _w8a8_triton_block_scaled_mm, _gemm_a8w8_blockscale_kernel, _gemm_blockscale_splitk_kernel, _splitk_reduce_kernel]
-platforms: [gfx950]
-kernel_class: dense_gemm
-regime: both
 key: fp8 a8w8 128x128 block-scale DENSE GEMM, Tier-C AUTHORED replacement of the library CK kernel (not the env tune DB) · gfx950 · vLLM
 type: lever
 confidence: ★★★
 effect: iso 2.687x serving-weighted (decode guard 1.23, correctness PASS); e2e +16.77% at the integrate gate and +15.72% (1.1572x, non-overlapping, TPOT -15.4%) Director-validated same-session, parity PASS under the accuracy gate. Decisive datum: on the SAME op in the SAME run the env CK per-shape tune measured a comparable iso 2.577x yet moved e2e only +0.18% (rejected) — isolated rank did NOT order e2e, so budget the author lane, do not stop at the tune. 2nd CONFIRM on a different model/box (hybrid linear-attn 27B-FP8, TP4, ISL/OSL 1024/1024 conc 64, 41.22% head): iso 1.899x serving-wtd -> e2e +15.81% at the integrate gate (non-overlapping, TTFT -24%, TPOT -12.9%), vs the same run's env CK tune at iso 1.523x/+6.46% and a flydsl author at iso 1.735x/-51.9% (rejected) — the author lane won on both boxes and the backend ORDER (triton > ck-env > flydsl) was identical. FINAL-GATE RECONCILIATION for that 2nd confirm: the run closed `flagged`, NOT validated_win — the mechanism and the correctness gate were independently reproduced by the Director (rebind banner + live ENGAGED calls in all 4 TP workers under its own launch; same-session accuracy probe 24/30 base vs 26/30 final, output_parity pass, kind=accuracy; byte-parity unusable on this async-scheduled fp8 stack), but ZERO independent timed samples were obtained, so no run-level speedup is certified. The quoted whole-run headline (1.0719x, TTFT -32.6%, TPOT -6.0%) is CROSS-session against a 21-h-old baseline, and a same-day no-overlay leg at the identical config read 7.4% BELOW that baseline, so the cross-session ratio is not trustworthy in either direction; only the same-session integrate pair carries evidential weight on this box. 3rd CONFIRM, same model class but a DECODE-heavy workload and a bigger head (dense 14B-FP8, TP1, ISL/OSL 1024/1024 conc 64, head 67.96%, stock path = UNTUNED in-tree Triton `_w8a8_triton_block_scaled_mm` with no shipped device config): iso 2.368x serving-wtd (decode M64 2.53x, M1 3.36x) -> integrate gate +70.62% (strictly non-overlapping, TPOT -45%), and the run it anchored was Director-validated same-session at 1.7706x (+77.1%, non-overlapping, TTFT -36%, TPOT -43.7%), validation_status validated_win, parity pass under the accuracy gate (gsm8k 5-shot n=400: 0.9025 base vs 0.8950 cand, inside binomial noise). Backend ORDER reproduced a THIRD time and is now the stable prior: authored triton (2.368x / +70.6%) > env aiter Triton->CK swap (1.792x / +50.3%) > authored flydsl (1.551x / -18.0%, rejected). Here the realized e2e (+70.6%) EXCEEDED the nominal Amdahl ceiling (+64.7%) because the stock baseline was an untuned Triton path (no per-device config) and the iso number was measured under co-tenancy — when that happens, re-check accuracy on a larger sample against a FRESH no-overlay baseline before believing it.
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
+last_seen: 2026-08-22
+name: fp8-blockscale-dense-gemm-authored-triton-gfx950-vllm
+description: Tier-C authored Triton replacement of the aiter/CK fp8 128x128 block-scale dense GEMM, rebound by a sitecustomize overlay — iso 2.69x, Director-validated +15.7% e2e where the env CK tune of the SAME op returned +0.18%.
+keywords: ['authored-triton', 'tier-c-author', 'fp8-blockscale', 'dense-gemm', 'sitecustomize-overlay', 'rebind-seam', 'accuracy-gate', 'amdahl', 'cudagraph-safe', 'split-k', 'lazy-import', 'launch-bound']
+kernels: ['gemm_a8w8_blockscale', 'kernel_gemm_xdl_cshuffle_v3', '_w8a8_triton_block_scaled_mm', '_gemm_a8w8_blockscale_kernel', '_gemm_blockscale_splitk_kernel', '_splitk_reduce_kernel']
+platforms: ['gfx950']
+kernel_class: dense_gemm
+regime: both
 confirms: 3
 lifecycle: active
-last_seen: 2026-08-22
 ---
 # gfx950 vLLM fp8 block-scale dense GEMM — the AUTHORED Triton lever, not just the tune DB
 

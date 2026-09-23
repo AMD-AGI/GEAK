@@ -6,9 +6,9 @@ effect: 1.71x geomean isolated vs frozen baseline (director-verified, 10/10 pari
 confirms_cited: 0
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 4
 toolchain: unknown
-last_seen: 2026-08-17
+last_seen: 2026-09-17
 name: derive-the-split-kv-decode-launch-shape-from-a-constant-byte-attention-decode-gfx950-decode
 description: Constant-byte KV tile, exact-fill the decode grid, then re-sweep launch meta on top: 1.71x and 1.84x geomean on two split-KV decode-attention lanes.
 keywords: ['launch-shape', 'split-kv', 'tile-size', 'occupancy', 'cu-underfill', 'empty-workgroups', 'grid-occupancy', 'constexpr-promotion', 'waves-per-eu', 'num-stages', 'sliding-window', 'roofline', 'hardware-counters', 'attention-decode', 'paged-attention', 'decode', 'cache-modifier', 'triton', 'gfx950']

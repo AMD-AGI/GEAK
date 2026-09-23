@@ -3,8 +3,12 @@ key: mxfp8-dense-linear-gemm · gfx950 · both
 type: lever
 confidence: ★★
 effect: iso ~1.12x geomean (BLOCK_K 128->256, all 12 cases win incl. decode M1/M64); e2e unverified
-confirms: 1
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-06-22
+confirms: 1
 ---
 # MXFP8 E8M0 DENSE linear GEMM (vLLM native, gfx950) — author/rewrite Triton, tune BLOCK_K/N
 - context: live = in-tree Triton `tl.dot_scaled` DENSE-linear kernel `_mxfp8_linear_kernel`

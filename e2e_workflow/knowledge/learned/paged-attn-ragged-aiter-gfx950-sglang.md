@@ -1,23 +1,22 @@
 ---
-name: sglang aiter paged_attention_ragged decode head (block_size=1 token-indexed KV)
-description: On sglang+aiter the decode head is `aiter:paged_attention_ragged` (JIT-built HIP/CK
-  `paged_attention_ll4mi_QKV_mfma16_kernel`). No op-level env/flag knob exists, the stock Triton paged
-  decode is 17-24x SLOWER at block_size=1, `partition_size` != 256 silently returns GARBAGE (a fake
-  2.05x), and the only large lever is kv-fp8 (a server flag, lossy).
-keywords: [paged attention, decode, aiter, paged_attention_ragged, ragged, block_size 1, partition_size,
-  ll4mi, mfma16, kv-fp8, sglang, gfx950, memory bound]
-kernels: [paged_attention_ragged, paged_attention_ll4mi_QKV_mfma16_kernel, paged_attn_decode_v2_w_dot_kernel]
-platforms: [gfx950]
-kernel_class: attention-decode
-regime: decode, bf16 KV, GQA 40q/8kv, head_dim 128, sglang aiter backend
 key: paged decode attention (ragged, block_size=1) · gfx950 · sglang + aiter
 type: routing
 confidence: ★★
 effect: head 56.76% GPU but memory-bound at 85% of roofline (attainable ~1.057x -> ~+3% e2e ceiling);
-  kv-fp8 server flag measured 1.477x serving-weighted -> +22.45% e2e ceiling (LOSSY, accuracy gate)
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
+last_seen: 2026-08-21
+name: sglang aiter paged_attention_ragged decode head (block_size=1 token-indexed KV)
+description: On sglang+aiter the decode head is `aiter:paged_attention_ragged` (JIT-built HIP/CK
+keywords: [paged attention, decode, aiter, paged_attention_ragged, ragged, block_size 1, partition_size,
+kernels: ['paged_attention_ragged', 'paged_attention_ll4mi_QKV_mfma16_kernel', 'paged_attn_decode_v2_w_dot_kernel']
+platforms: ['gfx950']
+kernel_class: attention-decode
+regime: decode, bf16 KV, GQA 40q/8kv, head_dim 128, sglang aiter backend
 confirms: 1
 lifecycle: active
-last_seen: 2026-08-21
 ---
 # sglang + aiter paged decode: the seam is `aiter:paged_attention_ragged`, and it has NO op-level knob
 - lever (routing): the live decode attention on sglang's aiter backend is

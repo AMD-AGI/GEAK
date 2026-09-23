@@ -3,10 +3,12 @@ key: e2e A/B measurement · any gfx · sglang/vllm
 type: method
 confidence: ★★★
 effect: stops false wins — a positive median inside the noise band is a NULL, not a win; and stops
-  UNMEASURABLE rounds — a candidate whose Amdahl ceiling is below the box's session spread cannot be
-  resolved in either direction, so the A/B buys noise
-confirms: 8
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-08-24
+confirms: 8
 ---
 # Honest e2e A/B: tight interleave + non-overlap gate (not just a positive median)
 - lever: run a tight INTERLEAVED A/B (REF, CAND, REF, CAND, …) on a SINGLE GPU with a PINNED port, then

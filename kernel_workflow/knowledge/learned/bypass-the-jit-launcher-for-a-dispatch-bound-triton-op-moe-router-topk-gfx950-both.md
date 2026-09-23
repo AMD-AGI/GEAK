@@ -6,9 +6,9 @@ effect: 1.96x geomean director-verified (three runs 1.94/2.03/1.96, non-overlapp
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-17
 name: bypass-the-jit-launcher-for-a-dispatch-bound-triton-op-moe-router-topk-gfx950-both
 description: Tiny dispatch-bound Triton op: memoize compile, bake launch opts, call the C launch entry directly - ~1.96x geomean, largest on the smallest case
 keywords: ['launch-overhead', 'host-runtime', 'dispatch-bound', 'triton', 'moe-router', 'topk', 'memoization', 'gfx950']

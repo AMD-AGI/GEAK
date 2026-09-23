@@ -3,6 +3,10 @@ key: int4_w4a16 fused-MoE grouped GEMM · gfx942/MI300X · vLLM
 type: lever
 confidence: ★★★
 effect: per-shape Triton config tune (winner_kind=env, ZERO HBM) → +11-18% e2e VERIFIED (iso ~1.25-1.6×); 10 re-confirms on Kimi-K2.6 (TP=8 N=256 and TP=4 N=512; isl/osl/conc=8192/1024/64)
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-06-23
 ---
 # int4 W4A16 fused-MoE grouped GEMM head → the memory-free vLLM config-tune lever

@@ -3,8 +3,12 @@ key: mxfp8-e8m0-dense-linear-gemm · gfx950 · both
 type: routing
 confidence: ★★
 effect: iso baseline only (live=editable Triton dot_scaled, geomean 1.0 on immutable harness); no env/flag win; author route is the lever
-confirms: 2
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-06-21
+confirms: 2
 ---
 # MXFP8 (1x32 E8M0 microscale) DENSE LINEAR GEMM — route via Tier-C author, not env
 - op: `_mxfp8_linear_kernel` / wrapper `_mxfp8_dot_scaled_linear` in

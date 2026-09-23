@@ -6,9 +6,9 @@ effect: 1.00x banked (reverted bit-identical): replay ~2x SLOWER than direct lau
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 2
+attempts: 3
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-17
 name: graph-capture-loses-to-a-direct-launch-when-the-graph-holds--topk-router-gfx950-both
 description: Graph capture around one tiny launch replays ~2x slower than a direct launch at both host layers — a closed axis for dispatch-bound single-kernel ops.
 keywords: ['launch-overhead', 'host-runtime', 'dispatch-bound', 'graph-capture', 'triton', 'small-batch', 'moe-router', 'anti-pattern']

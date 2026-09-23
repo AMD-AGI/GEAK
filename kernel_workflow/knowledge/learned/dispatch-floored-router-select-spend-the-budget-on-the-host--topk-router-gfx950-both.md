@@ -6,9 +6,9 @@ effect: 2.12x cumulative isolated geomean vs frozen baseline; per-case 2.33x at 
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 5
+attempts: 6
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-17
 name: dispatch-floored-router-select-spend-the-budget-on-the-host--topk-router-gfx950-both
 description: Tiny router select whose wall time is flat across a 32x row spread is host-marshaling floored: cached launch closure + steady-state gives 1.9-2.3x per case.
 keywords: ['launch-overhead', 'host-runtime', 'dispatch-bound', 'triton', 'small-batch', 'top-k', 'moe-router', 'register-math']

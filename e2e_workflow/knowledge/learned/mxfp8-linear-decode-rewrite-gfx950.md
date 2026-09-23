@@ -3,8 +3,12 @@ key: dense GEMM · gfx950 · vLLM MXFP8 E8M0 decode-bound
 type: lever
 confidence: ★★★
 effect: dense MXFP8 linear Triton split-K/fused decode-tile rewrite → +21.8% e2e (1709→2082) at conc=64; quality-clean
-confirms: 2
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-06-22
+confirms: 2
 ---
 # MXFP8 dense-linear decode-tile rewrite is the main e2e lever (decode-bound serving)
 - lever: rewrite the dense MXFP8 linear kernel (qkv / o_proj / up-gate / down — vLLM `rocm_native` `tl.dot_scaled`)

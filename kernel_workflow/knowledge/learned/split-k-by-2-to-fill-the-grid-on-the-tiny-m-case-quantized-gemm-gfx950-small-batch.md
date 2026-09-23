@@ -6,9 +6,9 @@ effect: the tiny-M case ends at 24.3x, slightly ahead of the 23.8x/23.9x of the 
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 2
+attempts: 3
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-18
 name: split-k-by-2-to-fill-the-grid-on-the-tiny-m-case-quantized-gemm-gfx950-small-batch
 description: Tiny-M block-scaled fp8 GEMM, gfx950: split-K=2 doubles grid fill with a fused reduce; deeper split-K and a narrower N tile both lose
 keywords: ['split-k', 'grid-fill', 'skinny-m', 'quantized-gemm', 'fp8', 'block-scale', 'tile-size', 'triton']

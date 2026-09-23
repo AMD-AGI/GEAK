@@ -4,11 +4,11 @@ type: anti-pattern
 confidence: ★★
 effect: ~1.00x (inside run-to-run noise) on both large token-count cases across six directions - wider num_warps, larger and smaller tiles, store cache modifiers, load hints, num_stages, flat 1D cross-row tiling, manual store repack; none cleared the >2%-on-both-cases gate at ~62-63% of nameplate HBM bandwidth
 confirms_cited: 1
-confirms_blind: 0
+confirms_blind: 1
 losses: 0
-attempts: 4
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-17
 name: near-the-practical-hbm-ceiling-the-bandwidth-knobs-are-a-clo-quantize-cast-gfx950-memory-bound
 description: Above ~60% of nameplate HBM, six bandwidth directions all returned ~1.00x on an fp8 quant cast; the store already lowered to one 128-bit instruction
 keywords: ['memory-bound', 'quantize-cast', 'fp8', 'closed-axis', 'cache-modifier', 'num-warps', 'tiling', 'store-vectorization', 'assembly-inspection']

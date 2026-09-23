@@ -3,6 +3,10 @@ key: block-sparse NSA GQA attention (prefill) · gfx950 · vLLM
 type: routing
 confidence: ★★
 effect: ~5.6% GPU (MiniMax-M3-MXFP8 prefill); editable in-tree Triton kernel → Tier-C rewrite is the lever (e2e transfer TBD)
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-06-20
 ---
 # MiniMax-M3 / NSA block-sparse GQA attention → the live path IS an editable in-tree Triton kernel

@@ -1,18 +1,22 @@
 ---
-name: aiter paged_attention_ragged — QKV_VERSION=EXPERIMENTAL is a free, byte-exact op-level env win
 key: paged decode attention (`paged_attention_ll4mi_QKV_mfma16_kernel` + `_reduce_kernel`) · gfx950/MI355X · sglang + aiter, bf16 KV, page_size=1, GQA 32:8, head_dim 128
-description: On sglang's aiter attention backend the non-editable CK/HIP paged-decode head DOES have an op-level env knob after all — aiter's JIT template reads $QKV_VERSION per call and ships a faster EXPERIMENTAL kernel for head_dim=128 + bf16 KV. Bitwise-identical output, zero HBM, no overlay.
-keywords: [paged attention, decode, ragged kv_indptr, QKV_VERSION, EXPERIMENTAL, aiter, cpp_itfs JIT, split-kv, partition_size, gfx950, sglang, byte-exact env win]
-kernels: [paged_attention_ll4mi_QKV_mfma16_kernel, paged_attention_ll4mi_reduce_kernel, paged_attention_ragged, csrc.cpp_itfs.pa.pa_ragged]
-platforms: [gfx950/MI355X, ROCm 7.2, sglang 0.5.17, aiter (cpp_itfs JIT)]
-kernel_class: attention-decode
-regime: decode-only, page_size=1, bf16 KV (kv-cache-dtype=auto), GQA 32:8 head_dim 128, TP=1, ISL 8192 / OSL 1024 / conc 64
 type: lever
 confidence: ★★★
 effect: iso serving-weighted 1.086x-1.145x (geomean 1.18-1.21x) on a 73.6-75.0% head -> +6.3..9.3% e2e ceiling; BITWISE-IDENTICAL to the stock kernel on every case, both runs; e2e PENDING
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
+last_seen: 2026-08-21
+name: aiter paged_attention_ragged — QKV_VERSION=EXPERIMENTAL is a free, byte-exact op-level env win
+description: On sglang's aiter attention backend the non-editable CK/HIP paged-decode head DOES have an op-level env knob after all — aiter's JIT template reads $QKV_VERSION per call and ships a faster EXPERIMENTAL kernel for head_dim=128 + bf16 KV. Bitwise-identical output, zero HBM, no overlay.
+keywords: ['paged attention', 'decode', 'ragged kv_indptr', 'QKV_VERSION', 'EXPERIMENTAL', 'aiter', 'cpp_itfs JIT', 'split-kv', 'partition_size', 'gfx950', 'sglang', 'byte-exact env win']
+kernels: ['paged_attention_ll4mi_QKV_mfma16_kernel', 'paged_attention_ll4mi_reduce_kernel', 'paged_attention_ragged', 'csrc.cpp_itfs.pa.pa_ragged']
+platforms: ['gfx950/MI355X', 'ROCm 7.2', 'sglang 0.5.17', 'aiter (cpp_itfs JIT)']
+kernel_class: attention-decode
+regime: decode-only, page_size=1, bf16 KV (kv-cache-dtype=auto), GQA 32:8 head_dim 128, TP=1, ISL 8192 / OSL 1024 / conc 64
 confirms: 2
 lifecycle: active
-last_seen: 2026-08-21
 ---
 # The "non-editable CK paged-decode head has no op-level knob" prior is WRONG on sglang+aiter
 

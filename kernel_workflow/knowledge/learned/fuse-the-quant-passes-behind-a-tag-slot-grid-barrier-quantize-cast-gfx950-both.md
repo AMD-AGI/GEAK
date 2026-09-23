@@ -1,4 +1,13 @@
 ---
+key: dynamic per-tensor activation quant to fp8 that ships as reset + absmax + quantize passes, HIP/C++ source on gfx950/CDNA4, timed under graph replay
+type: lever
+confidence: ★★
+effect: 1.73x weighted director-verified vs the frozen baseline, every case up (roughly 1.49x on the largest / 1.72x mid / 1.96x smallest, i.e. the win grows as the fixed cost dominates); paired, non-overlapping A/B
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
+last_seen: 2026-08-17
 name: fuse-the-quant-passes-behind-a-tag-slot-grid-barrier-quantize-cast-gfx950-both
 description: Fuse a 3-dispatch dynamic per-tensor quant into one kernel behind a 2-round-trip tag-slot grid barrier: 1.73x weighted, every case up.
 keywords: ['quantize-cast', 'fp8', 'dispatch-collapse', 'kernel-fusion', 'cross-workgroup', 'arrival-counter', 'coherence', 'raw-hip', 'latency-bound', 'grid-occupancy', 'profiler-error', 'paired-ab-rig', 'gfx950']
@@ -6,21 +15,12 @@ kernels: ['dynamic_per_tensor_quant', 'fused_dynamic_per_tensor_quant_kernel']
 platforms: ['gfx950']
 kernel_class: quantize_cast
 regime: both
-key: dynamic per-tensor activation quant to fp8 that ships as reset + absmax + quantize passes, HIP/C++ source on gfx950/CDNA4, timed under graph replay
 layer: learned
 levers: ['algo.fusion', 'host.dispatch-count', 'algo.grid-barrier']
 cost: L3
 lifecycle: active
-type: lever
-confidence: ★★
-effect: 1.73x weighted director-verified vs the frozen baseline, every case up (roughly 1.49x on the largest / 1.72x mid / 1.96x smallest, i.e. the win grows as the fixed cost dominates); paired, non-overlapping A/B
 roofline: latency-bound throughout — effective HBM stays at a few percent of nameplate, and after the win ~3/4 of the largest case is a size-independent fixed cost (fit of wall against bytes across an 8x size spread)
 verified_on: 2026-08-17
-last_seen: 2026-08-17
-confirms_cited: 0
-confirms_blind: 0
-losses: 0
-attempts: 0
 ---
 # Fuse the quant passes behind a tag-slot grid barrier
 - lever: A per-tensor quant that reduces a scale and then applies it does not need three dispatches — one kernel can do reset + absmax + apply if the grid barrier between the two phases is cheap; the fusion, not the body, is where the win is.

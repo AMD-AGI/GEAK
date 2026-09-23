@@ -1,19 +1,23 @@
 ---
-name: dense-gemm-bf16-gfx950-sglang
-description: bf16 dense GEMM on sglang/gfx950 - backend swap is a dead-end, the aiter per-shape DB tune is the lever, and hot-tuned rows must be re-gated COLD.
 key: dense_gemm_bf16 · gfx950 · sglang decode+prefill
-keywords: [aiter, tuned_gemm, gemm_a16w16, AITER_CONFIG_GEMM_BF16, gradlib, gemm_tuner, hipblaslt, flydsl, colon-merge, cold-cache, get_padded_m, shipped-coverage, split-k, decode-roofline]
-kernels: [aiter.tuned_gemm:gemm_a16w16, Cijk_Alik_Bljk_BBS_BH_*, hgemm_*]
-platforms: [gfx950, gfx942]
-kernel_class: dense_gemm
-regime: decode+prefill
 type: lever
 confidence: ★★
-confirms: 6
 effect: backend swap = NO win (iso 1.0×, hipBLASLt already fastest, 4 confirms). The aiter per-shape DB tune is the only env lever on sglang (live seam `aiter.tuned_gemm:gemm_a16w16`) and engages hard (1180 tuned hits vs 0), ZERO extra HBM — but the HOT-tuned CSV must be re-gated COLD or it regresses decode, and on a SMALL, hipBLASLt-native shape family the cold gate can eat the whole win. Cold-gated: 1.05× serving-wtd (Qwen3.5-397B) but exactly 1.00× on Llama-3.1-8B TP1 AND on Qwen3-8B TP1 (every kept row landed on a ramp M bucket, both served buckets regressed); gfx942·sglang analog banked +2.23% e2e. NOTE (aiter d9e5ef7c): `gradlib/gemm_tuner.py` is now hipblaslt-ONLY — the multi-backend (asm/opus/flydsl/triton/skinny/torch) race moved to `csrc/gemm_a16w16/gemm_tuner.py --with-hipblaslt`.
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
+last_seen: 2026-08-22
+name: dense-gemm-bf16-gfx950-sglang
+description: bf16 dense GEMM on sglang/gfx950 - backend swap is a dead-end, the aiter per-shape DB tune is the lever, and hot-tuned rows must be re-gated COLD.
+keywords: ['aiter', 'tuned_gemm', 'gemm_a16w16', 'AITER_CONFIG_GEMM_BF16', 'gradlib', 'gemm_tuner', 'hipblaslt', 'flydsl', 'colon-merge', 'cold-cache', 'get_padded_m', 'shipped-coverage', 'split-k', 'decode-roofline']
+kernels: ['aiter.tuned_gemm:gemm_a16w16', 'Cijk_Alik_Bljk_BBS_BH_*', 'hgemm_*']
+platforms: ['gfx950', 'gfx942']
+kernel_class: dense_gemm
+regime: decode+prefill
+confirms: 6
 3rd NEGATIVE (same Qwen3-8B box, the SKINNY down/qkv/o family): the tuner DOES elect `libtype=flydsl` split-K at decode here — but every pick LOSES COLD by ~0.71x, and 2 of the 3 (N,K) decode buckets were ALREADY covered by a shipped `model_configs/*_bf16_tuned_gemm.csv` from an unrelated model. Check shipped coverage per (M,N,K) before tuning, and cold-gate flydsl split-K picks especially.
 lifecycle: active
-last_seen: 2026-08-22
 ---
 # bf16 dense GEMM on sglang/gfx950 — backend swap dead-ends, the aiter DB tune engages
 

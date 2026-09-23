@@ -1,18 +1,22 @@
 ---
-name: moe-mxfp4-grouped-authored-gfx950-vllm
-description: mxfp4 grouped fused-MoE (gpt-oss style) on gfx950/vLLM — author a whole-file Triton replacement of the fused dispatcher seam; +26.9% to +92.5% e2e, byte-exact, and it REPLAYS from the KB.
-keywords: [moe, mxfp4, grouped-gemm, whole-file-overlay, launch-overhead, byte-exact-parity, warm-start-replay, pythonpath-shadow, dispatch-floor, routing-metadata]
-kernels: [triton_kernel_moe_forward, matmul_ogs, _fused_sum_bitmatrix_rows_kernel, _topk_forward, pack_bitmatrix]
-platforms: [gfx950]
-kernel_class: moe_grouped_gemm
-regime: both
 key: moe-grouped-gemm-mxfp4 · gfx950 · decode-dominated (prefill present) · vLLM
 type: routing
 confidence: ★★★
-confirms: 8
 effect: 8th confirm CLOSES THE GEMM LANE ON THIS SEAM — four measured e2e A/Bs on the `_matmul_ogs_*` head (static decode-tile override at two shapes, a corrective re-tile, and an in-kernel gather-div dispatch fold) returned **−20.47% / −12.41% / flat / −6.10%**, all byte-exact and all engagement-proven, confirming the round-1 roofline verdict that both grouped-GEMM decode legs are HBM-pinned with zero micro-tuning headroom; see the `static tile override` and `resolvability` cautions below before funding another GEMM round here. 7th confirm CASHES THE CARD'S OWN PREDICTION — the `pack_bitmatrix` decode lever, recorded here in 2026-08-21 as an untested hypothesis, is now MEASURED e2e on gpt-oss-120b TP2 gfx950/vLLM: **+12.01% e2e, byte-exact, from ONE prologue kernel at only 5.05% GPU** (iso 1.586x serving-wtd; in-trace **4.41x** per decode launch). Also see the WARM-START narrowing in the caution below: the "it REPLAYS" claim holds only when the store carries a bindable overlay ARTIFACT — a record holding just a source diff was classified `winner_kind=authored, cannot be replayed` and produced no replay at all on a later exact-identity match. Original text: authored whole-file Triton rewrite of the fused seam = +92.5% e2e (gpt-oss-120b TP2, head 8.32% GPU), +26.9% (gpt-oss-120b TP2, head 32.43%, byte-exact after a corrective re-author; finalize/Director-validated_win, full-run 1.285×) and +1.83% (DeepSeek-V4-Flash TP4, head ~15.6%) — all Director/Integrator-verified byte-exact. It also REPLAYS: recalling the stored overlay as a warm start on the same deployment identity reproduced +85.9% e2e (byte-exact, non-overlapping) on a fresh run with no re-authoring. Isolated grouped-GEMM only shows 1.06–1.57×; it structurally undercounts the live decode win. Higher head share does NOT mean bigger e2e: at 32% the MoE is memory-bound at the HBM wall so the win is the launch-overhead/decode-seam share, not micro-tuning. 6th confirm (DeepSeek-V4-Pro TP8, 20.83% head, bake-off only): the NO-AUTHOR tuning surface is empty (triton_kernels opt_flags has no env knob and its constraints are GLOBAL: block_m=16 buys decode 1.030x/1.011x but costs prefill 0.638x, serving-wtd 1.008x = +0.16% ceiling), while a device-time profile of the seam exposes a FIXED-COST pack_bitmatrix (13.1% of decode_M64, 30.2% of decode_M1, unchanged at M=1/64/8192 because grid=cdiv(M,512)=1 workgroup serially loops bm_cols) -- the single biggest authorable decode lever, ahead of the GEMMs. NEW ENV LEVER NEVER TRIED BEFORE: on a deepseek_v4 routing method vLLM ranks AITER_MXFP4_BF16 (AiterExperts, W4A16 CK/flydsl mxfp4 MoE) ABOVE TRITON_UNFUSED and only rejects it because is_fused_moe_enabled() is False -- VLLM_ROCM_USE_AITER_MOE=1 makes every static support predicate pass, so probe the fused backend swap before/alongside authoring.
-lifecycle: active
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-08-24
+name: moe-mxfp4-grouped-authored-gfx950-vllm
+description: mxfp4 grouped fused-MoE (gpt-oss style) on gfx950/vLLM — author a whole-file Triton replacement of the fused dispatcher seam; +26.9% to +92.5% e2e, byte-exact, and it REPLAYS from the KB.
+keywords: ['moe', 'mxfp4', 'grouped-gemm', 'whole-file-overlay', 'launch-overhead', 'byte-exact-parity', 'warm-start-replay', 'pythonpath-shadow', 'dispatch-floor', 'routing-metadata']
+kernels: ['triton_kernel_moe_forward', 'matmul_ogs', '_fused_sum_bitmatrix_rows_kernel', '_topk_forward', 'pack_bitmatrix']
+platforms: ['gfx950']
+kernel_class: moe_grouped_gemm
+regime: both
+confirms: 8
+lifecycle: active
 ---
 # MXFP4 grouped fused-MoE (gpt-oss style) — author a whole-file Triton replacement, not a GEMM swap
 

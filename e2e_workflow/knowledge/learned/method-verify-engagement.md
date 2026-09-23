@@ -2,9 +2,13 @@
 key: engagement verification · any gfx · any backend
 type: method
 confidence: ★★★
-confirms: 5
 effect: turns "did my kernel actually run live?" from a guess into proof — and, when the banner also prints the TUNED VALUES, turns a null e2e delta into a one-A/B corrective fix (a -0.222% reject became a +1.2249% accept)
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-08-24
+confirms: 5
 ---
 # Prove the optimized kernel ran on the LIVE serving path (don't infer it from an e2e wiggle)
 

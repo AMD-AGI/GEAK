@@ -2,9 +2,13 @@
 key: fp8_w8a8 block-scale fused-MoE grouped GEMM · gfx950 · vLLM
 type: lever
 confidence: ★★
-confirms: 4
 effect: TWO different seams depending on whether AITER MoE is on. (A) AITER ON (`VLLM_ROCM_USE_AITER[_MOE]=1`, seam `aiter.fused_moe:fused_moe`): the aiter asm 1-stage kernel runs UNTUNED (`[fused_moe] using 1stage default` for every token tier — the shipped `tuned_fmoe.csv` has ZERO `per_1x128`/cu_num=256 rows), so a per-token-tier row in an `AITER_CONFIG_FMOE` CSV picking a bigger asm tile is a free env win: iso 1.11–1.31×/bucket, serving-weighted 1.155× (Qwen3.5-122B-A10B-FP8 TP2, 25.7% head → +3.44% Amdahl ceiling), ZERO HBM, e2e pending. (B) AITER OFF (Triton seam): per-shape Triton config tune (winner_kind=env, ZERO HBM) → iso 1.02–1.16× per M-bucket, serving-weighted ~1.03× (decode M64 1.026×, prefill M8192 1.041×). Same VLLM_TUNED_CONFIG_FOLDER mechanism as the int4/bf16 MoE cards, dtype segment = fp8_w8a8 + block_shape. An authored Triton rewrite of `fused_experts_impl` (Tier-C) beat the env-tune bake-off (iso 1.034×). e2e transfer did NOT clear the noise band at the FINAL gate: Director same-session A/B = +0.16% (1.0016×), ranges OVERLAP → validated_no_win, byte-exact parity 12/12. The lever ENGAGES (decode-bucket rebind fired on both TP workers) but at a 21.4% head with iso ~1.03× the Amdahl ceiling (~0.6%) is inside serving noise. 4th confirm SIZES THE SEAM SWAP ITSELF: flipping A↔B (Triton MoE → aiter fused asm fmoe) leaves the GEMM cost EXACTLY unchanged (one fused launch per decode layer costs what the two Triton launches did; 97.3% of the HBM roofline in BOTH legs) — 100% of the MoE-side e2e win is the peripheral quant/routing CHAIN the fused kernel absorbs (**−77% GPU time** over six kernels), so size an aiter-MoE swap by the launch chain it deletes, never by expected GEMM headroom.
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-08-23
+confirms: 4
 ---
 # fp8_w8a8 block-scale fused-MoE → the memory-free vLLM config-tune lever (fp8 analog of int4/bf16 cards)
 

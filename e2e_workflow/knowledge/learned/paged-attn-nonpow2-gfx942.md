@@ -3,8 +3,12 @@ key: paged decode attention · gfx942 + gfx950 · vLLM (pow2 + non-pow2 KV block
 type: routing
 confidence: ★★★
 effect: head ~8-21% GPU; decode-regime Triton/HIP rewrite → ~+1-4% e2e ceiling (modest, real); op-level backend bake-off is N/A (server-flag swap); ⚠ on the pow2 ROCm/CK head the immutable oracle can be UNSATISFIABLE by any non-bit-identical rewrite (RMS-diluted atol on mixed chunked-prefill rows) — probe that before funding the round
-confirms: 9
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-08-22
+confirms: 9
 ---
 # vLLM paged attention with a non-pow2 KV block → the live path is the editable in-tree Triton kernel
 - lever: when the KV `block_size` is non-pow2 (e.g. 784), `use_rocm_custom_paged_attention()` returns

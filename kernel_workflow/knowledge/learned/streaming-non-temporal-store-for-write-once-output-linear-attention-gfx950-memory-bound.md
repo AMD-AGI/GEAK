@@ -6,9 +6,9 @@ effect: +6.4% on the largest case (store-bandwidth-bound), stable across 8+ repe
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 1
+attempts: 3
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-20
 name: streaming-non-temporal-store-for-write-once-output-linear-attention-gfx950-memory-bound
 description: Non-temporal '.cs' cache_modifier on write-once output stores lifts store bandwidth on gfx950 store-bound kernels; a cache-policy win, not vectorization
 keywords: ['cache-modifier', 'non-temporal-store', 'store-bandwidth', 'memory-bound', 'linear-attention', 'gfx950', 'roofline', 'triton']

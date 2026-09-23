@@ -3,8 +3,12 @@ key: cuda/HIP-graph integration · any gfx · sglang/vllm decode
 type: method
 confidence: ★★★
 effect: the #1 e2e-integration killer — a kernel can win isolated yet never run live (or net ~0 e2e), OR crash the server
-confirms: 5
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-06-27
+confirms: 5
 ---
 # Make an optimized kernel survive CUDA/HIP-graph capture (or the win vanishes e2e)
 - lever: sglang/vLLM capture the decode path into a graph. A kernel that JITs, syncs the host, or

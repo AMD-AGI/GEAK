@@ -3,6 +3,10 @@ key: block-sparse GQA attention (sparse-fwd prefill + decode index-score) · gfx
 type: reference
 confidence: ★★★
 effect: MERGED upstream win; gfx950 TP8 +42% output tok/s / −50% TTFT / −30% TPOT; gfx950 c64 +6.4% tok/s / −10.5% TTFT; low-bit (w4) +10% tok/s at conc256; gsm8k unchanged
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-06-25
 ---
 # Block-sparse GQA attention → the concrete Triton→Triton rewrite that lands the win (both archs)

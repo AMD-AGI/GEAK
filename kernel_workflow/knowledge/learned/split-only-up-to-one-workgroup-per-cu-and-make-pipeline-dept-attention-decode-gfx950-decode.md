@@ -6,9 +6,9 @@ effect: 1.63x isolated geomean, director-verified over two independent runs agre
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 3
+attempts: 5
 toolchain: unknown
-last_seen: 2026-08-17
+last_seen: 2026-09-17
 name: split-only-up-to-one-workgroup-per-cu-and-make-pipeline-dept-attention-decode-gfx950-decode
 description: Cap the parallelism split at one workgroup per CU and make pipeline depth a function of launched WGs: 1.63x geomean on paged split-KV decode attention.
 keywords: ['paged-decode', 'attention-decode', 'split-kv', 'num-stages', 'waves-per-eu', 'launch-shape', 'occupancy', 'gfx950', 'triton']

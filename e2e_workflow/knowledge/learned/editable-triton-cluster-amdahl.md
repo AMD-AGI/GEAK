@@ -1,21 +1,23 @@
 ---
-# --- discovery header ---
-name: editable-triton-cluster-amdahl
-description: Many-tiny-kernel editable clusters (FLA/mamba, MoE routing/metadata) are Amdahl- or launch-bound → stack them into the owning seam's whole-file overlay and gate on e2e, never as solo extractions.
-keywords: [amdahl, launch-bound, host-dispatch, cluster, whole-file-overlay, extraction-seam, moe-routing, linear-attention, carry-forward, noise-band]
-kernels: [chunk_gated_delta_rule_fwd_h, chunk_fwd_kernel_o, causal_conv1d, recompute_w_u_fwd, moe_align_block_size, moe_sum_vec, act_and_mul, topkGating]
-platforms: [gfx942, gfx950]
-kernel_class: method
-regime: both
-# --- classification + evidence ---
 key: editable small-kernel clusters (FLA/mamba linear-attn; MoE routing/metadata launch chains) · gfx942/gfx950 · vLLM + sglang
 type: routing
 confidence: ★★★
 effect: per-kernel iso 1.10–1.18× real, but each ~1–3% GPU → solo e2e below the 0.5% noise band. The overlay-extension route is now MEASURED, not just recommended: folding a bf16 MoE launch chain into the owning module's whole-file overlay landed +6.15% e2e byte-exact while the head GEMM's per-launch time did not move at all. 8th confirm sharpens the screen from %GPU to PER-LAUNCH time vs the ROCm dispatch floor: at the floor ⇒ fold-only (a device-time harness scores a launch-collapse ~1.0× by construction); well above the floor ⇒ a solo extraction is justified even at 5% GPU, and one such prologue gated at +12.01% e2e byte-exact.
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
+last_seen: 2026-08-23
+name: editable-triton-cluster-amdahl
+description: Many-tiny-kernel editable clusters (FLA/mamba, MoE routing/metadata) are Amdahl- or launch-bound → stack them into the owning seam's whole-file overlay and gate on e2e, never as solo extractions.
+keywords: ['amdahl', 'launch-bound', 'host-dispatch', 'cluster', 'whole-file-overlay', 'extraction-seam', 'moe-routing', 'linear-attention', 'carry-forward', 'noise-band']
+kernels: ['chunk_gated_delta_rule_fwd_h', 'chunk_fwd_kernel_o', 'causal_conv1d', 'recompute_w_u_fwd', 'moe_align_block_size', 'moe_sum_vec', 'act_and_mul', 'topkGating']
+platforms: ['gfx942', 'gfx950']
+kernel_class: method
+regime: both
 9th confirm adds the cheapest screen of all: before funding an overlay on a peripheral chain, check whether a backend swap already in the config lane DELETES the chain — one did, for free, and the declined cluster's six kernels lost **77% of their GPU time** with no kernel work at all.
 10th confirm gives the lane's STOP SIGNAL a concrete shape: after two accepted rounds the top of the profile was 26.9% fused-MoE at 95.7% of the HBM roof + 24.8% TP all-reduce pinned at the xGMI interconnect roof — both non-editable/config-only — and the largest EDITABLE head had fallen to 3.56%, collapsing the kernel-rewrite ceiling from ~+4% to ~+1.5%. When no editable kernel clears the 5% bar and the two heads that do are at a hardware roof, the honest move is to STOP the kernel lane and spend the round on config (comm algorithm/threshold, AR quantization, comm-compute overlap) or byte reduction — not to nominate the biggest sub-bar kernel to fill a task floor.
 confirms: 10
-last_seen: 2026-08-23
 ---
 # Editable Triton cluster → STACK-and-compound, don't expect a solo e2e pass
 - lever: the gated-delta / FLA / mamba Triton kernels (chunk_gated_delta_rule_fwd_h, chunk_fwd_kernel_o,

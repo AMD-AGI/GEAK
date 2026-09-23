@@ -2,9 +2,13 @@
 key: bf16 fused-MoE grouped GEMM · gfx942+gfx950 · vLLM AND sglang
 type: lever
 confidence: ★★★
-confirms: 6
 effect: TWO independent levers on the same op — (A) per-shape Triton config tune (winner_kind=env, ZERO HBM) → iso 1.01–1.66× per M-bucket, serving-weighted 1.10–1.40×; e2e VERIFIED +7.01% (Mixtral-8x7B gfx950 TP8, Director-validated, byte-exact) — above the +3.37% Amdahl ceiling once bundled with `--max-num-batched-tokens 8192`. PORTS TO SGLANG unchanged (env is `SGLANG_MOE_CONFIG_DIR`, same `E=<E>,N=<N>,device_name=<dev>.json` name under a `configs/triton_<ver>/` subdir): serving-weighted 1.239x byte-exact on Gemma-4-26B-A4B TP2 gfx950. The lever RE-FIRES on an already-tuned config: a second pass adding BLOCK_SIZE_K=256 + the gfx launch knobs (`waves_per_eu`, `matrix_instr_nonkdim`) bought a further serving-weighted 1.043× / 1.06–1.14× on the small-M buckets, byte-exact. (B) the Tier-C WHOLE-FILE Triton overlay of the modular fused-MoE module is a SEPARATE, stackable win: +6.15% e2e byte-exact on Mixtral-8x7B gfx950 vLLM TP8 at a 35% head — and the gain came from the peripheral launch chain the same file owns, NOT from the head GEMM (per-launch time unchanged in situ).
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-08-21
+confirms: 6
 ---
 # bf16 fused-MoE grouped GEMM → the memory-free config-tune lever (analog of the int4 card)
 

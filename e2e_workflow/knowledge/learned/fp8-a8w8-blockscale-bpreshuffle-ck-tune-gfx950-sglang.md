@@ -3,6 +3,10 @@ key: fp8 a8w8 blockscale GEMM · gfx950 · sglang (ROCm>=7.2) prefill+decode
 type: lever
 confidence: ★★★
 effect: bpreshuffle CK per-shape tune DB → iso 1.46× geomean (per-shape 1.01–2.28×, no regressions); e2e VERIFIED +20.91% (Qwen3-14B-FP8 TP1, Director validated_win, 5046.9→6102.0 tok/s, byte-identical parity 8/8, TPOT −17.5%) at a 53.51% head — i.e. AT the Amdahl ceiling.
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-08-17
 ---
 # gfx950 sglang fp8 a8w8 blockscale — the live kernel is CK **bpreshuffle**, so tune THAT DB

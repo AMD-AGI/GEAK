@@ -3,8 +3,12 @@ key: dense bf16 GEMM · gfx942 · sglang
 type: lever
 confidence: ★★★
 effect: +2.23% e2e VERIFIED (1548.9→1583.5 tok/s, non-overlapping 5-repeat A/B); ~+6% cumulative w/ attn-triton
-confirms: 2
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-06-08
+confirms: 2
 ---
 # Dense bf16 GEMM → tune aiter's per-shape DB (the #1 verified e2e win on this stack)
 - lever: the live dense-GEMM path on sglang/gfx942 is aiter `tuned_gemm.py` (executing hipBLASLt

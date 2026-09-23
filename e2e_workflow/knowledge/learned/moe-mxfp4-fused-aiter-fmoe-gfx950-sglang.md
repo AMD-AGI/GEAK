@@ -1,23 +1,19 @@
 ---
+confidence: ★★
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
+last_seen: 2026-08-21
 name: mxfp4 fused-MoE on sglang+aiter (gfx950) — the shipped tuned_fmoe CSV is already the optimum; the only env lever left is the 1-STAGE fuse at the decode tier
 description: >
-  Bake-off result for an aiter `fused_moe` mxfp4 (fp4_e2m1 weights + e8m0 per_1x32 scales, bf16 act)
-  grouped-expert head on sglang/gfx950 (Qwen3.5-397B-A17B-MXFP4, TP4, inter_dim/rank 256, E=512,
-  topk=10). Racing the FULL flydsl stage-2 kernel registry against the shipped model-specific
-  `*_fp4_tuned_fmoe.csv` finds NO tile that beats the shipped election. The one real env lever is
-  electing aiter's 1-STAGE fused asm kernel (stage1+silu/mul+stage2 in one launch) at the decode
-  token tier. Also records a HARD deployment trap in aiter's AITER_CONFIG_* colon-merge.
 keywords: [fused_moe, mxfp4, fp4_e2m1, e8m0, per_1x32, AITER_CONFIG_FMOE, tuned_fmoe, flydsl,
-  1stage, xbf16, grouped GEMM, MoE, sglang, aiter, gfx950, MI355X, quark]
 kernels: [mfma_moe1_silu_mul_afp4_wfp4_bf16, mfma_moe2_afp4_wfp4_bf16_cshuffle_t32x128x256,
-  flydsl_moe2_afp4_wfp4_bf16_*, fmoe_bf16_pertokenMXfp4_g1u1_flat_novs_silu_16x256]
-platforms: [gfx950 · sglang 0.5.17 + aiter · ROCm 7.2 · quark mxfp4]
+platforms: ['gfx950 · sglang 0.5.17 + aiter · ROCm 7.2 · quark mxfp4']
 kernel_class: MoE grouped GEMM (fused dispatcher)
 regime: decode-dominated serving (ISL 8192 / OSL 1024 / conc 64, TP4)
-confidence: "★★"
 confirms: 1
 lifecycle: active
-last_seen: 2026-08-21
 ---
 
 # mxfp4 fused-MoE (sglang + aiter, gfx950): where the levers actually are

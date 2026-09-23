@@ -6,9 +6,9 @@ effect: total 20.20x isolated geomean vs frozen baseline, non-overlapping; per-c
 confirms_cited: 1
 confirms_blind: 0
 losses: 0
-attempts: 5
+attempts: 6
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-18
 name: de-scale-the-fp8-gemm-k-loop-then-feed-the-native-non-scaled-quantized-gemm-gfx950-compute-bound
 description: Fold and hoist block scales out of the fp8 GEMM K-loop until the inner loop is a plain non-scaled MFMA: 20.2x per-case stacked on gfx950
 keywords: ['fp8', 'block-scale', 'quantized-gemm', 'mfma', 'dequant-hoist', 'k-loop', 'l2-swizzle', 'hip-graph', 'gfx950']

@@ -3,6 +3,10 @@ key: mxfp8_microscale (dense linear + grouped MoE) · gfx950/CDNA4 · vLLM+sglan
 type: lever
 confidence: ★★★
 effect: per-(N,K,regime) STATIC tiles → +12.1% e2e VERIFIED (vLLM dense+grouped stacked); iso dense 1.39–1.58×, grouped 1.17×. sglang leg: same seam, same headroom, e2e still UNMEASURED (contention).
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
 last_seen: 2026-08-17
 ---
 # MXFP8 (E8M0 1×32 microscale) GEMM heads → editable Triton `tl.dot_scaled` tiles

@@ -6,9 +6,9 @@ effect: 1.066x weighted geomean isolated vs frozen baseline, non-overlapping, bi
 confirms_cited: 2
 confirms_blind: 0
 losses: 0
-attempts: 2
+attempts: 4
 toolchain: unknown
-last_seen: 2026-08-17
+last_seen: 2026-09-20
 name: get-the-nt-bit-onto-kv-loads-by-loading-one-native-128-bit-v-attention-decode-gfx950-both
 description: Read-once paged KV on gfx950: the shipped 16-byte non-temporal helper drops the nt bit; one 128-bit vector builtin load restores it for ~1.07x, all cases up.
 keywords: ['attention-decode', 'paged-kv', 'non-temporal-loads', 'cache-modifier', 'kv-cache', 'memory-bound', 'isa-inspection', 'gfx950']
