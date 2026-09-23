@@ -763,7 +763,7 @@ def test_emit_on_success(monkeypatch, tmp_path):
     report = eval_dir / "final_report.md"
     report.write_text("# GEAK final report\n", encoding="utf-8")
 
-    def ok_invoke(prompt, t, ed):
+    def ok_invoke(prompt, t, ed, ps_args=None):
         return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
                 "final_throughput_tok_s": 535.352,
                 "baseline_throughput_tok_s": 461.314,
@@ -800,7 +800,7 @@ def test_emit_when_workflow_raises_but_disk_has_intermediate(monkeypatch, tmp_pa
     report = eval_dir / "final_report.md"
     report.write_text("# Recovered GEAK report\n", encoding="utf-8")
 
-    def boom(prompt, t, ed):
+    def boom(prompt, t, ed, ps_args=None):
         raise TimeoutError("budget expired before Validate")
 
     rc, rp = _run_main(
@@ -831,7 +831,7 @@ def test_emit_error_when_nothing_on_disk(monkeypatch, tmp_path):
     eval_dir = tmp_path / "e2e_empty"
     eval_dir.mkdir()
 
-    def boom(prompt, t, ed):
+    def boom(prompt, t, ed, ps_args=None):
         raise RuntimeError("crashed immediately")
 
     rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
@@ -891,7 +891,7 @@ def test_emit_timeout_still_writes_journey(monkeypatch, tmp_path):
     eval_dir = tmp_path / "e2e_to"
     eval_dir.mkdir()
 
-    def boom(prompt, t, ed):
+    def boom(prompt, t, ed, ps_args=None):
         raise TimeoutError("signal 15: self-stop to flush interface files")
 
     rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
@@ -910,7 +910,7 @@ def test_emit_surfaces_journey_write_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(rx, "_write_kernel_journey",
                         lambda ed, wf, n: (_ for _ in ()).throw(OSError("disk full")))
 
-    def ok_invoke(prompt, t, ed):
+    def ok_invoke(prompt, t, ed, ps_args=None):
         return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
                 "final_throughput_tok_s": 535.352,
                 "baseline_throughput_tok_s": 461.314}
@@ -927,7 +927,7 @@ def test_emit_is_atomic_and_parseable(monkeypatch, tmp_path):
     """No .tmp residue; the emitted file always parses as JSON."""
     eval_dir = _make_eval_dir(tmp_path, with_validation=True)
 
-    def ok_invoke(prompt, t, ed):
+    def ok_invoke(prompt, t, ed, ps_args=None):
         return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
                 "final_throughput_tok_s": 535.352}
 

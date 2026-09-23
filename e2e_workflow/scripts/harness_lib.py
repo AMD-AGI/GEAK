@@ -309,7 +309,7 @@ def compiled_op(fn, regime, *, fullgraph=True, dynamic=False, mode=None):
         return fn
 
 
-def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True, detail=False):
+def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False):
     """Median PER-CALL milliseconds. PRIMARY metric = CUDA-EVENT DEVICE time; wall-clock is a reference.
 
     `call` is a zero-arg closure that issues ONE op launch (its return is ignored for timing).
@@ -320,9 +320,14 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True,
         sub-microsecond kernels (amortizes event/launch resolution).
       - WALL time (perf_counter+sync) is measured in the SAME loop and reported as a REFERENCE only
         (host+device); a large wall≫device gap flags a host-bound op.
-    `flush_cache` (default True) evicts the last-level/Infinity cache BEFORE each timed sample so a
-    memory-bound decode kernel reads its weights COLD from HBM — matching the live server, where the model
-    working set >> cache and every weight is evicted between decode steps. Flushed OUTSIDE the event window.
+    CACHE CONDITION. Before each timed sample the harness runs one eviction pass over a buffer larger
+    than the last-level cache (default 512MB > MI300's 256MB Infinity Cache), so a memory-bound decode
+    kernel does not read weights that the previous sample left resident — the live server evicts them
+    between decode steps. The pass always READS the buffer with a float32 sum: the old write pass
+    inflated a measured decode speedup from 1.12 to 1.40 through writeback contention. Buffer size is
+    configured by HARNESS_CACHE_FLUSH_MB; the preparation cannot be disabled or switched to writes.
+    Runs OUTSIDE the event window. `detail=True` carries the policy back as `cache_condition`; its
+    `deployment_calibrated: False` is literal — this is a sensitivity condition, not a residency proof.
 
     `graph=True` times a captured CUDA-graph replay (the decode deployment context) with the same
     event+flush method; falls back to eager event timing if capture is unavailable (see the `timer` field).
@@ -340,6 +345,7 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True,
     Returns median device ms (float), or {ms, wall_ms, timer} when detail=True — plus {primed, host_ms}
     whenever the timer can produce them. None if `call` raises. On a box without CUDA, device time is
     unavailable so ms == wall_ms and timer='wall'."""
+    policy = cache_policy()   # outside the try: a bad size must raise, not read as "call raised"
     torch = _torch()
     inner = max(1, int(inner))
     try:
@@ -347,28 +353,34 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, flush_cache=True,
     except Exception:
         have_cuda = False
     try:
+        if have_cuda:
+            _flush_buffer(torch, policy["bytes"])   # allocate once BEFORE warmup, never inside a sample
         if have_cuda and graph:
             g = _try_capture(torch, call, inner)
             if g is not None:
-                dev, wall = _time_graph(torch, g, warmup, repeats, flush_cache)
+                dev, wall = _time_graph(torch, g, warmup, repeats, policy)
                 # One replay issues all `inner` launches, so divide to put host on the SAME per-launch
                 # basis as `dev` -- otherwise a clean inner>1 graph reads as host-bound.
                 host = _host_dispatch_ms(torch, lambda: g[0].replay()) / g[1]
-                return _timing_result(dev, wall, "cuda_event_graph", detail, host, host < dev)
+                return _timing_result(dev, wall, "cuda_event_graph", detail, host, host < dev, policy)
         if have_cuda:
-            dev, wall = _time_events(torch, call, warmup, repeats, inner, flush_cache)
+            dev, wall = _time_events(torch, call, warmup, repeats, inner, policy)
             host = _host_dispatch_ms(torch, call)
-            return _timing_result(dev, wall, "cuda_event", detail, host, host < dev)
+            return _timing_result(dev, wall, "cuda_event", detail, host, host < dev, policy)
         wall = _time_wall(torch, call, warmup, repeats, inner)   # no device timeline -> wall only
-        return _timing_result(wall, wall, "wall", detail)
+        return _timing_result(wall, wall, "wall", detail, policy=policy)
     except Exception:
         return None
 
 
-def _timing_result(dev_ms, wall_ms, timer, detail, host_ms=None, primed=None):
+def _timing_result(dev_ms, wall_ms, timer, detail, host_ms=None, primed=None, policy=None):
     if not detail:
         return dev_ms
     d = {"ms": dev_ms, "wall_ms": wall_ms, "timer": timer}
+    if policy is not None:
+        # ABSENT means the measurement predates the cache receipt, i.e. it was taken under an
+        # unconditional write-evict -- see director.md. Never read absence as "no cache preparation".
+        d["cache_condition"] = policy
     if host_ms is not None:
         # Both keys or neither. A consumer distinguishes "host-bound" from "cannot tell" by PRESENCE
         # (oracle_freezer.md step 4), so half a receipt would be read as a whole one.
@@ -408,31 +420,73 @@ def _host_dispatch_ms(torch, call):
 
 
 _CACHE_FLUSH_BUF = None
+_CACHE_FLUSH_SINK = None
+_CACHE_FLUSH_DEV = None
+
+
+def cache_policy():
+    """Describe the fixed read eviction performed before each timed GPU sample.
+
+    The old 512 MiB `zero_()` left dirty cache lines whose later writeback competed with the timed
+    kernel for HBM bandwidth. On MI355X / GLM-5.2 fused-MoE, decode-weighted speedups were 1.408/1.395
+    with write eviction, 1.121/1.129 with read eviction, and 1.104/1.117 without eviction. An absolute-
+    time probe also confirmed that reading evicts cached data, supporting read eviction as the single
+    measurement policy. Only the buffer size is configurable, via HARNESS_CACHE_FLUSH_MB (MiB)."""
+    mb = int(os.environ.get("HARNESS_CACHE_FLUSH_MB", "512"))
+    if mb <= 0:
+        raise ValueError("Eviction requires positive HARNESS_CACHE_FLUSH_MB")
+    return {"mode": "read-evict", "bytes": mb * (1 << 20), "preparation": "float32-sum",
+            # The preparation runs outside both the event and the reference wall window. It is a
+            # sensitivity condition, NOT a proof that the deployed cache state was reproduced.
+            "outside_timing": True, "deployment_calibrated": False}
+
+
+def _flush_buffer(torch, size):
+    """Persistent eviction buffer, sized EXACTLY to the request (not `>=`): a stale oversized buffer
+    would silently evict more than the caller asked for. No-op (None) without CUDA, so read-evict on a
+    CPU box behaves like the old write-evict did rather than raising."""
+    global _CACHE_FLUSH_BUF
+    try:
+        if not torch.cuda.is_available():
+            return None
+    except Exception:
+        return None
+    n = max(1, size // 4)
+    # The device is tracked HERE rather than read back off the tensor: `buf.device` is a torch.device on
+    # real torch but a bare string on the test double, so comparing it would silently never match and
+    # reallocate 512MB every single sample -- with every test still passing.
+    global _CACHE_FLUSH_DEV
+    try:
+        device = torch.cuda.current_device()
+    except Exception:
+        device = None
+    if _CACHE_FLUSH_BUF is None or _CACHE_FLUSH_BUF.numel() != n or _CACHE_FLUSH_DEV != device:
+        # Finite input for the read reduction. Allocation is outside the samples and before warmup.
+        _CACHE_FLUSH_BUF = torch.ones(n, dtype=torch.float32, device="cuda")
+        _CACHE_FLUSH_DEV = device
+    return _CACHE_FLUSH_BUF
 
 
 def flush_cache(torch=None, mb=None):
-    """Evict the GPU last-level / Infinity cache so the NEXT launch reads cold from HBM (matches decode:
-    the model working set >> cache, so every weight is evicted between reuses). Writes a persistent buffer
-    larger than the cache (default 512MB > MI300's 256MB Infinity Cache; override HARNESS_CACHE_FLUSH_MB).
-    No-op without CUDA."""
-    global _CACHE_FLUSH_BUF
+    """Read an eviction buffer with a float32 sum, without dirtying its cache lines.
+
+    Never claims a particular hardware residency — see `cache_policy` for why the preparation method is
+    part of the measurement and is reported in the timing receipt."""
+    size = cache_policy()["bytes"] if mb is None else int(mb) * (1 << 20)
+    if size <= 0:
+        raise ValueError("Eviction buffer must be positive")
     torch = torch or _torch()
-    try:
-        if not torch.cuda.is_available():
-            return
-    except Exception:
-        return
-    mb = int(os.environ.get("HARNESS_CACHE_FLUSH_MB", "512")) if mb is None else int(mb)
-    n = max(1, (mb << 20) // 4)
-    if _CACHE_FLUSH_BUF is None or _CACHE_FLUSH_BUF.numel() < n:
-        _CACHE_FLUSH_BUF = torch.empty(n, dtype=torch.float32, device="cuda")
-    _CACHE_FLUSH_BUF.zero_()
+    buf = _flush_buffer(torch, size)
+    if buf is None:
+        return          # no CUDA
+    global _CACHE_FLUSH_SINK
+    _CACHE_FLUSH_SINK = buf.sum()   # kept alive so the reduction cannot be optimized away
 
 
-def _time_events(torch, call, warmup, repeats, inner, flush):
+def _time_events(torch, call, warmup, repeats, inner, policy):
     """Median (device_ms, wall_ms) over `repeats` samples of `inner` back-to-back launches: device via
-    cuda.Event (host-free), wall via perf_counter (reference). Cache flushed before each sample when
-    `flush`, so a memory-bound kernel is timed cold.
+    cuda.Event (host-free), wall via perf_counter (reference). `policy` names the cache preparation run
+    before each sample, so a memory-bound kernel is not timed on lines the previous sample left resident.
 
     The per-sample sync is deliberate. Batching the samples into one queue with no intervening sync was
     tried and REJECTED on measurement: fitting per-launch ms against 1/inner on MI355X (torch 2.9 / ROCm
@@ -447,8 +501,7 @@ def _time_events(torch, call, warmup, repeats, inner, flush):
     end = torch.cuda.Event(enable_timing=True)
     dev, wall = [], []
     for _ in range(max(1, repeats)):
-        if flush:
-            flush_cache(torch)
+        flush_cache(torch, mb=policy["bytes"] // (1 << 20))
         sync(torch)
         t0 = time.perf_counter()
         start.record()
@@ -498,10 +551,10 @@ def _try_capture(torch, call, inner):
         return None
 
 
-def _time_graph(torch, g, warmup, repeats, flush):
-    """Median (device_ms, wall_ms) of a captured-graph replay, device via cuda.Event, cache flushed
-    before each sample when `flush` (replay reuses static buffers, so without a flush the weights stay
-    hot — unrepresentative of cold decode)."""
+def _time_graph(torch, g, warmup, repeats, policy):
+    """Median (device_ms, wall_ms) of a captured-graph replay, device via cuda.Event, with `policy`'s
+    read eviction before each sample so replay's static buffers do not keep weights resident across
+    samples."""
     graph, inner = g
     for _ in range(max(1, warmup)):
         graph.replay()
@@ -510,8 +563,7 @@ def _time_graph(torch, g, warmup, repeats, flush):
     end = torch.cuda.Event(enable_timing=True)
     dev, wall = [], []
     for _ in range(max(1, repeats)):
-        if flush:
-            flush_cache(torch)
+        flush_cache(torch, mb=policy["bytes"] // (1 << 20))
         sync(torch)
         t0 = time.perf_counter()
         start.record()
@@ -1133,6 +1185,17 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
           and EXCLUDED. If EVERY surviving bucket is identity, `weighted` is None with a reason so the
           caller does not trust an unmeasured 1.0x (re-measure per-bucket ms in a fresh subprocess under
           the deployment graph/compile — see kernel_extractor.md).
+
+    Do NOT amortize a prefill bucket over OSL here. It reads like an omission — a prefill pass is paid
+    once per request and should be spread over the OSL tokens it precedes — but (2) already did it:
+    `analytic_calls` puts both regimes on one per-wave basis, so `weighted` (a RATIO) is already
+    `b_d*OSL : b_p*calls_p`. Dividing prefill by OSL again makes it `b_d*OSL^2 : b_p*calls_p`, i.e.
+    prefill under-weighted by a factor of OSL (typically 1024x) — enough to flip the PRIMARY gate's
+    sign: at OSL=1024/CONC=64/ISL=4096/chunk=2048 with prefill 0.98x and decode 1.02x, the correct
+    0.9818 (regression) is reported as 1.0192 (a "win"). This was shipped once, in `35d8f491`, and
+    reverted; the entire 327-test suite passed both with and without it, so tests will not catch it.
+    If a workload ever genuinely needs a different basis, change `_analytic_calls_from_meta` /
+    `attribute_weights` (which own the per-wave basis) and ship a mixed prefill+decode regression test.
 
     `per_case`: list of {sig|name, regime, m?, baseline_ms, optimized_ms?|speedup?}. speedup is derived
     from baseline_ms/optimized_ms when both present (preferred), else the passed `speedup` is used.
