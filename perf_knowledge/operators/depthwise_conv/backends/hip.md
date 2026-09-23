@@ -3,7 +3,7 @@ title: depthwise_conv on HIP/C++ — SOTA card
 kind: sota_card
 operator: depthwise_conv
 backend: hip
-gens: [gfx942, gfx950]
+gens: [gfx942, gfx950, gfx1151]
 dtypes: [fp32, bf16, fp16]
 regimes: [both]
 status: competitive
@@ -73,3 +73,15 @@ LLM 1D variant with a real HIP kernel: [[causal_conv1d]].
 - HIP kernel language (wave64, __launch_bounds__, __restrict__): https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
 - MI300X workload optimization (≥1024 grid, VGPR/LDS budgets, memory-bound tuning): https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
 - LDS banks / occupancy (halo staging): https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.

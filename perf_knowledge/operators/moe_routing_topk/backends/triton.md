@@ -3,7 +3,7 @@ title: moe_routing_topk on Triton — SOTA card
 kind: sota_card
 operator: moe_routing_topk
 backend: triton
-gens: [gfx942, gfx950]
+gens: [gfx942, gfx950, gfx1151]
 dtypes: [bf16, fp16, fp32]
 regimes: [prefill, decode]
 status: competitive
@@ -67,3 +67,15 @@ confirm the Triton routing kernel ran (carries the Python name).
 - vLLM reference `fused_grouped_topk`/`grouped_topk`: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py
 - aiter Triton topk: `ROCm/aiter@a6bb49937:aiter/ops/triton/topk.py`
 - Triton AMD knobs (num_warps/wave64): https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.

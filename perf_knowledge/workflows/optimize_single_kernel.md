@@ -75,11 +75,20 @@ kernel must beat. A backend only counts if it **passes correctness** (dtype-appr
 tolerance) AND is faster.
 
 ## Step 3 — Tier B: tune the promising backend(s) (no source)
-- **GEMM** → the aiter per-shape DB is the lever (gradlib races
-  hipBLASLt/asm/triton/skinny/flydsl per shape, so one tune covers per-backend GEMM
-  tuning). Full recipe: [`gemm_tuning_workflow.md`](gemm_tuning_workflow.md).
-  ⚠ **Do NOT use PyTorch TunableOp / `HIPBLASLT_TUNING_FILE`** on sglang/aiter — they hook
-  the torch dispatch the aiter live path bypasses (zero engagement).
+- **GEMM** → pick the tuner that matches the seam THIS box's live path uses; the two are not
+  interchangeable and each is worthless on the other's stack.
+  - *aiter stack* → the aiter per-shape DB is the lever (gradlib races
+    hipBLASLt/asm/triton/skinny/flydsl per shape, so one tune covers per-backend GEMM
+    tuning). Full recipe: [`gemm_tuning_workflow.md`](gemm_tuning_workflow.md).
+    ⚠ **Do NOT use PyTorch TunableOp / `HIPBLASLT_TUNING_FILE` here** — they hook
+    the torch dispatch the aiter live path bypasses (zero engagement).
+  - *non-aiter stack* (e.g. **gfx1151 / Strix Halo**, where aiter is absent and the
+    unquantized linear goes through `rocm_unquantized_gemm_impl`) → the aiter DB does not
+    exist, and **PyTorch TunableOp is then the correct lever, measured +11.31% median
+    fresh-server E2E** (n=3, per-round +10.40%..+11.45%). Deploy the *installed* cold-tuned
+    table, not the raw hot intermediate — they share a filename shape and the wrong one
+    measures +1.65% instead of +11.31%, i.e. it fails as a plausible small win.
+  In both cases **decide by probing engagement, not by this file's prose.**
 - **attention** → the Tier-B lever is the `--attention-backend` swap
   ([`attention_backend_selection.md`](attention_backend_selection.md)).
 - **FlyDSL env path** — FlyDSL is one of the backends the aiter DB tune races

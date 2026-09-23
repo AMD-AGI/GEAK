@@ -13,6 +13,15 @@ sources:
 
 # HBM, Infinity Fabric & Infinity Cache
 
+> **Architecture guard — this file is CDNA-only despite living under `shared/`.**
+> This page is **HBM + Infinity Fabric/Cache**, i.e. discrete Instinct. RDNA APUs (`gfx1151` Strix
+> Halo) have **no HBM and no Infinity Cache**: LPDDR5X in a **UMA shared with the CPU**, ~229-233 GB/s
+> measured against a 256 GB/s vendor figure, behind a 32 MB MALL measured at ~790 GB/s
+> (read-read-write). Bandwidth budgets, cache-flush sizes and roofline ceilings all move, and on a UMA
+> part any surplus traffic is charged to the same bus the op is timed on.
+> RDNA counterpart: [`../rdna35_gfx1151/memory.md`](../rdna35_gfx1151/memory.md). The `gens:` frontmatter above is the
+> authoritative scope; `shared/` means *shared across CDNA generations*, not arch-neutral.
+
 ## TL;DR
 > Most LLM-inference kernels are **HBM-bandwidth-bound**, not FLOP-bound — optimize **bytes moved**,
 > not FLOPs. The device-shared cache is the **256 MiB Infinity Cache (MALL/L3)** on the I/O dies; there

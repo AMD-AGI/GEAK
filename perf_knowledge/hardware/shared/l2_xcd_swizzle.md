@@ -13,6 +13,14 @@ sources:
 
 # L2 / XCD locality, tile swizzle & coalescing
 
+> **Architecture guard — this file is CDNA-only despite living under `shared/`.**
+> XCD-aware swizzling is a **CDNA3/4 chiplet** concern. RDNA (`gfx11xx`, e.g. `gfx1151`) is a single
+> monolithic die with **no XCDs**, so there is no XCD-locality term to optimize; what matters there
+> instead is the **32 MB MALL** in front of a shared LPDDR5X bus. A swizzle tuned for 8 XCDs is not a
+> conservative default on RDNA, it is a different problem.
+> RDNA counterpart: [`../rdna35_gfx1151/memory.md`](../rdna35_gfx1151/memory.md). The `gens:` frontmatter above is the
+> authoritative scope; `shared/` means *shared across CDNA generations*, not arch-neutral.
+
 ## TL;DR
 > On chiplet CDNA (MI300X/MI350X) **L2 is per-XCD**, not global. Two perf rules fall out:
 > (1) make GEMM tile counts and grid dims **multiples of 8** so work distributes evenly across the

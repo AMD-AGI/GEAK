@@ -3,7 +3,7 @@ title: gather_scatter on Triton — SOTA card
 kind: sota_card
 operator: gather_scatter
 backend: triton
-gens: [gfx942, gfx950]
+gens: [gfx942, gfx950, gfx1151]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
 regimes: [both]
 status: sota
@@ -62,3 +62,15 @@ inside the Triton fused-MoE; aiter's catalog uses asm/CK for the production sort
 ## Sources
 - BLOCK_D tiling, 54% BW, 30% coalescing, 2-D scalar-index limit: https://huggingface.co/blog/yiakwy-xpu-team/efficient-moe-align-sort-design-for-sglang · https://pytorch.org/blog/accelerating-moes-with-a-triton-persistent-cache-aware-grouped-gemm-kernel/
 - Triton AMD coalescing/tuning: https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.

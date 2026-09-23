@@ -3,7 +3,7 @@ title: lm_head_logits on vllm_kernels — SOTA card
 kind: sota_card
 operator: lm_head_logits
 backend: vllm_kernels
-gens: [gfx942, gfx950]
+gens: [gfx942, gfx950, gfx1151]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz]
 regimes: [decode, prefill, both]
 status: sota
@@ -69,3 +69,15 @@ AITER vs skinny; isolated skinny-GEMM bench at the served decode batch.
 - LogitsProcessor (GEMM, gather/all-gather, soft_cap/scale/bias, `get_top_tokens`): https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/logits_processor.py
 - vLLM ROCm skinny GEMM kernels: https://github.com/vllm-project/vllm/blob/main/csrc/rocm/skinny_gemms.cu
 - ROCm GEMM dispatch / env hierarchy: https://github.com/vllm-project/vllm/blob/main/vllm/platforms/rocm.py
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.

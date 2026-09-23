@@ -3,7 +3,7 @@ title: chunked_prefill on Triton — SOTA card
 kind: sota_card
 operator: chunked_prefill
 backend: triton
-gens: [gfx90a, gfx942, gfx950]
+gens: [gfx90a, gfx942, gfx950, gfx1151]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3]
 regimes: [prefill, decode, both]
 status: sota
@@ -62,3 +62,15 @@ batch; rocprofv3 to confirm one kernel vs two; `AMDGCN_ENABLE_DUMP=1` ISA check;
 - `unified_attention` (on-box `ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/triton/attention/unified_attention.py`).
 - vLLM `TRITON_ATTN` unified attention: https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/triton_attn.py
 - Triton AMD knobs: https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.

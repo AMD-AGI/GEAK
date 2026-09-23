@@ -31,6 +31,7 @@ It has two jobs:
 | **Decide what to even try** | [`index/decision_trees.md`](index/decision_trees.md) |
 | **Understand an operator** | [`operators/<op>/overview.md`](operators/) (+ `tuning` / `numerics` / `fusion`) |
 | **Learn the hardware / a language / a library** | [`hardware/`](hardware/) · [`languages/`](languages/) · [`backends/`](backends/) |
+| **Work on RDNA / Strix Halo (`gfx1151`)** | [`hardware/rdna35_gfx1151/`](hardware/rdna35_gfx1151/) — **start here**; the rest of this base is CDNA-only, and a `gen=gfx1151` backend query returns empty |
 | **Apply a cross-cutting technique** | [`optimization/`](optimization/) · [`quantization/`](quantization/) |
 | **Profile / triage a kernel** | [`profiling/`](profiling/) |
 | **Run an end-to-end optimization** | [`workflows/`](workflows/) |
@@ -46,7 +47,8 @@ It has two jobs:
 ```
 perf_knowledge/
 ├── index/         (10)  navigation + SOTA registry + taxonomy + sourcing rules + templates + generator
-├── hardware/      (27)  CDNA1–4 deep dives + shared (matrix core, memory, numerics)
+├── hardware/      (34)  CDNA1–4 deep dives + shared (matrix core, memory, numerics)
+│                        + rdna35_gfx1151/ (Strix Halo APU — WMMA, 32 MB LLC, LPDDR5X UMA)
 ├── languages/     (42)  triton · flydsl · hip · ck · asm · tilelang · rocwmma · hipkittens · mojo · cutlass
 ├── backends/      (35)  aiter · hipblaslt · ck_lib · rocblas/tunableop · fa_rocm · mori/rccl · miopen
 │                        · pytorch_inductor · sglang · vllm

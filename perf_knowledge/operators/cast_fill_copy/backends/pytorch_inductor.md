@@ -3,7 +3,7 @@ title: cast_fill_copy on PyTorch Inductor — SOTA card
 kind: sota_card
 operator: cast_fill_copy
 backend: pytorch_inductor
-gens: [gfx90a, gfx942, gfx950]
+gens: [gfx90a, gfx942, gfx950, gfx1151]
 dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz]
 regimes: [both, training]
 status: sota
@@ -68,3 +68,15 @@ into a fused kernel's store; rocprof kernel count + `WRITE_SIZE` drop vs eager.
 - Inductor cast elision / stride tracking / pointwise fusion: https://github.com/pytorch/pytorch/blob/main/torch/_inductor/config.py
 - ROCm Inductor/Triton on MI300X: https://rocm.blogs.amd.com/artificial-intelligence/pytorch-amd-gpus/README.html
 - max-autotune / TORCH_COMPILE_DEBUG: https://rocm.docs.amd.com/en/docs-6.3.1/how-to/rocm-for-ai/inference-optimization/workload.html
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.

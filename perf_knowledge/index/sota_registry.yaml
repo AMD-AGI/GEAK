@@ -12,7 +12,7 @@ entries:
   - operator: dense_gemm
     backend: aiter
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/dense_gemm/backends/aiter.md
@@ -95,7 +95,7 @@ entries:
   - operator: dense_gemm
     backend: rocwmma
     status: legacy
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/dense_gemm/backends/rocwmma.md
@@ -115,7 +115,7 @@ entries:
   - operator: dense_gemm
     backend: triton
     status: competitive
-    gens: [gfx90a, gfx942, gfx950]
+    gens: [gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/dense_gemm/backends/triton.md
@@ -158,7 +158,7 @@ entries:
   - operator: batched_gemm
     backend: hip
     status: legacy
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16]
     regimes: [prefill, decode]
     card: ../operators/batched_gemm/backends/hip.md
@@ -179,7 +179,7 @@ entries:
   - operator: batched_gemm
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/batched_gemm/backends/triton.md
@@ -224,7 +224,7 @@ entries:
   - operator: grouped_gemm_moe
     backend: hip
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/grouped_gemm_moe/backends/hip.md
@@ -244,7 +244,7 @@ entries:
   - operator: grouped_gemm_moe
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp4_e2m1]
     regimes: [prefill, decode]
     card: ../operators/grouped_gemm_moe/backends/triton.md
@@ -286,7 +286,7 @@ entries:
   - operator: splitk_streamk_gemm
     backend: hip
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/splitk_streamk_gemm/backends/hip.md
@@ -306,7 +306,7 @@ entries:
   - operator: splitk_streamk_gemm
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/splitk_streamk_gemm/backends/triton.md
@@ -450,7 +450,7 @@ entries:
   - operator: gemm_epilogue_fused
     backend: hip
     status: legacy
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/gemm_epilogue_fused/backends/hip.md
@@ -471,7 +471,7 @@ entries:
   - operator: gemm_epilogue_fused
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/gemm_epilogue_fused/backends/triton.md
@@ -514,7 +514,7 @@ entries:
   - operator: skinny_gemv_decode
     backend: hip
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode]
     card: ../operators/skinny_gemv_decode/backends/hip.md
@@ -524,7 +524,7 @@ entries:
   - operator: skinny_gemv_decode
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode]
     card: ../operators/skinny_gemv_decode/backends/triton.md
@@ -603,7 +603,7 @@ entries:
   - operator: attention_prefill_fmha
     backend: triton
     status: competitive
-    gens: [gfx90a, gfx942, gfx950]
+    gens: [gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32, fp8_e4m3_fnuz, fp8_e4m3]
     regimes: [prefill]
     card: ../operators/attention_prefill_fmha/backends/triton.md
@@ -649,7 +649,7 @@ entries:
   - operator: attention_decode_paged
     backend: hip
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode]
     card: ../operators/attention_decode_paged/backends/hip.md
@@ -660,7 +660,7 @@ entries:
   - operator: attention_decode_paged
     backend: triton
     status: competitive
-    gens: [gfx90a, gfx942, gfx950]
+    gens: [gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode]
     card: ../operators/attention_decode_paged/backends/triton.md
@@ -672,7 +672,7 @@ entries:
   - operator: attention_decode_paged
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode]
     card: ../operators/attention_decode_paged/backends/vllm_kernels.md
@@ -722,12 +722,11 @@ entries:
     regimes: [training]
     card: ../operators/mla_attention/backends/flydsl.md
     sources:
-      - Attention-Kernels/geak_trans_py2flydsl/fmha_backward/FMHA_BWD_FlyDSL_Skills.md
       - https://arxiv.org/abs/2511.08083
   - operator: mla_attention
     backend: hip
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode, prefill]
     card: ../operators/mla_attention/backends/hip.md
@@ -738,7 +737,7 @@ entries:
   - operator: mla_attention
     backend: triton
     status: competitive
-    gens: [gfx90a, gfx942, gfx950]
+    gens: [gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/mla_attention/backends/triton.md
@@ -795,7 +794,7 @@ entries:
   - operator: gqa_mqa_attention
     backend: triton
     status: competitive
-    gens: [gfx90a, gfx942, gfx950]
+    gens: [gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/gqa_mqa_attention/backends/triton.md
@@ -839,7 +838,7 @@ entries:
   - operator: sliding_window_attention
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/sliding_window_attention/backends/triton.md
@@ -872,7 +871,7 @@ entries:
   - operator: chunked_prefill
     backend: triton
     status: sota
-    gens: [gfx90a, gfx942, gfx950]
+    gens: [gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3]
     regimes: [prefill, decode, both]
     card: ../operators/chunked_prefill/backends/triton.md
@@ -883,7 +882,7 @@ entries:
   - operator: chunked_prefill
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode, both]
     card: ../operators/chunked_prefill/backends/vllm_kernels.md
@@ -894,7 +893,7 @@ entries:
   - operator: sparse_attention_nsa
     backend: hip
     status: experimental
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/sparse_attention_nsa/backends/hip.md
@@ -917,7 +916,7 @@ entries:
   - operator: sparse_attention_nsa
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/sparse_attention_nsa/backends/triton.md
@@ -941,7 +940,7 @@ entries:
   - operator: linear_attention_gated_delta
     backend: hip
     status: experimental
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16]
     regimes: [prefill, decode]
     card: ../operators/linear_attention_gated_delta/backends/hip.md
@@ -963,7 +962,7 @@ entries:
   - operator: linear_attention_gated_delta
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16]
     regimes: [prefill, decode]
     card: ../operators/linear_attention_gated_delta/backends/triton.md
@@ -1031,7 +1030,7 @@ entries:
   - operator: speculative_decode_verify
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode]
     card: ../operators/speculative_decode_verify/backends/triton.md
@@ -1042,7 +1041,7 @@ entries:
   - operator: speculative_decode_verify
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode]
     card: ../operators/speculative_decode_verify/backends/vllm_kernels.md
@@ -1077,7 +1076,7 @@ entries:
   - operator: rmsnorm
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both]
     card: ../operators/rmsnorm/backends/hip.md
@@ -1100,7 +1099,7 @@ entries:
   - operator: rmsnorm
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [prefill, decode, both]
     card: ../operators/rmsnorm/backends/triton.md
@@ -1111,7 +1110,7 @@ entries:
   - operator: rmsnorm
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both]
     card: ../operators/rmsnorm/backends/vllm_kernels.md
@@ -1141,7 +1140,7 @@ entries:
   - operator: layernorm
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/layernorm/backends/hip.md
@@ -1162,7 +1161,7 @@ entries:
   - operator: layernorm
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both, training]
     card: ../operators/layernorm/backends/triton.md
@@ -1173,7 +1172,7 @@ entries:
   - operator: layernorm
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both]
     card: ../operators/layernorm/backends/vllm_kernels.md
@@ -1203,7 +1202,7 @@ entries:
   - operator: softmax
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/softmax/backends/hip.md
@@ -1214,7 +1213,7 @@ entries:
   - operator: softmax
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/softmax/backends/triton.md
@@ -1247,7 +1246,7 @@ entries:
   - operator: act_and_mul_silu_gelu
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both]
     card: ../operators/act_and_mul_silu_gelu/backends/hip.md
@@ -1257,7 +1256,7 @@ entries:
   - operator: act_and_mul_silu_gelu
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz, mxfp4]
     regimes: [both]
     card: ../operators/act_and_mul_silu_gelu/backends/triton.md
@@ -1267,7 +1266,7 @@ entries:
   - operator: act_and_mul_silu_gelu
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both]
     card: ../operators/act_and_mul_silu_gelu/backends/vllm_kernels.md
@@ -1289,7 +1288,7 @@ entries:
   - operator: fused_add_rmsnorm
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both]
     card: ../operators/fused_add_rmsnorm/backends/hip.md
@@ -1300,7 +1299,7 @@ entries:
   - operator: fused_add_rmsnorm
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both]
     card: ../operators/fused_add_rmsnorm/backends/triton.md
@@ -1311,7 +1310,7 @@ entries:
   - operator: fused_add_rmsnorm
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both]
     card: ../operators/fused_add_rmsnorm/backends/vllm_kernels.md
@@ -1368,7 +1367,7 @@ entries:
   - operator: rope
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/rope/backends/hip.md
@@ -1391,7 +1390,7 @@ entries:
   - operator: rope
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/rope/backends/triton.md
@@ -1402,7 +1401,7 @@ entries:
   - operator: rope
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/rope/backends/vllm_kernels.md
@@ -1423,7 +1422,7 @@ entries:
   - operator: mrope
     backend: hip
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/mrope/backends/hip.md
@@ -1434,7 +1433,7 @@ entries:
   - operator: mrope
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/mrope/backends/triton.md
@@ -1445,7 +1444,7 @@ entries:
   - operator: alibi
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/alibi/backends/hip.md
@@ -1456,7 +1455,7 @@ entries:
   - operator: alibi
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/alibi/backends/triton.md
@@ -1479,7 +1478,7 @@ entries:
   - operator: moe_routing_topk
     backend: hip
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [prefill, decode]
     card: ../operators/moe_routing_topk/backends/hip.md
@@ -1490,7 +1489,7 @@ entries:
   - operator: moe_routing_topk
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [prefill, decode]
     card: ../operators/moe_routing_topk/backends/triton.md
@@ -1501,7 +1500,7 @@ entries:
   - operator: moe_routing_topk
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [prefill, decode]
     card: ../operators/moe_routing_topk/backends/vllm_kernels.md
@@ -1594,7 +1593,7 @@ entries:
   - operator: fused_moe_grouped_gemm
     backend: hip
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3]
     regimes: [prefill, decode]
     card: ../operators/fused_moe_grouped_gemm/backends/hip.md
@@ -1605,7 +1604,7 @@ entries:
   - operator: fused_moe_grouped_gemm
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp8_e4m3_fnuz, int8]
     regimes: [prefill, decode]
     card: ../operators/fused_moe_grouped_gemm/backends/triton.md
@@ -1627,7 +1626,7 @@ entries:
   - operator: shared_expert_fusion
     backend: hip
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp8_e4m3_fnuz, fp8_e4m3]
     regimes: [prefill, decode]
     card: ../operators/shared_expert_fusion/backends/hip.md
@@ -1637,7 +1636,7 @@ entries:
   - operator: shared_expert_fusion
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp8_e4m3_fnuz]
     regimes: [prefill, decode]
     card: ../operators/shared_expert_fusion/backends/triton.md
@@ -1824,7 +1823,7 @@ entries:
   - operator: quant_int8
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [int8]
     regimes: [both]
     card: ../operators/quant_int8/backends/hip.md
@@ -1835,7 +1834,7 @@ entries:
   - operator: quant_int8
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [int8]
     regimes: [both]
     card: ../operators/quant_int8/backends/triton.md
@@ -1846,7 +1845,7 @@ entries:
   - operator: quant_int8
     backend: vllm_kernels
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [int8]
     regimes: [prefill, decode, both]
     card: ../operators/quant_int8/backends/vllm_kernels.md
@@ -1960,7 +1959,7 @@ entries:
   - operator: embedding
     backend: hip
     status: competitive
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/embedding/backends/hip.md
@@ -1971,7 +1970,7 @@ entries:
   - operator: embedding
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/embedding/backends/triton.md
@@ -1982,7 +1981,7 @@ entries:
   - operator: embedding
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [both]
     card: ../operators/embedding/backends/vllm_kernels.md
@@ -2004,7 +2003,7 @@ entries:
   - operator: lm_head_logits
     backend: hip
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode, prefill, both]
     card: ../operators/lm_head_logits/backends/hip.md
@@ -2015,7 +2014,7 @@ entries:
   - operator: lm_head_logits
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [decode, prefill, both]
     card: ../operators/lm_head_logits/backends/triton.md
@@ -2026,7 +2025,7 @@ entries:
   - operator: lm_head_logits
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode, prefill, both]
     card: ../operators/lm_head_logits/backends/vllm_kernels.md
@@ -2049,7 +2048,7 @@ entries:
   - operator: sampling_topk_topp
     backend: hip
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16]
     regimes: [decode, both]
     card: ../operators/sampling_topk_topp/backends/hip.md
@@ -2060,7 +2059,7 @@ entries:
   - operator: sampling_topk_topp
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16]
     regimes: [decode, both]
     card: ../operators/sampling_topk_topp/backends/triton.md
@@ -2072,7 +2071,7 @@ entries:
   - operator: sampling_topk_topp
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16]
     regimes: [decode, both]
     card: ../operators/sampling_topk_topp/backends/vllm_kernels.md
@@ -2083,7 +2082,7 @@ entries:
   - operator: elementwise
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, int8]
     regimes: [both]
     card: ../operators/elementwise/backends/hip.md
@@ -2094,7 +2093,7 @@ entries:
   - operator: elementwise
     backend: pytorch_inductor
     status: sota
-    gens: [gfx90a, gfx942, gfx950]
+    gens: [gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both, training]
     card: ../operators/elementwise/backends/pytorch_inductor.md
@@ -2105,7 +2104,7 @@ entries:
   - operator: elementwise
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both]
     card: ../operators/elementwise/backends/triton.md
@@ -2136,7 +2135,7 @@ entries:
   - operator: reduction
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, int32]
     regimes: [both]
     card: ../operators/reduction/backends/hip.md
@@ -2147,7 +2146,7 @@ entries:
   - operator: reduction
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16]
     regimes: [both]
     card: ../operators/reduction/backends/triton.md
@@ -2158,7 +2157,7 @@ entries:
   - operator: cumsum_scan
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, int32, int64]
     regimes: [both]
     card: ../operators/cumsum_scan/backends/hip.md
@@ -2169,7 +2168,7 @@ entries:
   - operator: cumsum_scan
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, int32]
     regimes: [both]
     card: ../operators/cumsum_scan/backends/triton.md
@@ -2181,7 +2180,7 @@ entries:
   - operator: argmax_topk
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16]
     regimes: [both]
     card: ../operators/argmax_topk/backends/hip.md
@@ -2192,7 +2191,7 @@ entries:
   - operator: argmax_topk
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16]
     regimes: [both]
     card: ../operators/argmax_topk/backends/triton.md
@@ -2204,7 +2203,7 @@ entries:
   - operator: cast_fill_copy
     backend: hip
     status: sota
-    gens: [gfx908, gfx90a, gfx942, gfx950]
+    gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, int8]
     regimes: [both]
     card: ../operators/cast_fill_copy/backends/hip.md
@@ -2215,7 +2214,7 @@ entries:
   - operator: cast_fill_copy
     backend: pytorch_inductor
     status: sota
-    gens: [gfx90a, gfx942, gfx950]
+    gens: [gfx90a, gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz]
     regimes: [both, training]
     card: ../operators/cast_fill_copy/backends/pytorch_inductor.md
@@ -2226,7 +2225,7 @@ entries:
   - operator: cast_fill_copy
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, int8]
     regimes: [both]
     card: ../operators/cast_fill_copy/backends/triton.md
@@ -2248,7 +2247,7 @@ entries:
   - operator: causal_conv1d
     backend: hip
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [decode]
     card: ../operators/causal_conv1d/backends/hip.md
@@ -2259,7 +2258,7 @@ entries:
   - operator: causal_conv1d
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp32]
     regimes: [prefill, decode]
     card: ../operators/causal_conv1d/backends/triton.md
@@ -2270,7 +2269,7 @@ entries:
   - operator: depthwise_conv
     backend: hip
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16]
     regimes: [both]
     card: ../operators/depthwise_conv/backends/hip.md
@@ -2293,7 +2292,7 @@ entries:
   - operator: depthwise_conv
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16]
     regimes: [both]
     card: ../operators/depthwise_conv/backends/triton.md
@@ -2316,7 +2315,7 @@ entries:
   - operator: conv2d
     backend: hip
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16]
     regimes: [both]
     card: ../operators/conv2d/backends/hip.md
@@ -2339,7 +2338,7 @@ entries:
   - operator: transpose
     backend: hip
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, int8]
     regimes: [both]
     card: ../operators/transpose/backends/hip.md
@@ -2350,7 +2349,7 @@ entries:
   - operator: transpose
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
     regimes: [both]
     card: ../operators/transpose/backends/triton.md
@@ -2372,7 +2371,7 @@ entries:
   - operator: gather_scatter
     backend: hip
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, int8]
     regimes: [both]
     card: ../operators/gather_scatter/backends/hip.md
@@ -2383,7 +2382,7 @@ entries:
   - operator: gather_scatter
     backend: triton
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
     regimes: [both]
     card: ../operators/gather_scatter/backends/triton.md
@@ -2440,7 +2439,7 @@ entries:
   - operator: paged_kv_copy
     backend: hip
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
     regimes: [decode, prefill, both]
     card: ../operators/paged_kv_copy/backends/hip.md
@@ -2451,7 +2450,7 @@ entries:
   - operator: paged_kv_copy
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode, prefill, both]
     card: ../operators/paged_kv_copy/backends/triton.md
@@ -2462,7 +2461,7 @@ entries:
   - operator: paged_kv_copy
     backend: vllm_kernels
     status: sota
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp16, fp8_e4m3_fnuz]
     regimes: [decode, prefill, both]
     card: ../operators/paged_kv_copy/backends/vllm_kernels.md
@@ -2497,7 +2496,7 @@ entries:
   - operator: layout_shuffle
     backend: hip
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp8_e4m3_fnuz, int8]
     regimes: [both]
     card: ../operators/layout_shuffle/backends/hip.md
@@ -2508,7 +2507,7 @@ entries:
   - operator: layout_shuffle
     backend: triton
     status: competitive
-    gens: [gfx942, gfx950]
+    gens: [gfx942, gfx950, gfx1151]
     dtypes: [bf16, fp8_e4m3_fnuz, fp4_e2m1, int8]
     regimes: [both]
     card: ../operators/layout_shuffle/backends/triton.md

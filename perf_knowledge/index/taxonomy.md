@@ -10,6 +10,22 @@ These ids are authoritative. Use them verbatim in frontmatter and in `sota_regis
 | `gfx90a` | CDNA2 | MI210, MI250, MI250X |
 | `gfx942` | CDNA3 | MI300A, MI300X, MI325X |
 | `gfx950` | CDNA4 | MI350X, MI355X |
+| `gfx1151` | RDNA 3.5 (APU) | Ryzen AI MAX+ 395 / Radeon 8060S ("Strix Halo") |
+
+> `gfx1151` is **not CDNA**: wave32, 2 SIMDs/CU, WMMA instead of MFMA, no AGPRs, LPDDR5X UMA with a
+> 32 MB last-level cache, and none of the CDNA4 block-scaled FP4/FP6 stack. Same family: `gfx1150`,
+> `gfx1152`.
+>
+> A `gen=gfx1151` query is **no longer empty**, but read what it means. `gfx1151` is listed only on
+> backends whose **source is portable** to RDNA (`triton`, `hip`, `vllm_kernels`, `pytorch_inductor`,
+> `rocwmma`, plus `aiter` on `dense_gemm` where we measured it live) — it says *this can be built and
+> run here*, never *this was measured here*. The vendor-asset backends (`ck`, `hipblaslt`, `asm`,
+> `flydsl`, `hipkittens`, `gluon`, `tilelang`, `mori`, `rccl`, …) are deliberately **not** listed for
+> gfx1151: on the Strix box `gradlib`, `ckProfiler` and `hipblaslt-bench` are all measured absent and
+> aiter ships 1 gfx1151 asset file against 54 for gfx942. Two operator groups are also withheld —
+> anything fp8/FP4-scaled (no fp8 matrix instruction on RDNA, so the candidate runs emulated) and the
+> multi-GPU collectives (single-device APU). Per-card detail lives in each card's
+> "On gfx1151" section; the hardware baseline is `hardware/rdna35_gfx1151/`.
 
 ## dtypes (`dtype`)
 `fp32` · `tf32`(N/A on CDNA4, removed) · `bf16` · `fp16` ·

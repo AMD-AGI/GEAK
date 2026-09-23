@@ -3,7 +3,7 @@ title: linear_attention_gated_delta on Triton — SOTA card
 kind: sota_card
 operator: linear_attention_gated_delta
 backend: triton
-gens: [gfx942, gfx950]
+gens: [gfx942, gfx950, gfx1151]
 dtypes: [bf16, fp16]
 regimes: [prefill, decode]
 status: sota
@@ -68,3 +68,15 @@ ops: [[causal_conv1d]] · [[cumsum_scan]] · backend: [[aiter]] · [[sglang_kern
 - FLA: https://github.com/fla-org/flash-linear-attention
 - AMD Qwen3.5 day-0 (SGLang auto-detect GDN, `--attention-backend triton`): https://www.amd.com/en/developer/resources/technical-articles/2026/day-0-support-for-qwen-3-5-on-amd-instinct-gpus.html
 - vLLM Qwen3-Next (FLA Triton kernels, hybrid KV cache): https://vllm.ai/blog/2025-09-11-qwen3-next
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.

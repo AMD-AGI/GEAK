@@ -3,7 +3,7 @@ title: layernorm on hip — SOTA card
 kind: sota_card
 operator: layernorm
 backend: hip
-gens: [gfx908, gfx90a, gfx942, gfx950]
+gens: [gfx908, gfx90a, gfx942, gfx950, gfx1151]
 dtypes: [bf16, fp16, fp32]
 regimes: [both]
 status: sota
@@ -60,3 +60,15 @@ variance (/N). See [../numerics.md](../numerics.md).
 - vLLM HIP layernorm kernels: https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu.
 - wave64 block reduce: https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html, https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/.
 - γ/β regression: https://github.com/vllm-project/vllm/issues/42325.
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.

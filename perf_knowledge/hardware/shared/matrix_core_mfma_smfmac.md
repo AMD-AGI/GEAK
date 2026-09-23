@@ -14,6 +14,15 @@ sources:
 
 # Matrix Cores — MFMA / SMFMAC / scaled-MFMA
 
+> **Architecture guard — this file is CDNA-only despite living under `shared/`.**
+> Everything below is **MFMA/SMFMAC**, a CDNA-only instruction family. RDNA (`gfx11xx`/`gfx12xx`,
+> e.g. `gfx1151` Strix Halo) has **no MFMA at all** — its matrix path is **WMMA**, with different
+> operand layouts, different tile granularities, a 32-wide wave and no AGPR accumulators, and none of
+> the CDNA4 scaled-MFMA / block-scaled FP8-FP6-FP4 stack. Do not port an MFMA fragment layout or an
+> `amd_matrix_instruction_calculator` result to RDNA.
+> RDNA counterpart: [`../rdna35_gfx1151/matrix_core_wmma.md`](../rdna35_gfx1151/matrix_core_wmma.md). The `gens:` frontmatter above is the
+> authoritative scope; `shared/` means *shared across CDNA generations*, not arch-neutral.
+
 ## TL;DR
 > The Matrix Core executes `D = A·B + C` as a **wavefront-collective** op: all **64 lanes** cooperate
 > on one tile, low-precision inputs accumulate into **FP32/INT32**. MFMA is mandatory for any

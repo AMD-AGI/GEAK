@@ -3,7 +3,7 @@ title: speculative_decode_verify on vLLM kernels — SOTA card
 kind: sota_card
 operator: speculative_decode_verify
 backend: vllm_kernels
-gens: [gfx942, gfx950]
+gens: [gfx942, gfx950, gfx1151]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz]
 regimes: [decode]
 status: sota
@@ -66,3 +66,15 @@ the spec method in the log.
 - vLLM spec-decode (EAGLE/Medusa/ngram, rejection sampler, V1 config): https://docs.vllm.ai/en/latest/features/speculative_decoding/
 - AMD spec-decode MI300X (2.31× / 3.6×+FP8): https://rocm.blogs.amd.com/artificial-intelligence/spec_decode_mi300x/README.html ; https://www.amd.com/en/developer/resources/technical-articles/vllm-x-amd-highly-efficient-llm-inference-on-amd-instinct-mi300x-gpus.html
 - vLLM ROCm attention backends / `VLLM_ROCM_USE_AITER` requirement: https://blog.vllm.ai/2026/02/27/rocm-attention-backend.html
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.

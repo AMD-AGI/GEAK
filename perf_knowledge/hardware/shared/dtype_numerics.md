@@ -13,6 +13,16 @@ sources:
 
 # Datatype numerics across CDNA
 
+> **Architecture guard — this file is CDNA-only despite living under `shared/`.**
+> The dtype matrix below is **CDNA**. On RDNA (`gfx11xx`, e.g. `gfx1151`) the supported set is much
+> narrower: **no fp8 matrix instruction of either encoding (fnuz or OCP `fn`), and no block-scaled
+> MXFP8/MXFP6/MXFP4** — the usable matrix dtypes are bf16/fp16 plus int8/int4. This is the expensive
+> one to get wrong: an fp8 or MXFP4 candidate on RDNA does not fail, it runs an **emulated** path that
+> passes the correctness gate and loses performance silently. Gate on hardware support
+> (`harness_lib.fp8_matrix_supported`), never on the encoding question (`fp8_is_fnuz`).
+> RDNA counterpart: [`../rdna35_gfx1151/matrix_core_wmma.md`](../rdna35_gfx1151/matrix_core_wmma.md). The `gens:` frontmatter above is the
+> authoritative scope; `shared/` means *shared across CDNA generations*, not arch-neutral.
+
 ## TL;DR
 > Two correctness traps dominate: **(1) FP8 is FNUZ on CDNA3 but OCP on CDNA4** — different bias and
 > saturation, so a checkpoint must be **re-cast**, never bit-copied across gens; **(2) MXFP4/6/8** pack

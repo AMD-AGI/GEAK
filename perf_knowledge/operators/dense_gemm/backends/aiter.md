@@ -3,7 +3,7 @@ title: dense_gemm on aiter — SOTA card
 kind: sota_card
 operator: dense_gemm
 backend: aiter
-gens: [gfx942, gfx950]
+gens: [gfx942, gfx950, gfx1151]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz]
 regimes: [prefill, decode]
 status: sota
@@ -143,3 +143,15 @@ the live aiter path still resolves to hipBLASLt/asm/skinny per shape. See
 - hipBLASLt bf16 ~708 TFLOPS / 1307 theo. peak (MI300X, ROCm 6.3, Feb-2025): https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html ; ~45% sustained utilization: https://arxiv.org/pdf/2510.27583
 - aiter as central engine: https://github.com/ROCm/aiter
 - CDNA4 ceilings — Gluon FP16 1489@98.75%: AMD Gluon GEMM tutorial; HipKittens BF16 1610: arXiv 2511.08083; HIP/C++ 8-wave ping-pong FP8 3204@8192 (>hipBLASLt): AMD cdna4-gemm-kernels blog.
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.

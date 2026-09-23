@@ -14,6 +14,14 @@ sources:
 
 # LDS (Local Data Share) memory model & bank conflicts
 
+> **Architecture guard — this file is CDNA-only despite living under `shared/`.**
+> The LDS geometry and bank-conflict rules below are stated for **CDNA** (wave64 addressing across 32
+> banks). RDNA (`gfx11xx`, e.g. `gfx1151`) executes **wave32**, so the conflict pattern for a given
+> access stride is not the same, and the LDS-per-workgroup limits that bound occupancy differ. Re-derive
+> padding/swizzle choices for wave32 rather than copying a CDNA stride.
+> RDNA counterpart: [`../rdna35_gfx1151/isa_notes.md`](../rdna35_gfx1151/isa_notes.md). The `gens:` frontmatter above is the
+> authoritative scope; `shared/` means *shared across CDNA generations*, not arch-neutral.
+
 ## TL;DR
 > LDS is the on-CU scratchpad used to stage GEMM/attention tiles. The killer rule:
 > a **bank conflict** occurs when ≥2 lanes in the same half-wave hit the **same bank** at

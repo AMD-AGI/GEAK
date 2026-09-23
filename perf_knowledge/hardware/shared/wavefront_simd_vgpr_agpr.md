@@ -13,6 +13,14 @@ sources:
 
 # Wavefront / SIMD / VGPR / AGPR execution model
 
+> **Architecture guard — this file is CDNA-only despite living under `shared/`.**
+> The execution model below is **CDNA**: wave64, 4 SIMDs/CU, and a VGPR file split with AGPRs. RDNA
+> (`gfx11xx`/`gfx12xx`, e.g. `gfx1151`) is **wave32, 2 SIMDs/CU, and has no AGPRs** — so every
+> occupancy calculation, register-budget table and `waves/SIMD` target on this page is off by a
+> factor that silently changes the answer rather than failing.
+> RDNA counterpart: [`../rdna35_gfx1151/arch.md`](../rdna35_gfx1151/arch.md). The `gens:` frontmatter above is the
+> authoritative scope; `shared/` means *shared across CDNA generations*, not arch-neutral.
+
 ## TL;DR
 > CDNA is **wave64**: a wavefront = **64 work-items** in lockstep on one **SIMD64**; each CU has
 > **4 SIMDs** (= 4 EUs = 4 Matrix Cores). Occupancy is per-SIMD and is gated by the **minimum** of

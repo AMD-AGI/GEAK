@@ -3,7 +3,7 @@ title: sparse_attention_nsa on HIP/C++ — SOTA card
 kind: sota_card
 operator: sparse_attention_nsa
 backend: hip
-gens: [gfx942, gfx950]
+gens: [gfx942, gfx950, gfx1151]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz]
 regimes: [prefill, decode]
 status: experimental
@@ -66,3 +66,15 @@ quant helpers aren't the bottleneck; check capture-safe metadata under `hipGraph
 - ROCm helper / fnuz quantise-and-insert / capture-safe metadata: https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/
 - HIP wave64 / launch_bounds / fp-atomics: https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
 - aiter on-box (no HIP NSA attn kernel; Triton sparse-MLA only): `ROCm/aiter@a6bb49937` (on-box).
+
+## On gfx1151 (RDNA3.5, Strix Halo)
+`gfx1151` appears in `gens:` because this backend's **source is portable** to RDNA — it
+compiles/JITs there with no vendor asset table. It is **not** a claim that anything on this
+card was measured on RDNA: every perf number, ranking and tuning recipe above is CDNA
+(gfx90a/942/950) evidence. Three differences bite before any of it transfers — WMMA not MFMA,
+wave32 not wave64, and 40 CU behind a 32 MB MALL on ~229 GB/s shared LPDDR5X rather than HBM —
+so tile shapes, occupancy targets and the roofline ceiling all move. Any `fp8_*` entry in
+`dtypes:` above is CDNA-only: gfx1151 has **no fp8 matrix instruction and no block-scaled
+FP4/FP6**, so an fp8 candidate there runs EMULATED — it passes correctness and loses
+performance silently. See [`../../../hardware/rdna35_gfx1151/`](../../../hardware/rdna35_gfx1151/)
+and MEASURE on the box.
