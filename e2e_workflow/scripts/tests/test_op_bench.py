@@ -1617,6 +1617,33 @@ class TestMainSummary(_ObStateMixin, unittest.TestCase):
         self.assertEqual(summary["pct_gpu_time"], 0.5)
         self.assertIsNotNone(summary["amdahl_ceiling_e2e_pct"])
 
+    def test_a_head_nobody_beats_reports_a_zero_ceiling_not_an_absent_one(self):
+        # The gfx1151 head case, and the one the head-budget refund is built on: lm_head at 12% of
+        # GPU time sits on the 233 GB/s LPDDR5X wall (measured 233.4 GB/s = 100% of roofline), so no
+        # candidate beats the vendor and the winner IS the baseline at speedup 1.0.
+        # The refund fires on the NUMBER 0.0 and never on null -- "we measured no headroom" is a
+        # finding, "we did not measure" is not. If this path ever degraded to None the refund would
+        # go silently inert on exactly the ops it exists to retire, with nothing to notice it.
+        summary, _ = self._run_main(
+            {"op_kind": "gemm", "pct_gpu_time": 12.0},
+            results=[self._res("hipblaslt", ms=1.0, correct=True),
+                     self._res("aiter", ms=1.0, correct=True)])
+        self.assertEqual(summary["winner_backend"], "hipblaslt")
+        self.assertEqual(summary["isolated_speedup"], 1.0)
+        self.assertEqual(summary["amdahl_ceiling_e2e_pct"], 0.0)
+        self.assertIsNotNone(summary["amdahl_ceiling_e2e_pct"])
+
+    def test_no_winner_leaves_the_ceiling_absent_even_with_a_gpu_time_share(self):
+        # The mirror image: a known pct_gpu_time is NOT enough on its own. With no correct backend
+        # the bake-off timed nothing, so the ceiling must stay null and the refund must not fire --
+        # otherwise a harness that failed to measure would retire the op as hopeless.
+        summary, _ = self._run_main(
+            {"op_kind": "gemm", "pct_gpu_time": 12.0},
+            results=[self._res("hipblaslt", ms=1.0, correct=False)])
+        self.assertIsNone(summary["winner_backend"])
+        self.assertEqual(summary["pct_gpu_time"], 12.0)
+        self.assertIsNone(summary["amdahl_ceiling_e2e_pct"])
+
     def test_unparseable_gpu_time_share_omits_the_ceiling_instead_of_crashing(self):
         summary, _ = self._run_main({"op_kind": "gemm", "pct_gpu_time": "unknown"},
                                     results=[self._res("hipblaslt", ms=1.0, correct=True)])
