@@ -42,6 +42,8 @@ Write `profile/round_<R>/profile_roofline.json` and a human-readable `profile_ro
   "skill": "roofline", "skill_version": "1",
   "gfx": "gfx950",
   "peaks": { "hbm_bw_bytes_s": 8.0e12, "flops": {"fp8": 5.0e15},
+             // present only on parts with a large LLC (gfx1151); see §3 step 5
+             "mall_bytes": null, "mall_bw_bytes_s": null,
              "source": "table|derived", "confidence": "high|low" },
   "stage": "A|B|C",
   "entries": [{
@@ -55,6 +57,7 @@ Write `profile/round_<R>/profile_roofline.json` and a human-readable `profile_ro
     "bytes_est": 0, "flops_est": 0,
     "achieved_bw_bytes_s": 0, "achieved_flops": 0,
     "hbm_util": 0.88, "compute_util": 0.01,   // achieved/peak on each axis; the pair decides bound_type
+    "mem_roof_used": "dram",            // "dram" | "mall" — which bandwidth hbm_util was scored on (§3 step 5)
     "arithmetic_intensity": 4.6, "ridge_point": 625.0,
     "bound_type": "memory|compute|latency|unknown",  // latency = neither roof near its ceiling
     "roofline_pct": 0.88,               // achieved / peak on the AI-selected roof
@@ -113,6 +116,24 @@ see the disagreement rather than a single blended number that hides it.
    attainable_speedup    = max(1.0, target_eff / roofline_pct)
    expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable_speedup)
    ```
+   **Parts with a last-level cache large enough to hold a working set — the third roof.** If the
+   `peaks.md` section for this `gfx` defines `mall_bytes` / `mall_bw_bytes_s` (today: **gfx1151**,
+   32 MB @ ~790 GB/s), `peak_bw` is **not** a constant for the part. Pick it per kernel:
+   ```
+   peak_bw = mall_bw_bytes_s  if bytes_est <= mall_bytes  else  hbm_bw_bytes_s
+   ```
+   Skipping this is not a small error: on gfx1151 the two roofs differ by **3.4×**, so a
+   MALL-resident kernel scored against the DRAM roof reads ~300% of roof, trips the **infeasible**
+   rule below, and **silently loses its verdict** — the failure looks like a modelling bug and is
+   actually a missing roof. Record which roof you used in `notes`; when `bytes_est` is near
+   `mall_bytes`, compute both and say so. Two caveats before leaning on it:
+   - `mall_bw_bytes_s` is a **read-read-write** figure. A read-dominated kernel's real ceiling is
+     higher (913–945 GB/s measured by ablation on gfx1151), so calling such a kernel `saturated`
+     against 790 can hide ~17% of headroom.
+   - **Residency is not binary.** "Under 32 MB" is not one performance class, and where the figure
+     starts to degrade inside 32 MB has not been measured. Treat a near-`mall_bytes` verdict as
+     `confidence: low`.
+
    A latency-bound kernel **still gets a headroom verdict** (its `roofline_pct` on the AI-selected
    roof is real, and `target_eff` already prices in the occupancy penalty for irregular classes like
    paged attention) — so a low-utilization head still ranks by its headroom. What changes is the
@@ -256,6 +277,15 @@ set by **access regularity**, not by how important the kernel is.
 | attention decode (paged) | **0.50** | irregular paged KV access, occupancy-sensitive |
 
 These are **priors, not constants** — §8 corrects them from observed outcomes.
+
+> **gfx1151 (RDNA3.5 / Strix Halo) — apply `target_eff` on the memory axis only.** The compute peak
+> in `peaks.md` is a datasheet figure no kernel here has come within 35% of (best measured
+> 38.35–38.52 vs 59.4 TFLOP/s). A dense-GEMM `target_eff` of 0.90 on the **compute** axis is
+> therefore unreachable by construction, and routing on it labels every GEMM `underperforming` and
+> promises headroom that does not exist. On this part: rank on `hbm_util` (against the correct roof
+> per §3 step 5), and treat any compute-axis number as display-only until its peak is validated.
+> Empirically this is not over-caution — the vendor BLAS path wins 3 of 4 GEMM regimes measured on
+> gfx1151. See `perf_knowledge/hardware/rdna35_gfx1151/peak_tables.md`.
 
 ### Routing table (the actual point of this skill)
 

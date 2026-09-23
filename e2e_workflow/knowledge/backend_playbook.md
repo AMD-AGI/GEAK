@@ -33,6 +33,44 @@ experience; treat the seed as priors, not gospel — the unittest is the judge.
 | activation (silu/gelu + mul) | fused act_and_mul (aiter/triton) | collapse into the producing GEMM epilogue if possible |
 | elementwise/fill/cast/copy | fuse away (host_runtime) / cuda-graph | usually shouldn't be its own kernel |
 
+## gfx1151 / RDNA3.5 (Strix Halo APU) — a DIFFERENT menu, not a derated one
+
+Everything above is MI300X/MI350X experience. On gfx1151 most of that menu is **absent**, and one
+entry is **inverted**. Do not derate the CDNA priors — replace them.
+
+| backend | gfx942/950 | **gfx1151** |
+|---|---|---|
+| aiter C++/CK GEMM + per-shape DB (`AITER_CONFIG_GEMM_BF16`) | **THE lever** | **absent** |
+| CK / ck_tile | best paged attention | **`ckProfiler` not on the image** |
+| hipBLASLt offline Tensile tune | available | **`hipblaslt-bench` not on the image** |
+| FlyDSL | SOTA author backend | CDNA-only |
+| fp8 / MXFP4 / block-scaled | core lever | **no hardware path at all** |
+| PyTorch TunableOp | *not* the lever (aiter bypasses the torch dispatch) | **IS a lever — `[measured]` +10.93% e2e fresh-server, per-shape BLAS table** |
+| aiter **Triton** `gemm_a16w16` | `use_aiter_triton_gemm()` gates it **OFF** | **engages and wins — `[measured]` +13.85% e2e** |
+| Triton (authored) | one option among many | the main authoring path |
+
+**Class → backend on gfx1151 (measured priors):**
+
+| kernel class | try in this order | evidence |
+|---|---|---|
+| dense GEMM (decode/skinny, the e2e-critical one) | reroute `rocm_unquantized_gemm_impl` → aiter-Triton `gemm_a16w16` + gfx1151 tile table → TunableOp per-shape table | `[measured]` +13.85% / +10.93% e2e — recipe: `gemm_tuning/gfx1151_gemm_tuning.md` |
+| dense GEMM (large square, prefill) | **leave it on the vendor path** | `[measured]` vendor wins 3 of 4 GEMM regimes here |
+| `lm_head` | skip | `[measured]` already at the 233 GB/s DRAM wall |
+| fused row ops (softmax, add+rmsnorm) | author Triton, collapse dispatches | `[measured]` 2.21× / 1.81×, reaching 99.4–99.8% of the measured DRAM wall |
+| attention decode | author Triton, split KV for residency | `[measured]` GQA 2.92× |
+
+Three structural cautions specific to this part:
+- **Never force a BLAS library globally.** `[measured]` per-shape mixing **+14.3%** vs global
+  hipBLASLt **−8.2%** — a 22-point spread. The win is the per-shape table, nothing else.
+- **`torch` defaults to rocBLAS here** (`preferred_blas_library()` → `Cublas`), so a `torch.mm`
+  baseline says nothing about hipBLASLt.
+- **Isolated × does not predict e2e at decode.** `[measured]` 1.31× isolated → +13.85% e2e; the win
+  is launch/dispatch. Gate on e2e in both directions.
+
+Hardware model: `perf_knowledge/hardware/rdna35_gfx1151/`. Roofline denominators and the **third
+(32 MB MALL) roof**: `analysis_skills/roofline/peaks.md` + `SKILL.md` §3 step 5 — scoring a
+MALL-resident kernel against the DRAM roof is wrong by 3.4× and silently voids its verdict.
+
 ## Roofline prior calibration (predicted vs measured — one line per direction)
 - 2026-08-19 · gfx950 vLLM mxfp4 grouped fused-MoE (`_matmul_ogs...swiglu`, gpt-oss-120b, decode): roofline
   predicted `attainable_speedup=1.0`, `expected_e2e_gain_pct=0.0` (memory-bound, `roofline_pct` 0.95–1.0,

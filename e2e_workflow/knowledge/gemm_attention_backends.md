@@ -117,6 +117,40 @@ e2e parity**; if it fails on a non-quant change, flag it for an accuracy eval (s
 > target (N,K) to the authored kernel and pass other shapes through to stock — bounds the cache to one
 > projection family and avoids regressing untuned shapes. Prefer (1); use (2) to bound footprint further.
 
+### Backend menu — DENSE GEMM on gfx1151 (RDNA3.5 / Strix Halo APU)
+
+The MI300X menu above is mostly **unreachable** here, and its most important routing verdict is
+**inverted**. Full recipe with the measured numbers: **`gemm_tuning/gfx1151_gemm_tuning.md`**.
+
+- **The Tier-B rung that works is PyTorch TunableOp** — a per-shape race between rocBLAS and
+  hipBLASLt, cached to CSV. On CDNA this is explicitly *not* the lever (aiter bypasses the torch
+  dispatch); on gfx1151 it **is**, because there is no aiter C++ GEMM path to bypass it.
+  `[measured]` **+10.93% e2e, fresh-server reproducible**. Deploy the **`installed/` cold table**,
+  never the raw hot intermediate table — the wrong one reproduces a fraction of the gain and reads
+  as noise.
+- **The Tier-A rung that works is aiter's *Triton* `gemm_a16w16`** on the live vLLM seam
+  `rocm_unquantized_gemm_impl`, with a gfx1151-tuned tile table. `[measured]` **+13.85% e2e**,
+  byte-exact, CUDA-graph-safe, pure overlay. **`use_aiter_triton_gemm()` gates this exact route OFF
+  on gfx942/gfx950** — re-check the live dispatch per arch instead of inheriting the CDNA verdict.
+- **Unavailable rungs — record as `degrade`, do not plan around them:** aiter C++/CK GEMM and its
+  `AITER_TUNE_GEMM`→gradlib→`AITER_CONFIG_GEMM_BF16` DB (CDNA-only); `ckProfiler` and
+  `hipblaslt-bench` (**absent on the image**, a provisioning gap not an architectural one); FlyDSL
+  (CDNA-only); **Tier-D quantization to fp8/MXFP4 — no hardware path exists on this part at all**.
+- **Default BLAS is rocBLAS.** `torch.backends.cuda.preferred_blas_library()` → `_BlasBackend.Cublas`.
+  `Cublaslt` would be hipBLASLt. A `torch.mm` baseline characterises rocBLAS only.
+- **Never force one BLAS globally.** `[measured]` per-shape mix **+14.3%** vs global hipBLASLt
+  **−8.2%**.
+- **Expect vendor wins.** `[measured]` the vendor path wins **3 of 4** GEMM regimes on this part; the
+  one a generated kernel clearly takes is **skinny/decode**. A bake-off that returns "vendor wins" on
+  a large square shape is a correct result, not a harness failure.
+- **Size the opportunity on e2e, not on the isolated ×.** `[measured]` 1.31× isolated → +13.85% e2e,
+  because at decode the win is launch/dispatch. This cuts both ways: do not reject a small isolated
+  ×, and do not project e2e from a large one.
+
+> Roofline note: this part has a **32 MB MALL at ~790 GB/s in front of a 256 GB/s DRAM roof**. Score
+> a MALL-resident kernel against the DRAM roof and it reads ~300% of roof, trips the infeasible rule,
+> and loses its verdict. See `analysis_skills/roofline/SKILL.md` §3 step 5.
+
 ### Tier-B tuning knobs per GEMM backend
 - **hipBLASLt**: enumerate solution indices for the exact (M,N,K,dtype,transpose,bias) and pin the
   best via `HIPBLASLT_TUNING_FILE=<file>` (offline `hipblaslt-bench`, or the hipBLASLt ext-op API).
