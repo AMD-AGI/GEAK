@@ -1416,7 +1416,9 @@ def _magpie_script_from_recipe(h: dict) -> str:
         # multi_node/).
         candidates = [benchmarks / name]
         try:
-            candidates.extend(sorted(benchmarks.rglob(name)))
+            # rglob rejects an absolute pattern with NotImplementedError
+            if not Path(name).is_absolute():
+                candidates.extend(sorted(benchmarks.rglob(name)))
         except OSError:
             pass
         for candidate in candidates:
