@@ -287,6 +287,12 @@ jobs:
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
 
+      # The head-budget refund is off on CDNA by default; this pins that default AND the
+      # guards that keep an unmeasured or harness-faulted head from being retired as if it
+      # had been measured at zero headroom. Pure arithmetic over the shipped expressions.
+      - name: head-budget refund regression
+        run: node e2e_workflow/scripts/test_head_budget_refund.js
+
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest
     runs-on: ubuntu-latest

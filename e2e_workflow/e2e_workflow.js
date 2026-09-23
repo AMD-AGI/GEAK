@@ -906,6 +906,11 @@ const OPBENCH_SCHEMA = obj({
   // timed by something that does not state one, and the store treats unstated as comparable with
   // everything rather than guessing.
   measurement_mode: { type: 'string' },
+  // op_bench.py already computes this (harness_lib.amdahl_ceiling): the MOST e2e this op can pay
+  // even if its isolated win were free, = pct_gpu_time x (1 - 1/isolated_speedup). Carried up so the
+  // orchestrator can tell "we measured a ceiling the e2e gate can never bank" apart from "we did not
+  // measure". Optional: absent means unmeasured, which is NOT the same as zero and is never acted on.
+  amdahl_ceiling_e2e_pct: { type: 'number' },
 }, ['gate', 'isolated_speedup']);
 
 const EXTRACT_SCHEMA = obj({
@@ -3291,6 +3296,11 @@ const acceptedHeads = (ST.accepted_heads || []).slice();
 // is surfaced (return.pending_integrations) instead of being silently dropped.
 const pendingIntegrations = (ST.pending_integrations || []).slice();
 const flaggedHeads = (ST.flagged_heads || []).concat(PRE_FLAGGED_HEADS);   // heads that could NOT be optimized (loudly surfaced, never silently skipped)
+// Heads that returned their budget slot because their MEASURED Amdahl ceiling was inside the noise
+// band, plus what was admitted in each one's place. Carried and reported so a refund is an auditable
+// decision with its number attached, not an invisible re-ordering of the queue. Empty on every arch
+// where the refund is off, which keeps the report byte-identical there.
+const headRefunds = (ST.head_refunds || []).slice();
 let headDispatched = 0;
 const history = ST.history || { insights: [], ledger: [], milestones: [], bottleneck_now: '', suggest_next: '' };
 
@@ -3736,10 +3746,35 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   phase('HeadKernel');
   log(`Head-kernel track: ${headQueue.length} candidate op(s), head_budget=${HEAD_BUDGET}, threshold=${HEAD_THRESHOLD_PCT}%.`);
   // Head ops are taken in the Architect's Amdahl-ranked order — no forced GEMM-first reordering.
-  const heads = headQueue.slice(0, HEAD_BUDGET).map((c, i) => ({
+  const asHead = (c, i) => ({
     ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
     short_name: c.short_name || `${c.op_kind || 'op'}${i}`,
-  }));
+  });
+  const heads = headQueue.slice(0, HEAD_BUDGET).map(asHead);
+  // ---- head-budget REFUND (see the refund site in the serial loop below) --------------------------
+  // The budget exists to cap how many recursive authoring runs a head track may spend, so a head that
+  // spends one proving it CANNOT pay has mis-spent it. When the bake-off comes back with a real no-win
+  // AND a measured Amdahl ceiling at/below the noise band, the slot is refunded and the next queued op
+  // is admitted in its place. The cap is what keeps this an adaptation rather than a policy change:
+  //   rdna  -> HEAD_BUDGET (the queue may extend to at most 2x budget, still bounded)
+  //   else  -> 0, i.e. byte-for-byte the behaviour every prior run had.
+  // Defaulted by arch because this is a measured RDNA problem: on gfx1151 the three top-pct_gpu_time
+  // ops are all decode GEMMs sitting on the 233 GB/s LPDDR5X wall (lm_head measured 233.4 GB/s = 100%
+  // of roofline), so all three bake-offs return ceiling 0.0 and the whole budget is spent proving
+  // physics, while ops the kernel lane has already beaten 2.21x sit below the 5% bar and are never
+  // reached. Evaluated HERE, inside the phase, because archFamily() reads KB_DIMS which the Director
+  // only populates after its probe. Explicit --head-refund-max overrides on every arch.
+  const HEAD_REFUND_MAX = parseInt(
+    A.head_refund_max != null ? A.head_refund_max : (archFamily() === 'rdna' ? HEAD_BUDGET : 0), 10);
+  let headRefundsUsed = 0;
+  // Scoped to the SERIAL head loop on purpose: deep and fast mode both prepare every head up front in
+  // one parallel wave, so there is no "next head" to admit in place of a refunded one without
+  // restructuring their schedulers. Say which mode is actually live rather than implying all three.
+  const REFUND_LIVE = HEAD_REFUND_MAX > 0 && !DEEP && !FAST_MODE;
+  if (HEAD_REFUND_MAX > 0)
+    log(`  head-budget refund ${REFUND_LIVE ? 'ENABLED' : 'configured but INERT here (serial head loop only)'} ` +
+      `(arch=${archFamily() || 'unknown'}, max ${HEAD_REFUND_MAX}): a head whose MEASURED amdahl ceiling ` +
+      `is <= ${NOISE_BAND}% returns its slot to the queue instead of spending it.`);
   if (DEEP) {
     // ============ DEEP-MODE v2: GLOBAL cross-kernel × cross-backend co-optimization ====================
     // One global lane pool over ALL (head op × backend) lanes (kernels + backends optimize concurrently);
@@ -3791,6 +3826,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
           EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
           CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
+          NOISE_BAND_PCT: NOISE_BAND,
           GPU_ID: GPU_LIST[0], ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET: DEEP_WAVE_BUDGET, SKILL_DIR: WORKFLOW_DIR,
         }),
         { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
@@ -4180,6 +4216,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
             EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
             CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
+            NOISE_BAND_PCT: NOISE_BAND,
             GPU_ID: gpu, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
           }),
           { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
@@ -4403,6 +4440,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.', {
         EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
         CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
+        NOISE_BAND_PCT: NOISE_BAND,
         GPU_ID: h.gpu_id, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
       }),
       { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
@@ -4422,6 +4460,28 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       } else {
         log(`  ${h.short_name}: no win and nothing worth authoring (${bake ? bake.reason || gate : 'none'}); skipping.`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: bake ? bake.isolated_speedup : 0, verdict: 'dead_end', lesson: bake ? bake.reason || 'no op win' : 'bakeoff failed' });
+        // Refund this slot iff the bake-off MEASURED a ceiling the e2e gate could never bank. Three
+        // conditions, all necessary: the number must be present (absent != 0 — an unmeasured head is
+        // not a proven-hopeless one), it must be at/below the noise band, and `harness` must be false
+        // (a probe that could not measure has told us nothing about the op). `heads` is an Array and
+        // for...of walks it by live index, so pushing here genuinely extends this loop.
+        const ceiling = bake && typeof bake.amdahl_ceiling_e2e_pct === 'number'
+          ? bake.amdahl_ceiling_e2e_pct : null;
+        const nextIdx = HEAD_BUDGET + headRefundsUsed;
+        if (REFUND_LIVE && headRefundsUsed < HEAD_REFUND_MAX && !harness && ceiling !== null &&
+            ceiling <= NOISE_BAND && nextIdx < headQueue.length) {
+          const next = asHead(headQueue[nextIdx], nextIdx);
+          headRefundsUsed++;
+          heads.push(next);
+          headRefunds.push({ refunded: h.short_name, pct_gpu_time: h.pct_gpu_time,
+            amdahl_ceiling_e2e_pct: ceiling, noise_band_pct: NOISE_BAND,
+            isolated_speedup: bake.isolated_speedup, admitted: next.short_name,
+            admitted_pct_gpu_time: next.pct_gpu_time });
+          log(`  ↩ head-budget REFUND: ${h.short_name} measured ceiling ${ceiling.toFixed(3)}% <= noise ` +
+            `${NOISE_BAND}% (isolated ${Number(bake.isolated_speedup || 0).toFixed(4)}x) — the slot buys ` +
+            `nothing here, so admitting ${next.short_name} (${Number(next.pct_gpu_time || 0).toFixed(1)}% GPU) ` +
+            `in its place [${headRefundsUsed}/${HEAD_REFUND_MAX}].`);
+        }
         continue;
       }
     }
@@ -5155,6 +5215,7 @@ const carryState = {
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
+  head_refunds: headRefunds,
   // Full tuning-phase result, so a phase-by-phase resume does not re-run the tuning loop and the Report
   // phase still has the attribution numbers when it runs in a later invocation.
   ...(tuning ? { tuning } : {}),
@@ -5271,6 +5332,9 @@ const wfReturn = {
     pct_gpu_time: p.pct_gpu_time, partial: p.partial || null,
   })),
   flagged_heads: flaggedHeads,   // dominant heads surfaced but not optimized (harness/extract/no-candidate) — never silently dropped
+  // Budget slots returned by a head whose measured Amdahl ceiling was inside the noise band, each
+  // paired with the op admitted in its place. [] unless the refund is enabled for this arch.
+  head_refunds: headRefunds,
   config_tune_enabled: CONFIG_TUNE_ENABLED,
   head_budget: HEAD_BUDGET,
   head_used: headDispatched,

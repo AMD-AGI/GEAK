@@ -221,7 +221,7 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
 ## PHASE=bakeoff  (one head-kernel candidate)
 
 Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_KIND` (gemm|attn),
-`PCT_GPU_TIME`, `CANDIDATE_BACKENDS` (Architect's ranked list), `GPU_ID`, `ENABLE_FP8`,
+`PCT_GPU_TIME`, `CANDIDATE_BACKENDS` (Architect's ranked list), `NOISE_BAND_PCT`, `GPU_ID`, `ENABLE_FP8`,
 `KERNEL_WF_DIR` (for Tier-C recursion), `KERNEL_BUDGET`, `SKILL_DIR`.
 
 1. **Provenance**: re-hash `reference_io.pt`, compare to `meta.json.reference_io_sha256`. If mismatch →
@@ -261,7 +261,8 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    `pct_gpu_time` — op_bench computes it via `harness_lib.amdahl_ceiling`). Surface the ceiling in your
    report: if it is at/below `NOISE_BAND_PCT` (e.g. a 1.1x win on a 3%-GPU kernel → ~0.3% ceiling), the
    op cannot clear the e2e noise band alone — flag it as `stack`-only headroom so nobody chases an
-   isolated number the e2e gate can never bank. A large isolated speedup with a tiny ceiling means the
+   isolated number the e2e gate can never bank. `NOISE_BAND_PCT` is an INPUT to this phase (it is the
+   same band the e2e gate will judge against, so the comparison is the real one, not a stand-in). A large isolated speedup with a tiny ceiling means the
    op's GPU-time share is small; do not over-invest authoring it.
    Set `best_known_ms` = fastest correct backend's ms — this is the BAR any authored kernel must beat.
    The default backend set now includes **flydsl** (aiter's `flydsl_hgemm` for bf16/fp16; gated by
@@ -368,6 +369,7 @@ Return JSON:
   "winner_kind": "env|flag|patch|none",
   "isolated_speedup": 1.0,
   "measured": true,
+  "amdahl_ceiling_e2e_pct": 0.0,
   "winner_editable": false,
   "best_known_ms": 0.0,
   "recommend_tier_c": false,
@@ -388,6 +390,11 @@ Return JSON:
   "reason": "the route decision: direct_light winner and/or which languages to author, with Amdahl headroom"
 }
 ```
+- `amdahl_ceiling_e2e_pct` — copy `opbench_result.json`'s value VERBATIM; it is the ceiling you were
+  already told to surface in step 2 above, now reported as a number instead of only as prose. OMIT the
+  key entirely when the bake-off did not measure (`measured:false` / `harness_error`): the orchestrator
+  reads an absent key as "unknown" and a present `0.0` as "measured, and this op cannot pay" — and it
+  acts on the second. A guessed `0.0` therefore retires an op that was never actually timed.
 - `measured` / `isolated_speedup` — copy BOTH straight from `opbench_result.json`; never fill one in
   yourself. `measured:false` means no backend produced a timing, and then `isolated_speedup` is `null`,
   not `0.0`. `0.0` means the bake-off ran and nothing was faster — a different fact, and the acceptance
