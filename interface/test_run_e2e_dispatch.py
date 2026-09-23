@@ -710,6 +710,31 @@ class TestBenchLauncher(_RunE2ECase):
 
         self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
 
+    def test_an_absolute_script_in_the_recipe_is_taken_as_is(self):
+        """Some orchestrators record benchmark_script as a full path. Searching
+        for it would raise NotImplementedError (rglob rejects an absolute
+        pattern, and the OSError guard does not catch it), losing a script the
+        first candidate already resolved."""
+        checkout = self.tmp / "InferenceX@abc123"
+        (checkout / "benchmarks").mkdir(parents=True)
+        elsewhere = self.tmp / "scripts"
+        elsewhere.mkdir()
+        script = elsewhere / "vllm_mi355x.sh"
+        script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (elsewhere / "benchmark_lib.sh").write_text("# lib\n", encoding="utf-8")
+        recipe = self.tmp / "baseline_config.with_envs.yaml"
+        recipe.write_text(
+            "benchmark:\n"
+            "  framework: vllm\n"
+            f"  benchmark_script: {script}\n"
+            f"  inferencex_path: {checkout}\n",
+            encoding="utf-8",
+        )
+
+        rx.apply_bench_launcher({"launch_recipe": str(recipe), "framework": "vllm"})
+
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], str(script))
+
     def test_an_explicit_script_outranks_the_recipe(self):
         recipe, _ = self._recipe()
 
