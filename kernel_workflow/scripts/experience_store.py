@@ -29,11 +29,22 @@ without the filter one dtype's entries can take every top-N slot on a page a rea
 dtype is looking at. Keying on it instead would have moved every existing entry's address on a
 store with no delete.
 
+Cache residency (`--measurement-mode`) is the second such filter, and it exists because the gap the
+paragraph above describes is not only a dtype problem: `bench_key` hashes `metric_kind` and the case
+names and nothing else, so the same cases timed with the working set resident and timed cold hash
+EQUAL and are flagged `comparable: true`. Three of our own measurements flip their verdict across
+that line (op-level 1.7-2.6x hot vs 0.66-0.90x cold; a first-read bandwidth above the part's physical
+ceiling; a warm-server A/B at +14.3% that came back +10.9% fresh), so this is a wrong ranking, not a
+noisy one. It is a filter for the same two reasons precision is — re-keying would re-address a store
+with no delete, and a filter applied BEFORE `_rank_key` is what actually partitions the ranking.
+Not an RDNA-only hazard; a large last-level cache just makes it routine rather than occasional.
+
 Subcommands:
     write      Store one measured win behind the gate (missing_arch / no_improvement / empty_diff,
                or no_artifact / unreadable_artifact on the tuned carrier).
     resolve    Rank the top-N same-gfx solutions for a slug and mirror their prose into <refs-dir>,
-               for ONE --carrier (default patch), optionally narrowed to one --precision.
+               for ONE --carrier (default patch), optionally narrowed to one --precision and/or
+               one --measurement-mode.
     remap      Rewrite a stored patch's paths onto the calling workspace's layout, or refuse and say why.
     languages  Which languages a kernel has a page in — the store, not a task_type guess, decides.
     backfill-content
@@ -149,6 +160,58 @@ def _precision_matches(want: str, have: str) -> bool:
 def _precision_of(meta) -> str:
     upstream = (meta or {}).get("upstream")
     return _norm_precision((upstream or {}).get("precision") if isinstance(upstream, dict) else "")
+
+
+# Cache residency is the second FILTER, and it exists for a measured reason, not a theoretical one.
+# `bench_key` hashes only `metric_kind|sorted(case_names)`, so the SAME cases timed with the working
+# set resident and timed cold produce the SAME key and are flagged `comparable: true`. Three of our
+# own measurements flip their verdict across that line: op-level 1.7-2.6x hot became 0.66-0.90x cold;
+# a qkv first-read reported 642 GB/s, above the part's physical ceiling; a warm-server A/B at +14.3%
+# came back +10.9% fresh. This is NOT an RDNA-only hazard — it is true on gfx950 too; gfx1151 only
+# makes it routine, because its 32 MB MALL is ~3.4x faster than its LPDDR5X, so "did the working set
+# fit" decides the number more often there.
+#
+# Deliberately NOT folded into `bench_key`: the header note above records why precision was made a
+# filter instead of a key component, and the same reasoning binds here — re-keying would declare the
+# whole backlog incomparable with itself and move nothing into the right bucket. A filter, by
+# contrast, PARTITIONS the ranking (it runs before `_rank_key`, like `--precision`), which is what
+# the `comparable` flag alone never did.
+_MEASUREMENT_ALIASES = {
+    "cold": "cold", "fresh": "cold", "cold_cache": "cold", "first_touch": "cold",
+    "flushed": "cold", "fresh_server": "cold",
+    "warm": "warm", "hot": "warm", "warm_cache": "warm", "hot_cache": "warm",
+    "steady_state": "warm", "resident": "warm", "warm_server": "warm",
+}
+
+
+def _norm_measurement(value) -> str:
+    """Fold a residency spelling to a comparable token: `Hot-cache` and `hot_cache` are one thing.
+
+    Unknown spellings are kept verbatim rather than forced into one of the two known buckets. A
+    harness that reports something we have no alias for is stating a real distinction we do not
+    understand yet, and guessing `warm` for it would reintroduce exactly the false comparison this
+    filter exists to stop.
+    """
+    text = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    return _MEASUREMENT_ALIASES.get(text, text)
+
+
+def _measurement_matches(want: str, have: str) -> bool:
+    """Whether an entry measured at `have` may be offered to a caller asking for `want`.
+
+    Unstated on EITHER side is a match, for the same reason precision works that way: every entry in
+    the store predates this field, and excluding what states no mode would empty every page. Unlike
+    precision there is no refinement hierarchy to honour — cold and warm are disjoint claims about
+    the same run, so the test is equality.
+    """
+    if not want or not have:
+        return True
+    return want == have
+
+
+def _measurement_of(meta) -> str:
+    metric = (meta or {}).get("metric")
+    return _norm_measurement((metric or {}).get("measurement_mode") if isinstance(metric, dict) else "")
 
 
 def _upstream_of(a) -> dict:
@@ -643,6 +706,11 @@ def cmd_write(a) -> dict:
             "metric_kind": a.metric_kind or "",
             "bench_key": bench_key(a.metric_kind, case_names),
             "case_names": case_names,
+            # Cache residency, stored VERBATIM and folded only at comparison time (see
+            # `_norm_measurement`) so a later reader that disagrees with today's alias table still
+            # has the original word. Empty when the caller does not say — which is every entry
+            # written before this field, and they stay comparable with everything.
+            "measurement_mode": str(getattr(a, "measurement_mode", "") or "").strip()[:40],
         },
         # The optimization IDEA, not the impl: resolve ranks at most one entry per direction.
         "direction": (a.direction or "")[:120],
@@ -1078,8 +1146,14 @@ def _render_references(refs_dir: str, address: str, summary: str, views):
     return paths
 
 
-def _candidate(rank: int, v: dict, gfx: str, prose_path: str, top_bench: str) -> dict:
-    """The candidate record both planes hand the lane. Extra keys ride in `v['extra']`."""
+def _candidate(rank: int, v: dict, gfx: str, prose_path: str, top_bench: str,
+               top_measurement: str = "") -> dict:
+    """The candidate record both planes hand the lane. Extra keys ride in `v['extra']`.
+
+    `top_measurement` defaults to empty so a caller that does not pass it gets the pre-existing
+    `comparable` rule byte-for-byte — the flag only ever tightens, and only when BOTH sides state a
+    residency mode.
+    """
     return dict({
         "rank": rank,
         "exp_dir": v["exp_dir"],
@@ -1101,9 +1175,19 @@ def _candidate(rank: int, v: dict, gfx: str, prose_path: str, top_bench: str) ->
         "artifact_names": v.get("artifact_names") or {},
         "apply_env": v.get("apply_env", ""),
         "cache_invalidation": v.get("cache_invalidation", ""),
+        # What cache state the speedup was taken in, when its writer said. Empty on the backlog.
+        "measurement_mode": v.get("measurement_mode", ""),
         # False = ranked against rank 1 on a DIFFERENT case set, so their ordering is a prior only.
         # Adoption is decided by this run's own measurement either way.
-        "comparable": bool(v["bench_key"]) and v["bench_key"] == top_bench,
+        #
+        # Matching `bench_key` is necessary but NOT sufficient: that hash covers `metric_kind` and
+        # the case names and nothing else, so the same cases timed hot and timed cold hash equal.
+        # When both sides name a residency mode and the modes differ, the two numbers are not one
+        # ranking — our own hot-vs-cold pairs invert (1.7-2.6x becomes 0.66-0.90x). Silent when
+        # either side is unstated, which is the entire pre-existing store.
+        "comparable": (bool(v["bench_key"]) and v["bench_key"] == top_bench
+                       and _measurement_matches(top_measurement,
+                                                v.get("measurement_mode", ""))),
         "alternates": v["alts"],
         # What happened the last times somebody actually adopted this patch, as opposed to the
         # speedup its own writer measured once. An entry offered at rank 1 that three lanes have
@@ -1184,6 +1268,23 @@ def cmd_resolve(a) -> dict:
                         precision=want_precision, other_precisions=other_precision_n)
         found = of_precision
 
+    # Cache residency, filtered here rather than flagged after ranking. `bench_key` gives a hot and
+    # a cold measurement of the same cases the SAME key, so `comparable` cannot separate them; a
+    # filter can, and placing it BEFORE `_rank_key` is what makes it partition the ranking instead
+    # of merely annotating it. Off by default, and an entry that states no mode is never excluded,
+    # so omitting --measurement-mode reproduces the previous behaviour exactly.
+    want_measurement = _norm_measurement(getattr(a, "measurement_mode", ""))
+    other_measurement_n = 0
+    if want_measurement:
+        of_measurement = [(m, d) for (m, d) in found
+                          if _measurement_matches(want_measurement, _measurement_of(m))]
+        other_measurement_n = len(found) - len(of_measurement)
+        if not of_measurement:
+            return dict(base_out, read_reason="no_such_measurement_mode", carrier=want_carrier,
+                        measurement_mode=want_measurement,
+                        other_measurement_modes=other_measurement_n)
+        found = of_measurement
+
     # --- curation gate: what this page may OFFER, before any ranking -------------------------
     total = len(found)
     servable = found if a.include_retired else [(m, d) for (m, d) in found if not _is_retired(m)]
@@ -1197,7 +1298,9 @@ def cmd_resolve(a) -> dict:
     stats = {"total": total, "retired": retired_n, "below_min_speedup": below_n,
              "min_speedup": min_speedup, "carrier": want_carrier,
              "other_carriers": other_carrier_n,
-             "precision": want_precision, "other_precisions": other_precision_n}
+             "precision": want_precision, "other_precisions": other_precision_n,
+             "measurement_mode": want_measurement,
+             "other_measurement_modes": other_measurement_n}
     if not above:
         return dict(base_out, filtered=stats,
                     read_reason="all_retired" if not servable else "below_min_speedup")
@@ -1229,6 +1332,7 @@ def cmd_resolve(a) -> dict:
             "direction": str(meta.get("direction") or ""),
             "bench_key": str(metric.get("bench_key") or ""),
             "metric_kind": str(metric.get("metric_kind") or ""),
+            "measurement_mode": _measurement_of(meta),
             "origin": f"- source: {meta.get('source_eval_dir', '')}\n",
             "alts": [{
                 "exp_dir": d,
@@ -1245,7 +1349,8 @@ def cmd_resolve(a) -> dict:
                f"{below_n} below {min_speedup:g}x, {collapsed} same-direction re-discoveries "
                f"moved to `alternates`.")
     prose = _render_references(a.refs_dir, f"slug `{slug}` (gfx {gfx})", summary, views)
-    candidates = [_candidate(rank, v, gfx, p, views[0]["bench_key"])
+    candidates = [_candidate(rank, v, gfx, p, views[0]["bench_key"],
+                             views[0].get("measurement_mode", ""))
                   for rank, (v, p) in enumerate(zip(views, prose), start=1)]
     return dict(base_out, read_reason="read", candidates=candidates, filtered=stats)
 
@@ -1548,6 +1653,11 @@ def remote_value(meta: dict, digest: str = "") -> dict:
             "metric_kind": str(metric.get("metric_kind") or ""),
             "bench_key": str(metric.get("bench_key") or ""),
             "case_names": list(metric.get("case_names") or []),
+            # Sent for the same reason bench_key is: the reader has to filter on residency
+            # client-side, because two entries that differ only in cache state carry the SAME
+            # bench_key and upstream ranks them against each other as one list. Empty for every
+            # record written before this field, which keeps them comparable with everything.
+            "measurement_mode": str(metric.get("measurement_mode") or ""),
         },
         "verified_stack": meta.get("verified_stack") if isinstance(meta.get("verified_stack"), dict) else {},
         # The dimensions the ADDRESS deliberately does not carry (see the export note above). They
@@ -2311,9 +2421,11 @@ def cmd_resolve_remote(a) -> dict:
     # than reading empty, which is what an auditor wants and why it is a flag, not the default.
     want_carrier = str(getattr(a, "carrier", "") or "patch")
     want_precision = _norm_precision(getattr(a, "precision", ""))
+    want_measurement = _norm_measurement(getattr(a, "measurement_mode", ""))
     include_retired = bool(getattr(a, "include_retired", False))
     other_carrier = [0]
     other_precision = [0]
+    other_measurement = [0]
     # What the page handed back before any filter ran — not what the page HOLDS: the service pages
     # `--scan` rows (kb/store_remote.py:candidates), so a busy identity can be read through a
     # keyhole with nothing saying so.
@@ -2340,18 +2452,31 @@ def cmd_resolve_remote(a) -> dict:
                                 "match_tier": tier, "read_plane": read_plane,
                                 "carrier": want_carrier}, **extra)
 
-        if not want_precision:
-            if not of_carrier:
+        of_precision = of_carrier
+        if want_precision:
+            of_precision = [c for c in of_carrier
+                            if _precision_matches(want_precision, _precision_of(c.value))]
+            other_precision[0] = len(of_carrier) - len(of_precision)
+        # Residency narrows LAST, so a rung emptied by it says so instead of borrowing the
+        # carrier/precision reason. Skipped entirely when unasked, which leaves the two branches
+        # below exactly the pair that existed before this filter.
+        of_measurement = of_precision
+        if want_measurement:
+            of_measurement = [c for c in of_precision
+                              if _measurement_matches(want_measurement, _measurement_of(c.value))]
+            other_measurement[0] = len(of_precision) - len(of_measurement)
+        if not of_measurement:
+            if not want_precision and not want_measurement:
                 note("no_such_carrier", other_carriers=other_carrier[0])
-            return of_carrier, retired_n
-        of_precision = [c for c in of_carrier
-                        if _precision_matches(want_precision, _precision_of(c.value))]
-        other_precision[0] = len(of_carrier) - len(of_precision)
-        if not of_precision:
-            note("no_such_carrier" if not of_carrier else "no_such_precision",
-                 other_carriers=other_carrier[0], precision=want_precision,
-                 other_precisions=other_precision[0])
-        return of_precision, retired_n
+            elif not of_precision:
+                note("no_such_carrier" if not of_carrier else "no_such_precision",
+                     other_carriers=other_carrier[0], precision=want_precision,
+                     other_precisions=other_precision[0])
+            else:
+                note("no_such_measurement_mode", other_carriers=other_carrier[0],
+                     measurement_mode=want_measurement,
+                     other_measurement_modes=other_measurement[0])
+        return of_measurement, retired_n
 
     # The WHOLE descent is redone on the next plane — ladder, then near misses — so a coarse rung
     # on one plane cannot shadow an exact rung on the other. `live` reads `store` from this scope,
@@ -2398,6 +2523,9 @@ def cmd_resolve_remote(a) -> dict:
              "below_min_speedup": len(found) - len(above), "min_speedup": min_speedup,
              "carrier": want_carrier, "other_carriers": other_carrier[0],
              "precision": want_precision, "other_precisions": other_precision[0],
+             # Reported for the same reason as `other_precisions`: a caller has to be able to see
+             # that the page was narrowed, not just that it came back short. Zero when unasked.
+             "measurement_mode": want_measurement, "other_measurement_modes": other_measurement[0],
              "scanned": scanned[0], "scan_limit": scan_limit,
              "scan_saturated": bool(scan_limit and scanned[0] >= scan_limit)}
     if not above:
@@ -2435,6 +2563,7 @@ def cmd_resolve_remote(a) -> dict:
             "direction": str(meta.get("direction") or ""),
             "bench_key": str(metric.get("bench_key") or ""),
             "metric_kind": str(metric.get("metric_kind") or ""),
+            "measurement_mode": _measurement_of(meta),
             "origin": f"- session: {c.session_id}{' (champion)' if c.is_champion else ''}\n",
             # Alternates are materialized too. They are same-direction runners-up, so there are few
             # of them, and a candidate listed with a path that resolves to nothing is worse than not
@@ -2460,7 +2589,8 @@ def cmd_resolve_remote(a) -> dict:
             "other_version": f" Served from `{cid}` — a DIFFERENT stack version, and not even the"
                              " version-agnostic page had it."}.get(match_tier, "")))
     prose = _render_references(a.refs_dir, f"`{cid}`", summary, views)
-    candidates = [_candidate(rank, v, gfx, p, views[0]["bench_key"])
+    candidates = [_candidate(rank, v, gfx, p, views[0]["bench_key"],
+                             views[0].get("measurement_mode", ""))
                   for rank, (v, p) in enumerate(zip(views, prose), start=1)]
     return dict(base_out, read_reason="read", candidates=candidates, filtered=stats)
 
@@ -2570,6 +2700,11 @@ def main(argv=None):
         w.add_argument("--precision", default="",
                        help="numeric precision this was measured at (fp8, fp8_w8a8, bf16, ...); "
                             "recorded for filtering, NOT part of the key")
+        # Cache residency of the measurement itself. In `metric`, not `upstream`: it is a fact
+        # about how the number was taken, not about the stack it was taken on.
+        w.add_argument("--measurement-mode", dest="measurement_mode", default="",
+                       help="cache residency the speedup was measured in (cold | warm, or your "
+                            "harness's own word); recorded for filtering, NOT part of the key")
         w.add_argument("--serving-framework", dest="serving_framework", default="",
                        help="vllm | sglang — recorded alongside precision, never keyed")
         w.add_argument("--serving-framework-version", dest="serving_framework_version", default="",
@@ -2596,6 +2731,10 @@ def main(argv=None):
     r.add_argument("--precision", default="",
                    help="only offer entries measured at this precision; entries that state none "
                         "are always offered. Omit to filter on nothing (the default)")
+    r.add_argument("--measurement-mode", dest="measurement_mode", default="",
+                   help="only offer entries measured in this cache residency (cold | warm); "
+                        "entries that state none are always offered. Omit to filter on nothing "
+                        "(the default)")
 
     lg = sub.add_parser("languages", help="which languages this kernel has a page in")
     lg.add_argument("--root", required=True)
@@ -2667,6 +2806,11 @@ def main(argv=None):
                     help="only offer entries measured at this precision; entries that state none "
                          "are always offered. A rung holding only other dtypes reads as empty and "
                          "the ladder descends. Omit to filter on nothing (the default)")
+    rr.add_argument("--measurement-mode", dest="measurement_mode", default="",
+                    help="only offer entries measured in this cache residency (cold | warm); "
+                         "entries that state none are always offered. A rung holding only the "
+                         "other residency reads as empty and the ladder descends. Omit to filter "
+                         "on nothing (the default)")
 
     wr = add_plane_args(add_write_args(
         sub.add_parser("write-remote", help="store one win in the local store AND under its key")))

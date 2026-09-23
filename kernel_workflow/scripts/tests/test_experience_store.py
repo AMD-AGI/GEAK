@@ -36,7 +36,8 @@ def patch_text(path="source/k.py", old="BLOCK = 64", new="BLOCK = 128", at=1):
 
 def write_entry(root, exp_id, *, kernel="fused_moe_kernel", lang="triton", gfx="gfx950",
                 kclass="triton", speedup=2.0, direction="tile-retune", retired=False,
-                bench="b:aaa", reproductions=1, lifecycle="candidate", patch=None):
+                bench="b:aaa", reproductions=1, lifecycle="candidate", patch=None,
+                measurement=""):
     """Seed one entry directly on disk, the way the imported backlog looks."""
     d = os.path.join(root, gfx, kclass, f"{kernel}__{lang}__{gfx}", exp_id)
     os.makedirs(d, exist_ok=True)
@@ -47,6 +48,10 @@ def write_entry(root, exp_id, *, kernel="fused_moe_kernel", lang="triton", gfx="
         "metric": {"speedup": speedup, "gpu_arch": gfx, "bench_key": bench, "metric_kind": "geomean"},
         "strategy": f"strategy for {exp_id}",
     }
+    # Left OUT of the dict unless asked, so the default entry stays byte-identical to the backlog
+    # this helper exists to imitate — an entry written before the field existed has no such key.
+    if measurement:
+        meta["metric"]["measurement_mode"] = measurement
     if retired:
         meta["retained"] = False
         meta["retired_reason"] = f"duplicate_direction:{direction}"
@@ -1709,6 +1714,98 @@ def test_the_filter_survives_the_round_trip_to_the_store_plane(tmp_path):
     narrowed = resolve_remote(store, refs, "fused_moe_kernel", "triton", "gfx950",
                               *common, "--precision", "fp8_w8a8")
     assert _offers(narrowed) == [(3.29, "tuning-aiter")] and narrowed["filtered"]["other_precisions"] == 1
+
+
+# --------------------------------------------------------------------------- cache residency
+# The second filter, and the one with measured teeth. `bench_key` hashes `metric_kind` and the case
+# names and NOTHING about how the number was taken, so the same cases timed with the working set
+# resident and timed cold hash EQUAL — the store then ranks them as one list and flags them
+# `comparable: true`. Three of our own measurements invert across that line (op-level 1.7-2.6x hot
+# vs 0.66-0.90x cold; a first-read bandwidth above the part's physical ceiling; a warm-server A/B
+# at +14.3% that came back +10.9% fresh), so what is at stake is a wrong ordering, not a noisy one.
+# Same shape as precision for the same reason: recorded not keyed, off by default, unstated on
+# either side is a match — but applied BEFORE `_rank_key`, which is what the `comparable` flag alone
+# never did. Not an RDNA-only hazard; a big last-level cache only makes it routine.
+def test_a_reader_that_states_no_residency_sees_what_it_always_saw(tmp_path):
+    """The migration guarantee, restated for this field. Every caller in the tree predates the flag
+    and not one of them may lose a candidate by not yet passing it."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_a", speedup=2.6, direction="hot", measurement="warm")
+    write_entry(root, "20260101_000001_b", speedup=0.9, direction="cold", measurement="cold")
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950", "--min-speedup", "0.5")
+    assert [c["direction"] for c in out["candidates"]] == ["hot", "cold"]
+    assert out["filtered"]["other_measurement_modes"] == 0
+
+
+def test_the_other_cache_state_is_dropped_before_ranking_not_after(tmp_path):
+    """Why a filter and not just a flag. The hot number is the bigger number BY CONSTRUCTION — it
+    is the same kernel with its working set already resident — so an unfiltered page hands a cold
+    deployment the hot entry in rank 1 every time, and spends the first verify slot proving that a
+    2.6x is really a 0.9x. The spelling is folded, so a harness that says `fresh-server` and one
+    that says `cold` are one bucket."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_a", speedup=2.6, direction="hot", measurement="hot_cache")
+    write_entry(root, "20260101_000001_b", speedup=0.9, direction="cold", measurement="fresh-server")
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950",
+                  "--min-speedup", "0.5", "--measurement-mode", "Cold")
+    assert [c["direction"] for c in out["candidates"]] == ["cold"]
+    assert out["filtered"]["other_measurement_modes"] == 1       # and it SAYS what it withheld
+
+
+def test_the_backlog_is_never_excluded_for_saying_nothing_about_residency(tmp_path):
+    """Every entry in the store today states no mode. Excluding them would empty every page, and an
+    unlabelled measurement is still a lead worth a verify slot — the verify is what decides adoption
+    either way. Symmetric: a caller that names a mode against an unlabelled store loses nothing."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_a", speedup=2.0, direction="legacy")
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950",
+                  "--min-speedup", "1.0", "--measurement-mode", "cold")
+    assert [c["direction"] for c in out["candidates"]] == ["legacy"]
+
+
+def test_a_page_with_only_the_wrong_residency_says_so(tmp_path):
+    """The same contract `no_such_carrier` and `no_such_precision` hold: a caller must be able to
+    tell "nothing here" from "nothing here FOR YOU", or it records a cold start on a page that
+    holds knowledge it was simply not allowed to use."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_a", speedup=2.6, direction="hot", measurement="warm")
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950",
+                  "--min-speedup", "1.0", "--measurement-mode", "cold")
+    assert out["read_reason"] == "no_such_measurement_mode" and out["other_measurement_modes"] == 1
+    assert out["candidates"] == []
+
+
+def test_a_hot_and_a_cold_run_of_the_same_cases_are_not_one_ranking(tmp_path):
+    """The defect itself, pinned. Identical `bench_key` — same metric_kind, same cases — is what
+    the store has always taken as proof that two speedups are one ordered fact. It is not: these
+    two rows are the same kernel measured on opposite sides of the cache. The flag tightens ONLY
+    when both sides name a mode and the modes differ, so nothing in the existing store moves."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_a", speedup=2.6, direction="hot",
+                bench="b2:same", measurement="warm")
+    write_entry(root, "20260101_000001_b", speedup=0.9, direction="cold",
+                bench="b2:same", measurement="cold")
+    write_entry(root, "20260101_000002_c", speedup=0.8, direction="mute", bench="b2:same")
+    out = resolve(root, refs, "fused_moe_kernel", "triton", "gfx950", "--min-speedup", "0.5")
+    assert [c["bench_key"] for c in out["candidates"]] == ["b2:same"] * 3, "the old test passes"
+    assert [c["comparable"] for c in out["candidates"]] == [True, False, True]
+    assert [c["measurement_mode"] for c in out["candidates"]] == ["warm", "cold", ""]
+
+
+def test_the_residency_filter_survives_the_round_trip_to_the_store_plane(tmp_path):
+    """`metric.measurement_mode` has to cross the export or the remote plane — which is the one a
+    recall actually reads — filters on a field that is always empty and silently offers everything,
+    which is indistinguishable from not having built the filter at all."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_a", speedup=2.6, direction="hot", measurement="warm")
+    write_entry(root, "20260101_000001_b", speedup=0.9, direction="cold", measurement="cold")
+    store = seed_store(tmp_path, root)
+    wide = resolve_remote(store, refs, "fused_moe_kernel", "triton", "gfx950", "--min-speedup", "0.5")
+    assert [c["direction"] for c in wide["candidates"]] == ["hot", "cold"]
+    narrow = resolve_remote(store, str(tmp_path / "r2"), "fused_moe_kernel", "triton", "gfx950",
+                            "--min-speedup", "0.5", "--measurement-mode", "cold")
+    assert [c["direction"] for c in narrow["candidates"]] == ["cold"]
+    assert narrow["filtered"]["other_measurement_modes"] == 1
 
 
 # --------------------------------------------------------------------------- the tuned digest
