@@ -5731,23 +5731,57 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
     # ``apply_*`` (flat/nested-e2e schema) or ``accepted_*`` (summary schema).
     flags: list[str] = []
     env: list[str] = []
-    # ``*_addition`` is a THIRD spelling seen in the wild: the PHASE=integrate result
-    # schema documents ``accepted_overlay`` but no env field at all, while Finalize's
-    # inputs require "accepted config (flags/env)" — so an integrator whose overlay
-    # needs env to bind has no schema slot and invents one. Measured on gfx1151: the
-    # winning candidate recorded ``accepted_env_addition=GEAK_TUNED_GEMM_TABLE=...``,
-    # no reader looked for that key, and the win came back with env="" — accepted,
-    # but with nothing carried forward to actually bind it. Reading the alias costs
-    # nothing and turns that silent drop into a reproducible relaunch.
+    # ``*_addition`` / ``*_extra`` are FURTHER spellings seen in the wild: the
+    # PHASE=integrate result schema documents ``accepted_overlay`` but no env field at
+    # all, while Finalize's inputs require "accepted config (flags/env)" — so an
+    # integrator whose overlay needs env to bind has no schema slot and invents one.
+    # Measured on gfx1151 across the 6 artifacts of one authoring run: 5 said
+    # ``accepted_env_extra`` and 1 said ``accepted_env_addition``, both carrying the
+    # identical payload ``GEAK_TUNED_GEMM_TABLE=...``. No reader looked for either, so
+    # the win came back with env="" — accepted, but with nothing carried forward to
+    # actually bind it.
+    #
+    # Enumerating aliases therefore does not converge: with no schema slot, each
+    # integrator coins its own suffix, and a list only ever covers the spellings we
+    # have already been burned by. So read the known names FIRST (deterministic, and
+    # they win ties), then fall back to any ``{apply,accepted}_{env,flags}[_suffix]``
+    # key. The fallback is deliberately narrow — it matches the field's own prefix, so
+    # it cannot swallow an unrelated key — and the real repair is to give the schema an
+    # env field, which is filed separately; until then this stops the silent drop.
+    _alias_re = re.compile(r"^(?:apply|accepted)_(env|flags)(?:_[a-z_]+)?$")
+
+    def _collect(ir_obj: dict, field: str, explicit: tuple[str, ...]) -> list[str]:
+        out: list[str] = []
+        seen_keys: set[str] = set()
+        v = _ir_get(ir_obj, *explicit)
+        if v:
+            out.append(str(v))
+        seen_keys.update(explicit)
+        # same FLAT-or-NESTED sources _ir_get walks, so an invented key is found
+        # wherever the integrator happened to put it
+        sources = [ir_obj] + [ir_obj[s] for s in ("e2e", "accepted_config")
+                              if isinstance(ir_obj.get(s), dict)]
+        for src in sources:
+            for k in sorted(src):
+                if k in seen_keys:
+                    continue
+                m = _alias_re.match(k)
+                if not m or m.group(1) != field:
+                    continue
+                val = src.get(k)
+                if isinstance(val, str) and val.strip():
+                    seen_keys.add(k)
+                    out.append(val)
+        return out
+
     for c in banked:
-        for value, sink in (
-            (str(_ir_get(c["ir"], "apply_flags", "accepted_flags",
-                         "accepted_flags_addition") or ""), flags),
-            (str(_ir_get(c["ir"], "apply_env", "accepted_env",
-                         "accepted_env_addition") or ""), env),
+        for values, sink in (
+            (_collect(c["ir"], "flags", ("apply_flags", "accepted_flags")), flags),
+            (_collect(c["ir"], "env", ("apply_env", "accepted_env")), env),
         ):
-            if value and value not in sink:
-                sink.append(value)
+            for value in values:
+                if value and value not in sink:
+                    sink.append(value)
     # Fold in the sweep-adopted serving config (config/sweep_results.json). It was
     # live on the server this kernel A/B ran against, so (a) its flags/env belong in
     # accepted_config for a reproducible relaunch, and (b) when the kernel's own

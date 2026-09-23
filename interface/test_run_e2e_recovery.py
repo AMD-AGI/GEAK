@@ -1387,12 +1387,16 @@ if __name__ == "__main__":
 
 # ── recovered AUTHORED-overlay win: binding env + replayable launcher ───────
 
-def _make_authored_eval_dir(tmp_path: Path, *, with_bench: bool = True) -> Path:
+def _make_authored_eval_dir(tmp_path: Path, *, with_bench: bool = True,
+                            env_key: str = "accepted_env_addition") -> Path:
     """The gfx1151 shape: an ACCEPTED authored-overlay win whose binding env was
     recorded under ``accepted_env_addition`` -- a spelling the PHASE=integrate
     result schema does not define (it declares ``accepted_overlay`` but no env
     field at all, while Finalize's inputs require one), so the integrator invented
     it. Nothing read that key, and the win came back with env="" and no launcher.
+
+    ``env_key`` is parameterised because the invented spelling is NOT stable: see
+    test_binding_env_survives_whatever_suffix_the_integrator_invented.
     """
     eval_dir = tmp_path / "e2e_authored"
     ov = eval_dir / "overlay" / "cand_o_proj_decode_gemm_iso"
@@ -1409,7 +1413,7 @@ def _make_authored_eval_dir(tmp_path: Path, *, with_bench: bool = True) -> Path:
         "e2e_throughput_tok_s": 129.126, "e2e_delta_pct": 11.678,
         "output_parity": "pass", "gate": "accepted",
         "accepted_overlay": str(ov),
-        "accepted_env_addition": "GEAK_TUNED_GEMM_TABLE=/x/config/tuned_gemm_table.json",
+        env_key: "GEAK_TUNED_GEMM_TABLE=/x/config/tuned_gemm_table.json",
     }), encoding="utf-8")
     return eval_dir
 
@@ -1444,3 +1448,51 @@ def test_recovered_launcher_absent_when_no_bench_script(tmp_path):
     wf = rx._recover_best_intermediate_win(eval_dir)
     assert wf["final_launch_script"] == ""
     assert not (eval_dir / "final" / "final_launch.sh").exists()
+
+
+@pytest.mark.parametrize("env_key", [
+    "accepted_env_addition",   # 1 of the 6 artifacts of the gfx1151 run
+    "accepted_env_extra",      # the other 5 -- same payload, different coinage
+    "accepted_env_additional",  # not yet observed: the point is that it works anyway
+    "apply_env_overlay",
+])
+def test_binding_env_survives_whatever_suffix_the_integrator_invented(tmp_path, env_key):
+    """Enumerating alias spellings does not converge, so do not rely on it.
+
+    Because the PHASE=integrate schema has NO env field, each integrator coins its
+    own key, and a fixed alias list only ever covers the spellings that have
+    already cost us a run. Surveying one real gfx1151 authoring run found TWO
+    coinages across its 6 integrate_result.json files -- ``accepted_env_extra``
+    (5) and ``accepted_env_addition`` (1) -- carrying the identical
+    ``GEAK_TUNED_GEMM_TABLE=...`` payload. A list that had only the second would
+    still have dropped the win in 5 of 6 cases, which is how this nearly shipped
+    looking fixed.
+    """
+    wf = rx._recover_best_intermediate_win(
+        _make_authored_eval_dir(tmp_path, env_key=env_key))
+    assert wf is not None
+    assert "GEAK_TUNED_GEMM_TABLE" in wf["accepted_config"]["env"], (
+        f"{env_key} was dropped: the overlay is accepted but unbindable")
+    assert "GEAK_TUNED_GEMM_TABLE" in Path(wf["final_launch_script"]).read_text(
+        encoding="utf-8")
+
+
+def test_alias_fallback_does_not_swallow_unrelated_keys(tmp_path):
+    """The fallback must stay narrow: prefix-matched, not 'any key mentioning env'.
+
+    A wide match would fold diagnostics or paths into the server's env line, where
+    a bad KEY=VAL is applied blind -- turning a recovery convenience into a way to
+    corrupt the relaunch.
+    """
+    eval_dir = _make_authored_eval_dir(tmp_path, env_key="accepted_env_extra")
+    ir = eval_dir / "overlay" / "cand_o_proj_decode_gemm_iso" / "integrate_result.json"
+    d = json.loads(ir.read_text(encoding="utf-8"))
+    d["env_probe_log"] = "NOT_A_SETTING=1"
+    d["baseline_env_snapshot"] = "ALSO_NOT_A_SETTING=1"
+    d["flags_considered"] = "--not-a-flag"
+    ir.write_text(json.dumps(d), encoding="utf-8")
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    env, flags = wf["accepted_config"]["env"], wf["accepted_config"]["flags"]
+    assert "GEAK_TUNED_GEMM_TABLE" in env
+    assert "NOT_A_SETTING" not in env and "ALSO_NOT_A_SETTING" not in env
+    assert "--not-a-flag" not in flags
