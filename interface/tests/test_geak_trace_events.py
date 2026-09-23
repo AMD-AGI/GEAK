@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""Tests for the explicit linkage contracts (interface/geak_trace_events.py).
+
+These fixtures establish that the TRACKER consumes recorded linkage events
+correctly. They do NOT establish that the native runtime emits them -- that is
+a separate question about runtime instrumentation, and nothing here should be
+read as evidence for it.
+"""
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import geak_trace_events as E  # noqa: E402
+
+
+def supplied(**kw):
+    base = {"type": E.RESULT_SUPPLIED, "event_id": "transfer-1",
+            "producer_invocation_id": "p1",
+            "producer_result_ref": "result.directions[0]",
+            "consumer_invocation_id": "c1",
+            "consumer_input_ref": "dispatch.prompt#offset=120"}
+    base.update(kw)
+    return base
+
+
+def spawn(**kw):
+    base = {"type": E.SPAWN, "parent_invocation_id": "p1",
+            "spawn_event_id": "s1", "child_invocation_id": "c1",
+            "spawn_tool_call_id": "toolu_1"}
+    base.update(kw)
+    return base
+
+
+def ret(**kw):
+    base = {"type": E.SPAWN_RETURN, "spawn_event_id": "s1",
+            "child_invocation_id": "c1", "attempt_id": "a1", "status": "returned"}
+    base.update(kw)
+    return base
+
+
+class ValidationTest(unittest.TestCase):
+    def test_complete_result_supplied_event_validates(self):
+        kind, norm = E.validate(supplied())
+        self.assertEqual(kind, E.RESULT_SUPPLIED)
+        self.assertEqual(norm["forwarding"], E.FORWARD_UNKNOWN)
+
+    def test_every_required_field_is_required(self):
+        for field in ("event_id", "producer_invocation_id", "producer_result_ref",
+                      "consumer_invocation_id", "consumer_input_ref"):
+            ev = supplied()
+            del ev[field]
+            with self.assertRaises(E.EventError, msg=field):
+                E.validate(ev)
+
+    def test_partial_event_is_rejected_not_downgraded(self):
+        with self.assertRaises(E.EventError):
+            E.validate({"type": E.RESULT_SUPPLIED, "producer_invocation_id": "p1"})
+
+    def test_transformed_without_description_is_marked_unknown(self):
+        _, norm = E.validate(supplied(forwarding=E.FORWARD_TRANSFORMED))
+        self.assertEqual(norm["forwarding"], E.FORWARD_TRANSFORMED)
+        self.assertFalse(norm["transformation_known"])
+
+    def test_transformed_with_description_is_known(self):
+        _, norm = E.validate(supplied(forwarding=E.FORWARD_TRANSFORMED,
+                                      transformation="json path + truncation"))
+        self.assertTrue(norm["transformation_known"])
+
+    def test_literal_forwarding_is_preserved(self):
+        _, norm = E.validate(supplied(forwarding=E.FORWARD_LITERAL))
+        self.assertEqual(norm["forwarding"], E.FORWARD_LITERAL)
+
+    def test_invalid_forwarding_rejected(self):
+        with self.assertRaises(E.EventError):
+            E.validate(supplied(forwarding="probably"))
+
+    def test_spawn_requires_parent_event_and_child(self):
+        for field in ("parent_invocation_id", "spawn_event_id",
+                      "spawn_tool_call_id", "child_invocation_id"):
+            ev = spawn()
+            del ev[field]
+            with self.assertRaises(E.EventError, msg=field):
+                E.validate(ev)
+
+    def test_unknown_event_type_rejected(self):
+        with self.assertRaises(E.EventError):
+            E.validate({"type": "vibes"})
+
+    def test_invalid_return_status_rejected(self):
+        with self.assertRaises(E.EventError):
+            E.validate(ret(status="probably-fine"))
+
+
+class EdgeBuildTest(unittest.TestCase):
+    def _val(self, events):
+        out = []
+        for ev in events:
+            kind, norm = E.validate(ev)
+            norm["_kind"] = kind
+            out.append(norm)
+        return out
+
+    def test_result_supplied_edge_is_proven_and_carries_refs(self):
+        edges, unresolved, stats, _inv = E.build_edges(
+            self._val([supplied(forwarding=E.FORWARD_LITERAL)]), {"p1", "c1"})
+        self.assertEqual(stats["result_supplied_edges"], 1)
+        edge = edges[0]
+        self.assertTrue(edge["proven"])
+        self.assertEqual(edge["provenance"], "recorded_event")
+        self.assertEqual(edge["producer_result_ref"], "result.directions[0]")
+        self.assertEqual(edge["consumer_input_ref"], "dispatch.prompt#offset=120")
+
+    def test_unknown_invocation_is_unresolved_not_a_new_node(self):
+        edges, unresolved, stats, _inv = E.build_edges(
+            self._val([supplied(consumer_invocation_id="ghost")]), {"p1"})
+        self.assertEqual(edges, [])
+        self.assertEqual(stats["unresolved"], 1)
+        self.assertIn("not present", unresolved[0]["reason"])
+
+    def test_spawn_and_return_join_into_one_edge(self):
+        edges, _, stats, _inv = E.build_edges(self._val([spawn(), ret()]), {"p1", "c1"})
+        self.assertEqual(stats["spawn_edges"], 1)
+        edge = edges[0]
+        self.assertEqual(edge["from"], "agent:p1")
+        self.assertEqual(edge["to"], "agent:c1")
+        self.assertEqual(edge["return_status"], "returned")
+        self.assertEqual(edge["spawn_tool_call_id"], "toolu_1")
+
+    def test_spawn_without_return_is_flagged_unmatched(self):
+        edges, unresolved, stats, _inv = E.build_edges(self._val([spawn()]), {"p1", "c1"})
+        self.assertEqual(edges[0]["return_status"], "unmatched")
+        self.assertEqual(stats["spawns_without_return"], 1)
+        self.assertTrue(any("no matching return" in u["reason"] for u in unresolved))
+
+    def test_retries_keep_separate_attempt_identities(self):
+        events = self._val([spawn(),
+                            ret(attempt_id="a1", status="error", error="boom"),
+                            ret(attempt_id="a2", status="returned")])
+        edges, _a, _b, _inv = E.build_edges(events, {"p1", "c1"})
+        attempts = edges[0]["attempts"]
+        self.assertEqual([a["attempt_id"] for a in attempts], ["a1", "a2"])
+        self.assertEqual([a["status"] for a in attempts], ["error", "returned"])
+
+    def test_parallel_children_produce_distinct_edges(self):
+        events = self._val([spawn(spawn_event_id="s1", child_invocation_id="c1"),
+                            spawn(spawn_event_id="s2", child_invocation_id="c2",
+                                  spawn_tool_call_id="toolu_2"),
+                            ret(spawn_event_id="s1", child_invocation_id="c1"),
+                            ret(spawn_event_id="s2", child_invocation_id="c2")])
+        edges, _, stats, _inv = E.build_edges(events, {"p1", "c1", "c2"})
+        self.assertEqual(stats["spawn_edges"], 2)
+        self.assertEqual({e["to"] for e in edges}, {"agent:c1", "agent:c2"})
+
+    def test_duplicate_replayed_spawn_is_idempotent(self):
+        edges, _, stats, _inv = E.build_edges(self._val([spawn(), spawn()]), {"p1", "c1"})
+        self.assertEqual(stats["spawn_edges"], 1)
+
+    def test_conflicting_duplicate_spawn_invalidates_the_join(self):
+        """Astra R7: the first record must not stay proven."""
+        events = self._val([spawn(), spawn(child_invocation_id="other")])
+        edges, unresolved, _s, _inv = E.build_edges(events, {"p1", "c1", "other"})
+        self.assertEqual(edges, [], "a conflicted spawn must not remain proven")
+        self.assertTrue(any("join invalidated" in u["reason"] for u in unresolved))
+
+    def test_conflicting_parent_is_not_silently_ignored(self):
+        events = self._val([spawn(), spawn(parent_invocation_id="other_parent")])
+        edges, unresolved, _s, _inv = E.build_edges(events, {"p1", "c1", "other_parent"})
+        self.assertEqual(edges, [])
+        self.assertTrue(any("join invalidated" in u["reason"] for u in unresolved))
+
+    def test_return_naming_a_different_child_does_not_join(self):
+        events = self._val([spawn(child_invocation_id="c1"),
+                            ret(child_invocation_id="c2")])
+        edges, unresolved, _s, _inv = E.build_edges(events, {"p1", "c1", "c2"})
+        self.assertEqual(edges, [], "a return for another child must not join")
+        self.assertTrue(any("names child c2" in u["reason"] for u in unresolved))
+
+    def test_spawn_without_tool_reference_is_rejected(self):
+        ev = spawn()
+        del ev["spawn_tool_call_id"]
+        with self.assertRaises(E.EventError):
+            E.validate(ev)
+
+    def test_empty_known_set_means_nothing_is_joinable(self):
+        """Astra R7: an empty observed set must not disable the check."""
+        edges, unresolved, _s, _inv = E.build_edges(self._val([supplied(), spawn(), ret()]),
+                                             set())
+        self.assertEqual(edges, [], "ghost edges were created to absent invocations")
+        self.assertTrue(unresolved)
+
+    def test_identical_return_replays_are_idempotent(self):
+        events = self._val([spawn(), ret(), ret()])
+        edges, _a, _b, _inv = E.build_edges(events, {"p1", "c1"})
+        self.assertEqual(len(edges[0]["attempts"]), 1,
+                         "a replay was counted as a second attempt")
+
+    def test_contradictory_status_for_one_attempt_invalidates(self):
+        events = self._val([spawn(), ret(attempt_id="a1", status="returned"),
+                            ret(attempt_id="a1", status="error", error="boom")])
+        edges, unresolved, _s, _inv = E.build_edges(events, {"p1", "c1"})
+        self.assertEqual(edges, [])
+        self.assertTrue(any("contradictory return" in u["reason"] for u in unresolved))
+
+    def test_identical_transfer_replays_are_one_edge(self):
+        edges, _, stats, _inv = E.build_edges(self._val([supplied(), supplied()]),
+                                        {"p1", "c1"})
+        self.assertEqual(stats["result_supplied_edges"], 1)
+
+    def test_conflicting_transfer_for_one_event_id_invalidates(self):
+        events = self._val([supplied(),
+                            supplied(consumer_input_ref="dispatch.prompt#offset=999")])
+        edges, unresolved, _s, _inv = E.build_edges(events, {"p1", "c1"})
+        self.assertEqual(edges, [])
+        self.assertTrue(any("conflicting transfer" in u["reason"] for u in unresolved))
+
+    def test_distinct_transfers_between_same_agents_are_separate_edges(self):
+        events = self._val([supplied(event_id="t1"),
+                            supplied(event_id="t2",
+                                     producer_result_ref="result.other")])
+        edges, _, stats, _inv = E.build_edges(events, {"p1", "c1"})
+        self.assertEqual(stats["result_supplied_edges"], 2)
+        self.assertEqual({e["event_id"] for e in edges}, {"t1", "t2"})
+
+    def test_orphan_return_is_reported(self):
+        edges, unresolved, stats, _inv = E.build_edges(self._val([ret()]), {"p1", "c1"})
+        self.assertEqual(stats["orphan_returns"], 1)
+        self.assertTrue(any("no spawn event" in u["reason"] for u in unresolved))
+
+    def test_no_edge_is_ever_built_without_an_event(self):
+        edges, _, stats, _inv = E.build_edges([], {"p1", "c1"})
+        self.assertEqual(edges, [])
+        self.assertEqual(stats["result_supplied_edges"], 0)
+        self.assertEqual(stats["spawn_edges"], 0)
+
+
+class ReadAndAttachTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-events-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, "events.jsonl")
+
+    def _write(self, rows, raw_extra=None):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+            if raw_extra:
+                fh.write(raw_extra)
+
+    def _trace(self, agent_ids=("p1", "c1"), parent_tools=("toolu_1",)):
+        agents = []
+        for a in agent_ids:
+            acts = ([{"tool_use_id": t} for t in parent_tools] if a == "p1" else [])
+            agents.append({"agent_id": a, "calls": [{"actions": acts}]})
+        return {"schema": "geak.trace/1", "run": {"run_id": "wf_e"},
+                "agents": agents, "edges": [], "warnings": []}
+
+    def test_malformed_line_is_reported_not_skipped(self):
+        self._write([supplied()], raw_extra='{"type": "agent_spawn"\n')
+        events, problems = E.read_events(self.path)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(len(problems), 1)
+
+    def test_absent_events_file_is_explicit_about_meaning(self):
+        trace = E.attach(self._trace(), os.path.join(self.dir, "nope.jsonl"))
+        link = trace["run"]["linkage"]
+        self.assertFalse(link["present"])
+        self.assertIn("not that they did not occur", link["note"])
+        self.assertEqual(trace["edges"], [])
+
+    def test_attach_adds_proven_edges_and_coverage(self):
+        self._write([supplied(forwarding=E.FORWARD_LITERAL), spawn(), ret()])
+        trace = E.attach(self._trace(), self.path)
+        kinds = {e["type"] for e in trace["edges"]}
+        self.assertEqual(kinds, {"result_supplied_to_dispatch", "agent_spawn"})
+        self.assertTrue(trace["run"]["linkage"]["complete"])
+
+    def test_incomplete_linkage_warns(self):
+        self._write([supplied(consumer_invocation_id="ghost")])
+        trace = E.attach(self._trace(), self.path)
+        self.assertFalse(trace["run"]["linkage"]["complete"])
+        self.assertTrue(any("INCOMPLETE" in w for w in trace["warnings"]))
+
+    def test_historical_run_gets_no_synthesised_links(self):
+        """The existing flat runs must stay flat."""
+        trace = E.attach(self._trace(), None)
+        self.assertEqual(trace["edges"], [])
+        self.assertFalse(trace["run"]["linkage"]["present"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+
+
+class ConflictPersistenceTest(unittest.TestCase):
+    """Astra R8 #4: a contradicted relationship must not come back as proven."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-conf-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, "events.jsonl")
+
+    def _write(self, rows):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    def _trace(self):
+        return {"schema": "geak.trace/1", "run": {"run_id": "wf_c"},
+                "agents": [{"agent_id": "p1"}, {"agent_id": "c1"}],
+                "edges": [], "warnings": []}
+
+    def test_conflicting_transformation_is_not_an_exact_replay(self):
+        self._write([supplied(forwarding=E.FORWARD_TRANSFORMED,
+                              transformation="json path"),
+                     supplied(forwarding=E.FORWARD_TRANSFORMED,
+                              transformation="something entirely different")])
+        trace = E.attach(self._trace(), self.path)
+        self.assertEqual([e for e in trace["edges"]], [])
+        self.assertTrue(any("conflicting transfer" in u["reason"]
+                            for u in trace["run"]["linkage"]["unresolved"]))
+
+    def test_invalidated_identities_are_published_for_retention(self):
+        self._write([supplied(),
+                     supplied(consumer_input_ref="dispatch.prompt#offset=999")])
+        trace = E.attach(self._trace(), self.path)
+        inv = trace["run"]["linkage"]["invalidated"]
+        self.assertTrue(inv, "invalidated identities were not published")
+        self.assertEqual(inv[0], ["result_supplied_to_dispatch", "transfer-1"],
+                         "identity must be type+event id, endpoints excluded")
+
+
+class ParentToolJoinTest(unittest.TestCase):
+    """Astra R8: a spawn must name one of the parent's CAPTURED tool actions."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-tooljoin-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, "events.jsonl")
+
+    def _write(self, rows):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    def _trace(self, parent_tools):
+        return {"schema": "geak.trace/1", "run": {"run_id": "wf_j"},
+                "agents": [{"agent_id": "p1",
+                            "calls": [{"actions": [{"tool_use_id": t}
+                                                   for t in parent_tools]}]},
+                           {"agent_id": "c1", "calls": []}],
+                "edges": [], "warnings": []}
+
+    def test_spawn_naming_a_real_parent_action_joins(self):
+        self._write([spawn(spawn_tool_call_id="toolu_real"), ret()])
+        trace = E.attach(self._trace(["toolu_real"]), self.path)
+        self.assertEqual([e["type"] for e in trace["edges"]], ["agent_spawn"])
+
+    def test_nonexistent_spawning_tool_is_rejected(self):
+        self._write([spawn(spawn_tool_call_id="does-not-exist"), ret()])
+        trace = E.attach(self._trace(["toolu_real"]), self.path)
+        self.assertEqual(trace["edges"], [], "an unjoined spawn was proven")
+        self.assertTrue(any("not among the parent's captured actions" in u["reason"]
+                            for u in trace["run"]["linkage"]["unresolved"]))
+
+    def test_parent_with_no_captured_actions_cannot_prove_a_spawn(self):
+        self._write([spawn(spawn_tool_call_id="toolu_x"), ret()])
+        trace = E.attach(self._trace([]), self.path)
+        self.assertEqual(trace["edges"], [])
+        self.assertFalse(trace["run"]["linkage"]["complete"])
+
+
+class LinkageGenerationTest(unittest.TestCase):
+    """Retained linkage generations must participate in a rebuild."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-linkgen-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, "linkage_events.jsonl")
+
+    def test_events_in_a_retained_generation_are_read(self):
+        with open(self.path + ".gen1", "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(supplied(event_id="t1")) + "\n")
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(supplied(event_id="t2")) + "\n")
+        events, problems = E.read_events(self.path)
+        self.assertEqual({e["event_id"] for e in events}, {"t1", "t2"})
+        self.assertEqual(problems, [])
+
+    def test_absent_everything_is_still_empty(self):
+        events, problems = E.read_events(os.path.join(self.dir, "nope.jsonl"))
+        self.assertEqual((events, problems), ([], []))

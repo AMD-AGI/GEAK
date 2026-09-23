@@ -28,6 +28,52 @@ if (!WORKFLOW_DIR) {
 const WORKER = String(A.kernel_lane_script || `${WORKFLOW_DIR}/kernel_lane.js`);
 const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() || 'optimize';
 
+// ---- Live execution tracker (read-only observer; see interface/geak_trace_collector.py) ----
+// Started HERE so a direct kernel run is tracked from its first agent, not only
+// at the end. Both dispatcher lanes (pass-through and bakeoff) pass through this
+// point, so one call covers them. The observer resolves its own workflow run from
+// the runtime's workflow record (no eval-dir substring matching) — needed because
+// neither EXP_ROOT nor eval_dir exists yet on the pass-through branch.
+//
+// Detached, read-only and strictly non-fatal: it never influences model choice,
+// prompts, budgets or optimization decisions. Set GEAK_LIVE_TRACE=0 to disable.
+(function startLiveTracker() {
+  try {
+    if (String(process.env.GEAK_LIVE_TRACE || '1') === '0') return;
+    // Same default as kernel_lane.js computes for EXP_ROOT: args.exp_root is NOT
+    // required, so bailing out when it is absent silently disabled tracking for
+    // every ordinary invocation.
+    const expRoot = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp'))
+      .replace(/\/+$/, '');
+    const { spawn } = require('child_process');
+    const child = spawn('python3', [
+      '-B', `${WORKFLOW_DIR}/../interface/geak_trace_collector.py`,
+      '--exp-root', expRoot,
+      // Runtime-supplied invocation identity: the wf_*.json record carries this
+      // same args object, so matching it identifies THIS launch deterministically
+      // instead of guessing from timing or from being the only run around.
+      '--identity-args', JSON.stringify(A),
+      '--script-dir', WORKFLOW_DIR,
+      // Per-run filename: two runs under one exp_root must not overwrite each other.
+      '--out-dir', expRoot,
+      '--watch',
+      '--interval', String(process.env.GEAK_LIVE_TRACE_INTERVAL_S || '30'),
+      '--resolve-timeout', '600',
+      '--max-seconds', String(process.env.GEAK_LIVE_TRACE_MAX_S || '172800'),
+    ], { detached: true, stdio: 'ignore' });
+    // spawn reports a missing executable ASYNCHRONOUSLY: try/catch cannot see it,
+    // and without this listener the ENOENT is an unhandled error event.
+    child.on('error', (err) => {
+      try { log(`Live execution tracker failed to start (non-fatal): ${err && err.message}`); }
+      catch (_) {}
+    });
+    child.unref();
+    log(`Live execution tracker started -> ${expRoot}/geak_trace_<runId>.json`);
+  } catch (e) {
+    try { log(`Live execution tracker not started (non-fatal): ${e && e.message}`); } catch (_) {}
+  }
+})();
+
 // ===========================================================================
 // SINGLE-LANGUAGE PASS-THROUGH (mode=optimize | author) — byte-compatible with
 // the pre-dispatcher behavior. Forward EVERY arg to the worker unchanged (the
@@ -36,7 +82,39 @@ const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() |
 if (MODE === 'optimize' || MODE === 'author') {
   phase('Bakeoff');            // reuse a declared phase slot for the single passthrough lane
   log(`mode=${MODE}: single-language pass-through -> ${WORKER}`);
-  return await workflow({ scriptPath: WORKER }, { ...A, workflow_dir: WORKFLOW_DIR });
+  const r = await workflow({ scriptPath: WORKER }, { ...A, workflow_dir: WORKFLOW_DIR });
+  // Final step: render the run report (token/time/cost ledger -> clickable role-execution-tree
+  // HTML + MD twin) from the lane's OWN timeline. In passthrough the dispatcher makes no agent calls
+  // itself, so the lane result carries the timeline (`llm_timeline`) + its `eval_dir`. This is the
+  // top-level entry for optimize/author runs, so it owns the report (E2E nests kernel_lane.js directly
+  // and reports at its own top level, so there is no double-emit). NOTE: this branch runs BEFORE the
+  // obj()/agentT()/LLM_STATS definitions below, so it is self-contained: raw agent() + inline schema +
+  // an inline llm_stats check. Entirely best-effort — never fail a real result over accounting.
+  const llmStatsOn = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+  if (llmStatsOn && r && r.eval_dir && r.llm_timeline) {
+    try {
+      const tlJson = JSON.stringify({ ...r.llm_timeline, instance: r.eval_dir });
+      const tlPath = `${r.eval_dir}/reports/trace/agent_timeline.json`;
+      await agent(
+        `You are the file_writer. PHASE=persist_llm_stats.\n` +
+        `Do exactly two things, in order:\n` +
+        `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
+        `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
+        '```json\n' + tlJson + '\n```\n\n' +
+        `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
+        `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
+        `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${r.eval_dir}"\n\n` +
+        `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
+        { phase: 'Bakeoff', label: 'file_writer:persist_llm_stats',
+          schema: { type: 'object',
+            properties: { written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } },
+            required: [], additionalProperties: true } });
+      log(`LLM token+time+cost ledger + run report (HTML+MD) -> ${r.eval_dir}/reports/trace/ and ${r.eval_dir}/report/.`);
+    } catch (e) {
+      log(`LLM stats/report emit failed (NON-FATAL — the run is unaffected): ${String(e)}`);
+    }
+  }
+  return r;
 }
 
 // ===========================================================================
@@ -155,11 +233,38 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // Hung-agent + API-fault guard (same contract as kernel_lane.js:agentT).
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
+// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
+// duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
+// role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_workflow', events: [], nested: [] };
+const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
+// Called AT DISPATCH (before the await) so LLM_TL.events is in dispatch order, not completion order.
+// Returns the event so the caller flips `ok` once the attempt resolves (null when off).
+function tlAgent(prompt, o, attempt) {
+  if (!LLM_STATS) return null;
+  const m = TL_ROLE_RE.exec(String(prompt || ''));
+  const e = {
+    seq: LLM_TL.events.length,
+    phase: (o && o.phase) || '',
+    label: (o && o.label) || 'agent',
+    role: m ? m[1] : '',
+    sub_phase: m ? m[2] : '',
+    attempt: attempt,
+    ok: false,
+  };
+  LLM_TL.events.push(e);
+  return e;
+}
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
+    const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);
+      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
+      }
       let to;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
@@ -167,10 +272,12 @@ async function agentT(p, o) {
           resolve(null);
         }, AGENT_TIMEOUT_MS);
       });
-      return await Promise.race([
-        agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+      const r = await Promise.race([
+        agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
+      if (ev && r) ev.ok = true;
+      return r;
     } catch (e) {
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
@@ -390,11 +497,17 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // this one does not), so anything omitted here silently reverts to the lane's default — a
       // caller asking for a KB-off bakeoff would have got eight KB-on lanes and no error.
       use_learned_kb: A.use_learned_kb != null ? String(A.use_learned_kb) : 'true',
+      // This explicit arg object drops nothing load-bearing that the parent set: forward llm_stats
+      // when supplied so a parent opt-out reaches each lane (unset stays absent -> lane default on).
+      ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',
       warm_start: WARM_START, kb_artifacts_dir: KB_ARTIFACTS_DIR, ...KB_PLANE_ARGS,
     });
+    // Absorb this lane's own agent timeline so the dispatcher's returned timeline accounts for every
+    // lane's attempts (kernel lanes never persist their own trace file, so this is the only path).
+    if (LLM_STATS && r && r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
     const speedup = primSpeedup(r);
     log(`lane ${l.key}:${l.mode} -> ${speedup ? speedup.toFixed(2) + 'x' : 'no result'} (${r ? r.validation_status : 'null'})`);
     return { lane: l, r, speedup };
@@ -522,8 +635,41 @@ if (winner && winner.speedup > 1.0) {
   }
 }
 
+// Persist the agent timeline, then render the run report (ledger -> clickable role-execution-tree
+// HTML + MD twin) as the very last step. kernel_workflow is always a TOP-LEVEL entry point (E2E nests
+// kernel_lane.js, not this dispatcher), so it owns its own ledger + report. The nested lane timelines
+// are already merged into LLM_TL.nested, so this one report covers the whole bake-off. The script has
+// no filesystem access, so a tiny agent writes the timeline and runs the report driver. Entirely
+// best-effort: accounting must never fail a run that produced a real speedup.
+if (EVAL_DIR && LLM_STATS) {
+  try {
+    const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
+    const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
+    await agentT(
+      `You are the file_writer. PHASE=persist_llm_stats.\n` +
+      `Do exactly two things, in order:\n` +
+      `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
+      `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
+      '```json\n' + tlJson + '\n```\n\n' +
+      `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
+      `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
+      `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${EVAL_DIR}"\n\n` +
+      `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
+      { phase: 'Report', label: 'file_writer:persist_llm_stats',
+        schema: obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []) });
+    const nestedNote = LLM_TL.nested.length ? ' plus ' + LLM_TL.nested.length + ' nested lane(s)' : '';
+    log(`LLM token+time+cost ledger -> ${EVAL_DIR}/reports/trace/ and run report (HTML+MD) -> ` +
+        `${EVAL_DIR}/report/. ${LLM_TL.events.length} agent attempts recorded${nestedNote}.`);
+  } catch (e) {
+    log(`LLM stats/report emit failed (NON-FATAL — the run is unaffected): ${String(e)}`);
+  }
+}
+
 return {
   mode: MODE,
+  // `instance` = this run's eval dir: a stable identity so the parser dedupes a timeline reached
+  // twice without collapsing two distinct same-shape lanes.
+  llm_timeline: LLM_STATS ? { ...LLM_TL, instance: EVAL_DIR } : undefined,
   task_dir: oracle.task_dir,
   eval_dir: EVAL_DIR,
   baseline_ms: bake.baseline_ms != null ? bake.baseline_ms : (bake.best_known_ms != null ? bake.best_known_ms : null),

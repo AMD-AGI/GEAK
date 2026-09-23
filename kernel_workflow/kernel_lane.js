@@ -647,11 +647,58 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// GEAK-ABLATION-ARMS-v1 (B6): registered mechanical dispatches are folded into the NEXT
+// agent instead of getting an agent of their own. In the historical Qwen3 run the
+// storage-reclaim agent -- whose whole job is to run one fixed bash command -- cost
+// 152 calls across 8 agents ($13.90), because every one of them paid the full
+// bootstrap floor and then held a conversation. Folding removes the dispatch; the
+// command still runs, verbatim, as the next agent's first action.
+const ABLATION_ARM = String(A.ablation_arm || '').trim().toUpperCase();
+const ABL_B6 = ABLATION_ARM === 'B6';
+const ABL_PENDING = [];
+const ABL_DRAINED = [];
+function ablDrainPrelude() {
+  if (!ABL_PENDING.length) return '';
+  const cmds = ABL_PENDING.splice(0, ABL_PENDING.length);
+  for (const c of cmds) ABL_DRAINED.push(c);
+  return '## FIRST, run these registered maintenance commands EXACTLY as written, then continue with your task.\n' +
+    cmds.map((c) => '```bash\n' + c + '\n```').join('\n') + '\n\n';
+}
+
+// LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
+// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
+// duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
+// role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_lane', events: [], nested: [] };
+const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
+// Called AT DISPATCH (before the await) so LLM_TL.events is in dispatch order, not completion order.
+// Returns the event so the caller flips `ok` once the attempt resolves (null when off).
+function tlAgent(prompt, o, attempt) {
+  if (!LLM_STATS) return null;
+  const m = TL_ROLE_RE.exec(String(prompt || ''));
+  const e = {
+    seq: LLM_TL.events.length,
+    phase: (o && o.phase) || '',
+    label: (o && o.label) || 'agent',
+    role: m ? m[1] : '',
+    sub_phase: m ? m[2] : '',
+    attempt: attempt,
+    ok: false,
+  };
+  LLM_TL.events.push(e);
+  return e;
+}
+
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
+  if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
+    const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);
+      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
+      }
       let to;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
@@ -660,10 +707,12 @@ async function agentT(p, o) {
         }, AGENT_TIMEOUT_MS);
       });
       // A timeout resolves null (returned as-is, no retry). An API/agent error rejects -> caught below.
-      return await Promise.race([
-        agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+      const r = await Promise.race([
+        agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
+      if (ev && r) ev.ok = true;
+      return r;
     } catch (e) {
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
@@ -1633,6 +1682,10 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     `   bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${EVAL_DIR} --keep-round ${round};` +
     ` fi` +
     `; echo STORAGE_RECLAIM_DONE round=${round}`;
+  if (ABL_B6) {
+    ABL_PENDING.push(reclaimCmd);
+    log(`  [B6] storage reclaim r${round} folded into the next agent — no dedicated dispatch.`);
+  } else
   await agentT(
     `Storage reclaim after round ${round} (issue #429). Run EXACTLY this bash, then return ` +
     `{ok:true, note:"reclaimed"}. Do NOT stop optimizing — reclaim frees disk so later rounds can run.\n` +
@@ -1859,6 +1912,9 @@ const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
 
 return {
   mode: MODE,
+  // `instance` = this lane's eval dir: a stable identity so the parser dedupes a timeline reached
+  // twice (parent-merge + glob) without collapsing two distinct lanes that share a shape.
+  llm_timeline: LLM_STATS ? { ...LLM_TL, instance: EVAL_DIR } : undefined,
   target_language: MODE === 'author' ? TARGET_LANGUAGE : undefined,
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
