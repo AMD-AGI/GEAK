@@ -5,12 +5,13 @@ gens: [gfx942, gfx950]
 dtypes: [fp8_e4m3_fnuz, fp8_e5m2_fnuz, fp8_e4m3, fp8_e5m2]
 regimes: [both]
 status: sota
-updated: 2026-06-08
+updated: 2026-09-21
 sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/fp8_numbers.html
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
   - https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/
   - https://github.com/ROCm/AMDMIGraphX/issues/2717
+  - ROCm/aiter@04c7b808:.claude/skills/review-pr/rules.md
 ---
 
 # FNUZ vs OCP FP8 — the dialect split that bites
@@ -75,8 +76,31 @@ acceptable per AMD's framework experiments, and it dovetails with the **224.0 RO
   ([[calibration_and_quark.md]], [[deployment_recipes.md]]).
 - The trap is **specific to CDNA3**. On MI350/MI355 (OCP) the off-by-2× problem does not exist — OCP
   checkpoints load natively.
-- gfx942 vs gfx950 is the line: treat any cross-gen FP8 move as a **re-cast**, gated on `err_ratio<0.05`
-  and a task-accuracy check ([[accuracy_evaluation.md]]).
+- gfx942 vs gfx950 is the line **for checkpoints**: treat any cross-gen FP8 move as a **re-cast**,
+  gated on `err_ratio<0.05` and a task-accuracy check ([[accuracy_evaluation.md]]). It is *not* the
+  line for kernel code — see below.
+
+## Within one arch: don't infer the dialect from the arch string
+The cross-gen framing above is about *checkpoints*, and it misleads when applied to *dispatch logic*.
+**A single arch can have both fn and fnuz tensors in flight at once.** On gfx942 the KV cache is
+fnuz by default while a Q-quantization path may emit OCP fn (observed on the DSv4 Flash fused
+indexer), so a kernel receiving both needs explicit per-tensor dtype dispatch. A silent mismatch
+compiles cleanly and produces wrong values — the same 2× mechanism as the checkpoint trap, reached
+without ever crossing a generation.
+
+The rule that follows, and it is narrow:
+
+- **Gating a *conversion* by arch is fine** — `if arch == 'gfx942':` around the fnuz cast path is
+  correct, because which dialect the hardware wants *is* an arch fact.
+- **Inspecting what a tensor already is must use the dtype**, never the arch:
+  `tensor.dtype == fp8_e4m3_fnuz`, not `"gfx942" in arch`. The arch tells you the default, not the
+  contents.
+- **Do not hardcode the saturation bound.** `fp8_max = 240.0` is right for e4m3fnuz and silently
+  wrong for OCP e4m3 (448) — derive it from the dtype. A literal is only safe on a path already
+  runtime-guarded to a single flavor, and then the guard is what makes it safe, not the arch.
+
+This is a standing review check when a diff adds an fp8 branch —
+[`../workflows/review_kernels.md`](../workflows/review_kernels.md) §3c.
 
 ## Pitfalls
 - **Bit-copying FP8 weights gfx942 ↔ gfx950** → silent 2× error.

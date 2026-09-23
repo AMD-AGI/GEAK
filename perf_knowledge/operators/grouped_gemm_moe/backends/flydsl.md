@@ -7,7 +7,7 @@ gens: [gfx942, gfx950]
 dtypes: [fp8_e4m3_fnuz, fp4_e2m1, fp16, bf16]
 regimes: [prefill, decode]
 status: sota
-updated: 2026-06-09
+updated: 2026-09-21
 sources:
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/moe_kernels.py
   - ROCm/aiter@a6bb4993:aiter/ops/flydsl/kernels/moe_gemm_2stage.py
@@ -114,6 +114,18 @@ from aiter.ops.flydsl import flydsl_moe_stage1, flydsl_moe_stage2
 [[operators/grouped_gemm_moe/backends/ck]] · [[operators/grouped_gemm_moe/backends/triton]] ·
 [[operators/dense_gemm/backends/flydsl]] (the dense FlyDSL hgemm) ·
 [[operators/act_and_mul_silu_gelu/backends/flydsl]] (fused split-K post-activation).
+
+**Authoring / optimizing a FlyDSL MoE GEMM `@flyc.kernel`** (write from scratch OR port ck→flydsl):
+[[languages/flydsl/authoring_gemm_levers]] (tiling / LDS / XCD-swizzle / epilogue) ·
+[[languages/flydsl/authoring_optimization]] (structure-first workflow) ·
+[[languages/flydsl/authoring_tile_programming]] (CuTe tile model) ·
+[[languages/flydsl/debugging]] (correctness / NaN / hang triage).
+
+**API surface** (refactoring / compatibility references — neither is a perf lever):
+[[languages/flydsl/authoring_api_migration]] (legacy raw dialects → `fx.*`, behavior-preserving) ·
+[[languages/flydsl/api_stability]] (which `fx.*` paths survive a FlyDSL minor bump).
+This card describes the on-box FlyDSL 0.1.5 kernels as written; the migration reference is pinned to
+0.3.2, so its replacements are not implied to exist in the card's source revision.
 
 ## Sources
 - On-box: `/sgl-workspace/aiter/aiter/ops/flydsl/moe_kernels.py` (`flydsl_moe_stage1`,
