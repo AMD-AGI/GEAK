@@ -118,6 +118,19 @@ REGIME_VOCAB = ["decode", "prefill", "mixed", "launch-bound", "memory-bound", "c
 UNMATCHED = "unmatched"
 
 
+def canon(s):
+    """Fold every non-alphanumeric run to a single space.
+
+    The vocabulary above writes its classes with spaces ("dense gemm") and its needles with
+    underscores ("gemm_a16_w16"); cards write `kernel_class: dense_gemm`. Those are the same word in
+    three spellings, and comparing them raw made `normalize_class("dense_gemm")` return `unmatched` —
+    a lookup for the single most common class in the tree matched nothing, silently. Canonicalising
+    BOTH sides is what makes the comparison spelling-independent; folding only one side would break
+    the underscore needles that do match today.
+    """
+    return re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()
+
+
 def normalize_class(operator, kernel_name=""):
     """Longest matching needle wins — NEVER first-match-in-dict-order.
 
@@ -127,12 +140,23 @@ def normalize_class(operator, kernel_name=""):
     later attention kernel would then be handed linear-attention cards. That mis-filing is silent:
     the card exists, the lookup succeeds, and only the content is wrong. Observed on the first real
     batch. Specificity, not declaration order, decides.
+
+    A class name is always a needle for its own class. Without that, `memory movement` and
+    `reduction / norm` were reachable only through an incidental synonym ("copy", "norm") and a card
+    that named its class exactly right was the one that did not match.
+
+    Canonicalising the haystack moves three of the fifteen class strings on disk, and all three are
+    the mis-filing described above, committed by this function against itself: `linear_attention` fell
+    to "attention" (the very example in the paragraph above), `quantized_gemm` to "quantize / cast" on
+    the 5-character needle "quant", and only `dense_gemm`/`memory_movement` were honestly unmatched.
+    Nothing on disk is rewritten — this is consulted by `match` and by `drain` only for a card that
+    supplies no key of its own.
     """
-    hay = f"{operator or ''} {kernel_name or ''}".lower()
+    hay = canon(f"{operator or ''} {kernel_name or ''}")
     best, best_len = UNMATCHED, 0
     for cls, needles in CLASS_VOCAB.items():
-        for n in needles:
-            if n in hay and len(n) > best_len:
+        for n in [canon(x) for x in needles] + [canon(cls)]:
+            if n and n in hay and len(n) > best_len:
                 best, best_len = cls, len(n)
     return best
 
@@ -150,6 +174,50 @@ def normalize_regime(regime):
 def make_key(operator, device, regime, kernel_name=""):
     return " · ".join([normalize_class(operator, kernel_name), normalize_gfx(device),
                        normalize_regime(regime)])
+
+
+def card_axes(card):
+    """(classes, gfxs, regimes) a card can be matched on — SETS, from its HEADER fields.
+
+    `match` used to derive these by splitting `meta["key"]` on "·" and requiring exactly three
+    parts. But `key` is the curator's plain-English sentence by design — `drain` says so in its own
+    comment, after an earlier attempt to write triples over it failed the lint on all 58 cards it had
+    just written. So the requirement was never met: 140 of 142 cards have a plain-English key, the
+    parse dropped them before scoring, and `match` returned zero cards for every query on every
+    device — gfx950 included. It read exactly like "the KB has nothing", which is the failure this
+    module's own header warns about.
+
+    The header fields carry the same three axes and are present on 141/143 cards, so they are the
+    primary source. Sets, and the key triple still folded in, so that the two triple-keyed cards keep
+    matching everything they matched before: this is a strict superset, not a replacement.
+    """
+    m = card.get("meta", card) if hasattr(card, "get") else card
+    classes, gfxs, regimes = set(), set(), set()
+
+    def add_class(raw):
+        c = canon(raw)
+        if not c:
+            return
+        classes.add(c)
+        # Also file it under the closed vocabulary, so a card saying `attention_decode` is reachable
+        # from a query that normalizes to `attention`. UNMATCHED is deliberately NOT added: it is the
+        # bucket for "a human should look at this", and seeding it would make every unrecognised
+        # query collide with every unrecognised card.
+        v = normalize_class(raw)
+        if v != UNMATCHED:
+            classes.add(v)
+
+    add_class(m.get("kernel_class"))
+    regimes.add(canon(m.get("regime")))
+    gfxs.update(g.lower() for g in re.findall(r"gfx\d+[a-z]*", str(m.get("platforms") or ""), re.I))
+
+    parts = [p.strip() for p in str(m.get("key") or "").split("·")]
+    if len(parts) == 3:
+        add_class(parts[0])
+        gfxs.add(canon(parts[1]).replace(" ", ""))
+        regimes.add(canon(parts[2]))
+
+    return classes, gfxs, {r for r in regimes if r}
 
 
 def slugify(s):
@@ -460,14 +528,14 @@ def cmd_match(kb, a):
     cls, gfx, regime = key.split(" · ")
     scored = []
     for c in all_cards(kb):
-        parts = [p.strip() for p in c["meta"].get("key", "").split("·")]
-        if len(parts) != 3 or parts[0] != cls:
+        classes, gfxs, regimes = card_axes(c)
+        if cls not in classes and canon(cls) not in classes:
             continue
         why = ["class matches"]
         score = rank(c)
-        if parts[1] == gfx:
+        if gfx in gfxs:
             score += 1.0; why.append("same gfx")
-        if parts[2] == regime:
+        if canon(regime) in regimes:
             score += 0.5; why.append("same regime")
         scored.append((score, c, why))
     scored.sort(key=lambda t: -t[0])

@@ -425,6 +425,74 @@ check("a well-formed card is admitted", json.loads(out)["cards_failing"] == 0,
       json.dumps(json.loads(out)["failures"]))
 shutil.rmtree(dd)
 
+
+# --- recall ------------------------------------------------------------------
+# `match` is the ONLY read path: warm start, cross-kernel transfer and every "has anyone tried this"
+# question go through it. It used to derive a card's axes by splitting `meta["key"]` into a
+# "class · gfx · regime" triple — but `key` is the curator's plain-English sentence by design (see
+# `drain`'s comment, and the default in card() above), so the parse dropped 140 of 142 shipped cards
+# before scoring and match returned ZERO cards for every query on every device. Nothing failed: the
+# command exits 0 with an empty list, which reads as "the KB had nothing useful for you".
+#
+# So these assert on the number of cards RETURNED, not on the exit code, and the fixture cards carry
+# the plain-English key that the shipped tree actually uses.
+def matched(d, **kw):
+    args = ["match", "--max", "99", "--explain"]
+    for k, v in kw.items():
+        args += [f"--{k.replace('_', '-')}", v]
+    rc, out, err = run(d, *args)
+    assert rc == 0, err
+    return json.loads(out)["cards"]
+
+
+dd = fresh()
+write(dd, "dense.md", card("dense", kernel_class="dense_gemm", regime="decode", platforms="[gfx950]"))
+write(dd, "dense-rdna.md", card("dense-rdna", kernel_class="dense_gemm", regime="decode",
+                                platforms="[gfx1151]"))
+write(dd, "attn.md", card("attn", kernel_class="attention_decode", regime="decode"))
+write(dd, "moe.md", card("moe", kernel_class="moe_grouped_gemm", regime="prefill"))
+write(dd, "norm.md", card("norm", kernel_class="reduction_norm", regime="memory-bound"))
+# The two spellings that survive from the era when a triple WAS written over the key. They must keep
+# matching everything they matched before — this change is a superset, not a replacement.
+write(dd, "triple.md", card("triple", kernel_class="", regime="",
+                            key="dense gemm · gfx950 · decode"))
+
+got = matched(dd, operator="dense_gemm", device="gfx950", regime="decode")
+check("a plain-English-keyed card is recalled at all", len(got) >= 1,
+      "match returned nothing — the read path is dead")
+names = {os.path.basename(c["path"]) for c in got}
+check("underscore kernel_class matches the space-spelled vocabulary",
+      {"dense.md", "dense-rdna.md"} <= names, str(sorted(names)))
+check("a triple-keyed card still matches (superset, not replacement)", "triple.md" in names,
+      str(sorted(names)))
+check("recall is selective, not match-everything", "moe.md" not in names and "norm.md" not in names,
+      str(sorted(names)))
+
+# `attention_decode` is not a vocabulary class; it must still be reachable from a query that
+# normalizes to `attention`, or every card the curator named precisely is the one that never matches.
+check("a specialised class is reachable from its vocabulary class",
+      "attn.md" in {os.path.basename(c["path"]) for c in matched(dd, operator="attention",
+                                                                 device="gfx950", regime="decode")})
+
+# The gfx bonus is what makes a same-device card outrank a borrowed one. It is read from `platforms`.
+byname = {os.path.basename(c["path"]): c for c in matched(dd, operator="dense_gemm",
+                                                          device="gfx1151", regime="decode")}
+check("same-gfx fires off the platforms header",
+      "same gfx" in byname.get("dense-rdna.md", {}).get("why_matched", []),
+      json.dumps(byname.get("dense-rdna.md", {}).get("why_matched")))
+check("a card on another device is still offered, without the bonus",
+      "same gfx" not in byname.get("dense.md", {}).get("why_matched", []))
+check("same-regime fires off the regime header, hyphen spelling included",
+      "same regime" in {w for c in matched(dd, operator="rmsnorm", device="gfx950",
+                                           regime="memory-bound") for w in c["why_matched"]})
+
+# An unrecognised query must NOT collide with every unrecognised card: `unmatched` is the bucket a
+# human inspects, and making it match itself would hand back the tree's junk as advice.
+write(dd, "junk.md", card("junk", kernel_class="wat", regime="n/a"))
+check("unmatched does not match unmatched",
+      not matched(dd, operator="something_nobody_has_seen", device="gfx950", regime="decode"))
+shutil.rmtree(dd)
+
 print()
 if FAILED:
     print(f"{len(FAILED)} FAILED: {', '.join(FAILED)}")
