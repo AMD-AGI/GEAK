@@ -122,6 +122,8 @@ FP8_E4M3FN = _Dtype("float8_e4m3fn", 1, True, 448.0)
 FP8_E5M2 = _Dtype("float8_e5m2", 1, True, 57344.0)
 FP8_E4M3FNUZ = _Dtype("float8_e4m3fnuz", 1, True, 240.0)
 FP8_E5M2FNUZ = _Dtype("float8_e5m2fnuz", 1, True, 57344.0)
+# Packed sub-byte: two fp4 per byte, and no copy_kernel on ROCm -- see _to_device.
+FP4 = _Dtype("float4_e2m1fn_x2", 1, True, 6.0)
 
 # Every fake randn() cycles this pattern, so amax/RMS over a synthesized operand is a known number.
 # 4.0 (not 3.0) because 4.0 * 0.1 is exactly representable and 3.0 * 0.1 is not.
@@ -2444,6 +2446,307 @@ class TestRunLeg(_LegTestCase):
         self.assertIn("produced no JSON", str(cm.exception))
 
 
+class TestDeclaredAttrs(_HarnessTestCase):
+    """`meta.live_tensor_attrs` retrofits a dispatch flag onto an oracle captured before `attrs`."""
+
+    def test_a_declared_attribute_lands_on_the_named_kwarg(self):
+        w1, w2 = _T((2, 2)), _T((2, 2))
+        args = {"pos": [], "kw": {"w1": w1, "w2": w2, "doweight_stage1": False}}
+        hl.apply_declared_attrs(args, {"live_tensor_attrs": {"w1": {"is_shuffled": True},
+                                                             "w2": {"is_shuffled": True}}})
+        self.assertTrue(getattr(w1, "is_shuffled", False))
+        self.assertTrue(getattr(w2, "is_shuffled", False))
+
+    def test_a_positional_operand_is_addressable_by_index(self):
+        w = _T((2, 2))
+        args = {"pos": [_T((1,)), w], "kw": {}}
+        hl.apply_declared_attrs(args, {"live_tensor_attrs": {"pos[1]": {"is_shuffled": True}}})
+        self.assertTrue(getattr(w, "is_shuffled", False))
+
+    def test_the_other_bundle_shapes_are_accepted_too(self):
+        """The role sketch spells `call` as `fn(**args)` and `iter_eager_cases_from_oracle` yields a
+        flat mapping; rejecting those would raise "name does not land" on a perfectly good meta."""
+        flat, seq = _T((2, 2)), _T((2, 2))
+        hl.apply_declared_attrs({"w1": flat, "doweight_stage1": False},
+                                {"live_tensor_attrs": {"w1": {"is_shuffled": True}}})
+        hl.apply_declared_attrs([_T((1,)), seq],
+                                {"live_tensor_attrs": {"pos[1]": {"is_shuffled": True}}})
+        self.assertTrue(getattr(flat, "is_shuffled", False))
+        self.assertTrue(getattr(seq, "is_shuffled", False))
+
+    def test_no_declaration_is_a_no_op(self):
+        args = {"pos": [], "kw": {"w1": _T((2, 2))}}
+        self.assertIs(hl.apply_declared_attrs(args, {}), args)
+        self.assertIs(hl.apply_declared_attrs(args, {"live_tensor_attrs": None}), args)
+
+    def test_a_declaration_that_lands_on_nothing_raises_instead_of_silently_doing_nothing(self):
+        """The per-task ancestor returned early on an empty spec, so a stale name read exactly like
+        "nothing to restore" and the leg went on measuring the wrong backend."""
+        args = {"pos": [_T((1,))], "kw": {"w1": _T((2, 2)), "doweight_stage1": False}}
+        for name in ("w3", "doweight_stage1", "pos[7]"):   # unknown, non-tensor, out of range
+            with self.assertRaises(hl.HarnessIncompleteError) as cm:
+                hl.apply_declared_attrs(args, {"live_tensor_attrs": {name: {"is_shuffled": True}}})
+            self.assertIn(repr(name), str(cm.exception))
+
+
+class TestKernelMatcherLookup(unittest.TestCase):
+    """`kernel_matches` is loaded out of the VENDORED kernel_selection.py rather than re-implemented,
+    so canonicalisation cannot drift from e2e_workflow.js. A task dir vendored before that file
+    existed must degrade to "no matcher" (the gate then reports unchecked), never explode: refusing
+    to measure because a sanity check could not load is strictly worse than not running the check."""
+
+    @contextlib.contextmanager
+    def _unloaded(self):
+        prev = sys.modules.pop("kernel_selection", _MISSING)
+        try:
+            yield
+        finally:
+            if prev is _MISSING:
+                sys.modules.pop("kernel_selection", None)
+            else:
+                sys.modules["kernel_selection"] = prev
+
+    def test_the_real_vendored_matcher_is_returned(self):
+        with self._unloaded():
+            self.assertTrue(hl._kernel_matcher()("ck::kernel_moe_mxgemm<float>", "kernel_moe_mxgemm"))
+
+    def test_an_absent_kernel_selection_py_is_not_an_error(self):
+        with self._unloaded(), _patched(os.path, exists=lambda p: False):
+            self.assertIsNone(hl._kernel_matcher())
+            # nothing half-built left registered for the next caller to import successfully
+            self.assertNotIn("kernel_selection", sys.modules)
+
+    def test_a_file_that_fails_to_load_is_not_an_error_either(self):
+        broken = types.SimpleNamespace(
+            util=types.SimpleNamespace(spec_from_file_location=lambda *a, **k: 1 / 0))
+        with self._unloaded(), _patched(hl, importlib=broken):
+            self.assertIsNone(hl._kernel_matcher())
+            self.assertNotIn("kernel_selection", sys.modules)
+
+
+class TestObservedDeviceKernels(_CudaTestCase):
+    """The EVIDENCE the dispatch gate rules on: which GPU kernels a leg actually launched.
+
+    The gate below is only as good as this reader. It gets its names out of a chrome trace, so the
+    two failure modes that matter are silent: reading the wrong rows (host-side `cpu_op` rows carry
+    kernel-ish names and would make ANY seam look like it launched the right kernel) and losing the
+    per-case keying (one case's kernels attributed to another's sig). Both produce a well-formed
+    verdict, so nothing downstream can notice. Fake `torch.profiler` -- the trace is a document, and
+    a document is exactly what can be written by hand."""
+
+    @contextlib.contextmanager
+    def _profiler(self, *docs):
+        """Install a torch.profiler whose export_chrome_trace writes the next scripted doc."""
+        seen = {"activities": [], "exports": 0}
+        pending = list(docs)
+        mod = types.ModuleType("torch.profiler")
+
+        class _Profile:
+            def __init__(self, activities=None, **kw):
+                seen["activities"].append(list(activities or []))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def export_chrome_trace(self, path):
+                seen["exports"] += 1
+                with open(path, "w") as fh:
+                    json.dump(pending.pop(0) if pending else {"traceEvents": []}, fh)
+
+        mod.profile = _Profile
+        mod.ProfilerActivity = types.SimpleNamespace(CPU="CPU", CUDA="CUDA")
+        prev = sys.modules.get("torch.profiler", _MISSING)
+        sys.modules["torch.profiler"] = mod
+        self.torch.profiler = mod
+        try:
+            yield seen
+        finally:
+            if prev is _MISSING:
+                sys.modules.pop("torch.profiler", None)
+            else:
+                sys.modules["torch.profiler"] = prev
+
+    @staticmethod
+    def _trace(*events):
+        return {"traceEvents": list(events)}
+
+    @staticmethod
+    def _kernel(name):
+        return {"cat": "kernel", "name": name}
+
+    def _calls(self):
+        seen = []
+        return seen, seen.append
+
+    def test_only_device_kernel_rows_are_read(self):
+        """A `cpu_op` row is named after the ATEN op, and an `ac2g` flow row after the kernel it
+        points at. Counting either would let a seam that launched nothing certify itself."""
+        seen, call = self._calls()
+        with self._profiler(self._trace(
+                {"cat": "cpu_op", "name": "aten::mm"},
+                {"cat": "kernel", "name": "mfma_moe1_silu_mul_afp4_wfp4_bf16"},
+                {"cat": "gpu_memcpy", "name": "Memcpy DtoH"},
+                {"cat": "ac2g", "name": "mfma_moe1_silu_mul_afp4_wfp4_bf16"},
+                {"ph": "M", "name": "process_name"})):
+            got = hl.observed_device_kernels(call, [{"sig": "prefill"}])
+        self.assertEqual(got, {"prefill": ["mfma_moe1_silu_mul_afp4_wfp4_bf16"]})
+
+    def test_each_case_is_profiled_and_keyed_separately(self):
+        """Per-sig keying is the whole point: the gate reports WHICH case dispatched wrong, and a
+        MoE seam routinely launches a different kernel for decode than for prefill."""
+        seen, call = self._calls()
+        with self._profiler(self._trace(self._kernel("decode_attn")),
+                            self._trace(self._kernel("ck::kernel_moe_mxgemm"))) as prof:
+            got = hl.observed_device_kernels(call, [{"sig": "decode", "m": 1},
+                                                    {"sig": "prefill_M16384", "m": 16384}])
+        self.assertEqual(got, {"decode": ["decode_attn"],
+                               "prefill_M16384": ["ck::kernel_moe_mxgemm"]})
+        self.assertEqual(prof["exports"], 2)
+        self.assertEqual([c["sig"] for c in seen[:3]], ["decode"] * 3)   # warmup+warmup+profiled
+
+    def test_repeated_launches_are_reported_once_in_launch_order(self):
+        """One case launches the same kernel many times; the gate compares NAMES, so the list is a
+        set with an order, not a histogram."""
+        seen, call = self._calls()
+        with self._profiler(self._trace(
+                self._kernel("b"), self._kernel("a"), self._kernel("b"), self._kernel("a"))):
+            got = hl.observed_device_kernels(call, [{"sig": "s"}])
+        self.assertEqual(got["s"], ["b", "a"])
+
+    def test_the_case_is_warmed_up_before_it_is_profiled(self):
+        """First call of a JIT/autotuned op compiles and picks a config; profiling THAT records the
+        tuner's trial kernels, not the steady-state one the server runs."""
+        seen, call = self._calls()
+        with self._profiler(self._trace(self._kernel("k"))):
+            hl.observed_device_kernels(call, [{"sig": "s"}], warmup=3)
+        self.assertEqual(len(seen), 4)
+        with self._profiler(self._trace(self._kernel("k"))):
+            hl.observed_device_kernels(call, [{"sig": "s"}], warmup=0)
+        self.assertEqual(len(seen), 5)
+        with self._profiler(self._trace(self._kernel("k"))):
+            hl.observed_device_kernels(call, [{"sig": "s"}], warmup=-2)   # never a negative range
+        self.assertEqual(len(seen), 6)
+
+    def test_the_device_is_synchronised_around_the_profiled_call(self):
+        """Async launches that land after the profiler exits are simply absent from the trace."""
+        seen, call = self._calls()
+        before = self.stack.syncs
+        with self._profiler(self._trace(self._kernel("k"))):
+            hl.observed_device_kernels(call, [{"sig": "s"}])
+        self.assertEqual(self.stack.syncs - before, 2)
+
+    def test_both_activities_are_requested(self):
+        """CUDA alone drops the correlation rows some torch builds need to emit `cat: kernel`."""
+        seen, call = self._calls()
+        with self._profiler(self._trace()) as prof:
+            hl.observed_device_kernels(call, [{"sig": "s"}])
+        self.assertEqual(prof["activities"], [["CPU", "CUDA"]])
+
+    def test_a_bare_list_trace_is_read_too(self):
+        """Older torch exports the event array at the top level instead of under traceEvents."""
+        seen, call = self._calls()
+        with self._profiler([self._kernel("k"), {"cat": "cpu_op", "name": "aten::mm"}]):
+            got = hl.observed_device_kernels(call, [{"sig": "s"}])
+        self.assertEqual(got, {"s": ["k"]})
+
+    def test_a_trace_with_nothing_readable_reports_an_empty_list_not_an_error(self):
+        """Empty == "no evidence", which assert_baseline_dispatch reports as unchecked. Raising here
+        would convert a profiler that is unavailable into a failed measurement."""
+        seen, call = self._calls()
+        for doc in ({"traceEvents": None}, {}, [], {"traceEvents": ["not-a-dict", None]},
+                    {"traceEvents": [{"cat": "kernel", "name": ""},
+                                     {"cat": "kernel", "name": None},
+                                     {"cat": None, "name": "k"}]}):
+            with self._profiler(doc):
+                self.assertEqual(hl.observed_device_kernels(call, [{"sig": "s"}]), {"s": []})
+
+    def test_a_case_with_no_sig_is_keyed_by_position(self):
+        """cases.py is task-generated; a missing/blank sig must not collapse two cases onto one key
+        and silently halve the evidence."""
+        seen, call = self._calls()
+        with self._profiler(self._trace(self._kernel("k0")), self._trace(self._kernel("k1"))):
+            got = hl.observed_device_kernels(call, [{}, {"sig": ""}])
+        self.assertEqual(got, {"0": ["k0"], "1": ["k1"]})
+
+    def test_the_trace_file_does_not_outlive_the_read(self):
+        """One profiled case of a real MoE seam exports tens of MB; the legs run under the task dir."""
+        seen, call = self._calls()
+        paths = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def mkdtemp(*a, **kw):
+            paths.append(real_mkdtemp(*a, **kw))
+            return paths[-1]
+
+        with self._profiler(self._trace(self._kernel("k"))):
+            with _patched(tempfile, mkdtemp=mkdtemp):
+                hl.observed_device_kernels(call, [{"sig": "s"}])
+        self.assertTrue(paths)
+        self.assertFalse(any(os.path.exists(p) for p in paths))
+
+
+class TestBaselineDispatchGate(_HarnessTestCase):
+    """The baseline leg must launch the kernel the task is NAMED after, else it measures a dispatch
+    flip and no existing gate can catch it (the golden was frozen from that same wrong baseline).
+    Observed on a MoE task whose oracle lost `w1.is_shuffled`: 1.55x isolated, 1.0034x e2e."""
+
+    META = {"device_kernel": "mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256_pm1_async_v32"}
+
+    @contextlib.contextmanager
+    def _leg(self, kernels, matcher=None):
+        def run_leg(task, overlay, mode, **kw):
+            self.assertEqual(mode, "dispatch")
+            return {"kernels": kernels}
+
+        with _patched(hl, _run_leg=run_leg,
+                      _kernel_matcher=lambda: (matcher or (lambda w, g: w == g))):
+            yield
+
+    def test_matching_kernel_passes_and_reports_the_case(self):
+        with self._leg({"prefill_M16384": ["some_memcpy", self.META["device_kernel"]]}):
+            got = hl.assert_baseline_dispatch("/t", "/t/baseline_overlay", self.META)
+        self.assertTrue(got["checked"])
+        self.assertEqual(got["matched_cases"], ["prefill_M16384"])
+
+    def test_a_different_kernel_is_a_harness_defect_not_a_correctness_failure(self):
+        """HarnessIncompleteError => "regenerate the UT" (exit 3), never "reject the candidate"."""
+        with self._leg({"prefill_M16384": ["kernel_moe_mxgemm"]}):
+            with self.assertRaises(hl.HarnessIncompleteError) as cm:
+                hl.assert_baseline_dispatch("/t", "/t/baseline_overlay", self.META)
+        why = str(cm.exception)
+        self.assertIn("kernel_moe_mxgemm", why)
+        self.assertIn(self.META["device_kernel"], why)
+        self.assertIn("Do NOT", why)   # never advise exporting a config the server did not have
+
+    def test_no_kernels_observed_is_reported_unchecked_never_a_verdict(self):
+        """Absence of evidence (CPU box, profiler unavailable) must not manufacture a failure."""
+        with self._leg({"prefill_M16384": []}):
+            got = hl.assert_baseline_dispatch("/t", "/t/baseline_overlay", self.META)
+        self.assertFalse(got["checked"])
+
+    def test_a_leg_that_cannot_run_degrades_to_unchecked_instead_of_blocking_the_measurement(self):
+        """A task dir vendored before `--mode dispatch` makes the leg exit non-zero -- not evidence
+        about dispatch. `measure_legs` calls this every time, so letting the RuntimeError out would
+        turn a gate against wrong baselines into a new way for a correct task to fail to measure."""
+        def run_leg(task, overlay, mode, **kw):
+            raise RuntimeError("leg(dispatch) exited 2: invalid choice: 'dispatch'")
+
+        with _patched(hl, _run_leg=run_leg, _kernel_matcher=lambda: (lambda w, g: w == g)):
+            got = hl.assert_baseline_dispatch("/t", "/t/baseline_overlay", self.META)
+        self.assertFalse(got["checked"])
+        self.assertIn("invalid choice", got["why"])
+
+    def test_missing_matcher_or_device_kernel_degrades_to_unchecked(self):
+        with _patched(hl, _kernel_matcher=lambda: None,
+                      _run_leg=lambda *a, **k: self.fail("must not run a leg")):
+            self.assertFalse(hl.assert_baseline_dispatch("/t", "/b", self.META)["checked"])
+        with _patched(hl, _run_leg=lambda *a, **k: self.fail("must not run a leg")):
+            self.assertFalse(hl.assert_baseline_dispatch("/t", "/b", {})["checked"])
+
+
 class TestLegTimeoutReleasesTheGpu(_LegTestCase):
     """A timed-out leg must take everything it spawned with it.
 
@@ -2800,6 +3103,46 @@ class TestBaselineRandomOutputs(_LegTestCase):
         self.assertEqual(loaded, [(dest, "cpu")])          # CPU-side, so either leg can compare it
         self.assertEqual(list(got), ["decode|0"])
 
+    def test_a_repeat_recording_gets_its_own_file_so_it_cannot_clobber_the_first(self):
+        self.torch.load = lambda path, map_location=None: {}
+        self._script(lambda cmd, env: _Proc(0, '{"out": "x", "n": 1}'))
+        hl.baseline_random_outputs(self.task, self.meta, rep=1)
+        self.assertEqual(self.sub.flag("--out"),
+                         os.path.join(self.task, "_baseline_random.rep1.pt"))
+
+
+class TestBaselineNoiseFloor(_LegTestCase):
+    """An op that reduces with atomics does not reproduce ITSELF bit-for-bit. Measure that spread
+    with the same metric the candidate is judged by, or the candidate is blamed for it."""
+
+    def _blobs(self, second):
+        blobs = {"_baseline_random.pt": {"m1|0": _T((2,), [1.0, 2.0])},
+                 "_baseline_random.rep1.pt": {"m1|0": second}}
+        self.torch.load = lambda path, map_location=None: blobs[os.path.basename(path)]
+        self._script(lambda cmd, env: _Proc(0, '{"out": "x", "n": 1}'))
+
+    def test_the_baseline_is_recorded_twice_at_the_same_seed_and_scored_against_itself(self):
+        self._blobs(_T((2,), [1.0, 2.2]))
+        floor = hl.baseline_noise_floor(self.task, self.meta, 0.01, seed=7)
+        self.assertEqual(self.sub.modes(), ["oracle", "oracle"])
+        self.assertEqual({c["cmd"][c["cmd"].index("--seed") + 1] for c in self.sub.calls}, {"7"})
+        self.assertAlmostEqual(floor["m1|0"], 0.2 / (2.0 + 0.01 * math.sqrt(2.5)), places=6)
+
+    def test_an_already_recorded_first_pass_is_reused_rather_than_paid_for_twice(self):
+        self._blobs(_T((2,), [1.0, 2.0]))
+        floor = hl.baseline_noise_floor(self.task, self.meta, 0.01,
+                                        baseline_outputs={"m1|0": _T((2,), [1.0, 2.0])})
+        self.assertEqual(self.sub.modes(), ["oracle"])     # only the REPEAT leg runs
+        self.assertEqual(floor, {"m1|0": 0.0})
+
+    def test_a_key_the_repeat_did_not_produce_gets_no_floor_instead_of_a_zero_one(self):
+        """A zero floor would read as 'proven deterministic' — the opposite of 'unmeasured'."""
+        self._blobs(_T((2,), [1.0, 2.0]))
+        floor = hl.baseline_noise_floor(self.task, self.meta, 0.01,
+                                        baseline_outputs={"m1|0": _T((2,), [1.0, 2.0]),
+                                                          "m1|1": _T((2,), [1.0, 2.0])})
+        self.assertEqual(list(floor), ["m1|0"])
+
 
 # --------------------------------------------------------------------------- #
 # The recorded-oracle arm of check_random_vs_baseline / run_correctness
@@ -2864,6 +3207,31 @@ class TestCheckRandomVsBaselineRecorded(_HarnessTestCase):
             [self._shape()], 0.01, draws=1, baseline_outputs={"m1|0": ref})
         self.assertTrue(ok, per[0].get("note"))
         self.assertEqual([t.device for t in ref], ["cpu", "cpu"])   # oracle not mutated
+
+    def test_a_deviation_inside_the_baselines_own_spread_passes_and_says_so(self):
+        """The 0.559 'relative error' that failed the FlyDSL MoE UT was the baseline against
+        ITSELF. Without this the honest candidate is failed for the op's atomic reduction order."""
+        ok, per = hl.check_random_vs_baseline(
+            None, lambda args: _T((2,), [1.0, 2.2]), [self._shape()], 0.01, draws=1,
+            baseline_outputs={"m1|0": _T((2,), [1.0, 2.0])}, noise_floor={"m1|0": 0.1})
+        self.assertTrue(ok)
+        self.assertTrue(per[0]["correct"])
+        self.assertEqual(per[0]["noise_floor"], 0.1)
+        self.assertIn("run-to-run spread", per[0]["note"])
+
+    def test_a_deviation_past_the_margin_still_fails(self):
+        ok, per = hl.check_random_vs_baseline(
+            None, lambda args: _T((2,), [1.0, 2.2]), [self._shape()], 0.01, draws=1,
+            baseline_outputs={"m1|0": _T((2,), [1.0, 2.0])}, noise_floor={"m1|0": 0.001})
+        self.assertFalse(ok)
+        self.assertFalse(per[0]["correct"])
+
+    def test_a_key_with_no_measured_floor_is_judged_as_strictly_as_before(self):
+        ok, per = hl.check_random_vs_baseline(
+            None, lambda args: _T((2,), [1.0, 2.2]), [self._shape()], 0.01, draws=1,
+            baseline_outputs={"m1|0": _T((2,), [1.0, 2.0])}, noise_floor={"other|0": 9.9})
+        self.assertFalse(ok)
+        self.assertIsNone(per[0]["noise_floor"])
 
     def test_a_candidate_that_returns_no_tensor_is_named_rather_than_compared(self):
         ok, per = hl.check_random_vs_baseline(
@@ -2982,6 +3350,51 @@ class TestOracleSharedAndLazy(_HarnessTestCase):
         self.assertIn("a", out)
         self.assertEqual(len(out["b"]), 1)
 
+    def test_reconstruct_captured_restores_loader_attrs_after_the_device_move(self):
+        """`.to()` returns a fresh tensor whose __dict__ is empty, so attrs must be re-applied AFTER.
+
+        This is the whole defect: aiter's fused-MoE gate reads `getattr(w1, "is_shuffled", False)`, so
+        an oracle replayed without the label dispatches to a different backend than the captured
+        server ran -- and the golden, frozen from that same wrong baseline, agrees with itself.
+        """
+        leaf = {"__tensor__": True, "data": _T((2,), fill=1.5),
+                "attrs": {"is_shuffled": True, "quant_mode": "mxfp4"}}
+        out = hl.reconstruct_captured(leaf, device="cuda")
+        self.assertIsNot(out, leaf["data"])          # the move really did make a new object
+        self.assertIs(getattr(out, "is_shuffled", False), True)
+        self.assertEqual(getattr(out, "quant_mode", None), "mxfp4")
+
+    def test_reconstruct_captured_rehydrates_a_dtype_with_no_copy_kernel(self):
+        """ROCm torch 2.9 cannot `.to("cuda")` a float4_e2m1fn_x2 tensor -- an MXFP4 oracle would be
+        unreplayable. The identical storage crosses as a uint8 view and is restored to its dtype."""
+        class _Fp4(_T):
+            def to(self, *args, **kw):
+                if self.dtype is not UINT8:
+                    raise NotImplementedError('"copy_kernel" not implemented for \'Float4_e2m1fn_x2\'')
+                return _Fp4(self.shape, self.tolist(), dtype=self.dtype,
+                            device=(args[0] if args else kw.get("device")))
+
+            def view(self, dtype):
+                return _Fp4(self.shape, self.tolist(), dtype=dtype, device=self.device)
+
+        out = hl.reconstruct_captured(
+            {"__tensor__": True, "data": _Fp4((2,), fill=1.5, dtype=FP4),
+             "attrs": {"is_shuffled": True}}, device="cuda")
+        self.assertIs(out.dtype, FP4)
+        self.assertEqual(out.device, "cuda")
+        self.assertIs(getattr(out, "is_shuffled", False), True)
+
+    def test_reconstruct_captured_without_attrs_is_unchanged(self):
+        out = hl.reconstruct_captured({"__tensor__": True, "data": _T((2,), fill=1.5)}, "cpu")
+        self.assertFalse(getattr(out, "is_shuffled", False))
+
+    def test_apply_captured_attrs_survives_a_tensor_that_refuses_setattr(self):
+        class _Frozen:
+            __slots__ = ()
+
+        frozen = _Frozen()
+        self.assertIs(hl.apply_captured_attrs(frozen, {"is_shuffled": True}), frozen)
+
     def test_reconstruct_captured_repr_and_containers(self):
         self.assertEqual(hl.reconstruct_captured({"__repr__": "x"}, "cpu"), "x")
         nested = hl.reconstruct_captured(
@@ -3052,6 +3465,25 @@ class TestOracleSharedAndLazy(_HarnessTestCase):
         self.assertIn("hidden_states", case["args"])
         self.assertIn("w1", case["args"])
         self.assertEqual(case["args"]["scale"], 1.0)
+
+    def test_eager_cases_apply_declared_attrs_when_meta_is_passed(self):
+        """Otherwise the retrofit reaches the TIMING legs (cases.py applies it) but not the frozen
+        correctness cases, and the two gates grade different backends. No meta => unchanged."""
+        blob = {
+            "shared": {},
+            "records": [{
+                "sig": "s0",
+                "args": (),
+                "kwargs": {"w1": {"__tensor__": True, "data": _T((2, 2), fill=1.0)}},
+                "output": {"__tensor__": True, "data": _T((2,), fill=2.0)},
+            }],
+        }
+        self.torch.load = lambda *a, **k: blob
+        plain = next(hl.iter_eager_cases_from_oracle("ref.pt"))
+        self.assertFalse(getattr(plain["args"]["w1"], "is_shuffled", False))
+        meta = {"live_tensor_attrs": {"w1": {"is_shuffled": True}}}
+        case = next(hl.iter_eager_cases_from_oracle("ref.pt", meta=meta))
+        self.assertTrue(getattr(case["args"]["w1"], "is_shuffled", False))
 
     def test_check_correct_multi_lazy_runs_independence_with_two_cases(self):
         def call(args):

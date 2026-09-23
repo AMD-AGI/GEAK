@@ -88,7 +88,8 @@ def _snapshot(out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True)
-    ap.add_argument("--mode", required=True, choices=("list", "resolve", "time", "oracle"))
+    ap.add_argument("--mode", required=True,
+                    choices=("list", "resolve", "time", "oracle", "dispatch"))
     ap.add_argument("--bucket", default="")
     ap.add_argument("--out", default="")
     ap.add_argument("--seed", type=int, default=0)
@@ -115,6 +116,16 @@ def main():
     if h.deployment_compile_mode(regime):
         call = h.compiled_op(call, regime)
     graph = h.deployment_graph_mode(regime)
+
+    if a.mode == "dispatch":
+        # Which GPU kernels this leg ACTUALLY launches. Read on the BASELINE leg only, by
+        # harness_lib.assert_baseline_dispatch — changing which kernel runs is what a candidate is FOR.
+        sel = [c for c in cases.timing_cases(h, meta) if not a.bucket or c["sig"] == a.bucket]
+        print(json.dumps({
+            "kernels": h.observed_device_kernels(lambda c: call(c["args"]), sel),
+            "identity": _identity(meta["target_callable"]),
+        }))
+        return
 
     if a.mode == "time":
         sel = [c for c in cases.timing_cases(h, meta) if not a.bucket or c["sig"] == a.bucket]

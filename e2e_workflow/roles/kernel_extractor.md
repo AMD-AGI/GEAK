@@ -27,15 +27,36 @@ You are invoked once per kernel candidate. Read first:
   harness_lib.py        # VENDORED scripts/harness_lib.py — the SHARED timing/correctness lib; IMMUTABLE
   leg_runner.py         # VENDORED scripts/leg_runner.py — runs ONE leg under the ambient overlay; IMMUTABLE
   overlay_setup.py      # VENDORED scripts/overlay_setup.py — builds the candidate overlay; IMMUTABLE
+  kernel_selection.py   # VENDORED scripts/kernel_selection.py — supplies the kernel-name matcher the
+                        #   baseline dispatch gate uses; stdlib-only; IMMUTABLE
   unittest.py           # driver: h.measure_legs + h.run_correctness, prints the metric; IMMUTABLE
   meta.json             # name, source path, target_callable, candidate_bind, shapes, dtypes, backend,
                         #   regime, served_regimes, build, random_draws (default 3), checksum
 ```
-**Vendor the three shared scripts into the task dir**
-(`for f in harness_lib.py leg_runner.py overlay_setup.py; do cp "$SKILL_DIR/scripts/$f" "$TASK/"; done`).
+**Vendor the four shared scripts into the task dir**
+(`for f in harness_lib.py leg_runner.py overlay_setup.py kernel_selection.py; do cp "$SKILL_DIR/scripts/$f" "$TASK/"; done`).
 `unittest.py` imports `harness_lib` for ALL timing + correctness — never hand-roll a timing loop or an
 allclose check. This is what makes every task measure the same way; it also keeps the task
 self-contained + immutable (the validator sha-checks them alongside `reference_io.pt`).
+`kernel_selection.py` supplies the kernel-name matcher only (stdlib-only, no torch); without it
+`h.assert_baseline_dispatch` degrades to a no-op and the baseline is never proven to be deployment.
+
+🔴 **Rehydrate the oracle with `h.reconstruct_captured` — never hand-roll the walk.** `capture_shapes`
+records more than data+dtype+shape: loader-set Python attributes (`attrs`) carry BACKEND DISPATCH
+DECISIONS — aiter's fused-MoE gate reads `getattr(w1, "is_shuffled", False)` to choose FlyDSL vs CK.
+`torch.save` does not persist them and `.to(device)` drops them, so a hand-written rehydrator silently
+replays the op on a DIFFERENT kernel than the captured server ran — and the golden, frozen from that
+same wrong baseline, agrees with itself. `h.reconstruct_captured` (and `h.eager_cases_from_oracle`,
+which calls it) re-apply `attrs` after the device move. Need an extra step (a uint8 raw view for a
+packed fp4 operand)? Wrap it — do not replace it.
+
+When rehydration genuinely cannot preserve the attribute (`.view(dt)`/`.set_()` return fresh tensors),
+or the oracle predates `attrs` and the flag is simply not in the file, declare it in
+`meta.live_tensor_attrs` (`{operand: {attr: value}}`, `"pos[<i>]"` for a positional) and call
+`h.apply_declared_attrs(args, META)` ONCE, after rehydration, where every case set draws its operands —
+and pass `META` to `h.eager_cases_from_oracle` so correctness gets it too. Record WHY the declared value
+is deployment's (a server.log line, a profile): `assert_baseline_dispatch` proves the result reaches the
+right kernel, not that the value is right.
 
 ### 🔴 THE TWO LEGS ARE THE SAME CODE UNDER TWO PYTHONPATHS — read this before writing anything
 There is no `baseline_callable`, and no second copy of the source to time against. Both legs run the
@@ -80,7 +101,8 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (the Architect'
 short_name, classification, extract_hint = the `module:attr` callable to hook, candidate_backends,
 regime, and — when an upstream TraceLens prior was available — OPTIONAL `source_hint` (resolved source
 file), `launcher_hint` (launcher seam), `bound_type`), `CURRENT_OVERLAY` (the accepted-kernel stack
-carried forward — may be empty on the first milestone), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`.
+carried forward — may be empty on the first milestone), `CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`,
+and `PROFILE_TOPN` (the profiler's own topN JSON — the ONLY authority on how a device kernel is spelled).
 
 ### Resolve + HONOR the ONLINE REGIME first (same contract as PHASE=extract_op)
 The #1 cause of "isolated win, e2e loss/crash" is a unittest that SYNTHESIZES its inputs with OFFLINE
@@ -155,6 +177,20 @@ freeze an out-of-regime oracle nobody should trust.
    capture overlay, driven by the SAME workload as the profile so shapes match the regime:
    ```bash
    TASK="$EVAL_DIR/kernels/<short_name>_task"; mkdir -p "$TASK"
+   # FIRST, before any capture: prove KERNEL.device_kernel is a name the PROFILER actually recorded.
+   # It is hand-transcribed prose until this passes. One `_HA_S_` mistyped as `_AS_` is invisible to
+   # every later check except this one, and reads downstream as "the seam is wrong" -- which sends the
+   # extractor descending through callables it can never fix. This costs no GPU, no server, no capture.
+   # On failure: DO NOT proceed. COPY the right name verbatim out of profile_kernel_candidates.
+   # PROFILE_TOPN can be empty on a resumed run whose state predates the profile. Then the check
+   # CANNOT run -- say so in `notes`; its absence is not a pass, and must not abort the extraction.
+   if [ -s "$PROFILE_TOPN" ]; then
+     python3 "$SKILL_DIR/scripts/kernel_selection.py" \
+       --target "<selected module:attr>" --device-kernel "<KERNEL.device_kernel>" \
+       --profile-top-n "$PROFILE_TOPN" --check-device-kernel || exit 1
+   else
+     echo "WARN: PROFILE_TOPN is empty - pre-capture device_kernel name check SKIPPED (report in notes)"
+   fi
    # FREEZE the live serving stack as this task's baseline env, then hang the capture hook off a COPY
    # of it. --from is what stacks them: two overlay dirs on PYTHONPATH do NOT compound (only the first
    # sitecustomize is imported), so capturing on a bare hook overlay would silently capture the
@@ -182,6 +218,7 @@ freeze an out-of-regime oracle nobody should trust.
      --capture-meta "$TASK"/capture.pid-*.rank-*/meta.json \
      --torch-trace "$TASK"/selection_trace.pid-*.rank-*.call-*.json \
      --candidate-target "<candidate module:attr>" \
+     --profile-top-n "$PROFILE_TOPN" \
      --task-dir "$TASK" \
      --out "$TASK/selection_validation.json"
    ```
@@ -194,6 +231,13 @@ freeze an out-of-regime oracle nobody should trust.
    **promotes** the selected process's `meta.json` + `reference_io.pt` into the task root and **reclaims**
    every `capture.pid-*` directory (issue #429 — do NOT leave per-rank oracles around). On failure or
    before a capture retry, reclaim without promote:
+
+   🔴 **`device_kernel_name_mismatch` is NOT `device_kernel_not_under_target`.** The first means the
+   seam launched GPU work but nothing spelled like `--device-kernel`; the verdict lists what it *did*
+   launch in `kernels_under_target`. The seam is LIVE — keep it, keep the capture, and fix the NAME by
+   copying one of those strings verbatim. Descending to another callable there repairs a defect that is
+   not present and starts a search with no terminating condition. Only `device_kernel_not_under_target`
+   (the marker launched nothing at all) means the seam is wrong and you should go deeper.
 
    ```bash
    python3 "$SKILL_DIR/scripts/capture_shapes.py" --cleanup-task-dir "$TASK" --no-promote
@@ -317,8 +361,15 @@ freeze an out-of-regime oracle nobody should trust.
      case sigs). The BASELINE leg records its outputs for those draws in its own process:
      ```python
      base_out = h.baseline_random_outputs(TASK, meta, draws=meta.get("random_draws", 3))
+     floor = h.baseline_noise_floor(TASK, meta, tol, draws=meta.get("random_draws", 3),
+                                    baseline_outputs=base_out)   # pass to run_correctness(noise_floor=)
      ```
-     and the candidate is compared against them (same seed ⇒ same inputs). **🔴 Do NOT randomize SHAPES
+     and the candidate is compared against them (same seed ⇒ same inputs). **🔴 Always pass
+     `noise_floor=`.** Records the baseline a second time at the same seed and scores it against the
+     first: an op that reduces with atomics or split-k (FlyDSL MoE, `persist_cu*`) does not reproduce
+     itself bit-for-bit, and `correct`'s `atol = tol*RMS(ref)` inflates a 1e-05 wobble on a near-zero
+     element into a ~0.5 "relative error". Without the floor the honest candidate is FAILED for the
+     baseline's own nondeterminism. Costs one extra oracle leg (~15-25s). **🔴 Do NOT randomize SHAPES
      — dims stay online-aligned; only the input VALUES vary.** Fold its correctness verdict into the
      overall PASS/FAIL (a delta vs
      baseline on ANY draw FAILS the unittest); print its per-draw `speedup` as a SECONDARY robustness
@@ -466,22 +517,27 @@ freeze an out-of-regime oracle nobody should trust.
    is still a byte-copy of the baseline file, so the legs differ by PATH while `speedup≈1.0` — that is
    the expected smoke result. If the target cannot be resolved on the live stack at all, do NOT fall
    back to a `kernel_src/` strawman: return `editable:false` with a clear reason.
-   > **Exit-code contract — a missing replay leg is a UT DEFECT, not a kernel/smoke failure.** The UT
-   > routes correctness through `h.run_correctness(...)`, which for a graph-deploy kernel (`cuda_graph=true`)
-   > RAISES `h.HarnessIncompleteError` when no ≥2-shape replay bundle was wired — and it has ALREADY
-   > printed the `UT_HARNESS_INCOMPLETE: …` sentinel line itself (so the smoke sees it even if `main()`
-   > forgets to catch). The generated `main()` MUST translate the exception to a DEDICATED exit code; do
-   > NOT re-print the sentinel (it is already on stdout — a second print is just noise):
+   > **Exit-code contract — a missing replay leg or a wrong baseline is a UT DEFECT, not a kernel/smoke
+   > failure.** TWO harness calls raise `h.HarnessIncompleteError`: `h.run_correctness(...)`, when a
+   > graph-deploy kernel (`cuda_graph=true`) was wired no ≥2-shape replay bundle, and `h.measure_legs(...)`,
+   > when the BASELINE leg never launches `meta.device_kernel`. Both have ALREADY printed the
+   > `UT_HARNESS_INCOMPLETE: …` sentinel themselves. The generated `main()` MUST wrap **both** — not just
+   > correctness, or a dispatch mismatch escapes as an uncaught traceback and scores exit 1, the code
+   > reserved for a genuine kernel failure. Do NOT re-print the sentinel (already on stdout):
    > ```python
    > try:
+   >     per_case = h.measure_legs(TASK, META)                    # raises if the baseline is not deployment
    >     ok, report = h.run_correctness(META["regime"], ...)      # eager+random+replay legs
    > except h.HarnessIncompleteError:
    >     sys.exit(3)                                              # 3 = regenerate UT (sentinel already printed)
    > sys.exit(0 if ok else 1)                                     # 1 = real correctness FAIL, 2 = env
    > ```
-   > On smoke **exit 3 OR a `UT_HARNESS_INCOMPLETE` line on stdout: REGENERATE the UT** — add the replay
-   > bundle (build ≥2 boundary cases via `h.boundary_decode_seq_lens`/`h.shuffled_block_table` for attn, or
-   > the family×M-buckets for gemm; wire `fill/run/read_out`) and re-run the smoke. Retry up to 3 times.
+   > On smoke **exit 3 OR a `UT_HARNESS_INCOMPLETE` line on stdout: REGENERATE the UT** — read WHICH
+   > defect the sentinel names. Missing replay bundle: add it (build ≥2 boundary cases via
+   > `h.boundary_decode_seq_lens`/`h.shuffled_block_table` for attn, or the family×M-buckets for gemm;
+   > wire `fill/run/read_out`). Baseline dispatch mismatch: recapture the oracle, declare the lost
+   > attribute in `meta.live_tensor_attrs`, or re-select the seam — NEVER by exporting a tuned config
+   > the captured server did not have. Then re-run the smoke. Retry up to 3 times.
    > Do **NOT** record `unittest_smoke:"fail"` or drop the head for exit 3 — that status is reserved for a
    > genuine baseline-bind / correctness failure (exit 1). Only after 3 failed regenerations set
    > `unittest_smoke:"fail"` with `reason="harness_incomplete_unrecoverable"`.
@@ -662,7 +718,8 @@ needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
 op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
 TraceLens `source_hint`/`launcher_hint`/`bound_type`), `GEMM_SYNTH` (bool, default true),
-`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, and OPTIONAL `PROFILE_WORKLOAD_JSON` (the profiler's
+`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, `PROFILE_TOPN` (the profiler's own topN JSON — the ONLY
+authority on how a device kernel is spelled), and OPTIONAL `PROFILE_WORKLOAD_JSON` (the profiler's
 per-(shape,dtype) weighted workload model — slice this kernel's cases into `workload_path`, see below).
 
 > **TraceLens shape double-check (mandatory when the shapes came from TraceLens).** If `KERNEL.shapes`
