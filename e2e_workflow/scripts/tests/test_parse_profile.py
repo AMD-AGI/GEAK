@@ -89,7 +89,7 @@ def _shared_impl(func):
 # window [300,350), cpu_ops carrying the shapes, and kernel launches placed
 # both inside and outside those windows.
 # --------------------------------------------------------------------------- #
-GEMM = "void gemm_kernel<float>(int)"
+GEMM = "void hipblaslt::gemm_kernel<float>(int)"
 
 
 def _trace_events():
@@ -207,6 +207,7 @@ class TestClassify(unittest.TestCase):
             "rms_norm_forward": ("reduction_norm", "triton", True),
             "vectorized_elementwise_add": ("elementwise_overhead", "torch_native", True),
             "Memcpy DtoH": ("memory", "torch_native", False),
+            "ncclDevKernel_Generic_1": ("communication", "rccl", False),
         }
         for name, want in expected.items():
             with self.subTest(name=name):
@@ -230,6 +231,27 @@ class TestClassify(unittest.TestCase):
 
     def test_classification_is_case_insensitive(self):
         self.assertEqual(pp.classify("TRITON_FOO")[0], "triton")
+
+    def test_atom_and_jit_gemms_are_not_mislabeled_as_hipblaslt(self):
+        cases = {
+            "void ck::kernel_gemm_xdl_cshuffle_v3_multi_d_blockscale_b_preshuffle<int>()":
+                ("fused_custom", "ck", True),
+            "_batched_gemm_a8w8_kernel_BLOCK_SIZE_M_4_BLOCK_SIZE_N_16":
+                ("triton", "triton", True),
+            "void kn_mla_reduce_v1_ps<MlaTraits>()":
+                ("fused_custom", "aiter", True),
+            "void kn_get_mla_metadata_v1_2<MlaTraits>()":
+                ("fused_custom", "aiter", True),
+            "_ZN5aiter35fused_qk_rmsnorm_group_quant_kernel":
+                ("fused_custom", "aiter", True),
+        }
+        for name, want in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(pp.classify(name)[:3], want)
+
+    def test_generic_gemm_name_is_not_assumed_to_be_hipblaslt(self):
+        cls, backend, editable, _ = pp.classify("custom_gemm_dispatch")
+        self.assertEqual((cls, backend, editable), ("other", "unknown", True))
 
 
 class TestShortNameAndNormKey(unittest.TestCase):

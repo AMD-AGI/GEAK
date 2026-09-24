@@ -22,6 +22,7 @@ no GPU, no framework, no model. It also pins the two GPU-pinning shapes
 (inherited outer ROCR mask vs bare box), which the same env line decides.
 """
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +36,7 @@ FAKE_SCRIPT = """#!/usr/bin/env bash
 {{
   printf 'EXTRA_VLLM_ARGS=%s\\n'      "${{EXTRA_VLLM_ARGS-<unset>}}"
   printf 'EXTRA_SGLANG_ARGS=%s\\n'    "${{EXTRA_SGLANG_ARGS-<unset>}}"
+  printf 'EXTRA_ATOM_ARGS=%s\\n'      "${{EXTRA_ATOM_ARGS-<unset>}}"
   printf 'ROCR_VISIBLE_DEVICES=%s\\n' "${{ROCR_VISIBLE_DEVICES-<unset>}}"
   printf 'HIP_VISIBLE_DEVICES=%s\\n'  "${{HIP_VISIBLE_DEVICES-<unset>}}"
   printf 'CUDA_VISIBLE_DEVICES=%s\\n' "${{CUDA_VISIBLE_DEVICES-<unset>}}"
@@ -92,7 +94,8 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
         env = dict(os.environ)
         for k in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
                   "CUDA_VISIBLE_DEVICES", "RECIPE_ENV_FILE",
-                  "EXTRA_VLLM_ARGS", "EXTRA_SGLANG_ARGS", "EXTRA_ENV",
+                  "EXTRA_ATOM_ARGS", "EXTRA_VLLM_ARGS", "EXTRA_SGLANG_ARGS",
+                  "EXTRA_ENV",
                   "PYTHONPATH", "OVERLAY_PYTHONPATH"):
             env.pop(k, None)
         env.update(
@@ -155,6 +158,179 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
         cap, _ = self._launch(backend="sglang", extra_server_args="--geak-y",
                               recipe=recipe)
         self.assertEqual(cap["EXTRA_SGLANG_ARGS"], "--mem-fraction-static 0.8 --geak-y")
+
+    def test_atom_backend_uses_extra_atom_args(self):
+        recipe = self._recipe_file([
+            ("EXTRA_ATOM_ARGS", "--kv_cache_dtype fp8 --block-size 16"),
+        ])
+        cap, _ = self._launch(
+            backend="atom",
+            extra_server_args="--max-num-seqs 8",
+            recipe=recipe,
+        )
+        self.assertEqual(
+            cap["EXTRA_ATOM_ARGS"],
+            "--kv_cache_dtype fp8 --block-size 16 --max-num-seqs 8",
+        )
+
+    def test_atom_wrap_survives_a_late_session_leader(self):
+        """The pgid probe must SETTLE, not judge on one sample.
+
+        A launch script records $! at FORK and can hand back the pid -- and exit --
+        before that child has reached setsid(2), so the first probe still sees the
+        SCRIPT's group.  The sibling test above only hits that window by luck (it
+        loses on a loaded 2-vCPU CI runner and wins on a fast dev box), so this one
+        WIDENS it deterministically: the child becomes a session leader late, which
+        is the exact state CI observed.  Judging on the first sample sets
+        SERVER_GROUP_UNVERIFIED=1, which disables group teardown AND skips the ATOM
+        supervisor -- leaking the rank workers the supervisor exists to reap.
+        """
+        live_script = os.path.join(self.tmp, "late_leader_magpie.sh")
+        with open(live_script, "w", encoding="utf-8") as fh:
+            fh.write("""#!/usr/bin/env bash
+bash -c 'sleep 0.6; exec setsid bash -c "exec -a atom-server sleep 300"' &
+server_pid=$!
+printf '%s\n' "$server_pid" > "$MAGPIE_SERVER_PID_FILE"
+disown "$server_pid" 2>/dev/null || true
+exit 0
+""")
+        os.chmod(live_script, 0o755)
+        driver = os.path.join(self.tmp, "late_leader_driver.sh")
+        with open(driver, "w", encoding="utf-8") as fh:
+            fh.write(f"""#!/usr/bin/env bash
+set -uo pipefail
+set +m
+source "{MAGPIE}"
+adapter_launch
+printf '%s %s\n' "$SERVER_PID" "${{MAGPIE_INNER_SERVER_PID:-unset}}"
+if [ -n "${{MAGPIE_INNER_SERVER_PID:-}}" ]; then
+  kill -TERM "-$SERVER_PID" 2>/dev/null || true
+  kill -KILL "-$MAGPIE_INNER_SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+else
+  # The wrap did NOT happen, so SERVER_PID may still share OUR process group and a
+  # group kill here would take the test runner down with it -- which is precisely
+  # why this failure mode is worth pinning.  Kill the pid only.
+  kill -KILL "$SERVER_PID" 2>/dev/null || true
+fi
+exit 0
+""")
+        os.chmod(driver, 0o755)
+        env = dict(os.environ)
+        for key in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
+                    "CUDA_VISIBLE_DEVICES", "SERVER_GROUP_UNVERIFIED"):
+            env.pop(key, None)
+        env.update(
+            BACKEND="atom", MODEL=os.path.join(self.tmp, "model"), TP="1",
+            PORT="18080", GPU="1", OUT_DIR=self.out,
+            LOG=os.path.join(self.out, "server.log"), PROFILE="0",
+            MAGPIE_LAUNCH_SCRIPT=live_script, EXTRA_SERVER_ARGS="",
+            ATOM_MAGPIE_STOP_GRACE_S="1",
+        )
+        proc = subprocess.run(
+            [BASH, driver], env=env, cwd=self.tmp,
+            capture_output=True, text=True, timeout=45,
+        )
+        self.assertNotIn("does not lead its own group", proc.stderr)
+        self.assertIn("wrapped by supervisor", proc.stdout)
+        supervisor_pid, inner_pid = proc.stdout.strip().splitlines()[-1].split()
+        self.assertNotEqual(inner_pid, "unset")
+        self.assertNotEqual(supervisor_pid, inner_pid)
+
+    def test_atom_server_is_wrapped_and_reaped_after_leader_term(self):
+        """Magpie must retain ATOM's native worker-safe teardown property."""
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous_sigterm)
+
+        live_script = os.path.join(self.tmp, "live_atom_magpie.sh")
+        with open(live_script, "w", encoding="utf-8") as fh:
+            fh.write("""#!/usr/bin/env bash
+setsid bash -c 'exec -a atom-server sleep 300' &
+server_pid=$!
+printf '%s\n' "$server_pid" > "$MAGPIE_SERVER_PID_FILE"
+disown "$server_pid" 2>/dev/null || true
+exit 0
+""")
+        os.chmod(live_script, 0o755)
+        state = os.path.join(self.tmp, "atom_reaper_state.txt")
+        driver = os.path.join(self.tmp, "atom_reaper_driver.sh")
+        with open(driver, "w", encoding="utf-8") as fh:
+            fh.write(f"""#!/usr/bin/env bash
+set -uo pipefail
+set +m
+source "{MAGPIE}"
+adapter_launch
+printf '%s %s\n' "$SERVER_PID" "$MAGPIE_INNER_SERVER_PID" > "{state}"
+_inner_start=$(awk '{{print $22}}' "/proc/$MAGPIE_INNER_SERVER_PID/stat")
+_supervisor_ready() {{
+  kill -0 "$SERVER_PID" 2>/dev/null || return 1
+  _supervisor_pgid=$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')
+  [ "$_supervisor_pgid" = "$SERVER_PID" ] || return 1
+  _sigcgt=$(awk '/^SigCgt:/ {{print $2}}' "/proc/$SERVER_PID/status" 2>/dev/null || true)
+  [ -n "$_sigcgt" ] && (( (16#$_sigcgt & 16384) != 0 ))
+}}
+_deadline=$((SECONDS + 5))
+while ! _supervisor_ready && [ "$SECONDS" -lt "$_deadline" ]; do
+  sleep 0.05
+done
+if ! _supervisor_ready; then
+  kill -KILL "-$SERVER_PID" 2>/dev/null || true
+  kill -KILL "-$MAGPIE_INNER_SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  exit 7
+fi
+_supervisor_alive() {{
+  kill -0 "$SERVER_PID" 2>/dev/null || return 1
+  _state=$(awk '{{print $3}}' "/proc/$SERVER_PID/stat" 2>/dev/null || true)
+  case "$_state" in Z*) return 1 ;; esac
+  return 0
+}}
+kill -TERM "-$SERVER_PID" || exit 7
+_deadline=$((SECONDS + 8))
+while _supervisor_alive && [ "$SECONDS" -lt "$_deadline" ]; do
+  sleep 0.1
+done
+if _supervisor_alive; then
+  kill -KILL "-$SERVER_PID" 2>/dev/null || true
+  kill -KILL "-$MAGPIE_INNER_SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  exit 8
+fi
+wait "$SERVER_PID" 2>/dev/null || true
+_deadline=$((SECONDS + 8))
+while [ "$SECONDS" -lt "$_deadline" ]; do
+  kill -0 "$MAGPIE_INNER_SERVER_PID" 2>/dev/null || exit 0
+  _state=$(awk '{{print $3}}' "/proc/$MAGPIE_INNER_SERVER_PID/stat" 2>/dev/null || true)
+  case "$_state" in Z*) exit 0 ;; esac
+  _now_start=$(awk '{{print $22}}' "/proc/$MAGPIE_INNER_SERVER_PID/stat" 2>/dev/null || true)
+  [ -n "$_now_start" ] && [ "$_now_start" != "$_inner_start" ] && exit 0
+  sleep 0.1
+done
+kill -KILL "-$MAGPIE_INNER_SERVER_PID" 2>/dev/null || true
+exit 9
+""")
+        os.chmod(driver, 0o755)
+        env = dict(os.environ)
+        for key in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
+                    "CUDA_VISIBLE_DEVICES", "SERVER_GROUP_UNVERIFIED"):
+            env.pop(key, None)
+        env.update(
+            BACKEND="atom", MODEL=os.path.join(self.tmp, "model"), TP="1",
+            PORT="18080", GPU="1", OUT_DIR=self.out,
+            LOG=os.path.join(self.out, "server.log"), PROFILE="0",
+            MAGPIE_LAUNCH_SCRIPT=live_script, EXTRA_SERVER_ARGS="",
+            ATOM_MAGPIE_STOP_GRACE_S="1",
+        )
+        proc = subprocess.run(
+            [BASH, driver], env=env, cwd=self.tmp,
+            capture_output=True, text=True, timeout=45,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        with open(state, encoding="utf-8") as fh:
+            supervisor_pid, inner_pid = fh.read().split()
+        self.assertNotEqual(supervisor_pid, inner_pid)
+        self.assertIn("wrapped by supervisor", proc.stdout)
 
     # ---- GPU-pinning shapes ------------------------------------------------------
 

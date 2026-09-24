@@ -592,15 +592,16 @@ class TestBenchLauncher(_RunE2ECase):
     def setUp(self):
         super().setUp()
         for key in ("BENCH_LAUNCHER", "MAGPIE_LAUNCH_SCRIPT",
-                    "MAGPIE_LAUNCH_SCRIPT_SOURCE", "MAGPIE_VLLM_SCRIPT",
+                    "MAGPIE_LAUNCH_SCRIPT_SOURCE", "MAGPIE_ATOM_SCRIPT",
+                    "MAGPIE_VLLM_SCRIPT",
                     "MAGPIE_SGLANG_SCRIPT", "MAX_MODEL_LEN",
                     "RECIPE_ENV_FILE", "RECIPE_ENV_SOURCE", "RECIPE_ENV_REPLAYED",
                     "RECIPE_ENV_GEAK_OWNED", "GEAK_STRICT_RECIPE_ENV",
                     "EFFECTIVE_SERVER_ARGS_COMPLETE"):
             os.environ.pop(key, None)
 
-    def _recipe(self, *, script="vllm_mi355x.sh", subdir="", root=None,
-                with_lib=True, write_script=True):
+    def _recipe(self, *, script="vllm_mi355x.sh", framework="vllm", subdir="",
+                root=None, with_lib=True, write_script=True):
         """An orchestrator launch recipe next to a checkout it can point at.
 
         ``write_script=False`` + ``with_lib=False`` leaves the checkout path
@@ -619,7 +620,7 @@ class TestBenchLauncher(_RunE2ECase):
         recipe = self.tmp / "baseline_config.with_envs.yaml"
         recipe.write_text(
             "benchmark:\n"
-            "  framework: vllm\n"
+            f"  framework: {framework}\n"
             "  model: /models/Qwen3-8B\n"
             "  envs:\n"
             "    TP: 1\n"
@@ -661,6 +662,27 @@ class TestBenchLauncher(_RunE2ECase):
         os.environ["MAGPIE_SGLANG_SCRIPT"] = "/magpie/sglang.sh"
         self.assertEqual(rx.apply_bench_launcher({"framework": "sglang"}), "magpie")
         self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/sglang.sh")
+
+    def test_atom_per_backend_env_script_is_discovered(self):
+        os.environ["MAGPIE_ATOM_SCRIPT"] = "/magpie/atom.sh"
+        self.assertEqual(rx.apply_bench_launcher({"framework": "atom"}), "magpie")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], "/magpie/atom.sh")
+
+    def test_atom_recipe_enables_magpie_and_replays_atom_env(self):
+        recipe, script = self._recipe(script="atom_mi355x.sh", framework="atom")
+        launcher = rx.apply_bench_launcher({
+            "launch_recipe": recipe,
+            "framework": "atom",
+            "eval_dir": str(self.tmp / "eval"),
+        })
+        self.assertEqual(launcher, "magpie")
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"], "launch_recipe")
+        self.assertIn("MAX_MODEL_LEN", os.environ["RECIPE_ENV_REPLAYED"].split())
+        self.assertIn(
+            b"MAX_MODEL_LEN=6144\0",
+            Path(os.environ["RECIPE_ENV_FILE"]).read_bytes(),
+        )
 
     def test_unsupported_backend_keeps_native_even_with_a_script(self):
         launcher = rx.apply_bench_launcher(
@@ -709,6 +731,31 @@ class TestBenchLauncher(_RunE2ECase):
         rx.apply_bench_launcher({"launch_recipe": recipe, "framework": "vllm"})
 
         self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], script)
+
+    def test_an_absolute_script_in_the_recipe_is_taken_as_is(self):
+        """Some orchestrators record benchmark_script as a full path. Searching
+        for it would raise NotImplementedError (rglob rejects an absolute
+        pattern, and the OSError guard does not catch it), losing a script the
+        first candidate already resolved."""
+        checkout = self.tmp / "InferenceX@abc123"
+        (checkout / "benchmarks").mkdir(parents=True)
+        elsewhere = self.tmp / "scripts"
+        elsewhere.mkdir()
+        script = elsewhere / "vllm_mi355x.sh"
+        script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        (elsewhere / "benchmark_lib.sh").write_text("# lib\n", encoding="utf-8")
+        recipe = self.tmp / "baseline_config.with_envs.yaml"
+        recipe.write_text(
+            "benchmark:\n"
+            "  framework: vllm\n"
+            f"  benchmark_script: {script}\n"
+            f"  inferencex_path: {checkout}\n",
+            encoding="utf-8",
+        )
+
+        rx.apply_bench_launcher({"launch_recipe": str(recipe), "framework": "vllm"})
+
+        self.assertEqual(os.environ["MAGPIE_LAUNCH_SCRIPT"], str(script))
 
     def test_an_explicit_script_outranks_the_recipe(self):
         recipe, _ = self._recipe()
