@@ -290,8 +290,12 @@ function amdahlCeilingPct(pct_gpu_time, isolated) {
 // env/flag) wins while keeping the backstop exactly where byte-parity is waived. Backward-safe: an
 // integrator that doesn't report `parity_kind` only trips the guard when the RUN uses an accuracy gate.
 function parityIsSoft(integ) {
-  const pk = integ && integ.parity_kind;               // 'byte_exact' | 'accuracy' | 'none' (optional)
+  const pk = integ && integ.parity_kind;               // 'byte_exact' | 'accuracy' | 'op_tolerance' | 'none' (optional)
   if (pk === 'accuracy') return true;
+  // op_tolerance rests on a NUMERIC op-level probe, not on e2e byte-parity — same soft class as 'accuracy'
+  // (a degenerate server can still pass a per-op check). Stating it explicitly rather than leaning on the
+  // unknown-kind fallback below, which already resolves it to soft whenever the run sets an accuracy gate.
+  if (pk === 'op_tolerance') return true;
   if (pk === 'byte_exact' || pk === 'none') return false;
   return ACCURACY_GATE !== 'none';                      // unknown -> soft only when the run uses an accuracy gate
 }
@@ -316,11 +320,53 @@ function rejectClass(reason) {
   if (CORRECTNESS_REJECT_RX.test(r)) return 'correctness';
   return '';
 }
-// A gate 'accept'/'stack' only counts as a REAL win if the measured e2e delta is not an implausible
-// (corruption) speedup. Centralizes the guard so every integrate site treats a too-good-to-be-true
-// delta as a reject instead of banking it. GENERIC (uses only pct_gpu_time + isolated speedup).
-function integAccepted(integ, pct_gpu_time, isolated) {
+// Authoring promotion is intentionally stricter than config/tuning promotion.  A free-form
+// `provenance_ok:true` is not evidence by itself: the Integrator must return the immutable identities
+// it actually re-checked, the live seam/binding it installed, and the engagement witness.  Keeping this
+// in deterministic workflow code prevents one banking site (or one wording change in the role) from
+// silently accepting an untraceable patch.
+const SHA256_RX = /^[0-9a-f]{64}$/i;
+function isAuthoringPromotion(kr) {
+  const k = kr || {};
+  if (k.provenance === 'knowledge_base_replay') return false;
+  const kind = String(k.winner_kind || '').toLowerCase();
+  return kind === 'patch' || kind === 'authored' || !!(k.code_patch || k.final_patch);
+}
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((out, key) => {
+      out[key] = canonicalJson(value[key]);
+      return out;
+    }, {});
+  }
+  return value;
+}
+function provenanceAllowsPromotion(integ, kr) {
+  if (!isAuthoringPromotion(kr)) return true;
+  if (!integ || integ.provenance_ok !== true || !String(integ.accepted_overlay || '').trim()) return false;
+  if (typeof integ.accepted_env !== 'string' || typeof integ.accepted_flags !== 'string') return false;
+  if (!String(integ.engagement_evidence || '').trim()) return false;
+  const p = integ.provenance;
+  if (!p || !SHA256_RX.test(String(p.authored_patch_sha256 || '')) ||
+      !SHA256_RX.test(String(p.oracle_sha256 || '')) ||
+      !String(p.target_seam || '').trim() ||
+      !p.candidate_binding || typeof p.candidate_binding !== 'object' ||
+      Array.isArray(p.candidate_binding) || !Object.keys(p.candidate_binding).length) return false;
+  const k = kr || {};
+  if (k.reference_io_sha256 &&
+      String(p.oracle_sha256).toLowerCase() !== String(k.reference_io_sha256).toLowerCase()) return false;
+  if (k.target_callable && String(p.target_seam) !== String(k.target_callable)) return false;
+  if (k.candidate_bind &&
+      JSON.stringify(canonicalJson(p.candidate_binding)) !==
+      JSON.stringify(canonicalJson(k.candidate_bind))) return false;
+  return true;
+}
+// A gate 'accept'/'stack' only counts as a REAL win if its provenance is complete and the measured e2e
+// delta is not an implausible (corruption) speedup. Centralizes both guards so every banking site agrees.
+function integAccepted(integ, pct_gpu_time, isolated, kr) {
   return !!(integ && (integ.gate === 'accepted' || integ.gate === 'stack')
+    && provenanceAllowsPromotion(integ, kr)
     && !isImplausibleSpeedup(pct_gpu_time, isolated, integ));
 }
 // Fold the env/flags an ACCEPTED win needs in order to BIND into the running config.
@@ -352,9 +398,12 @@ function bindAcceptedConfig(integ) {
     if (fresh.length) set((cur ? cur + ' ' : '') + fresh.join(' '));
   }
 }
-// The reason string to feed the corrective loop: if the gate "passed" but the delta is impossible, emit
-// an implausible_speedup verdict (routes to the correctness corrective); else the integrator's own reason.
-function gateRejectReason(integ, pct_gpu_time, isolated) {
+// The reason string to feed the corrective loop: turn a nominal accept that fails a deterministic
+// workflow guard into an explicit rejection instead of logging the Integrator's stale "accepted" reason.
+function gateRejectReason(integ, pct_gpu_time, isolated, kr) {
+  if (integ && (integ.gate === 'accepted' || integ.gate === 'stack')
+      && !provenanceAllowsPromotion(integ, kr))
+    return 'provenance_incomplete (authoring promotion requires patch/oracle digests, exact seam/binding, accepted env/flags, overlay, and engagement evidence)';
   if (integ && (integ.gate === 'accepted' || integ.gate === 'stack')
       && isImplausibleSpeedup(pct_gpu_time, isolated, integ))
     return `implausible_speedup (+${(integ.e2e_delta_pct || 0).toFixed(1)}% >> Amdahl ceiling +${amdahlCeilingPct(pct_gpu_time, isolated).toFixed(1)}% on a soft/accuracy-gated accept — likely corruption/degenerate work)`;
@@ -433,11 +482,26 @@ const DEEP_FINAL_ACCURACY_LIMIT = parseInt(A.deep_final_accuracy_limit != null ?
 // candidate vs the true baseline on a sampled gsm8k subset (scripts/gsm8k_eval.py, 5-shot greedy
 // exact_match, InferenceX-style) and accepts iff cand_score >= baseline_score - accuracy_tol — instead of
 // (over-strict) byte-parity. Default 'none' => unchanged byte/greedy parity (normal/fast untouched).
-const ACCURACY_GATE = String(A.accuracy_gate || 'none').trim();          // 'none' | 'gsm8k'
+// A THIRD bar, `accuracy_gate=op_tolerance`, exists for the case byte-parity also over-rejects without
+// any quantization involved: a dtype-preserving KERNEL/BLAS SWAP. A vendor BLAS picks its solution per
+// shape, so swapping tables changes reduction ORDER, which flips borderline greedy argmaxes exactly the
+// way a quant kernel does (measured gfx1151/vLLM: a +14.38% TunableOp table diverged on 3/12 greedy
+// prompts, every divergence coherent and correct). The tuning lane already gates that class of change,
+// and it gates it on a RELATIVE OP-LEVEL error — see perf_knowledge/expert_skills/tuning/tuning-core/
+// correctness_gates.md, whose rule is "establish the baseline error first; a candidate is suspect when it
+// is materially worse, not when it is merely nonzero." This gate brings the integrate seam onto that same
+// standard via scripts/op_parity_probe.py. It is NUMERIC, not task-level: stack accuracy_gate=gsm8k on top
+// when the correctness of the ANSWER (not the trajectory) is what has to hold.
+const ACCURACY_GATE = String(A.accuracy_gate || 'none').trim();          // 'none' | 'gsm8k' | 'op_tolerance'
 const ACCURACY_LIMIT = parseInt(A.accuracy_limit != null ? A.accuracy_limit : 200, 10); // sampled gsm8k subset size
 const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);        // allowed absolute exact_match drop vs baseline
+const OP_TOL = parseFloat(A.op_tol != null ? A.op_tol : 0.01);           // relative op tolerance; matches the tuning lane's rtol=atol=1e-2 convention
+const OP_TOL_FLOOR_MULT = parseFloat(A.op_tol_floor_mult != null ? A.op_tol_floor_mult : 2.0); // candidate error may not exceed this multiple of the BASELINE's own error floor
 const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
-  ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
+  ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py`,
+      ...(ACCURACY_GATE === 'op_tolerance'
+        ? { OP_TOL, OP_TOL_FLOOR_MULT, OP_PARITY_SCRIPT: `${WORKFLOW_DIR}/scripts/op_parity_probe.py` }
+        : {}) }
   : {};
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
@@ -883,6 +947,7 @@ const EXTRACT_OP_SCHEMA = obj({
   target_callable: { type: 'string' }, // module:attr rebind seam for an authored kernel ('' if none)
   baseline_callable: { type: 'string' }, // module:attr of the FROZEN real online kernel (the speedup denominator)
   baseline_frozen: { type: 'boolean' }, // true only when baseline_callable resolves outside the task dir
+  candidate_bind: { type: 'object', additionalProperties: true },
   device_kernel: { type: 'string' },
   seam_candidates: arrObj,
   selection_validation: { type: 'object', additionalProperties: true },
@@ -937,6 +1002,13 @@ const KERNEL_LAYER_SCHEMA = obj({
 
 const INTEGRATE_SCHEMA = obj({
   short_name: { type: 'string' }, provenance_ok: { type: 'boolean' },
+  provenance: obj({
+    authored_patch_sha256: { type: 'string' },
+    oracle_sha256: { type: 'string' },
+    target_seam: { type: 'string' },
+    candidate_binding: { type: 'object', additionalProperties: true },
+  }, ['authored_patch_sha256', 'oracle_sha256', 'target_seam', 'candidate_binding']),
+  engagement_evidence: { type: 'string' },
   isolated_speedup: { type: 'number' }, pct_gpu_time: { type: 'number' },
   e2e_throughput_tok_s: { type: 'number' }, e2e_delta_pct: { type: 'number' },
   // A/B completion signals: the integrator MUST set ab_complete=true ONLY when
@@ -947,8 +1019,10 @@ const INTEGRATE_SCHEMA = obj({
   ab_complete: { type: 'boolean' },
   output_parity: { type: 'string' },
   // How the correctness of an ACCEPT was established: 'byte_exact' (hard greedy byte-parity vs the true
-  // baseline), 'accuracy' (soft sampled task-accuracy probe — quant / accuracy_gate), or 'none'. The
-  // implausible-speedup guard only distrusts an 'accuracy'/soft accept; a byte_exact accept is trusted.
+  // baseline), 'accuracy' (soft sampled task-accuracy probe — quant / accuracy_gate), 'op_tolerance' (soft
+  // relative op-level numeric probe vs an fp32 reference, with the BASELINE kernel's own error as the
+  // floor — accuracy_gate=op_tolerance), or 'none'. The implausible-speedup guard distrusts every SOFT
+  // accept ('accuracy' and 'op_tolerance'); a byte_exact accept is trusted.
   parity_kind: { type: 'string' },
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' },
@@ -1755,6 +1829,12 @@ const e2eFrom = (integ) => ({
   e2e_delta_pct: integ.e2e_delta_pct,
   base_tput: integ.ref_med,
   new_tput: integ.cand_med,
+  provenance_ok: integ.provenance_ok === true,
+  provenance: integ.provenance || {},
+  engagement_evidence: integ.engagement_evidence || '',
+  accepted_overlay: integ.accepted_overlay || '',
+  apply_env: typeof integ.accepted_env === 'string' ? integ.accepted_env : '',
+  apply_flags: typeof integ.accepted_flags === 'string' ? integ.accepted_flags : '',
 });
 // The KERNEL_RESULT that a given integrate A/B actually gated. Both patch spellings are read at the
 // call sites because the two tracks fill different ones (head=code_patch, milestone=final_patch) and
@@ -1780,6 +1860,8 @@ const bankAccepted = (list, e, kr) => {
     winner_kind: e.kind || k.winner_kind || '',
     patch: e.patch || k.code_patch || k.final_patch || '',
     target_callable: k.target_callable || '',
+    candidate_bind: k.candidate_bind || {},
+    reference_io_sha256: k.reference_io_sha256 || '',
     source_path_in_sglang: k.source_path_in_sglang || '',
     apply_env: e.apply_env || k.apply_env || '',
     apply_flags: e.apply_flags || k.apply_flags || '',
@@ -1797,6 +1879,15 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   // Caller inputs win; the tuning carve-out only ever ADDS keys (and is {} when no tuning was banked).
   const withTuning = {
     MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
+    // The correctness bar belongs to EVERY integrate A/B, not just the deep-head one. It used to be
+    // spread only at the two direct `roleAgent('e2e_integrator', ...)` call sites, so all SIX paths
+    // that go through this helper — head-corrective, KB-seed, head, milestone, and the finalize-gate
+    // disk scanner that finishes a resumed A/B — ran with the gate absent and silently fell back to
+    // byte-exact parity. Measured: a seeded finalize-gate run with `accuracy_gate=op_tolerance` set
+    // end-to-end still had the integrator write "no ACCURACY_GATE in inputs -> byte-parity is the
+    // bar". Putting it here rather than at each call site is the point: a seventh caller inherits it.
+    // `{}` when ACCURACY_GATE === 'none', so every existing run's inputs are byte-identical.
+    ...ACCURACY_INPUTS,
     ...tuningIntegrateInputs(), ...inputs,
   };
   let integ = await safeAgent(
@@ -1985,7 +2076,8 @@ async function tryCorrectiveReauthor(spec) {
     // let the next corrective attempt fix it. GENERIC (uses only pct_gpu_time + isolated).
     const implausible2 = ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack')
       && isImplausibleSpeedup(pctForGuard, fix.final_geomean, integ2);
-    if (ab2 && (integ2.gate === 'accepted' || integ2.gate === 'stack') && integ2.e2e_throughput_tok_s > curTput && !implausible2) {
+    if (ab2 && integAccepted(integ2, pctForGuard, fix.final_geomean, krOf(fixInputs)) &&
+        integ2.e2e_throughput_tok_s > curTput) {
       // Carry the CORRECTED patch out to the caller's bankAccepted. The gated KERNEL_RESULT at the
       // call site still holds the broken kernel, and recording that into the KB would publish a
       // patch that was rejected on this very box as if it were the win.
@@ -2876,7 +2968,7 @@ if (want('setup')) {
           'mechanism, so a rejection costs nothing to undo — you simply do not adopt the directory.',
           kbIntegrateInputs, `warm_start integrate ${k.name}`, 'WarmStart');
         const base = kbSeedTput || BASELINE_TPUT;
-        if (abDone(integ) && integAccepted(integ, Number(k.pct_gpu_time) || 0, isolated) &&
+        if (abDone(integ) && integAccepted(integ, Number(k.pct_gpu_time) || 0, isolated, krOf(kbIntegrateInputs)) &&
             integ.e2e_throughput_tok_s > base) {
           kbSeedOverlay = integ.accepted_overlay || kbSeedOverlay;
           kbSeedTput = integ.e2e_throughput_tok_s;
@@ -2897,7 +2989,7 @@ if (want('setup')) {
             measured_delta_pct: integ.e2e_delta_pct, why: integ.reason || '' });
           log(`[kb] ADOPTED kernel ${k.name} (${kind}): e2e now ${kbSeedTput} tok/s (+${integ.e2e_delta_pct}%).`);
         } else {
-          const reason = gateRejectReason(integ, Number(k.pct_gpu_time) || 0, isolated);
+          const reason = gateRejectReason(integ, Number(k.pct_gpu_time) || 0, isolated, krOf(kbIntegrateInputs));
           kernelVerdicts.push({ ...k, kind, outcome: abDone(integ) ? 'rejected' : 'incomplete',
             measured_delta_pct: integ ? integ.e2e_delta_pct : null,
             why: reason || 'A/B did not complete' });
@@ -4000,6 +4092,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             short_name: c.head.short_name, task_dir: c.ext.task_dir, op_kind: c.ext.op_kind, lane: c.key,
             winner_kind: 'patch', winner_backend: c.lang,
             target_callable: c.ext.target_callable || c.head.target_callable || '',
+            candidate_bind: c.ext.candidate_bind || {},
+            reference_io_sha256: c.ext.reference_io_sha256 || '',
             authored_language: c.lang, authored_kernel_eval_dir: c.lastEval,
             apply_env: '', apply_flags: '', code_patch: c.patch || (c.lastEval ? `${c.lastEval}/final_patch.diff` : ''), tuning_artifact: '',
             verified_isolated_speedup: c.best, pct_gpu_time: c.head.pct_gpu_time, parity_note: 'expected_close',
@@ -4017,7 +4111,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (integ && integ.output_parity === 'fail') {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
-        } else if (integAccepted(integ, c.head.pct_gpu_time, c.best) && integ.e2e_throughput_tok_s > curTput) {
+        } else if (integAccepted(integ, c.head.pct_gpu_time, c.best, krOf(deepInputs)) && integ.e2e_throughput_tok_s > curTput) {
           curOverlay = integ.accepted_overlay || curOverlay; curTput = integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
           bindAcceptedConfig(integ);
           bankAccepted(acceptedHeads, { short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', ...e2eFrom(integ), isolated: c.best }, krOf(deepInputs));
@@ -4026,7 +4120,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         } else {
           // gateRejectReason converts an implausible "pass" into a corruption reject so it routes to the
           // correctness corrective (the deep site already calls the corrective helper for every reject).
-          const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
+          const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best, krOf(deepInputs));
           const dcorr = await tryCorrectiveReauthor({
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
             gpu_id: SERVING_GPU, kernel_eval_dir: c.lastEval, task_dir: c.ext.task_dir, language: c.lang,
@@ -4037,6 +4131,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
                 short_name: c.head.short_name, task_dir: c.ext.task_dir, op_kind: c.ext.op_kind, lane: c.key,
                 winner_kind: 'patch', winner_backend: c.lang,
                 target_callable: c.ext.target_callable || c.head.target_callable || '',
+                candidate_bind: c.ext.candidate_bind || {},
+                reference_io_sha256: c.ext.reference_io_sha256 || '',
                 authored_language: c.lang, authored_kernel_eval_dir: c.lastEval, apply_env: '', apply_flags: '',
                 code_patch: c.patch || '', tuning_artifact: '', verified_isolated_speedup: c.best,
                 pct_gpu_time: c.head.pct_gpu_time, parity_note: 'expected_close' },
@@ -4360,6 +4456,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
           winner_kind: cand.winner_kind, winner_backend: cand.source,
           target_callable: st.ext.target_callable || h.target_callable || '',
+          candidate_bind: st.ext.candidate_bind || {},
+          reference_io_sha256: st.ext.reference_io_sha256 || '',
           authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
           apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
           code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
@@ -4376,7 +4474,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const integ = await runIntegrateBothLegs(
         'Apply the head-op winner; gate on e2e throughput.', headWinnerInputs,
         `integrate ${h.short_name}`, 'HeadKernel');
-      if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
+      if (integAccepted(integ, h.pct_gpu_time, cand.isolated, krOf(headWinnerInputs)) && integ.e2e_throughput_tok_s > curTput) {
         curOverlay = integ.accepted_overlay || curOverlay;
         bindAcceptedConfig(integ);
         if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
@@ -4388,7 +4486,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       } else {
         // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
         // impossible (corruption) — so a fake win routes to the correctness corrective instead of banking.
-        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated, krOf(headWinnerInputs));
         const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: st.ext.op_kind, shapes: st.ext.shapes, dtype: st.ext.dtype, regime: h.regime,
@@ -4399,6 +4497,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
                 KERNEL_RESULT: { short_name: h.short_name, task_dir: st.ext.task_dir, op_kind: st.ext.op_kind,
                   winner_kind: cand.winner_kind, winner_backend: cand.source,
                   target_callable: st.ext.target_callable || h.target_callable || '',
+                  candidate_bind: st.ext.candidate_bind || {},
+                  reference_io_sha256: st.ext.reference_io_sha256 || '',
                   authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
                   apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
                   code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
@@ -4602,6 +4702,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       KERNEL_RESULT: { short_name: h.short_name, task_dir: ext.task_dir, op_kind: ext.op_kind,
         winner_kind: cand.winner_kind, winner_backend: cand.source,
         target_callable: ext.target_callable || h.target_callable || '',
+        candidate_bind: ext.candidate_bind || {},
+        reference_io_sha256: ext.reference_io_sha256 || '',
         authored_language: cand.language || '', authored_kernel_eval_dir: cand.kernel_eval_dir || '',
         apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
         code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
@@ -4626,7 +4728,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const abc = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
       if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
       if (ci === 0) top = { cand, inputs, integ, abc };
-      const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput;
+      const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated, krOf(inputs)) && integ.e2e_throughput_tok_s > curTput;
       // Persist EVERY candidate's MEASURED e2e (one ledger row per backend, keyed short_name:backend) so the
       // report + experience library keep the full per-backend picture — not just the winning backend.
       history.ledger.push({ direction: `${h.short_name}:${cand.source}`, isolated_speedup: cand.isolated || 0,
@@ -4637,7 +4739,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!bestPick || integ.e2e_throughput_tok_s > bestPick.integ.e2e_throughput_tok_s) bestPick = { cand, integ, inputs };
         log(`  ${h.short_name}: candidate ${cand.source} PASSED e2e gate (${integ.e2e_throughput_tok_s} tok/s, +${integ.e2e_delta_pct}%).`);
       } else {
-        log(`  ${h.short_name}: candidate ${cand.source} ${abc ? `rejected (${gateRejectReason(integ, h.pct_gpu_time, cand.isolated)})` : `A/B incomplete (${integ ? integ.reason || integ.gate : 'null/timeout'})`}.`);
+        log(`  ${h.short_name}: candidate ${cand.source} ${abc ? `rejected (${gateRejectReason(integ, h.pct_gpu_time, cand.isolated, krOf(inputs))})` : `A/B incomplete (${integ ? integ.reason || integ.gate : 'null/timeout'})`}.`);
       }
     }
 
@@ -4690,7 +4792,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         // gateRejectReason injects an implausible_speedup verdict when the gate "passed" but the delta is
         // impossible (corruption); rejectClass then routes parity/accuracy/implausible rejects to the
         // correctness corrective and JIT/capture/host-sync rejects to the integration corrective.
-        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated);
+        const reason = gateRejectReason(integ, h.pct_gpu_time, cand.isolated, krOf(headIntegrateInputs));
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
@@ -4839,6 +4941,8 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
       KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
         source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
+        candidate_bind: ext.candidate_bind || {},
+        reference_io_sha256: ext.reference_io_sha256 || '',
         final_patch: kl.final_patch, verified_isolated_speedup: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
@@ -4851,7 +4955,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
     // flag => not done; a legacy return without ab_complete behaves as before.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.final_geomean) && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.final_geomean, krOf(mileIntegrateInputs)) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       bindAcceptedConfig(integ);
       curTput = integ.e2e_throughput_tok_s;
@@ -4864,7 +4968,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       // crash-during-warmup (ab_complete=false) of an iso-verified editable kernel earns a corrective
       // re-author (re-optimize the EXISTING kernel; NOT charged to HEAD_BUDGET); only keep PENDING if the
       // A/B was merely incomplete for a NON-fixable reason (real transient timeout/hang). See tryCorrectiveReauthor.
-      const reason = gateRejectReason(integ, c.pct_gpu_time, kl.final_geomean);
+      const reason = gateRejectReason(integ, c.pct_gpu_time, kl.final_geomean, krOf(mileIntegrateInputs));
       const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
             short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
@@ -5051,7 +5155,7 @@ if (want('final')) {
       // measured against the latest accepted baseline.
       { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
       `finish-integrate ${p.short_name}`, FINALIZE_GATE_PHASE);
-    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated, krOf(p.inputs)) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       bindAcceptedConfig(integ);
       if (p.track === 'head') {
@@ -5066,8 +5170,9 @@ if (want('final')) {
       log(`Finalize-gate: pending win ${p.short_name} ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
       history.ledger.push({ direction: p.short_name, isolated_speedup: p.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: 'finished at finalize-gate' });
     } else if (abDone(integ)) {
-      log(`Finalize-gate: pending win ${p.short_name} REJECTED after a COMPLETED A/B (${integ.reason || integ.gate}).`);
-      history.ledger.push({ direction: p.short_name, isolated_speedup: p.isolated, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: integ.reason || 'no e2e gain' });
+      const reason = gateRejectReason(integ, p.pct_gpu_time, p.isolated, krOf(p.inputs));
+      log(`Finalize-gate: pending win ${p.short_name} REJECTED after a COMPLETED A/B (${reason}).`);
+      history.ledger.push({ direction: p.short_name, isolated_speedup: p.isolated, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
     } else {
       stillIncomplete.push(p.short_name);
       log(`Finalize-gate: pending win ${p.short_name} A/B STILL incomplete after ${AB_FINISH_RETRIES} finish-retries ` +
@@ -5175,6 +5280,13 @@ if (want('final')) {
       MEASUREMENT_MODE: VALIDATION_MEASUREMENT_MODE,
       MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_SAMPLES,
       SKILL_DIR: WORKFLOW_DIR,
+      // The Director re-runs parity INDEPENDENTLY, so it needs the same bar the integrate gate used.
+      // Without this it always byte-diffs, and a candidate the integrator accepted under an opt-in
+      // gate (quant via `gsm8k`, or a BLAS/kernel swap via `op_tolerance`) comes back `flagged` on
+      // the exact divergence that gate exists to permit — the run would end reporting a failure it
+      // had already adjudicated. Spread from the same object the integrator gets, so the two seams
+      // can never drift apart; `{}` when ACCURACY_GATE === 'none', leaving this call byte-identical.
+      ...ACCURACY_INPUTS,
       // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
       // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup
       // / TTFT / TPOT (and status/parity) to its authoritative same-session numbers, so report-vs-director
