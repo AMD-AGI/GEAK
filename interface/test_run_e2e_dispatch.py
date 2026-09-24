@@ -1806,6 +1806,41 @@ class TestInvokeWorkflow(_RunE2ECase):
         with self.assertRaises(rx.WorkflowParseError):
             rx.invoke_workflow("P", 100, None)
 
+    def test_fresh_canonical_file_beats_sdk_text(self):
+        self.install_module("claude_agent_sdk", _make_fake_sdk([]))
+        eval_dir = self.tmp / "canonical"
+        eval_dir.mkdir()
+        (eval_dir / rx.WORKFLOW_RETURN_FILE).write_text(
+            json.dumps({"eval_dir": str(eval_dir), "status": "stale"}))
+
+        def invoke(_prompt, _timeout, pinned):
+            # The stale handoff must be gone before the workflow starts.
+            self.assertFalse((eval_dir / rx.WORKFLOW_RETURN_FILE).exists())
+            (eval_dir / rx.WORKFLOW_RETURN_FILE).write_text(json.dumps({
+                "eval_dir": pinned, "status": "fresh",
+            }))
+            return '{"eval_dir": "/from/sdk", "status": "sdk"}'
+
+        self.patch_rx("_invoke_via_sdk", invoke)
+        wf = rx.invoke_workflow("P", 100, str(eval_dir))
+        self.assertEqual(wf["status"], "fresh")
+        self.assertEqual(wf["eval_dir"], str(eval_dir))
+
+    def test_foreign_canonical_eval_dir_falls_back_to_sdk_text(self):
+        self.install_module("claude_agent_sdk", _make_fake_sdk([]))
+        eval_dir = self.tmp / "canonical"
+        eval_dir.mkdir()
+
+        def invoke(_prompt, _timeout, _pinned):
+            (eval_dir / rx.WORKFLOW_RETURN_FILE).write_text(json.dumps({
+                "eval_dir": "/another/run", "status": "foreign",
+            }))
+            return '{"eval_dir": "/from/sdk", "status": "sdk"}'
+
+        self.patch_rx("_invoke_via_sdk", invoke)
+        self.assertEqual(
+            rx.invoke_workflow("P", 100, str(eval_dir))["status"], "sdk")
+
 
 # =========================================================================== #
 # numeric + attribution helpers

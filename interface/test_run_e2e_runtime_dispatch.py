@@ -7,10 +7,9 @@ CONTRACT under test:
   * An AMBIGUOUS credential environment (two backends configured) keeps the
     native Claude path rather than hijacking it — the same shape rule the JS
     side applies, so the two halves cannot disagree about which keys mean what.
-  * Once a backend is selected, the workflow's top-level return is recovered
-    from the runtime's --result-file, then its stdout, then the on-disk
-    workflow_return.json — in that order, because each is a weaker witness
-    than the one before it.
+  * Once a backend is selected, the workflow-owned ``workflow_return.json`` is
+    the canonical return.  Runtime result-file and stdout parsing are legacy
+    fallbacks only.
 
 Selection is decided at IMPORT time (module constants), so these tests reload
 the module under a controlled environment rather than poking the constants.
@@ -123,20 +122,24 @@ def _runtime_mod(monkeypatch, captured):
 
     def fake_run(cmd, **kw):
         captured["cmd"], captured["kw"] = cmd, kw
+        if captured.get("during_run"):
+            captured["during_run"]()
         return captured["proc"]
 
     monkeypatch.setattr(rx, "subprocess", SimpleNamespace(run=fake_run))
     return rx
 
 
-def test_the_result_file_is_the_authoritative_return(monkeypatch, tmp_path):
+def test_the_workflow_file_is_the_authoritative_return(monkeypatch, tmp_path):
     captured = {"proc": _Proc(stdout="WORKFLOW_RESULT {\"eval_dir\": \"/from/stdout\"}")}
     rx = _runtime_mod(monkeypatch, captured)
     (tmp_path / "runtime_result.json").write_text(
         json.dumps({"eval_dir": str(tmp_path), "throughput_speedup": 1.21}), encoding="utf-8")
+    captured["during_run"] = lambda: (tmp_path / "workflow_return.json").write_text(
+        json.dumps({"eval_dir": str(tmp_path), "throughput_speedup": 1.31}), encoding="utf-8")
 
     out = rx._invoke_via_runtime({"model_path": "/m"}, 60, str(tmp_path))
-    assert out["throughput_speedup"] == 1.21
+    assert out["throughput_speedup"] == 1.31
     assert out["eval_dir"] == str(tmp_path)
 
 
@@ -183,13 +186,32 @@ def test_a_corrupt_result_file_falls_through_to_stdout(monkeypatch, tmp_path):
     assert rx._invoke_via_runtime({}, 60, str(tmp_path))["eval_dir"] == "/from/stdout"
 
 
-def test_the_on_disk_workflow_return_is_the_last_resort(monkeypatch, tmp_path):
+def test_a_stale_workflow_return_is_removed_before_dispatch(monkeypatch, tmp_path):
     captured = {"proc": _Proc(stdout="no json here at all")}
     rx = _runtime_mod(monkeypatch, captured)
     (tmp_path / "workflow_return.json").write_text(
-        json.dumps({"eval_dir": str(tmp_path), "status": "ok"}), encoding="utf-8")
+        json.dumps({"eval_dir": str(tmp_path), "status": "stale"}), encoding="utf-8")
 
-    assert rx._invoke_via_runtime({}, 60, str(tmp_path))["status"] == "ok"
+    with pytest.raises(rx.WorkflowParseError):
+        rx._invoke_via_runtime({}, 60, str(tmp_path))
+    assert not (tmp_path / "workflow_return.json").exists()
+
+
+def test_a_fresh_workflow_return_beats_runtime_and_stdout(monkeypatch, tmp_path):
+    captured = {"proc": _Proc(stdout='WORKFLOW_RESULT {"eval_dir": "/from/stdout"}')}
+    rx = _runtime_mod(monkeypatch, captured)
+    captured["during_run"] = lambda: (
+        (tmp_path / "workflow_return.json").write_text(
+            json.dumps({"eval_dir": str(tmp_path), "status": "fresh"}),
+            encoding="utf-8",
+        ),
+        (tmp_path / "runtime_result.json").write_text(
+            json.dumps({"eval_dir": str(tmp_path), "status": "runtime"}),
+            encoding="utf-8",
+        ),
+    )
+
+    assert rx._invoke_via_runtime({}, 60, str(tmp_path))["status"] == "fresh"
 
 
 def test_a_nonzero_exit_names_the_combo_and_keeps_the_stderr_tail(monkeypatch, tmp_path):

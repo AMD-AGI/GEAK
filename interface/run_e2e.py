@@ -584,6 +584,19 @@ def map_args(
     if h.get("tuning_kb") is not None:
         ps_args["tuning_kb"] = "true" if _as_bool(h["tuning_kb"]) else "false"
     # No op budget is forwarded: the tuning loop is uncapped by design (see e2e_workflow.js).
+    # The integrate-lane correctness bar. `ps_args` is an allowlist, so until now BOTH opt-in gates
+    # (`gsm8k` and `op_tolerance`) were reachable only from a direct workflow call -- a handoff-driven
+    # run could not select either one, and silently fell back to byte-exact parity. Forwarded here with
+    # the same shape as the knobs above: omitted keys leave the workflow's own defaults untouched, so a
+    # handoff without these keys produces byte-identical args to before.
+    if h.get("accuracy_gate") is not None:
+        ps_args["accuracy_gate"] = str(h["accuracy_gate"]).strip()
+    for _k in ("accuracy_limit",):
+        if h.get(_k) is not None:
+            ps_args[_k] = int(h[_k])
+    for _k in ("accuracy_tol", "op_tol", "op_tol_floor_mult"):
+        if h.get(_k) is not None:
+            ps_args[_k] = float(h[_k])
     # Carried cross-phase state (the prior workflow return's `state`), so a
     # resume continues from where a previous phase invocation left off.
     if h.get("state"):
@@ -2146,15 +2159,20 @@ def _invoke_via_runtime(
     Bypasses Claude Code's Workflow tool entirely: the runtime provides the
     Workflow globals and dispatches agent() calls to the selected agent CLI
     (claude | codex) via the config registry. The workflow's
-    top-level return value is captured from the runtime's ``--result-file`` (most
-    robust); we fall back to parsing stdout and finally to the on-disk
-    ``workflow_return.json`` the JS also writes.
+    ``EVAL_DIR/workflow_return.json`` is the canonical return protocol.  The
+    runtime result file and stdout remain compatibility fallbacks for older
+    workflows that do not write it.
     """
     result_file = None
     metrics_file = None
     if eval_dir:
         result_file = str(Path(eval_dir) / "runtime_result.json")
         metrics_file = str(Path(eval_dir) / "runtime_metrics.json")
+        _discard_stale_workflow_return(eval_dir)
+        try:
+            Path(result_file).unlink()
+        except FileNotFoundError:
+            pass
     cmd = [
         NODE_BIN, str(RUNTIME_SCRIPT), str(E2E_SCRIPT),
         "--args", json.dumps(ps_args),
@@ -2176,7 +2194,12 @@ def _invoke_via_runtime(
             f"runtime (node, {runtime_combo_label()}) failed (rc={proc.returncode}): "
             f"{proc.stderr[-2000:]}"
         )
-    # 1) result-file (authoritative top-level return).
+    # 1) Canonical workflow-owned return.  It was removed before dispatch, so
+    # its presence proves this invocation reached the workflow's final handoff.
+    canonical = _read_canonical_workflow_return(eval_dir)
+    if canonical is not None:
+        return canonical
+    # 2) Runtime result-file compatibility fallback.
     if result_file and Path(result_file).exists():
         try:
             obj = json.loads(Path(result_file).read_text())
@@ -2184,18 +2207,11 @@ def _invoke_via_runtime(
                 return obj
         except (json.JSONDecodeError, OSError):
             pass
-    # 2) stdout "WORKFLOW_RESULT <json>" line.
+    # 3) stdout "WORKFLOW_RESULT <json>" compatibility fallback.
     try:
         return _parse_last_json_line(proc.stdout)
     except WorkflowParseError:
         pass
-    # 3) on-disk workflow_return.json the JS persists as its final act.
-    if eval_dir:
-        wr = Path(eval_dir) / "workflow_return.json"
-        if wr.exists():
-            obj = _read_json(wr)
-            if obj.get("eval_dir"):
-                return obj
     raise WorkflowParseError(
         "runtime produced no parseable workflow return (with eval_dir). "
         f"Last 2000 chars of stdout:\n{(proc.stdout or '')[-2000:]}"
@@ -2215,16 +2231,53 @@ def invoke_workflow(
     """
     if USE_RUNTIME and ps_args is not None:
         return _invoke_via_runtime(ps_args, timeout_s, eval_dir)
+    _discard_stale_workflow_return(eval_dir)
     try:
         import claude_agent_sdk  # noqa: F401
         raw = _invoke_via_sdk(prompt, timeout_s, eval_dir)
     except ImportError:
         raw = _invoke_via_cli(prompt, timeout_s)
+    canonical = _read_canonical_workflow_return(eval_dir)
+    if canonical is not None:
+        return canonical
     return _parse_last_json_line(raw)
 
 
 class WorkflowParseError(RuntimeError):
     """The agent output carried no parseable workflow return (no ``eval_dir``)."""
+
+
+def _discard_stale_workflow_return(eval_dir: str | None) -> None:
+    """Remove a prior canonical handoff before starting a new invocation.
+
+    A resumed terminal run is handled before ``invoke_workflow`` is called.  If
+    execution reaches this function, an existing handoff is stale/partial and
+    must never be mistaken for the result of the new process.
+    """
+    if not eval_dir:
+        return
+    try:
+        (Path(eval_dir) / WORKFLOW_RETURN_FILE).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _read_canonical_workflow_return(eval_dir: str | None) -> dict | None:
+    """Read and validate the workflow-owned canonical return, if present."""
+    if not eval_dir:
+        return None
+    path = Path(eval_dir) / WORKFLOW_RETURN_FILE
+    if not path.exists():
+        return None
+    try:
+        obj = _read_json(path)
+        returned_dir = Path(str(obj.get("eval_dir", ""))).resolve()
+        expected_dir = Path(eval_dir).resolve()
+    except (OSError, TypeError, ValueError):
+        return None
+    if not isinstance(obj, dict) or returned_dir != expected_dir:
+        return None
+    return obj
 
 
 def _iter_json_objects(raw: str):
@@ -4805,7 +4858,19 @@ def _tuning_recovery_return(
         "throughput_speedup": speedup,
         "baseline_throughput_tok_s": pre,
         "final_throughput_tok_s": post,
-        "output_parity": tuning.get("correctness_gate") or "unknown",
+        # A recovered tuning result carries an OP-LEVEL numeric verdict (`correctness_gate`), not an
+        # e2e output-parity probe: no baseline determinism control, no greedy decode, no per-prompt
+        # comparison. Copying it into `output_parity` is what let a +8.06% recovered run report an
+        # unearned parity "pass" with no validation artifacts behind it. Keep the verdict, but keep
+        # it under its own name; the empty string lets the `output_parity or correctness_gate`
+        # readers below fall through to it, so their output is unchanged.
+        "output_parity": "",
+        "correctness_gate": tuning.get("correctness_gate") or "unknown",
+        "parity_kind": (
+            "op_tolerance"
+            if str(tuning.get("correctness_gate") or "").strip().lower() == "pass"
+            else "none"
+        ),
         "final_overlay": overlay,
         "final_launch_script": launcher,
         "accepted_config": {
