@@ -3072,6 +3072,58 @@ def _same_session_baseline(
     return 0.0, ""
 
 
+def _stage_post_measure_lifecycle(eval_dir: Path, final_launch: str) -> dict:
+    """Advertise only recognized replay code with exact staged helper bytes.
+
+    Old/agent-modified benchmarks are never upgraded in place. The callback
+    protocol must already be present in the actual benchmark being returned.
+    """
+    source_dir = BENCH_SCRIPT.parent
+    names = ("bench_e2e.sh", "bench_replica.sh", "server_teardown.sh", "bench_summarize.py", "bench_lifecycle.py")
+    unsupported = {"schema": "geak.post_measure.capability.v1", "status": "unsupported",
+                   "protocol": "geak.post_measure.v1"}
+    try:
+        expected = {name: (source_dir / name).read_bytes() for name in names}
+        bench = eval_dir / "bench_e2e.sh"
+        if bench.is_symlink() or not bench.is_file() or bench.read_bytes() != expected["bench_e2e.sh"]:
+            return {**unsupported, "reason": "unrecognized_bench_script"}
+        # Check all conflicts before staging anything. Never overwrite a file
+        # that a workflow/recovery bundle may depend on for its old semantics.
+        for name in names:
+            target = eval_dir / name
+            if target.is_symlink() or (target.exists() and target.read_bytes() != expected[name]):
+                return {**unsupported, "reason": "conflicting_staged_asset", "asset": name}
+        for name in names:
+            target = eval_dir / name
+            if not target.exists():
+                fd, temporary = tempfile.mkstemp(prefix=f".{name}.stage_", dir=eval_dir)
+                try:
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(expected[name])
+                    os.chmod(temporary, (source_dir / name).stat().st_mode & 0o777)
+                    try:
+                        os.link(temporary, target)  # atomic and refuses replacement
+                    except FileExistsError:
+                        pass  # verify a concurrent stager's bytes below
+                finally:
+                    os.unlink(temporary)
+            if target.is_symlink() or target.read_bytes() != expected[name]:
+                return {**unsupported, "reason": "staged_asset_changed", "asset": name}
+        final = Path(final_launch) if final_launch else None
+        recovery = eval_dir / "tuning/recovery_launch.sh"
+        final_supported = bool(final and final == recovery and final.is_file() and not final.is_symlink()
+                               and final.read_text(encoding="utf-8") == _tuning_recovery_launcher_content())
+        return {"schema": "geak.post_measure.capability.v1", "status": "available",
+                "protocol": "geak.post_measure.v1", "bench_script": str(bench),
+                "helper_path": str(eval_dir / "bench_lifecycle.py"),
+                "capabilities_argv": ["bash", str(bench), "--post-measure-capabilities"],
+                "sources": {name: hashlib.sha256(expected[name]).hexdigest() for name in names},
+                "replay_support": {"bench_e2e_fallback": True, "final_launch_script": final_supported},
+                "final_launch_reason": "verified_recovery_launcher" if final_supported else "unverified_or_missing_launcher"}
+    except (OSError, UnicodeError):
+        return {**unsupported, "reason": "staging_unavailable"}
+
+
 def normalize_result(h: dict, wf: dict) -> dict:
     eval_dir = Path(wf["eval_dir"])
     validation = _read_json(eval_dir / "director_e2e_validation.json")
@@ -3623,6 +3675,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Sweep-reuse handles (see interface/run_e2e.md).
         "final_launch_script": final_launch,
         "bench_script": str(eval_dir / "bench_e2e.sh"),
+        "post_measure_lifecycle": _stage_post_measure_lifecycle(eval_dir, final_launch),
         # Empty string == this run produced no reusable artifact of that kind.
         # Never a path to a directory/diff that holds nothing (see
         # _material_overlay_path / _material_patch_path).
@@ -4628,6 +4681,35 @@ def _tuning_recovery_overlay(eval_dir: Path, tuning: dict) -> str | None:
     return str(candidate) if candidate.is_dir() else None
 
 
+def _tuning_recovery_launcher_content() -> str:
+    """One deterministic deployment bridge; inherited callback environment survives exec."""
+    return """#!/usr/bin/env bash
+set -euo pipefail
+OUT_DIR="${1:?expected Hyperloom output directory}"
+export OUT_DIR
+readonly _GEAK_REPLAY_OUT="$OUT_DIR"
+readonly _GEAK_REPLAY_REQUEST="${GEAK_POST_MEASURE_REQUEST-}"
+readonly _GEAK_REPLAY_REQUEST_SET="${GEAK_POST_MEASURE_REQUEST+x}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+readonly _GEAK_REPLAY_ROOT="$ROOT"
+export GEAK_TUNING_ENV_OUT="$HERE/deploy/apply_env.sh"
+bash "$HERE/deploy/deploy.sh"
+if [[ -s "$GEAK_TUNING_ENV_OUT" ]]; then
+  # shellcheck disable=SC1090
+  source "$GEAK_TUNING_ENV_OUT"
+fi
+export OUT_DIR="$_GEAK_REPLAY_OUT"
+if [[ "$_GEAK_REPLAY_REQUEST_SET" == "x" ]]; then
+  export GEAK_POST_MEASURE_REQUEST="$_GEAK_REPLAY_REQUEST"
+else
+  unset GEAK_POST_MEASURE_REQUEST
+fi
+ROOT="$_GEAK_REPLAY_ROOT"
+exec bash "$ROOT/bench_e2e.sh"
+"""
+
+
 def _write_tuning_recovery_launcher(eval_dir: Path) -> str:
     """Write the executable replay bridge for a data-only tuning deployment."""
     tuning_dir = eval_dir / "tuning"
@@ -4636,20 +4718,7 @@ def _write_tuning_recovery_launcher(eval_dir: Path) -> str:
     launcher = tuning_dir / "recovery_launch.sh"
     if not deploy_script.is_file() or not bench_script.is_file():
         return ""
-    content = """#!/usr/bin/env bash
-set -euo pipefail
-OUT_DIR="${1:?expected Hyperloom output directory}"
-export OUT_DIR
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
-export GEAK_TUNING_ENV_OUT="$HERE/deploy/apply_env.sh"
-bash "$HERE/deploy/deploy.sh"
-if [[ -s "$GEAK_TUNING_ENV_OUT" ]]; then
-  # shellcheck disable=SC1090
-  source "$GEAK_TUNING_ENV_OUT"
-fi
-exec bash "$ROOT/bench_e2e.sh"
-"""
+    content = _tuning_recovery_launcher_content()
     try:
         if not launcher.is_file() or launcher.read_text(encoding="utf-8") != content:
             launcher.write_text(content, encoding="utf-8")

@@ -85,6 +85,7 @@ jobs:
         run: |
           python -m pytest -q --cov --cov-report=term --cov-fail-under=0 \
             interface/test_run_e2e_recovery.py \
+            interface/test_run_e2e_post_measure.py \
             interface/test_e2e_checkpoint.py \
             interface/test_run_e2e_tuning_result.py \
             interface/test_run_e2e_alignment.py \
@@ -127,6 +128,7 @@ jobs:
             kernel_workflow/scripts/tests/test_kb_loop_offline.py \
             interface/test_effective_config.py \
             e2e_workflow/scripts/tests/test_bench_replica_lifecycle.py \
+            e2e_workflow/scripts/tests/test_bench_post_measure.py \
             e2e_workflow/scripts/tests/test_bench_summarize.py \
             e2e_workflow/scripts/tests/test_inferencex_client_warmup_parity.py \
             e2e_workflow/scripts/tests/test_agentx_client_canonicality.py \
