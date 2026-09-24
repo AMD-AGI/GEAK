@@ -360,6 +360,78 @@ def _glob_for_record(
     return g, bool(_glob.glob(g))
 
 
+
+def _anchor_top_by_live_journal(
+    homes: list[Path], eval_dir: str | None,
+) -> tuple[str, bool] | str | None:
+    """Anchor a run whose workflow record does not exist YET.
+
+    ``_anchor_top_by_exp_root`` assumes a record is on disk carrying
+    ``args.exp_root``. For a report emitted from inside the run that assumption
+    fails outright: the runtime CREATES ``workflows/wf_<runId>.json`` when the
+    workflow returns, so during the run there is no record to rank, anchor or
+    own anything — every record-based path is unresolvable by construction.
+
+    The run's own ``subagents/workflows/<runId>/journal.jsonl`` is written from
+    the first agent onward, and the agents record the eval-dir they work in. So
+    a journal that NAMES the requested eval-dir identifies the run positively,
+    from live evidence, while the run is still going.
+
+    This is a stronger signal than exp_root containment (which is mere
+    ancestry), but it is still not the run's own record, so the caller marks the
+    result INFERRED and never ``complete``.
+
+    - Only an EXACT eval-dir path occurrence counts; a prefix of a longer path
+      (``/x/eval`` inside ``/x/eval-2``) does not, or a sibling run whose dir
+      merely starts the same way would answer for this one.
+    - A run dir with no ``agent-*.jsonl`` is not adopted: a journal alone
+      carries no billable calls, and claiming it would report an empty ledger as
+      a scoped one.
+    - If two DISTINCT run dirs name the same eval-dir (a nested dispatcher and
+      its lane, each with its own runId), that is a genuine tie: refuse rather
+      than bill one run's transcripts as the other's.
+    """
+    wanted = (eval_dir or "").strip().rstrip("/")
+    if not wanted:
+        return None
+    hits: dict[str, tuple[str, bool]] = {}
+    for home in homes:
+        for journal in home.glob("projects/*/*/subagents/workflows/*/journal.jsonl"):
+            run_dir = journal.parent
+            try:
+                text = journal.read_text(errors="replace")
+            except OSError:
+                continue
+            if not _names_path(text, wanted):
+                continue
+            g = str(run_dir / "agent-*.jsonl")
+            if not _glob.glob(g):
+                continue
+            hits[run_dir.name] = (g, True)
+    if not hits:
+        return None
+    if len(hits) > 1:
+        return _ANCHOR_AMBIGUOUS
+    return next(iter(hits.values()))
+
+
+def _names_path(text: str, wanted: str) -> bool:
+    """Whether *text* contains *wanted* as a whole path, not as a prefix.
+
+    A bare substring test would let ``/runs/eval`` match ``/runs/eval-2``, so an
+    occurrence only counts when what follows it cannot extend the path — i.e.
+    end of text, a separator, or any character that cannot appear mid-path.
+    """
+    start = 0
+    while True:
+        i = text.find(wanted, start)
+        if i < 0:
+            return False
+        nxt = text[i + len(wanted):i + len(wanted) + 1]
+        if nxt == "" or nxt in '"\'\\ \t\r\n,}]:' or nxt == "/":
+            return True
+        start = i + 1
+
 # Sentinel: more than one enclosing run could anchor a mid-run eval-dir, so we
 # refuse to guess rather than bill the wrong run's transcripts.
 _ANCHOR_AMBIGUOUS = "ambiguous"
@@ -511,6 +583,22 @@ def resolve_run_scope(
             # identifies it. Anchor on that enclosing run deliberately — a unique
             # most-specific exp_root only; a genuine tie stays unresolved.
             anchored = _anchor_top_by_exp_root(homes, ev)
+            if anchored is None:
+                # No record anchored it — which is the NORMAL state for a report
+                # emitted from inside its own run, because the runtime creates
+                # the workflow record only when the workflow returns. Fall back
+                # to the live journal, which exists from the first agent on.
+                anchored = _anchor_top_by_live_journal(homes, ev)
+                if anchored is not None and anchored != _ANCHOR_AMBIGUOUS:
+                    res = anchored
+                    top_anchor = "live-journal"
+                    inferred.append(label)
+                    warnings.append(
+                        "top-level run identity %r resolved from the live "
+                        "journal naming this eval-dir (the run's own workflow "
+                        "record is not written until the run returns) — scope "
+                        "INFERRED, ownership not proven" % label)
+                    anchored = None
             if anchored == _ANCHOR_AMBIGUOUS:
                 warnings.append(
                     "top-level run identity %r matches more than one enclosing "
