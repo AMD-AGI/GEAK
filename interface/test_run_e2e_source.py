@@ -218,6 +218,32 @@ def test_source_relative_eval_dir_is_absolute_before_recipe_export(raw_source_re
     assert recipe.read_bytes() == b"SGLANG_USE_AITER=1\0"
 
 
+def test_source_handoff_does_not_select_a_trace_created_after_it(
+    raw_source_request, tmp_path, monkeypatch, capsys,
+):
+    experiment = tmp_path / "experiment"
+    traces = []
+    for run_id, stamp in (("before", "20260101_010101"), ("after", "20260103_030303")):
+        trace = experiment / "runs/roofline" / run_id / f"benchmark_sglang_{stamp}" / "torch_trace"
+        trace.mkdir(parents=True)
+        (trace / "1-TP-0.trace.json.gz").write_text("fixture")
+        traces.append(trace)
+    handoff = _handoff(raw_source_request)
+    handoff.update(schema_version=2, model_path="/models/example",
+                   exp_root=str(experiment / "geak"), eval_dir=str(tmp_path / "eval"))
+    handoff_path = tmp_path / "handoff.json"
+    handoff_path.write_text(json.dumps(handoff))
+    cutoff = run_e2e.datetime(2026, 1, 2, tzinfo=run_e2e.timezone.utc).timestamp()
+    os.utime(handoff_path, (cutoff, cutoff))
+    monkeypatch.setattr(run_e2e, "apply_bench_launcher", lambda _handoff: "native")
+
+    assert run_e2e.main([str(handoff_path), str(tmp_path / "result.json"), "--dry-run"]) == 0
+
+    mapped = json.loads(capsys.readouterr().out)["mapped_args"]
+    assert mapped["baseline_source_request"]
+    assert mapped["tracelens"]["trace_file"] == str(traces[0])
+
+
 @pytest.mark.parametrize("outcome", ["verified", "missing_seal", "workflow_error"])
 def test_main_binds_staged_source_to_result_without_global_exports(
     raw_source_request, tmp_path, monkeypatch, outcome,

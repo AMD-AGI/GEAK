@@ -109,7 +109,7 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 {
   "schema_version": 2,
   "model_path": "/models/Qwen-Qwen3.5-27B",
-  "framework": "sglang",                 // -> backend (sglang|vllm)
+  "framework": "sglang",                 // -> backend (sglang|vllm|atom)
   "gpu_type": "MI300X",
   "tp": 8,                               // serving tensor-parallel size (honoured, no TP=1 lock)
   "gpu_ids": "0,1,2,3,4,5,6,7",          // optional; default 0..tp-1
@@ -153,7 +153,7 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | handoff field | `e2e_workflow.js` arg | note |
 |---|---|---|
 | `model_path` | `model_path` | required |
-| `framework` | `backend` | `sglang` \| `vllm` |
+| `framework` | `backend` | `sglang` \| `vllm` \| `atom` |
 | `tp` | `tp` | serving tensor-parallel (threaded to bench `TP`) |
 | `gpu_ids` / `tp` | `gpu_ids` | defaults to `0..tp-1` |
 | `workload.{isl,osl,conc}` | `isl` / `osl` / `conc` | profile + bench workload |
@@ -540,12 +540,12 @@ The workflow must measure on the **same口径** as the caller's official baselin
 
 ### Bench-CLIENT adapter (closes the last口径 residual)
 
-The serving stack is always launched by the **backend** adapter
-(`adapters/sglang.sh` / `vllm.sh`). The **client** that drives the timed bench is
+The serving stack is launched through the selected backend adapter
+(`adapters/sglang.sh`, `vllm.sh`, or `atom.sh`). The **client** that drives the timed bench is
 selected independently by `BENCH_CLIENT`:
 
 * `native` (default standalone) — each backend's built-in bench
-  (`sglang.bench_serving` / vLLM). Small cross-harness差异 may remain.
+  (SGLang, vLLM, or ATOM). Small cross-harness差异 may remain.
 * `inferencex` — `adapters/clients/inferencex.sh` redefines `adapter_bench` to
   call **Hyperloom/Magpie's own** `InferenceX/utils/bench_serving/benchmark_serving.py`
   (`--backend vllm --dataset-name random --request-rate inf --ignore-eos
@@ -569,6 +569,11 @@ overlay prepended to `PYTHONPATH` (which the orchestrator's own path cannot do),
 so recipe parity and overlay application coexist. One adapter serves every
 backend, because the scripts share one server-phase contract.
 
+ATOM additionally keeps a GEAK-owned supervisor around the process group returned
+by the Magpie script. ATOM's multiprocessing leader can exit before its rank workers
+on SIGTERM; the supervisor drains that external group through SIGKILL when necessary,
+preserving the native ATOM adapter's worker-safe teardown behavior.
+
 The script itself is resolved most-explicit-first: `handoff.bench_launcher` /
 `$BENCH_LAUNCHER` decide the launcher, then the script comes from
 `handoff.launch_server_script`, `$MAGPIE_LAUNCH_SCRIPT`,
@@ -585,9 +590,9 @@ that degrade explicitly and is the escape hatch.
 
 `MAX_MODEL_LEN` is forwarded to the script on the `magpie` path only, because
 the script's own default (4096) has nothing to do with the run and the
-orchestrator overrode it by env when it measured the reference. gpu-mem-util is
-deliberately *not* forwarded: no handoff carries `mem_fraction`, and the
-script's 0.95 default is the recipe being matched. The script writes the server
+orchestrator overrode it by env when it measured the reference. GEAK does not
+invent a separate gpu-mem-util value on this path; the selected SGLang/vLLM/ATOM
+recipe script and its recorded `EXTRA_<BACKEND>_ARGS` remain authoritative. The script writes the server
 to `$LOG` and its own trace to `magpie_launch.log` next to it, because the
 script's redirect truncates `$LOG` and would otherwise destroy anything the
 adapter wrote there.

@@ -251,6 +251,7 @@ DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 _SERVING_FIDELITY_FLAGS: dict[str, dict[str, str]] = {
     "vllm": {"max_model_len": "--max-model-len", "mem_fraction": "--gpu-memory-utilization"},
     "sglang": {"max_model_len": "--context-length", "mem_fraction": "--mem-fraction-static"},
+    "atom": {"max_model_len": "--max-model-len", "mem_fraction": "--gpu-memory-utilization"},
 }
 
 
@@ -406,7 +407,12 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     return obs_isl, obs_osl, "agentx_observed"
 
 
-def map_args(h: dict, timeout_s: int | None = None) -> dict:
+def map_args(
+    h: dict,
+    timeout_s: int | None = None,
+    *,
+    artifact_cutoff_ts: float | None = None,
+) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
     baseline_spec = h.get("baseline_env_spec")
@@ -602,7 +608,10 @@ def map_args(h: dict, timeout_s: int | None = None) -> dict:
     # (not just the driver prompt) so the JS Profile/Strategize/Extract phases can
     # use them as a prior. Only non-null paths are forwarded; when nothing is found
     # the key is omitted entirely, so a tracelens-less run is byte-identical.
-    tl = resolve_tracelens_report(h.get("exp_root", ""))
+    tl = resolve_tracelens_report(
+        h.get("exp_root", ""),
+        not_after=artifact_cutoff_ts,
+    )
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
@@ -666,6 +675,10 @@ _TRACELENS_ARTIFACT_PATTERNS = {
     "trace_file": "runs/roofline/**/torch_trace",
 }
 
+_BENCHMARK_TIMESTAMP_RE = re.compile(
+    r"(?:^|/)benchmark_[^/]+_(\d{8}_\d{6})(?:/|$)"
+)
+
 
 def _experiment_root_from_exp_root(exp_root: str) -> str:
     """Return the experiment root (the directory that CONTAINS ``geak``).
@@ -679,17 +692,53 @@ def _experiment_root_from_exp_root(exp_root: str) -> str:
     return norm
 
 
-def _find_latest_artifact(root: str, pattern: str) -> str | None:
-    """Return the latest match for ``pattern`` under ``root`` (or None).
+def _artifact_timestamp(path: str) -> float:
+    """Return an artifact's chronological timestamp.
 
-    Matches are sorted for determinism; the timestamps embedded in the run
-    directory names sort chronologically, so the last entry is the most recent.
+    Roofline paths put a random run id before ``benchmark_<backend>_<UTC>``;
+    sorting the full path therefore orders by that random id, not by time. Use
+    the embedded benchmark timestamp when present. For other artifacts, and
+    legacy layouts without that component, fall back to the artifact mtime.
     """
-    matches = sorted(glob.glob(os.path.join(root, pattern), recursive=True))
-    return matches[-1] if matches else None
+    match = _BENCHMARK_TIMESTAMP_RE.search(path)
+    if match:
+        parsed = datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+        return parsed.replace(tzinfo=timezone.utc).timestamp()
+
+    return Path(path).stat().st_mtime
 
 
-def resolve_tracelens_report(exp_root: str) -> dict:
+def _find_latest_artifact(
+    root: str,
+    pattern: str,
+    *,
+    not_after: float | None = None,
+) -> str | None:
+    """Return the newest artifact under ``root`` at the cutoff (or ``None``).
+
+    ``not_after`` freezes discovery at the handoff boundary, preventing a
+    resumed GEAK run from consuming artifacts written later into the same
+    experiment directory.
+    """
+    candidates: list[tuple[float, str]] = []
+    for path in glob.glob(os.path.join(root, pattern), recursive=True):
+        try:
+            timestamp = _artifact_timestamp(path)
+        except (OSError, ValueError):
+            continue
+        if not_after is not None and timestamp > not_after:
+            continue
+        candidates.append((timestamp, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item[0], item[1]))[1]
+
+
+def resolve_tracelens_report(
+    exp_root: str,
+    *,
+    not_after: float | None = None,
+) -> dict:
     """Resolve the four TraceLens artifacts beside the handoff's ``geak``.
 
     Returns a dict with ``search_root`` plus the four artifact paths
@@ -699,7 +748,10 @@ def resolve_tracelens_report(exp_root: str) -> dict:
     root = _experiment_root_from_exp_root(exp_root)
     report: dict = {"search_root": root}
     for key, pattern in _TRACELENS_ARTIFACT_PATTERNS.items():
-        report[key] = _find_latest_artifact(root, pattern) if root else None
+        report[key] = (
+            _find_latest_artifact(root, pattern, not_after=not_after)
+            if root else None
+        )
     return report
 
 
@@ -725,13 +777,13 @@ PROCESS_SAFETY = (
 
 def build_prompt(ps_args: dict) -> str:
     eval_dir = ps_args.get("eval_dir", "")
-    # Locate the upstream TraceLens / kernel-agent artifacts (analysis.md,
-    # kernel_candidates.json, tracelens_report.json) plus the roofline torch
-    # trace, and surface them to the agent as a single tracelens_report block.
-    tracelens_report = resolve_tracelens_report(ps_args.get("exp_root", ""))
-    # The prompt only needs the four artifact paths, not the internal search_root.
+    # Artifact discovery is frozen once in map_args. Re-scanning here can pick
+    # files written after the handoff and make the prompt disagree with the
+    # actual Workflow args.
+    resolved_tracelens = ps_args.get("tracelens") or {}
     tracelens_prompt_payload = {
-        k: v for k, v in tracelens_report.items() if k != "search_root"
+        key: resolved_tracelens.get(key)
+        for key in _TRACELENS_ARTIFACT_PATTERNS
     }
     tracelens_block = (
         "\n\ntracelens_report (upstream kernel-agent / roofline artifacts; "
@@ -919,7 +971,7 @@ def agentx_preflight(h: dict) -> list[str]:
 # Backends for which Magpie ships a server-phase launch script (its scripts all
 # share ONE contract, so a single backend-agnostic launcher adapter serves them
 # all). Extend this set as Magpie adds backends — never add per-backend code.
-_MAGPIE_BACKENDS = {"sglang", "vllm"}
+_MAGPIE_BACKENDS = {"atom", "sglang", "vllm"}
 
 # The flat scalars we need out of the orchestrator's launch recipe. Keep this
 # lightweight scan separate from the BaseLoader parse used for the nested
@@ -1433,7 +1485,9 @@ def _magpie_script_from_recipe(h: dict) -> str:
         # multi_node/).
         candidates = [benchmarks / name]
         try:
-            candidates.extend(sorted(benchmarks.rglob(name)))
+            # rglob rejects an absolute pattern with NotImplementedError
+            if not Path(name).is_absolute():
+                candidates.extend(sorted(benchmarks.rglob(name)))
         except OSError:
             pass
         for candidate in candidates:
@@ -1463,7 +1517,7 @@ def apply_bench_launcher(h: dict) -> str:
     adapter — which Magpie itself cannot do), mirroring :func:`apply_bench_client`.
 
     BACKEND-AGNOSTIC (never model/case specific): the SAME ``magpie`` launcher and
-    the SAME resolution logic serve sglang, vllm and any future Magpie backend —
+    the SAME resolution logic serve atom, sglang, vllm and any future Magpie backend —
     the launcher derives the per-backend flag/profiler var names from ``$BACKEND``.
 
     Resolution:
@@ -1472,7 +1526,7 @@ def apply_bench_launcher(h: dict) -> str:
         script cannot run on this box);
       * else enable ``magpie`` ONLY when a script is discoverable
         (``handoff.launch_server_script``, or generic ``$MAGPIE_LAUNCH_SCRIPT``,
-        or per-backend ``$MAGPIE_<BACKEND>_SCRIPT`` e.g. ``$MAGPIE_VLLM_SCRIPT``,
+        or per-backend ``$MAGPIE_<BACKEND>_SCRIPT`` e.g. ``$MAGPIE_ATOM_SCRIPT``,
         or derived from ``handoff.launch_recipe``)
         AND the backend is one Magpie supports; otherwise ``native``.
 
@@ -1536,9 +1590,9 @@ def apply_bench_launcher(h: dict) -> str:
     # handoff carried it; absent => the script's own default stands, which is
     # what the orchestrator served with.
     #
-    # gpu-mem-util is deliberately NOT forwarded the same way: no handoff has
-    # ever carried mem_fraction, and the script's 0.95 default IS the recipe we
-    # are trying to match.
+    # gpu-mem-util is deliberately NOT synthesized from a GEAK default here:
+    # the recipe script and its recorded EXTRA_<BACKEND>_ARGS are the source of
+    # truth (vLLM and ATOM do not necessarily share the same default).
     if launcher == "magpie":
         replay, owned = _recipe_launch_env(h)
         _export_recipe_env(h, replay, owned, source)
@@ -6740,7 +6794,15 @@ def main(argv: list[str]) -> int:
     h.pop("_geak_source_request_path", None)
 
     try:
-        ps_args = map_args(h, timeout_s)
+        artifact_cutoff_ts = handoff_path.stat().st_mtime
+    except OSError:
+        artifact_cutoff_ts = None
+    try:
+        ps_args = map_args(
+            h,
+            timeout_s,
+            artifact_cutoff_ts=artifact_cutoff_ts,
+        )
         if ps_args.get("baseline_source_request"):
             # Recipe export prefers h.eval_dir. Canonicalize both owners before
             # export so changing into the workflow/evaluation directory cannot
