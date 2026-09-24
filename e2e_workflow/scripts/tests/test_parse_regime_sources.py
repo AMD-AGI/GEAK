@@ -230,6 +230,14 @@ class TestParseRegimeFromSources(_TmpFileMixin, unittest.TestCase):
         self.assertEqual(got["quant"]["method"], "awq")
         self.assertEqual(got["quant"]["source"], "flag")
 
+    def test_quant_flag_reports_conflicting_fp8_model_config(self):
+        cfg = self._write(json.dumps(
+            {"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}}),
+            suffix=".json")
+        got = pr.parse_regime("--quantization awq", model_config_path=cfg)
+        self.assertEqual(got["quant"]["method"], "awq")
+        self.assertIn("model config says fp8", got["notes"])
+
     def test_model_config_used_when_no_quant_flag(self):
         cfg = self._write(json.dumps(
             {"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}}),
@@ -254,6 +262,18 @@ class TestParseRegimeFromSources(_TmpFileMixin, unittest.TestCase):
     def test_atom_level_zero_is_eager(self):
         got = pr.parse_regime("--level 0", backend="atom")
         self.assertEqual(got["compile"], "eager")
+
+    def test_atom_invalid_level_falls_back_to_compile_default(self):
+        got = pr.parse_regime("--level auto", backend="atom")
+        self.assertEqual(got["compile"], "torch_compile")
+        self.assertIn("level was unreadable", got["notes"])
+
+    def test_unrelated_server_log_does_not_override_atom_defaults(self):
+        log = self._write("loading /opt/atom/compile_helpers.py\n")
+        self.assertEqual(pr._read_server_log_state(log), {})
+        got = pr.parse_regime("", backend="atom", server_log=log)
+        self.assertEqual(got["compile"], "torch_compile")
+        self.assertTrue(got["cuda_graph"])
 
     def test_atom_live_compilation_config_overrides_flags(self):
         log = self._write(

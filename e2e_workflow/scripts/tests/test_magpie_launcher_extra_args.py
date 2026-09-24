@@ -22,6 +22,7 @@ no GPU, no framework, no model. It also pins the two GPU-pinning shapes
 (inherited outer ROCR mask vs bare box), which the same env line decides.
 """
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -174,6 +175,10 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
 
     def test_atom_server_is_wrapped_and_reaped_after_leader_term(self):
         """Magpie must retain ATOM's native worker-safe teardown property."""
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous_sigterm)
+
         live_script = os.path.join(self.tmp, "live_atom_magpie.sh")
         with open(live_script, "w", encoding="utf-8") as fh:
             fh.write("""#!/usr/bin/env bash
@@ -189,17 +194,48 @@ exit 0
         with open(driver, "w", encoding="utf-8") as fh:
             fh.write(f"""#!/usr/bin/env bash
 set -uo pipefail
+set +m
 source "{MAGPIE}"
 adapter_launch
 printf '%s %s\n' "$SERVER_PID" "$MAGPIE_INNER_SERVER_PID" > "{state}"
 _inner_start=$(awk '{{print $22}}' "/proc/$MAGPIE_INNER_SERVER_PID/stat")
-kill -TERM "-$SERVER_PID"
-for _i in $(seq 1 50); do
-  kill -0 "$SERVER_PID" 2>/dev/null || break
+_supervisor_ready() {{
+  kill -0 "$SERVER_PID" 2>/dev/null || return 1
+  _supervisor_pgid=$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')
+  [ "$_supervisor_pgid" = "$SERVER_PID" ] || return 1
+  _sigcgt=$(awk '/^SigCgt:/ {{print $2}}' "/proc/$SERVER_PID/status" 2>/dev/null || true)
+  [ -n "$_sigcgt" ] && (( (16#$_sigcgt & 16384) != 0 ))
+}}
+_deadline=$((SECONDS + 5))
+while ! _supervisor_ready && [ "$SECONDS" -lt "$_deadline" ]; do
+  sleep 0.05
+done
+if ! _supervisor_ready; then
+  kill -KILL "-$SERVER_PID" 2>/dev/null || true
+  kill -KILL "-$MAGPIE_INNER_SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  exit 7
+fi
+_supervisor_alive() {{
+  kill -0 "$SERVER_PID" 2>/dev/null || return 1
+  _state=$(awk '{{print $3}}' "/proc/$SERVER_PID/stat" 2>/dev/null || true)
+  case "$_state" in Z*) return 1 ;; esac
+  return 0
+}}
+kill -TERM "-$SERVER_PID" || exit 7
+_deadline=$((SECONDS + 8))
+while _supervisor_alive && [ "$SECONDS" -lt "$_deadline" ]; do
   sleep 0.1
 done
+if _supervisor_alive; then
+  kill -KILL "-$SERVER_PID" 2>/dev/null || true
+  kill -KILL "-$MAGPIE_INNER_SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  exit 8
+fi
 wait "$SERVER_PID" 2>/dev/null || true
-for _i in $(seq 1 50); do
+_deadline=$((SECONDS + 8))
+while [ "$SECONDS" -lt "$_deadline" ]; do
   kill -0 "$MAGPIE_INNER_SERVER_PID" 2>/dev/null || exit 0
   _state=$(awk '{{print $3}}' "/proc/$MAGPIE_INNER_SERVER_PID/stat" 2>/dev/null || true)
   case "$_state" in Z*) exit 0 ;; esac
@@ -220,10 +256,11 @@ exit 9
             PORT="18080", GPU="1", OUT_DIR=self.out,
             LOG=os.path.join(self.out, "server.log"), PROFILE="0",
             MAGPIE_LAUNCH_SCRIPT=live_script, EXTRA_SERVER_ARGS="",
+            ATOM_MAGPIE_STOP_GRACE_S="1",
         )
         proc = subprocess.run(
             [BASH, driver], env=env, cwd=self.tmp,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=45,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         with open(state, encoding="utf-8") as fh:
