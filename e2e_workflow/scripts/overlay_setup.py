@@ -38,6 +38,8 @@ Stdlib only.
 """
 import argparse
 import importlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
