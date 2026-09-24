@@ -39,7 +39,7 @@ answer — plan cold, exactly as this workflow does without any KB.
   - kernels: gemm_a8w8_blockscale, kernel_gemm_xdl_cshuffle_v3, _w8a8_triton_block_scaled_mm, _gemm_a8w8_blockscale_kernel, _gemm_blockscale_splitk_kernel, _splitk_reduce_kernel · kw: authored-triton, tier-c-author, fp8-blockscale, dense-gemm, sitecustomize-overlay, rebind-seam, accuracy-gate, amdahl, cudagraph-safe, split-k, lazy-import, launch-bound
 - [gfx950/gfx942 · decode+prefill] bf16 dense GEMM on sglang/gfx950 - backend swap is a dead-end, the aiter per-shape DB tune is the lever, and hot-tuned rows must be re-gated COLD. ★★ — (dense-gemm-bf16-gfx950-sglang.md)
   - kernels: aiter.tuned_gemm:gemm_a16w16, Cijk_Alik_Bljk_BBS_BH_*, hgemm_* · kw: aiter, tuned-gemm, gemm-a16w16, aiter-config-gemm-bf16, gradlib, gemm-tuner, hipblaslt, flydsl, colon-merge, cold-cache, get-padded-m, shipped-coverage, split-k, decode-roofline
-- [gfx1151 · decode] gfx1151/RDNA vLLM dense bf16 decode: a per-shape TunableOp BLAS table is a real e2e lever (~+11%); forcing one library globally is a large regression ★★ — (let-a-per-shape-table-pick-the-blas-library-instead-of-picki-dense-gemm-gfx1151-decode.md)
+- [gfx1151 · decode] gfx1151/RDNA vLLM dense bf16 decode: a per-shape TunableOp BLAS table is a real e2e lever (+11% to +14%, 2 Director-validated models/workloads); forcing one library globally is a large regression ★★★ — (let-a-per-shape-table-pick-the-blas-library-instead-of-picki-dense-gemm-gfx1151-decode.md)
   - kw: dense-gemm, bf16, gfx1151, rdna, strix-halo, vllm, tunableop, per-shape-tuning, backend-routing, rocblas, hipblaslt, decode, vendor-library, cold-vs-hot, measurement-discipline, tuning-artifact
 
 ## moe_grouped_gemm

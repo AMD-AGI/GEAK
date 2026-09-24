@@ -222,6 +222,22 @@ your own. It is one of:
    request set against both baseline and final; diff the decoded outputs. Record pass/fail. If
    parity fails (and the change was not an intentional, accuracy-approved quantization), status =
    `flagged`.
+   **When `ACCURACY_GATE` is in your Inputs and is not `none`, byte-diff is NOT the bar** — the
+   integrate lane already adjudicated this candidate against a different one, and re-imposing
+   byte-diff here would flag the exact divergence that gate exists to permit, turning an accepted win
+   into a reported failure at the last step. Apply the SAME bar it did:
+   - **Always run the control group first** — baseline against ITSELF, greedy/temp=0, requests issued
+     ONE AT A TIME. A server that does not byte-match itself gives you no floor, and the right record
+     is `output_parity: "n/a"` with the control numbers in `notes`, not a `flagged`.
+   - `ACCURACY_GATE=gsm8k` → score both legs with `$GSM8K_EVAL_SCRIPT` and pass iff
+     `final_score >= baseline_score - ACCURACY_TOL`.
+   - `ACCURACY_GATE=op_tolerance` → run `$OP_PARITY_SCRIPT` per leg and `--compare` them
+     (`--tol $OP_TOL --floor-mult $OP_TOL_FLOOR_MULT`); pass iff it prints `OP_PARITY=pass`. Treat
+     `OP_PARITY=unknown` as `output_parity: "n/a"`, never as a pass — `unknown` means the two legs
+     were indistinguishable or their references disagreed, i.e. the probe measured nothing.
+   Byte-parity remains the FAST PATH under either gate: if the outputs byte-match, record `pass` and
+   do not run the probe. Record in `notes` which bar decided it and the numbers behind it — a `pass`
+   whose provenance is not stated is the field-conflation defect this gate was built to fix.
 3. Compute `throughput_speedup = final_med / base_med` (drift-corrected, same-session). Also report
    vs the provided baseline for reference. The COMBINED stack counts as a real win only if
    `delta% > NOISE_BAND_PCT` AND non-overlapping; otherwise report it honestly as within-noise (the

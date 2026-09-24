@@ -1,14 +1,14 @@
 ---
 key: dense bf16 Linear shapes at decode on a 40-CU RDNA3.5 iGPU (gfx1151, shared LPDDR memory), vLLM on PyTorch's own dispatch, where two vendor BLAS libraries are both present
 type: lever
-confidence: ★★
-effect: +10.68% e2e on the orchestrator's own revalidate arm and +11.31% median on an independent fresh-server 3-repeat (per-round range +10.40%..+11.45%, arms non-overlapping against a 0.4% box noise floor); task accuracy flat (GSM8K 0.94 -> 0.94). Same-family corroboration: per-shape mixing +14.3% on a warm-server ruler versus -8.2% for forcing one library globally, a 22-point spread across the same shapes.
+confidence: ★★★
+effect: +10.68% e2e on the orchestrator's own revalidate arm and +11.31% median on an independent fresh-server 3-repeat (per-round range +10.40%..+11.45%, arms non-overlapping against a 0.4% box noise floor); task accuracy flat (GSM8K 0.94 -> 0.94). Same-family corroboration: per-shape mixing +14.3% on a warm-server ruler versus -8.2% for forcing one library globally, a 22-point spread across the same shapes. SECOND independent Director-validated_win (2026-09-24, Qwen3-4B-Instruct-2507, a DIFFERENT model + workload point ISL1024/OSL128/conc8, TP1 gfx1151): +14.15% e2e (133.82 -> 152.76 tok/s, 1.1415x), 3 timed rounds/leg non-overlapping vs a 0.5% noise band (>28x margin), op-tolerance parity pass (err 3.87e-3 < 1e-2), TunableOp table engagement proven in the server log. So the lever now transfers across two model/workload geometries on the same part, not one.
 confirms_cited: 0
-confirms_blind: 0
+confirms_blind: 1
 losses: 0
-attempts: 1
+attempts: 2
 toolchain: unknown
-last_seen: 2026-09-21
+last_seen: 2026-09-24
 name: let-a-per-shape-table-pick-the-blas-library-instead-of-picki-dense-gemm-gfx1151-decode
 description: gfx1151/RDNA vLLM dense bf16 decode: a per-shape TunableOp BLAS table is a real e2e lever (~+11%); forcing one library globally is a large regression
 keywords: ['dense-gemm', 'bf16', 'gfx1151', 'rdna', 'strix-halo', 'vllm', 'tunableop', 'per-shape-tuning', 'backend-routing', 'rocblas', 'hipblaslt', 'decode', 'vendor-library', 'cold-vs-hot', 'measurement-discipline', 'tuning-artifact']
@@ -31,5 +31,6 @@ levers: ['host.backend-routing', 'host.host-tuning']
 - verify: Score on a FRESH server, not a warm one. A warm-server A/B overstated this lever by about 25-30% on this part (14.3% warm reconciling to about 10.9% fresh), which is large enough to change a funding decision on its own. Confirm the deployed table path is the one the launch recipe actually points at, and re-check task accuracy, since a different library changes accumulation order.
 - pitfall: the tuning pass emits TWO tables with the same filename shape: a raw intermediate recorded during the hot sweep, and the cold/rotating-tuned one under the install directory that the pipeline actually deploys -> deploying the intermediate measured +1.65% and deploying the installed one measured +11.31%, a 7x difference from a directory name -> resolve which artifact the launch recipe references before benchmarking, because both are non-empty, both parse, and the wrong one fails as a small positive rather than as an error.
 hot op-level timing inverts the cold verdict on these shapes -> with one weight resident a naive candidate measures 1.7-2.6x faster than the vendor, and 0.66-0.90x once weights rotate past the last-level cache -> real decode streams far more than the cache per step, so rank on the cold measurement.
-- caution: also verify, rather than assume, that this survives a three-arm greedy-token consistency gate: changing the BLAS library changes accumulation order, and a sibling stride-padding lever on this same part passed its throughput gate at a similar magnitude and then diverged on 2 of 8 controls. Also verify the emitted table path is portable before treating the recipe as deliverable - it is written as a session-scoped absolute path by default. Evidence here is one model, one workload point, one box.
+- caution: also verify, rather than assume, that this survives a three-arm greedy-token consistency gate: changing the BLAS library changes accumulation order, and a sibling stride-padding lever on this same part passed its throughput gate at a similar magnitude and then diverged on 2 of 8 controls. Also verify the emitted table path is portable before treating the recipe as deliverable - it is written as a session-scoped absolute path by default. Evidence is now two model/workload points on the same box (the "one workload point" caveat is partly relieved), but still one part (gfx1151).
 - source: run e2e_gfx1151_tunableop_20260921, 2026-09-21 - orchestrator revalidate arm plus an independent operator-run fresh-server 3-repeat A/B on the same recipe; accuracy smoke re-run on both arms; supersedes four earlier conclusions that were drawn from the raw intermediate tuning table
+- source: exp/e2e_*Qwen3-4B-Instruct-2507*/ 2026-09-24 - Director same-session warm_server A/B (TP1 GPU0, 3 rounds/leg) at ISL1024/OSL128/conc8: 133.82 -> 152.76 tok/s (+14.15%, 1.1415x), non-overlapping vs 0.5% noise band, op-tolerance parity pass, TunableOp engagement confirmed in server.log (env-only deploy: PYTORCH_TUNABLEOP_ENABLED=1 TUNING=0 + FILENAME table); TPOT 58.22 -> 50.94 ms

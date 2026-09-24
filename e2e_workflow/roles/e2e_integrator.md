@@ -13,6 +13,15 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
 ## The gate (a change enters e2e only if ALL hold)
 1. The isolated unittest speedup is REAL (kernel-layer Director verified it, oracle untampered —
    re-check `reference_io_sha256` vs meta.json).
+   For every authored/patch candidate, make this check machine-auditable in the return:
+   - SHA256 the exact patch you apply and return it as `provenance.authored_patch_sha256`.
+   - SHA256 the immutable operator oracle and return it as `provenance.oracle_sha256`; it must equal
+     `KERNEL_RESULT.reference_io_sha256` when that input is present.
+   - Copy the exact live callable and candidate binding you installed into
+     `provenance.target_seam` and `provenance.candidate_binding`. They must match the corresponding
+     `KERNEL_RESULT` fields. Do not substitute a nearby device symbol.
+   - Return `accepted_env` and `accepted_flags` even when either is the empty string.
+   Missing or mismatched evidence makes `provenance_ok=false` and the workflow will refuse promotion.
 2. **Engagement proof** (the TunableOp lesson): the optimized kernel/config is ACTUALLY used on the live
    serving path — prove it from the server log, don't infer it from a throughput wiggle. For an aiter
    GEMM DB env: `grep -c 'is tuned on cu_num'` must be >0 (and "not found tuned config" must drop). For
@@ -34,7 +43,9 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
    at the first token vs a deterministic baseline, while every per-leg check "passed"). So run the parity
    probe with the CAND overlay vs a FRESH no-overlay baseline server (both greedy/temp=0/fixed seed). 
    - If the baseline is deterministic (re-run it twice; byte-exact) and the CAND diverges on ANY prompt →
-     it is a REAL output change, NOT FP noise. For a NON-quant change → REJECT.
+     it is a REAL output change, NOT FP noise. For a NON-quant change → REJECT. (Exception, opt-in only:
+     a dtype-preserving KERNEL/BLAS SWAP also diverges here for reduction-order reasons; when
+     `ACCURACY_GATE=op_tolerance` is in your inputs, see the OP-TOLERANCE GATE below before rejecting.)
    - For a QUANTIZED kernel (MXFP8/fp8 — byte-parity is expected to drift from rounding/argmax) → do NOT
      accept on throughput alone: run a small TASK-ACCURACY gate (e.g. a fixed greedy eval set / agreement
      rate vs the true baseline) and accept ONLY if quality holds within tolerance; otherwise `rejected`
@@ -44,14 +55,17 @@ e2e_optimization.md` (measurement discipline + the Amdahl stop rule).
 5. **Report `parity_kind` on every ACCEPT** so the orchestrator can trust the win correctly:
    `"byte_exact"` when acceptance rests on hard greedy byte-parity vs the TRUE baseline; `"accuracy"`
    when it rests on the soft sampled task-accuracy probe (a quant kernel / `ACCURACY_GATE=gsm8k`, where
-   byte-parity is waived); `"none"` if no correctness check ran. This matters: the orchestrator only
-   distrusts a too-good-to-be-true speedup on an `accuracy` (soft) accept — a `byte_exact` accept is a
+   byte-parity is waived); `"op_tolerance"` when it rests on the soft RELATIVE OP-LEVEL numeric probe
+   scored against the baseline kernel's own error floor (`ACCURACY_GATE=op_tolerance`, see below);
+   `"none"` if no correctness check ran. This matters: the orchestrator only
+   distrusts a too-good-to-be-true speedup on a SOFT accept (`accuracy` or `op_tolerance`) — a `byte_exact` accept is a
    hard correctness guarantee and is trusted even above its Amdahl ceiling (the profile can under-count).
 6. **Implausible-speedup guard (a correctness signal, not a win) — for the SOFT gate.** The MOST e2e
    speedup an op that is `pct_gpu_time`% of GPU time can yield at its isolated speedup S is the Amdahl
-   ceiling `1/(1 - (pct/100)(1 - 1/S))`. When you accept a QUANT / accuracy-gated kernel (byte-parity
-   waived) and the measured e2e delta BLOWS PAST that ceiling, the kernel is likely doing LESS / degenerate
-   work (corruption) that squeaked past a small accuracy sample — a fast-but-wrong server (truncated /
+   ceiling `1/(1 - (pct/100)(1 - 1/S))`. When you accept on ANY soft gate — a QUANT / accuracy-gated
+   kernel, or an `op_tolerance` accept (byte-parity waived either way) — and the measured e2e delta BLOWS
+   PAST that ceiling, the kernel is likely doing LESS / degenerate
+   work (corruption) that squeaked past a small accuracy sample or a per-op check — a fast-but-wrong server (truncated /
    degenerate generations). Re-check accuracy on a LARGER sample vs the TRUE baseline; if it does not
    genuinely hold, report `gate:"rejected"` with reason **`implausible_speedup`**. (A byte-exact accept is
    NOT subject to this — trust it.) Use the reason vocabulary the orchestrator's auto-correct classifier
@@ -98,6 +112,69 @@ differently → flips borderline argmaxes → over-rejects valid kernels). Inste
   quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply the
   throughput + engagement + memory gates as usual. (You can reuse the same two servers for the throughput
   A/B to avoid extra launches.)
+
+**OP-TOLERANCE GATE (only if `ACCURACY_GATE=op_tolerance` is in your inputs; else use the normal parity
+gate).** Byte-exact greedy parity also over-rejects a change that involves NO quantization at all: a
+dtype-preserving KERNEL/BLAS SWAP. A vendor BLAS picks its solution per shape, so swapping tables changes
+reduction ORDER, which flips borderline greedy argmaxes exactly the way rounding does (measured
+gfx1151/vLLM: a +14.38% TunableOp table diverged on 3/12 greedy prompts, every divergence coherent and
+correct, against a baseline that was byte-exact against itself 12/12). The tuning lane already gates this
+class of change, on a RELATIVE op-level error. This gate puts the integrate seam on that same standard.
+- **Control group FIRST, and it is not optional.** Run the TRUE baseline against ITSELF (two fresh
+  no-overlay servers, greedy/temp=0, requests issued ONE AT A TIME — concurrency alone makes a server
+  disagree with itself). If the control is NOT byte-exact, you have no floor: report `gate:"incomplete"`
+  with the control numbers and do NOT rule on the candidate. The candidate has to match the FLOOR, not
+  match perfection.
+- **Byte-exact stays the fast path.** If the candidate is byte-exact vs the true baseline, accept with
+  `parity_kind:"byte_exact"` as usual — this gate never downgrades a clean result.
+- **Provision the oracle if there isn't one.** `KERNEL_RESULT.task_dir` only holds a `reference_io.pt`
+  when the kernel lane captured one; a HEAD winner with `winner_kind ∈ {env,flag}` (the TunableOp case)
+  has no task dir at all. Two ways to get one, in order of preference:
+  - **A BLAS-TABLE swap (`env`/`flag` winner): build the oracle FROM THE TABLE.**
+    `python3 $OP_PARITY_SCRIPT --from-tunableop-csv <the deployed table>.csv --out <dir>/reference_io.pt`
+    Every row of a TunableOp table is a shape the table selected an algorithm for, so the table IS the
+    exhaustive list of GEMMs the swap can touch — a tighter set than sampling a server would give, and
+    it needs no server at all. The script prints `OP_PARITY_ORACLE=complete|partial` and lists any rows
+    it skipped; treat `partial` as a reason to read the skip list, never as done.
+    Do NOT try to `capture_shapes` this seam: `torch.nn.functional:linear` is a C builtin and the
+    capture tool refuses to wrap it (a plain-function stand-in SIGSEGVs the server), while the
+    Python-level seams around it are either registered custom ops — so patching the module attribute
+    never intercepts — or take the `nn.Module` as an argument, which the snapshotter reduces to
+    `{"__repr__": ...}`, losing the weights.
+  - **An AUTHORED kernel with a real task dir:** use the `reference_io.pt` already there, or capture one
+    off the REFERENCE leg — never off the candidate — with the recipe the kernel lane uses
+    (`overlay_setup.py add-capture` + `capture_shapes.py`, see `kernel_extractor.md`), `CAPTURE_MAX=5`,
+    driven by the SAME `WORKLOAD` so the shapes match the regime you are gating. Capturing off the
+    candidate would make the oracle agree with the candidate by construction.
+  If no oracle can be obtained either way, report `gate:"incomplete"` — do not rule without one.
+- **Prove the two legs are DISTINCT before you read the verdict.** Each leg JSON carries a `tunable`
+  block snapshotted in-process; on a TunableOp candidate the `cand` leg must show `is_enabled: true`
+  with `num_results > 0` and the `ref` leg `0`. This is not ceremony: `PYTORCH_TUNABLEOP_FILENAME`
+  names a file PyTorch rewrites by inserting the DEVICE ORDINAL before `.csv` (point it at `t.csv` and
+  it opens `t0.csv`). Measured here: a mistyped path made the candidate fall back to stock BLAS, both
+  legs reported the identical `3.870e-03`, and the gate said `pass`. The verbose log cannot save you —
+  TunableOp prints no banner when it merely USES a loaded entry. The probe now refuses such a pair with
+  `unknown`, but check the field yourself and report `gate:"incomplete"` if engagement is not shown.
+- **Only on a byte-parity divergence**, run the numeric probe, once per leg, each in a process carrying
+  that leg's env (so `ref` sees the untuned path and `cand` sees the candidate's `apply_env`):
+  `python3 $OP_PARITY_SCRIPT --oracle <oracle dir> --leg ref|cand --tol $OP_TOL --out <dir>/op_parity_<leg>.json`
+  (`<oracle dir>` = `KERNEL_RESULT.task_dir` for an authored kernel, or the dir you synthesized into above)
+  then `python3 $OP_PARITY_SCRIPT --compare <dir>/op_parity_ref.json <dir>/op_parity_cand.json
+  --tol $OP_TOL --floor-mult $OP_TOL_FLOOR_MULT --out <dir>/op_parity.json` (it prints `OP_PARITY=<pass|fail|unknown>`).
+  The probe scores BOTH legs against the same CPU-fp32 reference built from the UNMODIFIED baseline seam,
+  and verifies that sameness by fingerprint — it returns `unknown` rather than ruling if the legs'
+  references disagree or if no higher-precision reference could be built. Treat `unknown` as
+  `gate:"incomplete"`, never as a pass.
+- **Verdict:** `pass` iff `err_cand <= max($OP_TOL, $OP_TOL_FLOOR_MULT * err_base)` — the baseline's OWN
+  error is the floor; a candidate is suspect when it is MATERIALLY worse, not when it is merely nonzero.
+  On pass → `accepted` with `parity_kind:"op_tolerance"`, and `parity_detail` MUST carry all three
+  numbers (`err_base_vs_fp32`, `err_cand_vs_fp32`, `err_cand_vs_captured_baseline`) plus the byte-parity
+  count it is overriding. On fail → `rejected` with reason `parity_regression`, same numbers recorded.
+- **Scope, stated plainly:** this is a NUMERIC check, not a TASK check. It says the op still computes the
+  same function to within the precision its own baseline achieves; it does NOT say the model's answers
+  stayed right. Where the correctness of the ANSWER is what has to hold, stack `accuracy_gate=gsm8k` on
+  top of it. Because it is soft, an `op_tolerance` accept remains subject to the implausible-speedup
+  guard below.
 
 **DEEP-MODE feedback (only if `DEEP_FEEDBACK` is in your inputs; a normal/fast run omits it).** Besides
 the gate decision, the deep-mode scheduler needs the WHY so the next co-opt waves can fix the
@@ -361,6 +438,13 @@ Return JSON:
 {
   "short_name": "<short_name>",
   "provenance_ok": true,
+  "provenance": {
+    "authored_patch_sha256": "<64 lowercase hex chars; required for patch/authored>",
+    "oracle_sha256": "<64 lowercase hex chars; required for patch/authored>",
+    "target_seam": "<live module:callable>",
+    "candidate_binding": {"kind": "module|rebind", "...": "exact binding replayed"}
+  },
+  "engagement_evidence": "<concrete marker/counter/log line proving candidate execution>",
   "isolated_speedup": 0.0,
   "pct_gpu_time": 0.0,
   "e2e_throughput_tok_s": 0.0,
@@ -369,7 +453,7 @@ Return JSON:
   "cand_med": 0.0,
   "ab_complete": true,
   "output_parity": "pass|fail",
-  "parity_kind": "byte_exact|accuracy|none",
+  "parity_kind": "byte_exact|accuracy|op_tolerance|none",
   "gate": "accepted|stack|rejected|incomplete",
   "accepted_overlay": "<path to the overlay to carry forward>",
   "accepted_env": "<KEY=VAL[ KEY=VAL...] the overlay needs to bind, or \"\">",
