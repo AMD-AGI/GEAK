@@ -58,6 +58,22 @@ class TestModuleStartup(unittest.TestCase):
     def assert_success(self, process):
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
 
+    def test_cli_builder_does_not_depend_on_site_import_side_effects(self):
+        source = self.write("sources/cli_target.py", "VALUE = 'cli-patched'\n")
+        output = self.root / "cli-overlay"
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(self.installed)
+        process = subprocess.run(
+            [sys.executable, "-S", str(SCRIPTS / "overlay_setup.py"), "add-module",
+             "--overlay", str(output), "--module", "probe_pkg.target",
+             "--patched-file", str(source)],
+            cwd=self.root, env=env, capture_output=True, text=True, timeout=10,
+        )
+        self.assert_success(process)
+        manifest = json.loads((output / "_overlay_manifest.json").read_text())
+        self.assertEqual(manifest["modules"][0]["module"], "probe_pkg.target")
+        self.assertEqual((output / manifest["modules"][0]["file"]).read_bytes(), source.read_bytes())
+
     def test_plain_helper_does_not_import_target_or_framework(self):
         process = self.run_python("""
             import sys
