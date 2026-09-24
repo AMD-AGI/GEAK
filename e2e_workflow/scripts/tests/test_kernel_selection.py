@@ -112,6 +112,68 @@ REAL_ROCM_SYMBOLS = {
 }
 
 
+class TestNumericSpecializationIsOneKernel(unittest.TestCase):
+    """The rule that admits a Triton autotune variant -- and the guards that keep it narrow.
+
+    This is the only widening in the matcher: names that were refused before are now admitted,
+    on EVERY arch, not just the RDNA part the change came from. A rule that loosens a matcher
+    used to decide `device_kernel_not_under_target` has to be pinned in both directions, or the
+    next edit to it silently starts certifying the wrong kernel with nothing to catch it.
+    """
+
+    # The real pair. Triton bakes constexpr values into the symbol, so one autotune decision per
+    # launch shape reads as a different kernel: the same aiter head was refused at one M bucket
+    # (matched_kernel_calls: 0) while its sibling matched the identically-named base kernel.
+    A = "_gemm_a16_w16_kernel_BLOCK_SIZE_N_16_BLOCK_SIZE_K_64_NUM_KSPLIT_2"
+    B = "_gemm_a16_w16_kernel_BLOCK_SIZE_N_128_BLOCK_SIZE_K_64_NUM_KSPLIT_1"
+
+    def test_two_autotune_variants_of_one_kernel_match(self):
+        self.assertTrue(ks.kernel_matches(self.A, self.B))
+        self.assertTrue(ks.kernel_matches(self.B, self.A))
+
+    def test_the_verdict_names_the_weaker_rule_that_admitted_it(self):
+        # A caller recording evidence must be able to show this was NOT an exact match.
+        self.assertEqual(ks.kernel_match_kind(self.A, self.B), "numeric_specialization")
+        self.assertEqual(ks.kernel_match_kind(self.A, self.A), "exact")
+
+    def test_a_differing_NAME_token_is_still_refused(self):
+        # Same shape, same digits, one word apart: a genuinely different kernel differs in a name
+        # token. If this ever passes, the rule has stopped distinguishing kernels from tunings.
+        other = self.A.replace("_gemm_a16_w16_kernel_", "_gemv_a16_w16_kernel_")
+        self.assertFalse(ks.kernel_matches(self.A, other))
+        self.assertEqual(ks.kernel_match_kind(self.A, other), "")
+
+    def test_a_different_leading_token_is_refused_even_with_every_value_equal(self):
+        self.assertFalse(ks.kernel_matches("alpha_BLOCK_16", "beta_BLOCK_16"))
+
+    def test_different_token_counts_never_match(self):
+        # The longer name must DIVERGE, not merely extend: `A + "_EVEN_K_1"` is admitted by the
+        # older truncated-prefix rule (a display-limit cut still matches its full symbol), which
+        # runs first and has nothing to do with this change. Inserting a token mid-name is what
+        # actually reaches the length guard.
+        self.assertFalse(ks.kernel_matches("k_pad_1_2", "k_pad_1_9_2"))
+
+    def test_two_short_symbols_cannot_certify_each_other_on_a_numeric_tail(self):
+        # The majority guard. Agreeing tokens must not be outnumbered by differing ones, so
+        # `k_1_2` vs `k_3_4` -- one shared token, two differing -- stays refused even though every
+        # difference is numeric.
+        self.assertFalse(ks.kernel_matches("k_1_2", "k_3_4"))
+        self.assertTrue(ks.kernel_matches("k_pad_1_2", "k_pad_3_4"))
+
+    def test_identical_names_do_not_reach_the_numeric_rule(self):
+        # differing == 0 must NOT be reported as a specialization match; exact equality is checked
+        # first and has to stay the reported kind.
+        self.assertEqual(ks.kernel_match_kind("k_16", "k_16"), "exact")
+
+    def test_template_arguments_still_have_to_agree(self):
+        # The numeric rule relaxes the BASE token only. A disagreeing closed template list is a
+        # different instantiation and must still lose, or the rule would leak past its own scope.
+        left = self.A + "<__hip_bfloat16, 8>"
+        right = self.B + "<float, 8>"
+        self.assertFalse(ks.kernel_matches(left, right))
+        self.assertTrue(ks.kernel_matches(left, self.B + "<__hip_bfloat16, 8>"))
+
+
 class TestRealRocmSymbolsCanonicalizeToTheirKernel(unittest.TestCase):
     def test_each_symbol_reduces_to_the_kernel_it_names(self):
         for symbol, token in REAL_ROCM_SYMBOLS.items():
