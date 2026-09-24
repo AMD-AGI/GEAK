@@ -42,7 +42,10 @@ function build(argsObj, stubs) {
       trace.workflowCalls.push({ scriptPath: ref.scriptPath, args: a });
       trace.lanes.push({ lang: a.target_language, mode: a.mode, gpus: a.gpu_ids });
       const sp = s.lane && s.lane[a.target_language] !== undefined ? s.lane[a.target_language] : 1.0;
-      return { validation_status: 'validated', final_speedup: sp };
+      // The Director enum is accepted|flagged (roles/director.md). Anything else is unproducible,
+      // and stubbing one here silently disabled the ACCEPTED gate below for every bake-off case.
+      const st = s.laneStatus && s.laneStatus[a.target_language] || 'accepted';
+      return { validation_status: st, final_speedup: sp };
     },
     agent: async (p, o) => {
       const label = (o && o.label) || '';
@@ -238,6 +241,24 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     const w = r && r.winner;
     ok(w && w.lang === 'hip' && Math.abs(w.speedup - 1.85) < 1e-9, 'winner = hip @1.85x', JSON.stringify(w));
     ok(w && w.mode === 'author', 'winner.mode = author', JSON.stringify(w));
+  }
+
+  // -------------------------------------------------------------------------
+  console.log('\n# J2. a FLAGGED lane cannot win even when it is the fastest');
+  {
+    // The ACCEPTED gate is the whole point of J's stub being accurate: a lane whose Director
+    // validation came back  (correctness failed, patch did not install, contended box)
+    // beat the baseline on paper and must still be ineligible. Without this case, flipping the
+    // stub to 'accepted' would silently retire the gate instead of testing it.
+    const { run } = build({ ...BASE, mode: 'bakeoff', gpu_ids: '0,1,2' }, {
+      agent: healthy('triton', [{ language: 'hip', route: 'author' }, { language: 'ck', route: 'author' }]),
+      lane: { triton: 1.10, hip: 1.85, ck: 1.42 },
+      laneStatus: { hip: 'flagged' },
+    });
+    const r = await run();
+    const w = r && r.winner;
+    ok(w && w.lang === 'ck' && Math.abs(w.speedup - 1.42) < 1e-9,
+      'flagged fastest lane skipped; winner = ck @1.42x', JSON.stringify(w));
   }
 
   // -------------------------------------------------------------------------
