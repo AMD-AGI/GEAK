@@ -233,6 +233,7 @@ DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 _SERVING_FIDELITY_FLAGS: dict[str, dict[str, str]] = {
     "vllm": {"max_model_len": "--max-model-len", "mem_fraction": "--gpu-memory-utilization"},
     "sglang": {"max_model_len": "--context-length", "mem_fraction": "--mem-fraction-static"},
+    "atom": {"max_model_len": "--max-model-len", "mem_fraction": "--gpu-memory-utilization"},
 }
 
 
@@ -902,7 +903,7 @@ def agentx_preflight(h: dict) -> list[str]:
 # Backends for which Magpie ships a server-phase launch script (its scripts all
 # share ONE contract, so a single backend-agnostic launcher adapter serves them
 # all). Extend this set as Magpie adds backends — never add per-backend code.
-_MAGPIE_BACKENDS = {"sglang", "vllm"}
+_MAGPIE_BACKENDS = {"atom", "sglang", "vllm"}
 
 # The flat scalars we need out of the orchestrator's launch recipe. Keep this
 # lightweight scan separate from the BaseLoader parse used for the nested
@@ -1448,7 +1449,7 @@ def apply_bench_launcher(h: dict) -> str:
     adapter — which Magpie itself cannot do), mirroring :func:`apply_bench_client`.
 
     BACKEND-AGNOSTIC (never model/case specific): the SAME ``magpie`` launcher and
-    the SAME resolution logic serve sglang, vllm and any future Magpie backend —
+    the SAME resolution logic serve atom, sglang, vllm and any future Magpie backend —
     the launcher derives the per-backend flag/profiler var names from ``$BACKEND``.
 
     Resolution:
@@ -1457,7 +1458,7 @@ def apply_bench_launcher(h: dict) -> str:
         script cannot run on this box);
       * else enable ``magpie`` ONLY when a script is discoverable
         (``handoff.launch_server_script``, or generic ``$MAGPIE_LAUNCH_SCRIPT``,
-        or per-backend ``$MAGPIE_<BACKEND>_SCRIPT`` e.g. ``$MAGPIE_VLLM_SCRIPT``,
+        or per-backend ``$MAGPIE_<BACKEND>_SCRIPT`` e.g. ``$MAGPIE_ATOM_SCRIPT``,
         or derived from ``handoff.launch_recipe``)
         AND the backend is one Magpie supports; otherwise ``native``.
 
@@ -1521,9 +1522,9 @@ def apply_bench_launcher(h: dict) -> str:
     # handoff carried it; absent => the script's own default stands, which is
     # what the orchestrator served with.
     #
-    # gpu-mem-util is deliberately NOT forwarded the same way: no handoff has
-    # ever carried mem_fraction, and the script's 0.95 default IS the recipe we
-    # are trying to match.
+    # gpu-mem-util is deliberately NOT synthesized from a GEAK default here:
+    # the recipe script and its recorded EXTRA_<BACKEND>_ARGS are the source of
+    # truth (vLLM and ATOM do not necessarily share the same default).
     if launcher == "magpie":
         replay, owned = _recipe_launch_env(h)
         _export_recipe_env(h, replay, owned, source)

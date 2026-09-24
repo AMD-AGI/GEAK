@@ -6,7 +6,8 @@ capture a trace from a WARM server under the SAME workload as the throughput ben
 hand the Architect a clean, classified bottleneck table with per-entry shapes. You do not optimize.
 
 You are invoked per PHASE. Read first: `SKILL_DIR/knowledge/profile_parse.md` (the contract +
-classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profiler env + flags).
+classification semantics), `SKILL_DIR/knowledge/sglang_internals.md` for SGLang, and the ATOM
+profiling contract at the top of `SKILL_DIR/scripts/adapters/atom.sh` when `BACKEND=atom`.
 
 ## Discipline (a bad trace misroutes the whole run)
 - Profile with the EXACT ISL/OSL/concurrency as the throughput bench, AFTER warmup.
@@ -16,17 +17,20 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
   chunks AND decode steps. (The old behavior warmed PAST the prefill ramp first, so the window landed in
   decode ONLY and prefill kernels were never captured.) If your trace has ONLY large-M prefill shapes and
   no decode, OR only decode and no prefill, the window was mis-sized — raise `PROFILE_WINDOW_SEC` (vllm,
-  time) / `PROFILE_NUM_STEPS` (sglang, steps) and re-profile. Note that decode often runs under a CUDA/HIP
+  time), `ATOM_PROFILE_WINDOW_SEC` (ATOM, time, bounded by `ATOM_PROFILE_WINDOW_MAX_SEC`), or
+  `PROFILE_NUM_STEPS` (sglang, steps) and re-profile. Note that decode often runs under a CUDA/HIP
   graph, so its kernels may appear WITHOUT `Input Dims` (shape-hidden); that is expected — decode shapes
   are recovered downstream from config (decode batch = concurrency), not the trace. Tune the window via
   `PROFILE_WINDOW_SEC` / `PROFILE_NUM_STEPS` / `PROFILE_NUM_PROMPTS`; `PROFILE_WARMUP_SEC` defaults to 0.
 - **Steady state (batch ≈ CONC) is what makes the prefill/decode split valid — it is now sized
-  ANALYTICALLY UP FRONT for BOTH backends (the reactive re-capture gate is DISABLED):**
+  ANALYTICALLY UP FRONT for every supported backend (the reactive re-capture gate is DISABLED):**
   - `bench_e2e.sh` auto-sizes the window from `ISL/OSL/CONC`: `TARGET_STEPS = ceil(CONC·ISL/chunk) [prefill
     ramp] + max(30, 5·ceil(OSL/CONC)) [steady decode] + margin`, and bumps `PROFILE_NUM_PROMPTS` so the
     queue stays saturated through it. **sglang** (step-controlled) records `PROFILE_NUM_STEPS = TARGET_STEPS`
-    forward steps. **vLLM** (time-controlled) auto-derives `TPOT_MS` from the timed bench that just ran and
-    sizes the window to `TARGET_STEPS·TPOT·1.5`, clamped to `[PROFILE_WINDOW_SEC(40), PROFILE_WINDOW_SEC_MAX(60)]`
+    forward steps. **vLLM and ATOM** are time-controlled: the workflow auto-derives `TPOT_MS` from the
+    timed bench and sizes the common window to `TARGET_STEPS·TPOT·1.5`, bounded by
+    `PROFILE_WINDOW_SEC`/`PROFILE_WINDOW_SEC_MAX`; ATOM then applies its backend-specific
+    `ATOM_PROFILE_WINDOW_SEC`/`ATOM_PROFILE_WINDOW_MAX_SEC` guard
     — so it spans the prefill ramp + a steady decode sample while the cap bounds trace size (warmup=0 records
     the whole ramp). Override with `PREFILL_CHUNK` (chunk budget; raises RAMP so sglang's step budget doesn't
     get eaten by prefill at high CONC), `TPOT_MS`, `PROFILE_WINDOW_SEC_MAX`, or set
@@ -68,8 +72,9 @@ classification semantics) and `SKILL_DIR/knowledge/sglang_internals.md` (profile
   torch). **Read `EVAL_DIR/env_report.json` (`trace_sources`)** from the Director's preflight — if
   rocprofv3 is absent, run torch-trace only and say so in `notes`; don't fail.
 - The serving stack is selected by `BACKEND`; always invoke `bench_e2e.sh` with `BACKEND=<backend>`.
-  The adapter points the stack's torch profiler (`SGLANG_TORCH_PROFILER_DIR` /
-  `VLLM_TORCH_PROFILER_DIR`) at `PROFILE_DIR` for you.
+  SGLang and vLLM use `SGLANG_TORCH_PROFILER_DIR` / `VLLM_TORCH_PROFILER_DIR`. ATOM uses the
+  `--torch-profiler-dir` launch flag plus `ATOM_PROFILER_MORE=1`, writes one trace directory per rank,
+  and emits `atom_profile_manifest.json` only after all expected rank traces finalize.
 
 ---
 
@@ -188,7 +193,23 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
 3. Run the standardized parser:
    ```bash
    PDIR="$EVAL_DIR/profile/round_${ROUND}/profile"
-   TRACE=$(ls -t "$PDIR"/*.json.gz "$PDIR"/*.json 2>/dev/null | head -1)
+   if [ "$BACKEND" = atom ]; then
+     # ATOM writes one recursive trace per TP rank. Its adapter emits this manifest only after every
+     # expected rank has finalized a gzip; a missing/incomplete manifest is a failed profile, never a
+     # rank-0-only fallback.
+     python3 - "$PDIR/atom_profile_manifest.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+assert d.get("status") == "complete", d
+assert len(d.get("completed_ranks", [])) >= int(d.get("expected_ranks", 1)), d
+PY
+     TRACE=$(find "$PDIR/rank_0" "$PDIR/dp0_tp0" -type f -name '*.trace.json.gz' \
+       -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+   else
+     TRACE=$(ls -t "$PDIR"/*.json.gz "$PDIR"/*.json 2>/dev/null | head -1)
+   fi
+   [ -n "$TRACE" ] || { echo "No complete torch trace found under $PDIR" >&2; exit 1; }
    # CAPTURE_SIZES: the server's cudagraph_capture_sizes (grep server.log "cudagraph_capture_sizes");
    # CHUNK: max_num_batched_tokens (grep server.log "Chunked prefill is enabled with ...").
    python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$TRACE" \
@@ -201,7 +222,7 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    Pass `--isl/--osl/--conc` (the SAME values as the bench). IF the trace carries `gpu_user_annotation`
    `execute_*` step spans, each top kernel is annotated with its MEASURED serving **phase**
    (`prefill`/`decode`/`both`), per-phase `base_latency_ms`, and a top-level `serving` block with the
-   prefill/decode step counts + steady-state gate. On current vllm/sglang builds those spans are ABSENT
+   prefill/decode step counts + steady-state gate. On current vllm/sglang/ATOM builds those spans are ABSENT
    (see the steady-state note above), so these MEASURED fields will typically be MISSING — that is
    EXPECTED, not a capture error; do not re-profile chasing them. Regardless, the parser ALWAYS emits
    `est_shape` (prefill M = token budget + remainders; decode M = concurrency snapped to a capture size)
@@ -215,7 +236,7 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
    hits. It needs the torch trace's `Input Dims` (record_shapes); if shapes are absent the cases come
    out `weight_source:"regime_prior"` — note that in `notes`. Report its path as `profile_workload_json`.
 4. Sanity-read `profile_topN.md`. Resolve any `other`-classified top entries before finishing: grep
-   the `short_name` under the serving-stack package dir (sglang/vllm, from `env_info.txt`) to identify
+   the `short_name` under the serving-stack package dir (sglang/vllm/atom, from `env_info.txt`) to identify
    it, and note the correct class in `notes` so the Architect routes it right. Flag same-named kernels appearing with BOTH large-M and small-M shapes
    (one kernel serving prefill + decode → different regimes).
 5. **Per-call distribution sanity** on the top entries you'll route on, per `knowledge/profile_parse.md`
