@@ -1496,3 +1496,88 @@ def test_alias_fallback_does_not_swallow_unrelated_keys(tmp_path):
     assert "GEAK_TUNED_GEMM_TABLE" in env
     assert "NOT_A_SETTING" not in env and "ALSO_NOT_A_SETTING" not in env
     assert "--not-a-flag" not in flags
+
+
+# ── handoff-failure attribution ─────────────────────────────────────────────
+# A recovered run used to emit a result.json indistinguishable from a clean one: the class and
+# the exception were written only on the NON-recovered branch. Five DC runs in a row recovered,
+# so five runs in a row lost their own cause. These pin that the cause now survives, and that
+# `timeout` again means only what the synthesized report says it means.
+
+def test_recovered_run_records_why_the_handoff_failed(monkeypatch, tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+
+    def boom(prompt, t, ed, ps_args=None):
+        raise RuntimeError("claude CLI failed: gateway 502")
+
+    rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
+    out = json.loads(rp.read_text())
+    assert out.get("recovered_from_disk") is True, "precondition: this test needs the recovered path"
+    assert out["handoff_error_class"] == "cli_failed"
+    assert "gateway 502" in out["handoff_error"]
+    assert out["handoff_budget_s"] > 0 and out["handoff_elapsed_s"] >= 0
+
+
+def test_clean_run_carries_no_handoff_error_keys(monkeypatch, tmp_path):
+    """The stamp must be invisible to a run that did not fail."""
+    eval_dir = _make_eval_dir(tmp_path, with_validation=True)
+
+    def ok_invoke(prompt, t, ed, ps_args=None):
+        return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
+                "final_throughput_tok_s": 535.352,
+                "baseline_throughput_tok_s": 461.314}
+
+    rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=ok_invoke)
+    out = json.loads(rp.read_text())
+    assert not [k for k in out if k.startswith("handoff_error")]
+
+
+def test_early_timeout_is_not_called_a_budget_expiry(monkeypatch, tmp_path):
+    """MEASURED on the DC box: run-auth raised TimeoutError at 1098s of a 14400s budget and was
+    reported as having run out of wall clock. asyncio.TimeoutError IS builtins.TimeoutError, so
+    an SDK/gateway read timeout wears the same name; 7.6% of a budget is not budget expiry."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+
+    def boom(prompt, t, ed, ps_args=None):
+        raise TimeoutError("read timed out")
+
+    rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
+    out = json.loads(rp.read_text())
+    assert out["handoff_error_class"] == "sdk_timeout"
+    assert out["handoff_elapsed_s"] < 0.9 * out["handoff_budget_s"]
+
+
+def test_self_stop_stays_a_timeout_however_early_it_lands(monkeypatch, tmp_path):
+    """The SIGTERM graceful stop is a `timeout` BY CONTRACT, not by elapsed time — it is raised
+    on purpose and may land one second in. The reclassification must not swallow it."""
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+
+    def boom(prompt, t, ed, ps_args=None):
+        raise TimeoutError(f"signal 15: {rx.SELF_STOP_MARK}")
+
+    rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
+    out = json.loads(rp.read_text())
+    assert out["handoff_error_class"] == "timeout"
+
+
+def test_synthesized_report_states_the_real_reason(tmp_path):
+    body = rx._render_synthesized_final_report({
+        "status": "no_gain", "handoff_error_class": "sdk_timeout",
+        "handoff_elapsed_s": 1098.0, "handoff_budget_s": 14400.0,
+        "handoff_error": "TimeoutError: read timed out",
+    }, None)
+    assert "wall-clock budget expired" not in body
+    assert "sdk_timeout" in body and "1098s of a 14400s budget" in body
+
+
+def test_config_only_win_is_not_reported_as_nothing_accepted(tmp_path):
+    """r3 printed "Nothing was accepted" directly above its own Accepted-config block and a
+    1.14x table. accepted_config IS accepted work."""
+    body = rx._render_synthesized_final_report({
+        "status": "ok", "throughput_speedup": 1.1408,
+        "accepted_config": {"env": {"PYTORCH_TUNABLEOP_ENABLED": "1"}, "flags": ""},
+    }, None)
+    assert "Nothing was accepted" not in body
+    assert "configuration-only" in body
+    plain = rx._render_synthesized_final_report({"status": "no_gain"}, None)
+    assert "Nothing was accepted" in plain

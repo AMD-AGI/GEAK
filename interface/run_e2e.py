@@ -52,6 +52,10 @@ except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
     from effective_config import resolve_effective_config
 
 SCHEMA_VERSION = 2
+# The exact text the SIGTERM self-stop carries. It is a constant because two places now have to
+# agree on it: the handler that raises it, and the elapsed-vs-budget check that must NOT
+# re-classify a deliberate graceful stop as an SDK timeout just because it landed early.
+SELF_STOP_MARK = "self-stop to flush interface files"
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
 E2E_CHECKPOINT_SCHEMA_VERSION = 2
 E2E_CHECKPOINT_FILE = "e2e_validation.json"
@@ -6561,12 +6565,27 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
 
     parts: list[str] = []
     parts.append("# GEAK e2e — final report (SYNTHESIZED)\n")
+    # Why the workflow stopped is now recorded, so say the true reason instead of asserting the
+    # one that happened to be most common. The old text claimed "its wall-clock budget expired"
+    # unconditionally; on the DC box that sentence was printed over a run that died at 1098s of a
+    # 14400s budget, and it sent the reader after the wrong thing.
+    hclass = normalized.get("handoff_error_class")
+    helapsed = normalized.get("handoff_elapsed_s")
+    hbudget = normalized.get("handoff_budget_s")
+    if hclass:
+        why = f"stopped early (`{hclass}`)"
+        if isinstance(helapsed, (int, float)) and isinstance(hbudget, (int, float)):
+            why += f" after {helapsed:.0f}s of a {hbudget:.0f}s budget"
+        detail = str(normalized.get("handoff_error") or "").strip()
+        why += f". Cause: `{detail[:300]}`" if detail else "."
+    else:
+        why = "did not reach Finalize/Report/Validate."
     parts.append(
-        "> **This report was not written by the Report phase.** The workflow did not reach\n"
-        "> Finalize/Report/Validate before its wall-clock budget expired, so `run_e2e.py`\n"
-        "> synthesized this file from the artifacts already on disk. Every number below was\n"
-        "> really measured, but there was **no independent Director re-measurement**, so treat\n"
-        "> the headline as provisional and re-bench before promoting it.\n"
+        "> **This report was not written by the Report phase.** The workflow "
+        f"{why}\n"
+        "> `run_e2e.py` synthesized this file from the artifacts already on disk. Every number\n"
+        "> below was really measured, but there was **no independent Director re-measurement**,\n"
+        "> so treat the headline as provisional and re-bench before promoting it.\n"
     )
     parts.append("\n## Result\n")
     parts.append(_md_table([
@@ -6585,8 +6604,14 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
     ]))
 
     parts.append("\n\n## Accepted work\n")
-    if not kernels and not heads:
+    # `accepted_config` counts as accepted work. It was left out of this test, so a run that
+    # accepted a tuning-data/config hypothesis printed "Nothing was accepted" directly above its
+    # own Accepted-config block and a >1x speedup table -- a self-contradiction in the one file
+    # a reader is most likely to quote.
+    if not kernels and not heads and not (config.get("flags") or config.get("env")):
         parts.append("\nNothing was accepted — the run is a do-no-harm no-gain.\n")
+    elif not kernels and not heads:
+        parts.append("\nNo kernel or head was accepted; the win below is configuration-only.\n")
     for label, entries in (("kernels", kernels), ("heads", heads)):
         if not entries:
             continue
@@ -6820,7 +6845,9 @@ def main(argv: list[str]) -> int:
     _emit_state: dict[str, Any] = {"done": False, "out": {}}
 
     def _emit(wf: dict | None = None, *, error: object = None,
-              error_class: str | None = None) -> dict:
+              error_class: str | None = None,
+              error_elapsed_s: float | None = None,
+              error_budget_s: float | None = None) -> dict:
         if _emit_state["done"]:
             return _emit_state["out"]
         # A second SIGTERM must not interrupt the flush we are about to do.
@@ -6838,6 +6865,19 @@ def main(argv: list[str]) -> int:
                 out = normalize_result(h, wf)
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
+                # The recovered path used to record NOTHING about the failure it recovered from:
+                # error_class/error were written only in the `wf is None` branch below, so a run
+                # that died at 7.6% of its budget and was rebuilt from disk emitted a result.json
+                # indistinguishable from a clean finish. These keys are namespaced (handoff_*) so
+                # they cannot be mistaken for -- or collide with -- the terminal error fields, and
+                # they are written ONLY when there was an error, leaving clean runs byte-identical.
+                if error is not None or error_class:
+                    out["handoff_error_class"] = error_class or "runner_error"
+                    out["handoff_error"] = str(error or "")[:800]
+                    if error_elapsed_s is not None:
+                        out["handoff_elapsed_s"] = round(float(error_elapsed_s), 1)
+                    if error_budget_s is not None:
+                        out["handoff_budget_s"] = round(float(error_budget_s), 1)
             else:
                 out = {
                     "schema_version": SCHEMA_VERSION,
@@ -6951,7 +6991,12 @@ def main(argv: list[str]) -> int:
     # SIGTERM (the outer runner's graceful-stop) -> break out of the workflow
     # wait as a TimeoutError so the finally below emits from on-disk artifacts.
     def _on_term(signum, _frame):
-        raise TimeoutError(f"signal {signum}: self-stop to flush interface files")
+        exc = TimeoutError(f"signal {signum}: {SELF_STOP_MARK}")
+        # Tagged so the elapsed-vs-budget reclassification below can tell THIS deliberate
+        # TimeoutError -- a graceful stop we raised on purpose, which is a "timeout" by contract
+        # no matter how early it lands -- apart from one that came up out of the SDK.
+        exc.geak_self_stop = True  # type: ignore[attr-defined]
+        raise exc
     signal.signal(signal.SIGTERM, _on_term)
 
     # ── Resume-from-cache short-circuit ──────────────────────────────────────
@@ -6981,24 +7026,47 @@ def main(argv: list[str]) -> int:
     wf: dict | None = None
     err: object = None
     err_class: str | None = None
+    err_elapsed: float | None = None
+    handoff_t0 = time.time()
     try:
         wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args)
     except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
         err = e
         err_class = _classify_error(e)
+        elapsed = err_elapsed = time.time() - handoff_t0
+        # `timeout` used to mean one thing -- our own budget ran out -- and the synthesized report
+        # says so in as many words. It does not: _classify_error maps ANY TimeoutError, and
+        # asyncio.TimeoutError IS builtins.TimeoutError, so a read timeout against the API gateway
+        # arrives wearing the same name. MEASURED on the DC box: run-auth died at 1098s of a 14400s
+        # budget -- 7.6% -- and was reported, on stdout and in its own final report, as having run
+        # out of wall clock. Naming it separately costs nothing and stops the next person spending a
+        # day on a budget that was never the problem.
+        # Both the tag and the message: the tag is exact, and the message is the contract the
+        # SIGTERM self-stop is tested against (the test raises the same text without going
+        # through our handler). Either one present means "deliberate", so leave it a `timeout`.
+        self_stop = getattr(e, "geak_self_stop", False) or SELF_STOP_MARK in str(e)
+        if err_class == "timeout" and elapsed < 0.9 * timeout_s and not self_stop:
+            err_class = "sdk_timeout"
         try:
             wf = _recover_workflow_return(exp_root)
         except Exception:
             wf = None
         if wf is not None:
+            # The exception itself used to be dropped on this branch -- only the class survived, and
+            # only to stderr. Every recovered run therefore lost the one string that says WHAT broke,
+            # which is why five DC runs in a row are unexplained. It is truncated, not summarized:
+            # a class name plus the model's own last words.
+            detail = f"{type(e).__name__}: {e}"
             sys.stderr.write(
-                f"GEAK e2e: workflow handoff failed [{err_class}]; "
-                f"recovered from disk artifacts ({wf.get('eval_dir')}).\n"
+                f"GEAK e2e: workflow handoff failed [{err_class}] after {elapsed:.0f}s of "
+                f"{timeout_s}s; recovered from disk artifacts ({wf.get('eval_dir')}).\n"
+                f"GEAK e2e:   cause: {detail[:800]}\n"
             )
         else:
             sys.stderr.write(f"GEAK e2e failed [{err_class}]: {e}\n")
     finally:
-        out = _emit(wf=wf, error=err, error_class=err_class)
+        out = _emit(wf=wf, error=err, error_class=err_class,
+                    error_elapsed_s=err_elapsed, error_budget_s=timeout_s)
 
     print(json.dumps({"status": out.get("status"),
                       "result_json": str(result_path),
