@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3, int8, fp4_e2m1, mxfp4]
 regimes: [prefill, decode, both]
 status: competitive
-updated: 2026-06-08
+updated: 2026-09-21
 sources:
   - https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html
   - https://github.com/ROCm/aiter
@@ -84,6 +84,14 @@ gfx (`..._gfx942`). Key arch behavior baked into aiter's wrappers:
 - [authoring_gemm_levers.md](authoring_gemm_levers.md) — GEMM-specific levers (tiling / LDS staging / swizzle / epilogue).
 - [authoring_attention_levers.md](authoring_attention_levers.md) — fused multi-GEMM attention levers (fusion boundary, MFMA fragment orientation, which output goes on atomics, wave count vs the register cap).
 - [debugging.md](debugging.md) — correctness/stability/hang triage (NaN / zeros / mismatch / compile / hang).
+
+**API surface and compatibility** (refactoring and audit references — neither is a perf lever):
+- [authoring_api_migration.md](authoring_api_migration.md) — legacy raw MLIR dialects / `ArithValue` / `SmemAllocator` / `*_atom_call` → the `fx.*` surface (behavior-preserving refactor only).
+- [api_stability.md](api_stability.md) — which `fx.*` paths are stable across a FlyDSL minor bump, the deprecation table with declared removals, and how to audit a kernel for stable-only usage.
+
+The on-box inventory above describes FlyDSL 0.1.5. The migration reference is pinned to aiter's
+FlyDSL 0.3.2 dependency, and the stability policy is revisioned with FlyDSL itself; do not project a
+newer API name back onto the older on-box kernels without checking the imported version.
 
 ## Sources
 - Kimi-K2.5 optimization with FlyDSL (FLIR, instruction-level control, +162% throughput): https://rocm.blogs.amd.com/artificial-intelligence/kimi-k2.5-optimize/README.html

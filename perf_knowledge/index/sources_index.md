@@ -4,7 +4,7 @@ kind: reference
 updated: 2026-06-09
 ---
 
-# Sources index — 503 unique URLs across 656 docs
+# Sources index — 505 unique URLs across 659 docs
 
 Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources.py`). Each doc keeps its own inline `## Sources`.
 
@@ -201,6 +201,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/ROCm/ATOM
 - https://github.com/ROCm/DeepEP
 - https://github.com/ROCm/DeepEP/blob/main/README.md
+- https://github.com/ROCm/FlyDSL
 - https://github.com/ROCm/HIP/issues/3333
 - https://github.com/ROCm/HIP/issues/3667
 - https://github.com/ROCm/MIOpen/blob/develop/CHANGELOG.md
@@ -274,6 +275,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/llvm/llvm-project/pull/116680
 - https://github.com/llvm/llvm-project/pull/116723
 - https://github.com/llvm/llvm-project/pull/117047
+- https://github.com/llvm/llvm-project/pull/153645
 - https://github.com/meta-pytorch/BackendBench
 - https://github.com/meta-pytorch/BackendBench/blob/main/docs/correctness.md
 - https://github.com/meta-pytorch/KernelAgent

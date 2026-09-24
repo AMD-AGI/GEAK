@@ -3,11 +3,12 @@ title: Workflows — end-to-end optimization playbooks (AMD MI-series)
 kind: workflow
 gens: [gfx942, gfx950]
 status: sota
-updated: 2026-06-08
+updated: 2026-09-21
 sources:
   - GEAK/e2e_workflow/roles/op_benchmarker.md
   - GEAK/e2e_workflow/roles/e2e_integrator.md
   - GEAK/perf_knowledge/index/decision_trees.md
+  - ROCm/aiter@04c7b808:.claude/skills/review-pr/SKILL.md
 ---
 
 # Workflows
@@ -46,6 +47,12 @@ single-kernel playbook is the inner loop of the e2e playbook.
 | [`authoring_a_kernel_with_geak.md`](authoring_a_kernel_with_geak.md) | No editable backend impl exists | unittest passes + beats `best_known_ms` |
 | [`choosing_a_backend.md`](choosing_a_backend.md) | "Which backend for operator family X?" | per-family decision table |
 | [`model_bringup_checklist.md`](model_bringup_checklist.md) | New model, first time on MI300X/MI350X | model runs + each lever banked |
+| [`review_kernels.md`](review_kernels.md) | Judging someone else's kernel change | every finding anchored + both evidence tiers stated |
+
+The last entry answers a different question from the rest. Where the other workflows ask *"how do I
+make X faster and bank it"*, a review asks *"should I believe this change is correct and faster"* —
+the gate is on the quality of the evidence rather than on a delta, and its output is findings, not a
+banked win.
 
 ## How to read a workflow
 Each file: **TL;DR → preconditions → numbered steps (with the exact env/flags/commands)

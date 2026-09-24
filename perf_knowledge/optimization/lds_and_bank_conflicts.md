@@ -1,14 +1,16 @@
 ---
 title: LDS sizing and bank-conflict avoidance
 kind: technique
-gens: [gfx942, gfx950]
+gens: [gfx942, gfx950, gfx1250]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, int8]
 regimes: [prefill, decode, training, both]
-updated: 2026-06-05
+updated: 2026-09-21
 sources:
   - https://rocm.docs.amd.com/projects/composable_kernel/en/latest/conceptual/ck_tile/hardware/lds_bank_conflicts.html
   - https://rocm.blogs.amd.com/software-tools-optimization/lds-bank-conflict/README.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
+  - https://github.com/llvm/llvm-project/pull/153645
+  - https://llvm.org/docs/AMDGPUUsage.html
 ---
 
 # LDS sizing and bank conflicts
@@ -16,7 +18,8 @@ sources:
 ## TL;DR
 The Local Data Share (LDS) is the on-CU scratchpad that stages GEMM/attention operands for the matrix
 cores. Capacity: **64 KB/CU on CDNA3 (MI300X)**, **160 KB/CU on CDNA4 (MI350X/MI355X)** with ~2× LDS
-bandwidth. LDS is split into **32 banks of 4 bytes** (a 128-byte row); two lanes in a wave hitting the
+bandwidth, and **320 KB on gfx1250**. LDS is split into **32 banks of 4 bytes** (a 128-byte row);
+two lanes in a wave hitting the
 same bank on different addresses serialize (**bank conflict**). The two fixes are **padding** (add a
 stride so consecutive rows land in different banks) and **XOR swizzle** (permute the column index so
 `ds_read`/`ds_write` are conflict-free). LDS capacity directly bounds tile/head-dim size, so the
@@ -34,6 +37,24 @@ CDNA3→CDNA4 jump materially relaxes flash-attention head-dim limits. See
 - **Why it bites GEMM**: storing a tile column-major / reading row-major (or vice-versa for the MFMA
   operand layout) makes lanes stride by the row length, which is frequently a multiple of 32 words ⇒
   worst-case 32-way conflict.
+
+### Large allocations and the 16-bit DS immediate window
+**gfx1250 exposes 320 KB of addressable LDS**, but the immediate offset on ordinary
+`ds_read`/`ds_write` instructions is 16 bits (maximum 65535 bytes). The effective address also
+contains a VGPR base, so this is **not a 64 KB allocation limit**: an access beyond the immediate
+window remains legal when the compiler folds the high part into the base address.
+
+The performance risk is the extra address arithmetic and VGPR liveness needed when offsets no longer
+fold into the instruction. That can increase register pressure and, in an already constrained
+kernel, contribute to lower occupancy or spilling; it is not guaranteed to do so, and exceeding
+64 KB is not by itself a compile error. This immediate-window issue is not unique to gfx1250, but its
+larger capacity makes it easier to encounter.
+
+For any allocation spanning more than 64 KB, inspect the generated DS addressing and the resource
+report instead of treating either 64 KB or the full capacity as a universal performance ceiling.
+Keep hot regions near a reusable base when the layout permits. This is a standing review check when
+a diff materially enlarges LDS:
+[`../workflows/review_kernels.md`](../workflows/review_kernels.md) §3g.
 
 ## The levers
 ### 1. Padding
@@ -109,5 +130,7 @@ register-driven occupancy (`[[optimization/occupancy_and_registers.md]]`).
 
 ## Sources
 - 64 KB (CDNA3) vs 160 KB (CDNA4), 2× LDS bandwidth, direct L1→LDS path: AMD CDNA4 whitepaper + ISSCC/press coverage.
+- 320 KB addressable LDS on gfx1250: LLVM AMDGPU PR #153645; DS instructions use a VGPR address plus
+  an instruction offset: LLVM AMDGPU backend documentation and instruction definitions.
 - 32 banks × 4 B / 128-B row, conflict model: AMD/CK shared-memory bank-conflict docs.
 - XOR swizzle eliminating GEMM LDS conflicts: CK-Tile bank-conflict ROCm blog + CK-Tile docs.
