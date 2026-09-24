@@ -13,6 +13,7 @@ CI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # <ws>/GEAK/ci
 # shellcheck source=/dev/null
 [ -f "$CI_DIR/config.sh" ] && source "$CI_DIR/config.sh"
 GEAK_ROOT="${GEAK_ROOT:-$(dirname "$CI_DIR")}"                   # <ws>/GEAK
+GPU_IDENTITY_SCRIPT="${GPU_IDENTITY_SCRIPT:-$GEAK_ROOT/scripts/gpu_identity.py}"
 WS="${WS:-$(dirname "$GEAK_ROOT")}"                              # <ws>
 INFERENCEX_PATH="${INFERENCEX_PATH:-$WS/InferenceX}"
 HF_LOGS="${HF_LOGS:-$WS/geak_runtime}"
@@ -220,23 +221,96 @@ pick_account() {
   echo "$acct $qos"
 }
 
-# Detect the GPU arch bucket used to pick a docker_default.json entry.
-# Returns MI355 (gfx950 / MI35x) or MI300 (gfx942/gfx90a / MI30x). Honors a
-# GEAK_GPU_ARCH override; auto-detects via rocminfo when present; defaults to
-# MI355 (this SPUR cluster's nodes are gfx950). resolve_image runs on the
-# compute-node host, before the container starts.
+# Detect the identity bucket used to pick a docker_default.json entry.
+# Returns MI355 (gfx950 / MI35x), MI300 (gfx942/gfx90a / MI30x), R9700 only
+# for the exact validated Radeon AI PRO R9700 product, or gfx1201 when only the
+# ISA is known. A bare gfx1201/RDNA4 override never proves the product.
+# Missing identity keeps the historical MI355 SPUR default unless R9700 was
+# explicitly requested, in which case detection fails closed.
+# resolve_image runs on the compute-node host, before the container starts.
+normalize_gpu_arch() {
+  local raw
+  raw="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$raw" in
+    mi355|gfx950) echo MI355 ;;
+    mi300|gfx942|gfx90a) echo MI300 ;;
+    r9700) echo R9700 ;;
+    rdna4|gfx1201) echo gfx1201 ;;
+    gfx1200)
+      echo "E_ARCH_UNVALIDATED: gfx1200 is not validated; refusing R9700 runtime policy" >&2
+      return 1
+      ;;
+    *)
+      echo "E_ARCH_UNSUPPORTED: unsupported GPU arch override '$1' (want MI355|MI300|R9700|RDNA4|gfx950|gfx942|gfx90a|gfx1201)" >&2
+      return 1
+      ;;
+  esac
+}
+
 detect_gpu_arch() {
-  if [ -n "${GEAK_GPU_ARCH:-}" ]; then echo "$GEAK_GPU_ARCH"; return; fi
-  local rocminfo_bin gfx
+  local expected rocminfo_bin gfx target normalized identity parsed requested_target
+  expected="$(printf '%s' "${GEAK_EXPECTED_TARGET:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$expected" in
+    ""|unknown|r9700) ;;
+    *)
+      echo "E_TARGET_UNSUPPORTED: unsupported GEAK_EXPECTED_TARGET '$GEAK_EXPECTED_TARGET' (want r9700|unknown)" >&2
+      return 1
+      ;;
+  esac
+
+  if [ -n "${GEAK_GPU_ARCH:-}" ]; then
+    normalized="$(normalize_gpu_arch "$GEAK_GPU_ARCH")" || return 1
+    if [ "$expected" = "r9700" ] && [ "$normalized" != "R9700" ] && [ "$normalized" != "gfx1201" ]; then
+      echo "E_ARCH_EXPECTED_MISMATCH: expected R9700 but GPU arch override resolved to $normalized" >&2
+      return 1
+    fi
+    case "$normalized" in
+      MI300|MI355)
+        echo "$normalized"
+        return
+        ;;
+      R9700)
+        requested_target=r9700
+        normalized=gfx1201
+        ;;
+    esac
+  fi
+
   rocminfo_bin="$(command -v rocminfo 2>/dev/null || true)"
   [ -z "$rocminfo_bin" ] && [ -x /opt/rocm/bin/rocminfo ] && rocminfo_bin=/opt/rocm/bin/rocminfo
-  if [ -n "$rocminfo_bin" ]; then
-    gfx="$("$rocminfo_bin" 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -1)"
+  if [ -n "$rocminfo_bin" ] && [ -f "$GPU_IDENTITY_SCRIPT" ]; then
+    identity="$(python3 "$GPU_IDENTITY_SCRIPT" --rocminfo-bin "$rocminfo_bin" 2>/dev/null || true)"
+    if [ -n "$identity" ]; then
+      parsed="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("gfx",""), d.get("target","unknown"))' "$identity" 2>/dev/null || true)"
+      read -r gfx target <<<"$parsed"
+    fi
   fi
+
+  if [ -n "${normalized:-}" ] && [ -n "${gfx:-}" ] && [ "$normalized" != "$gfx" ]; then
+    echo "E_ARCH_OVERRIDE_MISMATCH: GPU arch override resolved to $normalized but rocminfo reported $gfx" >&2
+    return 1
+  fi
+  gfx="${gfx:-${normalized:-}}"
+  requested_target="${requested_target:-$expected}"
+  if [ "$requested_target" = "r9700" ] \
+      && { [ "$gfx" != "gfx1201" ] || [ "${target:-unknown}" != "r9700" ]; }; then
+    echo "E_TARGET_EXPECTED_MISMATCH: expected exact R9700 but structured rocminfo identity was gfx='${gfx:-missing}' target='${target:-unknown}'" >&2
+    return 1
+  fi
+
   case "$gfx" in
-    gfx950)          echo MI355 ;;
-    gfx942|gfx90a)   echo MI300 ;;
-    *)               echo "$GEAK_GPU_ARCH_DEFAULT" ;;   # config.sh default (this cluster = gfx950)
+    gfx950)            echo MI355 ;;
+    gfx942|gfx90a)     echo MI300 ;;
+    gfx1201)
+      if [ "${target:-unknown}" = "r9700" ]; then echo R9700; else echo gfx1201; fi
+      ;;
+    gfx1200)
+      echo "E_ARCH_UNVALIDATED: gfx1200 is not validated; refusing R9700 runtime policy" >&2
+      return 1
+      ;;
+    *)
+      echo "$GEAK_GPU_ARCH_DEFAULT"   # config.sh default (this cluster = gfx950)
+      ;;
   esac
 }
 
@@ -260,9 +334,14 @@ except Exception:
 
 def pick(node):
     # node may be a plain image string or an {arch: image, "default": image} dict.
+    # A bare gfx1201 ISA has no validated product image and must never inherit one.
+    if arch == "gfx1201":
+        return ""
     if isinstance(node, str):
         return node
     if isinstance(node, dict):
+        if arch == "R9700":
+            return node.get("R9700") or ""
         return (node.get(arch) or node.get("default")
                 or next((v for v in node.values() if isinstance(v, str)), ""))
     return ""
@@ -278,6 +357,6 @@ if not img:
 print(img or "")
 PY
 )
-  [ -n "$img" ] || die "no image for model=${mk:-<none>} framework=$fw (arch=$arch) in $DOCKER_DEFAULT (or pass IMAGE=)"
+  [ -n "$img" ] || die "E_IMAGE_UNAVAILABLE: no image for model=${mk:-<none>} framework=$fw (arch=$arch) in $DOCKER_DEFAULT (or pass IMAGE=)"
   echo "$img"
 }

@@ -1,10 +1,13 @@
 # Hardware peaks — roofline denominators
 
-Pure data. One section per `gfx`. Extend by adding a section; nothing else needs to change.
+Pure data. One section per calibrated product (or per `gfx` when the ISA is the product).
+Client RDNA4 peaks are **R9700-only**. A bare `gfx1201` lookup without `product: r9700`
+must not inherit these numbers — several SKUs share that ISA.
 
-Peaks are **dense, no-sparsity, sustained-achievable-ceiling** figures. HBM bandwidth is the
+Peaks are **dense, no-sparsity, datasheet-ceiling** figures. Memory bandwidth is the
 *theoretical pin* rate — real streaming kernels top out near 0.85–0.92 of it, which is exactly what
-`target_eff` in `SKILL.md` encodes. Do not pre-derate the numbers here.
+`target_eff` in `SKILL.md` encodes. Do not pre-derate the numbers here. Do not put sparse (2:4)
+rates in the yaml `flops` map.
 
 **Compute peaks need validation; the memory axis is the trustworthy one.** BF16 and FP16 run at the
 same rate on the matrix core of every part below (MFMA on CDNA, WMMA on RDNA), so the two `flops`
@@ -13,6 +16,33 @@ Empirical matrix-core microbenchmarks (e.g. from rocprof-compute) frequently rep
 low, which inflates any BF16 compute-axis `roofline_pct` (sometimes above 100%, where `SKILL.md` §6
 L3 flags it `suspect`). At decode, prefer `hbm_util` and only rank on a compute-axis number once its
 dtype peak has been validated against this equality.
+
+## r9700 — Radeon AI PRO R9700 (Navi 48, gfx1201, 300 W)
+```yaml
+product: r9700
+gfx: gfx1201
+cu: 64                         # physical CUs from rocminfo; not PyTorch WGP count (32)
+hbm_bw_bytes_s: 6.4e11         # 32 GB GDDR6, 256-bit at 20 Gbps, ~640 GB/s
+flops:                         # dense matrix-core peaks, FLOP/s (or OPS/s for int8)
+  fp32: 4.78e13
+  bf16: 1.91e14
+  fp16: 1.91e14
+  fp8:  3.83e14
+  int8: 3.83e14
+```
+
+Public dense peaks for this SKU: FP32 vector 47.8 TFLOPS; FP16/BF16 matrix 191 TFLOPS
+(383 sparse 2:4); FP8 matrix 383 TFLOPS (766 sparse); INT8 383 TOPS (766 sparse);
+INT4 766 TOPS (1531 sparse). There is **no** `fp4` key: this SKU has no block-scaled
+MX path. Memory sits behind 64 MB Infinity Cache and 8 MB L2. Clocks: 1620 base /
+2350 game / 2920 boost. Other gfx120x / gfx1201 products stay unknown until they have
+their own `product:` section. `gfx1250` is CDNA5, not RDNA4 — do not inherit these numbers.
+
+The FP16/BF16 ridge is ~298 FLOP/byte (`191e12 / 640e9`), between the tabulated
+MI300X (~247) and MI350/355 (~312) ridges. A repeatedly reused working set that fits
+the 64 MB Infinity Cache can report effective bandwidth above 640 GB/s; do not call
+that impossible GDDR bandwidth. Measure the external-memory roof with a streaming
+working set larger than the cache.
 
 ## gfx950 — CDNA4, MI350X / MI355X class
 ```yaml

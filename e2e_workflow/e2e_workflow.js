@@ -1,7 +1,9 @@
 export const meta = {
   name: 'e2e-workflow',
-  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950, the target card is auto-detected on-box). The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm + ATOM shipped; pass args.backend). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
-  whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom, default sglang) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
+
+  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201, vLLM only). Generic gfx1201 is not a product identity. The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm + ATOM shipped on Instinct; R9700 is vLLM-only). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
+  whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs, or on Radeon AI PRO R9700 with vLLM. Use interface/run_e2e.py for structured auto-detection; a direct model-mode call must pass expected_gfx and expected_target before backend/knowledge policy is selected. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom on Instinct, default sglang; vllm only on confirmed R9700) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
+
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the isolated eval dir + records baseline throughput' },
     { title: 'Profile', detail: 'Profiler captures a warm trace -> standardized Top-N' },
@@ -35,6 +37,20 @@ const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
 // worker = 3 levels) and the runtime forbids it. The worker's behavior/args are unchanged.
 const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
+const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
+const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
+const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
+const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
+if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+}
+const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
+const R9700_E2E = EXPECTED_TARGET === 'r9700';
+// ISA isolation and product policy are intentionally separate. Any gfx1201
+// target must avoid CDNA priors, but only exact R9700 identity selects its
+// calibrated peaks, serving backend, and image policy.
+const RDNA4_ISOLATE = RDNA4_ISA || R9700_E2E;
+
 // The kernel workflow's learned KB is OFF by default for lanes launched from here, and ON by default
 // when kernel_workflow is driven directly. Same worker, different prior: a kernel_workflow campaign
 // re-optimizes a fixed benchmark set, where a card distilled from a past run of the same kernel is
@@ -48,7 +64,23 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 // be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
 // silently take the lane's own default (on) with nothing to catch it. test_e2e_lane_defaults.py
 // fails if a `scriptPath: KERNEL_WF_SCRIPT` call is added that does not route through this.
-const laneArgs = (wfArgs) => ({ use_learned_kb: LANE_USE_LEARNED_KB, ...wfArgs });
+const laneArgs = (wfArgs) => {
+  const out = { use_learned_kb: LANE_USE_LEARNED_KB, ...wfArgs };
+  if (RDNA4_ISOLATE) {
+    out.use_learned_kb = 'false';
+    out.use_expert_skills = 'false';
+    out.perf_knowledge_dir = '';
+    out.warm_start = 'off';
+  }
+  if (EXPECTED_GFX) out.expected_gfx = out.expected_gfx || EXPECTED_GFX;
+  if (EXPECTED_TARGET) out.expected_target = out.expected_target || EXPECTED_TARGET;
+  if (EXPECTED_DEVICE_NAME) out.expected_device_name = out.expected_device_name || EXPECTED_DEVICE_NAME;
+  if (EXPECTED_PHYSICAL_CU_COUNT > 0) {
+    out.expected_physical_cu_count =
+      out.expected_physical_cu_count || EXPECTED_PHYSICAL_CU_COUNT;
+  }
+  return out;
+};
 
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
@@ -90,9 +122,23 @@ const MODEL_PATH = A.model_path || '';
 if (!MODEL_PATH && !KERNEL_PATH) {
   throw new Error('Provide args.model_path (e2e mode) OR args.kernel_path (single-kernel pass-through).');
 }
+if (MODEL_PATH && (!EXPECTED_GFX || !EXPECTED_TARGET)) {
+  throw new Error(
+    'E2E serving requires structured GPU identity before policy selection: pass expected_gfx and ' +
+    'expected_target (run interface/run_e2e.py for auto-detection).');
+}
+if (MODEL_PATH && RDNA4_ISA && !R9700_E2E) {
+  throw new Error(
+    'gfx1201 architecture detected but the product is not confirmed as r9700; refusing R9700-only ' +
+    'serving policy for an unknown gfx1201 product.');
+}
 
 const LAUNCH_SCRIPT = A.launch_script || '';
-const BACKEND = String(A.backend != null ? A.backend : 'sglang').trim() || 'sglang';  // serving adapter
+const BACKEND = String(A.backend != null ? A.backend : (R9700_E2E ? 'vllm' : 'sglang')).trim()
+  || (R9700_E2E ? 'vllm' : 'sglang');  // serving adapter
+if (R9700_E2E && BACKEND !== 'vllm') {
+  throw new Error(`R9700 E2E is vLLM-only (got backend=${BACKEND}): there is no validated R9700 image for it; pass args.backend=vllm`);
+}
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // Serving tensor-parallel: TP size + the GPU set used for EVERY e2e SERVING launch (baseline, config
@@ -213,7 +259,7 @@ const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true
 // A/B reference leg already contains the tuning.
 // tuning_skillset="false" disables the phase entirely: no prompt injection, no report inputs, no state
 // keys -> the run is byte-identical to a build without this feature.
-const TUNING_SKILLSET_ENABLED = String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
+const TUNING_SKILLSET_ENABLED = !RDNA4_ISOLATE && String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
 // Lives under expert_skills/ so the tuning skills sit in the same hierarchy, and are selected through
 // the same index.yaml, as every other expert skill. The tree itself stays VENDORED and pinned whole —
 // the index entries that describe it are outside it, which is what lets both things be true at once.
@@ -222,7 +268,7 @@ const TUNING_SKILLSET_DIR = String(A.tuning_skillset_dir ||
 // tuning-kb/ is the skillset's per-model ANSWER KEY (verified wins + deployable artifacts). Useful in
 // production, contaminating in a blind evaluation — the skillset says so itself. Default ON; pass
 // tuning_kb="false" for eval runs and the role is told not to read it.
-const TUNING_KB_ENABLED = String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
+const TUNING_KB_ENABLED = !RDNA4_ISOLATE && String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
 // NOTE: there is deliberately NO op budget here. The head track caps its ops because each one spends a
 // recursive kernel-authoring run; tuning ops are cheap by comparison and their value is cumulative, so
 // a cap would just leave measurable wins on the table. The role decides where the returns stop.
@@ -413,8 +459,9 @@ const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
-const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
+let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
+if (RDNA4_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
 // Warm start = the kernel layer's LOCAL experience reuse: before round 1 a lane resolves this kernel's
 // own history in kb_artifacts/ and re-validates the top stored patches through the same verify gate as
 // a fresh candidate. The knobs live in the kernel layer; e2e only forwards them, so that (a) one store
@@ -425,7 +472,7 @@ const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
 const KB_ARGS = {
   kb_artifacts_dir: KB_ARTIFACTS_DIR,
-  warm_start: String(A.warm_start != null ? A.warm_start : 'on'),
+  warm_start: RDNA4_ISOLATE ? 'off' : String(A.warm_start != null ? A.warm_start : 'on'),
   ...(A.warm_start_match != null ? { warm_start_match: String(A.warm_start_match) } : {}),
   ...(A.warm_start_min_speedup != null ? { warm_start_min_speedup: A.warm_start_min_speedup } : {}),
   // Which plane the lanes read and write. Forwarded like the rest so one run uses one plane; omitted
@@ -569,7 +616,7 @@ const KB_ENV_PRELUDE = `. "${WORKFLOW_DIR}/scripts/kb_env.sh"; `;
 // a result below the measured baseline. Default OFF (opt-in): pass use_expert_skills="true" to enable.
 // When OFF (the default) NOTHING is injected into any role prompt -> the prompt (and thus the whole run)
 // is byte-identical to a build without this feature. The flag + dir are passed DOWN to the kernel layer.
-const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
 // Only routing/bake-off/integration roles consult skills; every other role gets no injection.
@@ -720,9 +767,11 @@ const SETUP_SCHEMA = obj({
   // and `required` is unchanged, so a director that returns none of them is still valid — the run
   // simply files itself under a coarse `unknown` page, which is recoverable. A GUESS is not: the
   // service has no DELETE, so a wrong-but-authoritative-looking page is permanent.
-  gfx: { type: 'string' }, precision: { type: 'string' },
+  gfx: { type: 'string' }, device_target: { type: 'string' },
+  device_name: { type: 'string' }, physical_cu_count: { type: 'number' },
+  precision: { type: 'string' },
   framework_version: { type: 'string' }, rocm_version: { type: 'string' },
-}, ['eval_dir', 'baseline_throughput_tok_s']);
+}, ['eval_dir', 'baseline_throughput_tok_s', 'gfx', 'device_target', 'physical_cu_count']);
 
 const PROFILE_SCHEMA = obj({
   round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
@@ -2226,10 +2275,38 @@ if (want('setup')) {
       LAUNCH_SCRIPT, MODEL_PATH, EXP_ROOT, EVAL_DIR_OVERRIDE, MODEL_NAME_HINT, TASK,
       GPU_IDS, WORKLOAD, INIT_FLAGS, INIT_ENV, INIT_BASE_OVERLAY,
       MEASUREMENT_PURPOSE: 'parity', REPLICAS: PARITY_REPLICAS,
-      SKILL_DIR: WORKFLOW_DIR,
+      SKILL_DIR: WORKFLOW_DIR, EXPECTED_GFX, EXPECTED_TARGET,
+      EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
     }),
     { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
   if (!setup || !setup.eval_dir) throw new Error('Setup failed: no eval_dir');
+  const detectedGfx = String(setup.gfx || '').trim().toLowerCase();
+  const detectedTarget = String(setup.device_target || '').trim().toLowerCase();
+  const detectedPhysicalCuCount = Number(setup.physical_cu_count);
+  if (!detectedGfx || !detectedTarget) {
+    throw new Error('Setup failed: Director did not return structured gfx and device_target identity');
+  }
+  if (!Number.isFinite(detectedPhysicalCuCount) || detectedPhysicalCuCount <= 0) {
+    throw new Error('Setup failed: Director did not return a positive physical_cu_count');
+  }
+  if (EXPECTED_GFX && detectedGfx !== EXPECTED_GFX) {
+    throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${detectedGfx}`);
+  }
+  if (EXPECTED_TARGET === 'r9700' && detectedTarget !== 'r9700') {
+    throw new Error(`GPU product mismatch: expected r9700, detected ${detectedTarget}`);
+  }
+  if (EXPECTED_DEVICE_NAME &&
+      String(setup.device_name || '').trim() !== EXPECTED_DEVICE_NAME) {
+    throw new Error(
+      `GPU product name mismatch: expected ${EXPECTED_DEVICE_NAME}, ` +
+      `detected ${String(setup.device_name || '').trim() || 'unknown'}`);
+  }
+  if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
+      detectedPhysicalCuCount !== EXPECTED_PHYSICAL_CU_COUNT) {
+    throw new Error(
+      `GPU physical CU mismatch: expected ${EXPECTED_PHYSICAL_CU_COUNT}, ` +
+      `detected ${detectedPhysicalCuCount}`);
+  }
   EVAL_DIR = setup.eval_dir;
   MODEL_NAME = setup.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = setup.baseline_throughput_tok_s;

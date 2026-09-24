@@ -133,6 +133,7 @@ jobs:
             e2e_workflow/scripts/tests/test_agentx_client_canonicality.py \
             e2e_workflow/scripts/tests/test_roofline_skill.py \
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
+            scripts/tests/test_gpu_identity.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation
@@ -155,6 +156,10 @@ jobs:
           python3 kernel_workflow/scripts/test_kb.py
           python3 kernel_workflow/scripts/test_lane_refs.py
           python3 kernel_workflow/scripts/test_kb_switch.py
+          bash kernel_workflow/scripts/test_profile_policy.sh
+          bash kernel_workflow/scripts/test_profile_fallback.sh
+          bash kernel_workflow/scripts/test_detect_gpu_arch.sh
+          bash kernel_workflow/scripts/test_gpu_lock_arch.sh
           python3 e2e_workflow/scripts/tests/test_e2e_lane_defaults.py
           # The kernel KB must lint clean and its generated index must match the cards. `lint --cards`
           # now exits non-zero on failure, so this is a gate rather than a printout.
@@ -287,6 +292,12 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      - name: gfx1201 fail-closed knowledge regression
+        run: node kernel_workflow/scripts/test_rdna4_policy.js
+      - name: R9700 E2E identity and knowledge policy
+        run: node e2e_workflow/scripts/test_rdna4_e2e_policy.js
+      - name: kernel_workflow mode dispatch / R9700 bakeoff isolation
+        run: node kernel_workflow/scripts/test_mode_dispatch.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest

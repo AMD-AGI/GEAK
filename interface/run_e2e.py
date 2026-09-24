@@ -109,6 +109,7 @@ GEAK_ROOT = INTERFACE_DIR.parent
 E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
+GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
 
 # Workflow primitives are only available at this effort tier (see README).
 CLAUDE_EFFORT = os.environ.get("GEAK_CLAUDE_EFFORT", "ultracode")
@@ -389,6 +390,76 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     return obs_isl, obs_osl, "agentx_observed"
 
 
+def _expected_gpu_identity(h: dict) -> dict[str, Any]:
+    """Resolve policy identity before the workflow chooses backend or knowledge.
+
+    A caller may explicitly pin the expected ISA/product. Otherwise the shared
+    structured rocminfo parser establishes both. A bare gfx1201 remains product
+    `unknown`; only exact R9700 detection produces target `r9700`.
+    """
+    explicit_gfx = str(h.get("expected_gfx") or "").strip().lower()
+    explicit_target = str(h.get("expected_target") or "").strip().lower()
+    if explicit_gfx or explicit_target:
+        if not explicit_gfx or not explicit_target:
+            raise ValueError(
+                "expected_gfx and expected_target must be supplied together"
+            )
+        if not re.fullmatch(r"gfx[0-9a-f]+", explicit_gfx):
+            raise ValueError(f"invalid expected_gfx: {explicit_gfx!r}")
+        if explicit_target not in {"r9700", "unknown"}:
+            raise ValueError(
+                "expected_target must be 'r9700' or 'unknown'"
+            )
+        if explicit_target == "r9700" and explicit_gfx != "gfx1201":
+            raise ValueError("expected_target=r9700 requires expected_gfx=gfx1201")
+        return {
+            "gfx": explicit_gfx,
+            "target": explicit_target,
+            "marketing_name": str(h.get("expected_device_name") or ""),
+            "physical_cu_count": int(h.get("expected_physical_cu_count") or 0),
+        }
+
+    env_identity = os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip()
+    if env_identity:
+        try:
+            identity = json.loads(env_identity)
+        except json.JSONDecodeError as error:
+            raise ValueError("GEAK_GPU_IDENTITY_JSON is not valid JSON") from error
+    else:
+        proc = subprocess.run(
+            [sys.executable, str(GPU_IDENTITY_SCRIPT)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "identity probe failed").strip()
+            raise RuntimeError(
+                "GPU identity must be established before E2E policy selection: "
+                f"{detail}. Pass expected_gfx and expected_target explicitly if "
+                "this host cannot run rocminfo."
+            )
+        try:
+            identity = json.loads(proc.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("GPU identity probe returned invalid JSON") from error
+
+    gfx = str(identity.get("gfx") or "").strip().lower()
+    target = str(identity.get("target") or "unknown").strip().lower()
+    if not re.fullmatch(r"gfx[0-9a-f]+", gfx):
+        raise RuntimeError(f"GPU identity probe returned invalid gfx: {gfx!r}")
+    if target not in {"r9700", "unknown"}:
+        raise RuntimeError(f"GPU identity probe returned invalid target: {target!r}")
+    if target == "r9700" and gfx != "gfx1201":
+        raise RuntimeError("GPU identity probe returned r9700 on a non-gfx1201 ISA")
+    return {
+        "gfx": gfx,
+        "target": target,
+        "marketing_name": str(identity.get("marketing_name") or ""),
+        "physical_cu_count": int(identity.get("physical_cu_count") or 0),
+    }
+
+
 def map_args(
     h: dict,
     timeout_s: int | None = None,
@@ -397,6 +468,7 @@ def map_args(
 ) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
+    gpu_identity = _expected_gpu_identity(h)
     effective = None
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
@@ -440,7 +512,13 @@ def map_args(
     ps_args = {
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
-        "backend": h.get("framework", "sglang"),
+        "backend": h.get("framework") or (
+            "vllm" if gpu_identity["target"] == "r9700" else "sglang"
+        ),
+        "expected_gfx": gpu_identity["gfx"],
+        "expected_target": gpu_identity["target"],
+        "expected_device_name": gpu_identity["marketing_name"],
+        "expected_physical_cu_count": gpu_identity["physical_cu_count"],
         "tp": tp,
         "gpu_ids": str(gpu_ids),
         # On an AgentX handoff these describe the shape the agents OPTIMIZE for,

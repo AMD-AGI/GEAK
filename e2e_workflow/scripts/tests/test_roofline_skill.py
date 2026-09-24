@@ -103,6 +103,55 @@ class TestPeaks(unittest.TestCase):
         for gfx in ("gfx942", "gfx950", "gfx1151"):
             p = rt.load_peaks(PEAKS_MD, gfx)
             self.assertEqual(p["flops"]["bf16"], p["flops"]["fp16"], gfx)
+            
+    def test_r9700_peaks_require_product_identity(self):
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1201"))
+        p = rt.resolve_peaks(PEAKS_MD, "gfx1201", product="r9700")
+        self.assertIsNotNone(p)
+        self.assertEqual(p["source"], "table")
+        self.assertEqual(p["confidence"], "high")
+        self.assertEqual(p.get("product"), "r9700")
+        self.assertEqual(p["cu"], 64)
+        self.assertAlmostEqual(p["hbm_bw_bytes_s"], 6.4e11, delta=1e8)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "bf16"), 1.91e14, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp16"), 1.91e14, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 4.78e13, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp8"), 3.83e14, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "int8"), 3.83e14, delta=1e11)
+        self.assertIsNone(rt.peak_flops_for(p, "fp4"))
+        self.assertNotIn("fp4", p["flops"])
+
+    def test_peak_flops_for_unknown_dtype_is_none_not_table_max(self):
+        p = _peaks()
+        self.assertIsNone(rt.peak_flops_for(p, "mystery_dtype"))
+        self.assertIsNone(rt.peak_flops_for(None, "bf16"))
+
+    def test_client_rdna4_family_is_gfx120x_not_gfx1250(self):
+        self.assertTrue(rt.is_client_rdna4("gfx1201"))
+        self.assertTrue(rt.is_client_rdna4("gfx1200"))
+        self.assertFalse(rt.is_client_rdna4("gfx1250"))
+        self.assertFalse(rt.is_client_rdna4("gfx950"))
+
+    def test_unmeasured_gfx120x_is_hard_unknown_not_derived(self):
+        self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
+
+    def test_gfx1250_missing_table_may_derive(self):
+        called = []
+        original = rt.derive_peaks_from_props
+
+        def fake_derive(device=0):
+            called.append(device)
+            return None
+
+        rt.derive_peaks_from_props = fake_derive
+        try:
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1250"))
+            self.assertEqual(called, [0])
+            called.clear()
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
+            self.assertEqual(called, [])
+        finally:
+            rt.derive_peaks_from_props = original
 
     def test_L1_unknown_gfx_returns_none(self):
         """Unknown gfx -> None, so the caller falls back to derived peaks at confidence=low."""

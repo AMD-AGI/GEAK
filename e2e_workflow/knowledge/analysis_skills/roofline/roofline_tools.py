@@ -93,8 +93,11 @@ def dtype_bytes(name, default=2):
 
 # ---------------------------------------------------------------- peaks
 
-def load_peaks(peaks_md_path, gfx):
-    """Parse the ```yaml blocks in peaks.md and return the one matching `gfx`.
+def load_peaks(peaks_md_path, gfx, product=None):
+    """Parse the ```yaml blocks in peaks.md and return the matching section.
+
+    Product-scoped blocks (``product: r9700``) match only when `product` is that
+    identity. A gfx1201 lookup without an R9700 product must not inherit R9700 peaks.
 
     Returns {"hbm_bw_bytes_s": float, "flops": {dtype: float}, "cu": int, "source": "table",
              "confidence": "high"} or None when the file or the section is absent.
@@ -105,6 +108,7 @@ def load_peaks(peaks_md_path, gfx):
     except (OSError, UnicodeDecodeError):
         return None
 
+    want_product = str(product or "").strip().lower()
     for block in re.findall(r"```yaml\s*\n(.*?)```", text, re.S):
         if not re.search(r"^\s*gfx:\s*%s\s*$" % re.escape(str(gfx)), block, re.M):
             continue
@@ -134,6 +138,12 @@ def load_peaks(peaks_md_path, gfx):
                 out[key] = float(val) if re.match(r"^[-+0-9.eE]+$", val) else val
             except ValueError:
                 out[key] = val
+        block_product = str(out.get("product") or "").strip().lower()
+        if block_product:
+            if want_product != block_product:
+                continue
+        elif want_product:
+            continue
         if out.get("hbm_bw_bytes_s"):
             return out
     return None
@@ -165,18 +175,58 @@ def derive_peaks_from_props(device=0):
     }
 
 
+def is_client_rdna4(gfx):
+    """True for Navi 48 client RDNA4 (gfx1200/gfx1201/...).
+
+    gfx1250 is CDNA5 / MI450-class and must not match this family. A bare
+    ``gfx12*`` prefix is therefore wrong.
+    """
+    return bool(re.fullmatch(r"gfx120\d+", str(gfx or "").lower()))
+
+
+def resolve_peaks(peaks_md_path, gfx, device=0, product=None):
+    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA4.
+
+    Navi 48 reports properties that are insufficient to derive WMMA throughput,
+    and its GDDR clock interpretation is toolchain-dependent. An absent table
+    entry on gfx120x is therefore a hard unknown rather than a low-confidence
+    numeric denominator. R9700 peaks require product='r9700'. CDNA5 gfx1250
+    is not in that family and may derive.
+    """
+    peaks = load_peaks(peaks_md_path, gfx, product=product)
+    if peaks:
+        return peaks
+    if is_client_rdna4(gfx):
+        return None
+    return derive_peaks_from_props(device)
+
+
+_FLOP_KEYS = {
+    "bf16": "bf16", "bfloat16": "bf16",
+    "fp16": "fp16", "float16": "fp16", "half": "fp16",
+    "fp32": "fp32", "float32": "fp32", "float": "fp32",
+    "fp64": "fp64", "float64": "fp64", "double": "fp64",
+    "fp8": "fp8", "float8": "fp8",
+    "int8": "int8",
+    "fp4": "fp4", "float4": "fp4", "mxfp4": "fp4",
+}
+
+
 def peak_flops_for(peaks, dtype_name):
-    """Peak FLOP/s for a dtype, falling back to the largest tabulated value. None if unknown."""
+    """Peak FLOP/s for a canonical dtype key. None if that dtype is not tabulated."""
     if not peaks:
         return None
     flops = peaks.get("flops") or {}
     if not flops:
         return None
-    key = str(dtype_name or "").strip().lower()
-    for k, v in flops.items():
-        if k and k in key:
-            return float(v)
-    return float(max(flops.values()))
+    raw = str(dtype_name or "").strip().lower().lstrip("torch.")
+    key = _FLOP_KEYS.get(raw, raw)
+    if key in flops:
+        try:
+            return float(flops[key])
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 # ---------------------------------------------------------------- op models
@@ -436,7 +486,10 @@ if __name__ == "__main__":
     ap.add_argument("--peaks", metavar="GFX", help="print the peak table entry for GFX as JSON")
     a = ap.parse_args()
     if a.peaks:
-        p = load_peaks(os.path.join(os.path.dirname(os.path.abspath(__file__)), "peaks.md"), a.peaks)
-        print(json.dumps(p or derive_peaks_from_props() or {"error": "no peaks for %s" % a.peaks}, indent=2))
+        p = resolve_peaks(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "peaks.md"),
+            a.peaks,
+        )
+        print(json.dumps(p or {"error": "no calibrated peaks for %s" % a.peaks}, indent=2))
         raise SystemExit(0)
     raise SystemExit(_selftest() if a.selftest else ap.print_help())

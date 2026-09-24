@@ -39,6 +39,8 @@ Regime = Literal["square", "tall_skinny", "short_fat", "k_heavy", "decode", "bat
 DTYPES_BY_ARCH = {
     "gfx942": ["bf16", "fp16", "fp8_e4m3_fnuz", "int8"],
     "gfx950": ["bf16", "fp16", "fp8_e4m3", "int8", "mxfp8", "mxfp4"],
+    # RDNA4 client: OCP fp8, no FNUZ, no MX block-scale.
+    "gfx1201": ["bf16", "fp16", "fp8_e4m3", "int8"],
 }
 
 

@@ -187,6 +187,12 @@ class _RunE2ECase(unittest.TestCase):
 
     def setUp(self):
         self._env = dict(os.environ)
+        os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps({
+            "gfx": "gfx950",
+            "target": "unknown",
+            "marketing_name": "AMD Instinct MI355X",
+            "physical_cu_count": 256,
+        })
         self._attrs: list[tuple[str, object]] = []
         self._mods: list[tuple[str, object]] = []
         self._sigterm = signal.getsignal(signal.SIGTERM)
@@ -279,6 +285,86 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["gpu_ids"], "0,1,2,3")
         self.assertEqual(ps["config_tune"], "false")
         self.assertEqual(ps["apply_to_original"], "true")
+
+    def test_structured_identity_is_forwarded_before_policy(self):
+        ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_identity")))
+        self.assertEqual(ps["expected_gfx"], "gfx950")
+        self.assertEqual(ps["expected_target"], "unknown")
+        self.assertEqual(ps["expected_physical_cu_count"], 256)
+        self.assertEqual(ps["backend"], "sglang")
+
+    def test_explicit_r9700_identity_selects_vllm_without_gfx_promotion(self):
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_r9700"),
+            expected_gfx="gfx1201",
+            expected_target="r9700",
+            expected_device_name="AMD Radeon AI PRO R9700",
+            expected_physical_cu_count=64,
+        ))
+        self.assertEqual(ps["expected_target"], "r9700")
+        self.assertEqual(ps["backend"], "vllm")
+
+    def test_partial_or_incompatible_product_identity_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "supplied together"):
+            rx.map_args(self._handoff(expected_gfx="gfx1201"))
+        with self.assertRaisesRegex(ValueError, "requires expected_gfx=gfx1201"):
+            rx.map_args(self._handoff(
+                expected_gfx="gfx950", expected_target="r9700",
+            ))
+
+    def test_explicit_identity_rejects_malformed_values(self):
+        with self.assertRaisesRegex(ValueError, "invalid expected_gfx"):
+            rx._expected_gpu_identity(
+                {"expected_gfx": "rdna4", "expected_target": "unknown"})
+        with self.assertRaisesRegex(ValueError, "must be 'r9700' or 'unknown'"):
+            rx._expected_gpu_identity(
+                {"expected_gfx": "gfx1201", "expected_target": "r9600"})
+
+    def test_env_identity_must_be_valid_and_consistent(self):
+        cases = [
+            ("{not json", ValueError, "not valid JSON"),
+            (json.dumps({"gfx": "RDNA4"}), RuntimeError, "invalid gfx"),
+            (json.dumps({"gfx": "gfx1201", "target": "r9600"}),
+             RuntimeError, "invalid target"),
+            (json.dumps({"gfx": "gfx950", "target": "r9700"}),
+             RuntimeError, "r9700 on a non-gfx1201 ISA"),
+        ]
+        for raw, exc, pattern in cases:
+            with self.subTest(raw=raw):
+                os.environ["GEAK_GPU_IDENTITY_JSON"] = raw
+                with self.assertRaisesRegex(exc, pattern):
+                    rx._expected_gpu_identity({})
+
+    def test_identity_probe_is_structured_and_fails_closed(self):
+        """Without a pinned or env identity, the rocminfo probe is the only
+        source; a failed or garbled probe must stop policy selection."""
+        os.environ.pop("GEAK_GPU_IDENTITY_JSON", None)
+        calls = []
+
+        def probe(returncode=0, stdout="", stderr=""):
+            def run(argv, **_kwargs):
+                calls.append(argv)
+                return types.SimpleNamespace(
+                    returncode=returncode, stdout=stdout, stderr=stderr)
+            return types.SimpleNamespace(run=run)
+
+        self.patch_rx("subprocess", probe(stdout=json.dumps({
+            "gfx": "gfx1201", "target": "r9700",
+            "marketing_name": "AMD Radeon AI PRO R9700", "physical_cu_count": 64,
+        })))
+        identity = rx._expected_gpu_identity({})
+        self.assertEqual(identity["target"], "r9700")
+        self.assertEqual(identity["physical_cu_count"], 64)
+        self.assertEqual(calls[-1][-1], str(rx.GPU_IDENTITY_SCRIPT))
+
+        self.patch_rx("subprocess", probe(returncode=1, stderr="no GPU agent"))
+        with self.assertRaisesRegex(
+            RuntimeError, "no GPU agent.*Pass expected_gfx and expected_target"):
+            rx._expected_gpu_identity({})
+
+        self.patch_rx("subprocess", probe(stdout="not json"))
+        with self.assertRaisesRegex(RuntimeError, "returned invalid JSON"):
+            rx._expected_gpu_identity({})
 
     def test_budget_omitted_when_unknown(self):
         """No timeout => the workflow stays budget-unaware (byte-identical to a

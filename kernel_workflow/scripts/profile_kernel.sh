@@ -11,8 +11,8 @@
 # Usage: bash profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>
 #
 # Optional env overrides (all have sensible defaults; nothing kernel-specific is hard-coded):
-#   PROFILER_PRIORITY  space-separated profiler order to try
-#                      (default: "rocprof-compute omniperf rocprofv3 rocprof")
+#   PROFILER_PRIORITY  space-separated profiler order to try (default is arch-aware:
+#                      gfx1201 -> rocprofv3 first; CDNA/other -> rocprof-compute first)
 #   WARMUP_RUNS        number of warmup runs before profiling (default: 3)
 #   RPC_PROFILE_ARGS   extra args passed to rocprof-compute/omniperf `profile` (default: "--no-roof")
 #   RPV3_TRACE_ARGS    args passed to rocprofv3 (default: "--kernel-trace --stats --output-format csv")
@@ -36,9 +36,11 @@ OUTPUT_DIR="${3:?Missing output directory}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GPU_LOCK="$SCRIPT_DIR/gpu_lock.sh"
+source "$SCRIPT_DIR/profile_policy.sh"
 
 WARMUP_RUNS="${WARMUP_RUNS:-3}"
-PROFILER_PRIORITY="${PROFILER_PRIORITY:-rocprof-compute omniperf rocprofv3 rocprof metrix}"
+DETECTED_ARCH="$(profile_detect_arch)"
+PROFILER_PRIORITY="${PROFILER_PRIORITY:-$(profiler_priority_for_arch "$DETECTED_ARCH")}"
 RPC_PROFILE_ARGS="${RPC_PROFILE_ARGS:---no-roof}"
 RPV3_TRACE_ARGS="${RPV3_TRACE_ARGS:---kernel-trace --stats --output-format csv}"
 RPROF_ARGS="${RPROF_ARGS:---stats}"
@@ -52,8 +54,7 @@ REPORT="$OUTPUT_DIR/profile_report.txt"
 # (the BENCHMARK_CMD is expected to `cd` into the workspace whose isolated .torch_ext already holds the
 # built .so). Generic; honors a caller-set PYTORCH_ROCM_ARCH, and KERNEL_ENV_KEEP_ARCH=1 opts out.
 if [ "${KERNEL_ENV_KEEP_ARCH:-0}" != "1" ] && [ -z "${PYTORCH_ROCM_ARCH:-}" ]; then
-    _ARCH="$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)"
-    [ -n "${_ARCH:-}" ] && export PYTORCH_ROCM_ARCH="$_ARCH"
+    [ -n "$DETECTED_ARCH" ] && export PYTORCH_ROCM_ARCH="$DETECTED_ARCH"
 fi
 
 echo "=== Profiling setup ==="
@@ -70,13 +71,10 @@ for i in $(seq 1 "$WARMUP_RUNS"); do
     bash "$GPU_LOCK" "$GPU_ID" bash -c "$BENCHMARK_CMD" > /dev/null 2>&1 || true
 done
 
-# Step 2: Pick the first available profiler from the priority list.
-PROFILER=""
-for p in $PROFILER_PRIORITY; do
-    if command -v "$p" &> /dev/null; then PROFILER="$p"; break; fi
-done
-
+# Step 2: Try each installed profiler until one produces real artifacts (csv/json/txt
+# from the tool, not just a failure log stuffed into profile_report.txt).
 PROFILE_SUCCESS=false
+PROFILER=""
 
 # Surface a profiler failure (instead of silently degrading) + tell the engineer how to self-heal:
 # which env var to override and where the per-profiler recovery recipe lives.
@@ -84,7 +82,7 @@ emit_profiler_failure() {  # <tool> <exit_code> <override_env_var> <raw_log>
     local tool="$1" code="$2" envvar="$3" log="$4"
     {
         echo ""
-        echo "!!! PROFILER FAILED: $tool exited $code — its output may be unusable; degrading."
+        echo "!!! PROFILER FAILED: $tool exited $code — its output may be unusable; trying next tool."
         echo ">>> Most likely a CLI/version mismatch (a flag was renamed or removed in this toolchain)."
         echo ">>> Self-heal: run \`$tool --help\` to find the current flag, then re-run this script with"
         echo ">>>   an override, e.g.   $envvar=\"<corrected args>\" bash profile_kernel.sh <gpu> <cmd> <out>"
@@ -95,6 +93,11 @@ emit_profiler_failure() {  # <tool> <exit_code> <override_env_var> <raw_log>
         fi
         echo ""
     } >> "$REPORT"
+}
+
+profiler_artifacts_ok() {  # true when the tool left a non-empty csv/json (not just the report)
+    local dir="${1:-$OUTPUT_DIR}"
+    find "$dir" -type f \( -name '*.csv' -o -name '*.json' \) -size +0 2>/dev/null | grep -q .
 }
 
 run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump the FULL analyze text.
@@ -108,12 +111,16 @@ run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump 
     bash "$GPU_LOCK" "$GPU_ID" \
         "$tool" profile $RPC_PROFILE_ARGS -n "$workload" -- bash -c "$BENCHMARK_CMD" \
         > "$OUTPUT_DIR/${tool}_profile_raw.log" 2>&1 || rc=$?
-    if [ "$rc" -ne 0 ]; then emit_profiler_failure "$tool" "$rc" RPC_PROFILE_ARGS "$OUTPUT_DIR/${tool}_profile_raw.log"; fi
+    if [ "$rc" -ne 0 ]; then emit_profiler_failure "$tool" "$rc" RPC_PROFILE_ARGS "$OUTPUT_DIR/${tool}_profile_raw.log"; return 1; fi
     if [ -d "$workload" ]; then
         echo "=== $tool analyze (full, unparsed) ===" >> "$REPORT"
         bash "$GPU_LOCK" "$GPU_ID" "$tool" analyze -p "$workload" >> "$REPORT" 2>&1 || true
     fi
-    [ -s "$REPORT" ] && PROFILE_SUCCESS=true
+    if profiler_artifacts_ok "$workload"; then
+        PROFILE_SUCCESS=true
+        return 0
+    fi
+    return 1
 }
 
 run_rocprofv3() {        # modern profiler: kernel trace + stats CSVs (per-kernel dispatch counts + durations).
@@ -132,15 +139,23 @@ run_rocprofv3() {        # modern profiler: kernel trace + stats CSVs (per-kerne
     while IFS= read -r f; do
         { echo ""; echo "=== rocprofv3 artifact: $f ==="; cat "$f"; } >> "$REPORT" 2>/dev/null || true
     done < <(find "$dir" -type f \( -name '*.csv' -o -name '*.json' -o -name '*.txt' \) 2>/dev/null | sort)
-    [ -s "$REPORT" ] && PROFILE_SUCCESS=true
+    if [ "$rc" -eq 0 ] && profiler_artifacts_ok "$dir"; then
+        PROFILE_SUCCESS=true
+        return 0
+    fi
+    return 1
 }
 
 run_rocprof() {          # legacy: rocprof --stats (HIP dispatch stats).
     echo "=== Profiling with rocprof ($RPROF_ARGS) ==="
     local rc=0
     bash "$GPU_LOCK" "$GPU_ID" rocprof $RPROF_ARGS bash -c "$BENCHMARK_CMD" >> "$REPORT" 2>&1 || rc=$?
-    if [ "$rc" -ne 0 ]; then emit_profiler_failure rocprof "$rc" RPROF_ARGS "$REPORT"; fi
-    [ -s "$REPORT" ] && PROFILE_SUCCESS=true
+    if [ "$rc" -ne 0 ]; then emit_profiler_failure rocprof "$rc" RPROF_ARGS "$REPORT"; return 1; fi
+    if grep -qE 'Name|Duration|Kernel' "$REPORT" 2>/dev/null; then
+        PROFILE_SUCCESS=true
+        return 0
+    fi
+    return 1
 }
 
 run_metrix() {           # generic/extensible profiler: env-driven (METRIX_ARGS), harvest any csv/json/txt.
@@ -159,16 +174,23 @@ run_metrix() {           # generic/extensible profiler: env-driven (METRIX_ARGS)
     while IFS= read -r f; do
         { echo ""; echo "=== metrix artifact: $f ==="; cat "$f"; } >> "$REPORT" 2>/dev/null || true
     done < <(find "$dir" -type f \( -name '*.csv' -o -name '*.json' -o -name '*.txt' \) 2>/dev/null | sort)
-    [ -s "$REPORT" ] && PROFILE_SUCCESS=true
+    if [ "$rc" -eq 0 ] && profiler_artifacts_ok "$dir"; then
+        PROFILE_SUCCESS=true
+        return 0
+    fi
+    return 1
 }
 
-case "$PROFILER" in
-    rocprof-compute|omniperf) run_rocprof_compute "$PROFILER" ;;
-    rocprofv3)                run_rocprofv3 ;;
-    rocprof)                  run_rocprof ;;
-    metrix)                   run_metrix ;;
-    "")                       echo "No profiler found in priority list; benchmark-only." ;;
-esac
+for p in $PROFILER_PRIORITY; do
+    command -v "$p" &> /dev/null || continue
+    case "$p" in
+        rocprof-compute|omniperf) run_rocprof_compute "$p" && { PROFILER="$p"; break; } || true ;;
+        rocprofv3)                run_rocprofv3 && { PROFILER="$p"; break; } || true ;;
+        rocprof)                  run_rocprof && { PROFILER="$p"; break; } || true ;;
+        metrix)                   run_metrix && { PROFILER="$p"; break; } || true ;;
+    esac
+    [ "$PROFILE_SUCCESS" = true ] && break
+done
 
 # Final fallback: no profiler available, or the chosen one produced nothing -> benchmark-only.
 if [ "$PROFILE_SUCCESS" = false ]; then

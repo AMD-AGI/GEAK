@@ -1,5 +1,9 @@
 # AMD Instinct (MI-series) Hardware Reference — DETECT THE BOX FIRST
 
+**RDNA4 fork:** if `rocminfo` reports validated `gfx1201` (client RDNA 4 — R9700 class),
+**stop**. This file's wave64 / MFMA / FNUZ / MX rules are wrong on that box. Read
+`amd_rdna4.md` instead. (`gfx125x` is CDNA5, not RDNA4 — do not send it to `amd_rdna4.md`.)
+
 This workflow runs on AMD Instinct MI-series accelerators — **CDNA 3** (MI300X / MI300A / MI308X /
 MI325X, `gfx942`) and **CDNA 4** (MI350X / MI355X, `gfx950`). They differ in CU count, HBM bandwidth,
 peak FLOPS, and — critically for quantized kernels — the **fp8 number format**. Do NOT assume MI300X.
