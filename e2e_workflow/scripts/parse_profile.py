@@ -47,18 +47,31 @@ from collections import defaultdict
 # Each entry: (regex, classification, backend_guess, editable, hint)
 # --------------------------------------------------------------------------- #
 RULES = [
-    (r"triton|_kernel_0d1d|tt\.|fused_.*kernel", "triton", "triton", True,
-     "Triton kernel — extractable; try Triton tuning, or a CK/HIP rewrite if memory/compute bound."),
-    (r"Cijk|Tensile|hipblaslt|_gemm|GemmEx|gemm_|hgemm|sgemm|f16_gemm|igemm",
-     "library_gemm", "hipblaslt", False,
-     "Library GEMM (hipBLASLt/Tensile). Tune via heuristics/env or swap to aiter/CK GEMM; rarely source-editable."),
+    # Strong implementation/library fingerprints precede generic operation names.
+    # CK and Triton symbols commonly contain "gemm"; that alone is not hipBLASLt evidence.
     (r"aiter|ater::", "fused_custom", "aiter", True,
      "AITER kernel. Has source; compare aiter vs triton vs CK for this shape."),
-    (r"flash|fmha|attention|attn|_mha_|paged|kv_cache|decode_attention|prefill",
+    (r"\bck_|composable_kernel|CK::|ck::", "fused_custom", "ck", True,
+     "Composable Kernel. Compare CK instance/config; source-tunable via instance selection."),
+    (r"nccl|rccl|ncclDevKernel|allreduce|all2all|alltoall|all_gather",
+     "communication", "rccl", False,
+     "Collective kernel. Tune topology or the collective backend, not a compute-kernel seam."),
+    (r"BLOCK_SIZE_|BLOCK_M|BLOCK_N|num_warps|num_stages|_kernel_0d1d",
+     "triton", "triton", True,
+     "Triton JIT kernel (launch/autotune constants in the symbol). Extractable."),
+    # Some ATOM/AITER HIP symbols omit the aiter namespace in profiler output.
+    # Keep this list narrow and require live-seam verification downstream.
+    (r"\b(?:fmoe_|opus_|kn_(?:mla|get_mla)|wv_splitk|dynamic_per_group_scaled_quant)",
+     "fused_custom", "aiter", True,
+     "ATOM/AITER kernel family. Verify the live Python seam before attempting a rebind."),
+    (r"triton|_kernel_0d1d|tt\.|fused_.*kernel", "triton", "triton", True,
+     "Triton kernel — extractable; try Triton tuning, or a CK/HIP rewrite if memory/compute bound."),
+    (r"Cijk|Tensile|hipblaslt|GemmEx|hgemm|sgemm|f16_gemm|igemm",
+     "library_gemm", "hipblaslt", False,
+     "Library GEMM (hipBLASLt/Tensile). Tune via heuristics/env or swap to aiter/CK GEMM; rarely source-editable."),
+    (r"flash|fmha|attention|attn|_mha_|mla|paged|kv_cache|decode_attention|prefill",
      "library_attn", "ck", False,
      "Attention kernel (CK/AITER/FA). Try --attention-backend swap + per-shape backend; source-edit only if Triton attn."),
-    (r"ck_|composable_kernel|CK::|ck::", "fused_custom", "ck", True,
-     "Composable Kernel. Compare CK instance/config; source-tunable via instance selection."),
     (r"mamba|ssm|causal_conv|selective_scan|chunk_scan|chunk_fwd|chunk_gated|"
      r"gated_delta|delta_rule|state_passing|recompute_w|kkt_solve|l2norm|cumsum",
      "fused_custom", "triton", True,
@@ -80,7 +93,7 @@ def classify(name):
         if re.search(rx, name, re.IGNORECASE):
             return cls, backend, editable, hint
     # Fallback: a snake_case symbol ending in 'kernel' (and not a mangled C++ symbol) is almost
-    # always a Triton/custom JIT kernel in sglang -> editable.
+    # always a Triton/custom JIT kernel -> editable.
     if re.search(r"^[a-z0-9_]+kernel[a-z0-9_]*$", name) or re.search(r"_fwd_kernel|_bwd_kernel", name):
         return ("triton", "triton", True,
                 "Snake_case JIT kernel (likely Triton). Extractable; tune or compare backends.")

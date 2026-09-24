@@ -81,7 +81,7 @@ Do this instead of the optimize-mode steps below:
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
    done
    cd "$EVAL_DIR/workspace"
-   printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
@@ -131,7 +131,7 @@ Steps:
    [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
-   printf '%s\n' 'build/' '__pycache__/' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
    # Avoid git hangs/failures in non-interactive agents: no pager, no prompts, and ALWAYS pass an
    # identity (the machine may have no global git user). Fresh repo (the source .git was never copied
    # in) so HEAD is exactly this baseline.
@@ -162,6 +162,55 @@ Steps:
      the pristine original (set `baseline_callable` from `meta.json:target_callable` if present, else "").
    Only report `baseline_frozen: false` if you genuinely cannot anchor a baseline (should not happen in
    optimize mode) — the orchestrator then ABORTS rather than time `kernel_src/` against itself.
+3b. **(OPT-IN) Freeze the measurement harness the SAME way correctness freezes `source_golden`.**
+   This entire step is gated behind `GEAK_FREEZE_HARNESS=1` — when the env var is unset/`0` (the
+   DEFAULT), do NOTHING here and GEAK's baseline framework behavior is byte-for-byte unchanged. Only
+   when explicitly enabled do the following. The perf harness (timer, input generation, golden compare,
+   launch config) is the measurement CONTRACT, not an optimization target: only the declared
+   `config.yaml:source_file_path` (the kernel) is editable.
+   Correctness already reads a pristine, frozen `source/source_golden` copy — give performance the
+   identical treatment: keep a read-only golden copy of every non-source measurement file OUTSIDE the
+   workspace, and (see the COMMANDMENT) restore from it before EVERY measurement. `chmod -w` alone is
+   not enough — the agent runs as root and can `chmod +w`; the HARD guarantee is that each measurement
+   re-copies the frozen files in first, so no per-round number can ever reflect a harness edit and the
+   agent gets ZERO reward for tampering. This forces re-tiling and launch-config changes to happen
+   INSIDE the kernel source (`tl.constexpr`, internal autotune) instead of by editing the harness — the
+   legitimate outlet — and it surfaces any kernel that was co-designed with a tampered harness as a
+   failure IN THE SAME ROUND (not only at final Validate), so the loop can self-correct.
+   ```bash
+   cd "$EVAL_DIR/workspace"
+   if [ "${GEAK_FREEZE_HARNESS:-0}" = "1" ]; then   # DEFAULT off → upstream behavior; only opt-in freezes
+   SRC=$(awk '/^source_file_path:/{f=1;next} /^[^[:space:]-]/{f=0} f&&/-/{sub(/.*-[[:space:]]*/,"");print}' config.yaml)
+   FROZEN="$EVAL_DIR/measure_golden"          # read-only golden for the perf harness (sibling of workspace)
+   mkdir -p "$FROZEN"
+   for f in scripts/harness_run.py scripts/task_runner.py scripts/_runtime.py test_cases.json; do
+     printf '%s\n' "$SRC" | grep -qxF "$f" && continue   # never freeze a file the kernel legitimately owns
+     [ -e "$f" ] || continue
+     mkdir -p "$FROZEN/$(dirname "$f")"
+     cp -f "$f" "$FROZEN/$f"
+     chmod -w "$f" 2>/dev/null || true                    # soft in-workspace signal (root may override)
+   done
+   # A tiny restorer the COMMANDMENT calls before each measurement. Write it INTO the frozen dir, then
+   # make the whole golden read-only. It restores exactly the files that were frozen (so it never
+   # clobbers the editable kernel source), forcing chmod +w first so a root chmod -w cannot block it.
+   cat > "$FROZEN/restore.sh" <<'RESTORE'
+#!/usr/bin/env bash
+# Restore the frozen measurement harness into the CURRENT workspace before a measurement.
+# Mirrors correctness always reading the frozen source_golden. Run with cwd = the workspace.
+FROZEN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for f in scripts/harness_run.py scripts/task_runner.py scripts/_runtime.py test_cases.json; do
+  [ -e "$FROZEN/$f" ] || continue
+  [ -e "$f" ] && chmod +w "$f" 2>/dev/null || true
+  cp -f "$FROZEN/$f" "$f"
+done
+RESTORE
+   chmod +x "$FROZEN/restore.sh"
+   chmod -R a-w "$FROZEN" 2>/dev/null || true             # frozen golden: read-only for the whole run
+   fi   # end GEAK_FREEZE_HARNESS
+   ```
+   (Belt-and-suspenders: the Validate step ALSO rebuilds a fresh workspace from the TRUE original and
+   restores every non-source file before it measures, so even if a root agent defeats the per-round
+   restore, the official number still reflects ONLY the kernel-source change.)
 4. List the source files (so downstream agents know what exists):
    `find "$EVAL_DIR/workspace" -maxdepth 3 -type f \( -name '*.py' -o -name '*.hip' -o -name '*.cu' -o -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cuh' -o -name '*.yaml' \) | sort`
 
@@ -194,6 +243,13 @@ baseline latencies recorded at benchmark setup).
 
 **Do NOT trust the TechLead's reported speedup — reproduce it from the TRUE baseline.**
 
+Source-binding failures (`GEAK_SOURCE_INVALID`, exit 86, or `invalid_measurement` in round results)
+are invalid experiments, not evidence of no improvement. Review the affected Engineer workspace's
+`.geak/invalid_measurements.jsonl` even if the final patch is empty. If that candidate was not validly
+remeasured after repair, report `validation_status:"flagged"`, `correctness:"not_checked"` and explain
+the unresolved build defect in `arbitration_note`; do not report an accepted speedup or a validated
+no-op. A clean benchmark of the reverted original does not validate the discarded candidate.
+
 1. Read `EVAL_DIR/COMMANDMENT.md` for the exact correctness + full-benchmark commands.
 2. Build a fresh validation workspace from the ORIGINAL path:
    ```bash
@@ -214,6 +270,18 @@ baseline latencies recorded at benchmark setup).
    git apply "$EVAL_DIR/final_patch.diff"
    # Soft reclaim of prior validation_workspace.old_* (keeps disk bounded across re-validates).
    bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/reclaim_eval_artifacts.sh" --eval-dir "$EVAL_DIR" --keep-round 0 2>/dev/null || true
+   # (OPT-IN, GEAK_FREEZE_HARNESS=1 only) ENFORCE the immutable measurement contract (COMMANDMENT:
+   # "never edit the golden copy or the harness"): only the declared source_file_path may change.
+   # Restore every OTHER tracked file the patch touched (harness_run.py / task_runner.py / _runtime.py
+   # / test_cases.json / source_golden/…) back to the pristine baseline, so the measured speedup
+   # reflects ONLY the kernel-source change and an agent cannot inflate results by tuning launch params
+   # inside the harness. DEFAULT off → the full patch is applied exactly as upstream (no restore).
+   if [ "${GEAK_FREEZE_HARNESS:-0}" = "1" ]; then
+     SRC=$(awk '/^source_file_path:/{f=1;next} /^[^[:space:]-]/{f=0} f&&/-/{sub(/.*-[[:space:]]*/,"");print}' config.yaml)
+     for f in $(git diff --name-only); do
+       printf '%s\n' "$SRC" | grep -qxF "$f" || git checkout -- "$f"
+     done
+   fi
    ```
 3. Run CORRECTNESS (from COMMANDMENT, with cwd = validation_workspace). If it fails → status
    `flagged`, record the failure, do NOT report a speedup as accepted.
@@ -277,6 +345,20 @@ baseline latencies recorded at benchmark setup).
      normal shape of the default mode.
    Whatever the outcome, `timing_basis` is REQUIRED in `director_validation.json`, and any campaign summary
    that quotes the speedup must carry it — an unlabelled number is read as a clean device-time win.
+
+   Read `cache_mode` from the same `GEAK_TIMING_RECEIPT` (the freezer copies it from each leg's
+   `cache_condition.mode`) into `director_validation.json` as `cache_basis`:
+   - `"read-evict"` → the single supported preparation for new measurements. Nothing to flag.
+   - `"unknown_write_evict"` or ABSENT → the task was frozen against a `harness_lib.py` older than the
+     cache receipt. Record `cache_basis: "unknown_write_evict"`, `status: "flagged"`. The old write pass
+     left dirty lines whose writeback competed with the timed kernel for HBM bandwidth: on MI355X /
+     GLM-5.2 fused-MoE, a decode-weighted 1.12 read as 1.40. Absence is not "no cache preparation".
+   - Any other reported mode → preserve its value and set `status: "flagged"`. Historical receipts may
+     say `"write-evict"` or `"none"`; these are not selectable in the current harness and must never be
+     relabelled as `"read-evict"`.
+   There is no correction factor for old scores: the inflation depends on each leg's HBM traffic.
+   Re-freeze against a current `$HARNESS_LIB` and remeasure. Prefill-only tasks are less sensitive but
+   still carry the label. Never fold different cache bases into one campaign-level speedup.
    `not_applicable` is a label, not a pass: the number is this lane's own baseline ratio, not a
    receipt-backed device-time claim, and a cross-lane comparison must not treat it as one.
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:

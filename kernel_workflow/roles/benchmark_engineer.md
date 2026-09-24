@@ -104,7 +104,44 @@ and FLAG it in `notes` + the COMMANDMENT as a non-representative baseline.
 For `--correctness` in the no-runner case (no oracle at all), compare to a trusted reference
 (PyTorch/naive) with appropriate tolerance. When the oracle exists, `--correctness` just defers to it.
 
-### 3. Validate every mode actually runs
+### 3. Validate source binding and every mode
+
+**Candidate source binding is part of correctness.** The workspace will be copied into Engineer,
+Verify, and later-wave directories. Build from the CURRENT workspace (`Path.cwd()`, since all
+commands run there), never from an absolute parent workspace embedded during harness generation.
+Keep generated overlays, source mirrors and build metadata under `build/` so materialization drops
+them. A fresh `.torch_ext` alone does not fix stale source links elsewhere.
+
+For every target source override in a generated builder:
+
+- Recreate or rebind its owned link on EVERY invocation, including existing and dangling links.
+  Never use `if link.exists() or link.is_symlink(): continue` for a candidate source override.
+- Use `scripts/workspace_sources.py bind` from this workflow to bind and validate the compiler input;
+  it refuses external candidate sources and emits the resolved path + SHA256. For example, from the
+  current workspace, with the actual source and overlay paths substituted:
+  ```bash
+  python3 "$SKILL_DIR/scripts/workspace_sources.py" bind --workspace "$PWD" \
+    --source quant_kernels.cu --link build/.overlay/candidate/quant_kernels.cu
+  ```
+  Invoke this from the builder with checked exit status, immediately BEFORE compiling or loading the
+  extension. For a builder that already binds correctly, use `check-input --workspace "$PWD"
+  --source <candidate-relative-source> --input <actual-compiler-input>` instead. Check the path passed
+  to the compiler, not an unused duplicate of the candidate. Validate every overridden translation
+  unit/header; keep immutable baseline/vendor inputs separate. For source transformations, verify the
+  input to the transformation and regenerate its output from the current source before compilation.
+- Validate relocation once in a disposable directory made with `materialize_workspace.sh`: add a
+  deliberate `#error GEAK_CANDIDATE_SOURCE_PROBE` to a copied HIP/C++ target, rebuild with the SAME
+  generated builder, and require a compiler failure naming that marker. A successful build is an
+  invalid harness, even if ordinary correctness/performance commands pass. Only edit the disposable
+  candidate for this probe; preserve the canonical source and frozen reference. For interpreted/JIT
+  languages, use an equivalent unmistakable import/compile failure in the copied candidate.
+
+The wrapper checks copied workspace links before AND after commands. Exit 86 / `GEAK_SOURCE_INVALID`
+means the entire invocation is an **invalid measurement**, including any PASS or timing output already
+printed. Fix the build infrastructure and rerun before freezing the COMMANDMENT. Record the source
+paths, binding command and successful relocation probe in its `SOURCE_BINDING` section. Do not freeze
+a harness whose actual candidate input cannot be established.
+
 Run compile (if any), correctness, benchmark, profile once each (correctness/benchmark via
 `gpu_lock.sh $GPU_ID`). Fix anything that errors before continuing.
 
@@ -118,6 +155,22 @@ essential: without (a), parallel engineers compiling `torch.utils.cpp_extension.
 share ONE global cache → they serialize on a single lock and can benchmark each other's `.so`;
 without (b) every compile builds ~9 architectures. These are generic to any torch HIP extension.
 
+**Freeze-restore prefix (measurement integrity — OPT-IN).** FIRST check whether Setup froze the perf
+harness: `test -e "$EVAL_DIR/measure_golden/restore.sh"`. This file exists ONLY when the run was
+started with `GEAK_FREEZE_HARNESS=1`; when it is ABSENT (the DEFAULT), write every measurement command
+EXACTLY as upstream — no prefix — so baseline GEAK behavior is unchanged. When it IS present, it is the
+exact analog of the frozen `source_golden` correctness reads: EVERY GPU measurement command you write
+into the COMMANDMENT (CORRECTNESS / BENCHMARK / FULL_BENCHMARK / PROFILE) MUST re-restore that golden
+into the workspace IMMEDIATELY before it runs, so no per-round number can reflect a harness edit — only
+the kernel source counts. In that case prefix every measurement command (inside the workspace, before
+`gpu_lock.sh`) with `bash <EVAL_DIR>/measure_golden/restore.sh &&` using the concrete `EVAL_DIR` path, e.g.:
+```
+cd <workspace> && bash <EVAL_DIR>/measure_golden/restore.sh && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <perf cmd>
+```
+`restore.sh` only re-copies the frozen NON-source files, so it never touches the editable kernel. Do NOT
+rely on `chmod` (the agent is root) — restore-before-measure is the hard guarantee. (When the golden is
+absent, skip this entire paragraph.)
+
 The COMMANDMENT MUST contain, with concrete commands (not placeholders):
 - `SETUP` — `cd <workspace>`. Do NOT use `rm` anywhere in the COMMANDMENT (it triggers an approval
   prompt that blocks autonomous/background runs). Each workspace is already a fresh artifact-free copy
@@ -126,9 +179,9 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
   (e.g. after editing headers), MOVE it aside instead of deleting:
   `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true` (a fresh `.torch_ext` rebuilds).
   So `SETUP` is just `cd <workspace>` (plus the env exports below) — no deletion.
-- `CORRECTNESS` — wrapped: `cd <workspace> && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <correctness cmd>`.
-- `BENCHMARK` — wrapped in gpu_lock (quick measurement).
-- `FULL_BENCHMARK` — wrapped in gpu_lock (authoritative).
+- `CORRECTNESS` — wrapped: `cd <workspace> && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <correctness cmd>` (prepend `bash <EVAL_DIR>/measure_golden/restore.sh &&` ONLY when the golden exists — see opt-in note above).
+- `BENCHMARK` — wrapped in gpu_lock (quick measurement); same optional restore prefix.
+- `FULL_BENCHMARK` — wrapped in gpu_lock (authoritative); same optional restore prefix.
 - `PROFILE` — `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<cmd that cd's into the workspace>" <out_dir>`.
   If the report shows a `!!! PROFILER FAILED` block, follow the fault-tolerance ladder in
   `knowledge/profiling_guide.md` (override the named env var with the corrected flag, or degrade and say so).

@@ -1022,6 +1022,130 @@ def test_remeasuring_one_patch_updates_its_candidate_instead_of_adding_one(tmp_p
     assert document["speedup"] == 2.0, "the original's own measurement is what was recorded"
 
 
+# --------------------------------------------------------------------------- what a rewrite keeps
+# The local tree is BOTH a store and the source every remote field is derived from, and session ids
+# are content-addressed off the patch — so re-measuring the same patch from a fresh `--root` lands
+# on the same remote session and replaces the document whole. Everything the remote copy earned
+# from other boxes is in that document. These pin that a rewrite carries it instead of zeroing it.
+
+
+def _document(store, remote):
+    return json.load(open(os.path.join(store, *remote["canonical_id"].split(":"), "sessions",
+                                       remote["session_id"], "knowledge.json")))
+
+
+def _write_remote(root, store, patch_path, *extra, speedup="2.0"):
+    return run("write-remote", "--root", root, "--store", store, "--kernel-name", "k",
+               "--language", "triton", "--gfx", "gfx950", "--kernel-class", "triton",
+               "--speedup", speedup, "--patch", str(patch_path), "--direction", "tile-retune",
+               "--framework-version", "7.2", *extra)
+
+
+def _attest_remote(store, session, outcome, *extra):
+    return run("attest-remote", "--store", store, "--session-id", session, "--outcome", outcome,
+               "--kernel-name", "k", "--language", "triton", "--gfx", "gfx950",
+               "--framework-version", "7.2", "--apply", *extra)
+
+
+def test_a_rewrite_from_a_clean_tree_keeps_the_verdicts_other_boxes_recorded(tmp_path):
+    """The hazard in one test. Two boxes tried this record and neither reproduced it; a third box
+    rediscovering the same patch must not hand it back a clean record."""
+    store = str(tmp_path / "store")
+    p = tmp_path / "p.diff"
+    p.write_text(patch_text())
+    a = _write_remote(str(tmp_path / "kbA"), store, p)
+    for _ in range(2):
+        _attest_remote(store, a["remote"]["session_id"], "not_reproduced")
+
+    b = _write_remote(str(tmp_path / "kbB"), store, p, speedup="2.1")
+    assert b["remote"]["session_id"] == a["remote"]["session_id"]
+    assert b["remote"]["replaced"] is True and b["remote"]["carried_attestations"] is True
+    ledger = _document(store, b["remote"])["value"]["attestations"]
+    assert ledger["recalls"] == 2 and ledger["not_reproduced"] == 2
+    # And the read still demotes it, which is the whole reason the ledger is worth keeping.
+    assert resolve_remote(store, str(tmp_path / "refs"), "k")["candidates"][0]["retire_hint"]
+
+
+def test_the_reproduction_count_never_goes_backwards_and_counts_the_new_box(tmp_path):
+    """`reproductions` is what promotes a record to `active`, and it is the one number a fresh tree
+    cannot know: locally this write is the first, remotely it is the second."""
+    store = str(tmp_path / "store")
+    p = tmp_path / "p.diff"
+    p.write_text(patch_text())
+    _write_remote(str(tmp_path / "kbA"), store, p)
+    b = _write_remote(str(tmp_path / "kbB"), store, p)
+    local_meta = yaml.safe_load(open(os.path.join(b["dir"], "meta.yaml")))
+    assert local_meta["reproductions"] == 1, "the local tree only ever saw this patch once"
+    assert b["remote"]["reproductions"] == 2
+    value = _document(store, b["remote"])["value"]
+    assert value["reproductions"] == 2 and value["lifecycle"] == "active"
+    assert value["validated"] is True
+
+
+def test_a_rewrite_does_not_resurrect_a_record_curation_took_back(tmp_path):
+    store = str(tmp_path / "store")
+    p = tmp_path / "p.diff"
+    p.write_text(patch_text())
+    a = _write_remote(str(tmp_path / "kbA"), store, p)
+    run("retract-remote", "--store", store, "--session-id", a["remote"]["session_id"],
+        "--kernel-name", "k", "--language", "triton", "--gfx", "gfx950",
+        "--framework-version", "7.2", "--reason", "measured against the wrong baseline", "--apply")
+
+    b = _write_remote(str(tmp_path / "kbB"), store, p, speedup="2.5")
+    assert b["remote"]["retracted"] is True and b["remote"]["unretired"] is False
+    value = _document(store, b["remote"])["value"]
+    assert value["retained"] is False and "wrong baseline" in value["retired_reason"]
+    assert _document(store, b["remote"])["speedup"] == 0.0, "a tombstone must not rank"
+    assert value["withdrawn_scores"] == {"speedup": 2.0}, \
+        "the score it was retracted FOR, not whatever this rewrite measured onto it"
+    assert resolve_remote(store, str(tmp_path / "refs"), "k")["candidates"] == []
+
+
+def test_a_tombstone_lifts_when_a_recall_has_since_reproduced_the_win(tmp_path):
+    """The one signal a retraction is built from the absence of. Not the write's own speedup —
+    that is the claim the retraction distrusted."""
+    store = str(tmp_path / "store")
+    p = tmp_path / "p.diff"
+    p.write_text(patch_text())
+    a = _write_remote(str(tmp_path / "kbA"), store, p)
+    run("retract-remote", "--store", store, "--session-id", a["remote"]["session_id"],
+        "--kernel-name", "k", "--language", "triton", "--gfx", "gfx950",
+        "--framework-version", "7.2", "--reason", "nobody could reproduce it", "--apply")
+    _attest_remote(store, a["remote"]["session_id"], "validated")
+
+    b = _write_remote(str(tmp_path / "kbB"), store, p, speedup="2.5")
+    assert b["remote"]["unretired"] is True and b["remote"]["retracted"] is False
+    value = _document(store, b["remote"])["value"]
+    assert not value.get("retained") is False and not value.get("retired_reason")
+    assert "nobody could reproduce it" in value["unretired_from_reason"]
+    assert value["withdrawn_scores"], "what it was carrying when it was taken back"
+    assert value["attestations"]["recalls"] == 1, "the reprieve is not itself a recall"
+    assert [c["speedup"] for c in resolve_remote(store, str(tmp_path / "refs"), "k")["candidates"]] \
+        == [2.5]
+
+
+def test_every_rung_is_asked_separately_what_it_already_holds(tmp_path):
+    """Each ladder rung keeps its own copy of the session and they drift — `retract-remote
+    --canonical-id` takes back one page and not the other. One lookup reused for all rungs would
+    copy whichever page happened to be asked over the rest."""
+    store = str(tmp_path / "store")
+    p = tmp_path / "p.diff"
+    p.write_text(patch_text())
+    a = _write_remote(str(tmp_path / "kbA"), store, p)
+    exact_id = a["remote"]["canonical_id"]
+    coarse = [c for c in a["remote"]["canonical_ids"] if c != exact_id]
+    assert coarse, "the ladder writes more than one rung"
+    run("retract-remote", "--store", store, "--session-id", a["remote"]["session_id"],
+        "--canonical-id", exact_id, "--reason", "wrong baseline", "--apply")
+
+    b = _write_remote(str(tmp_path / "kbB"), store, p, speedup="2.5")
+    assert b["remote"]["retracted"] is True
+    exact = _document(store, {"canonical_id": exact_id, "session_id": b["remote"]["session_id"]})
+    other = _document(store, {"canonical_id": coarse[0], "session_id": b["remote"]["session_id"]})
+    assert exact["value"]["retained"] is False and exact["speedup"] == 0.0
+    assert other["value"].get("retained") is not False and other["speedup"] == 2.5
+
+
 def test_a_store_failure_never_costs_the_measured_result(tmp_path):
     """The directory plane is the source of truth; a KB write is bookkeeping on top of it."""
     root = str(tmp_path / "kb")
@@ -1086,7 +1210,7 @@ def test_attestations_accumulate_and_raise_a_hint_the_read_surfaces(tmp_path):
         attest(root, d, "not_reproduced", "--apply")
     candidate = resolve(root, refs)["candidates"][0]
     assert candidate["recalls"] == 2 and candidate["validations"] == 0
-    assert "could not reproduce" in candidate["retire_hint"]
+    assert "came back negative" in candidate["retire_hint"]
     assert "track record" in open(candidate["prose_path"]).read()
 
 
@@ -1150,6 +1274,219 @@ def test_attest_remote_on_an_unknown_session_reports_rather_than_raises(tmp_path
               "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
               "--apply")
     assert out["attested"] is False and all(p["found"] is False for p in out["pages"])
+
+
+# --------------------------------------------------------------------------- one ledger, named
+# `meta.yaml` lives in a checkout created empty and deleted with the run, so a count kept only there
+# is invisible to every other box. `attest` therefore writes both and SAYS which ones took it: a
+# curation pass must not read an uncorroborated local counter as agreement between machines.
+def _keyed_attest(store, session, outcome, *extra):
+    return run("attest", "--plane", "local", "--store", store, "--session-id", session,
+               "--outcome", outcome, "--kernel-name", "fused_moe_kernel", "--language", "triton",
+               "--gfx", "gfx950", "--framework-version", "7.2", *extra)
+
+
+def test_a_count_with_no_keyed_address_is_named_local_only(tmp_path):
+    root = str(tmp_path / "kb")
+    out = attest(root, stacked(root, "20260101_000000_aaaaaa"), "failed", "--apply")
+    assert out["ledger_scope"] == "local_only" and out["attestations"]["failures"] == 1
+
+
+def test_a_keyed_count_lands_on_both_planes_and_says_so(tmp_path):
+    root = str(tmp_path / "kb")
+    d = stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    out = _keyed_attest(store, session, "failed", "--exp-dir", d, "--apply")
+    assert out["ledger_scope"] == "keyed" and out["keyed"]["attested"] is True
+    assert yaml.safe_load(open(os.path.join(d, "meta.yaml")))["attestations"]["failures"] == 1
+    assert resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel"
+                          )["candidates"][0]["recalls"] == 1
+
+
+def test_an_unreachable_keyed_record_degrades_rather_than_pretending(tmp_path):
+    """The local count still lands — it is a real observation — but the scope must not read as
+    agreement, or a sweep retires a record on one box's word."""
+    root = str(tmp_path / "kb")
+    d = stacked(root, "20260101_000000_aaaaaa")
+    store, _ = _seeded(tmp_path, root)
+    out = _keyed_attest(store, "no-such-session", "failed", "--exp-dir", d, "--apply")
+    assert out["ledger_scope"] == "local_only" and "keyed_ledger_missed" in out["reason"]
+    assert yaml.safe_load(open(os.path.join(d, "meta.yaml")))["attestations"]["failures"] == 1
+
+
+def test_a_keyed_candidate_with_no_local_mirror_is_still_attestable(tmp_path):
+    """`resolve-remote` serves out of a hydrated refs dir that has no meta.yaml of its own. That is
+    a missing MIRROR, not a missing record, and it must not swallow the verdict."""
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    out = _keyed_attest(store, session, "failed", "--apply")
+    assert out["ledger_scope"] == "keyed" and out["keyed"]["attested"] is True
+    assert resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel"
+                          )["candidates"][0]["recalls"] == 1
+
+
+# --------------------------------------------------------------------------- the curation sweep
+# The counters are only worth keeping if something eventually acts on them. `curate-remote` is that
+# something, and it is deliberately a SEPARATE command from `attest`: counting evidence and passing
+# a verdict in one pass would make the attestor too dangerous for a lane to run unattended.
+def curate(store, *extra):
+    return run("curate-remote", "--plane", "local", "--store", store,
+               "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
+               "--framework-version", "7.2", *extra)
+
+
+def _losses(store, session, n, outcome="failed"):
+    for i in range(n):
+        _keyed_attest(store, session, outcome, "--measured-by", "box%d" % i, "--apply")
+
+
+def test_curate_leaves_a_page_nobody_has_tried_alone(tmp_path):
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, _ = _seeded(tmp_path, root)
+    out = curate(store)
+    assert out["ok"] is True and out["scanned"] == 1 and out["kept"] == 1
+    assert out["candidates"] == [] and out["applied"] is False
+
+
+def test_curate_names_a_record_two_boxes_could_not_make_win(tmp_path):
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    out = curate(store)
+    assert [c["session_id"] for c in out["candidates"]] == [session]
+    assert "policy threshold is 2" in out["candidates"][0]["reason"]
+    assert out["kept"] == 0
+
+
+def test_curate_is_a_dry_run_until_a_human_says_otherwise(tmp_path):
+    """It acts on a whole page and the store has no delete, so the default must be to say what it
+    would do."""
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    assert curate(store)["candidates"]
+    assert resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel")["candidates"]
+
+    out = curate(store, "--apply")
+    assert out["ok"] is True and out["applied"] is True and out["pages"]
+    assert resolve_remote(store, str(tmp_path / "refs"), "fused_moe_kernel")["candidates"] == []
+
+
+def test_curate_retracts_rather_than_only_flagging(tmp_path):
+    """A `retained: false` beside a live ranking scalar is worse than nothing: the reader that
+    ranks on the scalar still serves it."""
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    dry = [p for p in curate(store)["pages"] if p["found"]]
+    assert dry and not any(p["rewritten"] for p in dry)
+    # The dry run hands back the document it WOULD write, so the zeroing is reviewable before it
+    # happens rather than inferred from a reader that has already stopped serving the record.
+    assert all(p["would_write"]["value"]["retained"] is False for p in dry)
+    assert all(not p["would_write"].get("speedup", 0) for p in dry)
+
+    out = curate(store, "--apply")
+    written = [p for p in out["pages"] if p["found"]]
+    assert written and all(p["rewritten"] and not p["error"] for p in written)
+    assert resolve_remote(store, str(tmp_path / "r2"), "fused_moe_kernel")["candidates"] == []
+
+
+def test_the_keyed_read_can_be_asked_to_show_what_curation_took_back(tmp_path):
+    """The slug-tree `resolve` has had `--include-retired` since it existed. Without it here there
+    is no way to ask the service what it is hiding — and an audit needs exactly that."""
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    curate(store, "--apply")
+    assert resolve_remote(store, str(tmp_path / "r1"), "fused_moe_kernel")["candidates"] == []
+
+    out = resolve_remote(store, str(tmp_path / "r2"), "fused_moe_kernel", "triton", "gfx950",
+                         "--include-retired", "--min-speedup", "0")
+    assert len(out["candidates"]) == 1 and out["filtered"]["retired"] == 1
+    assert out["filtered"]["include_retired"] is True
+    # Counted once, not twice: with the flag the tombstone IS the candidate.
+    assert out["filtered"]["total"] == 1
+
+
+def test_a_rung_of_nothing_but_tombstones_stops_an_audit_where_it_hides_a_read(tmp_path):
+    """The descent is the reason this is a flag and not the default. A retracted exact rung must
+    read as empty for a lane — so it falls through to the coarse one — and must NOT for an auditor,
+    who is asking about that page specifically."""
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    exact = "geak:kernel:gfx950:fused_moe_kernel:triton:rocm:7.2"
+    run("retract-remote", "--store", store, "--session-id", session, "--canonical-id", exact,
+        "--reason", "measured on the wrong bench", "--apply")
+
+    fell_through = resolve_remote(store, str(tmp_path / "r1"), "fused_moe_kernel", "triton",
+                                  "gfx950", "--framework-version", "7.2")
+    assert fell_through["canonical_id"] != exact and fell_through["candidates"]
+    audit = resolve_remote(store, str(tmp_path / "r2"), "fused_moe_kernel", "triton", "gfx950",
+                           "--framework-version", "7.2", "--include-retired", "--min-speedup", "0")
+    assert audit["canonical_id"] == exact and audit["filtered"]["retired"] == 1
+    assert [c["speedup"] for c in audit["candidates"]] == [0.0], "a tombstone ranks at zero"
+
+
+def test_the_keyed_read_says_when_it_only_saw_part_of_the_page(tmp_path):
+    """The service ignores the limit and pages `--scan` rows, so every count below it describes a
+    prefix. A curation decision taken on a truncated page must know it was truncated."""
+    root = str(tmp_path / "kb")
+    for i in range(4):
+        stacked(root, "20260101_00000%d_aaaaaa" % i, speedup=2.0 + i, direction="dir%d" % i)
+    store, _ = _seeded(tmp_path, root)
+    out = resolve_remote(store, str(tmp_path / "r1"), "fused_moe_kernel")
+    # A local plane truncates nothing, and must not claim a limit it does not have.
+    assert out["filtered"]["scanned"] == 4
+    assert out["filtered"]["scan_limit"] == 0 and out["filtered"]["scan_saturated"] is False
+
+
+def test_curate_skips_what_is_already_retracted_rather_than_rewriting_it(tmp_path):
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    curate(store, "--apply")
+    out = curate(store, "--apply")
+    assert out["already_retired"] == 1 and out["candidates"] == [] and out["ok"] is True
+
+
+def test_curate_honours_the_threshold_the_policy_exposes(tmp_path):
+    root = str(tmp_path / "kb")
+    stacked(root, "20260101_000000_aaaaaa")
+    store, session = _seeded(tmp_path, root)
+    _losses(store, session, 2)
+    assert curate(store)["candidates"]
+    assert curate(store, "--threshold", "3")["candidates"] == []
+
+
+def test_curate_reports_a_bad_page_rather_than_raising(tmp_path):
+    out = run("curate-remote", "--plane", "local", "--store", str(tmp_path / "nope"),
+              "--kernel-name", "fused_moe_kernel", "--language", "triton", "--apply")
+    assert out["ok"] is False and out["error"] == "missing_arch"
+
+
+def test_a_hinted_candidate_stops_evicting_its_direction_group(tmp_path):
+    """Both entries are `tile-retune`, so the collapse offers exactly one of them. Ranked on the
+    raw speedup that is the suspect one and the clean one is never read at all."""
+    root, refs = str(tmp_path / "kb"), str(tmp_path / "refs")
+    fast = write_entry(root, "20260101_000000_fast", speedup=3.0,
+                       patch=patch_text(new="BLOCK = 256"))
+    write_entry(root, "20260101_000000_slow", speedup=2.0, patch=patch_text(new="BLOCK = 128"))
+    assert resolve(root, refs)["candidates"][0]["speedup"] == 3.0
+
+    for who in ("boxA", "boxB"):
+        attest(root, fast, "failed", "--measured-by", who, "--apply")
+    out = resolve(root, refs)
+    assert out["candidates"][0]["speedup"] == 2.0
+    assert out["filtered"]["demoted_by_hint"] == 1
+    assert [a["speedup"] for a in out["candidates"][0]["alternates"]] == [3.0]
 
 
 # --------------------------------------------------------------------------- the tuning carrier
@@ -1437,3 +1774,173 @@ def test_signing_bare_paths_says_what_is_wrong(tmp_path):
     down in a hash loop."""
     with pytest.raises(TypeError, match=r"\(stored_name, path\) pairs"):
         _store_module().artifact_signature([tuned_files(tmp_path)])
+
+
+# --------------------------------------------------------------------------- one address, two planes
+# The lane now READS by canonical id on both planes, and the slug tree stays behind as the write-side
+# staging area and the surface a curation pass edits. `sync-local` is the hinge: it runs before every
+# read, so what it must guarantee is not "the copy happened" but that running it a thousand times is
+# indistinguishable from running it once — except for the backlog it carried across the first time.
+
+
+def _sync(root, store, *extra):
+    return run("sync-local", "--root", str(root), "--store", str(store), *extra)
+
+
+def _sessions(store, cid="geak:kernel:gfx950:fused_moe_kernel:triton:rocm:unspecified"):
+    import glob
+    return sorted(glob.glob(os.path.join(store, *cid.split(":"), "sessions", "*", "knowledge.json")))
+
+
+def test_the_backlog_only_the_tree_ever_held_becomes_readable_by_key(tmp_path):
+    """Why this exists. Every entry older than the double-write default lives in the tree alone, so
+    pointing the read at the store without this step would read as a cold start on exactly the
+    kernels with the longest history."""
+    root, store, refs = str(tmp_path / "kb"), str(tmp_path / "store"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_a", speedup=2.0, direction="tile-retune")
+    write_entry(root, "20260102_000000_b", speedup=1.6, direction="unroll")
+    assert run("resolve-remote", "--plane", "local", "--store", store, "--kernel-name",
+               "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
+               "--refs-dir", refs)["candidates"] == []
+
+    summary = _sync(root, store)
+    assert summary["ok"] and summary["entries"] == 2 and summary["new_sessions"] == 2
+    got = run("resolve-remote", "--plane", "local", "--store", store, "--kernel-name",
+              "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950", "--refs-dir", refs)
+    assert [round(c["speedup"], 2) for c in got["candidates"]] == [2.0, 1.6]
+
+
+def test_a_second_sync_keeps_the_verdicts_the_store_earned_between_them(tmp_path):
+    """It runs before EVERY read, so the interesting case is the second one. A sync that re-derived
+    the document from the tree would hand back a clean ledger to a record two boxes had just failed
+    to reproduce — the same hazard `write-remote` was taught to avoid, on a path that runs far more
+    often."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a")
+    _sync(root, store)
+    session = os.path.basename(os.path.dirname(_sessions(store)[0]))
+    for _ in range(2):
+        run("attest-remote", "--store", store, "--session-id", session, "--outcome",
+            "not_reproduced", "--kernel-name", "fused_moe_kernel", "--language", "triton",
+            "--gfx", "gfx950", "--apply")
+
+    _sync(root, store)
+    value = json.load(open(_sessions(store)[0]))["value"]
+    assert value["attestations"]["recalls"] == 2
+    assert value["attestations"]["not_reproduced"] == 2
+    # And the counter that says how many boxes rediscovered this patch has not moved either: a sync
+    # copies a measurement that was already counted, it does not report a new one.
+    assert value["reproductions"] == 1
+
+
+def test_a_retired_entry_arrives_as_a_tombstone_and_not_as_a_live_win(tmp_path):
+    """`retained: false` travels on its own — `remote_value` copies it — and that is precisely the
+    inert half-retraction kb/retract.py warns about. What has to travel with it is the zeroed
+    ranking scalar and the withheld champion pointer."""
+    root, store, refs = str(tmp_path / "kb"), str(tmp_path / "store"), str(tmp_path / "refs")
+    write_entry(root, "20260101_000000_a", speedup=1.4, direction="tile-retune")
+    write_entry(root, "20260102_000000_b", speedup=3.0, direction="unroll", retired=True)
+
+    summary = _sync(root, store)
+    assert summary["retired"] == 1
+    tombstone = [json.load(open(f)) for f in _sessions(store)
+                 if json.load(open(f))["value"].get("retained") is False]
+    assert len(tombstone) == 1
+    # Zeroed, not merely flagged; and the number it was taken back FOR is kept, or the retraction
+    # cannot be reviewed later.
+    assert tombstone[0]["speedup"] == 0.0
+    assert tombstone[0]["value"]["withdrawn_scores"] == {"speedup": 3.0}
+    # The 3.0x tombstone must not have taken the champion pointer from the 1.4x live entry.
+    champion = json.load(open(os.path.join(
+        store, "geak", "kernel", "gfx950", "fused_moe_kernel", "triton", "rocm", "unspecified",
+        "champion.json")))
+    assert champion["value"] == 1.4
+    offered = run("resolve-remote", "--plane", "local", "--store", store, "--kernel-name",
+                  "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
+                  "--refs-dir", refs, "--min-speedup", "0")
+    assert [round(c["speedup"], 2) for c in offered["candidates"]] == [1.4]
+
+
+def test_curating_the_tree_still_reaches_a_record_the_store_already_published(tmp_path):
+    """The tree is the surface a human edits, and it stays useful only if an edit made after the
+    record was published still lands."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    exp = write_entry(root, "20260101_000000_a", speedup=2.0)
+    _sync(root, store)
+    assert json.load(open(_sessions(store)[0]))["speedup"] == 2.0
+
+    meta = yaml.safe_load(open(os.path.join(exp, "meta.yaml")))
+    meta.update({"retained": False, "retired_reason": "measured against the wrong baseline"})
+    with open(os.path.join(exp, "meta.yaml"), "w") as f:
+        yaml.safe_dump(meta, f)
+    _sync(root, store)
+    document = json.load(open(_sessions(store)[0]))
+    assert document["speedup"] == 0.0
+    assert document["value"]["retired_reason"] == "measured against the wrong baseline"
+
+
+def test_a_sync_does_not_undo_a_retraction_a_recall_already_lifted(tmp_path):
+    """The one verdict the tree does NOT get to re-impose. A tombstone lifts when somebody read the
+    record, took it to a box and reproduced the win — evidence the tree, which only knows what was
+    curated, cannot have. Re-imposing it once per warm start would revoke that silently and forever."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a", speedup=2.0, retired=True)
+    _sync(root, store)
+    session = os.path.basename(os.path.dirname(_sessions(store)[0]))
+    assert json.load(open(_sessions(store)[0]))["speedup"] == 0.0
+
+    # A box reproduces the win the retraction distrusted, and a rewrite lifts the tombstone.
+    run("attest-remote", "--store", store, "--session-id", session, "--outcome", "validated",
+        "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950", "--apply")
+    _sync(root, store)
+    lifted = json.load(open(_sessions(store)[0]))
+    assert lifted["value"].get("unretired_at")
+    assert lifted["value"].get("retained") is not False
+
+    _sync(root, store)                                    # and it stays lifted on every read after
+    assert json.load(open(_sessions(store)[0]))["value"].get("retained") is not False
+
+
+def test_re_filing_a_tombstone_does_not_re_date_the_retraction(tmp_path):
+    """`retracted_document` stamps the moment it runs. On a path that runs before every read that
+    would date every retraction to the last warm start, which is the one field an auditor uses to
+    decide whether the retraction is still current."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a", retired=True)
+    _sync(root, store)
+    first = json.load(open(_sessions(store)[0]))["value"]["retracted_at"]
+
+    path = _sessions(store)[0]
+    document = json.load(open(path))
+    document["value"]["retracted_at"] = "2020-01-01T00:00:00Z"       # older than any sync could mint
+    with open(path, "w") as f:
+        json.dump(document, f)
+    _sync(root, store)
+    assert json.load(open(path))["value"]["retracted_at"] == "2020-01-01T00:00:00Z" != first
+
+
+def test_the_sync_names_the_entry_it_could_not_file_and_carries_the_rest(tmp_path):
+    """A catch-up that aborts on the first bad entry leaves the read with a page that is thin for a
+    reason nothing recorded. The rest of the backlog is worth more than the failure is."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a", speedup=2.0)
+    broken = write_entry(root, "20260102_000000_b", speedup=1.5, direction="unroll")
+    os.chmod(os.path.join(broken, "patch.diff"), 0)      # readable meta, unreadable payload
+    try:
+        summary = _sync(root, store)
+    finally:
+        os.chmod(os.path.join(broken, "patch.diff"), 0o644)
+    assert summary["ok"] is False
+    assert [os.path.basename(e["exp_dir"]) for e in summary["errors"]] == ["20260102_000000_b"]
+    assert summary["new_sessions"] == 1 and len(_sessions(store)) == 1
+
+
+def test_the_sync_can_be_narrowed_to_the_kernel_the_read_is_about(tmp_path):
+    """The lane runs this before every read, so it is scoped: a whole-tree walk per warm start would
+    charge every run for a backlog it is not going to look at."""
+    root, store = str(tmp_path / "kb"), str(tmp_path / "store")
+    write_entry(root, "20260101_000000_a")
+    write_entry(root, "20260102_000000_b", kernel="attention_kernel")
+    summary = _sync(root, store, "--kernel-name", "fused_moe_kernel", "--gfx", "gfx950")
+    assert summary["entries"] == 1 and summary["skipped"]["filtered"] == 1
+    assert len(_sessions(store)) == 1

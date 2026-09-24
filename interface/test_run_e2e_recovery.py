@@ -854,7 +854,7 @@ def test_emit_on_success(monkeypatch, tmp_path):
     report = eval_dir / "final_report.md"
     report.write_text("# GEAK final report\n", encoding="utf-8")
 
-    def ok_invoke(prompt, t, ed):
+    def ok_invoke(prompt, t, ed, ps_args=None):
         return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
                 "final_throughput_tok_s": 535.352,
                 "baseline_throughput_tok_s": 461.314,
@@ -922,7 +922,7 @@ def test_final_launch_rejection_cannot_recover_positive_throughput(
         write_rejection()
         (eval_dir / rx.WORKFLOW_RETURN_FILE).write_text(json.dumps(wf))
 
-    def invoke(*args):
+    def invoke(*args, ps_args=None):
         assert route != "cached", "A cached result must not invoke another worker"
         write_rejection()
         if route == "interrupted":
@@ -987,7 +987,7 @@ def test_tuning_delivery_is_verified_on_live_cached_and_interrupted_emission(
     if route == "cached":
         (eval_dir / "workflow_return.json").write_text(json.dumps(wf))
 
-    def invoke(*args):
+    def invoke(*args, ps_args=None):
         assert route != "cached", "A completed run must recover without invoking a worker"
         if route == "interrupted":
             saved = eval_dir / "tuning/tuning_result.json"
@@ -1024,7 +1024,7 @@ def test_emitted_result_preserves_explicit_argument_semantics(monkeypatch, tmp_p
     accepted = {**config, "env": "'JSON={\"path\": \"two words\"}' EMPTY="}
     calls = []
 
-    def invoke(prompt, timeout, ed):
+    def invoke(prompt, timeout, ed, ps_args=None):
         calls.append(ed)
         return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
                 "final_throughput_tok_s": 535.352,
@@ -1045,7 +1045,7 @@ def test_emit_when_workflow_raises_but_disk_has_intermediate(monkeypatch, tmp_pa
     report = eval_dir / "final_report.md"
     report.write_text("# Recovered GEAK report\n", encoding="utf-8")
 
-    def boom(prompt, t, ed):
+    def boom(prompt, t, ed, ps_args=None):
         raise TimeoutError("budget expired before Validate")
 
     rc, rp = _run_main(
@@ -1077,7 +1077,7 @@ def test_emit_error_when_nothing_on_disk(monkeypatch, tmp_path):
     eval_dir = tmp_path / "e2e_empty"
     eval_dir.mkdir()
 
-    def boom(prompt, t, ed):
+    def boom(prompt, t, ed, ps_args=None):
         raise RuntimeError("crashed immediately")
 
     rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
@@ -1137,7 +1137,7 @@ def test_emit_timeout_still_writes_journey(monkeypatch, tmp_path):
     eval_dir = tmp_path / "e2e_to"
     eval_dir.mkdir()
 
-    def boom(prompt, t, ed):
+    def boom(prompt, t, ed, ps_args=None):
         raise TimeoutError("signal 15: self-stop to flush interface files")
 
     rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
@@ -1156,7 +1156,7 @@ def test_emit_surfaces_journey_write_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(rx, "_write_kernel_journey",
                         lambda ed, wf, n: (_ for _ in ()).throw(OSError("disk full")))
 
-    def ok_invoke(prompt, t, ed):
+    def ok_invoke(prompt, t, ed, ps_args=None):
         return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
                 "final_throughput_tok_s": 535.352,
                 "baseline_throughput_tok_s": 461.314}
@@ -1173,7 +1173,7 @@ def test_emit_is_atomic_and_parseable(monkeypatch, tmp_path):
     """No .tmp residue; the emitted file always parses as JSON."""
     eval_dir = _make_eval_dir(tmp_path, with_validation=True)
 
-    def ok_invoke(prompt, t, ed):
+    def ok_invoke(prompt, t, ed, ps_args=None):
         return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
                 "final_throughput_tok_s": 535.352}
 
