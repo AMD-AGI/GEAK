@@ -13,11 +13,19 @@
 # The Director's preflight step should smoke-test these two commands on the target image and record
 # any needed EXTRA_SERVER_ARGS BEFORE the run relies on them. This adapter targets the current CLI.
 
+source "$(dirname "${BASH_SOURCE[0]}")/extra_env.sh"
+
 adapter_default_port() { echo 8000; }
 
 adapter_launch() {
+  local -a _extra_env=() _config_env_unset=()
+  geak_read_extra_env _extra_env "${EXTRA_ENV:-}" || return $?
+  geak_read_unset_env _config_env_unset "${GEAK_UNSET_ENVS:-}" || return $?
   # Pin GPU_ARCHS so aiter's JIT skips rocm_agent_enumerator/_detect_native (see sglang.sh / gpu_lock.sh).
-  local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
+  local _ga=""
+  if ! geak_env_is_unset GPU_ARCHS "${_config_env_unset[@]}"; then
+    _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
+  fi
   # Enable the server-side torch profiler version-portably. No PROFILE_DIR -> off. The ProfilerConfig
   # schema is strict (extra=forbid) and aborts the server on an unknown key, so probe its fields and emit
   # only what the installed build declares. JSON held in an array so it stays one argument.
@@ -25,7 +33,7 @@ adapter_launch() {
   local -a _prof_env=()
   if [ -n "${PROFILE_DIR:-}" ]; then
     local _prof_fields
-    _prof_fields="$(python3 - <<'PY' 2>/dev/null
+    _prof_fields="$(env "${_config_env_unset[@]}" -- "${_extra_env[@]}" python3 - <<'PY' 2>/dev/null
 names=set()
 try:
     from vllm.config import ProfilerConfig
@@ -65,8 +73,9 @@ PY
   # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
   # own session so teardown can prove the process group is ours. Empty when unset.
   # shellcheck disable=SC2086
-  ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
+  ${SERVER_LAUNCH_PREFIX:-} env "${_config_env_unset[@]}" -- \
     ${_ga:+GPU_ARCHS=$_ga} \
+    "${_extra_env[@]}" \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     "${_prof_env[@]}" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \

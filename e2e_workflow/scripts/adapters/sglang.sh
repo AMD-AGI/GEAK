@@ -4,6 +4,8 @@
 #   ISL OSL CONC SEED
 # Sets SERVER_PID (global) in adapter_launch. Append canonical result lines to $RESULT_JSONL.
 
+source "$(dirname "${BASH_SOURCE[0]}")/extra_env.sh"
+
 adapter_default_port() { echo 30000; }
 
 # sglang is editable-installed in the ROCm images; its module finder can miss the `sglang.benchmark`
@@ -14,6 +16,9 @@ adapter_default_port() { echo 30000; }
 _SGL_PP="${SGLANG_SRC_PYTHONPATH-/sgl-workspace/sglang/python}"; [ -d "$_SGL_PP" ] || _SGL_PP=""
 
 adapter_launch() {
+  local -a _extra_env=() _config_env_unset=()
+  geak_read_extra_env _extra_env "${EXTRA_ENV:-}" || return $?
+  geak_read_unset_env _config_env_unset "${GEAK_UNSET_ENVS:-}" || return $?
   # Raise the scheduler watchdog by default: an authored/JIT kernel (FlyDSL/triton-author) overlaid on
   # the path JIT-compiles on first prefill, which can exceed sglang's default watchdog and kill the
   # server before CUDA-graph capture. Harmless for stock runs. Only add it if the caller didn't already
@@ -27,12 +32,16 @@ adapter_launch() {
   # _detect_native() — the latter shells to rocm_agent_enumerator -> rocminfo PER cold-build worker
   # (~77 per import), which hang under GPU/KFD contention and pile up into a box-degrading storm
   # (observed: 561 procs, e2e throughput halved). Detect once here; honor a caller-set value.
-  local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
+  local _ga=""
+  if ! geak_env_is_unset GPU_ARCHS "${_config_env_unset[@]}"; then
+    _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
+  fi
   # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
   # own session so teardown can prove the process group is ours. Empty when unset.
   # shellcheck disable=SC2086
-  ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
+  ${SERVER_LAUNCH_PREFIX:-} env "${_config_env_unset[@]}" -- \
     ${_ga:+GPU_ARCHS=$_ga} \
+    "${_extra_env[@]}" \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     SGLANG_TORCH_PROFILER_DIR="$PROFILE_DIR" \
     PYTHONPATH="${_SGL_PP:+$_SGL_PP:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \

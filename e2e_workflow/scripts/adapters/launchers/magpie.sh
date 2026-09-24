@@ -37,6 +37,8 @@
 # adapter_health is inherited from the BACKEND adapter (curl $BASE_URL/health),
 # which works regardless of who launched the server, so it is NOT redefined.
 
+source "$(dirname "${BASH_SOURCE[0]}")/../extra_env.sh"
+
 # ATOM's multiprocessing leader can exit promptly on SIGTERM while rank workers
 # remain alive in its process group and keep all GPU memory allocated.  The
 # native ATOM adapter prevents that with its own long-lived supervisor, but a
@@ -100,6 +102,21 @@ adapter_launch() {
   # Per-backend var NAMES (regular rule), passed to the script via env NAME=VALUE.
   local _args_var="EXTRA_${backend_uc}_ARGS"
   local _prof_var="${backend_uc}_TORCH_PROFILER_DIR"
+  local -a _config_env_unset=()
+  local -A _removed_env=()
+  local _name
+  geak_read_unset_env _config_env_unset "${GEAK_UNSET_ENVS:-}" || return $?
+  for _name in "${_config_env_unset[@]}"; do
+    [ "$_name" = "-u" ] || _removed_env["$_name"]=1
+  done
+
+  # Replay the recipe below an explicit run value, and leave candidate EXTRA_ENV
+  # assignments above both. The capability probe and server must see the same
+  # value, including an explicit removal or a later candidate re-add.
+  local -a _max_model_env=()
+  if [ -n "${MAX_MODEL_LEN:-}" ] && ! geak_env_is_unset MAX_MODEL_LEN "${_config_env_unset[@]}"; then
+    _max_model_env=(MAX_MODEL_LEN="$MAX_MODEL_LEN")
+  fi
 
   # The orchestrator's RECORDED launch environment, replayed as the BASE layer.
   # Without it the two servers agree only where their ${X:-default} expansions
@@ -137,6 +154,10 @@ adapter_launch() {
   if ((${#_recipe_env[@]})); then
     local -a _kept=(); local _kv
     for _kv in "${_recipe_env[@]}"; do
+      _name="${_kv%%=*}"
+      if [[ "$_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && [ "${_removed_env[$_name]:-0}" = "1" ]; then
+        continue
+      fi
       case "$_kv" in
         "${_args_var}="*) _recipe_extra="${_kv#*=}" ;;
         ROCR_VISIBLE_DEVICES=*|HIP_VISIBLE_DEVICES=*|CUDA_VISIBLE_DEVICES=*)
@@ -154,21 +175,12 @@ adapter_launch() {
     if ((${#_kept[@]})); then _recipe_env=("${_kept[@]}"); else _recipe_env=(); fi
   fi
 
-  # EXTRA_ENV carries GEAK's accepted env under test. Split every input line with
-  # `read -ra`, which performs shell word splitting but NOT pathname expansion:
-  # an accepted value such as `FOO=*` must reach the child literally even when
-  # matching files exist in the launcher's cwd. Reading line-by-line is required
-  # because a single `read` stops at the first newline. Keep only strict
-  # IDENTIFIER=VALUE assignments; GPU masks are run-scoped and are re-asserted
-  # separately below.
-  local -a _extra_env=() _extra_env_tokens=() _extra_env_line_tokens=()
-  local _tok _extra_env_line
-  if [ -n "${EXTRA_ENV:-}" ]; then
-    while IFS= read -r _extra_env_line; do
-      read -ra _extra_env_line_tokens <<< "$_extra_env_line"
-      _extra_env_tokens+=("${_extra_env_line_tokens[@]}")
-    done <<< "$EXTRA_ENV"
-  fi
+  # Decode quoted values once without shell expansion. NUL framing preserves
+  # spaces and embedded newlines; the shared parser also accepts legacy bare JSON.
+  # GPU masks are run-scoped and are re-asserted separately below.
+  local -a _extra_env=() _extra_env_tokens=()
+  local _tok
+  geak_read_extra_env _extra_env_tokens "${EXTRA_ENV:-}" || return $?
   for _tok in "${_extra_env_tokens[@]}"; do
     case "$_tok" in
       ROCR_VISIBLE_DEVICES=*|HIP_VISIBLE_DEVICES=*|CUDA_VISIBLE_DEVICES=*)
@@ -211,8 +223,9 @@ adapter_launch() {
   fi
   if [ "${PROFILE:-0}" = "1" ] && [ "$backend_uc" = "VLLM" ]; then
     local _prof_fields
-    _prof_fields="$(env -- \
+    _prof_fields="$(env "${_config_env_unset[@]}" -- \
       ${_recipe_env[@]+"${_recipe_env[@]}"} \
+      "${_max_model_env[@]}" \
       ${_extra_env[@]+"${_extra_env[@]}"} \
       PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
       python3 - <<'PY' 2>/dev/null
@@ -247,9 +260,9 @@ PY
   fi
 
   # Map GEAK's env onto Magpie's server-phase env. Ordering IS the precedence
-  # policy: recipe replay first, then the accepted env under test, then the
-  # run-scoped names GEAK owns -- so a later layer knowingly overrides an
-  # earlier one and nothing GEAK sets can be silently displaced by the recipe.
+  # policy: recipe replay first, then an explicit run MAX_MODEL_LEN, then the
+  # accepted env under test, then the run-scoped names GEAK owns -- so a later
+  # layer knowingly overrides an earlier one and the recipe cannot displace it.
   # Overlay is prepended so the launch_server child imports the patched subtree
   # first. EXTRA_<BE>_ARGS carries the accepted extra flags; Magpie dedupes them
   # against its own DEFAULT_ARGS.
@@ -295,8 +308,10 @@ PY
   # be an assignment-or-command operand, so no recipe/EXTRA_ENV value beginning
   # with `-` can be reparsed as an env option (belt-and-braces with the
   # allowlists above). `-u` unsets must precede `--`, hence the split.
-  env "${_env_unset[@]}" -- \
-    ${_recipe_env[@]+"${_recipe_env[@]}"} ${_extra_env[@]+"${_extra_env[@]}"} \
+  env "${_config_env_unset[@]}" "${_env_unset[@]}" -- \
+    ${_recipe_env[@]+"${_recipe_env[@]}"} \
+    "${_max_model_env[@]}" \
+    ${_extra_env[@]+"${_extra_env[@]}"} \
     "${_gpu_env[@]}" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     MAGPIE_RUN_PHASE=server \
@@ -307,7 +322,6 @@ PY
     RESULT_DIR="$_out_dir" \
     SERVER_LOG="$LOG" \
     PROFILE="${PROFILE:-0}" \
-    ${MAX_MODEL_LEN:+MAX_MODEL_LEN="$MAX_MODEL_LEN"} \
     ${PROFILE_DIR:+"${_prof_var}=$PROFILE_DIR"} \
     "${_args_var}=${_extra_args}" \
     bash "$script" >> "$_launchlog" 2>&1
