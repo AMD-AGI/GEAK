@@ -92,4 +92,19 @@ absolute per-case latencies. The script trusts only your numbers.
   "notes": "anything suspicious (overfit special-casing, narrow correctness, graph-capture host-sync, etc.)"
 }
 ```
+
+## Persist it before you return
+
+Write that exact JSON to `VERIFY_DIR/verify_result.json` (create the directory if
+needed) BEFORE you return it.
+
+The workflow script cannot write files -- every artifact in the experiment tree is
+written by an agent. Your return value is consumed in memory to build the round's
+candidate list and is then gone: no file in the tree records which directions were
+`verified` vs `correctness_failed`, or what each one measured. Today that survives
+only if a downstream phase happens to quote it in prose, so a run without that phase
+banks a winner whose correctness verdict was never recorded anywhere.
+
+This is a record, not a gate -- the lane still decides on your returned value, so a
+failed write must not change what you return.
 Be skeptical and exact. Your number becomes the official round result.
