@@ -173,6 +173,70 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
             "--kv_cache_dtype fp8 --block-size 16 --max-num-seqs 8",
         )
 
+    def test_atom_wrap_survives_a_late_session_leader(self):
+        """The pgid probe must SETTLE, not judge on one sample.
+
+        A launch script records $! at FORK and can hand back the pid -- and exit --
+        before that child has reached setsid(2), so the first probe still sees the
+        SCRIPT's group.  The sibling test above only hits that window by luck (it
+        loses on a loaded 2-vCPU CI runner and wins on a fast dev box), so this one
+        WIDENS it deterministically: the child becomes a session leader late, which
+        is the exact state CI observed.  Judging on the first sample sets
+        SERVER_GROUP_UNVERIFIED=1, which disables group teardown AND skips the ATOM
+        supervisor -- leaking the rank workers the supervisor exists to reap.
+        """
+        live_script = os.path.join(self.tmp, "late_leader_magpie.sh")
+        with open(live_script, "w", encoding="utf-8") as fh:
+            fh.write("""#!/usr/bin/env bash
+bash -c 'sleep 0.6; exec setsid bash -c "exec -a atom-server sleep 300"' &
+server_pid=$!
+printf '%s\n' "$server_pid" > "$MAGPIE_SERVER_PID_FILE"
+disown "$server_pid" 2>/dev/null || true
+exit 0
+""")
+        os.chmod(live_script, 0o755)
+        driver = os.path.join(self.tmp, "late_leader_driver.sh")
+        with open(driver, "w", encoding="utf-8") as fh:
+            fh.write(f"""#!/usr/bin/env bash
+set -uo pipefail
+set +m
+source "{MAGPIE}"
+adapter_launch
+printf '%s %s\n' "$SERVER_PID" "${{MAGPIE_INNER_SERVER_PID:-unset}}"
+if [ -n "${{MAGPIE_INNER_SERVER_PID:-}}" ]; then
+  kill -TERM "-$SERVER_PID" 2>/dev/null || true
+  kill -KILL "-$MAGPIE_INNER_SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+else
+  # The wrap did NOT happen, so SERVER_PID may still share OUR process group and a
+  # group kill here would take the test runner down with it -- which is precisely
+  # why this failure mode is worth pinning.  Kill the pid only.
+  kill -KILL "$SERVER_PID" 2>/dev/null || true
+fi
+exit 0
+""")
+        os.chmod(driver, 0o755)
+        env = dict(os.environ)
+        for key in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
+                    "CUDA_VISIBLE_DEVICES", "SERVER_GROUP_UNVERIFIED"):
+            env.pop(key, None)
+        env.update(
+            BACKEND="atom", MODEL=os.path.join(self.tmp, "model"), TP="1",
+            PORT="18080", GPU="1", OUT_DIR=self.out,
+            LOG=os.path.join(self.out, "server.log"), PROFILE="0",
+            MAGPIE_LAUNCH_SCRIPT=live_script, EXTRA_SERVER_ARGS="",
+            ATOM_MAGPIE_STOP_GRACE_S="1",
+        )
+        proc = subprocess.run(
+            [BASH, driver], env=env, cwd=self.tmp,
+            capture_output=True, text=True, timeout=45,
+        )
+        self.assertNotIn("does not lead its own group", proc.stderr)
+        self.assertIn("wrapped by supervisor", proc.stdout)
+        supervisor_pid, inner_pid = proc.stdout.strip().splitlines()[-1].split()
+        self.assertNotEqual(inner_pid, "unset")
+        self.assertNotEqual(supervisor_pid, inner_pid)
+
     def test_atom_server_is_wrapped_and_reaped_after_leader_term(self):
         """Magpie must retain ATOM's native worker-safe teardown property."""
         previous_sigterm = signal.getsignal(signal.SIGTERM)

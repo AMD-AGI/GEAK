@@ -335,10 +335,29 @@ PY
   # own group, and a stale file can name a pid that now belongs to someone else
   # entirely (worst case: the caller's orchestrator). Either case must DISABLE group
   # teardown here, at launch, rather than be discovered by a kill that already fired.
+  # The probe must also SETTLE before it judges.  A launch script records $! at
+  # FORK and can hand us the pid (and exit) before that child has reached
+  # setsid(2)/exec, so the FIRST sample still shows the SCRIPT's group and the
+  # pre-exec argv.  That window is not exotic: pinned to one core it is lost
+  # ~100% of the time, and a 2-vCPU CI runner loses it often enough to fail.
+  # Judging on one sample turns a race into SERVER_GROUP_UNVERIFIED=1, which
+  # disables group teardown AND skips the ATOM supervisor -- leaking exactly the
+  # rank workers they exist to reap.  Re-probe instead: a pid that genuinely
+  # never leads its own group still ends up unverified, just a few seconds later.
   local _mp_pgid _mp_args _mp_server_pid _mp_atom_wrapped=0
+  local _mp_pgid_i
   _mp_server_pid="$SERVER_PID"
-  _mp_pgid="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
-  _mp_args="$(ps -o args= -p "$SERVER_PID" 2>/dev/null)"
+  _mp_pgid="$(ps -o pgid= -p "$_mp_server_pid" 2>/dev/null | tr -d ' ')"
+  _mp_pgid_i=0
+  while [ "$_mp_pgid" != "$_mp_server_pid" ] && [ "$_mp_pgid_i" -lt 100 ] && \
+        kill -0 "$_mp_server_pid" 2>/dev/null; do
+    sleep 0.05
+    _mp_pgid="$(ps -o pgid= -p "$_mp_server_pid" 2>/dev/null | tr -d ' ')"
+    _mp_pgid_i=$((_mp_pgid_i + 1))
+  done
+  # Read argv only AFTER the settle loop: `setsid ... exec -a <name>` renames the
+  # process inside the same window, so an early sample mis-judges identity too.
+  _mp_args="$(ps -o args= -p "$_mp_server_pid" 2>/dev/null)"
   if [ "$_mp_pgid" != "$SERVER_PID" ]; then
     SERVER_GROUP_UNVERIFIED=1
     echo "!!! magpie launcher: pid $SERVER_PID does not lead its own group (pgid=${_mp_pgid:-?});" \
