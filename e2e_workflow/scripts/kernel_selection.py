@@ -178,6 +178,36 @@ def _numeric_specialization_variants(expected, observed):
     token must be identical and the agreeing tokens must not be outnumbered by the differing ones,
     which keeps two short unrelated symbols from certifying each other on a single numeric tail.
     """
+    return _specialization_variants(expected, observed, _digit_valued_tokens)
+
+
+def _digit_valued_tokens(left, right):
+    """Two tokens that are the same knob at different values, spelled ``<value>``."""
+    return left.isdigit() and right.isdigit()
+
+
+_GLUED_TOKEN = re.compile(r"^([a-z]+)(\d+)$")
+
+
+def _glued_valued_tokens(left, right):
+    """Same knob at different values, spelled ``<NAME><value>`` with no separator.
+
+    Tensile (hipBLASLt) writes its solution parameters glued to their own names -- ``SIA1``,
+    ``SU32``, ``SUS256``, ``WGM8`` -- where Triton writes ``BLOCK_SIZE_N_16``. That is the only
+    difference, and it is a spelling convention, not a semantic one: both are an autotune/solution
+    choice baked into the symbol.
+    """
+    left_match, right_match = _GLUED_TOKEN.match(left), _GLUED_TOKEN.match(right)
+    return bool(left_match and right_match and left_match.group(1) == right_match.group(1))
+
+
+def _specialization_variants(expected, observed, same_knob):
+    """Shared skeleton: identical token sequence except at positions ``same_knob`` admits.
+
+    Every guard that made the digits-only rule strict is applied here unchanged -- equal token
+    count, identical leading token, and agreeing tokens not outnumbered by differing ones -- so a
+    widened ``same_knob`` widens exactly one thing.
+    """
     want = canonical_kernel_name(expected).split("_")
     got = canonical_kernel_name(observed).split("_")
     if len(want) != len(got) or not want or want[0] != got[0]:
@@ -186,10 +216,31 @@ def _numeric_specialization_variants(expected, observed):
     for left, right in zip(want, got):
         if left == right:
             continue
-        if not (left.isdigit() and right.isdigit()):
+        if not same_knob(left, right):
             return False
         differing += 1
     return 0 < differing <= len(want) - differing
+
+
+def _solution_specialization_variants(expected, observed):
+    """True when two canonical names are one kernel under different VENDOR SOLUTION selection.
+
+    The same defect as :func:`_numeric_specialization_variants`, reached by a different vendor's
+    naming. hipBLASLt picks a Tensile solution PER SHAPE, so one callable spanning several shapes
+    runs several symbols that differ only in solution parameters. MEASURED on gfx1151: the decode
+    bf16 dense GEMM seam (``rocm_unquantized_gemm_impl``, five (N,K) pairs, ~85% of GPU time)
+    dispatched four ``Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_...`` solutions against the
+    ONE the profile recorded as ``device_kernel``. Ten of fourteen tokens agreed; the four that did
+    not were ``SIA1/SIA3``, ``SU32/SU0``, ``SUS256/SUS0``, ``WGM1/WGM8`` -- and one of the four
+    solutions differed from the recorded one at a single character, ``WGM1`` against ``WGM8``.
+    ``matched_kernel_calls: 0``, so the verdict was "this callable never ran that kernel" about a
+    seam that had just been profiled running it 14 times out of 14.
+
+    Kept as its own rule with its own match kind rather than folded into the digits-only one: it is
+    a weaker claim (the knob NAMES have to agree, but a knob name is not a kernel name), and a
+    verdict that admitted a kernel this way should say so.
+    """
+    return _specialization_variants(expected, observed, _glued_valued_tokens)
 
 
 def kernel_match_kind(expected, observed):
@@ -205,9 +256,15 @@ def kernel_match_kind(expected, observed):
         return ""
     kind = "exact"
     if want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want):
-        if not _numeric_specialization_variants(expected, observed):
+        if _numeric_specialization_variants(expected, observed):
+            kind = "numeric_specialization"
+        elif _solution_specialization_variants(expected, observed):
+            # Only reachable where the rule above already said no, so this is purely additive:
+            # nothing that used to match changes its kind, and nothing that used to be refused for
+            # any OTHER reason starts matching.
+            kind = "solution_specialization"
+        else:
             return ""
-        kind = "numeric_specialization"
     # The base token deliberately drops template arguments so a bare declared name can match its
     # decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
     # it certifies the wrong kernel: one capture here held 20 distinct kernels named

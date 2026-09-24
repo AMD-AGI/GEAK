@@ -68,10 +68,26 @@
       "symbol": "_fwd_grouped_kernel_stage1 [sliding_attention]",
       "canonical": "_fwd_grouped_kernel_stage1"
     },
-    { "real": true, "symbol": "main_kernel[prefill]", "canonical": "main_kernel" },
-    { "real": true, "symbol": "main_kernel [cluster B (long, ~34us)]", "canonical": "main_kernel" },
-    { "real": true, "symbol": "hgemm_bf16_32x64x256x3_SPK1 [qkv_proj]", "canonical": "hgemm_bf16_32x64x256x3_spk1" },
-    { "real": true, "symbol": "allreduce_prototype_twoshot@prefill", "canonical": "allreduce_prototype_twoshot" },
+    {
+      "real": true,
+      "symbol": "main_kernel[prefill]",
+      "canonical": "main_kernel"
+    },
+    {
+      "real": true,
+      "symbol": "main_kernel [cluster B (long, ~34us)]",
+      "canonical": "main_kernel"
+    },
+    {
+      "real": true,
+      "symbol": "hgemm_bf16_32x64x256x3_SPK1 [qkv_proj]",
+      "canonical": "hgemm_bf16_32x64x256x3_spk1"
+    },
+    {
+      "real": true,
+      "symbol": "allreduce_prototype_twoshot@prefill",
+      "canonical": "allreduce_prototype_twoshot"
+    },
     {
       "real": true,
       "_note": "rocprof spells memory ops with the direction after the operation",
@@ -84,9 +100,18 @@
       "symbol": "void at::native::(anonymous namespace)::CatArrayBatchedCopy<at::native::(anonymous namespace)::O",
       "canonical": "catarraybatchedcopy"
     },
-    { "symbol": "gemm_kernel<half", "canonical": "gemm_kernel" },
-    { "symbol": "<>", "canonical": "" },
-    { "symbol": "", "canonical": "" }
+    {
+      "symbol": "gemm_kernel<half",
+      "canonical": "gemm_kernel"
+    },
+    {
+      "symbol": "<>",
+      "canonical": ""
+    },
+    {
+      "symbol": "",
+      "canonical": ""
+    }
   ],
   "matches": [
     {
@@ -127,15 +152,21 @@
     },
     {
       "why": "folding separators to _ stops '128, 4,' from reading as a prefix of '128, 48,'",
-      "a": "k<128, 4, at::native::gpu_k", "b": "k<128, 48, at::native::gpu_k", "match": false
+      "a": "k<128, 4, at::native::gpu_k",
+      "b": "k<128, 48, at::native::gpu_k",
+      "match": false
     },
     {
       "why": "real sglang neighbours: a name appearing inside another is a different kernel",
-      "a": "_fwd_kernel", "b": "_fwd_kernel_stage2", "match": false
+      "a": "_fwd_kernel",
+      "b": "_fwd_kernel_stage2",
+      "match": false
     },
     {
       "why": "a name embedded in another is not evidence of the same kernel",
-      "a": "gemm_kernel", "b": "fused_gemm_kernel_v2", "match": false
+      "a": "gemm_kernel",
+      "b": "fused_gemm_kernel_v2",
+      "match": false
     },
     {
       "why": "two unnamed-namespace kernels used to both reduce to 'void' and certify each other",
@@ -145,11 +176,15 @@
     },
     {
       "why": "a token this short appears inside unrelated kernels and is not evidence",
-      "a": "gemm", "b": "gemm_kernel_v2", "match": false
+      "a": "gemm",
+      "b": "gemm_kernel_v2",
+      "match": false
     },
     {
       "why": "a prefix that is not the display-limit truncation is a different kernel",
-      "a": "attention_kernel", "b": "attention_kernelbackward", "match": false
+      "a": "attention_kernel",
+      "b": "attention_kernelbackward",
+      "match": false
     },
     {
       "why": "a name cut at the 60-char display limit ends mid-token, so only a prefix rule can match it",
@@ -171,8 +206,51 @@
     },
     {
       "why": "real head row: a memcpy row and its own rocprof spelling",
-      "a": "Memcpy", "b": "Memcpy DtoD (Device -> Device)", "match": true
+      "a": "Memcpy",
+      "b": "Memcpy DtoD (Device -> Device)",
+      "match": true
     },
-    { "why": "an empty side is never evidence", "a": "", "b": "gemm_kernel", "match": false }
+    {
+      "why": "an empty side is never evidence",
+      "a": "",
+      "b": "gemm_kernel",
+      "match": false
+    },
+    {
+      "why": "MEASURED gfx1151: hipBLASLt picks a Tensile solution per (N,K), so one seam ran four solutions against the one the profile recorded; the parameters are glued to their own names (SIA1/SU32/WGM8) where Triton spells them BLOCK_SIZE_N_16",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA3_SU0_SUS0_WG32_4_1_WGM8",
+      "match": true
+    },
+    {
+      "why": "the same pair differing at a single character, WGM1 vs WGM8",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM8",
+      "match": true
+    },
+    {
+      "why": "BBS is bf16 and HHS is fp16: same token shape, different kernel, never crossed",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Alik_Bljk_HHS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "match": false
+    },
+    {
+      "why": "Alik vs Ailk transposes an operand; it carries no digit, so it fails on the knob NAME",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Ailk_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "match": false
+    },
+    {
+      "why": "the macro tile is not a solution knob: MT128x128x32 is not <name><digits> and stays refused",
+      "a": "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "b": "Cijk_Alik_Bljk_BBS_BH_MT256x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1",
+      "match": false
+    },
+    {
+      "why": "a glued token and a bare number share no knob name, so the two widenings do not compose",
+      "a": "k_pad_su32",
+      "b": "k_pad_32",
+      "match": false
+    }
   ]
 }

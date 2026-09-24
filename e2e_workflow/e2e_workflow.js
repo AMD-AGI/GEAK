@@ -1432,23 +1432,48 @@ function templateArguments(value) {
 // stay refused). Must stay identical to `_numeric_specialization_variants` in kernel_selection.py:
 // the JS gate and that verdict compare the same two symbols, and a rule that drifted between them
 // would let a kernel pass one side and be refused by the other.
-function numericSpecializationVariants(a, b) {
+function specializationVariants(a, b, sameKnob) {
   const want = canonicalDeviceKernel(a).split('_'), got = canonicalDeviceKernel(b).split('_');
   if (want.length !== got.length || !want.length || want[0] !== got[0]) return false;
-  const isDigits = (s) => s.length > 0 && /^[0-9]+$/.test(s);
   let differing = 0;
   for (let i = 0; i < want.length; i++) {
     if (want[i] === got[i]) continue;
-    if (!isDigits(want[i]) || !isDigits(got[i])) return false;
+    if (!sameKnob(want[i], got[i])) return false;
     differing++;
   }
   return differing > 0 && differing <= want.length - differing;
+}
+const digitValuedTokens = (l, r) => /^[0-9]+$/.test(l) && /^[0-9]+$/.test(r);
+function numericSpecializationVariants(a, b) {
+  return specializationVariants(a, b, digitValuedTokens);
+}
+// The same widening for a vendor that glues a parameter's value to its own name. Tensile
+// (hipBLASLt) writes `SIA1`/`SU32`/`SUS256`/`WGM8` where Triton writes `BLOCK_SIZE_N_16`; that is a
+// spelling convention, not a semantic one -- both are a solution/autotune choice baked into the
+// symbol -- and the digits-only rule above refuses them for a purely orthographic reason. MEASURED
+// on gfx1151: `rocm_unquantized_gemm_impl` spans five (N,K) pairs and hipBLASLt picks per shape, so
+// the seam dispatched four `Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_...` solutions against
+// the ONE the profile recorded; ten of fourteen tokens agreed and one solution differed at a single
+// character (`WGM1` vs `WGM8`), yet the verdict was `matched_kernel_calls: 0` about a seam that had
+// just been profiled running it 14 times out of 14. Consulted ONLY where the rule above already
+// said no, so nothing that used to match changes and nothing refused for another reason starts
+// matching. The knob NAME must agree, which is what keeps `BBS`/`HHS` (bf16 vs fp16) and
+// `Alik`/`Ailk` (transpose layout) refused; `MT128x128x32` still fails the `<name><digits>` shape
+// outright. Must stay identical to `_solution_specialization_variants` in kernel_selection.py.
+const GLUED_TOKEN = /^([a-z]+)([0-9]+)$/;
+function gluedValuedTokens(l, r) {
+  const lm = GLUED_TOKEN.exec(l), rm = GLUED_TOKEN.exec(r);
+  return Boolean(lm && rm && lm[1] === rm[1]);
+}
+function solutionSpecializationVariants(a, b) {
+  return specializationVariants(a, b, gluedValuedTokens);
 }
 function kernelIdentitiesMatch(a, b) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   if (!x || !y) return false;
   if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)
-      && !numericSpecializationVariants(a, b)) return false;
+      && !numericSpecializationVariants(a, b)
+      && !solutionSpecializationVariants(a, b)) return false;
   // The base token deliberately drops template arguments so a bare declared name can match its
   // decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
   // it certifies the wrong kernel: one capture here held 20 distinct kernels named

@@ -174,6 +174,66 @@ class TestNumericSpecializationIsOneKernel(unittest.TestCase):
         self.assertTrue(ks.kernel_matches(left, self.B + "<__hip_bfloat16, 8>"))
 
 
+class TestSolutionSpecializationIsOneKernel(unittest.TestCase):
+    """The same widening for a vendor that glues parameter values to their own names.
+
+    Tensile writes ``SIA1``/``SU32``/``WGM8`` where Triton writes ``BLOCK_SIZE_N_16``, so the
+    digits-only rule above refuses them for a reason that is purely orthographic. Everything the
+    class above says about pinning a widening in both directions applies here verbatim, and the
+    negative cases matter more: hipBLASLt encodes the DTYPE and the TRANSPOSE LAYOUT in tokens of
+    exactly this shape, so a rule that crossed either would certify an fp16 kernel as the bf16 one.
+    """
+
+    # MEASURED on strixhalo25 2026-09-24. `rocm_unquantized_gemm_impl` spans five (N,K) pairs and
+    # hipBLASLt picks per shape, so the seam ran four solutions against the one the profile
+    # recorded. Ten of fourteen tokens agreed; the verdict was `matched_kernel_calls: 0`.
+    REC = "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM1"
+    ALT = "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA3_SU0_SUS0_WG32_4_1_WGM8"
+    # One of the four differed from REC at a single character.
+    ONE_CHAR = "Cijk_Alik_Bljk_BBS_BH_MT128x128x32_MI16x16x16x1_SIA1_SU32_SUS256_WG32_4_1_WGM8"
+
+    def test_solutions_of_one_kernel_match(self):
+        self.assertTrue(ks.kernel_matches(self.REC, self.ALT))
+        self.assertTrue(ks.kernel_matches(self.ALT, self.REC))
+        self.assertTrue(ks.kernel_matches(self.REC, self.ONE_CHAR))
+
+    def test_the_verdict_names_the_weaker_rule_that_admitted_it(self):
+        self.assertEqual(ks.kernel_match_kind(self.REC, self.ALT), "solution_specialization")
+        self.assertEqual(ks.kernel_match_kind(self.REC, self.REC), "exact")
+
+    def test_dtype_is_never_crossed(self):
+        # BBS is bf16, HHS is fp16. Same token position, same shape of token, different KERNEL --
+        # and the one difference a performance verdict must never wave through.
+        hhs = self.REC.replace("_BBS_", "_HHS_")
+        self.assertEqual(ks.kernel_match_kind(self.REC, hhs), "")
+
+    def test_transpose_layout_is_never_crossed(self):
+        # Alik vs Ailk: one operand transposed. Differs in no digit at all, so it must fail on the
+        # name-token guard rather than on any value rule.
+        self.assertEqual(ks.kernel_match_kind(self.REC, self.REC.replace("_Alik_", "_Ailk_")), "")
+
+    def test_a_differing_knob_NAME_is_refused(self):
+        # SIA1 -> XYZ1. The value agrees; the knob does not.
+        self.assertEqual(ks.kernel_match_kind(self.REC, self.REC.replace("_SIA1_", "_XYZ1_")), "")
+
+    def test_a_glued_token_does_not_match_a_bare_number(self):
+        # `su32` vs `32` share no knob name, and admitting them would let the two rules compose
+        # into something neither one claims.
+        self.assertEqual(ks.kernel_match_kind("k_pad_su32", "k_pad_32"), "")
+
+    def test_the_majority_and_leading_token_guards_still_apply(self):
+        self.assertFalse(ks.kernel_matches("k_sia1_su2", "k_sia3_su4"))
+        self.assertFalse(ks.kernel_matches("alpha_wgm1", "beta_wgm1"))
+
+    def test_the_triton_rule_is_unchanged_by_this_one(self):
+        # The widening is additive: it is only consulted where the digits-only rule said no, so the
+        # kind reported for a Triton pair must not drift to the new one.
+        self.assertEqual(
+            ks.kernel_match_kind(TestNumericSpecializationIsOneKernel.A,
+                                 TestNumericSpecializationIsOneKernel.B),
+            "numeric_specialization")
+
+
 class TestRealRocmSymbolsCanonicalizeToTheirKernel(unittest.TestCase):
     def test_each_symbol_reduces_to_the_kernel_it_names(self):
         for symbol, token in REAL_ROCM_SYMBOLS.items():
