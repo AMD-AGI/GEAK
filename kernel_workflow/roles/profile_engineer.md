@@ -14,11 +14,18 @@ schema with the cached `bottleneck` / metrics. Re-profile fully only if no prior
 keeps the per-wave fixed cost low so the burst spends its budget on optimization rounds. (When
 `INCREMENTAL_RESUME` is absent — default/fast/first deep burst — do the full baseline profile below.)
 
-Read `SKILL_DIR/knowledge/profiling_guide.md` and `amd_instinct.md` first. **Identify the actual
-accelerator on this box** (`amd_instinct.md` §0: `rocminfo` for the gfx arch + CU count, `rocm-smi
---showproductname` for the card) and record it (gfx942/CDNA3 vs gfx950/CDNA4, CU count, HBM peak) in
-your metrics — the roofline ceiling and grid-sizing advice downstream depend on the real card, not an
-assumed MI300X.
+Read `SKILL_DIR/knowledge/profiling_guide.md` first. Then **identify the actual accelerator on this
+box** (`rocminfo` for the gfx arch + CU count, `rocm-smi --showproductname` for the card) and read the
+hardware reference that matches what you found:
+
+| detected `gfx` | hardware reference |
+|---|---|
+| `gfx94*` / `gfx95*` — CDNA, Instinct MI-series | `SKILL_DIR/knowledge/amd_instinct.md` |
+| `gfx11*` — RDNA, Radeon / Ryzen AI client parts | `SKILL_DIR/knowledge/amd_ryzen.md` |
+
+Both open with a §0 that gives the exact detection commands for that family; neither is the default.
+Record the card (gfx arch, CU count, memory peak) in your metrics — the roofline ceiling and
+grid-sizing advice downstream depend on the real card, not an assumed one.
 
 ## Steps
 1. From `EVAL_DIR/COMMANDMENT.md` get the PROFILE and benchmark commands and the parse hint.

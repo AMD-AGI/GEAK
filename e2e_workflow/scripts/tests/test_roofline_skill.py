@@ -73,6 +73,37 @@ class TestPeaks(unittest.TestCase):
         self.assertIsNotNone(p)
         self.assertAlmostEqual(p["hbm_bw_bytes_s"], 5.3e12, delta=1e9)
 
+    def test_gfx1151_row(self):
+        """RDNA3.5 APU: memory axis, CU count, and the theoretical WMMA compute peaks."""
+        p = rt.load_peaks(PEAKS_MD, "gfx1151")
+        self.assertIsNotNone(p)
+        self.assertAlmostEqual(p["hbm_bw_bytes_s"], 256.0e9, delta=1e9)
+        self.assertEqual(p["cu"], 40)
+        self.assertEqual(p["source"], "table")
+        self.assertAlmostEqual(rt.peak_flops_for(p, "bf16"), 60.0e12, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 30.0e12, delta=1e11)
+
+    def test_gfx1151_metrics_see_both_axes(self):
+        """Both roofs must be live, not just the memory one. A high-AI kernel at 67% of the WMMA
+        peak has to come back compute-bound with ~1.35x attainable — if the compute peak were
+        missing, compute_util would read a hard 0.0 and the same kernel would be sold as
+        latency-bound with 9x headroom off the 10% memory utilization."""
+        p = rt.load_peaks(PEAKS_MD, "gfx1151")
+        m = rt.roofline_metrics(2.56e6, 4e9, 100e-6, p["hbm_bw_bytes_s"],
+                                rt.peak_flops_for(p, "bf16"), 0.90, pct_gpu_time=20.0)
+        self.assertEqual(m["bound_type"], "compute")
+        self.assertAlmostEqual(m["compute_util"], 2.0 / 3.0, places=3)
+        self.assertAlmostEqual(m["hbm_util"], 0.1, places=3)
+        self.assertIsNotNone(m["ridge_point"])
+        self.assertLess(m["attainable_speedup"], 2.0)
+
+    def test_bf16_equals_fp16_on_every_arch_that_tabulates_flops(self):
+        """peaks.md's own load-bearing cross-check: the matrix core runs both at the same rate
+        (MFMA on CDNA, WMMA on RDNA), so an inequality means the compute axis is inflated."""
+        for gfx in ("gfx942", "gfx950", "gfx1151"):
+            p = rt.load_peaks(PEAKS_MD, gfx)
+            self.assertEqual(p["flops"]["bf16"], p["flops"]["fp16"], gfx)
+
     def test_L1_unknown_gfx_returns_none(self):
         """Unknown gfx -> None, so the caller falls back to derived peaks at confidence=low."""
         self.assertIsNone(rt.load_peaks(PEAKS_MD, "gfx-does-not-exist"))
