@@ -95,8 +95,9 @@ Workflow({
     kernel_workflow_dir: "<...>/workflows",          // optional; default = sibling kernel_workflow/
     budget: 4,            // max kernel-optimization tasks (kernel-layer tasks; config sweep is free)
     kernel_budget: 6,     // budget passed DOWN to each recursive single-kernel run
-    milestone_min_pct: 5, // Milestone only optimizes editable kernels with pct_gpu_time >= this (default 5);
-                          //   overrides min_kernel_tasks — sub-threshold kernels are skipped (Amdahl)
+    milestone_min_pct: 2, // Milestone only optimizes editable kernels with pct_gpu_time >= this (default 2);
+                          //   overrides min_kernel_tasks — sub-threshold kernels are skipped (Amdahl).
+                          //   A kernel already at/above its roofline target_eff is skipped as well.
     config_tune: "true",  // Tier-0 sweep on/off (default ON)
     tuning_skillset: "true", // standalone TuningSkillset phase on/off (default ON). Runs the VENDORED
                           //   tuning skillset (<repo>/perf_knowledge/expert_skills/tuning) WHOLE, as its own phase, AFTER

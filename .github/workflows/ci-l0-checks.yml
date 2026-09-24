@@ -286,6 +286,13 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # The roofline gate can drop the single biggest kernel in a profile, so its confidence
+      # carve-outs (suspect / unknown / low-confidence never skip) are what keeps one bad byte
+      # model from silently deleting the run's whole workload. Predicate is extracted from the
+      # shipped source; the target table is held in sync with the Python side by
+      # scripts/tests/test_roofline_skill.py. Pure node — no GPU, no model.
+      - name: roofline skip-gate regression
+        run: node e2e_workflow/scripts/test_roofline_gate.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest

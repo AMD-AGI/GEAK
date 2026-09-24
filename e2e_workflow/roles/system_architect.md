@@ -48,15 +48,20 @@ profile is where the budget goes, even though those kernels are library calls.
 **`achievable_speedup` is the half everyone guesses wrong.** A big `pct_gpu_time` is *necessary* but not
 *sufficient*: a kernel already running at the hardware's bandwidth or compute ceiling has no time left to
 recover, no matter how much of the profile it owns. When a roofline prior is available (step 1c) use it
-to ground that factor in a measured ceiling instead of a class prior — but note what it does and does not
-mean: **a saturated kernel is done with micro-tuning, NOT done being optimized.** If it is still the
-largest consumer of GPU time it remains the top target; the lever just moves from "make this kernel
-faster" to "make it move fewer bytes" (step 1d). Never let a headroom estimate drop the biggest kernel.
+to ground that factor in a measured ceiling instead of a class prior — and when it says the kernel is at
+its class `target_eff`, **do not optimize that kernel at all**, however much of the profile it owns. The
+measured case: a fused-MoE head owning 26.45% of GPU time, at 88% of its roof, whose optimization was
+worth **−0.064% e2e**. A run that spends its budget there has spent it on nothing.
+
+That gate is only trustworthy on a **full-confidence** verdict, so the confidence rules in step 1c are
+load-bearing rather than advisory: dropping the biggest kernel in the profile because a byte model was
+wrong is a far worse failure than tuning a saturated one.
 
 **`edit=N` (library) does NOT mean "skip" — it means "Tier-C code rewrite is unavailable."** A
 fixed-shape GEMM is one of the most tunable things on the chip. Route by *which optimization the op
 admits*, not by the edit flag:
-- **Head track** — any kernel with `pct_gpu_time ≥ HEAD_THRESHOLD_PCT` (default 5%), GEMM or attention,
+- **Head track** — any kernel with `pct_gpu_time ≥ HEAD_THRESHOLD_PCT` (default 2%) **and roofline
+  headroom left** (step 1c), GEMM or attention,
   **regardless of edit flag** → Kernel Extractor `extract_op` → **Op Benchmarker** ladder: Tier A
   backend select → Tier B per-backend tune (**GEMM = aiter per-shape DB**, NOT TunableOp) → **Tier C
   ALWAYS author+optimize a real kernel via kernel_workflow (triton ≥1)** → Tier D quant. **All GEMM
@@ -147,52 +152,58 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    profile is the judge; TraceLens only ADDs hints/candidates, never prunes them.** Treat any `shapes` it
    carries as a STARTING hint that the Extractor will re-verify against a live capture (they may be inaccurate).
    If the prior is absent, proceed exactly as before.
-1c. **Roofline prior (ADVISORY — only if `ANALYSIS_SKILL_DIR` is non-empty AND the Profiler returned a
+1c. **Roofline prior (only if `ANALYSIS_SKILL_DIR` is non-empty AND the Profiler returned a
    `profile_roofline_json` that EXISTS; otherwise skip this step entirely and route exactly as before).**
    Read the artifact. Per entry it gives `roofline_pct` (how much of the hardware ceiling the kernel
-   already reaches), `bound_type`, `attainable_speedup`, `expected_e2e_gain_pct`, `headroom_class` and a
-   `confidence`. Use it to answer the question `pct_gpu_time` alone cannot: **is the time this kernel
-   spends actually recoverable?**
+   already reaches), `target_eff`, `bound_type`, `attainable_speedup`, `expected_e2e_gain_pct`,
+   `headroom_class`, `skip_optimization` and a `confidence`. Use it to answer the question
+   `pct_gpu_time` alone cannot: **is the time this kernel spends actually recoverable?**
 
-   **The doctrine (do not violate).** `roofline_pct` measures how well a kernel executes its *current*
-   byte/FLOP budget; it says NOTHING about whether that budget is necessary. So:
-   - **NEVER prune a candidate on roofline.** Same rule as TraceLens: the measured `pct_gpu_time` is the
-     judge; this prior only ADDs information and REORDERS. `drop_list` decisions stay Amdahl-based.
-   - **A saturated head is NOT dropped — it is REROUTED.** A kernel that is both a large `pct_gpu_time`
-     and `headroom_class: saturated` is done with *micro-tuning*, not done being optimized. It remains a
-     top target; what changes is the class of fix (see 1d).
-   - Honour `confidence`: **`low` (stage A, or derived peaks) = display and annotate ONLY, do not rank on
-     it.** `medium`/`high` may be used as a SECONDARY ranking key. `unknown`/`suspect`/`modeled:false`
-     entries fall back to the ordinary playbook prior for that entry alone.
-   - If a kernel squad later measures an isolated speedup LARGER than `attainable_speedup`, the roofline
-     model was wrong: prefer the measurement, and say so in the report.
+   **The gate.** Unlike TraceLens, this prior DOES prune, through exactly one predicate:
+
+   > `roofline_pct ≥ target_eff` (the skill's `skip_optimization`) → **do not optimize this kernel.**
+   > Do not nominate it as a head or kernel candidate. This holds however large its `pct_gpu_time` is.
+
+   Class targets are gemm/moe/elementwise **0.85**, attention decode **0.60** (roofline `SKILL.md` §7).
+   The orchestrator enforces the same predicate on both queues, so a nomination above the bar is
+   dropped anyway — don't waste one.
+
+   **What the gate does NOT license (do not violate):**
+   - **It fires only on a full-confidence verdict.** `low` confidence (stage A, or peaks derived from
+     device props), `suspect`, `modeled:false`, or `headroom_class: unknown` → **never skipped**, and
+     not ranked on either; that entry falls back to the ordinary playbook prior. An unvalidated compute
+     peak can read a kernel with 2× of headroom as "at 85%" (`SKILL.md` §8) — skipping on it would
+     delete the largest kernel in the profile for nothing.
+   - **`roofline_pct` still says nothing about whether the byte/FLOP budget is *necessary*.** A skipped
+     kernel is not proven optimal; it is proven not worth a *tuning* budget. Changing its algorithm is
+     a different lever and is routed on its own merits, never on this number.
+   - If a kernel squad measures an isolated speedup LARGER than `attainable_speedup`, the roofline model
+     was wrong: prefer the measurement, and say so in the report.
 
    **Routing table** (applies only at `confidence` ≥ medium; otherwise use `pct_gpu_time` order):
 
    | `headroom_class` | `pct_gpu_time` | route |
    |---|---|---|
+   | **any, at `roofline_pct ≥ target_eff`** | **any** | **SKIPPED — not nominated to either track** |
    | underperforming | high | **kernel/head track, top priority** — real headroom exists |
-   | **saturated** | **high** | **byte-reduction track (1d) — NOT dropped, NOT another tuning pass** |
+   | saturated (still below target) | high | kernel/head track, low priority — little left, but not at the bar |
    | any | low | low priority (ordinary Amdahl) |
-   | unknown / low confidence | any | ignore roofline; order by `pct_gpu_time` |
+   | unknown / suspect / low confidence | any | **never skipped**; ignore roofline, order by `pct_gpu_time` |
 
    Report BOTH orderings in `strategy.md` — the one by `pct_gpu_time` and the one by
    `expected_e2e_gain_pct` — and state explicitly which you followed and why. When they disagree, that
    disagreement is the most useful thing in the analysis; do not hide it behind a single blended number.
+   **List every skipped kernel with its `skip_reason`**: a run that skipped the biggest kernel in its
+   profile must say so plainly rather than read as having found nothing.
 
-1d. **Byte-reduction levers (for a `saturated` + high-`pct_gpu_time` head).** The kernel is at the
-   bandwidth/compute wall, so the only remaining win is to make it do the same work moving fewer bytes.
-   Enumerate concretely: **fuse an adjacent op away** (a separate quant/silu/norm kernel in the Top-N →
-   fusing it removes a whole activation round-trip *and* that kernel's own GPU time); **stop reading what
-   isn't used** (e.g. streaming all `E` experts when routing only touches a fraction); **layout/packing**
-   (padding waste, coalescing, L2 reuse between stages); **lower-precision weights** (fp8→fp4, lossy →
-   must pass the accuracy gate).
-   **🔴 Hard constraints — a "win" that violates these is not a win:** the **measurement contract is
+1d. **🔴 Hard constraints — a "win" that violates these is not a win:** the **measurement contract is
    fixed**. The user-supplied workload — `isl`, `osl`, **`conc`/batch size — must NOT be changed**, and
    **speculative decoding (MTP or otherwise) must NOT be introduced** as an optimization. Raising
    throughput by changing what is being measured is out of scope for this workflow.
 
-2. Partition the Top-N into FOUR routes (by what optimization the op admits, NOT by edit flag):
+2. Partition the Top-N into FOUR routes (by what optimization the op admits, NOT by edit flag).
+   **Apply the step 1c skip gate first**: an entry at `roofline_pct ≥ target_eff` on a full-confidence
+   verdict goes to `drop_list` with its `skip_reason`, not to any of these four.
    - **config fast path** — service-level env/flag with no op isolation: `--attention-backend` swap,
      `--quantization fp8`, cuda-graph, torch-compile, kv-cache-dtype, scheduling/mem knobs → Config
      Tuner, FIRST. **GEMM tuning is NOT a config axis** (it's a head-track op now).
@@ -289,10 +300,10 @@ Return JSON:
      "source_hint": "<TraceLens source_file/source_path if any, else ''>",
      "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
      "bound_type": "<memory|compute|'' from TraceLens or the roofline prior>",
-     "roofline_pct": 0.0, "attainable_speedup": 0.0, "expected_e2e_gain_pct": 0.0,
+     "roofline_pct": 0.0, "target_eff": 0.0, "attainable_speedup": 0.0, "expected_e2e_gain_pct": 0.0,
      "headroom_class": "<underperforming|moderate|saturated|unknown|'' if no roofline prior>",
      "roofline_confidence": "<low|medium|high|'' if none>",
-     "byte_reduction_levers": ["only when headroom_class=saturated; see step 1d"]}
+     "suspect": false}
   ],
   "kernel_candidates": [
     {"id": "k0", "short_name": "...", "classification": "...", "pct_gpu_time": 0.0,
@@ -301,12 +312,12 @@ Return JSON:
      "source_hint": "<TraceLens source_file/source_path if any, else ''>",
      "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
      "bound_type": "<memory|compute|'' from TraceLens or the roofline prior>",
-     "roofline_pct": 0.0, "attainable_speedup": 0.0, "expected_e2e_gain_pct": 0.0,
+     "roofline_pct": 0.0, "target_eff": 0.0, "attainable_speedup": 0.0, "expected_e2e_gain_pct": 0.0,
      "headroom_class": "<underperforming|moderate|saturated|unknown|'' if no roofline prior>",
      "roofline_confidence": "<low|medium|high|'' if none>",
-     "byte_reduction_levers": ["only when headroom_class=saturated; see step 1d"]}
+     "suspect": false}
   ],
-  "drop_list": [{"short_name": "...", "why": "below Amdahl threshold"}],
+  "drop_list": [{"short_name": "...", "why": "below Amdahl threshold | roofline_pct >= target_eff (copy skip_reason)"}],
   "order_of_work": ["config fast path first", "then h0 (GEMM #1)", "then k0", "..."],
   "strategy_path": "<EVAL_DIR>/strategy.md"
 }
@@ -317,7 +328,7 @@ Return JSON:
 ## PHASE=plan_milestone  (between milestones, decide what to do next / whether to stop)
 
 Inputs: `EVAL_DIR`, `ROUND`, `BUDGET_REMAINING`, `CURRENT_THROUGHPUT`, `BASELINE_THROUGHPUT`,
-`NOISE_BAND_PCT`, **`MILESTONE_MIN_PCT`** (the pct_gpu_time bar; default 5), `MIN_KERNEL_TASKS`,
+`NOISE_BAND_PCT`, **`MILESTONE_MIN_PCT`** (the pct_gpu_time bar; default 2), `MIN_KERNEL_TASKS`,
 `DISPATCHED_SO_FAR`, `BELOW_MIN_FLOOR` (bool), latest `PROFILE_TOPN` (re-profiled after the last accepted
 change), `HISTORY`, `SKILL_DIR`.
 
@@ -329,6 +340,12 @@ change), `HISTORY`, `SKILL_DIR`.
    the floor**. If no editable kernel clears the bar, set `stop=true` with that reason (the floor does not
    force sub-threshold work). The orchestrator also post-filters by this bar, so sub-threshold
    nominations are dropped anyway — don't waste them.
+2b. **Roofline gate (HARD — also overrides the floor):** clearing the pct bar is necessary, not
+   sufficient. Do NOT nominate a kernel whose roofline entry says `roofline_pct >= target_eff` on a
+   full-confidence verdict (step 1c) — it has no recoverable time, so tuning it cannot move e2e no
+   matter how large its share. The confidence carve-outs in 1c apply here unchanged: `suspect`,
+   `unknown` and low-confidence entries are **never** gated out, only ordered. The orchestrator
+   post-filters on this predicate too. If nothing clears BOTH gates, set `stop=true` with that reason.
 3. **Floor rule (only among above-bar kernels):** if `BELOW_MIN_FLOOR` is true AND there ARE editable
    kernels `>= MILESTONE_MIN_PCT`, nominate enough of those fresh `kernel_candidates` to progress toward
    the floor — draw from the broad above-bar editable pool (gated-delta sub-kernels chunk_h / chunk_o /
@@ -337,12 +354,11 @@ change), `HISTORY`, `SKILL_DIR`.
 4. **Amdahl stop rule:** estimate remaining headroom = Σ over untouched above-bar editable kernels of
    `(pct_gpu_time × plausible_speedup_fraction)`. If the best remaining candidate can't plausibly move
    e2e beyond the noise band, set `stop=true`.
+   Sum over kernels that clear BOTH gates (2 and 2b) — a saturated kernel contributes nothing to the
+   remaining headroom, which is the point of gating it.
    **If a roofline prior is available at `confidence` ≥ medium** (`profile_roofline_json`, step 1c),
    prefer its `expected_e2e_gain_pct` over a guessed `plausible_speedup_fraction` — it is derived from a
-   measured ceiling rather than a class prior. It still may not PRUNE a candidate: use it to ORDER the
-   remaining pool and to justify `stop`. Never stop solely because roofline says headroom is small while
-   a large `pct_gpu_time` kernel remains untouched — such a kernel routes to the byte-reduction track
-   (step 1d) instead.
+   measured ceiling rather than a class prior.
 5. Issue concrete directions: exact callable to extract (`module:attr`) + candidate backends, citing the
    profile entry + pct_gpu_time. **Use HISTORY only to ORDER/diversify (deprioritize a direction that
    already showed no e2e gain THIS run, prefer a different kernel or a different mechanism) — NEVER as a

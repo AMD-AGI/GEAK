@@ -14,9 +14,13 @@ feature existed — see "Degradation" in each skill.
 
 ## Contract every skill must honour
 
-1. **Advisory only.** A skill may ADD fields, ADD annotations and SUGGEST an ordering. It may never
-   prune a candidate, never overwrite the measured `pct_gpu_time`, and never be the sole reason a
-   kernel is or isn't optimized. The on-box measurement is always the judge.
+1. **Additive, with ONE declared gate.** A skill may ADD fields, ADD annotations and SUGGEST an
+   ordering, and it may never overwrite the measured `pct_gpu_time`. It may prune a candidate only
+   through a **single, named, documented gate** whose exact predicate is written in its `SKILL.md`
+   (`roofline`: `skip_optimization`, §3 step 7) — never as a side effect of ranking. That gate must
+   fire only on a full-confidence verdict: a degraded, `suspect`, `unknown` or low-confidence entry is
+   ordered the ordinary way, never dropped. A skill may still never be the reason a result is
+   ACCEPTED — the on-box e2e measurement is always that judge.
 2. **Markdown-first.** The skill's logic lives in its `SKILL.md` so an agent can execute it by reading.
    Helper scripts are OPTIONAL mechanical primitives (parsing, unit math). If a helper is missing or
    raises, the agent completes the analysis by hand from `SKILL.md` — a broken script must not disable

@@ -5,8 +5,8 @@ Two things are locked here.
 1. **Calibration against a real run.** The numbers below are the measured profile of
    Qwen3.5-35B-A3B-FP8 on gfx950 / vLLM / TP1 / isl-osl 1k / conc 64 — a run whose outcome we know.
    The skill must reproduce the call it would have made:
-     fused_moe   26.45% GPU, ~88% of roofline -> saturated, ~1.02x attainable  (measured: 1.047x
-                 isolated, -0.064% e2e -> the budget spent there was wasted)
+     fused_moe   26.45% GPU, ~88% of roofline -> at/above the 0.85 MoE target -> SKIPPED entirely
+                 (measured: 1.047x isolated, -0.064% e2e -> the budget spent there was wasted)
      paged_attn   8.86% GPU, ~18% of roofline -> underperforming, >1.4x        (measured: 1.56x isolated)
    The load-bearing assertion is `test_rankings_disagree`: ranking by pct_gpu_time puts MoE first,
    ranking by roofline headroom puts attention first. That inversion is the entire point of the skill.
@@ -15,6 +15,7 @@ Two things are locked here.
    so a bad peak table / unmodellable op / impossible result / missing counter cannot fail a run.
 """
 import os
+import re
 import sys
 import unittest
 
@@ -101,15 +102,21 @@ class TestCalibrationMoE(unittest.TestCase):
         # measured e2e was -0.064%, i.e. inside the 0.5% noise band -> prediction must agree
         self.assertLess(m["expected_e2e_gain_pct"], 1.0)
 
-    def test_88pct_against_a_90pct_target_is_saturated_not_moderate(self):
+    def test_88pct_against_an_85pct_target_is_saturated_not_moderate(self):
         """Regression: banding on target_eff, not on the raw roofline.
 
-        Classifying 0.88 against a 0.90 target as `moderate` would route this head back to the
+        Classifying 0.88 against a 0.85 target as `moderate` would route this head back to the
         kernel track — exactly the wasted budget this skill exists to prevent.
         """
-        self.assertEqual(rt.classify_headroom(0.88, 0.90), "saturated")
-        self.assertEqual(rt.classify_headroom(0.60, 0.90), "moderate")
-        self.assertEqual(rt.classify_headroom(0.20, 0.90), "underperforming")
+        self.assertEqual(rt.classify_headroom(0.88, 0.85), "saturated")
+        self.assertEqual(rt.classify_headroom(0.60, 0.85), "moderate")
+        self.assertEqual(rt.classify_headroom(0.20, 0.85), "underperforming")
+
+    def test_saturated_head_is_skipped_outright(self):
+        """The doctrine reversal: 0.88 >= the 0.85 MoE target -> no optimization budget at all."""
+        m = _moe_metrics()
+        self.assertTrue(m["skip_optimization"])
+        self.assertIn("target_eff", m["skip_reason"])
 
 
 class TestCalibrationAttention(unittest.TestCase):
@@ -121,9 +128,11 @@ class TestCalibrationAttention(unittest.TestCase):
         self.assertGreater(a["attainable_speedup"], 1.4)
 
     def test_prediction_brackets_the_measured_speedup(self):
-        """target_eff=0.50 predicts ~1.7-2.8x; the squad measured 1.56x. A prior that predicted
+        """target_eff=0.60 predicts ~2.1-3.4x; the squad measured 1.56x. A prior that predicted
         below the measured value would be the dangerous direction (it under-ranks real work)."""
-        self.assertGreaterEqual(_attn_metrics()["attainable_speedup"], 1.56)
+        a = _attn_metrics()
+        self.assertGreaterEqual(a["attainable_speedup"], 1.56)
+        self.assertFalse(a["skip_optimization"])   # 18% of roofline is nowhere near the 0.60 bar
 
 
 class TestBoundTypeByUtilization(unittest.TestCase):
@@ -141,8 +150,8 @@ class TestBoundTypeByUtilization(unittest.TestCase):
         self.assertGreater(a["attainable_speedup"], 1.4)
 
     def test_saturated_memory_head_stays_memory_bound(self):
-        """A genuinely bandwidth-bound head (high hbm_util) keeps bound_type='memory' so it routes to
-        the byte-reduction track, not the occupancy track."""
+        """A genuinely bandwidth-bound head (high hbm_util) keeps bound_type='memory', so the
+        Architect reads a bandwidth wall rather than an occupancy problem."""
         m = _moe_metrics()
         self.assertEqual(m["bound_type"], "memory")
         self.assertGreaterEqual(m["hbm_util"], 0.60)
@@ -196,6 +205,9 @@ class TestDegradation(unittest.TestCase):
         self.assertEqual(m["headroom_class"], "unknown")
         self.assertEqual(m["attainable_speedup"], 1.0)
         self.assertEqual(m["expected_e2e_gain_pct"], 0.0)
+        # and, load-bearing since the gate went hard: a clamped 1.00 >= 0.85 must NOT skip the kernel
+        self.assertFalse(m["skip_optimization"])
+        self.assertEqual(m["skip_reason"], "")
         self.assertIn("bytes_upper_bound", m)          # what the model violated, for stage C
         self.assertLess(m["bytes_upper_bound"], m["bytes_est"])
 
@@ -204,10 +216,11 @@ class TestDegradation(unittest.TestCase):
         bandwidth or math. Emit bound_type='latency' and no verdict — the lever is fusion."""
         p = _peaks()
         m = rt.roofline_metrics(1e5, 1e5, 2e-6, p["hbm_bw_bytes_s"],
-                                rt.peak_flops_for(p, "bf16"), 0.875, pct_gpu_time=4.9)
+                                rt.peak_flops_for(p, "bf16"), 0.85, pct_gpu_time=1.9)
         self.assertEqual(m["bound_type"], "latency")
         self.assertEqual(m["headroom_class"], "unknown")
         self.assertEqual(m["expected_e2e_gain_pct"], 0.0)
+        self.assertFalse(m["skip_optimization"])   # no verdict is never a reason to skip
         self.assertIn("fusion", m["note"])
 
     def test_bound_type_is_a_closed_set(self):
@@ -216,7 +229,7 @@ class TestDegradation(unittest.TestCase):
         p = _peaks()
         cases = [_moe_metrics(), _attn_metrics(), _moe_metrics(all_experts=True),
                  rt.roofline_metrics(1e5, 1e5, 2e-6, p["hbm_bw_bytes_s"],
-                                     rt.peak_flops_for(p, "bf16"), 0.875)]
+                                     rt.peak_flops_for(p, "bf16"), 0.85)]
         for m in cases:
             self.assertIn(m["bound_type"], rt.BOUND_TYPES, m.get("note", ""))
 
@@ -231,6 +244,13 @@ class TestHeadScoping(unittest.TestCase):
     def test_below_bar_is_skipped_not_degraded(self):
         sel = [e["short_name"] for e in rt.select_entries(self.ENTRIES, min_pct_gpu=5.0)]
         self.assertEqual(sel, ["big", "mid", "bar"])   # sorted desc, sub-bar absent entirely
+
+    def test_default_scope_tracks_the_run_bar(self):
+        """The skill's scope must match the orchestrator's 2% bar: a 1.7% kernel is now gated on
+        roofline, so it must HAVE a roofline entry rather than being invisible to the analysis."""
+        self.assertEqual(rt.DEFAULT_MIN_PCT_GPU, 2.0)
+        sel = [e["short_name"] for e in rt.select_entries(self.ENTRIES)]
+        self.assertEqual(sel, ["big", "mid", "bar"])
 
     def test_top_n_cap(self):
         self.assertEqual(len(rt.select_entries(self.ENTRIES, min_pct_gpu=0.0, top_n=2)), 2)
@@ -280,21 +300,46 @@ class TestHeadScoping(unittest.TestCase):
 
 
 class TestSkillDocConsistency(unittest.TestCase):
-    """The helper's priors must not drift from the SKILL.md table that documents them."""
+    """The helper's priors must not drift from the two other places that restate them.
+
+    `target_eff` stopped being an advisory prior: it is the skip bar, so a drift between the helper,
+    the doc an agent executes, and the orchestrator's own fallback table would silently change which
+    kernels a run optimizes.
+    """
+
+    EXPECTED = {"gemm": 0.85, "moe": 0.85, "elementwise": 0.85, "attn": 0.60}
 
     def test_target_eff_matches_skill_md(self):
         skill_md = os.path.join(os.path.dirname(PEAKS_MD), "SKILL.md")
         with open(skill_md, encoding="utf-8") as fh:
             text = fh.read()
-        self.assertEqual(rt.TARGET_EFF["gemm"], 0.90)
-        self.assertEqual(rt.TARGET_EFF["moe"], 0.90)
-        self.assertEqual(rt.TARGET_EFF["attn"], 0.50)
-        for frag in ("dense GEMM | **0.90**", "MoE / grouped GEMM | **0.90**",
-                     "attention decode (paged) | **0.50**"):
+        self.assertEqual(dict(rt.TARGET_EFF), self.EXPECTED)
+        for frag in ("dense GEMM | **0.85**", "MoE / grouped GEMM | **0.85**",
+                     "elementwise / norm / quant | **0.85**",
+                     "attention decode (paged) | **0.60**"):
             self.assertIn(frag, text, "SKILL.md target_eff table drifted from roofline_tools.TARGET_EFF")
 
+    def test_target_eff_matches_the_orchestrator_fallback_table(self):
+        """`e2e_workflow.js` carries its own copy for candidates that arrive without `target_eff`."""
+        js = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "e2e_workflow.js")
+        with open(js, encoding="utf-8") as fh:
+            line = [ln for ln in fh if "const ROOFLINE_TARGET_EFF" in ln]
+        self.assertEqual(len(line), 1, "expected exactly one ROOFLINE_TARGET_EFF definition")
+        found = dict((k, float(v)) for k, v in
+                     re.findall(r"(\w+)\s*:\s*([0-9.]+)", line[0].split("{", 1)[1]))
+        self.assertEqual(found, self.EXPECTED,
+                         "e2e_workflow.js ROOFLINE_TARGET_EFF drifted from roofline_tools.TARGET_EFF")
+
+    def test_skip_gate_predicate_is_documented(self):
+        """INDEX.md's contract allows exactly ONE gate, and only if its predicate is written down."""
+        with open(os.path.join(os.path.dirname(PEAKS_MD), "SKILL.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("skip_optimization = (headroom_class != \"unknown\") and (not suspect) "
+                      "and (roofline_pct >= target_eff)", text)
+
     def test_workload_contract_is_stated(self):
-        """The hard constraint the byte-reduction track must not violate."""
+        """The hard constraint every lever this skill routes to must not violate."""
         with open(os.path.join(os.path.dirname(PEAKS_MD), "SKILL.md"), encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("must not be changed", text)

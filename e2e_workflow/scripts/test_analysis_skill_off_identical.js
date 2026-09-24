@@ -66,8 +66,14 @@ if (m) {
     `-> the spread can never shadow another input`);
 }
 
-// 3) Consumers must treat the prior as optional and advisory.
-ok(/ADVISORY|advisory/.test(src), 'gating block documents the prior as advisory');
+// 3) Consumers must treat the prior as optional, and the gating block must state the ONE way it is
+//    not advisory: `roofline_pct >= target_eff` prunes. INDEX.md's skill contract allows exactly one
+//    such gate and only if it is declared where the skill is wired in.
+ok(/ADVISORY|advisory/.test(src), 'gating block documents the prior as advisory for ordering');
+ok(/target_eff/.test(src.slice(0, src.indexOf('ANALYSIS_SKILL_INPUTS'))),
+  'gating block declares the one gate (target_eff) rather than claiming it never prunes');
+ok(!/never prunes a candidate/.test(src),
+  'the pre-gate "never prunes a candidate" claim is gone -- it would now be false');
 for (const [role, phrase] of [['profiler', 'ANALYSIS_SKILL_DIR'], ['system_architect', 'ANALYSIS_SKILL_DIR']]) {
   const roleSrc = fs.readFileSync(path.join(ROOT, 'e2e_workflow', 'roles', `${role}.md`), 'utf8');
   ok(roleSrc.includes(phrase), `roles/${role}.md consumes ${phrase}`);
