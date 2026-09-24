@@ -301,7 +301,7 @@ ok(/covers \*\*data only\*\*/.test(integrator),
 ok(/apply_overlay: \{ type: 'string' \}/.test(src), 'the phase can return a routing/dispatch overlay');
 ok(/if \(tuning\.apply_overlay\) curOverlay = tuning\.apply_overlay;/.test(src),
   'an accepted tuning overlay is carried forward (the code half is not dropped at the phase boundary)');
-ok(/OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,/.test(src),
+ok(/OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, GEAK_UNSET_ENVS: JSON\.stringify\(curUnsetEnvs\),[^\n]*SKILL_DIR: WORKFLOW_DIR,/.test(src),
   'the post-tuning re-profile runs WITH the carried overlay, not an empty one');
 ok(/reversible \*\*overlay\*\*/.test(role) && /Never edit a `\.py` in/.test(role),
   'the role routes code through the overlay and forbids live-tree source edits');

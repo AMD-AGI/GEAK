@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import py_compile
+import shlex
 import shutil
 import signal
 import socket
@@ -330,6 +331,61 @@ def test_real_bench_adapters_publish_bound_source_measurement(launch_files, tmp_
     assert ("vllm.__main__" if route == "vllm" else "sglang.launch_server") in names
     assert not runtime.group_members(gate["server_identity"]["pgid"])
     assert runtime.read_json(out / "teardown.json")["status"] == "confirmed"
+
+
+@pytest.mark.parametrize("route", ["sglang", "vllm", "magpie"])
+def test_source_bound_child_preserves_literal_env_and_removed_launch_settings(launch_files, tmp_path, route):
+    env = bench_fixture(launch_files, tmp_path, route)
+    request, _out, root = launch_files
+    declaration = runtime.read_json(request)
+    manifest = runtime.read_json(root / "manifest.json")
+    backend = "vllm" if route == "vllm" else "sglang"
+    entry = "__main__.py" if route == "vllm" else "launch_server.py"
+    relative = f"trees/a/python/{backend}/{entry}"
+    target = root / relative
+    literal = '{"path":"two words","pattern":"(a|b)"}'
+    checks = (
+        "import os,sys\n"
+        f"assert os.environ['LITERAL_CONFIG'] == {literal!r}\n"
+        "assert os.environ['EMPTY_VALUE'] == ''\n"
+        "assert 'REMOVED_AMBIENT' not in os.environ\n"
+        "assert '--removed-flag' not in sys.argv\n"
+        "assert '--kept-flag' in sys.argv\n"
+    )
+    code = checks + target.read_text()
+    target.write_text(code)
+    next(row for row in manifest["files"] if row["path"] == relative)["sha256"] = hashlib.sha256(code.encode()).hexdigest()
+    seal(declaration, manifest)
+    request.write_text(json.dumps(declaration))
+    recipe = tmp_path / "recipe.nul"
+    recipe.write_bytes(f"EXTRA_{backend.upper()}_ARGS=--removed-flag\0REMOVED_AMBIENT=recipe\0".encode())
+    env.update(
+        EXTRA_ENV=shlex.join(["LITERAL_CONFIG=" + literal, "EMPTY_VALUE="]),
+        EXTRA_SERVER_ARGS="--kept-flag value", EFFECTIVE_SERVER_ARGS_COMPLETE="1",
+        GEAK_REMOVE_ARGS=json.dumps(["--removed-flag"]),
+        GEAK_UNSET_ENVS=json.dumps(["REMOVED_AMBIENT"]), REMOVED_AMBIENT="ambient",
+        RECIPE_ENV_FILE=str(recipe),
+    )
+    if route == "magpie":
+        launcher = Path(env["MAGPIE_LAUNCH_SCRIPT"])
+        launcher.write_text(launcher.read_text().replace('--port "$PORT"', '--port "$PORT" $EXTRA_SGLANG_ARGS'))
+    elif route == "vllm":
+        # Match the real console-script argv recognized by the removal verifier.
+        # The older source-only fixture's `python -m vllm` is not a supported
+        # production entrypoint and must not become one just to satisfy a test.
+        (tmp_path / "bin/vllm").write_text(
+            f"#!{sys.executable}\nimport runpy\nrunpy.run_module('vllm', run_name='__main__')\n")
+
+    result = subprocess.run(["bash", str(SCRIPTS / "bench_e2e.sh")], env=env, text=True,
+                            capture_output=True, timeout=20, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = Path(env["OUT_DIR"])
+    assert runtime.read_json(output / "server_args_validation.json")["status"] == "verified"
+    assert runtime.read_json(output / "source_runtime/measurement.json")["status"] == "verified"
+    assert runtime.read_json(output / "source_runtime/teardown.json")["status"] == "confirmed"
+    # This is a synthetic CPU client result, not native GPU throughput evidence.
+    assert runtime.read_json(output / "bench_summary.json")["throughput_tok_s_median"] == 17
 
 
 def test_bench_post_measure_source_damage_preserves_raw_runs_without_seal(launch_files, tmp_path):

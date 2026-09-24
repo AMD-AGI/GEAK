@@ -389,8 +389,26 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
    `final_patch.diff` (all accepted kernel patches), and a `final_launch.sh` that reproduces the
    optimized server (sets `BACKEND=<backend>`, `PYTHONPATH=<overlay>`, the accepted flags/env, and runs
    the bench via bench_e2e.sh + its adapter). This is the spec deliverable: "complete patch + launch/benchmark script".
+   Preserve `ACCEPTED_UNSET_ENVS` in that script as the JSON-array environment
+   variable `GEAK_UNSET_ENVS`, including when the accepted assignment string is
+   empty. For intermediate comparisons, pass `CURRENT_UNSET_ENVS` the same way
+   to both arms. Explicit candidate assignments may re-add a removed name.
+   Preserve the supplied `GEAK_REMOVE_ARGS` JSON string in both benchmark arms
+   and the final script, including `[]` when clearing old controls. A failed
+   live-argument check rejects that launch before measurement; it is not an
+   inconclusive speed result to replay through another harness.
 
-1b. **Fold in the tuning deploy bundle** (only when `TUNING_DEPLOY_BUNDLE` is present).
+1b. **Fold in tuning data** (when `TUNING_DEPLOY_BUNDLE` or `TUNING_RUNTIME_CSV_MANIFESTS` is present).
+
+   When `TUNING_RUNTIME_CSV_MANIFESTS` is nonempty, preserve the complete immutable
+   tables already under `EVAL_DIR/final/tuning/runtime/` and their accepted
+   `AITER_CONFIG_*` environment bindings. These tables require no installed-tree
+   writes or cache deletion. Verify their hashes and selected paths through
+   `runtime_csv.verify_runtime_csv` before the final benchmark. Do not replace a
+   complete runtime CSV with the tuned-row subset. Keep the baseline table for
+   the reference arm and the candidate table for the optimized arm. If no
+   `TUNING_DEPLOY_BUNDLE` remains, skip the installed-file steps below and proceed
+   to the final benchmark with these environment bindings.
 
    A tuning win can have two halves. The **code** half (a routing switch that makes the seam dispatch the
    tuned backend) is an overlay in `TUNING_OVERLAY`; if it is non-empty it should already be inside the
@@ -409,7 +427,7 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
      # Tuning-skillset artifacts: data configs + cache invalidation. Idempotent; must run BEFORE launch.
      TUNING_DEPLOY="$E/final/tuning/deploy.sh"
      if [ -x "$TUNING_DEPLOY" ]; then bash "$TUNING_DEPLOY" || { echo "TUNING_DEPLOY_FAILED" >&2; exit 1; }
-     else echo "WARNING: tuning deploy bundle missing at $TUNING_DEPLOY — tuned configs will NOT be applied" >&2; fi
+     else echo "TUNING_DEPLOY_MISSING: $TUNING_DEPLOY" >&2; exit 1; fi
      ```
      Order matters: `deploy.sh` runs first, the server launch second. Applying a config to an
      already-running server does nothing, and for graph-captured decode paths the config is read at

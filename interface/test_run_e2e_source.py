@@ -3,6 +3,7 @@
 """Source-bearing results require the exact selected measurements' receipts."""
 import json
 import os
+import shlex
 import signal
 from pathlib import Path
 from unittest.mock import patch
@@ -72,6 +73,37 @@ def test_selected_director_pair_uses_fresh_base_not_setup(source_request, tmp_pa
     assert result["source_measurement"]["status"] == "verified"
     assert result["source_measurement"]["replay_status"] == "staged"
     assert Path(result["final_launch_script"]).is_file()
+
+
+@pytest.mark.parametrize("damage", [None, "source", "launch"])
+def test_source_and_launch_proofs_jointly_gate_returned_configuration(source_request, tmp_path, damage):
+    evaluation = measurements._pair(tmp_path, source_request)
+    workflow = _workflow(evaluation)
+    literal = '{"path":"two words","pattern":"(a|b)"}'
+    accepted = {"flags": "", "args_mode": "replace", "remove_args": [],
+                "unset_envs": ["REMOVED"], "env": shlex.join(["CONFIG=" + literal, "EMPTY="])}
+    workflow["accepted_config"] = accepted
+    if damage == "source":
+        (evaluation / "validation/final/source_runtime/measurement.json").unlink()
+    elif damage == "launch":
+        (evaluation / "validation/final/server_args_validation.json").write_text(json.dumps({
+            "schema_version": "geak.server_args_validation.v1", "status": "failed",
+        }))
+        with pytest.raises(ValueError, match="failed argument verification"):
+            run_e2e.normalize_result(_handoff(source_request), workflow)
+        return
+
+    result = run_e2e.normalize_result(_handoff(source_request), workflow)
+
+    if damage == "source":
+        assert result["status"] == "error"
+        assert "throughput_speedup" not in result and "accepted_config" not in result
+    else:
+        assert result["status"] == "ok"
+        assert result["source_measurement"]["replay_status"] == "staged"
+        assert {key: result["accepted_config"][key] for key in accepted} == accepted
+        assert result["accepted_config"]["env_map"] == {"CONFIG": literal, "EMPTY": ""}
+        assert result["throughput_speedup"] == pytest.approx(1.1)
 
 
 def test_missing_replay_launcher_withholds_even_a_verified_measurement(source_request, tmp_path):
