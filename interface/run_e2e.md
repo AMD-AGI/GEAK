@@ -109,7 +109,7 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 {
   "schema_version": 2,
   "model_path": "/models/Qwen-Qwen3.5-27B",
-  "framework": "sglang",                 // -> backend (sglang|vllm)
+  "framework": "sglang",                 // -> backend (sglang|vllm|atom)
   "gpu_type": "MI300X",
   "tp": 8,                               // serving tensor-parallel size (honoured, no TP=1 lock)
   "gpu_ids": "0,1,2,3,4,5,6,7",          // optional; default 0..tp-1
@@ -153,7 +153,7 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | handoff field | `e2e_workflow.js` arg | note |
 |---|---|---|
 | `model_path` | `model_path` | required |
-| `framework` | `backend` | `sglang` \| `vllm` |
+| `framework` | `backend` | `sglang` \| `vllm` \| `atom` |
 | `tp` | `tp` | serving tensor-parallel (threaded to bench `TP`) |
 | `gpu_ids` / `tp` | `gpu_ids` | defaults to `0..tp-1` |
 | `workload.{isl,osl,conc}` | `isl` / `osl` / `conc` | profile + bench workload |

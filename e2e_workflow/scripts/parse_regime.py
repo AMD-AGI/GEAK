@@ -27,6 +27,11 @@ Output (json):
                                          # (eager is the faithful baseline ONLY under this flag; otherwise
                                          # decode replays under a CUDA/HIP graph — see deployment_graph_mode)
   "cuda_graph": true|false,
+  "regime_source": {                     # provenance for the inferred/live execution regime
+    "compile": "live_log|flags|fallback_inference",
+    "cuda_graph": "live_log|flags|fallback_inference"
+  },
+  "diagnostics": ["..."],                # supplied live-log read/parse failures
   "attention_backend": "<str>|''",
   "prefill_chunk": <int>|null,           # chunked-prefill token budget (chunked-prefill-size /
                                          # max-num-batched-tokens); null = one prefill pass over the prompt.
@@ -170,24 +175,36 @@ def _load_model_quant(model_config_path):
 
 
 def _read_server_log_state(server_log):
-    """Return compile/cudagraph facts printed by the live server, when available.
+    """Return ``(state, diagnostic)`` for the live server configuration.
 
     ATOM prints a multiline ``CompilationConfig`` whose level/use_inductor and
     use_cudagraph fields are more authoritative than launch-flag inference.  Keep
     this parser deliberately narrow: an unrelated occurrence of "compile" in a
-    package path must not change the regime.
+    package path must not change the regime. ``diagnostic`` is empty when no log was
+    requested or parsing succeeded, and explains every supplied-log failure.
     """
-    if not server_log or not os.path.isfile(server_log):
-        return {}
+    if not server_log:
+        return {}, ""
+
+    def diagnose(reason):
+        return (
+            f"ATOM live configuration unavailable: {reason}; "
+            "compile/cuda_graph use flags or fallback inference."
+        )
+
+    if not os.path.exists(server_log):
+        return {}, diagnose(f"server log does not exist: {server_log}")
+    if not os.path.isfile(server_log):
+        return {}, diagnose(f"server log is not a regular file: {server_log}")
     try:
         with open(server_log, errors="replace") as fh:
             text = fh.read()
-    except Exception:
-        return {}
+    except OSError as exc:
+        return {}, diagnose(f"could not read server log {server_log}: {exc}")
 
     blocks = re.findall(r"CompilationConfig\s*\((.*?)\)", text, flags=re.I | re.S)
     if not blocks:
-        return {}
+        return {}, diagnose(f"no parseable CompilationConfig found in server log: {server_log}")
     block = blocks[-1]
     state = {}
     level = re.search(r"\blevel\s*=\s*(\d+)", block, flags=re.I)
@@ -200,13 +217,16 @@ def _read_server_log_state(server_log):
         )
     if cudagraph:
         state["cuda_graph"] = cudagraph.group(1).lower() == "true"
-    return state
+    if not state:
+        return {}, diagnose(f"CompilationConfig in server log has no recognized fields: {server_log}")
+    return state, ""
 
 
 def parse_regime(server_args, model_config_path="", server_script="", backend="", server_log=""):
     # Launch-script flags fill the base; the live --server-args string overrides on overlap.
     flags = {**_read_script_flags(server_script), **_tokenize(server_args)}
     notes = []
+    diagnostics = []
 
     # Resolve the serving backend up-front (drives the compile-default inference below).
     backend_resolved = _detect_backend(backend, server_script, server_args, flags)
@@ -268,21 +288,30 @@ def parse_regime(server_args, model_config_path="", server_script="", backend=""
                             or flags.get("torch-compile"))
     is_vllm = backend_resolved == "vllm"
     is_atom = backend_resolved == "atom"
+    atom_level_from_flags = is_atom and "level" in flags
+    atom_level_valid = True
     atom_level = flags.get("level", 3)
     try:
         atom_level = int(atom_level)
     except (TypeError, ValueError):
+        atom_level_valid = False
         atom_level = 3
-        notes.append("ATOM --level was unreadable -> using ATOM's default compile level 3; server log wins.")
+        notes.append("ATOM --level was unreadable -> using ATOM's default compile level 3 "
+                     "(fallback inference).")
     compile_on = explicit_compile or ((is_vllm or (is_atom and atom_level > 0)) and not enforce_eager)
     compile_state = "torch_compile" if compile_on else "eager"
+    if explicit_compile or (is_vllm and enforce_eager) or (
+            is_atom and (enforce_eager or (atom_level_from_flags and atom_level_valid))):
+        compile_source = "flags"
+    else:
+        compile_source = "fallback_inference"
     if compile_on and not explicit_compile:
         if is_atom:
             notes.append(f"ATOM compile level {atom_level} (default 3) with no --enforce-eager "
-                         "-> compile=torch_compile; live CompilationConfig in the server log wins.")
+                         "-> compile=torch_compile (flags/default inference).")
         else:
             notes.append("vLLM V1 compiles the backbone by default (no --enforce-eager) -> "
-                         "compile=torch_compile; confirm via server log compilation_config (log wins).")
+                         "compile=torch_compile (fallback inference).")
     # Consistency invariant: on vLLM, enforce_eager=false CANNOT coexist with compile=eager (no
     # --enforce-eager => VLLM_COMPILE is on). Repair defensively so a backend mis-detect can never
     # re-introduce the (enforce_eager=false, compile=eager) contradiction that timed a naked-eager baseline.
@@ -293,21 +322,27 @@ def parse_regime(server_args, model_config_path="", server_script="", backend=""
 
     # ---- cuda graph: on unless the baseline is forced eager (same flags as enforce_eager) ----
     cuda_graph = not enforce_eager
+    cuda_graph_source = "flags" if enforce_eager else "fallback_inference"
 
     # A live CompilationConfig is the strongest source. This catches backend-version defaults and
     # wrapper-injected settings that are absent from the launch script handed to the extractor.
-    log_state = _read_server_log_state(server_log) if is_atom else {}
+    log_state, log_diagnostic = _read_server_log_state(server_log) if is_atom else ({}, "")
+    if log_diagnostic:
+        diagnostics.append(log_diagnostic)
     if "compile" in log_state:
         logged = "torch_compile" if log_state["compile"] else "eager"
         if logged != compile_state:
             notes.append(f"server log CompilationConfig overrides inferred compile={compile_state} "
                          f"-> {logged}.")
         compile_state = logged
+        compile_source = "live_log"
     if "cuda_graph" in log_state:
         if log_state["cuda_graph"] != cuda_graph:
             notes.append(f"server log CompilationConfig overrides inferred cuda_graph={cuda_graph} "
                          f"-> {log_state['cuda_graph']}.")
         cuda_graph = log_state["cuda_graph"]
+        cuda_graph_source = "live_log"
+    notes.extend(diagnostics)
 
     attn = flags.get("attention-backend") or flags.get("attention_backend") or ""
     if attn is True:
@@ -323,6 +358,11 @@ def parse_regime(server_args, model_config_path="", server_script="", backend=""
         "compile": compile_state,
         "enforce_eager": enforce_eager,
         "cuda_graph": cuda_graph,
+        "regime_source": {
+            "compile": compile_source,
+            "cuda_graph": cuda_graph_source,
+        },
+        "diagnostics": diagnostics,
         "attention_backend": attn,
         "prefill_chunk": prefill_chunk,
         "notes": " ".join(notes),
@@ -343,11 +383,14 @@ def main():
                          "default. When omitted it is auto-detected from the serve command / framework "
                          "tag / launch flags (robust to a recipe path that lacks the backend name).")
     ap.add_argument("--server-log", default="",
-                    help="optional live server log; its CompilationConfig overrides flag/default inference")
+                    help="optional ATOM server log; a live CompilationConfig overrides inference, "
+                         "and read/parse failures are reported as diagnostics")
     ap.add_argument("--out", default="", help="write regime json here (also printed to stdout)")
     args = ap.parse_args()
     regime = parse_regime(args.server_args, args.model_config, args.server_script, args.backend,
                           args.server_log)
+    for diagnostic in regime["diagnostics"]:
+        sys.stderr.write(f"warning: {diagnostic}\n")
     js = json.dumps(regime, indent=2)
     if args.out:
         with open(args.out, "w") as fh:

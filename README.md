@@ -43,7 +43,7 @@ optimize a single kernel.
 
 - An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), **ROCm 6+**, a profiler (`rocprof-compute` /
   `rocprofv3` / `rocprof`), Python 3.8+.
-- For E2E: a running-capable serving backend (`sglang` or `vllm`) and the model weights on disk.
+- For E2E: a running-capable serving backend (`sglang`, `vllm`, or `atom`) and the model weights on disk.
 
 > **⚠️ Build your kernel environment first.** GEAK does **not** install the toolchains your kernels
 > need (e.g. PyTorch, Triton, FlyDSL, hipBLASLt) — these differ per kernel. Set up and verify the
@@ -176,7 +176,7 @@ optimization). This makes runs reliable and reproducible.
 GEAK/
 ├── e2e_workflow/        # ⭐ End-to-end LLM serving-throughput optimizer (wraps kernel_workflow/)
 │   ├── e2e_workflow.js   # system-layer orchestration (config / head-GEMM / kernel tracks + e2e gate)
-│   ├── roles/  knowledge/  scripts/   # adapters/{sglang,vllm}.sh, op_bench.py, parse_profile.py, …
+│   ├── roles/  knowledge/  scripts/   # adapters/{sglang,vllm,atom}.sh, op_bench.py, parse_profile.py, …
 │   └── README.md / PLAN.md
 ├── kernel_workflow/     # Single-kernel optimizer
 │   ├── kernel_workflow.js       # deterministic JS orchestration
