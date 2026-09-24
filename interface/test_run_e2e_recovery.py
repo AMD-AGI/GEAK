@@ -13,9 +13,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import signal
 from pathlib import Path
 
 import pytest
+
+from e2e_workflow.scripts.runtime_csv import build_runtime_csv
 
 _HERE = Path(__file__).resolve().parent
 
@@ -410,6 +413,95 @@ def test_no_baseline_still_errors(tmp_path):
     assert rx._recover_completed_no_gain(eval_dir) is None
 
 
+@pytest.mark.parametrize("readd", [False, True])
+@pytest.mark.parametrize("carried", [False, True])
+def test_disk_recovery_preserves_known_unsets_without_inventing_complete_args(tmp_path, readd, carried):
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    handoff = _handoff(eval_dir)
+    handoff["baseline_env_spec"] = {"config": {
+        "unset_envs": ["SGLANG_AITER_MLA_PERSIST"], "args_mode": "replace",
+    }}
+    if carried:
+        handoff["phases"] = "final"
+        handoff["state"] = {"eval_dir": str(eval_dir), "unset_envs": ["CARRIED_SETTING"]}
+    name = "CARRIED_SETTING" if carried else "SGLANG_AITER_MLA_PERSIST"
+    if readd:
+        path = eval_dir / "baseline/baseline_official.json"
+        data = json.loads(path.read_text())
+        data["server_env"] = f"{name}=3"
+        path.write_text(json.dumps(data))
+    workflow = rx._recover_workflow_return(eval_dir.parent)
+    output = rx.normalize_result(handoff, workflow)["accepted_config"]
+    assert "args_mode" not in output
+    if readd:
+        assert name not in output.get("unset_envs", [])
+        assert output["env_map"][name] == "3"
+    else:
+        assert output["unset_envs"] == [name]
+
+
+@pytest.mark.parametrize("phases", [None, "", "all", " setup, final ", "final"])
+@pytest.mark.parametrize("carried", [None, {}, {"unset_envs": ["CARRIED_SETTING"]}])
+def test_disk_recovery_seed_follows_workflow_phase_selection(tmp_path, phases, carried):
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    handoff = _handoff(eval_dir)
+    handoff.update(phases=phases, eval_dir=str(eval_dir), state=carried)
+    handoff["baseline_env_spec"] = {"config": {"unset_envs": ["BASELINE_SETTING"]}}
+    workflow = rx._recover_workflow_return(eval_dir.parent)
+    output = rx.normalize_result(handoff, workflow)["accepted_config"]
+    expected = (carried or {}).get("unset_envs", []) if phases == "final" else ["BASELINE_SETTING"]
+    assert output.get("unset_envs", []) == expected
+
+
+@pytest.mark.parametrize("phase", ["setup", "final"])
+@pytest.mark.parametrize("seed_assignment", [False, True])
+@pytest.mark.parametrize("returned_action", ["none", "remove", "assign"])
+def test_intermediate_recovery_orders_seed_and_returned_environment_controls(
+    tmp_path, phase, seed_assignment, returned_action,
+):
+    eval_dir = _make_eval_dir(tmp_path)
+    handoff = _handoff(eval_dir)
+    handoff["phases"] = phase
+    handoff["baseline_env_spec"] = {"config": {
+        "unset_envs": ["PERSIST"], "extra_envs": {"PERSIST": "3"} if seed_assignment else {},
+    }}
+    handoff["state"] = {"unset_envs": ["PERSIST"], "env": "PERSIST=3" if seed_assignment else ""}
+    workflow = rx._recover_best_intermediate_win(eval_dir)
+    if returned_action == "remove":
+        workflow["accepted_config"]["unset_envs"] = ["PERSIST"]
+    elif returned_action == "assign":
+        workflow["accepted_config"]["env"] += " PERSIST=4"
+    output = rx.normalize_result(handoff, workflow)["accepted_config"]
+    expected = returned_action == "remove" or (not seed_assignment and returned_action == "none")
+    assert ("PERSIST" in output.get("unset_envs", [])) == expected
+    assert "args_mode" not in output
+
+
+def test_disk_recovery_accepted_assignment_cancels_baseline_unset_without_recipe_read(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path)
+    handoff = _handoff(eval_dir)
+    handoff.update(accepted_env="PERSIST=3", launch_recipe=str(tmp_path / "unavailable.yaml"))
+    handoff["baseline_env_spec"] = {"config": {"unset_envs": ["PERSIST"]}}
+    workflow = rx._recover_best_intermediate_win(eval_dir)
+    assert "unset_envs" not in rx.normalize_result(handoff, workflow)["accepted_config"]
+
+
+def test_legacy_recovery_does_not_acquire_schema_v2_seed_controls(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path)
+    handoff = _handoff(eval_dir)
+    handoff.update(schema_version=1, baseline_env_spec={"config": {"unset_envs": ["PERSIST"]}})
+    workflow = rx._recover_best_intermediate_win(eval_dir)
+    assert "unset_envs" not in rx.normalize_result(handoff, workflow)["accepted_config"]
+
+
+def test_canonical_return_does_not_acquire_seed_removals(tmp_path):
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    handoff = _handoff(eval_dir)
+    handoff["baseline_env_spec"] = {"config": {"unset_envs": ["NEW_SETTING"]}}
+    workflow = {"eval_dir": str(eval_dir), "accepted_config": {"flags": "", "env": ""}}
+    assert "unset_envs" not in rx.normalize_result(handoff, workflow)["accepted_config"]
+
+
 def test_workflow_done_marker_ignores_final_launch(tmp_path):
     """final/final_launch.sh (Finalize, pre-Validate) must NOT count as done;
     only the post-Validate terminal markers (director_e2e_validation.json /
@@ -754,7 +846,13 @@ def _run_main(monkeypatch, tmp_path, eval_dir, *, invoke, handoff_extra=None):
     handoff = _handoff(eval_dir)
     handoff.update(handoff_extra or {})
     hp.write_text(json.dumps(handoff), encoding="utf-8")
-    rc = rx.main([str(hp), str(rp)])
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    try:
+        rc = rx.main([str(hp), str(rp)])
+    finally:
+        # main's final flush ignores SIGTERM; subprocesses in later tests must
+        # inherit the original disposition, not this in-process CLI's state.
+        signal.signal(signal.SIGTERM, previous_sigterm)
     return rc, rp
 
 
@@ -793,6 +891,160 @@ def test_emit_on_success(monkeypatch, tmp_path):
     assert (eval_dir / "kernel_journey.json").is_file()
 
 
+@pytest.mark.parametrize("route", ["live", "cached", "interrupted"])
+@pytest.mark.parametrize("failure_source", ["workflow", "director", "base", "final", "startup_base", "startup_final"])
+def test_final_launch_rejection_cannot_recover_positive_throughput(
+    monkeypatch, tmp_path, route, failure_source
+):
+    eval_dir = _make_eval_dir(tmp_path)
+    wf = {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
+          "final_throughput_tok_s": 535.352, "baseline_throughput_tok_s": 461.314}
+    if failure_source == "workflow":
+        wf["validation_status"] = "server_args_unverified"
+
+    def write_rejection():
+        if failure_source == "workflow":
+            (eval_dir / rx.WORKFLOW_RETURN_FILE).write_text(json.dumps(wf))
+        elif failure_source == "director":
+            (eval_dir / "director_e2e_validation.json").write_text(json.dumps({
+                **wf, "validation_status": "server_args_unverified",
+            }))
+        else:
+            startup = failure_source.startswith("startup_")
+            leg = failure_source.removeprefix("startup_")
+            proof = eval_dir / "validation" / leg / (
+                "server_start.json" if startup else "server_args_validation.json")
+            proof.parent.mkdir(parents=True, exist_ok=True)
+            proof.write_text(json.dumps({
+                "schema_version": "geak.server_args_validation.v1",
+                "status": "failed",
+                "reason": "server_args_unverified" if startup else "removal_mismatch",
+            }))
+            # A stale positive summary must not outrank a conclusive rejection.
+            (proof.parent / "bench_summary.json").write_text(json.dumps({
+                "throughput_tok_s": 999.0,
+            }))
+
+    if route == "cached":
+        write_rejection()
+        (eval_dir / rx.WORKFLOW_RETURN_FILE).write_text(json.dumps(wf))
+
+    def invoke(*args, ps_args=None):
+        assert route != "cached", "A cached result must not invoke another worker"
+        write_rejection()
+        if route == "interrupted":
+            raise RuntimeError("Interrupted after final launch rejection")
+        return wf
+
+    rc, result_path = _run_main(monkeypatch, tmp_path, eval_dir, invoke=invoke)
+    result = json.loads(result_path.read_text())
+    assert rc == 1
+    assert result["status"] == "error"
+    assert "failed argument verification" in result["error"]
+    assert "throughput_speedup" not in result
+    assert "final_throughput_tok_s" not in result
+    assert (eval_dir / rx.KERNEL_JOURNEY_FILE).is_file()
+
+
+@pytest.mark.parametrize("proof", [None, [], {"status": "failed"}, {
+    "schema_version": "geak.server_args_validation.v1", "status": "verified",
+}])
+def test_unrelated_or_successful_argument_receipts_preserve_valid_recovery(tmp_path, proof):
+    eval_dir = _make_eval_dir(tmp_path)
+    trial_proof = eval_dir / "overlay" / "rejected_trial" / "server_args_validation.json"
+    trial_proof.parent.mkdir()
+    trial_proof.write_text(json.dumps({
+        "schema_version": "geak.server_args_validation.v1", "status": "failed",
+    }))
+    final_proof = eval_dir / "validation" / "final" / "server_args_validation.json"
+    final_proof.parent.mkdir(parents=True)
+    final_proof.write_text(json.dumps(proof))
+    (final_proof.parent / "server_start.json").write_text(json.dumps({
+        "status": "failed", "reason": "health_timeout",
+    }))
+    wf = rx._recover_workflow_return(eval_dir.parent)
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["status"] == "ok"
+    assert out["final_throughput_tok_s"] == pytest.approx(535.352)
+
+
+@pytest.mark.parametrize("route", ["live", "cached", "interrupted"])
+@pytest.mark.parametrize("runtime_csv", [False, True])
+def test_tuning_delivery_is_verified_on_live_cached_and_interrupted_emission(
+    monkeypatch, tmp_path, route, runtime_csv
+):
+    eval_dir = _make_eval_dir(tmp_path)
+    tuning = {"enabled": True, "ran": True, "gate": "accepted",
+              "live_tree_files": ["aiter/configs/model_configs/tuned.csv"]}
+    if runtime_csv:
+        baseline = tmp_path / "stock.csv"
+        baseline.write_text("M,kernel\n64,stock\n128,retained\n")
+        tuned = tmp_path / "tuned.csv"
+        tuned.write_text("M,kernel\n64,candidate\n")
+        output = eval_dir / "final/tuning/runtime/gemm"
+        table = build_runtime_csv(baseline, [tuned], output, "AITER_CONFIG_GEMM_BF16", ["M"])
+        tuning.update(runtime_csv_manifests=[str(output / "runtime_csv.json")],
+                      apply_env=table["apply_env"], live_tree_files=[])
+    wf = {
+        "eval_dir": str(eval_dir), "throughput_speedup": 1.16,
+        "final_throughput_tok_s": 535.352, "baseline_throughput_tok_s": 461.314,
+        "tuning_skillset": tuning,
+        "accepted_config": {"flags": "", "env": tuning.get("apply_env", "")},
+    }
+    if route == "cached":
+        (eval_dir / "workflow_return.json").write_text(json.dumps(wf))
+
+    def invoke(*args, ps_args=None):
+        assert route != "cached", "A completed run must recover without invoking a worker"
+        if route == "interrupted":
+            saved = eval_dir / "tuning/tuning_result.json"
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            saved.write_text(json.dumps(tuning))
+            candidate = eval_dir / "overlay/cand_fused_moe_kernel_gptq_awq/integrate_result.json"
+            integration = json.loads(candidate.read_text())
+            integration["apply_env"] = tuning.get("apply_env", "")
+            candidate.write_text(json.dumps(integration))
+            raise RuntimeError("CPU workflow interruption fixture")
+        return wf
+
+    _, result_path = _run_main(monkeypatch, tmp_path, eval_dir, invoke=invoke)
+    result = json.loads(result_path.read_text())
+    if runtime_csv:
+        assert result["status"] == "ok"
+        assert result["tuning_skillset"]["runtime_csvs"] == [table]
+        assert result["accepted_config"]["env_map"][table["env_name"]] == table["candidate"]["path"]
+    else:
+        assert result["status"] == "error"
+        assert "complete per-process runtime CSVs" in result["error"]
+        assert "throughput_speedup" not in result
+
+
+@pytest.mark.parametrize("config", [
+    {"flags": "--context-length 9728", "args_mode": "replace"},
+    {"flags": "", "args_mode": "replace"},
+    {"flags": "--candidate-only", "args_mode": "append"},
+    {"flags": "--legacy-delta"},
+])
+def test_emitted_result_preserves_explicit_argument_semantics(monkeypatch, tmp_path, config):
+    eval_dir = tmp_path / "e2e_fresh"
+    eval_dir.mkdir()
+    accepted = {**config, "env": "'JSON={\"path\": \"two words\"}' EMPTY="}
+    calls = []
+
+    def invoke(prompt, timeout, ed, ps_args=None):
+        calls.append(ed)
+        return {"eval_dir": str(eval_dir), "throughput_speedup": 1.16,
+                "final_throughput_tok_s": 535.352,
+                "baseline_throughput_tok_s": 461.314, "accepted_config": accepted}
+
+    _, result_path = _run_main(monkeypatch, tmp_path, eval_dir, invoke=invoke)
+    assert len(calls) == 1
+    result = json.loads(result_path.read_text())["accepted_config"]
+    assert {key: result[key] for key in accepted} == accepted
+    assert result["env_map"] == {"JSON": '{"path": "two words"}', "EMPTY": ""}
+    assert ("args_mode" in result) == ("args_mode" in config)
+
+
 def test_emit_when_workflow_raises_but_disk_has_intermediate(monkeypatch, tmp_path):
     """The killer case: workflow dies before Validate, but an accepted
     intermediate is on disk -> result.json MUST still be ok (not discarded)."""
@@ -815,6 +1067,7 @@ def test_emit_when_workflow_raises_but_disk_has_intermediate(monkeypatch, tmp_pa
     )
     assert rp.is_file(), "result.json MUST exist even when workflow raised"
     out = json.loads(rp.read_text())
+    assert "args_mode" not in out["accepted_config"]
     assert out["status"] == "ok"
     assert out.get("recovered_from_disk") is True
     assert out["final_throughput_tok_s"] == pytest.approx(535.352)
@@ -1210,6 +1463,33 @@ def test_kb_write_back_can_be_switched_off(tmp_path, monkeypatch):
     monkeypatch.setenv("GEAK_E2E_KB_WRITE_BACK", "0")
     out = rx._kb_write_back(_kb_eval_dir(tmp_path), {}, {})
     assert out["skipped"] is True and "off" in out["why"]
+
+
+@pytest.mark.parametrize("failure_source", ["workflow", "director", "base", "final", "startup_base", "startup_final"])
+def test_kb_write_back_does_not_publish_final_argument_rejection(tmp_path, monkeypatch, failure_source):
+    seen = _kb_store(monkeypatch)
+    eval_dir = _kb_eval_dir(tmp_path)
+    wf = {"throughput_speedup": 1.16, "final_throughput_tok_s": 535.352}
+    if failure_source == "workflow":
+        wf["validation_status"] = "server_args_unverified"
+    elif failure_source == "director":
+        (eval_dir / "director_e2e_validation.json").write_text(json.dumps({
+            "validation_status": "server_args_unverified",
+        }))
+    else:
+        startup = failure_source.startswith("startup_")
+        leg = failure_source.removeprefix("startup_")
+        proof = eval_dir / "validation" / leg / (
+            "server_start.json" if startup else "server_args_validation.json")
+        proof.parent.mkdir(parents=True)
+        proof.write_text(json.dumps({
+            "schema_version": "geak.server_args_validation.v1", "status": "failed",
+            "reason": "server_args_unverified" if startup else "removal_mismatch",
+        }))
+    receipt = rx._kb_write_back(eval_dir, wf, {})
+    assert receipt["skipped"] is True
+    assert "failed argument verification" in receipt["why"]
+    assert seen == {}
 
 
 def test_kb_write_back_defers_to_the_workflows_own_receipt(tmp_path, monkeypatch):

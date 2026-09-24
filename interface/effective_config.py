@@ -9,14 +9,29 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import shlex
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, MutableMapping, Optional, Union
+from typing import Any, Mapping, MutableMapping, Optional, Union
 
 import yaml
 
+from e2e_workflow.scripts.adapters import server_args
+from e2e_workflow.scripts.adapters.extra_env import (
+    _protect_bare_json as _protect_bare_json,
+)
+from e2e_workflow.scripts.adapters.extra_env import _shell_tokens, parse_unset_envs
+from e2e_workflow.scripts.adapters.server_args import (
+    _Flag,
+    _flag_map,
+    _parse_flags,
+    _remove_flags,
+    _render_flags,
+    resolve_remove_args,
+)
+
+_canonical_value = server_args._canonical_value
+_looks_like_flag = server_args._looks_like_flag
 
 _RECIPE_ARG_ENVS = {
     "vllm": "EXTRA_VLLM_ARGS",
@@ -38,157 +53,13 @@ class EffectiveConfig:
     conflicts: list[dict[str, Any]]
     digest: str
     manifest: dict[str, Any]
+    unset_envs: tuple[str, ...] = ()
+    remove_args: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Return a detached JSON-serialisable representation."""
 
         return copy.deepcopy(asdict(self))
-
-
-@dataclass(frozen=True)
-class _Flag:
-    name: str
-    value: Optional[str]
-
-
-def _protect_bare_json(text: str) -> tuple[str, dict[str, str]]:
-    """Replace balanced bare JSON values before POSIX ``shlex`` removes quotes."""
-
-    protected: dict[str, str] = {}
-    out: list[str] = []
-    i = 0
-    while i < len(text):
-        char = text[i]
-        if char not in "[{" or (i and not (text[i - 1].isspace() or text[i - 1] == "=")):
-            out.append(char)
-            i += 1
-            continue
-
-        opening = char
-        closing = "}" if opening == "{" else "]"
-        depth = 0
-        quoted = False
-        escaped = False
-        end = i
-        while end < len(text):
-            current = text[end]
-            if quoted:
-                if escaped:
-                    escaped = False
-                elif current == "\\":
-                    escaped = True
-                elif current == '"':
-                    quoted = False
-            elif current == '"':
-                quoted = True
-            elif current == opening:
-                depth += 1
-            elif current == closing:
-                depth -= 1
-                if depth == 0:
-                    end += 1
-                    break
-            end += 1
-        if depth:
-            out.append(char)
-            i += 1
-            continue
-
-        candidate = text[i:end]
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            out.append(char)
-            i += 1
-            continue
-        token = f"__GEAK_JSON_{len(protected)}__"
-        protected[token] = json.dumps(
-            parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        )
-        out.append(token)
-        i = end
-    return "".join(out), protected
-
-
-def _shell_tokens(text: Any) -> list[str]:
-    """Split shell text while retaining and canonicalising bare JSON values."""
-
-    rendered = str(text or "").strip()
-    if not rendered:
-        return []
-    protected_text, protected = _protect_bare_json(rendered)
-    tokens = shlex.split(protected_text, posix=True)
-    for index, token in enumerate(tokens):
-        for marker, value in protected.items():
-            if marker in token:
-                token = token.replace(marker, value)
-        tokens[index] = token
-    return tokens
-
-
-def _looks_like_flag(token: str) -> bool:
-    if token == "-" or not token.startswith("-"):
-        return False
-    try:
-        float(token)
-    except ValueError:
-        return True
-    return False
-
-
-def _parse_flags(text: Any) -> list[_Flag]:
-    """Parse long/unknown flags, equals forms, booleans, and JSON values."""
-
-    tokens = _shell_tokens(text)
-    flags: list[_Flag] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if not _looks_like_flag(token):
-            raise ValueError(f"server argument has no flag: {token!r}")
-        if "=" in token:
-            name, value = token.split("=", 1)
-            flags.append(_Flag(name, _canonical_value(value)))
-            index += 1
-            continue
-        value: Optional[str] = None
-        if index + 1 < len(tokens) and not _looks_like_flag(tokens[index + 1]):
-            value = _canonical_value(tokens[index + 1])
-            index += 1
-        flags.append(_Flag(token, value))
-        index += 1
-    return flags
-
-
-def _canonical_value(value: str) -> str:
-    stripped = value.strip()
-    if stripped[:1] in "[{" and stripped[-1:] in "]}":
-        try:
-            return json.dumps(
-                json.loads(stripped),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            )
-        except json.JSONDecodeError:
-            pass
-    return value
-
-
-def _flag_map(text: Any) -> "OrderedDict[str, _Flag]":
-    result: "OrderedDict[str, _Flag]" = OrderedDict()
-    for flag in _parse_flags(text):
-        result[flag.name] = flag
-    return result
-
-
-def _render_flags(flags: Iterable[_Flag]) -> str:
-    tokens: list[str] = []
-    for flag in flags:
-        tokens.append(flag.name)
-        if flag.value is not None:
-            tokens.append(flag.value)
-    return shlex.join(tokens)
 
 
 def _parse_env(value: Any) -> "OrderedDict[str, str]":
@@ -197,12 +68,21 @@ def _parse_env(value: Any) -> "OrderedDict[str, str]":
     if isinstance(value, Mapping):
         return OrderedDict((str(key), str(item)) for key, item in value.items())
     result: "OrderedDict[str, str]" = OrderedDict()
-    for token in _shell_tokens(value):
+    # Environment values are opaque strings, including any embedded JSON text.
+    for token in _shell_tokens(value, canonicalize_json=False):
         key, separator, item = token.partition("=")
         if not separator or not key:
             raise ValueError(f"environment entry must be KEY=VALUE: {token!r}")
         result[key] = item
     return result
+
+
+def resolve_unset_envs(names: Any, *environments: Any) -> tuple[str, ...]:
+    """Keep explicit removals that current assignments have not re-enabled."""
+    unsets = set(parse_unset_envs(names))
+    for env in environments:
+        unsets.difference_update(_parse_env(env))
+    return tuple(sorted(unsets))
 
 
 def _reconcile(
@@ -296,9 +176,11 @@ def resolve_effective_config(
 ) -> EffectiveConfig:
     """Resolve a handoff into one canonical argument string and environment.
 
-    For schema v2 the precedence is recipe, then ``server_launch_flags``, then
-    the reconciled current-best delta.  Schema v1 remains a legacy pass-through:
-    only its top-level accepted values are represented.
+    For schema v2 a nonempty ``server_launch_flags`` is the complete argument
+    base; the recipe supplies arguments only when that snapshot is unavailable.
+    Explicit ``args_mode=replace`` also suppresses recipe fallback when the
+    observed snapshot is unavailable. Removals precede current assignments.
+    Schema v1 is a legacy pass-through.
     """
 
     data = _load_handoff(handoff)
@@ -306,6 +188,8 @@ def resolve_effective_config(
     baseline = data.get("baseline_env_spec") or {}
     baseline_config = baseline.get("config") or {}
     legacy_server_args: Optional[str] = None
+    unset_envs: tuple[str, ...] = ()
+    remove_args: tuple[str, ...] = ()
 
     if schema_version < 2:
         # Do not canonicalise or merge old handoffs: legacy consumers forwarded
@@ -329,8 +213,16 @@ def resolve_effective_config(
             backend_args = raw_recipe_env.get(backend_arg_name, "")
             recipe_args = " ".join(part for part in (recipe_args, backend_args) if part)
 
-        recipe_flags = _flag_map(recipe_args)
         launch_flags = _flag_map(baseline_config.get("server_launch_flags", ""))
+        # A complete argv records removals by absence. Merging recipe-only flags
+        # would restore options the caller removed from its best configuration.
+        # Empty launch flags mean unavailable evidence in existing handoffs.
+        mode = str(baseline_config.get("args_mode") or "append").strip().lower()
+        if mode not in ("append", "replace"):
+            raise ValueError(f"unsupported args_mode: {mode!r}")
+        recipe_flags = (
+            _flag_map(recipe_args) if not launch_flags and mode != "replace" else OrderedDict()
+        )
         extra_flags = _flag_map(baseline_config.get("extra_server_args", ""))
         accepted_flags = _flag_map(data.get("accepted_flags", ""))
         delta_flags = _reconcile(
@@ -356,6 +248,16 @@ def resolve_effective_config(
             kind="server_flag",
             conflicts=conflicts,
         )
+        requested_removals = resolve_remove_args(baseline_config.get("remove_args"))
+        _remove_flags(final_flags, requested_removals)
+        remove_args = resolve_remove_args(requested_removals, _render_flags(delta_flags.values()))
+        for spec in sorted(set(requested_removals) - set(remove_args)):
+            flag = _parse_flags(spec)[0]
+            conflicts.append({
+                "kind": "server_flag", "key": flag.name,
+                "lower_source": "remove_args", "lower_value": spec,
+                "higher_source": "current_best_delta", "higher_value": delta_flags[flag.name].value,
+            })
         _merge_layer(
             final_flags,
             delta_flags,
@@ -365,10 +267,11 @@ def resolve_effective_config(
             conflicts=conflicts,
         )
 
+        removed_envs = parse_unset_envs(baseline_config.get("unset_envs"))
         recipe_env = OrderedDict(
             (key, value)
             for key, value in raw_recipe_env.items()
-            if key not in _ALL_RECIPE_ARG_ENVS
+            if key not in _ALL_RECIPE_ARG_ENVS and key not in removed_envs
         )
         extra_env = _parse_env(baseline_config.get("extra_envs", {}))
         accepted_env = _parse_env(data.get("accepted_env", ""))
@@ -391,6 +294,9 @@ def resolve_effective_config(
             kind="environment",
             conflicts=conflicts,
         )
+        # Absence in the map alone cannot clear inherited launcher settings.
+        # Explicit current assignments may re-add a previously removed name.
+        unset_envs = resolve_unset_envs(removed_envs, final_env)
         snapshots = copy.deepcopy(list(baseline.get("source_snapshots") or []))
         overlay = str(baseline.get("overlay_pythonpath") or "")
 
@@ -409,7 +315,15 @@ def resolve_effective_config(
         "base_overlay_pythonpath": overlay,
         "source_snapshots": snapshots,
         "conflicts": conflicts,
+        "remove_args": list(remove_args),
     }
+    source = baseline.get("source_materialization")
+    if schema_version >= 2 and isinstance(source, dict):
+        # Declaration only: run_e2e separately validates the materialized
+        # contents, and the serving process must establish observed identity.
+        manifest["source_materialization_sha256"] = source.get("manifest_sha256")
+    if unset_envs:
+        manifest["unset_envs"] = list(unset_envs)
     digest = hashlib.sha256(
         json.dumps(
             manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -423,6 +337,8 @@ def resolve_effective_config(
         conflicts=conflicts,
         digest=digest,
         manifest=manifest,
+        unset_envs=unset_envs,
+        remove_args=remove_args,
     )
 
 

@@ -77,6 +77,15 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Invalidate previous results before any preflight can fail. Reuse keeps its
+# existing proof until the validator has read and rechecked the live process.
+_run_artifacts="${OUT_DIR:-$(pwd)/e2e_bench_out}"
+mkdir -p "$_run_artifacts"
+rm -f "$_run_artifacts/bench_summary.json" "$_run_artifacts/server_start.json"
+if [ "${REUSE_SERVER:-0}" != "1" ]; then
+  rm -f "$_run_artifacts/server_args_validation.json"
+fi
+
 # ---- staged siblings ----
 # This script is COPIED into $EVAL_DIR (roles/director.md), so its helper libraries resolve from $HERE
 # first, then the skill dir.  Both are resolved up here, before anything is launched: discovering a
@@ -89,6 +98,25 @@ _stage_lookup() {   # _stage_lookup NAME -> print the first copy that exists; rc
   done
   return 1
 }
+
+# Staged source-bearing evaluations remain source-bearing even if a replayed
+# environment drops the request variable. This relocation-safe marker pins the
+# accepted manifest independently of environment forwarding.
+if [ -e "$HERE/source_manifest.sha256" ] || [ -L "$HERE/source_manifest.sha256" ]; then
+  _source_marker_helper="$(_stage_lookup source_runtime.py)"
+  _source_marker_rc=3
+  if [ -n "$_source_marker_helper" ]; then
+    python3 "$_source_marker_helper" check-request --request "${GEAK_SOURCE_REQUEST:-}" \
+      --expected-manifest "$HERE/source_manifest.sha256"
+    _source_marker_rc=$?
+  fi
+  if [ "$_source_marker_rc" -ne 0 ]; then
+    _source_failed_out="${OUT_DIR:-$(pwd)/e2e_bench_out}"
+    rm -f "$_source_failed_out/bench_summary.json" "$_source_failed_out/source_runtime/measurement.json"
+    echo '!!! staged_source_request_missing_or_mismatched' >&2
+    exit "$_source_marker_rc"
+  fi
+fi
 
 # Every lifecycle ends by writing bench_summary.json with bench_summarize.py.
 SUMMARIZE="$(_stage_lookup bench_summarize.py)"
@@ -218,6 +246,36 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
       OUT_DIR="$_attempt_dir" REPLICA_INDEX="$_replica" REPLICA_ATTEMPT="$_attempt" \
         bash "$_replica_runner"
       _rc=$?
+      if [ -n "${GEAK_SOURCE_REQUEST:-}" ] && [ "$_rc" -eq 43 ]; then
+        echo '!!! source_cleanup_unverified: stopping isolated replicas without retry.' >&2
+        exit 43
+      fi
+      if [ "$_rc" -ne 0 ] && python3 - "$_attempt_dir/server_args_validation.json" \
+        "$_attempt_dir/server_start.json" <<'PY'
+import json, sys
+failed = False
+for path in sys.argv[1:]:
+    try:
+        with open(path) as stream:
+            result = json.load(stream)
+    except (OSError, ValueError):
+        continue
+    if isinstance(result, dict) and result.get("status") == "failed":
+        failed = failed or path == sys.argv[1] or result.get("reason") == "server_args_unverified"
+raise SystemExit(0 if failed else 1)
+PY
+      then
+        # Writing the argv receipt can itself fail. The dispatcher still writes
+        # the structured startup rejection; preserve it and stop the whole leg
+        # rather than retrying or aggregating an earlier successful replica.
+        for _failure_file in server_args_validation.json server_start.json; do
+          if [ -f "$_attempt_dir/$_failure_file" ]; then
+            cp "$_attempt_dir/$_failure_file" "$_aggregate_out/$_failure_file"
+          fi
+        done
+        echo "!!! Isolated replica launch failed argument verification; no retry or aggregate gain." >&2
+        exit 2
+      fi
       if [ "$_rc" -eq 0 ] && python3 - "$_attempt_dir/bench_summary.json" "${EFFECTIVE_CONFIG_DIGEST:-}" <<'PY'
 import json, sys
 try:
@@ -595,6 +653,99 @@ fi
 source "$TEARDOWN_LIB"
 trap server_teardown EXIT
 
+# Source-bearing measurements require a fresh, owned serving group. Freeze the
+# request and authored overlay before launch; adapters prepend the generated
+# startup hook while retaining their ordinary package/overlay precedence.
+SOURCE_RUNTIME=""
+SOURCE_SERVER_LAUNCH_ATTEMPTED=0
+SOURCE_SERVER_CLEANUP_DONE=0
+SOURCE_SERVER_CLEANUP_RC=0
+if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
+  # Invalidate old throughput eligibility even if this launch is refused before
+  # the observer can prepare a new capsule.
+  rm -f "$OUT_DIR/bench_summary.json" "$OUT_DIR/source_runtime/measurement.json"
+  if [ "$REUSE_SERVER" = "1" ]; then
+    echo '!!! source_runtime_reused_server_unsupported: source verification requires a fresh owned launch.' >&2
+    exit 3
+  fi
+  SOURCE_RUNTIME="$(_stage_lookup source_runtime.py)"
+  if [ -z "$SOURCE_RUNTIME" ]; then
+    echo '!!! source_runtime.py is required for source-bearing serving launches.' >&2
+    exit 3
+  fi
+  GEAK_SOURCE_OBSERVATION_DIR="$(cd "$OUT_DIR" && pwd)/source_runtime"
+  GEAK_SOURCE_BOOTSTRAP_PYTHONPATH="$GEAK_SOURCE_OBSERVATION_DIR/bootstrap"
+  export PYTHONDONTWRITEBYTECODE=1
+  GEAK_ACCEPTED_SOURCE_PYTHONPATH=$(python3 "$SOURCE_RUNTIME" prepare \
+    --request "$GEAK_SOURCE_REQUEST" --output-dir "$GEAK_SOURCE_OBSERVATION_DIR" \
+    --overlay-pythonpath "$OVERLAY_PYTHONPATH") || exit "$?"
+  export GEAK_SOURCE_OBSERVATION_DIR GEAK_SOURCE_BOOTSTRAP_PYTHONPATH GEAK_ACCEPTED_SOURCE_PYTHONPATH
+fi
+source_runtime_gate() {
+  [ -n "$SOURCE_RUNTIME" ] || return 0
+  if [ "${SERVER_GROUP_UNVERIFIED:-1}" != "0" ]; then
+    echo '!!! source_runtime_unverified_server_group' >&2
+    return 3
+  fi
+  python3 "$SOURCE_RUNTIME" gate --output-dir "$GEAK_SOURCE_OBSERVATION_DIR" \
+    --pid "$SERVER_PID" --pgid "$SERVER_PGID" --start-ticks "$SERVER_START_TICKS" \
+    --base-url "$BASE_URL" --phase "$1" --timeout-sec "${GEAK_SOURCE_GATE_TIMEOUT_SEC:-30}"
+}
+source_runtime_teardown() {
+  if [ -n "$SOURCE_RUNTIME" ] && [ "$SOURCE_SERVER_LAUNCH_ATTEMPTED" = "1" ] \
+     && [ "$SOURCE_SERVER_CLEANUP_DONE" = "0" ]; then
+    SOURCE_SERVER_CLEANUP_DONE=1
+    local _pid="${SERVER_PID:-0}" _pgid="${SERVER_PGID:-0}" _ticks="${SERVER_START_TICKS:-0}"
+    case "$_pid" in ''|*[!0-9]*) _pid=0 ;; esac
+    case "$_pgid" in ''|*[!0-9]*) _pgid=0 ;; esac
+    case "$_ticks" in ''|*[!0-9]*) _ticks=0 ;; esac
+    python3 "$SOURCE_RUNTIME" teardown --request "$GEAK_SOURCE_REQUEST" \
+      --output-dir "$GEAK_SOURCE_OBSERVATION_DIR" --pid "$_pid" --pgid "$_pgid" --start-ticks "$_ticks" \
+      || SOURCE_SERVER_CLEANUP_RC=43
+    if [ "$SOURCE_SERVER_CLEANUP_RC" -ne 0 ]; then
+      rm -f "$OUT_DIR/bench_summary.json" "$GEAK_SOURCE_OBSERVATION_DIR/measurement.json"
+    fi
+  fi
+  server_teardown
+  return "$SOURCE_SERVER_CLEANUP_RC"
+}
+source_runtime_exit_cleanup() {
+  local _original=$?
+  source_runtime_teardown || exit 43
+  exit "$_original"
+}
+[ -z "$SOURCE_RUNTIME" ] || trap source_runtime_exit_cleanup EXIT
+
+# Guards can reject before launching, or while reusing a server whose receipt
+# cannot be rewritten. Preserve that terminal rejection independently of the
+# receipt so isolated aggregation and interrupted-run recovery cannot salvage
+# an earlier gain. These paths did not wait for a fresh launch, hence zero times.
+_server_args_guard_failed() {
+  python3 - "$1" "$PORT" "$BACKEND" "$LOG" > "$OUT_DIR/server_start.json" <<'PY'
+import json, sys
+print(json.dumps({
+    "status": "failed", "reason": "server_args_unverified", "phase_hint": sys.argv[1],
+    "wait_sec": 0, "ceiling_sec": 0, "stall_window_sec": 0,
+    "port": sys.argv[2], "backend": sys.argv[3], "log": sys.argv[4],
+}))
+PY
+}
+
+_active_remove_args='[]'
+if [ -n "${GEAK_REMOVE_ARGS:-}" ]; then
+  _server_args_validator="$HERE/adapters/server_args.py"
+  if [ ! -f "$_server_args_validator" ]; then
+    echo "!!! Stage adapters/server_args.py with bench_e2e.sh to verify GEAK_REMOVE_ARGS." >&2
+    _server_args_guard_failed "Missing staged argument validator"
+    exit 3
+  fi
+  if ! _active_remove_args="$(python3 "$_server_args_validator" resolve \
+    --remove-args="$GEAK_REMOVE_ARGS" --current-args="$EXTRA_SERVER_ARGS")"; then
+    _server_args_guard_failed "Invalid argument-removal controls"
+    exit 2
+  fi
+fi
+
 # ---- serving-GPU mutex ----
 # TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
 # Profiler / config-sweep / integrate ref·cand / validation all share it, so
@@ -624,6 +775,7 @@ if [ "$REUSE_SERVER" != "1" ]; then
 
   _up=0; _reason=""
   echo ">>> Launching $BACKEND server (log: $LOG) ..."
+  SOURCE_SERVER_LAUNCH_ATTEMPTED=1
   adapter_launch
   if [ -z "${SERVER_PID:-}" ]; then echo "!!! adapter_launch did not set SERVER_PID"; exit 2; fi
   # Freeze the server's process identity NOW (pid, pgid, /proc start time) so the
@@ -651,6 +803,16 @@ if [ "$REUSE_SERVER" != "1" ]; then
     sleep 5
   done
   _waited=$((SECONDS-_t0))
+  if [ "$_up" = "1" ] && [ "$_active_remove_args" != '[]' ]; then
+    if ! python3 "$_server_args_validator" validate \
+      --pid "$SERVER_PID" --start-ticks "$SERVER_START_TICKS" \
+      --backend "$BACKEND" --host "$HOST" --port "$PORT" \
+      --remove-args="$GEAK_REMOVE_ARGS" --current-args="$EXTRA_SERVER_ARGS" \
+      --receipt "$OUT_DIR/server_args_validation.json"; then
+      _up=0
+      _reason="server_args_unverified"
+    fi
+  fi
   if [ "$_up" = "1" ]; then
     echo ">>> Server up after ~${_waited}s."
   else
@@ -663,7 +825,8 @@ if [ "$REUSE_SERVER" != "1" ]; then
         fi ;;
     esac
     echo "!!! Server did not come up (reason=$_reason) after ~${_waited}s. Last log:"; tail -n 60 "$LOG"
-    server_teardown; SERVER_PID=""
+    source_runtime_teardown || true
+    SERVER_PID=""
   fi
   # Structured outcome, ALWAYS written (success too), so a failed start is a REASON downstream can
   # read rather than an empty task dir that looks like "authored and found no gain".
@@ -676,12 +839,24 @@ if [ "$REUSE_SERVER" != "1" ]; then
     echo "!!! Server start FAILED (reason=$_reason) — see $OUT_DIR/server_start.json" >&2
     [ "$_reason" = "ceiling_exceeded" ] && \
       echo "    Still progressing at the ${CEILING}s backstop; raise it with SERVER_STARTUP_TIMEOUT_SEC." >&2
+    [ "$SOURCE_SERVER_CLEANUP_RC" -eq 0 ] || exit 43
     exit 2
   fi
 else
   echo ">>> Reusing warm server at $BASE_URL"
+  if [ "$_active_remove_args" != '[]' ]; then
+    if ! python3 "$_server_args_validator" validate-reuse \
+      --launch-receipt "${GEAK_SERVER_ARGS_RECEIPT:-$OUT_DIR/server_args_validation.json}" \
+      --backend "$BACKEND" --host "$HOST" --port "$PORT" \
+      --remove-args="$GEAK_REMOVE_ARGS" --current-args="$EXTRA_SERVER_ARGS" \
+      --receipt "$OUT_DIR/server_args_validation.json"; then
+      _server_args_guard_failed "Reused server argument proof failed"
+      exit 2
+    fi
+  fi
   adapter_health >/dev/null 2>&1 || { echo "!!! No healthy server at $BASE_URL"; exit 2; }
 fi
+source_runtime_gate prepared || exit "$?"
 
 # ---- overlay resident-memory parity guard (only when an overlay is active) ----
 # An authored kernel that builds a PERSISTENT dequant/shuffle cache inflates resident VRAM beyond the
@@ -768,6 +943,7 @@ fi
 : > "$RESULT_JSONL"
 
 # ---- timed repeats ----
+source_runtime_gate ready || exit "$?"
 _bench_failed=0
 for r in $(seq 1 "$REPEATS"); do
   echo ">>> Bench repeat $r/$REPEATS ..."
@@ -865,6 +1041,16 @@ PY
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----
+source_runtime_gate finished || exit "$?"
 python3 "$SUMMARIZE" from-runs "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL"
+_summary_rc=$?
+if [ -n "$SOURCE_RUNTIME" ]; then
+  [ "$_summary_rc" = "0" ] || exit "$_summary_rc"
+  # Profile/capture-only invocations and cold diagnostic columns are not hot
+  # throughput measurements covered by the ready-to-finished interval.
+  if [ "$REPEATS" -gt 0 ]; then
+    python3 "$SOURCE_RUNTIME" seal-measurement --output-dir "$GEAK_SOURCE_OBSERVATION_DIR" || exit 3
+  fi
+fi
 
 echo ">>> Done. Summary: $OUT_DIR/bench_summary.json"

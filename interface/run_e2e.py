@@ -45,13 +45,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_launch_import_path = sys.path[:]
 try:
-    # Package import under pytest / module use.
-    from interface.effective_config import resolve_effective_config
-except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
-    from effective_config import resolve_effective_config
+    if not __package__:  # Direct: python interface/run_e2e.py ...
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from e2e_workflow.scripts.adapters.extra_env import parse_unset_envs
+    from e2e_workflow.scripts.runtime_csv import verify_runtime_tuning
+    from interface.effective_config import (
+        resolve_effective_config,
+        resolve_remove_args,
+        resolve_unset_envs,
+    )
+    from interface.source_bundle import (
+        stage_source_bundle,
+        stage_source_replay_launcher,
+    )
+    from interface.source_materialization import (
+        SourceMaterializationError,
+        validate_source_materialization,
+    )
+    from interface.source_measurement import verify_normalized_source_measurements
+finally:
+    sys.path[:] = _launch_import_path
+del _launch_import_path
 
 SCHEMA_VERSION = 2
+# Literal capability read by upstream callers before sending accepted source.
+# Version 1 includes staging, guarded measurement, teardown proof and replay.
+SOURCE_MATERIALIZATION_SCHEMA_VERSION = 1
 KERNEL_JOURNEY_SCHEMA_VERSION = 1
 E2E_CHECKPOINT_SCHEMA_VERSION = 2
 E2E_CHECKPOINT_FILE = "e2e_validation.json"
@@ -397,14 +418,20 @@ def map_args(
 ) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
+    baseline_spec = h.get("baseline_env_spec")
+    if isinstance(baseline_spec, dict) and (
+        baseline_spec.get("source_snapshots") or baseline_spec.get("source_materialization") is not None
+    ) and int(h.get("schema_version", 1) or 1) < 2:
+        raise SourceMaterializationError("source_requires_handoff_schema_v2")
     effective = None
+    if int(h.get("schema_version", 1) or 1) >= 2 and not isinstance(h.get("baseline_env_spec"), dict):
+        print("WARNING: schema >= 2 handoff lacks baseline_env_spec; launch controls cannot be resolved", file=sys.stderr)
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
     ):
-        # Schema-v2 is authoritative: launch_recipe < complete resolved
-        # server_launch_flags < reconciled current-best delta.  The resolver
-        # canonicalises flag spellings so a key appears once and refuses
-        # contradictory extra_server_args vs accepted_flags/env.
+        # Schema-v2 uses complete server_launch_flags when available, otherwise
+        # recipe args, then the reconciled current-best delta. The resolver
+        # canonicalises flags and refuses contradictory extra/accepted values.
         effective = resolve_effective_config(h)
     initial_server_args = (
         effective.final_server_args
@@ -420,19 +447,12 @@ def map_args(
         else (h.get("accepted_env", "") or "")
     )
     initial_overlay = ""
+    materialized_source = None
     if effective is not None:
-        # Prefer a materialized aggregate overlay.  When Hyperloom only emitted
-        # source snapshots, later accepted snapshots precede earlier ones so
-        # Python resolves the newest current-best source first.
-        overlay_parts = [effective.base_overlay_pythonpath]
-        overlay_parts.extend(
-            str(snapshot.get("snapshot_dir") or "")
-            for snapshot in reversed(effective.source_snapshots)
-            if isinstance(snapshot, dict) and snapshot.get("reproducible")
-        )
-        initial_overlay = ":".join(
-            dict.fromkeys(part for part in overlay_parts if part)
-        )
+        # Source snapshots are sparse provenance, not import roots. Keep their
+        # complete materialization separate from authored startup overlays.
+        materialized_source = validate_source_materialization(h["baseline_env_spec"])
+        initial_overlay = effective.base_overlay_pythonpath
     # gpu_ids is the optimization-parallelism pool AND the serving device set.
     # Default to 0..tp-1 so serving honours the requested tensor-parallel size.
     gpu_ids = h.get("gpu_ids") or ",".join(str(i) for i in range(max(tp, 1)))
@@ -481,6 +501,11 @@ def map_args(
     }
     if effective is not None:
         ps_args["effective_config_digest"] = effective.digest
+        ps_args["initial_args_mode"] = "replace"
+        ps_args["initial_env_complete"] = True
+        ps_args["initial_remove_args"] = list(effective.remove_args)
+        if effective.unset_envs:
+            ps_args["initial_unset_envs"] = list(effective.unset_envs)
     # Forward the orchestrator's HARD wall-clock budget (the same timeout_s this
     # runner enforces via anyio.fail_after / subprocess timeout) so the JS
     # workflow can self-pace and FINISH (Finalize/Report/Validate + workflow_return
@@ -573,6 +598,15 @@ def map_args(
         run_id = uuid.uuid4().hex[:8]
         eval_dir = str(Path(h["exp_root"]) / f"e2e_{model_name}_{ts}_{run_id}Z")
     ps_args["eval_dir"] = eval_dir
+    if materialized_source is not None:
+        ps_args["baseline_source_request"] = {
+            "schema_version": 1,
+            "source_snapshots": [{"id": item} for item in materialized_source.required_layer_ids],
+            "source_materialization": h["baseline_env_spec"]["source_materialization"],
+        }
+        ps_args["baseline_source_pythonpath"] = os.pathsep.join(
+            materialized_source.pythonpath_prefixes
+        )
     # Keep the JS live-path implausible-speedup guard and THIS runner's recovery
     # path on ONE margin: forward the (validated) Python value so the workflow's
     # A.implausible_speedup_margin can never silently drift from the constant the
@@ -591,6 +625,49 @@ def map_args(
     if tl_paths:
         ps_args["tracelens"] = tl_paths
     return ps_args
+
+
+_SOURCE_RUN_ENV = frozenset({
+    "GEAK_SOURCE_REQUEST", "GEAK_SOURCE_OBSERVATION_DIR",
+    "GEAK_SOURCE_BOOTSTRAP_PYTHONPATH", "GEAK_ACCEPTED_SOURCE_PYTHONPATH",
+})
+
+
+def prepare_baseline_source(ps_args: dict) -> dict:
+    """Stage an exact helper/source closure before any agent can benchmark."""
+    for key in _SOURCE_RUN_ENV:
+        os.environ.pop(key, None)
+    request = ps_args.get("baseline_source_request")
+    if request is None:
+        return {}
+    ps_args["eval_dir"] = str(Path(ps_args["eval_dir"]).absolute())
+    names = (
+        "bench_e2e.sh", "bench_replica.sh", "server_teardown.sh", "bench_summarize.py",
+        "source_paths.sh", "source_runtime.py", "parse_profile.py",
+        "adapters/sglang.sh", "adapters/vllm.sh",
+        "adapters/clients/inferencex.sh", "adapters/clients/agentx.sh", "adapters/launchers/magpie.sh",
+    )
+    assets = {name: BENCH_SCRIPT.parent / name for name in names}
+    assets["source_materialization.py"] = INTERFACE_DIR / "source_materialization.py"
+    staged = stage_source_bundle(request, Path(ps_args["eval_dir"]), assets)
+    os.environ["GEAK_SOURCE_REQUEST"] = staged["request_path"]
+    os.environ["GEAK_ACCEPTED_SOURCE_PYTHONPATH"] = staged["pythonpath"]
+    ps_args["baseline_source_request_path"] = staged["request_path"]
+    ps_args["baseline_source_pythonpath"] = staged["pythonpath"]
+    return staged
+
+
+def _emit_source_preparation_error(result_path: Path, error: Exception) -> int:
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=result_path.parent,
+                                     encoding="utf-8", delete=False) as stream:
+        json.dump({"schema_version": SCHEMA_VERSION, "status": "error",
+                   "error_class": "unresolved_baseline_source", "error": str(error)}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(stream.name, result_path)
+    sys.stderr.write(str(error) + "\n")
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -952,7 +1029,7 @@ _RECIPE_ENV_GEAK_OWNED = frozenset({
     # an outer ROCR mask is already set — see magpie.sh).
     "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
     "VLLM_TORCH_PROFILER_DIR", "SGLANG_TORCH_PROFILER_DIR",
-})
+}) | _SOURCE_RUN_ENV
 
 
 # A shell environment-variable name: a leading letter/underscore then word
@@ -1501,17 +1578,27 @@ def apply_bench_launcher(h: dict) -> str:
     else:
         launcher = "native"
     os.environ["BENCH_LAUNCHER"] = launcher
+    effective = None
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
     ):
-        # initial_extra_server_args was resolved from the COMPLETE server argv,
-        # including the recipe layer.  Tell the Magpie adapter not to prepend
-        # its recipe EXTRA_<BACKEND>_ARGS a second time. This remains true when
-        # server_launch_flags is empty: the resolver still folded recipe args
-        # into the canonical result.
+        # The resolver selected the complete server argv or its recipe fallback.
+        # Tell Magpie not to prepend recipe EXTRA_<BACKEND>_ARGS again, which
+        # could restore flags intentionally absent from the complete argv.
         os.environ["EFFECTIVE_SERVER_ARGS_COMPLETE"] = "1"
+        effective = resolve_effective_config(h)
     else:
         os.environ.pop("EFFECTIVE_SERVER_ARGS_COMPLETE", None)
+    # Inherited by every benchmark process, including staged native adapters.
+    # Empty controls clear a previous handoff's explicit removals.
+    if effective is not None and effective.unset_envs:
+        os.environ["GEAK_UNSET_ENVS"] = json.dumps(list(effective.unset_envs))
+    else:
+        os.environ.pop("GEAK_UNSET_ENVS", None)
+    if effective is not None and effective.remove_args:
+        os.environ["GEAK_REMOVE_ARGS"] = json.dumps(list(effective.remove_args))
+    else:
+        os.environ.pop("GEAK_REMOVE_ARGS", None)
 
     # Magpie's script defaults max-model-len to a value of its own (4096) that
     # has nothing to do with this run, and the orchestrator overrode it via env
@@ -1527,6 +1614,11 @@ def apply_bench_launcher(h: dict) -> str:
     # truth (vLLM and ATOM do not necessarily share the same default).
     if launcher == "magpie":
         replay, owned = _recipe_launch_env(h)
+        if effective is not None:
+            # The original recipe also has an independent launcher replay path.
+            removed = [key for key in effective.unset_envs if key in replay]
+            replay = {key: value for key, value in replay.items() if key not in removed}
+            owned = sorted(set(owned) | set(removed))
         _export_recipe_env(h, replay, owned, source)
 
         try:
@@ -1550,7 +1642,9 @@ def apply_bench_launcher(h: dict) -> str:
             # Cleared so the launcher's own MAX_MODEL_LEN pass-through cannot
             # land on top of the replayed value.
             os.environ.pop("MAX_MODEL_LEN", None)
-        elif max_model_len > 0:
+        elif max_model_len > 0 and not (
+            effective is not None and "MAX_MODEL_LEN" in effective.unset_envs
+        ):
             os.environ["MAX_MODEL_LEN"] = str(max_model_len)
     return launcher
 
@@ -2934,8 +3028,8 @@ def _patch_has_hunks(path: Path) -> bool:
 
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# Shell control characters. A value carrying one of these is not a value: it is
-# a fragment of the launch script that leaked into the assignment string.
+# Unquoted shell control characters identify leaked launch-script fragments.
+# Quoted or escaped occurrences belong to the literal environment value.
 _ENV_VALUE_SHELL_CHARS = ";&|<>()`"
 
 
@@ -2948,9 +3042,9 @@ def _parse_env_assignments(env: str) -> tuple[dict, list]:
     variables — which is exactly how ``EXTRA_ENV=").", RUN_EVAL="true;",
     BACKEND="sglang;"`` reached a downstream rebench.
 
-    So GEAK does the split once and publishes the result: a key must be a real
-    identifier, a value must be free of shell control characters, and a trailing
-    ``;`` (a statement separator the line-joining left behind) is stripped first.
+    GEAK splits once while retaining lexical quoting: a key must be a real
+    identifier, quoted/escaped values stay opaque, and only unquoted ``;``
+    separates assignments. Other unquoted shell control characters are rejected.
     Anything that still fails goes to the reject list rather than being dropped,
     so a consumer can see the string was lossy instead of trusting a map that
     quietly lost a variable.
@@ -2961,29 +3055,68 @@ def _parse_env_assignments(env: str) -> tuple[dict, list]:
     if not text:
         return ok, rejected
     try:
-        tokens = shlex.split(text)
+        lexer = shlex.shlex(text, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = []
+        while True:
+            start = lexer.instream.tell()
+            token = lexer.get_token()
+            if token is None:
+                break
+            tokens.append((token, text[start:lexer.instream.tell()]))
     except ValueError:
-        tokens = text.split()
+        # Retain legacy recovery when the snapshot itself has broken quoting;
+        # no fragment from that fallback receives quoted-literal privileges.
+        tokens = [(token, None) for token in text.split()]
 
-    def _pair(piece: str) -> tuple[str, str] | None:
+    def _pair(piece: str, *, check_shell: bool) -> tuple[str, str] | None:
         key, sep, value = piece.partition("=")
         if (
             sep
-            and _ENV_KEY_RE.match(key)
-            and not any(c in value for c in _ENV_VALUE_SHELL_CHARS)
+            and _ENV_KEY_RE.fullmatch(key)
+            and (not check_shell or not any(c in value for c in _ENV_VALUE_SHELL_CHARS))
         ):
             return key, value
         return None
 
-    for token in tokens:
+    def _quoted_pairs(raw: str) -> list[tuple[str, str] | None]:
+        quote = ""
+        escaped = False
+        start = 0
+        pieces = []
+        for index, char in enumerate(raw):
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "'":
+                escaped = True
+            elif quote:
+                if char == quote:
+                    quote = ""
+            elif char in "\"'":
+                quote = char
+            elif char == ";":
+                pieces.append(raw[start:index])
+                start = index + 1
+            elif char in _ENV_VALUE_SHELL_CHARS:
+                return [None]
+        pieces.append(raw[start:])
+        pairs = []
+        for piece in pieces:
+            if piece.strip():
+                words = shlex.split(piece)
+                pairs.append(_pair(words[0], check_shell=False) if len(words) == 1 else None)
+        return pairs
+
+    for token, raw in tokens:
         if not token.strip():
             continue
         # One token can hold several assignments joined by ``;`` — a
         # launch-script line that never got re-split. Take the whole token only
         # if EVERY piece of it is a well-formed assignment, so a half-parsed
         # fragment is quarantined whole instead of contributing half a truth.
-        pieces = [p for p in token.split(";") if p.strip()]
-        pairs = [_pair(p) for p in pieces]
+        pairs = (_quoted_pairs(raw) if raw is not None else
+                 [_pair(piece, check_shell=True) for piece in token.split(";") if piece.strip()])
         if pairs and all(p is not None for p in pairs):
             ok.update(dict(pairs))  # type: ignore[arg-type]
         else:
@@ -3003,6 +3136,10 @@ def _accepted_config_with_env_map(config: dict) -> dict:
     out = dict(config)
     env_map, rejected = _parse_env_assignments(out.get("env"))
     out["env_map"] = env_map
+    if "remove_args" in out:
+        out["remove_args"] = list(resolve_remove_args(out["remove_args"], out.get("flags")))
+    if "unset_envs" in out:
+        out["unset_envs"] = list(resolve_unset_envs(out["unset_envs"], env_map))
     if rejected:
         out["env_unparsed"] = rejected
     return out
@@ -3073,8 +3210,32 @@ def _same_session_baseline(
     return 0.0, ""
 
 
+def _final_server_args_failure(eval_dir: Path, wf: dict) -> str | None:
+    """A conclusive final launch rejection outranks carried/intermediate wins."""
+    validation = _read_json(eval_dir / "director_e2e_validation.json")
+    if (wf.get("validation_status") == "server_args_unverified"
+            or (isinstance(validation, dict)
+                and validation.get("validation_status") == "server_args_unverified")):
+        return "Final server launch failed argument verification; refusing carried throughput"
+    for leg in ("base", "final"):
+        startup_path = eval_dir / "validation" / leg / "server_start.json"
+        startup = _read_json(startup_path)
+        if (isinstance(startup, dict) and startup.get("status") == "failed"
+                and startup.get("reason") == "server_args_unverified"):
+            return f"Final {leg} launch failed argument verification: {startup_path}"
+        proof_path = eval_dir / "validation" / leg / "server_args_validation.json"
+        proof = _read_json(proof_path)
+        if (isinstance(proof, dict)
+                and proof.get("schema_version") == "geak.server_args_validation.v1"
+                and proof.get("status") == "failed"):
+            return f"Final {leg} launch failed argument verification: {proof_path}"
+    return None
+
+
 def normalize_result(h: dict, wf: dict) -> dict:
     eval_dir = Path(wf["eval_dir"])
+    if failure := _final_server_args_failure(eval_dir, wf):
+        raise ValueError(failure)
     validation = _read_json(eval_dir / "director_e2e_validation.json")
     baseline_summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
     final_summary = _read_json(eval_dir / "validation" / "final" / "bench_summary.json")
@@ -3602,6 +3763,29 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "recovery": wf.get("recovery_evidence") or None,
     }
 
+    accepted_config = _accepted_config_with_env_map(wf.get("accepted_config") or {})
+    if wf.get("recovered_from_disk"):
+        # Disk evidence can reconstruct assignments without restating the
+        # explicit removals inherited by the run. Preserve that known seed;
+        # do not infer complete argv from a recovered argument string.
+        phases = {part.strip() for part in str(h.get("phases") or "all").split(",")}
+        if phases.intersection({"all", "setup"}):
+            seed = (h.get("baseline_env_spec") or {}).get("config") or {}
+            unsets = set(resolve_unset_envs(
+                seed.get("unset_envs"), seed.get("extra_envs"), h.get("accepted_env"),
+            )) if int(h.get("schema_version", 1) or 1) >= 2 else set()
+        else:
+            seed = h.get("state") or {}
+            unsets = set(resolve_unset_envs(seed.get("unset_envs"), seed.get("env")))
+        removals = (*resolve_remove_args(seed.get("remove_args")),
+                    *resolve_remove_args(accepted_config.get("remove_args")))
+        accepted_config["remove_args"] = list(resolve_remove_args(removals, accepted_config.get("flags")))
+        unsets.update(parse_unset_envs(accepted_config.get("unset_envs")))
+        unsets.difference_update(accepted_config["env_map"])
+        if unsets:
+            accepted_config["unset_envs"] = sorted(unsets)
+        else:
+            accepted_config.pop("unset_envs", None)
     result = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
@@ -3654,7 +3838,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # What the kernel phase actually did (req: report must carry this).
         "accepted_kernels": wf.get("accepted_kernels") or [],
         "accepted_heads": wf.get("accepted_heads") or [],
-        "accepted_config": _accepted_config_with_env_map(wf.get("accepted_config") or {}),
+        "accepted_config": accepted_config,
         # Self-describing baseline measurement-protocol + Hyperloom cross-check (see baseline_basis above).
         "baseline_basis": baseline_basis,
         # Reliability classification is independent of the optimization status.
@@ -3687,8 +3871,55 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # ADDITIVE ONLY. Appended after the dict above is complete so it is self-evident at review time that
     # no existing key is touched, and omitted entirely when the phase did not run.
     tuning_section = _tuning_skillset_section(wf, eval_dir)
+    if tuning_section is not None and tuning_section.get("gate") == "accepted" and tuning_section.get("runtime_csv_manifests"):
+        runtime_csvs = verify_runtime_tuning(tuning_section, eval_dir, accepted_config["env_map"])
+        if runtime_csvs:
+            tuning_section["runtime_csvs"] = runtime_csvs
     if tuning_section is not None:
         result["tuning_skillset"] = tuning_section
+    baseline_spec = h.get("baseline_env_spec") or {}
+    if baseline_spec.get("source_materialization") or baseline_spec.get("source_snapshots"):
+        descriptor = baseline_spec.get("source_materialization") or {}
+        source_evidence = verify_normalized_source_measurements(
+            h.get("_geak_source_request_path", ""),
+            eval_dir=eval_dir,
+            result_source=result_source,
+            baseline_basis_source=baseline_basis_source,
+            setup_tput=setup_baseline,
+            baseline_tput=geak_baseline,
+            final_tput=final_tput_out,
+            expected_manifest_sha256=descriptor.get("manifest_sha256"),
+            expected_required_layer_ids=descriptor.get("required_layer_ids"),
+            expected_setup_overlay=str(baseline_spec.get("overlay_pythonpath") or ""),
+            expected_baseline_overlay=str(baseline_spec.get("overlay_pythonpath") or ""),
+            expected_final_overlay=result["final_overlay"],
+        )
+        if source_evidence["status"] == "verified" and result["status"] == "ok":
+            try:
+                result["final_launch_script"] = stage_source_replay_launcher(
+                    Path(h["_geak_source_request_path"]), eval_dir, Path(final_launch)
+                )
+                source_evidence["replay_status"] = "staged"
+            except SourceMaterializationError as exc:
+                source_evidence["replay_status"] = "unavailable"
+                source_evidence["replay_error"] = str(exc)
+        if source_evidence["status"] != "verified" or source_evidence.get("replay_status") == "unavailable":
+            # Retain the exact diagnostic result, including negative outcomes,
+            # without exposing any of its measurements as eligible for adoption.
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "status": "error",
+                "error_class": "unresolved_baseline_source",
+                "error": source_evidence.get("replay_error") or source_evidence["reason"],
+                "eval_dir": str(eval_dir),
+                "source_measurement": source_evidence,
+                "unverified_source_result": result,
+            }
+        result["source_measurement"] = source_evidence
+        result["source_attribution"] = {
+            "status": "unavailable",
+            "reason": "per_candidate_source_measurements_not_bound",
+        }
     return result
 
 
@@ -3711,6 +3942,10 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
     caller that reproduces the bundle by hand needs to know the deploy step exists.
     """
     t = wf.get("tuning_skillset")
+    if not isinstance(t, dict):
+        persisted = _read_json(eval_dir / TUNING_RESULT_FILE)
+        if persisted:
+            t = {"enabled": True, "ran": True, **persisted}
     if not isinstance(t, dict) or not t.get("enabled"):
         return None
     if not t.get("ran"):
@@ -3777,6 +4012,8 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
 
     if accepted:
         section["artifacts"] = t.get("artifacts") or []
+        if t.get("runtime_csv_manifests"):
+            section["runtime_csv_manifests"] = t["runtime_csv_manifests"]
         section["apply_env"] = t.get("apply_env") or ""
         section["apply_flags"] = t.get("apply_flags") or ""
         section["cache_invalidation"] = t.get("cache_invalidation") or []
@@ -3807,6 +4044,15 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
                 else str(eval_dir / "final" / "tuning" / "deploy.sh")
             ),
         }
+        if section.get("runtime_csv_manifests") and not section["live_tree_files"] and not section["cache_invalidation"]:
+            section["deploy_bundle"] = t.get("deploy_bundle") or ""
+            section["reaches_production_via"] = {
+                "note": "Complete immutable CSV tables travel through the accepted AITER_CONFIG environment. Each arm selects its own table; no installed-tree writes or shared cache invalidation are required.",
+                "runtime_csv_manifests": section["runtime_csv_manifests"],
+                "final_patch_includes_tuning": False,
+                "final_launch_runs_deploy": False,
+                "deploy_script": "",
+            }
     return section
 
 
@@ -4101,6 +4347,8 @@ def _kb_write_back(eval_dir: Path, wf: dict, ps_args: dict) -> dict:
     """
     if str(os.environ.get("GEAK_E2E_KB_WRITE_BACK", "1")).strip().lower() in ("0", "false", "no"):
         return {"skipped": True, "why": "GEAK_E2E_KB_WRITE_BACK is off"}
+    if failure := _final_server_args_failure(eval_dir, wf):
+        return {"skipped": True, "why": failure}
     if (eval_dir / KB_WRITE_FILE).exists():
         return {"skipped": True, "why": "workflow already wrote (kb_write.json present)"}
     identity = _read_json(eval_dir / KB_IDENTITY_FILE)
@@ -6395,8 +6643,16 @@ def _write_kernel_journey(eval_dir: Path, wf: dict | None, normalized: dict) -> 
     ``kernel_journey_error`` instead of letting it pass silently.
     """
     try:
-        journey = build_kernel_journey(wf, normalized) if wf is not None \
+        journey = build_kernel_journey(wf, normalized) if (
+            wf is not None and normalized.get("error_class") != "unresolved_baseline_source"
+            and not normalized.get("source_measurement")
+        ) \
             else _empty_journey(eval_dir, normalized)
+        if normalized.get("source_measurement"):
+            journey["source_attribution"] = {
+                "status": "unavailable",
+                "reason": "per_candidate_source_measurements_not_bound",
+            }
     except Exception:  # full build failed: degrade to a valid empty journey.
         journey = _empty_journey(eval_dir, normalized)
     eval_dir.mkdir(parents=True, exist_ok=True)
@@ -6416,6 +6672,32 @@ def _md_table(rows: list[tuple[str, Any]]) -> str:
     return "\n".join(out)
 
 
+def _source_measurement_report_section(normalized: dict) -> str:
+    source = normalized.get("source_measurement") or {}
+    if not source:
+        return ""
+    eligible = (
+        source.get("status") == "verified"
+        and normalized.get("status") in {"ok", "no_gain"}
+        and source.get("replay_status") != "unavailable"
+    )
+    return "\n".join([
+        "<!-- GEAK_SOURCE_MEASUREMENT_BEGIN -->",
+        "## Accepted-source verification", "",
+        ("The selected hot measurement rounds have verified source observations."
+         if eligible else
+         "**No gain is eligible for adoption: source measurement or replay verification is unavailable.**"),
+        "",
+        f"- Serving-source measurement: `{source.get('status')}`",
+        f"- Replay: `{source.get('replay_status') or 'not required'}`",
+        f"- Detail: `{source.get('replay_error') or source.get('reason')}`",
+        ("- Proof covers the selected hot rounds and observed guarded Python processes."
+         if eligible else
+         "- Claimed measurements and configuration remain in `unverified_source_result` as diagnostics."),
+        "<!-- GEAK_SOURCE_MEASUREMENT_END -->",
+    ])
+
+
 def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
     """Render a final report from the normalized result + on-disk recovery.
 
@@ -6423,6 +6705,12 @@ def _render_synthesized_final_report(normalized: dict, wf: dict | None) -> str:
     budget left is the flush grace, so it must never hang. A dump of recovered
     numbers, not an analysis — the banner says so.
     """
+    if normalized.get("error_class") == "unresolved_baseline_source":
+        return (
+            "# GEAK e2e — source verification unavailable\n\n"
+            + _source_measurement_report_section(normalized)
+            + "\n\nRaw workflow artifacts are preserved. No accepted gain or kernel attribution is published.\n"
+        )
     status = str(normalized.get("status") or "unknown")
     speedup = normalized.get("throughput_speedup")
     kernels = normalized.get("accepted_kernels") or []
@@ -6514,12 +6802,23 @@ def _write_final_report_fallback(eval_dir: Path, normalized: dict,
     existing path — the architect's report is never overwritten.
     """
     existing = _existing_report_path(eval_dir)
-    if existing:
+    source_section = _source_measurement_report_section(normalized)
+    if existing and not source_section:
         return existing
-    path = eval_dir / FINAL_REPORT_FILE
+    path = Path(existing) if existing else eval_dir / FINAL_REPORT_FILE
     eval_dir.mkdir(parents=True, exist_ok=True)
+    original = path.read_text(encoding="utf-8") if existing else ""
+    text = original if existing else _render_synthesized_final_report(normalized, wf)
+    if source_section:
+        text = _upsert_marked_markdown_section(
+            text, source_section,
+            begin_marker="<!-- GEAK_SOURCE_MEASUREMENT_BEGIN -->",
+            end_marker="<!-- GEAK_SOURCE_MEASUREMENT_END -->",
+        )
+    if existing and text == original:
+        return existing
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(_render_synthesized_final_report(normalized, wf), encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)  # atomic: a kill mid-write never yields a partial file
     return str(path)
 
@@ -6628,16 +6927,26 @@ def main(argv: list[str]) -> int:
     if not h:
         sys.stderr.write(f"empty/invalid handoff: {handoff_path}\n")
         return 2
+    # The runner binds this private value only after its own successful staging.
+    h.pop("_geak_source_request_path", None)
 
     try:
         artifact_cutoff_ts = handoff_path.stat().st_mtime
     except OSError:
         artifact_cutoff_ts = None
-    ps_args = map_args(
-        h,
-        timeout_s,
-        artifact_cutoff_ts=artifact_cutoff_ts,
-    )
+    try:
+        ps_args = map_args(
+            h,
+            timeout_s,
+            artifact_cutoff_ts=artifact_cutoff_ts,
+        )
+        if ps_args.get("baseline_source_request"):
+            # Recipe export prefers h.eval_dir. Canonicalize both owners before
+            # export so changing into the workflow/evaluation directory cannot
+            # silently make the recorded recipe environment disappear.
+            h["eval_dir"] = ps_args["eval_dir"] = str(Path(ps_args["eval_dir"]).absolute())
+    except SourceMaterializationError as exc:
+        return _emit_source_preparation_error(result_path, exc)
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]
@@ -6655,6 +6964,14 @@ def main(argv: list[str]) -> int:
     workload_preflight = agentx_preflight(h)
     bench_protocol = apply_bench_protocol(h)
     alignment_flags = apply_alignment_flags(h)
+    if "--dry-run" not in flags:
+        try:
+            staged_source = prepare_baseline_source(ps_args)
+            if staged_source:
+                h["_geak_source_request_path"] = staged_source["request_path"]
+                os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
+        except SourceMaterializationError as exc:
+            return _emit_source_preparation_error(result_path, exc)
     prompt = build_prompt(ps_args)
 
     if "--dry-run" in flags:
@@ -6708,6 +7025,9 @@ def main(argv: list[str]) -> int:
         try:
             if wf is not None:
                 out = normalize_result(h, wf)
+                emitted_tuning = out.get("tuning_skillset") or {}
+                if emitted_tuning.get("gate") == "accepted":
+                    verify_runtime_tuning(emitted_tuning, Path(out.get("eval_dir") or eval_dir_hint), out["accepted_config"]["env_map"])
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
             else:
@@ -6724,6 +7044,16 @@ def main(argv: list[str]) -> int:
                 "error_class": "normalize_failed",
                 "error": f"{type(norm_exc).__name__}: {norm_exc}",
             }
+        source_bound = bool(ps_args.get("baseline_source_request"))
+        if source_bound:
+            out.setdefault("source_measurement", {
+                "status": "unavailable", "reason": "source_normalization_unavailable",
+            })
+            # Per-op/tuning recovery does not yet bind each of its own legs to
+            # serving-source observations. Keep that knowledge local, including
+            # on a run whose final Director pair is independently verified.
+            out["kb_write"] = {"skipped": True, "why": "source_bound_export_unavailable"}
+            out["kb_write_tuned"] = {"skipped": True, "why": "source_bound_export_unavailable"}
         # kernel_journey.json is a GUARANTEED interface file too (same contract as
         # result.json). Resolve eval_dir even on the error path (eval_dir_hint is
         # this run's pinned dir) so the journey always has a home, persist the
@@ -6782,7 +7112,7 @@ def main(argv: list[str]) -> int:
         # means a KB stall costs the record, never the interface files. Then result.json
         # is rewritten with the receipt — best-effort, atomic, and if that second write
         # loses a race the file from the first one is still correct.
-        if _emit_state["done"] and wf is not None and eval_dir_str:
+        if _emit_state["done"] and wf is not None and eval_dir_str and not source_bound:
             try:
                 receipt = _kb_write_back(Path(eval_dir_str), wf, ps_args)
                 if receipt and not receipt.get("skipped"):
@@ -6799,7 +7129,7 @@ def main(argv: list[str]) -> int:
         # proven tuning A/B on disk and no workflow return at all, and that table is still knowledge
         # about that op. Runs after the deployment record for the same ordering reason — result.json
         # first, network second.
-        if _emit_state["done"] and eval_dir_str:
+        if _emit_state["done"] and eval_dir_str and not source_bound:
             try:
                 tuned = _kb_write_tuned_ops(Path(eval_dir_str))
                 if tuned and not tuned.get("skipped"):
