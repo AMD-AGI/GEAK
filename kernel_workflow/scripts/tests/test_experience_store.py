@@ -2022,6 +2022,16 @@ def test_the_sync_names_the_entry_it_could_not_file_and_carries_the_rest(tmp_pat
     root, store = str(tmp_path / "kb"), str(tmp_path / "store")
     write_entry(root, "20260101_000000_a", speedup=2.0)
     broken = write_entry(root, "20260102_000000_b", speedup=1.5, direction="unroll")
+    # The only way to make ONE entry fail the way this is about — readable meta, unreadable payload
+    # — and have the failure be visible to the store, which `run()` invokes as a SUBPROCESS, is
+    # filesystem state. chmod is that state, and it does not bind root: with CAP_DAC_OVERRIDE a
+    # mode-0000 file reads back fine, the payload is copied, and the entry files successfully, so
+    # the branch under test is never reached and the assertions below fail for a reason that has
+    # nothing to do with the store. Skipped rather than rewritten because every root-proof stand-in
+    # lands somewhere else in the product: a missing/dangling/non-regular payload is caught earlier
+    # and already counted as `skipped.no_patch`, which is the handled path, not this one.
+    if os.geteuid() == 0:
+        pytest.skip("chmod cannot revoke read from root; run this suite as a non-root user")
     os.chmod(os.path.join(broken, "patch.diff"), 0)      # readable meta, unreadable payload
     try:
         summary = _sync(root, store)

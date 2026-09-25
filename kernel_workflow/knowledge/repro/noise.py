@@ -17,4 +17,4 @@ for i in range(12):
 m=statistics.mean(samples); sd=statistics.stdev(samples)
 print("mean=%.1f  sd=%.2f  CV=%.2f%%  min=%.1f  max=%.1f  spread=%.2f%%"
       % (m, sd, 100*sd/m, min(samples), max(samples), 100*(max(samples)-min(samples))/m))
-print("=> 小于 %.1f%% 的差异不可区分于噪声 (2 sigma)" % (2*100*sd/m))
+print("=> a difference under %.1f%% is indistinguishable from noise (2 sigma)" % (2*100*sd/m))

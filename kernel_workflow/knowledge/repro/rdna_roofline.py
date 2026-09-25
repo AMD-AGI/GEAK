@@ -237,9 +237,21 @@ def main():
           % (roof_llc / 1e12, roof_dram / 1e12, DATASHEET_FP16 / 1e12))
     flip_hi = DATASHEET_FP16 / BW_DRAM
     flip_lo = DATASHEET_FP16 / BW_LLC
-    print("  both memory roofs exceed the compute roof, so this shape is compute-bound EITHER WAY;")
-    print("  the LLC-vs-DRAM choice only changes the verdict for AI in %.0f-%.0f FLOP/byte."
-          % (flip_lo, flip_hi))
+    # DERIVED, not asserted: the sentence below was prose that happened to be true at S=2048 and
+    # would have kept printing "compute-bound EITHER WAY" at, say, S=512, where AI is 4x smaller and
+    # the DRAM roof drops UNDER the compute roof. A hardcoded conclusion next to computed numbers is
+    # the one thing this file is written not to do.
+    if roof_dram >= DATASHEET_FP16:
+        print("  both memory roofs exceed the compute roof, so this shape is compute-bound EITHER"
+              " WAY;")
+    elif roof_llc >= DATASHEET_FP16:
+        print("  the LLC roof exceeds the compute roof but the DRAM roof does NOT, so at this shape"
+              " the bracket is the verdict: which roof applies decides compute- vs memory-bound.")
+    else:
+        print("  BOTH memory roofs are under the compute roof, so this shape is memory-bound either"
+              " way and the compute peak is not its denominator.")
+    print("  the LLC-vs-DRAM choice only changes the verdict for AI in %.0f-%.0f FLOP/byte"
+          " (this shape: %.0f)." % (flip_lo, flip_hi, ai))
 
     print("  %-10s %9s   %s" % ("", "achieved", "true efficiency is bracketed by:"))
     bad = []

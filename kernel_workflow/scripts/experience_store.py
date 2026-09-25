@@ -2134,7 +2134,23 @@ def _store_ladder(a, gfx: str):
             "verified_stack": detect_stack(a.language)}
     identity = remote_identity(meta, a.producer, remote_gpu(gfx, getattr(a, "gpu", "")),
                                getattr(a, "framework_version", ""))
-    return list(zip(remote_canonical_ids(identity), ("exact", "any_version")))
+    cids = remote_canonical_ids(identity)
+    # The rung BETWEEN those two, and the one this reader was missing. remote_framework_version
+    # never guesses a version, so every entry written without a verified_stack — which is the whole
+    # imported backlog, everything sync-local carries — exports at `rocm/unspecified`. This reader
+    # DOES derive one (detect_stack, above), so its exact rung is whatever ROCm this box runs and it
+    # misses those pages outright. Falling straight to the coarse rung is not equivalent: a caller
+    # that asks rung 0 what the store already holds (cmd_sync_local) then reads an empty page and
+    # re-imposes a verdict the store had already lifted. Still not a derived address — `unspecified`
+    # is a real page the writer fills, so attest/retract writing to it stays inside the contract
+    # above.
+    unversioned = remote_canonical_ids(
+        dict(identity, framework_version=REMOTE_UNKNOWN_VERSION))[0]
+    rungs = [(cids[0], "exact")]
+    if unversioned != cids[0]:
+        rungs.append((unversioned, "unversioned"))
+    rungs.append((cids[-1], "any_version"))
+    return rungs
 
 
 def _legacy_name_ladder(a, gfx: str):

@@ -247,7 +247,7 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
   console.log('\n# J2. a FLAGGED lane cannot win even when it is the fastest');
   {
     // The ACCEPTED gate is the whole point of J's stub being accurate: a lane whose Director
-    // validation came back  (correctness failed, patch did not install, contended box)
+    // validation came back `flagged` (correctness failed, patch did not install, contended box)
     // beat the baseline on paper and must still be ineligible. Without this case, flipping the
     // stub to 'accepted' would silently retire the gate instead of testing it.
     const { run } = build({ ...BASE, mode: 'bakeoff', gpu_ids: '0,1,2' }, {
