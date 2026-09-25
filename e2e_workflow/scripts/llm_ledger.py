@@ -92,7 +92,13 @@ COMMIT_RE = re.compile(r"\A\s*You are the TechLead committing round")
 # The anchored patterns above never see column zero of the prompt through that frame, which is how
 # the kernel engineers — the largest block of spend in a run — came to read as "(driver)" again:
 # $242.61 of $457.08 on the 2026-09-24 gpt-oss-120b run.
-HARNESS_FRAME_RE = re.compile(r"\A\s*\[Workflow harness\b[^\]\n]*\][^\n]*\n")
+#: The harness frame's opening line. Group 1 is the MARKER -- the text inside the
+#: brackets, e.g. " — computed task" or " — user request" -- which is the only part
+#: that says what the record is. The prose after the bracket is explanation, and it
+#: discusses the other kind of frame by name ("the computed task text that follows
+#: in the next turn" appears in the USER REQUEST header), so classifying on the
+#: whole line read a relayed request as a computed task.
+HARNESS_FRAME_RE = re.compile(r"\A\s*\[Workflow harness\b([^\]\n]*)\][^\n]*\n")
 
 UNATTRIBUTED = "(unattributed)"
 DRIVER = "(driver)"
@@ -184,7 +190,9 @@ def _harness_frame(text):
         return "", text
     body = "\n".join(line[2:] if line.startswith("  ") else line
                       for line in text[m.end():].split("\n"))
-    return ("computed-task" if "computed task" in m.group(0) else "harness"), body
+    # The marker inside the brackets, never the explanatory prose after it.
+    marker = (m.group(1) or "").lower()
+    return ("computed-task" if "computed task" in marker else "harness"), body
 
 
 def _unwrap_harness(text):
@@ -460,6 +468,7 @@ def split_conversations(records, single_agent=False):
     """
     groups, cur = [], {"role": DRIVER, "subphase": "", "records": [], "prompt": ""}
     named = False
+    saw_task = False
     task_text = None   # single_agent: the computed task, kept as the prompt if no header names it
     # single_agent: what each KIND of record proposed the agent is. The computed task is the
     # agent's own brief; everything else is text that reached it, and a relayed turn quoting
@@ -469,8 +478,14 @@ def split_conversations(records, single_agent=False):
         if rec.get("type") == "user" and not (single_agent and named):
             raw = _text_of(rec.get("message"))
             kind, text = _harness_frame(raw)
-            if single_agent and task_text is None and kind == "computed-task":
-                task_text = text
+            if single_agent and kind == "computed-task":
+                # Seen, whether or not it names a role. An agent launched with a
+                # free-form brief has a computed task that matches no role regex;
+                # letting a later quoted turn name it anyway produced a `profiler`
+                # label for a `deep_explore` agent.
+                saw_task = True
+                if task_text is None:
+                    task_text = text
             m = ROLE_RE.search(text)
             me = None if m else ENGINEER_RE.search(text)
             if m:
@@ -499,8 +514,13 @@ def split_conversations(records, single_agent=False):
                 cur = {"role": role, "subphase": sub, "records": [], "prompt": text[:8000]}
         cur["records"].append(rec)
     if single_agent:
-        # Precedence is by what the record is, not when it arrived.
-        pick = proposed.get("computed-task") or proposed.get("harness") or proposed.get("relayed")
+        # Precedence is by what the record is, not when it arrived. A computed task
+        # that named no role still SPEAKS for the agent: it is the brief the agent
+        # was launched with, so a relayed turn does not get to name it in the gap.
+        # The agent then keeps its own task text and falls to explicit metadata.
+        pick = proposed.get("computed-task")
+        if pick is None and not saw_task:
+            pick = proposed.get("harness") or proposed.get("relayed")
         if pick:
             role, sub, text = pick
             cur.update(role=role, subphase=sub, prompt=text[:8000])
@@ -511,6 +531,11 @@ def split_conversations(records, single_agent=False):
                 # role and prompt described different agents, with nothing left to say so.
                 cur["role_conflict"] = sorted("%s:%s (%s)" % (r, sp, k)
                                               for k, (r, sp) in others.items())
+        elif proposed:
+            # Nothing was allowed to name this agent, but readings were offered.
+            # Dropping them silently loses the fact that the run was ambiguous.
+            cur["role_conflict"] = sorted("%s:%s (%s)" % (r, sp, k)
+                                          for k, (r, sp, _t) in proposed.items())
         cur["role_source"] = (
             next(iter(k or "relayed" for k in proposed if proposed[k] is pick), "")
             if pick else ("computed-task" if task_text else ""))
@@ -899,6 +924,28 @@ def _finish(acc):
     return acc
 
 
+def row_end_ms(row):
+    """When this call was LAST observed, not when it was first seen.
+
+    A response that streams is flushed repeatedly as it grows, and each flush is
+    its own record. ``ts_ms`` is the first flush -- kept as the call's timestamp
+    so first-seen ordering and the run window are unchanged -- and
+    ``last_seen_ms`` is the final one. Measuring a span to ``ts_ms`` stops it at
+    the first flush, which is why the HTML tree and the ledger's own totals
+    disagreed about the same run: one had been taught about the last flush and
+    the other had not.
+
+    This is the last flush OBSERVED in the transcript. An interrupted stream
+    never writes a final one, so it is not a claim that the response completed.
+    """
+    end, ts = row.get("last_seen_ms"), row.get("ts_ms")
+    if end is None:
+        return ts
+    if ts is None:
+        return end
+    return max(ts, end)
+
+
 def aggregate(rows, groups, timeline, rates):
     by_phase, by_role, by_agent = defaultdict(_blank), defaultdict(_blank), defaultdict(_blank)
     total = _blank()
@@ -924,7 +971,7 @@ def aggregate(rows, groups, timeline, rates):
     def _span(sel):
         starts = [r["ts_ms"] - (r["duration_ms"] or 0) for r in rows
                   if sel(r) and r["ts_ms"] is not None]
-        ends = [r["ts_ms"] for r in rows if sel(r) and r["ts_ms"] is not None]
+        ends = [e for e in (row_end_ms(r) for r in rows if sel(r)) if e is not None]
         if not ends:
             return None, None
         return min(starts), max(ends)
@@ -962,7 +1009,13 @@ def aggregate(rows, groups, timeline, rates):
     # wholly contained in the larger, which nothing here establishes. `agents_exact` says whether
     # it may be read as a count: only when one population is empty is there nothing to overlap.
     total["agents"] = max(len(events), len(groups))
-    total["agents_exact"] = not (events and groups)
+    # Exact only where the populations were actually RECORDED and there is nothing
+    # to overlap. With no timeline at all, an empty dispatch population is not a
+    # recorded zero -- it is an unread one, and calling the transcript count exact
+    # on that basis presented "what we happened to find" as "what ran".
+    total["agents_timeline_recorded"] = bool(timeline.get("sources"))
+    total["agents_exact"] = bool(
+        total["agents_timeline_recorded"] and not (events and groups))
     total["agent_attempts_failed"] = sum(1 for e in events if not e.get("ok"))
     total["conversations"] = len(groups)
     return {
@@ -997,7 +1050,9 @@ def render_md(agg, meta):
     L.append("Every API call this run made, however small, with what it cost and how long it took.")
     L.append("")
     L.append("- run: `%s`" % meta.get("eval_dir", "?"))
-    L.append("- window: %s → %s (%s)" % (t.get("started_at") or "?", t.get("ended_at") or "?", _hms(t.get("wall_ms"))))
+    L.append("- observed window: %s → %s (%s) — from the first request (start inferred by "
+             "stepping back that call's gap) to the last flush seen in the transcripts"
+             % (t.get("started_at") or "?", t.get("ended_at") or "?", _hms(t.get("wall_ms"))))
     L.append("- phase attribution: **%s**%s" % (
         meta.get("attribution_mode", "?"),
         "" if meta.get("attribution_mode") == "timeline"
@@ -1028,6 +1083,10 @@ def render_md(agg, meta):
                  "is unknown and the figure above is a lower bound, not a count."
                  % (t.get("agents_with_transcripts", 0), t.get("agents_dispatched", 0),
                     t.get("agent_attempts_failed", 0)))
+        if not t.get("agents_timeline_recorded"):
+            L.append("- no `agent_timeline.json` was read for this run, so the dispatch "
+                     "population is NOT RECORDED rather than recorded as zero. The figure "
+                     "above rests on transcripts alone and cannot be read as a total.")
         L.append("")
     L.append("*billed* is what the reuse discount actually cost; *no-reuse* is the same traffic with every "
              "input token at full price. *re-sent cheaply* is the share of input that was already stored — "
@@ -1155,7 +1214,9 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
             if not g["calls"]:
                 continue
             ts = [c["ts_ms"] for c in g["calls"] if c["ts_ms"] is not None]
-            g["t0_ms"], g["t1_ms"] = (min(ts), max(ts)) if ts else (None, None)
+            ends = [e for e in (row_end_ms(c) for c in g["calls"]) if e is not None]
+            g["t0_ms"] = min(ts) if ts else None
+            g["t1_ms"] = max(ends) if ends else None
             g["transcript"] = path
             g["agent_meta"] = meta_rec
             g["workflow_run"] = workflow_run_of(path)
@@ -1179,7 +1240,9 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
             dropped += len(g["calls"]) - len(keep)
             g["calls"] = keep
             ts = [c["ts_ms"] for c in keep if c["ts_ms"] is not None]
-            g["t0_ms"], g["t1_ms"] = (min(ts), max(ts)) if ts else (None, None)
+            ends = [e for e in (row_end_ms(c) for c in keep) if e is not None]
+            g["t0_ms"] = min(ts) if ts else None
+            g["t1_ms"] = max(ends) if ends else None
         groups = [g for g in groups if g["calls"]]
     if dropped:
         warnings.append("%d call(s) outside the run window were excluded "
@@ -1200,6 +1263,13 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
             c["workflow_run"] = g.get("workflow_run")
             c["group_id"] = g["group_id"]
             c["prompt"] = g.get("prompt", "")
+            # How this agent came by its name, and what else claimed it. Both were
+            # computed and then thrown away with the temporary group: nothing that
+            # was saved said whether a name was read off the agent's own brief or
+            # off a turn relayed into it.
+            c["role_source"] = g.get("role_source", "")
+            if g.get("role_conflict"):
+                c["role_conflict"] = list(g["role_conflict"])
             c["total_input_tokens"] = total_input(c)
             c["cost_usd"] = round(cost_of(c, rates), 6)
             c["cost_breakdown"] = {k: round(v, 6) for k, v in cost_breakdown(c, rates).items()}
@@ -1223,6 +1293,8 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
             # all default True -- a transcript exists, and there is no recorded outcome to
             # contradict. Never hardcode True over a known-uncertain mapping.
             "attempt": g.get("attempt", 1), "ok": g.get("ok", True), "attribution": g["attribution"],
+            "role_source": g.get("role_source", ""),
+            "role_conflict": list(g.get("role_conflict") or []),
             "started_at": _ms_to_iso(g["t0_ms"]), "ended_at": _ms_to_iso(g["t1_ms"]),
             "span_ms": (g["t1_ms"] - g["t0_ms"]) if (g["t0_ms"] is not None and g["t1_ms"] is not None) else None,
             "llm_ms": sum(durs),

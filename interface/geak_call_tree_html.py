@@ -131,11 +131,14 @@ def _iso(ms):
 def breakdown_rows(rows, field, missing):
     """Calls, agents, cost, tokens, billed span and ELAPSED time per value of *field*.
 
-    Elapsed is first request to last response — the clock a reader means by "how
-    long did this phase take", including the compiling and benchmarking between
-    calls. Billed span is the sum of per-call durations, time spent waiting on the
-    model. Groups overlap in time whenever work ran in parallel, so elapsed figures
-    are never summed. Rows come back in the order their group started."""
+    Elapsed is an OBSERVED span, not a measured request time: it runs from a start
+    inferred by stepping back the first call's gap to the last flush the
+    transcripts recorded, and it includes the compiling and benchmarking between
+    calls. The right edge is the last flush SEEN — a stream that was interrupted
+    never wrote a final one — so it is not an upper bound on time in the model.
+    Billed span is the sum of per-call durations. Groups overlap in time whenever
+    work ran in parallel, so these figures are never summed. Rows come back in the
+    order their group started."""
     groups = {}
     for r in rows:
         groups.setdefault(r.get(field) or missing, []).append(r)
@@ -492,8 +495,10 @@ def render_markdown(nodes, root, model, comp=None, phases=None, invocations=None
     out += ["## Run totals", ""]
     out += ["- **API calls**: %s" % _n(total["calls"])]
     if total.get("elapsed_ms") is not None:
-        out += ["- **Elapsed (first request → last response)**: %s (%s → %s)"
-                % (_hms(total["elapsed_ms"]), total["started"], total["ended"])]
+        out += ["- **Observed span (first request → last observed flush)**: %s (%s → %s) "
+                "— the left edge is inferred by stepping back the first call's gap, and the "
+                "right edge is the last flush written to the transcripts, not a completed "
+                "response" % (_hms(total["elapsed_ms"]), total["started"], total["ended"])]
     out += ["- **Billed span (Σ per-call, not wall-time)**: %s" % _hms(total["llm_ms"])]
     out += ["- **Cost**: %s" % _usd(total["cost_usd"])]
     out += ["  - " + ", ".join("%s %s" % (lbl, _usd(total["cost"][k]))
@@ -688,7 +693,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
   var tt=D.total, tot=document.getElementById('totals');
   function chip(v,l){ var d=document.createElement('div'); d.className='chip'; d.innerHTML='<b>'+v+'</b><span>'+l+'</span>'; return d; }
   tot.appendChild(chip(n(tt.calls),'API calls'));
-  if(tt.elapsed_ms!=null) tot.appendChild(chip(hms(tt.elapsed_ms),'elapsed · '+esc(tt.started)+' → '+esc(tt.ended)));
+  if(tt.elapsed_ms!=null) tot.appendChild(chip(hms(tt.elapsed_ms),'observed span* · '+esc(tt.started)+' → '+esc(tt.ended)+' · left edge inferred, right edge is the last flush seen'));
   tot.appendChild(chip(hms(tt.llm_ms),'billed span (Σ per-call, not wall-time)'));
   tot.appendChild(chip(usd(tt.cost_usd),'total cost'));
   tot.appendChild(chip(n(tt.tokens.cache_read),'cache-read tokens'));
