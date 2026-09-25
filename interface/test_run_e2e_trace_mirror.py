@@ -16,8 +16,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -328,17 +328,44 @@ def test_max_bytes_env_knob(monkeypatch, raw, expected):
 # --------------------------------------------------------------------------- #
 # Rendered report is strictly best-effort
 # --------------------------------------------------------------------------- #
-def test_render_is_skipped_when_no_renderer_is_reachable(tmp_path, monkeypatch):
-    monkeypatch.delenv("GEAK_LLM_REPORT_CMD", raising=False)
-    monkeypatch.setenv("HYPERLOOM_SRC", str(tmp_path / "nowhere"))
-    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports", tmp_path)
-    assert out["status"] == "skipped"
+def test_render_uses_geaks_own_report_driver_and_never_raises(tmp_path):
+    """An eval dir with no transcripts renders nothing, and says so, without raising."""
+    out = ctm.render_run_report(tmp_path, homes=[tmp_path / "no-home"])
+    assert out["status"] in {"no-calls", "no-capture"}
 
 
 def test_render_failure_is_recorded_not_raised(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEAK_LLM_REPORT_CMD", "false")
-    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports", tmp_path)
-    assert out["status"] in {"failed", "error", "skipped"}
+    import builtins
+    real_import = builtins.__import__
+
+    def broken(name, *a, **k):
+        if name == "geak_report":
+            raise ImportError("gone")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", broken)
+    monkeypatch.delitem(sys.modules, "geak_report", raising=False)
+    out = ctm.render_run_report(tmp_path)
+    assert out["status"] == "error" and "gone" in out["error"]
+
+
+def test_render_result_is_folded_into_the_manifest(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    eval_dir = tmp_path / "eval"
+    eval_dir.mkdir()
+    monkeypatch.setattr(ctm, "render_run_report", lambda *a, **k: {"status": "ok"})
+    out = ctm.mirror_run_trace(eval_dir, exp_root="/runs/exp", homes=[home], render=True)
+    assert out["status"] == "ok"
+    assert out["report"]["status"] == "ok"
+    written = json.loads(
+        (eval_dir / ctm.MIRROR_DIRNAME / ctm.MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert written["report"]["status"] == "ok"
+    # The skill travels with the one report page, in report/.
+    assert (eval_dir / "report" / "SKILL.md").is_file()
+
+
+
 
 
 # --------------------------------------------------------------------------- #
@@ -417,51 +444,14 @@ def test_an_unwritable_manifest_does_not_raise(tmp_path):
     ctm._write_manifest(blocker / "mirror", {"run_id": "x"})  # must not raise
 
 
-def test_no_renderer_without_hyperloom_src(tmp_path, monkeypatch):
-    monkeypatch.delenv("GEAK_LLM_REPORT_CMD", raising=False)
-    monkeypatch.delenv("HYPERLOOM_SRC", raising=False)
-    assert ctm._report_command(tmp_path, tmp_path, tmp_path) is None
 
 
-def test_renderer_is_built_when_the_tool_is_present(tmp_path, monkeypatch):
-    monkeypatch.delenv("GEAK_LLM_REPORT_CMD", raising=False)
-    tool = tmp_path / "src" / "hyperloom" / "inference_optimizer" / "tools"
-    tool.mkdir(parents=True)
-    (tool / "dump_geak_call_report.py").write_text("", encoding="utf-8")
-    monkeypatch.setenv("HYPERLOOM_SRC", str(tmp_path / "src"))
-    argv = ctm._report_command(tmp_path / "mirror", tmp_path / "out", tmp_path)
-    assert argv is not None
-    assert argv[0] == "python3"
-    assert "--claude-home" in argv and str(tmp_path / "mirror") in argv
 
 
-def test_a_renderer_that_cannot_be_executed_is_reported(tmp_path, monkeypatch):
-    monkeypatch.setenv("GEAK_LLM_REPORT_CMD", str(tmp_path / "not-an-executable"))
-    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports", tmp_path)
-    assert out["status"] == "error"
 
 
-def test_a_nonzero_renderer_is_reported(tmp_path, monkeypatch):
-    script = tmp_path / "renderer.sh"
-    script.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
-    script.chmod(0o755)
-    monkeypatch.setenv("GEAK_LLM_REPORT_CMD", str(script))
-    out = ctm.render_report(tmp_path / "mirror", tmp_path / "reports", tmp_path)
-    assert out["status"] == "error" and out.get("returncode") == 3
 
 
-def test_render_result_is_folded_into_the_manifest(tmp_path, monkeypatch):
-    home = _home(tmp_path)
-    eval_dir = tmp_path / "eval"
-    eval_dir.mkdir()
-    monkeypatch.setenv("GEAK_LLM_REPORT_CMD", "true")
-    out = ctm.mirror_run_trace(eval_dir, exp_root="/runs/exp", homes=[home], render=True)
-    assert out["status"] == "ok"
-    assert out["report"]["status"] == "ok"
-    written = json.loads(
-        (eval_dir / ctm.MIRROR_DIRNAME / ctm.MANIFEST_NAME).read_text(encoding="utf-8")
-    )
-    assert written["report"]["status"] == "ok"
 
 
 def test_an_unreadable_subagents_dir_still_mirrors_the_record(tmp_path, monkeypatch):
@@ -596,101 +586,22 @@ def test_install_skill_reports_an_oserror(tmp_path, monkeypatch):
     assert "OSError" in result["error"]
 
 
-def test_html_command_prefers_the_explicit_override(monkeypatch, tmp_path):
-    """GEAK_HTML_REPORT_CMD wins over any checkout discovery."""
-    monkeypatch.setenv("GEAK_HTML_REPORT_CMD", "my-renderer --flag")
-    argv = ctm._html_command(tmp_path / "reports", tmp_path)
-    reports = tmp_path / "reports"
-    assert argv == ["my-renderer", "--flag", "--reports-dir", str(reports),
-                    "-o", str(reports / "geak_run_report_run.html")]
 
 
-def test_html_command_is_none_without_a_checkout(monkeypatch, tmp_path):
-    """No Hyperloom checkout means no HTML step, not a crash."""
-    monkeypatch.delenv("GEAK_HTML_REPORT_CMD", raising=False)
-    monkeypatch.delenv("HYPERLOOM_SRC", raising=False)
-    assert ctm._html_command(tmp_path, tmp_path) is None
-    monkeypatch.setenv("HYPERLOOM_SRC", str(tmp_path / "absent"))
-    assert ctm._html_command(tmp_path, tmp_path) is None
 
 
-def test_html_command_finds_the_tool_in_a_checkout(monkeypatch, tmp_path):
-    """A checkout that actually carries the module produces a runnable argv."""
-    tool = tmp_path / "hyperloom" / "inference_optimizer" / "tools" / "render_geak_html_report.py"
-    tool.parent.mkdir(parents=True)
-    tool.write_text("")
-    monkeypatch.delenv("GEAK_HTML_REPORT_CMD", raising=False)
-    monkeypatch.setenv("HYPERLOOM_SRC", str(tmp_path))
-    argv = ctm._html_command(tmp_path / "reports", tmp_path)
-    assert argv[0] == "python3" and str(tmp_path) in argv
-    assert argv[-4:-2] == ["--reports-dir", str(tmp_path / "reports")]
-    assert argv[-2] == "-o" and argv[-1].endswith("geak_run_report_run.html")
 
 
-def test_render_html_report_skips_when_no_renderer(monkeypatch, tmp_path):
-    """Skipped is a status, not an error — the ledger is the durable artifact."""
-    monkeypatch.delenv("GEAK_HTML_REPORT_CMD", raising=False)
-    monkeypatch.delenv("HYPERLOOM_SRC", raising=False)
-    assert ctm.render_html_report(tmp_path, tmp_path)["status"] == "skipped"
 
 
-def test_render_html_report_runs_the_renderer(monkeypatch, tmp_path):
-    """A renderer that succeeds is reported ok with the directory it wrote to."""
-    monkeypatch.setenv("GEAK_HTML_REPORT_CMD", "python3 -c pass --ignored")
-    monkeypatch.setattr(
-        ctm.subprocess,
-        "run",
-        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
-    )
-    result = ctm.render_html_report(tmp_path, tmp_path)
-    assert result == {"status": "ok", "output": str(tmp_path / "geak_run_report_run.html")}
 
 
-def test_render_html_report_reports_a_failing_renderer(monkeypatch, tmp_path):
-    """A renderer that fails is recorded, never raised — telemetry must not kill a run."""
-    monkeypatch.setenv("GEAK_HTML_REPORT_CMD", "false")
-    monkeypatch.setattr(
-        ctm.subprocess,
-        "run",
-        lambda *a, **k: SimpleNamespace(returncode=3, stdout="", stderr="boom"),
-    )
-    result = ctm.render_html_report(tmp_path, tmp_path)
-    assert result["status"] == "error" and result["returncode"] == 3 and "boom" in result["stderr"]
 
 
-def test_run_converts_an_os_error_into_a_status(monkeypatch):
-    """A renderer that cannot even be spawned is a status dict too."""
-
-    def explode(*_a, **_k):
-        raise OSError("no such binary")
-
-    monkeypatch.setattr(ctm.subprocess, "run", explode)
-    result = ctm._run(["nope"], 1.0, {})
-    assert result["status"] == "error" and "no such binary" in result["error"]
 
 
-def test_report_command_carries_a_selector_and_asks_for_the_text_sidecar(tmp_path, monkeypatch):
-    """Regression: the renderer refuses to run without a selector.
-
-    ``--claude-home`` appends a search root, it does not select a run, and the
-    report tool exits 2 when no selector is given -- so a command built without
-    ``--eval-dir`` silently produces no report at all. ``--include-text`` is what
-    writes ``geak_calls.jsonl``, which is the only file the HTML report reads.
-    """
-    monkeypatch.setenv("GEAK_LLM_REPORT_CMD", "/bin/true")
-    argv = ctm._report_command(tmp_path / "mirror", tmp_path / "reports", tmp_path / "eval")
-    assert argv is not None
-    assert "--eval-dir" in argv
-    assert argv[argv.index("--eval-dir") + 1] == str(tmp_path / "eval")
-    assert "--include-text" in argv
-    assert "--claude-home" in argv
 
 
-def test_the_report_is_named_after_the_model_the_run_optimized(tmp_path):
-    """kb_identity.json is the canonical name, so it wins over every other source."""
-    (tmp_path / "kb_identity.json").write_text(json.dumps({"dims": {"model": "Qwen3-14B-FP8"}}))
-    (tmp_path / "env_report.json").write_text(json.dumps({"model": "/models/something-else"}))
-    assert ctm.report_basename(tmp_path) == "geak_run_report_Qwen3-14B-FP8.html"
 
 
 def test_the_model_name_falls_back_through_env_report_then_the_dir_name(tmp_path):
@@ -709,24 +620,15 @@ def test_an_unidentifiable_run_is_named_rather_than_left_unnamed(tmp_path):
     assert ctm._model_name(tmp_path) == "run"
 
 
-def test_hyperloom_prefixes_the_report_and_absence_means_standalone(monkeypatch, tmp_path):
-    """The prefix records who drove the run, because the two are not comparable.
-
-    An older Hyperloom that does not export the marker yields a ``geak_`` report:
-    that understates the context, but it never claims a standalone run was
-    Hyperloom's.
-    """
+def test_the_report_is_named_after_the_model_the_run_optimized(tmp_path):
+    """kb_identity.json is the canonical name, so it wins over every other source."""
     (tmp_path / "kb_identity.json").write_text(json.dumps({"dims": {"model": "Qwen3-14B-FP8"}}))
-    monkeypatch.setenv("GEAK_INVOKED_BY", "hyperloom")
-    assert ctm.report_basename(tmp_path) == "hl_run_report_Qwen3-14B-FP8.html"
-    monkeypatch.setenv("GEAK_INVOKED_BY", "HyperLoom")
-    assert ctm.report_basename(tmp_path).startswith("hl_")
-    monkeypatch.delenv("GEAK_INVOKED_BY")
-    assert ctm.report_basename(tmp_path).startswith("geak_")
+    (tmp_path / "env_report.json").write_text(json.dumps({"model": "/models/something-else"}))
+    assert ctm._model_name(tmp_path) == "Qwen3-14B-FP8"
 
 
-def test_a_model_name_cannot_escape_the_reports_directory(tmp_path):
+def test_a_model_name_cannot_escape_the_report_directory(tmp_path):
     """The name reaches a filesystem path, so separators must not survive it."""
     (tmp_path / "kb_identity.json").write_text(json.dumps({"dims": {"model": "../../etc/passwd"}}))
-    name = ctm.report_basename(tmp_path)
+    name = ctm._model_name(tmp_path)
     assert "/" not in name and ".." not in name

@@ -598,7 +598,10 @@ class OwnershipResolverTest(unittest.TestCase):
 
 
 class FinalRenderTest(unittest.TestCase):
-    """The end-of-run HTML must be built from what was TRACKED during the run."""
+    """The end-of-run HTML must be built from what was TRACKED during the run.
+
+    Rendering is opt-in (``render=True`` / ``--render``): a run has exactly one
+    report page, geak_run_report_<model>.html, and this view is not it."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="geak-render-")
@@ -627,7 +630,7 @@ class FinalRenderTest(unittest.TestCase):
     def test_watch_renders_html_from_tracked_trace_on_completion(self):
         self._record("completed")
         out = os.path.join(self.dir, "geak_trace_wf_r.json")
-        C.watch(self.wf, out, interval=0.01, max_seconds=5)
+        C.watch(self.wf, out, interval=0.01, max_seconds=5, render=True)
         self.assertTrue(os.path.exists(os.path.join(self.dir, "geak_execution_trace_wf_r.html")))
         self.assertTrue(os.path.exists(os.path.join(self.dir, "geak_execution_trace_wf_r.md")))
 
@@ -635,7 +638,7 @@ class FinalRenderTest(unittest.TestCase):
         """A run that never reported terminal still yields a usable report."""
         self._record("running")
         out = os.path.join(self.dir, "geak_trace_wf_r.json")
-        C.watch(self.wf, out, interval=0.01, max_seconds=0)
+        C.watch(self.wf, out, interval=0.01, max_seconds=0, render=True)
         self.assertTrue(os.path.exists(os.path.join(self.dir, "geak_execution_trace_wf_r.html")))
 
     def test_final_render_also_lands_in_the_runs_report_dir(self):
@@ -643,12 +646,24 @@ class FinalRenderTest(unittest.TestCase):
         os.makedirs(eval_dir)
         self._record("completed", eval_dir=eval_dir)
         out = os.path.join(self.dir, "geak_trace_wf_r.json")
-        C.watch(self.wf, out, interval=0.01, max_seconds=5)
+        C.watch(self.wf, out, interval=0.01, max_seconds=5, render=True)
         report_dir = os.path.join(eval_dir, "report")
         self.assertTrue(os.path.exists(os.path.join(report_dir, "geak_execution_trace.html")))
         # The tracked trace is persisted there too, so the report can be rebuilt
         # later even if the transcripts are gone.
         self.assertTrue(os.path.exists(os.path.join(report_dir, "geak_trace.json")))
+
+    def test_default_tracks_without_rendering_any_page(self):
+        eval_dir = os.path.join(self.dir, "run")
+        os.makedirs(eval_dir)
+        self._record("completed", eval_dir=eval_dir)
+        out = os.path.join(self.dir, "geak_trace_wf_r.json")
+        C.watch(self.wf, out, interval=0.01, max_seconds=5)
+        self.assertTrue(os.path.exists(out))  # the tracked data is still written
+        pages = [f for root in (self.dir, eval_dir) if os.path.isdir(root)
+                 for _, _, files in os.walk(root) for f in files
+                 if f.endswith(".html") or f.startswith("geak_execution_trace")]
+        self.assertEqual(pages, [])
 
     def test_render_can_be_disabled(self):
         self._record("completed")
@@ -660,7 +675,7 @@ class FinalRenderTest(unittest.TestCase):
     def test_rendered_html_contains_the_tracked_call(self):
         self._record("completed")
         out = os.path.join(self.dir, "geak_trace_wf_r.json")
-        C.watch(self.wf, out, interval=0.01, max_seconds=5)
+        C.watch(self.wf, out, interval=0.01, max_seconds=5, render=True)
         with open(os.path.join(self.dir, "geak_execution_trace_wf_r.html"), encoding="utf-8") as fh:
             body = fh.read()
         self.assertIn("director:setup", body)
