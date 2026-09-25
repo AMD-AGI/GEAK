@@ -383,8 +383,11 @@ def owned_invocations(
     Ownership is positive either way; a mere mention of the path never counts:
 
     - a workflow record whose OWN ``eval_dir`` (args or result) is exactly *eval_dir*;
-    - failing a record, a journal in which an agent returned ``"eval_dir":"<eval_dir>"`` as a
-      value -- the director that created or re-entered the dir says so in exactly that form.
+    - failing a record, a journal row in which an agent RETURNED *eval_dir* as its own:
+      ``{"type": "result", "key": ..., "agentId": ..., "result": {"eval_dir": "<eval_dir>"}}``.
+      The row is parsed, not matched as text, and only a DIRECT ``result.eval_dir`` counts -- a
+      path under any other key (``comparison_target``, a diagnostic subject) is what that row is
+      ABOUT, not who wrote it, and reading the two alike billed unrelated invocations here.
 
     Transcript sets never overlap (each runId owns its directory), so the union cannot double
     count. The same runId found under two homes (a live home and a mirror of it) is taken once,
@@ -400,9 +403,78 @@ def owned_invocations(
     ]
 
 
+#: The one journal row that carries an invocation's OWN identity. The runtime
+#: writes ``{"type": "result", "key": ..., "agentId": ..., "result": {...}}`` for
+#: each agent that returns; ``result.eval_dir`` is what THAT agent declared it was
+#: working in. Nothing else in the journal is an ownership statement.
+_JOURNAL_RESULT = "result"
+
+
+def _eval_dir_mention_re(wanted: str) -> "re.Pattern[str]":
+    """Matches the *text* ``"eval_dir": "<wanted>"`` anywhere in a journal.
+
+    Deliberately NOT an ownership test. It is kept only to tell a journal that
+    says nothing about *wanted* apart from a mention that could not be read as a
+    declaration -- which is reportable as incomplete evidence.
+    """
+    return re.compile(r'"eval_dir"\s*:\s*"' + re.escape(wanted) + r'/?"')
+
+
+def _journal_claims(journal: Path, wanted: str) -> tuple[list[dict[str, str]], bool]:
+    """What this journal DECLARES, and whether it only mentions *wanted*.
+
+    Ownership is read from a supported row shape, not from the file's text. A
+    text search cannot tell a declaration from a reference: a debug row's
+    ``{"comparison_target": {"eval_dir": "<wanted>"}}`` serializes to exactly the
+    bytes an owner's row does, and matching it billed an unrelated invocation to
+    this run. So each line is parsed, and only a ``type="result"`` row whose
+    ``result`` is a dict with a DIRECT ``eval_dir`` string counts. An
+    ``eval_dir`` nested under any other key is somebody else's subject, not this
+    invocation's identity.
+
+    Returns:
+        ``(claims, mention_only)``. Each claim is ``{"eval_dir", "key",
+        "agent_id"}`` -- the declared dir plus the agent that declared it, kept so
+        a hit can say WHICH agent proves it rather than just that the file
+        matched. *mention_only* is True when *wanted* appears as ``"eval_dir"``
+        text but no supported row declares it: evidence that is present but not
+        readable as ownership, which the caller reports rather than acts on.
+    """
+    try:
+        text = journal.read_text(errors="replace")
+    except OSError:
+        return [], False
+    claims: list[dict[str, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue    # a torn last line of a live journal, not a claim
+        if not isinstance(row, dict) or row.get("type") != _JOURNAL_RESULT:
+            continue
+        result = row.get("result")
+        if not isinstance(result, dict):
+            continue
+        declared = result.get("eval_dir")
+        if not isinstance(declared, str) or not declared.strip():
+            continue
+        claims.append({
+            "eval_dir": declared.strip().rstrip("/"),
+            "key": str(row.get("key") or ""),
+            "agent_id": str(row.get("agentId") or ""),
+        })
+    if any(c["eval_dir"] == wanted for c in claims):
+        return claims, False
+    return claims, bool(_eval_dir_mention_re(wanted).search(text))
+
+
 def _owned_sites(
     homes: Iterable[Path], eval_dir: str | None,
     conflicts: list[tuple[str, str]] | None = None,
+    mentions: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """:func:`owned_invocations`, keeping each hit's provenance for the mirror.
 
@@ -410,8 +482,26 @@ def _owned_sites(
     that function's body, not a second rule. It additionally carries the two paths
     the copier needs and the reader does not: the ``wf_*.json`` backing the hit
     (``None`` for a journal-owned invocation, which has no record yet) and the
-    session dir its transcripts live under. The public shape stays three keys so a
-    scope dict, which is serialized into the report, does not grow copier detail.
+    session dir its transcripts live under, plus, for a journal-owned hit, the
+    ``key``/``agentId`` of the row that declared it. The public shape stays three
+    keys so a scope dict, which is serialized into the report, does not grow copier
+    detail.
+
+    This is the run's FULL inventory and is deliberately unfiltered: a site whose
+    transcripts are absent is returned with ``files_exist=False`` rather than
+    dropped. :func:`owned_invocations` filters to usable sites for its callers;
+    dropping the hole here instead would leave the survivors to certify the scope
+    as complete, which is the undercount this exists to prevent.
+
+    Args:
+        homes: Claude home dirs to search.
+        eval_dir: The run directory whose owners are wanted.
+        conflicts: Out-param. ``(run_id, other_eval_dir)`` for each journal that
+            declares *eval_dir* while its own record assigns it elsewhere; such a
+            site is excluded, never silently adopted.
+        mentions: Out-param. ``run_id`` for each journal that contains *eval_dir*
+            as ``"eval_dir"`` text but declares it in no supported row -- evidence
+            present but unreadable as ownership, reported rather than acted on.
     """
     wanted = (eval_dir or "").strip().rstrip("/")
     if not wanted:
@@ -442,7 +532,6 @@ def _owned_sites(
                 # <session>/workflows/wf_*.json -> <session>
                 "record_path": record_path, "session_dir": record_path.parent.parent,
             }
-    value = re.compile(r'"eval_dir"\s*:\s*"' + re.escape(wanted) + r'/?"')
     for home in homes:
         try:
             journals = sorted(home.glob("projects/*/*/subagents/workflows/*/journal.jsonl"))
@@ -452,11 +541,14 @@ def _owned_sites(
             run_id = journal.parent.name
             if run_id in found:
                 continue
-            try:
-                text = journal.read_text(errors="replace")
-            except OSError:
-                continue
-            if not value.search(text):
+            claims, mention_only = _journal_claims(journal, wanted)
+            mine = [c for c in claims if c["eval_dir"] == wanted]
+            if not mine:
+                if mention_only and mentions is not None:
+                    # The path is in the file, but not as anything that declares
+                    # ownership. Silence here would read as "no evidence"; this is
+                    # evidence we refuse to act on, which is a different state.
+                    mentions.append(run_id)
                 continue
             known = on_record.get(run_id)
             if known and wanted not in known:
@@ -468,13 +560,20 @@ def _owned_sites(
                     conflicts.append((run_id, sorted(known)[0]))
                 continue
             g = str(journal.parent / "agent-*.jsonl")
-            if _glob.glob(g):
-                found[run_id] = {
-                    "run_id": run_id, "glob": g, "evidence": EVIDENCE_JOURNAL,
-                    "files_exist": True,
-                    # <session>/subagents/workflows/<runId>/journal.jsonl -> <session>
-                    "record_path": None, "session_dir": journal.parents[3],
-                }
+            found[run_id] = {
+                "run_id": run_id, "glob": g, "evidence": EVIDENCE_JOURNAL,
+                # Kept on the SAME terms as a record-backed site: a declared owner
+                # with no transcripts yet is a hole in the evidence, and dropping it
+                # from the inventory is what let the surviving subset certify the
+                # whole scope as complete. The public wrapper filters; this does not.
+                "files_exist": bool(_glob.glob(g)),
+                # Which agent's returned result proves this, so a hit can be
+                # audited back to its row instead of to "the file matched".
+                "owner_key": mine[0]["key"], "owner_agent": mine[0]["agent_id"],
+                "declared_eval_dirs": sorted({c["eval_dir"] for c in claims}),
+                # <session>/subagents/workflows/<runId>/journal.jsonl -> <session>
+                "record_path": None, "session_dir": journal.parents[3],
+            }
     return list(found.values())
 
 
@@ -541,6 +640,46 @@ def _anchor_top_by_exp_root(
         return _ANCHOR_AMBIGUOUS
     _, record_path, record = finalists[0]
     return _glob_for_record(record_path, record)
+
+
+def nested_lane_dirs(eval_dir: Path | str) -> list[str]:
+    """The eval-dirs of this run's nested lanes, from its persisted timeline.
+
+    Each ``nested[]`` entry of ``reports/trace/agent_timeline.json`` carries the
+    lane's own ``instance`` -- authoritative, because that is how the dispatcher
+    accounts for its lanes. Nesting is never guessed from the filesystem.
+
+    This exists so scope resolution and mirroring discover the SAME instances.
+    They used to differ: the resolver was given the lanes and the copier was not,
+    so the report counted lane calls the mirror had never copied, and a rebuild
+    from that mirror lost them with nothing to say they were missing.
+
+    Returns:
+        Lane eval-dirs in timeline order, de-duplicated; empty when the timeline
+        is absent or records no nesting. Never raises.
+    """
+    timeline = Path(eval_dir) / "reports" / "trace" / "agent_timeline.json"
+    try:
+        data = json.loads(timeline.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        for child in (node.get("nested") or []):
+            if not isinstance(child, dict):
+                continue
+            inst = child.get("instance")
+            if isinstance(inst, str) and inst and inst not in seen:
+                seen.add(inst)
+                out.append(inst)
+            walk(child)
+
+    walk(data)
+    return out
 
 
 def resolve_run_scope(
@@ -619,17 +758,26 @@ def resolve_run_scope(
     invocations: list[dict[str, str]] = []
 
     conflicts: list[tuple[str, str]] = []
+    mentions: list[str] = []
 
     for kind, ev, ex, label in requested:
         # The SAME ownership rule for every instance. A nested lane is as much a
         # multi-invocation affair as the top is -- a lane that was killed and
         # re-entered owns both invocations -- and resolving lanes by "newest
         # record wins" silently billed one of them and called the result whole.
-        sites = _owned_sites(homes, ev, conflicts)
+        sites = _owned_sites(homes, ev, conflicts, mentions)
         usable = [s for s in sites if s.get("files_exist")]
         if kind == "top":
-            invocations = [
-                {key: s[key] for key in ("run_id", "glob", "evidence")} for s in usable]
+            # Provenance travels with the invocation. "This invocation is ours on
+            # journal evidence" is not auditable on its own; "agent <id> returned
+            # this eval-dir under key <k>" is, and the report serializes it.
+            invocations = []
+            for s in usable:
+                inv = {key: s[key] for key in ("run_id", "glob", "evidence")}
+                for key in ("owner_key", "owner_agent"):
+                    if s.get(key):
+                        inv[key] = s[key]
+                invocations.append(inv)
         if sites:
             # Every invocation that owns this eval-dir, not the one newest record: a resumed or
             # re-entered run is several invocations, and each one's spend is this run's spend.
@@ -725,6 +873,14 @@ def resolve_run_scope(
             "workflow invocation %s names this eval-dir in its journal but its workflow "
             "record assigns it to %r — refusing to override the record; excluded from scope"
             % (run_id, elsewhere))
+
+    for run_id in sorted(set(mentions)):
+        # Reported, not resolved. The path is in the file but not as a declaration,
+        # so we can neither claim the invocation nor say the evidence is absent.
+        warnings.append(
+            "workflow invocation %s mentions this eval-dir but declares no ``result.eval_dir`` "
+            "for it — a mention is not a claim of ownership; excluded from scope, and its "
+            "spend (if any) is therefore uncounted" % run_id)
 
     req_labels = [r[3] for r in requested]
     if not top_ok:
@@ -1031,8 +1187,27 @@ def mirror_invocations(
         # Counted before de-duplication: the shared files a second invocation
         # skips are not evidence that IT was captured.
         own = "subagents/workflows/%s/" % run_id if run_id else None
-        entry["transcripts"] = sum(
-            1 for _, rel in pairs if own and own in rel.as_posix())
+        mine = [(src, rel) for src, rel in pairs if own and own in rel.as_posix()]
+        # Only an agent-*.jsonl with bytes in it is evidence that this invocation's
+        # calls were captured. Counting every file under the workflow dir counted
+        # the journal and the metadata as transcripts, so an invocation with a
+        # journal and no agent transcript at all reported "1 transcript, complete";
+        # and a zero-byte transcript -- a file created for an agent that never
+        # flushed -- counted the same as a full one.
+        usable, empty, unreadable = [], [], []
+        for src, rel in mine:
+            if not (rel.name.startswith("agent-") and rel.name.endswith(".jsonl")):
+                continue
+            try:
+                size = src.stat().st_size
+            except OSError:
+                unreadable.append(rel.as_posix())
+                continue
+            (usable if size > 0 else empty).append(rel.as_posix())
+        entry["files_seen"] = len(mine)
+        entry["transcripts"] = len(usable)
+        entry["transcripts_empty"] = sorted(empty)
+        entry["transcripts_unreadable"] = sorted(unreadable)
         for src, rel in pairs:
             key = rel.as_posix()
             if key in seen:
@@ -1078,7 +1253,14 @@ def mirror_invocations(
             manifest["files"].append(rec)
         if entry["status"] == "ok":
             if not entry.get("transcripts"):
-                entry["status"] = "no_transcripts"
+                # Distinguish "nothing was written" from "something was written and
+                # cannot be read". Neither is proof the invocation spent nothing --
+                # missing evidence is missing, not zero -- so both leave the run
+                # incomplete rather than letting the captured subset certify it.
+                entry["status"] = (
+                    "unusable_transcripts"
+                    if (entry.get("transcripts_empty") or entry.get("transcripts_unreadable"))
+                    else "no_transcripts")
             elif entry["skipped"]:
                 entry["status"] = "partial"
             elif entry["errors"]:
@@ -1278,6 +1460,7 @@ def mirror_run_trace(
     exp_root: Path | str | None = None,
     session_id: str | None = None,
     homes: Iterable[Path] | None = None,
+    nested_eval_dirs: Iterable[str] | None = None,
     render: bool = False,
 ) -> dict[str, Any]:
     """Mirror this run's Claude ledger into ``<eval_dir>/llm_trace``.
@@ -1291,6 +1474,11 @@ def mirror_run_trace(
             ``eval_dir`` is not what the record wrote down.
         session_id: The SDK session id, used only to disambiguate.
         homes: Override the searched homes (tests).
+        nested_eval_dirs: This run's lane eval-dirs. ``None`` reads them from the
+            run's own timeline via :func:`nested_lane_dirs`, so the copier covers
+            the same instances the resolver does without the caller having to
+            know about lanes; pass a list to override, ``()`` to mirror the top
+            invocations only.
         render: Also re-render the run's report page (``report/``) with GEAK's
             own driver, and drop the run-report skill beside it.
 
@@ -1323,12 +1511,21 @@ def mirror_run_trace(
                 "record_path": record_path,
                 "session_dir": record_path.parent.parent,
             })
-        for site in _owned_sites(search, str(eval_path)):
-            run_id = str(site.get("run_id") or "")
-            if run_id in seen_ids:
-                continue
-            seen_ids.add(run_id)
-            sites.append(site)
+        # Top-level owners, then every nested lane's owners. Mirroring only the
+        # top eval-dir left a lane's agent-*.jsonl out of the mirror entirely
+        # while the manifest still said coverage was complete -- the resolver had
+        # already learned to union the lanes, and the copier had not, so the calls
+        # the report counted from live sources were simply absent once the mirror
+        # was the only source left.
+        lanes = (list(nested_eval_dirs) if nested_eval_dirs is not None
+                 else nested_lane_dirs(eval_path))
+        for instance in [str(eval_path)] + [ln for ln in lanes if ln]:
+            for site in _owned_sites(search, instance):
+                run_id = str(site.get("run_id") or "")
+                if run_id in seen_ids:
+                    continue
+                seen_ids.add(run_id)
+                sites.append(site)
         if not sites:
             return {"status": "no_record", "homes": [str(h) for h in search]}
         dest = eval_path / MIRROR_DIRNAME
