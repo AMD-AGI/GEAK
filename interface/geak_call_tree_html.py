@@ -91,17 +91,24 @@ def _num(v):
 
 
 def _call_window(row):
-    """(request sent, response received) in epoch ms, or (None, None).
+    """(inferred start, last observed) in epoch ms, or (None, None).
 
-    A row's ``ts_ms`` is when the response landed; the request went out
-    ``duration_ms`` earlier. Spans are built from these so an elapsed figure starts
-    at the first request rather than after the first answer."""
+    Neither end is a measured request time — the transcript records none. The END is the last
+    timestamp at which this response was seen in the transcript (a streamed response is flushed
+    more than once; the earlier flushes are prefixes of the same reply, so the last one is when
+    it finished). The START is inferred by stepping back ``duration_ms``, the gap since the
+    previous record — which brackets the call but also contains whatever ran between the two.
+
+    So a span built from these is an OBSERVED span with an inferred left edge: an upper bound on
+    the model time and a lower bound on nothing. Everything derived from it is labelled
+    ``inferred`` for that reason, and it is still the right quantity for "how long did this take"
+    — it includes the compiling and benchmarking between calls, which is real elapsed time."""
     ts = row.get("ts_ms")
     if ts is None:
         return None, None
-    end = _num(ts)
-    dur = row.get("duration_ms")
-    return end - (_num(dur) if dur is not None else 0.0), end
+    end = _num(row.get("last_seen_ms") if row.get("last_seen_ms") is not None else ts)
+    start = _num(ts) - (_num(row.get("duration_ms")) if row.get("duration_ms") is not None else 0.0)
+    return start, max(start, end)
 
 
 def _span(rows):
@@ -439,7 +446,7 @@ def run_totals(nodes):
 # --------------------------------------------------------------------------- #
 def _md_breakdown(title, first_col, groups, note):
     out = ["", "## %s" % title, "",
-           "| %s | started | elapsed | billed span | calls | agents | input tok | output tok | cost |" % first_col,
+           "| %s | started | elapsed (inferred) | billed span | calls | agents | input tok | output tok | cost |" % first_col,
            "|---|---|---|---|---|---|---|---|---|"]
     for g in groups:
         out.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
@@ -502,8 +509,11 @@ def render_markdown(nodes, root, model, comp=None, phases=None, invocations=None
     if phases:
         out += _md_breakdown(
             "Time, cost and tokens by phase", "phase", phases,
-            "*elapsed* is first request to last response, including the compiling and "
-            "benchmarking between calls; *billed span* is time spent waiting on the model. "
+            "*elapsed\\** is an OBSERVED span: from a start inferred by stepping back the gap "
+            "since the previous transcript record, to the last time the final response was seen. "
+            "The transcript records no request time, so the left edge is inferred, and the span "
+            "includes the compiling and benchmarking between calls. *billed span* is the sum of "
+            "those same inferred per-call gaps, i.e. time plausibly spent waiting on the model. "
             "Phases overlap whenever work ran in parallel, so elapsed times do not add up "
             "to the run's.")
     if invocations and (len(invocations) > 1 or invocations[0]["name"] != OUTSIDE_WORKFLOW):
@@ -720,14 +730,16 @@ _HTML_TEMPLATE = r"""<!doctype html>
         +'<td class="r">'+n(g.output_tokens)+'</td><td class="r cost">'+usd(g.cost_usd)+'</td></tr>';
     }).join('');
     return '<h2>'+esc(title)+'</h2><div class="scroll"><table class="sum"><thead><tr><th>'+esc(col)
-      +'</th><th>started</th><th class="r">elapsed</th><th class="r">billed span</th><th class="r">calls</th>'
+      +'</th><th>started</th><th class="r" title="observed transcript span, left edge inferred">elapsed*</th><th class="r">billed span</th><th class="r">calls</th>'
       +'<th class="r">agents</th><th class="r">input tok</th><th class="r">output tok</th><th class="r">cost</th>'
       +'</tr></thead><tbody>'+body+'</tbody></table></div><div class="note">'+esc(note)+'</div>';
   }
   document.getElementById('sums').innerHTML =
     sumTable('Time, cost and tokens by phase','phase',D.phases,
-      'elapsed = first request to last response, including the compiling and benchmarking between calls; '
-      +'billed span = time spent waiting on the model. Phases overlap when work ran in parallel, so elapsed times do not add up to the run\'s.')
+      'elapsed* = an observed span: from a start inferred by stepping back the gap since the previous transcript '
+      +'record, to the last time the final response was seen. The transcript records no request time, so the left '
+      +'edge is inferred, and the span includes the compiling and benchmarking between calls; '
+      +'billed span = the sum of those same inferred per-call gaps. Phases overlap when work ran in parallel, so elapsed times do not add up to the run\'s.')
     + sumTable('Workflow invocations counted','invocation',D.invocations,
       'Every workflow invocation that worked in this run\'s eval dir is billed to it: a resumed or re-entered run is several invocations.');
   if(!document.getElementById('sums').innerHTML) document.getElementById('sums').style.display='none';
@@ -750,7 +762,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
       +(d.workflow_run?('<dt>workflow run</dt><dd>'+esc(d.workflow_run)+'</dd>'):'')
       +'<dt>models</dt><dd>'+esc((d.models||[]).join(', ')||'—')+'</dd>'
       +'<dt>API calls</dt><dd>'+n(d.calls)+' (this agent, exclusive of children)</dd>'
-      +'<dt>elapsed</dt><dd>'+(d.elapsed_ms==null?'—':hms(d.elapsed_ms))+(d.started?(' <span style="color:var(--muted)">('+esc(d.started)+' → '+esc(d.ended)+')</span>'):'')+'</dd>'
+      +'<dt title="observed transcript span, left edge inferred">elapsed*</dt><dd>'+(d.elapsed_ms==null?'—':hms(d.elapsed_ms))+(d.started?(' <span style="color:var(--muted)">('+esc(d.started)+' → '+esc(d.ended)+')</span>'):'')+'</dd>'
       +'<dt>billed span</dt><dd>'+hms(d.llm_ms)+' <span style="color:var(--muted)">(Σ per-call observed durations, not true request wall-time)</span></dd>'
       +'<dt>own cost</dt><dd>'+usd(d.cost_usd)+'</dd>'
       +'</dl>'
