@@ -359,77 +359,6 @@ def _glob_for_record(
 
 
 
-def _anchor_top_by_live_journal(
-    homes: list[Path], eval_dir: str | None,
-) -> tuple[str, bool] | str | None:
-    """Anchor a run whose workflow record does not exist YET.
-
-    ``_anchor_top_by_exp_root`` assumes a record is on disk carrying
-    ``args.exp_root``. For a report emitted from inside the run that assumption
-    fails outright: the runtime CREATES ``workflows/wf_<runId>.json`` when the
-    workflow returns, so during the run there is no record to rank, anchor or
-    own anything — every record-based path is unresolvable by construction.
-
-    The run's own ``subagents/workflows/<runId>/journal.jsonl`` is written from
-    the first agent onward, and the agents record the eval-dir they work in. So
-    a journal that NAMES the requested eval-dir identifies the run positively,
-    from live evidence, while the run is still going.
-
-    This is a stronger signal than exp_root containment (which is mere
-    ancestry), but it is still not the run's own record, so the caller marks the
-    result INFERRED and never ``complete``.
-
-    - Only an EXACT eval-dir path occurrence counts; a prefix of a longer path
-      (``/x/eval`` inside ``/x/eval-2``) does not, or a sibling run whose dir
-      merely starts the same way would answer for this one.
-    - A run dir with no ``agent-*.jsonl`` is not adopted: a journal alone
-      carries no billable calls, and claiming it would report an empty ledger as
-      a scoped one.
-    - If two DISTINCT run dirs name the same eval-dir (a nested dispatcher and
-      its lane, each with its own runId), that is a genuine tie: refuse rather
-      than bill one run's transcripts as the other's.
-    """
-    wanted = (eval_dir or "").strip().rstrip("/")
-    if not wanted:
-        return None
-    hits: dict[str, tuple[str, bool]] = {}
-    for home in homes:
-        for journal in home.glob("projects/*/*/subagents/workflows/*/journal.jsonl"):
-            run_dir = journal.parent
-            try:
-                text = journal.read_text(errors="replace")
-            except OSError:
-                continue
-            if not _names_path(text, wanted):
-                continue
-            g = str(run_dir / "agent-*.jsonl")
-            if not _glob.glob(g):
-                continue
-            hits[run_dir.name] = (g, True)
-    if not hits:
-        return None
-    if len(hits) > 1:
-        return _ANCHOR_AMBIGUOUS
-    return next(iter(hits.values()))
-
-
-def _names_path(text: str, wanted: str) -> bool:
-    """Whether *text* contains *wanted* as a whole path, not as a prefix.
-
-    A bare substring test would let ``/runs/eval`` match ``/runs/eval-2``, so an
-    occurrence only counts when what follows it cannot extend the path — i.e.
-    end of text, a separator, or any character that cannot appear mid-path.
-    """
-    start = 0
-    while True:
-        i = text.find(wanted, start)
-        if i < 0:
-            return False
-        nxt = text[i + len(wanted):i + len(wanted) + 1]
-        if nxt == "" or nxt in '"\'\\ \t\r\n,}]:' or nxt == "/":
-            return True
-        start = i + 1
-
 # Sentinel: more than one enclosing run could anchor a mid-run eval-dir, so we
 # refuse to guess rather than bill the wrong run's transcripts.
 _ANCHOR_AMBIGUOUS = "ambiguous"
@@ -467,11 +396,13 @@ def owned_invocations(
     return [
         {key: site[key] for key in ("run_id", "glob", "evidence")}
         for site in _owned_sites(homes, eval_dir)
+        if site.get("files_exist")
     ]
 
 
 def _owned_sites(
     homes: Iterable[Path], eval_dir: str | None,
+    conflicts: list[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """:func:`owned_invocations`, keeping each hit's provenance for the mirror.
 
@@ -487,14 +418,27 @@ def _owned_sites(
         return []
     homes = list(homes)
     found: dict[str, dict[str, Any]] = {}
+    # Every eval-dir each runId is on record for. A journal may not override this:
+    # a record positively assigning an invocation to another run is stronger
+    # evidence than that invocation's journal mentioning this one.
+    on_record: dict[str, set[str]] = {}
     for record_path, record in iter_records(homes):
+        run_id = str(record.get("runId") or "")
+        if run_id:
+            on_record.setdefault(run_id, set()).update(
+                directory for field, directory in record_paths_typed(record)
+                if field == _FIELD_EVAL)
         if _match_rank(record, wanted, _FIELD_EVAL) != _RANK_EXACT_SAME:
             continue
         res = _glob_for_record(record_path, record)
-        run_id = str(record.get("runId") or "")
-        if res and res[1] and run_id not in found:
+        if res and run_id not in found:
+            # Retained even when no agent-*.jsonl exists. The record PROVES this
+            # invocation is part of the run; absent transcripts are a hole in the
+            # evidence, and a hole has to be reported, not dropped -- dropping it
+            # lets the remaining subset certify the whole scope as complete.
             found[run_id] = {
                 "run_id": run_id, "glob": res[0], "evidence": EVIDENCE_RECORD,
+                "files_exist": bool(res[1]),
                 # <session>/workflows/wf_*.json -> <session>
                 "record_path": record_path, "session_dir": record_path.parent.parent,
             }
@@ -514,10 +458,20 @@ def _owned_sites(
                 continue
             if not value.search(text):
                 continue
+            known = on_record.get(run_id)
+            if known and wanted not in known:
+                # The runtime already wrote this invocation's record, and it names a
+                # DIFFERENT run. Adopting it here would silently overrule that record
+                # and then warn that the invocation has no record at all. Refuse, and
+                # let the caller say the evidence disagrees.
+                if conflicts is not None:
+                    conflicts.append((run_id, sorted(known)[0]))
+                continue
             g = str(journal.parent / "agent-*.jsonl")
             if _glob.glob(g):
                 found[run_id] = {
                     "run_id": run_id, "glob": g, "evidence": EVIDENCE_JOURNAL,
+                    "files_exist": True,
                     # <session>/subagents/workflows/<runId>/journal.jsonl -> <session>
                     "record_path": None, "session_dir": journal.parents[3],
                 }
@@ -664,26 +618,51 @@ def resolve_run_scope(
     top_anchor = "eval_dir"     # how the whole-run anchor was established
     invocations: list[dict[str, str]] = []
 
+    conflicts: list[tuple[str, str]] = []
+
     for kind, ev, ex, label in requested:
+        # The SAME ownership rule for every instance. A nested lane is as much a
+        # multi-invocation affair as the top is -- a lane that was killed and
+        # re-entered owns both invocations -- and resolving lanes by "newest
+        # record wins" silently billed one of them and called the result whole.
+        sites = _owned_sites(homes, ev, conflicts)
+        usable = [s for s in sites if s.get("files_exist")]
         if kind == "top":
-            invocations = owned_invocations(homes, ev)
-        if invocations and kind == "top":
+            invocations = [
+                {key: s[key] for key in ("run_id", "glob", "evidence")} for s in usable]
+        if sites:
             # Every invocation that owns this eval-dir, not the one newest record: a resumed or
             # re-entered run is several invocations, and each one's spend is this run's spend.
-            top_ok = True
-            for inv in invocations:
+            for inv in usable:
                 if inv["glob"] not in seen:
                     seen.add(inv["glob"])
                     globs.append(inv["glob"])
-            journal_only = [i["run_id"] for i in invocations if i["evidence"] == EVIDENCE_JOURNAL]
+            gone = sorted(s["run_id"] for s in sites if not s.get("files_exist"))
+            if gone:
+                # A record PROVES these belong to the run, so their absent
+                # transcripts are a known hole. Counting only what survived and
+                # calling that complete is exactly the undercount to avoid.
+                missing.append(label)
+                warnings.append(
+                    "%s instance %r owns workflow invocation(s) %s whose agent-*.jsonl "
+                    "transcripts are absent — their spend cannot be counted, so this "
+                    "scope is incomplete" % (kind, label, ", ".join(gone)))
+            if not usable:
+                continue
+            journal_only = [s["run_id"] for s in usable if s["evidence"] == EVIDENCE_JOURNAL]
             if journal_only:
-                top_anchor = "live-journal" if len(journal_only) == len(invocations) else "record+journal"
+                if kind == "top":
+                    top_anchor = (
+                        "live-journal" if len(journal_only) == len(usable) else "record+journal")
                 inferred.append(label)
                 warnings.append(
                     "workflow invocation(s) %s have no workflow record (still running, or ended "
                     "before returning) and were tied to this eval-dir by their journal naming it "
                     "as their eval_dir -- ownership INFERRED, not proven" % ", ".join(journal_only))
-            resolved.append(label)
+            if kind == "top":
+                top_ok = True
+            if not gone:
+                resolved.append(label)
             continue
         res = _resolve_one(homes, ev, ex)
         if res is None and kind == "top":
@@ -692,23 +671,16 @@ def resolve_run_scope(
             # and only ``args.exp_root`` (a STRICT ancestor of the lane eval-dir)
             # identifies it. Anchor on that enclosing run deliberately — a unique
             # most-specific exp_root only; a genuine tie stays unresolved.
+            # NOTE: there is deliberately no looser journal fallback here. A run
+            # still in flight is picked up ABOVE, by the one strict rule: its
+            # journal must name this eval-dir in an ``"eval_dir": "<path>"``
+            # field. The rule this replaced accepted any whole-path mention, so
+            # a journal that merely referenced ``<eval>/final_report.md`` — or a
+            # descendant, or an unrelated longer path ending in ``<eval>`` —
+            # became an owned, `owned=True` scope. Matching a mention is not
+            # evidence of ownership, and nothing downstream could tell the two
+            # apart once the scope said ``run-scoped-inferred``.
             anchored = _anchor_top_by_exp_root(homes, ev)
-            if anchored is None:
-                # No record anchored it — which is the NORMAL state for a report
-                # emitted from inside its own run, because the runtime creates
-                # the workflow record only when the workflow returns. Fall back
-                # to the live journal, which exists from the first agent on.
-                anchored = _anchor_top_by_live_journal(homes, ev)
-                if anchored is not None and anchored != _ANCHOR_AMBIGUOUS:
-                    res = anchored
-                    top_anchor = "live-journal"
-                    inferred.append(label)
-                    warnings.append(
-                        "top-level run identity %r resolved from the live "
-                        "journal naming this eval-dir (the run's own workflow "
-                        "record is not written until the run returns) — scope "
-                        "INFERRED, ownership not proven" % label)
-                    anchored = None
             if anchored == _ANCHOR_AMBIGUOUS:
                 warnings.append(
                     "top-level run identity %r matches more than one enclosing "
@@ -746,6 +718,13 @@ def resolve_run_scope(
             seen.add(g)
             globs.append(g)
         resolved.append(label)
+
+    for run_id, elsewhere in sorted(set(conflicts)):
+        # Evidence that disagrees is not evidence to pick from.
+        warnings.append(
+            "workflow invocation %s names this eval-dir in its journal but its workflow "
+            "record assigns it to %r — refusing to override the record; excluded from scope"
+            % (run_id, elsewhere))
 
     req_labels = [r[3] for r in requested]
     if not top_ok:
