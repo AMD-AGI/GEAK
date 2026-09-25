@@ -358,3 +358,73 @@ class TestOneReportPage(unittest.TestCase):
             self.assertEqual(res["trace"]["status"], "ok")
             self.assertNotIn("html", res["trace"])
             self.assertTrue(os.path.isfile(os.path.join(report, "geak_trace.json")))
+
+
+class TestAPartialCaptureReachesThePersistedLedger(unittest.TestCase):
+    """Astra re-review P1: the hole has to survive into the report (2026-09-25).
+
+    Fixing only the mirror manifest leaves the report driver unaware: the
+    resolver certified a zero-byte transcript as coverage, so an unmodified
+    ``geak_report.run`` wrote ``token_stats.json`` with ``complete: true`` and
+    ``warnings: []`` over an invocation the mirror had already called unusable.
+    The captured calls stay counted; the coverage claim is what changes.
+    """
+
+    def _home_with_one_empty(self, tmp):
+        eval_dir = os.path.join(tmp, "eval")
+        sess = Path(tmp) / "home" / "projects" / "slug" / "sess"
+        (sess / "workflows").mkdir(parents=True)
+        (sess / "workflows" / "wf_m.json").write_text(
+            json.dumps({"runId": "wf_m", "args": {"eval_dir": eval_dir}}),
+            encoding="utf-8")
+        wf = sess / "subagents" / "workflows" / "wf_m"
+        wf.mkdir(parents=True)
+        write_transcript(str(wf / "agent-a1.jsonl"), [
+            user_rec(prompt_for("director", "setup", eval_dir), 0),
+            asst_rec(10, "m_kept", read=100, out=1, text="ok"),
+        ])
+        # the agent that was created and never flushed
+        (wf / "agent-a2.jsonl").write_text("", encoding="utf-8")
+        tl = Path(eval_dir) / "reports" / "trace" / "agent_timeline.json"
+        tl.parent.mkdir(parents=True)
+        tl.write_text(json.dumps(timeline([ev("Setup", "director:setup")])),
+                      encoding="utf-8")
+        return eval_dir, Path(tmp) / "home"
+
+    def test_the_report_counts_the_calls_and_states_the_hole(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_partial_") as tmp:
+            eval_dir, home = self._home_with_one_empty(tmp)
+            with mock.patch.object(M, "candidate_homes", return_value=[home]):
+                res = R.run(eval_dir=eval_dir, model="empty-transcript-review")
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(res["transcript_scope"], "partial")
+            with open(os.path.join(eval_dir, "reports", "trace", "token_stats.json"),
+                      encoding="utf-8") as fh:
+                meta = json.load(fh)["meta"]
+            self.assertFalse(meta["complete"])
+            joined = " ".join(meta["warnings"])
+            self.assertIn("agent-a2.jsonl", joined)
+            self.assertIn("partially captured", joined)
+            # the transcript that DID flush is still billed -- a hole is reported,
+            # not a reason to drop real spend.
+            with open(res["calls"], encoding="utf-8") as fh:
+                ids = [json.loads(l)["message_id"] for l in fh if l.strip()]
+            self.assertEqual(ids, ["m_kept"])
+
+    def test_a_fully_flushed_run_still_reports_complete(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_whole_") as tmp:
+            eval_dir, home = self._home_with_one_empty(tmp)
+            # give the second agent a real transcript: the same run, no hole
+            wf = home / "projects" / "slug" / "sess" / "subagents" / "workflows" / "wf_m"
+            write_transcript(str(wf / "agent-a2.jsonl"), [
+                user_rec(prompt_for("engineer", "compute", eval_dir), 0),
+                asst_rec(20, "m_second", read=100, out=1, text="ok"),
+            ])
+            with mock.patch.object(M, "candidate_homes", return_value=[home]):
+                res = R.run(eval_dir=eval_dir, model="empty-transcript-review")
+            self.assertEqual(res["transcript_scope"], "run-scoped")
+            with open(os.path.join(eval_dir, "reports", "trace", "token_stats.json"),
+                      encoding="utf-8") as fh:
+                meta = json.load(fh)["meta"]
+            self.assertTrue(meta["complete"])
+            self.assertEqual(meta["warnings"], [])

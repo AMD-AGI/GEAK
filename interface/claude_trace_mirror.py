@@ -326,10 +326,11 @@ def _resolve_one(
 ) -> tuple[str, bool] | None:
     """Resolve one requested instance to its own ``agent-*.jsonl`` glob.
 
-    Returns ``(glob, files_exist)`` when a record EXACTLY owns the instance and
-    carries a ``runId``; ``None`` when no owning record exists. ``files_exist``
-    reflects ``glob.glob`` on disk, so the caller can flag a resolved-but-empty
-    lane rather than trust a nonempty glob STRING as proof of coverage.
+    Returns ``(glob, usability)`` when a record EXACTLY owns the instance and
+    carries a ``runId``; ``None`` when no owning record exists. ``usability`` is
+    the :func:`transcript_usability` split of what is actually on disk, so the
+    caller can flag a resolved-but-empty lane rather than trust a nonempty glob
+    STRING -- or a zero-byte file -- as proof of coverage.
     """
     rec = find_record(homes, eval_dir=eval_dir, exp_root=exp_root)
     if not rec:
@@ -343,19 +344,85 @@ def _resolve_one(
     return _glob_for_record(record_path, record)
 
 
+def is_transcript_name(name: str) -> bool:
+    """Whether *name* is an agent transcript, not a journal or a metadata file."""
+    return name.startswith("agent-") and name.endswith(".jsonl")
+
+
+def classify_transcript(path: Path | str) -> str:
+    """One transcript's usability: ``usable``, ``empty`` or ``unreadable``.
+
+    Only a file with BYTES in it is evidence that an invocation's calls were
+    captured. A zero-byte ``agent-*.jsonl`` is a file the runtime created for an
+    agent that never flushed: it proves the agent existed, NOT that it spent
+    nothing. Treating its existence as coverage is how a known hole shipped as a
+    complete report.
+    """
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        return "unreadable"
+    return "usable" if size > 0 else "empty"
+
+
+def transcript_usability(pattern: str) -> dict[str, list[str]]:
+    """Split the transcripts *pattern* names into usable / empty / unreadable.
+
+    This is the ONE reader for the two halves that have to agree: the scope
+    resolver, which decides whether a run's coverage is complete, and the mirror,
+    which copies the files and reports coverage for the same invocations. While
+    the resolver tested only ``glob.glob(...)`` -- a FILENAME test -- a zero-byte
+    transcript satisfied report scope while the mirror called the same invocation
+    unusable, and the report shipped ``complete: true`` with no warnings over a
+    hole the mirror had already found.
+
+    Returns:
+        ``{"usable", "empty", "unreadable"}``, each a sorted list of paths.
+    """
+    out: dict[str, list[str]] = {"usable": [], "empty": [], "unreadable": []}
+    for path in sorted(_glob.glob(pattern)):
+        if not is_transcript_name(os.path.basename(path)):
+            continue
+        out[classify_transcript(path)].append(path)
+    return out
+
+
+def _site_usability(site: dict[str, Any]) -> dict[str, list[str]]:
+    """The usability split an ``_owned_sites`` entry carries, as one dict."""
+    return {
+        "usable": ["<kept>"] if site.get("files_exist") else [],
+        "empty": list(site.get("transcripts_empty") or ()),
+        "unreadable": list(site.get("transcripts_unreadable") or ()),
+    }
+
+
+def _hole_note(usability: dict[str, list[str]]) -> str:
+    """Name the unusable transcripts, so a warning says WHICH file is a hole."""
+    bits = []
+    for state in ("empty", "unreadable"):
+        names = [os.path.basename(p) for p in usability.get(state) or ()]
+        if names:
+            bits.append("%d %s (%s)" % (len(names), state, ", ".join(names)))
+    return "; ".join(bits)
+
+
 def _glob_for_record(
     record_path: Path, record: dict[str, Any]
-) -> tuple[str, bool] | None:
+) -> tuple[str, dict[str, list[str]]] | None:
     """Build the ``agent-*.jsonl`` glob for *record*'s own run dir.
 
-    Returns ``(glob, files_exist)`` or ``None`` when the record has no ``runId``.
+    Returns ``(glob, usability)`` -- the usability split from
+    :func:`transcript_usability`, so the caller can tell a resolved-but-empty
+    lane from a covered one instead of trusting a nonempty glob STRING, or a
+    zero-byte file, as proof of coverage. ``None`` when the record has no
+    ``runId``.
     """
     run_id = str(record.get("runId") or "")
     if not run_id:
         return None
     session_dir = record_path.parent.parent
     g = str(session_dir / "subagents" / "workflows" / run_id / "agent-*.jsonl")
-    return g, bool(_glob.glob(g))
+    return g, transcript_usability(g)
 
 
 
@@ -391,7 +458,9 @@ def owned_invocations(
 
     Transcript sets never overlap (each runId owns its directory), so the union cannot double
     count. The same runId found under two homes (a live home and a mirror of it) is taken once,
-    from the first home. Directories without an ``agent-*.jsonl`` are skipped.
+    from the first home. Directories without a USABLE
+    ``agent-*.jsonl`` (one with bytes in it) are skipped here; the unfiltered
+    inventory keeps them, so the hole can be reported.
 
     Returns:
         ``[{"run_id", "glob", "evidence"}]`` in discovery order; empty when nothing owns it.
@@ -408,6 +477,14 @@ def owned_invocations(
 #: each agent that returns; ``result.eval_dir`` is what THAT agent declared it was
 #: working in. Nothing else in the journal is an ownership statement.
 _JOURNAL_RESULT = "result"
+
+#: How well a journal-owned invocation can be attributed. The supported native
+#: schema carries BOTH producer fields (``key`` and ``agentId``); a row that
+#: declares an ``eval_dir`` without them is still a claim, but it is one nobody
+#: signed, so it is adopted down an explicit path and labelled rather than
+#: passed off as a provenanced hit with two empty strings in it.
+OWNER_DECLARED = "declared"
+OWNER_UNATTRIBUTED = "unattributed"
 
 
 def _eval_dir_mention_re(wanted: str) -> "re.Pattern[str]":
@@ -432,11 +509,23 @@ def _journal_claims(journal: Path, wanted: str) -> tuple[list[dict[str, str]], b
     ``eval_dir`` nested under any other key is somebody else's subject, not this
     invocation's identity.
 
+    The supported native schema is ``{"type", "key", "agentId", "result"}`` and
+    BOTH producer fields are required to be non-empty strings; they are what makes
+    a hit auditable back to the agent that wrote it. They are validated here
+    rather than read optimistically: ``str(row.get("key") or "")`` turned a
+    missing or wrongly-typed field into ``""`` and the site then travelled into
+    the serialized scope as an owner with no owner, which reads as provenance
+    that was never recorded. A row that declares an ``eval_dir`` without them is
+    NOT dropped -- an older or hand-written journal may genuinely predate the
+    fields, and discarding its claim would undercount real spend -- it is
+    adopted on the explicit ``OWNER_UNATTRIBUTED`` path, which the caller
+    reports so the missing provenance is visible instead of silent.
+
     Returns:
         ``(claims, mention_only)``. Each claim is ``{"eval_dir", "key",
-        "agent_id"}`` -- the declared dir plus the agent that declared it, kept so
-        a hit can say WHICH agent proves it rather than just that the file
-        matched. *mention_only* is True when *wanted* appears as ``"eval_dir"``
+        "agent_id", "provenance"}`` -- the declared dir, the agent that declared
+        it, and whether that attribution was actually present, kept so a hit can
+        say WHICH agent proves it rather than just that the file matched. *mention_only* is True when *wanted* appears as ``"eval_dir"``
         text but no supported row declares it: evidence that is present but not
         readable as ownership, which the caller reports rather than acts on.
     """
@@ -461,10 +550,17 @@ def _journal_claims(journal: Path, wanted: str) -> tuple[list[dict[str, str]], b
         declared = result.get("eval_dir")
         if not isinstance(declared, str) or not declared.strip():
             continue
+        key, agent_id = row.get("key"), row.get("agentId")
+        key = key.strip() if isinstance(key, str) else ""
+        agent_id = agent_id.strip() if isinstance(agent_id, str) else ""
         claims.append({
             "eval_dir": declared.strip().rstrip("/"),
-            "key": str(row.get("key") or ""),
-            "agent_id": str(row.get("agentId") or ""),
+            "key": key,
+            "agent_id": agent_id,
+            # Both, or neither counts: half an attribution names a producer that
+            # cannot be looked up, which is not better evidence than none.
+            "provenance": (
+                OWNER_DECLARED if (key and agent_id) else OWNER_UNATTRIBUTED),
         })
     if any(c["eval_dir"] == wanted for c in claims):
         return claims, False
@@ -488,8 +584,9 @@ def _owned_sites(
     detail.
 
     This is the run's FULL inventory and is deliberately unfiltered: a site whose
-    transcripts are absent is returned with ``files_exist=False`` rather than
-    dropped. :func:`owned_invocations` filters to usable sites for its callers;
+    transcripts are absent -- or present but zero-byte/unreadable -- is returned
+    with ``files_exist=False``, its unusable files named in ``transcripts_empty``
+    and ``transcripts_unreadable``, rather than dropped. :func:`owned_invocations` filters to usable sites for its callers;
     dropping the hole here instead would leave the survivors to certify the scope
     as complete, which is the undercount this exists to prevent.
 
@@ -528,7 +625,12 @@ def _owned_sites(
             # lets the remaining subset certify the whole scope as complete.
             found[run_id] = {
                 "run_id": run_id, "glob": res[0], "evidence": EVIDENCE_RECORD,
-                "files_exist": bool(res[1]),
+                # Usability, not mere existence, and from the SAME reader the
+                # mirror uses -- a zero-byte transcript is a hole in both halves
+                # or the two disagree about the very same invocation.
+                "files_exist": bool(res[1]["usable"]),
+                "transcripts_empty": list(res[1]["empty"]),
+                "transcripts_unreadable": list(res[1]["unreadable"]),
                 # <session>/workflows/wf_*.json -> <session>
                 "record_path": record_path, "session_dir": record_path.parent.parent,
             }
@@ -560,16 +662,20 @@ def _owned_sites(
                     conflicts.append((run_id, sorted(known)[0]))
                 continue
             g = str(journal.parent / "agent-*.jsonl")
+            _journal_usability = transcript_usability(g)
             found[run_id] = {
                 "run_id": run_id, "glob": g, "evidence": EVIDENCE_JOURNAL,
                 # Kept on the SAME terms as a record-backed site: a declared owner
                 # with no transcripts yet is a hole in the evidence, and dropping it
                 # from the inventory is what let the surviving subset certify the
                 # whole scope as complete. The public wrapper filters; this does not.
-                "files_exist": bool(_glob.glob(g)),
+                "files_exist": bool(_journal_usability["usable"]),
+                "transcripts_empty": list(_journal_usability["empty"]),
+                "transcripts_unreadable": list(_journal_usability["unreadable"]),
                 # Which agent's returned result proves this, so a hit can be
                 # audited back to its row instead of to "the file matched".
                 "owner_key": mine[0]["key"], "owner_agent": mine[0]["agent_id"],
+                "owner_provenance": mine[0]["provenance"],
                 "declared_eval_dirs": sorted({c["eval_dir"] for c in claims}),
                 # <session>/subagents/workflows/<runId>/journal.jsonl -> <session>
                 "record_path": None, "session_dir": journal.parents[3],
@@ -608,7 +714,7 @@ def _anchor_top_by_exp_root(
     - If two DISTINCT runs tie at that most-specific depth, resolution is
       ambiguous and we refuse (return ``_ANCHOR_AMBIGUOUS``) rather than pick one.
 
-    Returns ``(glob, files_exist)`` for a unique anchor, ``_ANCHOR_AMBIGUOUS`` on
+    Returns ``(glob, usability)`` for a unique anchor, ``_ANCHOR_AMBIGUOUS`` on
     a genuine tie, or ``None`` when nothing encloses *eval_dir*.
     """
     cleaned = (eval_dir or "").strip().rstrip("/")
@@ -774,7 +880,7 @@ def resolve_run_scope(
             invocations = []
             for s in usable:
                 inv = {key: s[key] for key in ("run_id", "glob", "evidence")}
-                for key in ("owner_key", "owner_agent"):
+                for key in ("owner_key", "owner_agent", "owner_provenance"):
                     if s.get(key):
                         inv[key] = s[key]
                 invocations.append(inv)
@@ -785,15 +891,48 @@ def resolve_run_scope(
                 if inv["glob"] not in seen:
                     seen.add(inv["glob"])
                     globs.append(inv["glob"])
-            gone = sorted(s["run_id"] for s in sites if not s.get("files_exist"))
+            holed = sorted(
+                (s["run_id"], _hole_note(_site_usability(s)))
+                for s in sites
+                if s.get("files_exist")
+                and (s.get("transcripts_empty") or s.get("transcripts_unreadable")))
+            if holed:
+                # A sibling that DID flush does not cover for one that did not.
+                # Keeping the usable calls is right -- they are real spend -- but
+                # the invocation is partially captured, and saying so is the whole
+                # point: a zero-byte transcript is an unknown, not a zero.
+                if label not in missing:
+                    missing.append(label)
+                warnings.append(
+                    "%s instance %r has partially captured workflow invocation(s) %s — "
+                    "their other transcripts were kept, but the unusable ones cannot be "
+                    "counted, so this scope is incomplete" % (
+                        kind, label,
+                        ", ".join("%s [%s]" % (rid, note) for rid, note in holed)))
+            unattributed = sorted(
+                s["run_id"] for s in usable
+                if s.get("evidence") == EVIDENCE_JOURNAL
+                and s.get("owner_provenance") != OWNER_DECLARED)
+            if unattributed:
+                # Adopted, but nobody signed the claim. Said out loud rather than
+                # serialized as an owner with two empty strings for an owner.
+                warnings.append(
+                    "workflow invocation(s) %s declare this eval-dir in a journal row that "
+                    "carries no usable ``key``/``agentId`` — ownership is adopted but "
+                    "UNATTRIBUTED: it cannot be audited back to the agent that wrote it"
+                    % ", ".join(unattributed))
+            gone = sorted(
+                "%s [%s]" % (s["run_id"], _hole_note(_site_usability(s)) or "no files")
+                for s in sites if not s.get("files_exist"))
             if gone:
                 # A record PROVES these belong to the run, so their absent
                 # transcripts are a known hole. Counting only what survived and
                 # calling that complete is exactly the undercount to avoid.
-                missing.append(label)
+                if label not in missing:
+                    missing.append(label)
                 warnings.append(
                     "%s instance %r owns workflow invocation(s) %s whose agent-*.jsonl "
-                    "transcripts are absent — their spend cannot be counted, so this "
+                    "transcripts are absent or unusable — their spend cannot be counted, so this "
                     "scope is incomplete" % (kind, label, ", ".join(gone)))
             if not usable:
                 continue
@@ -809,7 +948,7 @@ def resolve_run_scope(
                     "as their eval_dir -- ownership INFERRED, not proven" % ", ".join(journal_only))
             if kind == "top":
                 top_ok = True
-            if not gone:
+            if not gone and not holed:
                 resolved.append(label)
             continue
         res = _resolve_one(homes, ev, ex)
@@ -853,19 +992,32 @@ def resolve_run_scope(
                 "%s instance %r has no owning workflow record — excluded from scope"
                 % (kind, label))
             continue
-        g, files_exist = res
-        if not files_exist:
+        g, usability = res
+        if not usability["usable"]:
+            missing.append(label)
+            note = _hole_note(usability)
+            warnings.append(
+                "%s instance %r resolved to %s but no usable agent-*.jsonl files exist%s"
+                % (kind, label, g, " — %s" % note if note else ""))
+            continue
+        if usability["empty"] or usability["unreadable"]:
+            # Scope to it, count what flushed, and still say the capture has a
+            # hole. Letting the usable siblings certify the instance is exactly
+            # how a report reached "complete, no warnings" over a known gap.
             missing.append(label)
             warnings.append(
-                "%s instance %r resolved to %s but no agent-*.jsonl files exist"
-                % (kind, label, g))
-            continue
+                "%s instance %r is partially captured: %s — those calls cannot be "
+                "counted, so this scope is incomplete" % (kind, label, _hole_note(usability)))
+            partial_capture = True
+        else:
+            partial_capture = False
         if kind == "top":
             top_ok = True
         if g not in seen:
             seen.add(g)
             globs.append(g)
-        resolved.append(label)
+        if not partial_capture:
+            resolved.append(label)
 
     for run_id, elsewhere in sorted(set(conflicts)):
         # Evidence that disagrees is not evidence to pick from.
@@ -1194,16 +1346,15 @@ def mirror_invocations(
         # journal and no agent transcript at all reported "1 transcript, complete";
         # and a zero-byte transcript -- a file created for an agent that never
         # flushed -- counted the same as a full one.
-        usable, empty, unreadable = [], [], []
+        # The SAME classifier the scope resolver reads, so the manifest and the
+        # report cannot disagree about whether an invocation was captured.
+        split = {"usable": [], "empty": [], "unreadable": []}
         for src, rel in mine:
-            if not (rel.name.startswith("agent-") and rel.name.endswith(".jsonl")):
+            if not is_transcript_name(rel.name):
                 continue
-            try:
-                size = src.stat().st_size
-            except OSError:
-                unreadable.append(rel.as_posix())
-                continue
-            (usable if size > 0 else empty).append(rel.as_posix())
+            split[classify_transcript(src)].append(rel.as_posix())
+        usable, empty, unreadable = (
+            split["usable"], split["empty"], split["unreadable"])
         entry["files_seen"] = len(mine)
         entry["transcripts"] = len(usable)
         entry["transcripts_empty"] = sorted(empty)
@@ -1261,6 +1412,12 @@ def mirror_invocations(
                     "unusable_transcripts"
                     if (entry.get("transcripts_empty") or entry.get("transcripts_unreadable"))
                     else "no_transcripts")
+            elif entry["transcripts_empty"] or entry["transcripts_unreadable"]:
+                # Some of this invocation's agents flushed and some did not. The
+                # calls that WERE captured stay counted, but a usable sibling is
+                # not evidence about the file next to it: the invocation is
+                # partially captured, and the run's coverage is not complete.
+                entry["status"] = "partial_transcripts"
             elif entry["skipped"]:
                 entry["status"] = "partial"
             elif entry["errors"]:
