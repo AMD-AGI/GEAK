@@ -359,7 +359,11 @@ class TestElapsedAndBreakdowns(unittest.TestCase):
         self.assertEqual(len(payload["invocations"]), 2)
         self.assertIn("## Time, cost and tokens by phase", md)
         self.assertIn("## Workflow invocations counted", md)
-        self.assertIn("Elapsed (first request → last response)", md)
+        # The span is OBSERVED, and the label must not promise a completed response
+        # on the right edge or a recorded request time on the left.
+        self.assertIn("Observed span (first request → last observed flush)", md)
+        self.assertIn("the left edge is inferred", md)
+        self.assertNotIn("last response)", md)
 
     def test_no_invocation_table_when_nothing_ran_in_a_workflow(self):
         rows = [call("director", "setup", 10_000)]   # no workflow_run field at all
