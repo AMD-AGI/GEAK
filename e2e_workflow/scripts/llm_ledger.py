@@ -160,17 +160,36 @@ def _text_of(message):
     return ""
 
 
-def _unwrap_harness(text):
-    """The task text inside a Claude Code workflow frame, dedented; *text* unchanged otherwise.
+def _harness_frame(text):
+    """``(kind, task_text)`` for one user record.
+
+    *kind* is what the record IS, stated rather than inferred:
+
+    - ``"computed-task"`` — the harness frame the runtime writes when it hands a
+      sub-agent its task. This is the only text that says what the agent was
+      launched to do.
+    - ``"harness"`` — some other ``[Workflow harness …]`` frame.
+    - ``""`` — an ordinary user record. Inside a sub-agent transcript that is a
+      relayed turn: a tool result, a quoted prompt, a forwarded instruction. It
+      may LOOK like a role header and must not be mistaken for one.
 
     The frame is one header line, then the task with every line indented by exactly two spaces
     (see HARNESS_FRAME_RE). Only that indent is removed, so the task's own indentation survives.
+    Callers used to distinguish the two cases by ``text is not raw``, which is an identity trick,
+    not a fact about the record — an unframed record that needed no dedent is indistinguishable
+    from a framed one under that test.
     """
     m = HARNESS_FRAME_RE.match(text or "")
     if not m:
-        return text
-    return "\n".join(line[2:] if line.startswith("  ") else line
-                     for line in text[m.end():].split("\n"))
+        return "", text
+    body = "\n".join(line[2:] if line.startswith("  ") else line
+                      for line in text[m.end():].split("\n"))
+    return ("computed-task" if "computed task" in m.group(0) else "harness"), body
+
+
+def _unwrap_harness(text):
+    """The task text inside a Claude Code workflow frame, dedented; *text* unchanged otherwise."""
+    return _harness_frame(text)[1]
 
 
 def _content_parts(message):
@@ -391,8 +410,10 @@ def role_of_label(label):
 def apply_agent_meta(groups):
     """Name every conversation that has runtime metadata by the workflow's own label and phase.
 
-    The label always wins over a derived ``role:sub`` key, because it IS the name the script gave
-    the agent. The phase wins too — it is recorded per agent by the runtime, where the timeline
+    The label names a conversation the prompt did not: a label is a free-form display string
+    (``extract_op fused_moe_a16w4_decode``), so reading a role out of it is lossy, and the
+    agent's own brief -- which states its role outright -- is the better source when there is
+    one. The label is always kept as ``label`` either way. The phase wins outright — it is recorded per agent by the runtime, where the timeline
     join is positional — with one exception: a nested kernel lane's metadata phase is only the
     lane marker (``▸ kernel-lane #4``), so a reliable timeline match that already placed the agent
     in a specific ``kernel/<phase>`` keeps it. A conversation no prompt pattern recognised stops
@@ -440,11 +461,15 @@ def split_conversations(records, single_agent=False):
     groups, cur = [], {"role": DRIVER, "subphase": "", "records": [], "prompt": ""}
     named = False
     task_text = None   # single_agent: the computed task, kept as the prompt if no header names it
+    # single_agent: what each KIND of record proposed the agent is. The computed task is the
+    # agent's own brief; everything else is text that reached it, and a relayed turn quoting
+    # "You are the profiler. PHASE=baseline." describes whoever was quoted, not this agent.
+    proposed = {}
     for rec in records:
         if rec.get("type") == "user" and not (single_agent and named):
             raw = _text_of(rec.get("message"))
-            text = _unwrap_harness(raw)
-            if single_agent and task_text is None and text is not raw and "computed task" in raw[:80]:
+            kind, text = _harness_frame(raw)
+            if single_agent and task_text is None and kind == "computed-task":
                 task_text = text
             m = ROLE_RE.search(text)
             me = None if m else ENGINEER_RE.search(text)
@@ -461,8 +486,10 @@ def split_conversations(records, single_agent=False):
             else:
                 role, sub = None, None
             if role and single_agent:
-                cur.update(role=role, subphase=sub, prompt=text[:8000])
-                named = True
+                # Do not name from the first match. Let every kind of record have its say and
+                # decide once, after the file, so the computed task cannot lose a race to a
+                # relayed turn that merely appeared earlier.
+                proposed.setdefault(kind or "relayed", (role, sub, text))
             elif role:
                 if cur["records"]:
                     groups.append(cur)
@@ -471,8 +498,24 @@ def split_conversations(records, single_agent=False):
                 # under <eval>/kernels/_exp/).
                 cur = {"role": role, "subphase": sub, "records": [], "prompt": text[:8000]}
         cur["records"].append(rec)
-    if single_agent and not named and task_text:
-        cur["prompt"] = task_text[:8000]
+    if single_agent:
+        # Precedence is by what the record is, not when it arrived.
+        pick = proposed.get("computed-task") or proposed.get("harness") or proposed.get("relayed")
+        if pick:
+            role, sub, text = pick
+            cur.update(role=role, subphase=sub, prompt=text[:8000])
+            named = True
+            others = {k: v[:2] for k, v in proposed.items() if v[:2] != (role, sub)}
+            if others:
+                # Both readings are kept. Overwriting one with the other produced a group whose
+                # role and prompt described different agents, with nothing left to say so.
+                cur["role_conflict"] = sorted("%s:%s (%s)" % (r, sp, k)
+                                              for k, (r, sp) in others.items())
+        cur["role_source"] = (
+            next(iter(k or "relayed" for k in proposed if proposed[k] is pick), "")
+            if pick else ("computed-task" if task_text else ""))
+        if not named and task_text:
+            cur["prompt"] = task_text[:8000]
     if cur["records"]:
         groups.append(cur)
     return [g for g in groups if any(r.get("type") == "assistant" for r in g["records"])]
@@ -517,7 +560,13 @@ def calls_of(group, source):
                 blocks[bk] = text
         row = {
             "ts_ms": ts,
+            "last_seen_ms": ts,
+            # NOT a measured request duration -- the transcript records no request time. This is
+            # the gap since the previous record in the file, which brackets the call but also
+            # contains whatever happened between the two (tool work, compiling, benchmarking,
+            # a pause). Named in the row so no reader has to guess how it was arrived at.
             "duration_ms": (ts - prev_ts) if (ts is not None and prev_ts is not None and ts >= prev_ts) else None,
+            "duration_source": "inter-record-gap",
             "message_id": msg.get("id"),
             "request_id": rec.get("requestId"),
             "model": msg.get("model"),
@@ -544,10 +593,15 @@ def calls_of(group, source):
             by_id[key] = row
             order.append(key)
         else:
+            # Keep BOTH ends of what was observed. The first flush is when the response first
+            # appeared; the last is when it stopped growing. Carrying only the first and pairing
+            # it with the final token count timed a complete response by its earliest fragment.
+            last = max((t for t in (prior.get("last_seen_ms"), ts) if t is not None), default=None)
             if row["output_tokens"] > prior["output_tokens"]:
                 keep_ts, keep_dur = prior["ts_ms"], prior["duration_ms"]
                 by_id[key] = row
                 by_id[key]["ts_ms"], by_id[key]["duration_ms"] = keep_ts, keep_dur
+            by_id[key]["last_seen_ms"] = last
         if ts is not None:
             prev_ts = ts
     # Reassemble each kept row's output/thinking from ALL of its blocks (the
@@ -889,13 +943,26 @@ def aggregate(rows, groups, timeline, rates):
     total["wall_ms"] = (run_t1 - run_t0) if (run_t0 is not None and run_t1 is not None) else None
     total["started_at"] = _ms_to_iso(run_t0)
     total["ended_at"] = _ms_to_iso(run_t1)
-    # "agents" = how many agent attempts happened. The workflow's own count is
-    # authoritative — it also sees the attempts that hung or errored without ever
-    # producing a transcript, which conversations alone would miss entirely.
+    # How many agents ran is two populations that are counted independently and cannot be
+    # joined: `load_timeline` carries no identity that a conversation can be matched on, so
+    # how far the two overlap is simply unknown. Report both, plus the unknown, and never
+    # present a derived single number as a count.
+    #
+    #   agents_with_transcripts: conversations found in the scoped transcripts.
+    #   agents_dispatched:       dispatch attempts the workflow itself recorded, including the
+    #                            ones that hung or errored before writing any transcript.
+    #
+    # Neither contains the other: a timeline written by only the LAST invocation of a resumed
+    # or re-entered run records that invocation's attempts alone, while transcripts from every
+    # invocation are in scope; and an attempt that died early is in the timeline only.
     events = timeline.get("events") or []
-    # The larger of the two: a timeline written by only the LAST invocation of a resumed or
-    # re-entered run records that invocation's attempts alone, while its transcripts are all here.
+    total["agents_with_transcripts"] = len(groups)
+    total["agents_dispatched"] = len(events)
+    # A LOWER BOUND on the agents that ran, not a count -- it assumes the smaller population is
+    # wholly contained in the larger, which nothing here establishes. `agents_exact` says whether
+    # it may be read as a count: only when one population is empty is there nothing to overlap.
     total["agents"] = max(len(events), len(groups))
+    total["agents_exact"] = not (events and groups)
     total["agent_attempts_failed"] = sum(1 for e in events if not e.get("ok"))
     total["conversations"] = len(groups)
     return {
@@ -948,11 +1015,20 @@ def render_md(agg, meta):
     L.append("## Run totals")
     L.append("")
     L += _table(
-        ["API calls", "agents", "wall", "in (total)", "out", "in:out", "billed", "no-reuse", "saved", "re-sent cheaply"],
+        ["API calls", "agents" if t.get("agents_exact") else "agents (>=)",
+         "wall", "in (total)", "out", "in:out", "billed", "no-reuse", "saved", "re-sent cheaply"],
         ["r"] * 10,
         [[_n(t["calls"]), _n(t["agents"]), _hms(t.get("wall_ms")), _n(t["total_input"]), _n(t["output_tokens"]),
           ratio, "$%.2f" % t["cost"], "$%.2f" % t["list_cost"], "%.1f%%" % saved, reuse]])
     L.append("")
+    if not t.get("agents_exact"):
+        L.append("- agents: %d conversation(s) in the scoped transcripts, %d dispatch attempt(s) "
+                 "recorded by the workflow (%d of them failed). The two are counted separately "
+                 "and cannot be joined — no shared identity is recorded — so how far they overlap "
+                 "is unknown and the figure above is a lower bound, not a count."
+                 % (t.get("agents_with_transcripts", 0), t.get("agents_dispatched", 0),
+                    t.get("agent_attempts_failed", 0)))
+        L.append("")
     L.append("*billed* is what the reuse discount actually cost; *no-reuse* is the same traffic with every "
              "input token at full price. *re-sent cheaply* is the share of input that was already stored — "
              "high is good, but it is not the same as efficient: it can also mean cheaply re-sending "

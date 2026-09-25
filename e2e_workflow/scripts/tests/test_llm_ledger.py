@@ -1164,3 +1164,106 @@ class TestHarnessFrameAndAgentMeta(LedgerTestBase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestTheAgentIsNamedByItsOwnBrief(LedgerTestBase):
+    """A relayed turn describes whoever was quoted in it, not this agent (2026-09-25).
+
+    ``split_conversations`` named a single-agent file from the FIRST user record matching a role
+    pattern and then stopped reading. In a sub-agent transcript the earliest user record is often
+    not the agent's brief at all -- it is a forwarded instruction or a quoted prompt -- so a
+    relayed ``You are the profiler. PHASE=baseline.`` froze the agent's identity and the computed
+    task that actually launched it never got a say.
+    """
+
+    def agent_file(self, run_id, agent_id, records, description=None, phase=None):
+        d = os.path.join(self.tmp, "home", "projects", "slug", "sess", "subagents", "workflows", run_id)
+        os.makedirs(d, exist_ok=True)
+        write_transcript(os.path.join(d, "agent-%s.jsonl" % agent_id), records)
+        if description is not None or phase is not None:
+            with open(os.path.join(d, "agent-%s.meta.json" % agent_id), "w", encoding="utf-8") as fh:
+                json.dump({"agentType": "workflow-subagent", "description": description or "",
+                           "workflowPhase": phase or ""}, fh)
+        return os.path.join(d, "agent-*.jsonl")
+
+    def test_a_relayed_role_header_does_not_outrank_the_computed_task(self):
+        g = self.agent_file("wf_run1", "a1", [
+            user_rec("Relaying the earlier turn: You are the profiler. PHASE=baseline.", 0),
+            user_rec(framed(prompt_for("tech_lead", "analyze", self.eval_dir)), 1),
+            asst_rec(2, "m1", read=100, out=1),
+        ], description="lane worker", phase="Analyze")
+        rows, _, _, _ = L.build(self.eval_dir, [g], owned_scope=True)
+        # One agent, and it is the one the task launched -- not the one the relay quoted.
+        self.assertEqual({r["group_id"] for r in rows}, {"agent-a1.jsonl#0"})
+        self.assertEqual((rows[0]["role"], rows[0]["sub_phase"]), ("tech_lead", "analyze"))
+
+    def test_the_losing_reading_is_kept_not_discarded(self):
+        recs = [
+            user_rec("Relaying the earlier turn: You are the profiler. PHASE=baseline.", 0),
+            user_rec(framed(prompt_for("tech_lead", "analyze", self.eval_dir)), 1),
+            {"type": "assistant", "timestamp": _ts(2), "message": {"role": "assistant", "content": []}},
+        ]
+        g = L.split_conversations(recs, single_agent=True)[0]
+        self.assertEqual(g["role"], "tech_lead")
+        self.assertEqual(g["role_source"], "computed-task")
+        self.assertEqual(g["role_conflict"], ["profiler:baseline (relayed)"])
+
+    def test_an_unframed_transcript_is_still_named_by_its_prompt(self):
+        # No computed-task frame anywhere: an older runtime, or a non-workflow agent. The only
+        # role text there is remains the best evidence, and must still name the agent.
+        recs = [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 0),
+            {"type": "assistant", "timestamp": _ts(1), "message": {"role": "assistant", "content": []}},
+        ]
+        g = L.split_conversations(recs, single_agent=True)[0]
+        self.assertEqual((g["role"], g["subphase"], g["role_source"]), ("director", "setup", "relayed"))
+
+
+class TestTheRunSaysWhatItActuallyCounted(LedgerTestBase):
+    """Two populations, and a span with an inferred edge, stated as such (2026-09-25).
+
+    ``agents`` was ``max(len(events), len(groups))`` printed as a count. The two populations
+    have no shared identity to join on, so the max assumes containment that nothing establishes.
+    And a response flushed more than once kept the FIRST flush's timestamp beside the LAST
+    flush's token count, timing a complete reply by its earliest fragment.
+    """
+
+    def test_the_two_agent_populations_are_reported_separately(self):
+        self.put_timeline(timeline([ev("Setup", "director:setup"),
+                                    ev("Setup", "director:setup", attempt=2, ok=False),
+                                    ev("Analyze", "lead:analyze")]))
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 0),
+            asst_rec(1, "m1", read=100, out=1),
+        ])
+        _, _, agg, _ = self.build()
+        t = agg["total"]
+        self.assertEqual(t["agents_with_transcripts"], 1)
+        self.assertEqual(t["agents_dispatched"], 3)
+        self.assertEqual(t["agent_attempts_failed"], 1)
+        self.assertFalse(t["agents_exact"])
+        self.assertEqual(t["agents"], 3)            # a bound, and labelled as one
+
+    def test_a_bound_is_labelled_a_bound_in_the_markdown(self):
+        self.put_timeline(timeline([ev("Setup", "director:setup")]))
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 0),
+            asst_rec(1, "m1", read=100, out=1),
+        ])
+        _, _, agg, meta = self.build()
+        md = L.render_md(agg, meta)
+        self.assertIn("agents (>=)", md)
+        self.assertIn("cannot be joined", md)
+
+    def test_a_response_flushed_twice_keeps_both_ends_of_what_was_seen(self):
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 0),
+            asst_rec(10, "m1", read=100, out=1),      # first flush, partial
+            asst_rec(40, "m1", read=100, out=9),      # final flush, complete
+        ])
+        rows, _, _, _ = self.build()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["output_tokens"], 9)
+        self.assertEqual(rows[0]["ts_ms"], L._iso_to_ms(_ts(10)))
+        self.assertEqual(rows[0]["last_seen_ms"], L._iso_to_ms(_ts(40)))
+        self.assertEqual(rows[0]["duration_source"], "inter-record-gap")
