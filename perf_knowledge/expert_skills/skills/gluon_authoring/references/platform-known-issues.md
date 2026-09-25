@@ -188,15 +188,16 @@ and counter naming/semantics on RDNA4 client parts are not the same as on Instin
 (`SQ_WAVES` / `VALUInsts` / the `MfmaUtil` / `VALUBusy` family) may be absent or differ.
 
 Decision rule (per-box preflight):
-- Before trusting a PMC-derived bound class on RDNA4, run `rocprofv3 --list-counters` and
-  confirm the specific counters you need actually exist on this device.
+- Before trusting a PMC-derived bound class on RDNA4, run `rocprofv3-avail list --pmc` and
+  confirm the specific counters you need actually exist on this device. The older
+  `rocprofv3 --list-counters` form fails on the ROCm 10 R9700 image.
 - If the discriminating counters are unavailable, do **not** fabricate them — fall back to
   the no-profiler evidence path: analytical roofline (`hardware/roofline-models.md`) +
   static `.amdgcn`/`.s` audit (`../scripts/asm_loop_audit.py`) + floor probe + A/B timing
   at the production boundary (`phases/profile.md ## Profiler-capability preflight`).
 
 > Scope: seen on R9700/gfx1201; the exact available counter set is device+ROCm-version
-> dependent — always `--list-counters` on the actual box.
+> dependent — always query `rocprofv3-avail` on the actual box.
 
 ## `int64_strides=false` regression on gfx1201 under CUDA graph
 

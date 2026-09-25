@@ -15,24 +15,28 @@ keeps the per-wave fixed cost low so the burst spends its budget on optimization
 `INCREMENTAL_RESUME` is absent — default/fast/first deep burst — do the full baseline profile below.)
 
 Read `SKILL_DIR/knowledge/profiling_guide.md` first. Then **identify the actual accelerator on this
-box** (`rocminfo` for the gfx arch + CU count, `rocm-smi --showproductname` for the card) and read the
+box** (`rocminfo` for the gfx arch + CU/WGP count, `rocm-smi --showproductname` for the card) and read the
 hardware reference that matches what you found:
 
 | detected `gfx` | hardware reference |
 |---|---|
 | `gfx94*` / `gfx95*` — CDNA, Instinct MI-series | `SKILL_DIR/knowledge/amd_instinct.md` |
-| `gfx11*` — RDNA, Radeon / Ryzen AI client parts | `SKILL_DIR/knowledge/amd_ryzen.md` |
+| `gfx11*` — RDNA3.5, Radeon / Ryzen AI client parts | `SKILL_DIR/knowledge/amd_ryzen.md` |
+| `gfx1201` — RDNA4 client (R9700 class) | `SKILL_DIR/knowledge/amd_rdna4.md` |
 
-Both open with a §0 that gives the exact detection commands for that family; neither is the default.
-Record the card (gfx arch, CU count, memory peak) in your metrics — the roofline ceiling and
+Each opens with detection commands for that family; none is the default.
+Record the card (gfx arch, CU/WGP count, memory peak) in your metrics — the roofline ceiling and
 grid-sizing advice downstream depend on the real card, not an assumed one.
+On RDNA4, missing MFMA%/CDNA PMC names is expected: do **not** fail the profile phase; classify from
+kernel-trace + latency table (`amd_rdna4.md` §5).
 
 ## Steps
 1. From `EVAL_DIR/COMMANDMENT.md` get the PROFILE and benchmark commands and the parse hint.
 2. Clear cache in `WORKSPACE`, then run:
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<profile/benchmark cmd>" $EVAL_DIR/profile_output[_rN]`
-   This warms up, then profiles with the best available profiler (rocprof-compute → omniperf →
-   rocprof → benchmark-only) and writes a report.
+   This warms up, then profiles with the architecture-specific policy and writes a report:
+   gfx1201 uses rocprofv3 first; gfx942/gfx950 keep rocprof-compute first. Both degrade through
+   the remaining supported tools to benchmark-only.
    If the report contains a `!!! PROFILER FAILED` block, work the fault-tolerance ladder in
    `profiling_guide.md` ("Profiler failed?"): use `<tool> --help` to find the renamed flag, re-run once
    with the named env override, then degrade deliberately — and record which tool actually ran + why in
@@ -66,8 +70,8 @@ If no profiler is available, fall back to benchmark-only + the per-case table + 
 ```json
 {
   "bottleneck": "compute|memory|latency|lds|balanced|overhead",
-  "profiler_used": "rocprof-compute|omniperf|rocprof|benchmark-only",
-  "device": "detected card, e.g. 'MI300X / gfx942 / CDNA3, 304 CU, ~5.3 TB/s'",
+  "profiler_used": "rocprofv3|rocprof-compute|omniperf|rocprof|metrix|benchmark-only",
+  "device": "detected card, e.g. 'MI300X / gfx942 / CDNA3, 304 CU' or 'gfx1201 / RDNA4, wave32, WMMA'",
   "dispatch_count": 0,
   "key_metrics": {"valu_pct": 0.0, "vmem_pct": 0.0, "lds_pct": 0.0, "hbm_gbps": 0.0,
                   "l2_hit_pct": 0.0, "vgpr": 0, "scratch_bytes": 0},

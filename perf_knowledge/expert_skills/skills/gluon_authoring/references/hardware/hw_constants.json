@@ -266,7 +266,7 @@
           5
         ]
       ],
-      "_vgpr_occupancy_basis": "compiler-derived (LLVM `; Occupancy:` sweep, ROCm 7.2.1/LLVM 22; reproduce per scripts/amd_occupancy.py docstring). vgpr_per_wave (256) is the per-WAVE addressable cap, NOT the per-SIMD file -- dividing 256 by a kernel's VGPR count (the old calc_perf/hw_budget bug) under-reports RDNA occupancy 2-3x. Same steps measured on gfx1100/gfx1151/gfx1200/gfx1201.",
+      "_vgpr_occupancy_basis": "compiler-derived (LLVM `; Occupancy:` sweep; regenerated unchanged on gfx1201 with ROCm 10 / AMD clang 23.0.0git, llvm-project 8f497e0992fb7513f7f78a6f6b6f1056c375e961, 2026-09-21; reproduce with scripts/amd_occupancy.py --compiler-sweep --arch gfx1201). vgpr_per_wave (256) is the per-WAVE addressable cap, NOT the per-SIMD file -- dividing 256 by a kernel's VGPR count (the old calc_perf/hw_budget bug) under-reports RDNA occupancy 2-3x.",
       "dynamic_vgpr": false,
       "gws": false,
       "mfma_valu_coexec": false,

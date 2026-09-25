@@ -10,10 +10,11 @@ These ids are authoritative. Use them verbatim in frontmatter and in `sota_regis
 | `gfx90a` | CDNA2 | MI210, MI250, MI250X |
 | `gfx942` | CDNA3 | MI300A, MI300X, MI325X |
 | `gfx950` | CDNA4 | MI350X, MI355X |
+| `gfx1201` | RDNA4 | R9700 / RX 9070 XT class |
 
 ## dtypes (`dtype`)
 `fp32` · `tf32`(N/A on CDNA4, removed) · `bf16` · `fp16` ·
-`fp8_e4m3_fnuz` · `fp8_e5m2_fnuz` (CDNA3 FNUZ) · `fp8_e4m3` · `fp8_e5m2` (OCP, CDNA4) ·
+`fp8_e4m3_fnuz` · `fp8_e5m2_fnuz` (CDNA3 FNUZ) · `fp8_e4m3` · `fp8_e5m2` (OCP, CDNA4 and RDNA4 client) ·
 `fp6_e2m3` · `fp6_e3m2` · `fp4_e2m1` · `mxfp8` · `mxfp6` · `mxfp4` (block-scaled, E8M0 scale) ·
 `int8` · `int4`
 

@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-workflow',
-  description: 'Single ENTRY POINT for kernel optimization on AMD Instinct MI-series GPUs (CDNA gfx942/gfx950, auto-detected on-box). Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
-  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover — leaving it empty also lets Discover decide per-language whether to optimize an existing impl or author a new one). Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool).',
+  description: 'Single ENTRY POINT for kernel optimization on AMD GPUs: Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201). The worker validates on-box identity via structured rocminfo data; generic gfx1201 is not a product identity. Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
+  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool).',
   phases: [
     { title: 'Freeze',   detail: 'oracle_freezer: freeze the input kernel -> immutable oracle + baseline_src/ (the ONE denominator) [bakeoff only]' },
     { title: 'Discover', detail: 'op_benchmarker: per-language existing-impl probe + measure + OFFLINE env tune (aiter/CK, shapes from the frozen oracle) -> author_plan, best_known_ms [bakeoff only]' },
@@ -51,8 +51,27 @@ if (MODE !== 'bakeoff') {
 const E2E_WF_DIR = String(A.e2e_workflow_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/e2e_workflow')).replace(/\/+$/, '');
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
-const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
+const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
+const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
+const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
+const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
+if (!!EXPECTED_GFX !== !!EXPECTED_TARGET) {
+  throw new Error('expected_gfx and expected_target must be supplied together');
+}
+if ((EXPECTED_GFX && !/^gfx[0-9a-f]+$/.test(EXPECTED_GFX)) ||
+    (EXPECTED_TARGET && !['r9700', 'unknown'].includes(EXPECTED_TARGET))) {
+  throw new Error('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|unknown');
+}
+if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+}
+if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
+  throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
+}
+let RDNA4_ISOLATE = EXPECTED_GFX === 'gfx1201';
+let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
+if (RDNA4_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
 const KERNEL_PATH_ORIG = A.kernel_path;
 const KERNEL_NAME_HINT = String(KERNEL_PATH_ORIG).replace(/\/+$/, '').split('/').pop();
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
@@ -71,14 +90,15 @@ const BACKENDS = (Array.isArray(A.backends) ? A.backends
   : (typeof A.backends === 'string' ? A.backends.split(',') : []))
   .map(s => String(s == null ? '' : s).trim().toLowerCase()).filter(Boolean);
 // Expert-skills passthrough (advisory; OFF by default -> nothing injected).
-const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+let USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 const EXPERT_SKILL_ROLES = new Set(['op_benchmarker']);
 
 // Warm-start experience KB. Passed to each lane explicitly (the bakeoff lane invocation spreads
 // specific keys, not ...A) so every language lane reads/writes its own <kernel>__<lang>__<gfx> slug.
-const WARM_START = String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on';
+let WARM_START = RDNA4_ISOLATE ? 'off'
+  : (String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on');
 const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
 // Plane selection, forwarded the same way and for the same reason: every bakeoff lane must read and
@@ -106,6 +126,10 @@ const FREEZE_SCHEMA = obj({
   candidate_backends: arrStr,
   baseline_frozen: { type: 'boolean' },
   baseline_callable: { type: 'string' },
+  device_gfx: { type: 'string' },
+  device_target: { type: 'string' },
+  device_name: { type: 'string' },
+  physical_cu_count: { type: 'number' },
   // Always "" from oracle_freezer — a freezer-built task dir records NO golden tensors (correctness is
   // live parity vs baseline_src/). Kept in the schema because an e2e kernel_extractor task dir, which
   // captures unsynthesizable real routing / paged-KV metadata, does ship a reference_io.pt and fills it.
@@ -246,7 +270,8 @@ const oracle = await agentT(
   roleAgent('oracle_freezer', 'freeze',
     'Freeze the input kernel into an immutable op task dir (no server). Create the run dir too.', {
       KERNEL_PATH: KERNEL_PATH_ORIG, EXP_ROOT, KERNEL_NAME_HINT, GPU_ID: GPU_LIST[0],
-      OP_SPEC, WORKLOAD_SPEC_PATH, SKILL_DIR: WORKFLOW_DIR, KERNEL_KNOWLEDGE_DIR,
+      OP_SPEC, WORKLOAD_SPEC_PATH, SKILL_DIR: WORKFLOW_DIR,
+      EXPECTED_GFX, EXPECTED_TARGET, EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
       // harness_lib.py (the shared timing/correctness lib) ships with e2e_workflow; gpu_lock.sh ships here.
       HARNESS_LIB: `${E2E_WF_DIR}/scripts/harness_lib.py`,
       GPU_LOCK: `${WORKFLOW_DIR}/scripts/gpu_lock.sh`,
@@ -256,6 +281,43 @@ if (!oracle || !says(oracle.smoke, 'pass') || !oracle.task_dir || oracle.baselin
   log(`Freeze FAILED (${oracle ? oracle.notes || oracle.smoke : 'no result'}); aborting — no comparable baseline.`);
   return { mode: MODE, validation_status: 'freeze_failed', winner: null,
     reason: oracle ? oracle.notes || 'freeze smoke did not pass' : 'oracle_freezer returned nothing' };
+}
+const DETECTED_GFX = String(oracle.device_gfx || '').trim().toLowerCase();
+const DETECTED_TARGET = String(oracle.device_target || '').trim().toLowerCase();
+const DETECTED_DEVICE_NAME = String(oracle.device_name || '').trim();
+const DETECTED_PHYSICAL_CU_COUNT = Number(oracle.physical_cu_count);
+if (!DETECTED_GFX || !DETECTED_TARGET) {
+  throw new Error('Freeze failed: oracle_freezer did not return structured device_gfx and device_target');
+}
+if (EXPECTED_GFX && DETECTED_GFX !== EXPECTED_GFX) {
+  throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${DETECTED_GFX}`);
+}
+if (EXPECTED_TARGET === 'r9700' && DETECTED_TARGET !== 'r9700') {
+  throw new Error(`GPU product mismatch: expected r9700, detected ${DETECTED_TARGET}`);
+}
+if (!Number.isFinite(DETECTED_PHYSICAL_CU_COUNT) || DETECTED_PHYSICAL_CU_COUNT <= 0) {
+  throw new Error('Freeze failed: oracle_freezer did not return a positive physical_cu_count');
+}
+if (EXPECTED_DEVICE_NAME && DETECTED_DEVICE_NAME !== EXPECTED_DEVICE_NAME) {
+  throw new Error(
+    `GPU product name mismatch: expected ${EXPECTED_DEVICE_NAME}, detected ${DETECTED_DEVICE_NAME || 'unknown'}`);
+}
+if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
+    DETECTED_PHYSICAL_CU_COUNT !== EXPECTED_PHYSICAL_CU_COUNT) {
+  throw new Error(
+    `GPU physical CU mismatch: expected ${EXPECTED_PHYSICAL_CU_COUNT}, ` +
+    `detected ${DETECTED_PHYSICAL_CU_COUNT}`);
+}
+const LANE_GFX = EXPECTED_GFX || DETECTED_GFX;
+const LANE_TARGET = EXPECTED_TARGET || DETECTED_TARGET;
+const LANE_DEVICE_NAME = EXPECTED_DEVICE_NAME || DETECTED_DEVICE_NAME;
+const LANE_PHYSICAL_CU_COUNT =
+  EXPECTED_PHYSICAL_CU_COUNT || DETECTED_PHYSICAL_CU_COUNT;
+if (DETECTED_GFX === 'gfx1201') {
+  RDNA4_ISOLATE = true;
+  KERNEL_KNOWLEDGE_DIR = '';
+  USE_EXPERT_SKILLS = false;
+  WARM_START = 'off';
 }
 const EVAL_DIR = oracle.eval_dir || `${EXP_ROOT}/bakeoff_${KERNEL_NAME_HINT}`;
 log(`Freeze done. op_kind=${oracle.op_kind}, task_dir=${oracle.task_dir}, live_backend=${oracle.live_backend || '?'}`);
@@ -272,7 +334,18 @@ log(`Freeze done. op_kind=${oracle.op_kind}, task_dir=${oracle.task_dir}, live_b
 // engagement probes) are skipped.
 // ===========================================================================
 phase('Discover');
-const DISCOVER_INTRO =
+const DISCOVER_INTRO = RDNA4_ISOLATE
+  ? (
+  'STANDALONE kernel bake-off — there is NO live server (do not try to launch or capture from one).\n' +
+  'R9700 / gfx1201 ISOLATION: do NOT consult learned KB, expert skills, AITER CDNA win cards, or CK/AITER offline tune.\n' +
+  'Do NOT inject MFMA / FNUZ / Instinct guidance. Discover existing impls by measuring the frozen oracle only.\n' +
+  '(1) Tier-A DISCOVER: bench candidate backends on the immutable oracle in OP_TASK_DIR (HIP/Triton/hipBLASLt).\n' +
+  '(2) SKIP Tier-B AITER/CK env tune — those inputs are CDNA-calibrated.\n' +
+  '(3) Fill `baseline_ms` = the FROZEN input kernel`s ms on the oracle.\n' +
+  '(4) DECIDE the author_plan as usual without CDNA SOTA cards.\n' +
+  '(5) DO NOT curate e2e_workflow/knowledge/learned/. WRITE NOTHING under e2e_workflow/.'
+  )
+  : (
   'STANDALONE kernel bake-off — there is NO live server (do not try to launch or capture from one).\n' +
   '(1) Tier-A DISCOVER: bench every candidate backend on the immutable oracle in OP_TASK_DIR.\n' +
   '(2) Tier-B TUNE is STILL IN SCOPE — run it OFFLINE, not from a server capture. The step`s "capture ' +
@@ -294,7 +367,8 @@ const DISCOVER_INTRO =
   'system_architect after an e2e A/B), and a kernel bake-off has no e2e-transfer evidence to put in it. ' +
   'This run`s learned sink is kernel_workflow/knowledge/learned/, curated by the TechLead`s ' +
   'update_experience step after Report. WRITE NOTHING under e2e_workflow/ — read it freely, but the ' +
-  'only files you create or modify live under EVAL_DIR (plus the tuning artifacts you were asked for).';
+  'only files you create or modify live under EVAL_DIR (plus the tuning artifacts you were asked for).'
+  );
 const bake = await agentT(
   roleAgentFrom(E2E_WF_DIR, 'op_benchmarker', 'bakeoff', DISCOVER_INTRO, {
     EVAL_DIR, OP_TASK_DIR: oracle.task_dir, OP_KIND: oracle.op_kind,
@@ -380,6 +454,9 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // pass-through lane (and e2e, which calls this worker directly) correctly defaults to false —
       // there is no Freeze on those routes, so director must not demand a receipt they cannot produce.
       frozen_oracle: 'true',
+      expected_gfx: LANE_GFX, expected_target: LANE_TARGET,
+      expected_device_name: LANE_DEVICE_NAME,
+      expected_physical_cu_count: LANE_PHYSICAL_CU_COUNT,
       mode: l.mode, target_language: l.lang,
       op_spec: oracle.op_spec || OP_SPEC, workload_spec_path: oracle.workload_path || WORKLOAD_SPEC_PATH || '',
       budget: BUDGET, gpu_ids: gpu, gpu_mode: GPU_MODE, task: TASK, apply_to_original: 'false',
@@ -511,6 +588,8 @@ if (winner && winner.speedup > 1.0) {
         'ratios not wall-clock; record the pitfalls hit).', {
           SCOPE: 'bakeoff', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR,
           PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
+          CURATION_ISOLATE: RDNA4_ISOLATE ? 'true' : 'false',
+          REQUIRED_PLATFORMS: RDNA4_ISOLATE ? ['gfx1201'] : [],
           WINNER: winner, CANDIDATES: laneRows,
           REPORT_PATH: rep ? rep.report_path : `${EVAL_DIR}/bakeoff_report.md`,
           OP_SPEC,

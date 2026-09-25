@@ -42,7 +42,9 @@ When you see that block, **do not just accept the degraded result** — work thi
    tool and why (e.g. "rocprofv3 rejected `--output-format`; fell back to rocprof --stats"). Never let a
    degrade pass unrecorded.
 
-Priority / degrade order: `rocprof-compute → omniperf → rocprofv3 → rocprof → benchmark-only`.
+Priority / degrade order is architecture-specific: gfx1201 uses
+`rocprofv3 → rocprof → metrix → rocprof-compute → omniperf → benchmark-only`; CDNA/other devices use
+`rocprof-compute → omniperf → rocprofv3 → rocprof → metrix → benchmark-only`.
 Override env vars (defaults in `profile_kernel.sh`): `PROFILER_PRIORITY`, `WARMUP_RUNS`,
 `RPC_PROFILE_ARGS` (rocprof-compute/omniperf `profile`), `RPV3_TRACE_ARGS` (rocprofv3), `RPROF_ARGS`
 (legacy rocprof).
@@ -87,6 +89,15 @@ Override env vars (defaults in `profile_kernel.sh`): `PROFILER_PRIORITY`, `WARMU
   **overhead-bound** (floor); a large-N case far above the floor ⇒ likely **compute-bound**. State that
   no profiler was available.
 
+### RDNA4 client (gfx1201) — PMC holes are expected
+
+On RDNA4, `rocprofv3 --kernel-trace` usually records dispatches, but CDNA SoL names (`SQ_WAVES`,
+`VALUInsts`, `MfmaUtil`, `VALUBusy`) may be missing or mean something else. Run
+`rocprofv3-avail list --pmc` before trusting a PMC-derived bound class (the older list-counters
+CLI is broken on the ROCm 10 R9700 image). **Do not fail the profile
+phase** if MFMA% is absent — classify from kernel-trace durations + per-case latency + dispatch
+count + `amd_rdna4.md` §5. Never invent MFMA utilization.
+
 ## rocprof-compute (formerly omniperf) Output Interpretation
 
 ### Section 2: System Speed-of-Light (SoL)
@@ -96,10 +107,10 @@ The most important section. Shows overall utilization as percentage of peak.
 | Metric | What it means | Threshold |
 |--------|--------------|-----------|
 | VALU Utilization | Vector ALU usage | > 60% = compute-bound |
-| MFMA Utilization | Matrix unit usage | > 40% = MFMA-active workload |
+| MFMA Utilization | Matrix unit usage (CDNA) | > 40% = MFMA-active; **often absent on RDNA4** — see below |
 | VMEM Utilization | Vector memory pipe | > 60% = memory-bound |
 | LDS Utilization | Local data share | > 50% = LDS-heavy |
-| Bandwidth (GB/s) | Effective HBM BW | Compare to this card's HBM peak (≈5300 GB/s MI300X/300A, ~6000 MI325X, ~8000 MI350/355 — see `amd_instinct.md`) |
+| Bandwidth (GB/s) | Effective HBM/GDDR BW | Compare to **this card**: Instinct peaks in `amd_instinct.md`; RDNA4 — **measure** (`amd_rdna4.md` §4) |
 
 **Classification from SoL:**
 - VALU > 60% AND VMEM < 40% → **compute-bound**
@@ -167,7 +178,17 @@ diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly 
 | Branch Divergence | Fraction of divergent branches |
 
 **Key checks:**
-- Active Threads < 64 → wavefront divergence (threads disabled by branches)
+- Active Threads: compare against **this card's wavefront**, not a fixed 64.
+  - **CDNA (gfx942/gfx950, wave64):** Active Threads < 64 → wavefront divergence.
+  - **R9700 / gfx1201 (wave32):** Active Threads < 32 → divergence. Do not apply the CDNA threshold.
+- VALU Util < 50% → occupancy or memory latency issue
+- High Branch Divergence → consider predication or data reorganization
+
+## Occupancy (architecture-specific)
+
+**CDNA (gfx942/gfx950):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. ArchVGPR and Accum_VGPR share one file.
+
+**R9700 / gfx1201:** do **not** use the 512 combined-VGPR formula. Occupancy is static ≤256 VGPR/wave, granule 24, cap 16 waves/SIMD. Read `amd_rdna4.md` and `perf_knowledge/hardware/rdna4_gfx1201/occupancy.md` and re-derive with `amd_occupancy.py --arch gfx1201` on this ROCm. Dividing 256 by kernel VGPRs under-reports occupancy 2–3×.
 - Branch Divergence > 10% → significant divergence penalty
 - VALU Util close to SoL → compute is the bottleneck
 
@@ -191,7 +212,7 @@ diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly 
 |--------|--------------|
 | Read BW | HBM read bandwidth achieved |
 | Write BW | HBM write bandwidth achieved |
-| Total BW | Should be < this card's HBM peak (≈5300 GB/s MI300X; higher on MI325X/MI350/MI355 — `amd_instinct.md`) |
+| Total BW | Should be < this card's peak (Instinct: `amd_instinct.md`; RDNA4: measured, `amd_rdna4.md`) |
 
 ## Bottleneck Classification Decision Tree
 
@@ -239,7 +260,7 @@ real mislabel. Run them before forming a hypothesis.
   occupy the GPU — no tile or register tuning helps; you must partition more (split-K, finer tiles,
   more blocks). This is separate from occupancy: a kernel can hit its per-wave occupancy ceiling and
   still leave most of the GPU idle because it never launched enough work.
-- **Occupancy ceiling:** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved.
+- **Occupancy ceiling (CDNA):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. **R9700:** use the gfx1201 table in `amd_rdna4.md` / `hardware/rdna4_gfx1201/occupancy.md`, not this formula.
 - **Spill:** any nonzero `Scratch_Per_Workitem` comes first, before other register work.
 - **LDS bank conflict:** `SQ_LDS_BANK_CONFLICT / SQ_LDS_IDX_ACTIVE > 20%` → pad the row stride / swizzle.
 - **Coalescing:** `TD_COALESCABLE_WAVEFRONT_sum / TD_LOAD_WAVEFRONT_sum < 50%` → fix access pattern.

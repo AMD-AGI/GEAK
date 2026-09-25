@@ -37,7 +37,9 @@ Inputs: `LAUNCH_SCRIPT` (path to a bench/launch script; may be empty), `MODEL_PA
 `INIT_ENV` (seed `KEY=VAL` env from the caller's best config; may be empty),
 `INIT_BASE_OVERLAY` (the caller's current-best Python overlay/source stack),
 `MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, and
-`EFFECTIVE_CONFIG_DIGEST`.
+`EFFECTIVE_CONFIG_DIGEST`, plus the caller-established structured identity
+`EXPECTED_GFX`, `EXPECTED_TARGET`, `EXPECTED_DEVICE_NAME`, and
+`EXPECTED_PHYSICAL_CU_COUNT`.
 
 Steps:
 1. Collision-proof run id: `TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}`.
@@ -58,7 +60,13 @@ Steps:
    - If `LAUNCH_SCRIPT` is empty, the baseline is the stack's default config + `MODEL_PATH` +
      `WORKLOAD` (bench_e2e.sh needs no model default — `MODEL` is passed). Record the resolved server
      flags in `EVAL_DIR/config/baseline_flags.json`.
-4. **Preflight + pin the environment** — follow `SKILL_DIR/knowledge/preflight.md` (judgment guide,
+4. **Preflight + pin the environment** — first run
+   `python3 "$SKILL_DIR/../scripts/gpu_identity.py"` and use its JSON as the
+   only product/ISA/CU source. `target=r9700` is emitted only for the exact
+   marketing name `AMD Radeon AI PRO R9700`; a different gfx1201 product remains
+   `unknown`. Hard-stop if it disagrees with `EXPECTED_GFX`,
+   `EXPECTED_TARGET=r9700`, or a positive `EXPECTED_PHYSICAL_CU_COUNT`.
+   Then follow `SKILL_DIR/knowledge/preflight.md` (judgment guide,
    not a script). Confirm the chosen `BACKEND` stack imports/launches, `MODEL` resolves, the GPU(s)
    are visible; detect gfx, trace sources (rocprofv3?), available op backends (aiter / flydsl via
    `aiter.ops.flydsl.is_flydsl_available()` — NOT `import flydsl` / ckProfiler /
@@ -136,6 +144,9 @@ Return JSON:
   "workload": {"isl": 1024, "osl": 1024, "conc": 64},
   "bench_script": "<EVAL_DIR>/bench_e2e.sh",
   "gfx": "<gfx target, e.g. gfx950 — from step 4, or \"\" if you could not detect it>",
+  "device_target": "r9700|unknown",
+  "device_name": "<exact Marketing Name from the selected rocminfo agent>",
+  "physical_cu_count": 64,
   "precision": "<serving precision, e.g. mxfp8 | fp8 | bf16 — or \"\" if not established>",
   "framework_version": "<BACKEND version, e.g. 0.26.0 — or \"\" if not established>",
   "rocm_version": "<ROCm <major>.<minor>, e.g. 7.2 — or \"\" if not established>",
@@ -143,7 +154,7 @@ Return JSON:
 }
 ```
 
-The last four are the dimensions the deployment knowledge base addresses a record by, and you have
+The final deployment dimensions are the dimensions the knowledge base addresses a record by, and you have
 already established every one of them in step 4 to launch the server at all. **Never guess one.**
 An empty string files this run under a deliberately coarse `unknown` page, which is honest and
 recoverable; a plausible-looking wrong value files it under an authoritative page, and the store has

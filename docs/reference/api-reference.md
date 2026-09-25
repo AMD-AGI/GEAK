@@ -269,7 +269,8 @@ Output entry point: `<output_dir>/profile_report.txt`.
 bash profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>
 ```
 
-Env: `PROFILER_PRIORITY` (default `rocprof-compute omniperf rocprofv3 rocprof metrix`), `WARMUP_RUNS` (3),
+Env: `PROFILER_PRIORITY` (default: gfx1201 uses `rocprofv3 rocprof metrix rocprof-compute omniperf`;
+CDNA/other uses `rocprof-compute omniperf rocprofv3 rocprof metrix`), `WARMUP_RUNS` (3),
 `RPC_PROFILE_ARGS`, `RPV3_TRACE_ARGS`, `RPROF_ARGS`, `METRIX_ARGS`.
 
 ## External-orchestrator contract (`interface/run_e2e.py`)

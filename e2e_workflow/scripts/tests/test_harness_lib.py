@@ -634,13 +634,12 @@ class TestRegimeDtype(_HarnessTestCase):
         self.assertIs(hl.regime_dtype("fp8_e4m3fn", self.torch, arch="gfx942"), FP8_E4M3FN)
         self.assertIs(hl.regime_dtype("fp8_e5m2fnuz", self.torch, arch="gfx950"), FP8_E5M2FNUZ)
 
-    def test_bare_e5m2_on_an_ocp_arch_degrades_to_bf16(self):
-        # SOURCE GAP, pinned as-is: the OCP fp8 pair torch exposes is float8_e4m3fn + float8_e5m2 --
-        # there is NO float8_e5m2fn. The suffix rule appends "fn" to both mantissa forms, so a bare
-        # "fp8_e5m2"/"e5m2" KV dtype on gfx950 resolves to bf16 (silently 2x the intended KV bytes,
-        # which also doubles pack_x) instead of torch.float8_e5m2.
-        self.assertIs(hl.regime_dtype("fp8_e5m2", self.torch, arch="gfx950"), BF16)
-        self.assertIs(hl.regime_dtype("e5m2", self.torch, arch="gfx950"), BF16)
+    def test_bare_e5m2_on_an_ocp_arch_is_torch_float8_e5m2(self):
+        self.assertIs(hl.regime_dtype("fp8_e5m2", self.torch, arch="gfx950"), FP8_E5M2)
+        self.assertIs(hl.regime_dtype("e5m2", self.torch, arch="gfx950"), FP8_E5M2)
+        self.assertIs(hl.regime_dtype("fp8_e5m2", self.torch, arch="gfx1201"), FP8_E5M2)
+        # There is no torch.float8_e5m2fn; the OCP `fn` spelling still maps to float8_e5m2.
+        self.assertIs(hl.regime_dtype("fp8_e5m2fn", self.torch, arch="gfx942"), FP8_E5M2)
 
 
 # --------------------------------------------------------------------------- #

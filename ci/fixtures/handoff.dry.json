@@ -3,6 +3,10 @@
   "model_path": "/tmp/geak-ci/models/Qwen3-8B",
   "framework": "vllm",
   "gpu_type": "mi300x",
+  "expected_gfx": "gfx942",
+  "expected_target": "unknown",
+  "expected_device_name": "AMD Instinct MI300X",
+  "expected_physical_cu_count": 304,
   "tp": 1,
   "workload": {
     "isl": 1024,

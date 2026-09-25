@@ -125,7 +125,11 @@ Images are chosen from a preset file under [`docker_setup/`](./docker_setup/) �
 default is [`docker_setup/docker_default.json`](./docker_setup/docker_default.json),
 a nested map `{ "models": { "<model_key>": <image> }, "<framework>": { "<arch>":
 "<image>" } }`. `arch` is auto-detected on the compute node as **`MI300`**
-(gfx942/gfx90a) or **`MI355`** (gfx950), overridable with `GEAK_GPU_ARCH`.
+(gfx942/gfx90a), **`MI355`** (gfx950), or **`R9700`** only when structured
+rocminfo identity reports the exact Radeon AI PRO R9700 product. Bare `gfx1201`
+or `RDNA4` identifies the ISA only and cannot select the R9700 image.
+`GEAK_GPU_ARCH` is allowlisted (`gfx1200` is rejected); an explicit R9700
+expectation still requires matching on-box structured identity.
 
 Which preset is active is selected per-run by the Actions variable
 `vars.DOCKER_DEFAULT_JSON` (a **bare filename** in `ci/docker_setup/`; unset →
@@ -134,7 +138,7 @@ default and flip the variable from the GitHub UI to switch images without a comm
 
 ```json
 {
-  "vllm":   { "MI300": "…/vllm-openai-rocm:<tag>",  "MI355": "…/vllm-openai-rocm:<tag>" },
+  "vllm":   { "MI300": "…/vllm-openai-rocm:<tag>",  "MI355": "…/vllm-openai-rocm:<tag>", "R9700": "rocm/vllm:…" },
   "sglang": { "MI300": "…/sglang:<tag>",            "MI355": "…/sglang:<tag>" }
 }
 ```

@@ -119,6 +119,7 @@ case "$GPU_SPEC" in
     GPU_ID=""
     while [ -z "$GPU_ID" ]; do
         for _g in $POOL; do
+            # (1) flock: exclusive lane. Held until this process exits.
             exec {_fd}>"${LOCK_DIR}/gpu_${_g}.lock"
             if flock -n -x "$_fd"; then
                 # We hold the lane. Only now check idleness -- checking before locking would race.
@@ -179,26 +180,39 @@ fi
 export TORCH_EXTENSIONS_DIR
 mkdir -p "$TORCH_EXTENSIONS_DIR" 2>/dev/null || true
 
-# (3) Compile for the local GPU arch only. The environment's default PYTORCH_ROCM_ARCH is often a
-# long multi-arch list (~9 targets) → ~9x slower compiles for no benefit on a single-arch box. We
-# OVERRIDE it to the detected local arch. Set KERNEL_ENV_KEEP_ARCH=1 to opt out (multi-arch boxes).
-if [ "${KERNEL_ENV_KEEP_ARCH:-0}" != "1" ]; then
-    _ARCH="$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)"
+# (3) Compile for the selected GPU's arch only. Invoked AFTER HIP_VISIBLE_DEVICES is set
+# so rocminfo sees the locked GPU, not GPU 0. Refuse mixed-ISA pools: compiling for GPU 0
+# while locked to GPU 1 is silent wrong-arch.
+# Set KERNEL_ENV_KEEP_ARCH=1 to opt out (intentional multi-arch boxes).
+_rocminfo_gpu_gfx_list() {
+    rocminfo 2>/dev/null | awk '
+        /^ *Name: *gfx[0-9a-f]+/ && $2 != "gfx000" { print $2 }
+    '
+}
+
+_pin_compile_arch() {
+    [ "${KERNEL_ENV_KEEP_ARCH:-0}" = "1" ] && return 0
+    local gfxs unique n
+    gfxs="$(_rocminfo_gpu_gfx_list || true)"
+    [ -z "${gfxs:-}" ] && return 0
+    unique="$(printf '%s\n' $gfxs | sort -u)"
+    n="$(printf '%s\n' $unique | grep -c . || true)"
+    if [ "${n:-0}" -gt 1 ]; then
+        echo "ERROR: gpu_lock.sh: mixed GPU ISAs in this pool ($unique); refusing to guess PYTORCH_ROCM_ARCH." >&2
+        echo "       Run on a homogeneous pool or set KERNEL_ENV_KEEP_ARCH=1 with an explicit PYTORCH_ROCM_ARCH." >&2
+        return 1
+    fi
+    _ARCH="$(printf '%s\n' $unique | head -1)"
     [ -n "${_ARCH:-}" ] && export PYTORCH_ROCM_ARCH="$_ARCH"
-    # Also pin GPU_ARCHS so aiter's JIT (chip_info.get_gfx_list) takes the env branch instead of
-    # _detect_native(), which shells to rocm_agent_enumerator -> rocminfo PER cold-build worker
-    # (~77 per cold aiter import). Under the parallel bake-off (isolated per-workspace build caches =>
-    # many cold builds) those rocminfo calls hang on the contended KFD driver and pile up by the
-    # hundreds -> kernel task-count explosion + ~2x serving-throughput degradation. Setting GPU_ARCHS
-    # eliminates the spawn at the source (the reap above is now just a backstop). Honor a caller value.
     [ -n "${_ARCH:-}" ] && export GPU_ARCHS="${GPU_ARCHS:-$_ARCH}"
-fi
+}
 
 if [ -n "${POOL_FD:-}" ]; then
-    # Pool mode: this process ALREADY holds the lane exclusively (and verified it idle). Re-locking
-    # the same file from the same process would be a no-op at best, so just run -- the lane stays
-    # held until we exit, which is what guarantees no two evaluations share a GPU.
+    # Pool mode: (1) this process ALREADY holds the lane exclusively (and verified it idle).
+    # Re-locking the same file from the same process would be a no-op at best, so just run --
+    # the lane stays held until we exit, which is what guarantees no two evaluations share a GPU.
     export HIP_VISIBLE_DEVICES="$GPU_ID"
+    _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
     "$@"
 else
     # Single-GPU mode BLOCKS TOO, and its wait must be measured for the same reason the pool's is.
@@ -208,6 +222,7 @@ else
     # advantage into the instrument. Both paths measure, so the comparison is real.
     _wait_t0=$SECONDS
     (
+        # (1) flock this GPU (exclusive for the duration of the command).
         flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
         # Default 1, matching pool mode above. It was 0 here, so a PINNED engineer skipped the
         # foreign-work check entirely -- not "sampled it once", never ran it. That is how two
@@ -225,6 +240,7 @@ else
             echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
         export HIP_VISIBLE_DEVICES="$GPU_ID"
+        _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
         "$@"
     ) 200>"$LOCK_FILE"
 fi

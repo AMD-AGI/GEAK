@@ -1,6 +1,6 @@
 export const meta = {
   name: 'kernel-lane',
-  description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series GPUs (MI300X/300A/308X/325X on CDNA3 gfx942, MI350X/355X on CDNA4 gfx950 — the target card is auto-detected on-box).',
+  description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201) — auto-detected on-box; on R9700 use knowledge/amd_rdna4.md (wave32, WMMA). Generic gfx1201 without R9700 identity is not a calibrated target.',
   whenToUse: 'Internal single-language worker. Prefer the kernel-workflow dispatcher (kernel_workflow.js) as the entry point; invoke this directly only to run one unchanged lane. Pass args.kernel_path (required), args.mode, args.target_language, args.budget, args.gpu_ids, args.gpu_mode, args.task.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
@@ -39,6 +39,16 @@ if (!WORKFLOW_DIR) {
 const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
 const KERNEL_PATH_ORIG = A.kernel_path;
+const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
+const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
+const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
+const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
+if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+}
+if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
+  throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
+}
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
@@ -146,18 +156,22 @@ const primSpeedup = (o) => {
 // answers "PASS - 15/15 draws" and a `=== 'pass'` test silently drops a genuinely verified candidate.
 // Match the leading word instead: "PASS - ..." / "passed" gate open, "FAIL"/"did not pass" stay shut.
 const says = (v, w) => String(v == null ? '' : v).trim().toLowerCase().startsWith(w);
-const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
+let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR ? WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge' : '')).replace(/\/+$/, '');
 // Expert skills = human-authored, validated kernel recipes (perf_knowledge/expert_skills/). ADVISORY
 // priors only: a matched `validated` skill is a HIGH-PRIOR author/optimize candidate the planning/author
 // roles reproduce, then gate by the isolated A/B vs the oracle — it NEVER overrides measurement. Default
 // OFF (opt-in: pass use_expert_skills="true"). When OFF (the default) NOTHING is injected -> byte-identical
 // to a build without this feature. When invoked by the e2e layer the flag + dir are passed down.
-const USE_EXPERT_SKILLS = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_EXPERT_SKILLS_REQUESTED = String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+let USE_EXPERT_SKILLS = USE_EXPERT_SKILLS_REQUESTED;
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
+// Expected-identity isolation must apply before Setup (no CDNA skills/KB on a declared R9700 run).
+// Detected identity is OR'd in after director setup — do not read GFX here (TDZ).
+let SKILLS_ISOLATE = EXPECTED_GFX === 'gfx1201';
 
 // --- Deep Research Agent (DRA) -------------------------------------------------------------------
 // OPT-IN: a v4-native research phase that runs AFTER Profile and BEFORE the optimize loop (so the
@@ -203,7 +217,7 @@ const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
 // before the run was stopped. A parse test cannot catch that: the file compiles, and the reference
 // only resolves when the line runs. Default ON, matching this branch's design where the tech_lead
 // role reads INDEX.md unconditionally; `use_learned_kb=false` turns the budget block off with it.
-const USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'true') === 'true';
+let USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'true') === 'true';
 const KB_DIR_CAP = Math.max(0, parseInt(A.kb_dir_cap != null ? A.kb_dir_cap : 1, 10));
 const KB_COLD_DIRECTION = String(A.kb_cold_direction != null ? A.kb_cold_direction : 'true') === 'true';
 let kbCapBound = 0;      // rounds where the cap actually had to strip something
@@ -224,7 +238,13 @@ const FROZEN_ORACLE = String(A.frozen_oracle != null ? A.frozen_oracle : 'false'
 //   return_after_read | adopt then RETURN before the optimize loop.
 //   off/false/none, a STATE_DIR resume, or no arch => cold start (byte-identical to pre-feature).
 const WARM_START = String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on';
-const WARM_START_ON = WARM_START !== 'off' && WARM_START !== 'false' && WARM_START !== 'none';
+let WARM_START_ON = WARM_START !== 'off' && WARM_START !== 'false' && WARM_START !== 'none';
+if (SKILLS_ISOLATE) {
+  KERNEL_KNOWLEDGE_DIR = '';
+  USE_LEARNED_READ = false;
+  WARM_START_ON = false;
+  USE_EXPERT_SKILLS = false;
+}
 const WARM_START_REF_ONLY = WARM_START === 'reference';
 const WARM_START_RETURN_AFTER = WARM_START === 'return_after_read';
 const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
@@ -364,7 +384,12 @@ const obj = (props, required) => ({ type: 'object', properties: props, required:
 
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
-  kernel_name: { type: 'string' }, source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
+  kernel_name: { type: 'string' },
+  device_gfx: { type: 'string' },
+  device_target: { type: 'string' },
+  device_name: { type: 'string' },
+  physical_cu_count: { type: 'number' },
+  source_files: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
   // Frozen-baseline verdict (BOTH modes). The unittest's timing + random-value parity baseline MUST be
   // the real online kernel — the immutable baseline_src/ dir OR an importable meta.baseline_callable —
   // never kernel_src/ (the candidate's own scaffold). The director sets baseline_frozen=true after it
@@ -379,7 +404,7 @@ const SETUP_SCHEMA = obj({
     ledger: { type: 'array', items: { type: 'object', additionalProperties: true } },
     bottleneck_now: { type: 'string' }, best_per_case: perCase,
   }, []),
-}, ['eval_dir', 'workspace', 'kernel_name']);
+}, ['eval_dir', 'workspace', 'kernel_name', 'device_gfx', 'device_target', 'physical_cu_count']);
 
 const AUTHOR_SCHEMA = obj({
   authored: { type: 'boolean' }, target_language: { type: 'string' }, correctness: { type: 'string' },
@@ -757,13 +782,56 @@ const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
     KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK,
     WORKFLOW_DIR, SKILL_DIR: WORKFLOW_DIR,
-    MODE, TARGET_LANGUAGE, OP_SPEC,
+    MODE, TARGET_LANGUAGE, OP_SPEC, EXPECTED_GFX, EXPECTED_TARGET,
+    EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
   { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
 const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
+const GFX = String(setup.device_gfx || '').trim().toLowerCase();
+const DEVICE_TARGET = String(setup.device_target || '').trim().toLowerCase();
+const DEVICE_NAME = String(setup.device_name || '').trim();
+const PHYSICAL_CU_COUNT = Number(setup.physical_cu_count);
+if (!GFX) {
+  throw new Error('Setup failed: director did not return device_gfx (required; refuse CDNA knowledge without an ISA)');
+}
+if (!DEVICE_TARGET) {
+  throw new Error('Setup failed: director did not return device_target (r9700 | unknown)');
+}
+if (!Number.isFinite(PHYSICAL_CU_COUNT) || PHYSICAL_CU_COUNT <= 0) {
+  throw new Error('Setup failed: director did not return a positive physical_cu_count');
+}
+if (GFX === 'gfx1200') {
+  throw new Error('Detected gfx1200, which is not validated by this workflow; refusing R9700 guidance');
+}
+if (EXPECTED_GFX && GFX !== EXPECTED_GFX) {
+  throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${GFX || 'unknown'}`);
+}
+if (EXPECTED_TARGET === 'r9700' && DEVICE_TARGET !== 'r9700') {
+  throw new Error(`GPU product mismatch: expected r9700, detected ${DEVICE_TARGET || 'unknown'}`);
+}
+if (EXPECTED_DEVICE_NAME && DEVICE_NAME !== EXPECTED_DEVICE_NAME) {
+  throw new Error(`GPU product name mismatch: expected ${EXPECTED_DEVICE_NAME}, detected ${DEVICE_NAME || 'unknown'}`);
+}
+if (EXPECTED_PHYSICAL_CU_COUNT > 0 && PHYSICAL_CU_COUNT !== EXPECTED_PHYSICAL_CU_COUNT) {
+  throw new Error(
+    `GPU physical CU mismatch: expected ${EXPECTED_PHYSICAL_CU_COUNT}, detected ${PHYSICAL_CU_COUNT}`);
+}
+const ROOFLINE_STATUS = (DEVICE_TARGET === 'r9700' && GFX === 'gfx1201')
+  ? 'calibrated-r9700'
+  : ((GFX === 'gfx1201' || /^gfx120/.test(GFX)) ? 'unknown-device-not-r9700' : 'non-rdna');
+const RDNA4_ISOLATE = GFX === 'gfx1201';
+if (RDNA4_ISOLATE) {
+  // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
+  // R9700 / gfx1201 receive the dedicated in-tree hardware guide but no CDNA-biased external cards.
+  SKILLS_ISOLATE = true;
+  USE_EXPERT_SKILLS = false;
+  KERNEL_KNOWLEDGE_DIR = '';
+  USE_LEARNED_READ = false;
+  WARM_START_ON = false;
+}
 // `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
 // would otherwise ride into the session id and the stored record. The canonical id is folded store-
 // side (experience_store.remote_identity); this keeps the rest of the run calling it one name.
@@ -833,7 +901,7 @@ phase('Analyze');
 const analysis = await agentT(
   roleAgent('tech_lead', 'analyze', 'Analyze the kernel and write the roadmap.', {
     WORKSPACE: CANONICAL, EVAL_DIR, TASK, SKILL_DIR: WORKFLOW_DIR,
-    KERNEL_KNOWLEDGE_DIR,
+    KERNEL_KNOWLEDGE_DIR, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...RESUME_INPUT,
   }),
   { phase: 'Analyze', label: 'tech_lead:analyze', schema: ANALYZE_SCHEMA });
@@ -871,7 +939,7 @@ phase('Profile');
 let profileSummary = await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
-    COMMANDMENT,
+    COMMANDMENT, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...RESUME_INPUT,
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
@@ -1001,7 +1069,6 @@ if (setup.resumed && setup.prior_state) {
 // measurement through the verify gate here. gfx comes from the baseline profile's
 // on-box `device` string (no extra probe).
 // ===========================================================================
-const GFX = (String((profileSummary && profileSummary.device) || '').match(/gfx\d+/i) || [''])[0].toLowerCase();
 // One benched candidate -> one of kb/attest.py's four outcomes. `inapplicable` is a verdict on the
 // PAIRING, excluded from the retire arithmetic — both "this workspace lacks those files" and "it
 // won but could not be committed here" belong there. A patch that ran and gave a WRONG ANSWER is
@@ -1270,6 +1337,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
+    GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...KB_INPUTS,
     // DRA brief (REFERENCE), from main. plan_round reads it and seeds directions[] from the ranked
     // DRA directions — see tech_lead.md plan_round. Spread conditionally, so when dra_enabled was off
@@ -1327,6 +1395,16 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
         planInputs(true)),
       { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: PLAN_SCHEMA });
     left = await secondsLeft(`replan-r${round}`);
+  }
+
+  if (plan && Array.isArray(plan.directions) && ROOFLINE_STATUS.startsWith('unknown')) {
+    const before = plan.directions.length;
+    plan.directions = plan.directions.filter((d) =>
+      !/roofline|peak\s*(?:flops|bandwidth)|%\s*of\s*peak/i.test(
+        `${d && d.title || ''} ${d && d.prompt || ''} ${d && d.why || ''}`));
+    if (plan.directions.length !== before) {
+      log(`Round ${round}: removed ${before - plan.directions.length} direction(s) that relied on unknown peaks.`);
+    }
   }
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
@@ -1399,6 +1477,7 @@ ${cfg({
         INSIGHTS: history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
         KK_REFS: (d.kk_refs && d.kk_refs.length ? d.kk_refs : KK_REFS),
+        GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
         ...KB_INPUTS,
       })}
 
@@ -1711,8 +1790,11 @@ if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimar
         'ratios not wall-clock; record the pitfalls hit; total-then-per-direction for a stacked win).', {
           SCOPE: 'lane', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR,
           PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
+          CURATION_ISOLATE: RDNA4_ISOLATE ? 'true' : 'false',
+          REQUIRED_PLATFORMS: RDNA4_ISOLATE ? ['gfx1201'] : [],
           WINNER: {
             kernel: KERNEL_NAME, language: TARGET_LANGUAGE, mode: MODE, gfx: GFX,
+            device_target: DEVICE_TARGET, physical_cu_count: PHYSICAL_CU_COUNT,
             kernel_class: (analysis && analysis.kernel_type) || '',
             speedup: finalPrimary, validation_status: validation ? validation.validation_status : '',
             bottleneck: profileSummary ? profileSummary.bottleneck : '',

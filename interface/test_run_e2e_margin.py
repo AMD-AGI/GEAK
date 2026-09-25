@@ -30,6 +30,11 @@ def _load_with_env(monkeypatch, value):
         monkeypatch.delenv("GEAK_IMPLAUSIBLE_SPEEDUP_MARGIN", raising=False)
     else:
         monkeypatch.setenv("GEAK_IMPLAUSIBLE_SPEEDUP_MARGIN", value)
+    monkeypatch.setenv(
+        "GEAK_GPU_IDENTITY_JSON",
+        '{"gfx":"gfx950","target":"unknown","marketing_name":"AMD Instinct MI355X",'
+        '"physical_cu_count":256}',
+    )
     spec = importlib.util.spec_from_file_location("run_e2e_margin_probe", _HERE / "run_e2e.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

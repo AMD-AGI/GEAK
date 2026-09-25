@@ -72,14 +72,18 @@ Read, as reference, before writing:
   attention_decode→`attention_decode_paged`, mla→`mla_attention`,
   linear_attention→`linear_attention_gated_delta`, moe→`fused_moe_grouped_gemm`/`grouped_gemm_moe`
   (else the closest dir under `operators/`).
-- **Hardware sanity (first cut only):** detect the arch with `rocminfo`, then read the matching hardware
-  reference for the matrix ISA and the dtypes it supports — `SKILL_DIR/knowledge/amd_instinct.md` for
-  `gfx94*`/`gfx95*` (CDNA Instinct) or `SKILL_DIR/knowledge/amd_ryzen.md` for `gfx11*` (RDNA client).
-  On CDNA that is `amd_instinct.md` §3 for the arch-specific fp8 format + MFMA shapes —
-  **fp8 is FNUZ on gfx942 (CDNA3) but OCP on gfx950 (CDNA4), which also adds MXFP4/MXFP6**; picking the
-  wrong fp8 format silently fails correctness. Also `hardware/shared/matrix_core_mfma_smfmac.md` +
-  `dtype_numerics.md` for MFMA shape/dtype, and `quantization/fnuz_vs_ocp.md` /
-  `optimization/mfma_scheduling.md` (prefer `matrix_instr_nonkdim=16` on gfx942).
+- **Hardware sanity (first cut only):** detect the arch with `rocminfo` and **branch**:
+  - **gfx1201 (RDNA4):** read `SKILL_DIR/knowledge/amd_rdna4.md`. Wave **32**, **WMMA not
+    MFMA**, OCP fp8 only, **no** MX/block-scale. Triton seeds: `BLOCK_M=64`, `BLOCK_N=32` on gfx1201.
+    Do not use Instinct MFMA tiles, FNUZ, or gfx950 MX.
+  - **gfx11* (RDNA3.5 client):** read `SKILL_DIR/knowledge/amd_ryzen.md` for the matrix ISA and the
+    dtypes it supports.
+  - **gfx942 / gfx950 (Instinct):** read `SKILL_DIR/knowledge/amd_instinct.md` §3 for the
+    arch-specific fp8 format + MFMA shapes — **fp8 is FNUZ on gfx942 (CDNA3) but OCP on gfx950
+    (CDNA4), which also adds MXFP4/MXFP6**; picking the wrong fp8 format silently fails correctness.
+    Also `hardware/shared/matrix_core_mfma_smfmac.md` + `dtype_numerics.md` for MFMA shape/dtype, and
+    `quantization/fnuz_vs_ocp.md` / `optimization/mfma_scheduling.md` (prefer
+    `matrix_instr_nonkdim=16` on gfx942).
 
 > **🔴 "Baseline" here means your CORRECT-FIRST SEED for the optimize loop — NOT the speedup
 > denominator.** The reported speedup is ALWAYS measured by the immutable `unittest.py` against the

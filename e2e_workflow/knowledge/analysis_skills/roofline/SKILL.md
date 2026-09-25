@@ -27,7 +27,8 @@ key and the measurement remains the judge. This skill may never prune a candidat
 ## 1. Inputs
 
 - `profile/round_<R>/profile_topN.json` — the standardized Top-N (required).
-- `env_report.json` — `gfx`, `model_arch_class`, `model_dtype`, `workload` (required).
+- `env_report.json` — `gfx`, structured `device_target`, `physical_cu_count`,
+  `model_arch_class`, `model_dtype`, `workload` (required).
 - The model's `config.json` — layer count, expert count, hidden/intermediate sizes, head counts
   (optional but needed for a good MoE/attention byte model).
 - `peaks.md` — hardware denominators, keyed by `gfx`.
@@ -84,8 +85,14 @@ see the disagreement rather than a single blended number that hides it.
    what the roofline says, so a headroom estimate cannot change a decision — modelling those kernels
    only adds failure modes. Skipped entries are **absent** from the artifact; they are NOT `degraded[]`
    (a kernel too small to matter is not a modelling failure and must not read as one).
-1. Resolve peaks for `gfx` from `peaks.md`. Not found → derive from device props, set
-   `peaks.confidence="low"` (§6 L1).
+1. Resolve peaks from `peaks.md` via
+   `resolve_peaks(gfx, product=env_report.device_target)`. Client RDNA4
+   numeric peaks exist only for product `r9700`. A bare gfx1201 (or any other
+   gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
+   unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4
+   — it must not use that gate. Other unknown architectures may derive from
+   device props with `peaks.confidence="low"` (§6 L1). Use `peak_flops_for()`
+   canonical dtype keys; a missing dtype is unknown, never the table maximum.
 2. For each selected entry, pick the **e2e-critical regime** — the one carrying the launches
    (`serving.n_decode_steps` vs `n_prefill_steps`; a decode-dominated run means decode). Use that
    regime's `base_latency_ms` as `t_ms`.

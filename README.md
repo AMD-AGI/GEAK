@@ -8,7 +8,7 @@
   <a href="https://rocm.docs.amd.com/projects/geak/en/latest/"><b>📚 Documentation</b></a>
 </p>
 
-GEAK is an autonomous optimization agent that makes AMD Instinct GPUs run faster, automatically. Built as a
+GEAK is an autonomous optimization agent that makes AMD GPUs run faster, automatically. Built as a
 multi-agent system with an evolving knowledge base, it learns from every optimization run and continuously
 improves its strategies over time. Point it at a single kernel or a live model-serving stack such as vLLM or
 sglang, and GEAK runs the full optimization loop: it finds the bottlenecks, generates and tunes better kernels
@@ -16,7 +16,7 @@ across paths such as Triton, FlyDSL, TileLang, and HIP, and validates the speedu
 normally takes weeks of expert kernel engineering becomes an automated, repeatable, and self-improving process.
 
 GEAK targets AMD Instinct MI GPUs (CDNA, e.g. gfx942 / gfx950; the on-box card is auto-detected), and also runs
-on RDNA3.5 client parts (gfx1151 / Radeon 8060S). It is driven by
+on RDNA3.5 client parts (gfx1151 / Radeon 8060S) and the RDNA4 client target gfx1201. It is driven by
 Claude Code and orchestrated by deterministic JS Workflows. It ships two workflows, each for a different scenario:
 
 | Workflow | Scope | What it optimizes |
@@ -42,9 +42,9 @@ optimize a single kernel.
 
 ### 1. Prerequisites
 
-- An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950) or an **RDNA3.5 part** (gfx1151), **ROCm 6+**, a profiler (`rocprof-compute` /
-  `rocprofv3` / `rocprof`), Python 3.8+.
-- For E2E: a running-capable serving backend (`sglang`, `vllm`, or `atom`) and the model weights on disk.
+- An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), an **RDNA3.5 part** (gfx1151), or **RDNA4 client gfx1201**, **ROCm 6+**, a profiler (`rocprof-compute` /
+  `rocprofv3` / `rocprof`; RDNA4 PMCs may be sparse — kernel-trace still counts), Python 3.8+.
+- For E2E: a running-capable serving backend (`sglang`, `vllm`, or `atom`; R9700 is vLLM-only) and the model weights on disk.
 
 > **⚠️ Build your kernel environment first.** GEAK does **not** install the toolchains your kernels
 > need (e.g. PyTorch, Triton, FlyDSL, hipBLASLt) — these differ per kernel. Set up and verify the
