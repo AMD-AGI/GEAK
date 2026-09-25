@@ -1046,5 +1046,121 @@ class TestJsBalancedFallbackLimits(unittest.TestCase):
         self.assertFalse(ok)
 
 
+# --------------------------------------------------------------------------- #
+# Claude Code's workflow frame, and the runtime's per-agent metadata
+# --------------------------------------------------------------------------- #
+def framed(task, kind="computed task"):
+    """Byte-shaped like Claude Code's workflow frame: one header line, then the task with every
+    line indented two spaces."""
+    return ("[Workflow harness — %s] The task text below was computed at runtime by a workflow "
+            "script. The harness indents every line of the computed text. The computed task text "
+            "follows:\n" % kind) + "\n".join("  " + line for line in task.split("\n"))
+
+
+class TestHarnessFrameAndAgentMeta(LedgerTestBase):
+    """Found on the 2026-09-24 gpt-oss-120b run: $242.61 of $457.08 read as "(driver)".
+
+    The runtime now wraps every agent's prompt in a frame with each line indented, so the
+    anchored engineer/commit patterns never matched; and a run killed before writing its timeline
+    had no other source of names. The runtime's own agent-<id>.meta.json has both the label the
+    script gave the agent and the phase it ran in.
+    """
+
+    def agent_file(self, run_id, agent_id, records, description=None, phase=None):
+        d = os.path.join(self.tmp, "home", "projects", "slug", "sess", "subagents", "workflows", run_id)
+        os.makedirs(d, exist_ok=True)
+        write_transcript(os.path.join(d, "agent-%s.jsonl" % agent_id), records)
+        if description is not None or phase is not None:
+            with open(os.path.join(d, "agent-%s.meta.json" % agent_id), "w", encoding="utf-8") as fh:
+                json.dump({"agentType": "workflow-subagent", "description": description or "",
+                           "workflowPhase": phase or ""}, fh)
+        return os.path.join(d, "agent-*.jsonl")
+
+    def test_a_framed_engineer_prompt_is_recognised(self):
+        eng = "You are Engineer r2_d0 (specialty=algorithm) for round 2.\n- EVAL_DIR: %s" % self.eval_dir
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(framed("optimize inference", kind="user request"), 0),
+            user_rec(framed(eng), 1),
+            asst_rec(2, "m1", read=100, out=1),
+        ])
+        rows, _, agg, _ = self.build()
+        self.assertEqual([(r["role"], r["sub_phase"]) for r in rows], [("engineer", "algorithm")])
+        self.assertNotIn("(driver)", agg["by_role"])
+
+    def test_unwrapping_removes_only_the_frames_indent(self):
+        self.assertEqual(L._unwrap_harness(framed("a\n  b\nc")), "a\n  b\nc")
+        self.assertEqual(L._unwrap_harness("You are the x. PHASE=y."), "You are the x. PHASE=y.")
+
+    def test_metadata_names_an_agent_no_pattern_recognises(self):
+        g = self.agent_file("wf_run1", "a1", [
+            user_rec(framed("Explore a ground-up kernel.\n- EVAL_DIR: %s" % self.eval_dir), 0),
+            asst_rec(1, "m1", read=100, out=1),
+        ], description="deep r1_d0:deep_explore", phase="▸ kernel-lane #4")
+        rows, agent_rows, _, _ = L.build(self.eval_dir, [g], owned_scope=True)
+        r = rows[0]
+        self.assertEqual((r["role"], r["sub_phase"]), ("engineer", "deep_explore"))
+        self.assertEqual(r["agent_label"], "deep r1_d0:deep_explore")
+        self.assertEqual(r["phase"], "kernel-lane #4")
+        self.assertEqual(r["attribution"], "agent-meta")
+        self.assertEqual(r["workflow_run"], "wf_run1")
+        self.assertEqual(agent_rows[0]["workflow_run"], "wf_run1")
+        # The computed task stands in as the prompt snippet when no header named the agent.
+        self.assertIn("Explore a ground-up kernel.", r["prompt"])
+
+    def test_metadata_label_and_phase_win_over_a_derived_key(self):
+        g = self.agent_file("wf_run1", "a1", [
+            user_rec(framed(prompt_for("kernel_extractor", "extract_op", self.eval_dir)), 0),
+            asst_rec(1, "m1", read=100, out=1),
+        ], description="extract_op fused_moe_a16w4_decode", phase="HeadKernel")
+        rows, _, _, _ = L.build(self.eval_dir, [g], owned_scope=True)
+        self.assertEqual((rows[0]["role"], rows[0]["sub_phase"]), ("kernel_extractor", "extract_op"))
+        self.assertEqual(rows[0]["agent_label"], "extract_op fused_moe_a16w4_decode")
+        self.assertEqual(rows[0]["phase"], "HeadKernel")
+
+    def test_a_single_agent_file_is_not_split_by_a_quoted_role_header(self):
+        """ROLE_RE is a search, so a tool result quoting another role's prompt used to open a new
+        conversation. A file with its own metadata is ONE agent, whatever it quotes."""
+        g = self.agent_file("wf_run1", "a1", [
+            user_rec(framed(prompt_for("director", "setup", self.eval_dir)), 0),
+            asst_rec(1, "m1", read=100, out=1),
+            user_rec("tool result: You are the tech_lead. PHASE=analyze.", 10),
+            asst_rec(11, "m2", read=100, out=1),
+        ], description="director:setup", phase="Setup")
+        rows, _, _, _ = L.build(self.eval_dir, [g], owned_scope=True)
+        self.assertEqual({r["group_id"] for r in rows}, {"agent-a1.jsonl#0"})
+        self.assertEqual({r["role"] for r in rows}, {"director"})
+
+    def test_a_partial_timeline_does_not_cap_the_agent_count(self):
+        """A re-entered run's timeline records only the last invocation's attempts."""
+        self.put_timeline(timeline([ev("Validate", "director:validate")]))
+        for i, (role, sub) in enumerate((("director", "validate"), ("profiler", "baseline"),
+                                         ("config_tuner", "sweep"))):
+            write_transcript(os.path.join(self.tdir, "t%d.jsonl" % i), [
+                user_rec(prompt_for(role, sub, self.eval_dir), i * 10),
+                asst_rec(i * 10 + 1, "m%d" % i, read=100, out=1),
+            ])
+        _, _, agg, _ = self.build()
+        self.assertEqual(agg["total"]["agents"], 3)
+
+    def test_role_of_label(self):
+        cases = {
+            "eng r2_d0:algorithm": ("engineer", "algorithm"),
+            "deep r1_d0:deep_explore": ("engineer", "deep_explore"),
+            "commit r2": ("tech_lead", "commit"),
+            "director:setup": ("director", "setup"),
+            "tech_lead:plan r1": ("tech_lead", "plan"),
+            "persist-e2e-checkpoint:config/e2e_validation.json": ("persist-e2e-checkpoint", "config"),
+            "extract_op fused_moe (ck_tile stage1)": ("extract_op", ""),
+            "verify r1_d0 (recovered)": ("verify", ""),
+            "": ("", ""),
+        }
+        for label, want in cases.items():
+            self.assertEqual(L.role_of_label(label), want, label)
+
+    def test_workflow_run_is_read_from_the_path_only(self):
+        self.assertEqual(L.workflow_run_of("/h/p/s/sess/subagents/workflows/wf_x/agent-1.jsonl"), "wf_x")
+        self.assertIsNone(L.workflow_run_of("/h/p/s/sess.jsonl"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

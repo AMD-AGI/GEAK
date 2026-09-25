@@ -275,13 +275,18 @@ def summarize(stages: list[dict[str, Any]], baseline: dict[str, Any]) -> dict[st
     }
 
 
-def spend_by_phase(reports_dir: Path) -> dict[str, dict[str, Any]] | None:
-    """Per-phase LLM spend from ``geak_calls.jsonl``, when that report exists.
+#: GEAK's own per-call ledger, written by e2e_workflow/scripts/llm_ledger.py.
+LEDGER_RELPATH = Path("trace") / "llm_calls.jsonl"
 
-    Returns None rather than zeros when the file is absent — a run whose ledger
-    was never harvested has unknown spend, not zero spend.
+
+def spend_by_phase(reports_dir: Path) -> dict[str, dict[str, Any]] | None:
+    """Per-phase LLM spend from the run's own ledger, ``reports/trace/llm_calls.jsonl``.
+
+    Returns None rather than zeros when the ledger is absent — a run whose ledger
+    was never written has unknown spend, not zero spend. The ledger carries no
+    per-call tool count, so ``tool_calls`` is None: not recorded, never 0.
     """
-    path = reports_dir / "geak_calls.jsonl"
+    path = reports_dir / LEDGER_RELPATH
     if not path.is_file():
         return None
     out: dict[str, dict[str, Any]] = {}
@@ -295,14 +300,14 @@ def spend_by_phase(reports_dir: Path) -> dict[str, dict[str, Any]] | None:
                     row = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(row, dict):
+                    continue
                 phase = str(row.get("phase") or "unknown")
-                acc = out.setdefault(phase, {"calls": 0, "isl": 0, "osl": 0, "usd": 0.0, "tool_calls": 0})
+                acc = out.setdefault(phase, {"calls": 0, "isl": 0, "osl": 0, "usd": 0.0, "tool_calls": None})
                 acc["calls"] += 1
-                acc["isl"] += int(_num(row.get("isl")) or 0)
-                acc["osl"] += int(_num(row.get("osl")) or 0)
-                acc["usd"] += _num(row.get("usd")) or 0.0
-                tools = row.get("tools")
-                acc["tool_calls"] += len(tools) if isinstance(tools, list) else 0
+                acc["isl"] += int(_num(row.get("total_input_tokens")) or 0)
+                acc["osl"] += int(_num(row.get("output_tokens")) or 0)
+                acc["usd"] += _num(row.get("cost_usd")) or 0.0
     except OSError:
         return None
     for acc in out.values():
@@ -387,12 +392,14 @@ def render_markdown(record: dict[str, Any]) -> str:
     if spend:
         lines += ["", "## LLM spend by phase", "", "| Phase | Calls | ISL | OSL | Tool calls | USD |", "|---|---|---|---|---|---|"]
         for phase, acc in sorted(spend.items(), key=lambda kv: -kv[1]["usd"]):
+            tools = "—" if acc["tool_calls"] is None else f"{acc['tool_calls']:,}"
             lines.append(
                 f"| {phase} | {acc['calls']:,} | {acc['isl']:,} | {acc['osl']:,} | "
-                f"{acc['tool_calls']:,} | ${acc['usd']:,.2f} |"
+                f"{tools} | ${acc['usd']:,.2f} |"
             )
     else:
-        lines += ["", "## LLM spend by phase", "", "No `geak_calls.jsonl` in this run's reports directory, so spend is unknown."]
+        lines += ["", "## LLM spend by phase", "",
+                  "No `trace/llm_calls.jsonl` in this run's reports directory, so spend is unknown."]
 
     lines += ["", "## Summary", ""]
     for key in (
