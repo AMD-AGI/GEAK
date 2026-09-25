@@ -737,3 +737,152 @@ class TestCoverageCountsEveryOwnerNotJustTheUsableOnes(unittest.TestCase):
             self.assertIn("wf_gone", " ".join(scope["warnings"]))
             # the usable one is still scoped -- a hole is reported, not a blackout
             self.assertEqual([i["run_id"] for i in scope["invocations"]], ["wf_kept"])
+
+
+def _blank(home, run_id, name="agent-1.jsonl", session="sess",
+           enc="-home-aditysin-PROJECTS-GEAK"):
+    """Zero a transcript the way the runtime leaves one for an agent that was
+    created and never flushed. Returns the path."""
+    p = (Path(home) / "projects" / enc / session / "subagents" / "workflows"
+         / run_id / name)
+    p.write_text("", encoding="utf-8")
+    return p
+
+
+class TestAFlushedSiblingDoesNotCoverForAnEmptyOne(unittest.TestCase):
+    """Scope and mirror must read transcript usability the same way (2026-09-25).
+
+    The resolver tested ``glob.glob(...)`` -- a FILENAME test -- so a zero-byte
+    ``agent-*.jsonl`` satisfied report scope while the mirror, which reads sizes,
+    called the same invocation unusable. One valid transcript beside one empty one
+    left the manifest at ``status="ok"`` and the report at ``complete: true`` with
+    no warnings, over a hole both halves could see.
+    """
+
+    def test_a_zero_byte_transcript_is_not_scope_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = os.path.join(tmp, "eval")
+            os.makedirs(ev)
+            home = _home(tmp, "sess", "wf_only_empty", ev, agents=1)
+            _blank(home, "wf_only_empty", "agent-0.jsonl")
+            info = M.resolve_run_scope([home], eval_dir=ev)
+            # A file that exists and holds nothing is an UNKNOWN, not a zero:
+            # the top has no usable evidence, so no whole-run scope is claimed.
+            self.assertFalse(info["complete"])
+            self.assertEqual(info["scope"], "unresolved")
+            self.assertEqual(info["globs"], [])
+            self.assertIn(ev, info["missing"])
+            self.assertIn("agent-0.jsonl", " ".join(info["warnings"]))
+
+    def _mixed(self, tmp):
+        ev = os.path.join(tmp, "eval")
+        os.makedirs(ev)
+        home = _home(tmp, "sess", "wf_mixed", ev, agents=2)
+        _blank(home, "wf_mixed", "agent-1.jsonl")
+        return ev, home
+
+    def test_the_captured_calls_are_kept_and_the_hole_is_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, home = self._mixed(tmp)
+            info = M.resolve_run_scope([home], eval_dir=ev)
+            # The glob stays -- agent-0 flushed real calls and they are real spend --
+            # but the instance is partially captured and says so.
+            self.assertEqual(len(info["globs"]), 1)
+            self.assertFalse(info["complete"])
+            self.assertEqual(info["scope"], "partial")
+            self.assertEqual(info["missing"], [ev])
+            self.assertEqual(info["resolved"], [])
+            self.assertIn("agent-1.jsonl", " ".join(info["warnings"]))
+
+    def test_the_mirror_marks_the_same_invocation_partial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, home = self._mixed(tmp)
+            man = M.mirror_invocations(M._owned_sites([home], ev),
+                                       Path(ev) / M.MIRROR_DIRNAME)
+            entry = man["invocations"][0]
+            self.assertEqual(entry["transcripts"], 1)       # the one that flushed
+            self.assertEqual([p.rsplit("/", 1)[-1] for p in entry["transcripts_empty"]],
+                             ["agent-1.jsonl"])
+            self.assertEqual(entry["status"], "partial_transcripts")
+            self.assertFalse(man["coverage"]["complete"])
+
+    def test_scope_and_mirror_do_not_disagree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, home = self._mixed(tmp)
+            info = M.resolve_run_scope([home], eval_dir=ev)
+            man = M.mirror_invocations(M._owned_sites([home], ev),
+                                       Path(ev) / M.MIRROR_DIRNAME)
+            # One reader, one verdict: neither half may certify what the other
+            # has already found to be a hole.
+            self.assertEqual(info["complete"], man["coverage"]["complete"])
+            self.assertFalse(info["complete"])
+
+    def test_a_fully_flushed_run_is_still_complete(self):
+        # Preservation: usability is a size test, not a new reason to warn.
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = os.path.join(tmp, "eval")
+            os.makedirs(ev)
+            home = _home(tmp, "sess", "wf_whole", ev, agents=2)
+            info = M.resolve_run_scope([home], eval_dir=ev)
+            man = M.mirror_invocations(M._owned_sites([home], ev),
+                                       Path(ev) / M.MIRROR_DIRNAME)
+            self.assertTrue(info["complete"])
+            self.assertEqual(info["scope"], "run-scoped")
+            self.assertTrue(man["coverage"]["complete"])
+            self.assertEqual(man["invocations"][0]["status"], "ok")
+
+
+class TestAnOwnershipClaimNamesWhoMadeIt(unittest.TestCase):
+    """The native result row carries ``key`` and ``agentId`` (2026-09-25).
+
+    They were read as ``str(row.get(...) or "")``, so a row that lacked them --
+    or carried the wrong type -- was adopted as an owner whose owner fields were
+    two empty strings. The scope then serialized provenance that had never been
+    recorded. The fields are validated; a row without them is still adopted (an
+    older journal's spend is real) but on an explicit, named path.
+    """
+
+    def _site(self, tmp, row):
+        ev = os.path.join(tmp, "eval")
+        os.makedirs(ev, exist_ok=True)
+        home = _journal_only(tmp, "sess", "wf_p", [dict(row, result={"eval_dir": ev})],
+                             agents=1)
+        return ev, home, M._owned_sites([home], ev)[0]
+
+    def test_a_signed_row_keeps_its_producer_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, home, site = self._site(tmp, {"type": "result", "key": "k7",
+                                              "agentId": "a42"})
+            self.assertEqual((site["owner_key"], site["owner_agent"]), ("k7", "a42"))
+            self.assertEqual(site["owner_provenance"], M.OWNER_DECLARED)
+            info = M.resolve_run_scope([home], eval_dir=ev)
+            self.assertEqual(info["invocations"][0]["owner_agent"], "a42")
+            self.assertNotIn("UNATTRIBUTED", " ".join(info["warnings"]))
+
+    def test_a_row_without_producer_fields_is_adopted_but_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, home, site = self._site(tmp, {"type": "result"})
+            self.assertEqual(site["owner_provenance"], M.OWNER_UNATTRIBUTED)
+            info = M.resolve_run_scope([home], eval_dir=ev)
+            # kept -- its transcripts are this run's spend -- and the missing
+            # provenance is stated instead of serialized as an empty owner.
+            self.assertTrue(info["globs"])
+            self.assertEqual(info["invocations"][0]["owner_provenance"],
+                             M.OWNER_UNATTRIBUTED)
+            joined = " ".join(info["warnings"])
+            self.assertIn("UNATTRIBUTED", joined)
+            self.assertIn("wf_p", joined)
+
+    def test_a_wrongly_typed_producer_field_is_not_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # `agentId` as a number is not the supported schema; coercing it with
+            # str() would have invented an agent id that identifies nothing.
+            _ev, _home, site = self._site(tmp, {"type": "result", "key": "k7",
+                                                "agentId": 42})
+            self.assertEqual(site["owner_agent"], "")
+            self.assertEqual(site["owner_provenance"], M.OWNER_UNATTRIBUTED)
+
+    def test_half_an_attribution_is_not_an_attribution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _ev, _home, site = self._site(tmp, {"type": "result", "key": "k7"})
+            self.assertEqual(site["owner_provenance"], M.OWNER_UNATTRIBUTED)
