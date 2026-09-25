@@ -474,6 +474,170 @@ class TestTheMirrorPreservesEveryOwnedInvocation(unittest.TestCase):
             self.assertEqual(lost["status"], "no_transcripts")
 
 
+class TestOwnershipIsReadFromAStatedResult(unittest.TestCase):
+    """A journal owns an eval-dir only where an agent RETURNED it as its own.
+
+    The rule used to be a text match for ``"eval_dir": "<path>"`` anywhere in the
+    file. A row can carry that text about something it is merely INSPECTING -- a
+    comparison target, a diagnostic subject -- and the bytes are identical to an
+    owner's, so the match billed unrelated invocations to this run (2026-09-25).
+    """
+
+    def test_an_eval_dir_nested_under_another_key_is_not_a_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/subject/task"
+            home = _journal_only(tmp, "sess-x", "wf_looker", [
+                {"type": "debug", "comparison_target": {"eval_dir": ev}}], agents=2)
+            self.assertEqual(M.owned_invocations([home], ev), [])
+            self.assertEqual(M._owned_sites([home], ev), [])
+
+    def test_a_result_row_owns_only_its_own_direct_eval_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/subject/task"
+            home = _journal_only(tmp, "sess-y", "wf_wrapper", [
+                {"type": "result", "key": "k", "agentId": "a0",
+                 "result": {"eval_dir": "/runs/exp/other/task",
+                            "comparison_target": {"eval_dir": ev}}}], agents=2)
+            self.assertEqual(M.owned_invocations([home], ev), [])
+
+    def test_a_mention_is_reported_rather_than_passed_over_in_silence(self):
+        """Evidence we refuse to act on is not the same as no evidence."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = os.path.join(tmp, "eval")
+            os.makedirs(ev, exist_ok=True)
+            home = _home(tmp, "sess-own", "wf_top", ev, agents=2)
+            _journal_only(tmp, "sess-x", "wf_looker", [
+                {"type": "debug", "comparison_target": {"eval_dir": ev}}], agents=1)
+            scope = M.resolve_run_scope([home], eval_dir=ev)
+            self.assertEqual([i["run_id"] for i in scope["invocations"]], ["wf_top"])
+            self.assertIn("wf_looker", " ".join(scope["warnings"]))
+            self.assertIn("mention", " ".join(scope["warnings"]))
+
+    def test_the_agent_that_declared_it_travels_with_the_invocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/live/task"
+            home = _journal_only(tmp, "sess-live", "wf_live", [
+                {"type": "result", "key": "baseline", "agentId": "a-77",
+                 "result": {"eval_dir": ev}}], agents=2)
+            scope = M.resolve_run_scope([home], eval_dir=ev)
+            inv = scope["invocations"][0]
+            self.assertEqual(inv["evidence"], M.EVIDENCE_JOURNAL)
+            self.assertEqual((inv["owner_key"], inv["owner_agent"]), ("baseline", "a-77"))
+
+
+class TestTheInventoryKeepsWhatThePublicViewFilters(unittest.TestCase):
+    """One inventory, two views. The private one must not drop the holes."""
+
+    def test_a_declared_owner_without_transcripts_stays_in_the_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/empty/task"
+            home = _journal_only(tmp, "sess-e", "wf_empty",
+                                 [_setup_result(ev)], agents=0)
+            sites = M._owned_sites([home], ev)
+            self.assertEqual([(s["run_id"], s["files_exist"]) for s in sites],
+                             [("wf_empty", False)])
+            # the public view still refuses to hand out an unusable glob
+            self.assertEqual(M.owned_invocations([home], ev), [])
+
+    def test_a_journal_only_owner_makes_the_run_partial_not_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = os.path.join(tmp, "eval")
+            os.makedirs(ev, exist_ok=True)
+            home = _home(tmp, "sess", "wf_final", ev, agents=2)
+            _journal_only(tmp, "sess", "wf_orig", [_setup_result(ev)], agents=0)
+            scope = M.resolve_run_scope([home], eval_dir=ev)
+            self.assertFalse(scope["complete"])
+            self.assertEqual(scope["scope"], "partial")
+            self.assertIn("wf_orig", " ".join(scope["warnings"]))
+
+
+class TestTranscriptsAreCountedOnlyWhereThereIsEvidence(unittest.TestCase):
+    """A file under the workflow dir is not automatically a transcript."""
+
+    def _sites(self, tmp, ev, run_id, session="sess"):
+        return M._owned_sites([Path(tmp)], ev)
+
+    def test_a_journal_is_not_itself_a_transcript(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = os.path.join(tmp, "eval")
+            os.makedirs(ev, exist_ok=True)
+            home = _journal_only(tmp, "sess", "wf_j", [_setup_result(ev)], agents=0)
+            man = M.mirror_invocations(M._owned_sites([home], ev),
+                                       Path(ev) / M.MIRROR_DIRNAME)
+            entry = man["invocations"][0]
+            self.assertEqual(entry["transcripts"], 0)
+            self.assertEqual(entry["status"], "no_transcripts")
+            self.assertFalse(man["coverage"]["complete"])
+
+    def test_a_zero_byte_transcript_is_not_usable_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = os.path.join(tmp, "eval")
+            os.makedirs(ev, exist_ok=True)
+            home = _journal_only(tmp, "sess", "wf_z", [_setup_result(ev)], agents=1)
+            blank = (Path(home) / "projects" / "-home-aditysin-PROJECTS-GEAK" / "sess"
+                     / "subagents" / "workflows" / "wf_z" / "agent-0.jsonl")
+            blank.write_text("", encoding="utf-8")
+            man = M.mirror_invocations(M._owned_sites([home], ev),
+                                       Path(ev) / M.MIRROR_DIRNAME)
+            entry = man["invocations"][0]
+            self.assertEqual(entry["transcripts"], 0)
+            self.assertEqual([p.rsplit("/", 1)[-1] for p in entry["transcripts_empty"]],
+                             ["agent-0.jsonl"])
+            self.assertEqual(entry["status"], "unusable_transcripts")
+            self.assertFalse(man["coverage"]["complete"])
+
+
+class TestTheMirrorPreservesEveryInstanceTheReportCounts(unittest.TestCase):
+    """What the resolver scopes and what the copier keeps must be one set.
+
+    The resolver learned to union a run's nested lanes; the copier kept mirroring
+    the top eval-dir alone. The report therefore counted lane calls that were
+    never copied, and once the mirror was the only surviving source those calls
+    were simply gone (2026-09-25).
+    """
+
+    def _run(self, tmp):
+        ev = os.path.join(tmp, "eval")
+        lane = os.path.join(ev, "kernels", "_exp", "lane1", "task")
+        os.makedirs(os.path.join(ev, "reports", "trace"), exist_ok=True)
+        with open(os.path.join(ev, "reports", "trace", "agent_timeline.json"),
+                  "w", encoding="utf-8") as fh:
+            json.dump({"events": [], "nested": [{"instance": lane, "nested": []}]}, fh)
+        home = _home(tmp, "sess", "wf_top", ev, agents=2)
+        _home(tmp, "sess-lane", "wf_lane", lane, agents=3)
+        return ev, lane, home
+
+    def test_a_nested_lanes_invocation_is_mirrored_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, lane, home = self._run(tmp)
+            out = M.mirror_run_trace(ev, homes=[home])
+            self.assertEqual(out["status"], "ok")
+            self.assertEqual(out["invocations"], 2)
+            got = sorted((Path(ev) / M.MIRROR_DIRNAME / "projects"
+                          / "-home-aditysin-PROJECTS-GEAK" / "sess-lane" / "subagents"
+                          / "workflows" / "wf_lane").glob("agent-*.jsonl"))
+            self.assertEqual(len(got), 3)
+
+    def test_the_mirror_alone_still_carries_the_lanes_calls(self):
+        """The durability claim, proved with the live home out of the picture."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, lane, home = self._run(tmp)
+            M.mirror_run_trace(ev, homes=[home])
+            mirror = Path(ev) / M.MIRROR_DIRNAME
+            rebuilt = M.resolve_run_scope([mirror], eval_dir=ev, nested_eval_dirs=[lane])
+            self.assertEqual(sorted(i["run_id"] for i in rebuilt["invocations"]), ["wf_top"])
+            self.assertTrue(rebuilt["complete"])
+            self.assertEqual(
+                sorted(g.split("workflows/")[-1].split("/")[0] for g in rebuilt["globs"]),
+                ["wf_lane", "wf_top"])
+
+    def test_the_caller_can_still_pin_the_lanes_explicitly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, lane, home = self._run(tmp)
+            out = M.mirror_run_trace(ev, homes=[home], nested_eval_dirs=())
+            self.assertEqual(out["invocations"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 

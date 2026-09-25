@@ -107,28 +107,21 @@ def _run_ledger(eval_dir, transcripts, rates_path, scope=None,
 def _nested_eval_dirs(eval_dir):
     """The eval-dirs of this run's nested lanes, read from the persisted
     ``agent_timeline.json`` (each ``nested[]`` entry carries the lane's own
-    ``instance``). Empty when the timeline is absent or has no nesting."""
-    tl = os.path.join(eval_dir, "reports", "trace", "agent_timeline.json")
+    ``instance``). Empty when the timeline is absent or has no nesting.
+
+    Delegates to ``claude_trace_mirror.nested_lane_dirs`` so the lanes this
+    report SCOPES to and the lanes the mirror COPIES are discovered by one
+    reader; two readers is how the mirror came to omit what the report counted.
+    Falls back to empty when the mirror module is unavailable, as the rest of
+    this module does."""
     try:
-        with open(tl, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
+        import claude_trace_mirror as mirror
+    except Exception:
         return []
-    out, seen = [], set()
-
-    def walk(node):
-        for child in (node.get("nested") or []):
-            if not isinstance(child, dict):
-                continue
-            inst = child.get("instance")
-            if inst and inst not in seen:
-                seen.add(inst)
-                out.append(inst)
-            walk(child)
-
-    if isinstance(data, dict):
-        walk(data)
-    return out
+    try:
+        return mirror.nested_lane_dirs(eval_dir)
+    except Exception:
+        return []
 
 
 def _resolve_scope(eval_dir, extra_homes=()):
