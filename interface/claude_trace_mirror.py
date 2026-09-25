@@ -464,18 +464,40 @@ def owned_invocations(
     Returns:
         ``[{"run_id", "glob", "evidence"}]`` in discovery order; empty when nothing owns it.
     """
+    return [
+        {key: site[key] for key in ("run_id", "glob", "evidence")}
+        for site in _owned_sites(homes, eval_dir)
+    ]
+
+
+def _owned_sites(
+    homes: Iterable[Path], eval_dir: str | None,
+) -> list[dict[str, Any]]:
+    """:func:`owned_invocations`, keeping each hit's provenance for the mirror.
+
+    Ownership is decided exactly as :func:`owned_invocations` documents -- this is
+    that function's body, not a second rule. It additionally carries the two paths
+    the copier needs and the reader does not: the ``wf_*.json`` backing the hit
+    (``None`` for a journal-owned invocation, which has no record yet) and the
+    session dir its transcripts live under. The public shape stays three keys so a
+    scope dict, which is serialized into the report, does not grow copier detail.
+    """
     wanted = (eval_dir or "").strip().rstrip("/")
     if not wanted:
         return []
     homes = list(homes)
-    found: dict[str, dict[str, str]] = {}
+    found: dict[str, dict[str, Any]] = {}
     for record_path, record in iter_records(homes):
         if _match_rank(record, wanted, _FIELD_EVAL) != _RANK_EXACT_SAME:
             continue
         res = _glob_for_record(record_path, record)
         run_id = str(record.get("runId") or "")
         if res and res[1] and run_id not in found:
-            found[run_id] = {"run_id": run_id, "glob": res[0], "evidence": EVIDENCE_RECORD}
+            found[run_id] = {
+                "run_id": run_id, "glob": res[0], "evidence": EVIDENCE_RECORD,
+                # <session>/workflows/wf_*.json -> <session>
+                "record_path": record_path, "session_dir": record_path.parent.parent,
+            }
     value = re.compile(r'"eval_dir"\s*:\s*"' + re.escape(wanted) + r'/?"')
     for home in homes:
         try:
@@ -494,7 +516,11 @@ def owned_invocations(
                 continue
             g = str(journal.parent / "agent-*.jsonl")
             if _glob.glob(g):
-                found[run_id] = {"run_id": run_id, "glob": g, "evidence": EVIDENCE_JOURNAL}
+                found[run_id] = {
+                    "run_id": run_id, "glob": g, "evidence": EVIDENCE_JOURNAL,
+                    # <session>/subagents/workflows/<runId>/journal.jsonl -> <session>
+                    "record_path": None, "session_dir": journal.parents[3],
+                }
     return list(found.values())
 
 
@@ -809,7 +835,28 @@ def _sources(record_path: Path, run_id: str) -> list[tuple[Path, Path]]:
         ``(source, relative_destination)`` pairs. The destination is relative to
         the mirror root and reproduces the home's own layout.
     """
-    session_dir = record_path.parent.parent
+    return _sources_at(record_path.parent.parent, run_id, record_path=record_path)
+
+
+def _sources_at(
+    session_dir: Path, run_id: str, *, record_path: Path | None = None,
+) -> list[tuple[Path, Path]]:
+    """:func:`_sources` for ONE invocation, addressed by its session dir.
+
+    Split out so an invocation owned by its live journal can be copied on the same
+    terms as a record-backed one. Such an invocation has no ``wf_*.json`` at all --
+    the runtime writes the record only when the workflow returns -- so the record
+    is optional here rather than the starting point.
+
+    Args:
+        session_dir: ``<home>/projects/<slug>/<session>``.
+        run_id: The invocation whose ``subagents/workflows/<runId>/`` to take.
+        record_path: Its ``wf_*.json`` when one exists; copied first so the record
+            survives a byte budget that the transcripts do not.
+
+    Returns:
+        ``(source, relative_destination)`` pairs, most important first.
+    """
     # <home>/projects/<slug>/<session> -> <home>. The mirror reproduces the
     # full relative path from the home down, because the consumer's glob is
     # anchored at ``projects/`` and counts directory levels.
@@ -818,7 +865,12 @@ def _sources(record_path: Path, run_id: str) -> list[tuple[Path, Path]]:
     def rel(path: Path) -> Path:
         return path.relative_to(home)
 
-    out: list[tuple[Path, Path]] = [(record_path, rel(record_path))]
+    out: list[tuple[Path, Path]] = []
+    # Listed even when it is already gone: transcripts are live files, and a
+    # record that vanishes between listing and copy must surface as an error in
+    # the manifest, not as a silently shorter source list.
+    if record_path is not None:
+        out.append((record_path, rel(record_path)))
 
     convo = session_dir.with_suffix(".jsonl")
     if convo.is_file():
@@ -897,14 +949,71 @@ def mirror(
     Returns:
         The manifest written alongside the copy.
     """
-    run_id = str(record.get("runId") or "")
-    # <home>/projects/<slug>/<session>/workflows/wf_*.json -> <home>
-    source_home = record_path.parents[4]
+    return mirror_invocations(
+        [{
+            "run_id": str(record.get("runId") or ""),
+            "evidence": EVIDENCE_RECORD,
+            "record_path": record_path,
+            # <session>/workflows/wf_*.json -> <session>
+            "session_dir": record_path.parent.parent,
+        }],
+        dest_root,
+        max_bytes=max_bytes,
+        deadline_s=deadline_s,
+        recorded_paths=record_paths(record),
+    )
+
+
+def mirror_invocations(
+    sites: Iterable[dict[str, Any]],
+    dest_root: Path,
+    *,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    deadline_s: float = DEFAULT_DEADLINE_S,
+    recorded_paths: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Copy EVERY invocation that owns this run into *dest_root*, under one manifest.
+
+    A run's spend is the union of the invocations that worked in its eval dir --
+    a resumed run, or one re-entered to finish what a killed one left, is several.
+    :func:`resolve_run_scope` has counted them all since 824db57; the mirror still
+    copied the single invocation :func:`find_record` returned. So a scope that
+    resolved to two invocations live rebuilt from the mirror as one, and called
+    itself complete: the original's transcripts were lost with the live home, which
+    is the one thing a durable mirror exists to prevent.
+
+    The budget and the deadline are shared across the whole set rather than granted
+    per invocation, so the ceiling the caller asked for still holds. Invocations are
+    copied in the order given, so the caller decides what survives a tight budget.
+
+    A session that drove two invocations shares one conversation file and one flat
+    ``subagents/`` dir; those are copied once. The per-invocation
+    ``subagents/workflows/<runId>/`` trees never overlap.
+
+    An invocation whose transcripts are missing, empty or unreadable is RETAINED in
+    the manifest with a status saying so, and named in ``coverage``. Dropping it
+    would let a nonempty subset certify the whole known scope as complete -- the
+    same silent-undercount this function exists to fix, one layer down.
+
+    Args:
+        sites: ``{"run_id", "session_dir", "record_path", "evidence"}`` per owning
+            invocation, as :func:`_owned_sites` returns them.
+        dest_root: The mirror root, normally ``<eval_dir>/llm_trace``.
+        max_bytes: Ceiling on bytes copied in this pass, across all invocations.
+        deadline_s: Wall-clock ceiling, across all invocations.
+        recorded_paths: The primary record's declared paths, for the manifest.
+
+    Returns:
+        The manifest written alongside the copy.
+    """
+    sites = list(sites)
+    primary = sites[0] if sites else None
     manifest: dict[str, Any] = {
-        "run_id": run_id,
-        "source_home": str(source_home),
-        "source_record": str(record_path),
-        "recorded_paths": record_paths(record),
+        "run_id": str(primary.get("run_id") or "") if primary else "",
+        # <home>/projects/<slug>/<session> -> <home>
+        "source_home": str(primary["session_dir"].parents[2]) if primary else "",
+        "source_record": str(primary.get("record_path") or "") if primary else "",
+        "recorded_paths": list(recorded_paths or []),
         "mirrored_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "files": [],
         "skipped": [],
@@ -912,36 +1021,97 @@ def mirror(
         "bytes_copied": 0,
         "max_bytes": int(max_bytes),
         "deadline_hit": False,
+        "invocations": [],
     }
 
     budget = int(max_bytes)
     started = time.monotonic()
-    for src, rel in _sources(record_path, run_id):
-        if deadline_s > 0 and time.monotonic() - started >= deadline_s:
-            manifest["deadline_hit"] = True
-            manifest["skipped"].append({"path": str(rel), "reason": "deadline"})
-            continue
-        dest = dest_root / rel
+    seen: set[str] = set()
+    for site in sites:
+        run_id = str(site.get("run_id") or "")
+        record_path = site.get("record_path")
+        entry: dict[str, Any] = {
+            "run_id": run_id,
+            "evidence": str(site.get("evidence") or ""),
+            "source_record": str(record_path) if record_path else "",
+            "files": [],
+            "skipped": [],
+            "errors": [],
+            "bytes_copied": 0,
+            "status": "ok",
+        }
+        manifest["invocations"].append(entry)
         try:
-            size = src.stat().st_size
-        except OSError as exc:
-            manifest["errors"].append({"path": str(src), "error": f"{type(exc).__name__}: {exc}"})
+            pairs = _sources_at(site["session_dir"], run_id, record_path=record_path)
+        except (OSError, ValueError, KeyError) as exc:
+            entry["status"] = "unreadable"
+            err = {"run_id": run_id, "error": f"{type(exc).__name__}: {exc}"}
+            entry["errors"].append(err)
+            manifest["errors"].append(err)
             continue
-        if _is_current(src, dest):
-            manifest["files"].append({"path": str(rel), "bytes": size, "copied": False})
-            continue
-        if size > budget:
-            manifest["skipped"].append({"path": str(rel), "bytes": size, "reason": "max_bytes"})
-            continue
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
-        except OSError as exc:
-            manifest["errors"].append({"path": str(src), "error": f"{type(exc).__name__}: {exc}"})
-            continue
-        budget -= size
-        manifest["bytes_copied"] += size
-        manifest["files"].append({"path": str(rel), "bytes": size, "copied": True})
+        # Counted before de-duplication: the shared files a second invocation
+        # skips are not evidence that IT was captured.
+        own = "subagents/workflows/%s/" % run_id if run_id else None
+        entry["transcripts"] = sum(
+            1 for _, rel in pairs if own and own in rel.as_posix())
+        for src, rel in pairs:
+            key = rel.as_posix()
+            if key in seen:
+                continue
+            seen.add(key)
+            if deadline_s > 0 and time.monotonic() - started >= deadline_s:
+                manifest["deadline_hit"] = True
+                rec = {"path": key, "reason": "deadline"}
+                entry["skipped"].append(rec)
+                manifest["skipped"].append(rec)
+                continue
+            dest = dest_root / rel
+            try:
+                size = src.stat().st_size
+            except OSError as exc:
+                rec = {"path": str(src), "error": f"{type(exc).__name__}: {exc}"}
+                entry["errors"].append(rec)
+                manifest["errors"].append(rec)
+                continue
+            if _is_current(src, dest):
+                rec = {"path": key, "bytes": size, "copied": False}
+                entry["files"].append(rec)
+                manifest["files"].append(rec)
+                continue
+            if size > budget:
+                rec = {"path": key, "bytes": size, "reason": "max_bytes"}
+                entry["skipped"].append(rec)
+                manifest["skipped"].append(rec)
+                continue
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+            except OSError as exc:
+                rec = {"path": str(src), "error": f"{type(exc).__name__}: {exc}"}
+                entry["errors"].append(rec)
+                manifest["errors"].append(rec)
+                continue
+            budget -= size
+            entry["bytes_copied"] += size
+            manifest["bytes_copied"] += size
+            rec = {"path": key, "bytes": size, "copied": True}
+            entry["files"].append(rec)
+            manifest["files"].append(rec)
+        if entry["status"] == "ok":
+            if not entry.get("transcripts"):
+                entry["status"] = "no_transcripts"
+            elif entry["skipped"]:
+                entry["status"] = "partial"
+            elif entry["errors"]:
+                entry["status"] = "errors"
+
+    incomplete = [e["run_id"] for e in manifest["invocations"] if e["status"] != "ok"]
+    manifest["coverage"] = {
+        "invocations": len(sites),
+        "captured": len(sites) - len(incomplete),
+        "complete": bool(sites) and not incomplete,
+        "incomplete": incomplete,
+    }
 
     _write_manifest(dest_root, manifest)
     return manifest
@@ -1151,26 +1321,56 @@ def mirror_run_trace(
     try:
         eval_path = Path(eval_dir)
         search = list(homes) if homes is not None else candidate_homes()
+        # The record this run declares stays the primary: it keeps the manifest's
+        # top-level identity, and it is first in line for the byte budget. Every
+        # OTHER invocation that owns this eval dir is then mirrored too, so what
+        # the report counts and what the mirror preserves are the same set.
+        sites: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        record: dict[str, Any] | None = None
         hit = find_record(
             search,
             eval_dir=str(eval_path),
             exp_root=str(exp_root) if exp_root else None,
             session_id=session_id,
         )
-        if hit is None:
+        if hit is not None:
+            record_path, record = hit
+            run_id = str(record.get("runId") or "")
+            seen_ids.add(run_id)
+            sites.append({
+                "run_id": run_id,
+                "evidence": EVIDENCE_RECORD,
+                "record_path": record_path,
+                "session_dir": record_path.parent.parent,
+            })
+        for site in _owned_sites(search, str(eval_path)):
+            run_id = str(site.get("run_id") or "")
+            if run_id in seen_ids:
+                continue
+            seen_ids.add(run_id)
+            sites.append(site)
+        if not sites:
             return {"status": "no_record", "homes": [str(h) for h in search]}
-        record_path, record = hit
         dest = eval_path / MIRROR_DIRNAME
-        manifest = mirror(record_path, record, dest, max_bytes=_max_bytes())
+        manifest = mirror_invocations(
+            sites, dest, max_bytes=_max_bytes(),
+            recorded_paths=record_paths(record) if record else None,
+        )
         result: dict[str, Any] = {
             "status": "ok",
             "path": str(dest),
             "run_id": manifest["run_id"],
             "files": len(manifest["files"]),
             "bytes_copied": manifest["bytes_copied"],
+            "invocations": len(manifest["invocations"]),
+            "coverage": manifest["coverage"],
         }
         if render:
-            report = render_run_report(eval_path)
+            # Render against the mirror that was just written, as well as the
+            # live homes: the page must be reproducible from the durable copy
+            # alone, and passing it here is what proves the copy is sufficient.
+            report = render_run_report(eval_path, homes=[dest, *search])
             skill = install_skill(eval_path / "report")
             manifest["report"] = report
             manifest["skill"] = skill

@@ -405,5 +405,74 @@ class TestOwnedInvocations(unittest.TestCase):
             self.assertTrue(found[0]["glob"].startswith(str(live)))
 
 
+class TestTheMirrorPreservesEveryOwnedInvocation(unittest.TestCase):
+    """What the report counts, the mirror must keep (2026-09-25).
+
+    ``resolve_run_scope`` has counted every owning invocation since 824db57, but the
+    mirror still copied the single invocation ``find_record`` returned. A run that
+    resolved to two invocations LIVE therefore rebuilt from the mirror as one -- and
+    called itself complete. The original's transcripts were lost with the live home,
+    which is the one thing a durable mirror exists to prevent.
+    """
+
+    def _run(self, tmp):
+        """A killed original (journal only) plus the re-entry that wrote the record."""
+        ev = os.path.join(tmp, "eval")
+        os.makedirs(ev, exist_ok=True)
+        home = _home(tmp, "sess", "wf_final", ev, key="args", agents=2)
+        _journal_only(tmp, "sess", "wf_orig", [_setup_result(ev)], agents=3)
+        return ev, home
+
+    def test_a_killed_original_is_mirrored_beside_its_re_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, home = self._run(tmp)
+            out = M.mirror_run_trace(ev, homes=[home])
+            self.assertEqual(out["status"], "ok")
+            self.assertEqual(out["invocations"], 2)
+            self.assertTrue(out["coverage"]["complete"])
+            self.assertEqual(out["coverage"]["incomplete"], [])
+            mirror = Path(ev) / M.MIRROR_DIRNAME
+            for run_id, agents in (("wf_final", 2), ("wf_orig", 3)):
+                got = sorted((mirror / "projects" / "-home-aditysin-PROJECTS-GEAK" / "sess"
+                              / "subagents" / "workflows" / run_id).glob("agent-*.jsonl"))
+                self.assertEqual(len(got), agents, run_id)
+
+    def test_the_mirror_alone_still_resolves_both_invocations(self):
+        """The durability claim itself: rebuild with the live home gone."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, home = self._run(tmp)
+            M.mirror_run_trace(ev, homes=[home])
+            mirror = Path(ev) / M.MIRROR_DIRNAME
+            info = M.resolve_run_scope([mirror], eval_dir=ev)
+            self.assertEqual(
+                sorted(i["run_id"] for i in info["invocations"]), ["wf_final", "wf_orig"])
+
+    def test_a_session_shared_by_two_invocations_is_copied_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, home = self._run(tmp)
+            man = M.mirror_run_trace(ev, homes=[home])
+            paths = [f["path"] for f in
+                     json.loads((Path(ev) / M.MIRROR_DIRNAME / M.MANIFEST_NAME)
+                                .read_text(encoding="utf-8"))["files"]]
+            self.assertEqual(len(paths), len(set(paths)))
+            self.assertEqual(man["coverage"]["captured"], 2)
+
+    def test_an_invocation_whose_transcripts_are_gone_is_named_not_dropped(self):
+        """A nonempty subset must not certify the whole known scope as complete."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, home = self._run(tmp)
+            sites = M._owned_sites([home], ev)
+            self.assertEqual(len(sites), 2)
+            sites.append({"run_id": "wf_lost", "evidence": M.EVIDENCE_JOURNAL,
+                          "record_path": None,
+                          "session_dir": Path(tmp) / "projects" / "gone" / "sess"})
+            man = M.mirror_invocations(sites, Path(ev) / M.MIRROR_DIRNAME)
+            self.assertEqual(man["coverage"]["invocations"], 3)
+            self.assertFalse(man["coverage"]["complete"])
+            self.assertEqual(man["coverage"]["incomplete"], ["wf_lost"])
+            lost = [e for e in man["invocations"] if e["run_id"] == "wf_lost"][0]
+            self.assertEqual(lost["status"], "no_transcripts")
+
+
 if __name__ == "__main__":
     unittest.main()
