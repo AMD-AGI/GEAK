@@ -324,5 +324,86 @@ class TestResolveRunScopeCoverage(unittest.TestCase):
             self.assertIn("wf_top", info["globs"][0])
 
 
+def _journal_only(root, session, run_id, journal_lines, *, agents=1,
+                  enc="-home-aditysin-PROJECTS-GEAK"):
+    """A workflow invocation with NO record: still running, or killed before it
+    returned. Only its journal and agent transcripts exist."""
+    run_dir = Path(root) / "projects" / enc / session / "subagents" / "workflows" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "journal.jsonl").write_text(
+        "".join(json.dumps(line) + "\n" for line in journal_lines), encoding="utf-8")
+    for i in range(agents):
+        (run_dir / ("agent-%d.jsonl" % i)).write_text("{}\n", encoding="utf-8")
+    return Path(root)
+
+
+def _setup_result(eval_dir):
+    return {"type": "result", "key": "k", "agentId": "a0",
+            "result": {"eval_dir": eval_dir, "model_name": "m"}}
+
+
+class TestOwnedInvocations(unittest.TestCase):
+    """A run is every invocation whose OWN eval-dir is this one (2026-09-25).
+
+    The gpt-oss-120b run of 2026-09-24 was an 18-hour original, killed before it could write
+    its record, plus a 53-minute ``phases: final`` re-entry that did write one. Scoping to the
+    newest record kept the re-entry alone: 103 of 2,270 calls.
+    """
+
+    def test_a_killed_original_and_its_re_entry_are_both_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/e2e_run"
+            home = _home(tmp, "sess", "wf_final", ev, key="args")
+            _journal_only(tmp, "sess", "wf_orig", [_setup_result(ev)], agents=3)
+            info = M.resolve_run_scope([home], eval_dir=ev)
+            self.assertEqual(len(info["globs"]), 2)
+            self.assertEqual({i["run_id"]: i["evidence"] for i in info["invocations"]},
+                             {"wf_final": "record", "wf_orig": "journal"})
+            # One invocation's ownership rests on its journal alone: usable, never complete.
+            self.assertEqual(info["scope"], "run-scoped-inferred")
+            self.assertFalse(info["complete"])
+            self.assertEqual(info["top_anchor"], "record+journal")
+            self.assertTrue(any("wf_orig" in w for w in info["warnings"]))
+
+    def test_two_recorded_invocations_are_a_complete_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/e2e_run"
+            home = _home(tmp, "sess", "wf_one", ev, key="args")
+            _home(tmp, "sess", "wf_two", ev, key="result")
+            info = M.resolve_run_scope([home], eval_dir=ev)
+            self.assertEqual(info["scope"], "run-scoped")
+            self.assertTrue(info["complete"])
+            self.assertEqual(sorted(i["run_id"] for i in info["invocations"]), ["wf_one", "wf_two"])
+
+    def test_a_mere_mention_of_the_path_is_not_ownership(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/e2e_run"
+            _journal_only(tmp, "sess", "wf_reader", [
+                {"type": "result", "result": {"note": "read %s/final_report.md" % ev}}])
+            self.assertEqual(M.owned_invocations([Path(tmp)], ev), [])
+
+    def test_a_child_eval_dir_does_not_own_its_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/e2e_run"
+            _journal_only(tmp, "sess", "wf_lane",
+                          [_setup_result(ev + "/kernels/_exp/team_x/task")])
+            self.assertEqual(M.owned_invocations([Path(tmp)], ev), [])
+
+    def test_an_invocation_without_transcripts_is_not_adopted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/e2e_run"
+            _journal_only(tmp, "sess", "wf_empty", [_setup_result(ev)], agents=0)
+            self.assertEqual(M.owned_invocations([Path(tmp)], ev), [])
+
+    def test_the_same_invocation_in_two_homes_is_counted_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/e2e_run"
+            live = _journal_only(os.path.join(tmp, "live"), "sess", "wf_orig", [_setup_result(ev)])
+            mirror = _journal_only(os.path.join(tmp, "mirror"), "sess", "wf_orig", [_setup_result(ev)])
+            found = M.owned_invocations([live, mirror], ev)
+            self.assertEqual(len(found), 1)
+            self.assertTrue(found[0]["glob"].startswith(str(live)))
+
+
 if __name__ == "__main__":
     unittest.main()

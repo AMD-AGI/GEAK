@@ -199,28 +199,43 @@ def test_spend_by_phase_absent_is_none(tmp_path: Path) -> None:
     assert gor.spend_by_phase(tmp_path) is None
 
 
+def _ledger(reports: Path) -> Path:
+    path = reports / "trace" / "llm_calls.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def test_spend_by_phase_aggregates_and_skips_bad_lines(tmp_path: Path) -> None:
-    path = tmp_path / "geak_calls.jsonl"
+    path = _ledger(tmp_path)
     path.write_text(
-        json.dumps({"phase": "P1", "isl": 10, "osl": 2, "usd": 1.5, "tools": ["Read"]}) + "\n"
+        json.dumps({"phase": "P1", "total_input_tokens": 10, "output_tokens": 2, "cost_usd": 1.5}) + "\n"
         + "\n"
         + "{not json\n"
-        + json.dumps({"phase": "P1", "isl": 5, "osl": 1, "usd": 0.5, "tools": []}) + "\n"
-        + json.dumps({"isl": 1, "osl": 1, "usd": 0.25, "tools": None}) + "\n",
+        + "[1, 2]\n"
+        + json.dumps({"phase": "P1", "total_input_tokens": 5, "output_tokens": 1, "cost_usd": 0.5}) + "\n"
+        + json.dumps({"total_input_tokens": 1, "output_tokens": 1, "cost_usd": 0.25}) + "\n",
         encoding="utf-8",
     )
     spend = gor.spend_by_phase(tmp_path)
-    assert spend["P1"] == {"calls": 2, "isl": 15, "osl": 3, "usd": 2.0, "tool_calls": 1}
+    # The ledger records no per-call tool count: None (not recorded), never 0.
+    assert spend["P1"] == {"calls": 2, "isl": 15, "osl": 3, "usd": 2.0, "tool_calls": None}
     assert spend["unknown"]["calls"] == 1
 
 
+def test_a_legacy_geak_calls_jsonl_is_not_read(tmp_path: Path) -> None:
+    """The external dump format is gone; only GEAK's own ledger is a spend source."""
+    (tmp_path / "geak_calls.jsonl").write_text(
+        json.dumps({"phase": "P1", "isl": 1, "osl": 1, "usd": 9.0}) + "\n", encoding="utf-8")
+    assert gor.spend_by_phase(tmp_path) is None
+
+
 def test_spend_by_phase_empty_file_is_none(tmp_path: Path) -> None:
-    (tmp_path / "geak_calls.jsonl").write_text("", encoding="utf-8")
+    _ledger(tmp_path).write_text("", encoding="utf-8")
     assert gor.spend_by_phase(tmp_path) is None
 
 
 def test_spend_by_phase_unreadable_is_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    (tmp_path / "geak_calls.jsonl").write_text("{}\n", encoding="utf-8")
+    _ledger(tmp_path).write_text("{}\n", encoding="utf-8")
 
     def boom(*_args, **_kwargs):
         raise OSError("nope")
@@ -235,8 +250,9 @@ def test_spend_by_phase_unreadable_is_none(tmp_path: Path, monkeypatch: pytest.M
 def test_markdown_has_every_section(run_dir: Path) -> None:
     reports = run_dir / "reports"
     reports.mkdir()
-    (reports / "geak_calls.jsonl").write_text(
-        json.dumps({"phase": "P4 ConfigSweep", "isl": 9, "osl": 3, "usd": 2.25, "tools": ["Bash"]}) + "\n",
+    _ledger(reports).write_text(
+        json.dumps({"phase": "P4 ConfigSweep", "total_input_tokens": 9, "output_tokens": 3,
+                    "cost_usd": 2.25}) + "\n",
         encoding="utf-8",
     )
     text = gor.render_markdown(gor.collect(run_dir))
@@ -248,7 +264,7 @@ def test_markdown_has_every_section(run_dir: Path) -> None:
     assert "1.0000x" in text
 
 
-def test_markdown_says_spend_unknown_without_the_jsonl(run_dir: Path) -> None:
+def test_markdown_says_spend_unknown_without_the_ledger(run_dir: Path) -> None:
     text = gor.render_markdown(gor.collect(run_dir))
     assert "spend is unknown" in text
 

@@ -1654,7 +1654,7 @@ def eval_dir_of_run(workflow_dir):
     return None
 
 
-def publish_final(trace, workflow_dir, out_path, render=True):
+def publish_final(trace, workflow_dir, out_path, render=False):
     """Write the end-of-run views from the tracked data.
 
     Renders beside the tracked JSON, and additionally into ``<eval_dir>/report/``
@@ -1687,7 +1687,7 @@ def publish_final(trace, workflow_dir, out_path, render=True):
 
 
 def watch(workflow_dir, out_path, interval=20.0, max_seconds=None,
-          rates_path=None, status_path=None, render=True, resolver_info=None,
+          rates_path=None, status_path=None, render=False, resolver_info=None,
           mirror_dir=None):
     """Poll until the RUN RECORD reports a terminal status, or the deadline hits.
 
@@ -2023,11 +2023,13 @@ def main(argv=None):
                     help="Explicit workflow runId to attach to. This is the only "
                          "PROOF of invocation identity; without it attachment is "
                          "refused when more than one record owns the directory.")
-    ap.add_argument("--render", dest="render", action="store_true", default=True,
-                    help="Render HTML+Markdown from the tracked data when the run "
-                         "ends (default)")
+    # Off by default: a run has exactly ONE report page, geak_run_report_<model>.html,
+    # written by interface/geak_report.py. The tracked JSON is the durable record.
+    ap.add_argument("--render", dest="render", action="store_true", default=False,
+                    help="Also render this tracker's own HTML+Markdown view when the "
+                         "run ends (off by default)")
     ap.add_argument("--no-render", dest="render", action="store_false",
-                    help="Track only; do not render")
+                    help="Track only; do not render (default)")
     ap.add_argument("--watch", action="store_true",
                     help="Poll until the run completes instead of collecting once")
     ap.add_argument("--interval", type=float, default=20.0,

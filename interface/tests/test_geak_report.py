@@ -315,3 +315,46 @@ class TestMidRunReportBeforeReturn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOneReportPage(unittest.TestCase):
+    """A run has exactly one HTML page: report/geak_run_report_<model>.html.
+
+    The execution tracker still collects its JSON beside it (it survives the
+    transcripts being pruned), but renders no page of its own."""
+
+    def test_report_dir_holds_exactly_one_page(self):
+        import geak_trace_collector as C
+        with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
+            ev = os.path.join(tmp, "run")
+            os.makedirs(ev)
+            sess = Path(tmp) / "home" / "projects" / "slug" / "sess"
+            (sess / "workflows").mkdir(parents=True)
+            (sess / "workflows" / "wf_r.json").write_text(
+                json.dumps({"runId": "wf_r", "args": {"eval_dir": ev}}), encoding="utf-8")
+            wf = sess / "subagents" / "workflows" / "wf_r"
+            wf.mkdir(parents=True)
+            write_transcript(str(wf / "agent-a1.jsonl"), [
+                user_rec(prompt_for("director", "setup", ev), 0),
+                asst_rec(10, "m1", read=100, out=1, text="ok"),
+            ])
+            (wf / "agent-a1.meta.json").write_text(
+                json.dumps({"description": "director:setup", "workflowPhase": "Setup"}),
+                encoding="utf-8")
+            (wf / "journal.jsonl").write_text(
+                json.dumps({"type": "started", "key": "k", "agentId": "a1",
+                            "label": "director:setup", "phase": "Setup"}) + "\n"
+                + json.dumps({"type": "result", "key": "k", "agentId": "a1",
+                              "result": {"eval_dir": ev}}) + "\n", encoding="utf-8")
+            with mock.patch.object(M, "candidate_homes", return_value=[Path(tmp) / "home"]), \
+                    mock.patch.object(C, "resolve_workflow_dir",
+                                      return_value=(str(wf), {"run_id": "wf_r"})):
+                res = R.run(eval_dir=ev, model="m")
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(res["transcript_scope"], "run-scoped")
+            report = os.path.join(ev, "report")
+            self.assertEqual(sorted(f for f in os.listdir(report) if f.endswith(".html")),
+                             ["geak_run_report_m.html"])
+            self.assertEqual(res["trace"]["status"], "ok")
+            self.assertNotIn("html", res["trace"])
+            self.assertTrue(os.path.isfile(os.path.join(report, "geak_trace.json")))

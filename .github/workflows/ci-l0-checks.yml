@@ -99,6 +99,8 @@ jobs:
             interface/test_geak_outcome_report.py \
             interface/tests/test_geak_call_tree_html.py \
             interface/tests/test_geak_report.py \
+            interface/tests/test_claude_trace_mirror.py \
+            interface/tests/test_no_hyperloom_dependency.py \
             interface/tests/test_geak_trace_collector.py \
             interface/tests/test_geak_trace_events.py \
             interface/tests/test_geak_trace_report.py \

@@ -314,5 +314,67 @@ class TestPerModelNoDoubleCount(unittest.TestCase):
         self.assertEqual(sum(pm["calls"] for pm in per_model.values()), total["calls"])
 
 
+def _payload(html):
+    start = html.index('type="application/json">') + len('type="application/json">')
+    return json.loads(html[start:html.index("</script>", start)].replace("<\\/", "</"))
+
+
+class TestElapsedAndBreakdowns(unittest.TestCase):
+    """The one page answers "how long", not only "how much": elapsed is first
+    request to last response, and it is never confused with billed span."""
+
+    def rows(self):
+        a = call("director", "setup", 10_000, duration_ms=1_000, cost=1.0)
+        a.update(phase="Setup", workflow_run="wf_orig")
+        b = call("engineer", "algorithm", 70_000, duration_ms=2_000, cost=2.0,
+                 label="eng r2_d0:algorithm")
+        b.update(phase="kernel-lane", workflow_run="wf_orig")
+        c = call("director", "validate", 100_000, duration_ms=4_000, cost=0.5)
+        c.update(phase="Validate", workflow_run="wf_final")
+        return [a, b, c]
+
+    def test_run_elapsed_is_first_request_to_last_response(self):
+        total, _ = R.run_totals(R.agentize(self.rows()))
+        # First request went out at 10s - 1s; the last response landed at 100s.
+        self.assertEqual(total["elapsed_ms"], 91_000)
+        self.assertEqual(total["llm_ms"], 7_000)   # billed span stays its own figure
+        self.assertTrue(total["started"] and total["ended"])
+
+    def test_breakdowns_are_ordered_by_start_and_carry_both_clocks(self):
+        phases = R.breakdown_rows(self.rows(), "phase", "(no phase)")
+        self.assertEqual([p["name"] for p in phases], ["Setup", "kernel-lane", "Validate"])
+        setup = phases[0]
+        self.assertEqual((setup["calls"], setup["agents"], setup["elapsed_ms"], setup["billed_ms"]),
+                         (1, 1, 1_000, 1_000))
+        runs = R.breakdown_rows(self.rows(), "workflow_run", R.OUTSIDE_WORKFLOW)
+        self.assertEqual([(r["name"], r["calls"]) for r in runs], [("wf_orig", 2), ("wf_final", 1)])
+        self.assertAlmostEqual(runs[0]["cost_usd"], 3.0)
+        self.assertEqual(runs[0]["elapsed_ms"], 70_000 - 9_000)
+
+    def test_page_and_markdown_carry_the_breakdowns(self):
+        html, md = R.render(self.rows(), "M")
+        payload = _payload(html)
+        self.assertEqual(payload["total"]["elapsed_ms"], 91_000)
+        self.assertEqual([p["name"] for p in payload["phases"]], ["Setup", "kernel-lane", "Validate"])
+        self.assertEqual(len(payload["invocations"]), 2)
+        self.assertIn("## Time, cost and tokens by phase", md)
+        self.assertIn("## Workflow invocations counted", md)
+        self.assertIn("Elapsed (first request → last response)", md)
+
+    def test_no_invocation_table_when_nothing_ran_in_a_workflow(self):
+        rows = [call("director", "setup", 10_000)]   # no workflow_run field at all
+        html, md = R.render(rows, "M")
+        self.assertEqual(_payload(html)["invocations"], [])
+        self.assertNotIn("## Workflow invocations counted", md)
+
+    def test_label_note_only_when_it_adds_information(self):
+        nodes = R.agentize(self.rows())
+        notes = {R.node_title(n): R.node_label_note(n) for n in nodes}
+        self.assertEqual(notes["engineer:algorithm"], "eng r2_d0:algorithm")
+        self.assertEqual(notes["director:setup"], "")   # the label only repeats the title
+        driver = call("(driver)", "", 5, label="(driver)")
+        self.assertEqual(R.node_label_note(R.agentize([driver])[0]), "")
+
+
 if __name__ == "__main__":
     unittest.main()

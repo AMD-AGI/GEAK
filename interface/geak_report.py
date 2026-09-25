@@ -74,7 +74,7 @@ def _model_name(eval_dir, override=None):
 
 
 def _run_ledger(eval_dir, transcripts, rates_path, scope=None,
-                scope_warnings=(), owned=False, scope_anchor=None):
+                scope_warnings=(), owned=False, scope_anchor=None, extra_homes=()):
     """Invoke the in-repo ledger; returns the path to llm_calls.jsonl (or None).
 
     ``scope`` / ``scope_warnings`` / ``scope_anchor`` are threaded into the ledger
@@ -97,6 +97,8 @@ def _run_ledger(eval_dir, transcripts, rates_path, scope=None,
         argv += ["--scope-warning", w]
     if owned:
         argv += ["--owned-scope"]
+    for home in (extra_homes or ()):
+        argv += ["--claude-home", home]
     llm_ledger.main(argv)
     calls = os.path.join(eval_dir, "reports", "trace", "llm_calls.jsonl")
     return calls if os.path.isfile(calls) else None
@@ -129,7 +131,7 @@ def _nested_eval_dirs(eval_dir):
     return out
 
 
-def _resolve_scope(eval_dir):
+def _resolve_scope(eval_dir, extra_homes=()):
     """Resolve THIS run's own transcript scope, with coverage, or ``None``.
 
     Returns the structured dict from
@@ -148,7 +150,8 @@ def _resolve_scope(eval_dir):
     except Exception:
         return None
     try:
-        homes = mirror.candidate_homes()
+        from pathlib import Path
+        homes = mirror.candidate_homes([Path(h) for h in (extra_homes or ())])
         return mirror.resolve_run_scope(
             homes, eval_dir=eval_dir,
             nested_eval_dirs=_nested_eval_dirs(eval_dir))
@@ -312,12 +315,16 @@ def _persist(eval_dir, calls_path, report_dir, model, persist_root):
 
 
 def _write_execution_trace(eval_dir, report_dir, rates_path=None):
-    """Collect and render this run's execution trace beside the ledger report.
+    """Collect this run's execution trace (data only) beside the ledger report.
 
     Resolves the run's own ``subagents/workflows/<runId>/`` directory from the
-    workflow record (never by eval-dir substring), snapshots the journal, agent
-    metadata and transcripts into ``reports/trace/geak_trace.json``, and renders
-    the graph/timeline/drill-down report into the report directory.
+    workflow record (never by eval-dir substring) and snapshots the journal, agent
+    metadata and transcripts into ``<report_dir>/geak_trace.json``.
+
+    Deliberately renders NO page: a run has exactly one report page,
+    ``geak_run_report_<model>.html``. The trace JSON is kept because it survives
+    the transcripts being pruned; ``geak_trace_report.write_reports`` can still turn
+    it into its own view by hand.
 
     Returns a summary dict, or None when there is nothing to trace. Every failure
     path is swallowed: the execution trace is additive to the ledger report.
@@ -337,17 +344,17 @@ def _write_execution_trace(eval_dir, report_dir, rates_path=None):
             if os.path.isfile(tracked):
                 with open(tracked, "r", encoding="utf-8") as fh:
                     trace = json.load(fh)
-                out = trace_report.write_reports(trace, report_dir)
+                totals = trace_report.build_view(trace)["totals"]
                 return {"status": "ok-from-tracked-data",
-                        "reason": "workflow sources unavailable (%s); rendered from "
+                        "reason": "workflow sources unavailable (%s); summarised from "
                                   "the trace captured during the run"
                                   % (info.get("error") or "unresolved"),
                         "run_id": (trace.get("run") or {}).get("run_id"),
                         "run_status": (trace.get("run") or {}).get("status"),
-                        "trace_json": tracked, "html": out["html"], "md": out["md"],
-                        "agents": out["totals"]["agents"],
-                        "calls": out["totals"]["calls"],
-                        "actions": out["totals"]["actions"]}
+                        "trace_json": tracked,
+                        "agents": totals["agents"],
+                        "calls": totals["calls"],
+                        "actions": totals["actions"]}
             return {"status": "no-workflow-record",
                     "reason": info.get("error") or "no workflow run resolved for this eval-dir"}
         # Kept beside the rendered report so --out-dir redirects the whole set.
@@ -364,19 +371,24 @@ def _write_execution_trace(eval_dir, report_dir, rates_path=None):
         mirror_dir = os.path.join(report_dir, "geak_trace_sources")
         trace = collector.collect_once(wf_dir, trace_path, rates_path=rates_path,
                                        mirror_dir=mirror_dir)
-        out = trace_report.write_reports(trace, report_dir)
+        totals = trace_report.build_view(trace)["totals"]
         return {"status": "ok", "run_id": info.get("run_id"),
                 "run_status": trace["run"].get("status"),
-                "trace_json": trace_path, "html": out["html"], "md": out["md"],
-                "agents": out["totals"]["agents"], "calls": out["totals"]["calls"],
-                "actions": out["totals"]["actions"]}
+                "trace_json": trace_path,
+                "agents": totals["agents"], "calls": totals["calls"],
+                "actions": totals["actions"]}
     except Exception as exc:
         return {"status": "error", "reason": str(exc)}
 
 
 def run(eval_dir=None, transcripts=None, model=None, rates_path=None,
-        out_dir=None, persist=False, persist_root=PERSIST_ROOT_DEFAULT):
-    """Build the report; optionally persist to the shared layout. Returns a dict."""
+        out_dir=None, persist=False, persist_root=PERSIST_ROOT_DEFAULT,
+        extra_homes=()):
+    """Build the report; optionally persist to the shared layout. Returns a dict.
+
+    ``extra_homes`` are Claude homes searched after ``$CLAUDE_CONFIG_DIR`` and
+    ``~/.claude`` — a run's ``llm_trace/`` mirror, or a durable copy of a home that
+    has since been lost."""
     tmp = None
     if not eval_dir:
         tmp = tempfile.mkdtemp(prefix="geak_report_")
@@ -402,7 +414,7 @@ def run(eval_dir=None, transcripts=None, model=None, rates_path=None,
         if transcripts:
             scope = "explicit"
         else:
-            info = _resolve_scope(eval_dir)
+            info = _resolve_scope(eval_dir, extra_homes)
             if info and info.get("globs") and info.get("scope") in (
                     "run-scoped", "run-scoped-inferred", "partial"):
                 scope = info["scope"]
@@ -423,7 +435,7 @@ def run(eval_dir=None, transcripts=None, model=None, rates_path=None,
         anchor_for_meta = top_anchor if (top_anchor and top_anchor != "eval_dir") else None
         calls = _run_ledger(eval_dir, used_transcripts, rates_path,
                             scope=scope, scope_warnings=scope_warnings, owned=owned,
-                            scope_anchor=anchor_for_meta)
+                            scope_anchor=anchor_for_meta, extra_homes=extra_homes)
         if not calls:
             return {"status": "no-calls",
                     "reason": "ledger produced no llm_calls.jsonl (no transcripts?)"}
@@ -484,6 +496,9 @@ def main(argv=None):
                     help="also copy ledger + per-call JSON + report into the shared layout")
     ap.add_argument("--persist-root", default=PERSIST_ROOT_DEFAULT,
                     help="root of the shared per-model layout")
+    ap.add_argument("--claude-home", action="append", default=[], dest="claude_homes",
+                    help="extra Claude home to search (repeatable), e.g. <eval-dir>/llm_trace; "
+                         "appended after $CLAUDE_CONFIG_DIR and ~/.claude")
     args = ap.parse_args(argv)
 
     if not args.eval_dir and not args.transcripts:
@@ -491,7 +506,7 @@ def main(argv=None):
 
     res = run(eval_dir=args.eval_dir, transcripts=args.transcripts, model=args.model,
               rates_path=args.rates, out_dir=args.out_dir, persist=args.persist,
-              persist_root=args.persist_root)
+              persist_root=args.persist_root, extra_homes=args.claude_homes)
     if res["status"] != "ok":
         print("geak_report: %s — %s" % (res["status"], res.get("reason", "")), file=sys.stderr)
         return 1

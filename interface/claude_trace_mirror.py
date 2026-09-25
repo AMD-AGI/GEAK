@@ -13,18 +13,17 @@ This module closes that gap: it copies the ledger for THIS run into
 ``<eval_dir>/llm_trace/`` as the run goes, so the telemetry inherits the
 durability of the artifacts it describes.
 
-Layout is dictated by the consumer, not chosen freely. Hyperloom's
-``dump_geak_call_report`` discovers runs with the glob
-``projects/*/*/workflows/wf_*.json`` and then derives everything else RELATIVE
-to the record it found — per-agent transcripts at
+The mirror is a Claude home in miniature, not a free-form copy. Run discovery
+here globs ``projects/*/*/workflows/wf_*.json`` and derives everything else
+RELATIVE to the record it found — per-agent transcripts at
 ``<record>/../../subagents/workflows/<runId>/``, the orchestrator conversation at
 ``<session_dir>.jsonl``. The slug and session names are wildcards and are never
-parsed; only the depth matters, and there is no flat-directory escape hatch. So
-the mirror reproduces that shape verbatim and is readable with
-``--claude-home <eval_dir>/llm_trace --eval-dir <eval_dir>``. Both halves are
-needed: ``--claude-home`` appends a search root, it does not select a run, and
-the reader refuses to run without a selector. The record is copied byte for byte
-precisely so the eval dir it names still selects it from the mirror.
+parsed; only the depth matters. So the mirror reproduces that shape verbatim and
+reads back as a home:
+``python3 interface/geak_report.py --eval-dir <eval_dir> --claude-home <eval_dir>/llm_trace``.
+``--claude-home`` appends a search root, it does not select a run; the eval dir
+does that. The record is copied byte for byte precisely so the eval dir it names
+still selects it from the mirror.
 
 Everything here is best effort. An 18-hour optimization run must never die over
 telemetry, so no function in this module raises to its caller: failures are
@@ -37,7 +36,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -109,7 +107,7 @@ _FIELD_EXP = "exp_root"
 def record_paths_typed(record: dict[str, Any]) -> list[tuple[str, str]]:
     """Return ``(field, directory)`` pairs a workflow record names.
 
-    A Hyperloom-driven run is identified by ``eval_dir``; a standalone one by
+    An orchestrator-driven run is identified by ``eval_dir``; a standalone one by
     ``exp_root``. Either can appear under ``args`` or under ``result``. The field
     each directory came from is preserved so an exact ``exp_root`` match cannot
     be confused with — or outrank — an exact ``eval_dir`` identity.
@@ -436,6 +434,69 @@ def _names_path(text: str, wanted: str) -> bool:
 # refuse to guess rather than bill the wrong run's transcripts.
 _ANCHOR_AMBIGUOUS = "ambiguous"
 
+# How an invocation was tied to the eval-dir: by its own workflow record, or -- when it has
+# none, because it is still running or was killed before returning -- by its journal.
+EVIDENCE_RECORD = "record"
+EVIDENCE_JOURNAL = "journal"
+
+
+def owned_invocations(
+    homes: Iterable[Path], eval_dir: str | None,
+) -> list[dict[str, str]]:
+    """Every workflow invocation that worked IN *eval_dir*, as its own run directory.
+
+    One eval-dir is routinely served by more than one invocation: a run resumed after its
+    session died, or re-entered with ``phases: final`` to finish what a killed run left. Each
+    gets its own ``runId`` and ``subagents/workflows/<runId>/`` dir, and all of them are spend on
+    this run. Picking one -- the newest record -- dropped an 18-hour original and kept a 53-minute
+    finalize (2,270 calls down to 103, 2026-09-25).
+
+    Ownership is positive either way; a mere mention of the path never counts:
+
+    - a workflow record whose OWN ``eval_dir`` (args or result) is exactly *eval_dir*;
+    - failing a record, a journal in which an agent returned ``"eval_dir":"<eval_dir>"`` as a
+      value -- the director that created or re-entered the dir says so in exactly that form.
+
+    Transcript sets never overlap (each runId owns its directory), so the union cannot double
+    count. The same runId found under two homes (a live home and a mirror of it) is taken once,
+    from the first home. Directories without an ``agent-*.jsonl`` are skipped.
+
+    Returns:
+        ``[{"run_id", "glob", "evidence"}]`` in discovery order; empty when nothing owns it.
+    """
+    wanted = (eval_dir or "").strip().rstrip("/")
+    if not wanted:
+        return []
+    homes = list(homes)
+    found: dict[str, dict[str, str]] = {}
+    for record_path, record in iter_records(homes):
+        if _match_rank(record, wanted, _FIELD_EVAL) != _RANK_EXACT_SAME:
+            continue
+        res = _glob_for_record(record_path, record)
+        run_id = str(record.get("runId") or "")
+        if res and res[1] and run_id not in found:
+            found[run_id] = {"run_id": run_id, "glob": res[0], "evidence": EVIDENCE_RECORD}
+    value = re.compile(r'"eval_dir"\s*:\s*"' + re.escape(wanted) + r'/?"')
+    for home in homes:
+        try:
+            journals = sorted(home.glob("projects/*/*/subagents/workflows/*/journal.jsonl"))
+        except OSError:
+            continue
+        for journal in journals:
+            run_id = journal.parent.name
+            if run_id in found:
+                continue
+            try:
+                text = journal.read_text(errors="replace")
+            except OSError:
+                continue
+            if not value.search(text):
+                continue
+            g = str(journal.parent / "agent-*.jsonl")
+            if _glob.glob(g):
+                found[run_id] = {"run_id": run_id, "glob": g, "evidence": EVIDENCE_JOURNAL}
+    return list(found.values())
+
 
 def _anchor_top_by_exp_root(
     homes: list[Path], eval_dir: str | None,
@@ -541,6 +602,8 @@ def resolve_run_scope(
     - ``complete``:  ``True`` only when nothing is missing
     - ``requested`` / ``resolved`` / ``missing``: the instance labels in each state
     - ``warnings``:  one human-readable line per missing/empty instance
+    - ``invocations``: every workflow invocation counted for the top-level eval-dir
+                     (see :func:`owned_invocations`), with the evidence for each
 
     A whole-run scope is NEVER claimed without a resolved, file-backed top-level
     identity: when the top-level record is absent (or resolves to an empty dir),
@@ -573,8 +636,29 @@ def resolve_run_scope(
     warnings: list[str] = []
     top_ok = False
     top_anchor = "eval_dir"     # how the whole-run anchor was established
+    invocations: list[dict[str, str]] = []
 
     for kind, ev, ex, label in requested:
+        if kind == "top":
+            invocations = owned_invocations(homes, ev)
+        if invocations and kind == "top":
+            # Every invocation that owns this eval-dir, not the one newest record: a resumed or
+            # re-entered run is several invocations, and each one's spend is this run's spend.
+            top_ok = True
+            for inv in invocations:
+                if inv["glob"] not in seen:
+                    seen.add(inv["glob"])
+                    globs.append(inv["glob"])
+            journal_only = [i["run_id"] for i in invocations if i["evidence"] == EVIDENCE_JOURNAL]
+            if journal_only:
+                top_anchor = "live-journal" if len(journal_only) == len(invocations) else "record+journal"
+                inferred.append(label)
+                warnings.append(
+                    "workflow invocation(s) %s have no workflow record (still running, or ended "
+                    "before returning) and were tied to this eval-dir by their journal naming it "
+                    "as their eval_dir -- ownership INFERRED, not proven" % ", ".join(journal_only))
+            resolved.append(label)
+            continue
         res = _resolve_one(homes, ev, ex)
         if res is None and kind == "top":
             # The run's OWN eval-dir may not be on record yet: a dispatcher emits
@@ -655,6 +739,7 @@ def resolve_run_scope(
             "inferred": inferred,
             "warnings": warnings,
             "top_anchor": None,
+            "invocations": [],
         }
 
     # An inferred (exp_root-containment) top is resolved enough to scope, but its
@@ -679,6 +764,7 @@ def resolve_run_scope(
         "inferred": inferred,
         "warnings": warnings,
         "top_anchor": top_anchor,
+        "invocations": invocations,
     }
 
 
@@ -921,76 +1007,6 @@ def warn_if_volatile(home: Path, exp_root: Path) -> str | None:
 # --------------------------------------------------------------------------- #
 # Rendering (best effort)
 # --------------------------------------------------------------------------- #
-def _report_command(mirror_root: Path, out_dir: Path, eval_dir: Path) -> list[str] | None:
-    """Build the command that renders a report from the mirror, if available.
-
-    GEAK cannot import Hyperloom, so the renderer is reached by subprocess when
-    a checkout happens to be present and skipped entirely when it is not. The
-    raw mirror is the durable artifact; the rendered report is a convenience.
-
-    ``--claude-home`` *appends* a search root rather than replacing the default
-    ones, and the tool refuses to run without a selector, so ``--eval-dir`` is
-    not optional here: without it the renderer exits 2 having written nothing.
-    The mirrored record keeps the eval dir it was written with -- the copy is
-    verbatim, deliberately -- so this run's own eval dir is what selects it.
-
-    ``--include-text`` is likewise required rather than a nicety: it is what
-    writes ``geak_calls.jsonl``, and the HTML report that runs next reads only
-    that file.
-
-    Args:
-        mirror_root: The mirror directory to read.
-        out_dir: Where the report should be written.
-        eval_dir: This run's eval dir, which selects its record.
-
-    Returns:
-        An argv list, or ``None`` when no renderer can be located.
-    """
-    tail = [
-        "--claude-home", str(mirror_root),
-        "--eval-dir", str(eval_dir),
-        "--include-text",
-        "--output-dir", str(out_dir),
-    ]
-    override = os.environ.get("GEAK_LLM_REPORT_CMD", "").strip()
-    if override:
-        return override.split() + tail
-    return _hyperloom_command(REPORT_MODULE, tail)
-
-
-HTML_MODULE = "hyperloom.inference_optimizer.tools.render_geak_html_report"
-REPORT_MODULE = "hyperloom.inference_optimizer.tools.dump_geak_call_report"
-
-
-def _hyperloom_command(module: str, tail: list[str]) -> list[str] | None:
-    """Build an argv that runs a Hyperloom tool out of ``HYPERLOOM_SRC``.
-
-    GEAK cannot import Hyperloom, so its tools are reached by subprocess when a
-    checkout happens to be present and skipped entirely when it is not.
-
-    Args:
-        module: Dotted module path to run as ``__main__``.
-        tail: Arguments appended after the module.
-
-    Returns:
-        An argv list, or ``None`` when no checkout can be located.
-    """
-    src = os.environ.get("HYPERLOOM_SRC", "").strip()
-    if not src:
-        return None
-    relative = Path(module.replace(".", "/")).with_suffix(".py")
-    if not (Path(src) / relative).is_file():
-        return None
-    return [
-        "python3",
-        "-c",
-        "import sys,runpy; sys.path.insert(0, sys.argv.pop(1)); "
-        f"runpy.run_module({module!r}, run_name='__main__')",
-        src,
-        *tail,
-    ]
-
-
 def _model_name(eval_dir: Path) -> str:
     """The model this run optimized, named the way the run itself named it.
 
@@ -1030,34 +1046,6 @@ def _model_name(eval_dir: Path) -> str:
     return "run"
 
 
-def report_basename(eval_dir: Path) -> str:
-    """Name the HTML report after the harness that ran it and the model it ran on.
-
-    A reports directory accumulates: several models are optimized into sibling
-    dirs, archives get flattened together, and a file called ``geak_report.html``
-    tells the reader nothing about which run it belongs to. The prefix says who
-    drove the run -- ``hl_`` when Hyperloom invoked GEAK as its KERNEL_AGENT
-    phase, ``geak_`` when GEAK ran standalone -- because the two answer different
-    questions and their numbers are not comparable.
-
-    Hyperloom announces itself by exporting ``GEAK_INVOKED_BY=hyperloom`` in the
-    child environment. Absence means standalone: an older Hyperloom that does not
-    set it produces a ``geak_``-prefixed report, which understates the context but
-    never misattributes a standalone run to Hyperloom.
-    """
-    prefix = "hl" if os.environ.get("GEAK_INVOKED_BY", "").strip().lower() == "hyperloom" else "geak"
-    return f"{prefix}_run_report_{_model_name(eval_dir)}.html"
-
-
-def _html_command(out_dir: Path, eval_dir: Path) -> list[str] | None:
-    """Build the command that turns the rendered ledger into the HTML report."""
-    override = os.environ.get("GEAK_HTML_REPORT_CMD", "").strip()
-    tail = ["--reports-dir", str(out_dir), "-o", str(out_dir / report_basename(eval_dir))]
-    if override:
-        return override.split() + tail
-    return _hyperloom_command(HTML_MODULE, tail)
-
-
 SKILL_RELPATH = Path("e2e_workflow") / "knowledge" / "analysis_skills" / "run-report" / "SKILL.md"
 
 
@@ -1086,60 +1074,36 @@ def install_skill(out_dir: Path) -> dict[str, Any]:
     return {"status": "ok", "path": str(dest)}
 
 
-def render_report(
-    mirror_root: Path, out_dir: Path, eval_dir: Path, *, timeout_s: float = 600.0
-) -> dict[str, Any]:
-    """Render a per-call report from the mirror, if a renderer is reachable.
+def render_run_report(eval_dir: Path, homes: Iterable[Path] = ()) -> dict[str, Any]:
+    """Re-render the run's one report page with GEAK's own driver, ``interface/geak_report.py``.
+
+    The workflow already renders ``<eval_dir>/report/geak_run_report_<model>.html`` as its last
+    step, but from INSIDE the run, before the runtime has written the run's workflow record.
+    Rendered again here, after the workflow returned, the same page can resolve the run's scope
+    from its record. Everything runs in-process from this checkout: GEAK depends on no external
+    renderer.
 
     Args:
-        mirror_root: The mirror directory to read.
-        out_dir: Where the report should be written.
-        eval_dir: This run's eval dir, which selects its record.
-        timeout_s: Ceiling on the renderer's runtime.
+        eval_dir: The run directory; the page lands in its ``report/``.
+        homes: Extra Claude homes to search (e.g. this run's mirror), after the standard ones.
 
     Returns:
-        A status dict; ``{"status": "skipped"}`` when no renderer was found.
-        Never raises — a failed render leaves the raw mirror untouched.
+        A status dict. Never raises.
     """
-    argv = _report_command(mirror_root, out_dir, eval_dir)
-    if not argv:
-        return {"status": "skipped", "reason": "no renderer (set HYPERLOOM_SRC or GEAK_LLM_REPORT_CMD)"}
-    return _run(argv, timeout_s, {"output_dir": str(out_dir)})
-
-
-def render_html_report(out_dir: Path, eval_dir: Path, *, timeout_s: float = 600.0) -> dict[str, Any]:
-    """Turn the rendered ledger into the structured HTML report, if possible.
-
-    Runs after :func:`render_report` has written ``geak_calls.jsonl`` and after
-    the outcome report has written ``geak_outcome.json``, because the HTML joins
-    the two: what each phase cost, beside what it measured. With only the ledger
-    present it still renders, and says in its coverage banner that the outcome
-    half is missing rather than implying the phases bought nothing.
-
-    Args:
-        out_dir: The run's ``reports`` directory — both input and output.
-        eval_dir: The run directory, read only to name the output file.
-        timeout_s: Ceiling on the renderer's runtime.
-
-    Returns:
-        A status dict; ``{"status": "skipped"}`` when no renderer was found.
-        Never raises.
-    """
-    argv = _html_command(out_dir, eval_dir)
-    if not argv:
-        return {"status": "skipped", "reason": "no renderer (set HYPERLOOM_SRC or GEAK_HTML_REPORT_CMD)"}
-    return _run(argv, timeout_s, {"output": str(out_dir / report_basename(eval_dir))})
-
-
-def _run(argv: list[str], timeout_s: float, extra: dict[str, Any]) -> dict[str, Any]:
-    """Run a renderer subprocess, converting every failure into a status dict."""
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
+        import sys
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import geak_report
+        res = geak_report.run(eval_dir=str(eval_dir), extra_homes=[str(h) for h in homes])
+    except Exception as exc:  # never let telemetry kill a run
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
-    if proc.returncode != 0:
-        return {"status": "error", "returncode": proc.returncode, "stderr": (proc.stderr or "")[-2000:]}
-    return {"status": "ok", **extra}
+    out = {"status": res.get("status", "error")}
+    for key in ("html", "md", "transcript_scope", "reason"):
+        if res.get(key):
+            out[key] = res[key]
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1178,8 +1142,8 @@ def mirror_run_trace(
             ``eval_dir`` is not what the record wrote down.
         session_id: The SDK session id, used only to disambiguate.
         homes: Override the searched homes (tests).
-        render: Also attempt a rendered report and the HTML report beside the
-            raw copy.
+        render: Also re-render the run's report page (``report/``) with GEAK's
+            own driver, and drop the run-report skill beside it.
 
     Returns:
         A status dict carrying ``path`` on success. Never raises.
@@ -1206,17 +1170,13 @@ def mirror_run_trace(
             "bytes_copied": manifest["bytes_copied"],
         }
         if render:
-            reports_dir = eval_path / "reports"
-            report = render_report(dest, reports_dir, eval_path)
-            skill = install_skill(reports_dir)
-            html = render_html_report(reports_dir, eval_path)
+            report = render_run_report(eval_path)
+            skill = install_skill(eval_path / "report")
             manifest["report"] = report
             manifest["skill"] = skill
-            manifest["html"] = html
             _write_manifest(dest, manifest)
             result["report"] = report
             result["skill"] = skill
-            result["html"] = html
         return result
     except Exception as exc:  # never let telemetry kill a run
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}

@@ -85,6 +85,14 @@ BARE_RE = re.compile(r"You are a file writer\.")
 # tool result that happens to quote a prompt cannot open a spurious conversation.
 ENGINEER_RE = re.compile(r"\A\s*You are Engineer (\S+) \(specialty=([A-Za-z0-9_.\-]+)\) for round")
 COMMIT_RE = re.compile(r"\A\s*You are the TechLead committing round")
+# Claude Code (>= 2.1.2xx) no longer hands a workflow agent its prompt verbatim. The first user
+# turn relays the launching user's request, and the second wraps the script-computed task in a
+# one-line frame ("[Workflow harness — computed task] ... The computed task text follows:") with
+# EVERY line of the task indented two spaces, so that a frame-like line inside it cannot be forged.
+# The anchored patterns above never see column zero of the prompt through that frame, which is how
+# the kernel engineers — the largest block of spend in a run — came to read as "(driver)" again:
+# $242.61 of $457.08 on the 2026-09-24 gpt-oss-120b run.
+HARNESS_FRAME_RE = re.compile(r"\A\s*\[Workflow harness\b[^\]\n]*\][^\n]*\n")
 
 UNATTRIBUTED = "(unattributed)"
 DRIVER = "(driver)"
@@ -150,6 +158,19 @@ def _text_of(message):
                 out.append(b["text"])
         return "\n".join(out)
     return ""
+
+
+def _unwrap_harness(text):
+    """The task text inside a Claude Code workflow frame, dedented; *text* unchanged otherwise.
+
+    The frame is one header line, then the task with every line indented by exactly two spaces
+    (see HARNESS_FRAME_RE). Only that indent is removed, so the task's own indentation survives.
+    """
+    m = HARNESS_FRAME_RE.match(text or "")
+    if not m:
+        return text
+    return "\n".join(line[2:] if line.startswith("  ") else line
+                     for line in text[m.end():].split("\n"))
 
 
 def _content_parts(message):
@@ -310,10 +331,97 @@ def discover_transcripts(eval_dir, explicit_globs=None, roots=None):
     return [p for p in uniq if _mentions(p, eval_dir)]
 
 
+def agent_meta(path):
+    """The runtime's own record of a workflow sub-agent, or None.
+
+    Claude Code writes ``agent-<id>.meta.json`` beside every workflow sub-agent transcript, with
+    the exact label the workflow script gave the agent (``description``: ``eng r2_d0:algorithm``,
+    ``director:setup``) and the phase it ran in (``workflowPhase``). Unlike the prompt text this
+    does not depend on how the harness frames the prompt, and unlike agent_timeline.json it exists
+    for a run that was killed before it could write its timeline.
+    """
+    if not path.endswith(".jsonl"):
+        return None
+    try:
+        with open(path[:-len(".jsonl")] + ".meta.json", "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    desc = doc.get("description") if isinstance(doc.get("description"), str) else ""
+    phase = doc.get("workflowPhase") if isinstance(doc.get("workflowPhase"), str) else ""
+    if not (desc.strip() or phase.strip()):
+        return None
+    return {"description": desc.strip(), "phase": phase.strip()}
+
+
+def workflow_run_of(path):
+    """The workflow run a transcript belongs to: ``<runId>`` for
+    ``.../subagents/workflows/<runId>/agent-*.jsonl``, None for any other file."""
+    parts = os.path.normpath(path).split(os.sep)
+    if len(parts) >= 4 and parts[-3] == "workflows" and parts[-4] == "subagents":
+        return parts[-2]
+    return None
+
+
+# A workflow label is `role:sub_phase` (``director:setup``) or a verb plus arguments
+# (``eng r2_d0:algorithm``, ``commit r2``, ``extract_op <op>``). The kernel lane's two verbs for
+# agents that also have a prompt pattern above map to the role that pattern would have given.
+_LABEL_VERB_ROLE = {"eng": ("engineer", None), "deep": ("engineer", None), "commit": ("tech_lead", "commit")}
+_SUB_RE = re.compile(r"[A-Za-z0-9_.\-]+")
+
+
+def role_of_label(label):
+    """(role, sub_phase) from a workflow label; ('', '') when there is nothing to read."""
+    head, _, rest = (label or "").strip().partition(" ")
+    if not head:
+        return "", ""
+    if head in _LABEL_VERB_ROLE:
+        role, sub = _LABEL_VERB_ROLE[head]
+        if sub is None:
+            m = _SUB_RE.match(rest.rpartition(":")[2]) if ":" in rest else None
+            sub = m.group(0) if m else ""
+        return role, sub
+    role, _, sub = head.partition(":")
+    m = _SUB_RE.match(sub)
+    return role, (m.group(0) if m else "")
+
+
+def apply_agent_meta(groups):
+    """Name every conversation that has runtime metadata by the workflow's own label and phase.
+
+    The label always wins over a derived ``role:sub`` key, because it IS the name the script gave
+    the agent. The phase wins too — it is recorded per agent by the runtime, where the timeline
+    join is positional — with one exception: a nested kernel lane's metadata phase is only the
+    lane marker (``▸ kernel-lane #4``), so a reliable timeline match that already placed the agent
+    in a specific ``kernel/<phase>`` keeps it. A conversation no prompt pattern recognised stops
+    reading as the driver: inside a sub-agent transcript it is that agent, not the launching session.
+    """
+    for g in groups:
+        meta = g.get("agent_meta")
+        if not meta:
+            continue
+        desc = meta["description"]
+        if g["role"] == DRIVER and desc:
+            role, sub = role_of_label(desc)
+            if role:
+                g["role"], g["subphase"] = role, sub
+        if desc:
+            g["label"] = desc
+        phase = meta["phase"].lstrip("▸").strip()
+        keep_timeline = (g.get("attribution") == "timeline" and meta["phase"].startswith("▸")
+                         and str(g.get("phase") or "").startswith("kernel/"))
+        if phase and not keep_timeline:
+            g["phase"] = phase
+            if g.get("attribution") != "timeline":
+                g["attribution"] = "agent-meta"
+
+
 # --------------------------------------------------------------------------- #
 # Transcript -> conversation groups -> API-call rows
 # --------------------------------------------------------------------------- #
-def split_conversations(records):
+def split_conversations(records, single_agent=False):
     """Split a transcript's records into conversations, one per agent.
 
     A conversation starts at a user record whose text is a role prompt ("You are
@@ -323,11 +431,21 @@ def split_conversations(records):
     Splitting on the prompt rather than on file boundaries or the isSidechain
     flag keeps this working whether the CLI writes each sub-agent to its own file
     or inlines them into the parent transcript.
+
+    ``single_agent`` says the file is known to hold exactly ONE agent (a workflow
+    sub-agent transcript with its own ``.meta.json``). The first role header then
+    names the whole file and later headers are ignored: a tool result that quotes
+    another role's prompt must not split one agent into two.
     """
     groups, cur = [], {"role": DRIVER, "subphase": "", "records": [], "prompt": ""}
+    named = False
+    task_text = None   # single_agent: the computed task, kept as the prompt if no header names it
     for rec in records:
-        if rec.get("type") == "user":
-            text = _text_of(rec.get("message"))
+        if rec.get("type") == "user" and not (single_agent and named):
+            raw = _text_of(rec.get("message"))
+            text = _unwrap_harness(raw)
+            if single_agent and task_text is None and text is not raw and "computed task" in raw[:80]:
+                task_text = text
             m = ROLE_RE.search(text)
             me = None if m else ENGINEER_RE.search(text)
             if m:
@@ -342,7 +460,10 @@ def split_conversations(records):
                 role, sub = "file_writer", "persist"
             else:
                 role, sub = None, None
-            if role:
+            if role and single_agent:
+                cur.update(role=role, subphase=sub, prompt=text[:8000])
+                named = True
+            elif role:
                 if cur["records"]:
                     groups.append(cur)
                 # Keep a slice of the prompt: it is what tells an e2e `director`
@@ -350,6 +471,8 @@ def split_conversations(records):
                 # under <eval>/kernels/_exp/).
                 cur = {"role": role, "subphase": sub, "records": [], "prompt": text[:8000]}
         cur["records"].append(rec)
+    if single_agent and not named and task_text:
+        cur["prompt"] = task_text[:8000]
     if cur["records"]:
         groups.append(cur)
     return [g for g in groups if any(r.get("type") == "assistant" for r in g["records"])]
@@ -770,7 +893,9 @@ def aggregate(rows, groups, timeline, rates):
     # authoritative — it also sees the attempts that hung or errored without ever
     # producing a transcript, which conversations alone would miss entirely.
     events = timeline.get("events") or []
-    total["agents"] = len(events) or len(groups)
+    # The larger of the two: a timeline written by only the LAST invocation of a resumed or
+    # re-entered run records that invocation's attempts alone, while its transcripts are all here.
+    total["agents"] = max(len(events), len(groups))
     total["agent_attempts_failed"] = sum(1 for e in events if not e.get("ok"))
     total["conversations"] = len(groups)
     return {
@@ -948,13 +1073,16 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
     for path in transcripts:
         recs = list(read_jsonl(path))
         base = os.path.basename(path)
-        for ci, g in enumerate(split_conversations(recs)):
+        meta_rec = agent_meta(path)
+        for ci, g in enumerate(split_conversations(recs, single_agent=meta_rec is not None)):
             g["calls"] = calls_of(g, base)
             if not g["calls"]:
                 continue
             ts = [c["ts_ms"] for c in g["calls"] if c["ts_ms"] is not None]
             g["t0_ms"], g["t1_ms"] = (min(ts), max(ts)) if ts else (None, None)
             g["transcript"] = path
+            g["agent_meta"] = meta_rec
+            g["workflow_run"] = workflow_run_of(path)
             # Stable per-conversation identity: one agent attempt = one group.
             # Two attempts that share a role/label — retries, or the same role in
             # separate transcripts — stay distinct nodes because the id carries
@@ -982,14 +1110,18 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
                         "(a launching session's earlier, unrelated work)" % dropped)
 
     mode = attribute(groups, timeline)
+    apply_agent_meta(groups)
 
     rows = []
     for g in groups:
         for c in g["calls"]:
             c["phase"] = g["phase"]
+            # calls_of stamped the role before the metadata pass could name the agent.
+            c["role"], c["sub_phase"] = g["role"], g["subphase"]
             c["agent_label"] = g["label"]
             c["attribution"] = g["attribution"]
             c["transcript"] = os.path.basename(g["transcript"])
+            c["workflow_run"] = g.get("workflow_run")
             c["group_id"] = g["group_id"]
             c["prompt"] = g.get("prompt", "")
             c["total_input_tokens"] = total_input(c)
@@ -1008,7 +1140,8 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
     for g in sorted(groups, key=lambda x: (x["t0_ms"] is None, x["t0_ms"] or 0)):
         durs = [c["duration_ms"] for c in g["calls"] if c["duration_ms"] is not None]
         agent_rows.append({
-            "workflow": g.get("workflow", ""), "phase": g["phase"], "label": g["label"],
+            "workflow": g.get("workflow", ""), "workflow_run": g.get("workflow_run"),
+            "phase": g["phase"], "label": g["label"],
             # `ok` carries the reliably-matched timeline outcome; None when the join is a
             # guess (ambiguous/incomplete mapping). Groups from a run with no timeline at
             # all default True -- a transcript exists, and there is no recorded outcome to
@@ -1085,6 +1218,9 @@ def main(argv=None):
     ap.add_argument("--owned-scope", action="store_true",
                     help="the globs are this run's OWN files; lift the inferred run-window "
                          "lower bound so the run's early un-role-headed calls are kept")
+    ap.add_argument("--claude-home", action="append", default=[], dest="claude_homes",
+                    help="extra Claude home to discover transcripts in (repeatable), searched "
+                         "after $CLAUDE_CONFIG_DIR and ~/.claude")
     ap.add_argument("--quiet", action="store_true", help="do not print the summary to stdout")
     args = ap.parse_args(argv)
 
@@ -1102,8 +1238,12 @@ def main(argv=None):
             print("llm_ledger: --rates ignored (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
 
     try:
+        roots = None
+        if args.claude_homes:
+            roots = transcript_roots() + [os.path.abspath(h) for h in args.claude_homes
+                                          if os.path.isdir(h)]
         rows, agent_rows, agg, meta = build(
-            args.eval_dir, args.transcripts, rates,
+            args.eval_dir, args.transcripts, rates, roots=roots,
             since_ms=_iso_to_ms(args.since), until_ms=_iso_to_ms(args.until),
             scope=args.scope, scope_warnings=args.scope_warnings or (),
             owned_scope=args.owned_scope, scope_anchor=args.scope_anchor)

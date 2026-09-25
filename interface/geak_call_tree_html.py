@@ -36,6 +36,7 @@ import html
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 
 # Lower rank = closer to the root of the delegation tree. Both workflows' roles
@@ -49,6 +50,10 @@ ROLE_RANK = {
     "engineer": 3, "verify": 3, "verifier": 3, "file_writer": 3,
 }
 LEAF = 4
+
+# Rows whose transcript is not a workflow sub-agent's (a launching session, or an
+# explicit glob over loose files) have no workflow run to group under.
+OUTSIDE_WORKFLOW = "(outside a workflow)"
 
 # Buckets, in the order a report reads them, with display labels.
 COST_BUCKETS = [
@@ -83,6 +88,70 @@ def _num(v):
         return float(v)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _call_window(row):
+    """(request sent, response received) in epoch ms, or (None, None).
+
+    A row's ``ts_ms`` is when the response landed; the request went out
+    ``duration_ms`` earlier. Spans are built from these so an elapsed figure starts
+    at the first request rather than after the first answer."""
+    ts = row.get("ts_ms")
+    if ts is None:
+        return None, None
+    end = _num(ts)
+    dur = row.get("duration_ms")
+    return end - (_num(dur) if dur is not None else 0.0), end
+
+
+def _span(rows):
+    """(first request, last response) over *rows*, or (None, None)."""
+    starts, ends = [], []
+    for r in rows:
+        s, e = _call_window(r)
+        if s is not None:
+            starts.append(s)
+            ends.append(e)
+    return (min(starts), max(ends)) if starts else (None, None)
+
+
+def _iso(ms):
+    if ms is None:
+        return ""
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
+def breakdown_rows(rows, field, missing):
+    """Calls, agents, cost, tokens, billed span and ELAPSED time per value of *field*.
+
+    Elapsed is first request to last response — the clock a reader means by "how
+    long did this phase take", including the compiling and benchmarking between
+    calls. Billed span is the sum of per-call durations, time spent waiting on the
+    model. Groups overlap in time whenever work ran in parallel, so elapsed figures
+    are never summed. Rows come back in the order their group started."""
+    groups = {}
+    for r in rows:
+        groups.setdefault(r.get(field) or missing, []).append(r)
+    out = []
+    for name, grp in groups.items():
+        start, end = _span(grp)
+        out.append({
+            "name": name,
+            "calls": len(grp),
+            "agents": len({_agent_key(r) for r in grp}),
+            "cost_usd": sum(_num(r.get("cost_usd")) for r in grp),
+            "billed_ms": sum(_num(r.get("duration_ms")) for r in grp),
+            "elapsed_ms": (end - start) if start is not None else None,
+            "started": _iso(start), "ended": _iso(end), "_start": start,
+            "input_tokens": sum(int(_num(r.get("input_tokens"))) + int(_num(r.get("cache_read_input_tokens")))
+                                + int(_num(r.get("cache_write_5m_tokens"))) + int(_num(r.get("cache_write_1h_tokens")))
+                                for r in grp),
+            "output_tokens": sum(int(_num(r.get("output_tokens"))) for r in grp),
+        })
+    out.sort(key=lambda d: (d["_start"] is None, d["_start"] or 0))
+    for d in out:
+        d.pop("_start")
+    return out
 
 
 def _agent_key(row):
@@ -134,9 +203,16 @@ def agentize(rows):
                 "outputs": [],
                 "thinkings": [],
                 "api_calls": [],   # the individual provider responses under this agent
+                "workflow_run": r.get("workflow_run") or "",
+                "t_start": None,   # first request sent (response time minus its duration)
+                "t_end": None,     # last response received
             }
             nodes[key] = node
             order.append(key)
+        start, end = _call_window(r)
+        if start is not None:
+            node["t_start"] = start if node["t_start"] is None else min(node["t_start"], start)
+            node["t_end"] = end if node["t_end"] is None else max(node["t_end"], end)
         node["calls"] += 1
         if r.get("model"):
             node["models"].add(r["model"])
@@ -232,19 +308,38 @@ def node_title(node):
     return "%s%s" % (role, (":" + sub) if sub else "")
 
 
+def node_label_note(node):
+    """The workflow's own label for the agent, when it says more than the title.
+
+    Several agents share a title (every ``engineer:memory``, every
+    ``kernel_extractor:extract_op``); the label the script gave each one —
+    ``eng r2_d0:memory``, ``extract_op fused_moe_a16w4_decode`` — is what tells
+    them apart. Empty when it would only repeat the title."""
+    label = (node.get("label") or "").strip()
+    title = node_title(node)
+    if not label or label in (title, title + ":", "(driver)"):
+        return ""
+    return label
+
+
 def node_detail(node):
     """A flat dict of everything the detail panel shows for one node."""
     tk = node["tokens"]
     cw = tk["cache_write_5m"] + tk["cache_write_1h"]
     total_in = tk["input"] + tk["cache_read"] + cw
+    t0, t1 = node.get("t_start"), node.get("t_end")
     return {
         "title": node_title(node),
+        "label_note": node_label_note(node),
         "role": node["role"], "sub_phase": node["sub_phase"],
         "phase": node["phase"], "label": node["label"],
         "attribution": node["attribution"],
+        "workflow_run": node.get("workflow_run") or "",
         "models": sorted(node["models"]),
         "calls": node["calls"],
         "llm_ms": node["llm_ms"],
+        "elapsed_ms": (t1 - t0) if t0 is not None else None,
+        "started": _iso(t0), "ended": _iso(t1),
         "tokens": {"uncached_input": tk["input"], "cache_read": tk["cache_read"],
                    "cache_write": cw, "output": tk["output"], "total_input": total_in},
         "cost": {k: node["cost"][k] for k, _ in COST_BUCKETS},
@@ -310,6 +405,13 @@ def run_totals(nodes):
     total = {"calls": 0, "llm_ms": 0.0, "cost_usd": 0.0,
              "cost": {k: 0.0 for k, _ in COST_BUCKETS},
              "tokens": {"uncached_input": 0, "cache_read": 0, "cache_write": 0, "output": 0}}
+    starts = [n["t_start"] for n in nodes if n.get("t_start") is not None]
+    ends = [n["t_end"] for n in nodes if n.get("t_end") is not None]
+    t0, t1 = (min(starts), max(ends)) if starts else (None, None)
+    # Wall clock of the whole run as the ledger saw it: first request to last
+    # response. Idle stretches with no LLM call at either end are outside it.
+    total["elapsed_ms"] = (t1 - t0) if t0 is not None else None
+    total["started"], total["ended"] = _iso(t0), _iso(t1)
     per_model = {}
     for n in nodes:
         d = node_detail(n)
@@ -335,7 +437,20 @@ def run_totals(nodes):
 # --------------------------------------------------------------------------- #
 # Markdown
 # --------------------------------------------------------------------------- #
-def render_markdown(nodes, root, model, comp=None):
+def _md_breakdown(title, first_col, groups, note):
+    out = ["", "## %s" % title, "",
+           "| %s | started | elapsed | billed span | calls | agents | input tok | output tok | cost |" % first_col,
+           "|---|---|---|---|---|---|---|---|---|"]
+    for g in groups:
+        out.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            g["name"], g["started"] or "—",
+            _hms(g["elapsed_ms"]) if g["elapsed_ms"] is not None else "—",
+            _hms(g["billed_ms"]), _n(g["calls"]), _n(g["agents"]),
+            _n(g["input_tokens"]), _n(g["output_tokens"]), _usd(g["cost_usd"])))
+    return out + ["", note]
+
+
+def render_markdown(nodes, root, model, comp=None, phases=None, invocations=None):
     total, per_model = run_totals(nodes)
     out = ["# GEAK run report — %s" % model, ""]
     if comp:
@@ -351,6 +466,9 @@ def render_markdown(nodes, root, model, comp=None):
             "partial": "PARTIAL — some lanes could not be established",
             "substring-fallback": "FALLBACK — path-substring discovery; may include concurrent sessions",
         }.get(_scope, _scope)
+        if _scope == "run-scoped-inferred" and _anchor in ("live-journal", "record+journal"):
+            _scope_note = ("INFERRED — an invocation with no workflow record was tied to this "
+                           "eval dir by its journal; ownership not proven")
         out += ["## Completeness", "",
                 "- **workflow telemetry**: %s%s" % (
                     {True: "complete", False: "incomplete", None: "unknown"}[wf["complete"]],
@@ -366,6 +484,9 @@ def render_markdown(nodes, root, model, comp=None):
                 "- **cost coverage**: %s" % comp["cost_coverage"], ""]
     out += ["## Run totals", ""]
     out += ["- **API calls**: %s" % _n(total["calls"])]
+    if total.get("elapsed_ms") is not None:
+        out += ["- **Elapsed (first request → last response)**: %s (%s → %s)"
+                % (_hms(total["elapsed_ms"]), total["started"], total["ended"])]
     out += ["- **Billed span (Σ per-call, not wall-time)**: %s" % _hms(total["llm_ms"])]
     out += ["- **Cost**: %s" % _usd(total["cost_usd"])]
     out += ["  - " + ", ".join("%s %s" % (lbl, _usd(total["cost"][k]))
@@ -378,6 +499,19 @@ def render_markdown(nodes, root, model, comp=None):
     for m, pm in sorted(per_model.items(), key=lambda kv: -kv[1]["cost_usd"]):
         out.append("| %s | %s | %s |" % (m, _n(pm["calls"]), _usd(pm["cost_usd"])))
 
+    if phases:
+        out += _md_breakdown(
+            "Time, cost and tokens by phase", "phase", phases,
+            "*elapsed* is first request to last response, including the compiling and "
+            "benchmarking between calls; *billed span* is time spent waiting on the model. "
+            "Phases overlap whenever work ran in parallel, so elapsed times do not add up "
+            "to the run's.")
+    if invocations and (len(invocations) > 1 or invocations[0]["name"] != OUTSIDE_WORKFLOW):
+        out += _md_breakdown(
+            "Workflow invocations counted", "invocation", invocations,
+            "Every workflow invocation that worked in this run's eval dir is billed to it — "
+            "a resumed or re-entered run is several invocations.")
+
     out += ["", "## Role view (organizational)", "",
             "> Nesting is by role rank + execution order, not a literal spawn tree "
             "(transcripts carry no cross-agent spawn edge). Each node is one agent "
@@ -388,9 +522,10 @@ def render_markdown(nodes, root, model, comp=None):
     def walk(node, depth):
         if not node.get("_root"):
             d = node_detail(node)
-            out.append("%s- **%s** — %s API calls · %s billed · %s (own)"
-                       % ("  " * depth, d["title"], _n(d["calls"]),
-                          _hms(d["llm_ms"]), _usd(d["cost_usd"])))
+            out.append("%s- **%s**%s — %s API calls · %s billed · %s (own)"
+                       % ("  " * depth, d["title"],
+                          (" `%s`" % d["label_note"]) if d["label_note"] else "",
+                          _n(d["calls"]), _hms(d["llm_ms"]), _usd(d["cost_usd"])))
         for c in node.get("children", []):
             walk(c, depth + (0 if node.get("_root") else 1))
 
@@ -403,8 +538,11 @@ def render_markdown(nodes, root, model, comp=None):
         if d["label"]:
             out.append("- label: `%s`" % d["label"])
         out += ["- models: %s" % (", ".join(d["models"]) or "—"),
-                "- phase: %s" % (d["phase"] or "—"),
-                "- calls: %s · time: %s" % (_n(d["calls"]), _hms(d["llm_ms"])),
+                "- phase: %s%s" % (d["phase"] or "—",
+                                   (" · workflow run: %s" % d["workflow_run"]) if d["workflow_run"] else ""),
+                "- calls: %s · billed: %s · elapsed: %s" % (
+                    _n(d["calls"]), _hms(d["llm_ms"]),
+                    _hms(d["elapsed_ms"]) if d["elapsed_ms"] is not None else "—"),
                 "- cost: %s (%s)" % (_usd(d["cost_usd"]),
                                      ", ".join("%s %s" % (lbl, _usd(d["cost"][k]))
                                                for k, lbl in COST_BUCKETS)),
@@ -430,8 +568,10 @@ def _tree_json(node):
     return out
 
 
-def render_html(nodes, root, model, comp=None):
+def render_html(nodes, root, model, comp=None, phases=None, invocations=None):
     total, per_model = run_totals(nodes)
+    show_inv = bool(invocations) and (len(invocations) > 1
+                                      or invocations[0]["name"] != OUTSIDE_WORKFLOW)
     payload = {
         "model": model,
         "total": total,
@@ -440,6 +580,8 @@ def render_html(nodes, root, model, comp=None):
         "tree": _tree_json(root),
         "buckets": [{"key": k, "label": lbl} for k, lbl in COST_BUCKETS],
         "completeness": comp,
+        "phases": phases or [],
+        "invocations": invocations if show_inv else [],
     }
     data = json.dumps(payload).replace("</", "<\\/")
     title = html.escape("GEAK run report — %s" % model)
@@ -501,11 +643,21 @@ _HTML_TEMPLATE = r"""<!doctype html>
   tr.apidetail.open { display:table-row; }
   tr.apidetail td { white-space:normal; }
   .empty { color:var(--muted); padding:24px; }
+  .sums { padding:6px 24px 14px; border-bottom:1px solid var(--line); }
+  .sums h2 { font-size:15px; margin:12px 0 4px; }
+  .sums .note { color:var(--muted); font-size:12px; margin:4px 0 0; }
+  .scroll { overflow-x:auto; }
+  table.sum { border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
+  table.sum th, table.sum td { border-bottom:1px solid var(--line); padding:3px 10px; white-space:nowrap; }
+  table.sum th { color:var(--muted); font-weight:600; text-align:left; }
+  table.sum td.r, table.sum th.r { text-align:right; }
+  .lbl { color:var(--muted); font-size:12px; font-weight:400; }
 </style></head>
 <body>
 <header><h1>__TITLE__</h1>
 <div class="sub">Role view (organizational) — nesting is by role rank + execution order, <b>not</b> a literal spawn tree; transcripts carry no cross-agent spawn edge. Each node is one <b>agent attempt</b>; click it to expand its individual <b>API calls</b> and see cost / time / tokens / prompt / output. Node totals are that agent's <b>own</b> calls (exclusive of children). Cost is derived from transcript token buckets against a fixed rate card, not an SDK total.</div></header>
 <div class="totals" id="totals"></div>
+<div class="sums" id="sums"></div>
 <div class="wrap">
   <div class="tree"><ul class="t root" id="tree"></ul></div>
   <div class="panel" id="panel"><div class="empty">Select an agent on the left.</div></div>
@@ -526,6 +678,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
   var tt=D.total, tot=document.getElementById('totals');
   function chip(v,l){ var d=document.createElement('div'); d.className='chip'; d.innerHTML='<b>'+v+'</b><span>'+l+'</span>'; return d; }
   tot.appendChild(chip(n(tt.calls),'API calls'));
+  if(tt.elapsed_ms!=null) tot.appendChild(chip(hms(tt.elapsed_ms),'elapsed · '+esc(tt.started)+' → '+esc(tt.ended)));
   tot.appendChild(chip(hms(tt.llm_ms),'billed span (Σ per-call, not wall-time)'));
   tot.appendChild(chip(usd(tt.cost_usd),'total cost'));
   tot.appendChild(chip(n(tt.tokens.cache_read),'cache-read tokens'));
@@ -556,6 +709,29 @@ _HTML_TEMPLATE = r"""<!doctype html>
     tot.parentNode.insertBefore(b, tot.nextSibling);
   }
 
+  // Time / cost / tokens by phase, and by workflow invocation.
+  function sumTable(title, col, rows, note){
+    if(!rows||!rows.length) return '';
+    var body=rows.map(function(g){
+      return '<tr><td>'+esc(g.name)+'</td><td>'+esc(g.started||'—')+'</td>'
+        +'<td class="r">'+(g.elapsed_ms==null?'—':hms(g.elapsed_ms))+'</td>'
+        +'<td class="r">'+hms(g.billed_ms)+'</td><td class="r">'+n(g.calls)+'</td>'
+        +'<td class="r">'+n(g.agents)+'</td><td class="r">'+n(g.input_tokens)+'</td>'
+        +'<td class="r">'+n(g.output_tokens)+'</td><td class="r cost">'+usd(g.cost_usd)+'</td></tr>';
+    }).join('');
+    return '<h2>'+esc(title)+'</h2><div class="scroll"><table class="sum"><thead><tr><th>'+esc(col)
+      +'</th><th>started</th><th class="r">elapsed</th><th class="r">billed span</th><th class="r">calls</th>'
+      +'<th class="r">agents</th><th class="r">input tok</th><th class="r">output tok</th><th class="r">cost</th>'
+      +'</tr></thead><tbody>'+body+'</tbody></table></div><div class="note">'+esc(note)+'</div>';
+  }
+  document.getElementById('sums').innerHTML =
+    sumTable('Time, cost and tokens by phase','phase',D.phases,
+      'elapsed = first request to last response, including the compiling and benchmarking between calls; '
+      +'billed span = time spent waiting on the model. Phases overlap when work ran in parallel, so elapsed times do not add up to the run\'s.')
+    + sumTable('Workflow invocations counted','invocation',D.invocations,
+      'Every workflow invocation that worked in this run\'s eval dir is billed to it: a resumed or re-entered run is several invocations.');
+  if(!document.getElementById('sums').innerHTML) document.getElementById('sums').style.display='none';
+
   // Tree
   var sel=null;
   function detailPanel(d){
@@ -567,12 +743,14 @@ _HTML_TEMPLATE = r"""<!doctype html>
     var tk=d.tokens;
     var api=d.api_calls||[];
     var h=''
-      +'<h2>'+esc(d.title)+'</h2>'
+      +'<h2>'+esc(d.title)+(d.label_note?(' <span class="lbl">'+esc(d.label_note)+'</span>'):'')+'</h2>'
       +'<dl class="kv">'
       +'<dt>role</dt><dd>'+esc(d.role)+(d.sub_phase?(' · '+esc(d.sub_phase)):'')+'</dd>'
       +'<dt>phase</dt><dd>'+esc(d.phase||'—')+'</dd>'
+      +(d.workflow_run?('<dt>workflow run</dt><dd>'+esc(d.workflow_run)+'</dd>'):'')
       +'<dt>models</dt><dd>'+esc((d.models||[]).join(', ')||'—')+'</dd>'
       +'<dt>API calls</dt><dd>'+n(d.calls)+' (this agent, exclusive of children)</dd>'
+      +'<dt>elapsed</dt><dd>'+(d.elapsed_ms==null?'—':hms(d.elapsed_ms))+(d.started?(' <span style="color:var(--muted)">('+esc(d.started)+' → '+esc(d.ended)+')</span>'):'')+'</dd>'
       +'<dt>billed span</dt><dd>'+hms(d.llm_ms)+' <span style="color:var(--muted)">(Σ per-call observed durations, not true request wall-time)</span></dd>'
       +'<dt>own cost</dt><dd>'+usd(d.cost_usd)+'</dd>'
       +'</dl>'
@@ -638,6 +816,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
     var tog=document.createElement('span'); tog.className='tog'; tog.textContent=kids.length?'▾':'·';
     row.appendChild(tog);
     var tt=document.createElement('span'); tt.className='tt'; tt.textContent=node.title; row.appendChild(tt);
+    if(node.detail && node.detail.label_note){ var lb=document.createElement('span'); lb.className='lbl'; lb.textContent=node.detail.label_note; row.appendChild(lb); }
     var meta=document.createElement('span'); meta.className='meta';
     meta.innerHTML=n(node.calls)+' calls · '+hms(node.llm_ms)+' · <span class="cost">'+usd(node.cost_usd)+'</span>';
     row.appendChild(meta);
@@ -669,8 +848,10 @@ def render(rows, model="run", meta=None):
     nodes = agentize(rows)
     root = build_tree(nodes)
     comp = completeness(rows, meta)
-    return (render_html(nodes, root, model, comp),
-            render_markdown(nodes, root, model, comp))
+    phases = breakdown_rows(rows, "phase", "(no phase)")
+    invocations = breakdown_rows(rows, "workflow_run", OUTSIDE_WORKFLOW)
+    return (render_html(nodes, root, model, comp, phases, invocations),
+            render_markdown(nodes, root, model, comp, phases, invocations))
 
 
 def _read_ledger_meta(calls_path):

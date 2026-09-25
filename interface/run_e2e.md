@@ -499,20 +499,18 @@ So the run mirrors it into its own output:
 ```
 
 The layout is not free-form — it reproduces the Claude home from `projects/`
-down, because the report tool discovers records by globbing
-`projects/*/*/workflows/wf_*.json` and derives the transcript directory
-*relative to the record it found*. A flat dump would be unreadable. Read it
-back with:
+down, because run discovery globs `projects/*/*/workflows/wf_*.json` and derives
+the transcript directory *relative to the record it found*. A flat dump would be
+unreadable. Read it back as an extra Claude home:
 
 ```bash
-PYTHONPATH=src python3 -m hyperloom.inference_optimizer.tools.dump_geak_call_report \
-    --claude-home <eval_dir>/llm_trace --list
+python3 interface/geak_report.py --eval-dir <eval_dir> --claude-home <eval_dir>/llm_trace
 ```
 
 | When | What happens |
 | --- | --- |
 | Every `TaskNotificationMessage`, at most once per `GEAK_TRACE_MIRROR_INTERVAL_S` | Incremental copy of whatever grew. Cheap: unchanged files are skipped by size+mtime. |
-| `_emit()` — the guaranteed final flush | Full pass, then a rendered report if one can be produced. Reported in `result.json` as `claude_trace`. |
+| `_emit()` — the guaranteed final flush | Full pass, then the run's report page (`<eval_dir>/report/geak_run_report_<model>.html`) is re-rendered by `interface/geak_report.py`, now that the workflow record exists. Reported in `result.json` as `claude_trace`. |
 
 Selection is an identity match on the record's own `args.eval_dir` /
 `args.exp_root`, never a guess by mtime, so a session driving several runs
@@ -528,7 +526,6 @@ run. Telemetry must never be the thing that kills an optimization job.
 | `GEAK_TRACE_MIRROR_MAX_MB` | 4096 | Per-pass byte ceiling. An over-budget file is named in the manifest, never truncated — a truncated `wf_*.json` fails to parse and a truncated transcript silently understates a token total. |
 | `GEAK_TELEMETRY_WARN` | `1` | `0` silences the startup durability warning. |
 | `GEAK_CLAUDE_CONFIG_DIR` | unset | Opt-in: sets `CLAUDE_CONFIG_DIR` for the Claude child process only. Point it at a *seeded* directory — a fresh empty one has no credentials. |
-| `HYPERLOOM_SRC` / `GEAK_LLM_REPORT_CMD` | unset | Where to find the report renderer. Absent, the raw mirror is still written. |
 
 At startup the runner compares the filesystem of the resolved Claude home with
 that of `exp_root` and warns on stderr when they differ, since a ledger on a
@@ -552,7 +549,7 @@ the end of every run:
 It reads only this run's own measured artifacts — `baseline/bench_summary.json`,
 `config/sweep_results.json`, `kernels/*/opbench_result.json`,
 `tuning/tuning_result.json` — and joins them to the per-phase spend when
-`reports/geak_calls.jsonl` is present. Two rules keep it honest:
+the run's own ledger, `reports/trace/llm_calls.jsonl`, is present. Two rules keep it honest:
 
 - **Absent is not zero.** A missing artifact renders as `—`. "We did not measure
   it" and "it contributed nothing" are different claims and conflating them is

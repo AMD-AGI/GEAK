@@ -6902,9 +6902,7 @@ def main(argv: list[str]) -> int:
             except Exception as fr_exc:
                 out["final_report_error"] = f"{type(fr_exc).__name__}: {fr_exc}"
             # What the run bought, beside what it cost: the throughput each
-            # phase measured, read from this run's own artifacts. This runs
-            # before the trace mirror because the mirror's HTML report joins the
-            # two, and a join needs both halves on disk first.
+            # phase measured, read from this run's own artifacts.
             try:
                 out["outcome_report"] = geak_outcome_report.write(eval_dir)
             except Exception as or_exc:
