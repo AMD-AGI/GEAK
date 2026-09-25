@@ -476,3 +476,100 @@ class TestTheMirrorPreservesEveryOwnedInvocation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOwnershipIsOneStrictRule(unittest.TestCase):
+    """A journal MENTIONING a path is not a journal OWNING it (2026-09-25).
+
+    ``owned_invocations`` always demanded an ``"eval_dir": "<path>"`` field, but
+    ``resolve_run_scope`` used to re-admit the rejects through a second, looser
+    anchor that accepted any whole-path mention — so a scope the strict rule had
+    refused came back as ``run-scoped-inferred`` with ``owned=True``. These pin
+    the single rule: mention, descendant, and record-contradicted journals are
+    all out, and the only thing left that a live run needs (its own eval_dir
+    field, written before its record exists) is still in.
+    """
+
+    def _scope(self, home, ev, **kw):
+        return M.resolve_run_scope([home], eval_dir=ev, **kw)
+
+    def test_a_journal_that_merely_mentions_the_eval_dir_owns_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/mention/task"
+            home = _journal_only(tmp, "sess", "wf_mention", [
+                {"type": "agent", "prompt": "write %s/final_report.md" % ev}])
+            scope = self._scope(home, ev)
+            self.assertEqual(scope["scope"], "unresolved")
+            self.assertEqual(scope["globs"], [])
+            self.assertEqual(scope["invocations"], [])
+
+    def test_a_journal_naming_a_descendant_owns_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/desc/task"
+            home = _journal_only(tmp, "sess", "wf_desc", [
+                _setup_result(ev + "/child")])
+            self.assertEqual(self._scope(home, ev)["scope"], "unresolved")
+
+    def test_a_live_runs_own_eval_dir_field_still_owns_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/live/task"
+            home = _journal_only(tmp, "sess", "wf_live", [_setup_result(ev)], agents=2)
+            scope = self._scope(home, ev)
+            self.assertEqual(scope["scope"], "run-scoped-inferred")
+            self.assertEqual(scope["top_anchor"], "live-journal")
+            self.assertEqual([i["run_id"] for i in scope["invocations"]], ["wf_live"])
+
+    def test_a_journal_is_not_adopted_over_its_own_records_verdict(self):
+        # wf_other's record assigns it to ANOTHER run; its journal happens to
+        # carry this eval-dir too. The record decides, and the disagreement is
+        # reported -- not silently resolved in the journal's favour and then
+        # warned about as "no workflow record".
+        with tempfile.TemporaryDirectory() as tmp:
+            ev, mine = "/runs/exp/conflict/task", "/runs/exp/conflict/owner"
+            home = _home(tmp, "sess-mine", "wf_mine", mine, agents=2)
+            _home(tmp, "sess-other", "wf_other", "/runs/elsewhere/task", agents=2)
+            journal = (home / "projects" / "-home-aditysin-PROJECTS-GEAK" / "sess-other"
+                       / "subagents" / "workflows" / "wf_other" / "journal.jsonl")
+            journal.write_text(json.dumps(_setup_result(mine)) + "\n", encoding="utf-8")
+            scope = self._scope(home, mine)
+            self.assertEqual([i["run_id"] for i in scope["invocations"]], ["wf_mine"])
+            joined = " ".join(scope["warnings"])
+            self.assertIn("wf_other", joined)
+            self.assertIn("/runs/elsewhere/task", joined)
+            self.assertNotIn("no workflow record", joined)
+
+
+class TestCoverageCountsEveryOwnerNotJustTheUsableOnes(unittest.TestCase):
+    """Complete means every owned invocation is accounted for (2026-09-25).
+
+    Two holes let a strict subset certify the whole: nested lanes resolved by
+    "newest record wins" instead of by ownership, so a lane's other invocations
+    vanished; and an owner whose transcripts were missing was dropped from the
+    owned set entirely, leaving the survivors to report ``complete=True``.
+    """
+
+    def test_a_lane_with_two_invocations_contributes_both(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            top, lane = "/runs/exp/top/task", "/runs/exp/top/lane"
+            home = _home(tmp, "sess-top", "wf_top", top, agents=2)
+            _home(tmp, "sess-l1", "wf_lane1", lane, agents=2, timestamp="2026-09-24T00:00:00Z")
+            _home(tmp, "sess-l2", "wf_lane2", lane, agents=3, timestamp="2026-09-25T00:00:00Z")
+            scope = M.resolve_run_scope([home], eval_dir=top, nested_eval_dirs=[lane])
+            self.assertEqual(scope["scope"], "run-scoped")
+            self.assertTrue(scope["complete"])
+            self.assertEqual(
+                sorted(g.split("workflows/")[-1].split("/")[0] for g in scope["globs"]),
+                ["wf_lane1", "wf_lane2", "wf_top"])
+
+    def test_an_owner_without_transcripts_makes_the_run_partial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ev = "/runs/exp/hole/task"
+            home = _home(tmp, "sess-kept", "wf_kept", ev, agents=2)
+            _home(tmp, "sess-gone", "wf_gone", ev, agents=0)
+            scope = M.resolve_run_scope([home], eval_dir=ev)
+            self.assertEqual(scope["scope"], "partial")
+            self.assertFalse(scope["complete"])
+            self.assertEqual(scope["missing"], [ev])
+            self.assertIn("wf_gone", " ".join(scope["warnings"]))
+            # the usable one is still scoped -- a hole is reported, not a blackout
+            self.assertEqual([i["run_id"] for i in scope["invocations"]], ["wf_kept"])
