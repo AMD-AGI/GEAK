@@ -104,7 +104,44 @@ and FLAG it in `notes` + the COMMANDMENT as a non-representative baseline.
 For `--correctness` in the no-runner case (no oracle at all), compare to a trusted reference
 (PyTorch/naive) with appropriate tolerance. When the oracle exists, `--correctness` just defers to it.
 
-### 3. Validate every mode actually runs
+### 3. Validate source binding and every mode
+
+**Candidate source binding is part of correctness.** The workspace will be copied into Engineer,
+Verify, and later-wave directories. Build from the CURRENT workspace (`Path.cwd()`, since all
+commands run there), never from an absolute parent workspace embedded during harness generation.
+Keep generated overlays, source mirrors and build metadata under `build/` so materialization drops
+them. A fresh `.torch_ext` alone does not fix stale source links elsewhere.
+
+For every target source override in a generated builder:
+
+- Recreate or rebind its owned link on EVERY invocation, including existing and dangling links.
+  Never use `if link.exists() or link.is_symlink(): continue` for a candidate source override.
+- Use `scripts/workspace_sources.py bind` from this workflow to bind and validate the compiler input;
+  it refuses external candidate sources and emits the resolved path + SHA256. For example, from the
+  current workspace, with the actual source and overlay paths substituted:
+  ```bash
+  python3 "$SKILL_DIR/scripts/workspace_sources.py" bind --workspace "$PWD" \
+    --source quant_kernels.cu --link build/.overlay/candidate/quant_kernels.cu
+  ```
+  Invoke this from the builder with checked exit status, immediately BEFORE compiling or loading the
+  extension. For a builder that already binds correctly, use `check-input --workspace "$PWD"
+  --source <candidate-relative-source> --input <actual-compiler-input>` instead. Check the path passed
+  to the compiler, not an unused duplicate of the candidate. Validate every overridden translation
+  unit/header; keep immutable baseline/vendor inputs separate. For source transformations, verify the
+  input to the transformation and regenerate its output from the current source before compilation.
+- Validate relocation once in a disposable directory made with `materialize_workspace.sh`: add a
+  deliberate `#error GEAK_CANDIDATE_SOURCE_PROBE` to a copied HIP/C++ target, rebuild with the SAME
+  generated builder, and require a compiler failure naming that marker. A successful build is an
+  invalid harness, even if ordinary correctness/performance commands pass. Only edit the disposable
+  candidate for this probe; preserve the canonical source and frozen reference. For interpreted/JIT
+  languages, use an equivalent unmistakable import/compile failure in the copied candidate.
+
+The wrapper checks copied workspace links before AND after commands. Exit 86 / `GEAK_SOURCE_INVALID`
+means the entire invocation is an **invalid measurement**, including any PASS or timing output already
+printed. Fix the build infrastructure and rerun before freezing the COMMANDMENT. Record the source
+paths, binding command and successful relocation probe in its `SOURCE_BINDING` section. Do not freeze
+a harness whose actual candidate input cannot be established.
+
 Run compile (if any), correctness, benchmark, profile once each (correctness/benchmark via
 `gpu_lock.sh $GPU_ID`). Fix anything that errors before continuing.
 

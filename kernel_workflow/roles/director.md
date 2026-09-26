@@ -81,7 +81,7 @@ Do this instead of the optimize-mode steps below:
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
    done
    cd "$EVAL_DIR/workspace"
-   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
@@ -131,7 +131,7 @@ Steps:
    [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
-   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
    # Avoid git hangs/failures in non-interactive agents: no pager, no prompts, and ALWAYS pass an
    # identity (the machine may have no global git user). Fresh repo (the source .git was never copied
    # in) so HEAD is exactly this baseline.
@@ -243,6 +243,13 @@ baseline latencies recorded at benchmark setup).
 
 **Do NOT trust the TechLead's reported speedup — reproduce it from the TRUE baseline.**
 
+Source-binding failures (`GEAK_SOURCE_INVALID`, exit 86, or `invalid_measurement` in round results)
+are invalid experiments, not evidence of no improvement. Review the affected Engineer workspace's
+`.geak/invalid_measurements.jsonl` even if the final patch is empty. If that candidate was not validly
+remeasured after repair, report `validation_status:"flagged"`, `correctness:"not_checked"` and explain
+the unresolved build defect in `arbitration_note`; do not report an accepted speedup or a validated
+no-op. A clean benchmark of the reverted original does not validate the discarded candidate.
+
 1. Read `EVAL_DIR/COMMANDMENT.md` for the exact correctness + full-benchmark commands.
 2. Build a fresh validation workspace from the ORIGINAL path:
    ```bash
@@ -338,6 +345,20 @@ baseline latencies recorded at benchmark setup).
      normal shape of the default mode.
    Whatever the outcome, `timing_basis` is REQUIRED in `director_validation.json`, and any campaign summary
    that quotes the speedup must carry it — an unlabelled number is read as a clean device-time win.
+
+   Read `cache_mode` from the same `GEAK_TIMING_RECEIPT` (the freezer copies it from each leg's
+   `cache_condition.mode`) into `director_validation.json` as `cache_basis`:
+   - `"read-evict"` → the single supported preparation for new measurements. Nothing to flag.
+   - `"unknown_write_evict"` or ABSENT → the task was frozen against a `harness_lib.py` older than the
+     cache receipt. Record `cache_basis: "unknown_write_evict"`, `status: "flagged"`. The old write pass
+     left dirty lines whose writeback competed with the timed kernel for HBM bandwidth: on MI355X /
+     GLM-5.2 fused-MoE, a decode-weighted 1.12 read as 1.40. Absence is not "no cache preparation".
+   - Any other reported mode → preserve its value and set `status: "flagged"`. Historical receipts may
+     say `"write-evict"` or `"none"`; these are not selectable in the current harness and must never be
+     relabelled as `"read-evict"`.
+   There is no correction factor for old scores: the inflation depends on each leg's HBM traffic.
+   Re-freeze against a current `$HARNESS_LIB` and remeasure. Prefill-only tasks are less sensitive but
+   still carry the label. Never fold different cache bases into one campaign-level speedup.
    `not_applicable` is a label, not a pass: the number is this lane's own baseline ratio, not a
    receipt-backed device-time claim, and a cross-lane comparison must not treat it as one.
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:

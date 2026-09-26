@@ -45,7 +45,8 @@ Read ALL of these before and during your work, and re-consult as the bottleneck 
   layout, graph capture). Re-read every time you re-profile.
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per the kernel's language.
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns (you own these too).
-- `SKILL_DIR/knowledge/amd_instinct.md` — DETECT the actual card (gfx942/gfx950) first, then use its
+- the hardware reference for the card detected on-box — `SKILL_DIR/knowledge/amd_instinct.md` (`gfx94*`/`gfx95*`,
+  CDNA Instinct) or `SKILL_DIR/knowledge/amd_ryzen.md` (`gfx11*`, RDNA client). DETECT first, then use its
   peaks for the roofline estimate (below).
 - `SKILL_DIR/knowledge/profiling_guide.md` — how to read whatever profiler is available.
 - `SKILL_DIR/knowledge/self_monitoring.md` — the guard signals (you raise the step caps, see below).
@@ -69,14 +70,16 @@ flydsl→`flydsl`, tilelang→`tilelang`; read `overview.md`/`patterns.md`/`knob
 
 ## Roofline targeting (how to know how far you really are)
 Your target may be expressed as "% of roofline". Estimate the ceiling, then drive toward it:
-0. **Detect the card first** (`amd_instinct.md` §0: `rocminfo` → gfx arch + CU count, `rocm-smi` → name)
-   and use ITS peaks below — never assume MI300X (gfx950/CDNA4 is much higher and uses OCP fp8 + MX).
+0. **Detect the card first** (`rocminfo` → gfx arch + CU count, `rocm-smi` → name), then read the matching
+   hardware reference — `amd_instinct.md` for `gfx94*`/`gfx95*`, `amd_ryzen.md` for `gfx11*` — and use ITS
+   peaks below. Never assume a default: peaks differ by integer factors across cards, and so do the fp8
+   format and the matrix ISA.
 1. From the profile / per-case table, decide whether each case is **memory-bound** or **compute-bound**.
-2. **Memory-bound ceiling**: `min_time ≈ bytes_moved / HBM_BW` — use this card's achievable HBM
-   bandwidth (~0.7–0.85× nameplate; e.g. ≈5.3 TB/s on MI300X, ~6 on MI325X, ~8 on MI350/355; see
-   `amd_instinct.md`). Achieved % = that min_time / your measured time.
-3. **Compute-bound ceiling**: `min_time ≈ FLOPs / peak_FLOPS` for the dtype (use the MFMA peak for the
-   precision on THIS card from `amd_instinct.md`). Achieved % similarly.
+2. **Memory-bound ceiling**: `min_time ≈ bytes_moved / mem_BW` — use this card's achievable memory
+   bandwidth (~0.7–0.85× nameplate; e.g. ≈5.3 TB/s on MI300X, ~6 on MI325X, ~8 on MI350/355; see the
+   reference for the detected card). Achieved % = that min_time / your measured time.
+3. **Compute-bound ceiling**: `min_time ≈ FLOPs / peak_FLOPS` for the dtype — use the matrix-core peak
+   for that precision on THIS card (MFMA on CDNA, WMMA on RDNA) from its reference. Achieved % similarly.
 4. Report the achieved % per representative case in your notes. If you are far below the ceiling, the
    kernel still has headroom — keep going. If you are near it, the remaining wall-clock is likely the
    launch/host floor → switch to `geomean_levers.md` Levers 1–3/6 (dispatch collapse, native layout,
@@ -96,6 +99,13 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 6. After editing sources, ninja auto-rebuilds. NEVER use `rm` (it prompts and blocks the run); your
    workspace is a fresh artifact-free copy. If you suspect a stale build (e.g. after editing headers),
    MOVE the cache aside: `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true`.
+7. Exit 86 / `GEAK_SOURCE_INVALID` is an **invalid measurement**: ignore all PASS/timing output from
+   that invocation, preserve the candidate and `.geak/invalid_measurements.jsonl`, and report the
+   build defect for repair. Do not revert or discard an idea based on invalid timings. Rerun the
+   same candidate after repair; do not edit the frozen harness yourself. If unresolved, save its diff
+   as `best_patch.diff` for recovery and return `status:"invalid_measurement"`, `measurement_valid:false`,
+   zero speedups and no per-case timings. Include `measurement_valid` in every return; true requires
+   successful current-source checks and measurement commands.
 
 ## Iteration protocol (you go deep — much longer than a specialist)
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record the
@@ -140,7 +150,8 @@ for the return.
   "speedup_geomean": 0.0,
   "speedup_arithmetic": 0.0,
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0}],
-  "status": "success|partial|failed",
+  "status": "success|partial|failed|invalid_measurement",
+  "measurement_valid": true,
   "patch_file": "best_patch.diff",
   "strategies_tried": ["the full exploration trace — what worked AND what didn't"],
   "notes": "roofline % achieved per representative case, where the remaining wall-clock sits (kernel vs floor), and what a follow-up could still attack — written for the TechLead's insight log"

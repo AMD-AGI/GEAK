@@ -205,14 +205,20 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    Read `opbench_result.json`: per-backend {available, correct, ms, wall_ms, max_rel_err}, the winner, the
    `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`, and
    > **`ms` is CUDA-EVENT DEVICE time (GPU-timeline duration); `wall_ms` is host+device REFERENCE.** The
-   > winner and `isolated_speedup` are scored on `ms`, timed with the L2/Infinity cache flushed COLD before
-   > each sample. Consequence for what you optimize: (1) device time already EXCLUDES host launch/dispatch,
+   > winner and `isolated_speedup` are scored on `ms`, timed with one eviction pass over the L2/Infinity
+   > cache before each sample so the number is not read off lines the previous sample left resident. The
+   > pass is always a READ (`harness_lib.cache_policy`, fixed `read-evict`); it does not assert a particular
+   > residency, and the receipt records the preparation. Consequence for what you optimize: (1) device time already EXCLUDES host launch/dispatch,
    > so shaving Python/dispatch overhead earns ZERO here — real wins come from cutting HBM traffic (memory-
    > bound decode) or MFMA/compute work (compute-bound prefill), NOT launch-overhead tricks (those only pay
    > off in the server via its decode CUDA graph, which already collapses dispatch). (2) A large `wall_ms ≫
    > ms` gap flags a host-bound op whose isolated device win won't transfer e2e — surface it. (3) Because
-   > caches are flushed cold, a candidate that only wins hot (back-to-back same-buffer reuse) will show its
-   > true cold cost here; do not optimize for cache residency the live server never gets.
+   > the cache is evicted between samples, a candidate that only wins hot (back-to-back same-buffer reuse)
+   > shows that cost here; do not optimize for cache residency the live server never gets. (4) The
+   > eviction pass is a READ, not a write. It used to be a 512MB `zero_()`, whose dirty lines wrote back
+   > WHILE the next, timed kernel ran — that contention inflated a measured GLM-5.2 decode A/B from 1.12
+   > to 1.40, flattering every candidate that read less HBM. Any decode number quoted from a task frozen
+   > before this change is on the old, inflated basis; do not compare the two.
    `amdahl_ceiling_e2e_pct` (the MAX e2e delta this isolated speedup can produce at the kernel's
    `pct_gpu_time` — op_bench computes it via `harness_lib.amdahl_ceiling`). Surface the ceiling in your
    report: if it is at/below `NOISE_BAND_PCT` (e.g. a 1.1x win on a 3%-GPU kernel → ~0.3% ceiling), the

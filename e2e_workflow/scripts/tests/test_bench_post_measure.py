@@ -513,6 +513,74 @@ class PostMeasureTest(unittest.TestCase):
             lifecycle.main()
         self.assertIsNone(lifecycle._read(output / "callback_exit.json")["returncode"])
 
+    def test_changed_readiness_observation_prevents_callback_without_losing_throughput(self):
+        out, _, _, server = self.live_context()
+        summary = (out / "bench_summary.json").read_bytes()
+        context_path = out / "post_measure/launch_context.json"
+        context = lifecycle._read(context_path)
+        context["observed"]["argv_sha256"] = "0" * 64
+        lifecycle._write(context_path, context)
+
+        lifecycle.run_callback(out)
+
+        self.assertEqual(lifecycle._read(out / "post_measure_receipt.json")["status"], "invalid_result_or_context")
+        self.assertFalse((out / "post_measure/output").exists())
+        self.assertEqual((out / "bench_summary.json").read_bytes(), summary)
+        self.assertEqual([event["event"] for event in self.read_events()], ["launch"])
+        self.assertIsNone(server.poll())
+
+    def test_supervisor_exit_without_receipt_is_explicit_and_preserves_server(self):
+        out, _, _, server = self.live_context()
+        summary = (out / "bench_summary.json").read_bytes()
+        popen = subprocess.Popen
+
+        def failed_supervisor(*args, **kwargs):
+            return popen([sys.executable, "-c", "import time; time.sleep(0.2)"], **kwargs)
+
+        with patch.object(lifecycle.subprocess, "Popen", side_effect=failed_supervisor):
+            lifecycle.run_callback(out)
+
+        receipt = lifecycle._read(out / "post_measure_receipt.json")
+        self.assertEqual(receipt["status"], "supervisor_failed")
+        self.assertIsNone(receipt["callback_returncode"])
+        self.assertIsNone(receipt["callback_result"])
+        self.assertEqual(receipt["callback_cleanup_status"], "recorded_group_gone")
+        self.assertEqual((out / "bench_summary.json").read_bytes(), summary)
+        self.assertIsNone(server.poll())
+
+    def test_cleanup_errors_preserve_failure_receipt_and_retry_only_owned_group(self):
+        teardown = lifecycle._teardown
+        for failures, status in ((1, "recorded_group_gone"), (2, "cleanup_unconfirmed")):
+            with self.subTest(failures=failures):
+                out, _, _, server = self.live_context()
+                summary = (out / "bench_summary.json").read_bytes()
+                owners = []
+
+                def failing_teardown(owner, grace, owners=owners, failures=failures):
+                    owners.append(owner)
+                    if len(owners) <= failures:
+                        raise OSError("fixture cleanup unavailable")
+                    return teardown(owner, grace)
+
+                try:
+                    with patch.object(lifecycle, "_teardown", side_effect=failing_teardown):
+                        lifecycle.run_callback(out)
+                    receipt = lifecycle._read(out / "post_measure_receipt.json")
+                    self.assertEqual(receipt["status"], "invalid_result_or_context")
+                    self.assertEqual(receipt["callback_cleanup_status"], status)
+                    self.assertEqual(len(owners), 2)
+                    self.assertEqual(owners[0], owners[1])
+                    self.assertNotEqual(owners[0]["pid"], server.pid)
+                    self.assertEqual((out / "bench_summary.json").read_bytes(), summary)
+                    self.assertIsNone(server.poll())
+                finally:
+                    for owner in owners[:1]:
+                        teardown(owner, 0)
+                        try:
+                            os.waitpid(owner["pid"], 0)
+                        except ChildProcessError:
+                            pass
+
     def test_json_size_limit_is_enforced_before_parsing(self):
         source = self.root / "oversized.json"
         source.write_bytes(b" " * (lifecycle.MAX_JSON_BYTES + 1))

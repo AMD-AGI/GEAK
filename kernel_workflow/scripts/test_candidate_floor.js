@@ -88,6 +88,20 @@ ok(/Save best_patch\.diff[^\n]*geomean>\$\{CANDIDATE_FLOOR_TXT\}/.test(src),
    'the Optimize prompt tells the engineer to save above CANDIDATE_FLOOR');
 ok(/trustworthyBelowBaseline = eng && eng\.status !== 'failed' && !\(primSpeedup\(eng\) > CANDIDATE_FLOOR\)/.test(src),
    'the harvest shortcut suppresses against CANDIDATE_FLOOR');
+// Exercise the real shortcut: invalid or unconfirmed experiments must reach Verify
+// even when an engineer returned zero speedup and an empty patch (#480).
+const shortcut = src.match(/const trustworthyBelowBaseline = ([\s\S]*?);/)[1];
+const maySkip = new Function('eng', 'CANDIDATE_FLOOR', 'primSpeedup', `return ${shortcut};`);
+for (const eng of [
+  { status: 'invalid_measurement', measurement_valid: false, speedup_geomean: 0 },
+  { status: 'invalid_measurement', measurement_valid: true, speedup_geomean: 0 },
+  { status: 'partial', measurement_valid: false, speedup_geomean: 1 },
+  { status: 'partial', speedup_geomean: 1 },
+]) {
+  ok(!maySkip(eng, 1, e => e.speedup_geomean), 'unvalidated experiment is sent to Verify', eng);
+}
+ok(maySkip({ status: 'partial', measurement_valid: true, speedup_geomean: 1 }, 1,
+           e => e.speedup_geomean), 'a valid measured no-op can still skip Verify');
 ok(/says\(r\.ver\.correctness, 'pass'\) && primSpeedup\(r\.ver\) > CANDIDATE_FLOOR/.test(src),
    'the verified filter admits against CANDIDATE_FLOOR');
 

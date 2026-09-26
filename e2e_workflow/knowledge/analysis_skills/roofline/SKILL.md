@@ -301,8 +301,9 @@ make the kernel move **fewer bytes for the same work**:
 
 1. **Sanity band** — §6 L3.
 2. **Validate the peak before believing a `roofline_pct`.** The peaks are empirical microbench
-   results, not spec figures. The load-bearing cross-check: BF16 and FP16 MFMA run at the same rate on
-   these parts, so their peaks must be equal — when they are not, the compute-axis number is inflated
+   results, not spec figures. The load-bearing cross-check: BF16 and FP16 run at the same rate on the
+   matrix core of every tabulated part (MFMA on CDNA, WMMA on RDNA), so their peaks must be equal —
+   when they are not, the compute-axis number is inflated
    (a "kernel at 85%" may really be at 43%). Trivial streaming also tops out near ~0.85 of the HBM pin
    rate, which is why the memory `target_eff` is 0.90, not 1.0.
 3. **Two noise bands, not one.** An **isolated-kernel** speedup is real only if it clears the

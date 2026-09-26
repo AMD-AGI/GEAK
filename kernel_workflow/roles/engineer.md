@@ -23,10 +23,13 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 
 ## Load only the knowledge for your specialty (keeps context focused)
 - algorithm  → `hip_optimization.md` (P0/P1) or `triton_optimization.md`, + `geomean_levers.md`
-- memory     → `hip_optimization.md` (P1/P2) or `triton_optimization.md`, + `amd_instinct.md`
-- compute    → `hip_optimization.md` (P3/P4) + `amd_instinct.md` (detect the card; occupancy/VGPR table)
+- memory     → `hip_optimization.md` (P1/P2) or `triton_optimization.md`, + the hardware reference
+- compute    → `hip_optimization.md` (P3/P4) + the hardware reference (occupancy/VGPR table)
 - host_runtime → `wrapper_optimization.md` + `geomean_levers.md` (dispatch collapse, native layout,
   allocation, CUDA graph). You MAY edit the Python wrapper AND the C++ binding, not just the kernel.
+
+"The hardware reference" means the one matching the card detected on-box (`rocminfo` → gfx arch):
+`amd_instinct.md` for `gfx94*`/`gfx95*` (CDNA Instinct), `amd_ryzen.md` for `gfx11*` (RDNA client).
 
 Always also read `SKILL_DIR/knowledge/self_monitoring.md` and follow its guard signals.
 
@@ -82,6 +85,13 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
 6. Preserve the kernel's external interface (signature, semantics) so the wrapper/tests still work.
 7. Hipify safety (HIP): never put `<<<>>>` launches inside a macro if/else or ternary — use template
    dispatch functions. See `hip_optimization.md` → Hipify Safety Rules.
+8. **Invalid source binding is not a failed optimization.** Exit 86 / `GEAK_SOURCE_INVALID` from
+   gpu_lock or the builder invalidates ALL correctness/timing output from that invocation. Preserve
+   the edited candidate; do not revert it, rank it, or conclude "no improvement" using those numbers.
+   Report the build defect for repair, then rerun correctness and performance on that SAME candidate.
+   Do not edit the frozen harness yourself. Keep `.geak/invalid_measurements.jsonl` as the audit trail.
+   If unresolved, save the candidate diff as `best_patch.diff` for recovery, return
+   `status:"invalid_measurement"`, `measurement_valid:false`, zero speedups and no per-case timings.
 
 ## Workflow
 1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record
@@ -124,7 +134,8 @@ JSON substitutes for the return — the lane does not read `worker_result.json`,
   "speedup_arithmetic": 0.0,
   "speedup_weighted": 0.0,
   "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0, "weight": 0.0}],
-  "status": "success|partial|failed",
+  "status": "success|partial|failed|invalid_measurement",
+  "measurement_valid": true,
   "patch_file": "best_patch.diff",
   "strategies_tried": ["..."],
   "notes": "what worked / what didn't — written for the TechLead's insight log"
@@ -132,6 +143,10 @@ JSON substitutes for the return — the lane does not read `worker_result.json`,
 ```
 `OUTPUT_DIR/report.md` — brief: task, approach, per-case results table, geomean, what worked, what
 didn't. (This is your required mini-report.)
+
+`measurement_valid` is true only when the result used current-candidate sources and both the source
+checks and measurement commands succeeded. An unresolved invalid measurement uses the status and
+recovery rules above, even if no patch remains; never label it a measured no-op.
 
 If you achieved no speedup (or correctness could not be fixed), still submit with `status` =
 `failed`/`partial`, NO patch_file, and notes explaining why — that is valuable signal for the ledger.
