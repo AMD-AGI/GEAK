@@ -389,6 +389,9 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
    `final_patch.diff` (all accepted kernel patches), and a `final_launch.sh` that reproduces the
    optimized server (sets `BACKEND=<backend>`, `PYTHONPATH=<overlay>`, the accepted flags/env, and runs
    the bench via bench_e2e.sh + its adapter). This is the spec deliverable: "complete patch + launch/benchmark script".
+   Preserve any caller-provided `GEAK_POST_MEASURE_REQUEST` environment through that launcher;
+   never bake a prior request into the bundle. Keep `bench_lifecycle.py`, `bench_replica.sh`,
+   `server_teardown.sh` and `bench_summarize.py` alongside the staged benchmark script.
 
 1b. **Fold in the tuning deploy bundle** (only when `TUNING_DEPLOY_BUNDLE` is present).
 
