@@ -7,6 +7,9 @@ CDNA3 gfx942, and MI350X / MI355X on CDNA4 gfx950 — the card is detected on-bo
 budget loop, round fan-out, and verification are **JS control flow**, while every judgement call is made
 by an agent returning **structured JSON**.
 
+The native SDK path also offers optional shared-tool caching and deterministic helpers.
+See [native workflow cost controls](../interface/native_cost_controls/README.md) for supported modes, settings, and comparison limits.
+
 ## Key properties
 1. **Deterministic orchestration** — the budget loop / parallelism / verification live in
    `kernel_workflow.js`, not in LLM-interpreted prose. The TechLead returns structured decisions.

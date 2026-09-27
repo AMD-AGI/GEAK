@@ -1879,7 +1879,11 @@ def _workflow_done_on_disk(eval_dir: str | None) -> bool:
     ).is_file()
 
 
-def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) -> str:
+def _invoke_via_sdk(
+    prompt: str, timeout_s: int, eval_dir: str | None = None,
+    *, workflow_request: dict | None = None, settings_profile: str | None = None,
+    native_cwd: str | None = None,
+) -> str:
     """Drive the JS workflow through the SDK, version-robustly.
 
     Why not a one-shot ``query()``? Newer Claude Code builds (CLI >=2.1.183)
@@ -1924,10 +1928,35 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
             permission_mode="bypassPermissions",
             settings=WORKFLOW_SETTINGS,
             extra_args=extra,
-            cwd=str(E2E_DIR),
+            cwd=native_cwd or str(E2E_DIR),
             env=sdk_env,
             **({"cli_path": CLAUDE_BIN} if CLAUDE_BIN else {}),
+            **({"setting_sources": []} if settings_profile == "isolated" else {}),
         )
+
+    cache_enabled = os.environ.get("GEAK_SHARED_TOOL_CACHE", "").strip().lower() in {"1", "true", "yes", "on"}
+    helpers_enabled = os.environ.get("GEAK_LOCAL_HELPERS", "").strip().lower() in {"1", "true", "yes", "on"}
+    if cache_enabled:
+        try:
+            from native_cost_controls.sdk_cache import CachedSDKClient, cached_query
+        except ModuleNotFoundError:
+            from interface.native_cost_controls.sdk_cache import (
+                CachedSDKClient,
+                cached_query,
+            )
+    if helpers_enabled and workflow_request is not None:
+        try:
+            from native_cost_controls.sdk_helpers import WorkflowSDKClient
+        except ModuleNotFoundError:
+            from interface.native_cost_controls.sdk_helpers import WorkflowSDKClient
+
+    def _client(options):
+        if helpers_enabled and workflow_request is not None:
+            return WorkflowSDKClient(ClaudeSDKClient, options, helpers_enabled=True, cache_enabled=cache_enabled,
+                workflow_request=workflow_request, source_root=GEAK_ROOT / "kernel_workflow")
+        if cache_enabled:
+            return CachedSDKClient(ClaudeSDKClient, options, enabled=True)
+        return ClaudeSDKClient(options=options)
 
     async def _run_client() -> str:
         # Accumulate the FULL transcript (every text fragment from every
@@ -1940,21 +1969,48 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
         bg_started = False          # did the workflow ever background a task?
         terminal_task = False       # saw a TaskNotification (completed/failed)
         saw_result = False          # the main turn's ResultMessage arrived
+        kernel_starts: dict[str, str] = {}
+        kernel_tasks: set[str] = set()
+        kernel_return: dict | None = None
         # Enforce the orchestrator's budget INSIDE the SDK path so we self-stop
         # before Hyperloom's outer kill_timeout SIGKILLs us (a SIGKILL would
         # skip result.json flushing entirely). anyio raises TimeoutError on
         # expiry, which main() maps to error_class="timeout".
         with anyio.fail_after(timeout_s):
-            async with ClaudeSDKClient(options=_opts()) as client:
+            async with _client(_opts()) as client:
+                if helpers_enabled and workflow_request is not None:
+                    helper_status = getattr(client, "helper_status", "unsupported_sdk_options")
+                    cache_session = getattr(client, "cache_session", None)
+                    cache_status = getattr(cache_session, "status", "disabled") if cache_enabled else "disabled"
+                    print(f"Local helpers: {helper_status}. Shared tool cache: {cache_status}.", file=sys.stderr)
                 await client.query(prompt)
                 async for msg in client.receive_messages():
                     chunks.extend(_iter_message_text(msg))
                     name = type(msg).__name__
+                    if workflow_request is not None and name == "UserMessage":
+                        native_result = getattr(msg, "tool_use_result", None)
+                        if isinstance(native_result, dict):
+                            task_id = native_result.get("taskId")
+                            tool_id = kernel_starts.get(task_id) if isinstance(task_id, str) else None
+                            blocks = getattr(msg, "content", [])
+                            matching = [block for block in blocks if (
+                                block.get("tool_use_id") if isinstance(block, dict) else getattr(block, "tool_use_id", None)
+                            ) == tool_id] if isinstance(blocks, list) and tool_id else []
+                            if (len(matching) == 1 and native_result.get("status") == "async_launched"
+                                    and native_result.get("taskType") == "local_workflow"
+                                    and native_result.get("scriptPath") == workflow_request.get("scriptPath")
+                                    and getattr(msg, "parent_tool_use_id", None) is None):
+                                block = matching[0]
+                                failed = block.get("is_error") if isinstance(block, dict) else getattr(block, "is_error", None)
+                                if failed is False:
+                                    kernel_tasks.add(task_id)
                     if name == "TaskStartedMessage":
                         tid = getattr(msg, "task_id", None)
                         if tid:
                             pending.add(tid)
                             bg_started = True
+                            if workflow_request is not None and getattr(msg, "task_type", None) == "local_workflow":
+                                kernel_starts[tid] = getattr(msg, "tool_use_id", None)
                     elif name == "TaskNotificationMessage":
                         terminal_task = True
                         pending.discard(getattr(msg, "task_id", None))
@@ -1964,7 +2020,17 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                         of = getattr(msg, "output_file", None)
                         if of:
                             try:
-                                chunks.append(Path(of).read_text(encoding="utf-8"))
+                                native_output = Path(of).read_text(encoding="utf-8")
+                                chunks.append(native_output)
+                                if (workflow_request is not None and getattr(msg, "task_id", None) in kernel_tasks
+                                        and getattr(msg, "status", None) == "completed"):
+                                    try:
+                                        wrapper = json.loads(native_output)
+                                    except json.JSONDecodeError:
+                                        wrapper = None
+                                    value = wrapper.get("result") if isinstance(wrapper, dict) else None
+                                    if isinstance(value, dict) and isinstance(value.get("eval_dir"), str) and value["eval_dir"]:
+                                        kernel_return = value
                             except OSError:
                                 pass
                         summ = getattr(msg, "summary", None)
@@ -2012,6 +2078,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                     terminal_task
                     and saw_result
                     and bg_started
+                    and workflow_request is None
                     and not _workflow_done_on_disk(eval_dir)
                 ):
                     deadline = time.monotonic() + DONE_GRACE_S
@@ -2019,6 +2086,10 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                         if _workflow_done_on_disk(eval_dir):
                             break
                         await anyio.sleep(DONE_POLL_S)
+        if workflow_request is not None and bg_started:
+            if kernel_return is None:
+                raise WorkflowParseError("The native kernel Workflow did not return a bound result.")
+            return json.dumps(kernel_return)
         return "\n".join(chunks)
 
     async def _run_query() -> str:
@@ -2027,7 +2098,8 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
         from claude_agent_sdk import query
         chunks: list[str] = []
         with anyio.fail_after(timeout_s):
-            async for msg in query(prompt=prompt, options=_opts()):
+            stream = cached_query(query, prompt=prompt, options=_opts(), enabled=True) if cache_enabled else query(prompt=prompt, options=_opts())
+            async for msg in stream:
                 chunks.extend(_iter_message_text(msg))
         return "\n".join(chunks)
 
