@@ -28,6 +28,11 @@ Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped 
 `EVAL_DIR_OVERRIDE` (may be empty), `KERNEL_NAME_HINT` (basename), `TASK` (may be empty), and
 `MODE` (`optimize` default | `author`). In `author` mode you also get `TARGET_LANGUAGE` and `OP_SPEC`.
 
+The shared quality profile can supply `REFERENCE_IO_MODE=pinned_regular_copy`.
+Its immutable shell sets `GEAK_QUALITY_REFERENCE_COPY=1` and pins `GEAK_QUALITY_REFERENCE_SHA256`.
+In that profile, preserve the materializer's regular `reference_io.pt` file before the seed commit.
+The host verifies the complete seed before any optimizer or profiler starts.
+
 ### DEEP-MODE resume (ONLY when `STATE_DIR` is in your inputs — otherwise ignore this entire section)
 `STATE_DIR` is a stable per-(kernel,backend) directory carried ACROSS deep-mode waves. It lets a
 continued wave build on the cumulative best instead of restarting. Handle it as follows:
@@ -128,7 +133,15 @@ Steps:
    done
    # Share the immutable golden by absolute symlink (sha check + torch.load are transparent through it;
    # downstream engineer/verify tars carry the symlink verbatim — never add -h/--dereference).
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
+   if [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ]; then
+     if [ "${GEAK_QUALITY_REFERENCE_COPY:-0}" = "1" ]; then
+       [ -f "$EVAL_DIR/workspace/reference_io.pt" ] && [ ! -L "$EVAL_DIR/workspace/reference_io.pt" ] || exit 86
+       reference_hash=$(sha256sum -- "$EVAL_DIR/workspace/reference_io.pt")
+       [ "${reference_hash%% *}" = "$GEAK_QUALITY_REFERENCE_SHA256" ] || exit 86
+     else
+       ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
+     fi
+   fi
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
    printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
@@ -262,7 +275,15 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
    bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
      --src "$KERNEL_PATH_ORIG" --dst "$VWS" \
      --shared-root "$EVAL_DIR/_shared" --link-aiter
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$VWS/reference_io.pt"
+   if [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ]; then
+     if [ "${GEAK_QUALITY_REFERENCE_COPY:-0}" = "1" ]; then
+       [ -f "$VWS/reference_io.pt" ] && [ ! -L "$VWS/reference_io.pt" ] || exit 86
+       reference_hash=$(sha256sum -- "$VWS/reference_io.pt")
+       [ "${reference_hash%% *}" = "$GEAK_QUALITY_REFERENCE_SHA256" ] || exit 86
+     else
+       ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$VWS/reference_io.pt"
+     fi
+   fi
    cd "$VWS"
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A

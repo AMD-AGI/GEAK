@@ -59,7 +59,7 @@ async function main(input) {
     clock: region(source, '  const r = await agentT(\n    `Run EXACTLY this command and nothing else:',
       '\n  if (!r || !Number.isFinite(r.epoch))'),
     resolver: region(source, '    const localResolveCmd = KB_MODE', '\n    warm_start.read_reason = resolved.read_reason'),
-    storage: region(source, '  const reclaimCmd =', '\n}\n\n// ===========================================================================\n// PHASE: Final report'),
+    storage: region(source, '  const reclaimCmd =', '\n  // END STORAGE RECLAIM'),
     citation: region(source, '    await agentT(\n      `Run EXACTLY this command and nothing else. Do NOT edit any file.',
       '\n    log(`[kb] citation ledger filed'),
     writer: region(source, '  const kernelClass = (analysis && analysis.kernel_type)', '\n  const remoteWrite = (kb_written && kb_written.remote)'),

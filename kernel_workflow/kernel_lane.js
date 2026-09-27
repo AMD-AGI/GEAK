@@ -23,7 +23,105 @@ export const meta = {
 // path; agents do all FS work, and every path is supplied/derived from args —
 // nothing about the install location is hard-coded.)
 // ---------------------------------------------------------------------------
+// BEGIN QUALITY STOP VERIFIER
+function qualitySha256Ascii(text) {
+  if (typeof text !== 'string' || text.length > 1048576 || /[^\x00-\x7f]/.test(text)) throw new Error('invalid_signed_payload');
+  const bytes = Array.from(text, c => c.charCodeAt(0));
+  const length = bytes.length * 8;
+  bytes.push(128);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  bytes.push(0, 0, 0, 0, length >>> 24, (length >>> 16) & 255, (length >>> 8) & 255, length & 255);
+  const constants = [
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  let state = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const rotate = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    const words = [];
+    for (let i = 0; i < 16; i++) {
+      const j = offset + 4 * i;
+      words[i] = ((bytes[j] << 24) | (bytes[j + 1] << 16) | (bytes[j + 2] << 8) | bytes[j + 3]) >>> 0;
+    }
+    for (let i = 16; i < 64; i++) {
+      const x = words[i - 15], y = words[i - 2];
+      words[i] = (words[i - 16] + (rotate(x, 7) ^ rotate(x, 18) ^ (x >>> 3)) + words[i - 7]
+        + (rotate(y, 17) ^ rotate(y, 19) ^ (y >>> 10))) >>> 0;
+    }
+    let [a,b,c,d,e,f,g,h] = state;
+    for (let i = 0; i < 64; i++) {
+      const first = (h + (rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25)) + ((e & f) ^ (~e & g))
+        + constants[i] + words[i]) >>> 0;
+      const second = ((rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+      h=g; g=f; f=e; e=(d+first)>>>0; d=c; c=b; b=a; a=(first+second)>>>0;
+    }
+    state = state.map((value, i) => (value + [a,b,c,d,e,f,g,h][i]) >>> 0);
+  }
+  return state.map(value => value.toString(16).padStart(8, '0')).join('');
+}
+
+function qualityBase64(text, url) {
+  if (typeof text !== 'string') throw new Error('invalid_signature_encoding');
+  if (url) {
+    if (!/^[A-Za-z0-9_-]+$/.test(text) || text.length % 4 === 1) throw new Error('invalid_public_key_encoding');
+    text = text.replace(/-/g, '+').replace(/_/g, '/');
+    while (text.length % 4) text += '=';
+  }
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(text)) throw new Error('invalid_signature_encoding');
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let accumulator = 0, bits = 0;
+  const result = [];
+  for (const character of text.replace(/=+$/, '')) {
+    accumulator = (accumulator << 6) | alphabet.indexOf(character);
+    bits += 6;
+    if (bits >= 8) { bits -= 8; result.push((accumulator >>> bits) & 255); }
+  }
+  if ((accumulator & ((1 << bits) - 1)) !== 0) throw new Error('noncanonical_signature_encoding');
+  return result;
+}
+
+function qualityVerify(envelope, config, task) {
+  try {
+    if (!envelope || Object.keys(envelope).sort().join(',') !== 'payload,signature') return null;
+    const key = config.public_key;
+    if (!key || key.kty !== 'RSA' || key.alg !== 'RS256' || key.e !== 'AQAB') return null;
+    const modulus = qualityBase64(key.n, true), signature = qualityBase64(envelope.signature, false);
+    if (modulus.length !== 256 || signature.length !== 256 || modulus[0] < 128) return null;
+    const integer = bytes => BigInt('0x' + bytes.map(value => value.toString(16).padStart(2, '0')).join(''));
+    const n = integer(modulus);
+    let base = integer(signature), exponent = 65537n, result = 1n;
+    if (base >= n) return null;
+    while (exponent > 0n) {
+      if (exponent & 1n) result = (result * base) % n;
+      base = (base * base) % n;
+      exponent >>= 1n;
+    }
+    const digestInfo = '3031300d060960864801650304020105000420' + qualitySha256Ascii(envelope.payload);
+    const expected = '0001' + 'ff'.repeat(256 - 3 - digestInfo.length / 2) + '00' + digestInfo;
+    if (result.toString(16).padStart(512, '0') !== expected) return null;
+    const value = JSON.parse(envelope.payload);
+    if (value.protocol !== 'geak-fixed-floor-stop-v2' || value.task !== task
+        || typeof value.certified !== 'boolean' || typeof value.qualifying !== 'boolean'
+        || typeof value.issued_at !== 'number' || !Number.isFinite(value.issued_at)
+        || !value.native_binding || Object.keys(value.native_binding).sort().join(',')
+          !== 'agent_id,root_task,root_tool,run_id,session_id') return null;
+    return value;
+  } catch (_) { return null; }
+}
+// END QUALITY STOP VERIFIER
+
 const A = args || {};
+const QUALITY_STOP = A.quality_stop || null;
+if (QUALITY_STOP && (QUALITY_STOP.protocol !== 'geak-fixed-floor-stop-v2'
+    || typeof QUALITY_STOP.trial_id !== 'string' || !QUALITY_STOP.public_key
+    || typeof QUALITY_STOP.candidate_root !== 'string' || String(A.mode || 'optimize') !== 'optimize')) {
+  throw new Error('The quality stopping configuration is invalid.');
+}
 if (!A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/model directory)');
 
 // WORKFLOW_DIR = the directory that holds this script + roles/ + knowledge/ + scripts/.
@@ -752,18 +850,45 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // ===========================================================================
 // PHASE: Setup
 // ===========================================================================
+const qualitySchema = { type: 'object', additionalProperties: false,
+  properties: { payload: { type: 'string' }, signature: { type: 'string' } },
+  required: ['payload', 'signature'] };
+async function qualityCheckpoint(request) {
+  const task = 'GEAK_QUALITY_STOP_V2\n' + JSON.stringify(request);
+  try {
+    // This call has no agentT timeout, retry, or provider substitute. The native
+    // bridge requires a local route and returns only a signed host decision.
+    const envelope = await agent(task, { phase: request.stage === 'seed' ? 'Setup' : request.stage === 'finalize' ? 'Validate' : 'Optimize',
+      label: request.stage === 'seed' ? 'quality_stop:seed' : `quality_stop:${request.stage} r${request.round} l${request.look_index}`, schema: qualitySchema });
+    const decision = qualityVerify(envelope, QUALITY_STOP, task);
+    if (!decision) return null;
+    if (request.stage === 'seed') {
+      if (decision.seed_manifest_sha256 !== request.seed_manifest_sha256 || decision.deadline_epoch !== DEADLINE_EPOCH) return null;
+    } else if (decision.look_index !== request.look_index || decision.round !== request.round
+        || decision.deadline_epoch !== request.deadline_epoch) return null;
+    return decision;
+  } catch (_) { return null; }
+}
+let qualitySeed = null;
+
 phase('Setup');
 const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
     KERNEL_PATH_ORIG, EXP_ROOT, EVAL_DIR_OVERRIDE, KERNEL_NAME_HINT, TASK,
     WORKFLOW_DIR, SKILL_DIR: WORKFLOW_DIR,
     MODE, TARGET_LANGUAGE, OP_SPEC,
+    ...(QUALITY_STOP && QUALITY_STOP.seed_manifest_sha256 ? { REFERENCE_IO_MODE: 'pinned_regular_copy' } : {}),
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
   { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
 const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
+if (QUALITY_STOP && QUALITY_STOP.seed_manifest_sha256) {
+  qualitySeed = await qualityCheckpoint({ protocol: 'geak-fixed-floor-stop-v2', trial_id: QUALITY_STOP.trial_id,
+    stage: 'seed', candidate_root: CANONICAL, seed_manifest_sha256: QUALITY_STOP.seed_manifest_sha256 });
+  if (!qualitySeed || qualitySeed.seed_bound !== true) throw new Error('The trusted seed handoff failed.');
+}
 // `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
 // would otherwise ride into the session id and the stored record. The canonical id is folded store-
 // side (experience_store.remote_identity); this keeps the rest of the run calling it one name.
@@ -977,6 +1102,9 @@ let noImprove = 0;
 let bestPerCase = BASELINE_PER_CASE;
 let finalWinner = null;      // {geomean, arithmetic, per_case, patch, source} — also set by a warm-start adopt
 let roundsCommitted = 0;     // rounds this run actually landed; a warm-start adopt is NOT one of them
+let qualityLooks = 0;
+let qualityCertificate = null;
+let qualityFinal = null;
 const history = { insights: [], ledger: [], rounds: [], bottleneck_now: profileSummary ? profileSummary.bottleneck : 'unknown', suggest_next: '' };
 // One row per KB-seeded direction, joined against what the verifier measured (see the push site in
 // the round loop). Fed to update_experience and returned to the caller: a driver aggregating these
@@ -1641,6 +1769,40 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       schema: { type: 'object', additionalProperties: true,
         properties: { ok: { type: 'boolean' }, note: { type: 'string' } },
         required: ['ok'] } });
+  // END STORAGE RECLAIM
+
+  // The ordinary budget, deadline, and no-improvement checks retain priority.
+  // A look occurs only after round memory and completed storage reclaim.
+  if (QUALITY_STOP && QUALITY_STOP.stopping_enabled !== false && qualityLooks < 3 && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
+    const boundaryLeft = await secondsLeft(`quality-r${round}`);
+    if (boundaryLeft <= 0) {
+      deadlineHit = true;
+      break;
+    }
+    qualityLooks++;
+    const request = { protocol: 'geak-fixed-floor-stop-v2', trial_id: QUALITY_STOP.trial_id,
+      stage: 'boundary', look_index: qualityLooks, round, dispatched, budget: BUDGET,
+      no_improve: noImprove, max_no_improve: MAX_NO_IMPROVE, forced_replans: forcedReplans,
+      deadline_epoch: DEADLINE_EPOCH, candidate_root: CANONICAL };
+    const decision = CANONICAL === QUALITY_STOP.candidate_root ? await qualityCheckpoint(request) : null;
+    // Refresh the native deadline after measurement. The signed host decision
+    // also checks its own clock and the still-admissible native counters.
+    const afterLeft = await secondsLeft(`post-quality-r${round}`);
+    if (afterLeft <= 0) {
+      deadlineHit = true;
+      break;
+    }
+    if (decision && decision.certified === true) {
+      const consumption = await qualityCheckpoint({ ...request, stage: 'consume' });
+      if (consumption && consumption.certified === true && consumption.consumed === true
+          && consumption.snapshot_sha256 === decision.snapshot_sha256
+          && (!DEADLINE_EPOCH || consumption.issued_at < DEADLINE_EPOCH)) {
+        qualityCertificate = { request, decision, consumption };
+        log(`Round ${round}: the host certificate ended search with ${BUDGET - dispatched} direction units remaining.`);
+        break;
+      }
+    }
+  }
 }
 
 // ===========================================================================
@@ -1844,6 +2006,19 @@ ${warm_start.exp_dir ? ` \\\n  --parent ${JSON.stringify(warm_start.exp_dir)}` :
       : `[kb] experience not written: ${kb_written ? kb_written.reason : 'writer returned nothing'}`);
 }
 
+// Report, director validation, knowledge writes, and the ordinary final duties
+// run before this check. A changed final source invalidates the certificate.
+if (qualityCertificate) {
+  qualityFinal = await qualityCheckpoint({ ...qualityCertificate.request, stage: 'finalize',
+    final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+    director_final_patch: validation && typeof validation.final_patch === 'string' ? validation.final_patch : null,
+    export_root: `${EVAL_DIR}/optimized` });
+  if (!qualityFinal || qualityFinal.qualifying !== true
+      || qualityFinal.snapshot_sha256 !== qualityCertificate.decision.snapshot_sha256) {
+    qualityFinal = { qualifying: false, reason: 'final_source_or_authority_unconfirmed' };
+  }
+}
+
 // finalPrimary is the total vs the pristine baseline; when a warm-start patch was adopted, split out
 // the delta ABOVE it so a KB-derived gain is never reported as this run's own work.
 //
@@ -1885,12 +2060,19 @@ return {
   // so a parent-process death erased it for every kernel already done, and the realised window had
   // to be reconstructed from queue timestamps. It is the whole point of an enforced window that you
   // can tell a run that used its budget from one that gave up.
-  stopped_by: deadlineHit ? 'deadline'
+  stopped_by: qualityCertificate ? (qualityFinal && qualityFinal.qualifying === true
+    ? 'quality_certificate' : 'quality_certificate_invalidated') : deadlineHit ? 'deadline'
     : (dispatched >= BUDGET) ? 'budget'
     : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
     : 'tech_lead_stop',
   deadline_hit: deadlineHit,
   forced_replans: forcedReplans,
+  ...(QUALITY_STOP ? { quality_stop: { enabled: true, stopping_enabled: QUALITY_STOP.stopping_enabled !== false,
+    seed: qualitySeed, final_artifacts: { final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+      director_final_patch: validation && typeof validation.final_patch === 'string' ? validation.final_patch : null,
+      export_root: `${EVAL_DIR}/optimized` }, eligible_looks: qualityLooks,
+    certificate: qualityCertificate, final_check: qualityFinal,
+    qualifying: !!(qualityCertificate && qualityFinal && qualityFinal.qualifying === true) } } : {}),
   // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was
   // cited (an empty array is the finding: the KB was read and nothing in it was worth acting on).
   learned_citations: citations,
