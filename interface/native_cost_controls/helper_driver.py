@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .native_envelope import qualified_initial_messages, qualified_notice_text
+from .native_preamble import qualified_bash_warning
 from .system_envelope import normalized_system
 
 ROLES = {'clock_reader', 'warm_start_resolver', 'storage_reclaim',
@@ -165,6 +166,10 @@ class LocalHelperDriver:
     def verify(self, binding):
         check(binding == self.approved, 'binding_differs')
         check(binding['role'] in ROLES and binding.get('gate') is True, 'role_or_gate_unsupported')
+        warning = binding.get('native_warning_profile')
+        if warning is not None:
+            check(qualified_bash_warning(binding.get('native_shell')) == warning,
+                  'native_warning_runtime_changed')
         workspace = Path(binding['workspace'])
         check(not workspace.is_symlink() and str(workspace.resolve()) == binding['workspace'], 'workspace_changed')
         st = workspace.stat()

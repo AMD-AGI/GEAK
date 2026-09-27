@@ -30,6 +30,7 @@ from .helper_driver import (
     json_values_equal,
 )
 from .native_journal import NativeJournal
+from .native_preamble import qualified_bash_warning
 
 
 def normalized(label):
@@ -438,13 +439,16 @@ class NativeHelperRegistry:
         operation = digest({"session": self.session_id, "root_tool": self.root_tool, "root_task": self.root_task,
             "lane": node["phaseIndex"], "role": role, "slot": slot})
         stat = self.workspace.stat()
+        warning = qualified_bash_warning(self.native_shell) if role != "storage_reclaim" else None
         binding = {"operation_id": operation, "role": role, "gate": True,
             "command": source["command"], "command_sha256": hashlib.sha256(source["command"].encode()).hexdigest(),
             "schema": schemas[0], "schema_sha256": digest(schemas[0]), "prompt": prompt,
             "workspace": str(self.workspace), "workspace_identity": [stat.st_dev, stat.st_ino],
             "source_bindings": self.contract.source_bindings, "native_session": self.session_id,
             "native_shell": self.native_shell,
-            "completion_marker": source.get("completion_marker"), "native_preamble": None}
+            "completion_marker": source.get("completion_marker"),
+            "native_warning_profile": warning,
+            "native_preamble": warning["prefix"] if warning else None}
         if operation not in self.operations:
             self.operations[operation] = LocalHelperDriver(self.directory / "ledger", binding)
             self.operations[operation].attest_dispatch(self.contract.root_request, self.contract.root_request)

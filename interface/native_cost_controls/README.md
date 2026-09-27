@@ -144,6 +144,12 @@ The native CLI continues its normal disk transcript writes.
 The bridge uses a temporary local ledger and removes it when the client closes.
 It does not support resuming local operations across SDK sessions.
 The helper driver accepts at most 65,536 bytes of native stdout.
+It recognizes one measured Bash loader warning when the exact Bash and `libtinfo` files match their qualified hashes.
+The driver retains the complete raw output for continuation checks.
+The clock, resolver, citation, and experience projections can remove one exact leading warning.
+Changed warnings, repeated warnings, and additional text remain unsupported for those projections.
+The driver checks the runtime files again before local continuation.
+The storage projection retains its existing completion-marker contract.
 
 ## Validation and comparison limits
 

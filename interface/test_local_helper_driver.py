@@ -18,6 +18,7 @@ from interface.native_cost_controls.helper_driver import (
     json_values_equal,
     project,
 )
+from interface.native_cost_controls.native_preamble import BASH_LIBRARY_WARNING
 from interface.test_system_envelope import SYNTHETIC_SYSTEM, synthetic_system_policy
 
 
@@ -71,16 +72,16 @@ class HelperDriverTests(unittest.TestCase):
         self.system_policy.stop()
         self.temp.cleanup()
 
-    def complete_bash(self):
+    def complete_bash(self, stdout="42\n"):
         first = self.driver.response(self.body, self.binding)
         self.assertEqual(first["name"], "Bash")
         self.driver.before_bash(first["id"], first["input"])
-        native = {"stdout": "42\n", "stderr": "", "interrupted": False, "isImage": False}
+        native = {"stdout": stdout, "stderr": "", "interrupted": False, "isImage": False}
         self.driver.capture_bash(first["id"], native)
         self.body["messages"].append({"role": "assistant", "content": [deepcopy(first)]})
         self.body["messages"].append(
             {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": first["id"], "content": "42\n", "is_error": False}
+                {"type": "tool_result", "tool_use_id": first["id"], "content": stdout, "is_error": False}
             ]}
         )
         return first
@@ -102,6 +103,67 @@ class HelperDriverTests(unittest.TestCase):
         self.assertEqual(json.loads(self.driver.path.read_bytes())["stage"], "ACKNOWLEDGED")
         self.finish_native({"epoch": 42})
         self.assertEqual(json.loads(self.driver.path.read_bytes())["stage"], "COMPLETE")
+
+    def test_qualified_warning_preserves_raw_continuation_and_terminal_requirement(self):
+        self.binding["native_preamble"] = BASH_LIBRARY_WARNING
+        raw = BASH_LIBRARY_WARNING + "42\n"
+        self.complete_bash(raw)
+        state = json.loads(self.driver.path.read_bytes())
+        self.assertEqual(state["native_result"]["stdout"], raw)
+        self.assertTrue(state["recognized_native_preamble"])
+        result = self.driver.response(self.body, self.binding)
+        self.assertEqual(result["input"], {"epoch": 42})
+        self.driver.accept(result["id"], result["input"])
+        self.assertEqual(json.loads(self.driver.path.read_bytes())["stage"], "ACKNOWLEDGED")
+        self.finish_native(result["input"])
+        self.assertEqual(json.loads(self.driver.path.read_bytes())["stage"], "COMPLETE")
+
+    def test_removing_the_warning_from_native_continuation_is_a_conflict(self):
+        self.binding["native_preamble"] = BASH_LIBRARY_WARNING
+        self.complete_bash(BASH_LIBRARY_WARNING + "42\n")
+        self.body["messages"][-1]["content"][0]["content"] = "42\n"
+        with self.assertRaises(Unsupported):
+            self.driver.response(self.body, self.binding)
+        state = json.loads(self.driver.path.read_bytes())
+        self.assertEqual(state["stage"], "UNKNOWN")
+        self.assertEqual(state["bash_emissions"], 1)
+
+    def test_changed_warning_runtime_cannot_repeat_a_command(self):
+        profile = {"prefix": BASH_LIBRARY_WARNING}
+        self.binding.update(native_warning_profile=profile, native_preamble=BASH_LIBRARY_WARNING, native_shell="/bin/bash")
+        with patch("interface.native_cost_controls.helper_driver.qualified_bash_warning", return_value=profile):
+            self.complete_bash(BASH_LIBRARY_WARNING + "42\n")
+        with patch("interface.native_cost_controls.helper_driver.qualified_bash_warning", return_value=None), self.assertRaises(Unsupported):
+            self.driver.response(self.body, self.binding)
+        state = json.loads(self.driver.path.read_bytes())
+        self.assertEqual(state["stage"], "UNKNOWN")
+        self.assertEqual(state["bash_emissions"], 1)
+
+    def test_exact_warning_projects_each_nonstorage_role_without_changing_raw_output(self):
+        cases = [("clock_reader", "42\n", {"epoch": 42}),
+                 ("warm_start_resolver", '{"candidates":[]}\n', {"candidates": []}),
+                 ("citation_writer", '{"citations":2}\n', {"filed": 2}),
+                 ("experience_writer", '{"written":true}\n', {"written": True})]
+        for role, text, expected in cases:
+            with self.subTest(role=role):
+                binding = {**self.binding, "role": role, "native_preamble": BASH_LIBRARY_WARNING}
+                native = {"stdout": BASH_LIBRARY_WARNING + text, "stderr": "", "interrupted": False}
+                original = deepcopy(native)
+                self.assertEqual(project(binding, native), expected)
+                self.assertEqual(native, original)
+
+    def test_near_repeated_and_additional_warning_text_stays_unsupported(self):
+        binding = {**self.binding, "role": "warm_start_resolver", "native_preamble": BASH_LIBRARY_WARNING}
+        value = '{"candidates":[]}\n'
+        cases = [BASH_LIBRARY_WARNING.replace("no version", "other version") + value,
+                 BASH_LIBRARY_WARNING.rstrip() + value,
+                 BASH_LIBRARY_WARNING + BASH_LIBRARY_WARNING + value,
+                 "extra feedback\n" + BASH_LIBRARY_WARNING + value,
+                 BASH_LIBRARY_WARNING + "extra feedback\n" + value,
+                 BASH_LIBRARY_WARNING + value + "extra feedback\n"]
+        for text in cases:
+            with self.subTest(text=text), self.assertRaises((Unsupported, ValueError)):
+                project(binding, {"stdout": text, "stderr": "", "interrupted": False})
 
     def test_completed_operation_replays_value_without_another_bash(self):
         self.complete_bash()

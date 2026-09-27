@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import patch
 
+from interface.native_cost_controls import native_preamble
 from interface.native_cost_controls.helper_driver import Unsupported
 from interface.native_cost_controls.native_helpers import (
     HelperMirror,
@@ -20,6 +21,56 @@ from interface.native_cost_controls.native_helpers import (
 )
 from interface.test_shared_tool_cache import request
 from interface.test_system_envelope import synthetic_system_policy
+
+
+class NativeWarningProfileTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.shell = self.root / "bash"
+        self.library = self.root / "libtinfo.so"
+        self.alias = self.root / "libtinfo.so.6"
+        self.shell.write_bytes(b"qualified fixture shell")
+        self.library.write_bytes(b"qualified fixture library")
+        self.alias.symlink_to(self.library)
+        assets = tuple((str(path), str(path.resolve()), hashlib.sha256(path.read_bytes()).hexdigest())
+                       for path in (self.shell, self.alias))
+        self.assets = patch.object(native_preamble, "_ASSETS", assets)
+        self.assets.start()
+
+    def tearDown(self):
+        self.assets.stop()
+        self.temporary.cleanup()
+
+    def test_exact_runtime_files_qualify_the_exact_warning(self):
+        profile = native_preamble.qualified_bash_warning("/bin/bash")
+        self.assertEqual(profile["prefix"], native_preamble.BASH_LIBRARY_WARNING)
+        self.assertEqual(profile["native_shell"], "/bin/bash")
+        self.assertEqual(profile["files"][str(self.alias)]["resolved_path"], str(self.library))
+
+    def test_other_shell_and_changed_runtime_bytes_do_not_qualify(self):
+        self.assertIsNone(native_preamble.qualified_bash_warning("/usr/bin/bash"))
+        self.library.write_bytes(b"changed library")
+        self.assertIsNone(native_preamble.qualified_bash_warning("/bin/bash"))
+
+    def test_retargeted_alias_missing_file_and_read_error_do_not_qualify(self):
+        other = self.root / "other.so"
+        other.write_bytes(self.library.read_bytes())
+        self.alias.unlink()
+        self.alias.symlink_to(other)
+        self.assertIsNone(native_preamble.qualified_bash_warning("/bin/bash"))
+        self.shell.unlink()
+        self.assertIsNone(native_preamble.qualified_bash_warning("/bin/bash"))
+        with patch.object(Path, "resolve", side_effect=RuntimeError("fixture loop")):
+            self.assertIsNone(native_preamble.qualified_bash_warning("/bin/bash"))
+
+    def test_nonregular_and_oversized_assets_do_not_qualify(self):
+        self.shell.unlink()
+        self.shell.mkdir()
+        self.assertIsNone(native_preamble.qualified_bash_warning("/bin/bash"))
+        self.shell.rmdir()
+        self.shell.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+        self.assertIsNone(native_preamble.qualified_bash_warning("/bin/bash"))
 
 
 @dataclass
