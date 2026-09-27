@@ -38,6 +38,12 @@ The native temporary path plus `/claude-<UID>` must contain at most 44 bytes.
 The builder pins `TMPDIR` and `CLAUDE_CODE_TMPDIR` to that native root.
 It preserves `HOME` and masks the existing home path with a fresh directory.
 
+The boundary binds `options.env["CLAUDE_CONFIG_DIR"]` to the actor's native configuration directory.
+That binding aligns the SDK transcript mirror with the native CLI.
+Each actor uses its own binding.
+The boundary preserves unrelated environment options and the caller's process environment.
+The documented composition requires no host `CLAUDE_CONFIG_DIR` setting.
+
 `FrozenPairedEvaluator` implements the frozen GPT-OSS scorer contract.
 It checks the source, task, scorer, image, bucket weights, process exit, parity, and runtime closure.
 The caller supplies a `ProtectedPairedRunner` for its admitted runtime.

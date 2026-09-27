@@ -518,7 +518,10 @@ class DockerActorBoundary(ExecutionBoundary):
                 and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", options.session_id),
                 "isolation_native_session_not_predeclared")
         self._native_session_id = options.session_id
-        return sdk_options(options, cli_path=path)
+        prepared = sdk_options(options, cli_path=path)
+        environment = dict(prepared.env or {})
+        environment["CLAUDE_CONFIG_DIR"] = str(self.journal_root.parent)
+        return replace(prepared, env=environment)
 
     def native_started(self):
         """Pin the real native CLI before the SDK submits the first query."""

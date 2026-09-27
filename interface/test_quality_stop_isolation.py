@@ -8,6 +8,7 @@ path, lifecycle, source, and refusal contracts against later code changes.
 """
 
 import ast
+import asyncio
 import builtins
 import io
 import json
@@ -44,6 +45,7 @@ class Options:
     disallowed_tools: list = field(default_factory=list)
     strict_mcp_config: bool = False
     cli_path: str | None = None
+    env: dict = field(default_factory=dict)
 
 
 class SyntheticBoundary(isolation.DockerActorBoundary):
@@ -279,10 +281,95 @@ class IsolationTests(unittest.TestCase):
         self.assertTrue(prepared.strict_mcp_config)
         self.assertEqual(boundary._native_session_id, SESSION)
         self.assertEqual(supplied.tools, [])
+        self.assertEqual(prepared.env["CLAUDE_CONFIG_DIR"], str(boundary.journal_root.parent))
+        self.assertEqual(supplied.env, {})
         with self.assertRaisesRegex(StopRejected, "session_not_predeclared"):
             boundary.prepare_sdk_options(Options(cwd=supplied.cwd, session_id=None))
         with self.assertRaisesRegex(StopRejected, "sdk_settings_unsupported"):
             isolation.sdk_options(Options(cwd=supplied.cwd, setting_sources=["user"]), cli_path=boundary.sdk_wrapper_path)
+
+    def test_sdk_mirror_directory_is_per_actor_and_preserves_caller_environment(self):
+        first = self.make()
+        other = type(self)(self._testMethodName)
+        other.setUp()
+        self.addCleanup(other.doCleanups)
+        second = other.make()
+        for parent_directory in (None, str(self.root / "unrelated_parent_config")):
+            with self.subTest(parent_directory=parent_directory), patch.dict(os.environ):
+                if parent_directory is None:
+                    os.environ.pop("CLAUDE_CONFIG_DIR", None)
+                else:
+                    os.environ["CLAUDE_CONFIG_DIR"] = parent_directory
+                parent = dict(os.environ)
+                environment = {"UNRELATED_OPTION": "preserved", "CLAUDE_CONFIG_DIR": str(self.root / "unrelated_option_config")}
+                prepared = []
+                for boundary in (first, second):
+                    supplied = Options(cwd=str(boundary.workspace_mount_root), env=environment)
+                    result = boundary.prepare_sdk_options(supplied)
+                    self.assertEqual(result.env, {**environment, "CLAUDE_CONFIG_DIR": str(boundary.journal_root.parent)})
+                    self.assertIsNot(result.env, environment)
+                    self.assertEqual(supplied.env, environment)
+                    prepared.append(result)
+                self.assertNotEqual(prepared[0].env["CLAUDE_CONFIG_DIR"], prepared[1].env["CLAUDE_CONFIG_DIR"])
+                self.assertEqual(environment["CLAUDE_CONFIG_DIR"], str(self.root / "unrelated_option_config"))
+                self.assertEqual(dict(os.environ), parent)
+
+    def test_actual_sdk_mirror_accepts_each_actor_without_parent_configuration(self):
+        try:
+            from claude_agent_sdk import ClaudeAgentOptions
+            from claude_agent_sdk._internal.session_resume import build_mirror_batcher
+            from claude_agent_sdk._internal.transcript_mirror_batcher import (
+                _MirrorEntry,
+            )
+        except ImportError:
+            self.skipTest("The native SDK mirror API is not installed.")
+        first = self.make()
+        other = type(self)(self._testMethodName)
+        other.setUp()
+        self.addCleanup(other.doCleanups)
+        second = other.make()
+
+        class Store:
+            def __init__(self):
+                self.calls = []
+
+            async def append(self, key, entries):
+                self.calls.append((key, entries))
+
+        async def check(boundary):
+            environment = {"UNRELATED_OPTION": "preserved", "CLAUDE_CONFIG_DIR": str(self.root / "unrelated_option_config")}
+            supplied = ClaudeAgentOptions(cwd=str(boundary.workspace_mount_root), session_id=SESSION,
+                                          setting_sources=[], env=environment)
+            prepared = boundary.prepare_sdk_options(supplied)
+            store = Store()
+            errors = []
+
+            async def on_error(key, error):
+                errors.append((key, error))
+
+            batcher = build_mirror_batcher(store, None, prepared.env, on_error, flush_mode="eager")
+            self.assertEqual(batcher.projects_dir, str(boundary.journal_root))
+            path = boundary.journal_root / "project" / SESSION / "subagents/workflows/wf_fixture/agent-fixture.jsonl"
+            entries = [{"type": "user", "parentUuid": None, "message": {"content": "Synthetic initial task"}}]
+            failures = []
+            await batcher._do_flush([_MirrorEntry(str(path), entries, len(json.dumps(entries)))], failures)
+            self.assertEqual(errors, [])
+            self.assertEqual(failures, [])
+            self.assertEqual(store.calls, [({"project_key": "project", "session_id": SESSION,
+                                           "subpath": "subagents/workflows/wf_fixture/agent-fixture"}, entries)])
+            self.assertEqual(prepared.env["UNRELATED_OPTION"], "preserved")
+            self.assertEqual(supplied.env, environment)
+
+        for parent_directory in (None, str(self.root / "unrelated_parent_config")):
+            with self.subTest(parent_directory=parent_directory), patch.dict(os.environ):
+                if parent_directory is None:
+                    os.environ.pop("CLAUDE_CONFIG_DIR", None)
+                else:
+                    os.environ["CLAUDE_CONFIG_DIR"] = parent_directory
+                parent = dict(os.environ)
+                for boundary in (first, second):
+                    asyncio.run(check(boundary))
+                self.assertEqual(dict(os.environ), parent)
 
     def test_private_sdk_wrapper_cannot_change_or_have_a_second_link(self):
         boundary = self.make()
