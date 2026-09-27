@@ -207,6 +207,18 @@ The initial evaluation directory must remain absent until native setup creates i
 The candidate must contain a clean committed Git tree and a local `.git` directory.
 The source census rejects untracked files, symbolic links, hard links, submodules, and changed executable modes.
 Only the source paths named by `SelectedArtifacts.files` may change from the trusted seed.
+
+The quality-stop workflow gives both arms the same runtime contract.
+Create temporary helpers in a unique directory under the isolated Bash `/tmp`.
+Save persistent profile records in the declared `EVAL_DIR`.
+Keep helpers and profile output outside every candidate workspace, including ignored directories.
+Keep benchmark working directories, interpreters, and source bindings unchanged.
+Do not add helper directories to `PATH` or `PYTHONPATH` for benchmark or correctness commands.
+Do not replace `rocminfo` or substitute constants for measured device information.
+Preserve the exact error when a required runtime import or device query fails.
+Report that failure through the role result.
+The caller must qualify changed runtime bindings through the actual failing import path before it admits another trial.
+Prompt instructions do not replace the strict source census or runtime checks.
 The controller checks immutable seed files even when the worktree contains uncommitted changes.
 The controller compares raw blobs and index entries. It does not execute Git clean filters through `git status`.
 The supported Git layout comes from an isolated `git init` repository.

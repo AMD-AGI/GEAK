@@ -745,7 +745,30 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+
+// BEGIN QUALITY RUNTIME CONTRACT
+function qualityRuntimeContract() {
+  if (!QUALITY_STOP) return '';
+  return `
+
+## Quality-stop runtime contract
+The host inventories every candidate file, including ignored files.
+Keep runtime helpers, executable wrappers, and profile output outside every candidate workspace.
+Use a unique directory under the isolated Bash /tmp for temporary helpers.
+Use the declared EVAL_DIR for persistent profile records.
+Keep the benchmark working directory, interpreter, and source bindings unchanged.
+Do not add a helper directory to PATH or PYTHONPATH for a benchmark or correctness command.
+Do not create a replacement rocminfo or substitute constants for measured device information.
+Do not change device mappings or runtime mounts.
+If a required runtime import or device query fails, preserve its exact error in EVAL_DIR.
+Report the runtime failure through your role result.
+Do not claim a reliable baseline or a completed profile after that failure.
+These rules also apply when stopping_enabled is false.`;
+}
+// END QUALITY RUNTIME CONTRACT
+
 async function agentT(p, o) {
+  p += qualityRuntimeContract();
   const label = (o && o.label) ? o.label : 'agent';
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     try {

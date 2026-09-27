@@ -18,7 +18,8 @@ const input=JSON.parse(fs.readFileSync(0,'utf8'));
 const {publicKey,privateKey}=crypto.generateKeyPairSync('rsa',{modulusLength:2048});
 const key={...publicKey.export({format:'jwk'}),alg:'RS256',ext:true,key_ops:['verify']};
 const config={protocol:'geak-fixed-floor-stop-v2',trial_id:'cpu-lane-fixture-20260927',public_key:key,candidate_root:'/fixture/workspace'};
-const calls=[],logs=[];
+const calls=[],logs=[],prompts=[];
+if(input.control) config.stopping_enabled=false;
 const deadline=Math.floor(Date.now()/1000)+3600;
 const args={kernel_path:'/fixture/task',workflow_dir:input.root+'/kernel_workflow',warm_start:'off',
   budget:6,max_no_improve:input.no_improve?2:100,update_experience:'off',use_learned_kb:false,
@@ -27,7 +28,7 @@ const args={kernel_path:'/fixture/task',workflow_dir:input.root+'/kernel_workflo
 if(input.wrong_source) config.candidate_root='/fixture/other';
 function signed(value){const payload=JSON.stringify(value);return {payload,signature:crypto.sign('sha256',Buffer.from(payload,'ascii'),privateKey).toString('base64')};}
 async function agent(task,options){
-  const label=options.label; calls.push(label);
+  const label=options.label; calls.push(label); prompts.push({label,task});
   const match=label.match(/(?:r|r=)([0-9]+)/),round=match?Number(match[1]):1;
   const speed=input.no_improve?0.9:1+round*0.1;
   const row={name:'synthetic_case',baseline_ms:1,optimized_ms:1/speed,speedup:speed};
@@ -74,7 +75,7 @@ async function evaluate(scriptPath,childArgs){
    pipeline:async(values,...stages)=>Promise.all(values.map(async value=>{for(const stage of stages)value=await stage(value);return value;}))});
  return await new vm.Script('(async()=>{'+source+'\n})()').runInContext(context,{timeout:3000});
 }
-evaluate(input.root+'/kernel_workflow/kernel_workflow.js',args).then(result=>console.log(JSON.stringify({result,calls,logs})))
+evaluate(input.root+'/kernel_workflow/kernel_workflow.js',args).then(result=>console.log(JSON.stringify({result,calls,logs,prompts})))
  .catch(error=>{console.error(error.stack);process.exitCode=1;});
 """
 
@@ -86,6 +87,29 @@ def lane(**case):
 
 
 class LaneTests(unittest.TestCase):
+    def test_runtime_contract_covers_both_arms_and_preserves_local_requests(self):
+        contract = '## Quality-stop runtime contract'
+        runs = [lane(certify_at=1), lane(certify_at=1, control=True)]
+        for value in runs:
+            for prompt in value['prompts']:
+                if prompt['label'].startswith('quality_stop:'):
+                    self.assertNotIn(contract, prompt['task'])
+                    prefix, request = prompt['task'].split('\n', 1)
+                    self.assertEqual(prefix, 'GEAK_QUALITY_STOP_V2')
+                    self.assertIsInstance(json.loads(request), dict)
+                else:
+                    self.assertEqual(prompt['task'].count(contract), 1)
+                    self.assertIn('isolated Bash /tmp', prompt['task'])
+                    self.assertIn('Do not create a replacement rocminfo', prompt['task'])
+        for label in ('benchmark_engineer', 'profile_engineer:baseline'):
+            tasks = [next(row['task'] for row in value['prompts'] if row['label'] == label) for value in runs]
+            self.assertEqual(tasks[0], tasks[1])
+
+    def test_runtime_contract_is_absent_outside_quality_stop(self):
+        value = lane(off=True)
+        self.assertTrue(value['prompts'])
+        self.assertFalse(any('## Quality-stop runtime contract' in row['task'] for row in value['prompts']))
+
     def test_disabled_path_retains_budget_stop_and_no_new_calls(self):
         value = lane(off=True)
         self.assertEqual(value["result"]["stopped_by"], "budget")
