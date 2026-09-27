@@ -162,7 +162,7 @@ A floor certificate cannot replace the final comparison.
 The lane places a checkpoint after round memory and storage reclaim.
 Budget, deadline, and no-improvement rules retain priority.
 The lane preserves the existing forced-replan behavior.
-The lane refreshes its deadline after the checkpoint.
+The lane rechecks its original deadline after the checkpoint.
 A qualifying exit requires remaining native search capacity.
 After a positive decision, the lane requests a signed `consume` reply.
 This stage performs no timing process.
@@ -336,7 +336,9 @@ The host requires this exact rule and accepts at most six attempts, as the pinne
 It rejects arbitrary suffixes, missing suffixes, and later raw-label changes.
 Each retirement proof records `logical_label` and both unchanged raw nodes.
 Role checks use the verified logical label, including seed setup and storage reclaim.
-The raw labels remain present in the final census and every cost join.
+The final census preserves raw labels.
+Generation joins use verified logical labels.
+Every generation and cost join preserves its agent identity.
 
 The transcript reader uses protected directory descriptors and `O_NOFOLLOW`.
 It requires stable regular files, the expected owner, one link, complete JSONL, and unchanged earlier bytes.
@@ -380,10 +382,14 @@ The final reader must reject scientific success after any denial.
 The reader must also retain every started attempt, raw journal row, recorder attempt, and charge.
 Unknown charges remain unknown.
 
-At checkpoints and final closure, the host rechecks the protected old transcript and rejects any later old journal result.
-The current nodes require successful native results.
+At checkpoints and final closure, the host rechecks the protected old transcript.
+The host rejects any later old journal result.
+At a checkpoint, every other current node must have a successful native result.
+At final closure, every current node must have a successful native result.
 Retired nodes remain a separate population with proof-qualified host fences.
-The generation and cost joins require the union of both populations.
+The census retains both populations.
+Generation and cost joins include every provider request from either population.
+The ledger retains proven local refusals without inventing provider attempts.
 
 ## Native failure evidence
 
