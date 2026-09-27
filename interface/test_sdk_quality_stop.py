@@ -46,6 +46,7 @@ class Options:
 class Matcher:
     matcher: str = None
     hooks: list = field(default_factory=list)
+    timeout: float = None
 
 
 class Client:
@@ -62,7 +63,8 @@ class Client:
         self.closed = True
         return False
 
-    async def query(self, prompt):
+    async def query(self, prompt, session_id="default"):
+        assert session_id == "default"
         return "queried: " + prompt
 
     async def receive_messages(self):
@@ -200,10 +202,12 @@ class QualityStopSDKTests(unittest.IsolatedAsyncioTestCase):
             async with self.wrapper(hook_matcher_factory=None):
                 self.assertIsInstance(self.clients[0].options.hooks["PreToolUse"][0], Matcher)
 
-    def test_unentered_wrapper_does_not_expose_client_attributes(self):
+    async def test_unentered_wrapper_rejects_query_and_does_not_expose_client_attributes(self):
         wrapper = self.wrapper()
+        with self.assertRaisesRegex(StopRejected, "native_sdk_not_entered"):
+            await wrapper.query("Synthetic root query.")
         with self.assertRaises(AttributeError):
-            _ = wrapper.query
+            _ = wrapper.unsupported_attribute
         self.assertEqual(self.clients, [])
         self.assertEqual(self.proxies, [])
 

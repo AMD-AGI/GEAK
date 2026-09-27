@@ -280,6 +280,121 @@ It waits at most ten seconds for pending bridge requests to reach a terminal eve
 It seals new bridge sends before it captures the final bytes.
 The final reader must join this census with the complete recorder attempt population.
 
+## Native replacement contract
+
+The prospective replacement path supports one narrow SDK interruption sequence.
+It uses host-enforced retirement, which does not establish OS-process termination.
+Whole-actor exclusion, source checks, GPU checks, final scoring, and owned process closure remain mandatory.
+
+The host first binds the root prompt through `QualityStopSDKClient.query()`.
+This path accepts one string prompt and the default query session.
+Headerless model requests must retain that exact initial prompt and its qualified native context.
+The qualified SDK changes its known system notice from a cached text-block list to a string during continuation.
+The host normalizes only that known representation for comparison.
+It forwards the original request bytes unchanged.
+The SDK can send one initial `HEAD /api/hello` request.
+The proxy adds the configured upstream base path before the transport checks this exact logical path.
+This request must contain no body, query, fragment, or native identity header.
+It must precede every provider forward and the root workflow tool.
+The host rechecks this bootstrap contract under the forwarding lock.
+Other headerless endpoints remain unsupported.
+
+The host binds root tool hooks to exact IDs and inputs from trusted root `AssistantMessage` events.
+The Workflow outcome hook can add its resolved `script` field.
+The host accepts that field only when it equals the pinned workflow source bytes.
+A hook can wait asynchronously when its root message arrives later.
+Every hook identity wait uses at most ten seconds, including a pending replacement.
+The SDK receives the matcher setting `timeout=30`.
+The CPU qualification does not establish an enforced native deadline for that setting.
+An expired identity wait returns an explicit denial and latches failure through the runtime's own ten-second limit.
+Every ordinary pre-hook exception also returns explicit denial and latches failure.
+This includes failures during tool-ID extraction and worker startup.
+The native callback adapter can otherwise replace a callback error with an empty reply that supplies no denial.
+Every ordinary post-hook exception latches an unknown outcome, including an error after removal of the active operation.
+An unidentified child hook cannot acquire root authority.
+Root task inspection does not enter the effectful tool census.
+Every child tool, including `TaskOutput`, `TaskList`, and `TaskGet`, remains active until its matching outcome hook.
+
+The host admits a replacement only when all these conditions hold:
+
+1. The old and new nodes use the same phase, index, and verified logical label.
+2. The new attempt number equals the old attempt number plus one.
+3. Both nodes use the observed `start` or `progress` state.
+4. The agents differ, and neither node is a checkpoint agent.
+5. Both initial tasks, prompt IDs, sessions, run descriptors, and journal keys match.
+6. The protected old transcript ends with the exact SDK interruption control frame.
+7. The control frame names the preceding native frame through `parentUuid`.
+8. Every recorded old bridge request contains a terminal event.
+9. No known old tool or background task remains active.
+10. No old `StructuredOutput` operation completed, and no old journal result exists.
+
+The host preserves each raw native label.
+The initial label defines the logical label for its phase and index.
+The pinned native source emits `logical_label + " (retry N)"` for attempt `N + 1`.
+That suffix remains present in progress and terminal events.
+The host requires this exact rule and accepts at most six attempts, as the pinned source permits five retries.
+It rejects arbitrary suffixes, missing suffixes, and later raw-label changes.
+Each retirement proof records `logical_label` and both unchanged raw nodes.
+Role checks use the verified logical label, including seed setup and storage reclaim.
+The raw labels remain present in the final census and every cost join.
+
+The transcript reader uses protected directory descriptors and `O_NOFOLLOW`.
+It requires stable regular files, the expected owner, one link, complete JSONL, and unchanged earlier bytes.
+Ordinary tool text cannot supply an interruption control frame.
+Embedded timestamps cannot establish when the host observed the frame.
+
+The host allows at most 600 seconds for a pending replacement proof.
+The original trial deadline can shorten this wait.
+The host does not reset the SDK stall timer, trial clock, pair deadline, or cost limits.
+The ordinary identity wait remains ten seconds.
+The successor remains unforwarded until the proof passes.
+A timeout latches failure.
+A successor can change again while its predecessor remains pending.
+The host retains the complete attempt chain and permanently blocks each superseded pending identity from forwarding.
+Its waiting model requests close locally with `native_pending_successor_superseded` and both attempt flags set to `false`.
+This narrow refusal does not latch failure.
+Every ancestor still needs its full retirement proof before the latest successor can proceed.
+The host installs the ancestor fences in attempt order under the shared lock.
+An intermediate tool admission remains disqualifying.
+
+`NativeProducerCensus.condition` protects retirement, tool admission, and bridge forwarding with one shared lock.
+The host records the proof before it permanently fences the old identity and admits the successor.
+An old request with only a `started` event still blocks retirement.
+A durable ledger failure prevents successor admission.
+The bridge route remains unclassified until forwarding admission succeeds.
+
+The host writes `native_retirements.jsonl` in the private controller directory.
+Each fence records the old and new nodes, initial hashes, task hash, prompt ID, journal key, and protected transcript bytes.
+It also records the exact bridge prefix and the sorted old request IDs.
+`old_unforwarded_request_ids` identifies the exact local refusals for superseded pending attempts.
+The reader must reject every other two-event bridge refusal.
+The proof labels its activity evidence `trusted_host_state_under_shared_admission_lock`.
+The empty activity arrays attest to the trusted host state under that lock.
+They do not reconstruct the complete hook history.
+The signed census and source hashes bind this attestation for the final reader.
+
+The host rejects every later old model request and every later old tool before admission.
+It records `denied_model` or `denied_tool` and latches failure.
+It does not invent completed tools for denied hooks.
+The final reader must reject scientific success after any denial.
+The reader must also retain every started attempt, raw journal row, recorder attempt, and charge.
+Unknown charges remain unknown.
+
+At checkpoints and final closure, the host rechecks the protected old transcript and rejects any later old journal result.
+The current nodes require successful native results.
+Retired nodes remain a separate population with proof-qualified host fences.
+The generation and cost joins require the union of both populations.
+
+## Native failure evidence
+
+The census latches its first failure without resetting that latch.
+It writes `native_census_first_failure.json` once when the private state directory permits the write.
+The record preserves the leaf error code, trigger identity, current nodes, pending replacements, and known activity.
+The record hashes task and tool payloads instead of copying possible credential text.
+The writer uses exclusive creation, `O_NOFOLLOW`, mode `0600`, and file and directory synchronization.
+It preserves any existing diagnostic file.
+A diagnostic write error cannot clear or replace the census failure.
+
 ## Recorder contract
 
 The private bridge ledger records local replies and scientific forwards in `controller.state_dir/bridge.jsonl`.

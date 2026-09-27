@@ -49,7 +49,7 @@ class QualityStopSDKClient:
         hooks = dict(prepared.hooks or {})
         for event, callback in (("PreToolUse", self.registry.pre), ("PostToolUse", self.registry.post),
                                 ("PostToolUseFailure", self.registry.post)):
-            hooks[event] = [factory(matcher=".*", hooks=[callback])]
+            hooks[event] = [factory(matcher=".*", hooks=[callback], timeout=30)]
         options = replace(prepared, session_id=session, hooks=hooks,
                           session_store=HelperMirror(self.registry, prepared.session_store), session_store_flush="eager")
         def proxy(endpoint, _policy, *, enabled):
@@ -92,6 +92,12 @@ class QualityStopSDKClient:
         if self._entered is None:
             raise AttributeError(name)
         return getattr(self._entered, name)
+
+    async def query(self, prompt, session_id="default"):
+        """Pin the single host root prompt before native inference can start."""
+        require(self._entered is not None, "native_sdk_not_entered")
+        self.registry.bind_root_prompt(prompt, session_id)
+        return await self._entered.query(prompt, session_id=session_id)
 
     async def receive_messages(self):
         async for message in self._entered.receive_messages():

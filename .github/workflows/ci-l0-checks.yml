@@ -104,6 +104,7 @@ jobs:
             interface/test_quality_stop_stats.py \
             interface/test_quality_stop_controller.py \
             interface/test_quality_stop_native.py \
+            interface/test_quality_stop_retirement.py \
             interface/test_quality_stop_envelope.py \
             interface/test_quality_stop_evaluator.py \
             interface/test_quality_stop_isolation.py \

@@ -62,6 +62,13 @@ class UserMessage:
     parent_tool_use_id: object = None
 
 
+@dataclass
+class AssistantMessage:
+    content: list = field(default_factory=list)
+    parent_tool_use_id: object = None
+    session_id: str = "stop-session"
+
+
 class Controller:
     """Keep the test independent of timing, signing, and GPU adapters."""
 
@@ -101,6 +108,7 @@ class NativeFixture:
             "quality_stop": deepcopy(self.controller.public_config)}}
         self.registry = NativeProducerCensus(session_id="stop-session", root_request=self.request,
             source_root=self.source, workspace=self.root, controller=self.controller, wait_seconds=0)
+        self.registry.bind_root_prompt("Synthetic host root prompt.")
         self.task = PREFIX + canonical({"protocol": PROTOCOL, "trial_id": "fixture_trial_001",
             "stage": "boundary", "look_index": 1, "round": 1, "dispatched": 2,
             "budget": 6, "no_improve": 0, "max_no_improve": 2, "forced_replans": 0,
@@ -127,6 +135,7 @@ class NativeFixture:
                 response={"stdout": "STORAGE_RECLAIM_DONE round=1\n", "stderr": "", "interrupted": False})
 
     def start(self):
+        self.registry.observe(AssistantMessage(content=[{"id": "root-tool", "name": "Workflow", "input": self.request}]))
         self.hook("PreToolUse", "Workflow", self.request, "root-tool")
         self.registry.observe(TaskStartedMessage())
         self.registry.observe(self.root_result())
@@ -365,7 +374,7 @@ class NativeCensusTests(unittest.TestCase):
             self.fixture.response()
         self.assertEqual(self.registry.error, "native_census_event_conflict")
         self.assertEqual(self.registry.emissions["checkpoint"], {"pending": True, "accepted": False})
-        with self.rejected("checkpoint_continuation_forbidden"):
+        with self.rejected("native_census_unavailable"):
             self.fixture.response()
 
     def test_event_lock_is_released_during_controller_measurement(self):
@@ -425,7 +434,10 @@ class NativeCensusTests(unittest.TestCase):
         self.assertEqual(self.fixture.controller.calls, [])
 
     def test_ordinary_scientific_request_retains_provider_path(self):
-        self.assertIsNone(self.registry.response([], b'{"messages":[]}'))
+        root = {"messages": [{"role": "user", "content": [{"type": "text", "text": self.registry.root_prompt}]}]}
+        self.assertIsNone(self.registry.response([], canonical(root).encode()))
+        with self.rejected("native_root_input_changed"):
+            self.registry.response([], b'{"messages":[]}')
         headers = [(name, "engineer" if name == "x-claude-code-agent-id" else value)
                    for name, value in self.fixture.headers]
         self.assertIsNone(self.registry.response(headers, b'{"messages":[]}'))
@@ -631,8 +643,10 @@ class NativeCensusTests(unittest.TestCase):
 
     def test_native_task_inspection_does_not_create_producers(self):
         for name in ("TaskOutput", "TaskList", "TaskGet"):
-            self.fixture.hook("PreToolUse", name, {}, "inspect", None)
-            self.fixture.hook("PostToolUse", name, {}, "inspect", None)
+            identity = "inspect-" + name
+            self.registry.observe(AssistantMessage(content=[{"id": identity, "name": name, "input": {}}]))
+            self.fixture.hook("PreToolUse", name, {}, identity, None)
+            self.fixture.hook("PostToolUse", name, {}, identity, None)
         self.assertEqual(self.registry.tools, {})
         self.assertIsNone(self.registry.error)
 
@@ -671,6 +685,82 @@ class NativeCensusTests(unittest.TestCase):
         self.registry.completed_tools["duplicate"] = deepcopy(self.registry.completed_tools["reclaim-tool"])
         with self.rejected("storage_reclaim_execution_missing_or_duplicate"):
             self.registry.assert_quiescent("checkpoint")
+
+
+class NativeFailureEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.fixture = NativeFixture(self.temporary.name)
+        self.registry = self.fixture.registry
+        self.directory = Path(self.temporary.name) / "private_controller"
+        self.directory.mkdir(mode=0o700)
+        self.fixture.controller.state_dir = self.directory
+        self.path = self.directory / "native_census_first_failure.json"
+
+    def conflict(self):
+        self.fixture.nodes[0]["agentId"] = "unqualified_replacement"
+        self.fixture.progress()
+
+    def test_first_progress_failure_keeps_leaf_and_both_identity_views(self):
+        self.conflict()
+        value = json.loads(self.path.read_text())
+        self.assertEqual(value["reason"], "native_census_event_conflict")
+        self.assertEqual(value["exception"]["code"], "native_node_changed")
+        self.assertEqual(value["nodes"][0]["agentId"], "engineer")
+        incoming = value["trigger"]["event"]["data"]["workflow_progress"]
+        self.assertEqual(incoming[0]["agentId"], "unqualified_replacement")
+        self.assertTrue(self.registry.first_failure_persisted)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        first = self.path.read_bytes()
+        self.fixture.hook("PreToolUse", "Bash", {}, "later", cwd="/wrong")
+        self.assertEqual(self.path.read_bytes(), first)
+        self.assertEqual(self.registry.error, "native_census_event_conflict")
+
+    def test_hook_payload_is_hashed_without_retaining_credential_text(self):
+        payload = {"command": "export API_KEY=synthetic-private-value", "run_in_background": True}
+        self.fixture.hook("PreToolUse", "Bash", payload, "secret-tool", cwd="/wrong")
+        raw = self.path.read_bytes()
+        self.assertNotIn(b"synthetic-private-value", raw)
+        value = json.loads(raw)
+        self.assertEqual(value["exception"]["code"], "native_tool_hook_identity_changed")
+        self.assertEqual(value["trigger"]["event"]["tool_input_sha256"],
+                         hashlib.sha256(canonical(payload).encode("ascii")).hexdigest())
+        self.assertTrue(value["trigger"]["event"]["tool_input.run_in_background"])
+
+    def test_existing_failure_file_is_never_replaced(self):
+        self.path.write_bytes(b"Preserved earlier evidence.\n")
+        self.conflict()
+        self.assertEqual(self.path.read_bytes(), b"Preserved earlier evidence.\n")
+        self.assertFalse(self.registry.first_failure_persisted)
+        self.assertEqual(self.registry.error, "native_census_event_conflict")
+
+    def test_diagnostic_write_failure_does_not_restore_identity_admission(self):
+        for error in (OSError("Synthetic write failure."), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__):
+                self.registry.error = None
+                self.registry.first_failure = None
+                with patch("interface.native_cost_controls.quality_stop_native.os.open", side_effect=error):
+                    self.conflict()
+                self.assertEqual(self.registry.error, "native_census_event_conflict")
+                self.assertFalse(self.registry.first_failure_persisted)
+                headers = [(key, "unknown" if key == "x-claude-code-agent-id" else value)
+                           for key, value in self.fixture.headers]
+                with self.assertRaisesRegex(StopRejected, "native_identity_unavailable"):
+                    self.registry.response(headers, canonical(self.fixture.body).encode())
+
+    def test_closed_registry_failure_records_the_distinct_closed_state(self):
+        self.registry.close()
+        headers = [(key, "unknown" if key == "x-claude-code-agent-id" else value)
+                   for key, value in self.fixture.headers]
+        with self.assertRaisesRegex(StopRejected, "native_identity_unavailable"):
+            self.registry.response(headers, canonical(self.fixture.body).encode())
+        value = json.loads(self.path.read_text())
+        self.assertEqual(value["reason"], "native_registry_closed")
+        self.assertEqual(value["exception"]["code"], "native_identity_unavailable")
+        self.assertTrue(value["closed"])
+        self.assertIsNotNone(value["closed_at"])
+        self.assertIsNone(self.registry.error)
 
 
 class NativeAdmissionTests(unittest.TestCase):
@@ -771,21 +861,24 @@ class CheckpointTransportTests(unittest.TestCase):
 
     def test_scientific_body_and_nonmessage_route_are_forwarded_unchanged(self):
         raw = b'{  "messages": [] }'
-        headers = [("Content-Type", "application/json"), ("Authorization", "public-fixture")]
+        headers = [("Content-Type", "application/json"), ("Authorization", "public-fixture"),
+                   ("x-claude-code-session-id", "stop-session"), ("x-claude-code-agent-id", "engineer")]
         for method, target in (("POST", "/api/v1/messages"), ("GET", "/api/models")):
             with self.transport.send(method, target, headers, raw) as response:
                 self.assertIs(response, self.upstream.response)
             self.assert_forwarded(method, target, headers, raw)
 
     def test_nonmessage_route_preserves_opaque_or_empty_body(self):
+        headers = [("x-claude-code-session-id", "stop-session"), ("x-claude-code-agent-id", "engineer")]
         for raw in (b"opaque fixture body", b""):
             with self.subTest(raw=raw):
-                with self.transport.send("GET", "/api/models", [], raw) as response:
+                with self.transport.send("GET", "/api/models", headers, raw) as response:
                     self.assertIs(response, self.upstream.response)
-                self.assert_forwarded("GET", "/api/models", [], raw)
+                self.assert_forwarded("GET", "/api/models", headers, raw)
 
     def test_bridge_trace_is_fresh_and_cannot_be_supplied_by_the_client(self):
-        headers = [("Content-Type", "application/json"), ("x-geak-quality-request-id", "forged")]
+        headers = [("Content-Type", "application/json"), ("x-geak-quality-request-id", "forged"),
+                   ("x-claude-code-session-id", "stop-session"), ("x-claude-code-agent-id", "engineer")]
         raw = b'{"messages":[]}'
         ids = []
         for _ in range(2):
@@ -800,7 +893,8 @@ class CheckpointTransportTests(unittest.TestCase):
         state = self.fixture.root / "controller-state"
         state.mkdir()
         self.fixture.controller.state_dir = state
-        headers = [("Content-Type", "application/json"), ("Authorization", "synthetic-private-token")]
+        headers = [("Content-Type", "application/json"), ("Authorization", "synthetic-private-token"),
+                   ("x-claude-code-session-id", "stop-session"), ("x-claude-code-agent-id", "engineer")]
         raw = b'{"messages":[],"private_text":"private-message-text"}'
         with self.transport.send("POST", "/api/v1/messages", headers, raw):
             pass
