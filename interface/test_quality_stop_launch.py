@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from interface.native_cost_controls.quality_stop_controller import StopRejected
+from interface.native_cost_controls.quality_stop_isolation import BindMount
 from interface.native_cost_controls.quality_stop_launch import (
     DockerCommands,
     create_native_actor,
@@ -44,6 +45,11 @@ class ActorLaunchTests(unittest.TestCase):
         (self.source / "workflow.js").write_text("// trusted fixture source\n")
         self.cli = self.root / "claude"
         self.cli.write_bytes(b"synthetic immutable native executable")
+        self.bwrap = self.root / "bwrap"
+        self.bwrap.write_bytes(b"synthetic immutable bubblewrap executable")
+        mount_patch = patch("interface.native_cost_controls.quality_stop_launch.BindMount", side_effect=self.bind_mount)
+        mount_patch.start()
+        self.addCleanup(mount_patch.stop)
         self.docker, self.boundaries = FakeDocker(), []
         self.options = {"trial_id": "fixture_trial", "image_id": "sha256:" + "b" * 64,
             "source_root": self.source, "task_root": self.task, "workspace_root": self.root / "work",
@@ -55,6 +61,11 @@ class ActorLaunchTests(unittest.TestCase):
             "cpu_set": "0-1", "shell_environment": {"PYTHONDONTWRITEBYTECODE": "1"},
             "immutable_paths": [self.source / "workflow.js"], "docker": self.docker,
             "boundary_factory": self.boundary}
+
+    def bind_mount(self, source, target, writable=False):
+        # Use fixture bytes for bubblewrap while retaining real mount validation.
+        source = self.bwrap if source == Path("/usr/bin/bwrap") else source
+        return BindMount(source, target, writable)
 
     def boundary(self, **arguments):
         self.boundaries.append(arguments)
@@ -73,10 +84,19 @@ class ActorLaunchTests(unittest.TestCase):
         self.assertEqual(boundary["shell_writable_paths"][-1], "/tmp")
         self.assertTrue(all(mount.source != self.options["private_root"] for mount in boundary["mounts"]))
         self.assertFalse(any(mount.source == Path("/tmp") for mount in boundary["mounts"]))
+        self.assertEqual([(mount.source, mount.writable) for mount in boundary["mounts"]
+                          if mount.target == Path("/usr/bin/bwrap")], [(self.bwrap, False)])
         record = json.loads(launch.manifest_path.read_text())
+        self.assertEqual(record["create_argv"].count(f"type=bind,src={self.bwrap},dst=/usr/bin/bwrap,readonly"), 1)
         self.assertFalse(record["provider_credentials_in_argv"])
         self.assertEqual(record["cli_sha256"], self.options["cli_sha256"])
         self.assertTrue((self.options["launch_root"] / "ACTOR_READY.json").exists())
+
+    def test_missing_bubblewrap_fixture_fails_before_docker(self):
+        self.bwrap.unlink()
+        with self.assertRaisesRegex(StopRejected, "isolation_mount_source_not_regular"):
+            create_native_actor(**self.options)
+        self.assertEqual(self.docker.calls, [])
 
     def test_source_identity_and_existing_eval_fail_before_docker(self):
         for change in ({"cli_sha256": "0" * 64}, {"source_root": Path("relative")},
