@@ -104,6 +104,26 @@ jobs:
             e2e_workflow/scripts/tests/test_gsm8k_eval.py \
             e2e_workflow/scripts/tests/test_parse_profile.py \
             e2e_workflow/scripts/tests/test_capture_shapes.py \
+            e2e_workflow/scripts/tests/test_trace_capability.py \
+            e2e_workflow/scripts/tests/test_validate_structural_patterns.py \
+            e2e_workflow/scripts/tests/test_semantic_layer_boundary_transfer.py \
+            e2e_workflow/scripts/tests/test_semantic_targeted_shape_plan.py \
+            e2e_workflow/scripts/tests/test_semantic_runtime_capture.py \
+            e2e_workflow/scripts/tests/test_semantic_evidence_ledger.py \
+            e2e_workflow/scripts/tests/test_semantic_report.py \
+            e2e_workflow/scripts/tests/test_run_semantic_shape_capture.py \
+            e2e_workflow/scripts/tests/test_semantic_kernel_mapping.py \
+            e2e_workflow/scripts/tests/test_semantic_shape_merge.py \
+            e2e_workflow/scripts/tests/test_semantic_source_mapping.py \
+            e2e_workflow/scripts/tests/test_semantic_runtime_marker_mapping.py \
+            e2e_workflow/scripts/tests/test_run_semantics_1_2.py \
+            e2e_workflow/scripts/tests/test_fusion_candidate_harness.py \
+            e2e_workflow/scripts/tests/test_fusion_topk_harness.py \
+            e2e_workflow/scripts/tests/test_fusion_unitside_harness.py \
+            e2e_workflow/scripts/tests/test_fusion_applyback_harness.py \
+            e2e_workflow/scripts/tests/test_fusion_priors.py \
+            e2e_workflow/scripts/tests/test_report_index.py \
+            e2e_workflow/scripts/tests/test_fusion_capture_manifest_contract.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \

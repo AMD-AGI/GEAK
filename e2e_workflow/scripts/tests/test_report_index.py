@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts import report_index  # noqa: E402
+import report_index  # noqa: E402
 
 
 class ReportIndexTest(unittest.TestCase):

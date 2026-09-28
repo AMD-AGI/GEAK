@@ -83,6 +83,36 @@ def test_recover_best_intermediate_win_config(tmp_path):
     assert wf["accepted_kernels"] == []
 
 
+def test_recover_intermediate_keeps_original_baseline_and_sweep_config(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    (eval_dir / "baseline").mkdir()
+    (eval_dir / "baseline" / "bench_summary.json").write_text(json.dumps({
+        "output_throughput_tok_s_median": 400.0,
+    }), encoding="utf-8")
+    (eval_dir / "config").mkdir()
+    (eval_dir / "config" / "sweep_results.json").write_text(json.dumps({
+        "accepted_flags": "--banked-config",
+        "accepted_env": "BANKED=1",
+        "best_throughput_tok_s": 461.314,
+    }), encoding="utf-8")
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["baseline_throughput_tok_s"] == pytest.approx(400.0)
+    assert wf["throughput_speedup"] == pytest.approx(535.352 / 400.0)
+    # Recovery must reproduce the stack that the winning A/B actually ran:
+    # the earlier ConfigSweep choice plus the later TuningSkillset config.
+    assert wf["accepted_config"] == {
+        "flags": "--max-num-batched-tokens 16384 --banked-config",
+        "env": "VLLM_TUNED_CONFIG_FOLDER=/x/config/integrate_moe_tuned BANKED=1",
+    }
+
+
+def test_normalize_does_not_invent_missing_report(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path, accepted=True)
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    out = rx.normalize_result(_handoff(eval_dir), wf)
+    assert out["report_path"] == ""
+
+
 def test_recover_skips_rejected(tmp_path):
     eval_dir = _make_eval_dir(tmp_path, accepted=False)
     assert rx._recover_best_intermediate_win(eval_dir) is None

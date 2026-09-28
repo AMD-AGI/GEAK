@@ -536,6 +536,52 @@ def map_args(
     # subset of {setup,profile,config,tune,head,kernel,final} (default unset => "all").
     if h.get("phases"):
         ps_args["phases"] = str(h["phases"])
+    if h.get("exec_prefix"):
+        ps_args["exec_prefix"] = str(h["exec_prefix"])
+    if h.get("runtime_image") or h.get("image"):
+        ps_args["runtime_image"] = str(h.get("runtime_image") or h.get("image"))
+    for key in ("fusion_discovery", "fusion_top_k", "fusion_budget",
+                "fusion_unitside_budget"):
+        if h.get(key) is not None:
+            ps_args[key] = h[key]
+    if h.get("semantics_shape_capture") is not None:
+        ps_args["semantics_shape_capture"] = h["semantics_shape_capture"]
+    if isinstance(h.get("semantics_shape_capture_setup"), dict):
+        ps_args["semantics_shape_capture_setup"] = dict(
+            h["semantics_shape_capture_setup"])
+    elif (str(ps_args.get("backend") or "").lower() == "sglang"
+          and _as_bool(h.get("fusion_discovery", True))
+          and _as_bool(h.get("semantics_shape_capture", True))):
+        # KernelFusion runs inside the target runtime.  A normal Hyperloom
+        # handoff therefore already contains everything needed for the one
+        # metadata-only replay; requiring it to invent a container-local setup
+        # made the default-ON phase silently stop after writing only its plan.
+        protocol = h.get("bench_protocol") or {}
+        ps_args["semantics_shape_capture_setup"] = {
+            "execution_mode": "local",
+            "model": h["model_path"],
+            "benchmark_repository": str(E2E_DIR),
+            "benchmark": str(BENCH_SCRIPT),
+            "port": 0,
+            "tensor_parallel_size": tp,
+            "gpu_ids": str(gpu_ids),
+            "workload": {
+                "input_length": int(workload.get("isl", 1024)),
+                "output_length": int(workload.get("osl", 1024)),
+                "concurrency": int(workload.get("conc", 64)),
+                "random_range_ratio": float(
+                    protocol.get("random_range_ratio", 0.8)),
+                "num_prompts": int(protocol.get("num_prompts", 20)),
+                "num_warmups": int(protocol.get(
+                    "num_warmups", min(int(workload.get("conc", 64)), 8))),
+                "seed": int(protocol.get("seed", 0)),
+            },
+            "extra_server_args": ps_args["initial_extra_server_args"],
+            "extra_env": ps_args["initial_extra_env"],
+            "mem_fraction": _mem if _mem > 0 else 0.8,
+            "bench_client": str(h.get("bench_client") or "inferencex"),
+            "inferencex_path": str(h.get("inferencex_path") or E2E_DIR),
+        }
     # No timed-repeat pass-through: the round count belongs to the lifecycle, not the handoff, so
     # an `e2e_repeats` key from a stale caller is ignored rather than allowed to pull one leg off
     # the lifecycle the rest of the run used.
@@ -3654,6 +3700,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # What the kernel phase actually did (req: report must carry this).
         "accepted_kernels": wf.get("accepted_kernels") or [],
         "accepted_heads": wf.get("accepted_heads") or [],
+        "accepted_fusions": wf.get("accepted_fusions") or [],
         "accepted_config": _accepted_config_with_env_map(wf.get("accepted_config") or {}),
         # Self-describing baseline measurement-protocol + Hyperloom cross-check (see baseline_basis above).
         "baseline_basis": baseline_basis,

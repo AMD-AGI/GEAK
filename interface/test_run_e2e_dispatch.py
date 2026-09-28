@@ -280,6 +280,62 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["config_tune"], "false")
         self.assertEqual(ps["apply_to_original"], "true")
 
+    def test_legacy_fusion_prior_is_not_forwarded(self):
+        h = self._handoff(
+            fusion={"topk_json": "/prior/topk.json",
+                    "candidates_json": "/prior/candidates.json",
+                    "unitside_json": "/prior/unitside.json"},
+        )
+        ps = rx.map_args(h, timeout_s=3600)
+        self.assertNotIn("fusion", ps)
+
+    def test_fusion_defaults_build_local_shape_capture_setup(self):
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"), framework="sglang",
+            accepted_flags="--disable-radix-cache",
+            accepted_env="SGLANG_USE_AITER=1",
+            bench_protocol={"num_prompts": 96, "num_warmups": 16, "seed": 7},
+        ))
+        setup = ps["semantics_shape_capture_setup"]
+        self.assertEqual(setup["execution_mode"], "local")
+        self.assertEqual(setup["model"], "/models/fake-8b")
+        self.assertEqual(setup["benchmark"], str(rx.BENCH_SCRIPT))
+        self.assertEqual(setup["port"], 0)
+        self.assertEqual(setup["tensor_parallel_size"], 4)
+        self.assertEqual(setup["gpu_ids"], "0,1,2,3")
+        self.assertEqual(setup["workload"]["concurrency"], 8)
+        self.assertEqual(setup["workload"]["num_prompts"], 96)
+        self.assertEqual(setup["extra_server_args"], "--disable-radix-cache")
+        self.assertEqual(setup["extra_env"], "SGLANG_USE_AITER=1")
+
+    def test_explicit_shape_capture_setup_remains_authoritative(self):
+        explicit = {"execution_mode": "docker", "container": "chosen"}
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"), framework="sglang",
+            semantics_shape_capture_setup=explicit))
+        self.assertEqual(ps["semantics_shape_capture_setup"], explicit)
+
+    def test_non_fusion_run_does_not_gain_implicit_capture_setup(self):
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"), framework="sglang",
+            fusion_discovery=False))
+        self.assertNotIn("semantics_shape_capture_setup", ps)
+
+    def test_fusion_runtime_and_budget_knobs_are_forwarded(self):
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"), framework="sglang",
+            exec_prefix="docker exec geak-runtime",
+            runtime_image="lmsysorg/sglang:test",
+            fusion_top_k=4, fusion_budget=2, fusion_unitside_budget=3,
+            semantics_shape_capture=False))
+        self.assertEqual(ps["exec_prefix"], "docker exec geak-runtime")
+        self.assertEqual(ps["runtime_image"], "lmsysorg/sglang:test")
+        self.assertEqual(ps["fusion_top_k"], 4)
+        self.assertEqual(ps["fusion_budget"], 2)
+        self.assertEqual(ps["fusion_unitside_budget"], 3)
+        self.assertIs(ps["semantics_shape_capture"], False)
+        self.assertNotIn("semantics_shape_capture_setup", ps)
+
     def test_budget_omitted_when_unknown(self):
         """No timeout => the workflow stays budget-unaware (byte-identical to a
         direct, non-interface invocation)."""
@@ -2049,6 +2105,14 @@ class TestColdFinalBasis(_RunE2ECase):
         self.assertEqual(out["final_throughput_basis"], "hot")
         self.assertIsNone(out["alignment_metrics"]["cold_speedup"])
         self.assertEqual(out["throughput_speedup"], 1.1111)
+
+    def test_accepted_fusions_reach_the_result(self):
+        eval_dir = self._eval_dir()
+        wf = self._wf(eval_dir)
+        wf["accepted_fusions"] = [{"exec_id": "e01", "fusion": "ar_rms_quant"}]
+        out = rx.normalize_result({}, wf)
+        self.assertEqual(out["accepted_fusions"], wf["accepted_fusions"])
+        self.assertEqual(rx.normalize_result({}, self._wf(eval_dir))["accepted_fusions"], [])
 
     def test_a_cold_final_without_a_cold_baseline_changes_nothing(self):
         eval_dir = self._eval_dir(cold_final=520.0)
