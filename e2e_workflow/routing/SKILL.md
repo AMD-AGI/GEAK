@@ -110,8 +110,10 @@ oracle, and no confidence score can substitute for it.
 | output-token kill switch | 1,000,000 | `route_max_output_tokens` (0 = off) |
 | per-scope starting floors | none | `route_floors` (JSON `{scope: lane}`) |
 
-**Kill switch.** Once the run's output tokens pass the cap, no new round starts and no worker is
-dispatched. Brain calls still run, so the TechLead report and the Director's validation of work
+**Kill switch.** Once the output tokens spent since the lane started pass the cap, no new round
+starts and no worker is dispatched. `budget.spent()` is the whole session's running total (it read
+4.7M before the first live run began), so the lane records it at start and caps the growth. Whatever
+else the session spends during the run counts too, so the switch can trip early but never late. Brain calls still run, so the TechLead report and the Director's validation of work
 already done are not thrown away. Output tokens are the only spend a workflow script can see
 (`budget.spent()`); dollars are settled afterwards by the ledger. If the runtime has no `budget`, the
 switch stays off and says so in the report. For scale: the 3.7× fused-MoE run used 472,918.

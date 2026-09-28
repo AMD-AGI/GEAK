@@ -815,9 +815,18 @@ function __routeStep(st, d, scope) {
            why: up ? 'escalate: ' + reasons.join('; ')
              : (ok ? 'retry on the same lane' : 'decider gave no valid answer -> retry on the same lane') };
 }
-function __routeSpent() {
+function __routeSessionSpent() {
   try { return (typeof budget !== 'undefined' && budget && typeof budget.spent === 'function') ? budget.spent() : null; }
   catch (e) { return null; }
+}
+// budget.spent() is the whole SESSION's running output-token total, not this run's: a probe on
+// 2026-09-28 read 4,727,204 before the lane began, and an absolute cap tripped on the first worker.
+// So the cap applies to growth since this lane started. Anything else the session spends meanwhile
+// (the launching conversation, another workflow) still counts: the switch can trip early, never late.
+const ROUTE_SPENT_AT_START = __routeSessionSpent();
+function __routeSpent() {
+  const now = __routeSessionSpent();
+  return now == null ? null : now - (ROUTE_SPENT_AT_START || 0);
 }
 // Kill switch. The only spend a workflow script can see is output tokens (budget.spent()); dollars are
 // settled afterwards by the ledger. Once tripped it stays tripped: no new round, no new worker dispatch.
@@ -829,7 +838,7 @@ function __routeOverBudget() {
   if (s != null && s >= ROUTE_MAX_OUTPUT_TOKENS) {
     __routeKilled = true;
     __routeAudit.push({ event: 'kill_switch', spent_output_tokens: s, cap: ROUTE_MAX_OUTPUT_TOKENS });
-    log(`  [route] KILL SWITCH: ${s} output tokens >= cap ${ROUTE_MAX_OUTPUT_TOKENS} — no new rounds or worker dispatches.`);
+    log(`  [route] KILL SWITCH: ${s} output tokens since this lane started >= cap ${ROUTE_MAX_OUTPUT_TOKENS} — no new rounds or worker dispatches.`);
   }
   return __routeKilled;
 }
@@ -903,6 +912,7 @@ function __routeReport() {
                          max_top_escalations: ROUTE_MAX_TOP_DISPATCHES, max_output_tokens: ROUTE_MAX_OUTPUT_TOKENS,
                          floors: ROUTE_FLOORS },
            top_dispatches: __routeTopUsed, killed: __routeKilled, spent_output_tokens: __routeSpent(),
+           session_output_tokens_at_start: ROUTE_SPENT_AT_START,
            ladder: __routeLadder, audit: __routeAudit };
 }
 // <<ROUTING-INLINE-END>>
