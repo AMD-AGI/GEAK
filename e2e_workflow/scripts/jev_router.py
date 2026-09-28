@@ -58,9 +58,14 @@ MIN_CHOICE_PROBABILITY = 0.7
 MIN_REVERSIBLE_PROBABILITY = 0.8
 
 CACHE_BASENAME = "jev_router_cache.json"
-# The canonical evaluation endpoint. NOT /typesafe/v1/systemone -- that compat shim rejects the
-# documented `boolean` discriminator with a corrupted message naming 'noul', whatever the model
-# slug (probed 2026-09-28). /v1/evaluate validates properly and accepts boolean|choice|score.
+# The native HTTP evaluation API, which the vendor changelog specifies for NEW integrations:
+# types boolean|choice|score, answers read at `.probability`, model id `typesafe-ai/jev`.
+#
+# Deliberately NOT https://ai-gateway.vercel.sh/typesafe -- that is the TypeSafe-COMPATIBLE
+# client surface for migrating existing TypeSafe code, and it keeps the legacy vocabulary: a
+# boolean question is typed `noul` there and its answer is read at `.noul` rather than
+# `.probability`. Both surfaces are correct; they are simply different vocabularies, and mixing
+# them is what produces `expected one of 'noul', 'choice', 'score'`.
 JEV_ENDPOINT = "https://ai-gateway.vercel.sh/v1/evaluate"
 JEV_MODEL = "typesafe-ai/jev"
 STATE_TOKEN_BUDGET_CHARS = 8000  # Jev caps state at 32k tokens; stay far below.
