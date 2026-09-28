@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "artifact": "fusion_strategies",
+  "note": "Provider-agnostic known fusions. op_set uses the catalog op_tag_vocab; matching = region op-set subset of strategy op_set + dtype-compat. Priors ADD candidates, never prune. confidence: verified|known|hypothesis.",
+  "strategies": [
+    {
+      "strategy_id": "norm_residual_quant",
+      "op_set": ["add_residual", "norm", "quant"],
+      "dtype": ["fp8"],
+      "description": "residual-add + RMSNorm + fp8 (group) quant folded into one kernel",
+      "known_kernels": [
+        {"provider": "aiter", "name": "add_rmsnorm_quant"},
+        {"provider": "aiter", "name": "rmsnorm2d_fwd_with_add_dynamicquant"},
+        {"provider": "vllm", "name": "fused_add_rms_norm", "coverage": "partial (norm+residual; quant separate)"}
+      ],
+      "typical_seam": "post-attn/post-ffn residual add -> input RMSNorm -> next-op fp8 group quant",
+      "confidence": "known"
+    },
+    {
+      "strategy_id": "collective_norm",
+      "op_set": ["allreduce", "norm"],
+      "dtype": [],
+      "description": "TP all-reduce fused with the following residual-add + RMSNorm",
+      "known_kernels": [
+        {"provider": "aiter", "name": "fused_allreduce_rmsnorm"}
+      ],
+      "typical_seam": "TP all-reduce write -> residual add -> RMSNorm (flag --enable-aiter-allreduce-fusion)",
+      "confidence": "known"
+    },
+    {
+      "strategy_id": "collective_norm_quant",
+      "op_set": ["allreduce", "norm", "quant"],
+      "dtype": ["fp8"],
+      "description": "all-reduce + add + RMSNorm + per-group fp8 quant in one collective kernel",
+      "known_kernels": [
+        {"provider": "aiter", "name": "fused_allreduce_rmsnorm_quant_per_group"}
+      ],
+      "typical_seam": "TP all-reduce -> residual RMSNorm -> FFN/expert-input fp8 quant",
+      "confidence": "verified",
+      "learned_card": "learned/fusion-allreduce-rmsnorm-quant-gfx942.md",
+      "notes": "banner can print while the arg is False; fused collective silently falls back above a 64MiB size guard (prefill exceeds)."
+    },
+    {
+      "strategy_id": "qk_norm_quant",
+      "op_set": ["norm", "quant"],
+      "dtype": ["fp8"],
+      "description": "Q/K RMSNorm + fp8 group quant fused",
+      "known_kernels": [
+        {"provider": "aiter", "name": "fused_qk_rmsnorm_group_quant"}
+      ],
+      "typical_seam": "attention q/k RMSNorm -> fp8 group quant before the score GEMM",
+      "confidence": "known"
+    },
+    {
+      "strategy_id": "qk_norm_rope_cache_quant",
+      "op_set": ["norm", "rope", "kv_cache", "quant"],
+      "dtype": ["fp8"],
+      "description": "wide MLA head-prep: qk-norm + RoPE + paged KV-cache write + fp8 quant in ONE kernel",
+      "known_kernels": [
+        {"provider": "aiter", "name": "fused_qk_norm_rope_cache_block_quant_shuffle"},
+        {"provider": "aiter", "name": "fused_fp8_bmm_rope_cat_and_cache_mla"}
+      ],
+      "typical_seam": "MLA head-prep (q/k norm -> RoPE -> concat -> fp8 cast -> paged cache write)",
+      "confidence": "known",
+      "notes": "SPANS a donor boundary (norm is pre-attention, cache-write is post) — the region model proposes narrower sub-fusions; this wide kernel needs a cross-region proposal."
+    },
+    {
+      "strategy_id": "kv_write_quant",
+      "op_set": ["kv_cache", "quant"],
+      "dtype": ["fp8"],
+      "description": "fold the K fp8 quantization into the paged KV-cache write",
+      "known_kernels": [
+        {"provider": "sglang", "name": "set_mla_kv_buffer_triton_fp8_quant"},
+        {"provider": "aiter", "name": "kn_entry_2c_sbhd_cached_indirect_inplace", "coverage": "rope+cache (quant separate on some paths)"}
+      ],
+      "typical_seam": "decode MLA: separate K fp8 quant + set_mla_kv_buffer write -> one triton kernel",
+      "confidence": "known",
+      "notes": "sglang path gated on `_is_hip and use_nsa and dtype==fp8` (off for non-NSA DSR1); backend-dependent (aiter backend writes via kn_entry_2c). Reported ~342us/1.34% decode on another config."
+    },
+    {
+      "strategy_id": "activation_quant",
+      "op_set": ["activation", "quant"],
+      "dtype": ["fp8"],
+      "description": "SiLU*Mul (SwiGLU) + fp8 group quant fused",
+      "known_kernels": [
+        {"provider": "aiter", "name": "act_mul_and_fp8_group_quant"},
+        {"provider": "vllm", "name": "silu_mul_fp8_quant_deep_gemm", "coverage": "act+quant (also folds gemm)"}
+      ],
+      "typical_seam": "FFN gate/up-GEMM output -> SiLU*Mul -> fp8 group quant before down-GEMM",
+      "confidence": "known",
+      "notes": "prefill single-shot may be SLOWER than the split (measured 0.48x at M=7389) — gate on 单侧; decode fine."
+    },
+    {
+      "strategy_id": "activation_quant_gemm",
+      "op_set": ["activation", "quant", "gemm"],
+      "dtype": ["fp8"],
+      "description": "fold activation + fp8 quant INTO the down/expert GEMM (deep-gemm style)",
+      "known_kernels": [
+        {"provider": "vllm", "name": "silu_mul_fp8_quant_deep_gemm"},
+        {"provider": "aiter", "name": "ck_moe_stage2_fwd", "coverage": "expert down-GEMM with activation+scale args"}
+      ],
+      "typical_seam": "FFN/expert: act -> quant -> down-GEMM as one deep-gemm call",
+      "confidence": "known",
+      "notes": "the wide cross-donor version of activation_quant; the region model (donor-bounded) will not propose it alone."
+    },
+    {
+      "strategy_id": "quant_gemm_prologue",
+      "op_set": ["quant", "gemm"],
+      "dtype": ["fp8"],
+      "description": "fold the input fp8 (per-token-group) quant into the GEMM prologue",
+      "known_kernels": [
+        {"provider": "aiter", "name": "batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant"},
+        {"provider": "aiter", "name": "dynamic_per_group_scaled_quant", "coverage": "the quant leg to fold"}
+      ],
+      "typical_seam": "o_proj / expert-input: fp8 group quant immediately before its fp8 GEMM",
+      "confidence": "known"
+    },
+    {
+      "strategy_id": "vabsorb_dequant_gemm",
+      "op_set": ["quant", "gemm"],
+      "dtype": ["fp8"],
+      "description": "fold the per-step MLA V-absorb weight fp8->bf16 DEQUANT into the batched GEMM",
+      "known_kernels": [
+        {"provider": "aiter", "name": "batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant"}
+      ],
+      "typical_seam": "decode MLA V-absorb: w_vc dequant -> scale -> bmm as one prequant batched-gemm",
+      "confidence": "verified",
+      "learned_card": "learned/fusion-vabsorb-fp8-batched-gemm-gfx942.md",
+      "notes": "-9.13% decode kernel time, +11.80% e2e (verified). The dequant kernels must reach n=0; capture path can differ from eager."
+    },
+    {
+      "strategy_id": "moe_expert_gemm",
+      "op_set": ["moe"],
+      "dtype": ["fp8"],
+      "description": "MoE expert chain (GEMM1 + activation/quant + GEMM2) as one fused mega-kernel",
+      "known_kernels": [
+        {"provider": "aiter", "name": "fmoe_fp8_blockscale_g1u1"},
+        {"provider": "aiter", "name": "ck_moe_stage1_fwd"},
+        {"provider": "vllm", "name": "fused_experts"}
+      ],
+      "typical_seam": "expert GEMM1 -> SiLU*Mul + fp8 quant -> expert GEMM2",
+      "confidence": "known",
+      "notes": "usually ALREADY the live body kernel — mark already_engaged, not a new candidate, unless the baseline runs the split."
+    },
+    {
+      "strategy_id": "router_topk",
+      "op_set": ["topk"],
+      "dtype": [],
+      "description": "router grouped-topk (+ shared-expert append) fused",
+      "known_kernels": [
+        {"provider": "aiter", "name": "biased_grouped_topk"},
+        {"provider": "vllm", "name": "fused_topk"}
+      ],
+      "typical_seam": "MoE gating -> biased grouped top-k -> shared-expert slot append",
+      "confidence": "known"
+    }
+  ]
+}
