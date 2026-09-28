@@ -42,6 +42,11 @@ from .quality_stop_controller import (
 
 ROOT_ULTRACODE_NOTICE_SHA256 = "a5f29abc2627e9d881289565aa239bed2d9feba821998d863a5c0eff788e0626"
 MAX_NATIVE_ATTEMPTS = 6
+BASH_TASK_ID = re.compile(r"b[0-9a-z]{8}")
+BASH_TERMINAL = {"completed": "completed", "failed": "failed", "stopped": "stopped", "killed": "stopped"}
+BASH_RESULT_FIELDS = frozenset({"stdout", "stderr", "interrupted", "isImage", "returnCodeInterpretation",
+    "noOutputExpected", "backgroundTaskId", "timedOutAfterMs", "backgroundCwdHint", "dangerouslyDisableSandbox",
+    "persistedOutputPath", "persistedOutputSize", "staleReadFileStateHint", "ghRateLimitHint"})
 
 
 def native_attempt_label(logical_label, attempt):
@@ -211,6 +216,11 @@ class NativeProducerCensus:
         self.nodes, self.mirrors, self.tools, self.background, self.emissions = {}, {}, {}, {}, {}
         self.mirror_inputs = {}
         self.completed_tools = {}
+        # Native Bash also registers foreground commands after its progress
+        # hint. Retain their lifecycle so an eventual automatic timeout can
+        # join the exact already-admitted tool without guessing an identity.
+        self.bash_tasks = {}
+        self.bash_task_tools = {}
         self.root_prompt = None
         self.root_messages = None
         self.root_tool_bindings = {}
@@ -426,6 +436,7 @@ class NativeProducerCensus:
             if (requests is None or any(operation["agent"] == old_agent for operation in self.tools.values())
                     or any(status == "active" for status in self.background.values())):
                 continue
+            self._automatic_bash_proof()
             require(self._retirement_remaining(pair) > 0, "native_retirement_timeout")
             # Hooks and forwarding use this same condition lock. The empty
             # activity arrays are a trusted host-state attestation at this point.
@@ -559,6 +570,148 @@ class NativeProducerCensus:
         self.verify_sources()
         self.root_tool = tool_id
 
+    def _bash_event(self, kind, value):
+        raw = value.get("data", {})
+        require(isinstance(raw, dict), "background_bash_event_invalid")
+        aliases = {"taskId", "toolUseId", "agentId", "sessionId", "taskType", "backgroundTaskId", "background_task_id"}
+        require(not aliases.intersection(value) and not aliases.intersection(raw), "background_bash_event_invalid")
+        event = {"kind": kind, "monotonic_time": time.monotonic()}
+        for key in ("session_id", "task_id", "tool_use_id", "task_type", "agent_id", "uuid", "status"):
+            if key in value and key in raw:
+                require(json_values_equal(value[key], raw[key]), "background_bash_event_invalid")
+            item = value.get(key, raw.get(key))
+            require(item is None or isinstance(item, str), "background_bash_event_invalid")
+            event[key] = item
+        if kind == "TaskUpdatedMessage":
+            patch = value.get("patch", raw.get("patch"))
+            require(isinstance(patch, dict) and ("patch" not in raw or json_values_equal(patch, raw["patch"]))
+                    and event["status"] == patch.get("status"), "background_bash_event_invalid")
+            require(not aliases.intersection(patch), "background_bash_event_invalid")
+            event["patch"] = deepcopy(patch)
+        require(event["session_id"] == self.session_id and isinstance(event["task_id"], str)
+                and BASH_TASK_ID.fullmatch(event["task_id"]), "background_bash_event_invalid")
+        event["event_sha256"] = _evidence_digest(value)
+        require(event["event_sha256"] is not None, "background_bash_event_invalid")
+        event["native_event"] = deepcopy(value)
+        return event
+
+    def _bash_binding(self, task, tool):
+        operation = self.tools.get(tool, self.completed_tools.get(tool))
+        require(isinstance(operation, dict) and operation.get("name") == "Bash"
+                and isinstance(operation.get("input"), dict) and operation.get("agent"),
+                "background_bash_binding_changed")
+        require(operation["input"].get("run_in_background", False) is False,
+                "background_bash_requires_qualified_adapter")
+        require(self.bash_task_tools.get(tool, task) == task, "background_bash_binding_changed")
+        binding = {"schema": "geak-native-automatic-bash-v1", "task_id": task, "tool_use_id": tool,
+                   "agent_id": operation["agent"], "input_sha256": _evidence_digest(operation["input"])}
+        require(binding["input_sha256"] is not None, "background_bash_binding_changed")
+        record = self.bash_tasks.get(task)
+        if record is None:
+            record = {**binding, "start": None, "result": None, "terminal": None, "events": []}
+            self.bash_tasks[task] = record
+            self.bash_task_tools[tool] = task
+        else:
+            require(all(record[key] == item for key, item in binding.items()), "background_bash_binding_changed")
+        return record
+
+    def _bash_started(self, value):
+        event = self._bash_event("TaskStartedMessage", value)
+        task, tool = event["task_id"], event["tool_use_id"]
+        require(event["task_type"] == "local_bash" and isinstance(tool, str) and tool,
+                "background_bash_event_invalid")
+        record = self._bash_binding(task, tool)
+        require(record["start"] is None, "duplicate_background_task_start")
+        require(event["agent_id"] in (None, record["agent_id"]), "background_bash_binding_changed")
+        record["start"] = event
+        record["events"].append(deepcopy(event))
+        self.background[task] = "active"
+
+    def _bash_terminal(self, kind, value):
+        event = self._bash_event(kind, value)
+        task = event["task_id"]
+        require(task in self.bash_tasks and self.bash_tasks[task]["start"] is not None,
+                "background_bash_orphan_event")
+        record = self.bash_tasks[task]
+        require(event["tool_use_id"] in (None, record["tool_use_id"])
+                and event["agent_id"] in (None, record["agent_id"])
+                and event["task_type"] in (None, "local_bash"), "background_bash_binding_changed")
+        patch = event.get("patch", {})
+        identity = {"task_id": task, "id": task, "tool_use_id": record["tool_use_id"],
+                    "agent_id": record["agent_id"], "session_id": self.session_id,
+                    "task_type": "local_bash", "type": "local_bash"}
+        require(all(patch[key] == expected for key, expected in identity.items() if key in patch),
+                "background_bash_binding_changed")
+        if kind == "TaskNotificationMessage":
+            require(event["tool_use_id"] == record["tool_use_id"] and event["status"] in BASH_TERMINAL,
+                    "background_bash_event_invalid")
+        status = event["status"]
+        require(status is None or status in {"pending", "running", *BASH_TERMINAL}, "background_bash_event_invalid")
+        if status not in BASH_TERMINAL:
+            require(record["terminal"] is None or status is None, "background_bash_terminal_changed")
+            return
+        require(not any(row["kind"] == kind and row.get("status") in BASH_TERMINAL for row in record["events"]),
+                "background_bash_duplicate_terminal")
+        terminal = record["terminal"]
+        require(terminal is None or BASH_TERMINAL[terminal["status"]] == BASH_TERMINAL[status],
+                "background_bash_terminal_changed")
+        record["terminal"] = terminal or event
+        record["events"].append(deepcopy(event))
+        self.background[task] = BASH_TERMINAL[status]
+
+    def _bash_result(self, tool, operation, response, failed):
+        inputs = operation["input"]
+        require(isinstance(inputs, dict) and inputs.get("run_in_background", False) is False,
+                "background_bash_requires_qualified_adapter")
+        if not isinstance(response, dict):
+            return
+        require(not any(key in response for key in ("task_id", "taskId", "background_task_id", "backgroundedByUser")),
+                "background_bash_result_unsupported")
+        if "backgroundTaskId" not in response:
+            require(not any(key in response for key in ("timedOutAfterMs", "backgroundCwdHint")),
+                    "background_bash_result_unsupported")
+            return
+        task = response["backgroundTaskId"]
+        timeout = inputs.get("timeout", 120000)
+        require(not failed and isinstance(task, str) and BASH_TASK_ID.fullmatch(task)
+                and type(timeout) is int and timeout > 0
+                and set(response) <= BASH_RESULT_FIELDS
+                and isinstance(response.get("stdout"), str) and isinstance(response.get("stderr"), str)
+                and response.get("interrupted") is False and response.get("isImage", False) is False
+                and type(response.get("timedOutAfterMs")) is int
+                and response["timedOutAfterMs"] == min(timeout, 600000), "background_bash_result_unsupported")
+        require(all(isinstance(response[key], str) for key in ("returnCodeInterpretation", "backgroundCwdHint",
+                    "persistedOutputPath", "staleReadFileStateHint", "ghRateLimitHint") if key in response)
+                and all(type(response[key]) is bool for key in ("noOutputExpected", "dangerouslyDisableSandbox") if key in response)
+                and ("persistedOutputSize" not in response or type(response["persistedOutputSize"]) is int
+                     and response["persistedOutputSize"] >= 0), "background_bash_result_unsupported")
+        record = self._bash_binding(task, tool)
+        require(record["result"] is None, "background_bash_binding_changed")
+        result = {"kind": "PostToolUse", "task_id": task, "tool_use_id": tool,
+                  "agent_id": operation["agent"], "input_sha256": record["input_sha256"],
+                  "response_sha256": _evidence_digest(response), "timed_out_after_ms": response["timedOutAfterMs"],
+                  "monotonic_time": time.monotonic()}
+        record["result"] = result
+        record["events"].append(deepcopy(result))
+        self.background[task] = (BASH_TERMINAL[record["terminal"]["status"]]
+                                 if record["terminal"] is not None else "active")
+
+    def _automatic_bash_proof(self):
+        proof = {}
+        for task, record in self.bash_tasks.items():
+            if record["result"] is None:
+                continue
+            require(record["start"] is not None and record["terminal"] is not None
+                    and self.background.get(task) in set(BASH_TERMINAL.values()), "background_bash_binding_incomplete")
+            operation = self.completed_tools.get(record["tool_use_id"], {})
+            require(operation.get("name") == "Bash" and operation.get("agent") == record["agent_id"]
+                    and operation.get("failed") is False
+                    and _evidence_digest(operation.get("input")) == record["input_sha256"]
+                    and _evidence_digest(operation.get("response")) == record["result"]["response_sha256"],
+                    "background_bash_binding_changed")
+            proof[task] = deepcopy(record)
+        return proof
+
     def observe(self, message):
         kind = type(message).__name__
         value = asdict(message) if is_dataclass(message) else vars(message)
@@ -581,12 +734,9 @@ class NativeProducerCensus:
                             self.root_task = task
                         else:
                             require(self.checkpoint_active is None, "producer_started_during_checkpoint")
-                            require(task not in self.background, "duplicate_background_task_start")
-                            self.background[task] = "active"
-                    elif kind in {"TaskNotificationMessage", "TaskUpdatedMessage"} and task in self.background:
-                        status = value.get("status", data.get("status"))
-                        if status in {"completed", "failed", "stopped", "cancelled"}:
-                            self.background[task] = status
+                            self._bash_started(value)
+                    elif kind in {"TaskNotificationMessage", "TaskUpdatedMessage"} and task != self.root_task:
+                        self._bash_terminal(kind, value)
                     if "workflow_progress" in data:
                         require(task == self.root_task and tool == self.root_tool, "native_progress_root_changed")
                         self._progress(data["workflow_progress"])
@@ -740,6 +890,7 @@ class NativeProducerCensus:
                 self.condition.wait(timeout=min(remaining, .1))
             self.verify_sources()
             require(not self.tools and all(status != "active" for status in self.background.values()), "native_closure_producer_active")
+            automatic_bash = self._automatic_bash_proof()
             snapshot = self.journal.snapshot()
             require(snapshot["status"] == "complete", "native_closure_journal_unstable")
             self._validate_retirements(snapshot)
@@ -792,6 +943,8 @@ class NativeProducerCensus:
                 "journal": {"descriptor": deepcopy(self.journal_descriptor), "snapshot": deepcopy(snapshot),
                             "raw_utf8": raw_journal.decode("utf-8")},
                 "sources_sha256": {str(path): value for path, value in self.sources.items()}}
+            if automatic_bash:
+                census["automatic_bash"] = automatic_bash
             if self.retirement_events:
                 path = self._retirement_path()
                 raw = canonical_bytes(self.retirement_events)
@@ -810,6 +963,8 @@ class NativeProducerCensus:
                     "events": deepcopy(self.retirement_events), "path": str(path), "raw_utf8": raw.decode("ascii"),
                     "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
             self.transport_sealed = True
+            if automatic_bash:
+                census["automatic_bash_closed_monotonic_time"] = time.monotonic()
             return census
 
     def _bridge_all_terminal(self):
@@ -844,6 +999,7 @@ class NativeProducerCensus:
         active = self._node(checkpoint_agent)
         require(active.get("state") not in {"done", "error", "failed", "stopped", "cancelled"}, "checkpoint_already_terminal")
         require(not self.tools and all(status != "active" for status in self.background.values()), "native_background_producer_active")
+        self._automatic_bash_proof()
         snapshot = self.journal.snapshot()
         require(snapshot["status"] == "complete", "native_journal_not_stable")
         self._validate_retirements(snapshot)
@@ -1056,6 +1212,10 @@ class NativeProducerCensus:
                 elif agent:
                     require(tool_id and tool_id not in self.tools and tool_id not in self.completed_tools,
                             "duplicate_native_tool_start")
+                    if name == "Bash":
+                        inputs = data.get("tool_input")
+                        require(isinstance(inputs, dict) and inputs.get("run_in_background", False) is False,
+                                "background_bash_requires_qualified_adapter")
                     self.tools[tool_id] = {"name": name, "agent": agent, "input": deepcopy(data.get("tool_input"))}
                 return {}
         except (Exception, asyncio.CancelledError) as error:
@@ -1104,10 +1264,7 @@ class NativeProducerCensus:
                     self.completed_tools[tool_id] = {**operation, "response": deepcopy(response),
                                                     "failed": data.get("hook_event_name") == "PostToolUseFailure"}
                     if name == "Bash":
-                        require(not (operation["input"] or {}).get("run_in_background"), "background_bash_requires_qualified_adapter")
-                        if isinstance(response, dict):
-                            require(not any(response.get(key) for key in ("task_id", "taskId", "backgroundTaskId", "background_task_id")),
-                                    "background_bash_result_unsupported")
+                        self._bash_result(tool_id, operation, response, data.get("hook_event_name") == "PostToolUseFailure")
             except Exception as error:
                 self.fail("native_tool_outcome_unknown", error=error,
                           trigger={"kind": "post_hook", "tool_use_id": tool_id, "event": _identity_evidence(data)})

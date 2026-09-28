@@ -18,7 +18,9 @@ from interface.native_cost_controls.quality_stop_controller import StopRejected,
 from interface.native_cost_controls.quality_stop_native import CheckpointTransport
 from interface.native_cost_controls.quality_stop_retirement import INTERRUPTION, canonical_bytes
 from interface.native_cost_controls.native_journal import JournalError
-from interface.test_quality_stop_native import NativeFixture, Upstream, AssistantMessage
+from interface.test_quality_stop_native import (
+    NativeFixture, Upstream, AssistantMessage, TaskStartedMessage, TaskNotificationMessage,
+)
 
 
 class RetirementFixture:
@@ -192,6 +194,30 @@ class NativeRetirementTests(unittest.TestCase):
             self.assertEqual(self.r.retired, {})
             self.fx.bridge("finished")
             self.assertTrue(future.result(timeout=2))
+        self.assertIsNone(self.r.error)
+
+    def test_automatic_bash_blocks_retirement_until_native_terminal(self):
+        self.r.retirement_wait_seconds = 2
+        f = self.fx.fixture
+        inputs = {"command": "sleep 135"}
+        f.hook("PreToolUse", "Bash", inputs, "old-bash", "old")
+        self.r.observe(TaskStartedMessage(task_id="b12345678", tool_use_id="old-bash", task_type="local_bash"))
+        f.hook("PostToolUse", "Bash", inputs, "old-bash", "old", response={
+            "stdout": "", "stderr": "", "interrupted": False,
+            "backgroundTaskId": "b12345678", "timedOutAfterMs": 120000})
+        self.fx.replace()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.fx.send)
+            with self.r.condition:
+                self.assertTrue(self.r.condition.wait_for(lambda: len(self.r.request_records) == 1, timeout=1))
+            self.assertFalse(future.done())
+            self.assertEqual(self.r.retired, {})
+            self.assertEqual(self.fx.upstream.calls, [])
+            self.r.observe(TaskNotificationMessage(task_id="b12345678", tool_use_id="old-bash",
+                                                   task_type="local_bash", status="completed"))
+            self.assertTrue(future.result(timeout=2))
+        self.assertEqual(list(self.r.retired), ["old"])
+        self.assertEqual(self.r.background["b12345678"], "completed")
         self.assertIsNone(self.r.error)
 
     def test_concurrent_journal_append_defers_the_retirement_snapshot(self):

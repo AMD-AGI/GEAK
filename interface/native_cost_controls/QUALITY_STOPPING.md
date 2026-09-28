@@ -182,7 +182,33 @@ It joins every native node with journal starts, journal results, and native term
 Queued nodes without identities prevent certification.
 An `agentT()` return does not prove producer completion.
 The census also tracks native tool calls and background tasks.
-The current implementation rejects explicit background Bash results that lack a qualified completion adapter.
+The pre-hook rejects explicit `run_in_background=True` Bash requests before execution.
+The pinned CLI can still move a foreground Bash command to the background when its native timeout expires.
+The automatic Bash adapter binds that result to the exact admitted tool, agent, input, and native task start.
+It requires `backgroundTaskId` and the matching `timedOutAfterMs` value from the native result.
+It rejects task ID aliases, malformed results, and user background transitions.
+It preserves the original Bash timeout, tool catalog, model settings, and workflow behavior.
+
+The CLI also registers long foreground Bash commands before any automatic background transition.
+The census retains those native starts and terminal events without treating them as automatic background results.
+For an automatic result, either the start event or result can arrive first.
+The census immediately marks the task active when either arrives.
+The terminal event must follow the native start.
+If the terminal event precedes the result, the admitted tool remains active until the post-hook records that result.
+The post-hook preserves the terminal task status.
+An unknown task, duplicate binding, duplicate terminal kind, or conflicting terminal status fails closed.
+The SDK can emit both a terminal update and a terminal notification.
+The adapter accepts one of each when their terminal statuses agree.
+The native `killed` update and `stopped` notification describe the same terminal status.
+
+The final census includes `automatic_bash` evidence for each automatic task.
+This evidence retains ordered events, native identities, timeout metadata, and hashes of the exact input and response.
+When automatic tasks exist, the census records `automatic_bash_closed_monotonic_time` after its final checks under the admission lock.
+This timestamp bounds the included event times in the same host clock domain.
+Checkpoint, retirement, and final closure checks require complete bindings and no active background task.
+Native terminal evidence does not by itself prove that operating-system processes stopped.
+The existing host exclusion boundary and process closure checks remain required.
+Actual SDK qualification must separately establish command completion and process closure.
 
 The registry blocks new native admissions during a checkpoint.
 The host boundary also holds continuous OS exclusion through snapshot, measurement, signing, and persistence.

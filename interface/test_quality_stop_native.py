@@ -53,6 +53,7 @@ class TaskNotificationMessage(TaskStartedMessage):
 @dataclass
 class TaskUpdatedMessage(TaskStartedMessage):
     status: str = "completed"
+    patch: dict = field(default_factory=lambda: {"status": "completed"})
 
 
 @dataclass
@@ -303,15 +304,19 @@ class NativeCensusTests(unittest.TestCase):
         self.registry.assert_quiescent("checkpoint")
 
     def test_background_task_requires_terminal_notification(self):
-        self.registry.observe(TaskStartedMessage(task_id="background", tool_use_id="bash", task_type="local_bash"))
+        self.fixture.hook("PreToolUse", "Bash", {"command": "true"}, "bash", "engineer")
+        self.registry.observe(TaskStartedMessage(task_id="b00000001", tool_use_id="bash", task_type="local_bash"))
         with self.rejected("native_background_producer_active"):
             self.registry.assert_quiescent("checkpoint")
-        self.registry.observe(TaskUpdatedMessage(task_id="background", tool_use_id="bash", status="running"))
-        self.registry.observe(TaskNotificationMessage(task_id="background", tool_use_id="bash", status="completed"))
+        self.registry.observe(TaskUpdatedMessage(task_id="b00000001", tool_use_id="bash", task_type="local_bash",
+                                                status="running", patch={"status": "running"}))
+        self.registry.observe(TaskNotificationMessage(task_id="b00000001", tool_use_id="bash", task_type="local_bash", status="completed"))
+        self.fixture.hook("PostToolUse", "Bash", {"command": "true"}, "bash", "engineer", response={})
         self.registry.assert_quiescent("checkpoint")
 
     def test_duplicate_background_start_fails_closed(self):
-        event = TaskStartedMessage(task_id="background", tool_use_id="bash", task_type="local_bash")
+        self.fixture.hook("PreToolUse", "Bash", {"command": "true"}, "bash", "engineer")
+        event = TaskStartedMessage(task_id="b00000001", tool_use_id="bash", task_type="local_bash")
         self.registry.observe(event)
         self.registry.observe(event)
         self.assertEqual(self.registry.error, "native_census_event_conflict")
@@ -659,7 +664,8 @@ class NativeCensusTests(unittest.TestCase):
                 identity = "background" + str(len(self.registry.completed_tools))
                 self.fixture.hook("PreToolUse", "Bash", inputs, identity, "engineer")
                 self.fixture.hook("PostToolUse", "Bash", inputs, identity, "engineer", response=response)
-                self.assertEqual(self.registry.error, "native_tool_outcome_unknown")
+                expected = "native_tool_admission_failed" if inputs.get("run_in_background") else "native_tool_outcome_unknown"
+                self.assertEqual(self.registry.error, expected)
 
     def test_reclaim_needs_exact_command_and_clean_native_completion(self):
         operation = self.registry.completed_tools["reclaim-tool"]
