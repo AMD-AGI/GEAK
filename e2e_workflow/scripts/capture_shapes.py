@@ -38,6 +38,7 @@ _TMP_ARTIFACT_RE = re.compile(r"\.(?:pt|json)\.tmp-\d+")
 # Heuristic names for expert/static parameter tensors (used by moe_slim / share_large).
 _WEIGHT_KEY_RE = re.compile(
     r"(^w[123]$|^weight$|expert_w|gate_up|down_proj|up_proj|_weight$)", re.I)
+import atexit, contextlib, functools, importlib, json, os, sys, threading
 
 _STATE = {
     "target": None, "out_dir": None, "max_cases": 5, "num_steps": 0,
@@ -68,7 +69,104 @@ _STATE = {
     "share_min_bytes": 16 << 20, "shared_tensors": {}, "shared_bytes_est": 0,
     "oracle_bytes_est": 0, "budget_exceeded": False,
     "budget_skip_count": 0, "oracle_save_count": 0, "meta_flush_count": 0,
+    # Semantics Mapping 1.2: an opt-in, metadata-only use of this same wrapper.  It is deliberately
+    # isolated from the oracle state above so the Kernel Extractor's default behavior is unchanged.
+    "semantics_metadata_only": False, "semantics_jsonl": None, "semantics_config": {},
+    "semantics_bucket_forwards": {}, "semantics_next_instance": 0,
+    "semantics_static_written": set(),
 }
+
+_SEMANTICS_CONTEXT = threading.local()
+
+
+def _csv_env(name):
+    value = os.environ.get(name, "")
+    return {v.strip() for v in value.split(",") if v.strip()}
+
+
+def _env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def set_semantics_context(**fields):
+    """Set per-thread runtime context used by metadata-only source filters.
+
+    Serving integrations should set at least ``phase``, ``bucket``, ``layer_id`` and a stable
+    ``forward_id`` around a model forward.  Context is thread-local so concurrent serving requests do
+    not label each other.  Passing a field as None removes it.
+    """
+    current = dict(getattr(_SEMANTICS_CONTEXT, "value", {}))
+    for key, value in fields.items():
+        if value is None:
+            current.pop(key, None)
+        else:
+            current[key] = value
+    _SEMANTICS_CONTEXT.value = current
+    return dict(current)
+
+
+def clear_semantics_context():
+    _SEMANTICS_CONTEXT.value = {}
+
+
+@contextlib.contextmanager
+def semantics_context(**fields):
+    """Temporarily add metadata-only capture context for the current thread."""
+    previous = dict(getattr(_SEMANTICS_CONTEXT, "value", {}))
+    set_semantics_context(**fields)
+    try:
+        yield
+    finally:
+        _SEMANTICS_CONTEXT.value = previous
+
+
+def _semantics_env_config():
+    rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK"))
+    return {
+        "ranks": _csv_env("CAPTURE_SEMANTICS_RANKS"),
+        "layer_ids": _csv_env("CAPTURE_SEMANTICS_LAYER_IDS"),
+        "op_paths": _csv_env("CAPTURE_SEMANTICS_OP_PATHS"),
+        "target_ops": _csv_env("CAPTURE_SEMANTICS_TARGET_OPS"),
+        "phases": _csv_env("CAPTURE_SEMANTICS_PHASES"),
+        "buckets": _csv_env("CAPTURE_SEMANTICS_BUCKETS"),
+        "max_forwards_per_bucket": int(
+            os.environ.get("CAPTURE_SEMANTICS_FORWARDS_PER_BUCKET", "1")),
+        "mapping_cardinality": os.environ.get("CAPTURE_SEMANTICS_MAPPING", "1:1"),
+        "context": {
+            "rank": os.environ.get("CAPTURE_SEMANTICS_CONTEXT_RANK", rank),
+            "layer_id": os.environ.get("CAPTURE_SEMANTICS_CONTEXT_LAYER_ID"),
+            "phase": os.environ.get("CAPTURE_SEMANTICS_CONTEXT_PHASE"),
+            "bucket": os.environ.get("CAPTURE_SEMANTICS_CONTEXT_BUCKET"),
+            "forward_id": os.environ.get("CAPTURE_SEMANTICS_CONTEXT_FORWARD_ID"),
+            "op_path": os.environ.get("CAPTURE_SEMANTICS_CONTEXT_OP_PATH"),
+            "target_op": os.environ.get("CAPTURE_SEMANTICS_CONTEXT_TARGET_OP"),
+            "dispatch_branch": os.environ.get("CAPTURE_SEMANTICS_DISPATCH_BRANCH"),
+        },
+    }
+
+
+def _normalise_semantics_config(config):
+    result = _semantics_env_config()
+    config = dict(config or {})
+    context = dict(result["context"])
+    context.update(config.pop("context", {}) or {})
+    result.update(config)
+    result["context"] = context
+    for key in ("ranks", "layer_ids", "op_paths", "target_ops", "phases", "buckets"):
+        value = result.get(key, set())
+        if isinstance(value, str):
+            value = {v.strip() for v in value.split(",") if v.strip()}
+        result[key] = {str(v) for v in (value or set())}
+    result["max_forwards_per_bucket"] = max(
+        0, int(result.get("max_forwards_per_bucket", 1)))
+    cardinality = str(result.get("mapping_cardinality", "1:1")).upper()
+    if cardinality not in ("1:1", "1:N"):
+        raise ValueError("semantics mapping_cardinality must be '1:1' or '1:N'")
+    result["mapping_cardinality"] = cardinality
+    return result
 
 
 def _rank():
@@ -515,6 +613,161 @@ def resolve_shared_refs(obj, shared):
     if isinstance(obj, (list, tuple)):
         return type(obj)(resolve_shared_refs(v, shared) for v in obj)
     return obj
+def _tensor_stride(x):
+    stride = getattr(x, "stride", None)
+    try:
+        return list(stride() if callable(stride) else stride) if stride is not None else None
+    except Exception:
+        return None
+
+
+def _metadata(x, aliases=None):
+    """Describe values without cloning tensors, moving devices, reading data, or synchronizing."""
+    torch = _torch()
+    aliases = aliases if aliases is not None else {}
+    if torch.is_tensor(x):
+        identity = id(x)
+        if identity not in aliases:
+            aliases[identity] = "tensor-%d" % len(aliases)
+        result = {
+            "kind": "tensor",
+            "alias_id": aliases[identity],
+            "shape": list(x.shape),
+            "dtype": str(x.dtype),
+            "device": str(x.device),
+            "stride": _tensor_stride(x),
+            "contiguous": bool(x.is_contiguous()),
+        }
+        for name in ("requires_grad", "storage_offset"):
+            value = getattr(x, name, None)
+            try:
+                result[name] = value() if callable(value) else value
+            except Exception:
+                result[name] = None
+        return result
+    if isinstance(x, tuple):
+        return {"kind": "tuple", "items": [_metadata(v, aliases) for v in x]}
+    if isinstance(x, list):
+        return {"kind": "list", "items": [_metadata(v, aliases) for v in x]}
+    if isinstance(x, dict):
+        return {"kind": "dict", "items": {
+            str(k): _metadata(v, aliases) for k, v in x.items()}}
+    if isinstance(x, (str, int, float, bool)) or x is None:
+        return {"kind": "scalar", "type": type(x).__name__, "value": x}
+    return {"kind": "object", "type": "%s.%s" % (
+        type(x).__module__, type(x).__name__)}
+
+
+def _semantics_call_context():
+    config = _STATE["semantics_config"]
+    context = {k: v for k, v in config.get("context", {}).items() if v is not None}
+    context.update(getattr(_SEMANTICS_CONTEXT, "value", {}))
+    context.setdefault("op_path", _STATE["target"])
+    context.setdefault("target_op", _STATE["attr"])
+    return context
+
+
+def _semantics_filter_match(context):
+    config = _STATE["semantics_config"]
+    fields = (
+        ("ranks", "rank"), ("layer_ids", "layer_id"), ("op_paths", "op_path"),
+        ("target_ops", "target_op"), ("phases", "phase"), ("buckets", "bucket"),
+    )
+    for allowed_name, field_name in fields:
+        allowed = config.get(allowed_name, set())
+        if allowed and str(context.get(field_name)) not in allowed:
+            return False
+    return True
+
+
+def _reserve_semantics_forward(context):
+    """Apply the per-bucket forward limit before any tensor metadata is inspected."""
+    s = _STATE
+    if not _semantics_filter_match(context):
+        return None
+    bucket_key = "%s|%s" % (context.get("phase"), context.get("bucket"))
+    configured_forward = context.get("forward_id")
+    with s["lock"]:
+        forwards = s["semantics_bucket_forwards"].setdefault(bucket_key, [])
+        if configured_forward is None:
+            forward_key = "call-%d" % s["semantics_next_instance"]
+        else:
+            forward_key = str(configured_forward)
+        if forward_key not in forwards:
+            if len(forwards) >= s["semantics_config"]["max_forwards_per_bucket"]:
+                return None
+            forwards.append(forward_key)
+        instance = s["semantics_next_instance"]
+        s["semantics_next_instance"] += 1
+        return "op-%d" % instance, bucket_key, forward_key
+
+
+def _append_semantics_record(record):
+    path = _STATE["semantics_jsonl"]
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    line = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    with _STATE["lock"]:
+        with open(path, "a") as fh:
+            fh.write(line + "\n")
+
+
+def _semantics_wrapper(*args, **kwargs):
+    """Metadata-only hot path. Filtering happens before metadata inspection and the real call."""
+    s = _STATE
+    s["calls"] += 1
+    context = _semantics_call_context()
+    reservation = _reserve_semantics_forward(context)
+    if reservation is None:
+        return s["orig"](*args, **kwargs)
+
+    op_instance_id, bucket_key, forward_id = reservation
+    aliases = {}
+    try:
+        input_meta = _metadata(args, aliases)
+        kwargs_meta = _metadata(kwargs, aliases)
+    except Exception as e:
+        sys.stderr.write(f"[capture_shapes] semantics input metadata error (ignored): {e}\n")
+        return s["orig"](*args, **kwargs)
+
+    out = s["orig"](*args, **kwargs)
+    try:
+        cardinality = s["semantics_config"]["mapping_cardinality"]
+        op_path = context.get("op_path")
+        in_graph = _capturing()
+        with s["lock"]:
+            first_static = op_path not in s["semantics_static_written"]
+            if first_static:
+                s["semantics_static_written"].add(op_path)
+        record = {
+            "schema": "geak.semantics_metadata.v1",
+            "op_instance_id": op_instance_id,
+            "rank": context.get("rank"),
+            "layer_id": context.get("layer_id"),
+            "phase": context.get("phase"),
+            "bucket": context.get("bucket"),
+            "bucket_key": bucket_key,
+            "forward_id": forward_id,
+            "target_op": context.get("target_op"),
+            "op_path": op_path,
+            "dispatch_branch": context.get("dispatch_branch"),
+            "in_graph": in_graph,
+            "capture_window": "cuda_graph_capture" if in_graph else "eager",
+            "mapping_cardinality": cardinality,
+            "evidence_level": (
+                "kernel_exact" if cardinality == "1:1" else "parent_wrapper_context"),
+            "parent_context_only": cardinality == "1:N",
+            "inputs": input_meta,
+            "kwargs": kwargs_meta,
+            "output": _metadata(out, aliases),
+        }
+        if first_static and context.get("static_context") is not None:
+            record["static_context"] = context["static_context"]
+        elif context.get("static_context") is not None:
+            record["static_context_ref"] = op_path
+        _append_semantics_record(record)
+    except Exception as e:
+        sys.stderr.write(f"[capture_shapes] semantics output metadata error (ignored): {e}\n")
+    return out
 
 
 def _sig(args, kwargs):
@@ -538,6 +791,8 @@ def _sig(args, kwargs):
 
 def _wrapper(*args, **kwargs):
     s = _STATE
+    if s["semantics_metadata_only"]:
+        return _semantics_wrapper(*args, **kwargs)
     # This marker is consumed by kernel_selection.py from the capture run's torch trace.  It turns
     # "the hook saw calls" into stronger evidence: the GPU kernel selected from the baseline profile
     # must actually execute while THIS callable is active.  record_function is effectively a no-op
@@ -663,9 +918,10 @@ def _maybe_flush(in_graph=False):
     rewrite multi-GiB tensors on every call, only when a new case is recorded (#429).
 
     NEVER flush while the server is capturing a CUDA graph: the oracle write does a device sync / host
-    copy, which is ILLEGAL inside graph capture.
+    copy, which is ILLEGAL inside graph capture and would corrupt the server's decode-graph capture.
+    The next eager call (or atexit) flushes instead.
     """
-    if in_graph:
+    if _STATE["semantics_metadata_only"] or in_graph:
         return
     s = _STATE
     n = s["calls"]
@@ -677,6 +933,8 @@ def _maybe_flush(in_graph=False):
 
 def _flush(write_oracle=True):
     s = _STATE
+    if s["semantics_metadata_only"]:
+        return
     if not s["records"] and not s["shape_counts"]:
         sys.stderr.write("[capture_shapes] no records captured; nothing to flush\n")
         return
@@ -840,14 +1098,24 @@ def _make_wrapper(orig):
     return _w
 
 
-def install(target, out_dir, max_cases=5):
+# Backward-compatible public call contract:
+# def install(target, out_dir, max_cases=5):
+def install(target, out_dir, max_cases=5, semantics_metadata_only=None,
+            semantics_config=None):
     """Wrap module:attr to record I/O. Registers an atexit flush. Idempotent.
 
     Fails FAST at install (server startup) if the target is a native/non-Python callable that a plain
     Python wrapper cannot safely stand in for — converting the old unpredictable mid-run SIGSEGV (which
     took the whole server down and lost the run) into a clear, actionable startup error so the Extractor
     picks a Python-level seam. Override with CAPTURE_WRAP_UNSAFE=1 to force (e.g. when the caller only
-    reads shapes, never the JIT internals)."""
+    reads shapes, never the JIT internals).
+
+    ``semantics_metadata_only`` is opt-in and may also be enabled with
+    CAPTURE_SEMANTICS_METADATA_ONLY=1.  In that mode records go to
+    CAPTURE_SEMANTICS_JSONL (default: <out_dir>/semantics_metadata.jsonl); no tensor is cloned and no
+    reference_io.pt/meta.json oracle is written. ``semantics_config`` supplies source filters and
+    runtime defaults; dynamic serving context is supplied with :func:`semantics_context`.
+    """
     s = _STATE
     if s["installed"]:
         return
@@ -881,13 +1149,20 @@ def install(target, out_dir, max_cases=5):
         raise RuntimeError(
             f"[capture_shapes] invalid CAPTURE_PERSIST_POLICY={persist_policy!r} "
             f"(expected full|share_large|moe_slim)")
+    if semantics_metadata_only is None:
+        semantics_metadata_only = _env_bool("CAPTURE_SEMANTICS_METADATA_ONLY")
+    config = _normalise_semantics_config(semantics_config) if semantics_metadata_only else {}
+    jsonl = os.environ.get(
+        "CAPTURE_SEMANTICS_JSONL", os.path.join(out_dir, "semantics_metadata.jsonl"))
     s.update(target=target, out_dir=out_dir, max_cases=int(max_cases),
              orig=orig, mod=mod, attr=attr, installed=True,
              byte_budget=byte_budget, case_byte_limit=case_byte_limit,
              persist_policy=persist_policy, share_min_bytes=share_min_bytes or (16 << 20),
              shared_tensors={}, shared_bytes_est=0,
              oracle_bytes_est=0, budget_exceeded=False,
-             budget_skip_count=0, oracle_save_count=0, meta_flush_count=0)
+             budget_skip_count=0, oracle_save_count=0, meta_flush_count=0,
+             semantics_metadata_only=bool(semantics_metadata_only),
+             semantics_config=config, semantics_jsonl=jsonl)
     if os.environ.get("GEAK_SELECTION_TRACE"):
         # Selection runs are intentionally short and server teardown may use SIGTERM, which skips
         # Python atexit. Persist meta immediately; heavy oracle still only rewrites when records grow.
@@ -896,15 +1171,24 @@ def install(target, out_dir, max_cases=5):
         s["flush_every"] = max(1, int(os.environ["CAPTURE_FLUSH_EVERY"]))
     setattr(owner, leaf, _make_wrapper(orig))
     atexit.register(_flush)
-    sys.stderr.write(
-        f"[capture_shapes] hooked {target}; recording up to {max_cases} cases -> {out_dir}"
-        f" (byte_budget={byte_budget or 'unlimited'}"
-        f" case_limit={case_byte_limit or 'unlimited'}"
-        f" policy={persist_policy})\n")
+    if semantics_metadata_only:
+        sys.stderr.write(
+            f"[capture_shapes] hooked {target}; semantics metadata-only -> {jsonl}\n")
+    else:
+        sys.stderr.write(
+            f"[capture_shapes] hooked {target}; recording up to {max_cases} cases -> {out_dir}"
+            f" (byte_budget={byte_budget or 'unlimited'}"
+            f" case_limit={case_byte_limit or 'unlimited'}"
+            f" policy={persist_policy})\n")
 
 
 # Allow configuration purely via env (so a generic overlay sitecustomize can call install()):
 #   CAPTURE_TARGET=module:attr  CAPTURE_OUT=/path  CAPTURE_MAX=5
+# Optional semantics mode:
+#   CAPTURE_SEMANTICS_METADATA_ONLY=1
+#   CAPTURE_SEMANTICS_RANKS=0 CAPTURE_SEMANTICS_LAYER_IDS=22
+#   CAPTURE_SEMANTICS_PHASES=prefill,decode CAPTURE_SEMANTICS_BUCKETS=...
+#   CAPTURE_SEMANTICS_OP_PATHS=module:attr CAPTURE_SEMANTICS_FORWARDS_PER_BUCKET=1
 def install_from_env():
     t = os.environ.get("CAPTURE_TARGET")
     o = os.environ.get("CAPTURE_OUT")
