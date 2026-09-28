@@ -239,6 +239,12 @@ def call_jev(req: dict, api_key: str, timeout_s: float) -> dict:
     gw = {}
     if os.environ.get("GEAK_JEV_ZDR", "1") == "1":
         gw["zeroDataRetention"] = True
+        # Pinning the provider is REQUIRED for ZDR, not a preference. Probed 2026-09-28 on a
+        # funded account: unpinned, the gateway resolves `typesafe-ai/jev` to `digitalocean`,
+        # then skips it with reason `zdr_ineligible_model` and returns 403 WITHOUT falling back
+        # to the `typesafe-ai` provider it listed as available. Pinning `typesafe-ai` reaches
+        # provider routing with ZDR intact. So ZDR-on without this line can never succeed.
+        gw["only"] = ["typesafe-ai"]
     payload["providerOptions"] = {"gateway": gw}
     resp = requests.post(
         JEV_ENDPOINT,
@@ -252,11 +258,18 @@ def call_jev(req: dict, api_key: str, timeout_s: float) -> dict:
         body = resp.text[:300]
         if "customer_verification" in body:
             hint = "the Vercel team has no credit card on file"
+        elif "zdr_ineligible_model" in body:
+            hint = ("no ZDR-eligible provider was reachable for this model; the request was "
+                    "pinned to `typesafe-ai`, so this means that provider became ineligible "
+                    "too. GEAK_JEV_ZDR=0 would send WITHOUT retention cover -- a deliberate act")
         elif "ZdrUnauthorized" in body or "Zero Data Retention" in body:
-            hint = ("Zero Data Retention needs a Pro/Enterprise plan; set GEAK_JEV_ZDR=0 to "
-                    "send without it, which means the state is NOT covered by ZDR")
+            hint = ("this API key's plan does not permit Zero Data Retention (observed on a "
+                    "`hobby` plan); set GEAK_JEV_ZDR=0 to send without it, which means the "
+                    "state is NOT covered by ZDR")
         elif "Free tier" in body:
-            hint = "the account is on the free tier and has no access to this model"
+            hint = ("the account has no paid credits, so this model is restricted. NOTE: a ZDR "
+                    "routing failure can also surface under this message -- check the routing "
+                    "metadata for `zdr_ineligible_model` before assuming it is a billing issue")
         else:
             hint = "unrecognised 403"
         raise RuntimeError(f"gateway refused the request (403): {hint}: {body}")
