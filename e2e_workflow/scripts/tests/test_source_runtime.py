@@ -75,7 +75,8 @@ def serving(launch_files, tmp_path, *, overlay="", startup="", after_bind="", ob
                       "  self.send_response(200);self.end_headers();self.wfile.write(b'healthy')\n"
                       " def log_message(self,*args): pass\n"
                       "server=HTTPServer(('127.0.0.1',0),Handler)\n"
-                      f"Path({str(marker)!r}).write_text(json.dumps([os.getpid(),server.server_port]))\n"
+                      f"Path({str(marker.with_suffix('.tmp'))!r}).write_text(json.dumps([os.getpid(),server.server_port]))\n"
+                      f"os.replace({str(marker.with_suffix('.tmp'))!r},{str(marker)!r})\n"
                       + after_bind + "\nserver.serve_forever()\n")
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", GEAK_SOURCE_REQUEST=str(request),
                GEAK_SOURCE_OBSERVATION_DIR=str(out), GEAK_ACCEPTED_SOURCE_PYTHONPATH=roots,
