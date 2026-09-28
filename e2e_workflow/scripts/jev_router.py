@@ -190,14 +190,21 @@ def call_jev(req: dict, api_key: str, timeout_s: float) -> dict:
         "attempt_number": int(req.get("attempt", 0) or 0),
         "task": (req.get("task") or "")[:STATE_TOKEN_BUDGET_CHARS],
     }
+    # ZDR and no-training are per-request Gateway options; the catalog listing `zdr: none`
+    # describes the catalog entry, not what is available per call. ZDR is DEFAULTED ON because
+    # the state carries GEAK task text, and shipping that to a third party without retention
+    # controls is the riskier default -- but probed 2026-09-28, ZDR is refused outright on
+    # non-Pro plans ("Current plan: hobby", ZdrUnauthorizedError), so it must be disableable
+    # or such an account can never make a call at all. Turning it off is a deliberate act.
     payload = {
         "model": JEV_MODEL,
         "state": state,
         "questions": build_questions(),
-        # ZDR and no-training are per-request options on the Gateway; the model catalog listing
-        # `zdr: none` describes the catalog entry, not what is available per call.
-        "providerOptions": {"gateway": {"zeroDataRetention": True, "noTraining": True}},
     }
+    gw = {"noTraining": True}
+    if os.environ.get("GEAK_JEV_ZDR", "1") == "1":
+        gw["zeroDataRetention"] = True
+    payload["providerOptions"] = {"gateway": gw}
     resp = requests.post(
         JEV_ENDPOINT,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -205,13 +212,19 @@ def call_jev(req: dict, api_key: str, timeout_s: float) -> dict:
         timeout=timeout_s,
     )
     if resp.status_code == 403:
-        # Observed 2026-09-28: a Vercel team with no card on file gets this for every evaluation
-        # call, whatever the payload. It is an account state, not a bad request -- say so.
-        raise RuntimeError(
-            "gateway refused the request (403). If the body mentions customer_verification, the "
-            "Vercel team needs a credit card on file before evaluation calls are serviced: "
-            + resp.text[:200]
-        )
+        # Three distinct account states produce a 403 here, all observed 2026-09-28. None is a
+        # bad request, so name them rather than letting a generic error hide the fix.
+        body = resp.text[:300]
+        if "customer_verification" in body:
+            hint = "the Vercel team has no credit card on file"
+        elif "ZdrUnauthorized" in body or "Zero Data Retention" in body:
+            hint = ("Zero Data Retention needs a Pro/Enterprise plan; set GEAK_JEV_ZDR=0 to "
+                    "send without it, which means the state is NOT covered by ZDR")
+        elif "Free tier" in body:
+            hint = "the account is on the free tier and has no access to this model"
+        else:
+            hint = "unrecognised 403"
+        raise RuntimeError(f"gateway refused the request (403): {hint}: {body}")
     resp.raise_for_status()
     body = resp.json()
     answers = body.get("answers") or body
