@@ -296,4 +296,23 @@ def test_no_undocumented_gateway_flags_are_sent(monkeypatch):
     monkeypatch.setitem(sys.modules, "requests", fake)
     monkeypatch.setenv("GEAK_JEV_ZDR", "1")
     jr.call_jev({"label": "x", "task": "t"}, "key", 5.0)
-    assert seen["providerOptions"]["gateway"] == {"zeroDataRetention": True}
+    assert seen["providerOptions"]["gateway"] == {
+        "zeroDataRetention": True, "only": ["typesafe-ai"],
+    }, "ZDR must pin the provider; unpinned it resolves to a zdr_ineligible_model and 403s"
+
+
+def test_zdr_off_sends_no_gateway_pin(monkeypatch):
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"answers": _answers()}
+
+    import sys, types
+    fake = types.ModuleType("requests")
+    fake.post = lambda url, **kw: (seen.update(kw.get("json") or {}), _Resp())[1]
+    monkeypatch.setitem(sys.modules, "requests", fake)
+    monkeypatch.setenv("GEAK_JEV_ZDR", "0")
+    jr.call_jev({"label": "x", "task": "t"}, "key", 5.0)
+    assert seen["providerOptions"]["gateway"] == {}
