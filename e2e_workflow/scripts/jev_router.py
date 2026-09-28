@@ -236,15 +236,24 @@ def call_jev(req: dict, api_key: str, timeout_s: float) -> dict:
     # verified by probing, because an unknown key under `providerOptions.gateway` is accepted
     # exactly like a real one (a bogus control key returned the same 403, not a 400). A flag
     # that may silently do nothing is worse than no flag, because it reads as protection.
-    gw = {}
+    # CORRECTED 2026-09-28. `typesafe-ai/jev` is listed in the model catalog with `zdr: none`,
+    # and it is the ONLY model of type `evaluation` in the catalog (1 of 391). Zero Data
+    # Retention is therefore NOT available for this model on any provider -- probing agrees
+    # (`skippedProviderAttempts[].reason == "zdr_ineligible_model"`). An earlier reading here
+    # claimed that pinning `only: ["typesafe-ai"]` made ZDR work, because that combination
+    # returned 429 rather than 403; that was wrong. A 429 is an upstream-capacity refusal
+    # raised before the retention check, so it demonstrates nothing about ZDR.
+    #
+    # So GEAK_JEV_ZDR=1 cannot be satisfied. Rather than sending the state anyway and silently
+    # dropping the guarantee the caller asked for, refuse. Sending GEAK task text WITHOUT
+    # retention cover must be an explicit act: GEAK_JEV_ZDR=0.
     if os.environ.get("GEAK_JEV_ZDR", "1") == "1":
-        gw["zeroDataRetention"] = True
-        # Pinning the provider is REQUIRED for ZDR, not a preference. Probed 2026-09-28 on a
-        # funded account: unpinned, the gateway resolves `typesafe-ai/jev` to `digitalocean`,
-        # then skips it with reason `zdr_ineligible_model` and returns 403 WITHOUT falling back
-        # to the `typesafe-ai` provider it listed as available. Pinning `typesafe-ai` reaches
-        # provider routing with ZDR intact. So ZDR-on without this line can never succeed.
-        gw["only"] = ["typesafe-ai"]
+        raise RuntimeError(
+            "GEAK_JEV_ZDR=1 but typesafe-ai/jev is catalogued `zdr: none`, so Zero Data "
+            "Retention cannot be honoured for it. Set GEAK_JEV_ZDR=0 to send the state "
+            "WITHOUT retention cover -- a deliberate choice -- or leave the router off."
+        )
+    gw = {}
     payload["providerOptions"] = {"gateway": gw}
     resp = requests.post(
         JEV_ENDPOINT,
