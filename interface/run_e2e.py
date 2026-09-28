@@ -125,7 +125,7 @@ GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
 
 # Workflow primitives are only available at this effort tier (see README).
 CLAUDE_EFFORT = os.environ.get("GEAK_CLAUDE_EFFORT", "ultracode")
-CLAUDE_MODEL = os.environ.get("GEAK_CLAUDE_MODEL", "claude-opus-4-8")
+CLAUDE_MODEL = os.environ.get("GEAK_CLAUDE_MODEL", "claude-opus-5-5")
 # WebSearch/WebFetch are required by the Deep Research Agent (kernel_workflow's opt-in `Research`
 # phase, args.dra_enabled=true): its per-question research agents do native web research. They are
 # harmless when the DRA is off (nothing opts into them) — the reason v4 previously "had no websearch"
