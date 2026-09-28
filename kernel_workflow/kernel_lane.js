@@ -1616,13 +1616,19 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   let integrate = null;
   if (verified.length >= 2) {
     phase('Merge');
+    const bestIndividual = candidates.reduce((best, candidate) =>
+      candidate.geomean > best.geomean ? candidate : best);
     integrate = await agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
         CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        SELECTION_METRIC: HAS_WORKLOAD ? 'weighted' : 'geomean',
+        SELECTION_METRIC_FALLBACK: HAS_WORKLOAD ? 'geomean' : 'none',
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
+        BEST_INDIVIDUAL_METRIC: HAS_WORKLOAD && Number.isFinite(bestIndividual.weighted) ? 'weighted' : 'geomean',
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
+          verified_weighted: r.ver.verified_weighted,
           files: r.d.focus_files || [], patch: r.patch })),
         INSIGHTS: history.insights,
       }),

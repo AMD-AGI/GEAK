@@ -25,6 +25,11 @@ const args={kernel_path:'/fixture/task',workflow_dir:input.root+'/kernel_workflo
   budget:6,max_no_improve:input.no_improve?2:100,update_experience:'off',use_learned_kb:false,
   agent_retries:1,agent_timeout_ms:0,deadline_epoch:input.deadline?deadline:0,
   ...(input.off?{}:{quality_stop:config})};
+if(input.integration){
+  args.budget=2;
+  args.task='The COMMANDMENT METRIC is GEAK_WEIGHTED_SPEEDUP (weighted).';
+  if(input.integration.workload) args.workload_spec_path='/fixture/workload.json';
+}
 if(input.wrong_source) config.candidate_root='/fixture/other';
 function signed(value){const payload=JSON.stringify(value);return {payload,signature:crypto.sign('sha256',Buffer.from(payload,'ascii'),privateKey).toString('base64')};}
 async function agent(task,options){
@@ -39,7 +44,17 @@ async function agent(task,options){
   if(label==='benchmark_engineer') return {commandment_path:'/fixture/eval/COMMANDMENT.md',baseline_per_case:[row],baseline_geomean_ms:1};
   if(label==='profile_engineer:baseline'||label.startsWith('reprofile ')) return profile;
   if(label.startsWith('tech_lead:plan ')||label.startsWith('tech_lead:replan ')) return {stop:!!input.planner_stop,
-    directions:input.planner_stop?[]:[{id:'r'+round+'_d0',specialty:'algorithm',title:'synthetic direction',focus_files:['fixture.py']}]};
+    directions:input.planner_stop?[]:Array.from({length:input.integration?2:1},(_,index)=>
+      ({id:'r'+round+'_d'+index,specialty:'algorithm',title:'synthetic direction',focus_files:['fixture.py']}))};
+  if(input.integration&&(label.startsWith('eng ')||label.startsWith('verify '))){
+    const item=input.integration.individuals[Number(label.match(/_d([01])/)[1])];
+    const weighted=item.weighted==='nonfinite'?NaN:item.weighted;
+    if(label.startsWith('eng ')) return {status:'success',measurement_valid:true,
+      speedup_geomean:item.geomean,speedup_weighted:weighted,per_case:[row],patch_file:'/fixture/patch.diff'};
+    return {status:'verified',correctness:'pass',verified_geomean:item.geomean,verified_weighted:weighted,per_case:[row]};
+  }
+  if(input.integration&&label.startsWith('integrate ')) return {attempted:true,conclusion:input.integration.conclusion||'improved',
+    best:{...input.integration.combined,patch_file:'/fixture/integrated.diff',per_case:[row]}};
   if(label.startsWith('eng ')) return {status:'success',speedup_geomean:speed,measurement_valid:true,per_case:[row],patch_file:'/fixture/patch.diff'};
   if(label.startsWith('verify ')) return {status:'verified',correctness:'pass',verified_geomean:speed,per_case:[row]};
   if(label.startsWith('commit ')) return {committed:true,current_best_diff:'/fixture/current.diff'};
@@ -87,6 +102,84 @@ def lane(**case):
 
 
 class LaneTests(unittest.TestCase):
+    def integration_inputs(self, value):
+        task = next(row["task"] for row in value["prompts"] if row["label"] == "integrate r1")
+        fields = {}
+        for line in task.splitlines():
+            if line.startswith("- ") and ": " in line:
+                key, raw = line[2:].split(": ", 1)
+                try:
+                    fields[key] = json.loads(raw)
+                except json.JSONDecodeError:
+                    fields[key] = raw
+        return fields
+
+    def test_integrator_tags_geomean_despite_weighted_commandment(self):
+        # Recorded metric mismatch. These are native report values, not final quality evidence.
+        case = {"workload": False,
+            "individuals": [{"geomean": 1.0825, "weighted": 1.0605},
+                            {"geomean": 1.0582, "weighted": 1.0617}],
+            "combined": {"geomean": 1.0866, "weighted": 1.0627}}
+        value = lane(off=True, integration=case)
+        fields = self.integration_inputs(value)
+        self.assertEqual(fields["SELECTION_METRIC"], "geomean")
+        self.assertEqual(fields["SELECTION_METRIC_FALLBACK"], "none")
+        self.assertEqual(fields["BEST_INDIVIDUAL_METRIC"], "geomean")
+        self.assertEqual(fields["BEST_INDIVIDUAL"], 1.0825)
+        self.assertEqual([row["verified_weighted"] for row in fields["PATCHES"]], [1.0605, 1.0617])
+        self.assertTrue(any("winner=integrated" in line for line in value["logs"]))
+
+    def test_integrator_tags_weighted_when_workload_is_present(self):
+        case = {"workload": True,
+            "individuals": [{"geomean": 1.0825, "weighted": 1.0605},
+                            {"geomean": 1.0582, "weighted": 1.0617}],
+            "combined": {"geomean": 1.02, "weighted": 1.0627}}
+        value = lane(off=True, integration=case)
+        fields = self.integration_inputs(value)
+        self.assertEqual(fields["SELECTION_METRIC"], "weighted")
+        self.assertEqual(fields["SELECTION_METRIC_FALLBACK"], "geomean")
+        self.assertEqual(fields["BEST_INDIVIDUAL_METRIC"], "weighted")
+        self.assertEqual(fields["BEST_INDIVIDUAL"], 1.0617)
+        self.assertTrue(any("winner=integrated" in line for line in value["logs"]))
+
+    def test_integrator_labels_the_actual_geomean_fallback(self):
+        for weighted in ({}, {"weighted": None}, {"weighted": "nonfinite"}):
+            with self.subTest(weighted=weighted):
+                case = {"workload": True,
+                    "individuals": [{"geomean": 1.0825, **weighted},
+                                    {"geomean": 1.0582, "weighted": 1.0617}],
+                    "combined": {"geomean": 1.0866}}
+                value = lane(off=True, integration=case)
+                fields = self.integration_inputs(value)
+                self.assertEqual(fields["SELECTION_METRIC"], "weighted")
+                self.assertEqual(fields["SELECTION_METRIC_FALLBACK"], "geomean")
+                self.assertEqual(fields["BEST_INDIVIDUAL_METRIC"], "geomean")
+                self.assertEqual(fields["BEST_INDIVIDUAL"], 1.0825)
+                self.assertTrue(any("winner=integrated" in line for line in value["logs"]))
+
+    def test_integrator_contract_is_identical_in_both_stopping_arms(self):
+        case = {"workload": False,
+            "individuals": [{"geomean": 1.0825, "weighted": 1.0605},
+                            {"geomean": 1.0582, "weighted": 1.0617}],
+            "combined": {"geomean": 1.0866, "weighted": 1.0627}}
+        control = self.integration_inputs(lane(control=True, integration=case))
+        treatment = self.integration_inputs(lane(integration=case))
+        for field in ("SELECTION_METRIC", "SELECTION_METRIC_FALLBACK", "BEST_INDIVIDUAL", "BEST_INDIVIDUAL_METRIC", "PATCHES"):
+            self.assertEqual(control[field], treatment[field])
+
+    def test_unavailable_weighted_comparison_retains_the_individual(self):
+        # Script the role's documented unavailable outcome. This does not test model compliance.
+        case = {"workload": True,
+            "individuals": [{"geomean": 1.0825, "weighted": 1.0605},
+                            {"geomean": 1.0582, "weighted": 1.0617}],
+            "combined": {"geomean": 1.5}, "conclusion": "no_improvement"}
+        value = lane(off=True, integration=case)
+        fields = self.integration_inputs(value)
+        self.assertEqual(fields["BEST_INDIVIDUAL_METRIC"], "weighted")
+        self.assertEqual(fields["BEST_INDIVIDUAL"], 1.0617)
+        self.assertFalse(any("winner=integrated" in line for line in value["logs"]))
+        self.assertTrue(any("winner=engineer r1_d1" in line for line in value["logs"]))
+
     def test_runtime_contract_covers_both_arms_and_preserves_local_requests(self):
         contract = '## Quality-stop runtime contract'
         runs = [lane(certify_at=1), lane(certify_at=1, control=True)]
