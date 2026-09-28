@@ -35,9 +35,10 @@ e.g. `--attention-backend triton`).
 ## PHASE=sweep
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND` (sglang|vllm), `GPU_ID`, `WORKLOAD`,
-`BASELINE_THROUGHPUT`, `NOISE_BAND_PCT`, `CONFIG_DIRECTIONS` (the Architect's ranked axes + swaps,
+`BASELINE_THROUGHPUT` (the current accepted-stack throughput, including KernelFusion),
+`NOISE_BAND_PCT`, `CONFIG_DIRECTIONS` (the Architect's ranked axes + swaps,
 each with target kernels + rationale), `CURRENT_FLAGS`/`CURRENT_ENV`/`CURRENT_OVERLAY`
-(the accepted stack so far),
+(the accepted stack so far), `REQUIRED_FUSION_ENGAGEMENT`,
 `MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, `EFFECTIVE_CONFIG_DIGEST`,
 `ENABLE_FP8` (bool; gates the FP8 axis), `SKILL_DIR`. On a warm-start replay you additionally get
 `MERGE_OVERRIDES` / `MERGE_ADDED` — see "A direction that arrives pre-merged" below.
@@ -67,6 +68,8 @@ For EACH direction, in the Architect's order:
    ```
 3. Read `bench_summary.json`. delta% = `(cand_median - current_median)/current_median*100`.
 4. Parity check if numerics could change. Verify the swap took (server log).
+5. When `REQUIRED_FUSION_ENGAGEMENT` is non-empty, verify every accepted fusion is still engaged;
+   reject a faster configuration that silently disables or bypasses an accepted fusion.
 5. Keep the change ONLY if delta% > noise band AND parity passes. Accepted changes COMPOUND into the
    running config for subsequent directions.
 6. (GEMM tuning is NOT a config axis — it lives in the head-kernel track now.)

@@ -73,8 +73,12 @@ admits*, not by the edit flag:
 ## PHASE=strategize  (after baseline profile, before any optimization)
 
 Inputs: `EVAL_DIR`, `PROFILE_TOPN` (path to profile_topN.json + inline top entries),
-`BASELINE_THROUGHPUT`, `WORKLOAD` (isl/osl/conc → tells you prefill vs decode regime mix),
+`BASELINE_THROUGHPUT` (the throughput of the stack that produced `PROFILE_TOPN`, including
+accepted KernelFusion changes), `WORKLOAD` (isl/osl/conc → tells you prefill vs decode regime mix),
 `BUDGET` (max kernel-optimization tasks), `CONFIG_TUNE_ENABLED` (bool), `SKILL_DIR`.
+Optional KernelFusion ownership inputs are `FUSION_TOPK_JSON`, `FUSION_UNITSIDE_JSON`,
+`ACCEPTED_FUSIONS`, and `FUSION_DISPOSITION`. Do not schedule an already-applied fusion again;
+an unapplied unit-side result must be routed to a fallback track or explicitly dropped with a reason.
 OPTIONAL profile-analysis prior (empty string = not provided): `ANALYSIS_SKILL`, `ANALYSIS_SKILL_DIR`
 (+ the Profiler's `profile_roofline_json`) — see step 1c.
 OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing as "not provided"):
