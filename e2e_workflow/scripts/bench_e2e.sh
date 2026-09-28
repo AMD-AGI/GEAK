@@ -809,12 +809,25 @@ PY
     case "${TPOT_MS:-}" in ''|*[!0-9.]*) TPOT_MS="" ;; esac   # keep only a clean number
     [ -n "${TPOT_MS:-}" ] && echo ">>> steady-state sizing: derived TPOT_MS=${TPOT_MS}ms from timed bench (vllm window auto-scale)"
   fi
-  # Size the single capture to PROFILE_TARGET_STEPS (computed at launch): raise the sglang step count
-  # (clamped to the cap) and scale the vllm window to target*TPOT*1.5. vllm 0.26+ is already step-bounded
-  # by PROFILE_MAX_ITERS; the window is a safety cap there, the sole bound on <0.26.
-  if [ "${PROFILE_NUM_STEPS:-0}" -lt "$PROFILE_TARGET_STEPS" ]; then
-    echo ">>> sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_TARGET_STEPS}"
-    PROFILE_NUM_STEPS=$PROFILE_TARGET_STEPS
+  # KernelFusion has a different evidence goal from the native Top-N profiler:
+  # it needs Python/module spans and one representative forward per sglang stage,
+  # not a long statistical sample.  Its caller sets GEAK_FUSION_TRACE=1 and
+  # PROFILE_NUM_STEPS=1. Do not inflate that stack-heavy sglang trace back to
+  # 40/64 steps. Other backends retain their existing adapter behavior.
+  _GEAK_FUSION_CAPTURE=0
+  case " ${EXTRA_ENV:-} " in
+    *" GEAK_FUSION_TRACE=1 "*) _GEAK_FUSION_CAPTURE=1 ;;
+  esac
+  [ "${GEAK_FUSION_TRACE:-0}" = "1" ] && _GEAK_FUSION_CAPTURE=1
+  if [ "$_GEAK_FUSION_CAPTURE" = "1" ] && [ "$BACKEND" = "sglang" ]; then
+    PROFILE_NUM_STEPS=1
+    echo ">>> Fusion semantic capture: preserving PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS} (steady-state auto-sizing disabled)"
+  else
+    # Native profiling keeps main's deterministic target computed at launch.
+    if [ "${PROFILE_NUM_STEPS:-0}" -lt "$PROFILE_TARGET_STEPS" ]; then
+      echo ">>> sizing: PROFILE_NUM_STEPS ${PROFILE_NUM_STEPS}->${PROFILE_TARGET_STEPS}"
+      PROFILE_NUM_STEPS=$PROFILE_TARGET_STEPS
+    fi
   fi
   if [ -n "${PROFILE_NUM_STEPS_MAX:-}" ] && [ "$PROFILE_NUM_STEPS" -gt "$PROFILE_NUM_STEPS_MAX" ]; then
     echo ">>> sizing: PROFILE_NUM_STEPS capped ${PROFILE_NUM_STEPS}->${PROFILE_NUM_STEPS_MAX}"
@@ -862,6 +875,37 @@ PY
       adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
   fi
   echo ">>> Trace(s) in $PROFILE_DIR"
+
+  # KernelFusion consumes a deterministic trace manifest, not the raw trace
+  # directory directly. Generate it in the capture process so the pipeline does
+  # not depend on an agent remembering to run trace_capability.py afterward.
+  if [ "$_GEAK_FUSION_CAPTURE" = "1" ]; then
+    _TRACE_CAPABILITY="${SKILL_DIR:-}/scripts/trace_capability.py"
+    _TRACE_MANIFEST="$OUT_DIR/profile_trace_manifest.json"
+    if [ ! -f "$_TRACE_CAPABILITY" ]; then
+      echo "!!! KernelFusion manifest builder missing: $_TRACE_CAPABILITY" >&2
+      exit 2
+    fi
+    if ! python3 "$_TRACE_CAPABILITY" \
+        --trace-dir "$PROFILE_DIR" \
+        --auto-select-rank \
+        --out "$_TRACE_MANIFEST"; then
+      echo "!!! KernelFusion trace manifest generation failed: $_TRACE_MANIFEST" >&2
+      exit 2
+    fi
+    if ! python3 - "$_TRACE_MANIFEST" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    doc = json.load(fh)
+if doc.get("status") != "pass" or not doc.get("analysis_rank_trace"):
+    raise SystemExit(2)
+PY
+    then
+      echo "!!! KernelFusion trace manifest is invalid: $_TRACE_MANIFEST" >&2
+      exit 2
+    fi
+    echo ">>> KernelFusion trace manifest: $_TRACE_MANIFEST"
+  fi
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----

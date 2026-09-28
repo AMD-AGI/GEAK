@@ -82,27 +82,88 @@ adapter_bench() {
 # (and MEM/RPD activities) shrinks the trace ~an order of magnitude while KEEPING everything parse_profile
 # needs: the GPU kernel timeline, cpu_op Input Dims (record_shapes), and execute_* phase annotations.
 # Override via SGLANG_PROFILE_ACTIVITIES / SGLANG_PROFILE_WITH_STACK.
+#
+# ⚠️ CONSEQUENCE OF with_stack=false, stated here so no downstream phase mistakes it for full decode
+# evidence: without python_function spans there are no nn.Module spans, so DECODE rows resolve their
+# SEQUENCE (which kernels, in what order) but NOT their SHAPES. Semantics records this honestly as
+# `phase_coverage.decode_evidence = "sequence_only_shapes_unresolved"` +
+# `decode_requires_graph_capture = true`, and Phase 2 REFUSES to build decode candidates on it (see
+# fusion_candidate_harness --require-phase-coverage). Decode shapes come from the separate
+# graph-construction capture (run_semantic_shape_capture), not from this clean timing trace.
+#
+# profile_by_stage=TRUE (default): sglang then writes SEPARATE per-phase traces
+# `<id>-TP-<rank>-EXTEND.trace.json.gz` and `...-DECODE.trace.json.gz`. This is what makes decode
+# analysable AT ALL — in a single merged trace the decode steps are interleaved into the prefill
+# chunks with no phase tag, so a decode-only view cannot be reconstructed. Historically this adapter
+# did NOT request it, every capture was one un-split trace, and decode was silently never analysed.
+# Override with SGLANG_PROFILE_BY_STAGE=0.
 adapter_profile_window() {
   local before after
   before=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
   local _acts="${SGLANG_PROFILE_ACTIVITIES:-[\"CPU\",\"GPU\"]}" _stack="${SGLANG_PROFILE_WITH_STACK:-false}"
+  # The semantics sidecar requests module spans by passing SGLANG_PROFILE_WITH_STACK
+  # through EXTRA_ENV (which otherwise only reaches the server launch line). Honor it
+  # for the profiler window too, so DecoderLayer python_function spans get captured.
+  case " ${EXTRA_ENV:-} " in
+    *" SGLANG_PROFILE_WITH_STACK=true "*|*" SGLANG_PROFILE_WITH_STACK=1 "*) _stack=true ;;
+  esac
+  # Per-phase split is the default; merge_profiles additionally emits the combined view so a
+  # consumer that wants the whole window (e.g. e2e attribution) still has one file.
+  local _by_stage=true _merge=true
+  case "${SGLANG_PROFILE_BY_STAGE:-1}" in 0|false|no) _by_stage=false; _merge=false ;; esac
+  case "${SGLANG_PROFILE_MERGE:-1}" in 0|false|no) _merge=false ;; esac
+  local _extra_json=""
+  [ "$_by_stage" = true ] && _extra_json=",\"profile_by_stage\":true"
+  [ "$_merge" = true ] && _extra_json="${_extra_json},\"merge_profiles\":true"
   # num_steps set => the server records that many forward steps then auto-saves (async; returns at once).
   if ! curl -sf -X POST "${BASE_URL}/start_profile" -H 'Content-Type: application/json' \
-        -d "{\"output_dir\":\"${PROFILE_DIR}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true,\"with_stack\":${_stack},\"activities\":${_acts}}" \
+        -d "{\"output_dir\":\"${PROFILE_DIR}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true,\"with_stack\":${_stack},\"activities\":${_acts}${_extra_json}}" \
         >/dev/null 2>&1; then
-    echo "!!! /start_profile request failed (sglang HTTP profiler unavailable?)" >&2
-    return 1
+    if [ "$_by_stage" = true ]; then
+      # Older builds reject the unknown key outright. Retry once WITHOUT it rather than
+      # losing the window entirely, and say so — a single un-split trace means decode
+      # cannot be analysed, which the caller must be able to see in the log.
+      echo "!!! /start_profile rejected profile_by_stage; retrying un-split (DECODE will NOT be separable)" >&2
+      _by_stage=false
+      if ! curl -sf -X POST "${BASE_URL}/start_profile" -H 'Content-Type: application/json' \
+            -d "{\"output_dir\":\"${PROFILE_DIR}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true,\"with_stack\":${_stack},\"activities\":${_acts}}" \
+            >/dev/null 2>&1; then
+        echo "!!! /start_profile request failed (sglang HTTP profiler unavailable?)" >&2
+        return 1
+      fi
+    else
+      echo "!!! /start_profile request failed (sglang HTTP profiler unavailable?)" >&2
+      return 1
+    fi
   fi
-  # wait for a NEW trace to land (server saves after num_steps forward passes)
+  # Wait for the trace(s) to land. With profile_by_stage the phases flush as separate files and
+  # EXTEND can land seconds before DECODE — returning on the FIRST new file is exactly how a run
+  # ends up with prefill-only evidence, so require BOTH phase files before declaring success.
   local deadline=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
+  local n_ext n_dec
   while [ "$(date +%s)" -lt "$deadline" ]; do
     after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
-    [ "$after" -gt "$before" ] && { sleep 2; return 0; }   # +2s for the write to flush
+    if [ "$_by_stage" = true ]; then
+      n_ext=$(ls "$PROFILE_DIR"/*EXTEND*.trace.json* 2>/dev/null | wc -l)
+      n_dec=$(ls "$PROFILE_DIR"/*DECODE*.trace.json* 2>/dev/null | wc -l)
+      if [ "$n_ext" -gt 0 ] && [ "$n_dec" -gt 0 ]; then sleep 2; return 0; fi
+    elif [ "$after" -gt "$before" ]; then
+      sleep 2; return 0                                   # +2s for the write to flush
+    fi
     sleep 3
   done
   # num_steps may not be honored on some builds — force a stop and re-check
   curl -sf -X POST "${BASE_URL}/stop_profile" >/dev/null 2>&1 || true
   sleep 3
   after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
-  [ "$after" -gt "$before" ]
+  if [ "$_by_stage" = true ]; then
+    n_ext=$(ls "$PROFILE_DIR"/*EXTEND*.trace.json* 2>/dev/null | wc -l)
+    n_dec=$(ls "$PROFILE_DIR"/*DECODE*.trace.json* 2>/dev/null | wc -l)
+    if [ "$n_ext" -gt 0 ] && [ "$n_dec" -eq 0 ]; then
+      echo "!!! profile window produced EXTEND but no DECODE trace -- decode cannot be analysed" >&2
+    fi
+    [ "$n_ext" -gt 0 ] && [ "$n_dec" -gt 0 ]
+  else
+    [ "$after" -gt "$before" ]
+  fi
 }
