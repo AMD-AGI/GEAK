@@ -74,9 +74,18 @@ find "$DST" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
 # Share the immutable golden when present on SRC (or as a dangling absolute link target).
 if [[ -e "$SRC/reference_io.pt" || -L "$SRC/reference_io.pt" ]]; then
   rm -f "$DST/reference_io.pt"
-  ln -s "$(readlink -f "$SRC/reference_io.pt" 2>/dev/null || echo "$SRC/reference_io.pt")" \
-    "$DST/reference_io.pt" 2>/dev/null \
-    || ln -s "$SRC/reference_io.pt" "$DST/reference_io.pt"
+  if [[ "${GEAK_QUALITY_REFERENCE_COPY:-0}" == "1" ]]; then
+    # The shared quality profile materializes only this pinned immutable input.
+    [[ "${GEAK_QUALITY_REFERENCE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || exit 86
+    actual_reference=$(sha256sum -- "$SRC/reference_io.pt")
+    [[ "${actual_reference%% *}" == "$GEAK_QUALITY_REFERENCE_SHA256" ]] || exit 86
+    cp --reflink=auto -- "$SRC/reference_io.pt" "$DST/reference_io.pt"
+    chmod a-w "$DST/reference_io.pt"
+  else
+    ln -s "$(readlink -f "$SRC/reference_io.pt" 2>/dev/null || echo "$SRC/reference_io.pt")" \
+      "$DST/reference_io.pt" 2>/dev/null \
+      || ln -s "$SRC/reference_io.pt" "$DST/reference_io.pt"
+  fi
 fi
 
 # Optional: one physical aiter/ tree per eval (shared-root), symlink into DST.

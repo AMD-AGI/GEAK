@@ -1822,7 +1822,7 @@ def test_a_second_sync_keeps_the_verdicts_the_store_earned_between_them(tmp_path
     for _ in range(2):
         run("attest-remote", "--store", store, "--session-id", session, "--outcome",
             "not_reproduced", "--kernel-name", "fused_moe_kernel", "--language", "triton",
-            "--gfx", "gfx950", "--apply")
+            "--gfx", "gfx950", "--framework-version", "unspecified", "--apply")
 
     _sync(root, store)
     value = json.load(open(_sessions(store)[0]))["value"]
@@ -1891,7 +1891,8 @@ def test_a_sync_does_not_undo_a_retraction_a_recall_already_lifted(tmp_path):
 
     # A box reproduces the win the retraction distrusted, and a rewrite lifts the tombstone.
     run("attest-remote", "--store", store, "--session-id", session, "--outcome", "validated",
-        "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950", "--apply")
+        "--kernel-name", "fused_moe_kernel", "--language", "triton", "--gfx", "gfx950",
+        "--framework-version", "unspecified", "--apply")
     _sync(root, store)
     lifted = json.load(open(_sessions(store)[0]))
     assert lifted["value"].get("unretired_at")

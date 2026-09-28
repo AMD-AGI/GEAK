@@ -30,7 +30,7 @@ except ImportError:
     )
 
 
-def invoke_kernel(arguments, timeout_s, *, settings_profile=None, working_directory=None):
+def invoke_kernel(arguments, timeout_s, *, settings_profile=None, working_directory=None, quality_stop_controller=None):
     """Pass one explicit kernel request to the native runner."""
     if not isinstance(arguments, dict):
         raise TypeError("The kernel arguments must be a JSON object.")
@@ -38,11 +38,19 @@ def invoke_kernel(arguments, timeout_s, *, settings_profile=None, working_direct
         raise ValueError("The kernel arguments require kernel_path and workflow_dir.")
     if settings_profile not in (None, "isolated"):
         raise ValueError("The native settings profile is unsupported.")
+    if arguments.get("quality_stop") is not None or quality_stop_controller is not None:
+        if quality_stop_controller is None or settings_profile != "isolated":
+            raise ValueError("Quality stopping requires a trusted host controller and isolated native settings.")
+        if arguments.get("quality_stop") not in (None, quality_stop_controller.public_config):
+            raise ValueError("The quality stopping arguments differ from the trusted host controller.")
+        arguments = {**arguments, "quality_stop": quality_stop_controller.public_config}
     request = {"scriptPath": str(GEAK_ROOT / "kernel_workflow" / "kernel_workflow.js"), "args": arguments}
     prompt = (PROCESS_SAFETY + "Invoke the Workflow tool exactly once with this JSON object:\n"
         + json.dumps(request) + "\nPass args as a JSON object. Wait for the Workflow task to finish. "
         "Print its full return value as one final line of compact JSON.\n")
     native_options = {"workflow_request": request}
+    if quality_stop_controller is not None:
+        native_options["quality_stop_controller"] = quality_stop_controller
     if settings_profile is not None:
         native_options["settings_profile"] = settings_profile
     if working_directory is not None:

@@ -225,3 +225,12 @@ class NativeJournal:
             if result is None:
                 return {"status": "pending", "reason": "native_child_result_missing", "value": None}
             return {**result, "journal_sha256": snapshot["journal_sha256"], "journal_bytes": snapshot["journal_bytes"]}
+
+    def bound_bytes(self, snapshot):
+        """Return exact bytes only while they match the caller's complete snapshot."""
+        with self._lock:
+            raw = self._read()
+            _require(raw is not None and snapshot.get("status") == "complete"
+                     and len(raw) == snapshot.get("journal_bytes")
+                     and _sha(raw) == snapshot.get("journal_sha256"), "journal_closure_bytes_changed")
+            return raw
