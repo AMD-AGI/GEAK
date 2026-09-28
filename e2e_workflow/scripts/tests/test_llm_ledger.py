@@ -587,6 +587,87 @@ class TestCostBreakdown(unittest.TestCase):
         self.assertLess(sonnet["output"], opus["output"])             # 10 vs 25 per M
         self.assertAlmostEqual(sonnet["cache_read"], 0.40, places=6)  # 2M * 0.2
 
+    def test_router_bucket_holds_the_whole_classifier_call(self):
+        """A route_classifier call is spent choosing a model: all of it is router cost."""
+        row = dict(self._row("claude-sonnet-5"), role=L.ROUTER_ROLE)
+        bd = L.cost_breakdown(row, L.DEFAULT_RATES)
+        self.assertAlmostEqual(bd["router"], L.cost_of(row, L.DEFAULT_RATES), places=9)
+        self.assertEqual(bd["uncached_input"] + bd["cache_read"] + bd["cache_write"] + bd["output"], 0.0)
+
+
+class TestLaneRates(unittest.TestCase):
+    """The routing ladder's four models are priced from the official table, not the Opus default."""
+
+    ROW = {"input_tokens": 1_000_000, "cache_read_input_tokens": 1_000_000,
+           "cache_creation_input_tokens": 1_000_000, "cache_write_5m_tokens": 1_000_000,
+           "cache_write_1h_tokens": 0, "output_tokens": 1_000_000}
+
+    def _cost(self, model):
+        return L.cost_of(dict(self.ROW, model=model), L.DEFAULT_RATES)
+
+    def test_each_lane_prices_at_its_own_card(self):
+        # in + read + 5m-write + out, 1M tokens each.
+        self.assertAlmostEqual(self._cost("claude-opus-5-5"), 4 + 0.20 + 5 + 20, places=6)
+        self.assertAlmostEqual(self._cost("claude-opus-4-6"), 5 + 0.50 + 6.25 + 25, places=6)
+        self.assertAlmostEqual(self._cost("claude-sonnet-5"), 2 + 0.20 + 2.50 + 10, places=6)
+        self.assertAlmostEqual(self._cost("claude-haiku-4-5-20251001"), 1 + 0.10 + 1.25 + 5, places=6)
+
+    def test_opus_5_5_reads_cache_at_five_percent(self):
+        """The one model off the 0.1x rule: its cache reads are 0.05x input."""
+        r = L.DEFAULT_RATES["claude-opus-5-5"]
+        self.assertAlmostEqual(r["cache_read"] / r["input"], 0.05, places=9)
+
+    def test_dated_and_undated_haiku_ids_price_the_same(self):
+        self.assertEqual(L.DEFAULT_RATES["claude-haiku-4-5"], L.DEFAULT_RATES["claude-haiku-4-5-20251001"])
+
+    def test_unknown_model_still_falls_back_to_the_default(self):
+        self.assertAlmostEqual(self._cost("claude-opus-4-8"), 5 + 0.50 + 6.25 + 25, places=6)
+
+
+class TestSdkCheck(unittest.TestCase):
+    """Our cost vs Claude Code's own ResultMessage: rates must reproduce it; coverage is reported."""
+
+    # The real ResultMessage from the 2026-09-15 ablation, arm control_r2 (sdk_messages.jsonl).
+    REAL = {"captured_at_unix": 1789496973.8563507, "session_id": "ef7c3aa4", "total_cost_usd": 25.460417749999998,
+            "model_usage": {"claude-opus-4-8": {"inputTokens": 744, "outputTokens": 373962,
+                                                "cacheReadInputTokens": 14726883,
+                                                "cacheCreationInputTokens": 1399073,
+                                                "costUSD": 25.460417749999998}}}
+
+    def _row(self, ts_s, model="claude-opus-4-8", out=1000):
+        return {"model": model, "ts_ms": int(ts_s * 1000), "input_tokens": 0, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "cache_write_5m_tokens": 0, "cache_write_1h_tokens": 0,
+                "output_tokens": out}
+
+    def test_our_rates_reproduce_a_real_claude_code_total(self):
+        c = L.sdk_check([], [self.REAL], L.DEFAULT_RATES)
+        self.assertTrue(c["rate_ok"])
+        self.assertAlmostEqual(c["models"]["claude-opus-4-8"]["ours_on_sdk_tokens_usd"], 25.460418, places=5)
+
+    def test_a_wrong_rate_card_is_caught(self):
+        # Claude Code priced Sonnet 5 at a (hypothetical) $3/$15; our card says $2/$10.
+        u = {"inputTokens": 0, "outputTokens": 1_000_000, "cacheReadInputTokens": 0,
+             "cacheCreationInputTokens": 0, "costUSD": 15.0}
+        c = L.sdk_check([], [{"captured_at_unix": 1.0, "total_cost_usd": 15.0,
+                              "model_usage": {"claude-sonnet-5": u}}], L.DEFAULT_RATES)
+        self.assertFalse(c["rate_ok"])
+        self.assertFalse(c["models"]["claude-sonnet-5"]["rate_ok"])
+
+    def test_calls_after_the_result_mark_it_partial(self):
+        at = self.REAL["captured_at_unix"]
+        rows = [self._row(at - 10), self._row(at + 10), self._row(at + 20)]
+        c = L.sdk_check(rows, [self.REAL], L.DEFAULT_RATES)
+        self.assertTrue(c["partial"])
+        self.assertEqual(c["calls_after_result"], 2)
+        self.assertEqual(c["models"]["claude-opus-4-8"]["ledger_tokens_until_result"]["output_tokens"], 1000)
+
+    def test_the_last_result_is_the_one_compared(self):
+        early = dict(self.REAL, captured_at_unix=1.0, total_cost_usd=1.0)
+        self.assertAlmostEqual(L.sdk_check([], [self.REAL, early], L.DEFAULT_RATES)["sdk_total_usd"], 25.460418, places=5)
+
+    def test_no_results_means_no_check(self):
+        self.assertIsNone(L.sdk_check([], [], L.DEFAULT_RATES))
+
 
 class TestOutputCapture(LedgerTestBase):
     """Output (thinking + response) must be recorded, not just the input prompt."""
