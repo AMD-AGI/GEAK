@@ -182,16 +182,19 @@ It joins every native node with journal starts, journal results, and native term
 Queued nodes without identities prevent certification.
 An `agentT()` return does not prove producer completion.
 The census also tracks native tool calls and background tasks.
-The pre-hook rejects explicit `run_in_background=True` Bash requests before execution.
+The Bash adapter supports foreground requests and explicit `run_in_background=true` requests.
+The pre-hook rejects nonboolean background flags before execution.
 The pinned CLI can still move a foreground Bash command to the background when its native timeout expires.
 The automatic Bash adapter binds that result to the exact admitted tool, agent, input, and native task start.
-It requires `backgroundTaskId` and the matching `timedOutAfterMs` value from the native result.
-It rejects task ID aliases, malformed results, and user background transitions.
+For an automatic timeout, it requires `backgroundTaskId` and the matching `timedOutAfterMs` value.
+For an explicit request, it requires `backgroundTaskId` without `timedOutAfterMs`.
+Both paths bind the unchanged original input and native result.
+It rejects task ID aliases, malformed results, and manual Ctrl+B transitions marked by `backgroundedByUser`.
 It preserves the original Bash timeout, tool catalog, model settings, and workflow behavior.
 
 The CLI also registers long foreground Bash commands before any automatic background transition.
 The census retains those native starts and terminal events without treating them as automatic background results.
-For an automatic result, either the start event or result can arrive first.
+For each supported background result, either the start event or result can arrive first.
 The census immediately marks the task active when either arrives.
 The terminal event must follow the native start.
 If the terminal event precedes the result, the admitted tool remains active until the post-hook records that result.
@@ -201,9 +204,13 @@ The SDK can emit both a terminal update and a terminal notification.
 The adapter accepts one of each when their terminal statuses agree.
 The native `killed` update and `stopped` notification describe the same terminal status.
 
-The final census includes `automatic_bash` evidence for each automatic task.
+The final census retains the historical `automatic_bash` map for all qualified background Bash tasks.
+Automatic timeout entries keep their existing shape.
+Explicit entries add `mode="explicit_request"` and record `result.timed_out_after_ms=null`.
+Their original input must contain `run_in_background=true`.
+Its native result cannot include `timedOutAfterMs` or `backgroundedByUser`.
 This evidence retains ordered events, native identities, timeout metadata, and hashes of the exact input and response.
-When automatic tasks exist, the census records `automatic_bash_closed_monotonic_time` after its final checks under the admission lock.
+When qualified background Bash tasks exist, the census records `automatic_bash_closed_monotonic_time` after its final checks under the admission lock.
 This timestamp bounds the included event times in the same host clock domain.
 Checkpoint, retirement, and final closure checks require complete bindings and no active background task.
 Native terminal evidence does not by itself prove that operating-system processes stopped.

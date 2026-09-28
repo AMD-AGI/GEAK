@@ -600,11 +600,13 @@ class NativeProducerCensus:
         require(isinstance(operation, dict) and operation.get("name") == "Bash"
                 and isinstance(operation.get("input"), dict) and operation.get("agent"),
                 "background_bash_binding_changed")
-        require(operation["input"].get("run_in_background", False) is False,
+        require(type(operation["input"].get("run_in_background", False)) is bool,
                 "background_bash_requires_qualified_adapter")
         require(self.bash_task_tools.get(tool, task) == task, "background_bash_binding_changed")
         binding = {"schema": "geak-native-automatic-bash-v1", "task_id": task, "tool_use_id": tool,
                    "agent_id": operation["agent"], "input_sha256": _evidence_digest(operation["input"])}
+        if operation["input"].get("run_in_background") is True:
+            binding["mode"] = "explicit_request"
         require(binding["input_sha256"] is not None, "background_bash_binding_changed")
         record = self.bash_tasks.get(task)
         if record is None:
@@ -661,14 +663,16 @@ class NativeProducerCensus:
 
     def _bash_result(self, tool, operation, response, failed):
         inputs = operation["input"]
-        require(isinstance(inputs, dict) and inputs.get("run_in_background", False) is False,
+        require(isinstance(inputs, dict) and type(inputs.get("run_in_background", False)) is bool,
                 "background_bash_requires_qualified_adapter")
+        explicit = inputs.get("run_in_background") is True
         if not isinstance(response, dict):
+            require(not explicit, "background_bash_result_unsupported")
             return
         require(not any(key in response for key in ("task_id", "taskId", "background_task_id", "backgroundedByUser")),
                 "background_bash_result_unsupported")
         if "backgroundTaskId" not in response:
-            require(not any(key in response for key in ("timedOutAfterMs", "backgroundCwdHint")),
+            require(not explicit and not any(key in response for key in ("timedOutAfterMs", "backgroundCwdHint")),
                     "background_bash_result_unsupported")
             return
         task = response["backgroundTaskId"]
@@ -677,9 +681,11 @@ class NativeProducerCensus:
                 and type(timeout) is int and timeout > 0
                 and set(response) <= BASH_RESULT_FIELDS
                 and isinstance(response.get("stdout"), str) and isinstance(response.get("stderr"), str)
-                and response.get("interrupted") is False and response.get("isImage", False) is False
+                and response.get("interrupted") is False and response.get("isImage", False) is False,
+                "background_bash_result_unsupported")
+        require((explicit and "timedOutAfterMs" not in response) or (not explicit
                 and type(response.get("timedOutAfterMs")) is int
-                and response["timedOutAfterMs"] == min(timeout, 600000), "background_bash_result_unsupported")
+                and response["timedOutAfterMs"] == min(timeout, 600000)), "background_bash_result_unsupported")
         require(all(isinstance(response[key], str) for key in ("returnCodeInterpretation", "backgroundCwdHint",
                     "persistedOutputPath", "staleReadFileStateHint", "ghRateLimitHint") if key in response)
                 and all(type(response[key]) is bool for key in ("noOutputExpected", "dangerouslyDisableSandbox") if key in response)
@@ -689,7 +695,7 @@ class NativeProducerCensus:
         require(record["result"] is None, "background_bash_binding_changed")
         result = {"kind": "PostToolUse", "task_id": task, "tool_use_id": tool,
                   "agent_id": operation["agent"], "input_sha256": record["input_sha256"],
-                  "response_sha256": _evidence_digest(response), "timed_out_after_ms": response["timedOutAfterMs"],
+                  "response_sha256": _evidence_digest(response), "timed_out_after_ms": response.get("timedOutAfterMs"),
                   "monotonic_time": time.monotonic()}
         record["result"] = result
         record["events"].append(deepcopy(result))
@@ -708,6 +714,10 @@ class NativeProducerCensus:
                     and operation.get("failed") is False
                     and _evidence_digest(operation.get("input")) == record["input_sha256"]
                     and _evidence_digest(operation.get("response")) == record["result"]["response_sha256"],
+                    "background_bash_binding_changed")
+            explicit = operation["input"].get("run_in_background") is True
+            require(record.get("mode") == ("explicit_request" if explicit else None)
+                    and (not explicit or record["result"]["timed_out_after_ms"] is None),
                     "background_bash_binding_changed")
             proof[task] = deepcopy(record)
         return proof
@@ -1214,7 +1224,7 @@ class NativeProducerCensus:
                             "duplicate_native_tool_start")
                     if name == "Bash":
                         inputs = data.get("tool_input")
-                        require(isinstance(inputs, dict) and inputs.get("run_in_background", False) is False,
+                        require(isinstance(inputs, dict) and type(inputs.get("run_in_background", False)) is bool,
                                 "background_bash_requires_qualified_adapter")
                     self.tools[tool_id] = {"name": name, "agent": agent, "input": deepcopy(data.get("tool_input"))}
                 return {}

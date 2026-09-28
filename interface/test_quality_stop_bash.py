@@ -235,8 +235,8 @@ class AutomaticBashTests(unittest.TestCase):
                 self.assertEqual(f.registry.error, "native_tool_outcome_unknown")
                 self.assertEqual(f.registry.background, {})
 
-    def test_explicit_background_request_is_denied_before_execution(self):
-        result = self.f.hook("PreToolUse", "Bash", {**self.inputs, "run_in_background": True}, "explicit", "engineer")
+    def test_nonboolean_background_request_is_denied_before_execution(self):
+        result = self.f.hook("PreToolUse", "Bash", {**self.inputs, "run_in_background": "true"}, "explicit", "engineer")
         self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertNotIn("explicit", self.r.tools)
 
@@ -314,6 +314,132 @@ class AutomaticBashTests(unittest.TestCase):
         self.r.background[self.task] = "completed"
         with self.assertRaisesRegex(StopRejected, "background_bash_binding_incomplete"):
             self.r.assert_quiescent("checkpoint")
+
+
+class ExplicitBashTests(unittest.TestCase):
+    def fixture(self, directory):
+        f = NativeFixture(directory)
+        inputs = {"command": "sleep 20", "description": "Run an explicit background worker", "run_in_background": True}
+        response = {"stdout": "", "stderr": "", "interrupted": False, "isImage": False,
+                    "noOutputExpected": False, "backgroundTaskId": "b12345678"}
+        reply = f.hook("PreToolUse", "Bash", inputs, "explicit-tool", "engineer")
+        self.assertEqual(reply, {})
+        return f, inputs, response
+
+    def apply(self, f, inputs, response, event):
+        if event == "start":
+            f.registry.observe(TaskStartedMessage(task_id="b12345678", tool_use_id="explicit-tool", task_type="local_bash"))
+        elif event == "post":
+            f.hook("PostToolUse", "Bash", inputs, "explicit-tool", "engineer", response=response)
+        else:
+            f.registry.observe(TaskNotificationMessage(task_id="b12345678", tool_use_id="explicit-tool",
+                                                       task_type="local_bash", status="completed"))
+
+    def test_three_explicit_orders_block_until_the_binding_is_complete(self):
+        for order in (("start", "post", "terminal"), ("post", "start", "terminal"), ("start", "terminal", "post")):
+            with self.subTest(order=order), tempfile.TemporaryDirectory() as directory:
+                f, inputs, response = self.fixture(directory)
+                for event in order[:-1]:
+                    self.apply(f, inputs, response, event)
+                    with self.assertRaisesRegex(StopRejected, "native_background_producer_active"):
+                        f.registry.assert_quiescent("checkpoint")
+                self.apply(f, inputs, response, order[-1])
+                f.registry.assert_quiescent("checkpoint")
+                proof = f.registry._automatic_bash_proof()["b12345678"]
+                self.assertEqual(proof["mode"], "explicit_request")
+                self.assertIsNone(proof["result"]["timed_out_after_ms"])
+                self.assertEqual(f.registry.completed_tools["explicit-tool"]["input"], inputs)
+                self.assertIsNone(f.registry.error)
+
+    def test_explicit_response_requires_task_and_rejects_timeout_or_manual_metadata(self):
+        cases = [None, {}, {"backgroundTaskId": "bad"}, {"timedOutAfterMs": 120000}, {"timedOutAfterMs": None},
+                 {"backgroundedByUser": True}, {"backgroundedByUser": False}, {"code": 0},
+                 {"task_id": "b12345678"}, {"interrupted": True}, {"isImage": True}]
+        for change in cases:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                f, inputs, response = self.fixture(directory)
+                value = change if change is None or change == {} else {**response, **change}
+                f.hook("PostToolUse", "Bash", inputs, "explicit-tool", "engineer", response=value)
+                self.assertEqual(f.registry.error, "native_tool_outcome_unknown")
+                self.assertEqual(f.registry.first_failure["exception"]["code"], "background_bash_result_unsupported")
+
+    def test_foreground_input_cannot_claim_an_explicit_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = NativeFixture(directory)
+            inputs = {"command": "sleep 20", "run_in_background": False}
+            f.hook("PreToolUse", "Bash", inputs, "explicit-tool", "engineer")
+            f.hook("PostToolUse", "Bash", inputs, "explicit-tool", "engineer", response={
+                "stdout": "", "stderr": "", "interrupted": False, "backgroundTaskId": "b12345678"})
+            self.assertEqual(f.registry.error, "native_tool_outcome_unknown")
+
+    def test_failed_post_cannot_admit_an_explicit_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f, inputs, response = self.fixture(directory)
+            f.hook("PostToolUseFailure", "Bash", inputs, "explicit-tool", "engineer", response=response)
+            self.assertEqual(f.registry.error, "native_tool_outcome_unknown")
+
+    def test_explicit_terminal_before_start_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f, inputs, response = self.fixture(directory)
+            self.apply(f, inputs, response, "post")
+            self.apply(f, inputs, response, "terminal")
+            self.assertEqual(f.registry.first_failure["exception"]["code"], "background_bash_orphan_event")
+
+    def test_explicit_duplicate_events_fail_closed(self):
+        for duplicate, code in (("start", "duplicate_background_task_start"), ("terminal", "background_bash_duplicate_terminal")):
+            with self.subTest(duplicate=duplicate), tempfile.TemporaryDirectory() as directory:
+                f, inputs, response = self.fixture(directory)
+                for event in ("start", "post", "terminal") if duplicate == "terminal" else ("start",):
+                    self.apply(f, inputs, response, event)
+                self.apply(f, inputs, response, duplicate)
+                self.assertEqual(f.registry.first_failure["exception"]["code"], code)
+
+    def test_explicit_timeout_input_does_not_create_timeout_result_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f, inputs, response = self.fixture(directory)
+            inputs["timeout"] = 400000
+            f.registry.tools["explicit-tool"]["input"] = deepcopy(inputs)
+            for event in ("start", "post", "terminal"):
+                self.apply(f, inputs, response, event)
+            f.registry.assert_quiescent("checkpoint")
+            self.assertIsNone(f.registry._automatic_bash_proof()["b12345678"]["result"]["timed_out_after_ms"])
+
+    def test_mixed_automatic_and_explicit_tasks_share_the_closure_guard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f, inputs, response = self.fixture(directory)
+            auto_inputs = {"command": "sleep 135"}
+            f.hook("PreToolUse", "Bash", auto_inputs, "automatic-tool", "engineer")
+            f.registry.observe(TaskStartedMessage(task_id="b87654321", tool_use_id="automatic-tool", task_type="local_bash"))
+            f.hook("PostToolUse", "Bash", auto_inputs, "automatic-tool", "engineer", response={
+                "stdout": "", "stderr": "", "interrupted": False, "backgroundTaskId": "b87654321", "timedOutAfterMs": 120000})
+            f.registry.observe(TaskNotificationMessage(task_id="b87654321", tool_use_id="automatic-tool",
+                                                       task_type="local_bash", status="completed"))
+            self.apply(f, inputs, response, "start")
+            self.apply(f, inputs, response, "post")
+            with self.assertRaisesRegex(StopRejected, "native_background_producer_active"):
+                f.registry.assert_quiescent("checkpoint")
+            self.apply(f, inputs, response, "terminal")
+            f.registry.assert_quiescent("checkpoint")
+            proof = f.registry._automatic_bash_proof()
+            self.assertEqual(set(proof), {"b12345678", "b87654321"})
+            self.assertNotIn("mode", proof["b87654321"])
+            self.assertEqual(proof["b12345678"]["mode"], "explicit_request")
+
+    def test_explicit_closure_has_the_same_clock_and_rechecks_its_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f, inputs, response = self.fixture(directory)
+            for event in ("start", "post", "terminal"):
+                self.apply(f, inputs, response, event)
+            proof = f.registry.bash_tasks["b12345678"]
+            proof["mode"] = "automatic"
+            with self.assertRaisesRegex(StopRejected, "background_bash_binding_changed"):
+                f.registry.assert_quiescent("checkpoint")
+            proof["mode"] = "explicit_request"
+            f.finish("checkpoint", {"ok": True})
+            f.progress()
+            census = f.registry.confirm_return({"quality_stop": {"enabled": True}})
+            self.assertEqual(census["automatic_bash"]["b12345678"]["mode"], "explicit_request")
+            self.assertGreater(census["automatic_bash_closed_monotonic_time"], proof["terminal"]["monotonic_time"])
 
 
 if __name__ == "__main__":

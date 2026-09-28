@@ -664,8 +664,7 @@ class NativeCensusTests(unittest.TestCase):
                 identity = "background" + str(len(self.registry.completed_tools))
                 self.fixture.hook("PreToolUse", "Bash", inputs, identity, "engineer")
                 self.fixture.hook("PostToolUse", "Bash", inputs, identity, "engineer", response=response)
-                expected = "native_tool_admission_failed" if inputs.get("run_in_background") else "native_tool_outcome_unknown"
-                self.assertEqual(self.registry.error, expected)
+                self.assertEqual(self.registry.error, "native_tool_outcome_unknown")
 
     def test_reclaim_needs_exact_command_and_clean_native_completion(self):
         operation = self.registry.completed_tools["reclaim-tool"]
