@@ -583,6 +583,10 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       // Forward the Expt-3 routing switch the same way, so a routed bake-off reaches every lane's
       // kernel_lane (unset stays absent -> routing OFF -> byte-identical run).
       ...(A.routing != null ? { routing: String(A.routing) } : {}),
+      // ...and the cost-ladder knobs (thresholds, caps, floors, decider), each only when set.
+      ...Object.fromEntries(['route_conf_escalate', 'route_max_retries_per_lane', 'route_max_top_escalations',
+        'route_max_output_tokens', 'route_floors', 'route_decider']
+        .filter((k) => A[k] != null).map((k) => [k, typeof A[k] === 'object' ? JSON.stringify(A[k]) : String(A[k])])),
       // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
       // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
       update_experience: 'off',

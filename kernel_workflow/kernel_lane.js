@@ -715,13 +715,25 @@ function tlAgent(prompt, o, attempt) {
   return e;
 }
 
-// --- Expt-3 complexity routing (PoC): route deterministic helper scopes to a cheap model.
-// OFF unless A.routing is truthy (or GEAK_ROUTING=1 for a harness) -> __routeModel() returns
-// undefined for every scope -> no opts.model is set -> the run is BYTE-IDENTICAL to a non-routing
-// build. Reversible via git on expt/3-routing. Keys = `${phase}` + U+0000 + labelPrefix (everything
-// before the first space), so dynamic round/tag suffixes collapse to one stable scope identity.
+// --- Expt-3 cost ladder: route EVERY agent scope to the lowest sufficient model.
+// The POLICY is e2e_workflow/routing/SKILL.md; this region is what ENFORCES it. OFF unless A.routing is
+// truthy (or GEAK_ROUTING=1 for a harness) -> agentT() never consults it -> the run is BYTE-IDENTICAL to
+// a non-routing build. Reversible via git on expt/3-routing.
+//   brain    director:* / tech_lead:*         -> Opus 5.5, fixed (planning, decomposition, adjudication)
+//   helper   the fixed-script scopes below    -> Haiku, fixed (their schema is the check)
+//   decider  route:* (the classifier itself)  -> Sonnet 5, fixed, never itself classified (no recursion)
+//   worker   every other scope                -> classified once by the decider, then moved UP the ladder
+//            only on a DETERMINISTIC failure: Haiku -> Sonnet 5 -> Opus 4.6 -> Opus 5.5
+// Keys = `${phase}` + U+0000 + labelPrefix (everything before the first space), so dynamic round/tag
+// suffixes collapse to one stable scope identity.
 // <<ROUTING-INLINE-START>>
-const ROUTE_MODEL_CHEAP = 'claude-sonnet-5';
+const ROUTE_LANES = ['claude-haiku-4-5-20251001', 'claude-sonnet-5', 'claude-opus-4-6', 'claude-opus-5-5'];
+const ROUTE_LANE_OF = { small: 0, medium: 1, high: 2, escalate: 3 };
+const ROUTE_TOP = ROUTE_LANES.length - 1;
+const ROUTE_MODEL_BRAIN = ROUTE_LANES[ROUTE_TOP];
+const ROUTE_MODEL_DECIDER = ROUTE_LANES[1];
+const ROUTE_MODEL_CHEAP = ROUTE_LANES[0];
+const ROUTE_BRAIN_ROLES = ['director', 'tech_lead'];
 const ROUTE_SEP = String.fromCharCode(0);   // scope-key separator: textual in source, U+0000 at runtime
 const ROUTE_TIER_MAP = (function () {
   const m = {};
@@ -737,24 +749,211 @@ const ROUTING_ON = (function () {
   if (a === '') { try { return String(process.env.GEAK_ROUTING || '').trim() === '1'; } catch (e) { return false; } }
   return false;                             // any explicit false-ish value stays OFF (args-off beats env-on)
 })();
+// Thresholds and caps. CODE owns them: the decider never sees or moves them. Each is a per-run arg so an
+// operator-approved proposal from route_review.py applies without a code change.
+function __routeNum(v, d) { const x = Number(v); return v != null && v !== '' && Number.isFinite(x) ? x : d; }
+const ROUTE_CONF_ESCALATE = __routeNum(A.route_conf_escalate, 0.70);
+const ROUTE_MAX_FAILS_PER_LANE = Math.max(1, __routeNum(A.route_max_retries_per_lane, 3));
+const ROUTE_MAX_TOP_DISPATCHES = Math.max(0, __routeNum(A.route_max_top_escalations, 1));
+const ROUTE_MAX_OUTPUT_TOKENS = Math.max(0, __routeNum(A.route_max_output_tokens, 1000000));
+// Per-scope starting floors, {scope: lane 0..3} — the ONLY thing route_review.py proposes changing.
+const ROUTE_FLOORS = (function () {
+  let f = A.route_floors;
+  if (typeof f === 'string') { try { f = JSON.parse(f); } catch (e) { f = null; } }
+  return (f && typeof f === 'object') ? f : {};
+})();
+// Decider backend. 'sonnet' is the only one wired here. 'jev' is a reserved slot: the Jev router lives on
+// feat/geak-jev and, as of 2026-09-28, the gateway refuses every Jev request, so asking for it falls back.
+const ROUTE_DECIDER = String(A.route_decider || 'sonnet').trim().toLowerCase();
+const ROUTE_DECISION_SCHEMA = {
+  type: 'object',
+  properties: {
+    complexity: { type: 'string', enum: ['small', 'medium', 'high', 'escalate'] },
+    action: { type: 'string', enum: ['continue', 'retry', 'verify', 'escalate', 'complete'] },
+    scope_drift: { type: 'boolean' },
+    confidence: { type: 'number', minimum: 0, maximum: 1 },
+    risk_flag: { type: 'string', enum: ['none', 'security', 'data_loss'] },
+  },
+  required: ['complexity', 'action', 'scope_drift', 'confidence', 'risk_flag'],
+  additionalProperties: false,
+};
+const __routeLadder = {};   // scope -> { lane, fails, pending, evidence, why, decision }
+const __routeAudit = [];    // every decision, dispatch, failure and skip, in order
+let __routeTopUsed = 0;
+let __routeKilled = false;
+let __routeJevWarned = false;
+
 function __routeLabelPrefix(label) {
   const s = String(label == null ? '' : label);
   const sp = s.indexOf(' ');                // colon is part of static identity; a space starts dynamic text
   return sp >= 0 ? s.slice(0, sp) : s;
 }
+// Ladder identity. Coarser than the dispatch label, finer than its prefix: `eng d3:memory` and
+// `eng d7:memory` share one ladder ('eng:memory'), `eng d3:compute` gets its own.
+function __routeScope(label) {
+  const parts = String(label == null ? '' : label).split(' ');
+  const rest = parts[1] || '';
+  const c = rest.indexOf(':');
+  return c >= 0 ? parts[0] + ':' + rest.slice(c + 1) : parts[0];
+}
+// Static part. A model for brain / helper / decider scopes; undefined for a worker (which __routePick
+// classifies). OFF -> undefined everywhere.
 function __routeModel(opts) {
-  if (!ROUTING_ON) return undefined;        // OFF -> no override -> byte-identical
-  const key = ((opts && opts.phase) || '') + ROUTE_SEP + __routeLabelPrefix(opts && opts.label);
-  return ROUTE_TIER_MAP[key];               // cheap model id, or undefined -> pinned strong (fall through)
+  if (!ROUTING_ON) return undefined;
+  const pfx = __routeLabelPrefix(opts && opts.label);
+  if (pfx.indexOf('route:') === 0) return ROUTE_MODEL_DECIDER;
+  if (ROUTE_BRAIN_ROLES.indexOf(pfx.split(':')[0]) >= 0) return ROUTE_MODEL_BRAIN;
+  return ROUTE_TIER_MAP[((opts && opts.phase) || '') + ROUTE_SEP + pfx];
+}
+function __routeValid(d) {
+  return !!d && typeof d === 'object' && ROUTE_LANE_OF[d.complexity] != null &&
+    typeof d.confidence === 'number' && d.confidence >= 0 && d.confidence <= 1 &&
+    ['none', 'security', 'data_loss'].indexOf(d.risk_flag) >= 0 &&
+    ['continue', 'retry', 'verify', 'escalate', 'complete'].indexOf(d.action) >= 0 &&
+    typeof d.scope_drift === 'boolean';
+}
+// Pure: (previous ladder state, decider answer) -> next state. `confidence` is always the decider's
+// estimate that the CURRENT lane finishes the task correctly (Haiku for a scope not yet tried), so one
+// gate serves both moments:
+//   first sight    stay on SMALL unless confidence < gate, then take the classified lane. The task has
+//                  to prove it deserves more; an invalid answer proves nothing -> SMALL.
+//   after failure  move up ONE lane if confidence < gate, or this lane has failed MAX times, or a
+//                  risk_flag is raised. Otherwise retry on the same lane.
+function __routeStep(st, d, scope) {
+  const ok = __routeValid(d);
+  const floor = Math.max(0, Math.min(ROUTE_TOP, __routeNum(ROUTE_FLOORS[scope], 0)));
+  if (!st) {
+    const want = ok && d.confidence < ROUTE_CONF_ESCALATE ? ROUTE_LANE_OF[d.complexity] : 0;
+    const lane = Math.max(floor, want);
+    const why = !ok ? 'decider gave no valid answer -> default SMALL'
+      : want ? `classified ${d.complexity}; small-lane confidence ${d.confidence} < ${ROUTE_CONF_ESCALATE}`
+      : `classified ${d.complexity}; small-lane confidence ${d.confidence} >= ${ROUTE_CONF_ESCALATE} -> SMALL`;
+    return { lane, fails: 0, pending: false, evidence: '', decision: ok ? d : null,
+             why: floor > want ? `${why}; raised to floor ${floor}` : why };
+  }
+  const reasons = [];
+  if (st.fails >= ROUTE_MAX_FAILS_PER_LANE) reasons.push(`${st.fails} failures on this lane`);
+  if (ok && d.confidence < ROUTE_CONF_ESCALATE) reasons.push(`confidence ${d.confidence} < ${ROUTE_CONF_ESCALATE}`);
+  if (ok && d.risk_flag !== 'none') reasons.push(`risk_flag=${d.risk_flag}`);
+  const up = reasons.length > 0 && st.lane < ROUTE_TOP;
+  return { lane: up ? st.lane + 1 : st.lane, fails: up ? 0 : st.fails, pending: false,
+           evidence: st.evidence, decision: ok ? d : null,
+           why: up ? 'escalate: ' + reasons.join('; ')
+             : (ok ? 'retry on the same lane' : 'decider gave no valid answer -> retry on the same lane') };
+}
+function __routeSpent() {
+  try { return (typeof budget !== 'undefined' && budget && typeof budget.spent === 'function') ? budget.spent() : null; }
+  catch (e) { return null; }
+}
+// Kill switch. The only spend a workflow script can see is output tokens (budget.spent()); dollars are
+// settled afterwards by the ledger. Once tripped it stays tripped: no new round, no new worker dispatch.
+// Brain dispatches still run so the report and Director validation are not lost.
+function __routeOverBudget() {
+  if (__routeKilled) return true;
+  if (!ROUTE_MAX_OUTPUT_TOKENS) return false;
+  const s = __routeSpent();
+  if (s != null && s >= ROUTE_MAX_OUTPUT_TOKENS) {
+    __routeKilled = true;
+    __routeAudit.push({ event: 'kill_switch', spent_output_tokens: s, cap: ROUTE_MAX_OUTPUT_TOKENS });
+    log(`  [route] KILL SWITCH: ${s} output tokens >= cap ${ROUTE_MAX_OUTPUT_TOKENS} — no new rounds or worker dispatches.`);
+  }
+  return __routeKilled;
+}
+async function __routeClassify(p, o, scope, st) {
+  if (ROUTE_DECIDER !== 'sonnet' && !__routeJevWarned) {
+    __routeJevWarned = true;
+    log(`  [route] decider '${ROUTE_DECIDER}' is not wired on this branch — using Sonnet 5.`);
+  }
+  const cur = st ? st.lane : 0;
+  const ph = String((o && o.phase) || 'Route').replace(/[^A-Za-z0-9_.-]/g, '') || 'Route';
+  const ev = st && st.evidence ? `\nLAST ATTEMPT on ${ROUTE_LANES[cur]} FAILED its deterministic check: ${st.evidence}\n` : '';
+  const q = `You are the route_classifier. PHASE=${ph}.
+Do not use any tools and do not open any file. Answer only from the text below, as StructuredOutput.
+Decide how capable a model this task needs. Most tasks are smaller than they look.
+- complexity: small = scripted, mechanical or schema-shaped; medium = bounded work with a clear check;
+  high = open-ended engineering or debugging; escalate = only a frontier model can do it.
+- confidence: 0..1, how likely ${ROUTE_LANES[cur]} is to finish this task correctly on its next attempt.
+- action: what should happen next (continue | retry | verify | escalate | complete).
+- scope_drift: true if the task, or the failed attempt, has wandered outside what was asked.
+- risk_flag: security or data_loss if the work touches either, else none.
+
+SCOPE: ${scope}
+${ev}TASK (first 1500 characters):
+${String(p == null ? '' : p).slice(0, 1500)}`;
+  const run = typeof agentT === 'function' ? agentT : agent;
+  try {
+    return await run(q, { phase: (o && o.phase) || '', label: `route:classify ${scope}`, effort: 'low',
+                          schema: ROUTE_DECISION_SCHEMA });
+  } catch (e) { return null; }
+}
+// The whole decision for one dispatch. Returns { model } to override, {} to leave the pinned model,
+// or { skip: true } when the kill switch has tripped.
+async function __routePick(p, o) {
+  const fixed = __routeModel(o);
+  if (fixed) return { model: fixed };
+  const scope = __routeScope(o && o.label);
+  if (__routeOverBudget()) {
+    __routeAudit.push({ event: 'skip', scope, label: (o && o.label) || '' });
+    return { skip: true, scope };
+  }
+  let st = __routeLadder[scope];
+  if (!st || st.pending) {                   // classify once; RE-classify only after a failed cycle
+    const d = await __routeClassify(p, o, scope, st);
+    st = __routeStep(st, d, scope);
+    __routeLadder[scope] = st;
+    __routeAudit.push({ event: 'decide', scope, lane: st.lane, why: st.why, decision: st.decision });
+  }
+  let lane = st.lane, capped = false;
+  if (lane === ROUTE_TOP) {
+    if (__routeTopUsed >= ROUTE_MAX_TOP_DISPATCHES) { lane = ROUTE_TOP - 1; capped = true; }
+    else __routeTopUsed++;
+  }
+  __routeAudit.push({ event: 'dispatch', scope, label: (o && o.label) || '', phase: (o && o.phase) || '',
+                      model: ROUTE_LANES[lane], capped });
+  return { model: ROUTE_LANES[lane], scope };
+}
+// Deterministic outcome of one cycle for a worker scope. ok=false queues a re-classification before the
+// scope's next dispatch. `evidence` must be compact: status words and numbers, never a log.
+function __routeOutcome(scope, ok, evidence) {
+  const st = __routeLadder[scope];
+  if (!st) return;
+  if (ok) { st.fails = 0; return; }
+  st.fails++;
+  st.pending = true;
+  st.evidence = String(evidence == null ? '' : evidence).slice(0, 300);
+  __routeAudit.push({ event: 'fail', scope, model: ROUTE_LANES[st.lane], fails: st.fails, evidence: st.evidence });
+}
+function __routeReport() {
+  return { lanes: ROUTE_LANES, decider: ROUTE_MODEL_DECIDER,
+           thresholds: { conf_escalate: ROUTE_CONF_ESCALATE, max_retries_per_lane: ROUTE_MAX_FAILS_PER_LANE,
+                         max_top_escalations: ROUTE_MAX_TOP_DISPATCHES, max_output_tokens: ROUTE_MAX_OUTPUT_TOKENS,
+                         floors: ROUTE_FLOORS },
+           top_dispatches: __routeTopUsed, killed: __routeKilled, spent_output_tokens: __routeSpent(),
+           ladder: __routeLadder, audit: __routeAudit };
 }
 // <<ROUTING-INLINE-END>>
 
 async function agentT(p, o) {
-  const __rm = __routeModel(o);
-  if (__rm) {                               // mapped deterministic helper -> route cheap (clone opts, don't mutate)
-    o = Object.assign({}, o, { model: __rm });
-    try { log(`  [route] ${(o && o.label) || 'agent'} @${(o && o.phase) || ''} -> ${__rm}`); } catch (e) {}
+  if (!ROUTING_ON) return agentTCore(p, o);
+  const pick = await __routePick(p, o);
+  if (pick.skip) {
+    log(`  [route] ${(o && o.label) || 'agent'} skipped — output-token cap reached.`);
+    return null;
   }
+  if (pick.model) {                         // clone opts, don't mutate
+    o = Object.assign({}, o, { model: pick.model });
+    try { log(`  [route] ${(o && o.label) || 'agent'} @${(o && o.phase) || ''} -> ${pick.model}`); } catch (e) {}
+  }
+  const r = await agentTCore(p, o);
+  // An engineer's cycle is judged by the oracle after verify (see the Optimize round), not here. For
+  // every other worker the one deterministic failure visible at this layer is no result at all.
+  if (pick.scope && !/^(eng|deep):/.test(pick.scope) && r == null) {
+    __routeOutcome(pick.scope, false, 'no result (timeout, API fault or lost StructuredOutput)');
+  }
+  return r;
+}
+
+async function agentTCore(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
   if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
@@ -1422,6 +1621,10 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     break;
   }
   if (DEADLINE_EPOCH) log(`[deadline] ${(left / 60).toFixed(0)} min remain before the hard stop.`);
+  if (ROUTING_ON && __routeOverBudget()) {
+    log(`ROUTING OUTPUT-TOKEN CAP reached after ${round} round(s) — starting no further rounds; going straight to report + validation.`);
+    break;
+  }
 
   round++;
   const remaining = BUDGET - dispatched;
@@ -1631,6 +1834,15 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   const clean = results.filter(Boolean);
   const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
     says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR);
+  // Routing: a direction that did not produce a verified, correct, above-floor patch is a failed cycle
+  // for its lane. Honest below-floor counts too — the task was the speedup, not a clean return.
+  if (ROUTING_ON) for (const r of clean) {
+    const sc = `${r.d.specialty === 'deep_explore' ? 'deep' : 'eng'}:${r.d.specialty}`;
+    const ev = !r.eng ? 'engineer returned nothing'
+      : !r.ver ? `engineer reported ${primSpeedup(r.eng)}x <= floor ${CANDIDATE_FLOOR}`
+      : `verify status=${r.ver.status} correctness=${r.ver.correctness} speedup=${primSpeedup(r.ver)}x floor=${CANDIDATE_FLOOR}`;
+    __routeOutcome(sc, verified.indexOf(r) >= 0, ev);
+  }
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
@@ -2078,10 +2290,13 @@ return {
   // to be reconstructed from queue timestamps. It is the whole point of an enforced window that you
   // can tell a run that used its budget from one that gave up.
   stopped_by: deadlineHit ? 'deadline'
+    : (ROUTING_ON && __routeKilled) ? 'route_output_cap'
     : (dispatched >= BUDGET) ? 'budget'
     : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
     : (plannerStopReason || 'tech_lead_stop'),
   deadline_hit: deadlineHit,
+  // Expt-3 cost ladder: lanes, thresholds, every decision/dispatch/failure. Absent when routing is OFF.
+  routing: ROUTING_ON ? __routeReport() : undefined,
   forced_replans: forcedReplans,
   // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was
   // cited (an empty array is the finding: the KB was read and nothing in it was worth acting on).
