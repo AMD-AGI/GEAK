@@ -58,7 +58,10 @@ MIN_CHOICE_PROBABILITY = 0.7
 MIN_REVERSIBLE_PROBABILITY = 0.8
 
 CACHE_BASENAME = "jev_router_cache.json"
-JEV_ENDPOINT = "https://ai-gateway.vercel.sh/typesafe/v1/systemone"
+# The canonical evaluation endpoint. NOT /typesafe/v1/systemone -- that compat shim rejects the
+# documented `boolean` discriminator with a corrupted message naming 'noul', whatever the model
+# slug (probed 2026-09-28). /v1/evaluate validates properly and accepts boolean|choice|score.
+JEV_ENDPOINT = "https://ai-gateway.vercel.sh/v1/evaluate"
 JEV_MODEL = "typesafe-ai/jev"
 STATE_TOKEN_BUDGET_CHARS = 8000  # Jev caps state at 32k tokens; stay far below.
 
@@ -123,18 +126,14 @@ def build_questions() -> dict:
                 "Open-ended: requires designing, diagnosing, or adjudicating.",
             ],
         },
-        # Deliberately a 2-option choice rather than a `boolean`. Probed 2026-09-28: the native
-        # HTTP endpoint has two validator builds that disagree on the boolean discriminator
-        # (one rejects "boolean" and names 'noul'; the other rejects everything but "boolean").
-        # Both accept `choice`, so this avoids the ambiguity entirely.
         "reversible": {
-            "type": "choice",
+            "type": "boolean",
             "instructions": "If this task is answered badly, will a later automated step detect "
                             "it and allow a cheap retry?",
             "criteria": {
-                "yes": "A compile, benchmark, correctness gate, or verifier checks the output.",
-                "no": "The output is consumed directly, or it is itself the check on "
-                      "another agent's work.",
+                "true": "A compile, benchmark, correctness gate, or verifier checks the output.",
+                "false": "The output is consumed directly, or it is itself the check on "
+                         "another agent's work.",
             },
         },
     }
@@ -151,9 +150,9 @@ def decide_from_answers(answers: dict, confidence: dict) -> dict:
     probs = tier_ans.get("probabilities") or {}
     selected_p = probs.get(choice, 0.0) if choice else 0.0
     tier_conf = (confidence or {}).get("tier", 0.0)
-    rev_ans = answers.get("reversible") or {}
-    rev_probs = rev_ans.get("probabilities") or {}
-    reversible_p = rev_probs.get("yes", 0.0) if rev_ans.get("choice") == "yes" else 0.0
+    # A boolean answer carries `probability` = P(true); it is NOT a confidence value, and
+    # confidence is not reported for booleans at all.
+    reversible_p = (answers.get("reversible") or {}).get("probability", 0.0)
 
     gates = {
         "known_tier": choice in TIERS,
