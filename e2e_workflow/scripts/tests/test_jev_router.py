@@ -207,8 +207,12 @@ def test_only_documented_question_types_are_emitted():
     assert types <= {"boolean", "choice", "score"}
 
 
-def test_endpoint_is_the_canonical_one_not_the_compat_shim():
-    """/typesafe/v1/systemone rejects `boolean` with a corrupted 'noul' message (2026-09-28)."""
+def test_endpoint_is_the_native_http_api_not_the_typesafe_client_surface():
+    """The two surfaces have different vocabularies; /typesafe types booleans as `noul`.
+
+    The changelog specifies the native HTTP API + `typesafe-ai/jev` for new integrations, and it
+    is the one whose answers are read at `.probability`, which decide_from_answers assumes.
+    """
     assert jr.JEV_ENDPOINT.endswith("/v1/evaluate")
     assert "systemone" not in jr.JEV_ENDPOINT
     assert jr.JEV_MODEL == "typesafe-ai/jev"
