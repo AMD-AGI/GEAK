@@ -144,6 +144,31 @@ def build_questions() -> dict:
     }
 
 
+def tier_confidence(tier_ans: dict, meta_confidence: dict, probs: dict) -> tuple:
+    """Confidence for the tier question, with the source recorded.
+
+    CORRECTED 2026-09-28 against /docs/ai-gateway/modalities/evaluation. The documented
+    `POST /v1/evaluate` response body is `{model, answers, usage, providerMetadata}`, and its
+    `providerMetadata.gateway` carries routing and cost ONLY. There is no
+    `providerMetadata.typesafe.confidence` on this surface -- that path was assumed from the AI
+    SDK docs and was never observed. What the HTTP contract DOES document on a choice/score
+    answer is `probabilities`, inline.
+
+    Precedence: an answer-level `confidence` if the server sends one, then the legacy metadata
+    map (harmless if absent), then the concentration of the distribution itself. The derived
+    value is the selected option's mass, so the confidence gate is then satisfied by a strictly
+    stronger test rather than silently passing -- and an empty `probabilities` yields 0.0, which
+    escalates. That matches the documented meaning: `confidence: 0` with `probabilities: {}`
+    means the value is UNAVAILABLE, not that the model measured zero.
+    """
+    if isinstance(tier_ans.get("confidence"), (int, float)):
+        return float(tier_ans["confidence"]), "answer"
+    meta = (meta_confidence or {}).get("tier")
+    if isinstance(meta, (int, float)):
+        return float(meta), "provider_metadata"
+    return (max(probs.values()) if probs else 0.0), "derived_from_probabilities"
+
+
 def decide_from_answers(answers: dict, confidence: dict) -> dict:
     """Apply the escalation rule. Anything short of every gate falls back to the thinker.
 
@@ -154,7 +179,7 @@ def decide_from_answers(answers: dict, confidence: dict) -> dict:
     choice = tier_ans.get("choice")
     probs = tier_ans.get("probabilities") or {}
     selected_p = probs.get(choice, 0.0) if choice else 0.0
-    tier_conf = (confidence or {}).get("tier", 0.0)
+    tier_conf, conf_source = tier_confidence(tier_ans, confidence, probs)
     # A boolean answer carries `probability` = P(true); it is NOT a confidence value, and
     # confidence is not reported for booleans at all.
     reversible_p = (answers.get("reversible") or {}).get("probability", 0.0)
@@ -171,6 +196,7 @@ def decide_from_answers(answers: dict, confidence: dict) -> dict:
     telemetry = {
         "source": "jev",
         "confidence": tier_conf,
+        "confidence_source": conf_source,
         "selected_probability": selected_p,
         "reversible_probability": reversible_p,
         "complexity": (answers.get("complexity") or {}).get("score"),
@@ -205,7 +231,12 @@ def call_jev(req: dict, api_key: str, timeout_s: float) -> dict:
         "state": state,
         "questions": build_questions(),
     }
-    gw = {"noTraining": True}
+    # `zeroDataRetention` is the documented gateway privacy control. `noTraining` was sent here
+    # until 2026-09-28 and has been REMOVED: it appears in no Vercel doc, and it cannot be
+    # verified by probing, because an unknown key under `providerOptions.gateway` is accepted
+    # exactly like a real one (a bogus control key returned the same 403, not a 400). A flag
+    # that may silently do nothing is worse than no flag, because it reads as protection.
+    gw = {}
     if os.environ.get("GEAK_JEV_ZDR", "1") == "1":
         gw["zeroDataRetention"] = True
     payload["providerOptions"] = {"gateway": gw}
@@ -232,6 +263,8 @@ def call_jev(req: dict, api_key: str, timeout_s: float) -> dict:
     resp.raise_for_status()
     body = resp.json()
     answers = body.get("answers") or body
+    # Kept only as a fallback source; see tier_confidence(). The documented HTTP response does
+    # not carry this path, so it is normally absent and the distribution is used instead.
     confidence = (
         ((body.get("providerMetadata") or {}).get("typesafe") or {}).get("confidence") or {}
     )
