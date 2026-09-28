@@ -522,6 +522,14 @@ def map_args(
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
+    # These existing workflow guards must use the operator's timing envelope too.
+    for env_name, arg_name in (
+        ("GEAK_AGENT_TIMEOUT_MS", "agent_timeout_ms"),
+        ("GEAK_TIME_TAIL_CAP_S", "time_tail_cap_s"),
+    ):
+        value = _int_or_none(os.environ.get(env_name), env_name)
+        if value is not None:
+            ps_args[arg_name] = value
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
