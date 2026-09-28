@@ -2,10 +2,12 @@
 title: profiling — benchmarking methodology (warmup, repeats, noise band, graphs, locked clocks)
 kind: technique
 gens: [gfx906, gfx90a, gfx942, gfx950]
-updated: 2026-06-08
+updated: 2026-09-21
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
   - https://rocm.docs.amd.com/projects/amdsmi/en/latest/
+  - ROCm/aiter@04c7b808:.claude/skills/review-pr/rules.md
+  - ROCm/aiter@04c7b808:.claude/skills/aiter-op-test/SKILL.md
 ---
 
 # Benchmarking methodology on MI GPUs
@@ -70,10 +72,67 @@ variant's delta against the first — that is the number to reason about. Keep a
 permanently for this reason: it is what makes a claim re-checkable on new hardware, and lets a regression
 be bisected against a mechanism rather than a commit.
 
-**Do not use graphs for this sweep**: capturing one graph per variant and replaying round-robin faults, and
-at ~1 ms per call launch overhead is far under the noise floor anyway. Graphs remain correct (and
-necessary) for a *separate* small-kernel harness — a 4 µs kernel is otherwise swamped by ~40 µs of Python
-dispatch per launch, so without graphs you are measuring the launch, not the kernel.
+**Do not mix graph capture into this sweep unless launch overhead is material and identically
+controlled for every variant.** One graph per build complicates round-robin replay and adds another
+stateful variable. For kernels around 1 ms, first verify that host overhead is stable and too small
+to change the ranking. For a *separate* small-kernel harness, graphs are necessary: a 4 µs kernel can
+otherwise be swamped by ~40 µs of Python dispatch per launch, so without graphs you are measuring the
+launch rather than the kernel.
+
+## Reviewing someone else's number: base vs head, patch reversed
+Everything above tells you how to produce a trustworthy measurement. Judging a **claimed** one is a
+different job, and the rule is narrower: **the measurement that counts is base vs head, on this box,
+back to back, from clean trees at the exact compared revisions.** Separate worktrees are preferable;
+if one worktree is reused, restore it exactly and verify the diff before measuring the other side.
+
+Running only the candidate against whatever baseline the change's author chose reproduces *their*
+comparison. It cannot show a regression, and it silently inherits any staleness in their baseline.
+Reduce each pair to a ratio oriented so **`<1` is always a regression**: candidate/base for
+higher-is-better metrics such as throughput, and base/candidate for lower-is-better metrics such as
+latency. If the verdict takes the minimum across columns, quote the column that set it. Require
+several matched rows with both sides exiting cleanly—a truncated log yields a meaningless ratio, so
+a nonzero exit on either side is never a "no regression".
+
+When the comparison could not be made, say which of these it was rather than merging them: the
+change has **no runtime surface** (nothing to measure); there is **no benchmark entry point** in the
+target; **the change adds the target**, so base has nothing to compare against; the two sides
+**measured different things**; or the run **could not happen** (no idle GPU, wrong arch, out of
+time). The last is an environment gap, not a defect in the change. A single sample on a shared box is
+weak evidence either way — report the sample count or the spread, never one bare number.
+
+**What may be excluded from the timing window, and what may not.** Excluding a genuinely one-time,
+amortizable cost from steady-state per-call latency is *correct* methodology, not a trick: weight
+shuffle/preshuffle, model weight loading, and a first-call JIT whose result is cached for the
+process's life are all paid once per deployment. `warmup_iters` before a steady-state loop is
+standard. What may not be excluded is a cost that **recurs** — a first-call JIT on a path that is not
+cached across calls, or setup running on the live stream on every cold start. Excluding a recurring
+cost can turn a net regression into an apparent speedup; charging a one-time shuffle against a single
+call to manufacture a regression is the same error in the other direction. Ask which it is before
+either accepting or rejecting the claim. Full review procedure:
+[`../workflows/review_kernels.md`](../workflows/review_kernels.md).
+
+## Candidate-table hygiene (when you bench several backends at once)
+A backend bake-off table is read as if every cell is comparable, so five rules keep it honest.
+
+1. **The reference is not a candidate.** Compute the torch reference, compare against it, and keep
+   it *out* of the timing table — an unoptimized reference in a perf column invites a meaningless
+   speedup ratio. The exception is when torch genuinely is one of the kernels under test
+   (`torch.mm`, `torch.einsum`).
+2. **Drop a candidate in configs it does not support, and say why in the table.** A kernel that is
+   only correct for some layouts or dtypes will still *produce a time* in the ones it isn't, and a
+   wrong-but-fast number is worse than a blank: it wins the bake-off. Leave the cell empty and
+   comment the reason. The error column is how you find these — a candidate sitting near `err ≈
+   0.99` is signalling an unsupported config or a real bug, so never silently drop it before you
+   know which.
+3. **Record the arch in the row**, so one table stays self-describing when results from two cards
+   end up side by side.
+4. **Report both roofline metrics, not bare `ms`** — TFLOP/s *and* GB/s from the same timing, so a
+   decode row's low TFLOP/s is readable as bandwidth-bound rather than as a failure. Worked
+   example and the reading rules: [`../expert_skills/tuning/benchmark/README.md`](../expert_skills/tuning/benchmark/README.md).
+5. **Store raw per-candidate values, not ratio columns.** Each candidate gets its own time,
+   TFLOP/s, GB/s and error cells; a hand-written `a/b` column hides which side moved and goes stale
+   when a candidate is added. Derive ratios from the raw cells when reading the table — the
+   base-vs-head ratio convention above is a review verdict, not a table column.
 
 ## Per-leg vs 2-launch A/B
 For an e2e serving change, prefer a **2-launch A/B** (full ref launch vs full candidate launch) over

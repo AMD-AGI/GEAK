@@ -1,7 +1,7 @@
 ---
 title: Repo index — pinned sources
 kind: reference
-updated: 2026-06-08
+updated: 2026-09-21
 ---
 
 # Repo index — pinned sources
@@ -17,7 +17,19 @@ consolidates the most-used ones. Grow as cards are added (P2–P4).
 | sglang | 0.5.11 | serving stack | attention backend selection |
 
 ## Upstream repos
-- ROCm/aiter — https://github.com/ROCm/aiter
+- ROCm/aiter — https://github.com/ROCm/aiter (upstream ingest pins below are distinct from the
+  on-box `a6bb4993` pin above; re-sync each snapshot when its source changes):
+  - `b0ced008`: `.claude/skills/flydsl-kernel-code-cleanup/SKILL.md`, `requirements.txt`
+    (`flydsl==0.3.2`) and `aiter/ops/flydsl/kernels/` →
+    `languages/flydsl/authoring_api_migration.md`.
+  - `04c7b808`: `.claude/skills/review-pr/{SKILL.md,rules.md}` → `workflows/review_kernels.md`
+    plus amendments to `profiling/benchmarking_methodology.md`, `quantization/fnuz_vs_ocp.md`,
+    `optimization/lds_and_bank_conflicts.md` and `languages/flydsl/authoring_api_migration.md`.
+  - `04c7b808`: `.claude/skills/aiter-op-test/SKILL.md` → amendments only to
+    `workflows/optimize_single_kernel.md`, `profiling/benchmarking_methodology.md`,
+    `operators/layout_shuffle/overview.md` and `workflows/review_kernels.md`; the overlapping
+    material already lives in `expert_skills/tuning/tuning-core/correctness_gates.md` and
+    `expert_skills/tuning/benchmark/README.md`.
 - ROCm/rocm-libraries (Composable Kernel now lives here) — https://github.com/ROCm/rocm-libraries (projects/composablekernel)
 - ROCm/composable_kernel (DEPRECATED mirror) — https://github.com/ROCm/composable_kernel
 - ROCm/hipBLASLt — https://github.com/ROCm/hipBLASLt
@@ -26,7 +38,8 @@ consolidates the most-used ones. Grow as cards are added (P2–P4).
 - Dao-AILab/flash-attention — https://github.com/dao-ailab/flash-attention
 - tile-ai/tilelang — https://github.com/tile-ai/tilelang
 - HazyResearch/HipKittens — https://arxiv.org/html/2511.08083v1
-- AMD-AGI/GEAK — https://github.com/AMD-AGI/GEAK (FlyDSL authoring docs ingested into `languages/flydsl/authoring_*` + `debugging.md` @ `c0a1f937` from `src/minisweagent/skills/flydsl/docs/`; re-sync on upstream change)
+- AMD-AGI/GEAK — https://github.com/AMD-AGI/GEAK (ingested @ `c0a1f937` from `src/minisweagent/skills/flydsl/docs/` into **`languages/flydsl/authoring_tile_programming.md`, `authoring_optimization.md`, `authoring_gemm_levers.md`, `debugging.md`** only; re-sync on upstream change. The other `authoring_*` files come from different upstreams — see the two entries below and the 2026-08-12 changelog entry for `authoring_attention_levers.md`)
+- ROCm/FlyDSL — https://github.com/ROCm/FlyDSL (the DSL itself; `docs/api_stability.md` + `.claude/skills/api-stability/` @ `da731e68` ingested into `languages/flydsl/api_stability.md`. The policy is versioned with the source — re-sync on upstream change)
 - sgl-project/sglang — https://github.com/sgl-project/sglang
 - vllm-project/vllm — https://github.com/vllm-project/vllm
 - deepseek-ai/DeepEP — https://github.com/deepseek-ai/DeepEP

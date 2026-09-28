@@ -5,11 +5,12 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp4_e2m1]
 regimes: [prefill, decode, both]
 status: sota
-updated: 2026-06-08
+updated: 2026-09-21
 sources:
   - GEAK/e2e_workflow/roles/op_benchmarker.md
   - GEAK/kernel_workflow/  (single-kernel kernel_workflow)
   - https://github.com/ROCm/aiter
+  - ROCm/aiter@04c7b808:.claude/skills/aiter-op-test/SKILL.md
 ---
 
 # Optimize a single kernel
@@ -45,6 +46,23 @@ Create the task dir the kernel layer consumes: `unittest.py` (correctness + timi
   **`bias` flag** and exact `M/N/K/dtype` — sglang issues most dense GEMMs with
   `bias=False` (bias applied separately). A synthesized `bias=True` set mismatches every
   live call → **0 engagement** (see [`gemm_tuning_workflow.md`](gemm_tuning_workflow.md)).
+- **Right shape is not enough — reproduce the *call*, not an idealized op.** Three things the
+  shape does not capture, each of which changes the number and can hide a correctness bug:
+  **buffer ownership** (if the model passes a preallocated `out=`/`YQ=` buffer, pass one too —
+  don't let the kernel allocate its own), **real tensor layout** (if the model feeds a transposed
+  *view*, build a transposed view of a contiguous tensor, not a fresh contiguous tensor of that
+  shape), and **input/output layout coupling** (they are linked at the call site; sweeping an
+  output layout without moving the input with it measures a combination the model never issues).
+  A test that quietly uses contiguous inputs where the model uses a view reports the wrong perf
+  *and* hides the bugs that only strided inputs trigger — see the missing-contiguous-check and
+  layout hazards in [`review_kernels.md`](review_kernels.md) §3d.
+- **If you cannot capture, derive — never guess.** Read the model's real `config.json` for the
+  dims rather than trusting dataclass defaults, map model semantics onto the kernel's `(b, m, n, k)`
+  and **write that mapping down next to the shapes**. Critically, **the parallelism config changes
+  the batch dim**, so one shape row is not one coverage point: with grouped output projections,
+  `b = groups / tp`, so a DeepSeek-V4-Flash-shaped op (`o_groups=8`) is `b=1` at tp8 and `b=4` at
+  tp2, while a V4-Pro-shaped one (`o_groups=16`) is `b=2` at tp8 and `b=16` under dp or tp1. Sweep
+  the real tp/dp set; a kernel correct at full head count can go out of bounds at `num_heads/tp`.
 - The oracle is **IMMUTABLE** (anti-cheating). Re-hash `reference_io.pt` vs
   `meta.json.reference_io_sha256` before trusting any later result.
 
@@ -118,7 +136,11 @@ A candidate is accepted into the bank only if **both** hold on the immutable ora
 1. **Correct** — passes dtype-appropriate tolerance vs `reference_io.pt`. Note: same-dtype
    cross-backend swaps are expected near-identical but NOT byte-identical (a bf16 argmax
    flip is real) → flag the parity risk.
-2. **Faster** — median of ≥3 warm repeats beats `best_known_ms`; note the spread.
+2. **Faster** — use the statistic required by
+   [`../profiling/benchmarking_methodology.md`](../profiling/benchmarking_methodology.md): median
+   plus spread for an ordinary candidate A/B, or the minimum from one interleaved invocation when
+   ranking many prebuilt variants under the documented single-kernel-sweep exception. Compare
+   `best_known_ms` and the candidate under the same protocol.
 
 ## Step 7 — Bank the win
 Record the winner as one of `{env, flag, patch, authored}` with its apply recipe, the

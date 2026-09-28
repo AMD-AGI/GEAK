@@ -2,13 +2,14 @@
 title: layout_shuffle — overview
 kind: operator_overview
 operator: layout_shuffle
-gens: [gfx942, gfx950]
+gens: [gfx942, gfx950, gfx1250]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3, fp4_e2m1, int8]
 regimes: [prefill, decode, both]
-updated: 2026-06-08
+updated: 2026-09-21
 sources:
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/shuffle.py
   - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/tuned_gemm.py
+  - ROCm/aiter@04c7b808:.claude/skills/aiter-op-test/SKILL.md
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
 ---
 
@@ -63,6 +64,13 @@ fuse with **weight quantization** at load: shuffle + quantize the weight in the 
 Value-preserving permutation → byte-exact (per element); the GEMM that consumes it carries the usual
 quant/accumulation numerics. The only correctness risk is a **layout mismatch** (wrong `layout=` vs the
 kernel). See [numerics.md](numerics.md).
+
+## Arch scope — not every part wants a shuffle
+The pre-shuffle exists to match a specific MFMA fragment layout, so it is **arch-conditional, not a
+universal win**. On **gfx1250 (CDNA5)** the FP8 path takes a **linear layout**, so the shuffle must
+be switched off (`preshuffle=False`) rather than carried over from a gfx942/gfx950 recipe. When you
+do gate it per-arch, move the reference with the kernel: a test that disables the shuffle for the
+kernel and leaves the reference on the shuffled layout fails for the wrong reason.
 
 ## How to bench
 Don't bench the shuffle in isolation (one-time). Bench the **GEMM with vs without** the shuffled weight +
