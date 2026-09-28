@@ -142,12 +142,11 @@ def test_unreadable_cache_does_not_raise(tmp_path):
 
 # --- The escalation rule --------------------------------------------------------------------
 
-def _answers(tier="cheap", p=0.95, reversible="yes", rev_p=0.95, score=0.4):
+def _answers(tier="cheap", p=0.95, rev_p=0.95, score=0.4):
     return {
         "tier": {"type": "choice", "choice": tier, "probabilities": {tier: p}},
         "complexity": {"type": "score", "score": score},
-        "reversible": {"type": "choice", "choice": reversible,
-                       "probabilities": {reversible: rev_p}},
+        "reversible": {"type": "boolean", "probability": rev_p},
     }
 
 
@@ -169,14 +168,13 @@ def test_low_selected_probability_escalates():
 
 def test_irreversible_task_escalates_even_when_confident():
     """The whole point: a confident 'cheap' on unverifiable work is still refused."""
-    d = jr.decide_from_answers(_answers(reversible="no", rev_p=0.99), {"tier": 0.95})
+    d = jr.decide_from_answers(_answers(rev_p=0.05), {"tier": 0.95})
     assert d["tier"] == "thinker" and d["escalated"] is True
 
 
 def test_thinker_choice_needs_no_reversibility():
     """Escalating is always safe, so it must not be gated on reversibility."""
-    d = jr.decide_from_answers(_answers(tier="thinker", reversible="no", rev_p=0.99),
-                               {"tier": 0.9})
+    d = jr.decide_from_answers(_answers(tier="thinker", rev_p=0.05), {"tier": 0.9})
     assert d["tier"] == "thinker" and d["escalated"] is False
 
 
@@ -203,10 +201,24 @@ def test_rounded_distribution_is_not_renormalized():
 
 # --- The question payload -------------------------------------------------------------------
 
-def test_no_boolean_questions_are_emitted():
-    """The native endpoint has validator builds that disagree on the boolean discriminator."""
+def test_only_documented_question_types_are_emitted():
+    """/v1/evaluate validates the discriminator; a bogus type is a 400."""
     types = {q["type"] for q in jr.build_questions().values()}
-    assert types <= {"choice", "score"}
+    assert types <= {"boolean", "choice", "score"}
+
+
+def test_endpoint_is_the_canonical_one_not_the_compat_shim():
+    """/typesafe/v1/systemone rejects `boolean` with a corrupted 'noul' message (2026-09-28)."""
+    assert jr.JEV_ENDPOINT.endswith("/v1/evaluate")
+    assert "systemone" not in jr.JEV_ENDPOINT
+    assert jr.JEV_MODEL == "typesafe-ai/jev"
+
+
+def test_boolean_question_has_no_criteria_requirement_violation():
+    """`choice` requires criteria (400 without it); boolean's criteria are optional."""
+    for name, q in jr.build_questions().items():
+        if q["type"] == "choice":
+            assert q.get("criteria"), name
 
 
 def test_score_levels_within_vendor_limits():
