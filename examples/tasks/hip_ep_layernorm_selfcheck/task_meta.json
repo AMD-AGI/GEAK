@@ -1,0 +1,19 @@
+{
+  "op": "layernorm_selfcheck",
+  "oracle": "selfcheck",
+  "arch": "gfx1151",
+  "kernel_file": "layernorm_kernel.hip",
+  "target_functions": [
+    "layernorm_kernel",
+    "layernorm_launch"
+  ],
+  "frozen_symbols": [
+    "layernorm_launch"
+  ],
+  "test_cpp": "test_layernorm.cpp",
+  "shapes": [
+    { "M": 4096, "N": 2880, "iters": 50 },
+    { "M": 8192, "N": 4096, "iters": 50 },
+    { "M": 2048, "N": 8192, "iters": 50 }
+  ]
+}

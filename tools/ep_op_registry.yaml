@@ -1,0 +1,74 @@
+# ONNX-Runtime Execution-Provider op registry for GEAK task generation.
+#
+# One row per supported EP op. `gen_ep_task.py` reads this to know, per op:
+#   - which kernel .hip file to vendor (the editable optimization surface),
+#   - which device functions are the optimization targets,
+#   - which symbols are the FROZEN C-ABI / dispatch contract (never editable),
+#   - which oracle to use (fast standalone hipcc harness, or the general
+#     ONNX-vs-CPU numeric pytest framework),
+#   - which arches it runs on, and a default shape preset.
+#
+# Adding a new op = one row here (+ a fast harness dir if oracle: fast).
+# Paths are relative to the HIP EP repo root passed via --ep-repo.
+
+schema:
+  op:              op short name (also the generated task dir suffix)
+  kernel_hip:      kernel source to vendor + edit, relative to <ep-repo>/hip-ep/lib/Runtime/Kernels/hip/
+  entry_points:    device/global functions the optimizer may rewrite (target_kernel_functions)
+  frozen_symbols:  C-ABI signatures / structs / dispatch gates that must stay byte-identical
+  oracle:          fast | numeric
+  fast_harness:    (fast only) dir under <ep-repo>/hip-ep/lib/Runtime/Kernels/test/example/
+  numeric_test:    (numeric only) pytest -k selector under <ep-repo>/hip-ep/test/numeric/tests/
+  arches:          gfx arches the kernel supports
+  shapes_preset:   named preset resolved by the generator (see gen_ep_task.py SHAPE_PRESETS)
+
+ops:
+  - op: matmul_nbits
+    kernel_hip: matmul_nbits_kernel.hip
+    entry_points:
+      - matmul_nbits_kernel_u2
+      - matmul_nbits_gemv_kernel_u2
+      - GemmFp16U2Impl
+      - dequant_u2_to_fp16
+      - matmul_nbits_kernel_u3
+      - matmul_nbits_gemv_kernel_u3
+      - GemmFp16U3Impl
+      - matmul_nbits_kernel_u4
+      - matmul_nbits_gemv_kernel_u4
+      - GemmFp16U4Impl
+    frozen_symbols:
+      - "hip_matmul_nbits"          # extern C ABI entry (matmul_nbits_kernel.hip)
+      - "ZeroPointsU2"              # zero-point struct contract
+      - "zp_elem_size"              # 1=uint8 packed / 2=fp16 dispatch gate
+    oracle: fast
+    fast_harness: gemm_fp16u2       # bits=2/3/4 share the kernel TU; the u2 harness also builds u4
+    bits: [2, 3, 4]
+    arches: [gfx1151, gfx1150, gfx942, gfx950]
+    shapes_preset: matmul_nbits_default
+
+  - op: layer_norm
+    kernel_hip: layer_norm_kernel.hip
+    entry_points:
+      - hip_layer_norm_kernel         # __global__ device kernel (layer_norm_kernel.hip:64)
+    frozen_symbols:
+      - "hip_layer_norm"              # extern C ABI entry (hip_custom_kernels.h:1462)
+    oracle: numeric
+    numeric_test: "test_layer_norm.py"
+    arches: [gfx1151, gfx1150, gfx942, gfx950]
+    shapes_preset: numeric_default
+
+  # selfcheck ops are self-contained (no EP repo needed): the kernel, a frozen
+  # CPU-reference harness, and the ABI header are templated under
+  # tools/selfcheck_templates/<template>/. Ideal for MVP/greenfield kernels.
+  - op: layernorm_selfcheck
+    template: layernorm               # dir under tools/selfcheck_templates/
+    kernel_hip: layernorm_kernel.hip
+    test_cpp: test_layernorm.cpp
+    entry_points:
+      - layernorm_kernel              # __global__ body (editable)
+      - layernorm_launch             # launch wrapper (editable)
+    frozen_symbols:
+      - "layernorm_launch"           # extern C ABI in include/layernorm_op.h
+    oracle: selfcheck
+    arches: [gfx1151, gfx1150, gfx942, gfx950]
+    shapes_preset: layernorm_default

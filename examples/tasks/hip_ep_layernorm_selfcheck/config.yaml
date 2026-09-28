@@ -1,0 +1,16 @@
+source_file_path:
+- kernel_src/layernorm_kernel.hip
+target_kernel_functions:
+- layernorm_kernel
+- layernorm_launch
+compile_command:
+- python3 scripts/task_runner.py compile
+correctness_command:
+- python3 scripts/task_runner.py correctness
+performance_command:
+- python3 scripts/task_runner.py performance
+task_type: hip_ep2hip_ep
+prompt:
+  source_code: null
+  instructions: null
+  cheatsheet: null
