@@ -16,8 +16,10 @@ Architect can tell which regime a kernel serves; optimization may produce regime
 
 ## Lever tiers (highest ROI first for a fresh model)
 
-### Tier 0 — Config / backend (Config Tuner, runs FIRST, no source edits)
-Cheapest, biggest, and it reshapes the kernel landscape (so profile AFTER). Knobs:
+### Tier 0 — Config / backend (Config Tuner, after KernelFusion, no source edits)
+Cheap and often high-impact. In the full workflow KernelFusion runs first and the formal profile
+already reflects accepted fusions; Config Tuner then explores the remaining configuration space on
+that current stack. Knobs:
 - **Attention backend**: `--attention-backend {triton, aiter, ck, fa3, ...}`. Huge for attn-heavy.
 - **GEMM backend / tuning**: aiter vs hipBLASLt; populate the hipBLASLt/Tensile tuning DB for the
   exact shapes (untuned GEMM falls back to a default solution — see the `aiter ... not found tuned
