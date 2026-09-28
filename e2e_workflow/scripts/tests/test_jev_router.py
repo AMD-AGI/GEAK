@@ -247,3 +247,53 @@ def test_state_is_truncated_to_stay_under_the_token_cap():
     key_a = jr.request_key(req)
     key_b = jr.request_key({**req, "task": "x" * jr.STATE_TOKEN_BUDGET_CHARS})
     assert key_a == key_b, "truncation must happen before hashing, or replay misses"
+
+
+# --- Confidence source (corrected 2026-09-28 against the documented HTTP response) -----------
+# `POST /v1/evaluate` returns {model, answers, usage, providerMetadata}, and providerMetadata
+# .gateway holds routing/cost only. The router must NOT depend on providerMetadata.typesafe
+# .confidence, which is not part of this surface's contract.
+
+def test_confidence_is_derived_from_the_distribution_when_metadata_is_absent():
+    d = jr.decide_from_answers(_answers(p=0.95), {})
+    assert d["confidence_source"] == "derived_from_probabilities"
+    assert d["confidence"] == 0.95
+    assert d["escalated"] is False
+
+
+def test_absent_probabilities_yield_zero_confidence_and_escalate():
+    """`confidence: 0` with no distribution means UNAVAILABLE, not 'measured zero'."""
+    d = jr.decide_from_answers({"tier": {"type": "choice", "choice": "cheap"},
+                                "reversible": {"probability": 0.99}}, {})
+    assert d["confidence"] == 0.0 and d["escalated"] is True
+
+
+def test_answer_level_confidence_outranks_both_other_sources():
+    a = _answers(p=0.95)
+    a["tier"]["confidence"] = 0.2
+    d = jr.decide_from_answers(a, {"tier": 0.9})
+    assert d["confidence_source"] == "answer" and d["escalated"] is True
+
+
+def test_provider_metadata_confidence_is_still_honoured_when_present():
+    d = jr.decide_from_answers(_answers(p=0.95), {"tier": 0.4})
+    assert d["confidence_source"] == "provider_metadata" and d["escalated"] is True
+
+
+def test_no_undocumented_gateway_flags_are_sent(monkeypatch):
+    """Only `zeroDataRetention` is documented. An unknown gateway key is accepted like a real
+    one, so an unverifiable flag would read as protection while possibly doing nothing."""
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"answers": _answers()}
+
+    import sys, types
+    fake = types.ModuleType("requests")
+    fake.post = lambda url, **kw: (seen.update(kw.get("json") or {}), _Resp())[1]
+    monkeypatch.setitem(sys.modules, "requests", fake)
+    monkeypatch.setenv("GEAK_JEV_ZDR", "1")
+    jr.call_jev({"label": "x", "task": "t"}, "key", 5.0)
+    assert seen["providerOptions"]["gateway"] == {"zeroDataRetention": True}
