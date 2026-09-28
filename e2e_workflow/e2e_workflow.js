@@ -1459,7 +1459,7 @@ function __routeAgentTimeoutMs() { try { return agentTimeoutFor(); } catch (e) {
 // Native Workflow scripts get no require()/fs, so this is inlined, not imported; the .js module is the
 // reviewable, unit-tested source of truth. __routeAgentTimeoutMs() is a per-file shim (defined just
 // above this region) so the guarded single attempt reuses each lane's own timeout.
-const ROUTE_MODEL_STRONG = 'claude-opus-4-8';
+const ROUTE_MODEL_STRONG = 'claude-opus-5-5';
 const ROUTE_MODEL_CHEAP = 'claude-sonnet-5';
 const ROUTE_SEP = String.fromCharCode(0);   // scope-key separator: textual in source, U+0000 at runtime
 const ROUTE_TIER_MAP = (function () {
