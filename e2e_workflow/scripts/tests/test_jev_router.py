@@ -280,7 +280,7 @@ def test_provider_metadata_confidence_is_still_honoured_when_present():
     assert d["confidence_source"] == "provider_metadata" and d["escalated"] is True
 
 
-def test_no_undocumented_gateway_flags_are_sent(monkeypatch):
+def test_zdr_on_refuses_rather_than_sending_without_cover(monkeypatch):
     """Only `zeroDataRetention` is documented. An unknown gateway key is accepted like a real
     one, so an unverifiable flag would read as protection while possibly doing nothing."""
     seen = {}
@@ -295,10 +295,10 @@ def test_no_undocumented_gateway_flags_are_sent(monkeypatch):
     fake.post = lambda url, **kw: (seen.update(kw.get("json") or {}), _Resp())[1]
     monkeypatch.setitem(sys.modules, "requests", fake)
     monkeypatch.setenv("GEAK_JEV_ZDR", "1")
-    jr.call_jev({"label": "x", "task": "t"}, "key", 5.0)
-    assert seen["providerOptions"]["gateway"] == {
-        "zeroDataRetention": True, "only": ["typesafe-ai"],
-    }, "ZDR must pin the provider; unpinned it resolves to a zdr_ineligible_model and 403s"
+    import pytest
+    with pytest.raises(RuntimeError, match="zdr: none"):
+        jr.call_jev({"label": "x", "task": "t"}, "key", 5.0)
+    assert not seen, "nothing may be sent when the requested ZDR cannot be honoured"
 
 
 def test_zdr_off_sends_no_gateway_pin(monkeypatch):
