@@ -328,10 +328,19 @@ async function runModelMap(F, src) {
         (await L.__routePick('x', W('reprofile r1'))).model === CHEAP);
   }
   {
+    // The session had already spent far more than the cap before this lane started (as observed live:
+    // 4,727,204). The cap is on growth since the lane started, so routing must proceed normally.
+    let spent = 4727204;
+    const { L } = harness({ route_max_output_tokens: '1000000' }, [dec('small', 0.9)], { spent: () => spent });
+    ok_(`${F.name}: cap counts growth since the lane started, not the session total`,
+        (await L.__routePick('x', W('benchmark_engineer'))).model === HAIKU && L.__routeReport().killed === false &&
+        L.__routeReport().session_output_tokens_at_start === 4727204);
+  }
+  {
     let spent = 10;
     const { L, asked } = harness({ route_max_output_tokens: '100' }, [dec('small', 0.9)], { spent: () => spent });
     const a = await L.__routePick('x', W('verify d1'));
-    spent = 100;
+    spent = 110;
     const b = await L.__routePick('x', W('verify d2'));
     const c = await L.__routePick('x', { phase: 'Optimize', label: 'tech_lead:report' });
     ok_(`${F.name}: under the output cap -> dispatch; at the cap -> worker skipped (kill switch)`,
@@ -339,7 +348,8 @@ async function runModelMap(F, src) {
     ok_(`${F.name}: kill switch leaves brain dispatches running (report + validation are not lost)`, c.model === OPUS55);
     const rep = L.__routeReport();
     ok_(`${F.name}: report records the kill, thresholds and full audit`,
-        rep.killed === true && rep.thresholds.max_output_tokens === 100 && rep.audit.some((e) => e.event === 'kill_switch'));
+        rep.killed === true && rep.thresholds.max_output_tokens === 100 && rep.spent_output_tokens === 100 &&
+        rep.audit.some((e) => e.event === 'kill_switch'));
   }
   {
     const { L } = harness({}, [dec('small', 0.9)]);   // no budget global at all (older runtime)
