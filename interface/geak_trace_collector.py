@@ -524,6 +524,7 @@ def build_agent_calls(transcript_path, rates=None, cost_fns=None):
 
         if rates is not None and cost_fns is not None and call.get("usage_known", True):
             call["cost_usd"], call["cost_breakdown"] = _cost_for(call, rates, cost_fns)
+            call["cost_rate_card"] = _rate_card_for(call, rates, cost_fns)
         else:
             # No usage block recorded: the cost is UNKNOWN, not zero. Pricing it
             # as $0 would understate a total that is presented as the run spend.
@@ -559,9 +560,22 @@ def _collect_tool_results(transcript_path):
     return found
 
 
+def _rate_card_for(call, rates, cost_fns):
+    """Which price card priced this call: its model's own card, "_default" when the model has
+    none (so the dollars are the default card's, not a verified price), or None when the
+    record is not a billed model call ("<synthetic>")."""
+    model = call.get("model") or ""
+    if model in ("", "<synthetic>"):
+        return None
+    rate_key = cost_fns[2] if len(cost_fns) > 2 else None
+    if rate_key is None:
+        return None
+    return rate_key(model, rates) or "_default"
+
+
 def _cost_for(call, rates, cost_fns):
     """Price one call with the ledger's own functions, so accounting never forks."""
-    cost_of, cost_breakdown = cost_fns
+    cost_of, cost_breakdown = cost_fns[0], cost_fns[1]
     row = dict(call["usage"])
     row["model"] = call.get("model")
     if not row.get("cache_write_5m_tokens") and not row.get("cache_write_1h_tokens"):
@@ -590,7 +604,7 @@ def _load_cost_support(rates_path=None):
                 loaded = json.load(fh)
             if isinstance(loaded, dict):
                 rates = llm_ledger.merge_rates(loaded)
-        return rates, (llm_ledger.cost_of, llm_ledger.cost_breakdown)
+        return rates, (llm_ledger.cost_of, llm_ledger.cost_breakdown, llm_ledger.rate_key)
     except Exception:
         return None, None
 
@@ -808,6 +822,11 @@ def build_trace(workflow_dir, run_status=None, price=True, rates_path=None,
             "Rebuilt from a directory named %r; run identity restored from the "
             "mirrored run record as %s." % (_dir_name, _true_run_id))
 
+    unpriced = sorted({m for a in agents for m in ((a.get("totals") or {}).get("default_priced_models") or [])})
+    if unpriced:
+        warnings.append(
+            "pricing: no rate card for %s; those calls are priced at the default card, so their "
+            "dollars are not a verified price." % ", ".join(unpriced))
     trace_out = {
         "schema": SCHEMA,
         "run": {
@@ -974,6 +993,7 @@ def _merge_call(prev, new):
         merged["usage_known"] = prev.get("usage_known", True)
         merged["cost_usd"] = prev.get("cost_usd")
         merged["cost_breakdown"] = prev.get("cost_breakdown")
+        merged["cost_rate_card"] = prev.get("cost_rate_card")
     # NOTE: no overall-score override here. A single lexicographic comparison
     # would discard this field-wise reconciliation whenever one dimension (e.g.
     # longer text) improved while another (e.g. a tool action) regressed.
@@ -1223,6 +1243,10 @@ def _totals_of(calls):
         "cost_usd": sum(c.get("cost_usd") or 0.0 for c in calls),
         "actions": sum(len(c.get("actions") or []) for c in calls),
         "usage_unknown_calls": sum(1 for c in calls if not c.get("usage_known", True)),
+        # Calls whose model had no price card: their dollars come from the default card.
+        "default_priced_calls": sum(1 for c in calls if c.get("cost_rate_card") == "_default"),
+        "default_priced_models": sorted({c.get("model") for c in calls
+                                         if c.get("cost_rate_card") == "_default"}),
     }
 
 

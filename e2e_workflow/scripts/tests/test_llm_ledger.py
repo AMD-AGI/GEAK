@@ -657,6 +657,26 @@ class TestPerModelPricing(unittest.TestCase):
         self.assertEqual(r["_default"]["input"], 6.0)
         self.assertEqual(L.DEFAULT_RATES["_default"]["input"], 5.0)    # built-in table untouched
 
+    def test_a_partial_override_for_a_dated_id_keeps_that_models_card(self):
+        """Astra 2026-09-29: an output-only override for the dated Haiku id used to inherit
+        _default, jumping input $1 -> $5 and cache read $0.10 -> $0.50."""
+        r = L.merge_rates({"claude-haiku-4-5-20251001": {"output": 6.0}})
+        c = r["claude-haiku-4-5-20251001"]
+        self.assertEqual((c["input"], c["cache_read"], c["output"]), (1.0, 0.1, 6.0))
+        self.assertEqual(r["claude-haiku-4-5"]["output"], 5.0)          # undated card untouched
+        row = self._row("claude-haiku-4-5-20251001", out=1_000_000)
+        self.assertAlmostEqual(L.cost_of(row, r), 6.0, places=6)
+
+    def test_a_partial_override_for_a_context_tagged_id_keeps_that_models_card(self):
+        r = L.merge_rates({"claude-opus-5-5[1m]": {"output": 21.0}})
+        c = r["claude-opus-5-5[1m]"]
+        self.assertEqual((c["input"], c["cache_read"], c["output"]), (4.0, 0.2, 21.0))
+
+    def test_an_exact_key_override_still_takes_precedence(self):
+        r = L.merge_rates({"claude-sonnet-5": {"input": 2.5}})
+        self.assertEqual(r["claude-sonnet-5"]["input"], 2.5)
+        self.assertEqual(r["claude-sonnet-5"]["output"], 10.0)
+
     def test_a_new_model_in_an_override_starts_from_the_default_card(self):
         r = L.merge_rates({"claude-opus-9": {"input": 7.0}})
         self.assertEqual(r["claude-opus-9"]["input"], 7.0)
