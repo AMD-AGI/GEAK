@@ -131,6 +131,10 @@ def merge_rates(loaded, base=None):
             rates[k] = dict(rates.get(k, rates["_default"]), **v)
     return rates
 
+# The routing classifier opens every prompt with "You are the route_classifier." (kernel_lane.js), so
+# its calls form their own group. All of their cost is the price of CHOOSING a model, i.e. router cost.
+ROUTER_ROLE = "route_classifier"
+
 # Every role prompt in both workflows opens with this exact line (see roleAgent()
 # in e2e_workflow.js / kernel_lane.js / kernel_workflow.js), which is what lets a
 # transcript be tied back to the agent that produced it.
@@ -726,12 +730,16 @@ def cost_breakdown(row, rates):
       - ``cache_read``      re-sent text served from cache (the tenth-price bucket).
       - ``cache_write``     text stored this call (5-minute + 1-hour writes summed).
       - ``output``          generated text (thinking + response bill the same).
-      - ``router``          routing-time LLM cost. 0.0 for the static deterministic
-                            router (no routing-time call); a labelled hook for a
-                            future dynamic router that would spend to choose a model.
+      - ``router``          routing-time LLM cost: the whole cost of a ``route_classifier``
+                            call (the cost ladder's Sonnet 5 decider), 0.0 for every other
+                            call. A static router makes no such call, so it stays 0.0.
     The five values sum to ``cost_of(row, rates)`` by construction; a test pins that.
     """
     r = rates_for(row, rates)
+    if row.get("role") == ROUTER_ROLE:
+        # A routing-time LLM call: every dollar of it is spent choosing a model, none doing the work.
+        return {"uncached_input": 0.0, "cache_read": 0.0, "cache_write": 0.0, "output": 0.0,
+                "router": cost_of(row, rates)}
     return {
         "uncached_input": row["input_tokens"] * r["input"] / 1e6,
         "cache_read": row["cache_read_input_tokens"] * r["cache_read"] / 1e6,
@@ -751,6 +759,62 @@ def list_cost_of(row, rates):
     """
     r = rates_for(row, rates)
     return (total_input(row) * r["input"] + row["output_tokens"] * r["output"]) / 1e6
+
+
+# --------------------------------------------------------------------------- #
+# Cross-check against Claude Code's own number
+# --------------------------------------------------------------------------- #
+# The API returns token counts, never dollars. Claude Code prices them itself and reports the session
+# total in each ResultMessage (``total_cost_usd``, per model in ``model_usage[m].costUSD``); run_e2e.py
+# saves those to reports/sdk_results.json. Two checks, kept apart because they fail for different
+# reasons:
+#   rate      our rates applied to the SDK's OWN tokens must reproduce the SDK's dollars. A miss means
+#             a wrong or missing rate card — the failure a routed, multi-model run is most exposed to.
+#   coverage  our tokens vs the SDK's, over calls finished by the time that result arrived. A result
+#             can arrive before a background workflow finishes; calls after it are not in its total.
+SDK_RATE_TOLERANCE_USD = 0.01
+SDK_RATE_TOLERANCE_REL = 0.001
+
+
+def load_sdk_results(eval_dir):
+    path = os.path.join(eval_dir, "reports", "sdk_results.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return [d for d in data if isinstance(d, dict) and isinstance(d.get("total_cost_usd"), (int, float))]
+    except (OSError, ValueError):
+        return []
+
+
+def sdk_check(rows, sdk_results, rates):
+    """Compare this ledger with the LAST ResultMessage. None when there is none to compare with."""
+    if not sdk_results:
+        return None
+    last = max(sdk_results, key=lambda d: d.get("captured_at_unix") or 0)
+    at_ms = (last.get("captured_at_unix") or 0) * 1000 or None
+    models, rate_ok = {}, True
+    for m, u in (last.get("model_usage") or {}).items():
+        tok = {"input_tokens": int(u.get("inputTokens") or 0),
+               "cache_read_input_tokens": int(u.get("cacheReadInputTokens") or 0),
+               "cache_creation_input_tokens": int(u.get("cacheCreationInputTokens") or 0),
+               "output_tokens": int(u.get("outputTokens") or 0)}
+        # model_usage does not split 5-minute from 1-hour writes; GEAK writes 5-minute only.
+        ours = cost_of(dict(tok, model=m, cache_write_5m_tokens=tok["cache_creation_input_tokens"],
+                            cache_write_1h_tokens=0), rates)
+        sdk_usd = float(u.get("costUSD") or 0.0)
+        ok = abs(ours - sdk_usd) <= max(SDK_RATE_TOLERANCE_USD, SDK_RATE_TOLERANCE_REL * sdk_usd)
+        rate_ok &= ok
+        mine = [r for r in rows if r.get("model") == m and (at_ms is None or (r.get("ts_ms") or 0) <= at_ms)]
+        ledger_tok = {k: sum(int(r.get(k) or 0) for r in mine) for k in tok}
+        models[m] = {"sdk_usd": round(sdk_usd, 6), "ours_on_sdk_tokens_usd": round(ours, 6),
+                     "rate_ok": ok, "sdk_tokens": tok, "ledger_tokens_until_result": ledger_tok,
+                     "ledger_usd_until_result": round(sum(cost_of(r, rates) for r in mine), 6)}
+    after = [r for r in rows if at_ms is not None and (r.get("ts_ms") or 0) > at_ms]
+    return {"results_seen": len(sdk_results), "session_id": last.get("session_id"),
+            "sdk_total_usd": round(float(last["total_cost_usd"]), 6), "rate_ok": rate_ok,
+            "models": models, "calls_after_result": len(after),
+            "usd_after_result": round(sum(cost_of(r, rates) for r in after), 6),
+            "partial": bool(after)}
 
 
 # --------------------------------------------------------------------------- #
@@ -1157,6 +1221,26 @@ def render_md(agg, meta):
              "something that should not be sent at all.")
     L.append("")
 
+    sdk = meta.get("sdk_check")
+    if sdk:
+        L.append("## Cross-check against Claude Code's own cost")
+        L.append("")
+        L.append("Claude Code reported **$%.2f** in its last ResultMessage (%d seen). Our rates on its own "
+                 "tokens: **%s**." % (sdk["sdk_total_usd"], sdk["results_seen"],
+                                    "match" if sdk["rate_ok"] else "DO NOT MATCH — a rate card is wrong"))
+        L.append("")
+        rows = [["`%s`" % m, "$%.4f" % v["sdk_usd"], "$%.4f" % v["ours_on_sdk_tokens_usd"],
+                 "ok" if v["rate_ok"] else "**MISMATCH**",
+                 _n(sum(v["sdk_tokens"].values())), _n(sum(v["ledger_tokens_until_result"].values()))]
+                for m, v in sorted(sdk["models"].items())]
+        L += _table(["model", "Claude Code $", "our rates, its tokens", "rate check",
+                     "its tokens", "our tokens (to result)"], ["l", "r", "r", "l", "r", "r"], rows)
+        L.append("")
+        if sdk["partial"]:
+            L.append("**Partial:** %d call(s) ($%.2f) finished after that result, so Claude Code's total "
+                     "leaves them out. Quote this ledger's total, not the SDK's." % (
+                         sdk["calls_after_result"], sdk["usd_after_result"]))
+            L.append("")
     L.append("## Tokens by phase")
     L.append("")
     rows = []
@@ -1383,6 +1467,10 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
     if unpriced:
         warnings.append("no rate card for %s; priced at the default card, so their dollars are "
                         "unreliable" % ", ".join(unpriced))
+    sdk = sdk_check(rows, load_sdk_results(eval_dir), rates)
+    if sdk and not sdk["rate_ok"]:
+        warnings.append("our rates do not reproduce Claude Code's own cost for: %s" % ", ".join(
+            m for m, v in sdk["models"].items() if not v["rate_ok"]))
     meta = {
         "schema": SCHEMA, "eval_dir": eval_dir, "attribution_mode": mode,
         "transcripts": transcripts, "timeline_sources": timeline["sources"],
@@ -1391,6 +1479,7 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
         "transcript_scope": scope,
         "transcript_scope_anchor": scope_anchor,
         "warnings": warnings, "rates": rates, "complete": not warnings,
+        "sdk_check": sdk,
         "generated_at": _ms_to_iso(int(datetime.now(tz=timezone.utc).timestamp() * 1000)),
     }
     return rows, agent_rows, agg, meta
