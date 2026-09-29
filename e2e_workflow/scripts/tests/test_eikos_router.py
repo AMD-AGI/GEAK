@@ -315,3 +315,105 @@ def test_malformed_request_still_answers(tmp_path):
                          input="not json", capture_output=True, text=True, env=e, timeout=30)
     d = json.loads(out.stdout)
     assert is_host(d) and d["reason"] == "malformed request"
+
+
+# --------------------------------------------------------------------------------------------
+# Astra's second review (2026-09-29, draft-130749): executed findings, now tests
+# --------------------------------------------------------------------------------------------
+def _race(args):
+    cache_dir, tier, delay = args
+    import time as _t
+    def fake(*a, **k):
+        _t.sleep(delay)
+        return er.decide_from_answers(answers(tier=tier, rev_p=0.95), {})
+    er.call_eikos = fake
+    d = er.route(req(), cache_dir, enabled=True, url="http://127.0.0.1:1", timeout_s=1.0)
+    return d["tier"], d["recorded"]
+
+
+def test_concurrent_callers_for_one_key_all_act_on_the_persisted_winner(tmp_path):
+    """Two callers, same key, providers disagree (cheap vs thinker). Both must return the one
+    outcome that was persisted, and a later replay must agree with it."""
+    with multiprocessing.get_context("fork").Pool(2) as pool:
+        got = pool.map(_race, [(str(tmp_path), "cheap", 0.0), (str(tmp_path), "thinker", 0.3)])
+    assert got[0][0] == got[1][0], got
+    replay = er.route(req(), str(tmp_path), enabled=True, url="http://127.0.0.1:1", timeout_s=1.0)
+    assert replay["cached"] and replay["tier"] == got[0][0]
+
+
+def test_a_bare_cheap_entry_cannot_authorize_a_downgrade(tmp_path, monkeypatch):
+    key = er.request_key(req(), "http://127.0.0.1:1")
+    (tmp_path / er.CACHE_BASENAME).write_text(json.dumps({key: {
+        "policy": er.POLICY_VERSION, "source": "eikos", "tier": "cheap",
+        "model": er.TIERS["cheap"]["model"], "effort": "low"}}))
+    monkeypatch.setattr(er, "call_eikos", lambda *a, **k: er.decide_from_answers(answers(rev_p=0.1), {}))
+    d = route(tmp_path)
+    assert not d["cached"] and d["tier"] == "thinker"
+
+
+def test_a_tampered_entry_whose_answers_disagree_is_not_trusted(tmp_path, monkeypatch):
+    real = er.decide_from_answers(answers(rev_p=0.1), {})          # escalates to thinker
+    forged = {**real, **er.TIERS["cheap"], "tier": "cheap", "escalated": False}
+    key = er.request_key(req(), "http://127.0.0.1:1")
+    (tmp_path / er.CACHE_BASENAME).write_text(json.dumps({key: forged}))
+    monkeypatch.setattr(er, "call_eikos", lambda *a, **k: real)
+    d = route(tmp_path)
+    assert not d["cached"] and d["tier"] == "thinker"
+
+
+def test_a_genuine_recorded_decision_is_re_derivable():
+    d = er.decide_from_answers(answers(), {})
+    assert er.valid_recorded(d)
+
+
+@pytest.mark.parametrize("url, ok", [
+    ("http://127.0.0.1:8000", True), ("http://127.9.9.9:8000", True), ("http://[::1]:8000", True),
+    ("http://localhost:8000", True), ("https://127.0.0.1", True),
+    ("http://127.example.invalid:8000", False), ("http://127.0.0.1.nip.io:8000", False),
+    ("http://10.0.0.5:8000", False), ("ftp://127.0.0.1/x", False), ("file:///etc/passwd", False),
+    ("http://:8000", False),
+])
+def test_loopback_means_a_literal_loopback_address(url, ok):
+    assert er.is_loopback(url) is ok
+
+
+class _Redirect(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):  # noqa: N802
+        self.send_response(307)
+        self.send_header("Location", "http://10.0.0.5:9/v1/systemone")
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+def test_a_redirect_is_refused_not_followed(tmp_path):
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Redirect)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        d = route(tmp_path, url="http://127.0.0.1:%d" % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert is_host(d) and "redirect" in d["eikos_error"]
+
+
+def test_proxy_settings_are_ignored(tmp_path, fake_server):
+    """With a dead proxy configured, the call still reaches the loopback server directly. Run in
+    a fresh process: urllib caches its default opener (and the proxies it read) per process, so
+    an in-process test would pass whatever the code does."""
+    _, url = fake_server
+    _Fake.body = json.dumps({"answers": answers()}).encode()
+    dead = "http://127.0.0.1:9"
+    d = run_cli(req(), tmp_path, env={"GEAK_EIKOS_ROUTER": "1", "GEAK_EIKOS_URL": url,
+                                     "http_proxy": dead, "HTTP_PROXY": dead,
+                                     "https_proxy": dead, "HTTPS_PROXY": dead,
+                                     "no_proxy": "", "NO_PROXY": ""})
+    assert d["source"] == "eikos", d
+
+def test_declared_model_identity_is_part_of_the_key_and_the_provenance(monkeypatch):
+    monkeypatch.delenv("GEAK_EIKOS_MODEL_ID", raising=False)
+    a = er.request_key(req(), "u")
+    assert er.decide_from_answers(answers(), {})["model_id"] == "undeclared"
+    monkeypatch.setenv("GEAK_EIKOS_MODEL_ID", "hf:103a5647")
+    assert er.request_key(req(), "u") != a
+    assert er.decide_from_answers(answers(), {})["model_id"] == "hf:103a5647"

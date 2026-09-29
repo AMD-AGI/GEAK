@@ -18,26 +18,32 @@ Caveats that bound what its answers mean here:
   - It was trained for finance and trade-rule decisions. Routing GEAK agent tasks is outside
     that domain; nothing here has measured how well it does.
   - Its context is 16,384 tokens, trained to 12k. The state sent is capped far below that.
-  - Its calibration temperature is T=1, fitted on its own held-out sets, not on GEAK. The gate
-    thresholds below are starting points, NOT calibrated against GEAK.
+  - Its calibration temperature is T=1 by the publisher's choice, not a fit: temperatures fitted
+    on their held-out sets made hard items over-confident, so they kept T=1 for want of a
+    realistic calibration set. Nothing is calibrated for GEAK; the gates below are starting
+    points.
   - It needs vLLM >= 0.30.0; older builds give wrong answers on batched long requests.
 
 THREE PROPERTIES THIS FILE GUARANTEES (see research/09_jev_typesafe_routing.md sections 10-11)
   1. OFF BY DEFAULT. Without GEAK_EIKOS_ROUTER=1 the decision is the static one, byte-identical
      to today, and no request is made.
   2. RECORDED. Every outcome for an eligible request -- an Eikos decision OR a failure -- is
-     written, under a file lock, to `<cache-dir>/eikos_router_cache.json`, keyed by the policy,
-     question set, endpoint and a digest of the FULL task. A second call with the same key
-     reads the recorded outcome instead of asking again. This is NOT a certified replay
-     guarantee: if the cache cannot be written, the next call asks again and may differ, and
-     whether a given workflow runtime re-executes this hook on resume is not documented.
+     written to `<cache-dir>/eikos_router_cache.json`, keyed by the policy, question set,
+     endpoint, declared model identity and a digest of the FULL task. The first outcome
+     persisted for a key wins: concurrent callers evaluating the same key all return that one,
+     never their own. Recorded decisions are re-derived from their stored answers before reuse.
+     This is NOT a certified replay guarantee: if the cache cannot be written the next call asks
+     again and may differ; a swapped checkpoint behind the same URL is only distinguished when
+     GEAK_EIKOS_MODEL_ID names it; and whether a workflow runtime re-executes this hook on resume
+     is not documented.
   3. NON-FATAL AND NON-INTRUSIVE. Every failure -- disabled, retry, oversized or empty task,
      unreachable server, malformed or out-of-range answer, unreadable cache -- returns "no
      decision" (model and effort null, source "host"), so the caller's own logic decides exactly
      as it would without this router. This router never substitutes a guess of its own.
 
-It also refuses to send GEAK task text to a non-loopback Eikos URL unless GEAK_EIKOS_ALLOW_REMOTE=1:
-the reason to use a local model is that the state never leaves the host.
+It also refuses to send GEAK task text anywhere but a literal loopback address (127.0.0.0/8, ::1 or
+`localhost`) over http(s) unless GEAK_EIKOS_ALLOW_REMOTE=1, and it neither follows redirects nor
+uses proxy settings: the reason to use a local model is that the state never leaves the host.
 
 PROTOCOL
     echo '<request-json>' | python3 eikos_router.py --cache-dir DIR
@@ -108,6 +114,12 @@ def policy_digest() -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def model_identity() -> str:
+    """The checkpoint behind the URL, as declared by the operator (e.g. an HF revision). The
+    server's own /health reports only a path, so it cannot identify a swapped checkpoint."""
+    return os.environ.get("GEAK_EIKOS_MODEL_ID", "") or "undeclared"
+
+
 def request_key(req: dict, url: str = "") -> str:
     """Stable, order-independent hash of the routing inputs. The task enters as a digest of its
     FULL text, so two tasks that share a prefix never share a decision."""
@@ -116,6 +128,7 @@ def request_key(req: dict, url: str = "") -> str:
         {
             "policy": policy_digest(),
             "url": url,
+            "model_id": model_identity(),
             "label": req.get("label", ""),
             "phase": req.get("phase", ""),
             "attempt": int(req.get("attempt", 0) or 0),
@@ -173,34 +186,42 @@ class _Lock:
         return False
 
 
-def record(path: str, key: str, value: dict) -> bool:
-    """Read-modify-write under the lock. Returns whether the outcome was persisted."""
+def record(path: str, key: str, value: dict) -> tuple:
+    """Insert-if-absent under the lock. Returns (outcome to use, persisted?). If a valid outcome
+    for this key is already stored -- a concurrent caller got there first -- that one is
+    returned instead of `value`, so every caller for one key acts on the same decision."""
     with _Lock(path) as lock:
         if not lock.held:
-            return False
+            return value, False
         cache = load_cache(path)
+        if valid_recorded(cache.get(key)):
+            return cache[key], True
         cache[key] = value
         try:
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(cache, fh, indent=2, sort_keys=True)
             os.replace(tmp, path)
-            return True
+            return value, True
         except Exception:
-            return False
+            return value, False
 
 
 def valid_recorded(value) -> bool:
-    """A recorded outcome is used only if it has exactly the shape this policy writes."""
+    """A recorded outcome is reused only if it has exactly the shape this policy writes, and an
+    Eikos decision only if re-deriving it from its own stored answers gives the same result. A
+    malformed or hand-edited entry can never authorize a route."""
     if not isinstance(value, dict) or value.get("policy") != POLICY_VERSION:
         return False
     if value.get("source") == "host":
         return value.get("model") is None and value.get("effort") is None
     if value.get("source") != "eikos":
         return False
-    tier = value.get("tier")
-    return (tier in TIERS and value.get("model") == TIERS[tier]["model"]
-            and value.get("effort") == TIERS[tier]["effort"])
+    try:
+        again = decide_from_answers(value.get("answers"), {})
+    except Exception:
+        return False
+    return all(value.get(k) == again.get(k) for k in ("tier", "model", "effort", "escalated"))
 
 
 def build_questions() -> dict:
@@ -302,8 +323,8 @@ def decide_from_answers(answers: dict, confidence: dict) -> dict:
     probs = tier_ans.get("probabilities") or {}
     selected_p = probs.get(choice, 0.0) if choice else 0.0
     tier_conf, conf_source = tier_confidence(tier_ans, confidence, probs)
-    # A boolean answer carries `probability` = P(true); it is NOT a confidence value, and
-    # confidence is not reported for booleans at all.
+    # A boolean answer carries `probability` = P(true). Eikos also sends a `confidence` for it,
+    # max(p, 1 - p), which is NOT what this gate needs; the gate reads P(true).
     reversible_p = (answers.get("reversible") or {}).get("probability", 0.0)
 
     gates = {
@@ -324,11 +345,15 @@ def decide_from_answers(answers: dict, confidence: dict) -> dict:
         "complexity": (answers.get("complexity") or {}).get("score"),
         "gates": gates,
     }
+    # Only the validated fields the decision depends on, so a recorded decision can be re-derived.
+    kept = {"tier": {k: tier_ans[k] for k in ("choice", "probabilities", "confidence") if k in tier_ans},
+            "reversible": {"probability": reversible_p}}
+    if isinstance(answers.get("complexity"), dict):
+        kept["complexity"] = {"score": answers["complexity"].get("score")}
+    base = {"policy": POLICY_VERSION, "model_id": model_identity(), "answers": kept, **telemetry}
     if not all(gates.values()):
-        return {**TIERS["thinker"], "tier": "thinker", "escalated": True, "policy": POLICY_VERSION,
-                **telemetry}
-    return {**TIERS[choice], "tier": choice, "escalated": False, "policy": POLICY_VERSION,
-            **telemetry}
+        return {**TIERS["thinker"], "tier": "thinker", "escalated": True, **base}
+    return {**TIERS[choice], "tier": choice, "escalated": False, **base}
 
 
 def eikos_url() -> str:
@@ -336,9 +361,32 @@ def eikos_url() -> str:
 
 
 def is_loopback(url: str) -> bool:
+    """True only for http(s) to a literal loopback IP or exactly `localhost`. A hostname that
+    merely starts with "127." is a name, not an address, and is refused."""
+    import ipaddress  # noqa: PLC0415
     from urllib.parse import urlparse  # noqa: PLC0415
-    host = (urlparse(url).hostname or "").lower()
-    return host in ("localhost", "::1") or host.startswith("127.")
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return False
+    host = u.hostname.lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class _NoRedirect:
+    """urllib handler that refuses every redirect: a redirect could move the state off-host."""
+
+    def __new__(cls):
+        import urllib.request  # noqa: PLC0415
+
+        class H(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):  # noqa: D401
+                raise RuntimeError("Eikos server answered with a redirect; refusing to follow it")
+        return H()
 
 
 def build_state(req: dict) -> str:
@@ -367,7 +415,10 @@ def call_eikos(req: dict, url: str, timeout_s: float) -> dict:
     payload = json.dumps({"state": build_state(req), "questions": build_questions()}).encode("utf-8")
     request = urllib.request.Request(url + EIKOS_PATH, data=payload,
                                      headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=timeout_s) as resp:  # noqa: S310 - fixed scheme
+    # No proxies (an http_proxy variable would route the state through another host) and no
+    # redirects: the destination is exactly the loopback address checked above.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    with opener.open(request, timeout=timeout_s) as resp:  # noqa: S310 - scheme checked above
         raw = resp.read(MAX_RESPONSE_BYTES + 1)
     if len(raw) > MAX_RESPONSE_BYTES:
         raise RuntimeError("Eikos response exceeds %d bytes" % MAX_RESPONSE_BYTES)
@@ -396,16 +447,17 @@ def route(req: dict, cache_dir: str, *, enabled: bool, url: str, timeout_s: floa
     key = request_key(req, url)
     hit = load_cache(cache_path).get(key)
     if valid_recorded(hit):
-        return {**hit, "cached": True}
+        return {**hit, "cached": True, "recorded": True}
 
     try:
         decision = call_eikos(req, url, timeout_s)
     except Exception as exc:  # noqa: BLE001 - every failure degrades, none propagates
         decision = no_decision("eikos unavailable or invalid", eikos_error=f"{type(exc).__name__}: {exc}"[:500])
 
-    # Failures are recorded too, so a repeat of this request gets the same outcome.
-    persisted = record(cache_path, key, decision)
-    return {**decision, "cached": False, "recorded": persisted}
+    # Failures are recorded too, so a repeat of this request gets the same outcome. If another
+    # caller persisted an outcome for this key first, that one is used, not ours.
+    used, persisted = record(cache_path, key, decision)
+    return {**used, "cached": used is not decision, "recorded": persisted}
 
 
 def main(argv=None) -> int:
