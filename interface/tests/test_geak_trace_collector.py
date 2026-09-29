@@ -405,6 +405,45 @@ class TraceCollectorTest(unittest.TestCase):
         self.assertEqual(second["run"]["agents_started"], 2)
 
 
+
+class PricingProvenanceTest(unittest.TestCase):
+    """Astra 2026-09-29: an unknown model's call showed a default-card dollar figure with no
+    marker. The trace must say which card priced each call, and warn at run level."""
+
+    # Borrow the fixture helpers only; inheriting TraceCollectorTest would re-run all its tests.
+    setUp = TraceCollectorTest.setUp
+    _write = TraceCollectorTest._write
+    _journal = TraceCollectorTest._journal
+
+    def _run(self, model):
+        self._journal([("a1", "eng d1:algorithm")])
+        self._write("agent-a1.jsonl", [
+            _user([{"type": "text", "text": "go"}]),
+            _asst("m1", [{"type": "text", "text": "ok"}], model=model,
+                  usage={"input_tokens": 0, "output_tokens": 1_000_000,
+                         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}),
+        ])
+        return C.build_trace(self.dir)
+
+    def test_unknown_model_is_marked_on_the_call_the_totals_and_the_warnings(self):
+        t = self._run("claude-future-unlisted")
+        a = t["agents"][0]
+        call = a["calls"][0]
+        self.assertEqual(call["cost_rate_card"], "_default")
+        self.assertAlmostEqual(call["cost_usd"], 25.0, places=6)
+        self.assertEqual(a["totals"]["default_priced_calls"], 1)
+        self.assertEqual(a["totals"]["default_priced_models"], ["claude-future-unlisted"])
+        self.assertTrue(any("claude-future-unlisted" in w and "not a verified price" in w
+                            for w in t["warnings"]))
+
+    def test_a_known_model_names_its_own_card_and_raises_no_pricing_warning(self):
+        t = self._run("claude-haiku-4-5-20251001")
+        call = t["agents"][0]["calls"][0]
+        self.assertEqual(call["cost_rate_card"], "claude-haiku-4-5")
+        self.assertAlmostEqual(call["cost_usd"], 5.0, places=6)
+        self.assertEqual(t["agents"][0]["totals"]["default_priced_calls"], 0)
+        self.assertFalse(any(w.startswith("pricing:") for w in t["warnings"]))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
