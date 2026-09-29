@@ -877,6 +877,12 @@ const PLAN_SCHEMA = obj({
   config_directions: arrObj, head_candidates: arrObj, kernel_candidates: arrObj,
 }, ['stop']);
 
+// Extraction smoke gate: EXACTLY lowercase "pass" or "fail". Every gate below tests `=== 'pass'`, and a
+// free string let agents answer "PASS (exit 0) on GPU 1 ..." — a passing unittest then read as a failed
+// extraction and the head was silently dropped. The enum makes StructuredOutput reject anything else so
+// the agent must re-answer; the prose belongs in smoke_detail / notes.
+const SMOKE_STATUS = { type: 'string', enum: ['pass', 'fail'] };
+
 const EXTRACT_OP_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, editable: { type: 'boolean' },
   task_dir: { type: 'string' }, shapes: { type: 'object', additionalProperties: true },
@@ -889,7 +895,7 @@ const EXTRACT_OP_SCHEMA = obj({
   device_kernel: { type: 'string' },
   seam_candidates: arrObj,
   selection_validation: { type: 'object', additionalProperties: true },
-  smoke: { type: 'string' }, notes: { type: 'string' },
+  smoke: SMOKE_STATUS, smoke_detail: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
 const OPBENCH_SCHEMA = obj({
@@ -911,7 +917,7 @@ const EXTRACT_SCHEMA = obj({
   short_name: { type: 'string' }, editable: { type: 'boolean' }, task_dir: { type: 'string' },
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
-  build: { type: 'boolean' }, unittest_smoke: { type: 'string' },
+  build: { type: 'boolean' }, unittest_smoke: SMOKE_STATUS, smoke_detail: { type: 'string' },
   // the baseline leg is an ENVIRONMENT (baseline_overlay/ = a frozen CURRENT_OVERLAY snapshot), and
   // candidate_bind is the ONE entry layered on top of it to make the candidate leg.
   candidate_bind: { type: 'object', additionalProperties: true },

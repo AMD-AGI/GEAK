@@ -74,6 +74,14 @@ def eager_cases(h, meta):             # [{args, ref}] from reference_io.pt (the 
 
 ---
 
+## Smoke status contract (both phases)
+
+`smoke` (extract_op) / `unittest_smoke` (extract) MUST be **exactly** the lowercase string `"pass"` or
+`"fail"` — nothing else. `"PASS"`, `"pass."`, `"PASS (exit 0) ..."`, `"passed"` are all REJECTED by the
+output schema and you will be asked to re-answer. `"pass"` means the smoke run exited 0 AND correctness
+passed; anything else is `"fail"`. Put the command, exit code, GPU, case counts and any caveats in
+`smoke_detail` (and `notes`), never in the status field.
+
 ## PHASE=extract
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (the Architect's candidate:
@@ -509,7 +517,8 @@ Return JSON:
   "regimes_captured": ["prefill","decode"],
   "candidate_backends": ["triton","hip","ck"],
   "build": false,
-  "unittest_smoke": "pass|fail",
+  "unittest_smoke": "pass",
+  "smoke_detail": "command run, exit code, cases passed — free text goes HERE, never in unittest_smoke",
   "reference_io_sha256": "...",
   "workload_path": "<task_dir>/workload.json",
   "notes": "granularity choice, hidden state captured, anything unusual"
@@ -875,7 +884,8 @@ Return JSON:
   ],
   "selection_validation": {"contract": "kernel_selection", "ok": true, "deepest_verified": true},
   "baseline_callable": "<module:attr of the live default backend, resolved OUTSIDE the task dir>",
-  "smoke": "pass|fail",
+  "smoke": "pass",
+  "smoke_detail": "command run, exit code, cases passed — free text goes HERE, never in smoke",
   "notes": "transpose/bias inference, regime, whether oracle was synthesized vs captured"
 }
 ```
