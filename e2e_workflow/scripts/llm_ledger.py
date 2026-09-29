@@ -52,21 +52,84 @@ SCHEMA = "geak.llm_ledger/1"
 # --------------------------------------------------------------------------- #
 # Prices, in dollars per million tokens. ONE home for every rate, so a wrong
 # price is a one-line correction that never touches the arithmetic below.
-# Basis: the $5 in / $25 out list price used throughout PROJECTS/research, with
-# the published cache multipliers (read 0.1x, 5-minute write 1.25x, 1-hour 2x).
-# Override wholesale with --rates <file.json>, or per-model by adding a key.
+# Every call is priced by the model that SERVED it (the transcript's
+# message.model), so a run that mixes models — routing, a cheap helper, a model
+# switch mid-run — is priced call by call, not at one run-wide rate.
+# Source: the official table, platform.claude.com/docs/en/about-claude/pricing,
+# read 2026-09-28. Cache multipliers are 1.25x (5-minute write) and 2x (1-hour
+# write) everywhere; reads are 0.1x except Opus 5.5 (0.05x) and Fable/Mythos 5.1
+# (0.025x). `_default` (the Opus 4.8 / Opus 5 card) prices a call whose model is
+# unknown; a real model missing from this table is reported, never silently
+# priced (see unpriced_models). Override with --rates <file.json>: its keys are
+# merged over this table, so overriding one model leaves the others intact.
 # Every table also reports raw tokens, so the dollar columns can be ignored
 # entirely if the rate is wrong for your contract.
 # --------------------------------------------------------------------------- #
+def _card(inp, out, read_mult=0.1):
+    return {"input": inp, "output": out, "cache_read": round(inp * read_mult, 6),
+            "cache_write_5m": inp * 1.25, "cache_write_1h": inp * 2.0}
+
+
 DEFAULT_RATES = {
-    "_default": {
-        "input": 5.00,
-        "output": 25.00,
-        "cache_read": 0.50,
-        "cache_write_5m": 6.25,
-        "cache_write_1h": 10.00,
-    },
+    "_default": _card(5.00, 25.00),
+    "claude-fable-5-1": _card(10.00, 50.00, 0.025),
+    "claude-mythos-5-1": _card(10.00, 50.00, 0.025),
+    "claude-fable-5": _card(10.00, 50.00),
+    "claude-mythos-5": _card(10.00, 50.00),
+    "claude-opus-5-5": _card(4.00, 20.00, 0.05),
+    "claude-opus-5": _card(5.00, 25.00),
+    "claude-opus-4-8": _card(5.00, 25.00),
+    "claude-opus-4-7": _card(5.00, 25.00),
+    "claude-opus-4-6": _card(5.00, 25.00),
+    "claude-opus-4-5": _card(5.00, 25.00),
+    "claude-sonnet-5": _card(2.00, 10.00),
+    "claude-sonnet-4-6": _card(3.00, 15.00),
+    "claude-sonnet-4-5": _card(3.00, 15.00),
+    "claude-haiku-4-5": _card(1.00, 5.00),
 }
+
+# Not models: Claude Code writes "<synthetic>" for locally generated turns (for
+# example "Prompt is too long"). They carry no usage and are never billed.
+_UNBILLED_MODELS = {"", "<synthetic>"}
+_DATE_SUFFIX = re.compile(r"-\d{8}$")
+
+
+def rate_key(model, rates):
+    """The rate-table key for a served model id, or None when none matches.
+
+    Tries the id as written, then without a context-window tag ("[1m]") and a
+    trailing snapshot date ("-20251001"), so claude-haiku-4-5-20251001 and
+    claude-opus-5-5[1m] find their cards.
+    """
+    m = str(model or "").strip()
+    if m in rates:
+        return m
+    base = _DATE_SUFFIX.sub("", re.sub(r"\[[^\]]*\]$", "", m))
+    return base if base in rates else None
+
+
+def rates_for(row, rates):
+    key = rate_key(row.get("model"), rates)
+    return rates[key] if key else rates["_default"]
+
+
+def unpriced_models(rows, rates):
+    """Real models this run used that had no card and fell back to `_default`."""
+    return sorted({r.get("model") for r in rows
+                   if (r.get("model") or "") not in _UNBILLED_MODELS
+                   and rate_key(r.get("model"), rates) is None})
+
+
+def merge_rates(loaded, base=None):
+    """Lay a --rates file over the built-in table. Each card it names is merged
+    over the card it replaces (or over `_default` for a new model), so a partial
+    override changes only what it names."""
+    base = base if base is not None else DEFAULT_RATES
+    rates = {k: dict(v) for k, v in base.items()}
+    for k, v in (loaded or {}).items():
+        if isinstance(v, dict):
+            rates[k] = dict(rates.get(k, rates["_default"]), **v)
+    return rates
 
 # Every role prompt in both workflows opens with this exact line (see roleAgent()
 # in e2e_workflow.js / kernel_lane.js / kernel_workflow.js), which is what lets a
@@ -645,7 +708,7 @@ def total_input(row):
 
 
 def cost_of(row, rates):
-    r = rates.get(row.get("model") or "", rates["_default"])
+    r = rates_for(row, rates)
     return (row["input_tokens"] * r["input"]
             + row["cache_read_input_tokens"] * r["cache_read"]
             + row["cache_write_5m_tokens"] * r["cache_write_5m"]
@@ -668,7 +731,7 @@ def cost_breakdown(row, rates):
                             future dynamic router that would spend to choose a model.
     The five values sum to ``cost_of(row, rates)`` by construction; a test pins that.
     """
-    r = rates.get(row.get("model") or "", rates["_default"])
+    r = rates_for(row, rates)
     return {
         "uncached_input": row["input_tokens"] * r["input"] / 1e6,
         "cache_read": row["cache_read_input_tokens"] * r["cache_read"] / 1e6,
@@ -686,7 +749,7 @@ def list_cost_of(row, rates):
     surcharge for storing text is only ever paid BECAUSE reuse is on, so pricing
     it into the comparison would overstate the saving.
     """
-    r = rates.get(row.get("model") or "", rates["_default"])
+    r = rates_for(row, rates)
     return (total_input(row) * r["input"] + row["output_tokens"] * r["output"]) / 1e6
 
 
@@ -1316,6 +1379,10 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
         })
 
     agg = aggregate(rows, groups, timeline, rates)
+    unpriced = unpriced_models(rows, rates)
+    if unpriced:
+        warnings.append("no rate card for %s; priced at the default card, so their dollars are "
+                        "unreliable" % ", ".join(unpriced))
     meta = {
         "schema": SCHEMA, "eval_dir": eval_dir, "attribution_mode": mode,
         "transcripts": transcripts, "timeline_sources": timeline["sources"],
@@ -1378,10 +1445,7 @@ def main(argv=None):
             with open(args.rates, "r", encoding="utf-8") as fh:
                 loaded = json.load(fh)
             if isinstance(loaded, dict):
-                merged = dict(DEFAULT_RATES["_default"])
-                merged.update(loaded.get("_default") or {})
-                rates = dict(loaded)
-                rates["_default"] = merged
+                rates = merge_rates(loaded)
         except (OSError, ValueError) as exc:
             print("llm_ledger: --rates ignored (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
 
