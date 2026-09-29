@@ -1452,11 +1452,18 @@ function ablEffortFor(opts, attempt) {
 //
 // COVERAGE. Only E2E labels the static router already deems cheap-eligible reach this hook --
 // eligibility is deterministic, never a model's opinion. Kernel-lane, nested-workflow and raw
-// agent() calls are not routed here. It also needs require('child_process'), which the native
-// Workflow tool does not provide: there the call throws, is logged, and the host decides.
-const EIKOS_ROUTER_ON = String(process.env.GEAK_EIKOS_ROUTER || '0') === '1';
-const EIKOS_ROUTER_TIMEOUT_MS = Number(process.env.GEAK_EIKOS_ROUTER_TIMEOUT_MS || '15000');
+// agent() calls are not routed here. It also needs require('child_process'), and the native
+// Workflow tool provides neither `require` nor `process` (probe wf_940bf156-7d8, 2026-09-29:
+// both `typeof` undefined). There the switch reads as off and nothing is attempted; only the
+// standalone Node runtime can run this hook today.
 // <<EIKOS-ROUTER-START>>
+// Read at load time, so it MUST NOT throw where `process` is undefined: an unguarded
+// `process.env` here would fail the whole workflow at startup, router on or off.
+function eikosEnv(name, dflt) {
+  try { return String(process.env[name] || dflt); } catch (e) { return dflt; }
+}
+const EIKOS_ROUTER_ON = eikosEnv('GEAK_EIKOS_ROUTER', '0') === '1';
+const EIKOS_ROUTER_TIMEOUT_MS = Number(eikosEnv('GEAK_EIKOS_ROUTER_TIMEOUT_MS', '15000'));
 // Only labels the static router already considers cheap-eligible are worth asking about. This
 // keeps the helper off the critical path of every spawn (~100-300 ms of python startup each).
 function eikosRouteFor(opts, attempt, prompt) {
