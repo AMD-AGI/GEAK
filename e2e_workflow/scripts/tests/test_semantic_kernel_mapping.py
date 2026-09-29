@@ -653,5 +653,32 @@ class DiagnosticStageRecurrenceTest(unittest.TestCase):
             [row["layer_id"] for row in second])
 
 
+class GatingStepAuditsTest(unittest.TestCase):
+    def _audit(self, step, phase, status, boundary="mapped", instances=2):
+        return {"step_id": step, "phase": phase, "status": status,
+                "boundary_source_status": boundary, "actual_instance_count": instances}
+
+    def test_extra_unresolved_step_of_a_mapped_phase_does_not_gate(self):
+        audits = [self._audit("s1", "prefill", "pass"),
+                  self._audit("s2", "decode", "pass"),
+                  self._audit("s3", "prefill", "fail", "boundary_unresolved", 0)]
+        gating = mapping._gating_step_audits(audits)
+        self.assertEqual([a["step_id"] for a in gating], ["s1", "s2"])
+        self.assertEqual(audits[2]["status"], "not_gating_unresolved_extra_step")
+
+    def test_phase_without_any_mapped_step_still_gates(self):
+        audits = [self._audit("s1", "decode", "pass"),
+                  self._audit("s2", "prefill", "fail", "boundary_unresolved", 0)]
+        gating = mapping._gating_step_audits(audits)
+        self.assertEqual([a["status"] for a in gating], ["pass", "fail"])
+
+    def test_contradicting_or_partial_mapping_still_gates(self):
+        audits = [self._audit("s1", "decode", "pass"),
+                  self._audit("s2", "decode", "fail", "mapped", 2),
+                  self._audit("s3", "decode", "fail", "boundary_unresolved", 1)]
+        gating = mapping._gating_step_audits(audits)
+        self.assertEqual([a["step_id"] for a in gating], ["s1", "s2", "s3"])
+
+
 if __name__ == "__main__":
     unittest.main()

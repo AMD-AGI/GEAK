@@ -108,6 +108,44 @@ class SemanticLayerBoundaryTransferTest(unittest.TestCase):
                     "validated_graph_capture_layer_scope")
                 for row in rows[1:5]))
 
+    def test_step_of_a_phase_the_donor_never_captured_does_not_veto(self):
+        # A Profile DECODE trace can hold a prefill step; the graph-construction
+        # donor only has decode passes. The decode step must still transfer.
+        with tempfile.TemporaryDirectory() as tmp:
+            patterns = self._patterns(tmp)
+            body = ["layer0_a", "layer0_b", "layer1_a", "layer1_b"]
+            events = [
+                {"cat": "gpu_user_annotation", "name": "step[DECODE bs=4]",
+                 "ts": 0, "dur": 200},
+                {"cat": "gpu_user_annotation", "name": "step[EXTEND bs=2 toks=16]",
+                 "ts": 300, "dur": 100},
+            ]
+            names = ["prepare_once"] + body + ["model_epilogue"]
+            events.extend({"cat": "kernel", "name": name, "ts": 10 + i * 3,
+                           "dur": 1, "args": {}} for i, name in enumerate(names))
+            events.extend({"cat": "kernel", "name": name, "ts": 310 + i * 3,
+                           "dur": 1, "args": {}} for i, name in enumerate(
+                               ["prefill_x", "prefill_y", "prefill_z"]))
+            recipient = os.path.join(tmp, "recipient.json")
+            with open(recipient, "w") as fh:
+                json.dump({"traceEvents": events}, fh)
+            result = transfer.transfer(self._donor(tmp), recipient, patterns)
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(result["failures"], [])
+            self.assertEqual(result["mapped_step_count"], 1)
+            self.assertEqual(
+                [(item["phase"], item["reason"]) for item in result["untransferable_steps"]],
+                [("prefill", "no_donor_pass_for_phase")])
+
+    def test_unmappable_step_of_a_captured_phase_still_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = transfer.transfer(
+                self._donor(tmp),
+                self._recipient(tmp, body=["x", "y", "x", "y"]),
+                self._patterns(tmp))
+            self.assertEqual(result["status"], "fail")
+            self.assertEqual(result["untransferable_steps"], [])
+
     def test_partial_donor_pass_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = transfer.transfer(

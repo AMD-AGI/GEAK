@@ -663,6 +663,13 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
     groups = []
     failures = []
     skipped_authoritative = []
+    # A step whose phase has no donor pass at all cannot be transferred, and that
+    # says nothing about the other phases: the graph-construction replay captures
+    # decode buckets only, while a Profile trace can hold a prefill step inside its
+    # DECODE file. Such steps are reported, not counted as transfer failures, so
+    # they cannot veto the steps that did map.
+    donor_phases = {str(donor.get("phase") or "") for donor in donor_passes}
+    untransferable = []
     for step_id, step_rows in sorted(
             by_step.items(), key=lambda item: min(
                 row["device_seq_index"] for row in item[1])):
@@ -672,7 +679,17 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
             continue
         group, failure = _map_step(
             step_rows, donor_passes, expected_layers)
-        if group is None:
+        step_phase = str(step_rows[0].get("phase") or "")
+        if group is None and donor_passes and step_phase not in donor_phases:
+            untransferable.append({
+                "step_id": step_id,
+                "phase": step_rows[0].get("phase"),
+                "batch_size": step_rows[0].get("step_batch_size"),
+                "input_tokens": step_rows[0].get("step_input_tokens"),
+                "reason": "no_donor_pass_for_phase",
+                "donor_phases": sorted(donor_phases),
+            })
+        elif group is None:
             failures.append({
                 "step_id": step_id,
                 "phase": step_rows[0].get("phase"),
@@ -734,6 +751,7 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
         "residual_range_count": sum(
             len(group.get("residual_ranges") or []) for group in groups),
         "skipped_authoritative_steps": skipped_authoritative,
+        "untransferable_steps": untransferable,
         "failures": failures,
     }
     if out_path:

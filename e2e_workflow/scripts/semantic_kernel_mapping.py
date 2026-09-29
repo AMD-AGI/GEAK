@@ -1396,6 +1396,28 @@ def _trace_pattern_consistency(instances):
     }
 
 
+def _gating_step_audits(step_audits):
+    """Mark extra unresolved steps non-gating and return the gating audits.
+
+    A step with NO boundary evidence at all (not a contradicting one) does not
+    gate when another step of the same phase mapped completely: that phase's
+    tables already stand on authoritative scopes, and the extra step's rows stay
+    unassigned rather than being guessed. A Profile trace can carry such a step,
+    e.g. a prefill step inside its DECODE file. A phase with no mapped step still
+    fails, exactly as before.
+    """
+    mapped_phases = {item.get("phase") for item in step_audits
+                     if item["status"] == "pass"}
+    for item in step_audits:
+        if (item["status"] == "fail"
+                and item.get("boundary_source_status") == "boundary_unresolved"
+                and item.get("actual_instance_count") == 0
+                and item.get("phase") in mapped_phases):
+            item["status"] = "not_gating_unresolved_extra_step"
+    return [item for item in step_audits
+            if item["status"] != "not_gating_unresolved_extra_step"]
+
+
 def _quality(
         pattern_doc, rows, instances, representatives, spans, out_of_scope,
         partition_diagnostics, tables):
@@ -1426,6 +1448,7 @@ def _quality(
             for left, right in zip(step_instances, step_instances[1:]))
         step_audits.append({
             "step_id": diagnostic["step_id"],
+            "phase": diagnostic.get("phase"),
             "expected_instance_count": len(expected_order),
             "actual_instance_count": len(step_instances),
             "layer_order_valid": actual_order == expected_order,
@@ -1436,8 +1459,9 @@ def _quality(
                 and actual_order == expected_order
                 and non_overlapping) else "fail",
         })
-    mechanical_pass = (not partition_diagnostics or bool(step_audits)) and all(
-        item["status"] == "pass" for item in step_audits)
+    gating_audits = _gating_step_audits(step_audits)
+    mechanical_pass = (not partition_diagnostics or bool(gating_audits)) and all(
+        item["status"] == "pass" for item in gating_audits)
     phase_status = "pass" if spans else "partial"
     representative_integrity = _representative_integrity(
         rows, tables, representatives)
@@ -1482,6 +1506,9 @@ def _quality(
                 "gating": True,
                 "scope": "all_required_steps",
                 "steps": step_audits,
+                "non_gating_unresolved_steps": [
+                    item["step_id"] for item in step_audits
+                    if item["status"] == "not_gating_unresolved_extra_step"],
             },
             "representative_layer_integrity": representative_integrity,
             "trace_pattern_consistency": trace_consistency,
