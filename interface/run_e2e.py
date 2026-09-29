@@ -238,6 +238,10 @@ DONE_POLL_S = float(os.environ.get("GEAK_DONE_POLL_S", "15"))
 # that dies with the container. These two pieces of state let the run copy that
 # ledger into its own (durable) eval_dir as it goes. See claude_trace_mirror.
 _LAST_SDK_SESSION: dict[str, str] = {}
+# Every ResultMessage the session emitted: Claude Code's own cost for the session so far. The ledger
+# checks its computed cost against the last one (llm_ledger.sdk_check). Several can arrive: a
+# background workflow can outlive the first turn's result, which then covers only part of the run.
+_SDK_RESULTS: list[dict] = []
 _MIRROR_STATE: dict[str, float] = {"t": 0.0}
 _RUN_EXP_ROOT: dict[str, str] = {}
 
@@ -264,6 +268,45 @@ def _note_session_id(msg: object) -> None:
         sid = msg.get("session_id")
     if isinstance(sid, str) and sid.strip():
         _LAST_SDK_SESSION["session_id"] = sid.strip()
+
+
+def _note_sdk_result(msg: object) -> None:
+    """Record a ResultMessage's cost and per-model usage, stamped with when it arrived.
+
+    Accepts the SDK object or the CLI's ``--output-format json`` payload. Anything else, or a
+    payload without ``total_cost_usd``, is a no-op; nothing here can raise into the message loop.
+
+    Args:
+        msg: Any SDK message object or decoded CLI payload.
+    """
+    get = msg.get if isinstance(msg, dict) else (lambda k, d=None: getattr(msg, k, d))
+    try:
+        cost = get("total_cost_usd")
+        if not isinstance(cost, (int, float)):
+            return
+        _SDK_RESULTS.append({
+            "captured_at_unix": time.time(),
+            "session_id": get("session_id"),
+            "total_cost_usd": float(cost),
+            "model_usage": get("model_usage") or get("modelUsage") or {},
+            "num_turns": get("num_turns"),
+            "is_error": get("is_error"),
+            "subtype": get("subtype"),
+        })
+    except Exception:  # pragma: no cover - telemetry must not end a run
+        pass
+
+
+def _write_sdk_results(eval_dir: object) -> None:
+    """Persist ``_SDK_RESULTS`` to ``<eval_dir>/reports/sdk_results.json``. Never raises."""
+    if not eval_dir or not _SDK_RESULTS:
+        return
+    try:
+        out = Path(eval_dir) / "reports" / "sdk_results.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(_SDK_RESULTS, indent=2, default=str) + "\n", encoding="utf-8")
+    except Exception:  # pragma: no cover
+        pass
 
 
 def _sdk_child_env() -> dict[str, str]:
@@ -306,6 +349,7 @@ def _mirror_trace(eval_dir: object, *, throttle: bool = False) -> dict:
     """
     if not eval_dir:
         return {"status": "no_eval_dir"}
+    _write_sdk_results(eval_dir)
     if throttle:
         if TRACE_MIRROR_EVERY_S <= 0:
             return {"status": "disabled"}
@@ -2168,6 +2212,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                 async for msg in client.receive_messages():
                     chunks.extend(_iter_message_text(msg))
                     _note_session_id(msg)
+                    _note_sdk_result(msg)
                     name = type(msg).__name__
                     if name == "TaskStartedMessage":
                         tid = getattr(msg, "task_id", None)
@@ -2256,6 +2301,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
             async for msg in query(prompt=prompt, options=_opts()):
                 chunks.extend(_iter_message_text(msg))
                 _note_session_id(msg)
+                _note_sdk_result(msg)
         return "\n".join(chunks)
 
     return anyio.run(_run_client if ClaudeSDKClient is not None else _run_query)
@@ -2291,6 +2337,7 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
         wrapped = json.loads(out)
         if isinstance(wrapped, dict):
             _note_session_id(wrapped)
+            _note_sdk_result(wrapped)
             return str(wrapped.get("result") or wrapped.get("text") or out)
     except json.JSONDecodeError:
         pass

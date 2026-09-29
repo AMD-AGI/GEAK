@@ -590,6 +590,58 @@ class TestCostBreakdown(unittest.TestCase):
         self.assertLess(sonnet["output"], opus["output"])             # 10 vs 25 per M
         self.assertAlmostEqual(sonnet["cache_read"], 0.40, places=6)  # 2M * 0.2
 
+    def test_router_bucket_holds_the_whole_classifier_call(self):
+        """A route_classifier call is spent choosing a model: all of it is router cost."""
+        row = dict(self._row("claude-sonnet-5"), role=L.ROUTER_ROLE)
+        bd = L.cost_breakdown(row, L.DEFAULT_RATES)
+        self.assertAlmostEqual(bd["router"], L.cost_of(row, L.DEFAULT_RATES), places=9)
+        self.assertEqual(bd["uncached_input"] + bd["cache_read"] + bd["cache_write"] + bd["output"], 0.0)
+
+
+class TestSdkCheck(unittest.TestCase):
+    """Our cost vs Claude Code's own ResultMessage: rates must reproduce it; coverage is reported."""
+
+    # The real ResultMessage from the 2026-09-15 ablation, arm control_r2 (sdk_messages.jsonl).
+    REAL = {"captured_at_unix": 1789496973.8563507, "session_id": "ef7c3aa4", "total_cost_usd": 25.460417749999998,
+            "model_usage": {"claude-opus-4-8": {"inputTokens": 744, "outputTokens": 373962,
+                                                "cacheReadInputTokens": 14726883,
+                                                "cacheCreationInputTokens": 1399073,
+                                                "costUSD": 25.460417749999998}}}
+
+    def _row(self, ts_s, model="claude-opus-4-8", out=1000):
+        return {"model": model, "ts_ms": int(ts_s * 1000), "input_tokens": 0, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "cache_write_5m_tokens": 0, "cache_write_1h_tokens": 0,
+                "output_tokens": out}
+
+    def test_our_rates_reproduce_a_real_claude_code_total(self):
+        c = L.sdk_check([], [self.REAL], L.DEFAULT_RATES)
+        self.assertTrue(c["rate_ok"])
+        self.assertAlmostEqual(c["models"]["claude-opus-4-8"]["ours_on_sdk_tokens_usd"], 25.460418, places=5)
+
+    def test_a_wrong_rate_card_is_caught(self):
+        # Claude Code priced Sonnet 5 at a (hypothetical) $3/$15; our card says $2/$10.
+        u = {"inputTokens": 0, "outputTokens": 1_000_000, "cacheReadInputTokens": 0,
+             "cacheCreationInputTokens": 0, "costUSD": 15.0}
+        c = L.sdk_check([], [{"captured_at_unix": 1.0, "total_cost_usd": 15.0,
+                              "model_usage": {"claude-sonnet-5": u}}], L.DEFAULT_RATES)
+        self.assertFalse(c["rate_ok"])
+        self.assertFalse(c["models"]["claude-sonnet-5"]["rate_ok"])
+
+    def test_calls_after_the_result_mark_it_partial(self):
+        at = self.REAL["captured_at_unix"]
+        rows = [self._row(at - 10), self._row(at + 10), self._row(at + 20)]
+        c = L.sdk_check(rows, [self.REAL], L.DEFAULT_RATES)
+        self.assertTrue(c["partial"])
+        self.assertEqual(c["calls_after_result"], 2)
+        self.assertEqual(c["models"]["claude-opus-4-8"]["ledger_tokens_until_result"]["output_tokens"], 1000)
+
+    def test_the_last_result_is_the_one_compared(self):
+        early = dict(self.REAL, captured_at_unix=1.0, total_cost_usd=1.0)
+        self.assertAlmostEqual(L.sdk_check([], [self.REAL, early], L.DEFAULT_RATES)["sdk_total_usd"], 25.460418, places=5)
+
+    def test_no_results_means_no_check(self):
+        self.assertIsNone(L.sdk_check([], [], L.DEFAULT_RATES))
+
 
 class TestPerModelPricing(unittest.TestCase):
     """Every call is priced by the model that served it, so a mixed-model run is priced right."""

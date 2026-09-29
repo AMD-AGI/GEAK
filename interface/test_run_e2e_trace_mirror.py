@@ -638,3 +638,38 @@ def test_a_model_name_cannot_escape_the_report_directory(tmp_path):
     (tmp_path / "kb_identity.json").write_text(json.dumps({"dims": {"model": "../../etc/passwd"}}))
     name = ctm._model_name(tmp_path)
     assert "/" not in name and ".." not in name
+
+
+def test_note_sdk_result_records_cost_from_sdk_object_and_cli_payload():
+    class ResultMessage:            # the SDK object's attribute spelling
+        total_cost_usd = 1.25
+        model_usage = {"claude-sonnet-5": {"costUSD": 1.25}}
+        session_id = "sess-1"
+        num_turns = 3
+        is_error = False
+        subtype = "success"
+    rx._SDK_RESULTS.clear()
+    rx._note_sdk_result(ResultMessage())
+    rx._note_sdk_result({"type": "result", "total_cost_usd": 2.5,      # the CLI's json spelling
+                         "modelUsage": {"claude-opus-5-5": {"costUSD": 2.5}}})
+    assert [r["total_cost_usd"] for r in rx._SDK_RESULTS] == [1.25, 2.5]
+    assert "claude-opus-5-5" in rx._SDK_RESULTS[1]["model_usage"]
+    assert all(r["captured_at_unix"] > 0 for r in rx._SDK_RESULTS)
+    rx._SDK_RESULTS.clear()
+
+
+def test_note_sdk_result_ignores_everything_else():
+    rx._SDK_RESULTS.clear()
+    for msg in (None, {"type": "assistant"}, {"total_cost_usd": "12"}, object()):
+        rx._note_sdk_result(msg)
+    assert rx._SDK_RESULTS == []
+
+
+def test_sdk_results_land_in_the_eval_dir_reports(tmp_path):
+    rx._SDK_RESULTS.clear()
+    rx._note_sdk_result({"total_cost_usd": 3.0, "modelUsage": {}})
+    rx._write_sdk_results(tmp_path)
+    saved = json.loads((tmp_path / "reports" / "sdk_results.json").read_text())
+    assert saved[0]["total_cost_usd"] == 3.0
+    rx._SDK_RESULTS.clear()
+
