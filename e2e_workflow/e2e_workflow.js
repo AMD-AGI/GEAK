@@ -1452,10 +1452,13 @@ function ablEffortFor(opts, attempt) {
 //
 // COVERAGE. Only E2E labels the static router already deems cheap-eligible reach this hook --
 // eligibility is deterministic, never a model's opinion. Kernel-lane, nested-workflow and raw
-// agent() calls are not routed here. It also needs require('child_process'), and the native
-// Workflow tool provides neither `require` nor `process` (probe wf_940bf156-7d8, 2026-09-29:
-// both `typeof` undefined). There the switch reads as off and nothing is attempted; only the
-// standalone Node runtime can run this hook today.
+// agent() calls are not routed here. It also needs require('child_process'), and NEITHER
+// supplied runtime provides it today. The native Workflow tool has no `require` and no
+// `process` (probe wf_940bf156-7d8, 2026-09-29): the switch reads as off and nothing is
+// attempted. The standalone runtime (interface/runtime/engine) has `process` but runs scripts
+// as ES-module AsyncFunctions without `require` (Astra, 2026-09-29): the helper call throws, is
+// logged, and the host decides. So this hook is tested offline but inert in every real run;
+// making it live needs a supported host-side evaluator boundary, which does not exist yet.
 // <<EIKOS-ROUTER-START>>
 // Read at load time, so it MUST NOT throw where `process` is undefined: an unguarded
 // `process.env` here would fail the whole workflow at startup, router on or off.
