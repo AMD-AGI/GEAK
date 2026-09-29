@@ -248,6 +248,17 @@ class TestAsk(unittest.TestCase):
         text, _ = self._call({"reasoning_content": None, "content": None})
         self.assertEqual(text, "")
 
+    def test_thinking_is_left_to_the_template_by_default(self):
+        _, post = self._call({"content": "#### 4"})
+        self.assertNotIn("chat_template_kwargs", post.payload)
+
+    def test_no_thinking_asks_the_template_to_disable_it(self):
+        _, post = self._call({"content": "#### 4"}, thinking=False)
+        self.assertEqual(post.payload["chat_template_kwargs"], {"enable_thinking": False})
+        # Everything that keeps base vs candidate comparable is unchanged.
+        self.assertEqual(post.payload["temperature"], 0.0)
+        self.assertEqual(post.payload["seed"], 0)
+
     def test_http_error_propagates(self):
         g.requests.post = _RecordingPost({"content": "x"}, raise_exc=RuntimeError("503"))
         with self.assertRaises(RuntimeError):
@@ -284,16 +295,17 @@ class _MainHarness(unittest.TestCase):
         g.load_dataset = self._orig_load
         g.ask = self._orig_ask
 
-    def run_main(self, n_test=6, answer=lambda i: None, out=None, **flags):
+    def run_main(self, n_test=6, answer=lambda i: None, out=None, switches=(), **flags):
         """answer(i) -> generated text for test item i; returning None means 'correct'."""
         data = _dataset(n_test)
         g.load_dataset = lambda *a, **k: data
         seen = []
 
-        def fake_ask(base_url, model, prompt, max_tokens, timeout=1800):
+        def fake_ask(base_url, model, prompt, max_tokens, timeout=1800, thinking=True):
             # Recover which item this is from the question echoed in the prompt.
             i = int(prompt.rsplit("Question: test q", 1)[1].split("\n", 1)[0])
             seen.append(i)
+            self.thinking_seen = thinking
             text = answer(i)
             if isinstance(text, Exception):
                 raise text
@@ -303,6 +315,7 @@ class _MainHarness(unittest.TestCase):
         argv = ["gsm8k_eval.py", "--base-url", "http://h/v1", "--model", "m"]
         for k, v in flags.items():
             argv += [f"--{k.replace('_', '-')}", str(v)]
+        argv += [f"--{sw}" for sw in switches]
         if out is not None:
             argv += ["--out", out]
         sys.argv = argv
@@ -392,6 +405,21 @@ class TestMainSummary(_MainHarness):
         self.assertTrue(summary["greedy"])
         self.assertEqual(summary["base_url"], "http://h/v1")
         self.assertIsInstance(summary["elapsed_s"], float)
+
+    def test_summary_records_the_gate_harness(self):
+        # The apply-back cache reuses a base score only for an identical harness,
+        # so these must be in the summary.
+        summary, _, _ = self.run_main(n_test=6, limit=4, concurrency=4, max_tokens=4096)
+        self.assertEqual(summary["concurrency"], 4)
+        self.assertEqual(summary["max_tokens"], 4096)
+        self.assertTrue(summary["thinking"])
+        self.assertTrue(self.thinking_seen)
+
+    def test_no_thinking_flag_reaches_every_request(self):
+        summary, last, _ = self.run_main(n_test=6, limit=4, switches=("no-thinking",))
+        self.assertFalse(summary["thinking"])
+        self.assertFalse(self.thinking_seen)
+        self.assertEqual(last, "GSM8K_EXACT_MATCH=1.0000")
 
     def test_out_file_holds_summary_and_per_item_results(self):
         out = os.path.join(self._tmp.name, "nested", "gsm8k.json")

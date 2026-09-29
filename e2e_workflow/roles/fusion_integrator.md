@@ -57,29 +57,51 @@ dir may be passed to STACK on top of.
 - **Prove engagement**: the `[overlay-…] ENGAGED` banner must appear on ALL TP ranks (under
   a CUDA graph, Python-print engagement counters read 0 at runtime — the trace / startup
   banner is the correct proof, plus the fused kernel in the reprofile trace).
-- **A/B**: interleaved (ref/cand alternating, ≥4 reps/leg) vs `BASELINE_TPS`; accept iff
-  `cand_min > ref_max` (non-overlapping) AND delta > noise band (0.5%). Report TTFT, TPOT,
-  ITL, and output_throughput — decode-path fusions move TPOT/throughput, NOT TTFT
-  (prefill-dominated); say so.
+- **Order: throughput A/B FIRST, accuracy SECOND.** Run the accuracy gate only for a
+  candidate whose A/B passed; a candidate that loses the A/B is `blocked` on throughput and
+  never costs a gsm8k run.
+- **A/B**: interleaved ref/cand pairs (R1 C1 R2 C2 …) vs the current accepted stack. After
+  EVERY completed pair run the decision script and obey it:
+  ```bash
+  python3 "$AB_DECIDE_SCRIPT" --ref <ref tok/s in run order> --cand <cand tok/s in run order> \
+    --noise-band-pct "$NOISE_BAND_PCT" --max-pairs "$AB_MAX_PAIRS" --out "$APPLY_DIR/ab_decision.json"
+  ```
+  `AB_DECISION=continue` → run one more pair; `accept` → the A/B passed (go to accuracy);
+  `reject` → the A/B failed. It never stops before 2 pairs, stops at 2 when the win is
+  clear (non-overlapping, above the noise band, and ≥10× the within-side spread), and
+  otherwise decides at `AB_MAX_PAIRS` on `cand_min > ref_max` AND delta > noise band. Put the
+  decision JSON in `apply_result.json`. Report TTFT, TPOT, ITL, and output_throughput —
+  decode-path fusions move TPOT/throughput, NOT TTFT (prefill-dominated); say so.
   **Measurement lifecycle:** run every ref and cand leg through `$EVAL_DIR/bench_e2e.sh` with
   `GEAK_REPEAT_MODE=$MEASUREMENT_MODE` (the lifecycle the baseline and Validate use), one
   invocation per leg. Do not call `bench_replica.sh` directly and do not mix lifecycles: a
   `warm_server` leg and an `isolated_server` leg are not comparable. Record the lifecycle in
   `apply_result.json` next to the A/B numbers.
-- **Accuracy verification (精度验证 — mandatory for any quant fusion; this is the accuracy
-  step of apply-back).** Run `scripts/gsm8k_eval.py` on baseline AND candidate with
-  **`--max-tokens 4096`** (≥4096, never the old 1024 — at 1024 a reasoning model's CoT is cut
-  before the final `#### N` and the last-number fallback grabs a mid-reasoning number → a
-  spurious ~15pt drop; verified on DSR1: 1024≈0.79 vs 4096=0.94). `gsm8k_eval.py` defaults to
-  4096 now; still pass it. **n=200 is enough — do NOT crank n to 1000 (wasteful).**
+- **Accuracy verification (精度验证 — mandatory for any quant fusion, after a passing A/B).**
+  Run `"$GSM8K_EVAL_SCRIPT"` with exactly this harness on both sides:
+  `--limit 200 --max-tokens 4096 --seed 0 --concurrency "$GSM8K_CONCURRENCY"`, plus
+  `--no-thinking` when `GSM8K_THINKING` is false (the default).
+  - **Concurrency is fixed to `GSM8K_CONCURRENCY`** (the server's `--cuda-graph-max-bs`).
+    Never raise it: above that batch the server decodes eagerly, so most tokens would bypass
+    the decode-path fusion you are gating. Check the gsm8k server log shows `cuda graph: True`.
+  - **Base score:** when `ACCURACY_REFERENCE` is set (it was measured on exactly
+    `ACCURACY_STACK_KEY` with this harness), use its `exact_match` as the base and do NOT
+    re-run the base gsm8k. Otherwise measure the base on a CURRENT_* server and return it as
+    `accuracy_reference: {stack_key: ACCURACY_STACK_KEY, exact_match, n, path, harness:
+    {limit, max_tokens, concurrency, thinking}}`.
+  - Run the candidate gsm8k on a server with the candidate overlay. If you ACCEPT the fusion,
+    return its score as `accepted_accuracy: {exact_match, n, path, harness}`: it is the base
+    for the next call.
+  - Thinking off is enough for a same-harness base-vs-candidate delta; it is not the model's
+    reported accuracy (the Director's Validate measures that). With thinking on, keep
+    `--max-tokens` ≥4096 (at 1024 a reasoning model's CoT is cut before `#### N`: ~15pt drop).
   **🔴 The gate must be NOISE-AWARE, not a fixed `cand ≥ base − 0.01`.** At n=200 one problem
   ≈0.5pt and SE≈1.8pt, so a fixed 0.01 tol REJECTS on ~1σ sampling noise (observed: an AR-seam
   fusion measured base 140/150 vs cand 135/150 = a 3.3pt "drop" that is only z≈1.0 — pure noise,
   yet a fixed tol failed it and a real +1.3% tps win was wrongly dropped). **Reject only when the
   accuracy drop is STATISTICALLY SIGNIFICANT** — a 2-proportion test at ~2σ (equivalently, drop >
   ~1.96·SE ≈ 3.5pt at n=200), NOT a flat 0.01. If the drop is within noise (< ~2σ), treat it as
-  no-degradation → PASS. Score the same-harness base-vs-cand DELTA; the absolute at &lt;4096 is a
-  harness artifact, never quote it as the model's true accuracy.
+  no-degradation → PASS. Score the same-harness base-vs-cand DELTA only.
 - **Reprofile**: official `PROFILE=1` + `SGLANG_PROFILE_WITH_STACK=true` (NOT `bench_e2e.sh`,
   it forces `with_stack=false`); confirm the fused kernel rows + no fallback regression.
 
@@ -130,7 +152,9 @@ gsm8k_base, gsm8k_cand, reprofile_ok, overlay_path, skipped_branches, notes}`.
 ## PHASE=apply_one — apply one execution-list entry/degrade ladder (called serially by KernelFusion)
 Inputs add `FUSION_TOPK_JSON`, `FUSION_CANDIDATES_JSON`, `FUSION_UNITSIDE_JSON`,
 `TARGET_EXEC_ID`, `TARGET_EXECUTION`, `PRIOR_APPLY_RESULT`,
-`CURRENT_OVERLAY/FLAGS/ENV/THROUGHPUT`, `FUSION_BUDGET`, `FUSION_OVERLAYS_DIR`, `ACCURACY_*`.
+`CURRENT_OVERLAY/FLAGS/ENV/THROUGHPUT`, `FUSION_BUDGET`, `FUSION_OVERLAYS_DIR`, `ACCURACY_*`,
+`AB_DECIDE_SCRIPT`, `AB_MAX_PAIRS`, `GSM8K_EVAL_SCRIPT`, `GSM8K_CONCURRENCY`, `GSM8K_THINKING`,
+`ACCURACY_STACK_KEY`, `ACCURACY_REFERENCE` (null unless a base score for this exact stack exists).
 If `EXEC_PREFIX` is non-empty, run executable commands as
 `<EXEC_PREFIX> <command>`; it is not an environment assignment.
 The orchestrator invokes this role serially, once per execution-list entry. Process exactly
@@ -161,9 +185,9 @@ return the unchanged aggregate after regenerating the report. The harness owns t
    except a ★★★-prior rung, which always gets its own marginal leg. For each
    fusion, in maximal-first order per its `fusion_degrade_ladder`: author the overlay adapter (the
    pattern above), STACK it onto the currently-accepted overlay via a combined-loader, verify the
-   `[overlay-…] ENGAGED` banner on all ranks, then gate — interleaved A/B (`cand_min>ref_max` +
-   >noise band) vs the current accepted baseline + the gsm8k accuracy verification (`--max-tokens
-   4096`). **Accept** → keep the stacked overlay as the new baseline for the next fusion, bank the
+   `[overlay-…] ENGAGED` banner on all ranks, then gate — the interleaved A/B decided pair by pair
+   with `AB_DECIDE_SCRIPT`, and only if it passes, the gsm8k accuracy verification (harness above;
+   reuse `ACCURACY_REFERENCE` as the base when set). **Accept** → keep the stacked overlay as the new baseline for the next fusion, bank the
    fusion; **fail/can't-wire** → degrade to the next ladder rung; whole ladder fails → skip that
    selected ladder, keep the last-good overlay, then return. Reuse ONE server where possible (restart only
    when an overlay change requires it); obey the single-init / no-relaunch-spiral / process-safety
@@ -176,7 +200,8 @@ return the unchanged aggregate after regenerating the report. The harness owns t
    accepted_flags, accepted_env, e2e_throughput_tok_s (final),
    rejected:[{exec_id,reason}], deferred:[{exec_id,reason}],
    deferred_author_count, applyback_gate_json, applyback_report_md,
-   learned_cards:[{card,action:merged|inserted|archived,key,confidence}], notes}`. Return the full
+   learned_cards:[{card,action:merged|inserted|archived,key,confidence}],
+   accuracy_reference (when this call measured the base), accepted_accuracy (when it accepted), notes}`. Return the full
    aggregate (`PRIOR_APPLY_RESULT` plus this call), not only this call's delta. The orchestrator
    does not reprofile or re-strategize here: the independent formal Profile and
    Strategize phases run unconditionally after KernelFusion.

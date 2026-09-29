@@ -10,7 +10,7 @@ Self-contained (requests + datasets only) so there is no lm-eval dependency to i
 
 Usage:
   python3 gsm8k_eval.py --base-url http://127.0.0.1:30000/v1 --model <path> --limit 200 \
-      --out <dir>/gsm8k.json [--fewshot 5] [--max-tokens 512] [--concurrency 32]
+      --out <dir>/gsm8k.json [--fewshot 5] [--max-tokens 4096] [--concurrency 32] [--no-thinking]
 Prints a final line:  GSM8K_EXACT_MATCH=<0..1>
 """
 import argparse, json, os, re, sys, random, time
@@ -45,11 +45,14 @@ def build_fewshot(train, k):
         shots.append(f"Question: {q}\nEnd your response with the answer on the last line, formatted as: #### [number]\nAnswer: {a}")
     return "\n\n".join(shots)
 
-def ask(base_url, model, prompt, max_tokens, timeout=1800):
-    r = requests.post(base_url.rstrip("/") + "/chat/completions",
-        json={"model": model, "messages": [{"role": "user", "content": prompt}],
-              "temperature": 0.0, "top_p": 1.0, "max_tokens": max_tokens, "seed": 0},
-        timeout=timeout)
+def ask(base_url, model, prompt, max_tokens, timeout=1800, thinking=True):
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0, "top_p": 1.0, "max_tokens": max_tokens, "seed": 0}
+    if not thinking:
+        # Chat templates that support a thinking switch (Qwen3/3.5 and similar) read this flag;
+        # templates without one ignore it.
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    r = requests.post(base_url.rstrip("/") + "/chat/completions", json=body, timeout=timeout)
     r.raise_for_status()
     msg = r.json()["choices"][0]["message"]
     # MiniMax-M3 is a REASONING model: the chat response splits into `content` (final answer) and
@@ -71,6 +74,11 @@ def main():
     # "#### N", the last-number fallback then grabs a mid-reasoning number -> ~15pt drop. Verified on
     # DSR1: gsm8k 1024=~0.79 vs 4096=0.94 (same server, only max_tokens changed). Keep >=4096 for CoT models.
     ap.add_argument("--concurrency", type=int, default=32)
+    # A gate for a decode-path change must keep the running batch inside the server's CUDA-graph
+    # capture range (sglang --cuda-graph-max-bs), or most tokens are generated on the eager path and
+    # the changed kernels are barely exercised.
+    ap.add_argument("--no-thinking", action="store_true",
+                    help="ask the chat template to disable thinking (chat_template_kwargs.enable_thinking=false)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="")
     a = ap.parse_args()
@@ -87,7 +95,7 @@ def main():
         gold = gold_answer(test[i]["answer"])
         prompt = fewshot + "\n\n" + f"Question: {q}\nEnd your response with the answer on the last line, formatted as: #### [number]\nAnswer:"
         try:
-            out = ask(a.base_url, a.model, prompt, a.max_tokens)
+            out = ask(a.base_url, a.model, prompt, a.max_tokens, thinking=not a.no_thinking)
         except Exception as e:
             return i, gold, None, f"ERR:{str(e)[:80]}"
         return i, gold, extract_pred(out), out[-200:]
@@ -106,6 +114,8 @@ def main():
     score = correct / len(idx) if idx else 0.0
     summary = {"task": "gsm8k", "exact_match": score, "n": len(idx), "correct": correct,
                "fewshot": a.fewshot, "greedy": True, "seed": a.seed, "limit": a.limit,
+               "max_tokens": a.max_tokens, "concurrency": a.concurrency,
+               "thinking": not a.no_thinking,
                "base_url": a.base_url, "elapsed_s": round(time.time() - t0, 1)}
     if a.out:
         os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)

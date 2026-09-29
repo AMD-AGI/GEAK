@@ -118,6 +118,20 @@ const FUSION_REQUIRED = String(A.fusion_required != null
 const FUSION_TOP_K = parseInt(A.fusion_top_k != null ? A.fusion_top_k : 10, 10);
 const FUSION_UNITSIDE_BUDGET = parseInt(
   A.fusion_unitside_budget != null ? A.fusion_unitside_budget : FUSION_TOP_K, 10);
+// Unit-side microbenches that may run at once (single-GPU candidates only;
+// collective candidates always run alone on the full GPU set). 1 = serial.
+const FUSION_UNIT_PARALLEL = parseInt(
+  A.fusion_unit_parallel != null ? A.fusion_unit_parallel : 8, 10);
+// Apply-back accuracy gate. It compares base vs candidate with ONE harness, so it
+// only needs to resolve a regression, not report the model's absolute accuracy:
+// thinking stays off by default (a CoT run is ~2.4k tokens/question), and the
+// concurrency follows the server's CUDA-graph batch (see fusionGsm8kConcurrency).
+const FUSION_GSM8K_THINKING = String(
+  A.fusion_gsm8k_thinking != null ? A.fusion_gsm8k_thinking : 'false') === 'true';
+// Most interleaved ref/cand pairs one apply-back A/B may take. The early-stop rule
+// lives in scripts/fusion_ab_decide.py.
+const FUSION_AB_MAX_PAIRS = parseInt(
+  A.fusion_ab_max_pairs != null ? A.fusion_ab_max_pairs : 3, 10);
 let FUSION_INPUTS = {
   FUSION_TOPK_JSON: '',
   FUSION_CANDIDATES_JSON: '',
@@ -861,6 +875,10 @@ const FUSION_APPLY_SCHEMA = obj({
   // e2e is simply never proposed again, and nothing turns red because "never proposed"
   // leaves no artifact. [] is a valid answer (nothing cleared >=** this round).
   learned_cards: arrObj,      // [{card, action: merged|inserted|archived, key, confidence}]
+  // Accuracy-gate cache (see ACCURACY_REFERENCE in the apply_one inputs): the base
+  // score this call measured for ACCURACY_STACK_KEY, and the candidate score of a
+  // fusion it accepted, which becomes the base for the next stack.
+  accuracy_reference: obj({}), accepted_accuracy: obj({}),
   notes: { type: 'string' },
 }, ['accepted_fusions']);
 
@@ -1243,6 +1261,23 @@ function warmStartBlock(role) {
         `in your pre/post A/B; a recalled artifact still has to earn its accept on THIS box, but it ` +
         `costs one measurement instead of a search. Search only the shapes that came back empty.`
       : '');
+}
+
+// Concurrency for the apply-back gsm8k gate: the server's CUDA-graph batch
+// (sglang --cuda-graph-max-bs), else the workload concurrency. Above that batch the
+// server decodes eagerly, so most tokens would bypass a decode-path fusion.
+function fusionGsm8kConcurrency(flags) {
+  const found = [...String(flags || '').matchAll(/--cuda-graph-max-bs(?:=|\s+)(\d+)/g)];
+  const bs = found.length ? parseInt(found[found.length - 1][1], 10) : NaN;
+  return Math.max(1, bs > 0 ? bs : CONC);
+}
+
+// Identity of the stack a gsm8k base score was measured on. Apply-back rewrites
+// the combined overlay in place, so the accepted fusion ids are part of the key,
+// not just the overlay path.
+function fusionStackKey() {
+  const ids = acceptedFusions.map((r) => String((r && (r.exec_id || r.fusion)) || '')).sort();
+  return JSON.stringify({ fusions: ids, overlay: curOverlay || '', flags: curFlags || '', env: curEnv || '' });
 }
 
 function roleAgent(role, phase, intro, inputs) {
@@ -2365,6 +2400,9 @@ let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv;
 let profile, strategy, kernelQueue = [], headQueue = [], semantics, fusionCapture;
 let fusionSemanticsAttempted = false;
 let fusionExecutionList = [];
+// Base gsm8k score of the current fusion stack, reused across apply-back calls
+// until a fusion is accepted. {stack_key, exact_match, n, path, harness}.
+let fusionAccuracyRef = null;
 
 // KernelFusion must establish the current stack before the original Profile.
 let curOverlay = ST.overlay || '';
@@ -3419,67 +3457,98 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
           const unitPassed = (r) => !!(r && r.status !== 'failed' &&
             String(r.parity || '').toLowerCase() === 'pass' &&
             Number(r.isolated_speedup) > 1);
+          // Unit-side microbenches run in WAVES. The budget is assigned in the same
+          // deterministic queue order as before, so which candidates are measured
+          // (and which are budget-skipped) does not depend on parallelism. Within a
+          // wave, single-GPU candidates run concurrently, one pinned card each;
+          // collective candidates need every serving GPU, so they run afterwards,
+          // one at a time. Rungs released by a failed ladder top form the next wave.
+          const isCollectiveEntry = (entry) => /allreduce|all_reduce|custom_ar|collective/i.test(
+            `${entry.handle || ''} ${(entry.candidate_ids || []).join(' ')}`);
+          const runUnit = (item, gpus) => safeAgent(
+            roleAgent('fusion_unit_validator', 'validate_one',
+              'Validate exactly this one concrete Top-K candidate; never substitute another candidate. ' +
+              'Use only the GPU(s) in GPU_IDS: other candidates may be running on the other cards.', {
+                EVAL_DIR, MODEL_PATH, GPU_IDS: gpus, TP: SERVING_TP,
+                FUSION_CANDIDATES_JSON: discover.fusion_candidates_json,
+                FUSION_TOPK_JSON: ranked.fusion_topk_json,
+                EXEC_ID: item.exec_id, CANDIDATE_ID: item.candidate_id,
+                IMAGE: RUNTIME_IMAGE, SKILL_DIR: WORKFLOW_DIR,
+                ...FUSION_RUNTIME_INPUTS,
+              }),
+            { phase: 'KernelFusion', label: `fusion-unit:${item.candidate_id}`, schema: FUSION_UNIT_SCHEMA }, 1);
+          const unitWidth = Math.max(1, Math.min(FUSION_UNIT_PARALLEL, GPU_LIST.length || 1));
           while (queue.length) {
-            const entry = queue.shift();
-            let anyPass = false;
-            let representativeBudgetSkipped = false;
-            for (const item of expand(entry)) {
-              if (spent >= FUSION_UNITSIDE_BUDGET) {
+            const wave = queue.splice(0, queue.length);
+            const plans = wave.map((entry) => {
+              const plan = { entry, items: [], representativeBudgetSkipped: false };
+              for (const item of expand(entry)) {
                 seenUnitCandidates.add(item.candidate_id);
-                representativeBudgetSkipped = true;
-                budgetSkipped.push({ ...item,
-                  reason: `unit-side budget ${FUSION_UNITSIDE_BUDGET} exhausted; NEVER MEASURED (not a waiver)` });
-                continue;
+                if (spent >= FUSION_UNITSIDE_BUDGET) {
+                  plan.representativeBudgetSkipped = true;
+                  budgetSkipped.push({ ...item,
+                    reason: `unit-side budget ${FUSION_UNITSIDE_BUDGET} exhausted; NEVER MEASURED (not a waiver)` });
+                  continue;
+                }
+                spent += 1;
+                plan.items.push({ ...item, collective: isCollectiveEntry(entry) });
               }
-              seenUnitCandidates.add(item.candidate_id);
-              spent += 1;
-              const r = await safeAgent(
-                roleAgent('fusion_unit_validator', 'validate_one',
-                  'Validate exactly this one concrete Top-K candidate; never substitute another candidate.', {
-                    EVAL_DIR, MODEL_PATH, GPU_IDS, TP: SERVING_TP,
-                    FUSION_CANDIDATES_JSON: discover.fusion_candidates_json,
-                    FUSION_TOPK_JSON: ranked.fusion_topk_json,
-                    EXEC_ID: item.exec_id, CANDIDATE_ID: item.candidate_id,
-                    IMAGE: RUNTIME_IMAGE, SKILL_DIR: WORKFLOW_DIR,
-                    ...FUSION_RUNTIME_INPUTS,
-                  }),
-                { phase: 'KernelFusion', label: `fusion-unit:${item.candidate_id}`, schema: FUSION_UNIT_SCHEMA }, 1);
-              if (unitPassed(r)) anyPass = true;
+              return plan;
+            });
+            const unitResults = new Map();
+            const single = [];
+            const collective = [];
+            for (const plan of plans) {
+              for (const item of plan.items) (item.collective ? collective : single).push(item);
             }
-            if (representativeBudgetSkipped) {
-              for (const cid of (entry.unit_equivalent_candidate_ids || [])) {
-                if (seenUnitCandidates.has(cid)) continue;
-                seenUnitCandidates.add(cid);
-                budgetSkipped.push({ exec_id: entry.exec_id, candidate_id: cid,
-                  reason: `representative unit-side test was skipped after budget ${FUSION_UNITSIDE_BUDGET} was exhausted` });
-              }
+            for (let i = 0; i < single.length; i += unitWidth) {
+              const chunk = single.slice(i, i + unitWidth);
+              const rs = await Promise.all(chunk.map((item, slot) =>
+                runUnit(item, String(GPU_LIST[slot % GPU_LIST.length] || GPU_LIST[0] || '0'))));
+              chunk.forEach((item, k) => unitResults.set(item.candidate_id, rs[k]));
             }
-            const held = heldByTop.get(entry.exec_id) || [];
-            if (!representativeBudgetSkipped) {
-              const representative = entry.unit_representative_candidate_id ||
-                (entry.candidate_ids || [])[0];
-              for (const cid of (entry.unit_equivalent_candidate_ids || [])) {
-                if (seenUnitCandidates.has(cid)) continue;
-                seenUnitCandidates.add(cid);
-                equivalentCovered.push({ exec_id: entry.exec_id,
-                  candidate_id: cid, representative_candidate_id: representative });
-              }
+            for (const item of collective) {
+              unitResults.set(item.candidate_id, await runUnit(item, GPU_IDS));
             }
-            if (anyPass) {
-              for (const child of held) {
-                for (const cid of (child.candidate_ids || [])) {
+            for (const plan of plans) {
+              const entry = plan.entry;
+              const representativeBudgetSkipped = plan.representativeBudgetSkipped;
+              const anyPass = plan.items.some((item) => unitPassed(unitResults.get(item.candidate_id)));
+              if (representativeBudgetSkipped) {
+                for (const cid of (entry.unit_equivalent_candidate_ids || [])) {
                   if (seenUnitCandidates.has(cid)) continue;
                   seenUnitCandidates.add(cid);
-                  subsumedCovered.push({ exec_id: child.exec_id, candidate_id: cid,
-                    ladder_top: entry.exec_id });
+                  budgetSkipped.push({ exec_id: entry.exec_id, candidate_id: cid,
+                    reason: `representative unit-side test was skipped after budget ${FUSION_UNITSIDE_BUDGET} was exhausted` });
                 }
               }
-              if (held.length) {
-                log(`KernelFusion unit-side: ${entry.exec_id} passed; ${held.length} subsumed rung(s) covered without their own slot.`);
+              const held = heldByTop.get(entry.exec_id) || [];
+              if (!representativeBudgetSkipped) {
+                const representative = entry.unit_representative_candidate_id ||
+                  (entry.candidate_ids || [])[0];
+                for (const cid of (entry.unit_equivalent_candidate_ids || [])) {
+                  if (seenUnitCandidates.has(cid)) continue;
+                  seenUnitCandidates.add(cid);
+                  equivalentCovered.push({ exec_id: entry.exec_id,
+                    candidate_id: cid, representative_candidate_id: representative });
+                }
               }
-            } else if (held.length) {
-              log(`KernelFusion unit-side: ${entry.exec_id} did NOT pass; releasing ${held.length} subsumed rung(s) to their own slot.`);
-              for (const child of held) queue.unshift(child);
+              if (anyPass) {
+                for (const child of held) {
+                  for (const cid of (child.candidate_ids || [])) {
+                    if (seenUnitCandidates.has(cid)) continue;
+                    seenUnitCandidates.add(cid);
+                    subsumedCovered.push({ exec_id: child.exec_id, candidate_id: cid,
+                      ladder_top: entry.exec_id });
+                  }
+                }
+                if (held.length) {
+                  log(`KernelFusion unit-side: ${entry.exec_id} passed; ${held.length} subsumed rung(s) covered without their own slot.`);
+                }
+              } else if (held.length) {
+                log(`KernelFusion unit-side: ${entry.exec_id} did NOT pass; releasing ${held.length} subsumed rung(s) to the next wave.`);
+                for (const child of held) queue.push(child);
+              }
             }
           }
           const deferred = budgetSkipped.map(item => ({ ...item, disposition: 'budget_skipped' }));
@@ -3559,13 +3628,15 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
       if (!applyEntry || !applyEntry.exec_id || dispositionIds().has(String(applyEntry.exec_id))) continue;
       fusionFailureStage = `apply_back:${applyEntry.exec_id}`;
       const acceptedBefore = new Set((applyState.accepted_fusions || []).map(rowKey).filter(Boolean));
+      const accuracyKey = fusionStackKey();
       const step = await safeAgent(
         roleAgent('fusion_integrator', 'apply_one',
           'Apply exactly TARGET_EXEC_ID and its declared degrade ladder; do not loop unrelated execution-list entries. ' +
           'Read FUSION_TOPK_JSON and FUSION_UNITSIDE_JSON, and act only when the selected tier-A/B row has ' +
           'unit_side_status pass/equivalent_pass/subsumed_pass. Start from CURRENT_OVERLAY/FLAGS/ENV/THROUGHPUT, ' +
           'which already include earlier terminal wins. For the selected ladder, author a reversible lazy-load overlay, ' +
-          'prove ENGAGED on every TP rank, run the interleaved serving A/B and required accuracy gate, and descend its ' +
+          'prove ENGAGED on every TP rank, run the interleaved serving A/B with AB_DECIDE_SCRIPT deciding each pair, then ' +
+          'run the accuracy gate only if the A/B passed (reuse ACCURACY_REFERENCE as the base score when it is set), and descend its ' +
           'declared ladder only when the wider rung fails. Preserve PRIOR_APPLY_RESULT dispositions verbatim and merge ' +
           'only this call\'s terminal result into it. Write the full aggregate apply_result.json, run ' +
           'fusion_applyback_harness.py with --allow-partial-coverage (later calls still have legitimate unprocessed rows), ' +
@@ -3580,6 +3651,12 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
             CURRENT_THROUGHPUT: curTput, BASELINE_THROUGHPUT: BASELINE_TPUT,
             NOISE_BAND_PCT: NOISE_BAND, FUSION_BUDGET,
             FUSION_OVERLAYS_DIR: `${EVAL_DIR}/fusion/fusion_overlays`,
+            AB_DECIDE_SCRIPT: `${WORKFLOW_DIR}/scripts/fusion_ab_decide.py`, AB_MAX_PAIRS: FUSION_AB_MAX_PAIRS,
+            GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py`,
+            GSM8K_CONCURRENCY: fusionGsm8kConcurrency(curFlags), GSM8K_THINKING: FUSION_GSM8K_THINKING,
+            ACCURACY_STACK_KEY: accuracyKey,
+            ACCURACY_REFERENCE: (fusionAccuracyRef && fusionAccuracyRef.stack_key === accuracyKey)
+              ? fusionAccuracyRef : null,
             ...ACCURACY_INPUTS, ...FUSION_RUNTIME_INPUTS, SKILL_DIR: WORKFLOW_DIR,
           }),
         { phase: 'KernelFusion', label: `fusion_integrator:apply_one:${applyEntry.exec_id}`,
@@ -3613,6 +3690,10 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
       fapply = applyState;
 
       const newlyAccepted = mergedAccepted.filter((r) => !acceptedBefore.has(rowKey(r)));
+      const measuredRef = step.accuracy_reference;
+      if (measuredRef && measuredRef.stack_key === accuracyKey && Number(measuredRef.exact_match) >= 0) {
+        fusionAccuracyRef = { ...measuredRef };
+      }
       if (newlyAccepted.length) {
         curOverlay = step.final_overlay || curOverlay;
         curFlags = step.accepted_flags || curFlags;
@@ -3621,6 +3702,11 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
           curTput = step.e2e_throughput_tok_s;
         }
         for (const accepted of newlyAccepted) acceptedFusions.push(accepted);
+        // The accepted candidate's score was measured on exactly the stack that is
+        // now current, so it is the next call's base; without it the cache resets.
+        const acc = step.accepted_accuracy;
+        fusionAccuracyRef = (acc && Number(acc.exact_match) >= 0)
+          ? { ...acc, stack_key: fusionStackKey() } : null;
         log(`KernelFusion apply-back ${applyEntry.exec_id}: committed ${newlyAccepted.length} ` +
             `terminal fusion win(s); e2e now ${curTput} tok/s.`);
       }

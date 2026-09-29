@@ -120,7 +120,9 @@ Return:
   non-empty `IMAGE` and delete it when done. If neither is available, use the
   current environment only after proving the required stack imports; otherwise
   return an explicit unmeasured/waived reason rather than fabricating a verdict.
-  `GPU_IDS` — the cards to use.
+  `GPU_IDS` — the cards to use, and ONLY these. Single-GPU candidates run in parallel on
+  different cards, so for a single-GPU family `GPU_IDS` is the one card pinned to you; a
+  collective family gets the full serving set and runs alone.
 - `EVAL_DIR` — where to write `verdict/<CANDIDATE_ID>.json` and scratch.
 - `SKILL_DIR` — this workflow dir (harness_lib, server_teardown).
 

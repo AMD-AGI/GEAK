@@ -124,6 +124,8 @@ jobs:
             e2e_workflow/scripts/tests/test_fusion_priors.py \
             e2e_workflow/scripts/tests/test_report_index.py \
             e2e_workflow/scripts/tests/test_fusion_capture_manifest_contract.py \
+            e2e_workflow/scripts/tests/test_fusion_ab_decide.py \
+            e2e_workflow/scripts/tests/test_fusion_applyback_speed_contract.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
