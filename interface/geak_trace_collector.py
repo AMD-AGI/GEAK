@@ -589,10 +589,7 @@ def _load_cost_support(rates_path=None):
             with open(rates_path, "r", encoding="utf-8") as fh:
                 loaded = json.load(fh)
             if isinstance(loaded, dict):
-                merged = dict(llm_ledger.DEFAULT_RATES["_default"])
-                merged.update(loaded.get("_default") or {})
-                rates = dict(loaded)
-                rates["_default"] = merged
+                rates = llm_ledger.merge_rates(loaded)
         return rates, (llm_ledger.cost_of, llm_ledger.cost_breakdown)
     except Exception:
         return None, None
