@@ -588,6 +588,98 @@ class TestCostBreakdown(unittest.TestCase):
         self.assertAlmostEqual(sonnet["cache_read"], 0.40, places=6)  # 2M * 0.2
 
 
+class TestPerModelPricing(unittest.TestCase):
+    """Every call is priced by the model that served it, so a mixed-model run is priced right."""
+
+    # The official table (platform.claude.com/docs/en/about-claude/pricing, 2026-09-28):
+    # input, 5m write, 1h write, cache read, output — $ per million tokens.
+    OFFICIAL = {
+        "claude-fable-5-1": (10, 12.50, 20, 0.25, 50), "claude-mythos-5-1": (10, 12.50, 20, 0.25, 50),
+        "claude-fable-5": (10, 12.50, 20, 1.00, 50), "claude-mythos-5": (10, 12.50, 20, 1.00, 50),
+        "claude-opus-5-5": (4, 5, 8, 0.20, 20), "claude-opus-5": (5, 6.25, 10, 0.50, 25),
+        "claude-opus-4-8": (5, 6.25, 10, 0.50, 25), "claude-opus-4-7": (5, 6.25, 10, 0.50, 25),
+        "claude-opus-4-6": (5, 6.25, 10, 0.50, 25), "claude-opus-4-5": (5, 6.25, 10, 0.50, 25),
+        "claude-sonnet-5": (2, 2.50, 4, 0.20, 10), "claude-sonnet-4-6": (3, 3.75, 6, 0.30, 15),
+        "claude-sonnet-4-5": (3, 3.75, 6, 0.30, 15), "claude-haiku-4-5": (1, 1.25, 2, 0.10, 5),
+    }
+
+    def _row(self, model, inp=0, read=0, w5=0, w1=0, out=0):
+        return {"model": model, "input_tokens": inp, "cache_read_input_tokens": read,
+                "cache_creation_input_tokens": w5 + w1, "cache_write_5m_tokens": w5,
+                "cache_write_1h_tokens": w1, "output_tokens": out}
+
+    def test_every_card_matches_the_official_table(self):
+        for m, (i, w5, w1, rd, o) in self.OFFICIAL.items():
+            c = L.DEFAULT_RATES[m]
+            self.assertEqual((c["input"], c["cache_write_5m"], c["cache_write_1h"], c["cache_read"], c["output"]),
+                             (i, w5, w1, rd, o), m)
+
+    def test_default_card_is_unchanged(self):
+        """Runs priced before per-model cards existed must price the same now."""
+        self.assertEqual(L.DEFAULT_RATES["_default"], L.DEFAULT_RATES["claude-opus-4-8"])
+        self.assertEqual(L.DEFAULT_RATES["_default"],
+                         {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write_5m": 6.25, "cache_write_1h": 10.0})
+
+    def test_reproduces_claude_codes_own_cost_for_four_models(self):
+        """Live model check 2026-09-28: Claude Code's costUSD for one tiny call per model."""
+        live = [("claude-haiku-4-5-20251001", 10, 6140, 38, 0.007875),
+                ("claude-sonnet-5", 2, 8424, 4, 0.021104),
+                ("claude-opus-4-6", 3, 6112, 4, 0.038315),
+                ("claude-opus-5-5", 2, 2018, 4, 0.010178)]
+        for m, inp, w5, out, sdk in live:
+            self.assertAlmostEqual(L.cost_of(self._row(m, inp=inp, w5=w5, out=out), L.DEFAULT_RATES), sdk, places=6)
+
+    def test_dated_and_context_tagged_ids_find_their_card(self):
+        self.assertEqual(L.rate_key("claude-haiku-4-5-20251001", L.DEFAULT_RATES), "claude-haiku-4-5")
+        self.assertEqual(L.rate_key("claude-opus-5-5[1m]", L.DEFAULT_RATES), "claude-opus-5-5")
+        self.assertEqual(L.rate_key("claude-sonnet-5", L.DEFAULT_RATES), "claude-sonnet-5")
+        self.assertIsNone(L.rate_key("claude-opus-9", L.DEFAULT_RATES))
+
+    def test_a_mixed_model_run_is_priced_call_by_call(self):
+        rows = [self._row("claude-opus-5-5", out=1_000_000), self._row("claude-haiku-4-5-20251001", out=1_000_000)]
+        self.assertAlmostEqual(sum(L.cost_of(r, L.DEFAULT_RATES) for r in rows), 20 + 5, places=6)
+        # The old single-card behaviour would have said 25 + 25.
+        self.assertNotAlmostEqual(sum(L.cost_of(r, L.DEFAULT_RATES) for r in rows), 50, places=3)
+
+    def test_opus_5_5_reads_cache_at_five_percent(self):
+        r = L.DEFAULT_RATES["claude-opus-5-5"]
+        self.assertAlmostEqual(r["cache_read"] / r["input"], 0.05, places=9)
+
+    def test_unknown_models_are_reported_not_hidden(self):
+        rows = [self._row("claude-opus-9"), self._row("<synthetic>"), self._row("claude-sonnet-5"), self._row(None)]
+        self.assertEqual(L.unpriced_models(rows, L.DEFAULT_RATES), ["claude-opus-9"])
+
+    def test_a_partial_rates_override_keeps_every_other_card(self):
+        r = L.merge_rates({"claude-sonnet-5": {"output": 12.0}, "_default": {"input": 6.0}})
+        self.assertEqual(r["claude-sonnet-5"]["output"], 12.0)
+        self.assertEqual(r["claude-sonnet-5"]["input"], 2.0)            # rest of the card kept
+        self.assertEqual(r["claude-haiku-4-5"], L.DEFAULT_RATES["claude-haiku-4-5"])
+        self.assertEqual(r["_default"]["input"], 6.0)
+        self.assertEqual(L.DEFAULT_RATES["_default"]["input"], 5.0)    # built-in table untouched
+
+    def test_a_new_model_in_an_override_starts_from_the_default_card(self):
+        r = L.merge_rates({"claude-opus-9": {"input": 7.0}})
+        self.assertEqual(r["claude-opus-9"]["input"], 7.0)
+        self.assertEqual(r["claude-opus-9"]["output"], 25.0)
+
+
+class TestMixedModelBuild(LedgerTestBase):
+    """End to end: a run that used two models, one of them unknown to the table."""
+
+    def test_each_call_priced_by_its_model_and_unknown_model_flagged(self):
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 0),
+            asst_rec(1, "m1", out=1_000_000, model="claude-sonnet-5"),
+            asst_rec(2, "m2", out=1_000_000, model="claude-opus-9"),
+        ])
+        rows, _, agg, meta = self.build()
+        by_model = {r["model"]: r["cost_usd"] for r in rows}
+        self.assertAlmostEqual(by_model["claude-sonnet-5"], 10.0, places=6)
+        self.assertAlmostEqual(by_model["claude-opus-9"], 25.0, places=6)   # default card, but flagged
+        self.assertTrue(any("claude-opus-9" in w for w in meta["warnings"]))
+        self.assertFalse(meta["complete"])
+
+
 class TestOutputCapture(LedgerTestBase):
     """Output (thinking + response) must be recorded, not just the input prompt."""
 
