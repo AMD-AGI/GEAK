@@ -128,7 +128,11 @@ def merge_rates(loaded, base=None):
     rates = {k: dict(v) for k, v in base.items()}
     for k, v in (loaded or {}).items():
         if isinstance(v, dict):
-            rates[k] = dict(rates.get(k, rates["_default"]), **v)
+            # Inherit through the same lookup cost_of uses, so an output-only override for
+            # claude-haiku-4-5-20251001 keeps Haiku's input and cache prices, not _default's.
+            # An exact key still wins, because rate_key tries the id as written first.
+            known = rate_key(k, rates)
+            rates[k] = dict(rates[known] if known else rates["_default"], **v)
     return rates
 
 # Every role prompt in both workflows opens with this exact line (see roleAgent()
