@@ -1490,75 +1490,89 @@ function ablEffortFor(opts, attempt) {
 }
 
 // ---------------------------------------------------------------------------
-// Jev router (OPT-IN). Generalises the B5 static decision above from `effort` into
-// `{effort, model}` by asking Jev (TypeSafe "System One") to classify the task.
+// Eikos router (OPT-IN). Generalises the B5 static decision above from `effort` into
+// `{effort, model}` by asking Eikos -- a local typed-decision model served on this host -- to
+// classify the task. See scripts/eikos_router.py for the model, its limits and its protocol.
 //
-// Three properties, in order of importance -- see research/09_jev_typesafe_routing.md §10-11:
-//   1. OFF BY DEFAULT. Without GEAK_JEV_ROUTER=1 this returns null immediately and the run is
-//      byte-identical to the static path. The helper ALSO refuses without GEAK_JEV_API_KEY, so
-//      setting the flag alone cannot produce a network call.
-//   2. DETERMINISTIC. Workflow scripts replay from a journal, so an unjournaled non-deterministic
-//      input would diverge on resume. The helper memoizes every decision under sha256(request)
-//      in <exp_root>/jev_router_cache.json; a replay reads the recorded answer instead of
-//      re-asking. This is why the call is allowed to exist at this seam at all.
-//   3. NON-FATAL. Every failure path -- timeout, non-zero exit, unparseable stdout, missing
-//      python -- falls through to ablEffortFor. This router can never fail a run.
+//   1. OFF BY DEFAULT. Without GEAK_EIKOS_ROUTER=1 this returns null immediately and the run is
+//      byte-identical to the static path.
+//   2. HOST DECIDES ON ANY FAILURE. The helper answers "no decision" (source "host") whenever it
+//      is disabled, the task is a retry, empty or over its state cap, the server is unreachable,
+//      or the answer is malformed. Only an actual Eikos decision is applied; everything else
+//      falls through to ablEffortFor exactly as if the router did not exist.
+//   3. RECORDED, NOT CERTIFIED. The helper records each outcome in
+//      <exp_root>/eikos_router_cache.json keyed by a digest of the FULL task, so a repeated
+//      request gets the same answer. Whether this runtime re-executes the hook on resume is not
+//      documented, so that is a best-effort record, not a replay guarantee.
 //
-// Cost note: routing does NOT save on cache reads, which are ~90% of input volume and priced
-// identically across tiers. The win here is decision quality on effort/model, not token price.
-const JEV_ROUTER_ON = String(process.env.GEAK_JEV_ROUTER || '0') === '1';
-const JEV_ROUTER_TIMEOUT_MS = Number(process.env.GEAK_JEV_ROUTER_TIMEOUT_MS || '15000');
+// COVERAGE. Only E2E labels the static router already deems cheap-eligible reach this hook --
+// eligibility is deterministic, never a model's opinion. Kernel-lane, nested-workflow and raw
+// agent() calls are not routed here. It also needs require('child_process'), which the native
+// Workflow tool does not provide: there the call throws, is logged, and the host decides.
+const EIKOS_ROUTER_ON = String(process.env.GEAK_EIKOS_ROUTER || '0') === '1';
+const EIKOS_ROUTER_TIMEOUT_MS = Number(process.env.GEAK_EIKOS_ROUTER_TIMEOUT_MS || '15000');
+// <<EIKOS-ROUTER-START>>
 // Only labels the static router already considers cheap-eligible are worth asking about. This
-// keeps the helper off the critical path of every spawn: at ~100-300ms of python process
-// startup per call, consulting it for all ~5k calls of a run would cost 10-25min of pure
-// overhead and swamp the inference it wraps.
-function jevRouteFor(opts, attempt, prompt) {
-  if (!JEV_ROUTER_ON || attempt > 0) return null;
+// keeps the helper off the critical path of every spawn (~100-300 ms of python startup each).
+function eikosRouteFor(opts, attempt, prompt) {
+  if (!EIKOS_ROUTER_ON || attempt > 0) return null;
   const label = String((opts && opts.label) || '');
   if (!ABL_CHEAP_LABELS.test(label)) return null;
   try {
     const { execFileSync } = require('child_process');
+    // The FULL prompt: the helper refuses to judge a task by a prefix and says so.
     const req = JSON.stringify({
       label,
       phase: String((opts && opts.phase) || ''),
       attempt: attempt || 0,
-      task: String(prompt || '').slice(0, 8000),
+      task: String(prompt || ''),
     });
     const out = execFileSync('python3', [
-      '-B', `${WORKFLOW_DIR}/scripts/jev_router.py`,
+      '-B', `${WORKFLOW_DIR}/scripts/eikos_router.py`,
       '--cache-dir', String(A.exp_root || EVAL_DIR || '.'),
-      '--timeout-s', String(Math.max(1, Math.round(JEV_ROUTER_TIMEOUT_MS / 1000))),
+      '--timeout-s', String(Math.max(1, Math.round(EIKOS_ROUTER_TIMEOUT_MS / 1000))),
     ], { input: req, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
-         timeout: JEV_ROUTER_TIMEOUT_MS });
+         timeout: EIKOS_ROUTER_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
     const d = JSON.parse(out);
-    if (!d || typeof d !== 'object') return null;
-    // A decision that changes nothing is not a route; let the static path speak instead.
+    // Anything but a real Eikos decision leaves the host in charge.
+    if (!d || typeof d !== 'object' || d.source !== 'eikos') {
+      if (d && d.reason) log(`  [eikos-router] ${label}: host decides (${d.reason})`);
+      return null;
+    }
     if (!d.model && !d.effort) return null;
     return d;
   } catch (e) {
-    log(`  [jev-router] ${label}: skipped (${(e && e.message) || e})`);
+    log(`  [eikos-router] ${label}: host decides (${(e && e.message) || e})`);
     return null;
   }
 }
 
+// The options this dispatch actually uses: an Eikos decision if there is one, else the host's
+// own B5 static route, else the caller's options untouched.
+function routeOptsFor(opts, attempt, prompt) {
+  const d = eikosRouteFor(opts, attempt, prompt);
+  if (d) {
+    const label = (opts && opts.label) || '';
+    const out = { ...(opts || {}) };
+    if (d.model) out.model = d.model;
+    if (d.effort) out.effort = d.effort;
+    ablEvent({ event: 'route', label, tier: d.tier || null, effort: d.effort || null,
+      model: d.model || null, source: 'eikos', cached: !!d.cached,
+      confidence: d.confidence, escalated: !!d.escalated });
+    return out;
+  }
+  const ablEffort = ablEffortFor(opts, attempt);
+  if (ablEffort) {
+    ablEvent({ event: 'route', label: (opts && opts.label) || '', tier: 'cheap', effort: ablEffort });
+    return { ...(opts || {}), effort: ablEffort };
+  }
+  return opts;
+}
+// <<EIKOS-ROUTER-END>>
+
 function agentBounded(rawPrompt, opts, ablAttempt) {
   const prompt = withProcessSafety(rawPrompt);
-  const jev = jevRouteFor(opts, ablAttempt || 0, prompt);
-  if (jev) {
-    const label = (opts && opts.label) || '';
-    opts = { ...(opts || {}) };
-    if (jev.model) opts.model = jev.model;
-    if (jev.effort) opts.effort = jev.effort;
-    ablEvent({ event: 'route', label, tier: jev.tier || 'cheap', effort: jev.effort || null,
-      model: jev.model || null, source: jev.source || 'jev', cached: !!jev.cached,
-      confidence: jev.confidence, escalated: !!jev.escalated });
-  } else {
-    const ablEffort = ablEffortFor(opts, ablAttempt || 0);
-    if (ablEffort) {
-      opts = { ...(opts || {}), effort: ablEffort };
-      ablEvent({ event: 'route', label: (opts && opts.label) || '', tier: 'cheap', effort: ablEffort });
-    }
-  }
+  opts = routeOptsFor(opts, ablAttempt || 0, prompt);
   const timeoutMs = agentTimeoutFor();
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
