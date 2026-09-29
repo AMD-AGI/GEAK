@@ -18,7 +18,7 @@ const B5 = slice('const ABL_CHEAP_LABELS', 'return ABL_CHEAP_LABELS.test(label) 
 const HOOK = slice('// <<EIKOS-ROUTER-START>>', '// <<EIKOS-ROUTER-END>>');
 
 // helper: what the stubbed eikos_router.py prints, a function of the request, or an Error to throw.
-function load({ on = true, b5 = true, helper = null, noRequire = false } = {}) {
+function load({ on = true, b5 = true, helper = null, noRequire = false, noProcess = false } = {}) {
   const calls = [], events = [], logs = [];
   const req = noRequire
     ? () => { throw new Error('require is not defined'); }
@@ -31,11 +31,13 @@ function load({ on = true, b5 = true, helper = null, noRequire = false } = {}) {
         return typeof out === 'string' ? out : JSON.stringify(out);
       } };
     };
-  const f = new Function('ABL', 'ablEvent', 'log', 'require', 'WORKFLOW_DIR', 'A', 'EVAL_DIR',
-    'EIKOS_ROUTER_ON', 'EIKOS_ROUTER_TIMEOUT_MS',
-    B5 + '\n' + HOOK + '\nreturn { routeOptsFor, eikosRouteFor };');
+  // `process` is injected: on/off comes from the environment the shipped code reads, and
+  // noProcess stands in for the native Workflow tool, where `process` does not exist.
+  const proc = noProcess ? undefined : { env: on ? { GEAK_EIKOS_ROUTER: '1' } : {} };
+  const f = new Function('ABL', 'ablEvent', 'log', 'require', 'WORKFLOW_DIR', 'A', 'EVAL_DIR', 'process',
+    B5 + '\n' + HOOK + '\nreturn { routeOptsFor, eikosRouteFor, EIKOS_ROUTER_ON };');
   const api = f((k) => k === 'B5' && b5, (e) => events.push(e), (m) => logs.push(m), req,
-    '/wf', { exp_root: '/exp' }, '/eval', on, 15000);
+    '/wf', { exp_root: '/exp' }, '/eval', proc);
   return { ...api, calls, events, logs };
 }
 
@@ -79,6 +81,14 @@ for (const [name, helper] of [
     ok(`ON + B5 on + ${name}: B5 static route applies`, o.effort === 'low' && !o.model &&
       h.events.length === 1 && h.events[0].tier === 'cheap' && !h.events[0].source);
   }
+}
+{
+  let h, threw = null;
+  try { h = load({ b5: true, noProcess: true, noRequire: true }); } catch (e) { threw = e; }
+  ok('native Workflow (no process): the hook LOADS without throwing (workflow can start)', !threw);
+  ok('native Workflow (no process): the switch reads as off', h && h.EIKOS_ROUTER_ON === false);
+  ok('native Workflow (no process): B5 still routes, helper never attempted',
+    h && h.routeOptsFor(CHEAP, 0, 't').effort === 'low' && h.calls.length === 0);
 }
 {
   const h = load({ on: true, b5: false, noRequire: true });
