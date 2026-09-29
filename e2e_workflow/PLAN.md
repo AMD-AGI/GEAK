@@ -13,7 +13,7 @@ compatible with single-kernel optimization. Spec: `../instruct_e2e.md`.
    cross-run experience library (`knowledge/backend_playbook.md`).
 3. **Dedicated Kernel Extractor** captures shapes + a reference I/O oracle → an immutable standalone
    unittest task dir (anti-cheating; the kernel layer consumes it unchanged).
-4. **Dedicated Config Tuner**, runs after KernelFusion and the formal post-fusion profile, default ON —
+4. **Dedicated Config Tuner**, runs after Profile, KernelFusion and (if a fusion landed) the post-fusion re-profile, default ON —
    flag/env/source-backend sweep; re-profile after an accepted config change.
 5. **Dedicated e2e Integrator/Validator** does reversible overlay reintegration + the e2e throughput
    gate, on a milestone cadence with a warm server and an Amdahl gate.
@@ -35,7 +35,7 @@ compatible with single-kernel optimization. Spec: `../instruct_e2e.md`.
 | (kernel squad) | — | UNCHANGED `../kernel_workflow/kernel_workflow.js`, called recursively |
 
 ## Pipeline (deterministic, in `e2e_workflow.js`)
-`Setup → KernelFusion → Post-fusion Profile → Strategize → [ConfigSweep → Re-profile → Re-strategize] →
+`Setup → Profile → KernelFusion (reuses the Profile trace) → [re-profile if a fusion landed] → Strategize → [ConfigSweep → Re-profile → Re-strategize] →
 LOOP milestone[ plan → per-kernel(Extract → recursive kernel layer → Overlay+e2e gate) → Re-profile → grow playbook ] →
 Finalize → Report → Validate`.
 

@@ -17,7 +17,7 @@ Architect can tell which regime a kernel serves; optimization may produce regime
 ## Lever tiers (highest ROI first for a fresh model)
 
 ### Tier 0 — Config / backend (Config Tuner, after KernelFusion, no source edits)
-Cheap and often high-impact. In the full workflow KernelFusion runs first and the formal profile
+Cheap and often high-impact. In the full workflow KernelFusion runs right after the formal profile (reusing its trace), the stack is re-profiled when a fusion lands, and that profile
 already reflects accepted fusions; Config Tuner then explores the remaining configuration space on
 that current stack. Knobs:
 - **Attention backend**: `--attention-backend {triton, aiter, ck, fa3, ...}`. Huge for attn-heavy.

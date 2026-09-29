@@ -1,21 +1,31 @@
 # Fusion Trace Collector
 
-You are the trace-capture role owned exclusively by the KernelFusion pre-stage.
-Produce a raw production serving trace and its manifest; do not parse Top-N,
-classify kernels, enrich roofline data, or perform GEAK Profile work.
+You are the trace-capture role owned exclusively by KernelFusion, which runs right
+after the formal Profile. Produce the manifest of a raw production serving trace;
+do not parse Top-N, classify kernels, enrich roofline data, or perform GEAK Profile work.
 
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `ROUND`,
 `CAPTURE_DIR`, `TRACE_MANIFEST_JSON`, `CAPTURE_REPEATS`,
 `CAPTURE_NUM_PROMPTS`, `OVERLAY_PYTHONPATH`, `EXTRA_SERVER_ARGS`,
-`EXTRA_ENV`, optional `TRACELENS_TRACE_FILE`, `EXEC_PREFIX`, and
-`SKILL_DIR`.
+`EXTRA_ENV`, optional `PROFILE_TRACE_DIR`, optional `TRACELENS_TRACE_FILE`,
+`EXEC_PREFIX`, and `SKILL_DIR`.
 
 When `EXEC_PREFIX` is non-empty, run executable commands as
 `<EXEC_PREFIX> <command>`; do not treat it as an environment assignment.
 
+0. **Reuse the formal Profile trace first.** When `PROFILE_TRACE_DIR` is set and
+   holds the Profile's raw traces (captured on this same stack, with
+   `SGLANG_PROFILE_WITH_STACK=true`), build the manifest from it and capture nothing:
+   ```bash
+   python3 "$SKILL_DIR/scripts/trace_capability.py" --trace-dir "$PROFILE_TRACE_DIR" \
+     --auto-select-rank --out "$TRACE_MANIFEST_JSON"
+   ```
+   Accept it only if the manifest has `status == "pass"` and a non-empty
+   `analysis_rank_trace`; then return it with `source: "profile-trace"`. If it fails,
+   say why in `notes` and fall through to step 1.
 1. Reuse `TRACELENS_TRACE_FILE` only when it exists and contains a usable
    top-level serving trace. An analysis Markdown file is not a raw trace.
-2. Otherwise run the existing `EVAL_DIR/bench_e2e.sh` serving capture with
+2. Otherwise (no usable Profile or TraceLens trace) run the existing `EVAL_DIR/bench_e2e.sh` serving capture with
    `OUT_DIR=CAPTURE_DIR`, `REPEATS=CAPTURE_REPEATS`,
    `NUM_PROMPTS=CAPTURE_NUM_PROMPTS`, and `PROFILE=1`, preserving the supplied
    overlay, flags, env, and Fusion-only profiler controls. `CAPTURE_DIR` is the
@@ -46,5 +56,5 @@ Return JSON:
  "trace_dir":"<absolute path>","trace_files":["<rank-sorted raw traces>"],
  "analysis_rank_trace":"<selected production TP Decode trace>",
  "phase_evidence_status":"measured_annotation|unresolved",
- "source":"torch-trace|tracelens-trace","notes":"..."}
+ "source":"profile-trace|torch-trace|tracelens-trace","notes":"..."}
 ```

@@ -4,8 +4,8 @@ export const meta = {
   whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom, default sglang) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the isolated eval dir + records baseline throughput' },
-    { title: 'KernelFusion', detail: 'capture clean baseline trace -> semantics -> discover/rank/validate Top-K -> integrate tier-A/B with reversible A/B gates' },
     { title: 'Profile', detail: 'Profiler captures a warm trace -> standardized Top-N' },
+    { title: 'KernelFusion', detail: 'reuse the Profile trace -> semantics -> discover/rank/validate Top-K -> integrate tier-A/B with reversible A/B gates -> re-profile if a fusion landed' },
     { title: 'Strategize', detail: 'System Architect routes kernels by Amdahl (config vs kernel vs host)' },
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
     { title: 'TuningSkillset', detail: 'Tuning Specialist runs the VENDORED tuning skillset whole + standalone (its own pre/post A/B) BEFORE HeadKernel, so its share of the gain is attributable' },
@@ -109,7 +109,7 @@ if (TL && Object.keys(TL).length) log(`TraceLens prior present: ${Object.keys(TL
 const FUSION_DISCOVERY_ON =
   String(A.fusion_discovery != null ? A.fusion_discovery : 'true') === 'true';
 // An explicitly requested discovery remains visible as a required-phase failure
-// in the disposition, but KernelFusion never prevents the formal Profile and
+// in the disposition, but KernelFusion never prevents Strategize and the
 // later GEAK phases from running. Callers may override this independently with
 // fusion_required=false.
 const FUSION_REQUIRED = String(A.fusion_required != null
@@ -851,7 +851,7 @@ const STRATEGY_SCHEMA = obj({
 // KernelFusion apply-back result. The orchestrator invokes fusion_integrator once
 // per execution-list entry/degrade ladder, then folds each terminal result into this
 // aggregate. Each call gates its selected entry with interleaved serving A/B plus
-// accuracy/engagement checks. The formal Profile + Strategize phases that follow own
+// accuracy/engagement checks. The post-fusion re-profile + Strategize that follow own
 // the post-fusion Top-N and routing.
 // COVERAGE: `accepted_fusions` alone made a 2-of-12 round render as a success. The
 // Top-K execution_list is the denominator now, so the return also carries the rows that
@@ -3273,9 +3273,32 @@ if (want('setup')) {
   curTput = kbSeedTput || BASELINE_TPUT;
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
 
+  phase('Profile');
+  // The semantics sidecar cuts per-layer boundaries from DecoderLayer module spans,
+  // which the sglang profiler only emits with with_stack=true. Turn it on for the
+  // BASELINE capture (only) when semantics mapping is enabled, so the shared clean
+  // trace carries the module hierarchy semantics needs. Reprofiles keep curEnv
+  // (the optimization Top-N does not need stacks, which bloat the trace).
+  const baselineExtraEnv = SEMANTICS_MAPPING_ON
+    ? (curEnv ? curEnv + ' ' : '') + 'SGLANG_PROFILE_WITH_STACK=true'
+    : curEnv;
+  const profileTraceLensInputs = acceptedFusions.length ? {} : TRACELENS_INPUTS;
+  profile = await safeAgent(
+    roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
+      EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
+      OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags,
+      EXTRA_ENV: baselineExtraEnv, SKILL_DIR: WORKFLOW_DIR,
+      ...profileTraceLensInputs, ...ANALYSIS_SKILL_INPUTS,
+    }),
+    { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
+  log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
+
+  const fusionAcceptedAtEntry = acceptedFusions.length;
+
 // ===========================================================================
-// PHASE: KernelFusion. Discovery failures are explicitly non-fatal: the formal
-// post-fusion Profile always runs next and owns the canonical Top-N.
+// PHASE: KernelFusion. Runs right after the formal Profile and reuses its trace
+// (captured on the same stack, with Python stacks). Failures are non-fatal: when a
+// fusion lands the stack is re-profiled, then Strategize routes on that Top-N.
 // ===========================================================================
 // The clean-trace capture (GEAK_FUSION_TRACE, profile_by_stage) and the Semantic
 // shape replay are implemented for sglang only. On any other backend skip the
@@ -3316,9 +3339,15 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
       ? (curEnv ? curEnv + ' ' : '') +
         'GEAK_FUSION_TRACE=1 PROFILE_NUM_STEPS=1 SGLANG_PROFILE_WITH_STACK=true'
       : curEnv;
+    // The formal Profile already captured this stack with Python stacks; the collector
+    // only builds the manifest from it, and captures on its own only as a fallback
+    // (e.g. a TraceLens profile that skipped the raw capture).
+    const profileTraceDir = (profile && (profile.trace_dir ||
+      (profile.trace_manifest_json ? `${EVAL_DIR}/profile/round_0/profile` : ''))) || '';
     fusionCapture = await safeAgent(
       roleAgent('fusion_trace_collector', 'capture',
-        'Capture only the clean production graph trace and manifest for fusion discovery; do not build Top-N.', {
+        'Build the fusion trace manifest from PROFILE_TRACE_DIR when it is usable; capture only as a fallback. Do not build Top-N.', {
+          PROFILE_TRACE_DIR: profileTraceDir,
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: fusionRound,
           CAPTURE_DIR: fusionCaptureDir,
           TRACE_MANIFEST_JSON: expectedFusionManifest,
@@ -3581,7 +3610,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
   }
 
   // Apply-back is best-effort. A discovery/validation failure leaves the inputs
-  // empty and simply falls through to the unconditional formal Profile. Run one
+  // empty and simply falls through to Strategize. Run one
   // execution-list entry (including its degrade ladder) per agent call so a later
   // failure cannot erase terminal results already returned by earlier calls.
   let fapply = null;
@@ -3666,7 +3695,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
         fusionApplyUnprocessed = fusionApplyEntries.slice(applyIndex).map((e) => e.exec_id).filter(Boolean);
         log(`KernelFusion apply-back ${applyEntry.exec_id} failed or returned no terminal result; ` +
             `stopping the remaining ${Math.max(0, fusionApplyUnprocessed.length - 1)} apply-back call(s) ` +
-            'and continuing to formal Profile with earlier terminal wins preserved.');
+            'and continuing to Strategize with earlier terminal wins preserved.');
         break;
       }
 
@@ -3721,12 +3750,11 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
       fusionRecoveryState.applyResult = fapply;
     }
   // KernelFusion is an optional optimization track. If apply-back fails to return a
-  // terminal result, preserve the exact pre-Fusion runtime state and continue with the
-  // formal Profile. Record the failure explicitly so reports do not confuse "Fusion
+  // terminal result, preserve the exact pre-Fusion runtime state and continue with Strategize. Record the failure explicitly so reports do not confuse "Fusion
   // failed" with "Fusion ran and found no win".
   if (!fapply) {
     log('KernelFusion apply-back failed or returned no terminal result; preserving the ' +
-        'pre-Fusion overlay/flags/env/throughput and continuing to formal Profile.');
+        'pre-Fusion overlay/flags/env/throughput and continuing to Strategize.');
     fusionDisposition = {
       applied: [], blocked: [], deferred: [], dispositioned: 0,
       deferred_author_count: 0,
@@ -3734,7 +3762,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
       failed_stage: fusionApplyFailedExec ? `apply_back:${fusionApplyFailedExec}` : 'apply_back',
       unprocessed_exec_ids: fusionApplyUnprocessed,
       notes: 'KernelFusion apply-back failed before producing a terminal result; ' +
-             'the pre-Fusion runtime state was preserved for downstream Profile.',
+             'the pre-Fusion runtime state was preserved for Strategize.',
     };
   }
   const acc = (fapply && Array.isArray(fapply.accepted_fusions)) ? fapply.accepted_fusions : [];
@@ -3784,7 +3812,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
     log(`KernelFusion: no fusion accepted (${fapply ? (fapply.notes || 'none passed the gate') : 'agent null/degraded'}).`);
   }
   } else {
-    log('KernelFusion discovery/validation produced no apply-back-ready Top-K; degrading to formal Profile.');
+    log('KernelFusion discovery/validation produced no apply-back-ready Top-K; continuing to Strategize.');
     if (FUSION_REQUIRED) {
       const requiredFailureStage = (!semantics || semantics.status !== 'pass')
         ? 'semantic'
@@ -3792,7 +3820,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
       const requiredFailure =
         'KernelFusion was explicitly required but produced no apply-back-ready Top-K. ' +
         `Expected deterministic capture manifest: ${EVAL_DIR}/fusion_capture/profile_trace_manifest.json`;
-      log(`ERROR: ${requiredFailure} Recording failure and continuing to formal Profile.`);
+      log(`ERROR: ${requiredFailure} Recording failure and continuing to Strategize.`);
       fusionDisposition = {
         applied: [], blocked: [], deferred: [],
         failed_stage: requiredFailureStage,
@@ -3851,30 +3879,28 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
         `${recoveredApplied.length} earlier terminal win(s) were preserved.`,
     };
     log(`ERROR: KernelFusion ${fusionFailureStage} raised an unexpected exception: ${message}. ` +
-        'Restored the latest terminal Fusion checkpoint and continuing to formal Profile.');
+        'Restored the latest terminal Fusion checkpoint and continuing to Strategize.');
   }
 }
 
+// The Top-N above was taken before KernelFusion. When a fusion landed, re-profile
+// the fused stack so Strategize and every later phase route on what now runs.
+if (acceptedFusions.length > fusionAcceptedAtEntry) {
   phase('Profile');
-  // The semantics sidecar cuts per-layer boundaries from DecoderLayer module spans,
-  // which the sglang profiler only emits with with_stack=true. Turn it on for the
-  // BASELINE capture (only) when semantics mapping is enabled, so the shared clean
-  // trace carries the module hierarchy semantics needs. Reprofiles keep curEnv
-  // (the optimization Top-N does not need stacks, which bloat the trace).
-  const baselineExtraEnv = SEMANTICS_MAPPING_ON
-    ? (curEnv ? curEnv + ' ' : '') + 'SGLANG_PROFILE_WITH_STACK=true'
-    : curEnv;
-  const profileTraceLensInputs = acceptedFusions.length ? {} : TRACELENS_INPUTS;
-  profile = await safeAgent(
-    roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
-      EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
-      OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags,
-      EXTRA_ENV: baselineExtraEnv, SKILL_DIR: WORKFLOW_DIR,
-      ...profileTraceLensInputs, ...ANALYSIS_SKILL_INPUTS,
+  const postFusion = await safeAgent(
+    roleAgent('profiler', 'reprofile', 'Re-profile after KernelFusion accepted fusions.', {
+      EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'fusion',
+      OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv,
+      SKILL_DIR: WORKFLOW_DIR, ...ANALYSIS_SKILL_INPUTS,
     }),
-    { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
-  log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
-
+    { phase: 'Profile', label: 'profiler:post-fusion', schema: PROFILE_SCHEMA });
+  if (postFusion && postFusion.profile_topN_json) {
+    profile = postFusion;
+    log(`Post-fusion profiled. ${(profile.top_kernels || []).length} top kernels.`);
+  } else {
+    log('Post-fusion re-profile failed; Strategize routes on the pre-fusion Top-N.');
+  }
+}
   phase('Strategize');
   strategy = await safeAgent(
     roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {

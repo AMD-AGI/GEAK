@@ -8,6 +8,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
 WORKFLOW = os.path.dirname(SCRIPTS)
+ROLES = os.path.join(WORKFLOW, "roles")
 
 
 class FusionCaptureManifestContractTest(unittest.TestCase):
@@ -64,17 +65,17 @@ class FusionCaptureManifestContractTest(unittest.TestCase):
         )
         required = source.index(
             "KernelFusion was explicitly required but produced no apply-back-ready Top-K")
-        profile = source.index("phase('Profile');", required)
+        profile = source.index("phase('Strategize');", required)
         block = source[required:profile]
         self.assertNotIn("throw new Error", block)
-        self.assertIn("Recording failure and continuing to formal Profile", block)
+        self.assertIn("Recording failure and continuing to Strategize", block)
         self.assertIn("failed_stage: requiredFailureStage", block)
 
     def test_unexpected_fusion_exception_restores_state_and_continues_profile(self):
         source = self._workflow_source()
         start = source.index("const fusionRecoveryState = {")
         caught = source.index("} catch (e) {", start)
-        profile = source.index("phase('Profile');", caught)
+        profile = source.index("phase('Strategize');", caught)
         block = source[caught:profile]
         self.assertIn("curOverlay = fusionRecoveryState.overlay;", block)
         self.assertIn("curFlags = fusionRecoveryState.flags;", block)
@@ -87,7 +88,7 @@ class FusionCaptureManifestContractTest(unittest.TestCase):
         self.assertIn("FUSION_INPUTS = { ...fusionRecoveryState.inputs };", block)
         self.assertIn("status: 'unexpected_exception'", block)
         self.assertIn("failed_stage: fusionFailureStage", block)
-        self.assertIn("continuing to formal Profile", block)
+        self.assertIn("continuing to Strategize", block)
         self.assertLess(caught, profile)
 
     def test_external_fusion_artifacts_cannot_bypass_run_local_discovery(self):
@@ -108,7 +109,27 @@ class FusionCaptureManifestContractTest(unittest.TestCase):
         body = source.index("if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang')")
         self.assertLess(guard, body)
         self.assertIn("status: 'skipped_backend'", source[guard:body])
-        self.assertLess(body, source.index("phase('Profile');"))
+        # KernelFusion now runs after the formal Profile and before Strategize.
+        self.assertLess(source.index("label: 'profiler:baseline'"), guard)
+        self.assertLess(body, source.index("phase('Strategize');"))
+
+    def test_fusion_reuses_the_profile_trace_and_reprofiles_after_a_win(self):
+        source = self._workflow_source()
+        baseline = source.index("label: 'profiler:baseline'")
+        fusion = source.index("phase('KernelFusion');")
+        reprofile = source.index("label: 'profiler:post-fusion'")
+        strategize = source.index("phase('Strategize');")
+        self.assertLess(baseline, fusion)
+        self.assertLess(fusion, reprofile)
+        self.assertLess(reprofile, strategize)
+        capture = source[fusion:source.index("roleAgent('semantics_mapper', 'build_table'", fusion)]
+        self.assertIn("PROFILE_TRACE_DIR: profileTraceDir", capture)
+        gate = source[source.index("const fusionAcceptedAtEntry"):reprofile]
+        self.assertIn("if (acceptedFusions.length > fusionAcceptedAtEntry)", gate)
+        with open(os.path.join(ROLES, "fusion_trace_collector.md")) as fh:
+            role = fh.read()
+        self.assertLess(role.index("PROFILE_TRACE_DIR"), role.index("TRACELENS_TRACE_FILE` only when"))
+        self.assertIn("--auto-select-rank", role)
 
     def test_applyback_cannot_time_out_into_a_stale_profile(self):
         source = self._workflow_source()
@@ -140,7 +161,7 @@ class FusionCaptureManifestContractTest(unittest.TestCase):
             "for (const accepted of newlyAccepted) acceptedFusions.push(accepted);",
             call,
         )
-        profile = source.index("phase('Profile');", commit)
+        profile = source.index("phase('Strategize');", commit)
         self.assertLess(call, commit)
         self.assertLess(commit, profile)
         self.assertIn(
@@ -229,7 +250,7 @@ class FusionCaptureManifestContractTest(unittest.TestCase):
         applyback = source.index("roleAgent('fusion_integrator', 'apply_one'", preserve)
         self.assertLess(aggregate, preserve)
         self.assertLess(preserve, applyback)
-        profile = source.index("phase('Profile');", applyback)
+        profile = source.index("phase('Strategize');", applyback)
         apply_block = source[preserve:profile]
         self.assertIn(
             "FUSION_INPUTS.FUSION_TOPK_JSON && FUSION_INPUTS.FUSION_UNITSIDE_JSON",
@@ -244,7 +265,7 @@ class FusionCaptureManifestContractTest(unittest.TestCase):
         source = self._workflow_source()
         fallback = source.index(
             "KernelFusion apply-back failed or returned no terminal result")
-        profile = source.index("phase('Profile');", fallback)
+        profile = source.index("phase('Strategize');", fallback)
         block = source[fallback:profile]
         self.assertLess(fallback, profile)
         self.assertIn("pre-Fusion overlay/flags/env/throughput", block)
