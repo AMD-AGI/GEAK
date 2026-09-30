@@ -52,7 +52,9 @@ try:
     from e2e_workflow.scripts.adapters.extra_env import parse_unset_envs
     from e2e_workflow.scripts.runtime_csv import verify_runtime_tuning
     from interface.effective_config import (
+        ReferenceLaunchError,
         resolve_effective_config,
+        resolve_reference_launch,
         resolve_remove_args,
         resolve_unset_envs,
     )
@@ -507,6 +509,12 @@ def map_args(
         ps_args["initial_remove_args"] = list(effective.remove_args)
         if effective.unset_envs:
             ps_args["initial_unset_envs"] = list(effective.unset_envs)
+    reference_args = resolve_reference_launch(h, effective)
+    if reference_args is not None:
+        ps_args["reference_server_args"] = reference_args
+        capture = (h.get("measurement_evidence") or h["baseline_env_spec"]["measurement_evidence"])["server_launch_capture"]
+        ps_args["reference_server_env"] = capture["server"]["serving_env"]
+        ps_args["reference_server_semantics"] = capture["server"]["semantic_binding"]
     # Forward the orchestrator's HARD wall-clock budget (the same timeout_s this
     # runner enforces via anyio.fail_after / subprocess timeout) so the JS
     # workflow can self-pace and FINISH (Finalize/Report/Validate + workflow_return
@@ -6967,6 +6975,8 @@ def main(argv: list[str]) -> int:
         return _emit_source_preparation_error(result_path, exc)
     except SchedulingError as exc:
         return _emit_source_preparation_error(result_path, exc, error_class="invalid_schedule")
+    except ReferenceLaunchError as exc:
+        return _emit_source_preparation_error(result_path, exc, error_class="reference_launch_mismatch")
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]
@@ -6977,6 +6987,14 @@ def main(argv: list[str]) -> int:
     # check (_workflow_done_on_disk) and the scrape-independent disk recovery
     # (_discover_eval_dir) target EXACTLY this run's dir, deterministically.
     os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
+    if "reference_server_args" in ps_args:
+        os.environ["GEAK_REFERENCE_SERVER_ARGS"] = ps_args["reference_server_args"]
+        os.environ["GEAK_REFERENCE_SERVER_ENV"] = json.dumps(ps_args["reference_server_env"])
+        os.environ["GEAK_REFERENCE_SERVER_SEMANTICS"] = json.dumps(ps_args["reference_server_semantics"])
+    else:
+        os.environ.pop("GEAK_REFERENCE_SERVER_ARGS", None)
+        os.environ.pop("GEAK_REFERENCE_SERVER_ENV", None)
+        os.environ.pop("GEAK_REFERENCE_SERVER_SEMANTICS", None)
     _publish_protected_pgids()
     bench_client = apply_bench_client(h)
     bench_launcher = apply_bench_launcher(h)

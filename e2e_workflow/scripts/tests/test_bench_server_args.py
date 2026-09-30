@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -27,6 +28,104 @@ pytestmark = pytest.mark.skipif(
     sys.platform != "linux" or BASH is None,
     reason="shell lifecycle verification requires bash and Linux /proc",
 )
+
+REFERENCE_FLAGS = ["--gpu-memory-utilization", "0.9", "--attention-backend", "aiter",
+                   "--speculative-config", '{"method":"real","nested":{"label":"a b"}}',
+                   "--compilation-config", '{"capture_sizes":[1,2,4]}']
+
+REFERENCE_SEMANTICS = {"model": "/cpu-only/model", "tokenizer": "/cpu-only/model",
+                       "served_model_name": "/cpu-only/model", "tp": "1", "dp": "1", "pp": "1",
+                       "seed": None, "nnodes": "1", "node_rank": "0"}
+
+
+@pytest.mark.parametrize("changed", ["model", "tokenizer", "tp", "dp", "pp", "seed", "nnodes", "node_rank"])
+@pytest.mark.parametrize("purpose", ["parity", "search"])
+def test_wrong_launch_semantics_refuse_before_warmup(lifecycle, changed, purpose):
+    expected = dict(REFERENCE_SEMANTICS)
+    expected[changed] = "/different/model" if changed in ("model", "tokenizer") else "7"
+    run = lifecycle(backend="vllm", EXTRA_SERVER_ARGS=shlex.join(REFERENCE_FLAGS),
+                    GEAK_REFERENCE_SERVER_ARGS=shlex.join(REFERENCE_FLAGS),
+                    GEAK_REFERENCE_SERVER_SEMANTICS=json.dumps(expected), MEASUREMENT_PURPOSE=purpose)
+    run.assert_no_measurement()
+    assert run.read("server_args_validation.json")["reason"] == "reference_semantics_mismatch"
+    run.assert_owned_server_stopped()
+
+
+@pytest.mark.parametrize("change", [["--model", "/different/model"], ["--tokenizer", "/different/tokenizer"],
+                                    ["--tensor-parallel-size", "2"], ["--seed", "9"]])
+def test_candidate_cannot_override_reference_identity(lifecycle, change):
+    run = lifecycle(backend="vllm", EXTRA_SERVER_ARGS=shlex.join([*REFERENCE_FLAGS, *change]),
+                    GEAK_REFERENCE_SERVER_ARGS=shlex.join(REFERENCE_FLAGS),
+                    GEAK_REFERENCE_SERVER_SEMANTICS=json.dumps(REFERENCE_SEMANTICS), MEASUREMENT_PURPOSE="search")
+    run.assert_no_measurement()
+    assert run.read("server_args_validation.json")["reason"] == "reference_semantics_mismatch"
+    run.assert_owned_server_stopped()
+
+
+@pytest.mark.parametrize("actual", ["", "VLLM_USE_BREAKABLE_CUDAGRAPH=0"])
+def test_missing_or_changed_serving_export_refuses_before_warmup(lifecycle, actual):
+    run = lifecycle(backend="vllm", EXTRA_SERVER_ARGS=shlex.join(REFERENCE_FLAGS), EXTRA_ENV=actual,
+                    GEAK_REFERENCE_SERVER_ARGS=shlex.join(REFERENCE_FLAGS),
+                    GEAK_REFERENCE_SERVER_ENV='{"VLLM_USE_BREAKABLE_CUDAGRAPH":"1"}', MEASUREMENT_PURPOSE="parity")
+    run.assert_no_measurement()
+    assert run.read("server_args_validation.json")["reason"] == "reference_env_mismatch"
+    run.assert_owned_server_stopped()
+
+
+def test_declared_candidate_environment_change_is_verified(lifecycle):
+    json_setting = '{"label": "two words", "sizes": [1, 2]}'
+    run = lifecycle(backend="vllm", EXTRA_SERVER_ARGS=shlex.join(REFERENCE_FLAGS),
+                    EXTRA_ENV="VLLM_USE_BREAKABLE_CUDAGRAPH=1 VLLM_API_KEY=secret-sentinel VLLM_JSON_CONFIG=" + json_setting,
+                    GEAK_REFERENCE_SERVER_ARGS=shlex.join(REFERENCE_FLAGS),
+                    GEAK_REFERENCE_SERVER_ENV='{"VLLM_USE_BREAKABLE_CUDAGRAPH":"0"}',
+                    GEAK_REFERENCE_SERVER_SEMANTICS=json.dumps(REFERENCE_SEMANTICS), MEASUREMENT_PURPOSE="search")
+    run.assert_measured(verified=True)
+    receipt = run.read("server_args_validation.json")
+    assert receipt["observed_serving_env"]["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "1"
+    assert receipt["observed_serving_env"]["VLLM_JSON_CONFIG"] == json_setting
+    assert "secret-sentinel" not in json.dumps(receipt)
+    run.assert_owned_server_stopped()
+
+
+def test_credential_argument_cannot_enter_strict_launch_receipt(lifecycle):
+    run = lifecycle(backend="vllm", EXTRA_SERVER_ARGS=shlex.join([*REFERENCE_FLAGS, "--api-key", "secret-sentinel"]),
+                    GEAK_REFERENCE_SERVER_ARGS=shlex.join(REFERENCE_FLAGS), MEASUREMENT_PURPOSE="parity")
+    run.assert_no_measurement()
+    assert "secret-sentinel" not in json.dumps(run.read("server_args_validation.json"))
+    run.assert_owned_server_stopped()
+
+
+@pytest.mark.parametrize("missing", ["GEAK_REFERENCE_SERVER_ENV", "GEAK_REFERENCE_SERVER_SEMANTICS"])
+def test_partial_reference_transport_refuses_before_launch(lifecycle, missing):
+    run = lifecycle(backend="vllm", EXTRA_SERVER_ARGS=shlex.join(REFERENCE_FLAGS),
+                    GEAK_REFERENCE_SERVER_ARGS=shlex.join(REFERENCE_FLAGS), omit_reference=(missing,))
+    run.assert_no_measurement()
+    assert run.read("server_start.json")["phase_hint"] == "Incomplete strict reference launch controls"
+    assert not (run.out / "ready.json").exists()
+
+
+@pytest.mark.parametrize("missing", ["--attention-backend", "--speculative-config", "--compilation-config"])
+def test_strict_reference_mismatch_stops_before_warmup(lifecycle, missing):
+    actual = REFERENCE_FLAGS.copy()
+    index = actual.index(missing)
+    del actual[index:index + 2]
+    run = lifecycle(backend="vllm", EXTRA_SERVER_ARGS=shlex.join(actual),
+                    GEAK_REFERENCE_SERVER_ARGS=shlex.join(REFERENCE_FLAGS), MEASUREMENT_PURPOSE="parity")
+    run.assert_no_measurement()
+    assert run.read("server_args_validation.json")["reason"] == "reference_args_mismatch"
+    run.assert_owned_server_stopped()
+
+
+@pytest.mark.parametrize("purpose", ["parity", "search"])
+def test_strict_launch_preserves_json_and_allows_declared_candidate_changes(lifecycle, purpose):
+    actual = REFERENCE_FLAGS.copy()
+    if purpose == "search":
+        actual += ["--max-num-seqs", "128"]
+    run = lifecycle(backend="vllm", EXTRA_SERVER_ARGS=shlex.join(actual),
+                    GEAK_REFERENCE_SERVER_ARGS=shlex.join(REFERENCE_FLAGS), MEASUREMENT_PURPOSE=purpose)
+    argv = run.assert_measured(verified=True)
+    assert argv[-len(actual):] == actual
+    run.assert_owned_server_stopped()
 
 SERVER = """import json, os, signal, time
 from pathlib import Path
@@ -188,7 +287,7 @@ disown
         "SERVER_STARTUP_TIMEOUT_SEC": "1", "SGLANG_SRC_PYTHONPATH": "",
     }
 
-    def run(backend="sglang", launcher="native", prepare=None, scripts_dir=SCRIPTS, **updates):
+    def run(backend="sglang", launcher="native", prepare=None, scripts_dir=SCRIPTS, omit_reference=(), **updates):
         out = tmp_path / f"run-{len(outputs)}"
         out.mkdir()
         if prepare is not None:
@@ -198,6 +297,11 @@ disown
                        OUT_DIR=str(out), STUB_EVENTS=str(out / "events.jsonl"),
                        STUB_READY=str(out / "ready.json"))
         run_env.update(updates)
+        if run_env.get("GEAK_REFERENCE_SERVER_ARGS"):
+            run_env.setdefault("GEAK_REFERENCE_SERVER_ENV", "{}")
+            run_env.setdefault("GEAK_REFERENCE_SERVER_SEMANTICS", json.dumps(REFERENCE_SEMANTICS))
+        for name in omit_reference:
+            run_env.pop(name, None)
         result = subprocess.run([BASH, str(scripts_dir / "bench_e2e.sh")], env=run_env,
                                 cwd=tmp_path, capture_output=True, text=True, timeout=20, check=False)
         return Run(result, out)
@@ -344,10 +448,10 @@ def test_legacy_empty_controls_and_explicit_readdition(lifecycle, backend, launc
 
 
 @pytest.mark.parametrize("backend", ["sglang", "vllm"])
-def test_ambiguous_native_argv_fails_before_measurement(lifecycle, backend):
+def test_quoted_native_argv_reaches_server_without_word_splitting(lifecycle, backend):
     run = lifecycle(backend, GEAK_REMOVE_ARGS='["--disabled"]', EXTRA_SERVER_ARGS="--note 'two words'")
-    run.assert_no_measurement()
-    assert run.read("server_args_validation.json")["status"] == "failed"
+    argv = run.assert_measured(verified=True)
+    assert argv[-2:] == ["--note", "two words"]
     run.assert_owned_server_stopped()
 
 

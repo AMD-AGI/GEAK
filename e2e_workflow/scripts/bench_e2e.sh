@@ -732,7 +732,20 @@ PY
 }
 
 _active_remove_args='[]'
-if [ -n "${GEAK_REMOVE_ARGS:-}" ]; then
+_required_launch_args=()
+if [ -n "${GEAK_REFERENCE_SERVER_ARGS+x}${GEAK_REFERENCE_SERVER_ENV+x}${GEAK_REFERENCE_SERVER_SEMANTICS+x}" ]; then
+  if [ -z "${GEAK_REFERENCE_SERVER_ARGS:-}" ] || [ -z "${GEAK_REFERENCE_SERVER_ENV+x}" ] || [ -z "${GEAK_REFERENCE_SERVER_SEMANTICS:-}" ]; then
+    _server_args_guard_failed "Incomplete strict reference launch controls"
+    exit 2
+  fi
+  if [ "${MEASUREMENT_PURPOSE:-}" = "parity" ]; then
+    _required_launch_args=(--required-args="$GEAK_REFERENCE_SERVER_ARGS" --required-env="$GEAK_REFERENCE_SERVER_ENV")
+  else
+    _required_launch_args=(--required-args="$EXTRA_SERVER_ARGS" --required-env="$EXTRA_ENV")
+  fi
+  _required_launch_args+=(--required-semantics="$GEAK_REFERENCE_SERVER_SEMANTICS")
+fi
+if [ -n "${GEAK_REMOVE_ARGS:-}" ] || [ "${#_required_launch_args[@]}" -gt 0 ]; then
   _server_args_validator="$HERE/adapters/server_args.py"
   if [ ! -f "$_server_args_validator" ]; then
     echo "!!! Stage adapters/server_args.py with bench_e2e.sh to verify GEAK_REMOVE_ARGS." >&2
@@ -740,7 +753,7 @@ if [ -n "${GEAK_REMOVE_ARGS:-}" ]; then
     exit 3
   fi
   if ! _active_remove_args="$(python3 "$_server_args_validator" resolve \
-    --remove-args="$GEAK_REMOVE_ARGS" --current-args="$EXTRA_SERVER_ARGS")"; then
+    --remove-args="${GEAK_REMOVE_ARGS:-[]}" --current-args="$EXTRA_SERVER_ARGS")"; then
     _server_args_guard_failed "Invalid argument-removal controls"
     exit 2
   fi
@@ -803,11 +816,11 @@ if [ "$REUSE_SERVER" != "1" ]; then
     sleep 5
   done
   _waited=$((SECONDS-_t0))
-  if [ "$_up" = "1" ] && [ "$_active_remove_args" != '[]' ]; then
+  if [ "$_up" = "1" ] && { [ "$_active_remove_args" != '[]' ] || [ "${#_required_launch_args[@]}" -gt 0 ]; }; then
     if ! python3 "$_server_args_validator" validate \
       --pid "$SERVER_PID" --start-ticks "$SERVER_START_TICKS" \
       --backend "$BACKEND" --host "$HOST" --port "$PORT" \
-      --remove-args="$GEAK_REMOVE_ARGS" --current-args="$EXTRA_SERVER_ARGS" \
+      --remove-args="${GEAK_REMOVE_ARGS:-[]}" --current-args="$EXTRA_SERVER_ARGS" "${_required_launch_args[@]}" \
       --receipt "$OUT_DIR/server_args_validation.json"; then
       _up=0
       _reason="server_args_unverified"
@@ -844,11 +857,11 @@ if [ "$REUSE_SERVER" != "1" ]; then
   fi
 else
   echo ">>> Reusing warm server at $BASE_URL"
-  if [ "$_active_remove_args" != '[]' ]; then
+  if [ "$_active_remove_args" != '[]' ] || [ "${#_required_launch_args[@]}" -gt 0 ]; then
     if ! python3 "$_server_args_validator" validate-reuse \
       --launch-receipt "${GEAK_SERVER_ARGS_RECEIPT:-$OUT_DIR/server_args_validation.json}" \
       --backend "$BACKEND" --host "$HOST" --port "$PORT" \
-      --remove-args="$GEAK_REMOVE_ARGS" --current-args="$EXTRA_SERVER_ARGS" \
+      --remove-args="${GEAK_REMOVE_ARGS:-[]}" --current-args="$EXTRA_SERVER_ARGS" "${_required_launch_args[@]}" \
       --receipt "$OUT_DIR/server_args_validation.json"; then
       _server_args_guard_failed "Reused server argument proof failed"
       exit 2

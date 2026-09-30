@@ -25,6 +25,19 @@ geak_read_unset_env() {
   geak_read_extra_env "$1" "${2:-}" --unset
 }
 
+geak_read_server_args() {
+  local _geak_args_file _geak_args_rc
+  _geak_args_file="$(mktemp)" || return 1
+  if python3 "$(dirname "$_GEAK_EXTRA_ENV_PARSER")/server_args.py" tokens --current-args="${2:-}" > "$_geak_args_file"; then
+    mapfile -d '' -t "$1" < "$_geak_args_file"
+    _geak_args_rc=$?
+  else
+    _geak_args_rc=$?
+  fi
+  rm -f -- "$_geak_args_file"
+  return "$_geak_args_rc"
+}
+
 geak_env_is_unset() {
   local _geak_name="$1" _geak_operand
   shift

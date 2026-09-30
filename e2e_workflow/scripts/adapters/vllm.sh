@@ -19,6 +19,8 @@ adapter_default_port() { echo 8000; }
 _VLLM_SOURCE_PATHS="$(dirname -- "${BASH_SOURCE[0]}")/../source_paths.sh"
 
 adapter_launch() {
+  local -a _server_args=()
+  geak_read_server_args _server_args "${EXTRA_SERVER_ARGS:-}" || return $?
   local _server_pythonpath="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}"
   local -a _source_env=()
   if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
@@ -99,7 +101,7 @@ PY
       --tensor-parallel-size "$TP" \
       --gpu-memory-utilization "$MEM_FRACTION" \
       "${_prof[@]}" \
-      $EXTRA_SERVER_ARGS \
+      "${_server_args[@]}" \
       > "$LOG" 2>&1 &
   SERVER_PID=$!
 }

@@ -9,6 +9,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
+import shlex
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -171,6 +173,87 @@ def _load_handoff(handoff: Union[Mapping[str, Any], str, Path]) -> dict[str, Any
     return loaded
 
 
+class ReferenceLaunchError(ValueError):
+    """The strict AgentX reference lacks complete accepted launch evidence."""
+
+
+def _capture_is_bound(capture: Mapping[str, Any], server: Mapping[str, Any]) -> bool:
+    measurement = capture.get("measurement")
+    endpoint = server.get("endpoint_identity")
+    argv = server.get("argv")
+    if not isinstance(measurement, Mapping) or not isinstance(argv, list) or not argv:
+        return False
+    if any(not isinstance(token, str) or "\0" in token for token in argv):
+        return False
+    if not isinstance(endpoint, list) or len(endpoint) != 2 or any(type(v) is not int or v <= 1 for v in endpoint):
+        return False
+    for source, keys in ((capture, ("started_ns", "owner_pid", "owner_start_ticks", "recipe_pid", "recipe_start_ticks")),
+                         (server, ("pid", "start_ticks", "log_inode")),
+                         (measurement, ("inode", "mtime_ns", "size"))):
+        if any(type(source.get(k)) is not int or source[k] <= 0 for k in keys):
+            return False
+    return (bool(re.fullmatch(r"[0-9a-f]{32}", str(capture.get("capture_id", ""))))
+            and bool(re.fullmatch(r"[0-9a-f]{64}", str(measurement.get("sha256", ""))))
+            and bool(re.fullmatch(r"sha256:[0-9a-f]{64}", str(capture.get("recipe_digest", ""))))
+            and isinstance(measurement.get("path"), str)
+            and Path(measurement["path"]).parent == Path(str(capture.get("workspace", "")))
+            and Path(measurement["path"]).is_absolute()
+            and measurement["mtime_ns"] >= capture["started_ns"])
+
+
+def resolve_reference_launch(data: Mapping[str, Any], effective: EffectiveConfig | None) -> str | None:
+    spec = data.get("workload_spec") or {}
+    if int(data.get("schema_version", 1)) < 3 or spec.get("kind") != "agentx_trace_replay":
+        return None
+    baseline = data.get("baseline_env_spec") or {}
+    evidence = data.get("measurement_evidence") or baseline.get("measurement_evidence") or {}
+    config = baseline.get("config") or {}
+    capture = evidence.get("server_launch_capture") or {}
+    server = capture.get("server") or {}
+    tokens = evidence.get("observed_server_launch_tokens")
+    if (effective is None or evidence.get("server_launch_argv_complete") is not True
+            or not isinstance(tokens, list) or not tokens
+            or any(not isinstance(token, str) or "\0" in token for token in tokens)
+            or not isinstance(config.get("server_env"), Mapping)
+            or not isinstance(evidence.get("observed_server_env"), Mapping)
+            or config["server_env"] != evidence["observed_server_env"]
+            or server.get("serving_env") != config["server_env"]
+            or server_args.serving_env(config["server_env"]) != config["server_env"]
+            or capture.get("schema") != "hyperloom.serving_launch.v1"
+            or not _capture_is_bound(capture, server)
+            or capture.get("capture_id") != server.get("launch_nonce")
+            or server.get("serving_env_scope") != "serving-knobs-v1"
+            or not all(capture.get(key) for key in ("capture_id", "recipe_digest", "workspace", "measurement", "started_ns"))
+            or not all(server.get(key) for key in ("pid", "start_ticks", "boot_id", "endpoint_identity", "argv", "semantic_binding"))
+            or capture.get("recipe_digest") != evidence.get("recipe_digest")
+            or capture.get("sha256") != hashlib.sha256(json.dumps(
+                {k: v for k, v in capture.items() if k != "sha256"}, sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest()
+            or not data.get("launch_server_script")
+            or data.get("bench_launcher", "auto") not in {"native", "magpie", "auto"}):
+        raise ReferenceLaunchError("AgentX reference requires captured launch tokens, declared serving env and its server recipe")
+    try:
+        semantics = server_args.server_semantics(server["argv"], str(data.get("framework")))
+    except (ValueError, IndexError) as error:
+        raise ReferenceLaunchError("AgentX reference has unsupported captured argv") from error
+    if (semantics != server["semantic_binding"] or semantics["model"] != str(data.get("model_path"))
+            or semantics["tp"] != str(data.get("tp", 1))):
+        raise ReferenceLaunchError("AgentX reference model or topology differs from the captured serving process")
+    expected = _flag_map(shlex.join(tokens))
+    captured_flags = _flag_map(shlex.join(server_args.server_flag_tokens(server["argv"], str(data.get("framework")))))
+    def comparable(flags):
+        return {k: v for k, v in flags.items() if k not in server_args.REFERENCE_LOCAL_FLAGS}
+    if comparable(expected) != comparable(captured_flags):
+        raise ReferenceLaunchError("AgentX projected flags differ from the captured process argv")
+    expected_env = {key: value for key, value in _parse_env(config["server_env"]).items()
+                    if key not in _ALL_RECIPE_ARG_ENVS}
+    if (dict(expected) != dict(_flag_map(config.get("server_launch_flags", "")))
+            or dict(expected) != dict(_flag_map(effective.final_server_args))
+            or dict(effective.final_env) != expected_env):
+        raise ReferenceLaunchError("AgentX accepted launch flags or environment differ from the captured reference")
+    return effective.final_server_args
+
+
 def resolve_effective_config(
     handoff: Union[Mapping[str, Any], str, Path],
 ) -> EffectiveConfig:
@@ -206,7 +289,11 @@ def resolve_effective_config(
         recipe_path = str(
             data.get("launch_recipe") or baseline.get("launch_recipe") or ""
         )
-        raw_recipe_env = _recipe_envs(recipe_path)
+        if (schema_version >= 3 and (data.get("workload_spec") or {}).get("kind") == "agentx_trace_replay"
+                and isinstance(baseline_config.get("server_env"), Mapping)):
+            raw_recipe_env = _parse_env(baseline_config["server_env"])
+        else:
+            raw_recipe_env = _recipe_envs(recipe_path)
         recipe_args = raw_recipe_env.get("EXTRA_SERVER_ARGS", "")
         backend_arg_name = _RECIPE_ARG_ENVS.get(framework)
         if backend_arg_name:

@@ -142,6 +142,41 @@ def resolve_remove_args(specs: Any, *assignments: Any) -> tuple[str, ...]:
 
 
 SCHEMA = "geak.server_args_validation.v1"
+REFERENCE_LOCAL_FLAGS = frozenset({
+    "--model-path", "--model", "--tokenizer", "--tokenizer-path", "--served-model-name",
+    "--host", "--port", "--nccl-port", "--dist-init-addr", "--base-gpu-id", "--gpu-id-step",
+    "--node-rank", "--nnodes", "--tensor-parallel-size", "--tp-size", "--tp",
+    "--data-parallel-size", "--dp-size", "--pipeline-parallel-size", "--pp-size",
+    "--random-seed", "--download-dir", "--pid", "--profiler-config",
+    "--enable-profile-cuda-graph", "--enable-shape-discovery-for-cuda-graph-profile",
+    "--enable-profile", "--enable-torch-compile-debug-mode", "--debug-cuda-graph",
+})
+SEMANTIC_FLAGS = {
+    "--model": "model", "--model-path": "model", "--tokenizer": "tokenizer", "--tokenizer-path": "tokenizer",
+    "--served-model-name": "served_model_name", "--tensor-parallel-size": "tp", "--tp-size": "tp", "--tp": "tp",
+    "--data-parallel-size": "dp", "--dp-size": "dp", "--pipeline-parallel-size": "pp", "--pp-size": "pp",
+    "--random-seed": "seed", "--seed": "seed", "--nnodes": "nnodes", "--node-rank": "node_rank",
+}
+CREDENTIAL_FLAGS = frozenset({"--api-key", "--api_key", "--auth-token", "--password", "--hf-token"})
+
+
+def serving_env(values: dict[str, str]) -> dict[str, str]:
+    prefixes = ("VLLM_", "SGLANG_", "AITER_", "TORCH_", "TORCHINDUCTOR_", "TORCHDYNAMO_", "PYTORCH_", "TRITON_", "NCCL_", "OMP_", "KMP_", "MIOPEN_", "ROCM_", "MORI_", "RCCL_", "HSA_", "HIP_")
+    exact = {"OMP_NUM_THREADS", "OMP_PROC_BIND", "OMP_PLACES", "MKL_NUM_THREADS", "PYTHONNOUSERSITE", "PYTHONUNBUFFERED", "TOKENIZERS_PARALLELISM"}
+    return {k: v for k, v in sorted(values.items()) if (k.startswith(prefixes) or k in exact)
+            and not re.search(r"API_?KEY|AUTH|HEADERS|SECRET|PASSWORD|CREDENTIAL|TOKEN(?!IZER)", k)
+            and not k.endswith(("PATH", "_DIR", "_FILE", "_PORT", "_URL", "_ENDPOINT", "_ROOT", "_HOME", "_VISIBLE_DEVICES"))
+            and not any(word in k for word in ("PROFILER", "PROFILE", "TRACE", "DUMP"))}
+
+
+def _env_map(value: str) -> dict[str, str]:
+    if value.lstrip().startswith('{'):
+        env = json.loads(value)
+    else:
+        env = dict(token.split('=', 1) for token in _extra_env._shell_tokens(value, canonicalize_json=False))
+    if not isinstance(env, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in env.items()):
+        raise ValueError("required serving environment must contain string assignments")
+    return serving_env(env)
 
 
 class VerificationError(ValueError):
@@ -166,7 +201,8 @@ def _source_hashes() -> dict[str, str]:
 
 
 def _prepare(backend: str, port: Any, remove_args: Any, current_args: str,
-             host: str) -> dict[str, Any]:
+             host: str, required_args: str | None = None, required_env: str | None = None,
+             required_semantics: str | None = None) -> dict[str, Any]:
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA,
         "status": "failed",
@@ -174,23 +210,37 @@ def _prepare(backend: str, port: Any, remove_args: Any, current_args: str,
         "backend": str(backend).lower(),
         "port": str(port),
         "host": host,
-        "current_args": current_args,
         "source_hashes": _source_hashes(),
         "validated_at_unix": time.time(),
     }
     try:
+        if required_args is not None and any(token.split("=", 1)[0] in CREDENTIAL_FLAGS
+                                             for text in (current_args, required_args)
+                                             for token in _shell_tokens(text)):
+            raise ValueError("credential-bearing argv cannot be recorded as serving evidence")
+        receipt["current_args"] = current_args
         requested = resolve_remove_args(remove_args)
         receipt["requested_remove_args"] = list(requested)
         # Preserve legacy launches with no controls, including older flag syntax.
-        if not requested:
+        if not requested and required_args is None and required_env is None and required_semantics is None:
             receipt.update(status="not_required", reason="no_active_removals", active_remove_args=[])
             return receipt
         active = resolve_remove_args(requested, current_args)
         current_flags = _render_flags(_flag_map(current_args).values())
         receipt.update(active_remove_args=list(active), current_flags=current_flags)
-        if not active:
+        if not active and required_args is None and required_env is None and required_semantics is None:
             receipt.update(status="not_required", reason="explicit_assignments_reenabled_flags")
             return receipt
+        if required_args is not None:
+            required = _flag_map(required_args)
+            if not required:
+                raise ValueError("strict launch requires complete nonempty accepted server flags")
+            receipt["required_args"] = _render_flags(required.values())
+        if required_env is not None:
+            receipt["required_env"] = _env_map(required_env)
+        if required_semantics is not None:
+            semantic = json.loads(required_semantics)
+            receipt["required_semantics"] = semantic
         # A local PID cannot attest a remote endpoint even when ports match.
         # No hostname lookup or DNS-based inference belongs in this proof.
         if host.lower() == "localhost":
@@ -211,7 +261,7 @@ def _prepare(backend: str, port: Any, remove_args: Any, current_args: str,
             key: receipt[key] for key in (
                 "backend", "host", "port", "requested_remove_args", "active_remove_args", "current_flags"
             )
-        })
+        } | {key: receipt[key] for key in ("required_args", "required_env", "required_semantics") if key in receipt})
     except (TypeError, ValueError) as error:
         receipt["detail"] = str(error)
     return receipt
@@ -260,6 +310,23 @@ def server_flag_tokens(argv: list[str], backend: str) -> list[str]:
     return argv[index:]
 
 
+def server_semantics(argv: list[str], backend: str) -> dict[str, str | None]:
+    flags = _flag_map(shlex.join(server_flag_tokens(argv, backend)))
+    out = {"model": None, "tokenizer": None, "served_model_name": None, "tp": "1", "dp": "1", "pp": "1", "seed": None, "nnodes": "1", "node_rank": "0"}
+    if backend == "vllm":
+        index = 0 if Path(argv[0]).name == "vllm" else _python_prefix(argv)
+        if (index < len(argv) and Path(argv[index]).name == "vllm"
+                and argv[index + 1:index + 2] == ["serve"]
+                and index + 2 < len(argv) and not _looks_like_flag(argv[index + 2])):
+            out["model"] = argv[index + 2]
+    out.update({SEMANTIC_FLAGS[k]: flag.value for k, flag in flags.items() if k in SEMANTIC_FLAGS})
+    if not out["model"]:
+        raise ValueError("server argv does not identify a model")
+    out["tokenizer"] = out["tokenizer"] or out["model"]
+    out["served_model_name"] = out["served_model_name"] or out["model"]
+    return out
+
+
 def _start_ticks(proc_root: Path, pid: int) -> str:
     text = (proc_root / str(pid) / "stat").read_text()
     # comm can contain spaces and ')'; fields after its final ') ' begin at state.
@@ -296,10 +363,32 @@ def _observe(receipt: dict[str, Any], pid: Any, expected_ticks: Any, proc_root: 
     if not raw or not raw.endswith(b"\0"):
         raise VerificationError("unverified_process", "server argv is empty or not NUL-delimited")
     argv = [token.decode("utf-8", "strict") for token in raw[:-1].split(b"\0")]
+    if "required_args" in receipt and any(
+            token.split("=", 1)[0] in CREDENTIAL_FLAGS
+            for token in argv):
+        raise VerificationError("unsupported_argv", "credential-bearing argv cannot be recorded as serving evidence")
     after = _start_ticks(proc_root, pid)
     if before != after:
         raise VerificationError("process_identity_mismatch", "server identity changed while reading argv")
     receipt.update(argv=argv, argv_digest=_digest(argv), observed_start_ticks=after, process_uid=uid)
+    if "required_semantics" in receipt:
+        observed_semantics = server_semantics(argv, receipt["backend"])
+        receipt["observed_semantics"] = observed_semantics
+        if observed_semantics != receipt["required_semantics"]:
+            raise VerificationError("reference_semantics_mismatch", "live model, tokenizer, topology or seed differs from the intended launch")
+    if "required_env" in receipt:
+        env = {}
+        for entry in (proc_root / str(pid) / "environ").read_bytes().split(b"\0"):
+            key, equal, value = entry.partition(b"=")
+            if equal:
+                name = key.decode("utf-8")
+                if serving_env({name: ""}):
+                    env[name] = value.decode("utf-8")
+        receipt["observed_serving_env"] = env
+        if env != receipt["required_env"]:
+            receipt["different_env_keys"] = sorted(k for k in env.keys() | receipt["required_env"].keys()
+                                                  if env.get(k) != receipt["required_env"].get(k))
+            raise VerificationError("reference_env_mismatch", "live serving environment differs from the intended launch")
     tokens = server_flag_tokens(argv, receipt["backend"])
     if "--" in tokens:
         raise VerificationError("unsupported_argv", "server argv contains an ambiguous option terminator")
@@ -331,6 +420,14 @@ def _observe(receipt: dict[str, Any], pid: Any, expected_ticks: Any, proc_root: 
     if violations:
         receipt["violations"] = violations
         raise VerificationError("removal_mismatch", "removed flags remain effective in the launched server argv")
+    if "required_args" in receipt:
+        required = {k: v for k, v in _flag_map(receipt["required_args"]).items() if k not in REFERENCE_LOCAL_FLAGS}
+        actual = {k: v for k, v in flags.items() if k not in REFERENCE_LOCAL_FLAGS}
+        if actual != required:
+            receipt["missing_flags"] = sorted(set(required) - set(actual))
+            receipt["unexpected_flags"] = sorted(set(actual) - set(required))
+            receipt["different_flags"] = sorted(k for k in required.keys() & actual.keys() if required[k] != actual[k])
+            raise VerificationError("reference_args_mismatch", "live serving flags differ from the complete intended launch")
     # Do not accept a process that exited or was recycled during interpretation.
     if _start_ticks(proc_root, pid) != after:
         raise VerificationError("process_identity_mismatch", "server identity changed during validation")
@@ -339,9 +436,11 @@ def _observe(receipt: dict[str, Any], pid: Any, expected_ticks: Any, proc_root: 
 
 def validate_launch(*, pid: Any, start_ticks: Any, backend: str, port: Any,
                     remove_args: Any, current_args: str = "", host: str = "127.0.0.1",
+                    required_args: str | None = None,
+                    required_env: str | None = None, required_semantics: str | None = None,
                     proc_root: Path = Path("/proc")) -> dict[str, Any]:
     """Observe an owned launch and return a structured, source-bound result."""
-    receipt = _prepare(backend, port, remove_args, current_args, host)
+    receipt = _prepare(backend, port, remove_args, current_args, host, required_args, required_env, required_semantics)
     receipt["validation_kind"] = "launch"
     if receipt["status"] == "not_required" or "detail" in receipt:
         return receipt
@@ -356,9 +455,11 @@ def validate_launch(*, pid: Any, start_ticks: Any, backend: str, port: Any,
 
 def validate_reuse(*, launch_receipt: Any, backend: str, port: Any, remove_args: Any,
                    current_args: str = "", host: str = "127.0.0.1",
+                   required_args: str | None = None,
+                   required_env: str | None = None, required_semantics: str | None = None,
                    proc_root: Path = Path("/proc")) -> dict[str, Any]:
     """Require matching previous proof and re-observe its still-live process."""
-    receipt = _prepare(backend, port, remove_args, current_args, host)
+    receipt = _prepare(backend, port, remove_args, current_args, host, required_args, required_env, required_semantics)
     receipt["validation_kind"] = "reuse"
     if receipt["status"] == "not_required" or "detail" in receipt:
         return receipt
@@ -401,12 +502,15 @@ def _write_receipt(path: str, receipt: dict[str, Any]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("resolve", "validate", "validate-reuse"):
+    for name in ("resolve", "tokens", "validate", "validate-reuse"):
         command = commands.add_parser(name)
         command.add_argument("--remove-args", default="[]")
         command.add_argument("--current-args", default="")
-        if name == "resolve":
+        if name in ("resolve", "tokens"):
             continue
+        command.add_argument("--required-args", default=None)
+        command.add_argument("--required-env", default=None)
+        command.add_argument("--required-semantics", default=None)
         command.add_argument("--backend", required=True)
         command.add_argument("--host", default="127.0.0.1", help="Loopback benchmark host; remote attestation is unsupported")
         command.add_argument("--port", required=True)
@@ -417,6 +521,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             command.add_argument("--launch-receipt", default="", help="Prior verified launch receipt")
     args = parser.parse_args(argv)
+    if args.command == "tokens":
+        try:
+            tokens = _extra_env._shell_tokens(args.current_args, canonicalize_json=False)
+            if any("\0" in token for token in tokens):
+                raise ValueError("server arguments cannot contain NUL")
+        except (TypeError, ValueError) as error:
+            print(f"invalid server arguments: {error}", file=sys.stderr)
+            return 2
+        for token in tokens:
+            sys.stdout.buffer.write(token.encode() + b"\0")
+        return 0
     if args.command == "resolve":
         try:
             requested = resolve_remove_args(json.loads(args.remove_args))
@@ -432,7 +547,9 @@ def main(argv: list[str] | None = None) -> int:
         result = {"schema_version": SCHEMA, "status": "failed", "reason": "invalid_controls", "detail": str(error)}
     else:
         kwargs = {"backend": args.backend, "host": args.host, "port": args.port,
-                      "remove_args": removals, "current_args": args.current_args}
+                      "remove_args": removals, "current_args": args.current_args,
+                      "required_args": args.required_args, "required_env": args.required_env,
+                      "required_semantics": args.required_semantics}
         if args.command == "validate":
             result = validate_launch(pid=args.pid, start_ticks=args.start_ticks, **kwargs)
         else:

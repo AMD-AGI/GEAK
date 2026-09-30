@@ -345,3 +345,40 @@ agents run inherits them.
 
 - [API reference](./api-reference.md): Workflow arguments and run artifacts.
 - [Run a workflow](../how-to/run-agent.md): natural-language invocation.
+
+## Strict AgentX serving references
+
+Schema-3 AgentX handoffs require a process-bound accepted launch receipt before
+the normal interface prepares a workflow. `measurement_evidence` includes the
+`hyperloom.serving_launch.v1` receipt, captured tokens, completeness marker, and
+observed serving environment. The receipt binds a fresh nonce observed in the
+server environment, owned PID/start time and endpoint, config digest, workspace,
+and measurement artifact. Missing or partial evidence returns
+`reference_launch_mismatch`. YAML declarations and nearby command files cannot
+substitute for the observed launch.
+
+The captured environment uses `serving-knobs-v1`: stable backend, AITER, compiler,
+communication, and selected Python/threading knobs. It excludes credentials,
+control-plane variables, local paths, GPU selection, and profiling controls.
+`baseline_env_spec.config.server_env` must match this observation, including
+model-script exports that override YAML values. Source snapshots and candidate
+overlays continue through their existing contract.
+
+Native vLLM/SGLang adapters decode argument strings into literal argv arrays.
+Nested JSON, whitespace, and shell metacharacters remain in their tokens; no
+`eval` or shell word expansion interprets them. The existing explicit launcher
+selection remains available.
+
+Before any client warmup or measured round, the live-process validator checks
+serving arguments, the scoped environment, model/tokenizer/served-name binding,
+TP/DP/PP, node topology, and seed. Local host/port/device and profiling projection
+does not bypass these semantic checks. Parity binds the accepted reference;
+candidate purposes verify the declared current engine arguments and environment.
+The captured model, tokenizer, topology, and seed remain binding in every purpose. Existing PID/start/port ownership and
+removal checks still apply.
+
+The paired Hyperloom producer currently captures local Linux full-lifecycle
+vLLM `/agentic/` recipes. Other launch paths and historical runs without that
+receipt are unavailable as strict references. Admission outside schema-3 AgentX
+retains its prior behavior. Benchmark durations, warmup counts, quality rules,
+and measurement protocol are unchanged.

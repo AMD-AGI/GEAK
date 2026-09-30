@@ -17,6 +17,8 @@ _SGL_PP="${SGLANG_SRC_PYTHONPATH-/sgl-workspace/sglang/python}"; [ -d "$_SGL_PP"
 _SGL_SOURCE_PATHS="$(dirname -- "${BASH_SOURCE[0]}")/../source_paths.sh"
 
 adapter_launch() {
+  local -a _server_args=()
+  geak_read_server_args _server_args "${EXTRA_SERVER_ARGS:-}" || return $?
   local _server_pythonpath="${_SGL_PP:+$_SGL_PP:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}"
   local -a _source_env=()
   if [ -n "${GEAK_SOURCE_REQUEST:-}" ]; then
@@ -66,7 +68,7 @@ adapter_launch() {
       --tp-size "$TP" \
       --mem-fraction-static "$MEM_FRACTION" \
       $_wd \
-      $EXTRA_SERVER_ARGS \
+      "${_server_args[@]}" \
       > "$LOG" 2>&1 &
   SERVER_PID=$!
 }
