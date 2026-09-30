@@ -138,6 +138,14 @@ export function createRuntime({
     const label = agentOpts.label || 'agent';
     const ph = agentOpts.phase || currentPhase;
     const schema = agentOpts.schema;
+    // An explicit workflow budget may be shorter than this runtime's generous
+    // global backstop. Queueing and schema retries share that one deadline.
+    const requestedTimeout = agentOpts.timeout_ms != null ? Number(agentOpts.timeout_ms) : null;
+    if (requestedTimeout != null && (!Number.isSafeInteger(requestedTimeout) || requestedTimeout <= 0)) {
+      throw new Error('agent timeout_ms must be a positive integer');
+    }
+    const deadline = requestedTimeout == null ? null : Date.now() +
+      Math.min(requestedTimeout, agentTimeoutMs > 0 ? agentTimeoutMs : Infinity);
 
     if (++state.spawned > MAX_TOTAL_AGENTS) {
       throw new Error(`agent cap ${MAX_TOTAL_AGENTS} exceeded (runaway-loop backstop)`);
@@ -155,13 +163,15 @@ export function createRuntime({
       let lastErr;
       const attempts = schema ? SCHEMA_RETRIES + 1 : 1;
       for (let i = 0; i < attempts; i++) {
+        const timeoutMs = deadline == null ? agentTimeoutMs : deadline - Date.now();
+        if (deadline != null && timeoutMs <= 0) throw new Error(`[${label}] workflow agent deadline exhausted`);
         const { text } = await backend.runAgent({
           prompt: fullPrompt,
           label,
           cwd: agentOpts.cwd,
           env: agentOpts.env,
           model: agentOpts.model,
-          timeoutMs: agentTimeoutMs,
+          timeoutMs,
         });
         if (!schema) return text;
         try {

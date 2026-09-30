@@ -648,21 +648,47 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// An e2e caller with an explicit final reserve supplies only the optimization
+// time still available. Bound every phase and retry in this lane, not just the
+// optimization-round loop. No option means the historical lane is unchanged.
+const LANE_TIME_BUDGET_MS = A.time_budget_ms != null ? Number(A.time_budget_ms) : null;
+if (LANE_TIME_BUDGET_MS != null && (!Number.isSafeInteger(LANE_TIME_BUDGET_MS) || LANE_TIME_BUDGET_MS < 0)) {
+  throw new Error('time_budget_ms must be a nonnegative integer');
+}
+let LANE_ELAPSED_MS = 0;
+const LANE_CLOCK_STEP_MS = Math.max(60000, Math.ceil((LANE_TIME_BUDGET_MS || 0) / 2048));
+if (LANE_TIME_BUDGET_MS != null && typeof setTimeout === 'function') {
+  const step = LANE_CLOCK_STEP_MS;
+  for (let at = Math.min(step, LANE_TIME_BUDGET_MS); at <= LANE_TIME_BUDGET_MS; at += step) {
+    const mark = at;
+    const timer = setTimeout(() => { LANE_ELAPSED_MS = Math.max(LANE_ELAPSED_MS, mark); }, at);
+    if (timer && timer.unref) timer.unref();
+  }
+  const timer = setTimeout(() => { LANE_ELAPSED_MS = LANE_TIME_BUDGET_MS; }, LANE_TIME_BUDGET_MS);
+  if (timer && timer.unref) timer.unref();
+}
+const laneAgentTimeout = () => LANE_TIME_BUDGET_MS == null ? AGENT_TIMEOUT_MS
+  : Math.max(0, Math.min(AGENT_TIMEOUT_MS > 0 ? AGENT_TIMEOUT_MS : Infinity,
+    LANE_TIME_BUDGET_MS - LANE_ELAPSED_MS - LANE_CLOCK_STEP_MS));
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return await agent(p, o);
+      const timeoutMs = laneAgentTimeout();
+      if (LANE_TIME_BUDGET_MS != null && timeoutMs <= 0) return null;
+      const boundedOpts = LANE_TIME_BUDGET_MS != null
+        ? { ...o, timeout_ms: Math.max(1, timeoutMs - 1000) } : o;
+      if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return await agent(p, boundedOpts);
       let to;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
-          log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
+          log(`  [hung-agent guard] ${label} exceeded ${Math.round(timeoutMs / 60000)}min with no return — resolving null so the round proceeds.`);
           resolve(null);
-        }, AGENT_TIMEOUT_MS);
+        }, timeoutMs);
       });
       // A timeout resolves null (returned as-is, no retry). An API/agent error rejects -> caught below.
       return await Promise.race([
-        agent(p, o).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+        agent(p, boundedOpts).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
         guard,
       ]);
     } catch (e) {

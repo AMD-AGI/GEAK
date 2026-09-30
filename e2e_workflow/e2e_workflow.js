@@ -52,6 +52,11 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 const laneArgs = (wfArgs) => ({
   use_learned_kb: LANE_USE_LEARNED_KB, ...wfArgs,
   ...(BASELINE_SOURCE_REQUEST ? { baseline_source_request_path: BASELINE_SOURCE_REQUEST } : {}),
+  // Pass the remaining optimization window into the lane's own agent guards;
+  // a parent-only Promise.race would leave the nested optimizer running.
+  ...(TIME_BUDGET_MS != null && EXPLICIT_FINAL_RESERVE_MS != null
+    ? { time_budget_ms: Math.max(0, remainingMs() - FINAL_RESERVE_MS - CLOCK_TICK_MS),
+        agent_timeout_ms: AGENT_TIMEOUT_MS } : {}),
 });
 
 // EXP_ROOT = where timestamped run dirs go. Default: sibling "exp/" next to this workflow dir.
@@ -146,12 +151,20 @@ const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remai
 // report (Hyperloom #1202). 60min covers all but the tail of 85 historical final phases (p50 40 / p75 50
 // / p90 77 / max 86min), and the tail is the case this exists for: big models spend the final phase
 // waiting on server boots. A longer tail still ships the reports (Report writes them before Validate; only
-// the re-measure is at risk and run_e2e falls back). The 20% cap binds below a 5h budget.
+// the re-measure is at risk and run_e2e falls back). The default's 20% cap binds below 5h.
+// An explicit reserve is an operator requirement, not a hint: full AgentX validation alone
+// takes four hour-long passes. Honor it in full without extending the external budget.
 // Env override: GEAK_FINAL_RESERVE_S.
 const FINAL_RESERVE_CAP_FRAC = 0.2;
+const EXPLICIT_FINAL_RESERVE_MS = A.final_reserve_s != null ? Number(A.final_reserve_s) * 1000 : null;
+if (EXPLICIT_FINAL_RESERVE_MS != null &&
+    (!Number.isSafeInteger(EXPLICIT_FINAL_RESERVE_MS) || EXPLICIT_FINAL_RESERVE_MS <= 0 ||
+     (TIME_BUDGET_MS != null && EXPLICIT_FINAL_RESERVE_MS >= TIME_BUDGET_MS))) {
+  throw new Error('final_reserve_s must be positive and smaller than the actual time_budget_s');
+}
 const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
-  ? Math.min(parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
-             Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC))
+  ? (EXPLICIT_FINAL_RESERVE_MS != null ? EXPLICIT_FINAL_RESERVE_MS
+     : Math.min(3600000, Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC)))
   : null;
 // Effective budget = budget minus the reserve: one definition of time available to optimize.
 const TIME_BUDGET_EFFECTIVE_MS = TIME_BUDGET_MS != null
@@ -163,8 +176,16 @@ const TIME_BUDGET_EFFECTIVE_MS = TIME_BUDGET_MS != null
 const TIME_TAIL_CAP_MS = parseInt(A.time_tail_cap_s != null ? A.time_tail_cap_s : 10800, 10) * 1000; // 3h
 // Point after which no mode starts new head/milestone/wave work. Defined here (not at the deadline timer)
 // because deep mode references it far earlier; TIME_DEADLINE_HIT is armed on it below.
-const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
+const DEFAULT_TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
   ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
+const EXPLICIT_SEARCH_DEADLINE_MS = A.search_deadline_s != null ? Number(A.search_deadline_s) * 1000 : null;
+if (EXPLICIT_SEARCH_DEADLINE_MS != null &&
+    (!Number.isSafeInteger(EXPLICIT_SEARCH_DEADLINE_MS) || EXPLICIT_SEARCH_DEADLINE_MS <= 0 ||
+     TIME_BUDGET_EFFECTIVE_MS == null || EXPLICIT_SEARCH_DEADLINE_MS > TIME_BUDGET_EFFECTIVE_MS)) {
+  throw new Error('search_deadline_s must be positive and no later than the final reserve boundary');
+}
+const TIME_HEAD_DEADLINE_MS = EXPLICIT_SEARCH_DEADLINE_MS != null
+  ? EXPLICIT_SEARCH_DEADLINE_MS : DEFAULT_TIME_HEAD_DEADLINE_MS;
 // ---- FAST MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A time-boxed run that takes ALL its optimization from the HeadKernel track: it SKIPS ConfigSweep AND
 // the editable-kernel Milestone loop, and completes within a wall-clock budget (default 5h). It exists
@@ -185,8 +206,10 @@ if (TIME_BUDGET_EFFECTIVE_MS != null) FAST_BUDGET_MS = TIME_BUDGET_EFFECTIVE_MS;
 // Stop STARTING new head ops after this point so the in-flight head + Finalize/Report/Validate still land
 // inside FAST_BUDGET_MS. Default 60% of the budget (3h at 5h) leaves ~40% for the last head to finish +
 // the deliverable/validation tail.
-const FAST_HEAD_DEADLINE_MS = parseInt(A.fast_head_deadline_ms != null ? A.fast_head_deadline_ms
+const REQUESTED_FAST_HEAD_DEADLINE_MS = parseInt(A.fast_head_deadline_ms != null ? A.fast_head_deadline_ms
   : Math.max(Math.floor(FAST_BUDGET_MS * 0.6), FAST_BUDGET_MS - TIME_TAIL_CAP_MS), 10);
+const FAST_HEAD_DEADLINE_MS = EXPLICIT_SEARCH_DEADLINE_MS != null
+  ? Math.min(REQUESTED_FAST_HEAD_DEADLINE_MS, TIME_HEAD_DEADLINE_MS) : REQUESTED_FAST_HEAD_DEADLINE_MS;
 // Per-head nested author/optimize workflow() bound (fast mode only): a single recursive kernel run can't
 // eat the whole budget. Default 90min. (Heads run in PARALLEL on exclusive GPU lanes, so this is a
 // per-lane wall-clock cap, not summed — 90min/lane + serial integrate + Finalize still lands inside the 5h
@@ -1251,6 +1274,10 @@ function withProcessSafety(prompt) {
 let FINAL_PHASE_STARTED = false;
 const FINALIZE_GATE_PHASE = 'Finalize-gate';   // display grouping only — not load-bearing for the cap
 function agentTimeoutFor() {
+  if (TIME_BUDGET_MS != null && EXPLICIT_FINAL_RESERVE_MS != null) {
+    return Math.max(0, Math.min(AGENT_TIMEOUT_MS,
+      remainingMs() - (FINAL_PHASE_STARTED ? 0 : FINAL_RESERVE_MS) - CLOCK_TICK_MS));
+  }
   if (TIME_BUDGET_MS == null || FINAL_PHASE_STARTED) return AGENT_TIMEOUT_MS;
   return Math.max(120000, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
 }
@@ -1258,6 +1285,11 @@ function agentTimeoutFor() {
 function agentBounded(rawPrompt, opts) {
   const prompt = withProcessSafety(rawPrompt);
   const timeoutMs = agentTimeoutFor();
+  if (TIME_BUDGET_MS != null && EXPLICIT_FINAL_RESERVE_MS != null && timeoutMs <= 0) {
+    return Promise.resolve(null);  // an exhausted budget must not start another agent
+  }
+  const boundedOpts = TIME_BUDGET_MS != null && EXPLICIT_FINAL_RESERVE_MS != null
+    ? { ...opts, timeout_ms: Math.max(1, timeoutMs - 1000) } : opts;
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
   const guard = new Promise((resolve) => {
@@ -1267,7 +1299,7 @@ function agentBounded(rawPrompt, opts) {
     }, timeoutMs);
   });
   return Promise.race([
-    agent(prompt, opts).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+    agent(prompt, boundedOpts).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
     guard,
   ]);
 }

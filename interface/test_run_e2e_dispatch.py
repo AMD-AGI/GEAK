@@ -57,6 +57,10 @@ import types
 import unittest
 from pathlib import Path
 
+import pytest
+
+from interface.scheduling import LIMITS as _SCHEDULING_LIMITS, SWITCHES as _SCHEDULING_SWITCHES, SchedulingError
+
 _HERE = Path(__file__).resolve().parent
 
 _SENTINEL = object()
@@ -3022,6 +3026,196 @@ class TestE2EDenominatorIsPublished(_RunE2ECase):
         self.assertIsNone(e2e["base_tput"])
         self.assertIsNone(e2e["new_tput"])
         self.assertEqual(e2e["e2e_gain_pct"], 25.0)
+
+
+
+# Explicit finite scheduling: kept in this CI-selected module.
+_schedule_rx = _load("run_e2e_scheduling")
+
+def _schedule_handoff(**values):
+    return {"model_path": "/models/x", "exp_root": "/tmp/exp", **values}
+
+def _schedule_agentx(**values):
+    return _schedule_handoff(workload_spec={"kind": "agentx_trace_replay", "duration_s": 3600,
+                                  "geak_loop_duration_s": 900, "observed_isl": 4096,
+                                  "observed_osl": 1024}, **values)
+
+def _schedule_bounded(**values):
+    return _schedule_agentx(final_reserve_s=21600, agent_timeout_ms=21600000, **values)
+
+
+class TestBoundedScheduling:
+    @pytest.fixture(autouse=True)
+    def clean_schedule_env(self, monkeypatch):
+        names = [env for env, _ in _SCHEDULING_LIMITS.values()] + list(_SCHEDULING_SWITCHES.values())
+        names += ["GEAK_WARM_START", "GEAK_FINAL_RESERVE_S", "GEAK_AGENT_TIMEOUT_MS",
+                  "GEAK_TIME_TAIL_CAP_S", "GEAK_AGENTX_DURATION_S", "GEAK_AGENTX_LOOP_DURATION_S",
+                  "GEAK_E2E_TIMEOUT_S", "REPEATS"]
+        for name in names:
+            monkeypatch.delenv(name, raising=False)
+
+    def test_default_dispatch_is_unchanged(self):
+        args = _schedule_rx.map_args(_schedule_handoff(), timeout_s=43200)
+        assert not set(_SCHEDULING_LIMITS) & args.keys()
+        assert not set(_SCHEDULING_SWITCHES) & args.keys()
+        assert "schedule_validation" not in args
+
+    def test_legacy_tuning_switch_does_not_activate_scheduling_preflight(self):
+        args = _schedule_rx.map_args(_schedule_agentx(tuning_skillset=False), timeout_s=43200)
+        assert args["tuning_skillset"] == "false"
+        assert "schedule_validation" not in args
+
+    def test_normal_env_can_select_one_editable_kernel(self, monkeypatch):
+        settings = {"GEAK_KERNEL_TASK_BUDGET": "1", "GEAK_MIN_KERNEL_TASKS": "1",
+                    "GEAK_KERNEL_ROUND_BUDGET": "1", "GEAK_HEAD_BUDGET": "0",
+                    "GEAK_HEAD_CORRECTIVE_MAX": "0", "GEAK_AB_FINISH_RETRIES": "0",
+                    "GEAK_TUNING_SKILLSET": "false", "GEAK_WARM_START": "off",
+                    "GEAK_FINAL_RESERVE_S": "21600", "GEAK_AGENT_TIMEOUT_MS": "21600000",
+                    "GEAK_SEARCH_DEADLINE_S": "14400"}
+        for name, value in settings.items():
+            monkeypatch.setenv(name, value)
+        h = _schedule_agentx()
+        args = _schedule_rx.map_args(h, timeout_s=43200)
+        assert {k: args[k] for k in ("budget", "min_kernel_tasks", "kernel_budget", "head_budget",
+                                   "head_corrective_max", "ab_finish_retries")} == {
+            "budget": 1, "min_kernel_tasks": 1, "kernel_budget": 1, "head_budget": 0,
+            "head_corrective_max": 0, "ab_finish_retries": 0}
+        assert args["tuning_skillset"] == "false"
+        assert args["warm_start"] == "off"
+        assert args["schedule_validation"]["final_reserve_s"] == 21600
+        assert args["schedule_validation"]["search_deadline_s"] == 14400
+        assert args["schedule_validation"]["minimum_client_seconds"] == {
+            "setup": 7200, "one_integration": 3600, "validate": 14400, "final_phase": 16200}
+        assert h["workload_spec"]["duration_s"] == 3600
+        assert h["workload_spec"]["geak_loop_duration_s"] == 900
+        assert args["measurement_mode"] == args["validation_measurement_mode"] == "warm_server"
+        assert args["parity_replicas"] == args["search_replicas"] == 1
+        assert "phases" not in args  # normal all-phases entry, no external controller
+
+    def test_explicit_zero_handoff_wins_over_environment(self, monkeypatch):
+        monkeypatch.setenv("GEAK_HEAD_BUDGET", "4")
+        monkeypatch.setenv("GEAK_TUNING_SKILLSET", "true")
+        args = _schedule_rx.map_args(_schedule_handoff(head_budget=0, tuning_skillset=False), timeout_s=43200)
+        assert args["head_budget"] == 0
+        assert args["tuning_skillset"] == "false"
+
+    @pytest.mark.parametrize("value", [-1, "bad", "1.5", 1.5, True, 2**53])
+    def test_invalid_candidate_limit_fails_instead_of_falling_back(self, value):
+        with pytest.raises(SchedulingError):
+            _schedule_rx.map_args(_schedule_handoff(budget=value), timeout_s=43200)
+
+    @pytest.mark.parametrize("value", ["bad", "-1", "1.5"])
+    def test_invalid_environment_limit_fails(self, monkeypatch, value):
+        monkeypatch.setenv("GEAK_HEAD_BUDGET", value)
+        with pytest.raises(SchedulingError):
+            _schedule_rx.map_args(_schedule_handoff(), timeout_s=43200)
+
+    @pytest.mark.parametrize("extra, message", [
+        ({"final_reserve_s": 43200}, "smaller than"),
+        ({"search_deadline_s": 22000}, "precede"),
+        ({"final_reserve_s": 16200}, "must exceed 16200"),
+        ({"agent_timeout_ms": 14400000}, "must exceed 14400000"),
+    ])
+    def test_impossible_agentx_schedule_is_rejected(self, extra, message):
+        h = _schedule_bounded()
+        h.update(extra)
+        with pytest.raises(SchedulingError, match=message):
+            _schedule_rx.map_args(h, timeout_s=43200)
+
+    def test_actual_outer_timeout_wins_over_requested_policy(self):
+        with pytest.raises(SchedulingError, match="smaller than"):
+            _schedule_rx.map_args(_schedule_bounded(), timeout_s=21480)
+        with pytest.raises(SchedulingError, match="Setup measurements"):
+            _schedule_rx.map_args(_schedule_bounded(), timeout_s=28800)
+        with pytest.raises(SchedulingError, match="one candidate A/B"):
+            _schedule_rx.map_args(_schedule_bounded(), timeout_s=32400)
+
+    def test_dispatch_deadline_cannot_expire_during_the_mandatory_baseline(self):
+        with pytest.raises(SchedulingError, match="after the full Setup"):
+            _schedule_rx.map_args(_schedule_bounded(search_deadline_s=7200), timeout_s=43200)
+
+    @pytest.mark.parametrize("actual_budget", [44400, 46200])
+    def test_actual_normal_hyperloom_budget_probe_funds_six_hour_reserve(self, actual_budget):
+        args = _schedule_rx.map_args(_schedule_bounded(search_deadline_s=21600, budget=1, min_kernel_tasks=1,
+                                  head_budget=0, tuning_skillset=False), timeout_s=actual_budget)
+        report = args["schedule_validation"]
+        assert report["time_budget_s"] == actual_budget
+        assert report["final_reserve_s"] == report["search_deadline_s"] == 21600
+        assert report["minimum_client_seconds"]["one_integration"] == 3600
+
+    def test_explicit_agentx_limits_require_a_real_budget(self):
+        with pytest.raises(SchedulingError, match="finite"):
+            _schedule_rx.map_args(_schedule_bounded())
+
+    def test_protocol_preflight_uses_actual_round_count(self, monkeypatch):
+        monkeypatch.setenv("REPEATS", "2")
+        with pytest.raises(SchedulingError, match="24300"):
+            _schedule_rx.map_args(_schedule_bounded(), timeout_s=43200)
+
+    def test_normal_agentx_export_overrides_inherited_replicas(self, monkeypatch):
+        monkeypatch.setenv("REPLICAS", "9")
+        h = _schedule_bounded()
+        args = _schedule_rx.map_args(h, timeout_s=43200)
+        assert args["schedule_validation"]["minimum_client_seconds"]["validate"] == 14400
+        exports = _schedule_rx.apply_workload_spec(h)
+        assert exports["REPEATS"] == "1"  # bench_e2e resolves REPEATS before REPLICAS
+
+    def test_protocol_preflight_does_not_replace_invalid_duration(self):
+        h = _schedule_bounded()
+        h["workload_spec"]["duration_s"] = 0
+        with pytest.raises(SchedulingError, match="duration_s"):
+            _schedule_rx.map_args(h, timeout_s=43200)
+
+    def test_partial_setup_does_not_require_final_measurements(self):
+        args = _schedule_rx.map_args(_schedule_agentx(phases="setup", final_reserve_s=300, budget=1), timeout_s=14400)
+        assert "minimum_client_seconds" not in args["schedule_validation"]
+
+    def test_main_emits_error_before_preflight_or_source_staging(self, tmp_path, monkeypatch):
+        hpath, result = tmp_path / "handoff.json", tmp_path / "result.json"
+        hpath.write_text(json.dumps(_schedule_bounded()))
+        def unexpected(*args, **kwargs):
+            pytest.fail("Invalid schedule reached launch preparation")
+        monkeypatch.setattr(_schedule_rx, "agentx_preflight", unexpected)
+        monkeypatch.setattr(_schedule_rx, "prepare_baseline_source", unexpected)
+        assert _schedule_rx.main([str(hpath), str(result), "--timeout-s", "7200"]) == 1
+        out = json.loads(result.read_text())
+        assert out["status"] == "error"
+        assert out["error_class"] == "invalid_schedule"
+
+
+# Existing operator timing checks also run through this CI-selected module.
+_timing_rx = _load("run_e2e_timing")
+
+_OPERATOR_TIMING = {
+    "GEAK_AGENT_TIMEOUT_MS": ("agent_timeout_ms", 14400000),
+    "GEAK_TIME_TAIL_CAP_S": ("time_tail_cap_s", 3600),
+    "GEAK_FINAL_RESERVE_S": ("final_reserve_s", 900),
+}
+
+
+def test_timing_overrides_reach_the_unchanged_workflow(monkeypatch):
+    for name, (_, value) in _OPERATOR_TIMING.items():
+        monkeypatch.setenv(name, str(value))
+    args = _timing_rx.map_args({"model_path": "/models/x", "exp_root": "/tmp/exp"}, timeout_s=17820)
+    assert args["time_budget_s"] == 17820
+    for arg, value in _OPERATOR_TIMING.values():
+        assert args[arg] == value
+    assert args["measurement_mode"] == "warm_server"
+    assert args["validation_measurement_mode"] == "warm_server"
+    assert args["parity_replicas"] == 1
+    assert "phases" not in args
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "-1", "bad"])
+def test_absent_or_invalid_timing_keeps_workflow_defaults(monkeypatch, value):
+    for name in _OPERATOR_TIMING:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    args = _timing_rx.map_args({"model_path": "/models/x", "exp_root": "/tmp/exp"})
+    for arg, _ in _OPERATOR_TIMING.values():
+        assert arg not in args
 
 
 if __name__ == "__main__":

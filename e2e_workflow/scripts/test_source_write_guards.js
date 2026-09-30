@@ -101,7 +101,9 @@ async function main() {
   }
 
   const argsCode = between(e2e, 'const laneArgs = (wfArgs) =>', '// EXP_ROOT =');
-  const makeArgs = new Function('BASELINE_SOURCE_REQUEST', 'LANE_USE_LEARNED_KB', argsCode + '\nreturn laneArgs;');
+  const makeArgs = new Function('BASELINE_SOURCE_REQUEST', 'LANE_USE_LEARNED_KB',
+    'TIME_BUDGET_MS', 'EXPLICIT_FINAL_RESERVE_MS', 'remainingMs', 'FINAL_RESERVE_MS', 'CLOCK_TICK_MS', 'AGENT_TIMEOUT_MS',
+    argsCode + '\nreturn laneArgs;');
   const input = { kernel_path: '/task', warm_start: 'reference', kb_store_dir: '/shared/store' };
   assert.deepStrictEqual(makeArgs('', 'false')(input), { use_learned_kb: 'false', ...input });
   const staged = '/run/source_requests/exact.json';
@@ -109,6 +111,10 @@ async function main() {
   assert.strictEqual(child.baseline_source_request_path, staged);
   assert.strictEqual(child.warm_start, input.warm_start);
   assert.strictEqual(child.kb_store_dir, input.kb_store_dir);
+  const boundedChild = makeArgs(staged, 'false', 43200000, 21600000, () => 25200000, 21600000, 60000, 21600000)(input);
+  assert.strictEqual(boundedChild.time_budget_ms, 3540000, 'nested lane gets remaining optimization time minus clock margin');
+  assert.strictEqual(boundedChild.agent_timeout_ms, 21600000, 'explicit role timeout reaches nested agents');
+  assert.strictEqual(boundedChild.baseline_source_request_path, staged, 'a time bound never changes source identity');
   const spread = dispatcher.match(/\.\.\.\(BASELINE_SOURCE_REQUEST \? \{ baseline_source_request_path: BASELINE_SOURCE_REQUEST \} : \{\}\)/);
   assert(spread, 'bakeoff lanes must inherit the same source binding');
   const forward = new Function('BASELINE_SOURCE_REQUEST', `return ({ ${spread[0]} });`);

@@ -65,6 +65,7 @@ try:
         validate_source_materialization,
     )
     from interface.source_measurement import verify_normalized_source_measurements
+    from interface.scheduling import SchedulingError, apply_schedule
 finally:
     sys.path[:] = _launch_import_path
 del _launch_import_path
@@ -516,8 +517,8 @@ def map_args(
     # budget-unaware (byte-identical to a direct, non-interface invocation).
     if timeout_s is not None and timeout_s > 0:
         ps_args["time_budget_s"] = int(timeout_s)
-    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget);
-    # this lets an operator widen it per run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
+    # The default reserve is capped at 20%; an explicit reserve is honored in
+    # full, provided it fits the actual budget. Long AgentX validation needs it.
     # Optional: unset means the JS default, so no caller (Hyperloom included) has to set it.
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
@@ -632,6 +633,9 @@ def map_args(
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
     if tl_paths:
         ps_args["tracelens"] = tl_paths
+    schedule = apply_schedule(h, ps_args)
+    if schedule is not None:
+        ps_args["schedule_validation"] = schedule
     return ps_args
 
 
@@ -665,12 +669,14 @@ def prepare_baseline_source(ps_args: dict) -> dict:
     return staged
 
 
-def _emit_source_preparation_error(result_path: Path, error: Exception) -> int:
+def _emit_source_preparation_error(
+    result_path: Path, error: Exception, *, error_class: str = "unresolved_baseline_source"
+) -> int:
     result_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode="w", dir=result_path.parent,
                                      encoding="utf-8", delete=False) as stream:
         json.dump({"schema_version": SCHEMA_VERSION, "status": "error",
-                   "error_class": "unresolved_baseline_source", "error": str(error)}, stream)
+                   "error_class": error_class, "error": str(error)}, stream)
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(stream.name, result_path)
@@ -2220,6 +2226,10 @@ def _invoke_via_runtime(
         "--args", json.dumps(ps_args),
         *_runtime_selection_args(),
     ]
+    if ps_args.get("agent_timeout_ms") is not None:
+        # The runtime's default four-hour backstop must not preempt a longer
+        # explicitly budgeted Validate role supplied through the handoff.
+        cmd += ["--agent-timeout-ms", str(ps_args["agent_timeout_ms"])]
     if result_file:
         cmd += ["--result-file", result_file]
     if metrics_file:
@@ -6955,6 +6965,8 @@ def main(argv: list[str]) -> int:
             h["eval_dir"] = ps_args["eval_dir"] = str(Path(ps_args["eval_dir"]).absolute())
     except SourceMaterializationError as exc:
         return _emit_source_preparation_error(result_path, exc)
+    except SchedulingError as exc:
+        return _emit_source_preparation_error(result_path, exc, error_class="invalid_schedule")
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
             ps_args["effective_config_digest"]
