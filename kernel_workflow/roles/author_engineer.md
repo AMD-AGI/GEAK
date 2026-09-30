@@ -74,7 +74,9 @@ Read, as reference, before writing:
   (else the closest dir under `operators/`).
 - **Hardware sanity (first cut only):** detect the arch with `rocminfo` and **branch**:
   - **gfx1201 (RDNA4):** read `SKILL_DIR/knowledge/amd_rdna4.md`. Wave **32**, **WMMA not
-    MFMA**, OCP fp8 only, **no** MX/block-scale. Triton seeds: `BLOCK_M=64`, `BLOCK_N=32` on gfx1201.
+    MFMA**, OCP fp8 only, **no** MX/block-scale. `BLOCK_M=64` /
+    `BLOCK_N=32` are provisional search hints only; include alternatives in the
+    same on-box autotune.
     Do not use Instinct MFMA tiles, FNUZ, or gfx950 MX.
   - **gfx11* (RDNA3.5 client):** read `SKILL_DIR/knowledge/amd_ryzen.md` for the matrix ISA and the
     dtypes it supports.

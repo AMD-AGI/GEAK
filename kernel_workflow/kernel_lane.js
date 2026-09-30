@@ -792,15 +792,15 @@ const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
 const GFX = String(setup.device_gfx || '').trim().toLowerCase();
 const DEVICE_TARGET = String(setup.device_target || '').trim().toLowerCase();
-const DEVICE_NAME = String(setup.device_name || '').trim();
-const PHYSICAL_CU_COUNT = Number(setup.physical_cu_count);
+const SETUP_DEVICE_NAME = String(setup.device_name || '').trim();
+const SETUP_PHYSICAL_CU_COUNT = Number(setup.physical_cu_count);
 if (!GFX) {
   throw new Error('Setup failed: director did not return device_gfx (required; refuse CDNA knowledge without an ISA)');
 }
 if (!DEVICE_TARGET) {
   throw new Error('Setup failed: director did not return device_target (r9700 | unknown)');
 }
-if (!Number.isFinite(PHYSICAL_CU_COUNT) || PHYSICAL_CU_COUNT <= 0) {
+if (!Number.isFinite(SETUP_PHYSICAL_CU_COUNT) || SETUP_PHYSICAL_CU_COUNT <= 0) {
   throw new Error('Setup failed: director did not return a positive physical_cu_count');
 }
 if (GFX === 'gfx1200') {
@@ -809,24 +809,30 @@ if (GFX === 'gfx1200') {
 if (EXPECTED_GFX && GFX !== EXPECTED_GFX) {
   throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${GFX || 'unknown'}`);
 }
-if (EXPECTED_TARGET === 'r9700' && DEVICE_TARGET !== 'r9700') {
-  throw new Error(`GPU product mismatch: expected r9700, detected ${DEVICE_TARGET || 'unknown'}`);
+if (EXPECTED_TARGET && DEVICE_TARGET !== EXPECTED_TARGET) {
+  throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${DEVICE_TARGET || 'unknown'}`);
 }
-if (EXPECTED_DEVICE_NAME && DEVICE_NAME !== EXPECTED_DEVICE_NAME) {
-  throw new Error(`GPU product name mismatch: expected ${EXPECTED_DEVICE_NAME}, detected ${DEVICE_NAME || 'unknown'}`);
+const normalizeDeviceName = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+if (EXPECTED_DEVICE_NAME &&
+    normalizeDeviceName(SETUP_DEVICE_NAME) !== normalizeDeviceName(EXPECTED_DEVICE_NAME)) {
+  log(`Setup identity telemetry differs from the deterministic probe: device_name expected ` +
+      `${EXPECTED_DEVICE_NAME}, Director returned ${SETUP_DEVICE_NAME || 'unknown'}; using expected value.`);
 }
-if (EXPECTED_PHYSICAL_CU_COUNT > 0 && PHYSICAL_CU_COUNT !== EXPECTED_PHYSICAL_CU_COUNT) {
-  throw new Error(
-    `GPU physical CU mismatch: expected ${EXPECTED_PHYSICAL_CU_COUNT}, detected ${PHYSICAL_CU_COUNT}`);
+if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
+    SETUP_PHYSICAL_CU_COUNT !== EXPECTED_PHYSICAL_CU_COUNT) {
+  log(`Setup identity telemetry differs from the deterministic probe: physical_cu_count expected ` +
+      `${EXPECTED_PHYSICAL_CU_COUNT}, Director returned ${SETUP_PHYSICAL_CU_COUNT}; using expected value.`);
 }
+const DEVICE_NAME = EXPECTED_DEVICE_NAME || SETUP_DEVICE_NAME;
+const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
+  ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
 const ROOFLINE_STATUS = (DEVICE_TARGET === 'r9700' && GFX === 'gfx1201')
   ? 'calibrated-r9700'
-  : ((GFX === 'gfx1201' || /^gfx120/.test(GFX)) ? 'unknown-device-not-r9700' : 'non-rdna');
+  : (/^gfx120/.test(GFX) ? 'unknown-device-not-r9700' : 'non-rdna');
 const RDNA4_ISOLATE = GFX === 'gfx1201';
 if (RDNA4_ISOLATE) {
   // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
   // R9700 / gfx1201 receive the dedicated in-tree hardware guide but no CDNA-biased external cards.
-  SKILLS_ISOLATE = true;
   USE_EXPERT_SKILLS = false;
   KERNEL_KNOWLEDGE_DIR = '';
   USE_LEARNED_READ = false;
@@ -1314,6 +1320,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
   }
 }
 
+let plannerStopReason = '';
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
@@ -1405,10 +1412,17 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     if (plan.directions.length !== before) {
       log(`Round ${round}: removed ${before - plan.directions.length} direction(s) that relied on unknown peaks.`);
     }
+    if (before > 0 && plan.directions.length === 0) {
+      plannerStopReason = 'all_directions_filtered_unknown_peaks';
+    }
   }
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
-    log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
+    if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
+      log(`Round ${round}: harness stopped after all directions were filtered because calibrated peaks are unknown.`);
+    } else {
+      log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
+    }
     break;
   }
 
@@ -1970,7 +1984,7 @@ return {
   stopped_by: deadlineHit ? 'deadline'
     : (dispatched >= BUDGET) ? 'budget'
     : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
-    : 'tech_lead_stop',
+    : (plannerStopReason || 'tech_lead_stop'),
   deadline_hit: deadlineHit,
   forced_replans: forcedReplans,
   // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was

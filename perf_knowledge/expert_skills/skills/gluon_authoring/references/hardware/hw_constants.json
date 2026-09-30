@@ -270,14 +270,14 @@
       "dynamic_vgpr": false,
       "gws": false,
       "mfma_valu_coexec": false,
-      "_dynamic_vgpr_note": "S_ALLOC_VGPR is rejected as 'invalid instruction' by ROCm 7.1 / LLVM 20 for gfx1200 AND gfx1201, and no +dynamic-vgpr subtarget feature exists -- dynamic VGPR is a gfx1250 (CDNA5) feature. Plan RDNA4 occupancy on the static <=256 VGPR/wave model only.",
+      "_dynamic_vgpr_note": "LLVM 22/23 llvm-mc -mcpu=gfx1201 accepts `s_alloc_vgpr 8`; do not claim ISA rejection. GEAK has not demonstrated dynamic-VGPR allocation through its HIP/Triton compute paths, so workflow occupancy remains on the compiler-derived static <=256 VGPR/wave model until toolchain evidence proves otherwise.",
       "_mfma_valu_coexec_note": "RDNA WMMA canNOT co-issue with VALU (MI-calc 'Can co-execute with VALU: False' on rdna3 AND rdna4). Do not port a CDNA 'interleave VALU into the MFMA shadow' plan here.",
       "matrix_layout_family": "AMDWMMALayout(v8-operand)",
       "isa_types": [
         "WMMA"
       ],
       "scaled_mfma": false,
-      "_note": "R9700/RX9070XT; occupancy-first, no mfma_scaled/blockscale, no TDM; do not apply CDNA combined-512-VGPR formula (rdna-fork.md)"
+      "_note": "gfx1201 ISA constants; product calibration is separate and R9700-only in GEAK. Occupancy-first, no mfma_scaled/blockscale, no TDM; do not apply the CDNA combined-512-VGPR formula."
     },
     "gfx1200": {
       "family": "RDNA4",
@@ -329,7 +329,7 @@
         "WMMA"
       ],
       "scaled_mfma": false,
-      "_note": "RX9070XT/RX9070. Same RDNA4 microarch as gfx1201; only the occupancy geometry is recorded here, the rest of the RDNA4 facts live under gfx1201."
+      "_note": "gfx1200 occupancy geometry only; product mapping and validation are intentionally not inferred from the ISA id."
     },
     "gfx1151": {
       "family": "RDNA3.5",

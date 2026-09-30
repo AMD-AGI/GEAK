@@ -42,12 +42,15 @@ const ok = (cond, msg, detail) => {
 
 function build(argsObj, opts) {
   const o = opts || {};
-  const trace = { workflowCalls: [], phases: [], logs: [] };
+  const trace = { workflowCalls: [], phases: [], logs: [], agentPrompts: [] };
   const g = {
     args: { workflow_dir: E2E_DIR, ...argsObj },
     phase: (t) => {
       trace.phases.push(t);
       if (o.stopAtFirstPhase) throw new Error(PROBE_STOP);
+      if (o.stopAtPhase && trace.phases.length >= o.stopAtPhase) {
+        throw new Error(PROBE_STOP);
+      }
     },
     log: (m) => trace.logs.push(m),
     workflow: async (ref, a) => {
@@ -57,7 +60,22 @@ function build(argsObj, opts) {
         validation_status: 'accepted',
       };
     },
-    agent: async () => null,
+    agent: async (prompt, options) => {
+      trace.agentPrompts.push({ label: options && options.label, prompt });
+      if (options && options.label === 'director:setup' && o.setupIdentity) {
+        return {
+          eval_dir: '/tmp/eval',
+          model_name: 'fixture',
+          baseline_throughput_tok_s: 100,
+          noise_band_pct: 0.5,
+          gfx: o.setupIdentity.gfx,
+          device_target: o.setupIdentity.target,
+          device_name: o.setupIdentity.name,
+          physical_cu_count: o.setupIdentity.cu,
+        };
+      }
+      return null;
+    },
     parallel: async (thunks) => Promise.all(thunks.map((t) => t())),
     pipeline: async (items) => items,
     budget: { total: null, spent: () => 0, remaining: () => Infinity },
@@ -173,6 +191,61 @@ const R9700 = {
     ok(/vLLM only|vllm only|vLLM-only/i.test(meta), 'meta states the vLLM-only constraint');
     const kernelLane = fs.readFileSync(path.join(GEAK_ROOT, 'kernel_workflow/kernel_lane.js'), 'utf8');
     ok(/expected_gfx/.test(kernelLane), 'the lane worker accepts the identity e2e forwards');
+  }
+
+  console.log('\n# F. effective role inputs isolate E2E learned knowledge and matrix-core guidance');
+  {
+    const { run, trace } = build(
+      { model_path: '/models/m', ...R9700 },
+      {
+        stopAtPhase: 2,
+        setupIdentity: {
+          gfx: 'gfx1201', target: 'r9700',
+          name: 'AMD Radeon AI PRO R9700', cu: 64,
+        },
+      },
+    );
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(msg === PROBE_STOP, 'R9700 setup reached the next phase', msg || 'no throw');
+    const directorPrompt = (trace.agentPrompts.find((p) => p.label === 'director:setup') || {}).prompt || '';
+    ok(/E2E_LEARNED_KB: off/.test(directorPrompt),
+      'effective R9700 role inputs disable the E2E learned KB', directorPrompt.slice(-500));
+  }
+  {
+    const { run, trace } = build(
+      {
+        model_path: '/models/m', backend: 'sglang',
+        expected_gfx: 'gfx950', expected_target: 'unknown',
+      },
+      {
+        stopAtPhase: 2,
+        setupIdentity: {
+          gfx: 'gfx950', target: 'unknown',
+          name: 'AMD Instinct MI355X', cu: 256,
+        },
+      },
+    );
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(msg === PROBE_STOP, 'CDNA setup reached the next phase', msg || 'no throw');
+    const directorPrompt = (trace.agentPrompts.find((p) => p.label === 'director:setup') || {}).prompt || '';
+    ok(/E2E_LEARNED_KB: on/.test(directorPrompt),
+      'effective CDNA role inputs preserve the E2E learned KB', directorPrompt.slice(-500));
+  }
+  {
+    ok(!/one fp8 MFMA/.test(BODY), 'R9700-reachable graph/head prompts have no hard-coded fp8 MFMA');
+    ok(/MATRIX_CORE_NAME = RDNA4_ISOLATE \? 'WMMA' : 'MFMA'/.test(BODY),
+      'matrix-core guidance is architecture-aware');
+    for (const role of ['op_benchmarker.md', 'system_architect.md', 'config_tuner.md']) {
+      const text = fs.readFileSync(path.join(E2E_DIR, 'roles', role), 'utf8');
+      ok(/E2E_LEARNED_KB=off/.test(text), `${role} honors the learned-KB off switch`);
+    }
+    for (const knowledge of ['backend_playbook.md', 'gemm_attention_backends.md']) {
+      const text = fs.readFileSync(path.join(E2E_DIR, 'knowledge', knowledge), 'utf8');
+      ok(/E2E_LEARNED_KB=off/.test(text),
+        `${knowledge} does not bypass the learned-KB off switch`);
+    }
   }
 
   console.log(failures === 0

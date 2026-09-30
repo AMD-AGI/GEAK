@@ -30,6 +30,21 @@ _DTYPE_BYTES = {
     "fp64": 8, "float64": 8, "double": 8, "int64": 8, "long": 8,
 }
 
+_FP8_NAMES = frozenset({
+    "e4m3", "e4m3fn", "e4m3fnuz",
+    "e5m2", "e5m2fn", "e5m2fnuz",
+    "fp8", "float8", "mxfp8", "w8a8",
+})
+
+
+def _normalize_dtype_name(name):
+    """Return the canonical profile dtype spelling without guessing its peak."""
+    raw = str(name or "").strip().lower().removeprefix("torch.")
+    if raw in _FP8_NAMES or raw.startswith(("fp8_", "float8_")):
+        return "fp8"
+    return raw
+
+
 # target_eff priors -- SKILL.md section 7 is the source of truth; keep the two in sync.
 TARGET_EFF = {
     "gemm": 0.90,
@@ -37,6 +52,18 @@ TARGET_EFF = {
     "elementwise": 0.875,
     "attn": 0.50,
 }
+PRODUCT_TARGET_EFF = {
+    # 1 GiB source + 1 GiB destination, 30 event-timed copies on R9700:
+    # median 485.8 GB/s read+write against the 640 GB/s datasheet pin rate.
+    "r9700": {"moe": 0.76, "elementwise": 0.76},
+}
+
+
+def target_eff_for(op_class, product=None):
+    """Return a product override when measured, otherwise the op-class prior."""
+    op = str(op_class or "").strip().lower()
+    prod = str(product or "").strip().lower()
+    return PRODUCT_TARGET_EFF.get(prod, {}).get(op, TARGET_EFF.get(op))
 
 #: Only kernels big enough for a headroom estimate to change a decision are worth analysing.
 #: Below this the Amdahl ceiling is under the noise band anyway, so modelling them adds failure
@@ -82,7 +109,7 @@ def dtype_bytes(name, default=2):
         return default
     if isinstance(name, (int, float)):
         return float(name)
-    key = str(name).strip().lower().lstrip("torch.")
+    key = _normalize_dtype_name(name)
     if key in _DTYPE_BYTES:
         return _DTYPE_BYTES[key]
     for k, v in _DTYPE_BYTES.items():          # substring fallback: "c10::BFloat16", "torch.float8_e4m3fnuz"
@@ -219,7 +246,7 @@ def peak_flops_for(peaks, dtype_name):
     flops = peaks.get("flops") or {}
     if not flops:
         return None
-    raw = str(dtype_name or "").strip().lower().lstrip("torch.")
+    raw = _normalize_dtype_name(dtype_name)
     key = _FLOP_KEYS.get(raw, raw)
     if key in flops:
         try:
@@ -421,6 +448,9 @@ def _selftest():
     peaks = load_peaks(os.path.join(here, "peaks.md"), "gfx950")
     assert peaks and abs(peaks["hbm_bw_bytes_s"] - 8.0e12) < 1e9, peaks
     assert abs(peak_flops_for(peaks, "fp8") - 5.0e15) < 1e12, peaks["flops"]
+    assert abs(peak_flops_for(peaks, "fp8_e4m3") - 5.0e15) < 1e12
+    assert abs(peak_flops_for(peaks, "float8_e4m3fn") - 5.0e15) < 1e12
+    assert abs(peak_flops_for(peaks, "half") - 2.5e15) < 1e12
     assert load_peaks(os.path.join(here, "peaks.md"), "gfxNOPE") is None      # L1 path
     print("peaks: gfx950 %.2f TB/s, fp8 %.2f PFLOP/s; unknown gfx -> None  OK"
           % (peaks["hbm_bw_bytes_s"] / 1e12, peak_flops_for(peaks, "fp8") / 1e15))

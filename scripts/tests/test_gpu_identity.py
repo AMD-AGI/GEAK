@@ -84,6 +84,30 @@ def test_homogeneous_visible_agents_are_accepted() -> None:
     assert identity["visible_gpu_agents"] == 2
 
 
+def test_generic_integrated_gpu_is_ignored_when_discrete_gpu_exists() -> None:
+    text = _rocminfo("gfx1201", gpu_identity.R9700_MARKETING_NAME)
+    text += """
+*******
+Agent 3
+*******
+  Name:                    gfx1036
+  Marketing Name:          AMD Radeon Graphics
+  Compute Unit:            2
+"""
+    identity = gpu_identity.parse_rocminfo(text)
+    assert identity["gfx"] == "gfx1201"
+    assert identity["target"] == "r9700"
+    assert identity["visible_gpu_agents"] == 1
+
+
+def test_generic_integrated_gpu_alone_remains_visible() -> None:
+    identity = gpu_identity.parse_rocminfo(
+        _rocminfo("gfx1036", "AMD Radeon Graphics", cu=2)
+    )
+    assert identity["gfx"] == "gfx1036"
+    assert identity["target"] == "unknown"
+
+
 def test_nested_isa_name_does_not_replace_agent_gfx() -> None:
     text = _rocminfo("gfx1201", gpu_identity.R9700_MARKETING_NAME)
     text += """
@@ -104,6 +128,26 @@ Agent 3
   Name:                    gfx1201
   Marketing Name:          Another gfx1201 Product
   Compute Unit:            64
+"""
+    with pytest.raises(gpu_identity.IdentityError, match="mixed identities"):
+        gpu_identity.parse_rocminfo(text)
+
+
+def test_integrated_gpu_filter_does_not_hide_unknown_discrete_product() -> None:
+    text = _rocminfo("gfx1201", gpu_identity.R9700_MARKETING_NAME)
+    text += """
+*******
+Agent 3
+*******
+  Name:                    gfx1201
+  Marketing Name:          Another gfx1201 Product
+  Compute Unit:            64
+*******
+Agent 4
+*******
+  Name:                    gfx1036
+  Marketing Name:          AMD Radeon Graphics
+  Compute Unit:            2
 """
     with pytest.raises(gpu_identity.IdentityError, match="mixed identities"):
         gpu_identity.parse_rocminfo(text)

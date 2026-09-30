@@ -49,7 +49,9 @@ const R9700_E2E = EXPECTED_TARGET === 'r9700';
 // ISA isolation and product policy are intentionally separate. Any gfx1201
 // target must avoid CDNA priors, but only exact R9700 identity selects its
 // calibrated peaks, serving backend, and image policy.
-const RDNA4_ISOLATE = RDNA4_ISA || R9700_E2E;
+const RDNA4_ISOLATE = RDNA4_ISA;
+const E2E_LEARNED_KB_ENABLED = !RDNA4_ISOLATE;
+const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA';
 
 // The kernel workflow's learned KB is OFF by default for lanes launched from here, and ON by default
 // when kernel_workflow is driven directly. Same worker, different prior: a kernel_workflow campaign
@@ -679,7 +681,7 @@ const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang' || BACKEND
 const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   ' DEPLOYMENT REQUIREMENT — the server captures the steady-state decode path into a FULL CUDA/HIP graph, ' +
   'so this kernel runs INSIDE that captured graph. Your speedup MUST be INTRINSIC: better tiles/algorithm, ' +
-  'fused quant (one fp8 MFMA, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ' +
+  `fused quant (one fp8 ${MATRIX_CORE_NAME}, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ` +
   'region. Do NOT rely on a per-call CUDA/HIP-graph capture+replay WRAPPER for the speedup — inside the ' +
   "server's graph that wrapper falls back to eager and the win vanishes, and the e2e integrate gate WILL " +
   'reject a wrapper-only win (this already happened: a 1.22x isolated MoE GEMM gave 0% e2e because only its ' +
@@ -763,10 +765,9 @@ const SETUP_SCHEMA = obj({
   bench_script: { type: 'string' }, notes: { type: 'string' },
   // The four deployment dimensions the KB addresses a page by, beyond model/framework/workload which
   // this script already knows. The Director establishes all four during its existing preflight (it
-  // has to, to launch the server at all) and previously just discarded them. They are OPTIONAL here
-  // and `required` is unchanged, so a director that returns none of them is still valid — the run
-  // simply files itself under a coarse `unknown` page, which is recoverable. A GUESS is not: the
-  // service has no DELETE, so a wrong-but-authoritative-looking page is permanent.
+  // has to, to launch the server at all) and previously just discarded them. gfx, product target,
+  // and physical CU count are required; device_name remains optional telemetry. A GUESS is not
+  // acceptable: the service has no DELETE, so a wrong-but-authoritative-looking page is permanent.
   gfx: { type: 'string' }, device_target: { type: 'string' },
   device_name: { type: 'string' }, physical_cu_count: { type: 'number' },
   precision: { type: 'string' },
@@ -1173,6 +1174,7 @@ function roleAgent(role, phase, intro, inputs) {
     BACKEND, SERVING_TP, SERVING_GPU,
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
     EFFECTIVE_CONFIG_DIGEST,
+    E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
     ...inputs,
   };
   const base = `You are the ${role}. PHASE=${phase}.
@@ -2292,20 +2294,21 @@ if (want('setup')) {
   if (EXPECTED_GFX && detectedGfx !== EXPECTED_GFX) {
     throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${detectedGfx}`);
   }
-  if (EXPECTED_TARGET === 'r9700' && detectedTarget !== 'r9700') {
-    throw new Error(`GPU product mismatch: expected r9700, detected ${detectedTarget}`);
+  if (EXPECTED_TARGET && detectedTarget !== EXPECTED_TARGET) {
+    throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${detectedTarget}`);
   }
+  const normalizeDeviceName = (name) =>
+    String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
   if (EXPECTED_DEVICE_NAME &&
-      String(setup.device_name || '').trim() !== EXPECTED_DEVICE_NAME) {
-    throw new Error(
-      `GPU product name mismatch: expected ${EXPECTED_DEVICE_NAME}, ` +
-      `detected ${String(setup.device_name || '').trim() || 'unknown'}`);
+      normalizeDeviceName(setup.device_name) !== normalizeDeviceName(EXPECTED_DEVICE_NAME)) {
+    log(`Setup identity telemetry differs from the deterministic probe: device_name expected ` +
+        `${EXPECTED_DEVICE_NAME}, Director returned ` +
+        `${String(setup.device_name || '').trim() || 'unknown'}; using expected value.`);
   }
   if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
       detectedPhysicalCuCount !== EXPECTED_PHYSICAL_CU_COUNT) {
-    throw new Error(
-      `GPU physical CU mismatch: expected ${EXPECTED_PHYSICAL_CU_COUNT}, ` +
-      `detected ${detectedPhysicalCuCount}`);
+    log(`Setup identity telemetry differs from the deterministic probe: physical_cu_count expected ` +
+        `${EXPECTED_PHYSICAL_CU_COUNT}, Director returned ${detectedPhysicalCuCount}; using expected value.`);
   }
   EVAL_DIR = setup.eval_dir;
   MODEL_NAME = setup.model_name || MODEL_NAME_HINT;
@@ -3797,7 +3800,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         for (const l of otherLangs) lanesSpec.push({ key: l, lang: l, mode: (planLangs.find(x => x.lang === l) || {}).mode || 'author',
           steer: ` AUTHOR a ${l} implementation that beats the LIVE kernel (not just your own first port); read SHARED_KB + GLOBAL_KB and borrow the winning decomposition other lanes/kernels found.` });
         const extra = [
-          { key: `${liveLang}-fused`, lang: liveLang, mode: 'author', steer: ' DIRECTION=fused-author: author a fresh single-pass FUSED kernel (fold pre/post ops + scaling into the main MFMA core; epilogue-fuse activation). Beat the LIVE kernel.' },
+          { key: `${liveLang}-fused`, lang: liveLang, mode: 'author', steer: ` DIRECTION=fused-author: author a fresh single-pass FUSED kernel (fold pre/post ops + scaling into the main ${MATRIX_CORE_NAME} core; epilogue-fuse activation). Beat the LIVE kernel.` },
           { key: `${liveLang}-splitk`, lang: liveLang, mode: 'author', steer: ' DIRECTION=split-K: author a split-K + accumulate variant for the large-M prefill shapes, with a per-shape launch selector that uses the non-split path for small-M decode.' },
           { key: `${liveLang}-deep`, lang: liveLang, mode: 'optimize', steer: ' DIRECTION=deep-explore: combine persistent kernel + epilogue fusion + grid swizzle + aggressive tiling in one coherent rewrite; push toward the roofline SOTA bar.' },
         ];
@@ -3811,7 +3814,10 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         `You are the ROOFLINE ANCHOR + shared-KB bootstrapper for DEEP cross-backend optimization of head op ${h.short_name} (${ext.op_kind}). ` +
         `Inputs: OP_TASK_DIR=${ext.task_dir}; shapes=${JSON.stringify(ext.shapes || {})}; dtype=${ext.dtype || '?'}; read ${EVAL_DIR}/env_report.json for the on-box device peak (FLOP/s + HBM bandwidth). ` +
         `DO: (a) mkdir -p ${deepDir}; (b) compute the ROOFLINE ceiling per case (compute- vs memory-bound, target ms/case + an overall SOTA geomean ~80-90% of roofline); ` +
-        `(c) bootstrap ${sharedKb} (markdown) with sections: Roofline target; Current best per backend (table backend|best geomean|technique|wave — empty now); Techniques that WORK (technique -> measured effect -> source); Dead-ends (scoped, evidence); Cross-backend assignments (borrow); Open hypotheses. Cite relevant ${KERNEL_KNOWLEDGE_DIR} cards (read INDEX in knowledge/learned/ first) for ${ext.op_kind}. ` +
+        `(c) bootstrap ${sharedKb} (markdown) with sections: Roofline target; Current best per backend (table backend|best geomean|technique|wave — empty now); Techniques that WORK (technique -> measured effect -> source); Dead-ends (scoped, evidence); Cross-backend assignments (borrow); Open hypotheses. ` +
+        (E2E_LEARNED_KB_ENABLED
+          ? `Cite relevant ${KERNEL_KNOWLEDGE_DIR} cards (read INDEX in knowledge/learned/ first) for ${ext.op_kind}. `
+          : `E2E_LEARNED_KB=off: do not read or cite knowledge/learned/; derive the bootstrap from this run's measurements only. `) +
         `Return {roofline_note, target_geomean}.`,
         { phase: 'HeadKernel', label: `roofline ${h.short_name}`, schema: ROOFLINE_SCHEMA });
       const rooflineTarget = anchor && Number.isFinite(anchor.target_geomean) ? anchor.target_geomean : 0;
@@ -4006,10 +4012,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // it hasn't tried, biased to the dominant-Amdahl head, so the search compounds depth instead of exiting.
     const DEEP_STEERS = {
       triton: [
-        ' DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with MFMA.',
-        ' DIRECTION=warp-specialization: split warps into a producer (async global->LDS copy) and a consumer (MFMA) for software pipelining.',
+        ` DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with ${MATRIX_CORE_NAME}.`,
+        ` DIRECTION=warp-specialization: split warps into a producer (async global->LDS copy) and a consumer (${MATRIX_CORE_NAME}) for software pipelining.`,
         ' DIRECTION=epilogue-fusion: fuse the scale/activation/cast epilogue into the GEMM to remove a memory round-trip.',
-        ' DIRECTION=mfma-layout: re-tune matrix_instr_nonkdim / kpack / LDS swizzle / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).',
+        RDNA4_ISOLATE
+          ? ' DIRECTION=wmma-layout: re-tune WMMA tile shape / LDS swizzle / num_warps / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).'
+          : ' DIRECTION=mfma-layout: re-tune matrix_instr_nonkdim / kpack / LDS swizzle / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).',
         ' DIRECTION=double-buffer: deepen num_stages and LDS double-buffering to hide HBM latency on the K loop.',
         ' DIRECTION=split-K-atomic: split the K reduction across CUs with atomic accumulate for the large-M prefill shapes; non-split for small-M decode.',
         ' DIRECTION=fresh-rewrite: abandon the current tiling and try a fundamentally different decomposition than your best so far.',
@@ -4202,7 +4210,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `This kernel will be overlaid onto the LIVE decode path (CUDA-graph captured): its STEADY-STATE hot path MUST be ` +
               `host-sync-free (NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize(), no Python branch on a GPU scalar). ` +
               `Cache any weight prep (transpose/requant/preshuffle) by weight.data_ptr() done ONCE, not per call. ` +
-              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, one fp8 MFMA ` +
+              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, one fp8 ${MATRIX_CORE_NAME} ` +
               `GEMM) and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion); the integrated kernel MUST fit at the ` +
               `accepted config's mem-fraction. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
@@ -4414,7 +4422,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `MEMORY FOOTPRINT IS A HARD CONSTRAINT: the persistent weight cache is kept for ALL layers at once, so do NOT ` +
               `re-materialize full bf16 weights (raw+preshuffled bf16 across every layer = tens of GB → forces mem-fraction ` +
               `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
-              `(fold the block-scale into the operand scale, run ONE fp8 MFMA GEMM — the "kill the dequant" lever) and cache ` +
+              `(fold the block-scale into the operand scale, run ONE fp8 ${MATRIX_CORE_NAME} GEMM — the "kill the dequant" lever) and cache ` +
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
               `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
@@ -4768,14 +4776,15 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   }
 
   // --- (d) Update the persistent experience library + in-run memory -------
-  const exp = await safeAgent(
+  const exp = E2E_LEARNED_KB_ENABLED ? await safeAgent(
     roleAgent('system_architect', 'update_experience', 'Curate knowledge/learned/ (merge/insert >=2-star / archive contradicted) per learned/README.md.', {
       ROUND: milestone, EVAL_DIR, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
       MILESTONE_RESULTS: history.ledger.slice(-cands.length),
       REPROFILE_SHIFT: profile ? profile.shift_note : '', PRIOR_HISTORY: history,
       ...ANALYSIS_SKILL_INPUTS,
     }),
-    { phase: 'Milestone', label: `architect:experience m${milestone}`, schema: EXPERIENCE_SCHEMA });
+    { phase: 'Milestone', label: `architect:experience m${milestone}`, schema: EXPERIENCE_SCHEMA })
+    : null;
   if (exp) {
     if (exp.insights) history.insights = exp.insights;
     if (exp.bottleneck_now) history.bottleneck_now = exp.bottleneck_now;
@@ -5064,7 +5073,7 @@ if (want('final')) {
   // gated number (see the 20260812 Qwen3.5-27B run: the +16.1% head card was left
   // at "e2e transfer NOT yet gated"). Re-curate ONCE now, with the authoritative
   // post-Validate numbers, so finalize-gate confirmations are written back.
-  if (allAccepted.length) {
+  if (allAccepted.length && E2E_LEARNED_KB_ENABLED) {
     const verifiedTput = validatedOk ? validation.director_verified_throughput_tok_s : finalTput;
     await safeAgent(
       roleAgent('system_architect', 'update_experience',

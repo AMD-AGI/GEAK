@@ -147,10 +147,12 @@ Match `BLOCK_M/N/K` to the hardware MFMA tile shapes for best utilization (detec
   ops not present on gfx942 — a major low-precision GEMM lever. See `amd_instinct.md` §3.
 
 ### WMMA / RDNA4 tiles (gfx1201)
-Do **not** use the MFMA table above. Starting Triton knobs (then autotune):
-- `BLOCK_M = 64` (128 is often too fat on client RDNA)
-- `BLOCK_N = 32` on **gfx1201** (16 is a common RDNA3 seed; 64 is the CDNA FA default)
-- `waves_per_eu` occupancy-first (RDNA start ~6 vs CDNA 1–3)
+Do **not** use the MFMA table above. The following are **provisional search
+seeds**, not sourced or validated defaults; include alternatives in the same
+autotune:
+- try `BLOCK_M = 64` alongside other tile heights
+- try `BLOCK_N = 32` alongside 16/64 on **gfx1201**
+- sweep `waves_per_eu`; `6` is an unvalidated hint
 - `num_warps` counted in wave32 units
 - Attention under CUDA graphs: keep `int64_strides=true` unless A/B says otherwise (`amd_rdna4.md` §3)
 

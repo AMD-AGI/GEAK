@@ -465,10 +465,24 @@ def map_args(
     timeout_s: int | None = None,
     *,
     artifact_cutoff_ts: float | None = None,
+    dry_run: bool = False,
 ) -> dict:
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
-    gpu_identity = _expected_gpu_identity(h)
+    has_explicit_identity = bool(
+        str(h.get("expected_gfx") or "").strip()
+        or str(h.get("expected_target") or "").strip()
+    )
+    has_env_identity = bool(os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip())
+    # A dry-run validates handoff-to-args wiring on a host that is explicitly
+    # documented not to need a GPU. Do not turn it into a runnable identity:
+    # omit expected_* and mark the dispatch metadata unavailable. Real runs,
+    # partial explicit identity, and supplied env identity stay fail-closed.
+    gpu_identity = (
+        None
+        if dry_run and not has_explicit_identity and not has_env_identity
+        else _expected_gpu_identity(h)
+    )
     effective = None
     if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
@@ -513,12 +527,8 @@ def map_args(
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
         "backend": h.get("framework") or (
-            "vllm" if gpu_identity["target"] == "r9700" else "sglang"
+            "vllm" if gpu_identity and gpu_identity["target"] == "r9700" else "sglang"
         ),
-        "expected_gfx": gpu_identity["gfx"],
-        "expected_target": gpu_identity["target"],
-        "expected_device_name": gpu_identity["marketing_name"],
-        "expected_physical_cu_count": gpu_identity["physical_cu_count"],
         "tp": tp,
         "gpu_ids": str(gpu_ids),
         # On an AgentX handoff these describe the shape the agents OPTIMIZE for,
@@ -557,6 +567,15 @@ def map_args(
         "apply_to_original": "true",
         "exp_root": h["exp_root"],
     }
+    if gpu_identity is not None:
+        ps_args.update({
+            "expected_gfx": gpu_identity["gfx"],
+            "expected_target": gpu_identity["target"],
+            "expected_device_name": gpu_identity["marketing_name"],
+            "expected_physical_cu_count": gpu_identity["physical_cu_count"],
+        })
+    else:
+        ps_args["gpu_identity_status"] = "unavailable_dry_run"
     if effective is not None:
         ps_args["effective_config_digest"] = effective.digest
     # Forward the orchestrator's HARD wall-clock budget (the same timeout_s this
@@ -6711,10 +6730,12 @@ def main(argv: list[str]) -> int:
         artifact_cutoff_ts = handoff_path.stat().st_mtime
     except OSError:
         artifact_cutoff_ts = None
+    is_dry_run = "--dry-run" in flags
     ps_args = map_args(
         h,
         timeout_s,
         artifact_cutoff_ts=artifact_cutoff_ts,
+        dry_run=is_dry_run,
     )
     if ps_args.get("effective_config_digest"):
         os.environ["EFFECTIVE_CONFIG_DIGEST"] = str(
@@ -6735,7 +6756,7 @@ def main(argv: list[str]) -> int:
     alignment_flags = apply_alignment_flags(h)
     prompt = build_prompt(ps_args)
 
-    if "--dry-run" in flags:
+    if is_dry_run:
         print(json.dumps({"mapped_args": ps_args, "bench_client": bench_client,
                           "bench_launcher": bench_launcher,
                           "workload_spec_exports": workload_exports,

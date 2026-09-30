@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 R9700_MARKETING_NAME = "AMD Radeon AI PRO R9700"
+INTEGRATED_MARKETING_NAMES = frozenset({"AMD Radeon Graphics"})
 _AGENT_RE = re.compile(r"^\s*Agent\s+\d+\s*$")
 _FIELD_RE = re.compile(r"^\s*([^:]+):\s*(.*?)\s*$")
 _GFX_RE = re.compile(r"^gfx[0-9a-f]+$", re.IGNORECASE)
@@ -87,6 +88,20 @@ def parse_rocminfo(text: str) -> dict[str, Any]:
 
     if not gpu_agents:
         raise IdentityError("rocminfo reported no non-gfx000 GPU agent")
+
+    # Ryzen desktop systems commonly expose a generic integrated GPU alongside
+    # the selected discrete card. rocminfo is filtered by ROCR_VISIBLE_DEVICES,
+    # not HIP_VISIBLE_DEVICES, so a direct probe may still contain that iGPU.
+    # Keep this deliberately narrow: ignore only the generic integrated
+    # nameplate and only when another GPU remains. An arbitrary unknown product
+    # must never disappear behind an exact R9700 (or an Instinct card).
+    discrete_agents = [
+        agent
+        for agent in gpu_agents
+        if agent["marketing_name"] not in INTEGRATED_MARKETING_NAMES
+    ]
+    if discrete_agents:
+        gpu_agents = discrete_agents
 
     identities = {
         (

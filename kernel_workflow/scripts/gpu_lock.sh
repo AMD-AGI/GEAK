@@ -180,14 +180,21 @@ fi
 export TORCH_EXTENSIONS_DIR
 mkdir -p "$TORCH_EXTENSIONS_DIR" 2>/dev/null || true
 
-# (3) Compile for the selected GPU's arch only. Invoked AFTER HIP_VISIBLE_DEVICES is set
-# so rocminfo sees the locked GPU, not GPU 0. Refuse mixed-ISA pools: compiling for GPU 0
-# while locked to GPU 1 is silent wrong-arch.
+# (3) Compile for the selected GPU's arch only. HIP_VISIBLE_DEVICES does NOT
+# filter rocminfo. When the launcher did not already provide a ROCR allocation,
+# scope only this rocminfo subprocess to the locked physical GPU. Preserve an
+# inherited ROCR mask because GPU_ID is then logical within that allocation.
+# Refuse a genuinely mixed-ISA allocation: compiling for one ISA while locked
+# to another is a silent wrong-arch result.
 # Set KERNEL_ENV_KEEP_ARCH=1 to opt out (intentional multi-arch boxes).
 _rocminfo_gpu_gfx_list() {
-    rocminfo 2>/dev/null | awk '
-        /^ *Name: *gfx[0-9a-f]+/ && $2 != "gfx000" { print $2 }
-    '
+    if [ -n "${ROCR_VISIBLE_DEVICES:-}" ] || [ -z "${GPU_ID:-}" ]; then
+        rocminfo 2>/dev/null
+    else
+        ROCR_VISIBLE_DEVICES="$GPU_ID" rocminfo 2>/dev/null
+    fi | awk '
+          /^ *Name: *gfx[0-9a-f]+/ && $2 != "gfx000" { print $2 }
+        '
 }
 
 _pin_compile_arch() {
@@ -204,6 +211,8 @@ _pin_compile_arch() {
     fi
     _ARCH="$(printf '%s\n' $unique | head -1)"
     [ -n "${_ARCH:-}" ] && export PYTORCH_ROCM_ARCH="$_ARCH"
+    # aiter's native detector spawns rocm_agent_enumerator per process; pinning
+    # GPU_ARCHS avoids an enumerator storm as well as redundant multi-ISA builds.
     [ -n "${_ARCH:-}" ] && export GPU_ARCHS="${GPU_ARCHS:-$_ARCH}"
 }
 

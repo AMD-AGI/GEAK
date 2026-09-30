@@ -279,9 +279,15 @@ detect_gpu_arch() {
   rocminfo_bin="$(command -v rocminfo 2>/dev/null || true)"
   [ -z "$rocminfo_bin" ] && [ -x /opt/rocm/bin/rocminfo ] && rocminfo_bin=/opt/rocm/bin/rocminfo
   if [ -n "$rocminfo_bin" ] && [ -f "$GPU_IDENTITY_SCRIPT" ]; then
-    identity="$(python3 "$GPU_IDENTITY_SCRIPT" --rocminfo-bin "$rocminfo_bin" 2>/dev/null || true)"
+    if ! identity="$(python3 "$GPU_IDENTITY_SCRIPT" --rocminfo-bin "$rocminfo_bin" 2>&1)"; then
+      printf '%s\n' "$identity" >&2
+      return 1
+    fi
     if [ -n "$identity" ]; then
-      parsed="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("gfx",""), d.get("target","unknown"))' "$identity" 2>/dev/null || true)"
+      if ! parsed="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("gfx",""), d.get("target","unknown"))' "$identity" 2>/dev/null)"; then
+        echo "E_GPU_IDENTITY: structured identity output was not valid JSON" >&2
+        return 1
+      fi
       read -r gfx target <<<"$parsed"
     fi
   fi
@@ -323,7 +329,9 @@ resolve_image() {
   local fw="$1" mk="${2:-}"
   if [ -n "${IMAGE:-}" ]; then echo "$IMAGE"; return; fi
   local arch img
-  arch="$(detect_gpu_arch)"
+  if ! arch="$(detect_gpu_arch)"; then
+    return 1
+  fi
   img=$(python3 - "$DOCKER_DEFAULT" "$fw" "$arch" "$mk" <<'PY'
 import json, sys
 path, fw, arch, mk = (list(sys.argv[1:5]) + [""] * 4)[:4]
@@ -334,8 +342,11 @@ except Exception:
 
 def pick(node):
     # node may be a plain image string or an {arch: image, "default": image} dict.
-    # A bare gfx1201 ISA has no validated product image and must never inherit one.
+    # A bare gfx1201 ISA has no validated product image. Exact R9700 may select
+    # only an explicit R9700 mapping; neither may inherit a plain MI image.
     if arch == "gfx1201":
+        return ""
+    if arch == "R9700" and isinstance(node, str):
         return ""
     if isinstance(node, str):
         return node

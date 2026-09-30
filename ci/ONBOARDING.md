@@ -72,6 +72,11 @@ real `hf_repo` in `models.tsv` (see step 3).
   At run time `run_geak_e2e.sh` localizes the handoff into `handoff.patched.json`,
   overwriting `exp_root`, `launch_recipe`, `inferencex_path`, and `model_path`
   (only if `MODEL_PATH` is set) with local values; everything else is used as-is.
+  Real runs probe structured GPU identity unless the handoff supplies the
+  `expected_gfx` / `expected_target` pair. For a deterministic host-only test,
+  set `GEAK_GPU_IDENTITY_JSON` to the JSON emitted by
+  `scripts/gpu_identity.py`; a probe-less `--dry-run` skips rocminfo and marks
+  identity unavailable in its dispatch metadata.
 
 - **`baseline_config.with_envs.yaml`** (required) — the vLLM/sglang launch recipe.
 

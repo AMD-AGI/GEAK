@@ -16,7 +16,9 @@ Details and decision rules: Gluon `platform-known-issues.md` (RDNA4 PMC + `int64
 ## Profiling
 - Kernel-trace usually works. CDNA PMC names (`MfmaUtil`, `SQ_WAVES`, …) may be absent.
 - Run `rocprofv3-avail list --pmc` on the actual box before deriving a bound class from counters.
-  The older `rocprofv3 --list-counters` form fails on the ROCm 10 R9700 image.
+  For rocprofv3's own list use `rocprofv3 -L` / `--list-avail`; older profiler
+  generations named the operation `--list-counters`. This is a CLI rename, not
+  an R9700-image defect.
 - `rocprof-compute` / `omniperf` may abort with `Unsupported arch` on gfx1201. Prefer rocprofv3;
   accept a fallback profiler only when it leaves real dispatch artifacts.
 - Missing MFMA% is **not** a failed profile — fall back to durations + latency table.
@@ -30,4 +32,6 @@ Details and decision rules: Gluon `platform-known-issues.md` (RDNA4 PMC + `int64
 - A literal `v_mfma_*` intrinsic/inline-assembly port does not compile for gfx1201. Use WMMA.
 - Native INT4 WMMA exists, but `int4_w4a16` can still name a software-dequant path. Verify
   `v_wmma_i32_16x16x{16,32}_iu4` in the emitted ISA before claiming native INT4 execution.
-- Triton FA seeds: `BLOCK_M=64`, `BLOCK_N=32` on gfx1201; `waves_per_eu` RDNA-high.
+- Provisional Triton FA search hints: include `BLOCK_M=64`, `BLOCK_N=32`, and
+  `waves_per_eu=6` in a sweep, but do not treat them as sourced defaults until
+  R9700 A/B evidence supports them.

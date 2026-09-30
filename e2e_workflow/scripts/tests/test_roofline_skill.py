@@ -68,6 +68,27 @@ class TestPeaks(unittest.TestCase):
         self.assertEqual(p["source"], "table")
         self.assertEqual(p["confidence"], "high")
 
+    def test_gfx950_profile_dtype_aliases_keep_their_compute_peak(self):
+        p = _peaks()
+        expected = {
+            "fp8_e4m3": 5.0e15,
+            "fp8_w8a8": 5.0e15,
+            "float8_e4m3fn": 5.0e15,
+            "torch.float8_e5m2fnuz": 5.0e15,
+            "half": 2.5e15,
+            "torch.half": 2.5e15,
+            "bfloat16": 2.5e15,
+            "float16": 2.5e15,
+            "float32": 1.57e14,
+        }
+        for dtype, peak in expected.items():
+            with self.subTest(dtype=dtype):
+                self.assertAlmostEqual(
+                    rt.peak_flops_for(p, dtype), peak, delta=peak * 1e-6
+                )
+        self.assertEqual(rt.dtype_bytes("torch.float8_e4m3fnuz"), 1)
+        self.assertEqual(rt.dtype_bytes("half"), 2)
+
     def test_gfx942_also_tabulated(self):
         p = rt.load_peaks(PEAKS_MD, "gfx942")
         self.assertIsNotNone(p)
@@ -117,6 +138,16 @@ class TestPeaks(unittest.TestCase):
         self.assertAlmostEqual(rt.peak_flops_for(p, "fp16"), 1.91e14, delta=1e11)
         self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 4.78e13, delta=1e11)
         self.assertAlmostEqual(rt.peak_flops_for(p, "fp8"), 3.83e14, delta=1e11)
+        for alias in (
+            "fp8_e4m3",
+            "fp8_e5m2",
+            "fp8_w8a8",
+            "float8_e4m3fn",
+            "torch.float8_e5m2fnuz",
+        ):
+            self.assertAlmostEqual(
+                rt.peak_flops_for(p, alias), 3.83e14, delta=1e11
+            )
         self.assertAlmostEqual(rt.peak_flops_for(p, "int8"), 3.83e14, delta=1e11)
         self.assertIsNone(rt.peak_flops_for(p, "fp4"))
         self.assertNotIn("fp4", p["flops"])
@@ -369,8 +400,13 @@ class TestSkillDocConsistency(unittest.TestCase):
         self.assertEqual(rt.TARGET_EFF["gemm"], 0.90)
         self.assertEqual(rt.TARGET_EFF["moe"], 0.90)
         self.assertEqual(rt.TARGET_EFF["attn"], 0.50)
+        self.assertEqual(rt.target_eff_for("moe", product="r9700"), 0.76)
+        self.assertEqual(rt.target_eff_for("elementwise", product="r9700"), 0.76)
+        self.assertEqual(rt.target_eff_for("gemm", product="r9700"), 0.90)
+        self.assertEqual(rt.target_eff_for("moe", product="unknown"), 0.90)
         for frag in ("dense GEMM | **0.90**", "MoE / grouped GEMM | **0.90**",
-                     "attention decode (paged) | **0.50**"):
+                     "attention decode (paged) | **0.50**",
+                     "R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76**"):
             self.assertIn(frag, text, "SKILL.md target_eff table drifted from roofline_tools.TARGET_EFF")
 
     def test_workload_contract_is_stated(self):

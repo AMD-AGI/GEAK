@@ -13,9 +13,27 @@ profile_detect_arch() {
         printf '%s\n' "$pinned"
         return
     fi
+    local identity_script="${GPU_IDENTITY_SCRIPT:-${SCRIPT_DIR:-.}/../../scripts/gpu_identity.py}"
+    local identity
+    if [ -f "$identity_script" ]; then
+        if [ -n "${ROCR_VISIBLE_DEVICES:-}" ] || [ -z "${GPU_ID:-}" ]; then
+            identity="$(python3 "$identity_script")" || return 1
+        else
+            identity="$(ROCR_VISIBLE_DEVICES="$GPU_ID" python3 "$identity_script")" || return 1
+        fi
+        python3 -c 'import json,sys; print(json.loads(sys.argv[1])["gfx"])' "$identity"
+        return
+    fi
+    # Standalone/vendor fallback: return an architecture only for a homogeneous
+    # visible set. Never select the first agent on a mixed host.
     rocminfo 2>/dev/null | awk '
-        /^ *Name: *gfx[0-9a-f]+/ && $2 != "gfx000" { print $2; exit }
-    ' || true
+        /^ *Name: *gfx[0-9a-f]+/ && $2 != "gfx000" { seen[$2] = 1 }
+        END {
+            for (gfx in seen) { count += 1; only = gfx }
+            if (count == 1) print only
+            else if (count > 1) exit 1
+        }
+    '
 }
 
 profiler_priority_for_arch() {

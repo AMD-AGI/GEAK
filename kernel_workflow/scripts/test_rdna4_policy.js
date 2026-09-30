@@ -13,6 +13,7 @@ const body = fs.readFileSync(path.join(wfDir, 'kernel_lane.js'), 'utf8')
 
 async function run(deviceGfx, expectedGfx = '', extras = {}) {
   const prompts = [];
+  const logs = [];
   const {
     deviceName = '',
     deviceTarget,
@@ -22,12 +23,14 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
     expectedTarget = '',
     expectedDeviceName = '',
     expectedPhysicalCuCount = 0,
+    budget = 0,
+    planDirections = null,
   } = extras;
   const globals = {
     args: {
       kernel_path: '/tmp/kernel',
       workflow_dir: wfDir,
-      budget: 0,
+      budget,
       expected_gfx: expectedGfx,
       expected_target: expectedTarget,
       expected_device_name: expectedDeviceName,
@@ -36,7 +39,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
       use_learned_kb: 'true',
     },
     phase: () => {},
-    log: () => {},
+    log: (message) => logs.push(String(message)),
     workflow: async () => null,
     parallel: async (items) => Promise.all(items.map((item) => item())),
     pipeline: async () => [],
@@ -83,6 +86,9 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
       if (options.label === 'profile_engineer:baseline') {
         return { bottleneck: 'unknown', device: deviceGfx, summary_path: '' };
       }
+      if (options.label.startsWith('tech_lead:plan')) {
+        return { stop: false, directions: planDirections || [] };
+      }
       if (options.label === 'update_experience') {
         return { action: 'skipped', card_path: '', key: '', note: 'test' };
       }
@@ -93,7 +99,7 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
     ...Object.keys(globals),
     `return (async () => { ${body} })();`,
   );
-  return { result: await fn(...Object.values(globals)), prompts };
+  return { result: await fn(...Object.values(globals)), prompts, logs };
 }
 
 function mustInclude(hay, needle, msg) {
@@ -161,15 +167,20 @@ function mustInclude(hay, needle, msg) {
       if (!/product mismatch/.test(String(error.message))) throw error;
     },
   );
-  await run('gfx1201', 'gfx1201', {
+  const identityDrift = await run('gfx1201', 'gfx1201', {
     deviceTarget: 'r9700', physicalCuCount: 32,
-    expectedTarget: 'r9700', expectedPhysicalCuCount: 64,
-  }).then(
-    () => { throw new Error('R9700 physical CU mismatch was not rejected'); },
-    (error) => {
-      if (!/physical CU mismatch/.test(String(error.message))) throw error;
-    },
-  );
+    deviceName: '  Radeon AI PRO R9700 (paraphrased)  ',
+    expectedTarget: 'r9700',
+    expectedDeviceName: 'AMD Radeon AI PRO R9700',
+    expectedPhysicalCuCount: 64,
+  });
+  const driftAnalyze = identityDrift.prompts.find(
+    (entry) => entry.label === 'tech_lead:analyze').prompt;
+  mustInclude(driftAnalyze, '- PHYSICAL_CU_COUNT: 64',
+    'deterministic expected CU count was not used for policy');
+  if (identityDrift.logs.filter((line) => /identity telemetry differs/.test(line)).length !== 2) {
+    throw new Error(`Director name/CU drift was not logged as telemetry: ${identityDrift.logs.join(' | ')}`);
+  }
   await run('gfx1201', 'gfx1201', {
     deviceTarget: 'r9700', physicalCuCount: 0, expectedTarget: 'r9700',
   }).then(
@@ -178,6 +189,39 @@ function mustInclude(hay, needle, msg) {
       if (!/positive physical_cu_count/.test(String(error.message))) throw error;
     },
   );
+
+  const allFiltered = await run('gfx1201', 'gfx1201', {
+    deviceTarget: 'unknown',
+    budget: 1,
+    planDirections: [{
+      id: 'roof', title: 'Use roofline peak bandwidth', prompt: 'Reach 90% of peak',
+      specialty: 'memory', focus_files: ['kernel.py'],
+    }],
+  });
+  if (allFiltered.result.stopped_by !== 'all_directions_filtered_unknown_peaks') {
+    throw new Error(`all-filtered plan reported ${allFiltered.result.stopped_by}`);
+  }
+  if (allFiltered.logs.some((line) => /TechLead chose to stop/.test(line))) {
+    throw new Error('harness filtering was still attributed to the TechLead');
+  }
+
+  const partlyFiltered = await run('gfx1201', 'gfx1201', {
+    deviceTarget: 'unknown',
+    budget: 1,
+    planDirections: [
+      {
+        id: 'roof', title: 'Use roofline peak bandwidth', prompt: 'Reach peak',
+        specialty: 'memory', focus_files: ['kernel.py'],
+      },
+      {
+        id: 'fusion', title: 'Fuse dispatches', prompt: 'Reduce launches',
+        specialty: 'host_runtime', focus_files: ['kernel.py'],
+      },
+    ],
+  });
+  if (partlyFiltered.result.stopped_by !== 'budget') {
+    throw new Error(`partially filtered plan did not keep its valid direction: ${partlyFiltered.result.stopped_by}`);
+  }
 
   const cdna5 = await run('gfx1250');
   const cdna5Analyze = cdna5.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt;
@@ -213,6 +257,10 @@ function mustInclude(hay, needle, msg) {
 
   const rdna = fs.readFileSync(path.join(wfDir, 'knowledge/amd_rdna4.md'), 'utf8');
   mustInclude(rdna, 'rocprofv3-avail list --pmc');
+  mustInclude(rdna, 'rocprofv3 -L');
+  mustInclude(rdna, 'accepts `s_alloc_vgpr`');
+  mustInclude(rdna, 'Use `gfx` for ISA facts');
+  mustInclude(rdna, 'unvalidated seed');
   if (rdna.includes('rocprofv3 --list-counters')) {
     throw new Error('amd_rdna4.md still documents rocprofv3 --list-counters');
   }
@@ -224,6 +272,41 @@ function mustInclude(hay, needle, msg) {
   if (profileGuide.includes('rocprofv3 --list-counters')) {
     throw new Error('profiling_guide.md still documents rocprofv3 --list-counters as the RDNA4 PMC listing command');
   }
+
+  const pitfalls = fs.readFileSync(
+    path.join(geakRoot, 'perf_knowledge/hardware/rdna4_gfx1201/pitfalls.md'), 'utf8');
+  mustInclude(pitfalls, 'rocprofv3 -L');
+  mustInclude(pitfalls, 'CLI rename');
+  const platformIssues = fs.readFileSync(
+    path.join(geakRoot, 'perf_knowledge/expert_skills/skills/gluon_authoring/references/platform-known-issues.md'),
+    'utf8');
+  mustInclude(platformIssues, 'rocprofv3 -L');
+  mustInclude(platformIssues, 'R9700-only');
+
+  const occupancy = fs.readFileSync(
+    path.join(geakRoot, 'perf_knowledge/hardware/rdna4_gfx1201/occupancy.md'), 'utf8');
+  mustInclude(occupancy, 'pointer, not a second prose copy');
+  if (occupancy.includes('| VGPRs/wave |')) {
+    throw new Error('orphan occupancy card still duplicates the workflow table');
+  }
+
+  const setupComment = e2e.slice(e2e.indexOf('const SETUP_SCHEMA'), e2e.indexOf('const PROFILE_SCHEMA'));
+  if (/OPTIONAL here|required` is unchanged/.test(setupComment)) {
+    throw new Error('E2E Setup schema comment still says required identity is optional');
+  }
+  const e2eDirector = fs.readFileSync(
+    path.join(geakRoot, 'e2e_workflow/roles/director.md'), 'utf8');
+  if (/gfx target[^\\n]*or \\\\\"\\\\"/.test(e2eDirector)) {
+    throw new Error('E2E Director still permits an empty required gfx');
+  }
+  const apiReference = fs.readFileSync(
+    path.join(geakRoot, 'docs/reference/api-reference.md'), 'utf8');
+  mustInclude(apiReference, 'expected_gfx: \"gfx950\"');
+  mustInclude(apiReference, 'expected_target: \"unknown\"');
+  const runE2eDocs = fs.readFileSync(
+    path.join(geakRoot, 'interface/run_e2e.md'), 'utf8');
+  mustInclude(runE2eDocs, 'GEAK_GPU_IDENTITY_JSON');
+  mustInclude(runE2eDocs, 'unavailable_dry_run');
 
   const curator = fs.readFileSync(path.join(wfDir, 'roles/update_experience.md'), 'utf8');
   mustInclude(curator, 'CURATION_ISOLATE');

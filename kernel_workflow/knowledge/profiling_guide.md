@@ -93,8 +93,10 @@ Override env vars (defaults in `profile_kernel.sh`): `PROFILER_PRIORITY`, `WARMU
 
 On RDNA4, `rocprofv3 --kernel-trace` usually records dispatches, but CDNA SoL names (`SQ_WAVES`,
 `VALUInsts`, `MfmaUtil`, `VALUBusy`) may be missing or mean something else. Run
-`rocprofv3-avail list --pmc` before trusting a PMC-derived bound class (the older list-counters
-CLI is broken on the ROCm 10 R9700 image). **Do not fail the profile
+`rocprofv3-avail list --pmc` before trusting a PMC-derived bound class. For
+rocprofv3's own listing, use `rocprofv3 -L` / `--list-avail`; older profiler
+generations called this `--list-basic`, `--list-derived`, or
+`--list-counters`. This is a CLI rename, not an R9700-image defect. **Do not fail the profile
 phase** if MFMA% is absent — classify from kernel-trace durations + per-case latency + dispatch
 count + `amd_rdna4.md` §5. Never invent MFMA utilization.
 
@@ -110,7 +112,7 @@ The most important section. Shows overall utilization as percentage of peak.
 | MFMA Utilization | Matrix unit usage (CDNA) | > 40% = MFMA-active; **often absent on RDNA4** — see below |
 | VMEM Utilization | Vector memory pipe | > 60% = memory-bound |
 | LDS Utilization | Local data share | > 50% = LDS-heavy |
-| Bandwidth (GB/s) | Effective HBM/GDDR BW | Compare to **this card**: Instinct peaks in `amd_instinct.md`; RDNA4 — **measure** (`amd_rdna4.md` §4) |
+| Bandwidth (GB/s) | Effective HBM/GDDR BW | Compare to **this card**: Instinct peaks in `amd_instinct.md`; R9700 datasheet ceiling in `amd_rdna4.md` §4, or a separately labeled streaming measurement |
 
 **Classification from SoL:**
 - VALU > 60% AND VMEM < 40% → **compute-bound**
@@ -188,7 +190,7 @@ diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly 
 
 **CDNA (gfx942/gfx950):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. ArchVGPR and Accum_VGPR share one file.
 
-**R9700 / gfx1201:** do **not** use the 512 combined-VGPR formula. Occupancy is static ≤256 VGPR/wave, granule 24, cap 16 waves/SIMD. Read `amd_rdna4.md` and `perf_knowledge/hardware/rdna4_gfx1201/occupancy.md` and re-derive with `amd_occupancy.py --arch gfx1201` on this ROCm. Dividing 256 by kernel VGPRs under-reports occupancy 2–3×.
+**R9700 / gfx1201:** do **not** use the 512 combined-VGPR formula. GEAK's HIP/Triton workflow uses the static ≤256 VGPR/wave model, granule 24, cap 16 waves/SIMD. Read `amd_rdna4.md` and re-derive with `amd_occupancy.py --compiler-sweep --arch gfx1201` on this ROCm. Dividing 256 by kernel VGPRs under-reports occupancy 2–3×.
 - Branch Divergence > 10% → significant divergence penalty
 - VALU Util close to SoL → compute is the bottleneck
 
@@ -212,7 +214,7 @@ diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly 
 |--------|--------------|
 | Read BW | HBM read bandwidth achieved |
 | Write BW | HBM write bandwidth achieved |
-| Total BW | Should be < this card's peak (Instinct: `amd_instinct.md`; RDNA4: measured, `amd_rdna4.md`) |
+| Total BW | Compare with the explicitly labeled denominator (Instinct table; R9700 640 GB/s datasheet ceiling or a separately recorded streaming measurement) |
 
 ## Bottleneck Classification Decision Tree
 

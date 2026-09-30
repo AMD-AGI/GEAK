@@ -28,6 +28,24 @@ chmod +x "$tmp/rocminfo"
 # shell (including under `set -o posix`) and so they apply to detect_gpu_arch itself.
 override() {
   local val="$1"
+  local gfx="gfx1201" product="Another gfx1201 Product" cu="64"
+  case "${val,,}" in
+    gfx950|mi355|mi350|mi350x) gfx="gfx950"; product="AMD Instinct MI355X"; cu="256" ;;
+    gfx942|gfx90a|mi300|mi300x) gfx="gfx942"; product="AMD Instinct MI300X"; cu="304" ;;
+    gfx1200) gfx="gfx1200"; product="AMD Radeon Graphics"; cu="56" ;;
+  esac
+  cat > "$tmp/rocminfo" <<EOF
+#!/bin/sh
+cat <<'ROCMINFO'
+*******
+Agent 1
+*******
+  Name:                    $gfx
+  Marketing Name:          $product
+  Compute Unit:            $cu
+ROCMINFO
+EOF
+  chmod +x "$tmp/rocminfo"
   PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH="$val" detect_gpu_arch
 }
 
@@ -147,7 +165,8 @@ got="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH= detect_gpu
   || fail "verbose rocminfo gfx1201 must not SIGPIPE under pipefail"
 [ "$got" = "R9700" ] || fail "verbose rocminfo gfx1201 -> R9700 (got $got)"
 
-# Empty stub: missing gfx while R9700 is expected fails closed; otherwise SPUR default.
+# Empty/invalid rocminfo is an identity failure and must never select the SPUR
+# default. The default is retained only when no identity helper is available.
 cat > "$tmp/rocminfo" <<'EOF'
 #!/bin/sh
 exit 0
@@ -159,11 +178,71 @@ if err="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET=r9700 GEAK_GPU_ARCH= de
   fail "expected R9700 with empty rocminfo must fail closed"
 fi
 [[ "$err" == *"E_TARGET_EXPECTED_MISMATCH"* ]] \
-  || fail "missing-rocminfo R9700 stderr missing E_TARGET_EXPECTED_MISMATCH (got: $err)"
+  || [[ "$err" == *"E_GPU_IDENTITY"* ]] \
+  || fail "missing-rocminfo R9700 stderr missing identity failure (got: $err)"
 
-got="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH= detect_gpu_arch)" \
-  || fail "missing rocminfo without R9700 expectation should keep the SPUR default"
-[ "$got" = "$GEAK_GPU_ARCH_DEFAULT" ] || fail "SPUR default when R9700 is not expected (got $got, default $GEAK_GPU_ARCH_DEFAULT)"
+err=""
+if err="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH= detect_gpu_arch 2>&1)"; then
+  fail "an installed but invalid rocminfo probe must fail rather than select the SPUR default"
+fi
+[[ "$err" == *"E_GPU_IDENTITY"* ]] \
+  || fail "invalid rocminfo stderr missing E_GPU_IDENTITY (got: $err)"
+
+got="$(PATH="$tmp:/usr/bin:/bin" GPU_IDENTITY_SCRIPT="$tmp/missing-identity-helper" \
+       GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH= detect_gpu_arch)" \
+  || fail "an unavailable identity helper should retain the SPUR default"
+[ "$got" = "$GEAK_GPU_ARCH_DEFAULT" ] \
+  || fail "SPUR default when no probe is available (got $got, default $GEAK_GPU_ARCH_DEFAULT)"
+
+# A typical R9700 workstation may expose a generic Ryzen iGPU. The narrow
+# integrated-agent filter must keep the exact R9700 identity.
+cat > "$tmp/rocminfo" <<'EOF'
+#!/bin/sh
+cat <<'ROCMINFO'
+*******
+Agent 1
+*******
+  Name:                    gfx1201
+  Marketing Name:          AMD Radeon AI PRO R9700
+  Compute Unit:            64
+*******
+Agent 2
+*******
+  Name:                    gfx1036
+  Marketing Name:          AMD Radeon Graphics
+  Compute Unit:            2
+ROCMINFO
+EOF
+chmod +x "$tmp/rocminfo"
+got="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET=r9700 GEAK_GPU_ARCH= detect_gpu_arch)" \
+  || fail "R9700 plus generic iGPU should resolve"
+[ "$got" = "R9700" ] || fail "R9700+iGPU resolved to $got"
+
+# An unrelated discrete product must not be hidden by the iGPU exception.
+cat > "$tmp/rocminfo" <<'EOF'
+#!/bin/sh
+cat <<'ROCMINFO'
+*******
+Agent 1
+*******
+  Name:                    gfx1201
+  Marketing Name:          AMD Radeon AI PRO R9700
+  Compute Unit:            64
+*******
+Agent 2
+*******
+  Name:                    gfx950
+  Marketing Name:          AMD Instinct MI355X
+  Compute Unit:            256
+ROCMINFO
+EOF
+chmod +x "$tmp/rocminfo"
+err=""
+if err="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH= detect_gpu_arch 2>&1)"; then
+  fail "a genuinely mixed discrete host must fail identity"
+fi
+[[ "$err" == *"mixed identities"* ]] \
+  || fail "mixed-discrete stderr missing explicit identity failure (got: $err)"
 
 # A generic gfx1201 product must not receive the R9700 vLLM image.
 install_rocminfo_stub gfx1201 'Another gfx1201 Product'
@@ -195,5 +274,20 @@ PY
 got="$(PATH="$tmp:/usr/bin:/bin" GEAK_GPU_ARCH=R9700 resolve_image vllm)" || fail "R9700 vLLM image"
 [ "$got" = "$want_r9700" ] || fail "R9700 vLLM must be the R9700 key, not a fallback (got $got, want $want_r9700)"
 [ "$got" != "$mi300" ] || fail "R9700 vLLM resolved to the MI300 image"
+
+model_cfg="$tmp/docker-model-string.json"
+python3 - "$DOCKER_DEFAULT" "$model_cfg" <<'PY'
+import json, sys
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    data = json.load(handle)
+data["models"] = {"string-pin": "example.invalid/mi-only:latest"}
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(data, handle)
+PY
+got="$(PATH="$tmp:/usr/bin:/bin" DOCKER_DEFAULT="$model_cfg" GEAK_GPU_ARCH=R9700 \
+       resolve_image vllm string-pin)" || fail "R9700 should skip a plain-string per-model pin"
+[ "$got" = "$want_r9700" ] \
+  || fail "R9700 inherited a plain-string model pin instead of vllm.R9700 (got $got)"
 
 echo "PASS: GPU arch overrides, rocminfo parsing, R9700 expectations, and image resolution."

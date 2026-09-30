@@ -125,11 +125,19 @@ Workflow({
     model_path: "/models/Qwen3.5-27B-FP8",
     workflow_dir: "<REPO>/e2e_workflow",
     backend: "sglang", tp: 4, gpu_ids: "0,1,2,3",
+    expected_gfx: "gfx950", expected_target: "unknown",
+    expected_device_name: "AMD Instinct MI355X",
+    expected_physical_cu_count: 256,
     isl: 1024, osl: 1024, conc: 64,
     budget: 6, config_tune: "true"
   }
 })
 ```
+
+For normal launches, prefer `interface/run_e2e.py`; it runs the structured GPU
+identity probe and supplies these `expected_*` fields before backend or
+architecture policy is selected. Direct `Workflow(...)` model-mode calls must
+supply `expected_gfx` and `expected_target` themselves.
 
 ## `kernel_workflow.js`
 

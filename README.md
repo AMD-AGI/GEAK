@@ -16,7 +16,9 @@ across paths such as Triton, FlyDSL, TileLang, and HIP, and validates the speedu
 normally takes weeks of expert kernel engineering becomes an automated, repeatable, and self-improving process.
 
 GEAK targets AMD Instinct MI GPUs (CDNA, e.g. gfx942 / gfx950; the on-box card is auto-detected), and also runs
-on RDNA3.5 client parts (gfx1151 / Radeon 8060S) and the RDNA4 client target gfx1201. It is driven by
+on RDNA3.5 client parts (gfx1151 / Radeon 8060S) and the validated RDNA4 product Radeon AI PRO R9700
+(gfx1201). gfx1201 is an ISA shared by other products; it does not by itself select R9700 images,
+calibrated peaks, or serving policy. It is driven by
 Claude Code and orchestrated by deterministic JS Workflows. It ships two workflows, each for a different scenario:
 
 | Workflow | Scope | What it optimizes |
@@ -42,7 +44,7 @@ optimize a single kernel.
 
 ### 1. Prerequisites
 
-- An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), an **RDNA3.5 part** (gfx1151), or **RDNA4 client gfx1201**, **ROCm 6+**, a profiler (`rocprof-compute` /
+- An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), an **RDNA3.5 part** (gfx1151), or a **Radeon AI PRO R9700** (validated RDNA4/gfx1201 product), **ROCm 6+**, a profiler (`rocprof-compute` /
   `rocprofv3` / `rocprof`; RDNA4 PMCs may be sparse — kernel-trace still counts), Python 3.8+.
 - For E2E: a running-capable serving backend (`sglang`, `vllm`, or `atom`; R9700 is vLLM-only) and the model weights on disk.
 

@@ -147,11 +147,19 @@ run_rocprofv3() {        # modern profiler: kernel trace + stats CSVs (per-kerne
 }
 
 run_rocprof() {          # legacy: rocprof --stats (HIP dispatch stats).
+    local dir="$OUTPUT_DIR/rocprof"
+    [ -e "$dir" ] && mv "$dir" "${dir}.old_$(date +%s)_$$" 2>/dev/null || true
+    mkdir -p "$dir"
+    local output="$dir/results.csv"
+    local log="$OUTPUT_DIR/rocprof_run.log"
     echo "=== Profiling with rocprof ($RPROF_ARGS) ==="
     local rc=0
-    bash "$GPU_LOCK" "$GPU_ID" rocprof $RPROF_ARGS bash -c "$BENCHMARK_CMD" >> "$REPORT" 2>&1 || rc=$?
-    if [ "$rc" -ne 0 ]; then emit_profiler_failure rocprof "$rc" RPROF_ARGS "$REPORT"; return 1; fi
-    if grep -qE 'Name|Duration|Kernel' "$REPORT" 2>/dev/null; then
+    bash "$GPU_LOCK" "$GPU_ID" \
+        rocprof $RPROF_ARGS -o "$output" bash -c "$BENCHMARK_CMD" \
+        > "$log" 2>&1 || rc=$?
+    { cat "$log"; echo ""; } >> "$REPORT" 2>/dev/null || true
+    if [ "$rc" -ne 0 ]; then emit_profiler_failure rocprof "$rc" RPROF_ARGS "$log"; return 1; fi
+    if profiler_artifacts_ok "$dir"; then
         PROFILE_SUCCESS=true
         return 0
     fi

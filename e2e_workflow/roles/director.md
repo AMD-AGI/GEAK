@@ -143,7 +143,7 @@ Return JSON:
   "tp": 1,
   "workload": {"isl": 1024, "osl": 1024, "conc": 64},
   "bench_script": "<EVAL_DIR>/bench_e2e.sh",
-  "gfx": "<gfx target, e.g. gfx950 — from step 4, or \"\" if you could not detect it>",
+  "gfx": "<required gfx target from step 4, e.g. gfx950>",
   "device_target": "r9700|unknown",
   "device_name": "<exact Marketing Name from the selected rocminfo agent>",
   "physical_cu_count": 64,
@@ -156,9 +156,10 @@ Return JSON:
 
 The final deployment dimensions are the dimensions the knowledge base addresses a record by, and you have
 already established every one of them in step 4 to launch the server at all. **Never guess one.**
-An empty string files this run under a deliberately coarse `unknown` page, which is honest and
-recoverable; a plausible-looking wrong value files it under an authoritative page, and the store has
-no delete — a bad record there can only be outranked, never removed. If a value is genuinely
+`gfx`, `device_target`, and `physical_cu_count` are required by the Setup schema; stop if the structured
+probe cannot establish them. Optional descriptive fields may remain empty. A plausible-looking wrong
+value files the run under an authoritative page, and the store has no delete — a bad record there can
+only be outranked, never removed. If an optional value is genuinely
 unknown, `""` is the correct answer.
 
 ---

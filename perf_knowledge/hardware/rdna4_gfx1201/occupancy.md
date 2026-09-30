@@ -12,30 +12,17 @@ sources:
 
 # RDNA4 / gfx1201 — occupancy
 
-Canonical constants: Gluon `hw_constants.json` key `gfx1201`. Re-measure after a
-ROCm/LLVM bump with
-`amd_occupancy.py --compiler-sweep --arch gfx1201 --format json`.
+This card is a pointer, not a second prose copy of the occupancy table.
 
-The table below was regenerated on **ROCm 10 / AMD clang 23.0.0git**
-(`llvm-project` `8f497e0992fb7513f7f78a6f6b6f1056c375e961`) in the pinned
-public rocm/vllm ROCm 10 image. All breakpoints matched the
-earlier ROCm 7.2.1 / LLVM 22 sweep.
+- Workflow-facing rules and the human-readable table:
+  [`kernel_workflow/knowledge/amd_rdna4.md`](../../../kernel_workflow/knowledge/amd_rdna4.md)
+- Machine-readable constants: Gluon `hw_constants.json`, key `gfx1201`
+- Reproduction command:
+  `amd_occupancy.py --compiler-sweep --arch gfx1201 --format json`
 
 ## TL;DR
-> Cap is **16 waves/SIMD**. VGPR allocation granule 24. Static ≤256 VGPR/wave — `S_ALLOC_VGPR` is
-> rejected on gfx1201. `vgpr_file_per_simd` = 1536; **do not** treat 256 as the SIMD file.
-
-## Compiler-derived VGPR → waves/SIMD (ROCm 10 / LLVM 23)
-
-| VGPRs/wave | Max waves/SIMD |
-|------------|----------------|
-| 96 | 16 |
-| 120 | 12 |
-| 144 | 10 |
-| 168 | 9 |
-| 192 | 8 |
-| 216 | 7 |
-| 240 | 6 |
-| 256 | 5 |
-
-LDS: 64 KiB per workgroup. `nW` = `ceil(threads_per_block / 32)` on this family.
+> GEAK's HIP/Triton workflow uses the compiler-derived static occupancy model:
+> cap **16 waves/SIMD**, VGPR allocation granule 24, and a 1536-VGPR SIMD
+> file. `llvm-mc -mcpu=gfx1201` accepts `s_alloc_vgpr`; dynamic allocation has
+> not been demonstrated through the workflow's HIP/Triton paths, so do not use
+> it in occupancy planning without separate toolchain evidence.

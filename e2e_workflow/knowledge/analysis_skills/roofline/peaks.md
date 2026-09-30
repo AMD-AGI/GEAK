@@ -5,8 +5,12 @@ Client RDNA4 peaks are **R9700-only**. A bare `gfx1201` lookup without `product:
 must not inherit these numbers — several SKUs share that ISA.
 
 Peaks are **dense, no-sparsity, datasheet-ceiling** figures. Memory bandwidth is the
-*theoretical pin* rate — real streaming kernels top out near 0.85–0.92 of it, which is exactly what
-`target_eff` in `SKILL.md` encodes. Do not pre-derate the numbers here. Do not put sparse (2:4)
+*theoretical pin* rate. `target_eff` in `SKILL.md` is a generic op-class
+implementation prior, not a measured product-specific bandwidth derate. Record
+an on-box streaming measurement before claiming a product efficiency factor;
+the measured R9700 streaming override is documented separately in `SKILL.md`
+and selected by `target_eff_for`. Do
+not pre-derate the numbers here. Do not put sparse (2:4)
 rates in the yaml `flops` map.
 
 **Compute peaks need validation; the memory axis is the trustworthy one.** BF16 and FP16 run at the
@@ -23,8 +27,8 @@ product: r9700
 gfx: gfx1201
 cu: 64                         # physical CUs from rocminfo; not PyTorch WGP count (32)
 hbm_bw_bytes_s: 6.4e11         # 32 GB GDDR6, 256-bit at 20 Gbps, ~640 GB/s
-flops:                         # dense matrix-core peaks, FLOP/s (or OPS/s for int8)
-  fp32: 4.78e13
+flops:                         # dense peaks, FLOP/s (or OPS/s for int8)
+  fp32: 4.78e13                # vector FP32 rate, not a matrix-core rate
   bf16: 1.91e14
   fp16: 1.91e14
   fp8:  3.83e14

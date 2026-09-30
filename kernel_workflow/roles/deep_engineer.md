@@ -76,14 +76,19 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    hardware reference — `amd_instinct.md` for `gfx94*`/`gfx95*`, `amd_ryzen.md` for `gfx11*`, `amd_rdna4.md`
    for `gfx1201` — and use ITS peaks below. Never assume a default: peaks differ by integer factors across
    cards, and so do the fp8 format and the matrix ISA. On RDNA4, MFMA/MX peaks do not exist — use a
-   **measured** WMMA GEMM peak and a measured copy-kernel bandwidth.
+   R9700 datasheet ceilings only when `ROOFLINE_STATUS=calibrated-r9700`;
+   pair them with measured on-box rates when available.
 1. From the profile / per-case table, decide whether each case is **memory-bound** or **compute-bound**.
 2. **Memory-bound ceiling**: `min_time ≈ bytes_moved / mem_BW` — use this card's achievable memory
    bandwidth (~0.7–0.85× nameplate; e.g. ≈5.3 TB/s on MI300X, ~6 on MI325X, ~8 on MI350/355; see the
-   reference for the detected card). RDNA4: **measure** (no nameplate in `amd_rdna4.md`). Achieved % = that min_time / your measured time.
+   reference for the detected card). RDNA4: §4 contains the 640 GB/s datasheet
+   ceiling; use a streaming-copy measurement for an achievable rate and label
+   clearly which denominator you used. Achieved % = that min_time / your measured time.
 3. **Compute-bound ceiling**: `min_time ≈ FLOPs / peak_FLOPS` for the dtype — use the matrix-core peak
    for that precision on THIS card (MFMA on CDNA, WMMA on RDNA3.5 and RDNA4) from its reference.
-   RDNA4: measured WMMA peak from `amd_rdna4.md` §4. Achieved % similarly.
+   RDNA4: R9700 datasheet WMMA peak from `amd_rdna4.md` §4, not a measured
+   peak. Use it only for `calibrated-r9700`; other gfx1201 products have no
+   calibrated compute denominator. Achieved % similarly.
 4. Report the achieved % per representative case in your notes. If you are far below the ceiling, the
    kernel still has headroom — keep going. If you are near it, the remaining wall-clock is likely the
    launch/host floor → switch to `geomean_levers.md` Levers 1–3/6 (dispatch collapse, native layout,

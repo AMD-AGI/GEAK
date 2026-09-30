@@ -1,5 +1,5 @@
 ---
-title: RDNA4 / gfx1201 (R9700, RX 9070 XT) — architecture overview
+title: RDNA4 / gfx1201 ISA — architecture overview
 kind: hardware
 gens: [gfx1201]
 dtypes: [fp32, bf16, fp16, fp8_e4m3, fp8_e5m2, int8, int4]
@@ -17,9 +17,14 @@ sources:
 > [`kernel_workflow/knowledge/amd_rdna4.md`](../../../kernel_workflow/knowledge/amd_rdna4.md).
 > Occupancy numbers live in [occupancy.md](occupancy.md); pitfalls in [pitfalls.md](pitfalls.md).
 > Do **not** duplicate Gluon `hw_constants.json` beyond the cheat sheet — that file is the source.
+> These ISA facts apply to gfx1201 products. GEAK's product validation, serving
+> image, and calibrated peaks are **R9700-only**; RX 9070 XT and other gfx1201
+> products remain uncalibrated.
 
 ## TL;DR
-> Wave **32**, matrix ISA **WMMA only** (no MFMA, no scaled/MX, no TDM, no dynamic VGPR).
+> Wave **32**, matrix ISA **WMMA only** (no MFMA, no scaled/MX, no TDM). GEAK
+> uses static VGPR occupancy for HIP/Triton; do not mistake that tooling policy
+> for ISA rejection of `S_ALLOC_VGPR`.
 > LDS 64 KiB/WG (128 KiB/WGP). fp8 is **OCP**, never FNUZ. Use the public R9700
 > peaks in the roofline table; do not carry MI300X TFLOPS here. gfx12 also has native
 > INT4→INT32 WMMA; do not confuse that with software-dequantized W4A16.

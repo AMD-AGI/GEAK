@@ -1,7 +1,8 @@
 #!/bin/bash
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# gpu_lock.sh must pin PYTORCH_ROCM_ARCH after HIP_VISIBLE_DEVICES and refuse mixed ISAs.
+# gpu_lock.sh must pin PYTORCH_ROCM_ARCH for the selected ROCR-visible GPU and
+# refuse genuinely mixed allocations.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCK="$SCRIPT_DIR/gpu_lock.sh"
@@ -58,5 +59,26 @@ out="$(PATH="$tmp:$PATH" bash -c '
   printf "%s" "$PYTORCH_ROCM_ARCH"
 ')"
 [ "$out" = "gfx1201" ] || fail "homogeneous gfx1201 should pin PYTORCH_ROCM_ARCH (got $out)"
+
+cat > "$tmp/rocminfo" <<'EOF'
+#!/bin/sh
+if [ "${ROCR_VISIBLE_DEVICES:-}" = "0" ]; then
+  echo "  Name:                    gfx1201"
+else
+  echo "  Name:                    gfx1036"
+  echo "  Name:                    gfx1201"
+fi
+EOF
+chmod +x "$tmp/rocminfo"
+out="$(PATH="$tmp:$PATH" bash -c '
+  eval "$(sed -n "/^_rocminfo_gpu_gfx_list()/,/^}/p; /^_pin_compile_arch()/,/^}/p" "'"$LOCK"'")"
+  KERNEL_ENV_KEEP_ARCH=0
+  GPU_ID=0
+  unset ROCR_VISIBLE_DEVICES
+  _pin_compile_arch
+  printf "%s" "$PYTORCH_ROCM_ARCH"
+')"
+[ "$out" = "gfx1201" ] \
+  || fail "selected physical GPU should be probed through a scoped ROCR mask (got $out)"
 
 echo "PASS: gpu_lock pins compile arch after the selected GPU and refuses mixed ISAs."

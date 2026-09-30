@@ -293,6 +293,20 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["expected_physical_cu_count"], 256)
         self.assertEqual(ps["backend"], "sglang")
 
+    def test_probe_less_dry_run_marks_identity_unavailable(self):
+        os.environ.pop("GEAK_GPU_IDENTITY_JSON", None)
+        self.patch_rx(
+            "_expected_gpu_identity",
+            lambda _handoff: self.fail("dry-run must not probe GPU identity"),
+        )
+        ps = rx.map_args(
+            self._handoff(eval_dir=str(self.tmp / "e2e_dry_no_gpu")),
+            dry_run=True,
+        )
+        self.assertEqual(ps["gpu_identity_status"], "unavailable_dry_run")
+        self.assertNotIn("expected_gfx", ps)
+        self.assertNotIn("expected_target", ps)
+
     def test_explicit_r9700_identity_selects_vllm_without_gfx_promotion(self):
         ps = rx.map_args(self._handoff(
             eval_dir=str(self.tmp / "e2e_r9700"),
@@ -2669,6 +2683,18 @@ class TestMain(_RunE2ECase):
         self.assertEqual(plan["e2e_script"], str(rx.E2E_SCRIPT))
         self.assertIn("Invoke the Workflow tool exactly once", plan["prompt"])
         self.assertFalse(self.result_path.exists())
+
+    def test_probe_less_dry_run_is_host_only(self):
+        os.environ.pop("GEAK_GPU_IDENTITY_JSON", None)
+        self.patch_rx(
+            "_expected_gpu_identity",
+            lambda _handoff: self.fail("dry-run must not probe GPU identity"),
+        )
+        rc, stdout = self._run(self._handoff(), "--dry-run")
+        self.assertEqual(rc, 0)
+        mapped = json.loads(stdout)["mapped_args"]
+        self.assertEqual(mapped["gpu_identity_status"], "unavailable_dry_run")
+        self.assertNotIn("expected_gfx", mapped)
 
     def test_protected_pgids_are_published_before_any_launch(self):
         """Pins the CALL SITE, not just the helper: the veto must be in the
