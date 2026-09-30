@@ -17,8 +17,10 @@ probe, so it is asserted at the shell layer with fakes rather than trusted:
 No GPU or real vLLM is needed: everything the adapter touches is a fake on PATH.
 """
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -48,10 +50,16 @@ class VllmProfilerConfigTest(unittest.TestCase):
         os.makedirs(self.profile_dir)
         self.log = os.path.join(self.tmp, "server.log")
 
-        # Fake `python3`: ignore the probe heredoc on stdin, print the modelled field set
-        # (empty => import failed => old build). Command substitution strips the newline.
+        # Fake only the capability probe (`python3 -` with its heredoc).
+        # Other calls, including server_args.py's token decoder, need the real
+        # interpreter rather than the modelled profiler fields as their result.
         self._write(os.path.join(self.bin, "python3"),
-                    '#!/usr/bin/env bash\nprintf \'%s\\n\' "${PROBE_FIELDS:-}"\n')
+                    '#!/usr/bin/env bash\n'
+                    'if [ "$#" = 1 ] && [ "$1" = "-" ]; then\n'
+                    '  printf \'%s\\n\' "${PROBE_FIELDS:-}"\n'
+                    'else\n'
+                    f'  exec {shlex.quote(sys.executable)} "$@"\n'
+                    'fi\n')
         # Fake `vllm`: echo the argv AND the profiler env var it was handed (the <0.19 path
         # passes the dir as VLLM_TORCH_PROFILER_DIR in the env, not on argv). Both land in
         # $LOG via the launch redirect.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -212,6 +213,124 @@ def fake_proc(tmp_path, argv):
     (pid / "stat").write_text("1234 (name with ) parens) S " + "0 " * 18 + "12345 0\n")
     (pid / "cmdline").write_bytes(b"\0".join(token.encode() for token in argv) + b"\0")
     return {"pid": 1234, "start_ticks": "12345", "backend": "sglang", "port": "18080", "proc_root": proc}
+
+
+@pytest.fixture
+def strict_reference(tmp_path):
+    config = '{"method":"real", "nested":{"label":"a b", "sizes":[1,2]}}'
+    flags = ["--speculative-config", config, "--attention-backend", "aiter"]
+    argv = ["/venv/bin/vllm", "serve", "/cpu-only/model", "--port", "18080", *flags]
+    identity = fake_proc(tmp_path, argv)
+    identity["backend"] = "vllm"
+    (identity["proc_root"] / "1234/environ").write_bytes(
+        b"VLLM_USE_AITER=1\0PATH=/local/bin\0VLLM_TORCH_PROFILER_DIR=/local/profile\0"
+    )
+    semantics = {"model": "/cpu-only/model", "tokenizer": "/cpu-only/model",
+                 "served_model_name": "/cpu-only/model", "tp": "1", "dp": "1",
+                 "pp": "1", "seed": None, "nnodes": "1", "node_rank": "0"}
+    controls = {"remove_args": [], "current_args": shlex.join(flags),
+                "required_args": shlex.join(flags), "required_env": '{"VLLM_USE_AITER":"1"}',
+                "required_semantics": json.dumps(semantics)}
+    return identity, controls
+
+
+@pytest.mark.parametrize("required_env", ['{"VLLM_USE_AITER":"1"}', "VLLM_USE_AITER=1"])
+def test_strict_launch_attests_complete_flags_environment_and_model(strict_reference, required_env):
+    identity, controls = strict_reference
+    controls["required_env"] = required_env
+    # Endpoint placement may differ, while serving flags and semantics must match.
+    controls["required_args"] += " --port 19090"
+    result = sa.validate_launch(**identity, **controls)
+    assert result["status"] == "verified"
+    assert result["required_env"] == result["observed_serving_env"] == {"VLLM_USE_AITER": "1"}
+    assert result["observed_semantics"] == json.loads(controls["required_semantics"])
+    assert result["active_remove_args"] == []
+    assert result["control_digest"]
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("missing_flag", "reference_args_mismatch"),
+    ("unexpected_flag", "reference_args_mismatch"),
+    ("different_flag", "reference_args_mismatch"),
+    ("model", "reference_semantics_mismatch"),
+    ("missing_env", "reference_env_mismatch"),
+    ("unexpected_env", "reference_env_mismatch"),
+    ("different_env", "reference_env_mismatch"),
+])
+def test_strict_launch_rejects_live_reference_drift(strict_reference, change, reason):
+    identity, controls = strict_reference
+    process = identity["proc_root"] / "1234"
+    argv = process.joinpath("cmdline").read_bytes()[:-1].decode().split("\0")
+    if change == "missing_flag":
+        del argv[-2:]
+    elif change == "unexpected_flag":
+        argv.append("--enable-prefix-caching")
+    elif change == "different_flag":
+        argv[-1] = "different-backend"
+    elif change == "model":
+        argv[2] = "/cpu-only/different-model"
+    else:
+        env = {"missing_env": b"PATH=/local/bin\0",
+               "unexpected_env": b"VLLM_USE_AITER=1\0VLLM_USE_TRITON_FLASH_ATTN=1\0",
+               "different_env": b"VLLM_USE_AITER=0\0"}[change]
+        process.joinpath("environ").write_bytes(env)
+    process.joinpath("cmdline").write_bytes(b"\0".join(token.encode() for token in argv) + b"\0")
+    result = sa.validate_launch(**identity, **controls)
+    assert result["status"] == "failed"
+    assert result["reason"] == reason
+    if reason == "reference_args_mismatch":
+        assert result["missing_flags"] == (["--attention-backend"] if change == "missing_flag" else [])
+        assert result["unexpected_flags"] == (["--enable-prefix-caching"] if change == "unexpected_flag" else [])
+        assert result["different_flags"] == (["--attention-backend"] if change == "different_flag" else [])
+    elif reason == "reference_env_mismatch":
+        assert result["different_env_keys"] == [
+            "VLLM_USE_TRITON_FLASH_ATTN" if change == "unexpected_env" else "VLLM_USE_AITER"
+        ]
+    else:
+        assert result["observed_semantics"]["model"] == "/cpu-only/different-model"
+
+
+@pytest.mark.parametrize("required_env", ['{"VLLM_USE_AITER":1}', "VLLM_USE_AITER"])
+def test_strict_environment_requires_string_assignments_before_observation(required_env, monkeypatch):
+    monkeypatch.setattr(sa, "_observe", lambda *_: pytest.fail("invalid environment reached process observation"))
+    result = sa.validate_launch(pid=1234, start_ticks=12345, backend="vllm", port=18080,
+                                remove_args=[], required_env=required_env)
+    assert result["status"] == "failed"
+    assert result["reason"] == "invalid_controls"
+    assert "detail" in result
+    assert "argv" not in result
+
+
+@pytest.mark.parametrize("location", ["current_args", "required_args", "live_argv"])
+def test_strict_launch_never_records_credential_arguments(strict_reference, location):
+    identity, controls = strict_reference
+    secret = "fixture-only-credential"
+    if location == "live_argv":
+        cmdline = identity["proc_root"] / "1234/cmdline"
+        cmdline.write_bytes(cmdline.read_bytes() + f"--api-key={secret}\0".encode())
+    else:
+        controls[location] += f" --api-key={secret}"
+    result = sa.validate_launch(**identity, **controls)
+    assert result["status"] == "failed"
+    assert result["reason"] == ("unsupported_argv" if location == "live_argv" else "invalid_controls")
+    assert secret not in json.dumps(result)
+    assert "argv" not in result
+
+
+def test_tokens_cli_preserves_json_spaces_unicode_and_empty_values(capsysbinary):
+    tokens = ["--config", '{"label": "a b", "nested": [1, 2]}', "--note", "café", "--empty", ""]
+    assert sa.main(["tokens", "--current-args=" + shlex.join(tokens)]) == 0
+    captured = capsysbinary.readouterr()
+    assert captured.out == b"\0".join(token.encode() for token in tokens) + b"\0"
+    assert captured.err == b""
+
+
+@pytest.mark.parametrize("text", ["--config 'unterminated", "--config=before\0after"])
+def test_tokens_cli_rejects_malformed_input_without_partial_output(text, capsysbinary):
+    assert sa.main(["tokens", "--current-args=" + text]) == 2
+    captured = capsysbinary.readouterr()
+    assert captured.out == b""
+    assert b"invalid server arguments:" in captured.err
 
 
 @pytest.mark.parametrize("argv", [

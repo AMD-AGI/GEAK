@@ -132,6 +132,7 @@ jobs:
             kb/tests/test_identity.py \
             kernel_workflow/scripts/tests/test_kb_loop_offline.py \
             interface/test_effective_config.py \
+            interface/test_recipe_fidelity.py \
             interface/test_source_materialization.py \
             interface/test_source_bundle.py \
             interface/test_source_measurement.py \
