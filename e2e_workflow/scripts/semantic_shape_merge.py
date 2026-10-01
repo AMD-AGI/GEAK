@@ -94,7 +94,8 @@ def _bucket_fields(record):
     if parts and parts[0]:
         phase = phase or parts[0].lower()
     phase = {"extend": "prefill", "prompt": "prefill",
-             "generation": "decode"}.get(phase, phase)
+             "generation": "decode",
+             "target_verify": "verify"}.get(phase, phase)
     if len(parts) >= 2 and parts[1].lstrip("-").isdigit():
         batch_size = int(parts[1])
     if len(parts) >= 3 and parts[2].lstrip("-").isdigit():
@@ -265,11 +266,27 @@ def _axis_0_alignment(tensor, group, table, exact_bucket):
     """
     shape = list(tensor.get("shape") or [])
     clean = table.get("selected_bucket") or {}
-    target = clean.get("input_tokens") or clean.get("batch_size")
+
+    def positive(value):
+        return value if isinstance(value, int) and value > 0 else None
+
+    capture_tokens = positive(group.get("input_tokens"))
+    capture_batch = positive(group.get("batch_size"))
+    clean_tokens = positive(clean.get("input_tokens"))
+    clean_batch = positive(clean.get("batch_size"))
+    # A decode step annotation records only bs.  Speculative TARGET_VERIFY
+    # runs bs x draft_tokens positions, so carry the capture's tokens per
+    # request over instead of collapsing the token axis to bs.
+    if (not clean_tokens and clean_batch and capture_tokens and capture_batch
+            and capture_tokens % capture_batch == 0):
+        clean_tokens = clean_batch * (capture_tokens // capture_batch)
+    target = None
+    if shape and shape[0] == capture_tokens:
+        target = clean_tokens or clean_batch
+    elif shape and shape[0] == capture_batch:
+        target = clean_batch or clean_tokens
     observed = {
-        value for value in (
-            group.get("input_tokens"), group.get("batch_size"))
-        if isinstance(value, int) and value > 0}
+        value for value in (capture_tokens, capture_batch) if value}
     dtype = str(tensor.get("dtype") or "").lower()
     tensor_path = str(tensor.get("tensor_path") or "").lower()
     io = str(tensor.get("io") or "").lower()
@@ -443,20 +460,28 @@ def _kernel_trace_schema(trace_shape):
             continue
         dtype = raw.get("dtype") or (
             types[index] if index < len(types) else "Tensor")
-        tensors.append({
-            **operand,
-            "io": operand["direction"],
-            "tensor_path": "operator_args.%s" % schema_name,
-            "arg_name": schema_name,
-            "trace_arg_index": index,
-            "shape": list(shape),
-            "logger_shape": list(shape),
-            "effective_shape": list(shape),
-            "dtype": dtype,
-            "axes": [
-                _axis(value, "unresolved", "graph_capture_trace")
-                for value in shape],
-        })
+        # A Tensor[] argument (e.g. aten::cat) records one shape per element.
+        if all(isinstance(value, list) for value in shape):
+            elements = [
+                ("operator_args.%s[%d]" % (schema_name, position), element)
+                for position, element in enumerate(shape) if element]
+        else:
+            elements = [("operator_args.%s" % schema_name, shape)]
+        for tensor_path, element in elements:
+            tensors.append({
+                **operand,
+                "io": operand["direction"],
+                "tensor_path": tensor_path,
+                "arg_name": schema_name,
+                "trace_arg_index": index,
+                "shape": list(element),
+                "logger_shape": list(element),
+                "effective_shape": list(element),
+                "dtype": dtype,
+                "axes": [
+                    _axis(value, "unresolved", "graph_capture_trace")
+                    for value in element],
+            })
     return {
         "source": trace_shape.get(
             "source", "graph_capture_trace_external_id"),

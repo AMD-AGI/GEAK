@@ -24,7 +24,8 @@ DEFAULT_FUSION_STRATEGIES = os.path.abspath(os.path.join(
     _SCRIPT_DIR, "..", "knowledge", "fusion", "fusion_strategies.json"))
 
 
-PHASE_ORDER = {"prefill": 0, "decode": 1}
+PHASE_ORDER = {"prefill": 0, "decode": 1, "verify": 1}
+GENERATION_PHASES = ("decode", "verify")
 READINESS = {
     "ready_for_api_validation",
     "needs_source_dependency_proof",
@@ -476,7 +477,7 @@ def _phase_coverage_gate(table, payload, allow_reason):
                 "shape capture (run_semantic_shape_capture) and merge before "
                 "Phase 2"
                 % (phase, rows,
-                   coverage.get("decode_evidence") if phase == "decode"
+                   coverage.get("decode_evidence") if phase in GENERATION_PHASES
                    else "no shape evidence"))
 
     for problem in problems:
@@ -485,10 +486,12 @@ def _phase_coverage_gate(table, payload, allow_reason):
         else:
             errors.append(problem)
 
+    # decode_* fields describe the generation phase (decode or verify).
+    _generation = "verify" if "verify" in shape_stats else "decode"
     _decode_shapes = int(
-        (shape_stats.get("decode") or {}).get("resolved", 0) or 0)
+        (shape_stats.get(_generation) or {}).get("resolved", 0) or 0)
     _decode_seq = bool(
-        coverage.get("decode_sequence_covered") or "decode" in shape_stats)
+        coverage.get("decode_sequence_covered") or _generation in shape_stats)
     record = {
         "available": True,
         "phases_in_tables": in_tables,
@@ -500,12 +503,12 @@ def _phase_coverage_gate(table, payload, allow_reason):
         # Derived from the same measurement as everything else, so the evidence
         # class can never contradict the resolution numbers printed beside it.
         "decode_evidence": (
-            coverage.get("decode_evidence") if "decode" not in shape_stats
+            coverage.get("decode_evidence") if _generation not in shape_stats
             else "sequence_and_shapes" if (_decode_shapes and _decode_seq)
             else "sequence_only_shapes_unresolved" if _decode_seq
             else "no_decode_trace_analysed"),
         "decode_requires_graph_capture": (
-            "decode" in shape_stats and not _decode_shapes),
+            _generation in shape_stats and not _decode_shapes),
         "problems": problems,
         "waiver": allow_reason,
         "ok": not problems or bool(allow_reason),
@@ -794,7 +797,24 @@ def _catalog_falsify(payload, catalog_path, errors, warnings,
         author = candidate.get("implementation_class") in AUTHOR_CLASSES
         similar_only = bool(apis) and all(
             api.get("coverage") == "similar" for api in apis)
-        if op_tags and hits and (author or similar_only):
+        # The escape this error names: the hit kernel is cited with the
+        # constraints that rule it out, and the absence search is recorded.
+        justified = any(
+            api.get("name") == best and api.get("constraints")
+            for api in apis) and bool(candidate.get("absence_search"))
+        if op_tags and hits and (author or similar_only) and justified:
+            # Ruled out: keep it auditable but do not let Top-K floor the
+            # tier at B on a kernel the candidate shows does not apply.
+            matches[cid]["match"] = None
+            matches[cid]["match_ruled_out"] = best
+            warnings.append(
+                "%s keeps %s despite catalog kernel '%s' covering op-set %s: "
+                "constraints recorded (%s)"
+                % (cid, "author-track" if author else "similar-only", best,
+                   op_tags, "; ".join(
+                       str(item) for api in apis if api.get("name") == best
+                       for item in api.get("constraints") or [])))
+        elif op_tags and hits and (author or similar_only):
             errors.append(
                 "%s is %s but catalog kernel '%s' covers its op-set %s "
                 "(dtype %s) — reclassify as existing_api (tier B), or record in "

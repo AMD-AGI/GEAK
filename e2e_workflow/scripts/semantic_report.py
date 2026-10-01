@@ -47,7 +47,16 @@ from fusion_candidate_harness import DONOR_STAGES, _fusible_regions
 # declared record saying so -- so the report showed one tidy prefill row and read as
 # complete. Both halves are always named; the one with no tables is named as absent.
 EXPECTED_PHASES = ("prefill", "decode")
-PHASE_ORDER = {phase: index for index, phase in enumerate(EXPECTED_PHASES)}
+# verify (speculative decoding's target generation) sorts where decode does.
+PHASE_ORDER = {"prefill": 0, "decode": 1, "verify": 1}
+
+
+def _expected_phases(table, measured):
+    """prefill plus the generation phase this trace actually used."""
+    coverage = table.get("phase_coverage") or {}
+    generation = coverage.get("generation_phase") or (
+        "verify" if "verify" in measured else "decode")
+    return ("prefill", generation)
 
 
 def _pattern_order(pattern):
@@ -255,7 +264,7 @@ def build(table_path, helper_floor=5.0, top_rows=8):
 
     declared_absent = ((table.get("phase_coverage") or {})
                        .get("phases_absent_from_tables") or [])
-    absent = [ph for ph in EXPECTED_PHASES if ph not in measured]
+    absent = [ph for ph in _expected_phases(table, measured) if ph not in measured]
     for ph in declared_absent:
         if ph not in absent:
             absent.append(str(ph))

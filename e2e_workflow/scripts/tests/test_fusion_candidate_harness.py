@@ -227,6 +227,41 @@ class FusionCandidateHarnessTest(unittest.TestCase):
                 inventory["available_apis"][0]["source"],
                 "cited_not_inventoried")
 
+    def test_author_track_catalog_hit_needs_named_constraint_and_absence(self):
+        """sigmoid(gate)*o + fp8 quant: the elementwise members carry no op tag,
+        so any fp8 quant kernel 'covers' the region. The error offers a
+        constraints escape; it must be honoured only when the hit kernel is
+        named with constraints AND an absence_search is recorded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog_path = self._write(tmp, "catalog.json", {"kernels": [{
+                "name": "kv_cache_write_quant",
+                "op_tags": ["quant"], "dtype_tags": ["fp8"],
+            }]})
+            base = {"candidate_id": "gate", "implementation_class":
+                    "new_helper_kernel",
+                    "members": [{"stage": "elementwise", "kernel": "sigmoid"},
+                                {"stage": "quant", "kernel": "group_quant"}]}
+            justified = dict(base, existing_apis=[{
+                "name": "kv_cache_write_quant", "coverage": "similar",
+                "constraints": ["writes the KV cache; takes no gate tensor"]}],
+                absence_search=[{"query": "q", "location": "l", "result": "none"}])
+            unjustified = dict(base, existing_apis=[{
+                "name": "kv_cache_write_quant", "coverage": "similar",
+                "constraints": []}])
+            for candidate, expect_error in ((justified, False),
+                                            (unjustified, True)):
+                errors, warnings = [], []
+                matches = harness._catalog_falsify(
+                    {"candidates": [candidate]}, catalog_path, errors, warnings)
+                self.assertEqual(bool(errors), expect_error, errors)
+                if not expect_error:
+                    self.assertTrue(any("kv_cache_write_quant" in w
+                                        for w in warnings), warnings)
+                    # A ruled-out hit must not floor the Top-K tier at B.
+                    self.assertIsNone(matches["gate"]["match"])
+                    self.assertEqual(matches["gate"]["match_ruled_out"],
+                                     "kv_cache_write_quant")
+
     def test_cited_api_absent_from_catalog_is_hard_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             env_path = self._write(tmp, "env.json", {})

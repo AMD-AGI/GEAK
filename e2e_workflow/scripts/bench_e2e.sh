@@ -810,17 +810,19 @@ PY
     [ -n "${TPOT_MS:-}" ] && echo ">>> steady-state sizing: derived TPOT_MS=${TPOT_MS}ms from timed bench (vllm window auto-scale)"
   fi
   # KernelFusion has a different evidence goal from the native Top-N profiler:
-  # it needs Python/module spans and one representative forward per sglang stage,
-  # not a long statistical sample.  Its caller sets GEAK_FUSION_TRACE=1 and
-  # PROFILE_NUM_STEPS=1. Do not inflate that stack-heavy sglang trace back to
-  # 40/64 steps. Other backends retain their existing adapter behavior.
+  # it needs Python/module spans and a few representative forwards per sglang
+  # stage, not a long statistical sample.  Its caller sets GEAK_FUSION_TRACE=1.
+  # Three steps per stage (GEAK_FUSION_PROFILE_STEPS) reach a real prefill
+  # batch and a full-concurrency decode/verify step once the client warmup is
+  # kept out of the window (see _BG_WARMUPS below); semantics then picks one
+  # analysis step per phase. Other backends retain their existing behavior.
   _GEAK_FUSION_CAPTURE=0
   case " ${EXTRA_ENV:-} " in
     *" GEAK_FUSION_TRACE=1 "*) _GEAK_FUSION_CAPTURE=1 ;;
   esac
   [ "${GEAK_FUSION_TRACE:-0}" = "1" ] && _GEAK_FUSION_CAPTURE=1
   if [ "$_GEAK_FUSION_CAPTURE" = "1" ] && [ "$BACKEND" = "sglang" ]; then
-    PROFILE_NUM_STEPS=1
+    PROFILE_NUM_STEPS="${GEAK_FUSION_PROFILE_STEPS:-3}"
     echo ">>> Fusion semantic capture: preserving PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS} (steady-state auto-sizing disabled)"
   else
     # Native profiling keeps main's deterministic target computed at launch.
@@ -855,7 +857,13 @@ PY
     # sustained, replenishing background load (>CONC prompts, realistic prefill+decode mix; NOT timed, NOT
     # profiled). With PROFILE_WARMUP_SEC=0 the profiler is armed at load start so the capture includes the
     # initial prefill burst (prefill shapes stay visible for head selection).
-    REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
+    # The fusion window opens at load start. The client's own warmup requests
+    # (NUM_WARMUPS, 8 by default) would then be what the window captures:
+    # Qwen3.5 NEXTN recorded 16/16 verify steps at bs=8 instead of 64. The timed
+    # run above already warmed the server, so the profiled load skips warmup.
+    _BG_WARMUPS="${NUM_WARMUPS:-}"
+    [ "$_GEAK_FUSION_CAPTURE" = "1" ] && _BG_WARMUPS="${GEAK_FUSION_PROFILE_WARMUPS:-0}"
+    NUM_WARMUPS="$_BG_WARMUPS" REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
       adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 0 >/dev/null 2>&1 &
     _bg_load=$!
     sleep "$PROFILE_WARMUP_SEC"
@@ -886,9 +894,12 @@ PY
       echo "!!! KernelFusion manifest builder missing: $_TRACE_CAPABILITY" >&2
       exit 2
     fi
+    # server.log only enriches speculative facts (accept length, verify
+    # tokens); the trace alone decides decode vs verify.
     if ! python3 "$_TRACE_CAPABILITY" \
         --trace-dir "$PROFILE_DIR" \
         --auto-select-rank \
+        --server-log "$OUT_DIR/server.log" \
         --out "$_TRACE_MANIFEST"; then
       echo "!!! KernelFusion trace manifest generation failed: $_TRACE_MANIFEST" >&2
       exit 2

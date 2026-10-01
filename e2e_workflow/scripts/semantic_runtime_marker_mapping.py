@@ -7,6 +7,8 @@ import json
 import os
 import re
 
+import sglang_step_modes
+
 
 MARKER_PREFIX = "GEAK_SEMANTICS|"
 LAYER_SCOPE_PREFIX = "GEAK_LAYER_SCOPE|"
@@ -36,6 +38,8 @@ def _phase(value):
         "extend": "prefill",
         "prompt": "prefill",
         "generation": "decode",
+        # Speculative decoding: the target model's generation step.
+        "target_verify": "verify",
     }.get(value, value)
 
 
@@ -371,7 +375,7 @@ def _marker_matches_bucket(marker, bucket):
         return False
     # Clean decode steps use input_tokens=0, while runtime markers describe
     # the one-token-per-sequence tensor and therefore report toks=bs.
-    if phase != "decode" and input_tokens >= 0:
+    if not sglang_step_modes.is_generation_phase(phase) and input_tokens >= 0:
         return marker["input_tokens"] == input_tokens
     return True
 
@@ -744,7 +748,8 @@ def _annotate_decode_semantic_regions(targets):
     """
     grouped = {}
     for target in targets:
-        if _phase(target.get("phase")) != "decode":
+        if not sglang_step_modes.is_generation_phase(
+                _phase(target.get("phase"))):
             continue
         key = (target.get("pattern_id"),
                int(target.get("representative_layer_id", -1)))
@@ -818,7 +823,8 @@ def _apply_vabsorb_bmm_probe(targets, shape_log_path):
                 or str(target.get("stage") or "").lower() != "gemm"):
             continue
         candidates = [record for record in records
-                      if _phase(record.get("phase")) == "decode"
+                      if sglang_step_modes.is_generation_phase(
+                          _phase(record.get("phase")))
                       and int(record.get("layer_id", -1)) == int(
                           target.get("representative_layer_id", -1))]
         if len(candidates) != 1:
@@ -1024,7 +1030,7 @@ def _apply_shape_log_region_fallback(targets, shape_log_path):
     records_by_key = _shape_log_first_forward(shape_log_path)
     matched = 0
     for (phase, layer_id), records in records_by_key.items():
-        if phase != "decode":
+        if not sglang_step_modes.is_generation_phase(phase):
             continue
         layer_pattern = re.compile(r"(?:^|\.)layers\.%d$" % layer_id)
         record = next((item for item in records

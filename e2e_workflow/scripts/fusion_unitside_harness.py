@@ -447,9 +447,11 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
             continue
         else:
             bucket = candidate.get("selected_bucket") or {}
+            # decode: token axis == batch; verify: bs x draft tokens, which
+            # the bucket does not record, so it is only checked when known.
             expect_tok = (bucket.get("batch_size")
                           if candidate.get("phase") == "decode"
-                          else bucket.get("input_tokens"))
+                          else bucket.get("input_tokens") or None)
             if expect_tok and int(tested[0]) != int(expect_tok):
                 errors.append(
                     "%s tested_shape leading dim %d != selected_bucket token count %d "

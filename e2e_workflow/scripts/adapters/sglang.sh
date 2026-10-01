@@ -97,6 +97,31 @@ adapter_bench() {
 # chunks with no phase tag, so a decode-only view cannot be reconstructed. Historically this adapter
 # did NOT request it, every capture was one un-split trace, and decode was silently never analysed.
 # Override with SGLANG_PROFILE_BY_STAGE=0.
+# Wait until every per-stage trace (<id>-TP-<rank>-<STAGE>.trace.json.gz) is a
+# complete gzip stream.  sglang flushes stack-heavy traces for tens of seconds
+# after the file first appears; tearing the server down earlier leaves a file
+# with no gzip end marker that no reader can load.  merged-* is excluded: some
+# builds leave it empty.  Returns non-zero (with a warning) on timeout.
+_sgl_wait_traces_complete() {
+  local dir="$1" timeout="${2:-${PROFILE_FLUSH_TIMEOUT:-300}}"
+  local poll="${PROFILE_FLUSH_POLL:-3}"
+  local deadline f pending
+  deadline=$(( $(date +%s) + ${timeout%.*} ))
+  while :; do
+    pending=""
+    for f in "$dir"/*-TP-*.trace.json.gz; do
+      [ -e "$f" ] || continue
+      gzip -t "$f" 2>/dev/null || pending="$pending $(basename "$f")"
+    done
+    [ -z "$pending" ] && return 0
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "!!! profile trace(s) still incomplete after ${timeout}s:${pending}" >&2
+      return 1
+    fi
+    sleep "$poll"
+  done
+}
+
 adapter_profile_window() {
   local before after
   before=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
@@ -146,7 +171,10 @@ adapter_profile_window() {
     if [ "$_by_stage" = true ]; then
       n_ext=$(ls "$PROFILE_DIR"/*EXTEND*.trace.json* 2>/dev/null | wc -l)
       n_dec=$(ls "$PROFILE_DIR"/*DECODE*.trace.json* 2>/dev/null | wc -l)
-      if [ "$n_ext" -gt 0 ] && [ "$n_dec" -gt 0 ]; then sleep 2; return 0; fi
+      if [ "$n_ext" -gt 0 ] && [ "$n_dec" -gt 0 ]; then
+        _sgl_wait_traces_complete "$PROFILE_DIR" || true
+        return 0
+      fi
     elif [ "$after" -gt "$before" ]; then
       sleep 2; return 0                                   # +2s for the write to flush
     fi

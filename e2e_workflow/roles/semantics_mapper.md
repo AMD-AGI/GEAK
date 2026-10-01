@@ -33,6 +33,18 @@ Phase 1.2 additionally receives `STRUCTURAL_PATTERNS_JSON`, `SEMANTIC_TABLE_JSON
    final Pattern grouping:
    - First identify the main language Decoder stack and its exact `layer_id=0..N-1` range. Exclude
      vision, embedding/head, MTP/speculative, and other auxiliary stacks with explicit evidence.
+   - Speculative decoding: read `speculative_algorithm` / `speculative_num_draft_tokens` from the
+     serving flags (not the checkpoint) into `runtime_dispatch_facts`. The draft (MTP/NEXTN/EAGLE)
+     stack stays in `excluded_stacks` even when active; cite its runtime source (e.g. the `*_mtp.py`
+     model and the speculative worker). Main-stack decode then runs as `TARGET_VERIFY`, whose token
+     dimension is `bs x speculative_num_draft_tokens`, so decode shapes differ from plain decode.
+     Semantic mapping names the target generation phase `verify` when the trace has TARGET_VERIFY
+     steps (else `decode`); required phases follow automatically (`prefill` + generation phase).
+     It excludes draft-model steps itself (`phase_coverage.speculative_decoding`,
+     `draft_steps_excluded`); never add the draft layer to `layers` to make counts match.
+   - Several steps per phase may be captured. Every table of a phase comes from ONE analysis step
+     (`phase_coverage.analysis_steps`: prefill = most tokens, decode/verify = largest batch, ties =
+     median duration); cite the chosen step and batch in notes.
    - Treat config as the first source of per-layer intent. Follow every config value consumed by a
      runtime layer-construction or layer-body branch that depends on `layer_id`: an explicit array,
      layer-id set, periodic/range formula, encoded pattern, or uniform default are all valid. Do not

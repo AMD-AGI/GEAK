@@ -51,7 +51,28 @@ def _canonical_phase(value):
         return "PREFILL"
     if value in ("DECODE", "GENERATION"):
         return "DECODE"
+    # Speculative decoding: the target generates with TARGET_VERIFY.
+    if value in ("TARGET_VERIFY", "VERIFY"):
+        return "VERIFY"
+    if value in ("DRAFT_EXTEND", "DRAFT_EXTEND_V2"):
+        return "DRAFT"
     return value
+
+
+# DECODE and VERIFY are the same generation phase for filtering: a caller
+# asking for "decode" on a speculative server must still see TARGET_VERIFY.
+_GENERATION = ("DECODE", "VERIFY")
+
+
+def _phase_requested(phase, requested):
+    """Whether a runtime forward phase passes the GEAK_SEMANTICS_PHASES filter."""
+    if not requested:
+        return True
+    phase = _canonical_phase(phase)
+    wanted = {_canonical_phase(item) for item in requested}
+    if phase in _GENERATION:
+        return bool(wanted & set(_GENERATION))
+    return phase in wanted
 
 
 def _profiler_active():
@@ -208,6 +229,44 @@ def dump_operator_schema_manifest():
         (len(schemas), path))
 
 
+# Speculative draft graph runners borrow CudaGraphRunner.capture without
+# subclassing it, and honour --enable-profile-cuda-graph themselves.
+_DRAFT_GRAPH_RUNNERS = (
+    ("sglang.srt.speculative.eagle_draft_cuda_graph_runner",
+     "EAGLEDraftCudaGraphRunner"),
+    ("sglang.srt.speculative.eagle_draft_extend_cuda_graph_runner",
+     "EAGLEDraftExtendCudaGraphRunner"),
+)
+
+
+def _install_draft_graph_profiler_noop():
+    """Give speculative draft graph runners a no-op capture profiler.
+
+    Semantic capture turns on --enable-profile-cuda-graph, which the draft
+    runners also read before calling the borrowed CudaGraphRunner.capture.
+    They lack the profile hooks (AttributeError at server start), and the draft
+    graph must not overwrite the target model's graph-capture trace anyway.
+    """
+    import importlib
+
+    def _init_noop(self):
+        return contextlib.nullcontext(None)
+
+    def _post_noop(self, prof_context):
+        return None
+
+    for module_name, class_name in _DRAFT_GRAPH_RUNNERS:
+        try:
+            cls = getattr(importlib.import_module(module_name), class_name)
+        except Exception:
+            continue
+        cls._init_profile_context_and_memory_record = _init_noop
+        cls._post_process_after_profile = _post_noop
+        sys.stderr.write(
+            "[GEAK_SEMANTICS] draft graph profiler disabled for %s\n"
+            % class_name)
+
+
 def install_graph_capture_profiler():
     """Export a rank-0 trace of CUDA/HIP graph construction.
 
@@ -252,6 +311,7 @@ def install_graph_capture_profiler():
             _init_profile_context_and_memory_record)
         CudaGraphRunner._post_process_after_profile = (
             _post_process_after_profile)
+        _install_draft_graph_profiler_noop()
         _GRAPH_CAPTURE_PROFILER_INSTALLED = True
         sys.stderr.write(
             "[GEAK_SEMANTICS] installed rank-0 graph-capture profiler export\n")
@@ -267,12 +327,14 @@ def _phase_of(forward_batch):
     except Exception:
         return "UNKNOWN", -1, -1
     phase = "UNKNOWN"
+    # Speculative modes first: ForwardMode.is_extend() is also True for
+    # TARGET_VERIFY and DRAFT_EXTEND, which would mislabel them as prefill.
     for method, candidate in (
-            ("is_decode", "DECODE"),
             ("is_target_verify", "TARGET_VERIFY"),
+            ("is_draft_extend", "DRAFT_EXTEND"),
+            ("is_decode", "DECODE"),
             ("is_extend", "EXTEND"),
-            ("is_prefill", "PREFILL"),
-            ("is_draft_extend", "DRAFT_EXTEND")):
+            ("is_prefill", "PREFILL")):
         try:
             if getattr(mode, method, lambda: False)():
                 phase = candidate
@@ -426,8 +488,7 @@ class SemanticRuntimeLogger(object):
         if layer_id < 0 or (self.layers and layer_id not in self.layers):
             return False
         if (self.phases
-                and _canonical_phase(self._context["phase"])
-                not in {_canonical_phase(item) for item in self.phases}):
+                and not _phase_requested(self._context["phase"], self.phases)):
             return False
         key = (
             self._context["phase"], self._context["batch_size"],
@@ -445,8 +506,7 @@ class SemanticRuntimeLogger(object):
         if not self.layer_scopes or not self.active() or layer_id < 0:
             return False
         if (self.phases
-                and _canonical_phase(self._context["phase"])
-                not in {_canonical_phase(item) for item in self.phases}):
+                and not _phase_requested(self._context["phase"], self.phases)):
             return False
         key = (
             self._context["phase"], self._context["batch_size"],
@@ -773,17 +833,30 @@ def _register_hooks(model):
         "marker+metadata hooks\n" % (layer_scope_count, count))
 
 
-def install_on_model(model):
+def install_on_model(model, is_draft=False):
     install_graph_capture_profiler()
     dump_operator_schema_manifest()
     logger = get_logger()
     if not logger.active():
+        return model
+    if is_draft:
+        # Speculative draft model (MTP/NEXTN/EAGLE head).  It may share the
+        # main model's class and its layers are numbered from 0, so its
+        # markers would collide with main layer 0.  Tag every module so the
+        # class-level forward wrapper leaves it uninstrumented.
+        for module in model.modules():
+            module._geak_semantics_draft = True
+        sys.stderr.write(
+            "[GEAK_SEMANTICS] skipped speculative draft model %s\n"
+            % model.__class__.__name__)
         return model
     model_class = model.__class__
     if model_class not in _INSTALLED_CLASSES:
         original_forward = model_class.forward
 
         def wrapped_forward(self, *args, **kwargs):
+            if getattr(self, "_geak_semantics_draft", False):
+                return original_forward(self, *args, **kwargs)
             forward_batch = args[2] if len(args) >= 3 else None
             forward_batch = kwargs.get("forward_batch", forward_batch)
             if forward_batch is not None:

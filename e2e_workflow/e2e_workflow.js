@@ -3357,11 +3357,14 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
     const expectedFusionManifest = `${fusionCaptureDir}/profile_trace_manifest.json`;
     // Fusion needs call/module hierarchy, not the long statistical window used by
     // the native Top-N profiler. Keep this mode scoped to the dedicated sglang
-    // Fusion capture: one step per separately captured stage with Python stacks.
+    // Fusion capture: three steps per separately captured stage with Python
+    // stacks, and no client warmup inside the window (bench_e2e.sh), so prefill
+    // reaches a real batch and decode/verify reaches full concurrency.
     // bench_e2e.sh leaves normal Profile/reprofile sizing unchanged otherwise.
     const captureEnv = BACKEND === 'sglang'
       ? (curEnv ? curEnv + ' ' : '') +
-        'GEAK_FUSION_TRACE=1 PROFILE_NUM_STEPS=1 SGLANG_PROFILE_WITH_STACK=true'
+        'GEAK_FUSION_TRACE=1 GEAK_FUSION_PROFILE_STEPS=3 GEAK_FUSION_PROFILE_WARMUPS=0 ' +
+        'SGLANG_PROFILE_WITH_STACK=true'
       : curEnv;
     // The formal Profile already captured this stack with Python stacks; the collector
     // only builds the manifest from it, and captures on its own only as a fallback

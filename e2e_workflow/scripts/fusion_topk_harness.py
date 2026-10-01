@@ -10,11 +10,14 @@ facts; it consumes the harness-computed savings and adds:
     (build once, reuse across patterns) — benefit aggregates across patterns
     within a phase, effort is counted once;
   * workload-aware ranking: retain each phase's local benefit, then weight one
-    prefill forward plus ``OSL - 1`` decode forwards for the requested workload;
+    prefill forward plus ``OSL - 1`` decode forwards for the requested workload
+    (``(OSL - 1) / accept_length`` TARGET_VERIFY forwards under speculative
+    decoding);
   * benefit-per-effort scoring, with mutual-exclusion groups flagged.
 """
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter, defaultdict
@@ -113,6 +116,11 @@ def _workload_model(workload, phase_total):
     forward, hence ``decode_forwards = max(OSL - 1, 0)``. Concurrency is also
     already represented by the captured serving shape and is metadata here.
 
+    Under speculative decoding one TARGET_VERIFY forward emits
+    ``accept_length`` tokens on average, so the decode weight becomes
+    ``ceil((OSL - 1) / accept_length)``.  When the accept length is unknown
+    the non-speculative ``OSL - 1`` is kept as an explicit upper bound.
+
     Older standalone callers may omit workload. They keep the legacy phase-
     local ranking instead of silently inventing an OSL.
     """
@@ -120,6 +128,15 @@ def _workload_model(workload, phase_total):
     isl = _nonnegative_int(workload.get("isl"))
     osl = _nonnegative_int(workload.get("osl"))
     conc = _nonnegative_int(workload.get("conc"))
+    accept_length = workload.get("spec_accept_length")
+    try:
+        accept_length = float(accept_length) if accept_length else None
+    except (TypeError, ValueError):
+        accept_length = None
+    if accept_length is not None and accept_length < 1.0:
+        accept_length = None
+    speculative = bool(workload.get("speculative_decoding")) or bool(
+        accept_length)
     available = isl is not None and osl is not None
     if not available:
         return {
@@ -133,22 +150,62 @@ def _workload_model(workload, phase_total):
             "reason": "isl/osl not supplied; preserved phase-local ranking",
         }, {}, None
 
+    decode_forwards = max(osl - 1, 0)
+    if accept_length:
+        decode_forwards = int(math.ceil(decode_forwards / accept_length))
+    # The generation phase is "verify" under speculative decoding.
+    generation = "verify" if "verify" in (phase_total or {}) else "decode"
     phase_weights = {
         "prefill": 1,
-        "decode": max(osl - 1, 0),
+        generation: decode_forwards,
     }
     total = sum(
         float(phase_total.get(phase, 0.0) or 0.0) * weight
         for phase, weight in phase_weights.items())
-    return {
+    info = {
         "available": True,
         "isl": isl,
         "osl": osl,
         "conc": conc,
         "prefill_forwards": phase_weights["prefill"],
-        "decode_forwards": phase_weights["decode"],
+        "decode_forwards": phase_weights[generation],
+        "generation_phase": generation,
         "ranking_metric": "workload_forward_pct",
-    }, phase_weights, round(total, 3)
+    }
+    if speculative:
+        info.update({
+            "speculative_decoding": True,
+            "spec_accept_length": accept_length,
+            "spec_accept_length_source": workload.get("spec_accept_length_source"),
+            "decode_forward_model": (
+                "ceil((OSL-1)/accept_length) TARGET_VERIFY forwards"
+                if accept_length else
+                "OSL-1 upper bound: accept_length unknown, decode weight "
+                "overstated"),
+        })
+    return info, phase_weights, round(total, 3)
+
+
+def _speculative_workload(workload, table):
+    """Mark speculative runs and take accept length from the semantic table.
+
+    An explicit --spec-accept-length wins; otherwise the capture's measured
+    mean (phase_coverage.speculative.accept_len_mean, from the trace
+    manifest) is used; without either the ranker keeps OSL-1 as an upper bound.
+    """
+    workload = dict(workload or {})
+    coverage = (table or {}).get("phase_coverage") or {}
+    speculative = coverage.get("speculative") or {}
+    if (coverage.get("speculative_decoding") or speculative.get("enabled")
+            or coverage.get("generation_phase") == "verify"):
+        workload["speculative_decoding"] = True
+    if workload.get("spec_accept_length"):
+        workload.setdefault("spec_accept_length_source", "cli")
+    elif speculative.get("accept_len_mean"):
+        workload["spec_accept_length"] = speculative["accept_len_mean"]
+        workload["spec_accept_length_source"] = (
+            "semantic_table:phase_coverage.speculative")
+    return workload
 
 
 def _ranking_pct(row):
@@ -246,6 +303,7 @@ def rank(candidates_path, validation_path, semantic_table_path, top_k,
     savings_by_id = {
         s["candidate_id"]: s for s in metrics.get("candidate_savings", [])}
     phase_total = metrics.get("phase_total_forward_us", {}) or {}
+    workload = _speculative_workload(workload, table)
     workload_info, phase_weights, workload_total = _workload_model(
         workload, phase_total)
     # Collective candidates whose fused path a size guard blocks at this shape
@@ -930,16 +988,19 @@ def render_markdown(result, actions):
                  "**C** = 没有现成算子，需自写 kernel。")
     lines.append("**现成算子** = 有没有可用的现成 fused kernel：**有** = A/B（kernel 已存在）；"
                  "**无** = C（需 author）。它只表示算子在不在，不表示接起来轻重。")
-    lines.append("单次 forward：prefill ≈ %.0f µs / decode ≈ %.0f µs。"
-                 % (fwd.get("prefill", 0.0), fwd.get("decode", 0.0)))
+    generation = workload.get("generation_phase") or (
+        "verify" if "verify" in fwd else "decode")
+    lines.append("单次 forward：prefill ≈ %.0f µs / %s ≈ %.0f µs。"
+                 % (fwd.get("prefill", 0.0), generation, fwd.get(generation, 0.0)))
     if workload.get("available"):
         lines.append(
             "真实 workload：ISL=%s / OSL=%s / conc=%s；prefill forward × %s，"
-            "decode forward × %s（OSL−1），累计 forward 分母 ≈ %.0f µs。"
+            "%s forward × %s（%s），累计 forward 分母 ≈ %.0f µs。"
             "ISL/conc 已体现在采集到的 phase shape 中，不重复相乘。"
             % (workload.get("isl"), workload.get("osl"),
                workload.get("conc"), workload.get("prefill_forwards"),
-               workload.get("decode_forwards"),
+               generation, workload.get("decode_forwards"),
+               workload.get("decode_forward_model") or "OSL−1",
                result.get("workload_total_forward_us") or 0.0))
     else:
         lines.append(
@@ -1027,11 +1088,16 @@ def main():
     parser.add_argument("--osl", type=int)
     parser.add_argument("--conc", type=int)
     parser.add_argument(
+        "--spec-accept-length", type=float,
+        help="speculative decoding: mean tokens accepted per TARGET_VERIFY "
+             "forward (SGLang server log `accept len`)")
+    parser.add_argument(
         "--tiers", default="A,B",
         help="difficulty tiers to include in the ranked table (default A,B; "
              "C author-track is summarized separately)")
     args = parser.parse_args()
-    workload = {"isl": args.isl, "osl": args.osl, "conc": args.conc}
+    workload = {"isl": args.isl, "osl": args.osl, "conc": args.conc,
+                "spec_accept_length": args.spec_accept_length}
     result = run(
         args.candidates, args.validation, args.semantic_table,
         args.out_md, args.out_json, args.top_k, args.tiers, workload)

@@ -28,6 +28,7 @@ import json
 import os
 
 import semantic_kernel_mapping
+import sglang_step_modes
 
 
 MARKER_PREFIX = "GEAK_LAYER_SCOPE|"
@@ -51,6 +52,8 @@ def _phase(value):
     return {
         "extend": "prefill", "prompt": "prefill",
         "generation": "decode",
+        # Speculative decoding: the target model's generation step.
+        "target_verify": "verify",
     }.get(value, value)
 
 
@@ -227,10 +230,30 @@ def _complete_authoritative_step(step_rows, expected_layers):
 def _bucket_matches(donor, phase, batch_size, input_tokens):
     if donor["phase"] != phase or donor["batch_size"] != batch_size:
         return False
-    if phase == "decode":
+    if sglang_step_modes.is_generation_phase(phase):
         return True
     return (input_tokens < 0 or donor["input_tokens"] < 0
             or donor["input_tokens"] == input_tokens)
+
+
+def _compatible_donors(donor_passes, phase, batch_size, input_tokens):
+    """Donor passes for one clean step.
+
+    Generation (decode/verify) steps replay the smallest captured CUDA graph
+    whose batch is >= the live batch, so a bs=9 step runs the bs=10 graph.
+    Match exactly first, then that padded bucket.  Prefill stays exact.
+    """
+    exact = [donor for donor in donor_passes
+             if _bucket_matches(donor, phase, batch_size, input_tokens)]
+    if exact or not sglang_step_modes.is_generation_phase(phase):
+        return exact
+    larger = sorted({donor["batch_size"] for donor in donor_passes
+                     if donor["phase"] == phase
+                     and donor["batch_size"] > batch_size})
+    if not larger:
+        return []
+    return [donor for donor in donor_passes
+            if _bucket_matches(donor, phase, larger[0], input_tokens)]
 
 
 def _subsequence_starts(sequence, needle):
@@ -528,10 +551,8 @@ def _map_step(step_rows, donor_passes, expected_layers):
     mappings = {}
     compatible_donors = []
     considered = 0
-    for donor in donor_passes:
-        if not _bucket_matches(
-                donor, phase, batch_size, input_tokens):
-            continue
+    for donor in _compatible_donors(
+            donor_passes, phase, batch_size, input_tokens):
         considered += 1
         compatible_donors.append(donor)
         for match_start in _subsequence_starts(sequence, donor["sequence"]):
@@ -638,6 +659,23 @@ def _map_step(step_rows, donor_passes, expected_layers):
     return stable, None
 
 
+def _split_step_failures(failures, analysis_step_ids):
+    """Only the steps semantics builds tables from may fail the transfer.
+
+    A capture holds several steps; a non-analysis step (e.g. an extra prefill
+    batch, or a ramp-up verify step) that cannot be mapped is reported but
+    does not discard the validated cuts of the analysis steps.
+    """
+    blocking, ignored = [], []
+    for failure in failures:
+        step_id = failure.get("step_id")
+        if step_id is not None and step_id not in analysis_step_ids:
+            ignored.append(failure)
+        else:
+            blocking.append(failure)
+    return blocking, ignored
+
+
 def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
     recipient_traces, adopted_siblings = (
         semantic_kernel_mapping._resolve_trace_paths(
@@ -653,8 +691,11 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
         donor_events, expected_layers)
     recipient_events = semantic_kernel_mapping._load_events_multi(
         recipient_traces)
-    rows, _, _, _, _ = semantic_kernel_mapping._event_rows(
+    rows, spans, _, _, _ = semantic_kernel_mapping._event_rows(
         recipient_events, pattern_doc)
+    analysis_step_ids = {
+        item["step_id"] for item in
+        semantic_kernel_mapping._select_analysis_steps(spans).values()}
     by_step = {}
     for row in rows:
         if row.get("step_id"):
@@ -709,6 +750,8 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
             "marker_count": len(markers),
             "expected_layers": expected_layers,
         })
+    failures, non_analysis_failures = _split_step_failures(
+        failures, analysis_step_ids)
     has_residuals = any(
         group.get("residual_ranges") for group in groups)
     status = (
@@ -724,6 +767,8 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
         "evidence_policy": (
             "Boundary cuts only; Clean Trace rows, order, timestamps and "
             "durations are never copied or replaced."),
+        "analysis_step_ids": sorted(analysis_step_ids),
+        "non_analysis_step_failures": non_analysis_failures,
         "expected_main_layers": expected_layers,
         "patterns": {
             "path": os.path.abspath(pattern_path),

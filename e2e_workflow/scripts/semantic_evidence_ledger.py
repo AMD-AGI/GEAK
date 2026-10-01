@@ -6,6 +6,7 @@ import json
 import os
 
 import semantic_shape_merge
+import sglang_step_modes
 
 
 def _load(path):
@@ -270,16 +271,19 @@ def merge(clean_table_path, probe_table_paths, out_dir):
             if stat["rows"] else 0.0)
     phase_coverage = output.setdefault("phase_coverage", {})
     phase_coverage["shape_resolution_by_phase"] = phase_stats
-    decode = phase_stats.get("decode", {"resolved": 0})
+    # decode_* fields describe the generation phase (decode or verify).
+    generation = sglang_step_modes.generation_phase(phase_stats)
+    phase_coverage["generation_phase"] = generation
+    decode = phase_stats.get(generation, {"resolved": 0})
     decode_sequence = bool(
         phase_coverage.get("decode_sequence_covered")
-        or "decode" in phase_stats)
+        or generation in phase_stats)
     phase_coverage["decode_shapes_covered"] = decode["resolved"] > 0
     phase_coverage["decode_covered"] = bool(
         decode_sequence and decode["resolved"] > 0)
     phase_coverage["decode_requires_graph_capture"] = bool(
-        "decode" in phase_stats and decode["resolved"] == 0)
-    if "decode" in phase_stats:
+        generation in phase_stats and decode["resolved"] == 0)
+    if generation in phase_stats:
         phase_coverage["decode_evidence"] = (
             "sequence_and_shapes" if phase_coverage["decode_covered"]
             else "sequence_only_shapes_unresolved"

@@ -12,10 +12,10 @@ import os
 import re
 from collections import Counter
 
+import sglang_step_modes
+
 
 TRACE_SUFFIXES = (".json", ".json.gz", ".pt.trace.json", ".pt.trace.json.gz")
-SGLANG_STEP_RE = re.compile(
-    r"^step\[(EXTEND|DECODE)\s+bs=(\d+)(?:\s+toks=(\d+))?\]$")
 MODULE_LAYER_RE = re.compile(
     r"^nn\.Module:\s+.*DecoderLayer_(\d+)$", re.IGNORECASE)
 
@@ -67,6 +67,7 @@ def inspect_trace(path):
     correlation = 0
     phase_spans = 0
     phase_dialects = Counter()
+    step_modes = Counter()
     module_layer_spans = 0
     module_layer_names = set()
     boundary_anchors = Counter()
@@ -104,9 +105,12 @@ def inspect_trace(path):
             if name.startswith("execute_") and "context_" in name and "generation_" in name:
                 phase_spans += 1
                 phase_dialects["legacy_execute"] += 1
-            elif SGLANG_STEP_RE.match(name):
-                phase_spans += 1
-                phase_dialects["sglang_step"] += 1
+            else:
+                step = sglang_step_modes.parse_step(name)
+                if step is not None:
+                    phase_spans += 1
+                    phase_dialects["sglang_step"] += 1
+                    step_modes[step["mode"]] += 1
         if cat == "python_function":
             name = str(event.get("name", ""))
             if MODULE_LAYER_RE.match(name):
@@ -123,6 +127,9 @@ def inspect_trace(path):
         "cpu_op_interval_count": cpu_parent,
         "phase_annotation_count": phase_spans,
         "phase_annotation_dialects": dict(sorted(phase_dialects.items())),
+        "step_mode_counts": dict(sorted(step_modes.items())),
+        "speculative_decoding": any(
+            mode in sglang_step_modes.SPECULATIVE_MODES for mode in step_modes),
         "module_layer_span_count": module_layer_spans,
         "distinct_module_layer_names": len(module_layer_names),
         "flow_event_count": flow,
@@ -160,13 +167,18 @@ def _stage_device_coverage(path):
     coverage = Counter()
     duration = Counter()
     annotation_count = Counter()
+    modes = Counter()
     for event in events:
         if not isinstance(event, dict) or event.get("cat") != "gpu_user_annotation":
             continue
-        match = SGLANG_STEP_RE.match(str(event.get("name", "")))
-        if not match or event.get("ts") is None or event.get("dur") is None:
+        step = sglang_step_modes.parse_step(event.get("name"))
+        if step is None or event.get("ts") is None or event.get("dur") is None:
             continue
-        phase = match.group(1).lower()
+        # Speculative decoding runs target generation as TARGET_VERIFY (phase
+        # "verify"). Draft steps are reported under their own "draft" phase and
+        # never compete for generation-step selection.
+        phase = step["phase"]
+        modes[step["mode"]] += 1
         start = float(event["ts"])
         end = start + float(event["dur"])
         # A retry may contain several steps. Use the best single step rather
@@ -179,10 +191,103 @@ def _stage_device_coverage(path):
         "device_events_by_phase": dict(sorted(coverage.items())),
         "annotation_duration_us_by_phase": dict(sorted(duration.items())),
         "annotation_count_by_phase": dict(sorted(annotation_count.items())),
+        "step_mode_counts": dict(sorted(modes.items())),
     }
 
 
-def build_manifest(trace_dir, analysis_rank=0, auto_select_rank=False):
+_SERVER_ARGS_RE = re.compile(r"server_args=ServerArgs\((?P<body>.*)\)")
+_ACCEPT_RE = re.compile(
+    r"#running-req:\s*(?P<running>\d+).*?accept len:\s*(?P<accept>[0-9.]+)")
+
+
+def _server_log_facts(path):
+    """Optional speculative facts from an SGLang server log (never a gate).
+
+    The log only enriches what the trace already decided: the runtime-resolved
+    speculative config (e.g. NEXTN is reported as EAGLE) and the steady-state
+    mean accept length (decode-stat rows whose running-req count is at least
+    90% of the largest seen, so warmup/ramp/tail rows do not bias it).
+    """
+    facts = {"algorithm_runtime": None, "verify_tokens_per_request": None,
+             "topk": None, "num_steps": None, "accept_len_mean": None,
+             "accept_len_rows": 0, "server_log": None, "warnings": []}
+    if not path:
+        facts["warnings"].append("no server log supplied; speculative "
+                                 "parameters left unset")
+        return facts
+    facts["server_log"] = os.path.abspath(path)
+    try:
+        with open(path, errors="ignore") as fh:
+            text = fh.read()
+    except OSError as exc:
+        facts["warnings"].append("server log unreadable: %s" % exc)
+        return facts
+    match = _SERVER_ARGS_RE.search(text)
+    if match:
+        body = match.group("body")
+        for key, field, cast in (
+                ("speculative_algorithm", "algorithm_runtime", str),
+                ("speculative_num_draft_tokens", "verify_tokens_per_request", int),
+                ("speculative_eagle_topk", "topk", int),
+                ("speculative_num_steps", "num_steps", int)):
+            value = re.search(r"\b%s=('?)([^,')]*)\1" % key, body)
+            if value and value.group(2) not in ("", "None"):
+                try:
+                    facts[field] = cast(value.group(2))
+                except ValueError:
+                    facts["warnings"].append("unparsable %s" % key)
+    else:
+        facts["warnings"].append("server_args line not found in server log")
+    rows = []
+    for line in text.splitlines():
+        found = _ACCEPT_RE.search(line)
+        if found:
+            try:
+                rows.append((int(found.group("running")),
+                             float(found.group("accept"))))
+            except ValueError:
+                continue
+    if rows:
+        peak = max(running for running, _ in rows)
+        steady = [accept for running, accept in rows if running >= 0.9 * peak]
+        facts["accept_len_mean"] = round(sum(steady) / len(steady), 4)
+        facts["accept_len_rows"] = len(steady)
+    elif "accept len" in text:
+        facts["warnings"].append("accept len rows present but unparsable")
+    return facts
+
+
+def _speculative_block(entries, server_log):
+    """Decide speculative decoding from the trace; enrich from the log."""
+    modes = {mode for entry in entries
+             for mode in entry.get("step_mode_counts", {})}
+    verify_modes = sorted(
+        mode for mode in modes
+        if sglang_step_modes.PHASE_BY_MODE.get(mode) == "verify")
+    enabled = bool(verify_modes)
+    block = {"enabled": enabled,
+             "evidence": ("trace:" + ",".join(verify_modes)) if enabled
+             else "trace:no_verify_steps"}
+    facts = _server_log_facts(server_log) if (enabled or server_log) else {
+        "warnings": []}
+    if enabled:
+        block.update({key: facts.get(key) for key in (
+            "algorithm_runtime", "verify_tokens_per_request", "topk",
+            "num_steps", "accept_len_mean", "accept_len_rows", "server_log")})
+    warnings = list(facts.get("warnings", []))
+    if not enabled and facts.get("algorithm_runtime"):
+        warnings.append(
+            "server log reports speculative_algorithm=%s but the trace has no "
+            "verify steps; the trace decides (generation phase = decode)"
+            % facts["algorithm_runtime"])
+    if not enabled:
+        warnings = [w for w in warnings if "trace" in w]
+    block["warnings"] = warnings
+    return block
+
+
+def build_manifest(trace_dir, analysis_rank=0, auto_select_rank=False,
+                   server_log=None):
     files = discover(trace_dir)
     entries = []
     for path in files:
@@ -201,10 +306,16 @@ def build_manifest(trace_dir, analysis_rank=0, auto_select_rank=False):
             rank = entry["rank"]
             if rank is None:
                 continue
+            # Generation is DECODE, or TARGET_VERIFY ("verify") when
+            # speculative decoding is on.
+            events_by_phase = entry.get("device_events_by_phase", {})
+            duration_by_phase = entry.get(
+                "annotation_duration_us_by_phase", {})
             score = (
-                int(entry.get("device_events_by_phase", {}).get("decode", 0)),
-                float(entry.get("annotation_duration_us_by_phase", {}).get(
-                    "decode", 0.0)),
+                max(int(events_by_phase.get(p, 0))
+                    for p in sglang_step_modes.GENERATION_PHASES),
+                max(float(duration_by_phase.get(p, 0.0))
+                    for p in sglang_step_modes.GENERATION_PHASES),
             )
             if score > by_rank.get(rank, ((-1, -1.0), None))[0]:
                 by_rank[rank] = (score, entry)
@@ -255,6 +366,11 @@ def build_manifest(trace_dir, analysis_rank=0, auto_select_rank=False):
         "capabilities": {},
         "error": "no top-level torch trace found",
     }
+    speculative = _speculative_block(entries, server_log)
+    observed_phases = {phase for entry in entries
+                       for phase in entry.get("device_events_by_phase", {})}
+    if speculative["enabled"]:
+        observed_phases.add("verify")
     return {
         "schema_version": 1,
         "trace_dir": os.path.abspath(trace_dir),
@@ -267,6 +383,18 @@ def build_manifest(trace_dir, analysis_rank=0, auto_select_rank=False):
         "selected_analysis_rank": analysis_rank if selected else None,
         "rank_candidates": rank_candidates,
         "cross_rank_merge": False,
+        "speculative_decoding": any(
+            mode in sglang_step_modes.SPECULATIVE_MODES
+            for entry in entries
+            for mode in entry.get("step_mode_counts", {})),
+        "decode_step_modes": sorted({
+            mode for entry in entries
+            for mode in entry.get("step_mode_counts", {})
+            if sglang_step_modes.is_generation_phase(
+                sglang_step_modes.PHASE_BY_MODE.get(mode))}),
+        "generation_phase": sglang_step_modes.generation_phase(observed_phases),
+        "target_phases": sglang_step_modes.target_phases(observed_phases),
+        "speculative": speculative,
         "capability": capabilities,
         "status": "pass" if selected else "failed",
     }
@@ -278,10 +406,14 @@ def main():
     parser.add_argument("--analysis-rank", type=int, default=0)
     parser.add_argument("--auto-select-rank", action="store_true")
     parser.add_argument("--out", required=True)
+    parser.add_argument(
+        "--server-log", default="",
+        help="optional server log; only enriches speculative parameters")
     args = parser.parse_args()
     doc = build_manifest(
         args.trace_dir, args.analysis_rank,
-        auto_select_rank=args.auto_select_rank)
+        auto_select_rank=args.auto_select_rank,
+        server_log=args.server_log or None)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as fh:
         json.dump(doc, fh, indent=2)

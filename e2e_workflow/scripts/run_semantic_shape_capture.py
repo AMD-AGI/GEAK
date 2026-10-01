@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 
+import sglang_step_modes
+
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_CAPTURE = os.path.join(
@@ -117,7 +119,8 @@ if _geak_os.environ.get("GEAK_SEMANTICS_CAPTURE", "0") in ("1", "true", "True"):
         _geak_original_load_model = ModelRunner.load_model
         def _geak_load_model(self, *args, **kwargs):
             result = _geak_original_load_model(self, *args, **kwargs)
-            _geak_capture.install_on_model(self.model)
+            _geak_capture.install_on_model(
+                self.model, is_draft=bool(getattr(self, "is_draft_worker", False)))
             return result
         ModelRunner.load_model = _geak_load_model
         _geak_sys.stderr.write("[GEAK_SEMANTICS] ModelRunner.load_model wrapped\\n")
@@ -191,7 +194,8 @@ if _geak_os.environ.get("GEAK_SEMANTICS_CAPTURE", "0") in ("1", "true", "True"):
         _geak_original_load_model = ModelRunner.load_model
         def _geak_load_model(self, *args, **kwargs):
             result = _geak_original_load_model(self, *args, **kwargs)
-            _geak_capture.install_on_model(self.model)
+            _geak_capture.install_on_model(
+                self.model, is_draft=bool(getattr(self, "is_draft_worker", False)))
             return result
         ModelRunner.load_model = _geak_load_model
         _geak_sys.stderr.write("[GEAK_SEMANTICS] ModelRunner.load_model wrapped\\n")
@@ -229,7 +233,6 @@ kill -KILL -"$pgid" 2>/dev/null || true
     subprocess.run(["bash", "-lc", command], check=True)
 
 
-_MODEL_PHASES = ("prefill", "decode")
 
 
 def _required_phases(plan):
@@ -251,7 +254,9 @@ def _required_phases(plan):
 def _warn_narrowed_phases(phases, plan, source):
     """B4: a phase set derived from a single-phase plan used to narrow the
     whole capture to that phase with no signal at all."""
-    absent = [phase for phase in _MODEL_PHASES if phase not in set(phases)]
+    absent = [phase for phase in ("prefill",) if phase not in set(phases)]
+    if not any(sglang_step_modes.is_generation_phase(p) for p in phases):
+        absent.append("decode/verify")
     if not absent:
         return []
     coverage = plan.get("phase_coverage") or {}
@@ -261,7 +266,7 @@ def _warn_narrowed_phases(phases, plan, source):
         "Fusion candidates derived from this capture apply only to %s."
         % (",".join(phases) or "<none>"),
     ]
-    if "decode" in absent:
+    if "decode/verify" in absent:
         notes.append(
             "To cover decode: pass --phase decode. Decode shapes are captured "
             "during CUDA/HIP graph construction; no enforce-eager trace is "
@@ -277,7 +282,9 @@ def _warn_narrowed_phases(phases, plan, source):
 
 def _observed_phases(shape_log):
     """Phases actually present in the emitted shape log."""
-    alias = {"extend": "prefill", "prompt": "prefill", "generation": "decode"}
+    alias = {"extend": "prefill", "prompt": "prefill", "generation": "decode",
+             "target_verify": "verify", "draft_extend": "draft",
+             "draft_extend_v2": "draft"}
     seen = set()
     try:
         with open(shape_log) as fh:
@@ -376,7 +383,8 @@ def capture(setup_path, capture_plan_path, out_dir, phases=None,
     phases = [str(phase).strip().lower() for phase in phases if str(phase).strip()]
     phase_notes = _warn_narrowed_phases(phases, plan, phase_source)
 
-    decode_requested = "decode" in phases
+    decode_requested = any(
+        sglang_step_modes.is_generation_phase(p) for p in phases)
     execution_mode = str(setup.get("execution_mode", "docker")).lower()
     if execution_mode not in ("docker", "local"):
         raise ValueError("unsupported shape capture execution_mode: %s" % execution_mode)

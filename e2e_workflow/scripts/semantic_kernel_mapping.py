@@ -12,14 +12,21 @@ import re
 import statistics
 
 import parse_profile
+import sglang_step_modes
 
 
 DEVICE_CATEGORIES = ("kernel", "gpu_memcpy", "gpu_memset")
 LAYER_RE = re.compile(r"(?:layers?|h|blocks?)[./_\[](\d+)", re.IGNORECASE)
 MODULE_LAYER_RE = re.compile(
     r"^nn\.Module:\s+.*DecoderLayer_(\d+)$", re.IGNORECASE)
-SGLANG_STEP_RE = re.compile(
-    r"^step\[(EXTEND|DECODE)\s+bs=(\d+)(?:\s+toks=(\d+))?\]$")
+# Python stack frames under SGLang's speculative workers.  The innermost such
+# frame enclosing a step's CPU annotation says whether the step ran the draft
+# model (e.g. `_draft_extend_for_prefill`, `draft_forward`) or the target model
+# (`verify`, `forward_batch_generation`).  SGLang labels the draft prefill
+# `step[EXTEND ...]`, so the step name alone cannot tell them apart.
+SPECULATIVE_FRAME_RE = re.compile(
+    r"/speculative/[^()]*\.py\(\d+\):\s*(?P<func>\w+)")
+DRAFT_FUNC_RE = re.compile(r"draft", re.IGNORECASE)
 
 
 def _open(path):
@@ -45,12 +52,55 @@ def _layer_id(event):
 
 
 def _phase_name(tag):
-    return "prefill" if tag == "P" else "decode"
+    return {"P": "prefill", "V": "verify"}.get(tag, "decode")
 
 
 def _collect_step_spans(events):
     """Recognize both legacy execute_* and current SGLang step[...] spans."""
+    return _collect_step_spans_with_draft(events)[0]
+
+
+def _speculative_frames(events):
+    """(start, end, tid, func) for python frames inside speculative workers."""
+    frames = []
+    for event in events:
+        if (not isinstance(event, dict)
+                or event.get("cat") != "python_function"
+                or event.get("ts") is None or event.get("dur") is None):
+            continue
+        match = SPECULATIVE_FRAME_RE.search(str(event.get("name", "")))
+        if match:
+            frames.append((event["ts"], event["ts"] + event["dur"],
+                           event.get("tid"), match.group("func")))
+    return frames
+
+
+def _draft_stack_evidence(cpu_window, frames):
+    """Innermost speculative-worker frame enclosing a CPU step window."""
+    if cpu_window is None:
+        return None
+    lo, hi, tid = cpu_window
+    best = None
+    for start, end, frame_tid, func in frames:
+        if tid is not None and frame_tid is not None and frame_tid != tid:
+            continue
+        if start <= lo and hi <= end:
+            if best is None or (end - start) < (best[1] - best[0]):
+                best = (start, end, func)
+    return best[2] if best else None
+
+
+def _collect_step_spans_with_draft(events):
+    """Return (main_stack_spans, draft_spans).
+
+    Draft spans are speculative-decoding draft-model forwards: an explicit
+    DRAFT_EXTEND* mode, or any step whose innermost speculative-worker stack
+    frame is a draft function.  They run the MTP/NEXTN/EAGLE head, never the
+    main decoder stack, so they are kept out of the main-layer spans and
+    reported separately.  TARGET_VERIFY is the target model's decode.
+    """
     spans = []
+    step_names = {}
     legacy = parse_profile._collect_step_spans(events)
     for index, span in enumerate(legacy):
         spans.append((span[0], span[1], span[2], span[3], span[4],
@@ -59,15 +109,18 @@ def _collect_step_spans(events):
         if not isinstance(event, dict) or event.get("cat") != "gpu_user_annotation":
             continue
         name = event.get("name")
-        match = SGLANG_STEP_RE.match(name) if isinstance(name, str) else None
-        if not match or event.get("ts") is None or event.get("dur") is None:
+        step = sglang_step_modes.parse_step(name)
+        if step is None or event.get("ts") is None or event.get("dur") is None:
             continue
-        kind, batch, tokens = match.groups()
-        tag = "P" if kind == "EXTEND" else "D"
+        tag = {"prefill": "P", "decode": "D", "verify": "V",
+               "draft": "S"}[step["phase"]]
+        step_id = "step-%d" % raw_index
+        step_names[step_id] = name
         spans.append((
             event["ts"], event["ts"] + event["dur"], tag,
-            int(tokens or 0), int(batch), "step-%d" % raw_index,
-            "sglang_step_annotation"))
+            step["tokens"], step["batch_size"], step_id,
+            "sglang_step_annotation" if step["mode"] in ("EXTEND", "DECODE")
+            else "sglang_step_annotation:%s" % step["mode"]))
 
     # SGLang emits each step[...] annotation TWICE: a CPU-side `user_annotation`
     # spanning the host wall-clock of the step, and a GPU-side
@@ -91,33 +144,66 @@ def _collect_step_spans(events):
         if not isinstance(event, dict) or event.get("cat") != "user_annotation":
             continue
         name = event.get("name")
-        if (not isinstance(name, str) or not SGLANG_STEP_RE.match(name)
+        if (sglang_step_modes.parse_step(name) is None
                 or event.get("ts") is None or event.get("dur") is None):
             continue
         cpu_by_name.setdefault(name, []).append(
-            (event["ts"], event["ts"] + event["dur"]))
+            (event["ts"], event["ts"] + event["dur"], event.get("tid")))
     for key in cpu_by_name:
-        cpu_by_name[key].sort()
+        cpu_by_name[key].sort(key=lambda item: (item[0], item[1]))
+    frames = _speculative_frames(events)
+    # One CPU annotation belongs to one GPU span.  Same-named steps (target
+    # and draft prefill are both `step[EXTEND bs=1 toks=N]`) pair in time
+    # order, so each CPU window is consumed once.
+    used_cpu = set()
     widened = []
-    for span in spans:
+    drafts = []
+    for span in sorted(spans, key=lambda item: (item[0], item[1], item[5])):
         cpu_lo, cpu_hi = span[0], span[1]
-        for lo, hi in cpu_by_name.get(_step_span_name(span), ()):
-            # Pair a CPU window with the GPU window it encloses/overlaps.
-            if lo <= span[0] < hi or (span[0] <= lo and hi <= span[1]):
-                cpu_lo, cpu_hi = min(cpu_lo, lo), max(cpu_hi, hi)
+        cpu_window = None
+        name = step_names.get(span[5], _step_span_name(span))
+        for index, (lo, hi, tid) in enumerate(cpu_by_name.get(name, ())):
+            if (name, index) in used_cpu:
+                continue
+            # Pair a CPU window with the GPU window it encloses/overlaps, or
+            # with the earliest unused CPU launch preceding the GPU work.
+            if (lo <= span[0] < hi or (span[0] <= lo and hi <= span[1])
+                    or hi <= span[0]):
+                used_cpu.add((name, index))
+                cpu_window = (lo, hi, tid)
+                if lo <= span[0] < hi or (span[0] <= lo and hi <= span[1]):
+                    cpu_lo, cpu_hi = min(cpu_lo, lo), max(cpu_hi, hi)
                 break
+        speculative_func = _draft_stack_evidence(cpu_window, frames)
+        is_draft = span[2] == "S" or bool(
+            speculative_func and DRAFT_FUNC_RE.search(speculative_func))
+        if is_draft:
+            drafts.append({
+                "step_id": span[5],
+                "name": name,
+                "ts": span[0],
+                "end": span[1],
+                "batch_size": span[4],
+                "input_tokens": span[3],
+                "evidence": (
+                    "draft_step_mode" if span[2] == "S"
+                    else "speculative_stack_frame:%s" % speculative_func),
+                "cpu_ts": cpu_window[0] if cpu_window else None,
+                "cpu_end": cpu_window[1] if cpu_window else None,
+            })
+            continue
         widened.append(tuple(span) + (cpu_lo, cpu_hi))
     spans = widened
     spans.sort(key=lambda item: (item[0], item[1], item[5]))
-    return spans
+    return spans, drafts
 
 
 def _step_span_name(span):
-    """Reconstruct the sglang annotation name a step span was parsed from."""
-    kind = "EXTEND" if span[2] == "P" else "DECODE"
+    """Reconstruct the sglang annotation name of a legacy/plain step span."""
+    kind = {"P": "EXTEND", "V": "TARGET_VERIFY"}.get(span[2], "DECODE")
     if kind == "EXTEND":
         return "step[EXTEND bs=%d toks=%d]" % (span[4], span[3])
-    return "step[DECODE bs=%d]" % span[4]
+    return "step[%s bs=%d]" % (kind, span[4])
 
 
 def has_module_layer_spans(path):
@@ -165,10 +251,13 @@ STAGE_RULES = (
     ("norm.layer", "norm", r"rms.?norm|layer.?norm|l2norm"),
     ("position.rope", "rope", r"rope|rotary"),
     ("attention.linear", "linear_attn",
-     r"fused_qkvzba|causal_conv1d|gdn_gating|gated_delta|"
+     r"fused_qkvzba|causal_conv1d|gdn_gating|gated_delta|delta_rule|"
      r"recompute_w_u|chunk_local_cumsum|chunk_fwd_kernel_o|"
      r"state_passing|wv_splitk_small"),
-    ("attention.full_or_mla", "attn", r"fmha|attention|attn|paged|mla_"),
+    # SGLang triton extend/decode attention launch as bare `_fwd_kernel*`;
+    # speculative TARGET_VERIFY decode runs the extend kernel.
+    ("attention.full_or_mla", "attn",
+     r"fmha|attention|attn|paged|mla_|^_fwd_kernel(_stage\d+)?$"),
     ("router.topk", "topk", r"topk|routing|router|gate_kernel"),
     ("experts.moe", "moe", r"\bmoe\b|expert|sorting|fmoe"),
     ("linear.gemm", "gemm", r"gemm|cijk|tensile|matmul|\bmm\b"),
@@ -307,7 +396,7 @@ def _step_at(ts, spans, starts):
     return None
 
 
-def _module_layer_scopes(events, spans, pattern_doc):
+def _module_layer_scopes(events, spans, pattern_doc, draft_windows=()):
     """Resolve outer DecoderLayer python spans to global layer ordinals.
 
     Numeric suffixes are class-local for some hybrid model implementations, so
@@ -329,6 +418,11 @@ def _module_layer_scopes(events, spans, pattern_doc):
         name = str(event.get("name", ""))
         match = MODULE_LAYER_RE.match(name)
         if not match or event.get("ts") is None or event.get("dur") is None:
+            continue
+        # The CPU dispatches the draft forward while the target's GPU work
+        # (whose window widens the target step) is still running; a draft
+        # DecoderLayer span there would be counted as a 65th target layer.
+        if any(lo <= event["ts"] < hi for lo, hi in draft_windows):
             continue
         step = _cpu_step_at(event["ts"], cpu_spans, span_starts)
         if step is None:
@@ -410,24 +504,32 @@ def _scope_at(ts, scopes, starts):
 
 
 def _flow_layer_index(events, module_scopes, module_starts):
-    """Map GPU flow-marker timestamps from CPU-side DecoderLayer spans."""
+    """Map GPU flow-marker timestamps from CPU-side DecoderLayer spans.
+
+    Only the flow source ("s", the CPU launch) is located against the CPU
+    module spans.  The flow targets ("t"/"f") are device timestamps: when the
+    CPU runs ahead of the GPU they routinely fall inside a *later* layer's CPU
+    span, which says nothing about ownership and must not veto the launch.
+    """
     flows = {}
     for event in events:
         if not isinstance(event, dict) or event.get("ph") not in ("s", "t", "f"):
             continue
         flow_id = event.get("id", (event.get("args") or {}).get("id"))
         if flow_id is not None and event.get("ts") is not None:
-            flows.setdefault(str(flow_id), []).append(event.get("ts"))
+            flows.setdefault(str(flow_id), []).append(
+                (event.get("ph"), event.get("ts")))
     result = {}
-    for timestamps in flows.values():
+    for endpoints in flows.values():
         sources = [_module_scope_at(ts, module_scopes, module_starts)
-                   for ts in timestamps]
+                   for ph, ts in endpoints if ph == "s"]
         sources = [source for source in sources if source]
         instance_ids = set(source["layer_instance_id"] for source in sources)
         if len(instance_ids) != 1:
             continue
-        for ts in timestamps:
-            result[ts] = sources[0]
+        for ph, ts in endpoints:
+            if ph != "s":
+                result[ts] = sources[0]
     return result
 
 
@@ -446,15 +548,20 @@ def _pattern_index(pattern_doc):
 
 def _event_rows(events, pattern_doc):
     patterns = _pattern_index(pattern_doc)
-    spans = _collect_step_spans(events)
+    spans, draft_spans = _collect_step_spans_with_draft(events)
     span_starts = [span[0] for span in spans]
+    draft_starts = [item["ts"] for item in draft_spans]
     cpu_by_ext, scopes, scope_starts = _cpu_evidence(events)
     module_scopes, module_diagnostics = _module_layer_scopes(
-        events, spans, pattern_doc)
+        events, spans, pattern_doc, draft_windows=[
+            (item["cpu_ts"], item["cpu_end"]) for item in draft_spans
+            if item.get("cpu_ts") is not None])
     module_starts = [scope["ts"] for scope in module_scopes]
     flow_layers = _flow_layer_index(events, module_scopes, module_starts)
     rows = []
     out_of_scope = {"count": 0, "duration_us": 0.0}
+    draft_scope = {"step_count": len(draft_spans), "device_event_count": 0,
+                   "duration_us": 0.0, "steps": draft_spans}
     device_sequence = 0
     device_events = [(raw_index, event) for raw_index, event in enumerate(events)
                      if isinstance(event, dict)
@@ -475,6 +582,10 @@ def _event_rows(events, pattern_doc):
         if spans and phase is None:
             out_of_scope["count"] += 1
             out_of_scope["duration_us"] += float(event.get("dur", 0) or 0)
+            pos = bisect.bisect_right(draft_starts, ts if ts is not None else -1) - 1
+            if pos >= 0 and ts < draft_spans[pos]["end"]:
+                draft_scope["device_event_count"] += 1
+                draft_scope["duration_us"] += float(event.get("dur", 0) or 0)
             continue
         device_sequence += 1
         args = event.get("args") or {}
@@ -570,6 +681,11 @@ def _event_rows(events, pattern_doc):
             },
         })
     out_of_scope["duration_us"] = round(out_of_scope["duration_us"], 6)
+    if draft_spans:
+        draft_scope["duration_us"] = round(draft_scope["duration_us"], 6)
+        # Speculative draft-model steps are excluded from main-layer tables by
+        # construction; keep the count auditable instead of silently dropping.
+        out_of_scope["speculative_draft"] = draft_scope
     return rows, spans, out_of_scope, module_scopes, module_diagnostics
 
 
@@ -847,15 +963,39 @@ def _authoritative_instances(step_rows):
     return instances
 
 
+def _anchor_cut(left, right, left_start):
+    """First device index of `right`, cut from both layers' sorted anchors.
+
+    Returns (start, misassigned_anchor_count), or (None, None) when no cut
+    keeps both layers non-empty.
+    """
+    lowest = max(left[0], left_start) + 1
+    best = None
+    for cut in range(lowest, right[-1] + 1):
+        misassigned = ((len(left) - bisect.bisect_left(left, cut))
+                       + bisect.bisect_left(right, cut))
+        if best is None or misassigned <= best[1]:
+            best = (cut, misassigned)
+    return best if best is not None else (None, None)
+
+
 def _normalize_module_scope_cuts(
         step_rows, instances, layer_count, patterns):
-    """Turn complete ordered module anchors into non-overlapping time cuts.
+    """Turn complete ordered module anchors into non-overlapping cuts.
 
-    Independent streams can interleave launches from adjacent layers, so raw
-    External-id ownership is not necessarily contiguous in device timestamp
-    order.  A complete module pass still provides an ordered anchor cloud for
-    every layer.  Midpoints between those clouds define the only deterministic
-    cut used here; no stage or kernel identity participates.
+    Raw module-span ownership can leave holes (a launch whose link to its
+    span was not recovered) or, when independent streams interleave, let two
+    adjacent layers overlap in device order.  Each boundary is cut from the
+    two layers' own anchors only, so layers of different sizes (hybrid
+    models) are cut where their anchors say, never at a size-dependent point:
+
+    * anchors do not overlap: the next layer starts at its first anchor, so
+      an unowned kernel inside a layer stays with it and one in the gap
+      between two layers stays with the layer that launched before it;
+    * anchors overlap: the cut inside the overlap that moves the fewest
+      anchors to the other side (ties: the latest such cut).
+
+    No stage or kernel identity participates.
     """
     if not instances or len(instances) % layer_count:
         return False, []
@@ -871,28 +1011,35 @@ def _normalize_module_scope_cuts(
             pass_index * layer_count:(pass_index + 1) * layer_count]
         if [item["layer_id"] for item in chunk] != list(range(layer_count)):
             return False, []
-        centers = [statistics.median(
-            row["device_seq_index"] for row in item["rows"])
-            for item in chunk]
-        if any(left >= right for left, right in zip(centers, centers[1:])):
+        anchors = [sorted(row["device_seq_index"] for row in item["rows"])
+                   for item in chunk]
+        if any(left[0] >= right[0]
+               for left, right in zip(anchors, anchors[1:])):
             return False, []
-        starts = [min(
-            row["device_seq_index"] for row in chunk[0]["rows"])]
-        starts.extend(
-            int(math.floor((left + right) / 2.0)) + 1
-            for left, right in zip(centers, centers[1:]))
-        end = max(row["device_seq_index"] for row in chunk[-1]["rows"]) + 1
-        if (starts != sorted(starts) or len(set(starts)) != len(starts)
-                or end <= starts[-1]
+        starts = [anchors[0][0]]
+        boundaries = []
+        for left, right in zip(anchors, anchors[1:]):
+            start, misassigned = _anchor_cut(left, right, starts[-1])
+            if start is None:
+                return False, []
+            starts.append(start)
+            boundaries.append({
+                "start_device_seq_index": start,
+                "method": ("anchor_gap" if left[-1] < right[0]
+                           else "anchor_overlap_min_misassigned"),
+                "misassigned_anchor_count": misassigned,
+            })
+        end = anchors[-1][-1] + 1
+        if (end <= starts[-1]
                 or (previous_end is not None and starts[0] < previous_end)):
             return False, []
-        specifications.append((pass_index, chunk, starts, end, centers))
+        specifications.append((pass_index, chunk, starts, end, boundaries))
         previous_end = end
 
     _clear_step_layer_assignments(
         step_rows, "outside_python_module_span_ordered_cut")
     audit = []
-    for pass_index, chunk, starts, end, centers in specifications:
+    for pass_index, chunk, starts, end, boundaries in specifications:
         for layer_id, start in enumerate(starts):
             stop = starts[layer_id + 1] if layer_id + 1 < layer_count else end
             instance_id = chunk[layer_id]["instance_id"]
@@ -913,8 +1060,10 @@ def _normalize_module_scope_cuts(
             selected[-1]["boundary_role"] = "end_kernel"
         audit.append({
             "pass_index": pass_index,
-            "layer_anchor_centers": centers,
             "layer_start_device_seq_indices": starts,
+            "layer_boundaries": boundaries,
+            "misassigned_anchor_count": sum(
+                item["misassigned_anchor_count"] for item in boundaries),
             "body_end_device_seq_index_exclusive": end,
         })
     return True, audit
@@ -1082,6 +1231,8 @@ def _layer_instances(rows):
             "layer_id": layer_id,
             "pattern_id": group[0]["pattern_id"],
             "step_id": group[0].get("step_id"),
+            "step_batch_size": group[0].get("step_batch_size"),
+            "step_input_tokens": group[0].get("step_input_tokens"),
             "layer_instance_id": explicit_instance,
             "occurrence": occurrence[key],
             "body_start_event": group[0]["row_id"],
@@ -1141,7 +1292,64 @@ def _context_penalty(pattern_doc, layer_id):
         "model_epilogue")))
 
 
-def _representatives(pattern_doc, instances, layer_hints=None):
+def _select_analysis_steps(spans):
+    """Pick ONE analysis step per phase from the captured target steps.
+
+    A capture holds several steps (e.g. the client's single test prompt and a
+    real 16x1024 prefill batch, or several steady verify steps).  Every table
+    of a phase must describe the same step, otherwise Patterns end up in
+    different buckets.  Prefill: most tokens, then batch size.  Decode/verify:
+    largest batch, then tokens.  Ties: the step with the median duration, so a
+    first/last-step outlier is not chosen.  Draft steps never reach `spans`.
+    """
+    by_phase = {}
+    for span in spans:
+        phase = _phase_name(span[2])
+        by_phase.setdefault(phase, []).append({
+            "step_id": span[5], "batch_size": int(span[4] or 0),
+            "input_tokens": int(span[3] or 0),
+            "duration_us": round(float(span[1]) - float(span[0]), 3),
+            "source": span[6]})
+    chosen = {}
+    for phase, steps in by_phase.items():
+        if phase == "prefill":
+            key = lambda item: (item["input_tokens"], item["batch_size"])
+            rule = "max_input_tokens_then_batch_then_median_duration"
+        else:
+            key = lambda item: (item["batch_size"], item["input_tokens"])
+            rule = "max_batch_then_tokens_then_median_duration"
+        best = max(key(item) for item in steps)
+        bucket = sorted((item for item in steps if key(item) == best),
+                        key=lambda item: (item["duration_us"], item["step_id"]))
+        pick = bucket[(len(bucket) - 1) // 2]
+        chosen[phase] = dict(pick, rule=rule, candidates=len(steps),
+                             same_bucket_step_ids=[i["step_id"] for i in bucket],
+                             other_bucket_step_ids=sorted(
+                                 i["step_id"] for i in steps if key(i) != best))
+    return chosen
+
+
+def _analysis_candidates(values, phase, analysis_steps):
+    """Restrict representative candidates to the phase's analysis step.
+
+    Falls back to the same bucket, then to every step, only when the chosen
+    step has no eligible instance; the returned tag records which applied.
+    """
+    chosen = (analysis_steps or {}).get(phase)
+    if not chosen:
+        return values, "no_analysis_step"
+    exact = [item for item in values if item.get("step_id") == chosen["step_id"]]
+    if exact:
+        return exact, "analysis_step"
+    same = set(chosen.get("same_bucket_step_ids") or [])
+    bucket = [item for item in values if item.get("step_id") in same]
+    if bucket:
+        return bucket, "same_bucket_fallback"
+    return values, "any_step_fallback"
+
+
+def _representatives(pattern_doc, instances, layer_hints=None,
+                     analysis_steps=None):
     """Choose one authoritative sequence medoid per (Pattern, phase)."""
     layer_hints = layer_hints or {}
     by_pattern = {}
@@ -1157,8 +1365,11 @@ def _representatives(pattern_doc, instances, layer_hints=None):
         phases = sorted({item["phase"] for item in values})
         medians = {}
         selected_instances = {}
+        step_match = {}
         for phase in phases:
             phase_values = [item for item in values if item["phase"] == phase]
+            phase_values, step_match[phase] = _analysis_candidates(
+                phase_values, phase, analysis_steps)
             allowed_ids = set(pattern.get(
                 "representative_candidates", pattern.get("layer_ids", [])))
             preferred = [
@@ -1204,6 +1415,8 @@ def _representatives(pattern_doc, instances, layer_hints=None):
                         _context_penalty(pattern_doc, chosen["layer_id"])),
                     "sequence_signature": chosen["sequence_signature"],
                     "boundary_evidence": chosen.get("boundary_evidence", {}),
+                    "step_id": chosen.get("step_id"),
+                    "analysis_step_match": step_match.get(phase),
                 }
         selected_layers = sorted(set(
             value["layer_id"] for value in selected_instances.values()))
@@ -1239,7 +1452,7 @@ def _table(pattern_doc, rows, representatives, table_phases=None):
             continue
         grouped.setdefault((row["phase"], row["pattern_id"]), []).append(row)
     tables = []
-    phase_order = {"prefill": 0, "decode": 1, "unresolved": 2}
+    phase_order = {"prefill": 0, "decode": 1, "verify": 1, "unresolved": 2}
     for (phase, pattern_id), group in sorted(
             grouped.items(),
             key=lambda item: (
@@ -1420,7 +1633,7 @@ def _gating_step_audits(step_audits):
 
 def _quality(
         pattern_doc, rows, instances, representatives, spans, out_of_scope,
-        partition_diagnostics, tables):
+        partition_diagnostics, tables, analysis_steps=None):
     input_count = len(rows)
     assigned_count = sum(1 for row in rows if row["assignment"] in (
         "layer_body", "transition_global", "concurrent_unresolved"))
@@ -1459,9 +1672,28 @@ def _quality(
                 and actual_order == expected_order
                 and non_overlapping) else "fail",
         })
-    gating_audits = _gating_step_audits(step_audits)
+    # Steps with no boundary evidence are marked first (an extra prefill step
+    # inside a DECODE file).  Tables are then built from one analysis step per
+    # phase; other captured steps (a test prompt, a step the profiler entered
+    # mid-way, a ramp-up step) are audited but do not gate.  An analysis step
+    # that is itself unresolved still gates: its rows are the tables.  Without
+    # analysis steps every step gates except the marked extra ones.
+    _gating_step_audits(step_audits)
+    analysis_ids = {item["step_id"]
+                    for item in (analysis_steps or {}).values()}
+    if analysis_ids:
+        gating_audits = [item for item in step_audits
+                         if item["step_id"] in analysis_ids]
+    else:
+        gating_audits = [item for item in step_audits
+                         if item["status"] != "not_gating_unresolved_extra_step"]
+    gated_step_ids = {item["step_id"] for item in gating_audits}
+    non_gating_audits = [item for item in step_audits
+                         if item["step_id"] not in gated_step_ids]
     mechanical_pass = (not partition_diagnostics or bool(gating_audits)) and all(
         item["status"] == "pass" for item in gating_audits)
+    incomplete = [item for item in incomplete
+                  if not analysis_ids or item.get("step_id") in gated_step_ids]
     phase_status = "pass" if spans else "partial"
     representative_integrity = _representative_integrity(
         rows, tables, representatives)
@@ -1497,15 +1729,16 @@ def _quality(
             "layer_boundaries": {
                 "status": "pass" if mechanical_pass and not incomplete else "fail",
                 "gating": True,
-                "scope": "all_required_steps",
+                "scope": "analysis_steps" if analysis_ids else "all_required_steps",
                 "incomplete_instances": len(incomplete),
                 "patterns_without_representative": pattern_missing,
             },
             "step_layer_order": {
                 "status": "pass" if mechanical_pass else "fail",
                 "gating": True,
-                "scope": "all_required_steps",
-                "steps": step_audits,
+                "scope": "analysis_steps" if analysis_ids else "all_required_steps",
+                "steps": gating_audits,
+                "non_gating_steps": non_gating_audits,
                 "non_gating_unresolved_steps": [
                     item["step_id"] for item in step_audits
                     if item["status"] == "not_gating_unresolved_extra_step"],
@@ -1516,11 +1749,10 @@ def _quality(
     }
 
 
-_MODEL_PHASES = ("prefill", "decode")
 
 
 def _phase_coverage(instances, tables, trace_paths, adopted_siblings,
-                    table_phases, require_phases):
+                    table_phases, require_phases, observed_phases=()):
     """Describe what phase coverage this build actually achieved.
 
     Exists because `table_phases: ["all"]` used to be emitted whenever no
@@ -1530,12 +1762,23 @@ def _phase_coverage(instances, tables, trace_paths, adopted_siblings,
     def _norm(value):
         value = str(value or "").strip().lower()
         return {"extend": "prefill", "prompt": "prefill",
-                "generation": "decode"}.get(value, value)
+                "generation": "decode",
+                "target_verify": "verify"}.get(value, value)
 
     in_tables = sorted({_norm(t.get("phase")) for t in tables if t.get("phase")})
     in_trace = sorted({_norm(i.get("phase")) for i in instances if i.get("phase")})
     tags = sorted({tag for tag in (_phase_tag(p) for p in trace_paths) if tag})
-    required = sorted({_norm(v) for v in (require_phases or []) if v})
+    # The trace decides the generation phase: "verify" when the target ran
+    # TARGET_VERIFY steps (speculative decoding), else "decode".  A caller's
+    # "decode"/"verify" requirement means "the generation phase".
+    generation = sglang_step_modes.generation_phase(
+        set(in_tables) | set(in_trace) | {_norm(p) for p in observed_phases})
+    if require_phases is None:
+        required = sglang_step_modes.target_phases([generation])
+    else:
+        required = sorted({
+            generation if sglang_step_modes.is_generation_phase(_norm(v))
+            else _norm(v) for v in require_phases if v})
     missing = [phase for phase in required if phase not in in_tables]
 
     # Sequence coverage and shape coverage fail independently, and conflating
@@ -1553,14 +1796,17 @@ def _phase_coverage(instances, tables, trace_paths, adopted_siblings,
     for phase, stat in shape_stats.items():
         stat["resolved_fraction"] = (
             round(stat["resolved"] / stat["rows"], 4) if stat["rows"] else 0.0)
-    decode_stat = shape_stats.get("decode", {"rows": 0, "resolved": 0})
-    decode_seq = "decode" in in_tables
+    # decode_* fields describe the generation phase (decode or verify).
+    decode_stat = shape_stats.get(generation, {"rows": 0, "resolved": 0})
+    decode_seq = generation in in_tables
     decode_shapes = decode_stat["resolved"] > 0
     return {
         "phases_in_tables": in_tables,
         "phases_in_trace": in_trace,
+        "generation_phase": generation,
         "phases_absent_from_tables": [
-            phase for phase in _MODEL_PHASES if phase not in in_tables],
+            phase for phase in sglang_step_modes.target_phases([generation])
+            if phase not in in_tables],
         "single_phase": len(in_tables) <= 1,
         "shape_resolution_by_phase": shape_stats,
         # sequence == "which kernels, in what order"; shapes == "with what
@@ -1724,6 +1970,51 @@ def _markdown(tables, quality):
     return "\n".join(lines) + "\n"
 
 
+def _step_consistency_warnings(instances, representatives, analysis_steps):
+    """Warn when same-bucket steps disagree with the chosen representative."""
+    warnings = []
+    for pid, selected in (representatives or {}).items():
+        for phase, chosen in (selected.get("selected_instances") or {}).items():
+            same = set((analysis_steps.get(phase) or {}).get(
+                "same_bucket_step_ids") or [])
+            others = [item for item in instances
+                      if item.get("pattern_id") == pid
+                      and item.get("phase") == phase
+                      and item.get("layer_id") == chosen["layer_id"]
+                      and item.get("step_id") in same
+                      and item.get("step_id") != chosen.get("step_id")]
+            differing = sorted({item["step_id"] for item in others
+                                if item["sequence_signature"]
+                                != chosen["sequence_signature"]})
+            if differing:
+                warnings.append(
+                    "step consistency: %s %s L%s kernel sequence differs in "
+                    "same-bucket step(s) %s from the analysis step %s"
+                    % (phase, pid, chosen["layer_id"], differing,
+                       chosen.get("step_id")))
+    return warnings
+
+
+def _manifest_speculative(trace_paths):
+    """Speculative facts from the capture's trace manifest, if present.
+
+    bench_e2e.sh writes profile_trace_manifest.json beside the trace
+    directory; it is optional enrichment (accept length, verify tokens).
+    """
+    for path in trace_paths:
+        candidate = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(path))),
+            "profile_trace_manifest.json")
+        try:
+            with open(candidate) as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc.get("speculative"), dict):
+            return dict(doc["speculative"], manifest=candidate)
+    return None
+
+
 def build(trace_path, pattern_path, out_dir, table_phases=None,
           auto_sibling=True, require_phases=None, boundary_map_paths=None,
           representative_layer_hints=None):
@@ -1762,16 +2053,39 @@ def build(trace_path, pattern_path, out_dir, table_phases=None,
     representative_instances = [
         instance for instance in instances
         if not table_phases or instance["phase"] in table_phases]
+    analysis_steps = _select_analysis_steps(spans)
     representatives = _representatives(
-        pattern_doc, representative_instances, representative_layer_hints)
+        pattern_doc, representative_instances, representative_layer_hints,
+        analysis_steps)
     tables = _table(pattern_doc, rows, representatives, table_phases)
     quality = _quality(
         pattern_doc, rows, instances, representatives, spans, out_of_scope,
-        partition_diagnostics, tables)
+        partition_diagnostics, tables, analysis_steps)
     coverage = _phase_coverage(
         instances, tables, trace_paths, adopted_siblings, table_phases,
-        require_phases)
+        require_phases, observed_phases=analysis_steps.keys())
+    coverage["analysis_steps"] = analysis_steps
     quality["phase_coverage"] = coverage
+    quality.setdefault("warnings", []).extend(
+        _step_consistency_warnings(instances, representatives, analysis_steps))
+    manifest_speculative = _manifest_speculative(trace_paths)
+    if manifest_speculative:
+        coverage["speculative"] = manifest_speculative
+    speculative_modes = sorted({
+        span[6].split(":", 1)[1] for span in spans
+        if str(span[6]).startswith("sglang_step_annotation:")})
+    draft_scope = out_of_scope.get("speculative_draft")
+    if speculative_modes or draft_scope:
+        # Speculative decoding: decode is TARGET_VERIFY (bs requests x
+        # draft-token positions through the main stack); draft-model steps
+        # were excluded from the main-layer tables above.
+        coverage["speculative_decoding"] = True
+        coverage["decode_step_modes"] = [
+            mode for mode in speculative_modes
+            if sglang_step_modes.is_generation_phase(
+                sglang_step_modes.PHASE_BY_MODE.get(mode))]
+        coverage["draft_steps_excluded"] = (
+            draft_scope["step_count"] if draft_scope else 0)
     if coverage["missing_required_phases"]:
         # A graph-replayed phase may legitimately need the Phase-1.2 donor
         # capture before it has authoritative layer boundaries. Preserve any
@@ -1784,13 +2098,14 @@ def build(trace_path, pattern_path, out_dir, table_phases=None,
                 ", ".join(coverage["missing_required_phases"]),
                 ", ".join(os.path.basename(p) for p in trace_paths)))
     elif coverage["decode_requires_graph_capture"]:
+        generation = coverage["generation_phase"]
         quality.setdefault("warnings", []).append(
-            "phase coverage: decode kernel SEQUENCE is covered but 0/%d decode "
+            "phase coverage: %s kernel SEQUENCE is covered but 0/%d %s "
             "rows carry resolved shapes (CUDA-graph replay emits no module "
-            "spans). Sequence is enough to discover decode fusion seams; "
+            "spans). Sequence is enough to discover %s fusion seams; "
             "generating or benchmarking one needs graph-construction shape capture."
-            % (coverage["shape_resolution_by_phase"]
-               .get("decode", {}).get("rows", 0)))
+            % (generation, coverage["shape_resolution_by_phase"]
+               .get(generation, {}).get("rows", 0), generation, generation))
     elif coverage["single_phase"]:
         quality.setdefault("warnings", []).append(
             "phase coverage: tables contain only %s. Fusion candidates derived "

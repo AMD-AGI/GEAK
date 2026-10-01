@@ -371,6 +371,26 @@ class SemanticShapeMergeTest(unittest.TestCase):
             self.assertEqual(audit["status"] == "axis_0_rewritten",
                              expected != tensor["shape"])
 
+    def test_axis_0_alignment_keeps_target_verify_token_axis(self):
+        """NEXTN TARGET_VERIFY: capture bucket bs=8 toks=32 (4 draft tokens
+        per request); the clean decode step records only bs=8. The token
+        axis must stay 32 (and scale to other bs), never shrink to bs."""
+        group = {"batch_size": 8, "input_tokens": 32}
+        x = {"io": "input", "tensor_path": "args.x",
+             "shape": [32, 5120], "dtype": "float8_e4m3fnuz"}
+        per_request = {"io": "input", "tensor_path": "args[0]",
+                       "shape": [8, 48], "dtype": "bfloat16"}
+        same = {"selected_bucket": {"batch_size": 8, "input_tokens": 0}}
+        self.assertEqual(merge._axis_0_alignment(
+            x, group, same, exact_bucket=False)[0], [32, 5120])
+        self.assertEqual(merge._axis_0_alignment(
+            per_request, group, same, exact_bucket=False)[0], [8, 48])
+        other = {"selected_bucket": {"batch_size": 16, "input_tokens": 0}}
+        self.assertEqual(merge._axis_0_alignment(
+            x, group, other, exact_bucket=False)[0], [64, 5120])
+        self.assertEqual(merge._axis_0_alignment(
+            per_request, group, other, exact_bucket=False)[0], [16, 48])
+
     def test_verified_pattern_position_allows_cross_layer_shape_group(self):
         groups = [{
             "rank": 0, "phase": "decode", "layer_id": 13,
@@ -403,6 +423,22 @@ class SemanticShapeMergeTest(unittest.TestCase):
             "P(kernel): x=FP8[7238×7168]<br>"
             "weight=FP8[2112×7168]<br><br>"
             "y=BF16[7238×2112]")
+
+    def test_tensor_list_operand_expands_to_one_tensor_per_element(self):
+        """Qwen3.5 GDN prefill: aten::cat(Tensor[] tensors, int dim) records
+        Input Dims [[[1024,2048],[1024,2048],[1024,6144]], []]."""
+        schema = merge._kernel_trace_schema({
+            "op_name": "aten::cat",
+            "input_dims": [[[1024, 2048], [1024, 2048], [1024, 6144]], []],
+            "input_types": ["TensorList", "Scalar"],
+        })
+        shapes = [item["shape"] for item in schema["tensors"]]
+        self.assertEqual(shapes, [[1024, 2048], [1024, 2048], [1024, 6144]])
+        self.assertEqual(
+            [item["tensor_path"] for item in schema["tensors"]],
+            ["operator_args.arg_0[0]", "operator_args.arg_0[1]",
+             "operator_args.arg_0[2]"])
+        self.assertEqual(schema["tensors"][2]["axes"][1]["value"], 6144)
 
     def test_trace_quant_shape_is_reordered_by_operator_semantics(self):
         row = {

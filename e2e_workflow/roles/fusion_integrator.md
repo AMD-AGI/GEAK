@@ -54,6 +54,12 @@ dir may be passed to STACK on top of.
 - **Single server-init attempt** (~10 min). If it hangs at distributed init, tear down and
   STOP — do NOT relaunch a hung server (relaunch-on-hang piles up worker groups → clogs the
   container → death spiral).
+- **Speculative decoding**: the target generation step is `TARGET_VERIFY`, for which
+  `ForwardMode.is_decode()` is False (and `is_extend()` is True). An overlay gated on
+  `is_decode()` never engages under MTP/EAGLE — sglang's own Qwen3 qk-norm+mrope fusion is
+  silently off for exactly this reason. Gate on `is_target_verify() or is_decode()` for the
+  `verify` phase, leave draft steps (`DRAFT_EXTEND*`, draft graphs) on the split path, and
+  report `accept len` for both A/B legs (a numerics change can move acceptance).
 - **Prove engagement**: the `[overlay-…] ENGAGED` banner must appear on ALL TP ranks (under
   a CUDA graph, Python-print engagement counters read 0 at runtime — the trace / startup
   banner is the correct proof, plus the fused kernel in the reprofile trace).
