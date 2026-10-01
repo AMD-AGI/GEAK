@@ -44,6 +44,9 @@ const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
 if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
   throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
 }
+if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
+  throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
+}
 const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
 const R9700_E2E = EXPECTED_TARGET === 'r9700';
 // ISA isolation and product policy are intentionally separate. Any gfx1201

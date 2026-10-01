@@ -289,6 +289,9 @@ const DETECTED_PHYSICAL_CU_COUNT = Number(oracle.physical_cu_count);
 if (!DETECTED_GFX || !DETECTED_TARGET) {
   throw new Error('Freeze failed: oracle_freezer did not return structured device_gfx and device_target');
 }
+if (DETECTED_GFX === 'gfx1200') {
+  throw new Error('Detected gfx1200, which is not validated by this workflow; refusing R9700 guidance');
+}
 if (EXPECTED_GFX && DETECTED_GFX !== EXPECTED_GFX) {
   throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${DETECTED_GFX}`);
 }

@@ -86,7 +86,9 @@ see the disagreement rather than a single blended number that hides it.
    only adds failure modes. Skipped entries are **absent** from the artifact; they are NOT `degraded[]`
    (a kernel too small to matter is not a modelling failure and must not read as one).
 1. Resolve peaks from `peaks.md` via
-   `resolve_peaks(gfx, product=env_report.device_target)`. Client RDNA4
+   `resolve_peaks(gfx, product=env_report.device_target)`.
+   `device_target=unknown` (every non-R9700 card, MI300/MI355 included) is no
+   product constraint: the ISA-keyed tables still resolve. Client RDNA4
    numeric peaks exist only for product `r9700`. A bare gfx1201 (or any other
    gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
    unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4

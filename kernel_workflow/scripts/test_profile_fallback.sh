@@ -19,13 +19,28 @@ cat > "$tmp/bin/rocprof" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod +x "$tmp/bin/rocprofv3" "$tmp/bin/rocprof"
+# profile_kernel.sh detects the arch before KERNEL_ENV_KEEP_ARCH is consulted, so
+# the fixture supplies the identity: CPU-only runners have no rocminfo, and a real
+# one on a GPU host must not decide the result.
+cat > "$tmp/bin/rocminfo" <<'EOF'
+#!/bin/sh
+cat <<'ROCMINFO'
+*******
+Agent 1
+*******
+  Name:                    gfx1201
+  Marketing Name:          AMD Radeon AI PRO R9700
+  Compute Unit:            64
+ROCMINFO
+EOF
+chmod +x "$tmp/bin/rocprofv3" "$tmp/bin/rocprof" "$tmp/bin/rocminfo"
 
 # A failed v3 attempt contaminates the shared report with Kernel/Duration
 # strings. An empty successful rocprof process must still fall through.
 (
   cd "$tmp/work"
   PATH="$tmp/bin:$PATH" \
+  PYTORCH_ROCM_ARCH= \
   PROFILER_PRIORITY="rocprofv3 rocprof" \
   WARMUP_RUNS=0 \
   KERNEL_ENV_KEEP_ARCH=1 \
@@ -65,6 +80,7 @@ chmod +x "$tmp/bin/rocprof"
 (
   cd "$tmp/work"
   PATH="$tmp/bin:$PATH" \
+  PYTORCH_ROCM_ARCH= \
   PROFILER_PRIORITY="rocprofv3 rocprof" \
   WARMUP_RUNS=0 \
   KERNEL_ENV_KEEP_ARCH=1 \

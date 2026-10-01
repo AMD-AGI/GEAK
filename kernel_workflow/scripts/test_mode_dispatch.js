@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // Regression guard for the kernel_workflow.js DISPATCHER (no GPU, no agent, no network).
 //
-// Two invariants under test, both exercised against the REAL kernel_workflow.js source:
+// Three invariants under test, all exercised against the REAL kernel_workflow.js source:
 //   A-D) mode dispatch — args.mode routes to the single-language worker (optimize|author) or to the
 //        multi-language bake-off (bakeoff); it normalizes case/whitespace, defaults to optimize, throws
 //        on anything else (never silently downgrades), and forwards every arg to the worker untouched.
 //   E-J) bake-off LANE ROUTING — the live language optimizes its existing impl, other languages follow
 //        Discover's author_plan.route (rewrite -> optimize, author -> author), explicit args.backends
 //        overrides auto-discovery, and the winner is picked by speedup on the one frozen baseline.
+//   L-M) bake-off IDENTITY — expected/detected identity reaches every lane, gfx1201 isolates CDNA
+//        knowledge, and an unvalidated ISA (gfx1200) is refused before Discover.
 //
 // The Workflow runtime globals (args/phase/log/workflow/agent/parallel/pipeline/budget) are stubbed, so
 // this runs in milliseconds and spawns nothing. The runtime wraps a workflow script body in an async
@@ -325,6 +327,35 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
       'auto-detected bakeoff forwards exact structured product identity');
     ok(lane && lane.args.use_expert_skills === 'false',
       'auto-detected gfx1201 isolates before Discover and lane dispatch');
+  }
+
+  console.log('\n# M. an unvalidated ISA (gfx1200) is rejected before Discover');
+  {
+    const { run, trace } = build({
+      kernel_path: '/tmp/k', workflow_dir: WF_DIR, mode: 'bakeoff',
+      backends: ['hip'], gpu_ids: '0',
+    }, { agent: healthy('hip', [], {
+      device_gfx: 'gfx1200', device_target: 'unknown',
+      device_name: 'AMD Radeon Graphics', physical_cu_count: 56,
+    }) });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(/gfx1200/.test(msg), 'Freeze-detected gfx1200 throws', msg || 'no throw');
+    ok(!trace.phases.includes('Discover'), 'detected gfx1200 never reaches Discover',
+      JSON.stringify(trace.phases));
+    ok(!trace.agentLabels.some((l) => l.startsWith('op_benchmarker')),
+      'no op_benchmarker agent spawned', JSON.stringify(trace.agentLabels));
+    ok(trace.lanes.length === 0, 'no lane opened', lanesOf(trace));
+  }
+  {
+    const { run, trace } = build({
+      ...BASE, mode: 'bakeoff', expected_gfx: 'gfx1200', expected_target: 'unknown',
+    }, { agent: healthy('hip', []) });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(/gfx1200 is not supported/.test(msg), 'expected gfx1200 throws', msg || 'no throw');
+    ok(trace.agentLabels.length === 0, 'expected gfx1200 spawns no agent, not even Freeze',
+      JSON.stringify(trace.agentLabels));
   }
 
   console.log(failures === 0

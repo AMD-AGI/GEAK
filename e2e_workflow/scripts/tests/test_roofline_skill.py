@@ -14,16 +14,30 @@ Two things are locked here.
 2. **Degradation is non-fatal.** Every level of the SKILL.md ladder returns a value instead of raising,
    so a bad peak table / unmodellable op / impossible result / missing counter cannot fail a run.
 """
+import importlib.util
 import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "knowledge", "analysis_skills", "roofline"))
+E2E_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(E2E_DIR, "knowledge", "analysis_skills", "roofline"))
 import roofline_tools as rt  # noqa: E402
 
 PEAKS_MD = os.path.join(os.path.dirname(os.path.abspath(rt.__file__)), "peaks.md")
+
+_IDENTITY_SPEC = importlib.util.spec_from_file_location(
+    "gpu_identity", os.path.join(os.path.dirname(E2E_DIR), "scripts", "gpu_identity.py"))
+gpu_identity = importlib.util.module_from_spec(_IDENTITY_SPEC)
+_IDENTITY_SPEC.loader.exec_module(gpu_identity)
+
+
+def _identity(gfx, marketing_name, cu):
+    """Structured identity exactly as the workflow's rocminfo probe reports it."""
+    return gpu_identity.parse_rocminfo(
+        "*******\nAgent 1\n*******\n"
+        "  Name:                    %s\n"
+        "  Marketing Name:          %s\n"
+        "  Compute Unit:            %d\n" % (gfx, marketing_name, cu))
 
 # --- measured profile of the reference run (see module docstring) ---------------------------------
 MOE = dict(E=256, M=64, top_k=8, hidden=2048, inter=512, layers=40,
@@ -151,6 +165,37 @@ class TestPeaks(unittest.TestCase):
         self.assertAlmostEqual(rt.peak_flops_for(p, "int8"), 3.83e14, delta=1e11)
         self.assertIsNone(rt.peak_flops_for(p, "fp4"))
         self.assertNotIn("fp4", p["flops"])
+
+    def test_unknown_product_identity_keeps_instinct_tables(self):
+        """gpu_identity reports target=unknown for every card except an exact R9700. Passing that
+        straight through as `product` must still find the ISA-keyed CDNA tables, not derive."""
+        original = rt.derive_peaks_from_props
+
+        def no_derive(device=0):
+            raise AssertionError("tabulated CDNA peaks fell back to device properties")
+
+        rt.derive_peaks_from_props = no_derive
+        try:
+            for gfx, name, cu in (("gfx950", "AMD Instinct MI355X", 256),
+                                  ("gfx942", "AMD Instinct MI300X", 304)):
+                with self.subTest(gfx=gfx):
+                    identity = _identity(gfx, name, cu)
+                    self.assertEqual(identity["target"], "unknown")
+                    p = rt.resolve_peaks(PEAKS_MD, identity["gfx"], product=identity["target"])
+                    self.assertEqual(p, rt.load_peaks(PEAKS_MD, gfx))
+                    self.assertEqual(p["source"], "table")
+                    self.assertEqual(p["confidence"], "high")
+        finally:
+            rt.derive_peaks_from_props = original
+
+    def test_identity_product_still_scopes_the_r9700_table(self):
+        r9700 = _identity("gfx1201", gpu_identity.R9700_MARKETING_NAME, 64)
+        p = rt.resolve_peaks(PEAKS_MD, r9700["gfx"], product=r9700["target"])
+        self.assertIsNotNone(p)
+        self.assertEqual(p.get("product"), "r9700")
+        other = _identity("gfx1201", "Another gfx1201 Product", 64)
+        self.assertEqual(other["target"], "unknown")
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, other["gfx"], product=other["target"]))
 
     def test_peak_flops_for_unknown_dtype_is_none_not_table_max(self):
         p = _peaks()

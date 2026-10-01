@@ -14,7 +14,8 @@
 //      forwarded. A CDNA run of the same shape keeps all of it (the negative control — without it
 //      these assertions would also pass on a build that isolates unconditionally).
 //   B) SERVING BACKEND policy. There is no validated R9700 SGLang image, so an explicit
-//      backend=sglang or backend=atom must fail closed and the default must be vllm.
+//      backend=sglang or backend=atom must fail closed and the default must be vllm. An
+//      unvalidated ISA (gfx1200) must be rejected before any backend/knowledge policy is chosen.
 //
 // The single-kernel pass-through is the entry point used for (A): it reaches `laneArgs()` after only
 // pure config, with no agent or server call in between.
@@ -175,6 +176,28 @@ const R9700 = {
     try { await run(); } catch (e) { msg = e.message; }
     ok(/product is not confirmed as r9700/.test(msg),
       'unknown gfx1201 product fails before serving policy', msg || 'no throw');
+  }
+  {
+    // gfx1200 is rejected by the CI image selector and kernel_lane.js; without the same guard here
+    // it would be accepted as a CDNA-shaped run (SGLang, learned KB, tuning skillset).
+    const { run, trace } = build({
+      model_path: '/models/m', expected_gfx: 'gfx1200', expected_target: 'unknown',
+    }, { stopAtFirstPhase: true });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(/gfx1200 is not supported/.test(msg),
+      'gfx1200 E2E fails before backend/knowledge policy', msg || 'no throw');
+    ok(trace.phases.length === 0, 'gfx1200 E2E enters no phase', JSON.stringify(trace.phases));
+  }
+  {
+    const { run, trace } = build({
+      kernel_path: '/tmp/k', expected_gfx: 'gfx1200', expected_target: 'unknown',
+    });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(/gfx1200 is not supported/.test(msg), 'gfx1200 pass-through is rejected', msg || 'no throw');
+    ok(trace.workflowCalls.length === 0, 'gfx1200 pass-through never reaches the kernel layer',
+      `n=${trace.workflowCalls.length}`);
   }
   {
     const { run } = build({ model_path: '/models/m' }, { stopAtFirstPhase: true });

@@ -125,6 +125,8 @@ def load_peaks(peaks_md_path, gfx, product=None):
 
     Product-scoped blocks (``product: r9700``) match only when `product` is that
     identity. A gfx1201 lookup without an R9700 product must not inherit R9700 peaks.
+    ``product="unknown"`` (what gpu_identity reports for every non-R9700 card,
+    MI300/MI355 included) is no product constraint: ISA-keyed blocks still match.
 
     Returns {"hbm_bw_bytes_s": float, "flops": {dtype: float}, "cu": int, "source": "table",
              "confidence": "high"} or None when the file or the section is absent.
@@ -136,6 +138,8 @@ def load_peaks(peaks_md_path, gfx, product=None):
         return None
 
     want_product = str(product or "").strip().lower()
+    if want_product == "unknown":
+        want_product = ""
     for block in re.findall(r"```yaml\s*\n(.*?)```", text, re.S):
         if not re.search(r"^\s*gfx:\s*%s\s*$" % re.escape(str(gfx)), block, re.M):
             continue
