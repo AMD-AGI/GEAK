@@ -32,6 +32,11 @@ def state(**kw):
     return json.dumps(s)
 
 
+# What kernel_lane.js writes after a measured round.
+OUTCOME = {"verified_candidates": 2, "winner_speedup": 1.31, "improved": True, "made_progress": True,
+           "commit_reported": "not_captured", "tracked_incumbent_after": 1.31}
+
+
 def answers(choice="continue", p=0.92, stalled=0.3):
     other = "stop" if choice == "continue" else "continue"
     return {"next_step": {"type": "choice", "choice": choice, "probabilities": {choice: p, other: 1 - p},
@@ -207,9 +212,9 @@ def test_bad_decision_name_writes_nothing_anywhere(tmp_path, fake):
 
 # ---------------------------------------------------------------------------------- CLI
 def test_cli_always_prints_one_json_object_and_exits_zero(tmp_path, fake):
-    st = state(last_round_outcome={"note": "it's \"odd\"\nwith a newline"})
+    st = state(last_round_outcome=OUTCOME)
     env = dict(os.environ, GEAK_EIKOS_URL=fake)
-    out = subprocess.run([sys.executable, "-B", SCRIPT, "--decision", "round_continue", "--scope", "/e v'al",
+    out = subprocess.run([sys.executable, "-B", SCRIPT, "--decision", "round_continue", "--scope", "/e v'al \"odd\"\nnl",
                           "--round", "2", "--state-json", st, "--receipt-dir", str(tmp_path)],
                          capture_output=True, text=True, env=env, timeout=60)
     assert out.returncode == 0
@@ -334,3 +339,64 @@ def test_non_standard_json_numbers_are_refused(tmp_path, fake, const):
     env = decide(tmp_path, fake, raw)
     assert env["status"] == "state_invalid" and "non-standard" in env["error"] and not _Fake.seen
 
+
+
+# ------------------------------------------------------------- second review (880582df)
+def test_a_negative_progress_delta_is_accepted_as_the_lane_allows(tmp_path, fake):
+    """kernel_lane.js accepts any finite progress_delta > -1; the validator must not refuse it."""
+    assert decide(tmp_path, fake, state(progress_delta=-0.1))["status"] == "ok"
+    assert decide(tmp_path, fake, state(progress_delta=-1), rnd=2, scope="/x")["status"] == "state_invalid"
+
+
+@pytest.mark.parametrize("bad", [
+    dict(specialties_dispatched=[{}]), dict(minutes_left_source={}),            # unhashable -> was TypeError
+    dict(tracked_incumbent_speedup=10 ** 400),                                  # was OverflowError
+    dict(last_round_outcome={"verified_candidates": -3}),                       # any object was accepted
+    dict(last_round_outcome=dict(OUTCOME, verified_candidates=-3)),
+    dict(last_round_outcome=dict(OUTCOME, extra=1)),
+    dict(last_round_outcome=dict(OUTCOME, commit_reported=True)),
+])
+def test_bad_nested_state_is_a_receipted_refusal(tmp_path, fake, bad):
+    env = decide(tmp_path, fake, json.dumps(json.loads(state()) | bad))
+    assert env["status"] == "state_invalid" and env["receipt"] == "written" and not _Fake.seen
+    assert [a["attempt_id"] for a in attempts(tmp_path)] == [env["attempt_id"]]
+
+
+def test_real_lane_outcomes_are_accepted(tmp_path, fake):
+    for i, o in enumerate(["none", OUTCOME, dict(OUTCOME, winner_speedup=None, verified_candidates=0,
+                                                   improved=False, made_progress=False)]):
+        assert decide(tmp_path, fake, state(last_round_outcome=o), scope="/s%d" % i)["status"] == "ok"
+
+
+def test_an_overflowing_nested_number_never_reaches_the_model(tmp_path, fake):
+    """1e999 is standard JSON spelling but parses to inf; it must not go out as Infinity."""
+    raw = state(last_round_outcome=dict(OUTCOME)).replace('"winner_speedup": 1.31', '"winner_speedup": 1e999')
+    assert "1e999" in raw
+    env = decide(tmp_path, fake, raw)
+    assert env["status"] == "state_invalid" and "non-finite" in env["error"] and not _Fake.seen
+
+
+@pytest.mark.parametrize("edit", [
+    dict(scope="/other/lane"), dict(round=3), dict(attempt_id=""), dict(attempt_id="x" * 32),
+])
+def test_a_cached_entry_with_the_wrong_identity_is_not_reused(tmp_path, fake, edit):
+    decide(tmp_path, fake)
+    p, idx, k, v = _first_index_entry(tmp_path)
+    v.update(edit)
+    p.write_text(json.dumps(idx))
+    env = decide(tmp_path, fake)
+    assert not env["reused"] and len(_Fake.seen) == 2
+
+
+def test_an_entry_copied_from_another_scope_is_not_adopted(tmp_path, fake):
+    """Valid entry for /source (continue) copied under /target's key must not be adopted by /target."""
+    _Fake.bodies = [{"answers": answers("continue")}, {"answers": answers("stop", p=0.95)}]
+    src = decide(tmp_path, fake, scope="/source/lane")
+    tgt = decide(tmp_path, fake, scope="/target/lane")
+    p = tmp_path / "round_continue.index.json"
+    idx = json.loads(p.read_text())
+    idx[tgt["logical_key"]] = idx[src["logical_key"]]
+    p.write_text(json.dumps(idx))
+    _Fake.bodies = [{"answers": answers("stop", p=0.95)}]
+    again = decide(tmp_path, fake, scope="/target/lane")
+    assert again["choice"] == "stop" and again["decision_attempt_id"] != src["attempt_id"]

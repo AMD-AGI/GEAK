@@ -68,6 +68,7 @@ DECISION_FIELDS = ("attempt_id", "decision_attempt_id", "logical_key", "status",
 ENVELOPE_FIELDS = DECISION_FIELDS + ("state_sha256", "error")
 DECISION_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_STATE_CHARS = 8000
+ATTEMPT_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
 def canonical(obj) -> str:
@@ -150,12 +151,51 @@ def _is_int(x, lo):
     return isinstance(x, int) and not isinstance(x, bool) and x >= lo
 
 
-def _is_num(x, lo):
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= lo
+def _is_num(x, lo, strict=False):
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return False
+    try:
+        x = float(x)                                # an int too large for a float is not a number here
+    except OverflowError:
+        return False
+    return math.isfinite(x) and (x > lo if strict else x >= lo)
+
+
+def _one_of(x, allowed) -> bool:
+    return isinstance(x, str) and x in allowed
+
+
+def _nonfinite(v) -> bool:
+    """True if any number anywhere in v is not a finite float (1e999 parses to inf; 10**400 overflows)."""
+    if isinstance(v, bool) or v is None or isinstance(v, str):
+        return False
+    if isinstance(v, (int, float)):
+        return not _is_num(v, -math.inf)
+    if isinstance(v, list):
+        return any(_nonfinite(x) for x in v)
+    if isinstance(v, dict):
+        return any(_nonfinite(x) for x in v.values())
+    return True
 
 
 SPECIALTIES = {"algorithm", "memory", "compute", "host_runtime", "deep_explore"}
 CLOCK_SOURCES = {"pre_plan_clock", "pre_replan_clock", "no_deadline"}
+# The object kernel_lane.js writes after a measured round (see its EIKOS_SHADOW outcome block).
+OUTCOME_CHECKS = {
+    "verified_candidates": lambda v: _is_int(v, 0),
+    "winner_speedup": lambda v: v is None or _is_num(v, 0, strict=True),
+    "improved": lambda v: isinstance(v, bool),
+    "made_progress": lambda v: isinstance(v, bool),
+    "commit_reported": lambda v: v == "not_captured",
+    "tracked_incumbent_after": lambda v: _is_num(v, 0, strict=True),
+}
+
+
+def _outcome_ok(o) -> bool:
+    if o == "none":
+        return True
+    return (isinstance(o, dict) and set(o) == set(OUTCOME_CHECKS)
+            and all(check(o[k]) for k, check in OUTCOME_CHECKS.items()))
 
 
 def _round_continue_state(state: dict, round_no: int) -> str:
@@ -165,19 +205,19 @@ def _round_continue_state(state: dict, round_no: int) -> str:
         ("round", _is_int(state["round"], 1) and state["round"] == round_no, "an integer >= 1 equal to --round"),
         ("directions_used", _is_int(state["directions_used"], 0), "an integer >= 0"),
         ("directions_budget", _is_int(state["directions_budget"], 1), "an integer >= 1"),
-        ("tracked_incumbent_speedup", _is_num(state["tracked_incumbent_speedup"], 0) and state["tracked_incumbent_speedup"] > 0, "a finite number > 0"),
+        ("tracked_incumbent_speedup", _is_num(state["tracked_incumbent_speedup"], 0, strict=True), "a finite number > 0"),
         ("best_seen_speedup", _is_num(state["best_seen_speedup"], 0), "a finite number >= 0"),
         ("rounds_without_improvement", _is_int(state["rounds_without_improvement"], 0), "an integer >= 0"),
         ("rounds_without_improvement_limit", _is_int(state["rounds_without_improvement_limit"], 1), "an integer >= 1"),
-        ("last_round_outcome", state["last_round_outcome"] == "none" or isinstance(state["last_round_outcome"], dict), '"none" or an object'),
+        ("last_round_outcome", _outcome_ok(state["last_round_outcome"]), '"none" or the lane\'s measured-outcome object'),
         ("specialties_dispatched", isinstance(state["specialties_dispatched"], list)
-         and all(x in SPECIALTIES for x in state["specialties_dispatched"])
+         and all(_one_of(x, SPECIALTIES) for x in state["specialties_dispatched"])
          and len(set(state["specialties_dispatched"])) == len(state["specialties_dispatched"]), "a list of distinct known specialties"),
         ("minutes_left", state["minutes_left"] == "unknown" or _is_int(state["minutes_left"], 0), '"unknown" or an integer >= 0'),
-        ("minutes_left_source", state["minutes_left_source"] in CLOCK_SOURCES, "one of " + ", ".join(sorted(CLOCK_SOURCES))),
+        ("minutes_left_source", _one_of(state["minutes_left_source"], CLOCK_SOURCES), "one of " + ", ".join(sorted(CLOCK_SOURCES))),
         ("noise_band", state["noise_band"] == "unknown" or _is_num(state["noise_band"], 0), '"unknown" or a finite number >= 0'),
         ("min_improve", _is_num(state["min_improve"], 0), "a finite number >= 0"),
-        ("progress_delta", _is_num(state["progress_delta"], 0), "a finite number >= 0"),
+        ("progress_delta", _is_num(state["progress_delta"], -1, strict=True), "a finite number > -1 (kernel_lane.js allows negatives)"),
     ]
     bad = ["%s must be %s" % (k, why) for k, ok, why in checks if not ok]
     return "; ".join(bad)
@@ -199,16 +239,31 @@ def derive(answers: dict, spec: dict) -> dict:
 def valid_persisted(entry, ctx: dict) -> bool:
     """Reuse a persisted decision only if it still matches this request's identity and its own recorded
     answers re-derive exactly the decision it claims. A hand-edited or stale entry is never reused."""
-    if not isinstance(entry, dict) or entry.get("status") != "ok" or not isinstance(entry.get("attempt_id"), str):
+    if not isinstance(entry, dict) or entry.get("status") != "ok":
         return False
-    for k in ("canonical_state", "questions_sha256", "policy_version", "model_id", "endpoint"):
+    if not isinstance(entry.get("attempt_id"), str) or not ATTEMPT_ID.match(entry["attempt_id"]):
+        return False
+    if not isinstance(entry.get("round"), int) or isinstance(entry.get("round"), bool):
+        return False
+    for k in ("scope", "round", "canonical_state", "questions_sha256", "policy_version", "model_id", "endpoint"):
         if entry.get(k) != ctx[k]:
             return False
+    # The entry must also sit under the key its own identity produces (no copying between keys).
+    if logical_key(ctx["decision"], entry["scope"], entry["round"], entry["canonical_state"],
+                   entry["questions_sha256"], entry["policy_version"], entry["model_id"],
+                   entry["endpoint"]) != ctx["logical_key"]:
+        return False
     answers = entry.get("answers")
     if not isinstance(answers, dict) or validate(answers, ctx["spec"]):
         return False
     again = derive(answers, ctx["spec"])
     return all(entry.get(k) == again[k] for k in ("choice", "confidence", "distribution", "would_be_action"))
+
+
+def logical_key(decision, scope, round_no, canon, questions_sha, policy_version, model_id, endpoint) -> str:
+    return sha256(canonical({
+        "decision": decision, "scope": scope, "round": round_no, "state": sha256(canon),
+        "questions": questions_sha, "policy": policy_version, "model_id": model_id, "endpoint": endpoint}))
 
 
 def receipt_paths(receipt_dir: str, decision: str) -> tuple:
@@ -287,18 +342,22 @@ def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir
     missing = [k for k in spec["required_state"] if k not in state]
     if missing:
         return finish("state_invalid", "state lacks required field(s): %s" % ", ".join(missing))
+    if _nonfinite(state):
+        return finish("state_invalid", "state holds a non-finite or out-of-range number")
     checker = STATE_VALIDATORS.get(decision)
-    problem = checker(state, round_no) if checker else ""
+    try:
+        problem = checker(state, round_no) if checker else ""
+    except (TypeError, ValueError, OverflowError) as exc:   # backstop: still a receipted refusal
+        problem = "%s: %s" % (type(exc).__name__, exc)
     if problem:
         return finish("state_invalid", "state: " + problem)
     canon = canonical(state)
     extra["canonical_state"] = canon
-    ctx = {"spec": spec, "canonical_state": canon, "questions_sha256": spec_sha,
-           "policy_version": spec["policy"].get("version"), "model_id": extra["model_id"], "endpoint": url}
-    env["logical_key"] = sha256(canonical({
-        "decision": decision, "scope": scope, "round": round_no, "state": sha256(canon),
-        "questions": spec_sha, "policy": ctx["policy_version"], "model_id": ctx["model_id"],
-        "endpoint": url}))
+    ctx = {"spec": spec, "decision": decision, "scope": scope, "round": round_no, "canonical_state": canon,
+           "questions_sha256": spec_sha, "policy_version": spec["policy"].get("version"),
+           "model_id": extra["model_id"], "endpoint": url}
+    env["logical_key"] = ctx["logical_key"] = logical_key(
+        decision, scope, round_no, canon, spec_sha, ctx["policy_version"], ctx["model_id"], url)
     index_path = receipt_paths(receipt_dir, decision)[0] if receipt_dir else None
 
     def adopt(entry, reused, persisted):
