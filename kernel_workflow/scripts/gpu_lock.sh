@@ -50,6 +50,12 @@ _check_sources_on_exit() {
 trap _check_sources_on_exit EXIT
 
 LOCK_DIR="/tmp/team_gpu_locks"
+# Correlation ids for the use-log, set by an OUTER inv_record.py (Eikos phase 2a). They are passed in,
+# never derived from time or PID, and only well-formed values are written. Unset -> the log line is
+# byte-identical to before.
+_ID_FIELDS=""
+[[ "${GEAK_ENGINEER_ID:-}" =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] && _ID_FIELDS+=",\"engineer_id\":\"$GEAK_ENGINEER_ID\""
+[[ "${GEAK_RECORDER_INV_ID:-}" =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] && _ID_FIELDS+=",\"recorder_inv_id\":\"$GEAK_RECORDER_INV_ID\""
 mkdir -p "$LOCK_DIR"
 
 # ---- Allocation fence ---------------------------------------------------------------------------
@@ -139,7 +145,7 @@ case "$GPU_SPEC" in
                 # backward-compatible with logs written before it existed. Nothing is added inside
                 # the timed region -- the arithmetic runs after the GPU is already won.
                 [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
-                    echo "{\"t\":$(date +%s),\"gpu\":$_g,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pool\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
+                    echo "{\"t\":$(date +%s),\"gpu\":$_g,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pool\",\"wait_s\":$(( SECONDS - _wait_t0 ))${_ID_FIELDS}}" \
                         >> "$GEAK_GPU_USE_LOG" 2>/dev/null
                 break
             fi
@@ -246,7 +252,7 @@ else
             exit 1
         fi
         [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
-            echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))}" \
+            echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))${_ID_FIELDS}}" \
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
         export HIP_VISIBLE_DEVICES="$GPU_ID"
         _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
