@@ -778,7 +778,9 @@ Return {"epoch": <the integer it printed>}. Do NOT modify any file and do NOT ru
 //     A fixed-window round, or an unreadable clock, is recorded as skipped with zero Eikos calls.
 //   - A native workflow cannot write files or call HTTP, so the state travels inside one
 //     shell-quoted command that a carrier agent runs verbatim; eikos_decide.py validates, asks,
-//     and persists the first decision per logical key. The carrier relays the script's JSON.
+//     and persists the first decision per logical key. The carrier relays the script's JSON, which
+//     carries the state's SHA-256 rather than the state: a carrier was observed to parse a relayed
+//     JSON string into an object, so the lane checks a hex digest it computes itself.
 //   - The carrier gets ONE attempt and its own wait bound. Promise.race only stops the wait: the
 //     agent is not cancelled and may finish later, but the script's first-persisted rule means a
 //     late finish cannot change the recorded decision.
@@ -794,6 +796,51 @@ const eikosSpecialties = new Set();
 let eikosLastOutcome = 'none';     // set from measurements at the end of each round
 
 function eikosShellQuote(x) { return "'" + String(x).replace(/'/g, "'\\''") + "'"; }
+
+// SHA-256 of a string's UTF-8 bytes, hex. Pure JS: the workflow sandbox has no crypto or
+// TextEncoder, but has encodeURIComponent/unescape, which yield the UTF-8 bytes. The relay check
+// compares this to the script's state_sha256 — a hex digest a carrier has no reason to reinterpret.
+function eikosSha256(str) {
+  const b = unescape(encodeURIComponent(String(str)));
+  const K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+  const H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const bytes = [];
+  for (let i = 0; i < b.length; i++) bytes.push(b.charCodeAt(i) & 0xff);
+  const bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (let i = 7; i >= 0; i--) bytes.push(i >= 4 ? 0 : (bitLen >>> (i * 8)) & 0xff);
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  const W = new Array(64);
+  for (let off = 0; off < bytes.length; off += 64) {
+    for (let t = 0; t < 16; t++) {
+      W[t] = (bytes[off + 4 * t] << 24) | (bytes[off + 4 * t + 1] << 16) | (bytes[off + 4 * t + 2] << 8) | bytes[off + 4 * t + 3];
+    }
+    for (let t = 16; t < 64; t++) {
+      const s0 = rotr(W[t - 15], 7) ^ rotr(W[t - 15], 18) ^ (W[t - 15] >>> 3);
+      const s1 = rotr(W[t - 2], 17) ^ rotr(W[t - 2], 19) ^ (W[t - 2] >>> 10);
+      W[t] = (W[t - 16] + s0 + W[t - 7] + s1) | 0;
+    }
+    let [a, bb, c, d, e, f, g, h] = H;
+    for (let t = 0; t < 64; t++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const t1 = (h + S1 + ((e & f) ^ (~e & g)) + K[t] + W[t]) | 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const t2 = (S0 + ((a & bb) ^ (a & c) ^ (bb & c))) | 0;
+      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = bb; bb = a; a = (t1 + t2) | 0;
+    }
+    H[0] = (H[0] + a) | 0; H[1] = (H[1] + bb) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+    H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+  }
+  return H.map((x) => ('00000000' + (x >>> 0).toString(16)).slice(-8)).join('');
+}
 
 // The frozen state. Every field names its source; see the audit's provenance table.
 function eikosSnapshot(roundNo, leftS, leftSource) {
@@ -823,6 +870,15 @@ function eikosStopPermitted(leftS) {
   }
   return { permitted: true, reason: null };
 }
+
+// Python json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False), for the decision digest.
+// Numbers use JSON.stringify, which matches Python's repr for finite doubles and integers.
+function eikosCanonical(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return '[' + v.map(eikosCanonical).join(',') + ']';
+  return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + eikosCanonical(v[k])).join(',') + '}';
+}
+const EIKOS_DECISION_FIELDS = ['attempt_id', 'logical_key', 'status', 'choice', 'confidence', 'would_be_action'];
 
 function eikosRawChoice(p) {
   if (!p) return 'no_plan';
@@ -868,7 +924,7 @@ async function eikosShadowRound(roundNo, snap, firstChoice, finalPlan, forcedThi
     effective_baseline_action: effective,
     host_stop_reason: effective === 'stop' ? (exhausted ? 'forced_window_exhausted' : 'tech_lead_stop') : 'none',
     state: snap, eligibility: eikosStopPermitted(leftS),
-    carrier: null, envelope: null, relay_ok: null,
+    carrier: null, envelope: null, relay_ok: null, decision_ok: null,
     outcome: effective === 'stop' ? { next_round: 'not_observed' } : null,
   };
   EIKOS_SHADOW_LOG.push(rec);
@@ -883,14 +939,17 @@ async function eikosShadowRound(roundNo, snap, firstChoice, finalPlan, forcedThi
   } else if (env.__error) {
     rec.carrier = { status: 'error', error: env.__error };
   } else {
-    rec.relay_ok = env.state_raw === stateJson;     // was the frozen state relayed byte-for-byte?
-    const rest = {};
-    Object.keys(env).forEach((k) => { if (k !== 'state_raw') rest[k] = env[k]; });
-    rec.envelope = rest;
+    // Did the script receive exactly the frozen state, and did its decision come back unaltered?
+    // Both compared on digests computed here; a carrier that edits either is detected, not trusted.
+    rec.relay_ok = env.state_sha256 === eikosSha256(stateJson);
+    const dec = {};
+    EIKOS_DECISION_FIELDS.forEach((k) => { dec[k] = env[k] === undefined ? null : env[k]; });
+    rec.decision_ok = env.decision_sha256 === eikosSha256(eikosCanonical(dec));
+    rec.envelope = env;
     rec.carrier = { status: 'returned' };
   }
   try { log(`  [eikos-shadow] r${roundNo}: baseline=${effective}, eikos=${rec.envelope ? rec.envelope.choice + '/' + rec.envelope.would_be_action + ' (' + rec.envelope.status + ')' : rec.carrier.status}` +
-            `${rec.relay_ok === false ? ', RELAY MISMATCH' : ''}`); } catch (e) {}
+            `${rec.relay_ok === false ? ', STATE RELAY MISMATCH' : ''}${rec.decision_ok === false ? ', DECISION ALTERED IN RELAY' : ''}`); } catch (e) {}
   return rec;
 }
 // <<EIKOS-SHADOW-END>>

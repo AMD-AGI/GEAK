@@ -5,8 +5,11 @@ This is the boundary that a carrier agent invokes with ONE fixed command. The co
 inside it, are built by the workflow's code; the carrier only runs it and relays what this prints.
 Everything that matters happens here, not in the model:
 
-  - the state arrives as JSON in --state-json, is validated against the decision's required fields,
-    and is echoed back byte-for-byte (`state_raw`) so the caller can check the relay was faithful;
+  - the state arrives as JSON in --state-json and is validated against the decision's required
+    fields. The envelope carries its SHA-256 (`state_sha256`), not the state itself: a carrier asked
+    to relay a JSON string inside JSON was observed to parse it into an object (synthetic native check
+    wf_c010449f-f41), so the caller compares a short hex digest it computes itself. The raw state is
+    kept in the attempt receipt;
   - the questions, options and threshold come from a versioned file in eikos_questions/, never from
     the caller or the carrier;
   - the request goes through eikos_router.post_systemone (loopback only, no proxies, no redirects,
@@ -21,8 +24,11 @@ unavailable, timeout, malformed, write_failed. A failed attempt is receipted but
 so a later attempt may still record a real one (shadow output controls nothing, so this costs no
 determinism the caller relies on).
 
-Always exits 0 and prints exactly one JSON object on stdout: a carrier must always have something
-faithful to relay.
+Always exits 0 and prints exactly one COMPACT JSON object on stdout (ENVELOPE_FIELDS): only what the
+caller acts on, so the carrier copies as little as possible. Everything else (distribution, versions,
+digests of questions/policy, timings, the raw state) is in the attempt receipt, joined by attempt_id.
+`decision_sha256` covers the decision fields, so the caller can detect a carrier that alters them —
+a carrier was observed to add a field it was asked to relay unchanged (wf_f81b3428-784).
 
     python3 eikos_decide.py --decision round_continue --scope <EVAL_DIR> --round 2 \\
         --state-json '{"round": 2, ...}' [--receipt-dir <dir>] [--timeout-s 30]
@@ -45,6 +51,9 @@ sys.path.insert(0, HERE)
 import eikos_router as er  # noqa: E402  (transport protections, lock, model identity)
 
 QUESTIONS_DIR = os.path.join(HERE, "eikos_questions")
+# What the carrier relays. DECISION_FIELDS are covered by decision_sha256.
+DECISION_FIELDS = ("attempt_id", "logical_key", "status", "choice", "confidence", "would_be_action")
+ENVELOPE_FIELDS = DECISION_FIELDS + ("reused", "first_attempt_id", "persisted", "state_sha256", "error")
 MAX_STATE_CHARS = 8000
 
 
@@ -101,6 +110,16 @@ def validate(answers: dict, spec: dict) -> str:
     return ""
 
 
+def decision_digest(env: dict) -> str:
+    return sha256(canonical({k: env.get(k) for k in DECISION_FIELDS}))
+
+
+def compact(env: dict) -> dict:
+    out = {k: env.get(k) for k in ENVELOPE_FIELDS}
+    out["decision_sha256"] = decision_digest(env)
+    return out
+
+
 def receipt_paths(receipt_dir: str, decision: str) -> tuple:
     return (os.path.join(receipt_dir, decision + ".index.json"),
             os.path.join(receipt_dir, decision + ".attempts.jsonl"))
@@ -140,7 +159,7 @@ def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir
            url: str, timeout_s: float) -> dict:
     t0 = time.monotonic()
     env = {"decision": decision, "status": None, "attempt_id": uuid.uuid4().hex, "logical_key": None,
-           "reused": False, "persisted": False, "state_raw": state_raw, "state_sha256": sha256(state_raw),
+           "reused": False, "persisted": False, "state_sha256": sha256(state_raw),
            "questions_version": None, "questions_sha256": None, "policy_version": None,
            "model_id": er.model_identity(), "options": None, "choice": None, "confidence": None,
            "distribution": None, "would_be_action": None, "error": None}
@@ -150,7 +169,8 @@ def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir
         env["elapsed_ms"] = round((time.monotonic() - t0) * 1000, 1)
         if receipt_dir:
             _, attempts_path = receipt_paths(receipt_dir, decision)
-            line = {k: env[k] for k in env if k != "state_raw"}
+            line = dict(env)
+            line["state_raw"] = state_raw
             line.update(attempt_extra or {})
             line["scope"], line["round"] = scope, round_no
             if not _append(attempts_path, line) and status == "ok" and not env["persisted"]:
@@ -237,15 +257,15 @@ def main(argv=None) -> int:
     try:
         a = ap.parse_args(argv)
     except SystemExit:
-        print(canonical({"status": "state_invalid", "error": "bad arguments"}))
+        print(canonical(compact({"status": "state_invalid", "error": "bad arguments"})))
         return 0
     receipt_dir = a.receipt_dir or os.path.join(a.scope, "eikos")
     try:
         env = decide(a.decision, a.scope, a.round, a.state_json, receipt_dir, er.eikos_url(), a.timeout_s)
     except Exception as exc:  # noqa: BLE001 - the carrier must always get one JSON object
-        env = {"decision": a.decision, "status": "malformed", "error": "%s: %s" % (type(exc).__name__, exc),
-               "state_raw": a.state_json}
-    print(canonical(env))
+        env = {"status": "malformed", "error": "%s: %s" % (type(exc).__name__, exc),
+               "state_sha256": sha256(a.state_json)}
+    print(canonical(compact(env)))
     return 0
 
 

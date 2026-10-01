@@ -81,13 +81,14 @@ def test_ok_decision_is_validated_persisted_and_echoed(tmp_path, fake):
     st = state()
     env = decide(tmp_path, fake, st)
     assert env["status"] == "ok" and env["choice"] == "continue" and env["persisted"] and not env["reused"]
-    assert env["state_raw"] == st                                         # byte-for-byte echo
+    assert env["state_sha256"] == ed.sha256(st) and "state_raw" not in env  # digest, not the state
     assert env["would_be_action"] == "continue"                           # 0.92 >= 0.8
     assert env["questions_version"] == "round_continue.v1" and env["policy_version"]
     sent = _Fake.seen[0]
     assert set(sent) == {"state", "questions"} and sent["questions"] == SPEC["questions"]
     assert json.loads(sent["state"]) == json.loads(st)                    # canonical, same content
     assert len(attempts(tmp_path)) == 1 and attempts(tmp_path)[0]["canonical_state"]
+    assert attempts(tmp_path)[0]["state_raw"] == st                       # raw state kept in the receipt
 
 
 def test_below_threshold_is_recorded_as_abstain(tmp_path, fake):
@@ -203,7 +204,20 @@ def test_cli_always_prints_one_json_object_and_exits_zero(tmp_path, fake):
                          capture_output=True, text=True, env=env, timeout=60)
     assert out.returncode == 0
     d = json.loads(out.stdout)
-    assert d["status"] == "ok" and d["state_raw"] == st
+    assert d["status"] == "ok" and d["state_sha256"] == ed.sha256(st) and "state_raw" not in d
+    assert set(d) == set(ed.ENVELOPE_FIELDS) | {"decision_sha256"}               # compact: only what the lane uses
+    assert d["decision_sha256"] == ed.sha256(ed.canonical({k: d[k] for k in ed.DECISION_FIELDS}))
+    assert len(out.stdout) < 700                                                  # small for the carrier to copy
     bad = subprocess.run([sys.executable, "-B", SCRIPT, "--decision", "round_continue"],
                          capture_output=True, text=True, timeout=60)
     assert bad.returncode == 0 and json.loads(bad.stdout)["status"] == "state_invalid"
+
+
+def test_decision_digest_detects_an_altered_choice():
+    env = {"attempt_id": "a", "logical_key": "k", "status": "ok", "choice": "continue", "confidence": 0.9,
+           "would_be_action": "continue"}
+    c = ed.compact(env)
+    tampered = dict(c, choice="stop")
+    assert ed.decision_digest(tampered) != c["decision_sha256"]
+    assert ed.decision_digest(dict(c, extra_field="ok")) == c["decision_sha256"]   # added fields are not decision fields
+
