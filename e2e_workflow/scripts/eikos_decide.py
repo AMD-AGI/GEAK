@@ -20,15 +20,25 @@ Everything that matters happens here, not in the model:
   - every execution, failed or not, appends an attempt receipt.
 
 Failures are explicit statuses, never a silent default: state_invalid, refused (non-loopback URL),
-unavailable, timeout, malformed, write_failed. A failed attempt is receipted but is NOT persisted as the key's decision,
+unavailable, timeout, malformed, write_failed (the decision could not be persisted). A failed attempt is receipted but is NOT persisted as the key's decision,
 so a later attempt may still record a real one (shadow output controls nothing, so this costs no
 determinism the caller relies on).
 
 Always exits 0 and prints exactly one COMPACT JSON object on stdout (ENVELOPE_FIELDS): only what the
 caller acts on, so the carrier copies as little as possible. Everything else (distribution, versions,
-digests of questions/policy, timings, the raw state) is in the attempt receipt, joined by attempt_id.
-`decision_sha256` covers the decision fields, so the caller can detect a carrier that alters them —
-a carrier was observed to add a field it was asked to relay unchanged (wf_f81b3428-784).
+timings, the raw state, what this attempt itself observed) is in the attempt receipt, joined by
+attempt_id.
+
+WIRE CONTRACT. Every field covered by `decision_sha256` is a string, a boolean or null — never a
+number — so both sides hash the same bytes: Python writes 1.0 where JavaScript writes 1, and a hash
+over numbers would flag a valid answer as altered. `confidence` therefore travels as Python's repr
+string ("0.92", "1.0"); parse it if you need the value. The digest lets the caller detect a carrier
+that alters the decision — a carrier was observed to add a field it was asked to relay unchanged
+(wf_f81b3428-784).
+
+RECEIPTS. `receipt` reports whether THIS attempt's receipt line was written (written / failed /
+not_written), separately from `status`, which is about the decision. A decision can be valid and
+reused while its attempt receipt failed; that is reported, never hidden.
 
     python3 eikos_decide.py --decision round_continue --scope <EVAL_DIR> --round 2 \\
         --state-json '{"round": 2, ...}' [--receipt-dir <dir>] [--timeout-s 30]
@@ -41,6 +51,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import socket
 import sys
 import time
@@ -51,9 +62,11 @@ sys.path.insert(0, HERE)
 import eikos_router as er  # noqa: E402  (transport protections, lock, model identity)
 
 QUESTIONS_DIR = os.path.join(HERE, "eikos_questions")
-# What the carrier relays. DECISION_FIELDS are covered by decision_sha256.
-DECISION_FIELDS = ("attempt_id", "logical_key", "status", "choice", "confidence", "would_be_action")
-ENVELOPE_FIELDS = DECISION_FIELDS + ("reused", "first_attempt_id", "persisted", "state_sha256", "error")
+# What the carrier relays. DECISION_FIELDS are covered by decision_sha256 and are str/bool/None only.
+DECISION_FIELDS = ("attempt_id", "decision_attempt_id", "logical_key", "status", "choice", "confidence",
+                   "would_be_action", "reused", "persisted", "receipt")
+ENVELOPE_FIELDS = DECISION_FIELDS + ("state_sha256", "error")
+DECISION_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_STATE_CHARS = 8000
 
 
@@ -67,8 +80,8 @@ def sha256(text: str) -> str:
 
 def load_spec(decision: str) -> tuple:
     """(spec, sha256 of the spec file's canonical form). The decision name must be a file here."""
-    if not decision or "/" in decision or decision.startswith("."):
-        raise ValueError("bad decision name %r" % decision)
+    if not isinstance(decision, str) or not DECISION_NAME.match(decision):
+        raise ValueError("bad decision name %r" % (decision,))
     with open(os.path.join(QUESTIONS_DIR, decision + ".json"), encoding="utf-8") as fh:
         spec = json.load(fh)
     for key in ("version", "required_state", "primary_question", "options", "questions", "policy"):
@@ -110,14 +123,92 @@ def validate(answers: dict, spec: dict) -> str:
     return ""
 
 
+def _wire(v):
+    """Wire form of a digested field: str, bool or None. Numbers become Python repr strings."""
+    if v is None or isinstance(v, (str, bool)):
+        return v
+    if isinstance(v, (int, float)):
+        return repr(v)
+    raise TypeError("decision field of type %s cannot be put on the wire" % type(v).__name__)
+
+
 def decision_digest(env: dict) -> str:
-    return sha256(canonical({k: env.get(k) for k in DECISION_FIELDS}))
+    return sha256(canonical({k: _wire(env.get(k)) for k in DECISION_FIELDS}))
 
 
 def compact(env: dict) -> dict:
-    out = {k: env.get(k) for k in ENVELOPE_FIELDS}
-    out["decision_sha256"] = decision_digest(env)
+    out = {k: (_wire(env.get(k)) if k in DECISION_FIELDS else env.get(k)) for k in ENVELOPE_FIELDS}
+    out["decision_sha256"] = decision_digest(out)
     return out
+
+
+def _reject_constant(name):
+    raise ValueError("non-standard JSON constant %s" % name)
+
+
+def _is_int(x, lo):
+    return isinstance(x, int) and not isinstance(x, bool) and x >= lo
+
+
+def _is_num(x, lo):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= lo
+
+
+SPECIALTIES = {"algorithm", "memory", "compute", "host_runtime", "deep_explore"}
+CLOCK_SOURCES = {"pre_plan_clock", "pre_replan_clock", "no_deadline"}
+
+
+def _round_continue_state(state: dict, round_no: int) -> str:
+    """Types, ranges and consistency for round_continue's fixed state. "unknown" is accepted only
+    where the lane legitimately lacks a value."""
+    checks = [
+        ("round", _is_int(state["round"], 1) and state["round"] == round_no, "an integer >= 1 equal to --round"),
+        ("directions_used", _is_int(state["directions_used"], 0), "an integer >= 0"),
+        ("directions_budget", _is_int(state["directions_budget"], 1), "an integer >= 1"),
+        ("tracked_incumbent_speedup", _is_num(state["tracked_incumbent_speedup"], 0) and state["tracked_incumbent_speedup"] > 0, "a finite number > 0"),
+        ("best_seen_speedup", _is_num(state["best_seen_speedup"], 0), "a finite number >= 0"),
+        ("rounds_without_improvement", _is_int(state["rounds_without_improvement"], 0), "an integer >= 0"),
+        ("rounds_without_improvement_limit", _is_int(state["rounds_without_improvement_limit"], 1), "an integer >= 1"),
+        ("last_round_outcome", state["last_round_outcome"] == "none" or isinstance(state["last_round_outcome"], dict), '"none" or an object'),
+        ("specialties_dispatched", isinstance(state["specialties_dispatched"], list)
+         and all(x in SPECIALTIES for x in state["specialties_dispatched"])
+         and len(set(state["specialties_dispatched"])) == len(state["specialties_dispatched"]), "a list of distinct known specialties"),
+        ("minutes_left", state["minutes_left"] == "unknown" or _is_int(state["minutes_left"], 0), '"unknown" or an integer >= 0'),
+        ("minutes_left_source", state["minutes_left_source"] in CLOCK_SOURCES, "one of " + ", ".join(sorted(CLOCK_SOURCES))),
+        ("noise_band", state["noise_band"] == "unknown" or _is_num(state["noise_band"], 0), '"unknown" or a finite number >= 0'),
+        ("min_improve", _is_num(state["min_improve"], 0), "a finite number >= 0"),
+        ("progress_delta", _is_num(state["progress_delta"], 0), "a finite number >= 0"),
+    ]
+    bad = ["%s must be %s" % (k, why) for k, ok, why in checks if not ok]
+    return "; ".join(bad)
+
+
+STATE_VALIDATORS = {"round_continue": _round_continue_state}
+
+
+def derive(answers: dict, spec: dict) -> dict:
+    """The decision the policy derives from validated answers."""
+    primary = answers[spec["primary_question"]]
+    choice = primary["choice"]
+    conf = primary["probabilities"][choice]
+    min_conf = float(spec["policy"].get("min_confidence", 1.0))
+    return {"choice": choice, "confidence": conf, "distribution": dict(primary["probabilities"]),
+            "would_be_action": choice if conf >= min_conf else "abstain"}
+
+
+def valid_persisted(entry, ctx: dict) -> bool:
+    """Reuse a persisted decision only if it still matches this request's identity and its own recorded
+    answers re-derive exactly the decision it claims. A hand-edited or stale entry is never reused."""
+    if not isinstance(entry, dict) or entry.get("status") != "ok" or not isinstance(entry.get("attempt_id"), str):
+        return False
+    for k in ("canonical_state", "questions_sha256", "policy_version", "model_id", "endpoint"):
+        if entry.get(k) != ctx[k]:
+            return False
+    answers = entry.get("answers")
+    if not isinstance(answers, dict) or validate(answers, ctx["spec"]):
+        return False
+    again = derive(answers, ctx["spec"])
+    return all(entry.get(k) == again[k] for k in ("choice", "confidence", "distribution", "would_be_action"))
 
 
 def receipt_paths(receipt_dir: str, decision: str) -> tuple:
@@ -135,14 +226,15 @@ def _append(path: str, line: dict) -> bool:
         return False
 
 
-def _first_persisted(index_path: str, key: str, value: dict) -> tuple:
-    """Insert-if-absent under the lock. Returns (decision to use, persisted?, reused?)."""
+def _first_persisted(index_path: str, key: str, value: dict, ctx: dict) -> tuple:
+    """Insert-if-absent under the lock. A valid prior decision wins; an invalid one is replaced.
+    Returns (decision to use, persisted?, reused?)."""
     with er._Lock(index_path) as lock:
         if not lock.held:
             return value, False, False
         index = er.load_cache(index_path)
         prior = index.get(key)
-        if isinstance(prior, dict) and prior.get("status") == "ok":
+        if valid_persisted(prior, ctx):
             return prior, True, True
         index[key] = value
         try:
@@ -158,92 +250,107 @@ def _first_persisted(index_path: str, key: str, value: dict) -> tuple:
 def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir: str,
            url: str, timeout_s: float) -> dict:
     t0 = time.monotonic()
-    env = {"decision": decision, "status": None, "attempt_id": uuid.uuid4().hex, "logical_key": None,
-           "reused": False, "persisted": False, "state_sha256": sha256(state_raw),
-           "questions_version": None, "questions_sha256": None, "policy_version": None,
-           "model_id": er.model_identity(), "options": None, "choice": None, "confidence": None,
-           "distribution": None, "would_be_action": None, "error": None}
+    attempt_id = uuid.uuid4().hex
+    env = {"status": None, "attempt_id": attempt_id, "decision_attempt_id": None, "logical_key": None,
+           "choice": None, "confidence": None, "would_be_action": None, "reused": False,
+           "persisted": False, "receipt": "not_written", "state_sha256": sha256(state_raw), "error": None}
+    observed = {"transport": "not_attempted"}      # what THIS attempt saw, kept apart from the decision
+    extra = {}
+    name_ok = isinstance(decision, str) and bool(DECISION_NAME.match(decision))
 
-    def finish(status, error=None, attempt_extra=None):
+    def finish(status, error=None):
         env["status"], env["error"] = status, error
-        env["elapsed_ms"] = round((time.monotonic() - t0) * 1000, 1)
-        if receipt_dir:
+        if receipt_dir and name_ok:                 # never build a path from an unvalidated name
             _, attempts_path = receipt_paths(receipt_dir, decision)
-            line = dict(env)
-            line["state_raw"] = state_raw
-            line.update(attempt_extra or {})
-            line["scope"], line["round"] = scope, round_no
-            if not _append(attempts_path, line) and status == "ok" and not env["persisted"]:
-                env["status"], env["error"] = "write_failed", "attempt receipt could not be written"
+            line = dict(env, decision=decision, scope=scope, round=round_no, state_raw=state_raw,
+                        elapsed_ms=round((time.monotonic() - t0) * 1000, 1), observed=observed, **extra)
+            line["receipt"] = "written"
+            env["receipt"] = "written" if _append(attempts_path, line) else "failed"
         return env
 
+    if not name_ok:
+        return finish("state_invalid", "bad decision name %r" % (decision,))
     try:
         spec, spec_sha = load_spec(decision)
     except (OSError, ValueError) as exc:
         return finish("state_invalid", "question file: %s" % exc)
-    env.update(questions_version=spec["version"], questions_sha256=spec_sha,
-               policy_version=spec["policy"].get("version"), options=list(spec["options"]))
+    extra.update(questions_version=spec["version"], questions_sha256=spec_sha,
+                 policy_version=spec["policy"].get("version"), model_id=er.model_identity(), endpoint=url)
     if len(state_raw) > MAX_STATE_CHARS:
         return finish("state_invalid", "state has %d chars, over %d" % (len(state_raw), MAX_STATE_CHARS))
     try:
-        state = json.loads(state_raw)
+        state = json.loads(state_raw, parse_constant=_reject_constant)
     except ValueError as exc:
-        return finish("state_invalid", "state is not JSON: %s" % exc)
+        return finish("state_invalid", "state is not standard JSON: %s" % exc)
     if not isinstance(state, dict):
         return finish("state_invalid", "state is not a JSON object")
     missing = [k for k in spec["required_state"] if k not in state]
     if missing:
         return finish("state_invalid", "state lacks required field(s): %s" % ", ".join(missing))
+    checker = STATE_VALIDATORS.get(decision)
+    problem = checker(state, round_no) if checker else ""
+    if problem:
+        return finish("state_invalid", "state: " + problem)
     canon = canonical(state)
+    extra["canonical_state"] = canon
+    ctx = {"spec": spec, "canonical_state": canon, "questions_sha256": spec_sha,
+           "policy_version": spec["policy"].get("version"), "model_id": extra["model_id"], "endpoint": url}
     env["logical_key"] = sha256(canonical({
         "decision": decision, "scope": scope, "round": round_no, "state": sha256(canon),
-        "questions": spec_sha, "policy": spec["policy"].get("version"), "model_id": env["model_id"]}))
-    index_path, _ = receipt_paths(receipt_dir, decision) if receipt_dir else (None, None)
+        "questions": spec_sha, "policy": ctx["policy_version"], "model_id": ctx["model_id"],
+        "endpoint": url}))
+    index_path = receipt_paths(receipt_dir, decision)[0] if receipt_dir else None
 
-    # Already decided for this key? Return that decision; never ask twice.
+    def adopt(entry, reused, persisted):
+        env.update({k: entry[k] for k in ("choice", "confidence", "would_be_action")})
+        env.update(decision_attempt_id=entry["attempt_id"], reused=reused, persisted=persisted)
+        extra["distribution"] = entry["distribution"]
+
+    # Already decided for this key, and the record still checks out? Return it; never ask twice.
     if index_path:
         prior = er.load_cache(index_path).get(env["logical_key"])
-        if isinstance(prior, dict) and prior.get("status") == "ok":
-            env.update({k: prior[k] for k in ("choice", "confidence", "distribution", "would_be_action")})
-            env.update(reused=True, persisted=True, first_attempt_id=prior.get("attempt_id"))
-            return finish("ok", attempt_extra={"canonical_state": canon})
+        if valid_persisted(prior, ctx):
+            adopt(prior, True, True)
+            return finish("ok")
+        if prior is not None:
+            observed["stale_index_entry"] = "ignored: did not re-validate"
 
     if not er.is_loopback(url) and os.environ.get("GEAK_EIKOS_ALLOW_REMOTE", "0") != "1":
-        return finish("refused", "Eikos URL %s is not a loopback address" % url, {"canonical_state": canon})
+        return finish("refused", "Eikos URL %s is not a loopback address" % url)
     try:
         body = er.post_systemone(url, canon, spec["questions"], timeout_s)
     except (socket.timeout, TimeoutError) as exc:
-        return finish("timeout", "%s: %s" % (type(exc).__name__, exc), {"canonical_state": canon})
+        observed["transport"] = "timeout"
+        return finish("timeout", "%s: %s" % (type(exc).__name__, exc))
     except OSError as exc:  # URLError and connection failures are OSError subclasses
         reason = getattr(exc, "reason", exc)
         status = "timeout" if isinstance(reason, (socket.timeout, TimeoutError)) else "unavailable"
-        return finish(status, "%s: %s" % (type(exc).__name__, reason), {"canonical_state": canon})
+        observed["transport"] = status
+        return finish(status, "%s: %s" % (type(exc).__name__, reason))
     except (ValueError, RuntimeError) as exc:
-        return finish("malformed", "%s: %s" % (type(exc).__name__, exc), {"canonical_state": canon})
+        observed["transport"] = "malformed"
+        return finish("malformed", "%s: %s" % (type(exc).__name__, exc))
 
     answers = body["answers"]
+    observed["transport"] = "answered"
+    observed["answers"] = answers
     problem = validate(answers, spec)
     if problem:
-        return finish("malformed", "invalid answers: " + problem, {"canonical_state": canon})
-    primary = answers[spec["primary_question"]]
-    choice, conf = primary["choice"], primary["probabilities"][primary["choice"]]
-    min_conf = float(spec["policy"].get("min_confidence", 1.0))
-    decided = {"status": "ok", "attempt_id": env["attempt_id"], "choice": choice, "confidence": conf,
-               "distribution": dict(primary["probabilities"]),
-               "would_be_action": choice if conf >= min_conf else "abstain",
-               "answers": {qid: answers[qid] for qid in spec["questions"]},
-               "canonical_state": canon, "scope": scope, "round": round_no,
-               "questions_version": spec["version"], "policy_version": spec["policy"].get("version"),
-               "model_id": env["model_id"]}
-    used, persisted, reused = (_first_persisted(index_path, env["logical_key"], decided)
-                               if index_path else (decided, False, False))
-    env.update({k: used[k] for k in ("choice", "confidence", "distribution", "would_be_action")})
-    env.update(persisted=persisted, reused=reused)
-    if reused:
-        env["first_attempt_id"] = used.get("attempt_id")
-    if index_path and not persisted:
-        return finish("write_failed", "decision could not be persisted", {"canonical_state": canon})
-    return finish("ok", attempt_extra={"canonical_state": canon, "answers": decided["answers"]})
+        return finish("malformed", "invalid answers: " + problem)
+    mine = derive(answers, spec)
+    observed.update(choice=mine["choice"], confidence=mine["confidence"])
+    decided = dict(mine, status="ok", attempt_id=attempt_id,
+                   answers={qid: answers[qid] for qid in spec["questions"]},
+                   scope=scope, round=round_no, **{k: ctx[k] for k in
+                   ("canonical_state", "questions_sha256", "policy_version", "model_id", "endpoint")})
+    if not index_path:
+        adopt(decided, False, False)
+        return finish("write_failed", "no receipt directory: the decision cannot be persisted")
+    used, persisted, reused = _first_persisted(index_path, env["logical_key"], decided, ctx)
+    adopt(used, reused, persisted)
+    if not persisted:
+        return finish("write_failed", "decision could not be persisted")
+    return finish("ok")
 
 
 def main(argv=None) -> int:

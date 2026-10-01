@@ -135,13 +135,14 @@ function bashCarrier(env) {
        r.envelope && r.envelope.status === 'ok' && r.envelope.choice === 'continue' && r.envelope.would_be_action === 'continue');
     ok('envelope carries the state digest, not the state', r.envelope && !('state_raw' in r.envelope) && /^[0-9a-f]{64}$/.test(r.envelope.state_sha256));
     ok('decision digest verified (decision_ok) on the real script output', r.decision_ok === true);
+    ok('receipt written and reported (receipt_ok); confidence travels as a string', r.receipt_ok === true && typeof r.envelope.confidence === 'string');
     ok('receipts written under the lane dir (path with space and apostrophe)',
        fs.existsSync(path.join(evalDir, 'eikos', 'round_continue.index.json')));
     ok('nothing in the state executed as shell ($(touch ...) and backticks left no marker)', !fs.existsSync(marker) && hits === 1);
     // a repeated execution for the same round/state returns the first decision without asking again
     const r2 = await L.eikosShadowRound(2, snap, 'continue', CONT, 0, Infinity);
     ok('repeat for the same key: reused first decision, no second Eikos request',
-       r2.envelope && r2.envelope.reused === true && r2.envelope.first_attempt_id === r.envelope.attempt_id && hits === 1);
+       r2.envelope && r2.envelope.reused === true && r2.envelope.decision_attempt_id === r.envelope.attempt_id && hits === 1);
   }
 
   // ---- stop: outcome not observed; host reason kept separate from the model's raw choice
@@ -189,6 +190,29 @@ function bashCarrier(env) {
   }
 
   ok('shell quoting round-trips an apostrophe', load().eikosShellQuote("a'b") === "'a'\\''b'");
+  {
+    // Astra's digest counterexample: Python confidence 1.0 must not read as an altered decision.
+    const { execFileSync } = require('child_process');
+    const SCRIPTS = path.join(WF, '..', 'e2e_workflow', 'scripts');
+    const pyFields = JSON.parse(execFileSync('python3', ['-B', '-c', 'import sys,json;sys.path.insert(0,sys.argv[1]);import eikos_decide as e;print(json.dumps(list(e.DECISION_FIELDS)))', SCRIPTS]).toString());
+    const jsFields = SRC.slice(SRC.indexOf('const EIKOS_DECISION_FIELDS'), SRC.indexOf('];', SRC.indexOf('const EIKOS_DECISION_FIELDS')));
+    ok('JS digest field list equals Python DECISION_FIELDS', pyFields.every((f) => jsFields.includes(`'${f}'`)) && (jsFields.match(/'/g) || []).length === pyFields.length * 2);
+    let all = true;
+    for (const conf of ['1.0', '0.92', '0.0078125', '1e-07', '5e-324', '0.0']) {
+      const L = load({ DEADLINE_EPOCH: 0 });
+      const snap = L.eikosSnapshot(2, Infinity, 'pre_plan_clock');
+      const st = JSON.stringify(snap);
+      const code = 'import sys,json;sys.path.insert(0,sys.argv[1]);import eikos_decide as e;print(json.dumps(e.compact({"attempt_id":"a","decision_attempt_id":"a","logical_key":"k","status":"ok","choice":"continue","confidence":float(sys.argv[2]),"would_be_action":"continue","reused":False,"persisted":True,"receipt":"written","state_sha256":e.sha256(sys.argv[3])})))';
+      const env = JSON.parse(execFileSync('python3', ['-B', '-c', code, SCRIPTS, conf, st]).toString());
+      const L2 = load({ DEADLINE_EPOCH: 0, agent: async () => env });
+      const res = await L2.eikosShadowRound(2, snap, 'continue', CONT, 0, Infinity);
+      if (!(res.decision_ok === true && res.relay_ok === true)) { all = false; console.log('   mismatch for confidence', conf); }
+    }
+    ok('decision_ok holds for confidence 1.0, 0.92, 0.0078125, 1e-07, 5e-324, 0.0 from real Python output', all);
+    const R = load({ DEADLINE_EPOCH: 0, agent: async () => ({ status: 'ok', receipt: 'failed', state_sha256: 'x' }) });
+    const rr = await R.eikosShadowRound(2, R.eikosSnapshot(2, Infinity, 'pre_plan_clock'), 'continue', CONT, 0, Infinity);
+    ok('receipt failure is a recorded collection failure (receipt_ok false)', rr.receipt_ok === false);
+  }
   {
     const crypto = require('crypto');
     const L = load();
