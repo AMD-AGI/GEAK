@@ -56,7 +56,7 @@ SCHEMA = "geak.llm_ledger/1"
 # message.model), so a run that mixes models — routing, a cheap helper, a model
 # switch mid-run — is priced call by call, not at one run-wide rate.
 # Source: the official table, platform.claude.com/docs/en/about-claude/pricing,
-# read 2026-09-28. Cache multipliers are 1.25x (5-minute write) and 2x (1-hour
+# read 2026-09-28 (Sonnet 5.5 added 2026-10-01). Cache multipliers are 1.25x (5-minute write) and 2x (1-hour
 # write) everywhere; reads are 0.1x except Opus 5.5 (0.05x) and Fable/Mythos 5.1
 # (0.025x). `_default` (the Opus 4.8 / Opus 5 card) prices a call whose model is
 # unknown; a real model missing from this table is reported, never silently
@@ -82,6 +82,7 @@ DEFAULT_RATES = {
     "claude-opus-4-7": _card(5.00, 25.00),
     "claude-opus-4-6": _card(5.00, 25.00),
     "claude-opus-4-5": _card(5.00, 25.00),
+    "claude-sonnet-5-5": _card(2.00, 10.00),
     "claude-sonnet-5": _card(2.00, 10.00),
     "claude-sonnet-4-6": _card(3.00, 15.00),
     "claude-sonnet-4-5": _card(3.00, 15.00),
