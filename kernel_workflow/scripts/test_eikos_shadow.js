@@ -37,9 +37,10 @@ function load(cfg) {
     MAX_NO_IMPROVE = c.MAX_NO_IMPROVE, MIN_IMPROVE = c.MIN_IMPROVE, PROGRESS_DELTA = c.PROGRESS_DELTA;
   ${REGION}
   return { EIKOS_SHADOW_ON, EIKOS_SHADOW_LOG, eikosSnapshot, eikosStopPermitted, eikosRawChoice,
-           eikosCommand, eikosShellQuote, eikosShadowRound, setLast: (o) => { eikosLastOutcome = o; } };`;
-  const f = new Function('c', 'agent', 'log', 'setTimeout', 'clearTimeout', body);
-  const api = f(Object.assign({ WF }, c), agentSpy, (m) => logs.push(m), c.setTimeout, c.clearTimeout);
+           eikosCommand, eikosShellQuote, eikosSha256, eikosCanonical, eikosShadowRound, setLast: (o) => { eikosLastOutcome = o; } };`;
+  const f = new Function('c', 'agent', 'log', 'setTimeout', 'clearTimeout', 'unescape', 'encodeURIComponent', body);
+  const api = f(Object.assign({ WF }, c), agentSpy, (m) => logs.push(m), c.setTimeout, c.clearTimeout,
+                unescape, encodeURIComponent);
   return Object.assign(api, { calls, logs });
 }
 
@@ -118,6 +119,8 @@ function bashCarrier(env) {
 
   // ---- synthetic eligible fixture: real bash -> real eikos_decide.py -> fake Eikos
   const evalDir = fs.mkdtempSync(path.join(os.tmpdir(), "eikos shadow it's ")) ;
+  const extraDirs = [];
+  const evalDir2 = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'eikos shadow 2 ')); extraDirs.push(d); return d; };
   {
     const L = load({ DEADLINE_EPOCH: 0, EVAL_DIR: evalDir, agent: bashCarrier({ GEAK_EIKOS_URL: URL }) });
     const marker = path.join(os.tmpdir(), `eikos_injection_marker_${process.pid}`);
@@ -127,10 +130,11 @@ function bashCarrier(env) {
     const r = await L.eikosShadowRound(2, snap, 'continue', CONT, 0, Infinity);
     ok('eligible: carrier ran once on the fixed Sonnet 5.5 model, with schema', L.calls.length === 1 &&
        L.calls[0].o.model === 'claude-sonnet-5-5' && L.calls[0].o.label === 'eikos:round_continue r2' && !!L.calls[0].o.schema);
-    ok('state with quotes, newline, $(...) and backticks relayed byte-for-byte (relay_ok)', r.relay_ok === true);
+    ok('state with quotes, newline, $(...) and backticks reached the script intact (digest relay_ok)', r.relay_ok === true);
     ok('envelope ok: choice continue, would_be_action continue at 0.91 >= 0.8',
        r.envelope && r.envelope.status === 'ok' && r.envelope.choice === 'continue' && r.envelope.would_be_action === 'continue');
-    ok('envelope does not keep the raw state (it is in rec.state)', r.envelope && !('state_raw' in r.envelope));
+    ok('envelope carries the state digest, not the state', r.envelope && !('state_raw' in r.envelope) && /^[0-9a-f]{64}$/.test(r.envelope.state_sha256));
+    ok('decision digest verified (decision_ok) on the real script output', r.decision_ok === true);
     ok('receipts written under the lane dir (path with space and apostrophe)',
        fs.existsSync(path.join(evalDir, 'eikos', 'round_continue.index.json')));
     ok('nothing in the state executed as shell ($(touch ...) and backticks left no marker)', !fs.existsSync(marker) && hits === 1);
@@ -164,17 +168,41 @@ function bashCarrier(env) {
     const X = load({ DEADLINE_EPOCH: 0, agent: async () => { throw new Error('boom'); } });
     const x = await X.eikosShadowRound(2, X.eikosSnapshot(2, Infinity, 'pre_plan_clock'), 'continue', CONT, 0, Infinity);
     ok('carrier error: recorded, one attempt only (no retries)', x.carrier.status === 'error' && X.calls.length === 1);
-    const M = load({ DEADLINE_EPOCH: 0, agent: async () => ({ status: 'ok', choice: 'stop', state_raw: '{"tampered":1}' }) });
+    const M = load({ DEADLINE_EPOCH: 0, agent: async () => ({ status: 'ok', choice: 'stop', state_sha256: '0'.repeat(64) }) });
     const m = await M.eikosShadowRound(2, M.eikosSnapshot(2, Infinity, 'pre_plan_clock'), 'continue', CONT, 0, Infinity);
     ok('altered relay detected (relay_ok false)', m.relay_ok === false);
+  }
+  {
+    // A carrier that flips the choice but keeps the script's digest is caught.
+    const real = load({ DEADLINE_EPOCH: 0, EVAL_DIR: evalDir2(), agent: bashCarrier({ GEAK_EIKOS_URL: URL }) });
+    const snap = real.eikosSnapshot(5, Infinity, 'pre_plan_clock');
+    const honest = await real.eikosShadowRound(5, snap, 'continue', CONT, 0, Infinity);
+    const flip = load({ DEADLINE_EPOCH: 0, agent: async () => Object.assign({}, honest.envelope, { choice: 'stop', would_be_action: 'stop' }) });
+    const f = await flip.eikosShadowRound(5, snap, 'continue', CONT, 0, Infinity);
+    ok('carrier that alters the decision is detected (decision_ok false), state still ok', f.decision_ok === false && f.relay_ok === true);
+    const extra = load({ DEADLINE_EPOCH: 0, agent: async () => Object.assign({}, honest.envelope, { status_: 'ok' }) });
+    const x2 = await extra.eikosShadowRound(5, snap, 'continue', CONT, 0, Infinity);
+    ok('an added non-decision field (as observed live) does not break decision_ok', x2.decision_ok === true);
     const Z = load({ DEADLINE_EPOCH: 0, agent: async () => null });
     const z = await Z.eikosShadowRound(2, Z.eikosSnapshot(2, Infinity, 'pre_plan_clock'), 'continue', CONT, 0, Infinity);
     ok('no result: recorded as no_result', z.carrier.status === 'no_result');
   }
 
   ok('shell quoting round-trips an apostrophe', load().eikosShellQuote("a'b") === "'a'\\''b'");
+  {
+    const crypto = require('crypto');
+    const L = load();
+    const samples = ['', 'abc', "it's \"q\"\n$(x) `y`", 'é ✓ 漢字 🚀', 'x'.repeat(1000), JSON.stringify({ a: [1, 2], b: 'ü' })];
+    const { execFileSync } = require('child_process');
+    const obj = { b: [1, 2.5, 'é'], a: { z: null, y: true }, c: 0.8438951373100281, d: "it's" };
+    const py = execFileSync('python3', ['-c', 'import json,sys;print(json.dumps(json.loads(sys.argv[1]),sort_keys=True,separators=(",",":"),ensure_ascii=False),end="")', JSON.stringify(obj)]).toString('utf8');
+    ok('JS canonical JSON matches Python json.dumps(sort_keys, compact, ensure_ascii=False)', L.eikosCanonical(obj) === py);
+    ok('pure-JS SHA-256 matches node crypto (ASCII, UTF-8, multi-block)',
+       samples.every((t) => L.eikosSha256(t) === crypto.createHash('sha256').update(t, 'utf8').digest('hex')));
+  }
   srv.close();
   fs.rmSync(evalDir, { recursive: true, force: true });
+  extraDirs.forEach((d) => fs.rmSync(d, { recursive: true, force: true }));
   console.log(`\n${fails === 0 ? 'ALL PASS' : 'FAIL'} — ${n - fails}/${n} checks`);
   process.exit(fails === 0 ? 0 : 1);
 })().catch((e) => { console.error(e); process.exit(1); });
