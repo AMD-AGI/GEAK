@@ -768,6 +768,133 @@ Return {"epoch": <the integer it printed>}. Do NOT modify any file and do NOT ru
   return DEADLINE_EPOCH - r.epoch;
 }
 
+// --- Eikos shadow pilot (OFF unless eikos_shadow=round_continue) -----------------------------
+// Plumbing pilot for research/eikos_decision_audit_20261001.md sec 5. At the round's effective
+// continue/stop point it asks local Eikos the same question through ONE fixed command, records the
+// answer, and NEVER lets it control the branch. When OFF nothing here runs and the lane is unchanged.
+//   - State is frozen in code before the planning attempt it describes, and never contains the
+//     TechLead's answer. Fields the lane does not track (noise_band) are "unknown", not estimated.
+//   - Eikos is asked only where the host would itself permit a stop (the exact refusal predicate).
+//     A fixed-window round, or an unreadable clock, is recorded as skipped with zero Eikos calls.
+//   - A native workflow cannot write files or call HTTP, so the state travels inside one
+//     shell-quoted command that a carrier agent runs verbatim; eikos_decide.py validates, asks,
+//     and persists the first decision per logical key. The carrier relays the script's JSON.
+//   - The carrier gets ONE attempt and its own wait bound. Promise.race only stops the wait: the
+//     agent is not cancelled and may finish later, but the script's first-persisted rule means a
+//     late finish cannot change the recorded decision.
+// <<EIKOS-SHADOW-START>>
+const EIKOS_SHADOW_ON = String(A.eikos_shadow || '').split(',').map((x) => x.trim()).indexOf('round_continue') >= 0;
+const EIKOS_CARRIER_MODEL = String(A.eikos_carrier_model || 'claude-sonnet-5-5');
+const EIKOS_CARRIER_TIMEOUT_MS = Math.max(10000, parseInt(A.eikos_carrier_timeout_ms != null ? A.eikos_carrier_timeout_ms : 180000, 10));
+const EIKOS_CLI_TIMEOUT_S = 30;
+const EIKOS_SHADOW_LOG = [];
+const EIKOS_ENVELOPE_SCHEMA = { type: 'object', properties: { status: { type: 'string' } },
+                                required: ['status'], additionalProperties: true };
+const eikosSpecialties = new Set();
+let eikosLastOutcome = 'none';     // set from measurements at the end of each round
+
+function eikosShellQuote(x) { return "'" + String(x).replace(/'/g, "'\\''") + "'"; }
+
+// The frozen state. Every field names its source; see the audit's provenance table.
+function eikosSnapshot(roundNo, leftS, leftSource) {
+  return {
+    round: roundNo,
+    directions_used: dispatched,                 // direction engineers dispatched (not $ or tokens)
+    directions_budget: BUDGET,
+    tracked_incumbent_speedup: cumulative,       // the lane's tracked best; commit NOT independently confirmed
+    best_seen_speedup: bestSeen,                 // best verified candidate, committed or not
+    rounds_without_improvement: noImprove,
+    rounds_without_improvement_limit: MAX_NO_IMPROVE,
+    last_round_outcome: eikosLastOutcome,
+    specialties_dispatched: Array.from(eikosSpecialties).sort(),
+    minutes_left: (DEADLINE_EPOCH && Number.isFinite(leftS)) ? Math.round(leftS / 60) : 'unknown',
+    minutes_left_source: DEADLINE_EPOCH ? leftSource : 'no_deadline',
+    noise_band: 'unknown',                       // not tracked by the lane; never estimated
+    min_improve: MIN_IMPROVE,                    // configured threshold, not a noise measurement
+    progress_delta: PROGRESS_DELTA,              // configured threshold, not a noise measurement
+  };
+}
+
+// The host's own refusal predicate (the forced re-plan loop guard), evaluated on the same values.
+function eikosStopPermitted(leftS) {
+  if (DEADLINE_EPOCH && !Number.isFinite(leftS)) return { permitted: false, reason: 'clock_unavailable' };
+  if (DEADLINE_EPOCH && leftS > NO_STOP_S && forcedReplans < MAX_FORCED_REPLANS) {
+    return { permitted: false, reason: 'fixed_window' };
+  }
+  return { permitted: true, reason: null };
+}
+
+function eikosRawChoice(p) {
+  if (!p) return 'no_plan';
+  if (p.stop) return 'stop';
+  return (p.directions && p.directions.length) ? 'continue' : 'empty_directions';
+}
+
+function eikosCommand(stateJson, roundNo) {
+  return `python3 -B ${eikosShellQuote(WORKFLOW_DIR + '/../e2e_workflow/scripts/eikos_decide.py')} ` +
+    `--decision round_continue --scope ${eikosShellQuote(EVAL_DIR)} --round ${roundNo} ` +
+    `--timeout-s ${EIKOS_CLI_TIMEOUT_S} --state-json ${eikosShellQuote(stateJson)}`;
+}
+
+// One attempt, own wait bound, no retries. Returns the envelope, or {__timeout} / {__error}.
+async function eikosCarrier(stateJson, roundNo) {
+  const prompt = `Run EXACTLY this command and nothing else:
+\`\`\`bash
+${eikosCommand(stateJson, roundNo)}
+\`\`\`
+It prints one JSON object. Return that object unchanged as StructuredOutput. Do NOT edit the command, do NOT modify any file, and do NOT run anything else.`;
+  const opts = { phase: 'Optimize', label: `eikos:round_continue r${roundNo}`,
+                 model: EIKOS_CARRIER_MODEL, schema: EIKOS_ENVELOPE_SCHEMA };
+  const ev = (typeof tlAgent === 'function') ? tlAgent(prompt, opts, 1) : null;
+  let to;
+  const guard = new Promise((resolve) => { to = setTimeout(() => resolve({ __timeout: true }), EIKOS_CARRIER_TIMEOUT_MS); });
+  const call = Promise.resolve().then(() => agent(prompt, opts)).then(
+    (r) => { clearTimeout(to); return r; },
+    (e) => { clearTimeout(to); return { __error: String((e && e.message) || e).slice(0, 200) }; });
+  const r = await Promise.race([call, guard]);
+  if (ev && r && !r.__timeout && !r.__error) ev.ok = true;
+  return r;
+}
+
+// The shadow call at the effective decision point. The TechLead's decision is already final here.
+async function eikosShadowRound(roundNo, snap, firstChoice, finalPlan, forcedThisRound, leftS) {
+  const finalChoice = eikosRawChoice(finalPlan);
+  const effective = finalChoice === 'continue' ? 'continue' : 'stop';
+  const exhausted = DEADLINE_EPOCH && Number.isFinite(leftS) && leftS > NO_STOP_S && forcedReplans >= MAX_FORCED_REPLANS;
+  const rec = {
+    decision: 'round_continue', round: roundNo,
+    raw_model_choice: { first: firstChoice, final: finalChoice },
+    forced_replans_this_round: forcedThisRound,
+    effective_baseline_action: effective,
+    host_stop_reason: effective === 'stop' ? (exhausted ? 'forced_window_exhausted' : 'tech_lead_stop') : 'none',
+    state: snap, eligibility: eikosStopPermitted(leftS),
+    carrier: null, envelope: null, relay_ok: null,
+    outcome: effective === 'stop' ? { next_round: 'not_observed' } : null,
+  };
+  EIKOS_SHADOW_LOG.push(rec);
+  if (!rec.eligibility.permitted) { rec.carrier = { status: 'skipped', eikos_calls: 0 }; return rec; }
+  const stateJson = JSON.stringify(snap);
+  const env = await eikosCarrier(stateJson, roundNo);
+  if (!env) {
+    rec.carrier = { status: 'no_result' };
+  } else if (env.__timeout) {
+    rec.carrier = { status: 'timeout', wait_ms: EIKOS_CARRIER_TIMEOUT_MS,
+                    note: 'wait ended; the carrier is not cancelled and may still finish; a late finish cannot change the first persisted decision' };
+  } else if (env.__error) {
+    rec.carrier = { status: 'error', error: env.__error };
+  } else {
+    rec.relay_ok = env.state_raw === stateJson;     // was the frozen state relayed byte-for-byte?
+    const rest = {};
+    Object.keys(env).forEach((k) => { if (k !== 'state_raw') rest[k] = env[k]; });
+    rec.envelope = rest;
+    rec.carrier = { status: 'returned' };
+  }
+  try { log(`  [eikos-shadow] r${roundNo}: baseline=${effective}, eikos=${rec.envelope ? rec.envelope.choice + '/' + rec.envelope.would_be_action + ' (' + rec.envelope.status + ')' : rec.carrier.status}` +
+            `${rec.relay_ok === false ? ', RELAY MISMATCH' : ''}`); } catch (e) {}
+  return rec;
+}
+// <<EIKOS-SHADOW-END>>
+
 // Expert-skills injection. PURELY ADDITIVE: '' when OFF or the role is not a skills consumer, so both
 // call sites (roleAgent, and the inline Optimize prompt) are byte-identical to the pre-feature build in
 // those cases. When ON, appends an advisory pointer telling the agent to Read the fragment + query the
@@ -1354,10 +1481,14 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),
   });
 
+  // Eikos shadow: freeze the state the planning attempt sees, before that attempt.
+  let eikosSnap = EIKOS_SHADOW_ON ? eikosSnapshot(round, left, 'pre_plan_clock') : null;
+  const forcedBeforeRound = forcedReplans;
   let plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).',
       planInputs(false)),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
+  const eikosFirstChoice = EIKOS_SHADOW_ON ? eikosRawChoice(plan) : null;
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
   // on the reasoning that a role repeating "stop" has run out of ideas. Measured at a 2h budget that
@@ -1370,12 +1501,17 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
          (!plan || plan.stop || !plan.directions || plan.directions.length === 0)) {
     forcedReplans++;
     log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing (#${forcedReplans}), re-planning.`);
+    if (EIKOS_SHADOW_ON) eikosSnap = eikosSnapshot(round, left, 'pre_replan_clock');
     plan = await agentT(
       roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.',
         planInputs(true)),
       { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: PLAN_SCHEMA });
     left = await secondsLeft(`replan-r${round}`);
   }
+
+  const eikosRec = EIKOS_SHADOW_ON
+    ? await eikosShadowRound(round, eikosSnap, eikosFirstChoice, plan, forcedReplans - forcedBeforeRound, left)
+    : null;
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
     log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
@@ -1396,6 +1532,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   if (deepDir) directions = [deepDir];
   const roundCost = directions.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
   dispatched += roundCost;
+  if (EIKOS_SHADOW_ON) directions.forEach((d) => eikosSpecialties.add(d.specialty));
   log(`Round ${round}: ${directions.length} direction(s) [${directions.map(d => d.specialty).join(', ')}], cost ${roundCost}, budget ${dispatched}/${BUDGET}`);
 
   // --- (b,c) Optimize -> Verify, pipelined per direction ----------------
@@ -1584,6 +1721,15 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
 
   if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;
   if (madeProgress || improved) { noImprove = 0; } else { noImprove++; }
+  if (EIKOS_SHADOW_ON) {
+    // Measured facts only. The commit agent's own return is not captured by the lane, so a commit is
+    // recorded as "not_captured", never inferred from the tracked incumbent value.
+    const o = { verified_candidates: verified.length, winner_speedup: winner ? winner.geomean : null,
+                improved: improved, made_progress: madeProgress, commit_reported: 'not_captured',
+                tracked_incumbent_after: cumulative };
+    if (eikosRec) eikosRec.outcome = o;
+    eikosLastOutcome = o;
+  }
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
   const mem = await agentT(
@@ -1942,6 +2088,13 @@ return {
     : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
     : 'tech_lead_stop',
   deadline_hit: deadlineHit,
+  // Eikos shadow pilot: one record per reached decision point, plus why the loop ended. Absent when OFF.
+  eikos_shadow: EIKOS_SHADOW_ON ? {
+    decision: 'round_continue', carrier_model: EIKOS_CARRIER_MODEL, carrier_timeout_ms: EIKOS_CARRIER_TIMEOUT_MS,
+    controls_branch: false, records: EIKOS_SHADOW_LOG,
+    loop_end_reason: deadlineHit ? 'deadline' : (dispatched >= BUDGET) ? 'budget'
+      : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve' : 'tech_lead_stop',
+  } : undefined,
   forced_replans: forcedReplans,
   // What the plan cited and whether it carried its round. Returned ALWAYS, including when nothing was
   // cited (an empty array is the finding: the KB was read and nothing in it was worth acting on).
