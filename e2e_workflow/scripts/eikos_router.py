@@ -400,8 +400,10 @@ def build_state(req: dict) -> str:
     ])
 
 
-def call_eikos(req: dict, url: str, timeout_s: float) -> dict:
-    """Single evaluation request. All questions are answered against one shared state.
+def post_systemone(url: str, state, questions: dict, timeout_s: float) -> dict:
+    """One request to Eikos's serve.py API, with the transport protections every caller needs:
+    loopback only (unless GEAK_EIKOS_ALLOW_REMOTE=1), no proxies, no redirects, bounded read.
+    Returns the parsed response body; raises on any transport or format failure.
 
     Standard library only, so the disabled path and the test suite need nothing installed.
     """
@@ -412,7 +414,7 @@ def call_eikos(req: dict, url: str, timeout_s: float) -> dict:
             "GEAK_EIKOS_URL %s is not a loopback address. The state carries GEAK task text, and "
             "the point of a local model is that it never leaves the host. Set "
             "GEAK_EIKOS_ALLOW_REMOTE=1 to send it there deliberately." % url)
-    payload = json.dumps({"state": build_state(req), "questions": build_questions()}).encode("utf-8")
+    payload = json.dumps({"state": state, "questions": questions}).encode("utf-8")
     request = urllib.request.Request(url + EIKOS_PATH, data=payload,
                                      headers={"Content-Type": "application/json"})
     # No proxies (an http_proxy variable would route the state through another host) and no
@@ -423,10 +425,15 @@ def call_eikos(req: dict, url: str, timeout_s: float) -> dict:
     if len(raw) > MAX_RESPONSE_BYTES:
         raise RuntimeError("Eikos response exceeds %d bytes" % MAX_RESPONSE_BYTES)
     body = json.loads(raw.decode("utf-8"))
-    answers = body.get("answers")
-    if not isinstance(answers, dict):
+    if not isinstance(body, dict) or not isinstance(body.get("answers"), dict):
         raise RuntimeError("Eikos response has no `answers` object")
-    return decide_from_answers(answers, {})
+    return body
+
+
+def call_eikos(req: dict, url: str, timeout_s: float) -> dict:
+    """Single evaluation request. All questions are answered against one shared state."""
+    body = post_systemone(url, build_state(req), build_questions(), timeout_s)
+    return decide_from_answers(body["answers"], {})
 
 
 def route(req: dict, cache_dir: str, *, enabled: bool, url: str, timeout_s: float) -> dict:
