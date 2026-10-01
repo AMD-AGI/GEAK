@@ -87,11 +87,44 @@ const gates = src.match(/(?:smoke|unittest_smoke) [!=]== '[^']*'/g) || [];
 ok(gates.length >= 5, `found ${gates.length} smoke gates`);
 ok(gates.every((g) => /'pass'$/.test(g)), 'every gate compares against lowercase \'pass\'');
 
+// An extraction failure's reason must survive the enum: the status field can only say "fail", so the
+// prose lives in smoke_detail. Every failure site reads it through extractFailWhy (review of #491: a
+// gpu_lock refusal only in smoke_detail, with unrelated notes, collapsed to a bare "fail").
+console.log('failure reasons');
+const helperStart = src.indexOf('const extractFailWhy = (');
+ok(helperStart >= 0, 'extractFailWhy is defined');
+const extractFailWhy = new Function(
+  src.slice(helperStart, src.indexOf(';\n', helperStart) + 1) + '\nreturn extractFailWhy;')();
+const GPU_LOCK = "Exit code 1: GPU 2 had foreign work running above the lock's busy/VRAM threshold";
+ok(extractFailWhy({ unittest_smoke: 'fail', smoke_detail: GPU_LOCK,
+  notes: 'The task uses synthesized fixed-seed inputs and has no reference_io.pt.' }).startsWith(GPU_LOCK),
+  'agent fail: the smoke_detail cause leads even when notes is unrelated (gpu_lock case)');
+// The shape extractWithBaseline returns when it overrides an agent "pass".
+const forced = { smoke: 'fail', unittest_smoke: 'fail', selection_failed: true,
+  smoke_detail: 'workflow forced fail: kernel selection failed: deeper_live_candidate_exists',
+  notes: 'kernel selection failed: deeper_live_candidate_exists — agent notes' };
+ok(extractFailWhy(forced).startsWith('workflow forced fail:'), 'forced fail: the workflow reason leads');
+ok(extractFailWhy({ smoke: 'fail', notes: 'capture OOM' }) === 'capture OOM', 'notes alone is kept');
+ok(extractFailWhy({ smoke: 'fail' }) === 'fail' && extractFailWhy({ unittest_smoke: 'fail' }) === 'fail',
+  'bare status when there is no prose');
+ok(extractFailWhy(null) === 'none', '"none" when there is no result');
+const forcedReturns = src.match(/smoke: 'fail', unittest_smoke: 'fail'[^}]*?smoke_detail: `workflow forced fail: /g) || [];
+ok(forcedReturns.length === 2, `both workflow-forced fails overwrite smoke_detail (${forcedReturns.length}/2)`);
+ok(!/notes \|\| (?:p\.)?ext\.(?:unittest_)?smoke\b/.test(src), 'no failure reason reads only notes || status');
+const sites = src.match(/extractFailWhy\((?:p\.)?ext\)/g) || [];
+ok(sites.length === 4, `all four extraction-failure sites use extractFailWhy (${sites.length}/4)`);
+
 console.log('role file');
 ok(/Smoke status contract/.test(role), 'kernel_extractor.md states the smoke status contract');
 ok(/lowercase string `"pass"` or\s+`"fail"`/.test(role), 'contract names exactly lowercase "pass"/"fail"');
 ok(!/"(unittest_)?smoke": "pass\|fail"/.test(role), 'no ambiguous "pass|fail" placeholder left in the output examples');
 ok((role.match(/"smoke_detail":/g) || []).length === 2, 'both output examples show smoke_detail');
+const contract = role.slice(role.indexOf('Smoke status contract'), role.indexOf('## PHASE=extract'));
+ok(/exit 3/.test(contract) && /UT_HARNESS_INCOMPLETE/.test(contract) && /regenerate the UT first/.test(contract),
+  'contract defers exit 3 / UT_HARNESS_INCOMPLETE to the regenerate rule');
+ok(!/anything else is `"fail"`/.test(contract), 'contract no longer says "anything else is fail"');
+ok(!/reason="harness_incomplete_unrecoverable"/.test(role) && /smoke_detail` with `harness_incomplete_unrecoverable`/.test(role),
+  'exit-3 give-up reason goes to smoke_detail, which the workflow reads');
 
 if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nall smoke status contract checks passed');

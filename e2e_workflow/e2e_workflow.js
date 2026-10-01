@@ -1587,6 +1587,11 @@ const hasFrozenBaseline = (ext) =>
              (ext.candidate_bind && typeof ext.candidate_bind === 'object') ||
              (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
 
+// Why an extraction failed, for logs / ledger / flagged heads. The status field is an enum
+// ("pass"/"fail"), so the prose lives in smoke_detail; notes may be unrelated, so read both.
+const extractFailWhy = (e) => !e ? 'none'
+  : [e.smoke_detail, e.notes].filter(Boolean).join(' | ') || e.smoke || e.unittest_smoke || 'none';
+
 // Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
 // transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
 // task dir present) but produced NO frozen baseline — re-invoking with a corrective instruction up
@@ -1671,12 +1676,14 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
     log(`  ${(opts && opts.label) || role}: kernel selection still unverified after ` +
       `${BASELINE_EXTRACT_RETRIES} re-extractions — ABORTING (${finalSelection.why}).`);
     return { ...ext, smoke: 'fail', unittest_smoke: 'fail', selection_failed: true,
+      smoke_detail: `workflow forced fail: kernel selection failed: ${finalSelection.why}`,
       notes: `kernel selection failed: ${finalSelection.why} — ${ext.notes || ''}` };
   }
   if (smokeOk(ext) && !hasFrozenBaseline(ext)) {
     log(`  ${(opts && opts.label) || role}: STILL no frozen baseline after ${BASELINE_EXTRACT_RETRIES} ` +
       `re-extractions — ABORTING this extraction (refusing a fake speedup vs the candidate's own scaffold).`);
     return { ...ext, smoke: 'fail', unittest_smoke: 'fail',
+      smoke_detail: `workflow forced fail: no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions`,
       notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
         `(baseline_overlay/ + meta.candidate_bind required as the speedup denominator) — ${ext.notes || ''}` };
   }
@@ -3776,7 +3783,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
       if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
-        const why = ext ? ext.notes || ext.smoke : 'none';
+        const why = extractFailWhy(ext);
         log(`  [deep] ${h.short_name}: op extraction failed (${why})${isDominant ? ' [DOMINANT — flagged]' : ''}; skipping.`);
         if (isDominant) flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why });
         history.ledger.push({ direction: h.short_name, verdict: isDominant ? 'flagged' : 'dead_end', lesson: `op extraction failed (${why})` });
@@ -4167,7 +4174,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (p.dead === 'deadline') { log(`  [fast-mode] ${h.short_name}: skipped (dispatch deadline).`); continue;
       }
       if (p.dead === 'extract' || !p.ext || !p.ext.task_dir) {
-        const why = p.ext ? p.ext.notes || p.ext.smoke : 'none';
+        const why = extractFailWhy(p.ext);
         if (isDominant) { log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head op extraction FAILED (${why}) — flagged, NOT skipped.`);
           flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why }); }
         else log(`  ${h.short_name}: op extraction failed (${why}); skipping.`);
@@ -4354,7 +4361,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
     if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
-      const why = ext ? ext.notes || ext.smoke : 'none';
+      const why = extractFailWhy(ext);
       if (isDominant) {
         log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) op extraction FAILED (${why}) — flagged, NOT silently skipped.`);
         flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why });
@@ -4672,7 +4679,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
-      return { c, skip: true, reason: `extraction failed/non-editable (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };
+      return { c, skip: true, reason: `extraction failed/non-editable (${extractFailWhy(ext)})` };
     }
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
     let kl;
