@@ -122,15 +122,25 @@ function bashCarrier(env) {
   const extraDirs = [];
   const evalDir2 = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'eikos shadow 2 ')); extraDirs.push(d); return d; };
   {
-    const L = load({ DEADLINE_EPOCH: 0, EVAL_DIR: evalDir, agent: bashCarrier({ GEAK_EIKOS_URL: URL }) });
+    // Hostile text first, in its own dir. The script refuses this outcome object (not the lane's
+    // shape), but bash parses the command BEFORE the script validates anything, so the quoting is
+    // still what stands between this text and the shell.
+    const H = load({ DEADLINE_EPOCH: 0, EVAL_DIR: evalDir2(), agent: bashCarrier({ GEAK_EIKOS_URL: URL }) });
     const marker = path.join(os.tmpdir(), `eikos_injection_marker_${process.pid}`);
     try { fs.unlinkSync(marker); } catch (e) {}
-    L.setLast({ note: `it's a "quoted"\nmulti-line outcome; $(touch ${marker}) \`touch ${marker}\``, verified_candidates: 1 });
+    H.setLast({ note: `it's a "quoted"\nmulti-line outcome; $(touch ${marker}) \`touch ${marker}\``, verified_candidates: 1 });
+    const h = await H.eikosShadowRound(2, H.eikosSnapshot(2, Infinity, 'pre_plan_clock'), 'continue', CONT, 0, Infinity);
+    ok('state with quotes, newline, $(...) and backticks reached the script intact (digest relay_ok)', h.relay_ok === true);
+    ok('hostile outcome refused by the state check before any Eikos request',
+       h.envelope && h.envelope.status === 'state_invalid' && hits === 0);
+
+    const L = load({ DEADLINE_EPOCH: 0, EVAL_DIR: evalDir, agent: bashCarrier({ GEAK_EIKOS_URL: URL }) });
+    L.setLast({ verified_candidates: 1, winner_speedup: 1.31, improved: true, made_progress: true,
+                commit_reported: 'not_captured', tracked_incumbent_after: 1.31 });   // the lane's real shape
     const snap = L.eikosSnapshot(2, Infinity, 'pre_plan_clock');
     const r = await L.eikosShadowRound(2, snap, 'continue', CONT, 0, Infinity);
     ok('eligible: carrier ran once on the fixed Sonnet 5.5 model, with schema', L.calls.length === 1 &&
        L.calls[0].o.model === 'claude-sonnet-5-5' && L.calls[0].o.label === 'eikos:round_continue r2' && !!L.calls[0].o.schema);
-    ok('state with quotes, newline, $(...) and backticks reached the script intact (digest relay_ok)', r.relay_ok === true);
     ok('envelope ok: choice continue, would_be_action continue at 0.91 >= 0.8',
        r.envelope && r.envelope.status === 'ok' && r.envelope.choice === 'continue' && r.envelope.would_be_action === 'continue');
     ok('envelope carries the state digest, not the state', r.envelope && !('state_raw' in r.envelope) && /^[0-9a-f]{64}$/.test(r.envelope.state_sha256));
