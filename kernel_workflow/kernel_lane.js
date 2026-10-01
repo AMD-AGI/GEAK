@@ -872,13 +872,15 @@ function eikosStopPermitted(leftS) {
 }
 
 // Python json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False), for the decision digest.
-// Numbers use JSON.stringify, which matches Python's repr for finite doubles and integers.
+// The digested fields are strings, booleans and null only (eikos_decide.py's wire contract): number
+// formatting differs between the languages (Python 1.0, JavaScript 1), so no number is ever hashed.
 function eikosCanonical(v) {
   if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
   if (Array.isArray(v)) return '[' + v.map(eikosCanonical).join(',') + ']';
   return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + eikosCanonical(v[k])).join(',') + '}';
 }
-const EIKOS_DECISION_FIELDS = ['attempt_id', 'logical_key', 'status', 'choice', 'confidence', 'would_be_action'];
+const EIKOS_DECISION_FIELDS = ['attempt_id', 'decision_attempt_id', 'logical_key', 'status', 'choice',
+  'confidence', 'would_be_action', 'reused', 'persisted', 'receipt'];
 
 function eikosRawChoice(p) {
   if (!p) return 'no_plan';
@@ -924,7 +926,7 @@ async function eikosShadowRound(roundNo, snap, firstChoice, finalPlan, forcedThi
     effective_baseline_action: effective,
     host_stop_reason: effective === 'stop' ? (exhausted ? 'forced_window_exhausted' : 'tech_lead_stop') : 'none',
     state: snap, eligibility: eikosStopPermitted(leftS),
-    carrier: null, envelope: null, relay_ok: null, decision_ok: null,
+    carrier: null, envelope: null, relay_ok: null, decision_ok: null, receipt_ok: null,
     outcome: effective === 'stop' ? { next_round: 'not_observed' } : null,
   };
   EIKOS_SHADOW_LOG.push(rec);
@@ -945,11 +947,14 @@ async function eikosShadowRound(roundNo, snap, firstChoice, finalPlan, forcedThi
     const dec = {};
     EIKOS_DECISION_FIELDS.forEach((k) => { dec[k] = env[k] === undefined ? null : env[k]; });
     rec.decision_ok = env.decision_sha256 === eikosSha256(eikosCanonical(dec));
+    // A decision whose attempt receipt was not written is a collection failure, even when valid.
+    rec.receipt_ok = env.receipt === 'written';
     rec.envelope = env;
     rec.carrier = { status: 'returned' };
   }
   try { log(`  [eikos-shadow] r${roundNo}: baseline=${effective}, eikos=${rec.envelope ? rec.envelope.choice + '/' + rec.envelope.would_be_action + ' (' + rec.envelope.status + ')' : rec.carrier.status}` +
-            `${rec.relay_ok === false ? ', STATE RELAY MISMATCH' : ''}${rec.decision_ok === false ? ', DECISION ALTERED IN RELAY' : ''}`); } catch (e) {}
+            `${rec.relay_ok === false ? ', STATE RELAY MISMATCH' : ''}${rec.decision_ok === false ? ', DECISION ALTERED IN RELAY' : ''}` +
+            `${rec.receipt_ok === false ? ', RECEIPT NOT WRITTEN' : ''}`); } catch (e) {}
   return rec;
 }
 // <<EIKOS-SHADOW-END>>
