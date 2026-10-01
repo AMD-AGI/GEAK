@@ -219,19 +219,21 @@ def _in_scope(candidate):
     return bool(candidate.get("existing_apis"))
 
 
-def _member_ops(candidate):
-    """Every op name the captured region runs, as the reference must reproduce it.
+def _member_names(member):
+    """The names one captured member goes by, as the reference must reproduce it.
 
-    Both spellings are collected because members carry `parent_operator` (the aten/
-    python-level op) and `kernel` (the device kernel); a reference leg may legitimately
-    be described in either vocabulary, so a match on EITHER counts."""
-    ops = set()
-    for member in candidate.get("members", []) or []:
-        for key in ("parent_operator", "kernel"):
-            value = member.get(key)
-            if value:
-                ops.add(str(value))
-    return ops
+    Members carry `parent_operator` (the aten/python-level op) and `kernel` (the device
+    kernel); a reference leg may legitimately be described in either vocabulary, so a
+    member is covered when EITHER name matches -- coverage is judged per member, never
+    per name, or every member would need both spellings in ref_ops."""
+    return tuple(str(member[key]) for key in ("parent_operator", "kernel")
+                 if member.get(key))
+
+
+def _uncovered_members(members, ref_ops):
+    """Members none of whose names appear in ref_ops, as sorted name strings."""
+    return sorted(" / ".join(names) for names in map(_member_names, members)
+                  if names and not any(_op_covered(n, ref_ops) for n in names))
 
 
 def _op_covered(needle, haystack):
@@ -475,21 +477,13 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
                     "fusion_unit_validator.md step 2b." % (vp, scope_missing))
                 continue
         if isinstance(ref_ops, list) and ref_ops:
-            member_ops = _member_ops(candidate)
-            uncovered = sorted(op for op in member_ops
-                               if not _op_covered(op, ref_ops))
+            members = candidate.get("members", []) or []
             # Only removable members are load-bearing: a member the fusion does NOT
             # remove may legitimately sit outside the timed reference.
             removable = set(candidate.get("removable_row_ids") or [])
             if removable:
-                removable_ops = set()
-                for member in candidate.get("members", []) or []:
-                    if member.get("row_id") in removable:
-                        for key in ("parent_operator", "kernel"):
-                            if member.get(key):
-                                removable_ops.add(str(member[key]))
-                uncovered = sorted(op for op in removable_ops
-                                   if not _op_covered(op, ref_ops))
+                members = [m for m in members if m.get("row_id") in removable]
+            uncovered = _uncovered_members(members, ref_ops)
             if uncovered:
                 errors.append(
                     "%s ref_ops %s does not cover the removable member ops %s — the "

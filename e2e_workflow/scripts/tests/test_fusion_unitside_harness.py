@@ -158,6 +158,75 @@ class FusionUnitsideTest(_UnitsideFixture, unittest.TestCase):
         self.assertIn("dc_nq", md)
 
 
+class RefScopeTest(_UnitsideFixture, unittest.TestCase):
+    """ref_ops must cover every removable member, judged per member: a member is covered
+    when either its parent_operator or its kernel name appears in ref_ops."""
+
+    QUANT = {"row_id": "r2", "parent_operator": "aiter::dynamic_per_token_scaled_quant",
+             "kernel": "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bDB8_Li",
+             "shape": {"input_dims": [[4, 4096]]}}
+
+    def _case(self, head, ref_ops, removable=("r1",), extra=()):
+        cands = {"candidates": [
+            {"candidate_id": "dc_x", "family": "norm_quant", "phase": "decode",
+             "implementation_class": "existing_api_needs_adapter",
+             "existing_apis": [{"name": "fused_x"}],
+             "removable_row_ids": list(removable),
+             "members": [dict(head, row_id="r1", shape={"input_dims": [[4, 4096]]}),
+                         self.QUANT] + list(extra)}]}
+        v = {"candidate_id": "dc_x", "family": "norm_quant", "fused_fn": "fused_x",
+             "tested_shape": [4, 4096], "parity": "pass", "isolated_speedup": 1.26,
+             "ref_ms": 0.021, "cand_ms": 0.0165, "engaged": True, "tp": 1,
+             "ref_ops": ref_ops, "outside_work_removed": []}
+        return self._run(cands, [v])
+
+    def test_operator_name_alone_covers_a_member(self):
+        # 0930 e05: ref_ops names the op, the trace's kernel name shares no substring.
+        res = self._case({"parent_operator": "LayerNormFn",
+                          "kernel": "_layer_norm_fwd_1pass_kernel"},
+                         ["LayerNormFn", "aiter::dynamic_per_token_scaled_quant"])
+        self.assertEqual(res["errors"], [])
+        self.assertEqual(self._status(res, "dc_x"), "pass")
+
+    def test_mangled_kernel_name_is_not_required(self):
+        # 0929 e03: aiter::silu_and_mul vs the mangled act_and_mul_kernel symbol.
+        res = self._case({"parent_operator": "aiter::silu_and_mul",
+                          "kernel": "_ZN5aiter18act_and_mul_kernelIfDF16bTnPFfRKT_EXadL_ZNS_11sil"},
+                         ["aiter::silu_and_mul", "aiter::dynamic_per_token_scaled_quant"])
+        self.assertEqual(self._status(res, "dc_x"), "pass")
+
+    def test_kernel_name_alone_covers_a_member(self):
+        res = self._case({"parent_operator": "LayerNormFn",
+                          "kernel": "_layer_norm_fwd_1pass_kernel"},
+                         ["_layer_norm_fwd_1pass_kernel", "dynamic_per_token_scaled_quant"])
+        self.assertEqual(self._status(res, "dc_x"), "pass")
+
+    def test_a_removable_member_the_ref_never_ran_is_still_rejected(self):
+        # The DSR1 failure the gate exists for: the ref leg skipped a member the fusion
+        # deletes, so isolated_speedup measures a narrower region.
+        res = self._case({"parent_operator": "LayerNormFn",
+                          "kernel": "_layer_norm_fwd_1pass_kernel"},
+                         ["aiter::dynamic_per_token_scaled_quant"])
+        self.assertIsNone(self._status(res, "dc_x"))
+        self.assertEqual(len(res["errors"]), 1)
+        self.assertIn("LayerNormFn / _layer_norm_fwd_1pass_kernel", res["errors"][0])
+
+    def test_a_non_removable_member_may_sit_outside_the_ref(self):
+        gemm = {"row_id": "r3", "parent_operator": "aiter::gemm_a8w8_blockscale",
+                "kernel": "kernel_gemm_xdl_cshuffle_v3", "shape": {"input_dims": [[4, 4096]]}}
+        res = self._case({"parent_operator": "LayerNormFn",
+                          "kernel": "_layer_norm_fwd_1pass_kernel"},
+                         ["LayerNormFn"], extra=[gemm])
+        self.assertEqual(self._status(res, "dc_x"), "pass")
+
+    def test_without_removable_ids_every_member_must_be_covered(self):
+        res = self._case({"parent_operator": "LayerNormFn",
+                          "kernel": "_layer_norm_fwd_1pass_kernel"},
+                         ["LayerNormFn"], removable=())
+        self.assertIsNone(self._status(res, "dc_x"))
+        self.assertIn("aiter::dynamic_per_token_scaled_quant", res["errors"][0])
+
+
 class ShapeProvenanceTest(_UnitsideFixture, unittest.TestCase):
     """A gate that vanishes when its input is missing is worse than no gate.
 
