@@ -599,6 +599,7 @@ class TestPerModelPricing(unittest.TestCase):
         "claude-opus-5-5": (4, 5, 8, 0.20, 20), "claude-opus-5": (5, 6.25, 10, 0.50, 25),
         "claude-opus-4-8": (5, 6.25, 10, 0.50, 25), "claude-opus-4-7": (5, 6.25, 10, 0.50, 25),
         "claude-opus-4-6": (5, 6.25, 10, 0.50, 25), "claude-opus-4-5": (5, 6.25, 10, 0.50, 25),
+        "claude-sonnet-5-5": (2, 2.50, 4, 0.20, 10),
         "claude-sonnet-5": (2, 2.50, 4, 0.20, 10), "claude-sonnet-4-6": (3, 3.75, 6, 0.30, 15),
         "claude-sonnet-4-5": (3, 3.75, 6, 0.30, 15), "claude-haiku-4-5": (1, 1.25, 2, 0.10, 5),
     }
@@ -628,6 +629,15 @@ class TestPerModelPricing(unittest.TestCase):
                 ("claude-opus-5-5", 2, 2018, 4, 0.010178)]
         for m, inp, w5, out, sdk in live:
             self.assertAlmostEqual(L.cost_of(self._row(m, inp=inp, w5=w5, out=out), L.DEFAULT_RATES), sdk, places=6)
+
+    def test_reproduces_claude_codes_own_cost_for_sonnet_5_5(self):
+        """Live calls 2026-10-01 through the AMD gateway, Claude Code's costUSD for each:
+        a bare reply, and an Eikos carrier call with cache reads (all four buckets)."""
+        self.assertAlmostEqual(L.cost_of(self._row("claude-sonnet-5-5", inp=2, w5=2026, out=4),
+                                         L.DEFAULT_RATES), 0.005109, places=6)
+        self.assertAlmostEqual(L.cost_of(self._row("claude-sonnet-5-5", inp=6, w5=30361, read=58690, out=1099),
+                                         L.DEFAULT_RATES), 0.0986425, places=7)
+        self.assertEqual(L.unpriced_models([self._row("claude-sonnet-5-5")], L.DEFAULT_RATES), [])
 
     def test_dated_and_context_tagged_ids_find_their_card(self):
         self.assertEqual(L.rate_key("claude-haiku-4-5-20251001", L.DEFAULT_RATES), "claude-haiku-4-5")
