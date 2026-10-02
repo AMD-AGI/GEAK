@@ -447,6 +447,11 @@ def test_removals_reach_benchmark_environment(
         "schema_version": 2, "framework": backend, "bench_launcher": launcher,
         "model_path": "/model", "exp_root": str(tmp_path),
         "eval_dir": str(tmp_path / "eval"),
+        # Use the committed CPU CI identity; this test exercises launch controls.
+        "expected_gfx": "gfx942",
+        "expected_target": "unknown",
+        "expected_device_name": "AMD Instinct MI300X",
+        "expected_physical_cu_count": 304,
         "baseline_env_spec": {"config": {
             "server_launch_flags": "--drop --keep 1",
             "extra_server_args": extra, "remove_args": removals,
