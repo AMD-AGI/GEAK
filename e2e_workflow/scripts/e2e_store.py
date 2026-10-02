@@ -63,7 +63,7 @@ import time
 # The shared KB plane lives at the repo root as the `kb` package, not beside this file. Executed as
 # a CLI from an arbitrary cwd, so the root is derived from __file__ and never from the environment.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from e2e_workflow.scripts.tuning_acceptance import tuning_accepted  # noqa: E402
+from e2e_workflow.scripts.tuning_acceptance import tuning_accepted
 from kb import identity as kbid                                             # noqa: E402
 from kb.attest import (OUTCOMES, RETIRE_THRESHOLD, attest_session,         # noqa: E402
                        attestation_ok, attestations_of, carry_attestations,

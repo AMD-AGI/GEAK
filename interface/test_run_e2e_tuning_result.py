@@ -16,9 +16,9 @@ Run: python3 -m pytest GEAK/interface/test_run_e2e_tuning_result.py -v
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import math
-import importlib.util
 from pathlib import Path
 
 import pytest
@@ -242,21 +242,25 @@ def _valid_complete_pair():
 ])
 def test_incomplete_or_invalid_phase_cannot_be_reported_as_accepted(tmp_path,field,value):
     tuning=_valid_complete_pair()
-    if value is None:tuning.pop(field,None)
-    else:tuning[field]=value
+    if value is None:
+        tuning.pop(field, None)
+    else:
+        tuning[field] = value
     assert not tuning_accepted(tuning)
     workflow = _wf(tuning_skillset=tuning)
     result = rx._tuning_skillset_section(workflow, tmp_path)
     if result is not None:
         assert result['gate']!='accepted'
         assert 'artifacts' not in result and 'apply_env' not in result
-        if result['ran']:assert result['share_of_total_gain_pct'] is None
+        if result['ran']:
+            assert result['share_of_total_gain_pct'] is None
     with pytest.raises(ValueError, match="Workflow banks tuning"):
         _norm(tmp_path, workflow)
 
 
 def test_complete_none_gate_preserves_the_3348_percent_object(tmp_path):
-    tuning=_valid_complete_pair();before=copy.deepcopy(tuning)
+    tuning = _valid_complete_pair()
+    before = copy.deepcopy(tuning)
     assert tuning_accepted(tuning)
     result=_norm(tmp_path,_wf(tuning_skillset=tuning))['tuning_skillset']
     assert result['gate']=='accepted' and result['ab_complete'] is True
@@ -268,9 +272,12 @@ def test_complete_none_gate_preserves_the_3348_percent_object(tmp_path):
 
 @pytest.mark.parametrize('complete',[None,False])
 def test_raw_claim_cannot_be_filed_by_kb_or_recovered_via_report(tmp_path,monkeypatch,complete):
-    directory=tmp_path/'tuning';directory.mkdir()
-    tuning=_valid_complete_pair();tuning.pop('ab_complete')
-    if complete is False:tuning['ab_complete']=False
+    directory = tmp_path / 'tuning'
+    directory.mkdir()
+    tuning = _valid_complete_pair()
+    tuning.pop('ab_complete')
+    if complete is False:
+        tuning['ab_complete'] = False
     (directory/'tuning_result.json').write_text(json.dumps(tuning))
     (directory/'tuning_report.md').write_text('Outcome: accepted (1000 -> 1033.48 tok/s)')
     monkeypatch.setattr(rx.subprocess,'run',lambda *a,**k:pytest.fail('An incomplete phase attempted a writer'))
