@@ -2282,6 +2282,10 @@ class WorkflowParseError(RuntimeError):
     """The agent output carried no parseable workflow return (no ``eval_dir``)."""
 
 
+# Text Claude Code emits when a subscription or API usage limit ends a session.
+_RATE_LIMIT_MARKERS = ("hit your session limit", "hit your usage limit", '"error":"rate_limit"')
+
+
 def _iter_json_objects(raw: str):
     """Yield every parseable top-level JSON object in ``raw`` (in order).
 
@@ -2367,11 +2371,16 @@ def _classify_error(exc: BaseException) -> str:
     # anyio.fail_after raises builtins.TimeoutError on budget expiry.
     if isinstance(exc, TimeoutError):
         return "timeout"
+    msg = str(exc)
+    # A usage limit ends the session with a plain-text notice and no workflow
+    # return, so it reaches here as a parse error carrying that notice. Checked
+    # first so the caller can tell "retry after the reset" from a broken run.
+    if any(marker in msg for marker in _RATE_LIMIT_MARKERS):
+        return "rate_limit"
     if isinstance(exc, WorkflowParseError):
         return "workflow_parse_error"
     if isinstance(exc, ImportError):
         return "sdk_import_failed"
-    msg = str(exc)
     if "claude CLI failed" in msg:
         return "cli_failed"
     return "runner_error"
@@ -5887,14 +5896,19 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
 
     With NO accepted change the served path is unchanged, so final == baseline by
     construction (do-no-harm); speedup 1.0 -> :func:`normalize_result` => no_gain.
-    Returns ``None`` only when no baseline throughput was ever measured (the run
-    genuinely produced nothing to keep).
+    Returns ``None`` when no baseline throughput was ever measured (the run
+    genuinely produced nothing to keep), and when the Finalize bundle
+    (``final/final_launch.sh``) is absent: a measured baseline alone also
+    describes a run that died mid-optimization, and calling that "nothing won"
+    hides the failure from the caller.
 
     This is the LAST recovery tier: :func:`_recover_workflow_return` reaches it only
     after ruling out an accepted kernel win AND an adopted serving config
     (:func:`_recover_accepted_config_win`), so "nothing accepted" is really true
     here — the default baseline is the correct floor.
     """
+    if not (eval_dir / "final" / "final_launch.sh").is_file():
+        return None
     official = _read_json(eval_dir / "baseline" / "baseline_official.json")
     summary = _read_json(eval_dir / "baseline" / "bench_summary.json")
     baseline_tput = (
