@@ -486,7 +486,16 @@ written returns naming the same `eval_dir` and requested `phases_run`; a newly
 written director validation can also finish a requested `final` phase. Prior
 baseline or accepted-result artifacts remain available as history, but cannot
 turn an interrupted new phase into a completed invocation. Ordinary calls with
-`phases` omitted or containing `all` retain completed-run cache idempotency.
+`phases` omitted or containing `all` retain cache idempotency for full completed
+returns; a prior `phase_partial` return instead starts a new full invocation.
+That partial return is also excluded from SDK completion, exception recovery,
+and exit recovery.
+
+The standalone runtime's newly written, matching `runtime_result.json` is an
+authoritative completion return. It remains recoverable if the runtime exits
+nonzero after writing it, such as when a later metrics write fails. Stale files
+and returns for another directory or phase are excluded. Fresh SDK/CLI transport
+returns continue to work without requiring a canonical file to have been saved.
 
 ## `kernel_journey.json` (per-kernel journey contract → orchestrator)
 

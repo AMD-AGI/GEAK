@@ -1691,7 +1691,7 @@ def test_completion_needs_new_matching_phase_and_eval_dir(tmp_path):
     assert not invocation.done()
     _write_phase_marker(marker, {**old, "eval_dir": str(tmp_path / "other")})
     assert not invocation.done()
-    _write_phase_marker(marker, old)
+    _write_phase_marker(marker, {**old, "state": {"head_used": 1}})
     assert invocation.done()
 
 
@@ -1753,3 +1753,58 @@ def test_recovery_rejects_old_setup_and_recovers_current_partial(tmp_path, monke
     assert (
         rx._recover_workflow_return(tmp_path.parent, invocation=invocation) == current
     )
+
+
+def test_partial_setup_is_not_full_completion_or_unscoped_recovery(tmp_path, monkeypatch):
+    (tmp_path / "bench_e2e.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("GEAK_EVAL_DIR", str(tmp_path))
+    _write_phase_marker(tmp_path / "workflow_return.json", {
+        "eval_dir": str(tmp_path), "phases_run": ["setup"],
+        "validation_status": "phase_partial", "baseline_throughput_tok_s": 400.0,
+        "final_throughput_tok_s": 400.0, "throughput_speedup": 1.0,
+    })
+    assert not rx._workflow_done_on_disk(str(tmp_path))
+    assert rx._recover_workflow_return(tmp_path.parent) is None
+
+
+@pytest.mark.parametrize("phases", [None, "", "all", " setup,all "])
+def test_full_request_after_partial_setup_gets_fresh_invocation(tmp_path, phases):
+    _write_phase_marker(tmp_path / "workflow_return.json", {
+        "eval_dir": str(tmp_path), "phases_run": ["setup"], "validation_status": "phase_partial",
+    })
+    invocation = rx.phase_invocation({"eval_dir": str(tmp_path), "phases": phases})
+    assert invocation is not None
+    assert not invocation.done()
+
+
+@pytest.mark.parametrize("variant", ["current", "stale", "wrong_phase", "wrong_directory"])
+def test_runtime_return_survives_metrics_failure_only_for_current_invocation(tmp_path, monkeypatch, variant):
+    (tmp_path / "bench_e2e.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("GEAK_EVAL_DIR", str(tmp_path))
+    args = {"eval_dir": str(tmp_path), "phases": "head", "state": {"headQueue": []}}
+    current = {"eval_dir": str(tmp_path), "phases_run": ["head"], "validation_status": "phase_partial",
+               "state": {"head_used": 1}}
+    _write_phase_marker(tmp_path / "workflow_return.json", {**current, "phases_run": ["setup"]})
+    _write_phase_marker(tmp_path / "runtime_result.json", {**current, "state": {"head_used": 0}})
+    invocation = rx.phase_invocation(args)
+
+    def runtime(*argv, **kwargs):
+        if variant != "stale":
+            value = dict(current)
+            if variant == "wrong_phase":
+                value["phases_run"] = ["setup"]
+            elif variant == "wrong_directory":
+                value["eval_dir"] = str(tmp_path / "other")
+            _write_phase_marker(tmp_path / "runtime_result.json", value)
+        return rx.subprocess.CompletedProcess([], 7, "", "metrics write failed after result")
+
+    monkeypatch.setattr(rx.subprocess, "run", runtime)
+    if variant == "current":
+        assert rx._invoke_via_runtime(args, 60, str(tmp_path), invocation=invocation) == current
+        assert invocation.done()
+        assert rx._recover_workflow_return(tmp_path.parent, invocation=invocation) == current
+    else:
+        with pytest.raises(RuntimeError, match="metrics write failed"):
+            rx._invoke_via_runtime(args, 60, str(tmp_path), invocation=invocation)
+        assert not invocation.done()
+        assert rx._recover_workflow_return(tmp_path.parent, invocation=invocation) is None

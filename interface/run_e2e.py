@@ -68,7 +68,7 @@ try:
     )
     from interface.source_measurement import verify_normalized_source_measurements
     from interface.scheduling import SchedulingError, apply_schedule
-    from interface.workflow_completion import PhaseInvocation, phase_invocation
+    from interface.workflow_completion import PhaseInvocation, partial_return, phase_invocation
 finally:
     sys.path[:] = _launch_import_path
 del _launch_import_path
@@ -1997,6 +1997,8 @@ def _workflow_done_on_disk(eval_dir: str | None, *, invocation: PhaseInvocation 
     if invocation is not None:
         return Path(eval_dir).absolute() == invocation.eval_dir and invocation.done()
     p = Path(eval_dir)
+    if partial_return(_read_json(p / WORKFLOW_RETURN_FILE)):
+        return False
     return (p / WORKFLOW_RETURN_FILE).is_file() or (
         p / "director_e2e_validation.json"
     ).is_file()
@@ -2237,7 +2239,10 @@ def _invoke_via_runtime(
     """
     result_file = None
     metrics_file = None
+    disk_invocation = invocation
     if eval_dir:
+        if disk_invocation is None:
+            disk_invocation = PhaseInvocation({**ps_args, "eval_dir": eval_dir})
         result_file = str(Path(eval_dir) / "runtime_result.json")
         metrics_file = str(Path(eval_dir) / "runtime_metrics.json")
     cmd = [
@@ -2260,20 +2265,21 @@ def _invoke_via_runtime(
         cmd, cwd=str(E2E_DIR), env=dict(os.environ), capture_output=True,
         text=True, timeout=wrap_timeout,
     )
+    # 1) result-file (authoritative top-level return).
+    # The runtime writes this before optional metrics. A later metrics failure
+    # must not discard a freshly completed workflow return.
+    if result_file and Path(result_file).exists():
+        try:
+            obj = disk_invocation.runtime_return()
+            if obj:
+                return obj
+        except (json.JSONDecodeError, OSError):
+            pass
     if proc.returncode != 0:
         raise RuntimeError(
             f"runtime (node, {runtime_combo_label()}) failed (rc={proc.returncode}): "
             f"{proc.stderr[-2000:]}"
         )
-    # 1) result-file (authoritative top-level return).
-    if result_file and Path(result_file).exists():
-        try:
-            obj = (invocation.current("runtime_result.json") if invocation else
-                   json.loads(Path(result_file).read_text()))
-            if isinstance(obj, dict) and obj.get("eval_dir") and (not invocation or invocation.accepts(obj)):
-                return obj
-        except (json.JSONDecodeError, OSError):
-            pass
     # 2) stdout "WORKFLOW_RESULT <json>" line.
     try:
         obj = _parse_last_json_line(proc.stdout)
@@ -2285,7 +2291,7 @@ def _invoke_via_runtime(
     if eval_dir:
         wr = Path(eval_dir) / "workflow_return.json"
         if wr.exists():
-            obj = invocation.canonical_return() if invocation else _read_json(wr)
+            obj = disk_invocation.canonical_return()
             if obj.get("eval_dir"):
                 return obj
     raise WorkflowParseError(
@@ -5499,8 +5505,10 @@ def _recover_workflow_return(exp_root: Path, *, invocation: PhaseInvocation | No
     # we previously wrote from our OWN best-effort disk recovery (recovered_*
     # flags) must be re-derived fresh here, otherwise a stale reconstruction would
     # permanently shadow later recovery improvements (e.g. newly-extracted latency).
-    persisted = invocation.canonical_return() if invocation else _read_json(eval_dir / WORKFLOW_RETURN_FILE)
+    persisted = invocation.completed_return() if invocation else _read_json(eval_dir / WORKFLOW_RETURN_FILE)
     if invocation and (eval_dir.absolute() != invocation.eval_dir or not invocation.done()):
+        return None
+    if invocation is None and partial_return(persisted):
         return None
     if persisted.get("eval_dir") and not any(
         persisted.get(k)

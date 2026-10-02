@@ -129,6 +129,8 @@ def _runtime_mod(monkeypatch, captured):
 
     def fake_run(cmd, **kw):
         captured["cmd"], captured["kw"] = cmd, kw
+        if captured.get("write_result"):
+            captured["write_result"]()
         return captured["proc"]
 
     monkeypatch.setattr(rx, "subprocess", SimpleNamespace(run=fake_run))
@@ -138,7 +140,7 @@ def _runtime_mod(monkeypatch, captured):
 def test_the_result_file_is_the_authoritative_return(monkeypatch, tmp_path):
     captured = {"proc": _Proc(stdout="WORKFLOW_RESULT {\"eval_dir\": \"/from/stdout\"}")}
     rx = _runtime_mod(monkeypatch, captured)
-    (tmp_path / "runtime_result.json").write_text(
+    captured["write_result"] = lambda: (tmp_path / "runtime_result.json").write_text(
         json.dumps({"eval_dir": str(tmp_path), "throughput_speedup": 1.21}), encoding="utf-8")
 
     out = rx._invoke_via_runtime({"model_path": "/m"}, 60, str(tmp_path))
@@ -200,7 +202,7 @@ def test_a_corrupt_result_file_falls_through_to_stdout(monkeypatch, tmp_path):
 def test_the_on_disk_workflow_return_is_the_last_resort(monkeypatch, tmp_path):
     captured = {"proc": _Proc(stdout="no json here at all")}
     rx = _runtime_mod(monkeypatch, captured)
-    (tmp_path / "workflow_return.json").write_text(
+    captured["write_result"] = lambda: (tmp_path / "workflow_return.json").write_text(
         json.dumps({"eval_dir": str(tmp_path), "status": "ok"}), encoding="utf-8")
 
     assert rx._invoke_via_runtime({}, 60, str(tmp_path))["status"] == "ok"
@@ -245,6 +247,42 @@ def test_invoke_workflow_routes_to_the_runtime_only_with_ps_args(monkeypatch):
     assert seen["runtime"] == ({"a": 1}, 60, "/e")
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
     assert rx.invoke_workflow("prompt", 60, "/e")["eval_dir"] == "/native"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="Node runtime required")
+@pytest.mark.parametrize("phases", [None, "head"])
+def test_real_runtime_result_survives_metrics_write_failure(tmp_path, monkeypatch, phases):
+    """Run only a literal-return JS fixture; no agent or model is invoked."""
+    rx = _fresh(monkeypatch, GEAK_AGENT_BACKEND="codex")
+    monkeypatch.setenv("GEAK_CODEX_AUTOCONFIG", "0")
+    workflow = tmp_path / "literal_return.js"
+    workflow.write_text(
+        "return {eval_dir:args.eval_dir, phases_run:[args.phases || 'all'], "
+        "validation_status:args.phases ? 'phase_partial' : 'pass', state:{head_used:1}};\n"
+    )
+    monkeypatch.setattr(rx, "E2E_SCRIPT", workflow)
+    monkeypatch.setattr(rx, "E2E_DIR", tmp_path)
+    monkeypatch.setattr(rx, "NODE_BIN", shutil.which("node"))
+    # The real runtime writes the authoritative result first; this directory
+    # makes its subsequent metrics write fail before WORKFLOW_RESULT is printed.
+    (tmp_path / "runtime_metrics.json").mkdir()
+    captured = []
+
+    def run_bounded(cmd, **kwargs):
+        kwargs["timeout"] = 5
+        completed = subprocess.run(cmd, check=False, **kwargs)
+        captured.append(completed)
+        return completed
+
+    monkeypatch.setattr(rx, "subprocess", SimpleNamespace(run=run_bounded))
+    args = {"eval_dir": str(tmp_path), "phases": phases}
+    result = rx._invoke_via_runtime(args, 60, str(tmp_path))
+    assert captured[0].returncode != 0
+    assert "runtime_metrics.json" in captured[0].stderr
+    assert "WORKFLOW_RESULT" not in captured[0].stdout
+    assert result == json.loads((tmp_path / "runtime_result.json").read_text())
+    assert result["phases_run"] == [phases or "all"]
+    assert not (tmp_path / "workflow_return.json").exists()
 
 
 # Real CPU-only timeout through the runtime, in an already selected CI file.

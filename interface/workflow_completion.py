@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Completion evidence for an explicit invocation of workflow phases."""
+"""Completion evidence for new workflow and phase invocations."""
 
 from __future__ import annotations
 
@@ -9,6 +9,19 @@ import json
 import os
 import uuid
 from pathlib import Path
+
+
+def partial_return(result: dict) -> bool:
+    """A completed phase subset is not a completed full workflow."""
+    if not isinstance(result, dict):
+        return False
+    phases = result.get("phases_run")
+    return result.get("validation_status") == "phase_partial" or (
+        isinstance(phases, list)
+        and bool(phases)
+        and all(isinstance(phase, str) for phase in phases)
+        and not {"all", "final"}.intersection(phases)
+    )
 
 
 class PhaseInvocation:
@@ -23,7 +36,9 @@ class PhaseInvocation:
     def __init__(self, args: dict):
         self.eval_dir = Path(args["eval_dir"]).absolute()
         self.phases = {
-            part.strip() for part in args["phases"].split(",") if part.strip()
+            part.strip()
+            for part in str(args.get("phases") or "all").split(",")
+            if part.strip()
         }
         self.prior = {name: self._read(name) for name in self.FILES}
         self.history = self.eval_dir / "workflow_invocations" / uuid.uuid4().hex
@@ -81,31 +96,71 @@ class PhaseInvocation:
         return value if isinstance(value, dict) else {}
 
     def accepts(self, result: dict) -> bool:
+        if not isinstance(result, dict):
+            return False
         phases = result.get("phases_run")
-        return (
+        full = "all" in self.phases
+        matching_phases = (
             isinstance(phases, list)
             and all(isinstance(p, str) for p in phases)
             and set(phases) == self.phases
-            and Path(str(result.get("eval_dir") or "")).absolute() == self.eval_dir
+        )
+        # Older full-workflow returns predate phases_run; they remain valid,
+        # but a partial phase can never satisfy a full-workflow request.
+        if full and phases is None:
+            matching_phases = True
+        eval_dir = result.get("eval_dir")
+        return (
+            matching_phases
+            and not (full and partial_return(result))
+            and isinstance(eval_dir, str)
+            and bool(eval_dir.strip())
+            and Path(eval_dir).absolute() == self.eval_dir
         )
 
     def canonical_return(self) -> dict:
         value = self.current("workflow_return.json")
         return value if self.accepts(value) else {}
 
+    def runtime_return(self) -> dict:
+        value = self.current("runtime_result.json")
+        return value if self.accepts(value) else {}
+
+    def completed_return(self) -> dict:
+        return self.runtime_return() or self.canonical_return()
+
     def validation(self) -> dict:
         return (
             self.current("director_e2e_validation.json")
-            if "final" in self.phases
+            if self.phases.intersection({"all", "final"})
             else {}
         )
 
     def done(self) -> bool:
-        return bool(self.canonical_return() or self.validation())
+        return bool(self.completed_return() or self.validation())
 
 
 def phase_invocation(args: dict) -> PhaseInvocation | None:
     phases = {
         p.strip() for p in str(args.get("phases") or "all").split(",") if p.strip()
     }
-    return PhaseInvocation(args) if phases and "all" not in phases else None
+    invocation = PhaseInvocation(args)
+    if phases and "all" not in phases:
+        return invocation
+    for name in ("workflow_return.json", "runtime_result.json"):
+        previous = invocation.prior[name]
+        if previous is not None:
+            try:
+                value = json.loads(previous[1])
+            except (ValueError, UnicodeError):
+                continue
+            if isinstance(value, dict) and partial_return(value):
+                return invocation
+            if (
+                name == "workflow_return.json"
+                and isinstance(value, dict)
+                and value.get("eval_dir")
+            ):
+                # A completed canonical return supersedes older runtime files.
+                return None
+    return None

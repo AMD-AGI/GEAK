@@ -1684,6 +1684,28 @@ class TestInvokeViaSdk(_RunE2ECase):
         self.assertEqual(anyio.calls["sleep"], [rx.DONE_POLL_S])
         self.assertTrue(invocation.done())
 
+    def test_full_workflow_ignores_partial_setup_through_sdk_grace(self):
+        eval_dir = self.tmp / "e2e_full_after_setup"
+        eval_dir.mkdir()
+        marker = eval_dir / rx.WORKFLOW_RETURN_FILE
+        marker.write_text(json.dumps({"eval_dir": str(eval_dir), "phases_run": ["setup"],
+                                      "validation_status": "phase_partial"}))
+        invocation = rx.phase_invocation({"eval_dir": str(eval_dir)})
+        self.assertIsNotNone(invocation)
+
+        def finish_full():
+            marker.write_text(json.dumps({"eval_dir": str(eval_dir), "phases_run": ["all"],
+                                          "validation_status": "pass"}))
+
+        script = [AssistantMessage(text="before task start"), TaskStartedMessage(task_id="all"),
+                  TaskNotificationMessage(task_id="all", summary="detached final work"),
+                  ResultMessage(result="turn done")]
+        anyio, sdk = self._install(script, sleep_hook=finish_full)
+        rx._invoke_via_sdk("P", 120, str(eval_dir), invocation=invocation)
+        self.assertEqual(sdk.state["consumed"], script)
+        self.assertEqual(anyio.calls["sleep"], [rx.DONE_POLL_S])
+        self.assertTrue(invocation.done())
+
     def test_background_task_keeps_the_client_open_until_the_marker_lands(self):
         """The killer case: a task notified terminal and the turn ended, but the
         detached A/B is still running. The runner must poll for the marker
@@ -2857,6 +2879,8 @@ class TestMain(_RunE2ECase):
         self.assertEqual((self.eval_dir / rx.WORKFLOW_RETURN_FILE).read_bytes(), original)
 
     def test_explicit_all_keeps_completed_rerun_idempotent(self):
+        self.write_json(self.eval_dir / "runtime_result.json", {
+            "eval_dir": str(self.eval_dir), "phases_run": ["setup"], "validation_status": "phase_partial"})
         self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, {
             "schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["all"],
             "baseline_throughput_tok_s": 400.0, "final_throughput_tok_s": 500.0,
@@ -2865,6 +2889,51 @@ class TestMain(_RunE2ECase):
         rc, _ = self._run(self._handoff(phases="all"))
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(self.result_path.read_text())["throughput_speedup"], 1.25)
+
+    def test_full_request_after_setup_invokes_and_cannot_recover_old_partial(self):
+        for phases in (None, "all"):
+            with self.subTest(phases=phases):
+                prior = {"schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+                         "validation_status": "phase_partial", "baseline_throughput_tok_s": 400.0,
+                         "final_throughput_tok_s": 400.0, "throughput_speedup": 1.0}
+                self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, prior)
+                calls = []
+
+                def interrupted(*args, _calls=calls, **kwargs):
+                    _calls.append(kwargs)
+                    self.assertIsNotNone(kwargs.get("invocation"))
+                    raise TimeoutError("full workflow not completed")
+
+                self.patch_rx("invoke_workflow", interrupted)
+                rc, _ = self._run(self._handoff(phases=phases))
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(rc, 0)
+                out = json.loads(self.result_path.read_text())
+                self.assertEqual(out["status"], "timeout")
+                self.assertNotIn("throughput_speedup", out)
+
+    def test_exit_recovery_does_not_reuse_partial_setup(self):
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, {
+            "schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+            "validation_status": "phase_partial", "baseline_throughput_tok_s": 400.0,
+            "final_throughput_tok_s": 400.0, "throughput_speedup": 1.0})
+        callbacks = []
+        self.patch_rx("atexit", types.SimpleNamespace(register=callbacks.append))
+
+        def interrupted_install(signum, handler):
+            if getattr(handler, "__name__", "") == "_on_term":
+                raise RuntimeError("exit before workflow invocation")
+
+        self.patch_rx("signal", types.SimpleNamespace(
+            SIGTERM=signal.SIGTERM, SIG_IGN=signal.SIG_IGN, signal=interrupted_install))
+        with self.assertRaisesRegex(RuntimeError, "exit before workflow"):
+            self._run(self._handoff())
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["error_class"], "interrupted")
+        self.assertNotIn("throughput_speedup", out)
 
     def test_resume_with_a_failing_recovery_still_emits_an_error_file(self):
         """Both recovery attempts (the short-circuit and the one inside _emit)
