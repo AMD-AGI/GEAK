@@ -27,8 +27,10 @@ freeze directly from the **input kernel dir**. You do NOT optimize; you build th
 ## Inputs
 `KERNEL_PATH` (input kernel dir), `EXP_ROOT` (where run dirs go), `KERNEL_NAME_HINT`, `GPU_ID`,
 `OP_SPEC` (optional hints: op_kind, shapes, dtype, regime), `WORKLOAD_SPEC_PATH` (optional real-workload
-cases), `SKILL_DIR` (this kernel_workflow dir), `KERNEL_KNOWLEDGE_DIR`, `HARNESS_LIB` (abs path to the
-shared `harness_lib.py` to vendor), `GPU_LOCK` (abs path to `gpu_lock.sh`).
+cases), `SKILL_DIR` (this kernel_workflow dir), `EXPECTED_GFX` / `EXPECTED_TARGET` /
+`EXPECTED_DEVICE_NAME` / `EXPECTED_PHYSICAL_CU_COUNT` (possibly empty/zero),
+`HARNESS_LIB` (abs path to the shared `harness_lib.py` to vendor),
+and `GPU_LOCK` (abs path to `gpu_lock.sh`).
 
 ## The op task-dir contract you must emit
 ```
@@ -48,7 +50,14 @@ demand instead of storing them. Downstream lanes must handle both dir shapes.
 
 ## PHASE=freeze — steps
 
-### 0. Create the isolated run dir
+### 0. Establish identity, then create the isolated run dir
+Run `python3 "$SKILL_DIR/../scripts/gpu_identity.py"` before any Discover
+policy can be selected. Return its `gfx`, `target`, `marketing_name`, and
+`physical_cu_count` as the structured fields below. Hard-stop on a mismatch
+with non-empty `EXPECTED_GFX` or `EXPECTED_TARGET=r9700`; never infer R9700
+from gfx1201. Also hard-stop when non-empty `EXPECTED_DEVICE_NAME` or a positive
+`EXPECTED_PHYSICAL_CU_COUNT` disagrees.
+
 ```bash
 TS=$(date +%Y%m%d_%H%M%S)
 EVAL_DIR="$EXP_ROOT/bakeoff_${KERNEL_NAME_HINT}_${TS}"
@@ -256,6 +265,10 @@ value/layout-dependent op whose inputs cannot be reconstructed), set `smoke:"fai
   "candidate_backends": ["hip","triton","flydsl"],
   "baseline_frozen": true,
   "baseline_callable": "module:attr of the frozen input kernel",
+  "device_gfx": "gfx950",
+  "device_target": "r9700|unknown",
+  "device_name": "<exact Marketing Name>",
+  "physical_cu_count": 256,
   "reference_io_sha256": "",
   "op_spec": { "op_kind": "...", "shapes": {}, "dtype": "bf16", "regime": "both" },
   "workload_path": "<task_dir>/workload.json or ''",

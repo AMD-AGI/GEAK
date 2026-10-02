@@ -27,7 +27,8 @@ key and the measurement remains the judge. This skill may never prune a candidat
 ## 1. Inputs
 
 - `profile/round_<R>/profile_topN.json` — the standardized Top-N (required).
-- `env_report.json` — `gfx`, `model_arch_class`, `model_dtype`, `workload` (required).
+- `env_report.json` — `gfx`, structured `device_target`, `physical_cu_count`,
+  `model_arch_class`, `model_dtype`, `workload` (required).
 - The model's `config.json` — layer count, expert count, hidden/intermediate sizes, head counts
   (optional but needed for a good MoE/attention byte model).
 - `peaks.md` — hardware denominators, keyed by `gfx`.
@@ -84,8 +85,16 @@ see the disagreement rather than a single blended number that hides it.
    what the roofline says, so a headroom estimate cannot change a decision — modelling those kernels
    only adds failure modes. Skipped entries are **absent** from the artifact; they are NOT `degraded[]`
    (a kernel too small to matter is not a modelling failure and must not read as one).
-1. Resolve peaks for `gfx` from `peaks.md`. Not found → derive from device props, set
-   `peaks.confidence="low"` (§6 L1).
+1. Resolve peaks from `peaks.md` via
+   `resolve_peaks(gfx, product=env_report.device_target)`.
+   `device_target=unknown` (every non-R9700 card, MI300/MI355 included) is no
+   product constraint: the ISA-keyed tables still resolve. Client RDNA4
+   numeric peaks exist only for product `r9700`. A bare gfx1201 (or any other
+   gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
+   unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4
+   — it must not use that gate. Other unknown architectures may derive from
+   device props with `peaks.confidence="low"` (§6 L1). Use `peak_flops_for()`
+   canonical dtype keys; a missing dtype is unknown, never the table maximum.
 2. For each selected entry, pick the **e2e-critical regime** — the one carrying the launches
    (`serving.n_decode_steps` vs `n_prefill_steps`; a decode-dominated run means decode). Use that
    regime's `base_latency_ms` as `t_ms`.
@@ -256,6 +265,15 @@ set by **access regularity**, not by how important the kernel is.
 | attention decode (paged) | **0.50** | irregular paged KV access, occupancy-sensitive |
 
 These are **priors, not constants** — §8 corrects them from observed outcomes.
+One measured product override is available through
+`roofline_tools.target_eff_for(op_class, product)`:
+
+| product / class | `target_eff` | evidence |
+|---|---:|---|
+| R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76** | 30 event-timed 1 GiB→1 GiB copies: median 485.8 GB/s read+write, or 0.759× the 640 GB/s datasheet pin rate |
+
+This override does not change dense-GEMM compute efficiency or paged-attention
+priors. It is product-scoped; do not apply it to an unknown gfx1201 card.
 
 ### Routing table (the actual point of this skill)
 
@@ -300,12 +318,14 @@ make the kernel move **fewer bytes for the same work**:
 ## 8. Guarding against being wrong
 
 1. **Sanity band** — §6 L3.
-2. **Validate the peak before believing a `roofline_pct`.** The peaks are empirical microbench
-   results, not spec figures. The load-bearing cross-check: BF16 and FP16 run at the same rate on the
+2. **Validate the denominator before believing a `roofline_pct`.** The table
+   records datasheet ceilings; any separately measured achievable peak must be
+   labeled with its product, toolchain, and workload. The load-bearing cross-check:
+   BF16 and FP16 run at the same rate on the
    matrix core of every tabulated part (MFMA on CDNA, WMMA on RDNA), so their peaks must be equal —
    when they are not, the compute-axis number is inflated
-   (a "kernel at 85%" may really be at 43%). Trivial streaming also tops out near ~0.85 of the HBM pin
-   rate, which is why the memory `target_eff` is 0.90, not 1.0.
+   (a "kernel at 85%" may really be at 43%). The memory `target_eff` values are
+   generic op-class priors, not measured R9700 GDDR6 efficiency factors.
 3. **Two noise bands, not one.** An **isolated-kernel** speedup is real only if it clears the
    isolated repeat band (**~3.4%** on identical reruns here — much wider than people assume), while an
    **e2e serving** delta uses the serving band (~0.5%). Do not judge an isolated kernel win against the

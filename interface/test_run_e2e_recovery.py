@@ -30,6 +30,19 @@ def _load():
 rx = _load()
 
 
+@pytest.fixture(autouse=True)
+def _gpu_identity(monkeypatch):
+    monkeypatch.setenv(
+        "GEAK_GPU_IDENTITY_JSON",
+        json.dumps({
+            "gfx": "gfx950",
+            "target": "unknown",
+            "marketing_name": "AMD Instinct MI355X",
+            "physical_cu_count": 256,
+        }),
+    )
+
+
 def _make_eval_dir(tmp_path: Path, *, accepted: bool = True,
                    with_validation: bool = False) -> Path:
     """Build a fake eval_dir with a bench_e2e.sh + an accepted intermediate."""

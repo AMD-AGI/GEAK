@@ -1,7 +1,9 @@
-# e2e_workflow — End-to-End LLM Inference-Throughput Optimizer (AMD Instinct MI GPUs)
+# e2e_workflow — End-to-End LLM Inference-Throughput Optimizer (AMD Instinct + R9700)
 
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that raises the **sglang/vllm/ATOM
-serving throughput** of an LLM on AMD Instinct MI GPUs. It is a *system layer* built on top of — and recursively
+serving throughput** of an LLM on AMD Instinct MI GPUs and the validated Radeon AI PRO R9700
+(gfx1201, vLLM only). Generic gfx1201 is an ISA identity, not a supported serving product.
+It is a *system layer* built on top of — and recursively
 calling — the UNCHANGED single-kernel `kernel_workflow` (`../kernel_workflow/`). The single-kernel workflow's
 quality is preserved verbatim; this layer adds everything above the kernel: profiling a running
 server, Amdahl triage, config/backend tuning, extracting hot kernels into standalone unittests,
@@ -48,7 +50,8 @@ LOOP milestone[ plan → per kernel: Extract → recursive kernel_workflow.js �
 Finalize(overlay+patch+launch bundle) → Architect Report → Director Validation
 ```
 Setup runs a **preflight** (see `knowledge/preflight.md`) — a judgment-guided env self-check (not a
-rigid script): it confirms the chosen `backend` stack, the model, GPU visibility; detects gfx, trace
+rigid script): it confirms the chosen `backend` stack, the model, GPU visibility; verifies the
+caller-established structured product/ISA/CU identity, detects trace
 sources, available op backends, and the model's arch class; degrades gracefully and writes
 `env_report.{md,json}` that every later phase routes on.
 Every accepted change compounds into the carried-forward overlay + config; throughput is always
@@ -89,15 +92,21 @@ reference only; verify every switch by measuring):
    step). HIP/CK when the headroom justifies them (`head_author_max`, default 2 = FlyDSL+Triton).
 
 ## Invocation
-Run via the `Workflow` tool. `workflow_dir` must be this folder (a JS workflow can't read its own
-path); the kernel layer defaults to the sibling `kernel_workflow/`.
+Production callers should use `interface/run_e2e.py`, which performs structured
+on-box identity detection before backend and knowledge policy are selected. A
+direct model-mode `Workflow` call must supply both `expected_gfx` and
+`expected_target`; this entry fails closed when either is missing.
+`workflow_dir` must be this folder (a JS workflow can't read its own path); the
+kernel layer defaults to the sibling `kernel_workflow/`.
 ```
 Workflow({
   scriptPath: "<E2E_DIR>/e2e_workflow.js",
   args: {
     model_path: "/path/to/model",                    // REQUIRED for e2e mode (no default)
     workflow_dir: "<E2E_DIR>",                       // REQUIRED: this folder
-    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh)
+    expected_gfx: "gfx950",                          // REQUIRED direct E2E identity
+    expected_target: "unknown",                      // REQUIRED: r9700|unknown; gfx1201 never implies r9700
+    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 is vllm-only (default vllm)
     launch_script: "<...>/launch.sh",                // optional; else the stack's default config
     kernel_workflow_dir: "<...>/workflows",          // optional; default = sibling kernel_workflow/
     budget: 4,            // max kernel-optimization tasks (kernel-layer tasks; config sweep is free)

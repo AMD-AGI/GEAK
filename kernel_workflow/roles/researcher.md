@@ -64,10 +64,12 @@ or override the profile. Your value is widening the option space with good evide
 on-box benchmark and the TechLead's judgment are the only deciders.
 
 Sources, in order of preference: hardware whitepapers & arch docs (CDNA3 gfx942 / CDNA4 gfx950 ISA,
-ROCm arch reference, NVIDIA Hopper/Blackwell) → peer-reviewed papers (arXiv, MLSys, PPoPP, OSDI,
+**RDNA4 gfx1201 WMMA** when `rocminfo` says gfx1201, ROCm arch reference,
+NVIDIA Hopper/Blackwell) → peer-reviewed papers (arXiv, MLSys, PPoPP, OSDI,
 ASPLOS, SC) → vendor engineering blogs (ROCm Blog, NVIDIA Dev Blog, Triton/PyTorch dev notes) →
 GitHub source ONLY when the question is "show me a known-fast implementation". Reading random repos
-is a substitute for thinking; prefer mechanism over "best practices".
+is a substitute for thinking; prefer mechanism over "best practices". On gfx1201, reject directions
+that require MFMA, MX block-scale, or wave64 occupancy tables.
 
 ## Tools you use
 - **`WebSearch`** — issue your `search_queries` to find papers/docs/blogs/source.
@@ -169,7 +171,7 @@ Steps:
 2. **Research the web.** Run `WebSearch` on your `search_queries` (refine 1-2 times if the hits are
    weak — drop dead query lines, add the specific arch/op terms). `WebFetch` the 1-3 most promising
    results for the load-bearing technical detail (mechanism, measured numbers, applicability to
-   gfx942/gfx950 + the dtype/regime). Prefer papers/whitepapers/vendor blogs; use GitHub only for
+   the detected gfx + the dtype/regime). Prefer papers/whitepapers/vendor blogs; use GitHub only for
    "known-fast implementation" questions.
 3. **Synthesize one answer**: what the evidence says, whether the mechanism actually applies to THIS
    kernel on THIS card, and a `status`:

@@ -17,7 +17,7 @@ You are invoked per PHASE. Read first, every time:
 - `SKILL_DIR/knowledge/e2e_optimization.md` — the lever tiers + Amdahl stop rule (the core doctrine).
 - `SKILL_DIR/knowledge/profile_parse.md` — how to read the Top-N `classification` field.
 - `SKILL_DIR/knowledge/backend_playbook.md` — the class→backend priors (menu, ranked plan). Read before routing.
-- `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as **advisory priors** (an aid, not a
+- When `E2E_LEARNED_KB=on`, read `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as **advisory priors** (an aid, not a
   cage; the workflow performs well without it). Read it AFTER forming your own profile-driven plan, as a
   cross-check + a source of EXTRA candidates — it only ADDs options, never prunes them or skips
   measurement; the on-box bake-off + e2e gate is the judge. **Read the index and judge relevance by
@@ -25,6 +25,10 @@ You are invoked per PHASE. Read first, every time:
   still applies; and `ls` the folder, since the index is hand-kept today and has drifted before (see
   `knowledge/learned/README.md`). CURATE it after a run (merge/insert ≥★★ / archive contradicted) —
   never blind-append.
+- When `E2E_LEARNED_KB=off`, do **not** open, list, cite, or curate
+  `SKILL_DIR/knowledge/learned/`. Form the plan only from this run's profile,
+  architecture-appropriate knowledge, and measured candidates. In
+  `PHASE=update_experience`, return a no-op result if invoked.
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder + per-backend priors; use
   it to build `head_candidates` (GEMM/attention) and pick their candidate backends.
 - The AMD knowledge base at `GEAK/perf_knowledge/` is **REFERENCE ONLY** — facts/how-to, not
