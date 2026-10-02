@@ -89,6 +89,24 @@ jobs:
             interface/test_run_e2e_tuning_result.py \
             interface/test_run_e2e_alignment.py \
             interface/test_run_e2e_dispatch.py \
+            interface/test_run_e2e_cost_controls.py \
+            interface/test_shared_tool_cache.py \
+            interface/test_native_prefix_marker.py \
+            interface/test_registered_native_cache.py \
+            interface/test_catalog_producer.py \
+            interface/test_kernel_catalog_profile.py \
+            interface/test_hyperloom_catalog_profile.py \
+            interface/test_run_registered_cache.py \
+            interface/test_cache_proxy.py \
+            interface/test_local_helper_driver.py \
+            interface/test_native_sdk_cache.py \
+            interface/test_native_helpers.py \
+            interface/test_native_envelope.py \
+            interface/test_system_envelope.py \
+            interface/test_native_journal.py \
+            interface/test_native_source_contract.py \
+            interface/test_sdk_helpers.py \
+            interface/test_run_kernel_native.py \
             interface/test_run_e2e_runtime_dispatch.py \
             interface/test_run_e2e_workload_comparability.py \
             interface/test_run_e2e_recipe_env.py \
