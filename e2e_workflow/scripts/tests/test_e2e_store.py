@@ -1151,3 +1151,42 @@ def test_unproven_tuning_cannot_enter_deployment_store(tmp_path, missing):
     with pytest.raises(SystemExit, match="Unproven tuning"):
         _write(tmp_path, "bad", "tuning", tuning_skillset=tuning)
     assert e2e_store._tuning_files({"tuning_skillset": tuning}, []) == {}
+
+
+@pytest.mark.parametrize("carrier", ["accepted_kernels", "accepted_heads"])
+@pytest.mark.parametrize("state", ["missing", "disabled", "incomplete", "disabled_complete"])
+def test_tagged_tuning_requires_an_accepted_section(tmp_path, carrier, state):
+    extra = {}
+    if state == "disabled":
+        extra["tuning_skillset"] = {"enabled": False, "ran": False}
+    elif state in ("incomplete", "disabled_complete"):
+        extra["tuning_skillset"] = _tuned(tmp_path, "unproven.csv")
+        if state == "incomplete":
+            extra["tuning_skillset"].pop("ab_complete")
+        else:
+            extra["tuning_skillset"]["enabled"] = False
+    extra[carrier] = [{"name": "unproven_tuned_op", "from_tuning_skillset": True}]
+    with pytest.raises(SystemExit, match="Unproven tuning"):
+        _write(tmp_path, "bad", "tuning", **extra)
+    assert not (tmp_path / "store").exists()
+
+
+@pytest.mark.parametrize("carrier", ["accepted_kernels", "accepted_heads"])
+@pytest.mark.parametrize("tuning", [None, {"enabled": False, "ran": False}])
+def test_independent_kernel_win_survives_without_tuning(tmp_path, carrier, tuning):
+    _write(tmp_path, "good", "kernels", tuning_skillset=tuning,
+           **{carrier: [{"name": "independent_op", "e2e_delta_pct": 20.0}]})
+    view = _run("resolve", "--store", str(tmp_path / "store"))["candidates"][0]
+    assert view["accepted_kernels"][0]["name"] == "independent_op"
+
+
+@pytest.mark.parametrize("carrier", ["accepted_kernels", "accepted_heads"])
+def test_complete_real_value_pair_keeps_tagged_tuning(tmp_path, carrier):
+    tuning = _tuned(tmp_path, "proven.csv")
+    tuning.update(pre_tune_throughput_tok_s=146069.366,
+                  post_tune_throughput_tok_s=150959.985, correctness_gate="none")
+    out = _write(tmp_path, "good", "tuning", tuning_skillset=tuning,
+                 **{carrier: [{"name": "proven_tuned_op", "from_tuning_skillset": True}]})
+    view = _run("resolve", "--store", str(tmp_path / "store"))["candidates"][0]
+    assert view["accepted_kernels"][0]["name"] == "proven_tuned_op"
+    assert "tuning/00_proven.csv" in out["files"]

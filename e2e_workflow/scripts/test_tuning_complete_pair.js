@@ -17,6 +17,7 @@ for (const value of [false,1,'true',null]) bad.push({...valid,ab_complete:value}
 for (const field of ['pre_tune_throughput_tok_s','post_tune_throughput_tok_s'])
   for (const value of [0,-1,NaN,Infinity,-Infinity,'1000',true]) bad.push({...valid,[field]:value});
 for (const value of ['fail','unknown','',null]) bad.push({...valid,correctness_gate:value});
+bad.push({...valid, enabled:false}, {...valid, ran:false});
 const reportCode=src.slice(src.indexOf('function tuningReturn()'),src.indexOf('\nconst wfReturn ='));
 const report = new Function('tuning','tuningAccepted', 'ACCURACY_GATE', `
  const TUNING_SKILLSET_ENABLED=true,TUNING_SKILLSET_DIR='/skills',TUNING_KB_ENABLED=false;
@@ -32,6 +33,17 @@ const resume=src.slice(src.indexOf('let tuning = ST.tuning'),src.indexOf('if (FA
 const resumeFn=new Function('ST','tuningAccepted',resume+'\nreturn tuning;');
 assert.strictEqual(resumeFn({tuning:valid},accepted),valid);
 for (const value of bad) assert.throws(()=>resumeFn({tuning:value},accepted),/Carried accepted tuning/);
+const realPair = {...valid, pre_tune_throughput_tok_s:146069.366, post_tune_throughput_tok_s:150959.985};
+for (const carrier of ['accepted_kernels', 'accepted_heads']) {
+  const tagged = {[carrier]: [{short_name:'tuned_op', from_tuning_skillset:true}]};
+  for (const value of [undefined, {enabled:false, ran:false}, {...realPair, enabled:false}, missing]) {
+    assert.throws(() => resumeFn({...tagged, tuning:value}, accepted), /Carried accepted tuning/);
+  }
+  assert.strictEqual(resumeFn({...tagged, tuning:realPair}, accepted), realPair);
+  for (const value of [undefined, {enabled:false, ran:false}]) {
+    assert.strictEqual(resumeFn({[carrier]: [{short_name:'independent_op'}], tuning:value}, accepted), value || null);
+  }
+}
 assert(src.includes('const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuningAccepted(tuning))'));
 assert(src.includes("if (!(TUNING_SKILLSET_ENABLED && tuningAccepted(tuning))) return {};"));
 console.log(`PASS ${bad.length} malformed pairs rejected by banking/report/resume; explicit none +3.348% retained`);

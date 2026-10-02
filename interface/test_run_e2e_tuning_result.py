@@ -238,16 +238,21 @@ def _valid_complete_pair():
     ('post_tune_throughput_tok_s',None),('post_tune_throughput_tok_s',0),('post_tune_throughput_tok_s',-1),
     ('post_tune_throughput_tok_s',math.nan),('post_tune_throughput_tok_s',math.inf),
     ('correctness_gate',None),('correctness_gate','unknown'),('correctness_gate','fail'),('ran',False),
+    ('enabled',False),
 ])
 def test_incomplete_or_invalid_phase_cannot_be_reported_as_accepted(tmp_path,field,value):
     tuning=_valid_complete_pair()
     if value is None:tuning.pop(field,None)
     else:tuning[field]=value
     assert not tuning_accepted(tuning)
-    result=_norm(tmp_path,_wf(tuning_skillset=tuning))['tuning_skillset']
-    assert result['gate']!='accepted'
-    assert 'artifacts' not in result and 'apply_env' not in result
-    if result['ran']:assert result['share_of_total_gain_pct'] is None
+    workflow = _wf(tuning_skillset=tuning)
+    result = rx._tuning_skillset_section(workflow, tmp_path)
+    if result is not None:
+        assert result['gate']!='accepted'
+        assert 'artifacts' not in result and 'apply_env' not in result
+        if result['ran']:assert result['share_of_total_gain_pct'] is None
+    with pytest.raises(ValueError, match="Workflow banks tuning"):
+        _norm(tmp_path, workflow)
 
 
 def test_complete_none_gate_preserves_the_3348_percent_object(tmp_path):
@@ -281,14 +286,59 @@ def test_report_alone_cannot_invent_explicit_completion(tmp_path):
 
 
 def test_none_tuning_is_not_accepted_when_handoff_requires_accuracy(tmp_path):
-    result = rx.normalize_result({"accuracy_gate": "gsm8k"}, _wf(eval_dir=str(tmp_path), tuning_skillset=_valid_complete_pair()))
-    assert result["tuning_skillset"]["gate"] != "accepted"
+    with pytest.raises(ValueError, match="Workflow banks tuning"):
+        rx.normalize_result({"accuracy_gate": "gsm8k"}, _wf(eval_dir=str(tmp_path), tuning_skillset=_valid_complete_pair()))
 
 
-def test_invalid_tuning_cannot_survive_as_an_accepted_kernel(tmp_path):
+def test_env_only_tuning_claim_requires_a_complete_pair(tmp_path):
     tuning = _valid_complete_pair()
     tuning.pop("ab_complete")
+    workflow = _wf(tuning_skillset=tuning,
+                   accepted_config={"flags": "", "env": tuning["apply_env"]})
     with pytest.raises(ValueError, match="Workflow banks tuning"):
-        _norm(tmp_path, _wf(tuning_skillset=tuning, accepted_kernels=[{
+        _norm(tmp_path, workflow)
+
+
+@pytest.mark.parametrize("carrier", ["accepted_kernels", "accepted_heads"])
+@pytest.mark.parametrize("state", ["missing", "disabled", "incomplete", "disabled_complete"])
+def test_tagged_tuning_requires_an_accepted_section(tmp_path, carrier, state):
+    tuning = {}
+    if state == "disabled":
+        tuning["tuning_skillset"] = {"enabled": False, "ran": False}
+    elif state in ("incomplete", "disabled_complete"):
+        tuning["tuning_skillset"] = _valid_complete_pair()
+        if state == "incomplete":
+            tuning["tuning_skillset"].pop("ab_complete")
+        else:
+            tuning["tuning_skillset"]["enabled"] = False
+    with pytest.raises(ValueError, match="Workflow banks tuning"):
+        _norm(tmp_path, _wf(**tuning, **{carrier: [{
             "short_name": "unproven_tuned_op", "from_tuning_skillset": True,
-        }]))
+        }]}))
+
+
+@pytest.mark.parametrize("carrier", ["accepted_kernels", "accepted_heads"])
+@pytest.mark.parametrize("tuning", [None, {"enabled": False, "ran": False}])
+def test_independent_kernel_win_survives_without_tuning(tmp_path, carrier, tuning):
+    kernels = [{"short_name": "independent_op", "e2e_delta_pct": 20.0}]
+    result = _norm(tmp_path, _wf(tuning_skillset=tuning, **{carrier: kernels}))
+    assert result[carrier] == kernels
+    assert result["throughput_speedup"] == 1.2
+    assert "tuning_skillset" not in result
+
+
+@pytest.mark.parametrize("carrier", ["accepted_kernels", "accepted_heads"])
+def test_complete_real_value_pair_keeps_tagged_tuning(tmp_path, carrier):
+    tuning = _tuning(
+        pre_tune_throughput_tok_s=146069.366,
+        post_tune_throughput_tok_s=150959.985,
+        tuning_speedup=150959.985 / 146069.366,
+        tuning_delta_pct=(150959.985 / 146069.366 - 1) * 100,
+        correctness_gate="none",
+    )
+    kernels = [{"short_name": "proven_tuned_op", "from_tuning_skillset": True}]
+    result = _norm(tmp_path, _wf(tuning_skillset=tuning, **{carrier: kernels}))
+    assert result[carrier] == kernels
+    assert result["tuning_skillset"]["gate"] == "accepted"
+    assert result["tuning_skillset"]["pre_tune_throughput_tok_s"] == 146069.366
+    assert result["tuning_skillset"]["post_tune_throughput_tok_s"] == 150959.985

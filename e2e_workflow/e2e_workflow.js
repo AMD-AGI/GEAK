@@ -730,7 +730,7 @@ const ST = A.state || {};   // carried state from a prior phase invocation
 // long before the TuningSkillset phase body — declaring `tuning` there left it in the temporal dead
 // zone on the first integrate leg. The tuning phase later reassigns it.
 function tuningAccepted(result) {
-  return !!(result && result.gate === 'accepted' && result.ran !== false && result.engagement_verified === true &&
+  return !!(result && result.gate === 'accepted' && result.enabled !== false && result.ran !== false && result.engagement_verified === true &&
     result.ab_complete === true &&
     Number.isFinite(result.pre_tune_throughput_tok_s) && result.pre_tune_throughput_tok_s > 0 &&
     Number.isFinite(result.post_tune_throughput_tok_s) && result.post_tune_throughput_tok_s > result.pre_tune_throughput_tok_s &&
@@ -738,7 +738,9 @@ function tuningAccepted(result) {
       (ACCURACY_GATE === 'none' && ['none', 'skipped'].includes(result.correctness_gate))));
 }
 let tuning = ST.tuning || null;
-if (tuning && tuning.gate === 'accepted' && !tuningAccepted(tuning)) {
+if (((tuning && tuning.gate === 'accepted') ||
+    ['accepted_kernels', 'accepted_heads'].some(key =>
+      (ST[key] || []).some(kernel => kernel && kernel.from_tuning_skillset))) && !tuningAccepted(tuning)) {
   throw new Error('Carried accepted tuning lacks a complete valid pre/post pair; refusing to reuse its config.');
 }
 if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel-only; budget ${Math.round(FAST_BUDGET_MS / 60000)}min (stop new heads at ${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min, per-head workflow cap ${Math.round(FAST_HEAD_WF_MS / 60000)}min).`);

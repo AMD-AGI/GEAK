@@ -21,6 +21,7 @@ def tuning_accepted(tuning, accuracy_gate=None):
     correctness_ok = correctness == "pass" or (
         requested == "none" and correctness in ("none", "skipped")
     )
-    return (tuning.get("gate") == "accepted" and tuning.get("ran") is not False
+    return (tuning.get("gate") == "accepted" and tuning.get("enabled") is not False
+            and tuning.get("ran") is not False
             and tuning.get("engagement_verified") is True and correctness_ok
             and tuning["post_tune_throughput_tok_s"] > tuning["pre_tune_throughput_tok_s"])

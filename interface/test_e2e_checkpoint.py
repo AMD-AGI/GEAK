@@ -444,11 +444,14 @@ def test_recovers_legacy_tuning_composite_as_provisional(tmp_path):
     }), encoding="utf-8")
 
     recovered = rx._recover_workflow_return(tmp_path)
-    normalized = rx.normalize_result({}, recovered)
 
     assert recovered["validation_status"] == "recovered_tuning_skillset_legacy_provisional"
     assert recovered["accepted_kernels"][0]["kernel_id"] == "gemm_a8w8"
-    assert normalized["result_source"] == "disk_tuning_skillset_legacy_provisional"
+    assert recovered["tuning_skillset"]["gate"] == "accepted_provisional"
+    assert recovered["recovered_tuning_legacy"] is True
+    assert recovered["recovery_evidence"]["original_gate"] == "not_persisted"
+    with pytest.raises(ValueError, match="Workflow banks tuning"):
+        rx.normalize_result({}, recovered)
 
     checkpoint = _checkpoint(eval_dir, "tuning_skillset")
     asset = eval_dir / "checkpoint_assets" / "bench_e2e.sh"

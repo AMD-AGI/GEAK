@@ -624,9 +624,11 @@ def build_record(a, result: dict, workdir=None) -> dict:
     writes.
     """
     tuning = result.get("tuning_skillset")
-    if isinstance(tuning, dict) and not tuning_accepted(tuning) and (
-        tuning.get("gate") == "accepted" or any(k.get("from_tuning_skillset") for k in (result.get("accepted_kernels") or []) if isinstance(k, dict))
-    ):
+    if ((isinstance(tuning, dict) and tuning.get("gate") == "accepted") or any(
+        isinstance(kernel, dict) and kernel.get("from_tuning_skillset")
+        for key in ("accepted_kernels", "accepted_heads")
+        for kernel in (result.get(key) or [])
+    )) and not tuning_accepted(tuning):
         raise SystemExit("Unproven tuning cannot be recorded as an accepted deployment")
     identity = identity_of(a)
     final = finite_speedup(result.get("final_throughput_tok_s"))

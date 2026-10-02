@@ -3919,10 +3919,12 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # ADDITIVE ONLY. Appended after the dict above is complete so it is self-evident at review time that
     # no existing key is touched, and omitted entirely when the phase did not run.
     tuning_section = _tuning_skillset_section(wf, eval_dir, accuracy_gate=h.get("accuracy_gate"))
-    if tuning_section is not None and tuning_section.get("gate") != "accepted" and any(
+    tuning = wf.get("tuning_skillset")
+    if ((isinstance(tuning, dict) and tuning.get("gate") == "accepted") or any(
         isinstance(kernel, dict) and kernel.get("from_tuning_skillset")
-        for kernel in (wf.get("accepted_kernels") or [])
-    ):
+        for key in ("accepted_kernels", "accepted_heads")
+        for kernel in (wf.get(key) or [])
+    )) and not (tuning_section and tuning_section.get("gate") == "accepted"):
         raise ValueError("Workflow banks tuning without a complete accepted pre/post pair")
     if tuning_section is not None and tuning_section.get("gate") == "accepted" and tuning_section.get("runtime_csv_manifests"):
         runtime_csvs = verify_runtime_tuning(tuning_section, eval_dir, accepted_config["env_map"])
