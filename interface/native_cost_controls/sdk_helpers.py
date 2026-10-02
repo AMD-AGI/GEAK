@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from .cache_proxy import HTTPTransport, SharedToolCacheProxy
 from .helper_driver import Unsupported
 from .native_helpers import HelperMirror, HelperTransport, NativeHelperRegistry
-from .sdk_cache import CachedSDKClient, native_shared_tool_cache
+from .sdk_cache import LEGACY_POLICY, CachedSDKClient, native_shared_tool_cache
 from .shared_tool_cache import CachePolicyResult
 
 
@@ -143,7 +143,10 @@ class WorkflowSDKClient:
                 return self.proxy_factory(endpoint, policy if self.cache_enabled else _UnchangedPolicy(),
                     enabled=enabled, transport=transport)
 
-            self._cache = native_shared_tool_cache(options, enabled=True, proxy_factory=proxy)
+            # Helpers still need the proxy when caching is off. Ignore optional
+            # registered-catalog settings in that unchanged transport-only path.
+            self._cache = native_shared_tool_cache(options, enabled=True, proxy_factory=proxy,
+                policy_mode=None if self.cache_enabled else LEGACY_POLICY)
             self.cache_session = self._cache.__enter__()
             if self.cache_session.status != "active":
                 # Unsupported transport setup must not retain helper hooks.

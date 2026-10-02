@@ -8,10 +8,19 @@ import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, is_dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from .cache_proxy import SharedToolCacheProxy
+from .native_prefix_marker import DECODER
+from .registered_prefix import (
+    POLICY_NAME,
+    RegisteredNativeToolCachePolicy,
+    RegisteredToolPrefix,
+)
 from .shared_tool_cache import CachePolicyResult, SharedToolCachePolicy
+
+LEGACY_POLICY = "legacy_shared_tool_prefix"
 
 
 def _pairs(items):
@@ -77,6 +86,50 @@ class NativeSessionCachePolicy:
         return policy.apply(raw_body, method=method, path=path)
 
 
+class NativeRegisteredSessionCachePolicy:
+    """Check the native session before applying an explicit source registration."""
+
+    def __init__(self, session_id, prefix, *, enabled=False):
+        if type(enabled) is not bool:
+            raise ValueError("The enabled setting must be a boolean.")
+        if enabled and (not isinstance(session_id, str) or not session_id):
+            raise ValueError("A native session ID is required.")
+        self.session_id = session_id
+        self.enabled = enabled
+        self.registration = prefix
+        self._policy = RegisteredNativeToolCachePolicy(prefix, enabled=enabled)
+
+    def apply(self, raw_body, *, method="POST", path="/v1/messages"):
+        if not isinstance(raw_body, bytes):
+            raise TypeError("The request body must be bytes.")
+        if not self.enabled:
+            return CachePolicyResult(raw_body, False, "disabled")
+        if method != "POST" or not isinstance(path, str) or path.split("?", 1)[0] != "/v1/messages":
+            return CachePolicyResult(raw_body, False, "unsupported_endpoint")
+        try:
+            body = DECODER.decode(raw_body.decode("utf-8"))
+            metadata = DECODER.decode(body.get("metadata", {}).get("user_id", ""))
+            if metadata.get("session_id") != self.session_id:
+                return CachePolicyResult(raw_body, False, "session_mismatch")
+        except (ValueError, TypeError, AttributeError, UnicodeError, RecursionError):
+            return CachePolicyResult(raw_body, False, "invalid_json")
+        return self._policy.apply(raw_body, method=method, path=path)
+
+
+def _cache_policy(session_id, environment, policy_mode):
+    mode = policy_mode if policy_mode is not None else environment.get("GEAK_SHARED_TOOL_CACHE_POLICY", LEGACY_POLICY)
+    if mode == LEGACY_POLICY:
+        return NativeSessionCachePolicy(session_id, enabled=True), mode, None
+    if mode != POLICY_NAME:
+        raise ValueError("GEAK_SHARED_TOOL_CACHE_POLICY is unsupported.")
+    path = environment.get("GEAK_SHARED_TOOL_CATALOG")
+    expected = environment.get("GEAK_SHARED_TOOL_CATALOG_SHA256")
+    if not isinstance(path, str) or not path or not Path(path).is_absolute():
+        raise ValueError("GEAK_SHARED_TOOL_CATALOG must identify an absolute source catalog path.")
+    prefix = RegisteredToolPrefix.from_file(path, expected_sha256=expected)
+    return NativeRegisteredSessionCachePolicy(session_id, prefix, enabled=True), mode, prefix
+
+
 @dataclass
 class NativeCacheSession:
     """Return prepared options and content-free status for one SDK client."""
@@ -84,6 +137,8 @@ class NativeCacheSession:
     options: Any
     status: str
     proxy: Any = None
+    policy_name: str = LEGACY_POLICY
+    registration: Any = None
 
     @property
     def decisions(self):
@@ -91,7 +146,7 @@ class NativeCacheSession:
 
 
 @contextmanager
-def native_shared_tool_cache(options, *, enabled=False, proxy_factory=SharedToolCacheProxy):
+def native_shared_tool_cache(options, *, enabled=False, proxy_factory=SharedToolCacheProxy, policy_mode=None):
     """Keep unsupported SDK options and endpoints on their original path."""
     if type(enabled) is not bool:
         raise ValueError("The enabled setting must be a boolean.")
@@ -129,14 +184,14 @@ def native_shared_tool_cache(options, *, enabled=False, proxy_factory=SharedTool
         yield NativeCacheSession(options, "unsupported_session_options")
         return
     endpoint = environment.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com"
-    policy = NativeSessionCachePolicy(session_id, enabled=True)
+    policy, selected_mode, registration = _cache_policy(session_id, environment, policy_mode)
     with proxy_factory(endpoint, policy, enabled=True) as proxy:
         if not proxy.active:
-            yield NativeCacheSession(options, proxy.status, proxy)
+            yield NativeCacheSession(options, proxy.status, proxy, selected_mode, registration)
             return
         prepared = replace(options, session_id=session_id,
             env={**(options.env or {}), "ANTHROPIC_BASE_URL": proxy.base_url})
-        yield NativeCacheSession(prepared, "active", proxy)
+        yield NativeCacheSession(prepared, "active", proxy, selected_mode, registration)
 
 
 

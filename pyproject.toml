@@ -114,3 +114,8 @@ ignore_errors = true
 # as unreachable-by-construction or untestable-without-filesystem-litter in the
 # tests that cover their neighbours.
 fail_under = 97
+
+[tool.ruff.lint.per-file-ignores]
+# Preserve the frozen marker module byte for byte. Only its import order differs
+# from the normal style. All other lint rules still apply to this source file.
+"interface/native_cost_controls/native_prefix_marker.py" = ["I001"]

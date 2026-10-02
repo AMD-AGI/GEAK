@@ -28,6 +28,9 @@ _HOP_HEADERS = frozenset({"connection", "keep-alive", "proxy-authenticate", "pro
 _POLICY_REASONS = frozenset({"disabled", "unsupported_endpoint", "invalid_json", "unsupported_request",
     "shared_tools_mismatch", "unsupported_output_tool", "marker_limit", "unsupported_cache_layout",
     "unsupported_json_layout", "marked", "session_mismatch"})
+_POLICY_REASONS |= frozenset({"prefix_missing", "unsupported_prefix", "duplicate_tool_names",
+    "prefix_mismatch", "unqualified_output_format", "existing_tool_marker",
+    "unqualified_cache_layout", "content_mismatch", "byte_mismatch", "unsupported_json"})
 
 
 def _upstream(url):

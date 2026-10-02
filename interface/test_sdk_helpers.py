@@ -13,6 +13,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+from interface.native_cost_controls.registered_prefix import POLICY_NAME
 from interface.native_cost_controls.sdk_helpers import WorkflowSDKClient
 from interface.test_native_helpers import (
     Contract,
@@ -28,6 +30,7 @@ from interface.test_native_helpers import (
     UserMessage,
 )
 from interface.test_native_sdk_cache import Options as CacheOptions
+from interface.test_native_sdk_cache import source_catalog_environment
 from interface.test_shared_tool_cache import INSERTION, request
 from interface.test_system_envelope import synthetic_system_policy
 
@@ -254,6 +257,107 @@ class SDKHelperTests(unittest.IsolatedAsyncioTestCase):
             [message async for message in client.receive_messages()]
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0], self.clients[0].provider_body)
+
+    def registered_environment(self):
+        tools = [{"name": "Bash", "input_schema": {"type": "object"}}] + request()["tools"][:-1]
+        return {**self.options.env, **source_catalog_environment(self.workspace / "catalog.json", tools)}
+
+    async def test_registered_cache_keeps_helpers_local_and_preserves_native_options(self):
+        options = replace(self.options, env={**self.registered_environment(),
+            "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "75"},
+            settings='{"enableWorkflows":true,"ultracode":true,"autoCompactEnabled":true}')
+        async with self.managed(options=options, helpers_enabled=True, cache_enabled=True) as client:
+            messages = [message async for message in client.receive_messages()]
+            self.assertEqual(messages[-1], "unchanged-message")
+            self.assertEqual(client.helper_status, "active")
+            self.assertEqual(client.cache_session.policy_name, POLICY_NAME)
+            self.assertEqual(client.cache_session.registration.count, 3)
+            prepared = self.clients[-1].options
+            for key in ("model", "effort", "permission_mode", "allowed_tools", "extra_args", "settings",
+                    "can_use_tool", "system_prompt", "setting_sources"):
+                self.assertIs(getattr(prepared, key), getattr(options, key), key)
+            self.assertEqual(prepared.env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"], "75")
+            self.assertTrue(all(reply == {} for reply in self.clients[-1].hook_replies))
+            self.assertEqual(self.clients[-1].responses[1][1]["content"][0]["input"], {"epoch": 42})
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual(self.calls[0].replace(INSERTION, b"", 1), self.clients[-1].provider_body)
+        self.assertIsNone(client.registry)
+
+    async def test_helpers_ignore_invalid_registered_catalog_when_cache_is_disabled(self):
+        options = replace(self.options, env={**self.options.env, "GEAK_SHARED_TOOL_CACHE_POLICY": POLICY_NAME,
+            "GEAK_SHARED_TOOL_CATALOG": "unused-relative-path.json",
+            "GEAK_SHARED_TOOL_CATALOG_SHA256": "invalid-unused-hash"})
+        async with self.managed(options=options, helpers_enabled=True) as client:
+            [message async for message in client.receive_messages()]
+            self.assertEqual(client.helper_status, "active")
+            self.assertIsNone(client.cache_session.registration)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0], self.clients[-1].provider_body)
+
+    async def test_invalid_registration_stops_combined_client_and_removes_registry(self):
+        options = replace(self.options, env={**self.registered_environment(),
+            "GEAK_SHARED_TOOL_CATALOG_SHA256": "0" * 64})
+
+        def proxy(*_args, **_kwargs):
+            self.fail("The proxy must not start after invalid registration.")
+
+        managed = self.managed(options=options, helpers_enabled=True, cache_enabled=True, proxy_factory=proxy)
+        with self.assertRaises(ValueError):
+            await managed.__aenter__()
+        self.assertEqual(self.clients, [])
+        self.assertEqual(self.calls, [])
+        self.assertIsNone(managed.registry)
+        self.assertIsNone(managed._temporary)
+
+    @staticmethod
+    @contextmanager
+    def inactive_proxy(endpoint, policy, *, enabled, transport):
+        try:
+            yield SimpleNamespace(active=False, status="unsupported_configuration", decisions=())
+        finally:
+            transport.close()
+
+    async def test_disabled_cache_ignores_invalid_registration_in_helper_fallbacks(self):
+        base = replace(self.options, env={**self.options.env, "GEAK_SHARED_TOOL_CACHE_POLICY": POLICY_NAME,
+            "GEAK_SHARED_TOOL_CATALOG": "unused-relative-path.json"})
+        cases = [
+            (base, {"helpers_enabled": False}, "disabled"),
+            (replace(base, system_prompt="Original system policy."), {"helpers_enabled": True},
+                "unsupported_system_prompt"),
+            (base, {"helpers_enabled": True, "proxy_factory": self.inactive_proxy}, "unsupported_configuration"),
+        ]
+        for options, settings, reason in cases:
+            with self.subTest(reason=reason):
+                async with self.managed(options=options, **settings) as client:
+                    self.assertIs(self.clients[-1].options, options)
+                    self.assertEqual(client.helper_status, reason)
+                    self.assertEqual(client.cache_session.status, "disabled")
+                    self.assertIsNone(client.cache_session.registration)
+                    self.assertIsNone(client.registry)
+        self.assertEqual(self.calls, [])
+
+    async def test_registered_cache_remains_active_in_both_helper_fallbacks(self):
+        base = replace(self.options, env=self.registered_environment())
+        for unsupported_options in (True, False):
+            with self.subTest(unsupported_options=unsupported_options):
+                options = replace(base, system_prompt="Original system policy.") if unsupported_options else base
+                settings = {} if unsupported_options else {"proxy_factory": self.inactive_proxy}
+                async with self.managed(options=options, helpers_enabled=True, cache_enabled=True, **settings) as client:
+                    self.assertNotEqual(client.helper_status, "active")
+                    self.assertIsNone(client.registry)
+                    self.assertEqual(client.cache_session.status, "active")
+                    self.assertEqual(client.cache_session.policy_name, POLICY_NAME)
+                    self.assertEqual(client.cache_session.registration.count, 3)
+                    prepared = self.clients[-1].options
+                    self.assertIs(prepared.hooks, options.hooks)
+                    self.assertIs(prepared.system_prompt, options.system_prompt)
+                    self.assertIsNone(prepared.session_store)
+                    body = request()
+                    body["tools"].insert(0, {"name": "Bash", "input_schema": {"type": "object"}})
+                    body["metadata"] = {"user_id": json.dumps({"session_id": prepared.session_id})}
+                    await asyncio.to_thread(self.clients[-1].send, body, "engineer")
+                    self.assertEqual(self.calls[-1].replace(INSERTION, b"", 1), self.clients[-1].provider_body)
+        self.assertEqual(len(self.calls), 2)
 
     async def test_combined_session_blocks_unsupported_retry_after_native_bash(self):
         with patch.object(Client, "retry_unsupported", True):
