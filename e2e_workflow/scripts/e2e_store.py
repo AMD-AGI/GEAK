@@ -63,6 +63,7 @@ import time
 # The shared KB plane lives at the repo root as the `kb` package, not beside this file. Executed as
 # a CLI from an arbitrary cwd, so the root is derived from __file__ and never from the environment.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from e2e_workflow.scripts.tuning_acceptance import tuning_accepted  # noqa: E402
 from kb import identity as kbid                                             # noqa: E402
 from kb.attest import (OUTCOMES, RETIRE_THRESHOLD, attest_session,         # noqa: E402
                        attestation_ok, attestations_of, carry_attestations,
@@ -622,6 +623,11 @@ def build_record(a, result: dict, workdir=None) -> dict:
     not synthesize files, and must not refuse over a reproducibility rule that only governs new
     writes.
     """
+    tuning = result.get("tuning_skillset")
+    if isinstance(tuning, dict) and not tuning_accepted(tuning) and (
+        tuning.get("gate") == "accepted" or any(k.get("from_tuning_skillset") for k in (result.get("accepted_kernels") or []) if isinstance(k, dict))
+    ):
+        raise SystemExit("Unproven tuning cannot be recorded as an accepted deployment")
     identity = identity_of(a)
     final = finite_speedup(result.get("final_throughput_tok_s"))
     baseline = finite_speedup(result.get("baseline_throughput_tok_s"))
@@ -987,7 +993,7 @@ def _tuning_files(result: dict, dropped: list) -> dict:
     and copying one in would let a reader mistake a rejected search residue for a banked lever.
     """
     tuning = result.get("tuning_skillset") or {}
-    if not isinstance(tuning, dict) or str(tuning.get("gate") or "") != "accepted":
+    if not tuning_accepted(tuning):
         return {}
     found, seen = {}, set()
     for path in (list(tuning.get("artifacts") or []) + list(tuning.get("live_tree_files") or [])):

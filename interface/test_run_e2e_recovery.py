@@ -974,7 +974,9 @@ def test_tuning_delivery_is_verified_on_live_cached_and_interrupted_emission(
     monkeypatch, tmp_path, route, runtime_csv
 ):
     eval_dir = _make_eval_dir(tmp_path)
-    tuning = {"enabled": True, "ran": True, "gate": "accepted",
+    tuning = {"enabled": True, "ran": True, "gate": "accepted", "ab_complete": True,
+              "engagement_verified": True, "correctness_gate": "pass",
+              "pre_tune_throughput_tok_s": 1000.0, "post_tune_throughput_tok_s": 1033.48,
               "live_tree_files": ["aiter/configs/model_configs/tuned.csv"]}
     if runtime_csv:
         baseline = tmp_path / "stock.csv"

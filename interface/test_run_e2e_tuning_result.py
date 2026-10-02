@@ -15,12 +15,16 @@ Run: python3 -m pytest GEAK/interface/test_run_e2e_tuning_result.py -v
 """
 from __future__ import annotations
 
+import copy
+import json
+import math
 import importlib.util
 from pathlib import Path
 
 import pytest
 
 from e2e_workflow.scripts.runtime_csv import build_runtime_csv
+from e2e_workflow.scripts.tuning_acceptance import tuning_accepted
 
 _HERE = Path(__file__).resolve().parent
 
@@ -218,3 +222,73 @@ def test_enabled_but_not_run(tmp_path):
     assert t["gate"] == "not_run"
     assert "did not run" in t["explanation"]
     assert "pre_tune_throughput_tok_s" not in t
+
+
+# Strict phase acceptance must survive every report/recovery path.
+def _valid_complete_pair():
+    return _tuning(pre_tune_throughput_tok_s=1000.,post_tune_throughput_tok_s=1033.48,
+                   tuning_delta_pct=3.348,tuning_speedup=1.03348,correctness_gate='none')
+
+
+@pytest.mark.parametrize('field,value',[
+    ('ab_complete',None),('ab_complete',False),('ab_complete',1),('ab_complete','true'),
+    ('pre_tune_throughput_tok_s',None),('pre_tune_throughput_tok_s',0),('pre_tune_throughput_tok_s',-1),
+    ('pre_tune_throughput_tok_s',True),('pre_tune_throughput_tok_s','1000'),
+    ('pre_tune_throughput_tok_s',math.nan),('pre_tune_throughput_tok_s',math.inf),
+    ('post_tune_throughput_tok_s',None),('post_tune_throughput_tok_s',0),('post_tune_throughput_tok_s',-1),
+    ('post_tune_throughput_tok_s',math.nan),('post_tune_throughput_tok_s',math.inf),
+    ('correctness_gate',None),('correctness_gate','unknown'),('correctness_gate','fail'),('ran',False),
+])
+def test_incomplete_or_invalid_phase_cannot_be_reported_as_accepted(tmp_path,field,value):
+    tuning=_valid_complete_pair()
+    if value is None:tuning.pop(field,None)
+    else:tuning[field]=value
+    assert not tuning_accepted(tuning)
+    result=_norm(tmp_path,_wf(tuning_skillset=tuning))['tuning_skillset']
+    assert result['gate']!='accepted'
+    assert 'artifacts' not in result and 'apply_env' not in result
+    if result['ran']:assert result['share_of_total_gain_pct'] is None
+
+
+def test_complete_none_gate_preserves_the_3348_percent_object(tmp_path):
+    tuning=_valid_complete_pair();before=copy.deepcopy(tuning)
+    assert tuning_accepted(tuning)
+    result=_norm(tmp_path,_wf(tuning_skillset=tuning))['tuning_skillset']
+    assert result['gate']=='accepted' and result['ab_complete'] is True
+    assert result['tuning_delta_pct']==3.348 and result['tuning_speedup']==1.03348
+    assert tuning==before
+    assert not tuning_accepted(tuning,accuracy_gate='gsm8k')
+    assert not tuning_accepted({**tuning,'accuracy_gate':'gsm8k'})
+
+
+@pytest.mark.parametrize('complete',[None,False])
+def test_raw_claim_cannot_be_filed_by_kb_or_recovered_via_report(tmp_path,monkeypatch,complete):
+    directory=tmp_path/'tuning';directory.mkdir()
+    tuning=_valid_complete_pair();tuning.pop('ab_complete')
+    if complete is False:tuning['ab_complete']=False
+    (directory/'tuning_result.json').write_text(json.dumps(tuning))
+    (directory/'tuning_report.md').write_text('Outcome: accepted (1000 -> 1033.48 tok/s)')
+    monkeypatch.setattr(rx.subprocess,'run',lambda *a,**k:pytest.fail('An incomplete phase attempted a writer'))
+    assert rx._kb_write_tuned_ops(tmp_path)['skipped'] is True
+    assert rx._recover_tuning_result(tmp_path) is None
+    assert rx._recover_tuning_report(tmp_path) is None
+
+
+def test_report_alone_cannot_invent_explicit_completion(tmp_path):
+    (tmp_path/'tuning').mkdir()
+    (tmp_path/'tuning/tuning_report.md').write_text('Outcome: accepted (1000 -> 1033.48 tok/s)')
+    assert rx._recover_tuning_report(tmp_path) is None
+
+
+def test_none_tuning_is_not_accepted_when_handoff_requires_accuracy(tmp_path):
+    result = rx.normalize_result({"accuracy_gate": "gsm8k"}, _wf(eval_dir=str(tmp_path), tuning_skillset=_valid_complete_pair()))
+    assert result["tuning_skillset"]["gate"] != "accepted"
+
+
+def test_invalid_tuning_cannot_survive_as_an_accepted_kernel(tmp_path):
+    tuning = _valid_complete_pair()
+    tuning.pop("ab_complete")
+    with pytest.raises(ValueError, match="Workflow banks tuning"):
+        _norm(tmp_path, _wf(tuning_skillset=tuning, accepted_kernels=[{
+            "short_name": "unproven_tuned_op", "from_tuning_skillset": True,
+        }]))

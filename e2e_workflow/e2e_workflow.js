@@ -729,7 +729,18 @@ const ST = A.state || {};   // carried state from a prior phase invocation
 // Hoisted: tuningIntegrateInputs() is reachable from runIntegrateBothLegs, which WarmStart drives
 // long before the TuningSkillset phase body — declaring `tuning` there left it in the temporal dead
 // zone on the first integrate leg. The tuning phase later reassigns it.
+function tuningAccepted(result) {
+  return !!(result && result.gate === 'accepted' && result.ran !== false && result.engagement_verified === true &&
+    result.ab_complete === true &&
+    Number.isFinite(result.pre_tune_throughput_tok_s) && result.pre_tune_throughput_tok_s > 0 &&
+    Number.isFinite(result.post_tune_throughput_tok_s) && result.post_tune_throughput_tok_s > result.pre_tune_throughput_tok_s &&
+    (result.correctness_gate === 'pass' ||
+      (ACCURACY_GATE === 'none' && ['none', 'skipped'].includes(result.correctness_gate))));
+}
 let tuning = ST.tuning || null;
+if (tuning && tuning.gate === 'accepted' && !tuningAccepted(tuning)) {
+  throw new Error('Carried accepted tuning lacks a complete valid pre/post pair; refusing to reuse its config.');
+}
 if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel-only; budget ${Math.round(FAST_BUDGET_MS / 60000)}min (stop new heads at ${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min, per-head workflow cap ${Math.round(FAST_HEAD_WF_MS / 60000)}min).`);
 
 // ---------------------------------------------------------------------------
@@ -3377,16 +3388,14 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
   // failure mode is silent (the artifact lands where nothing reads it and the timing still moves). A
   // completed BOTH-leg A/B is required for the same reason it is on the head track — a post-only number
   // is not a measurement.
-  if (tuning && tuning.gate === 'accepted') {
+  if (tuningAccepted(tuning)) {
     const { execFileSync } = require('child_process');
     execFileSync('python3', [WORKFLOW_DIR + '/scripts/runtime_csv.py', '--verify-tuning', '--eval-dir', EVAL_DIR],
       { input: JSON.stringify(tuning), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000 });
     if ((tuning.runtime_csv_manifests || []).length) tuning.deploy_verified = true;
   }
   const tuned = tuning && tuning.gate === 'accepted';
-  const tuneOk = tuned && tuning.engagement_verified === true && tuning.ab_complete !== false &&
-    tuning.correctness_gate !== 'fail' && tuning.post_tune_throughput_tok_s > 0 &&
-    tuning.post_tune_throughput_tok_s > (tuning.pre_tune_throughput_tok_s || 0);
+  const tuneOk = tuningAccepted(tuning);
 
   // Every op the skillset named, read twice below: by the accepted-kernel banking (gated on
   // `tuneOk`) and by the attestation under it (deliberately not). `tuning &&`, not just
@@ -3701,7 +3710,7 @@ const TUNING_REPORT_INPUTS = (TUNING_SKILLSET_ENABLED && tuning) ? { TUNING_RESU
 // final_patch.diff, copy its files, and invoke its deploy.sh from final_launch.sh before the server
 // starts). Passed only when the tuning phase actually banked a win, so an unaccepted/absent tuning
 // leaves the Finalize prompt byte-identical.
-const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted')
+const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuningAccepted(tuning))
   ? {
     TUNING_DEPLOY_BUNDLE: tuning.deploy_bundle || ((tuning.runtime_csv_manifests || []).length ? '' : `${EVAL_DIR}/tuning/deploy`),
     TUNING_APPLY_ENV: tuning.apply_env || '',
@@ -3723,7 +3732,7 @@ const TUNING_FINALIZE_INPUTS = (TUNING_SKILLSET_ENABLED && tuning && tuning.gate
 // like accepted env. A function, not a const, so it reflects a downgrade-to-no_win and so a resumed run
 // picks the carve-out up from carried state. Returns {} otherwise => prompt byte-identical without tuning.
 function tuningIntegrateInputs() {
-  if (!(TUNING_SKILLSET_ENABLED && tuning && tuning.gate === 'accepted')) return {};
+  if (!(TUNING_SKILLSET_ENABLED && tuningAccepted(tuning))) return {};
   return {
     TUNING_LIVE_TREE_FILES: tuning.live_tree_files || [],
     TUNING_DEPLOY_BUNDLE: tuning.deploy_bundle || `${EVAL_DIR}/tuning/deploy`,
@@ -5167,10 +5176,10 @@ function tuningReturn() {
   const finalT = validatedOk ? validation.director_verified_throughput_tok_s : finalTput;
   const totalGain = (finalT || 0) - (BASELINE_TPUT || 0);
   const tuningGain = (tuning.post_tune_throughput_tok_s || 0) - (tuning.pre_tune_throughput_tok_s || 0);
-  const banked = tuning.gate === 'accepted';
+  const banked = tuningAccepted(tuning);
   return {
     ...base,
-    gate: tuning.gate,
+    gate: tuning.gate === 'accepted' && !banked ? 'no_win' : tuning.gate,
     mode: tuning.mode || '',
     skills_used: tuning.skills_used || [],
     ops_tuned: (tuning.ops_tuned || []).map((o) => ({
@@ -5189,17 +5198,17 @@ function tuningReturn() {
     in_final_bundle: finalize ? (finalize.tuning_in_bundle === true) : null,
     final_bundle_engagement_recheck: (finalize && finalize.tuning_engagement_recheck) || '',
     apply_env: tuning.apply_env || '', apply_flags: tuning.apply_flags || '',
-    correctness_gate: tuning.correctness_gate || 'unknown',
+    correctness_gate: tuning.correctness_gate || 'unknown', accuracy_gate: ACCURACY_GATE,
     engagement_verified: tuning.engagement_verified === true,
     engagement_evidence: tuning.engagement_evidence || '',
-    pre_tune_throughput_tok_s: tuning.pre_tune_throughput_tok_s || 0,
-    post_tune_throughput_tok_s: tuning.post_tune_throughput_tok_s || 0,
+    pre_tune_throughput_tok_s: tuning.pre_tune_throughput_tok_s ?? null,
+    post_tune_throughput_tok_s: tuning.post_tune_throughput_tok_s ?? null,
     noise_floor_pct: tuning.noise_floor_pct || 0,
     tuning_delta_pct: tuning.tuning_delta_pct || 0,
     tuning_speedup: tuning.tuning_speedup ||
       (tuning.pre_tune_throughput_tok_s ? (tuning.post_tune_throughput_tok_s / tuning.pre_tune_throughput_tok_s) : 1.0),
     ab_interleaved: tuning.ab_interleaved === true,
-    ab_complete: tuning.ab_complete !== false,
+    ab_complete: tuning.ab_complete === true,
     // Share of the run's TOTAL gain attributable to the tuning phase (banked wins only).
     share_of_total_gain_pct: (banked && totalGain > 0) ? +((tuningGain / totalGain) * 100).toFixed(2) : null,
     report_path: tuning.report_path || `${EVAL_DIR}/tuning/tuning_report.md`,

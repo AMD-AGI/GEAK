@@ -200,7 +200,7 @@ soon as the gate is decided, before writing the report — if you can only do on
   "apply_env": "<env the deploy REQUIRES, KEY=VAL ...>",
   "apply_flags": "<flags the deploy requires>",
   "cache_invalidation": ["commands that MUST run after install or the artifact is silently ignored"],
-  "correctness_gate": "pass|fail|skipped",
+  "correctness_gate": "pass|fail|none|skipped",
   "accuracy_note": "...",
   "engagement_verified": true,
   "engagement_evidence": "the actual log lines / kernel names proving the tuned artifact is live",
@@ -217,6 +217,8 @@ soon as the gate is decided, before writing the report — if you can only do on
   "reason": "for a non-accepted gate: why"
 }
 ```
+
+`none`/`skipped` is explicit, never a missing correctness value, and is accepted only when the requested task-accuracy gate is `none`; it does not waive the skillset’s numerical correctness checks. Set `ab_complete:true` only after both finite, positive pre/post measurements complete.
 
 Gates — be strict, a soft accept here corrupts every downstream measurement:
 `accepted` (correctness passed, engagement proven, both A/B legs done, delta above the floor, deploy

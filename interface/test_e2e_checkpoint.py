@@ -340,6 +340,10 @@ def test_recovers_accepted_tuning_markdown_report_without_ab_scan(tmp_path):
         "(2644.24 → 2678.23 tok/s) against a noise band.\n",
         encoding="utf-8",
     )
+    (eval_dir / "tuning" / "tuning_result.json").write_text(json.dumps({
+        "gate": "accepted", "ab_complete": True, "engagement_verified": True, "correctness_gate": "pass",
+        "pre_tune_throughput_tok_s": 2644.24, "post_tune_throughput_tok_s": 2678.23,
+    }))
     stale_leg = eval_dir / "tuning" / "ab" / "pre_n1"
     stale_leg.mkdir(parents=True)
     (stale_leg / "bench_summary.json").write_text(

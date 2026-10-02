@@ -66,9 +66,9 @@ unless **all** of these hold, and logs loudly when it does:
 | bar | why |
 | --- | --- |
 | `engagement_verified === true` | the skillset's central thesis — an artifact the runtime never loads is not a win, and it fails *silently*, with plausible-looking numbers |
-| `ab_complete !== false` | a post-only number is not a measurement (same rule as the head track) |
-| `correctness_gate !== 'fail'` | a faster wrong server is a regression |
-| `post > pre > 0` | both legs real, and the direction is actually a win |
+| `ab_complete === true` | a post-only number is not a measurement (same rule as the head track) |
+| explicit `pass`, or `none`/`skipped` only with `accuracy_gate=none` | a faster wrong server is a regression |
+| finite numeric `post > pre > 0` | both legs real, and the direction is actually a win |
 
 A withheld accept is downgraded to `no_win` with the reason appended, and the run continues on the
 pre-tuning config. This matters more here than elsewhere: an unproven tuning artifact would sit in the

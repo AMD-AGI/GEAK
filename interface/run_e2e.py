@@ -51,6 +51,7 @@ try:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from e2e_workflow.scripts.adapters.extra_env import parse_unset_envs
     from e2e_workflow.scripts.runtime_csv import verify_runtime_tuning
+    from e2e_workflow.scripts.tuning_acceptance import tuning_accepted
     from interface.effective_config import (
         ReferenceLaunchError,
         resolve_effective_config,
@@ -3917,7 +3918,12 @@ def normalize_result(h: dict, wf: dict) -> dict:
     }
     # ADDITIVE ONLY. Appended after the dict above is complete so it is self-evident at review time that
     # no existing key is touched, and omitted entirely when the phase did not run.
-    tuning_section = _tuning_skillset_section(wf, eval_dir)
+    tuning_section = _tuning_skillset_section(wf, eval_dir, accuracy_gate=h.get("accuracy_gate"))
+    if tuning_section is not None and tuning_section.get("gate") != "accepted" and any(
+        isinstance(kernel, dict) and kernel.get("from_tuning_skillset")
+        for kernel in (wf.get("accepted_kernels") or [])
+    ):
+        raise ValueError("Workflow banks tuning without a complete accepted pre/post pair")
     if tuning_section is not None and tuning_section.get("gate") == "accepted" and tuning_section.get("runtime_csv_manifests"):
         runtime_csvs = verify_runtime_tuning(tuning_section, eval_dir, accepted_config["env_map"])
         if runtime_csvs:
@@ -3970,7 +3976,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
     return result
 
 
-def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
+def _tuning_skillset_section(wf: dict, eval_dir: Path, *, accuracy_gate=None) -> dict | None:
     """Build the ADDITIVE ``tuning_skillset`` block for result.json.
 
     Contract: this is the ONLY thing the tuning phase adds to result.json. Every pre-existing key keeps
@@ -4001,14 +4007,16 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
         return {
             "phase": "TuningSkillset",
             "ran": False,
-            "gate": t.get("gate") or "not_run",
+            "gate": "not_run" if t.get("gate") == "accepted" else t.get("gate") or "not_run",
             "explanation": "The standalone tuning-skillset phase was enabled but did not run in this invocation.",
         }
 
     gate = t.get("gate") or "unknown"
-    accepted = gate == "accepted"
+    accepted = tuning_accepted(t, accuracy_gate)
+    if gate == "accepted" and not accepted:
+        gate = "no_win"
     delta = t.get("tuning_delta_pct") or 0.0
-    share = t.get("share_of_total_gain_pct")
+    share = t.get("share_of_total_gain_pct") if accepted else None
 
     if accepted:
         explanation = (
@@ -4044,7 +4052,7 @@ def _tuning_skillset_section(wf: dict, eval_dir: Path) -> dict | None:
         "share_of_total_gain_pct": share,
         "noise_floor_pct": t.get("noise_floor_pct"),
         "ab_interleaved": t.get("ab_interleaved"),
-        "ab_complete": t.get("ab_complete"),
+        "ab_complete": t.get("ab_complete") is True,
         "correctness_gate": t.get("correctness_gate"),
         "engagement_verified": t.get("engagement_verified"),
         "engagement_evidence": t.get("engagement_evidence") or "",
@@ -4465,7 +4473,7 @@ TUNING_KB_WRITE_FILE = "tuning/kb_write_tuned.json"  # the orchestrator's receip
 KERNEL_STORE_SCRIPT = GEAK_ROOT / "kernel_workflow" / "scripts" / "experience_store.py"
 
 
-def _kb_write_tuned_ops(eval_dir: Path) -> dict:
+def _kb_write_tuned_ops(eval_dir: Path, *, accuracy_gate=None) -> dict:
     """File the tuning phase's proven tables when the workflow died before doing it itself.
 
     The orchestrator's own write-back (e2e_workflow.js, the `kernel-kb:write-tuned` step) runs after
@@ -4492,8 +4500,8 @@ def _kb_write_tuned_ops(eval_dir: Path) -> dict:
     if not tuning:
         return {"skipped": True, "why": "no %s (tuning never ran, or ran before this build)"
                                         % TUNING_RESULT_FILE}
-    if str(tuning.get("gate") or "") != "accepted":
-        return {"skipped": True, "why": "tuning gate is %r, not accepted" % (tuning.get("gate") or "")}
+    if not tuning_accepted(tuning, accuracy_gate):
+        return {"skipped": True, "why": "tuning not accepted: complete-pair/engagement/correctness evidence required"}
 
     dims = (_read_json(eval_dir / KB_IDENTITY_FILE) or {}).get("dims") or {}
     gfx = str(dims.get("gfx") or "")
@@ -5083,7 +5091,7 @@ def _tuning_recovery_return(
     }
 
 
-def _recover_tuning_result(eval_dir: Path) -> dict | None:
+def _recover_tuning_result(eval_dir: Path, *, accuracy_gate=None) -> dict | None:
     """Recover a formally accepted tuning skillset result without re-benchmarking."""
     source = eval_dir / "tuning" / "tuning_result.json"
     tuning = _read_json(source)
@@ -5095,10 +5103,7 @@ def _recover_tuning_result(eval_dir: Path) -> dict | None:
     actual_speedup = post / pre if pre > 0.0 else 0.0
     if not (
         tuning.get("ran") is True
-        and str(tuning.get("gate") or "").lower() == "accepted"
-        and tuning.get("engagement_verified") is True
-        and tuning.get("ab_complete") is True
-        and str(tuning.get("correctness_gate") or "").lower() != "fail"
+        and tuning_accepted(tuning, accuracy_gate)
         and pre > 0.0
         and post > pre
         and claimed_speedup > 1.0
@@ -5133,8 +5138,11 @@ _REPORT_SPEEDUP_RE = re.compile(
 )
 
 
-def _recover_tuning_report(eval_dir: Path) -> dict | None:
+def _recover_tuning_report(eval_dir: Path, *, accuracy_gate=None) -> dict | None:
     """Recover an accepted historical tuning report without scanning A/B legs."""
+    tuning = _read_json(eval_dir / TUNING_RESULT_FILE)
+    if not tuning_accepted(tuning, accuracy_gate):
+        return None
     report = eval_dir / "tuning" / "tuning_report.md"
     if not report.is_file():
         return None
@@ -5165,12 +5173,10 @@ def _recover_tuning_report(eval_dir: Path) -> dict | None:
         )
     ):
         return None
-    tuning = {
-        "engagement_verified": True,
-        "ab_complete": True,
-        "correctness_gate": "unknown",
-        "report_path": str(report),
-    }
+    if not (math.isclose(pre, tuning["pre_tune_throughput_tok_s"])
+            and math.isclose(post, tuning["post_tune_throughput_tok_s"])):
+        return None
+    tuning = {**tuning, "report_path": str(report)}
     return _tuning_recovery_return(
         eval_dir,
         tuning,
@@ -5487,7 +5493,7 @@ def _recover_tuning_legacy_composite(eval_dir: Path) -> dict | None:
     }
 
 
-def _recover_workflow_return(exp_root: Path, *, invocation: PhaseInvocation | None = None) -> dict | None:
+def _recover_workflow_return(exp_root: Path, *, invocation: PhaseInvocation | None = None, accuracy_gate=None) -> dict | None:
     """Rebuild the workflow return from on-disk artifacts (scrape-independent).
 
     Returns ``None`` when no completed eval_dir is discoverable (e.g. the run
@@ -5532,10 +5538,10 @@ def _recover_workflow_return(exp_root: Path, *, invocation: PhaseInvocation | No
         checkpoint_win = _recover_e2e_validation_checkpoint(eval_dir)
         if checkpoint_win is not None:
             return checkpoint_win
-        tuning_result_win = _recover_tuning_result(eval_dir)
+        tuning_result_win = _recover_tuning_result(eval_dir, accuracy_gate=accuracy_gate)
         if tuning_result_win is not None:
             return tuning_result_win
-        tuning_report_win = _recover_tuning_report(eval_dir)
+        tuning_report_win = _recover_tuning_report(eval_dir, accuracy_gate=accuracy_gate)
         if tuning_report_win is not None:
             return tuning_report_win
         tuning_win = _recover_tuning_legacy_composite(eval_dir)
@@ -7064,7 +7070,8 @@ def main(argv: list[str]) -> int:
     invocation = phase_invocation(ps_args)
 
     def _recover_current() -> dict | None:
-        return _recover_workflow_return(exp_root, **({"invocation": invocation} if invocation else {}))
+        return _recover_workflow_return(exp_root, **({"invocation": invocation} if invocation else {}),
+            **({"accuracy_gate": ps_args["accuracy_gate"]} if "accuracy_gate" in ps_args else {}))
 
     # ── Guaranteed interface-file emission ──────────────────────────────────
     # CONTRACT: as long as GEAK produced ANY measured E2E effect on disk,
@@ -7200,7 +7207,8 @@ def main(argv: list[str]) -> int:
         # first, network second.
         if _emit_state["done"] and eval_dir_str and not source_bound:
             try:
-                tuned = _kb_write_tuned_ops(Path(eval_dir_str))
+                tuned = _kb_write_tuned_ops(Path(eval_dir_str),
+                    **({"accuracy_gate": ps_args["accuracy_gate"]} if "accuracy_gate" in ps_args else {}))
                 if tuned and not tuned.get("skipped"):
                     out["kb_write_tuned"] = tuned
                     tmp = result_path.with_name(result_path.name + ".tmp")
