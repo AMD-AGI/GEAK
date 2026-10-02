@@ -1662,6 +1662,28 @@ class TestInvokeViaSdk(_RunE2ECase):
         self.assertEqual(raw, "first")
         self.assertNotIn(later, sdk.state["consumed"])
 
+    def test_phase_continuation_ignores_setup_marker_through_background_grace(self):
+        eval_dir = self.tmp / "e2e_continue"
+        eval_dir.mkdir()
+        marker = eval_dir / rx.WORKFLOW_RETURN_FILE
+        marker.write_text(json.dumps({"eval_dir": str(eval_dir), "phases_run": ["setup"],
+                                      "validation_status": "phase_partial"}))
+        invocation = rx.phase_invocation({"eval_dir": str(eval_dir), "phases": "head"})
+
+        def finish_head():
+            marker.write_text(json.dumps({"eval_dir": str(eval_dir), "phases_run": ["head"],
+                                          "validation_status": "phase_partial"}))
+
+        script = [AssistantMessage(text="before task start"), TaskStartedMessage(task_id="head"),
+                  TaskNotificationMessage(task_id="head", summary="detached work"),
+                  ResultMessage(result="turn done")]
+        anyio, sdk = self._install(script, sleep_hook=finish_head)
+        raw = rx._invoke_via_sdk("P", 120, str(eval_dir), invocation=invocation)
+        self.assertEqual(sdk.state["consumed"], script)
+        self.assertIn("turn done", raw)
+        self.assertEqual(anyio.calls["sleep"], [rx.DONE_POLL_S])
+        self.assertTrue(invocation.done())
+
     def test_background_task_keeps_the_client_open_until_the_marker_lands(self):
         """The killer case: a task notified terminal and the turn ended, but the
         detached A/B is still running. The runner must poll for the marker
@@ -2792,6 +2814,57 @@ class TestMain(_RunE2ECase):
         self.assertEqual(out["status"], "ok")
         self.assertEqual(out["result_source"], "workflow_return")
         self.assertEqual(out["final_throughput_tok_s"], 500.0)
+
+    def test_head_continuation_runs_and_preserves_setup_return(self):
+        prior = {"schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+                 "validation_status": "phase_partial", "state": {"headQueue": [{"name": "example"}]}}
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, prior)
+        original = (self.eval_dir / rx.WORKFLOW_RETURN_FILE).read_bytes()
+        calls = []
+
+        def run_head(prompt, timeout_s, eval_dir, ps_args=None, invocation=None):
+            calls.append(ps_args)
+            self.assertEqual(ps_args["state"], prior["state"])
+            self.assertFalse(invocation.done())
+            return {**prior, "phases_run": ["head"], "baseline_throughput_tok_s": 400.0,
+                    "final_throughput_tok_s": 400.0, "throughput_speedup": 1.0}
+
+        self.patch_rx("invoke_workflow", run_head)
+        rc, _ = self._run(self._handoff(phases="head", state=prior["state"]))
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(json.loads((self.eval_dir / rx.WORKFLOW_RETURN_FILE).read_text())["phases_run"], ["head"])
+        history = list((self.eval_dir / "workflow_invocations").glob("*/workflow_return.json"))
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].read_bytes(), original)
+
+    def test_failed_head_continuation_cannot_recover_setup_as_success(self):
+        prior = {"schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+                 "validation_status": "phase_partial", "state": {"headQueue": []},
+                 "baseline_throughput_tok_s": 400.0, "final_throughput_tok_s": 400.0}
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, prior)
+        original = (self.eval_dir / rx.WORKFLOW_RETURN_FILE).read_bytes()
+
+        def interrupted(*args, **kwargs):
+            raise TimeoutError("head has not returned")
+
+        self.patch_rx("invoke_workflow", interrupted)
+        rc, _ = self._run(self._handoff(phases="head", state=prior["state"]))
+        self.assertEqual(rc, 0)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "timeout")
+        self.assertNotIn("throughput_speedup", out)
+        self.assertEqual((self.eval_dir / rx.WORKFLOW_RETURN_FILE).read_bytes(), original)
+
+    def test_explicit_all_keeps_completed_rerun_idempotent(self):
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, {
+            "schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["all"],
+            "baseline_throughput_tok_s": 400.0, "final_throughput_tok_s": 500.0,
+            "throughput_speedup": 1.25, "output_parity": "pass"})
+        self.patch_rx("invoke_workflow", lambda *a, **k: self.fail("completed all must remain cached"))
+        rc, _ = self._run(self._handoff(phases="all"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(self.result_path.read_text())["throughput_speedup"], 1.25)
 
     def test_resume_with_a_failing_recovery_still_emits_an_error_file(self):
         """Both recovery attempts (the short-circuit and the one inside _emit)

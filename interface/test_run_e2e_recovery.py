@@ -1663,3 +1663,93 @@ def test_config_that_was_never_moved_is_not_a_direction(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# Explicit phase invocations must not consume prior completion evidence.
+def _write_phase_marker(path, value):
+    path.write_text(json.dumps(value))
+
+
+@pytest.mark.parametrize("phases", [None, "", "all", " setup,all "])
+def test_ordinary_invocation_retains_existing_cache_policy(tmp_path, phases):
+    assert rx.phase_invocation({"eval_dir": str(tmp_path), "phases": phases}) is None
+
+
+def test_completion_needs_new_matching_phase_and_eval_dir(tmp_path):
+    old = {
+        "eval_dir": str(tmp_path),
+        "phases_run": ["head"],
+        "validation_status": "phase_partial",
+    }
+    marker = tmp_path / "workflow_return.json"
+    _write_phase_marker(marker, old)
+    invocation = rx.phase_invocation({"eval_dir": str(tmp_path), "phases": "head"})
+    assert (
+        not invocation.done()
+    )  # Even the same phase belongs to an earlier invocation.
+    _write_phase_marker(marker, {**old, "phases_run": ["setup"]})
+    assert not invocation.done()
+    _write_phase_marker(marker, {**old, "eval_dir": str(tmp_path / "other")})
+    assert not invocation.done()
+    _write_phase_marker(marker, old)
+    assert invocation.done()
+
+
+def test_stale_validation_cannot_complete_head_or_final(tmp_path):
+    marker = tmp_path / "director_e2e_validation.json"
+    _write_phase_marker(marker, {"validation_status": "pass", "throughput_speedup": 1.2})
+    head = rx.phase_invocation({"eval_dir": str(tmp_path), "phases": "head"})
+    final = rx.phase_invocation({"eval_dir": str(tmp_path), "phases": "final"})
+    assert not head.done() and not final.done()
+    _write_phase_marker(marker, {"validation_status": "pass", "throughput_speedup": 1.3})
+    assert not head.done()
+    assert final.done()
+
+
+@pytest.mark.parametrize("new_return", [False, True])
+def test_runtime_ignores_stale_result_and_canonical_fallback(
+    tmp_path, monkeypatch, new_return
+):
+    old = {
+        "eval_dir": str(tmp_path),
+        "phases_run": ["setup"],
+        "validation_status": "phase_partial",
+    }
+    _write_phase_marker(tmp_path / "runtime_result.json", old)
+    _write_phase_marker(tmp_path / "workflow_return.json", old)
+    args = {"eval_dir": str(tmp_path), "phases": "head", "state": {"headQueue": []}}
+    invocation = rx.phase_invocation(args)
+    current = {**old, "phases_run": ["head"]}
+
+    def runtime(*argv, **kwargs):
+        if new_return:
+            _write_phase_marker(tmp_path / "workflow_return.json", current)
+        return rx.subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(rx.subprocess, "run", runtime)
+    if new_return:
+        assert (
+            rx._invoke_via_runtime(args, 60, str(tmp_path), invocation=invocation)
+            == current
+        )
+    else:
+        with pytest.raises(rx.WorkflowParseError):
+            rx._invoke_via_runtime(args, 60, str(tmp_path), invocation=invocation)
+
+
+def test_recovery_rejects_old_setup_and_recovers_current_partial(tmp_path, monkeypatch):
+    (tmp_path / "bench_e2e.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("GEAK_EVAL_DIR", str(tmp_path))
+    old = {
+        "eval_dir": str(tmp_path),
+        "phases_run": ["setup"],
+        "validation_status": "phase_partial",
+    }
+    _write_phase_marker(tmp_path / "workflow_return.json", old)
+    invocation = rx.phase_invocation({"eval_dir": str(tmp_path), "phases": "head"})
+    assert rx._recover_workflow_return(tmp_path.parent, invocation=invocation) is None
+    current = {**old, "phases_run": ["head"]}
+    _write_phase_marker(tmp_path / "workflow_return.json", current)
+    assert (
+        rx._recover_workflow_return(tmp_path.parent, invocation=invocation) == current
+    )

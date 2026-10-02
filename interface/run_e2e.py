@@ -68,6 +68,7 @@ try:
     )
     from interface.source_measurement import verify_normalized_source_measurements
     from interface.scheduling import SchedulingError, apply_schedule
+    from interface.workflow_completion import PhaseInvocation, phase_invocation
 finally:
     sys.path[:] = _launch_import_path
 del _launch_import_path
@@ -1971,10 +1972,11 @@ def _iter_message_text(msg: Any) -> list[str]:
     return out
 
 
-def _workflow_done_on_disk(eval_dir: str | None) -> bool:
+def _workflow_done_on_disk(eval_dir: str | None, *, invocation: PhaseInvocation | None = None) -> bool:
     """True once the workflow wrote a TERMINAL marker (its very last on-disk act).
 
-    Two terminal markers, both written AT/AFTER the final Validate leg:
+    Explicit phase invocations require new evidence for their requested phases.
+    Ordinary full runs use two terminal markers written AT/AFTER Validate:
       * ``workflow_return.json`` — the canonical schema-validated return the
         workflow persists as its FINAL action (see e2e_workflow.js). This is the
         authoritative "everything finished" signal and the file run_e2e.py reads
@@ -1992,13 +1994,18 @@ def _workflow_done_on_disk(eval_dir: str | None) -> bool:
     """
     if not eval_dir:
         return False
+    if invocation is not None:
+        return Path(eval_dir).absolute() == invocation.eval_dir and invocation.done()
     p = Path(eval_dir)
     return (p / WORKFLOW_RETURN_FILE).is_file() or (
         p / "director_e2e_validation.json"
     ).is_file()
 
 
-def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) -> str:
+def _invoke_via_sdk(
+    prompt: str, timeout_s: int, eval_dir: str | None = None,
+    *, invocation: PhaseInvocation | None = None,
+) -> str:
     """Drive the JS workflow through the SDK, version-robustly.
 
     Why not a one-shot ``query()``? Newer Claude Code builds (CLI >=2.1.183)
@@ -2099,7 +2106,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                     # Authoritative: the optimizer wrote its terminal marker.
                     # This is the ONLY hard "the workflow finished a measured
                     # leg" signal and is independent of HOW the agent ran it.
-                    if _workflow_done_on_disk(eval_dir):
+                    if _workflow_done_on_disk(eval_dir, invocation=invocation):
                         break
                     # Pure synchronous path: the turn ended and no background
                     # task was EVER spawned — the workflow ran fully in-turn, so
@@ -2131,11 +2138,11 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
                     terminal_task
                     and saw_result
                     and bg_started
-                    and not _workflow_done_on_disk(eval_dir)
+                    and not _workflow_done_on_disk(eval_dir, invocation=invocation)
                 ):
                     deadline = time.monotonic() + DONE_GRACE_S
                     while time.monotonic() < deadline:
-                        if _workflow_done_on_disk(eval_dir):
+                        if _workflow_done_on_disk(eval_dir, invocation=invocation):
                             break
                         await anyio.sleep(DONE_POLL_S)
         return "\n".join(chunks)
@@ -2216,7 +2223,8 @@ def runtime_combo_label() -> str:
 
 
 def _invoke_via_runtime(
-    ps_args: dict, timeout_s: int, eval_dir: str | None = None
+    ps_args: dict, timeout_s: int, eval_dir: str | None = None,
+    *, invocation: PhaseInvocation | None = None,
 ) -> dict:
     """Run the JS workflow on the standalone Node runtime with a swappable backend.
 
@@ -2260,21 +2268,24 @@ def _invoke_via_runtime(
     # 1) result-file (authoritative top-level return).
     if result_file and Path(result_file).exists():
         try:
-            obj = json.loads(Path(result_file).read_text())
-            if isinstance(obj, dict) and obj.get("eval_dir"):
+            obj = (invocation.current("runtime_result.json") if invocation else
+                   json.loads(Path(result_file).read_text()))
+            if isinstance(obj, dict) and obj.get("eval_dir") and (not invocation or invocation.accepts(obj)):
                 return obj
         except (json.JSONDecodeError, OSError):
             pass
     # 2) stdout "WORKFLOW_RESULT <json>" line.
     try:
-        return _parse_last_json_line(proc.stdout)
+        obj = _parse_last_json_line(proc.stdout)
+        if not invocation or invocation.accepts(obj):
+            return obj
     except WorkflowParseError:
         pass
     # 3) on-disk workflow_return.json the JS persists as its final act.
     if eval_dir:
         wr = Path(eval_dir) / "workflow_return.json"
         if wr.exists():
-            obj = _read_json(wr)
+            obj = invocation.canonical_return() if invocation else _read_json(wr)
             if obj.get("eval_dir"):
                 return obj
     raise WorkflowParseError(
@@ -2286,6 +2297,7 @@ def _invoke_via_runtime(
 def invoke_workflow(
     prompt: str, timeout_s: int, eval_dir: str | None = None,
     ps_args: dict | None = None,
+    *, invocation: PhaseInvocation | None = None,
 ) -> dict:
     """Run the JS workflow and return its parsed JSON return value.
 
@@ -2295,10 +2307,10 @@ def invoke_workflow(
     fallback).
     """
     if USE_RUNTIME and ps_args is not None:
-        return _invoke_via_runtime(ps_args, timeout_s, eval_dir)
+        return _invoke_via_runtime(ps_args, timeout_s, eval_dir, **({"invocation": invocation} if invocation else {}))
     try:
         import claude_agent_sdk  # noqa: F401
-        raw = _invoke_via_sdk(prompt, timeout_s, eval_dir)
+        raw = _invoke_via_sdk(prompt, timeout_s, eval_dir, **({"invocation": invocation} if invocation else {}))
     except ImportError:
         raw = _invoke_via_cli(prompt, timeout_s)
     return _parse_last_json_line(raw)
@@ -5469,7 +5481,7 @@ def _recover_tuning_legacy_composite(eval_dir: Path) -> dict | None:
     }
 
 
-def _recover_workflow_return(exp_root: Path) -> dict | None:
+def _recover_workflow_return(exp_root: Path, *, invocation: PhaseInvocation | None = None) -> dict | None:
     """Rebuild the workflow return from on-disk artifacts (scrape-independent).
 
     Returns ``None`` when no completed eval_dir is discoverable (e.g. the run
@@ -5487,13 +5499,17 @@ def _recover_workflow_return(exp_root: Path) -> dict | None:
     # we previously wrote from our OWN best-effort disk recovery (recovered_*
     # flags) must be re-derived fresh here, otherwise a stale reconstruction would
     # permanently shadow later recovery improvements (e.g. newly-extracted latency).
-    persisted = _read_json(eval_dir / WORKFLOW_RETURN_FILE)
+    persisted = invocation.canonical_return() if invocation else _read_json(eval_dir / WORKFLOW_RETURN_FILE)
+    if invocation and (eval_dir.absolute() != invocation.eval_dir or not invocation.done()):
+        return None
     if persisted.get("eval_dir") and not any(
         persisted.get(k)
         for k in ("recovered_from_disk", "recovered_intermediate", "recovered_no_gain")
     ):
         return persisted
-    validation = _read_json(eval_dir / "director_e2e_validation.json")
+    validation = invocation.validation() if invocation else _read_json(eval_dir / "director_e2e_validation.json")
+    if invocation and not validation:
+        return None
     if not validation:
         # No final Validate marker => the director never synthesized its json
         # (run killed mid-Validate, or torn down before it wrote). Recover in
@@ -7037,6 +7053,10 @@ def main(argv: list[str]) -> int:
 
     exp_root = Path(h.get("exp_root") or "")
     eval_dir_hint = ps_args["eval_dir"]
+    invocation = phase_invocation(ps_args)
+
+    def _recover_current() -> dict | None:
+        return _recover_workflow_return(exp_root, **({"invocation": invocation} if invocation else {}))
 
     # ── Guaranteed interface-file emission ──────────────────────────────────
     # CONTRACT: as long as GEAK produced ANY measured E2E effect on disk,
@@ -7060,7 +7080,7 @@ def main(argv: list[str]) -> int:
             pass
         if wf is None:
             try:
-                wf = _recover_workflow_return(exp_root)
+                wf = _recover_current()
             except Exception:
                 wf = None
         try:
@@ -7201,17 +7221,17 @@ def main(argv: list[str]) -> int:
     # If a prior invocation already drove THIS (pinned) eval_dir to a terminal
     # marker, re-emit result.json from the on-disk artifacts instead of re-running
     # the entire workflow. General, not case-by-case: it keys off the workflow's
-    # own terminal markers via _workflow_done_on_disk, so it fires for ANY re-entry
-    # against a completed eval_dir (e.g. an orchestrator resume that re-delegates
-    # the KERNEL phase). A fresh run mints an empty eval_dir, so the marker is
+    # own terminal markers via _workflow_done_on_disk. An explicit phase subset
+    # requests a new invocation instead; its prior markers remain history.
+    # A fresh run mints an empty eval_dir, so the marker is
     # absent and this never trips — byte-identical to a first-time run.
-    if _workflow_done_on_disk(eval_dir_hint):
+    if invocation is None and _workflow_done_on_disk(eval_dir_hint):
         sys.stderr.write(
             f"GEAK e2e: eval_dir already terminal on disk "
             f"({eval_dir_hint}); recovering without re-running the workflow.\n"
         )
         try:
-            cached_wf = _recover_workflow_return(exp_root)
+            cached_wf = _recover_current()
         except Exception:
             cached_wf = None
         cached_out = _emit(wf=cached_wf)
@@ -7225,12 +7245,17 @@ def main(argv: list[str]) -> int:
     err: object = None
     err_class: str | None = None
     try:
-        wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args)
+        if invocation is not None:
+            invocation.preserve()
+        wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args,
+                             **({"invocation": invocation} if invocation else {}))
+        if invocation is not None and not invocation.accepts(wf):
+            raise WorkflowParseError("Workflow return does not match the explicit phase invocation")
     except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
         err = e
         err_class = _classify_error(e)
         try:
-            wf = _recover_workflow_return(exp_root)
+            wf = _recover_current()
         except Exception:
             wf = None
         if wf is not None:

@@ -474,6 +474,20 @@ disk. `run_e2e.py` now removes that fragility, layered:
 These are general (no model/run-specific assumptions) and key only off the
 stable artifact layout the workflow always writes.
 
+An explicit subset in `phases` starts a new phase invocation in the same
+`eval_dir`, carrying the supplied `state` unchanged. A prior Setup return with
+`validation_status: phase_partial` cannot complete a subsequent `head` call.
+Before dispatch, the runner preserves existing canonical return, validation,
+and runtime-result bytes under `workflow_invocations/<id>/`, with their hashes
+and the requested phases. Existing files are not deleted.
+
+Completion gates and disk recovery for that invocation accept only newly
+written returns naming the same `eval_dir` and requested `phases_run`; a newly
+written director validation can also finish a requested `final` phase. Prior
+baseline or accepted-result artifacts remain available as history, but cannot
+turn an interrupted new phase into a completed invocation. Ordinary calls with
+`phases` omitted or containing `all` retain completed-run cache idempotency.
+
 ## `kernel_journey.json` (per-kernel journey contract → orchestrator)
 
 Because GEAK-e2e is a whole-pipeline e2e optimizer (not a per-kernel backend),

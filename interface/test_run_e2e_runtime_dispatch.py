@@ -243,6 +243,7 @@ def test_invoke_workflow_routes_to_the_runtime_only_with_ps_args(monkeypatch):
 
     assert rx.invoke_workflow("prompt", 60, "/e", ps_args={"a": 1}) == {"ok": 1}
     assert seen["runtime"] == ({"a": 1}, 60, "/e")
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
     assert rx.invoke_workflow("prompt", 60, "/e")["eval_dir"] == "/native"
 
 
