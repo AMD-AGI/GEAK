@@ -109,27 +109,34 @@ is a legitimate outcome; a marginal win inside the noise is not.
 
 ### The deliverable (this is the part that must be right)
 
-Your win has to survive the run and reach production. GEAK ships one bundle — `EVAL_DIR/final/`
-(an overlay, `final_patch.diff`, a self-contained `final_launch.sh`) — assembled by the Integrator from
-what you hand back. You run in the serving container, whose writable layer is thrown away; `EVAL_DIR` is
-the only thing that persists. **A tuned artifact you never exported is not a deliverable.**
+The Integrator assembles `EVAL_DIR/final/`: overlay, `final_patch.diff`, tuning data and
+`final_launch.sh`. The container's writable layer is discarded; persist every artifact under
+`EVAL_DIR`. **A tuned artifact you never exported is not a deliverable.**
 
 A tuning win has up to two halves, and they ship by **different** routes. Get this split right:
 
-- **Code** (a routing switch, a dispatch-path fix) → a reversible **overlay**, built with
-  `SKILL_DIR/scripts/overlay_setup.py add-module|add-rebind`. Return its directory as `apply_overlay`.
-  Seed it from `CURRENT_OVERLAY` so a Hyperloom handoff or warm-start kernel stack is never discarded;
-  it is carried forward like any accepted patch and later A/B legs extend it. **Never edit a `.py` in
-  the installed tree**: it lands in both legs of every later comparison, cannot be varied per leg, and
-  is not reversible. `live_tree_files` is for data; declaring source there does not make it allowed.
-- **Data** (config tables a library reads from its own package dir, usually plus a derived cache that
-  must be dropped or the new rows are silently ignored) → the deploy bundle below. This half does
-  **not** travel in the overlay; the overlay injects modules, it does not place files a JIT path reads.
+- **Code** → a reversible **overlay**, built with `SKILL_DIR/scripts/overlay_setup.py
+  add-module|add-rebind`, seeded from `CURRENT_OVERLAY`. Return `apply_overlay`.
+  **Never edit a `.py` in the installed tree**: that contaminates both A/B legs.
+- **Data** → complete per-process runtime tables for AITER, or the installer bundle below
+  for libraries without a per-process selector. Data does not travel in a Python overlay.
 
 Both halves are one change: gate and report them together. A routing overlay with no tuned table does
 nothing, and a tuned table behind an unrouted seam binds to nothing.
 
-Write the deploy bundle at `EVAL_DIR/tuning/deploy/`:
+For AITER, snapshot the **complete effective table before tuning**, using the installed
+loader with the current environment, shipped rows and model tables. Tune separate files.
+Run `python3 RUNTIME_CSV_SCRIPT --baseline <effective.csv> --tuned <new-rows.csv>
+--env-name <AITER_CONFIG_selector> --keys <runtime-key-columns>
+--output <EVAL_DIR>/final/tuning/runtime/<op>`. Resolve schema differences through the
+installed library; do not infer architecture or drop shipped rows. The helper preserves
+untouched rows and writes separate read-only baseline/candidate tables. Use its
+`baseline_env` and `apply_env` for the respective A/B legs and prove engagement/quality.
+Return `apply_env`, both CSVs in `artifacts`, and `runtime_csv.json` in
+`runtime_csv_manifests`. Keep `live_tree_files`, `cache_invalidation` and `deploy_bundle`
+empty. Finalization preserves these paths. A selector pointing only to new rows is invalid.
+
+For other libraries, write `EVAL_DIR/tuning/deploy/`:
 
 | path | what |
 | --- | --- |
@@ -139,20 +146,16 @@ Write the deploy bundle at `EVAL_DIR/tuning/deploy/`:
 | `overlay/` | a copy of your `apply_overlay` dir, if any — so the bundle is complete on its own |
 | `deploy.sh` | **idempotent** installer: place the files, run the cache invalidation, exit non-zero if it cannot. Re-running must be safe |
 
-`deploy.sh` is what makes this work: the Integrator adds one line to `final_launch.sh` running it
-before the server starts, so a fresh container off the same image reproduces your tuning. Test it:
-apply to a clean state, then confirm engagement.
+The Integrator runs `deploy.sh` before the server starts. Test it from a clean state
+and confirm engagement.
 
 Anything the deploy needs as an environment variable goes in `apply_env` (and `MANIFEST.extra_env`); env
 is folded into the run's accepted config, so later phases inherit it. Use absolute paths under
 `EVAL_DIR`, never `/tmp` or your shell history.
 
-**Declare every DATA path you write inside an installed package** (an `aiter/configs/...` table) in
-`live_tree_files` *and* in `MANIFEST.target_files`. GEAK otherwise forbids touching those trees and
-asserts they are pristine around every later A/B leg; your list is the carve-out that stops the head
-track from "restoring" the tree and deleting your win mid-run. A path you install but do not declare is
-silently reverted, and later phases report inflated deltas against a reference leg that lost your
-tuning. The carve-out covers data only — source goes in the overlay.
+For the installer route, declare every installed DATA path in `live_tree_files` and
+`MANIFEST.target_files`; otherwise later pristine-tree checks remove it. The carve-out
+covers data only. AITER runtime CSVs need no installed-tree writes or shared cache deletion.
 
 If a step cannot be captured this way, say so in `notes` rather than leaving a bundle that looks
 complete and is not. The bar: someone with this bundle and a fresh container lands on your numbers
@@ -191,6 +194,7 @@ soon as the gate is decided, before writing the report — if you can only do on
   "deploy_bundle": "<EVAL_DIR>/tuning/deploy",
   "deploy_verified": true,
   "artifacts": ["<deployed artifact paths>"],
+  "runtime_csv_manifests": ["<runtime_csv.json paths, or empty for the installer route>"],
   "live_tree_files": ["DATA paths written INSIDE an installed package, repo-relative — see above"],
   "apply_overlay": "<overlay dir with the routing/dispatch code change, or \"\" if none was needed>",
   "apply_env": "<env the deploy REQUIRES, KEY=VAL ...>",
