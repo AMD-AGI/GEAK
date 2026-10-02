@@ -126,12 +126,17 @@ def regime_dtype(name, torch=None, arch=None):
     if "fp8" in n or "e4m3" in n or "e5m2" in n:
         mant = "e5m2" if "e5m2" in n else "e4m3"
         if n.endswith("fnuz"):
-            suffix = "fnuz"
+            attr = f"float8_{mant}fnuz"
         elif n.endswith("fn"):
-            suffix = "fn"
-        else:  # bare/generic name → pick by arch (this is the MI300-vs-MI355 fork)
-            suffix = "fnuz" if fp8_is_fnuz(arch if arch is not None else detect_arch(torch)) else "fn"
-        return getattr(torch, f"float8_{mant}{suffix}", torch.bfloat16)
+            # OCP e5m2 has no `float8_e5m2fn` attribute — torch exposes `float8_e5m2`.
+            attr = "float8_e5m2" if mant == "e5m2" else f"float8_{mant}fn"
+        else:
+            use_fnuz = fp8_is_fnuz(arch if arch is not None else detect_arch(torch))
+            if mant == "e5m2":
+                attr = "float8_e5m2fnuz" if use_fnuz else "float8_e5m2"
+            else:
+                attr = "float8_e4m3fnuz" if use_fnuz else "float8_e4m3fn"
+        return getattr(torch, attr, torch.bfloat16)
     return torch.bfloat16
 
 

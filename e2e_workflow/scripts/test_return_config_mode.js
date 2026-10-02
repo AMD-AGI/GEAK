@@ -46,6 +46,9 @@ function makeContext(args, carried, setupFlags) {
     MODEL_NAME_HINT: 'test', TASK: '', GPU_IDS: '0', WORKLOAD: {}, INIT_BASE_OVERLAY: '',
     roleAgent: (_role, _phase, _task, inputs) => inputs,
     PARITY_REPLICAS: 2, WORKFLOW_DIR: '/workflow', GPU_LIST: ['0'],
+    EXPECTED_GFX: 'gfx942', EXPECTED_TARGET: 'unknown',
+    EXPECTED_DEVICE_NAME: 'AMD Instinct MI300X', EXPECTED_PHYSICAL_CU_COUNT: 304,
+    E2E_LEARNED_KB_ENABLED: true,
     TRACELENS_INPUTS: {}, ANALYSIS_SKILL_INPUTS: {}, TUNING_FINALIZE_INPUTS: {},
     c: { gpu_id: '0', short_name: 'kernel', pct_gpu_time: 10 },
     ext: { task_dir: '/task', source_path_in_sglang: 'kernel.py', target_callable: 'kernel.run' },
@@ -136,11 +139,12 @@ function assertRenderedRole(inputs, removalJson) {
   const defaults = {
     BACKEND: 'sglang', SERVING_TP: 2, SERVING_GPU: '0,1', MEASUREMENT_MODE: 'fresh_server',
     PARITY_REPLICAS: 2, SEARCH_REPLICAS: 1, VALIDATION_REPLICAS: 3, EFFECTIVE_CONFIG_DIGEST: 'digest',
+    E2E_LEARNED_KB: 'on',
   };
   const original = JSON.stringify(inputs);
   const prompt = vm.runInNewContext(`${cfgSource}\n${roleAgentSource}\n` +
     `roleAgent('director', 'test', 'Check the removal transport.', inputs)`, {
-    ...defaults, inputs, WORKFLOW_DIR: '/workflow', GPU_IDS: '0,1',
+    ...defaults, inputs, WORKFLOW_DIR: '/workflow', GPU_IDS: '0,1', E2E_LEARNED_KB_ENABLED: true,
     expertSkillsBlock: () => '', warmStartBlock: () => '',
   }, { timeout: 1000 });
   assert.equal(JSON.stringify(inputs), original, 'rendering cannot mutate the carried role inputs');
@@ -244,6 +248,8 @@ async function test() {
     INIT_ARGS_MODE: 'replace', INIT_ENV_COMPLETE: true,
     INIT_UNSET_ENVS: ['OLD_ENV'], INIT_REMOVE_ARGS: ['--disable-radix-cache', '--limit 8'],
     MEASUREMENT_PURPOSE: 'parity', REPLICAS: 2, SKILL_DIR: '/workflow',
+    EXPECTED_GFX: 'gfx942', EXPECTED_TARGET: 'unknown',
+    EXPECTED_DEVICE_NAME: 'AMD Instinct MI300X', EXPECTED_PHYSICAL_CU_COUNT: 304,
   }, 'the baseline-measuring setup role receives both removal controls with the exact seed');
   assert.deepEqual(controls.launch_inputs, expectedLaunchInputs('--keep 1', 'KEEP_ENV=1',
     ['--disable-radix-cache', '--limit 8'], ['OLD_ENV'], 'replace'),

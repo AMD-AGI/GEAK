@@ -111,6 +111,10 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "model_path": "/models/Qwen-Qwen3.5-27B",
   "framework": "sglang",                 // -> backend (sglang|vllm|atom)
   "gpu_type": "MI300X",
+  "expected_gfx": "gfx950",              // optional pair; otherwise probed
+  "expected_target": "unknown",          // r9700|unknown; supply with expected_gfx
+  "expected_device_name": "AMD Instinct MI355X",
+  "expected_physical_cu_count": 256,
   "tp": 8,                               // serving tensor-parallel size (honoured, no TP=1 lock)
   "gpu_ids": "0,1,2,3,4,5,6,7",          // optional; default 0..tp-1
   "workload": { "isl": 1024, "osl": 1024, "conc": 64 },
@@ -137,6 +141,22 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 
 Required: `model_path`, `exp_root`. Everything else has a default.
 
+Before a real run selects a backend or architecture policy, `run_e2e.py`
+requires structured GPU identity. It uses the explicit `expected_gfx` /
+`expected_target` pair when present, otherwise `GEAK_GPU_IDENTITY_JSON`, and
+otherwise runs `scripts/gpu_identity.py`. The environment override is a JSON
+object with `gfx`, `target`, `marketing_name`, and `physical_cu_count`, for
+example:
+
+```bash
+export GEAK_GPU_IDENTITY_JSON='{"gfx":"gfx1201","target":"r9700","marketing_name":"AMD Radeon AI PRO R9700","physical_cu_count":64}'
+```
+
+`--dry-run` is host-only: when neither explicit nor environment identity is
+provided it skips rocminfo and reports `gpu_identity_status:
+unavailable_dry_run`. A real run never uses that placeholder and still fails
+closed.
+
 `bench_protocol` is optional and **partial-friendly**: only the keys present are
 applied. Omit it entirely (standalone GEAK, no external orchestrator) and
 `bench_e2e.sh` keeps its own defaults unchanged. When the caller (Hyperloom)
@@ -156,6 +176,7 @@ a ~10-15% 口径 gap. Both default to `0` (fixed) so the standalone and forwarde
 | `framework` | `backend` | `sglang` \| `vllm` \| `atom` |
 | `tp` | `tp` | serving tensor-parallel (threaded to bench `TP`) |
 | `gpu_ids` / `tp` | `gpu_ids` | defaults to `0..tp-1` |
+| `expected_gfx` / `expected_target` | matching `expected_*` args | optional explicit structured identity pair; otherwise probe/env identity |
 | `workload.{isl,osl,conc}` | `isl` / `osl` / `conc` | profile + bench workload |
 | `accepted_flags` | `initial_extra_server_args` | seeds the baseline = caller best config |
 | `accepted_env` | `initial_extra_env` | seeds baseline env |

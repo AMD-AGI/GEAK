@@ -14,16 +14,30 @@ Two things are locked here.
 2. **Degradation is non-fatal.** Every level of the SKILL.md ladder returns a value instead of raising,
    so a bad peak table / unmodellable op / impossible result / missing counter cannot fail a run.
 """
+import importlib.util
 import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "knowledge", "analysis_skills", "roofline"))
+E2E_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(E2E_DIR, "knowledge", "analysis_skills", "roofline"))
 import roofline_tools as rt  # noqa: E402
 
 PEAKS_MD = os.path.join(os.path.dirname(os.path.abspath(rt.__file__)), "peaks.md")
+
+_IDENTITY_SPEC = importlib.util.spec_from_file_location(
+    "gpu_identity", os.path.join(os.path.dirname(E2E_DIR), "scripts", "gpu_identity.py"))
+gpu_identity = importlib.util.module_from_spec(_IDENTITY_SPEC)
+_IDENTITY_SPEC.loader.exec_module(gpu_identity)
+
+
+def _identity(gfx, marketing_name, cu):
+    """Structured identity exactly as the workflow's rocminfo probe reports it."""
+    return gpu_identity.parse_rocminfo(
+        "*******\nAgent 1\n*******\n"
+        "  Name:                    %s\n"
+        "  Marketing Name:          %s\n"
+        "  Compute Unit:            %d\n" % (gfx, marketing_name, cu))
 
 # --- measured profile of the reference run (see module docstring) ---------------------------------
 MOE = dict(E=256, M=64, top_k=8, hidden=2048, inter=512, layers=40,
@@ -68,6 +82,27 @@ class TestPeaks(unittest.TestCase):
         self.assertEqual(p["source"], "table")
         self.assertEqual(p["confidence"], "high")
 
+    def test_gfx950_profile_dtype_aliases_keep_their_compute_peak(self):
+        p = _peaks()
+        expected = {
+            "fp8_e4m3": 5.0e15,
+            "fp8_w8a8": 5.0e15,
+            "float8_e4m3fn": 5.0e15,
+            "torch.float8_e5m2fnuz": 5.0e15,
+            "half": 2.5e15,
+            "torch.half": 2.5e15,
+            "bfloat16": 2.5e15,
+            "float16": 2.5e15,
+            "float32": 1.57e14,
+        }
+        for dtype, peak in expected.items():
+            with self.subTest(dtype=dtype):
+                self.assertAlmostEqual(
+                    rt.peak_flops_for(p, dtype), peak, delta=peak * 1e-6
+                )
+        self.assertEqual(rt.dtype_bytes("torch.float8_e4m3fnuz"), 1)
+        self.assertEqual(rt.dtype_bytes("half"), 2)
+
     def test_gfx942_also_tabulated(self):
         p = rt.load_peaks(PEAKS_MD, "gfx942")
         self.assertIsNotNone(p)
@@ -103,6 +138,96 @@ class TestPeaks(unittest.TestCase):
         for gfx in ("gfx942", "gfx950", "gfx1151"):
             p = rt.load_peaks(PEAKS_MD, gfx)
             self.assertEqual(p["flops"]["bf16"], p["flops"]["fp16"], gfx)
+            
+    def test_r9700_peaks_require_product_identity(self):
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1201"))
+        p = rt.resolve_peaks(PEAKS_MD, "gfx1201", product="r9700")
+        self.assertIsNotNone(p)
+        self.assertEqual(p["source"], "table")
+        self.assertEqual(p["confidence"], "high")
+        self.assertEqual(p.get("product"), "r9700")
+        self.assertEqual(p["cu"], 64)
+        self.assertAlmostEqual(p["hbm_bw_bytes_s"], 6.4e11, delta=1e8)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "bf16"), 1.91e14, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp16"), 1.91e14, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 4.78e13, delta=1e11)
+        self.assertAlmostEqual(rt.peak_flops_for(p, "fp8"), 3.83e14, delta=1e11)
+        for alias in (
+            "fp8_e4m3",
+            "fp8_e5m2",
+            "fp8_w8a8",
+            "float8_e4m3fn",
+            "torch.float8_e5m2fnuz",
+        ):
+            self.assertAlmostEqual(
+                rt.peak_flops_for(p, alias), 3.83e14, delta=1e11
+            )
+        self.assertAlmostEqual(rt.peak_flops_for(p, "int8"), 3.83e14, delta=1e11)
+        self.assertIsNone(rt.peak_flops_for(p, "fp4"))
+        self.assertNotIn("fp4", p["flops"])
+
+    def test_unknown_product_identity_keeps_instinct_tables(self):
+        """gpu_identity reports target=unknown for every card except an exact R9700. Passing that
+        straight through as `product` must still find the ISA-keyed CDNA tables, not derive."""
+        original = rt.derive_peaks_from_props
+
+        def no_derive(device=0):
+            raise AssertionError("tabulated CDNA peaks fell back to device properties")
+
+        rt.derive_peaks_from_props = no_derive
+        try:
+            for gfx, name, cu in (("gfx950", "AMD Instinct MI355X", 256),
+                                  ("gfx942", "AMD Instinct MI300X", 304)):
+                with self.subTest(gfx=gfx):
+                    identity = _identity(gfx, name, cu)
+                    self.assertEqual(identity["target"], "unknown")
+                    p = rt.resolve_peaks(PEAKS_MD, identity["gfx"], product=identity["target"])
+                    self.assertEqual(p, rt.load_peaks(PEAKS_MD, gfx))
+                    self.assertEqual(p["source"], "table")
+                    self.assertEqual(p["confidence"], "high")
+        finally:
+            rt.derive_peaks_from_props = original
+
+    def test_identity_product_still_scopes_the_r9700_table(self):
+        r9700 = _identity("gfx1201", gpu_identity.R9700_MARKETING_NAME, 64)
+        p = rt.resolve_peaks(PEAKS_MD, r9700["gfx"], product=r9700["target"])
+        self.assertIsNotNone(p)
+        self.assertEqual(p.get("product"), "r9700")
+        other = _identity("gfx1201", "Another gfx1201 Product", 64)
+        self.assertEqual(other["target"], "unknown")
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, other["gfx"], product=other["target"]))
+
+    def test_peak_flops_for_unknown_dtype_is_none_not_table_max(self):
+        p = _peaks()
+        self.assertIsNone(rt.peak_flops_for(p, "mystery_dtype"))
+        self.assertIsNone(rt.peak_flops_for(None, "bf16"))
+
+    def test_client_rdna4_family_is_gfx120x_not_gfx1250(self):
+        self.assertTrue(rt.is_client_rdna4("gfx1201"))
+        self.assertTrue(rt.is_client_rdna4("gfx1200"))
+        self.assertFalse(rt.is_client_rdna4("gfx1250"))
+        self.assertFalse(rt.is_client_rdna4("gfx950"))
+
+    def test_unmeasured_gfx120x_is_hard_unknown_not_derived(self):
+        self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
+
+    def test_gfx1250_missing_table_may_derive(self):
+        called = []
+        original = rt.derive_peaks_from_props
+
+        def fake_derive(device=0):
+            called.append(device)
+            return None
+
+        rt.derive_peaks_from_props = fake_derive
+        try:
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1250"))
+            self.assertEqual(called, [0])
+            called.clear()
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
+            self.assertEqual(called, [])
+        finally:
+            rt.derive_peaks_from_props = original
 
     def test_L1_unknown_gfx_returns_none(self):
         """Unknown gfx -> None, so the caller falls back to derived peaks at confidence=low."""
@@ -320,8 +445,13 @@ class TestSkillDocConsistency(unittest.TestCase):
         self.assertEqual(rt.TARGET_EFF["gemm"], 0.90)
         self.assertEqual(rt.TARGET_EFF["moe"], 0.90)
         self.assertEqual(rt.TARGET_EFF["attn"], 0.50)
+        self.assertEqual(rt.target_eff_for("moe", product="r9700"), 0.76)
+        self.assertEqual(rt.target_eff_for("elementwise", product="r9700"), 0.76)
+        self.assertEqual(rt.target_eff_for("gemm", product="r9700"), 0.90)
+        self.assertEqual(rt.target_eff_for("moe", product="unknown"), 0.90)
         for frag in ("dense GEMM | **0.90**", "MoE / grouped GEMM | **0.90**",
-                     "attention decode (paged) | **0.50**"):
+                     "attention decode (paged) | **0.50**",
+                     "R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76**"):
             self.assertIn(frag, text, "SKILL.md target_eff table drifted from roofline_tools.TARGET_EFF")
 
     def test_workload_contract_is_stated(self):

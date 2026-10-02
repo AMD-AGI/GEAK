@@ -48,10 +48,13 @@ experience; treat the seed as priors, not gospel — the unittest is the judge.
 2. For `library_*` kernels → hand to Config Tuner with the ranked swaps above (no source edit).
 3. For editable kernels → hand to Extractor + kernel squad; pass the ranked backends as the
    squad's "candidate backends" so it compares them via the (immutable) unittest.
-4. **CURATE** `knowledge/learned/` after the run (read INDEX → merge/insert ≥★★ / archive
-   contradicted), per `knowledge/learned/README.md`.
+4. When `E2E_LEARNED_KB=on`, **CURATE** `knowledge/learned/` after the run
+   (read INDEX → merge/insert ≥★★ / archive contradicted), per
+   `knowledge/learned/README.md`. When `E2E_LEARNED_KB=off`, do not open or
+   curate that directory.
 
 ## Learned experience → `knowledge/learned/`
+This section applies only when `E2E_LEARNED_KB=on`.
 Confirmed routing/method findings are NOT appended here anymore. They live as distilled, evidence-cited
 cards in **`knowledge/learned/`**, read via **`knowledge/learned/INDEX.md`** (grouped by reuse key
 `kernel_class · gfx`). Open only the cards matching the current run's `(model_class, gfx, regime)`;

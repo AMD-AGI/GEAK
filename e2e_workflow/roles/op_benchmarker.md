@@ -27,10 +27,14 @@ e2e Integrator turns your winner into an overlay/config and runs the Amdahl gate
 Read first, every time:
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder, per-backend tuning knobs,
   parity/accuracy gate (the priors).
-- `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as **advisory priors** (an aid, not a
+- When `E2E_LEARNED_KB=on`, read `SKILL_DIR/knowledge/learned/INDEX.md` — distilled experience as
+  **advisory priors** (an aid, not a
   cage). Read it and judge relevance **by meaning, not by string match**; `ls` the folder too (the index
   is hand-kept today and has drifted). Use the matching cards to ADD candidates to your bake-off, never
   to prune it or skip the e2e gate — measurement is the judge. CURATE it after a run — never blind-append.
+- When `E2E_LEARNED_KB=off`, do **not** open, list, cite, or curate
+  `SKILL_DIR/knowledge/learned/`; derive every candidate from this run's profile,
+  architecture guide, and on-box measurements.
 - `SKILL_DIR/knowledge/e2e_optimization.md` — Amdahl reasoning + measurement discipline.
 - `GEAK/perf_knowledge/index/capability_index.yaml` — **REFERENCE ONLY**, to *widen* your Tier-A
   candidate set: which backends have a documented impl for this op + the gens/dtypes/regimes they support.
@@ -210,7 +214,7 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
    > pass is always a READ (`harness_lib.cache_policy`, fixed `read-evict`); it does not assert a particular
    > residency, and the receipt records the preparation. Consequence for what you optimize: (1) device time already EXCLUDES host launch/dispatch,
    > so shaving Python/dispatch overhead earns ZERO here — real wins come from cutting HBM traffic (memory-
-   > bound decode) or MFMA/compute work (compute-bound prefill), NOT launch-overhead tricks (those only pay
+   > bound decode) or matrix-core compute work (MFMA on CDNA, WMMA on RDNA; compute-bound prefill), NOT launch-overhead tricks (those only pay
    > off in the server via its decode CUDA graph, which already collapses dispatch). (2) A large `wall_ms ≫
    > ms` gap flags a host-bound op whose isolated device win won't transfer e2e — surface it. (3) Because
    > the cache is evicted between samples, a candidate that only wins hot (back-to-back same-buffer reuse)

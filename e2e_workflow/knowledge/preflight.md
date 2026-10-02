@@ -128,7 +128,9 @@ Write `EVAL_DIR/env_report.md` (human) and `EVAL_DIR/env_report.json` (machine),
 {
   "backend": "sglang", "backend_version": "0.5.11",
   "model": "/path", "model_arch_class": "hybrid_mamba_moe", "model_dtype": "bf16",
-  "gfx": "gfx942", "gpu_ids": ["0"],
+  "gfx": "gfx942", "device_target": "unknown",
+  "device_name": "AMD Instinct MI300X", "physical_cu_count": 304,
+  "gpu_ids": ["0"],
   "trace_sources": ["torch"],            // add "rocprofv3" if present
   "available_backends": ["aiter","hipblaslt","triton","flydsl"], // include "flydsl" iff aiter.ops.flydsl.is_flydsl_available(); aiter/ck/flydsl removed only if absent
   "absent_backends": {                    // one entry per OPTIONAL backend NOT available, with an actionable remedy (see probe 5)
@@ -142,7 +144,8 @@ Write `EVAL_DIR/env_report.md` (human) and `EVAL_DIR/env_report.json` (machine),
 ```
 Downstream phases read `env_report.json`: the Profiler picks its trace sources from `trace_sources`,
 the Architect routes using `model_arch_class` + `available_backends`, the bake-off ladder uses
-`available_backends`, and tuning priors are gated on `gfx`. The **Op Benchmarker gates its `author_plan`
+`available_backends`, tuning priors are gated on `gfx`, and product-scoped roofline peaks use
+`device_target` (never infer R9700 from gfx1201). The **Op Benchmarker gates its `author_plan`
 on `available_backends`** (a backend in `absent_backends` is NOT emitted as an author lane — it is
 emitted as a `backend_absent` advisory), and the **report renders `absent_backends` as a BACKEND_ABSENT
 (env-provisioning) section** so a mandated-but-missing lever is never silently dropped.

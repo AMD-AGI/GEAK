@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // Regression guard for the kernel_workflow.js DISPATCHER (no GPU, no agent, no network).
 //
-// Two invariants under test, both exercised against the REAL kernel_workflow.js source:
+// Three invariants under test, all exercised against the REAL kernel_workflow.js source:
 //   A-D) mode dispatch — args.mode routes to the single-language worker (optimize|author) or to the
 //        multi-language bake-off (bakeoff); it normalizes case/whitespace, defaults to optimize, throws
 //        on anything else (never silently downgrades), and forwards every arg to the worker untouched.
 //   E-J) bake-off LANE ROUTING — the live language optimizes its existing impl, other languages follow
 //        Discover's author_plan.route (rewrite -> optimize, author -> author), explicit args.backends
 //        overrides auto-discovery, and the winner is picked by speedup on the one frozen baseline.
+//   L-M) bake-off IDENTITY — expected/detected identity reaches every lane, gfx1201 isolates CDNA
+//        knowledge, and an unvalidated ISA (gfx1200) is refused before Discover.
 //
 // The Workflow runtime globals (args/phase/log/workflow/agent/parallel/pipeline/budget) are stubbed, so
 // this runs in milliseconds and spawns nothing. The runtime wraps a workflow script body in an async
@@ -42,7 +44,7 @@ function build(argsObj, stubs) {
       trace.workflowCalls.push({ scriptPath: ref.scriptPath, args: a });
       trace.lanes.push({ lang: a.target_language, mode: a.mode, gpus: a.gpu_ids });
       const sp = s.lane && s.lane[a.target_language] !== undefined ? s.lane[a.target_language] : 1.0;
-      return { validation_status: 'validated', final_speedup: sp };
+      return { validation_status: 'accepted', final_speedup: sp };
     },
     agent: async (p, o) => {
       const label = (o && o.label) || '';
@@ -61,7 +63,10 @@ function build(argsObj, stubs) {
   return { run: () => fn(...Object.values(g)), trace };
 }
 
-const BASE = { kernel_path: '/tmp/k', workflow_dir: WF_DIR };
+const BASE = {
+  kernel_path: '/tmp/k', workflow_dir: WF_DIR,
+  expected_gfx: 'gfx950', expected_target: 'unknown',
+};
 
 // Freeze that reports a failed smoke: enough to prove bake-off was ENTERED (phase 'Freeze' ran) without
 // paying for Discover/Bakeoff/Report. Used by the routing table below.
@@ -69,10 +74,14 @@ const freezeFails = (label) =>
   label.startsWith('oracle_freezer') ? { op_kind: 'gemm', task_dir: '/tmp/o', smoke: 'fail' } : null;
 
 // A healthy freeze + a Discover result, parameterized by live backend and author_plan.
-const healthy = (liveBackend, authorPlan) => (label) => {
+const healthy = (liveBackend, authorPlan, identity = {
+  device_gfx: 'gfx950', device_target: 'unknown',
+  device_name: 'AMD Instinct MI355X', physical_cu_count: 256,
+}) => (label) => {
   if (label.startsWith('oracle_freezer')) return {
     op_kind: 'gemm', task_dir: '/tmp/oracle', smoke: 'pass', baseline_frozen: true,
     eval_dir: '/tmp/eval', live_backend: liveBackend, candidate_backends: [],
+    ...identity,
   };
   if (label.startsWith('op_benchmarker')) return {
     gate: 'pass', isolated_speedup: 1.0, best_known_ms: 1.0, baseline_ms: 1.0,
@@ -138,11 +147,19 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
   // -------------------------------------------------------------------------
   console.log('\n# D. required args');
   {
-    let m1 = null, m2 = null;
+    let m1 = null, m2 = null, m3 = null;
     try { await build({ workflow_dir: WF_DIR }, {}).run(); } catch (e) { m1 = e.message; }
     try { await build({ kernel_path: '/tmp/k' }, {}).run(); } catch (e) { m2 = e.message; }
+    try {
+      await build(
+        { kernel_path: '/tmp/k', workflow_dir: WF_DIR, mode: 'bakeoff' },
+        { agent: healthy('hip', [], {}) },
+      ).run();
+    } catch (e) { m3 = e.message; }
     ok(/kernel_path is required/.test(m1 || ''), 'missing kernel_path throws', m1);
     ok(/workflow_dir is required/.test(m2 || ''), 'missing workflow_dir throws', m2);
+    ok(/did not return structured device_gfx and device_target/.test(m3 || ''),
+      'bakeoff refuses to Discover when Freeze cannot establish identity', m3);
   }
 
   // -------------------------------------------------------------------------
@@ -255,6 +272,90 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ok(r && r.validation_status === 'no_winner', 'validation_status=no_winner', r && r.validation_status);
     ok(Array.isArray(r && r.candidates) && r.candidates.length === 3,
       'all 3 candidates still reported for transparency', JSON.stringify(r && (r.candidates || []).length));
+  }
+
+  console.log('\n# L. bakeoff forwards expected identity and fail-closes R9700 knowledge before Discover');
+  {
+    const { run, trace } = build({
+      ...BASE, mode: 'bakeoff', expected_gfx: 'gfx1201', expected_target: 'r9700',
+      backends: ['hip'], gpu_ids: '0', use_expert_skills: 'true',
+    }, { agent: healthy('hip', [], {
+      device_gfx: 'gfx1201', device_target: 'r9700',
+      device_name: 'AMD Radeon AI PRO R9700', physical_cu_count: 64,
+    }) });
+    await run();
+    const lane = trace.workflowCalls[0];
+    ok(lane && lane.args.expected_gfx === 'gfx1201', 'lane expected_gfx', JSON.stringify(lane && lane.args));
+    ok(lane && lane.args.expected_target === 'r9700', 'lane expected_target');
+    ok(lane && lane.args.expected_physical_cu_count === 64, 'lane physical CU count');
+    ok(lane && lane.args.warm_start === 'off', 'R9700 bakeoff warm_start=off', lane && lane.args.warm_start);
+    ok(lane && lane.args.perf_knowledge_dir === '', 'R9700 bakeoff empty perf_knowledge_dir',
+      lane && lane.args.perf_knowledge_dir);
+    ok(lane && lane.args.use_expert_skills === 'false', 'R9700 bakeoff expert skills off',
+      lane && lane.args.use_expert_skills);
+  }
+  {
+    const { run, trace } = build({
+      ...BASE, mode: 'bakeoff', expected_gfx: 'gfx1201', expected_target: 'unknown',
+      backends: ['hip'], gpu_ids: '0', use_expert_skills: 'true',
+    }, { agent: healthy('hip', [], {
+      device_gfx: 'gfx1201', device_target: 'unknown',
+      device_name: 'Another gfx1201 Product', physical_cu_count: 64,
+    }) });
+    await run();
+    const lane = trace.workflowCalls[0];
+    ok(lane && lane.args.expected_target === 'unknown',
+      'unknown gfx1201 product is forwarded without R9700 synthesis');
+    ok(lane && lane.args.warm_start === 'off',
+      'unknown gfx1201 still isolates from CDNA warm-start');
+    ok(lane && lane.args.perf_knowledge_dir === '',
+      'unknown gfx1201 still isolates from CDNA performance knowledge');
+  }
+  {
+    const { run, trace } = build({
+      kernel_path: '/tmp/k', workflow_dir: WF_DIR, mode: 'bakeoff',
+      backends: ['hip'], gpu_ids: '0', use_expert_skills: 'true',
+    }, { agent: healthy('hip', [], {
+      device_gfx: 'gfx1201', device_target: 'r9700',
+      device_name: 'AMD Radeon AI PRO R9700', physical_cu_count: 64,
+    }) });
+    await run();
+    const lane = trace.workflowCalls[0];
+    ok(lane && lane.args.expected_gfx === 'gfx1201',
+      'auto-detected bakeoff forwards the detected ISA');
+    ok(lane && lane.args.expected_target === 'r9700',
+      'auto-detected bakeoff forwards exact structured product identity');
+    ok(lane && lane.args.use_expert_skills === 'false',
+      'auto-detected gfx1201 isolates before Discover and lane dispatch');
+  }
+
+  console.log('\n# M. an unvalidated ISA (gfx1200) is rejected before Discover');
+  {
+    const { run, trace } = build({
+      kernel_path: '/tmp/k', workflow_dir: WF_DIR, mode: 'bakeoff',
+      backends: ['hip'], gpu_ids: '0',
+    }, { agent: healthy('hip', [], {
+      device_gfx: 'gfx1200', device_target: 'unknown',
+      device_name: 'AMD Radeon Graphics', physical_cu_count: 56,
+    }) });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(/gfx1200/.test(msg), 'Freeze-detected gfx1200 throws', msg || 'no throw');
+    ok(!trace.phases.includes('Discover'), 'detected gfx1200 never reaches Discover',
+      JSON.stringify(trace.phases));
+    ok(!trace.agentLabels.some((l) => l.startsWith('op_benchmarker')),
+      'no op_benchmarker agent spawned', JSON.stringify(trace.agentLabels));
+    ok(trace.lanes.length === 0, 'no lane opened', lanesOf(trace));
+  }
+  {
+    const { run, trace } = build({
+      ...BASE, mode: 'bakeoff', expected_gfx: 'gfx1200', expected_target: 'unknown',
+    }, { agent: healthy('hip', []) });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(/gfx1200 is not supported/.test(msg), 'expected gfx1200 throws', msg || 'no throw');
+    ok(trace.agentLabels.length === 0, 'expected gfx1200 spawns no agent, not even Freeze',
+      JSON.stringify(trace.agentLabels));
   }
 
   console.log(failures === 0
