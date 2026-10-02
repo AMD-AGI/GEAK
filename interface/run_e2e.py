@@ -564,12 +564,15 @@ def map_args(
     # metadata; these flags are what the adapters actually launch with. Backend
     # translation + dedup live in _fold_serving_fidelity_flags (generic; a new
     # backend is one map entry). No knobs / unknown backend => unchanged.
-    ps_args["initial_extra_server_args"] = _fold_serving_fidelity_flags(
-        ps_args["initial_extra_server_args"],
-        backend=str(ps_args.get("backend") or ""),
-        max_model_len=_mml,
-        mem_fraction=_mem,
-    )
+    # A process-bound reference is complete: summary scalars cannot add flags
+    # that were absent from the measured server argv.
+    if reference_args is None:
+        ps_args["initial_extra_server_args"] = _fold_serving_fidelity_flags(
+            ps_args["initial_extra_server_args"],
+            backend=str(ps_args.get("backend") or ""),
+            max_model_len=_mml,
+            mem_fraction=_mem,
+        )
     # Optional phase scoping / resume. Pass-through of the workflow's own
     # phase-by-phase driving (args.phases): e.g. "final" re-enters only the
     # Finalize gate against a pinned eval_dir, which (with the disk-reconstruct +

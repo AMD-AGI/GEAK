@@ -92,15 +92,22 @@ def test_new_candidate_does_not_mutate_the_accepted_reference():
     assert value == original
 
 
-def test_normal_bridge_carries_the_strict_reference(tmp_path):
+@pytest.mark.parametrize("summary", [
+    {}, {"max_model_len": 1048576}, {"mem_fraction": 0.9},
+    {"max_model_len": 1048576, "mem_fraction": 0.9},
+])
+def test_normal_bridge_carries_the_strict_reference(tmp_path, summary):
     spec = importlib.util.spec_from_file_location("recipe_run_e2e", Path(__file__).with_name("run_e2e.py"))
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     value = handoff()
+    value.update(summary)
     value["exp_root"] = str(tmp_path)
     args = runner.map_args(value, timeout_s=43200)
     assert args["reference_server_args"] == args["initial_extra_server_args"]
     assert "VLLM_USE_AITER=1" in args["initial_extra_env"]
+    for key, expected in summary.items():
+        assert args[key] == expected
 
 
 def test_reference_environment_cannot_change_after_its_measurement():
