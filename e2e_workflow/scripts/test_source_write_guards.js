@@ -34,7 +34,7 @@ function context(request) {
   const op = { op: 'example', backend: 'triton', isolated_speedup: 1.2,
     engaged: true, artifact: '/run/table.json', session_id: 'prior-record', source: 'recall' };
   return {
-    calls, logs, BASELINE_SOURCE_REQUEST: request,
+    calls, logs, BASELINE_SOURCE_REQUEST: request, E2E_LEARNED_KB_ENABLED: true, RDNA4_ISOLATE: false,
     safeAgent: agent, agentT: agent, roleAgent: (_role, _phase, intro) => intro,
     log: message => logs.push(message), shq: JSON.stringify, obj: value => value,
     arrObj: {}, arrStr: {}, want: () => true,
@@ -59,6 +59,7 @@ function context(request) {
       rank: 1, verified_speedup: 1.2, status: 'adopted' }], plane: 'remote' },
     KB_STORE_DIR: '/shared/store', EXPERIENCE_STORE: '/experience.py',
     KERNEL_NAME: 'kernel', TARGET_LANGUAGE: 'triton', GFX: 'gfx942', KB_VERSION_FLAG: '',
+    DEVICE_TARGET: 'unknown', PHYSICAL_CU_COUNT: 304,
     kbGate: '', UPDATE_EXPERIENCE_ON: true, kbAccepted: true, finalPrimary: 1.2,
     learned_card: null, LEARNED_DIR: '/shared/learned', KERNEL_KNOWLEDGE_DIR: '/knowledge',
     MODE: 'optimize', analysis: {}, profileSummary: {}, report: {},
@@ -73,8 +74,8 @@ const cases = [
   ['e2e attestation', between(e2e, 'const configHalfOnly =', '      const allVerdicts ='), 'kb:attest'],
   ['tuning attestation', between(e2e, 'const tuningAttestable =', '\n  if (tuneOk) {'), 'kernel-kb:attest-tuned'],
   ['tuning write', between(e2e, 'const kernelKbOps =', '    await requireE2EValidationCheckpoint'), 'kernel-kb:write-tuned'],
-  ['milestone learned card', between(e2e, 'const exp = BASELINE_SOURCE_REQUEST', '  history.milestones.push'), 'architect:experience m1'],
-  ['final learned card', block(e2e, 'if (!BASELINE_SOURCE_REQUEST && allAccepted.length)', '  '), 'architect:experience final'],
+  ['milestone learned card', between(e2e, 'const exp = !BASELINE_SOURCE_REQUEST', '  history.milestones.push'), 'architect:experience m1'],
+  ['final learned card', block(e2e, 'if (!BASELINE_SOURCE_REQUEST && allAccepted.length', '  '), 'architect:experience final'],
   ['deployment write', between(e2e, 'const kbNoWinVerdict =', '\nreturn wfReturn;'), 'kb:write'],
   ['lane attestation', 'const benched = warm_start.candidates;\n' +
     block(lane, 'if (!BASELINE_SOURCE_REQUEST && benched.length)', '      '), 'kb:attest'],
@@ -97,12 +98,19 @@ async function main() {
       assert.strictEqual(env.tunedOps.length, 1, 'local tuned op retained');
       assert.strictEqual(env.citations.length, 1, 'local citations retained');
     }
+    if (name === 'milestone learned card' || name === 'final learned card') {
+      const env = { ...context(''), E2E_LEARNED_KB_ENABLED: false };
+      await new AsyncFunction(...Object.keys(env), code)(...Object.values(env));
+      assert.deepStrictEqual(env.calls, [], `${name}: disabled learned KB write leaked`);
+    }
     console.log(`PASS ${name}: source-bound skipped, ordinary path unchanged`);
   }
 
   const argsCode = between(e2e, 'const laneArgs = (wfArgs) =>', '// EXP_ROOT =');
   const makeArgs = new Function('BASELINE_SOURCE_REQUEST', 'LANE_USE_LEARNED_KB',
     'TIME_BUDGET_MS', 'EXPLICIT_FINAL_RESERVE_MS', 'remainingMs', 'FINAL_RESERVE_MS', 'CLOCK_TICK_MS', 'AGENT_TIMEOUT_MS',
+    'RDNA4_ISOLATE = false', 'EXPECTED_GFX = ""', 'EXPECTED_TARGET = ""',
+    'EXPECTED_DEVICE_NAME = ""', 'EXPECTED_PHYSICAL_CU_COUNT = 0',
     argsCode + '\nreturn laneArgs;');
   const input = { kernel_path: '/task', warm_start: 'reference', kb_store_dir: '/shared/store' };
   assert.deepStrictEqual(makeArgs('', 'false')(input), { use_learned_kb: 'false', ...input });
@@ -115,6 +123,18 @@ async function main() {
   assert.strictEqual(boundedChild.time_budget_ms, 3540000, 'nested lane gets remaining optimization time minus clock margin');
   assert.strictEqual(boundedChild.agent_timeout_ms, 21600000, 'explicit role timeout reaches nested agents');
   assert.strictEqual(boundedChild.baseline_source_request_path, staged, 'a time bound never changes source identity');
+  const rdnaChild = makeArgs(staged, 'true', 43200000, 21600000, () => 25200000,
+    21600000, 60000, 21600000, true, 'gfx1201', 'r9700', 'AMD Radeon AI PRO R9700', 64)(input);
+  assert.strictEqual(rdnaChild.baseline_source_request_path, staged, 'R9700 policy preserves source binding');
+  assert.strictEqual(rdnaChild.time_budget_ms, boundedChild.time_budget_ms, 'R9700 policy preserves lane deadline');
+  assert.strictEqual(rdnaChild.use_learned_kb, 'false');
+  assert.strictEqual(rdnaChild.use_expert_skills, 'false');
+  assert.strictEqual(rdnaChild.perf_knowledge_dir, '');
+  assert.strictEqual(rdnaChild.warm_start, 'off');
+  assert.strictEqual(rdnaChild.expected_gfx, 'gfx1201');
+  assert.strictEqual(rdnaChild.expected_target, 'r9700');
+  assert.strictEqual(rdnaChild.expected_device_name, 'AMD Radeon AI PRO R9700');
+  assert.strictEqual(rdnaChild.expected_physical_cu_count, 64);
   const spread = dispatcher.match(/\.\.\.\(BASELINE_SOURCE_REQUEST \? \{ baseline_source_request_path: BASELINE_SOURCE_REQUEST \} : \{\}\)/);
   assert(spread, 'bakeoff lanes must inherit the same source binding');
   const forward = new Function('BASELINE_SOURCE_REQUEST', `return ({ ${spread[0]} });`);

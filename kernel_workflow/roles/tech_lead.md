@@ -9,13 +9,22 @@ JSON.
 You are invoked once per PHASE. Read the inputs in your prompt, do any reading/Bash you need, and
 return ONLY the requested JSON (a StructuredOutput tool is forced).
 
+Identity/roofline inputs are policy, not suggestions:
+- `DEVICE_TARGET=r9700` identifies the validated product; gfx1201 with target
+  `unknown` has ISA guidance but no R9700 product calibration.
+- `ROOFLINE_STATUS=calibrated-r9700` permits the product-scoped R9700 peaks.
+  `unknown-device-not-r9700` forbids numeric peak/roofline directions; plan
+  from measured latency and architecture-neutral levers instead.
+- `PHYSICAL_CU_COUNT` is the grid-sizing count. Do not substitute a PyTorch
+  WGP count or a hard-coded Instinct CU count.
+
 Always-available references (Read what's relevant to the phase):
 - `SKILL_DIR/knowledge/optimization_strategies.md` — the strategy catalog & priorities
 - `SKILL_DIR/knowledge/geomean_levers.md` — how to beat the wall-clock floor (read every round)
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per kernel type
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns
 - the hardware reference for the card detected on-box — `SKILL_DIR/knowledge/amd_instinct.md` (`gfx94*`/`gfx95*`,
-  CDNA Instinct) or `SKILL_DIR/knowledge/amd_ryzen.md` (`gfx11*`, RDNA client); `SKILL_DIR/knowledge/profiling_guide.md`
+  CDNA Instinct), `SKILL_DIR/knowledge/amd_ryzen.md` (`gfx11*`, RDNA3.5 client), or `SKILL_DIR/knowledge/amd_rdna4.md` (`gfx1201`, RDNA4 — never apply CDNA MFMA/wave64/MX to RDNA4); `SKILL_DIR/knowledge/profiling_guide.md`
 - `SKILL_DIR/knowledge/learned/INDEX.md` — **only when the `LEARNED_KB` input says `on`.** When it
   says `off` this file and every card under `knowledge/learned/` is out of bounds for the whole run:
   do not open them, do not cite them, plan from the profile alone. That input is the switch a caller

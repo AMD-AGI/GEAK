@@ -46,6 +46,9 @@ function makeContext(args, carried, setupFlags) {
     LAUNCH_SCRIPT: '/recipe', MODEL_PATH: '/model', EXP_ROOT: '/exp', EVAL_DIR_OVERRIDE: '',
     MODEL_NAME_HINT: 'test', TASK: '', GPU_IDS: '0', WORKLOAD: {}, INIT_BASE_OVERLAY: '',
     BASELINE_SOURCE_REQUEST: '', BASELINE_SOURCE_PYTHONPATH: '',
+    EXPECTED_GFX: 'gfx942', EXPECTED_TARGET: 'unknown',
+    EXPECTED_DEVICE_NAME: 'AMD Instinct MI300X', EXPECTED_PHYSICAL_CU_COUNT: 304,
+    E2E_LEARNED_KB_ENABLED: true,
     roleAgent: (_role, _phase, _task, inputs) => inputs,
     PARITY_REPLICAS: 2, WORKFLOW_DIR: '/workflow', GPU_LIST: ['0'],
     TRACELENS_INPUTS: {}, ANALYSIS_SKILL_INPUTS: {}, TUNING_FINALIZE_INPUTS: {},
@@ -144,14 +147,14 @@ function assertRenderedRole(inputs, removalJson, sourceRequest = '') {
     `roleAgent('director', 'test', 'Check the removal transport.', inputs)`, {
     ...defaults, inputs, WORKFLOW_DIR: '/workflow', GPU_IDS: '0,1',
     BASELINE_SOURCE_REQUEST: sourceRequest, BASELINE_SOURCE_PYTHONPATH: '/accepted/python',
-    EVAL_DIR_OVERRIDE: '/eval',
+    EVAL_DIR_OVERRIDE: '/eval', E2E_LEARNED_KB_ENABLED: true,
     expertSkillsBlock: () => '', warmStartBlock: () => '',
   }, { timeout: 1000 });
   assert.equal(JSON.stringify(inputs), original, 'rendering cannot mutate the carried role inputs');
   const renderedInputs = prompt.split('\n## Inputs\n')[1].split('\n\nReturn ONLY')[0];
   const expectedInputs = { ...defaults,
     ...(sourceRequest ? { GEAK_SOURCE_REQUEST: sourceRequest,
-      GEAK_ACCEPTED_SOURCE_PYTHONPATH: '/accepted/python' } : {}), ...inputs };
+      GEAK_ACCEPTED_SOURCE_PYTHONPATH: '/accepted/python' } : {}), E2E_LEARNED_KB: 'on', ...inputs };
   if (removalJson !== undefined) expectedInputs.GEAK_REMOVE_ARGS = removalJson;
   const expectedLines = Object.entries(expectedInputs).map(([key, value]) =>
     `- ${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`).join('\n');
@@ -251,6 +254,8 @@ async function test() {
     INIT_ARGS_MODE: 'replace', INIT_ENV_COMPLETE: true,
     INIT_UNSET_ENVS: ['OLD_ENV'], INIT_REMOVE_ARGS: ['--disable-radix-cache', '--limit 8'],
     MEASUREMENT_PURPOSE: 'parity', REPLICAS: 2, SKILL_DIR: '/workflow',
+    EXPECTED_GFX: 'gfx942', EXPECTED_TARGET: 'unknown',
+    EXPECTED_DEVICE_NAME: 'AMD Instinct MI300X', EXPECTED_PHYSICAL_CU_COUNT: 304,
   }, 'the baseline-measuring setup role receives both removal controls with the exact seed');
   assert.deepEqual(controls.launch_inputs, expectedLaunchInputs('--keep 1', 'KEEP_ENV=1',
     ['--disable-radix-cache', '--limit 8'], ['OLD_ENV'], 'replace'),

@@ -26,7 +26,24 @@ filesystem and shell work yourself with Bash/Read/Write. Return ONLY the request
 
 Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped runs),
 `EVAL_DIR_OVERRIDE` (may be empty), `KERNEL_NAME_HINT` (basename), `TASK` (may be empty), and
-`MODE` (`optimize` default | `author`). In `author` mode you also get `TARGET_LANGUAGE` and `OP_SPEC`.
+`MODE` (`optimize` default | `author`), `EXPECTED_GFX` (possibly empty), and
+`EXPECTED_TARGET` (`r9700` | empty), `EXPECTED_DEVICE_NAME` (possibly empty),
+and `EXPECTED_PHYSICAL_CU_COUNT` (possibly zero). In `author` mode you also
+get `TARGET_LANGUAGE` and `OP_SPEC`.
+
+Before building the workspace, run
+`python3 "$WORKFLOW_DIR/../scripts/gpu_identity.py"` and use its JSON as the
+single source for `device_gfx`, `device_target`, `device_name`, and
+`physical_cu_count`. It scopes all fields to the same real GPU agent, rejects
+mixed visible identities, ignores `gfx000`, and emits `r9700` only when the
+trimmed Marketing Name is exactly `AMD Radeon AI PRO R9700`. Every other
+product, including another gfx1201 board, remains `unknown`. Do **not** use
+`torch.cuda.get_device_properties().multi_processor_count` for physical CUs:
+on R9700 that is 32 WGPs, not 64 physical CUs.
+
+If `EXPECTED_GFX` is non-empty, report any mismatch in `notes`; the orchestrator
+enforces the mismatch as a hard failure. Same for `EXPECTED_TARGET=r9700`,
+non-empty `EXPECTED_DEVICE_NAME`, and positive `EXPECTED_PHYSICAL_CU_COUNT`.
 
 ### DEEP-MODE resume (ONLY when `STATE_DIR` is in your inputs — otherwise ignore this entire section)
 `STATE_DIR` is a stable per-(kernel,backend) directory carried ACROSS deep-mode waves. It lets a
@@ -221,6 +238,10 @@ Return JSON:
   "workspace": "<EVAL_DIR>/workspace",
   "baseline_dir": "<EVAL_DIR>/baseline",
   "kernel_name": "<basename>",
+  "device_gfx": "<detected real gfx token>",
+  "device_target": "r9700|unknown",
+  "device_name": "<detected product/marketing name>",
+  "physical_cu_count": 64,
   "source_files": ["<relative paths under workspace>"],
   "baseline_frozen": true,
   "baseline_callable": "<module:attr of the frozen real online kernel, or '' if the pristine EVAL_DIR/baseline is the anchor>",

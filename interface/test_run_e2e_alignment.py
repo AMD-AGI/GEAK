@@ -46,6 +46,19 @@ def _load():
 rx = _load()
 
 
+@pytest.fixture(autouse=True)
+def _gpu_identity(monkeypatch):
+    monkeypatch.setenv(
+        "GEAK_GPU_IDENTITY_JSON",
+        json.dumps({
+            "gfx": "gfx950",
+            "target": "unknown",
+            "marketing_name": "AMD Instinct MI355X",
+            "physical_cu_count": 256,
+        }),
+    )
+
+
 def _wf(eval_dir: Path, *, base: float, final: float, speedup: float) -> dict:
     return {
         "eval_dir": str(eval_dir),
