@@ -1808,3 +1808,56 @@ def test_runtime_return_survives_metrics_failure_only_for_current_invocation(tmp
             rx._invoke_via_runtime(args, 60, str(tmp_path), invocation=invocation)
         assert not invocation.done()
         assert rx._recover_workflow_return(tmp_path.parent, invocation=invocation) is None
+
+
+@pytest.mark.parametrize("damaged", [b"{", b"\xff", b"null", b"[]"])
+def test_completion_waits_for_a_complete_object_return(tmp_path, monkeypatch, damaged):
+    """A partial write or non-object file cannot finish a running phase."""
+    (tmp_path / "bench_e2e.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("GEAK_EVAL_DIR", str(tmp_path))
+    marker = tmp_path / "workflow_return.json"
+    invocation = rx.phase_invocation({"eval_dir": str(tmp_path), "phases": "head"})
+    marker.write_bytes(damaged)
+    assert not invocation.done()
+    assert rx._recover_workflow_return(tmp_path.parent, invocation=invocation) is None
+
+    completed = {"eval_dir": str(tmp_path), "phases_run": ["head"],
+                 "validation_status": "phase_partial", "state": {"head_used": 1}}
+    _write_phase_marker(marker, completed)
+    assert invocation.done()
+    assert rx._recover_workflow_return(tmp_path.parent, invocation=invocation) == completed
+
+
+def test_final_recovery_uses_new_director_before_canonical_return(tmp_path, monkeypatch):
+    """Final validation can finish after Setup, before canonical persistence."""
+    eval_dir = _make_eval_dir(tmp_path, with_validation=True)
+    monkeypatch.setenv("GEAK_EVAL_DIR", str(eval_dir))
+    _write_phase_marker(eval_dir / "workflow_return.json", {
+        "eval_dir": str(eval_dir), "phases_run": ["setup"], "validation_status": "phase_partial"})
+    invocation = rx.phase_invocation({"eval_dir": str(eval_dir), "phases": "final"})
+    assert rx._recover_workflow_return(eval_dir.parent, invocation=invocation) is None
+    _write_phase_marker(eval_dir / "director_e2e_validation.json", {
+        "baseline_throughput_tok_s": 461.314, "director_verified_throughput_tok_s": 606.0,
+        "throughput_speedup": 606.0 / 461.314, "validation_status": "pass", "output_parity": "pass",
+        "serving_config": {"final_flags": "--max-num-batched-tokens 16384"}})
+    recovered = rx._recover_workflow_return(eval_dir.parent, invocation=invocation)
+    assert invocation.done()
+    assert recovered["final_throughput_tok_s"] == 606.0
+    assert recovered["validation_status"] == "pass"
+    assert not recovered.get("recovered_intermediate")
+
+
+def test_fresh_runtime_stdout_survives_unreadable_result_file(tmp_path, monkeypatch):
+    """A failed file read must not discard a matching current transport return."""
+    _write_phase_marker(tmp_path / "runtime_result.json", {"old": True})
+    args = {"eval_dir": str(tmp_path), "phases": "head"}
+    invocation = rx.phase_invocation(args)
+    completed = {"eval_dir": str(tmp_path), "phases_run": ["head"], "validation_status": "phase_partial"}
+
+    def unreadable():
+        raise PermissionError("result file cannot be read")
+
+    monkeypatch.setattr(invocation, "runtime_return", unreadable)
+    monkeypatch.setattr(rx.subprocess, "run", lambda *a, **k: rx.subprocess.CompletedProcess(
+        [], 0, "WORKFLOW_RESULT " + json.dumps(completed), ""))
+    assert rx._invoke_via_runtime(args, 60, str(tmp_path), invocation=invocation) == completed

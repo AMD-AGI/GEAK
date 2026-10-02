@@ -2935,6 +2935,54 @@ class TestMain(_RunE2ECase):
         self.assertEqual(out["error_class"], "interrupted")
         self.assertNotIn("throughput_speedup", out)
 
+    def test_full_continuation_preserves_damaged_prior_canonical_bytes(self):
+        for damaged in (b"{", b"\xff"):
+            with self.subTest(damaged=damaged):
+                prior = {"eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+                         "validation_status": "phase_partial"}
+                self.write_json(self.eval_dir / "runtime_result.json", prior)
+                canonical = self.eval_dir / rx.WORKFLOW_RETURN_FILE
+                canonical.write_bytes(damaged)
+                calls = []
+
+                def complete_full(*args, _damaged=damaged, _calls=calls, **kwargs):
+                    invocation = kwargs["invocation"]
+                    _calls.append(invocation)
+                    self.assertFalse(invocation.done())
+                    self.assertEqual((invocation.history / rx.WORKFLOW_RETURN_FILE).read_bytes(), _damaged)
+                    return {"eval_dir": str(self.eval_dir), "phases_run": ["all"],
+                            "validation_status": "pass", "baseline_throughput_tok_s": 400.0,
+                            "final_throughput_tok_s": 400.0, "throughput_speedup": 1.0, "output_parity": "pass"}
+
+                self.patch_rx("invoke_workflow", complete_full)
+                rc, _ = self._run(self._handoff())
+                self.assertEqual(rc, 0)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(json.loads(canonical.read_text())["phases_run"], ["all"])
+
+    def test_non_object_terminal_marker_emits_error_without_claiming_gain(self):
+        canonical = self.eval_dir / rx.WORKFLOW_RETURN_FILE
+        self.write_json(canonical, None)
+        original = canonical.read_bytes()
+        self.patch_rx("invoke_workflow", lambda *a, **k: self.fail("invalid cached return must be reported"))
+        rc, _ = self._run(self._handoff())
+        self.assertEqual(rc, 1)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "error")
+        self.assertNotIn("throughput_speedup", out)
+        self.assertEqual(canonical.read_bytes(), original)
+
+    def test_phase_continuation_rejects_wrong_phase_transport_return(self):
+        prior = {"eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+                 "validation_status": "phase_partial"}
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, prior)
+        self.patch_rx("invoke_workflow", lambda *a, **k: prior)
+        rc, _ = self._run(self._handoff(phases="head"))
+        self.assertEqual(rc, 1)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["error_class"], "workflow_parse_error")
+        self.assertNotIn("throughput_speedup", out)
+
     def test_resume_with_a_failing_recovery_still_emits_an_error_file(self):
         """Both recovery attempts (the short-circuit and the one inside _emit)
         blow up — result.json must STILL exist and be parseable."""
