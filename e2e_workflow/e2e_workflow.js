@@ -1681,7 +1681,15 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
   const captureIntro = `${intro} CAPTURE STORAGE BOUNDS (issue #429): every capture EXTRA_ENV MUST include ` +
     `\`${CAPTURE_STORAGE_ENV}\`. Use kernel_selection.py with --task-dir "$TASK" so the selected oracle is ` +
     `promoted and all capture.pid-* dirs are reclaimed. Unittests for large MoE oracles MUST use ` +
-    `h.iter_eager_cases_from_oracle / h.check_correct_multi_lazy.`;
+    `h.iter_eager_cases_from_oracle / h.check_correct_multi_lazy. ` +
+    `For a profiled GPU kernel, read selection_validation.json and return its FULL JSON object ` +
+    `verbatim as selection_validation; do not summarize it, omit fields, or replace structured ` +
+    `fields such as capture_storage with prose. Preserve total_calls_observed, target_marker_calls, ` +
+    `candidate_targets_tested, matched_kernel_calls, contract, ok, target_callable, device_kernel, ` +
+    `live_candidate_targets, deeper_live_candidates, deepest_verified, and every additional field ` +
+    `the helper emitted. If evidence is missing or selection failed, report the actual failure; ` +
+    `never invent counts, targets, or a successful verdict. A passing smoke test alone does not ` +
+    `satisfy the kernel-selection contract.`;
   let ext = await safeAgent(roleAgent(role, phase, captureIntro, {
     ...(inputs || {}),
     CAPTURE_STORAGE_ENV,
