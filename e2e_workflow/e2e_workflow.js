@@ -839,6 +839,7 @@ const FUSION_UNIT_SCHEMA = obj({
 const FUSION_UNIT_AGG_SCHEMA = obj({
   status: { type: 'string' }, fusion_unitside_json: { type: 'string' },
   fusion_unitside_md: { type: 'string' }, validated_count: { type: 'number' },
+  applyback_eligible_ids: arrStr,
   waived: arrObj, deferred: arrObj, notes: { type: 'string' },
 }, ['status', 'fusion_unitside_json']);
 
@@ -1278,6 +1279,26 @@ function fusionGsm8kConcurrency(flags) {
 function fusionStackKey() {
   const ids = acceptedFusions.map((r) => String((r && (r.exec_id || r.fusion)) || '')).sort();
   return JSON.stringify({ fusions: ids, overlay: curOverlay || '', flags: curFlags || '', env: curEnv || '' });
+}
+
+// Execution-list entries the apply-back loop calls. The budget counts only entries with a
+// 单侧 apply-back-eligible candidate: an entry the unit-side gate already blocked costs no
+// serving A/B, so it must not take a slot from a later passing entry. Ineligible entries
+// before the cut are still sent (the integrator records their disposition in a minute or
+// two). Without the eligible-id list this is the plain first-N slice. Must match
+// fusion_applyback_harness._budget_cutoff_rank.
+function fusionApplyBudgetEntries(list, eligibleIds, budget) {
+  const n = Math.max(0, budget);
+  if (!Array.isArray(eligibleIds)) return list.slice(0, n);
+  const eligible = new Set(eligibleIds.map(String));
+  const out = [];
+  let used = 0;
+  for (const entry of list) {
+    if (used >= n) break;
+    out.push(entry);
+    if ((entry.candidate_ids || []).some((cid) => eligible.has(String(cid)))) used += 1;
+  }
+  return out;
 }
 
 function roleAgent(role, phase, intro, inputs) {
@@ -2400,6 +2421,9 @@ let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv;
 let profile, strategy, kernelQueue = [], headQueue = [], semantics, fusionCapture;
 let fusionSemanticsAttempted = false;
 let fusionExecutionList = [];
+// candidate_ids whose 单侧 status is apply-back eligible, as the unit-side aggregate
+// read them from fusion_unitside.json; null when it did not report them.
+let fusionUnitEligibleIds = null;
 // Base gsm8k score of the current fusion stack, reused across apply-back calls
 // until a fusion is accepted. {stack_key, exact_match, n, path, harness}.
 let fusionAccuracyRef = null;
@@ -3587,7 +3611,9 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
               'Aggregate only the Top-K execution_list candidate ids. Pass EQUIVALENT_COVERED rows as ' +
               '--equivalent <id>=<representative_candidate_id> and SUBSUMED_COVERED rows as ' +
               '--subsumed <id>=<ladder_top> (covered: their ladder top was benched and passed) and BUDGET_SKIPPED rows as ' +
-              '--budget-skipped <id>=<reason> (NOT covered — never measured). Do NOT launder a budget skip through --waive.', {
+              '--budget-skipped <id>=<reason> (NOT covered — never measured). Do NOT launder a budget skip through --waive. ' +
+              'Return applyback_eligible_ids: every candidate_id whose unit_side_status in the written ' +
+              'fusion_unitside.json is pass, equivalent_pass or subsumed_pass.', {
                 EVAL_DIR, FUSION_CANDIDATES_JSON: discover.fusion_candidates_json,
                 FUSION_TOPK_JSON: ranked.fusion_topk_json,
                 FUSION_DIR: discover.fusion_candidates_json.replace(/\/[^/]+$/, ''),
@@ -3604,6 +3630,9 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
           if (aggregate && aggregate.fusion_unitside_json) {
             FUSION_INPUTS.FUSION_UNITSIDE_JSON = aggregate.fusion_unitside_json;
           }
+          if (aggregate && Array.isArray(aggregate.applyback_eligible_ids)) {
+            fusionUnitEligibleIds = aggregate.applyback_eligible_ids;
+          }
         }
       }
     }
@@ -3618,7 +3647,8 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
   let fusionApplyUnprocessed = [];
   if (FUSION_INPUTS.FUSION_TOPK_JSON && FUSION_INPUTS.FUSION_UNITSIDE_JSON) {
     const FUSION_BUDGET = parseInt(A.fusion_budget != null ? A.fusion_budget : 6, 10);
-    const fusionApplyEntries = fusionExecutionList.slice(0, Math.max(0, FUSION_BUDGET));
+    const fusionApplyEntries = fusionApplyBudgetEntries(
+      fusionExecutionList, fusionUnitEligibleIds, FUSION_BUDGET);
     let applyState = {
       accepted_fusions: [], final_overlay: curOverlay,
       e2e_throughput_tok_s: curTput, accepted_flags: curFlags, accepted_env: curEnv,

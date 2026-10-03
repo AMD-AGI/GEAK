@@ -108,8 +108,15 @@ Return:
  "fusion_unitside_json":"<absolute path>",
  "fusion_unitside_md":"<absolute path>",
  "validated_count":0,
+ "applyback_eligible_ids":["<candidate_id>", "..."],
  "waived":[],"deferred":[],"notes":"..."}
 ```
+
+`applyback_eligible_ids` lists every candidate whose `unit_side_status` in the
+`fusion_unitside.json` you just wrote is `pass`, `equivalent_pass` or `subsumed_pass`,
+copied from that file, not from your own reading of the verdicts. The apply-back budget
+counts only execution-list entries that carry one of these ids, so a unit-side failure
+does not use up a slot.
 
 ## Inputs
 - `FUSION_CANDIDATES_JSON` — the Phase 2.1 candidates.

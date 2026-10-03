@@ -40,8 +40,10 @@ the report, and it must be red.
 
 BUDGET TRUNCATION
 -----------------
-`--budget N` is not a licence to ignore the tail. It only excuses entries whose board
-RANK is beyond N. If a rank-2 entry is unaccounted while rank-9 was applied, the
+`--budget N` is not a licence to ignore the tail. It counts only rows whose 单侧
+status is apply-back eligible (pass / equivalent_pass / subsumed_pass) -- a row the
+unit-side gate already blocked uses no slot -- and excuses entries ranked after the
+N-th such row (plain board rank N when no --unitside is given). If a rank-2 entry is unaccounted while rank-9 was applied, the
 budget is not the explanation and the gate still fails -- the loop skipped something
 inside its own budget.
 
@@ -197,6 +199,30 @@ def _conflict_map(topk):
     return conflicts
 
 
+def _budget_cutoff_rank(execution_list, unit_index, budget):
+    """The last board rank the apply-back budget reaches, or None for "every row".
+
+    The budget counts only rows whose 单侧 result makes them apply-back eligible: a row
+    the unit-side gate already blocked costs no serving A/B, so it must not use up a
+    slot that a later passing row needs. Without unit-side evidence there is nothing to
+    filter on and the budget is the plain board rank, as before."""
+    if budget is None:
+        return None
+    if not unit_index:
+        return int(budget)
+    if int(budget) <= 0:
+        return 0
+    eligible = 0
+    for entry in execution_list:
+        statuses = {unit_index[cid][0] for cid in entry.get("candidate_ids") or []
+                    if cid in unit_index}
+        if statuses & APPLYBACK_ELIGIBLE:
+            eligible += 1
+            if eligible == int(budget) and entry.get("rank") is not None:
+                return int(entry["rank"])
+    return None
+
+
 def validate(topk_path, apply_path, unitside_path=None, budget=None,
              require_coverage=True, waivers=None):
     topk = _load(topk_path)
@@ -217,6 +243,7 @@ def validate(topk_path, apply_path, unitside_path=None, budget=None,
     records = _collect_records(apply_payload, errors)
     unit_index = _unitside_index(unitside)
     conflicts = _conflict_map(topk)
+    cutoff_rank = _budget_cutoff_rank(execution_list, unit_index, budget)
 
     # ---- pass 1: attach explicit records to rows -----------------------------
     rows = []
@@ -257,7 +284,7 @@ def validate(topk_path, apply_path, unitside_path=None, budget=None,
         unit_states = [u for u in unit_states if u]
         unit_statuses = sorted({u[0] for u in unit_states})
         within_budget = (
-            budget is None or rank is None or int(rank) <= int(budget)
+            cutoff_rank is None or rank is None or int(rank) <= cutoff_rank
         )
         applyback_required = bool(
             str(entry.get("tier") or "").upper() in ("A", "B") and
@@ -306,11 +333,11 @@ def validate(topk_path, apply_path, unitside_path=None, budget=None,
                 reason = ("conflicts with applied %s"
                           % sorted(conflicts[exec_id] & applied_ids))
                 source = "exclusion"
-            elif (budget is not None and rank is not None
-                  and int(rank) > int(budget)):
+            elif not within_budget:
                 disposition = "deferred_budget"
-                reason = ("rank %s beyond --budget %s — not attempted this round"
-                          % (rank, budget))
+                reason = ("rank %s beyond --budget %s (counted over 单侧-passing rows, "
+                          "cut at rank %s) — not attempted this round"
+                          % (rank, budget, cutoff_rank))
                 source = "budget"
             else:
                 disposition = "unaccounted"
@@ -373,16 +400,17 @@ def validate(topk_path, apply_path, unitside_path=None, budget=None,
         "execution_list_size": len(execution_list),
         "beyond_budget": len(truncated),
         "beyond_budget_exec_ids": truncated,
+        "cutoff_rank": cutoff_rank,
     }
-    if budget is not None and len(execution_list) > int(budget):
-        # Count the rows the budget ACTUALLY excused, not len-budget: a row past
+    if cutoff_rank is not None and len(execution_list) > cutoff_rank:
+        # Count the rows the budget ACTUALLY excused, not len-cutoff: a row past
         # the budget that the integrator deferred on its own merits was attempted
         # as a decision, and folding it into the budget number overstates the cut.
         warnings.append(
-            "--budget %s truncates a %d-row board: %d row(s) rank beyond it, "
-            "%d of which were left entirely unattempted"
-            % (budget, len(execution_list), len(execution_list) - int(budget),
-               len(truncated)))
+            "--budget %s truncates a %d-row board at rank %s: %d row(s) rank beyond "
+            "it, %d of which were left entirely unattempted"
+            % (budget, len(execution_list), cutoff_rank,
+               len(execution_list) - cutoff_rank, len(truncated)))
 
     coverage_fail = bool(require_coverage and unaccounted)
     accounted = sum(1 for r in results if r["disposition"] in ACCOUNTED)
@@ -582,7 +610,7 @@ def render_markdown(result):
         "说明：本 gate 不跑 server、不产生自己的性能数字；它只校验 apply-back 对 "
         "Phase 2.2 执行清单的**交代完整性**。`applied` 的收益数字来自 fusion_integrator "
         "的实测 A/B，`blocked_by_exclusion` 由互斥冲突图自动推导（只有与**已落地**条目"
-        "真正冲突的才会被自动挡），`deferred_budget` 由 `--budget` 按板上排名推导——"
+        "真正冲突的才会被自动挡），`deferred_budget` 由 `--budget` 推导（只数单侧通过的条目，单侧被挡的不占预算）——"
         "预算只能解释排名在预算之外的条目，预算之内漏掉的仍然是 🔴 无交代。")
     lines.append("")
     return "\n".join(lines) + "\n"
@@ -626,8 +654,9 @@ def main():
     parser.add_argument("--out-md", required=True)
     parser.add_argument("--out-json", required=True)
     parser.add_argument("--budget", type=int, default=None,
-                        help="FUSION_BUDGET actually applied; excuses rows ranked "
-                             "beyond it (recorded and named, never silent)")
+                        help="FUSION_BUDGET actually applied, counted over 单侧-eligible "
+                             "rows; excuses rows ranked after the N-th one "
+                             "(recorded and named, never silent)")
     parser.add_argument("--allow-partial-coverage", action="store_true")
     parser.add_argument("--waive", action="append", metavar="EXEC_ID=REASON", default=[])
     args = parser.parse_args()

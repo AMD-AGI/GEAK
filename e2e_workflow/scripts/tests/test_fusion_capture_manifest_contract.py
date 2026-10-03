@@ -142,7 +142,8 @@ class FusionCaptureManifestContractTest(unittest.TestCase):
     def test_applyback_runs_one_execution_entry_per_agent_call(self):
         source = self._workflow_source()
         self.assertIn(
-            "const fusionApplyEntries = fusionExecutionList.slice",
+            "const fusionApplyEntries = fusionApplyBudgetEntries(\n"
+            "      fusionExecutionList, fusionUnitEligibleIds, FUSION_BUDGET);",
             source,
         )
         self.assertIn(

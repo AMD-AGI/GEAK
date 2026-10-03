@@ -239,7 +239,7 @@ to engage, fails parity for a diagnosed reason, or loses the A/B, may it be `blo
 and the reason must state what was attempted and what the measurement was.
 | `deferred_with_reason` | only for a row that is not an in-budget tier-A/B unit-side pass | you — `deferred[]`, **with a reason** |
 | `blocked_by_exclusion` | a conflicting entry in its exclusive group was applied | derived by the harness |
-| `deferred_budget` | ranked beyond `FUSION_BUDGET` | derived by the harness |
+| `deferred_budget` | after the `FUSION_BUDGET`-th row with a 单侧 pass | derived by the harness |
 | `unaccounted` | nobody said anything | **the gate FAILS** |
 
 Three things about this that are easy to get wrong:
@@ -251,8 +251,9 @@ Three things about this that are easy to get wrong:
   accepted fusions and read as a complete success while the **rank-1 decode candidate**
   (kv-write cluster, 5.76% of decode forward) had no disposition anywhere — not applied,
   not blocked, not deferred, just absent.
-- **The budget only excuses the tail.** `--budget N` covers rows ranked beyond N, in board
-  order. A rank-2 row you skipped while integrating a rank-9 row is not a budget effect and
+- **The budget only excuses the tail.** `--budget N` counts only rows with a 单侧 pass
+  (`pass` / `equivalent_pass` / `subsumed_pass`) and covers the rows after the N-th one, in
+  board order; a row the unit-side gate blocked uses no slot. A rank-2 row you skipped while integrating a rank-9 row is not a budget effect and
   stays red.
 - **Exclusion is derived, and only from a REAL conflict.** The harness reads the board's
   pairwise `conflict_edges`; only entries that actually conflict with something you APPLIED

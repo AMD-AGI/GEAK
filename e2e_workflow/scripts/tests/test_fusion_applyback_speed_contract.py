@@ -101,6 +101,48 @@ class Gsm8kConcurrencyBehaviourTest(unittest.TestCase):
 
 
 @unittest.skipUnless(NODE, "node not available")
+class ApplyBudgetBehaviourTest(unittest.TestCase):
+    """The apply-back budget counts only entries with a 单侧-eligible candidate."""
+
+    # 1001 run: e01/e04 failed 单侧, e07 passed but was cut by the old first-6 slice.
+    LIST = [{"exec_id": "e%02d" % i, "candidate_ids": ["c%02d" % i]} for i in range(1, 11)]
+    ELIGIBLE = ["c02", "c03", "c05", "c06", "c07"]
+
+    def _entries(self, eligible, budget):
+        src = _source()
+        fn = src[src.index("function fusionApplyBudgetEntries("):]
+        fn = fn[:fn.index("\n}\n") + 3]
+        out = _run_node(f"{fn}\nconsole.log(JSON.stringify(fusionApplyBudgetEntries("
+                        f"{json.dumps(self.LIST)}, {json.dumps(eligible)}, {budget})"
+                        f".map((e) => e.exec_id)));")
+        return out
+
+    def test_unitside_failures_do_not_take_a_slot(self):
+        got = self._entries(self.ELIGIBLE, 6)
+        self.assertIn("e07", got)
+        # Only five entries passed, so a budget of six never cuts.
+        self.assertEqual(got, [e["exec_id"] for e in self.LIST])
+        self.assertEqual(self._entries(self.ELIGIBLE, 5),
+                         ["e01", "e02", "e03", "e04", "e05", "e06", "e07"])
+
+    def test_cut_after_the_nth_eligible_entry(self):
+        self.assertEqual(self._entries(self.ELIGIBLE, 2), ["e01", "e02", "e03"])
+
+    def test_without_the_eligible_list_it_is_the_plain_slice(self):
+        self.assertEqual(self._entries(None, 6), ["e01", "e02", "e03", "e04", "e05", "e06"])
+
+    def test_zero_budget_calls_nothing(self):
+        self.assertEqual(self._entries(self.ELIGIBLE, 0), [])
+
+    def test_loop_and_aggregate_are_wired(self):
+        src = _source()
+        self.assertIn("fusionApplyBudgetEntries(\n      fusionExecutionList, fusionUnitEligibleIds, FUSION_BUDGET)", src)
+        self.assertIn("fusionUnitEligibleIds = aggregate.applyback_eligible_ids", src)
+        schema = src[src.index("const FUSION_UNIT_AGG_SCHEMA"):]
+        self.assertIn("applyback_eligible_ids", schema[:schema.index("});")])
+
+
+@unittest.skipUnless(NODE, "node not available")
 class UnitSideWavesBehaviourTest(unittest.TestCase):
     """Runs the real scheduling block with stub agents."""
 

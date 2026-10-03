@@ -213,18 +213,53 @@ class FusionApplyBackTest(unittest.TestCase):
     def test_out_of_budget_unitside_pass_may_be_deferred(self):
         with tempfile.TemporaryDirectory() as tmp:
             unit = self._write(tmp, "unit.json", {"results": [
-                {"candidate_id": "pf_kv", "unit_side_status": "pass",
-                 "reason": "1.2x"}]})
+                {"candidate_id": cid, "unit_side_status": "pass", "reason": "1.2x"}
+                for cid in ("dc_arnq", "dc_ar", "dc_nq", "pf_kv")]})
             res = self._run(
                 tmp, unitside_path=unit, budget=3,
-                apply=self._apply(deferred=[
-                    {"exec_id": "e03", "reason": "not unit-side eligible"},
-                    {"exec_id": "e04", "reason": "rank beyond apply-back budget"},
-                ]))
+                apply=self._apply(
+                    rejected=[{"exec_id": "e03", "reason": "A/B inside noise"}],
+                    deferred=[{"exec_id": "e04", "reason": "rank beyond apply-back budget"}]))
 
             self.assertEqual(res["status"], "pass")
             row = next(r for r in res["results"] if r["exec_id"] == "e04")
             self.assertFalse(row["applyback_required"])
+
+    def test_unitside_blocked_rows_do_not_use_the_budget(self):
+        """1001 run: e01/e04 failed 单侧 yet took two of six slots, so e07 (passed) was
+        deferred_budget. The budget counts 单侧-eligible rows only."""
+        with tempfile.TemporaryDirectory() as tmp:
+            unit = self._write(tmp, "unit.json", {"results": [
+                {"candidate_id": "dc_arnq", "unit_side_status": "fail",
+                 "reason": "isolated_speedup 0.848"},
+                {"candidate_id": "dc_ar", "unit_side_status": "pass", "reason": "1.4x"},
+                {"candidate_id": "dc_nq", "unit_side_status": "pass", "reason": "1.3x"},
+                {"candidate_id": "pf_kv", "unit_side_status": "pass", "reason": "1.2x"}]})
+            res = self._run(
+                tmp, unitside_path=unit, budget=2,
+                apply=self._apply(accepted_fusions=[
+                    {"exec_id": "e02", "fusion": "fused_ar_rmsnorm"},
+                    {"exec_id": "e03", "fusion": "add_rmsnorm_quant"}]))
+            disp = {r["exec_id"]: r["disposition"] for r in res["results"]}
+            self.assertEqual(disp, {"e01": "blocked", "e02": "applied",
+                                    "e03": "applied", "e04": "deferred_budget"})
+            self.assertEqual(res["budget"]["cutoff_rank"], 3)
+            self.assertEqual(res["status"], "pass")
+
+    def test_a_passing_row_inside_the_shifted_budget_cannot_be_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            unit = self._write(tmp, "unit.json", {"results": [
+                {"candidate_id": "dc_arnq", "unit_side_status": "fail", "reason": "0.85x"},
+                {"candidate_id": "dc_ar", "unit_side_status": "pass", "reason": "1.4x"},
+                {"candidate_id": "dc_nq", "unit_side_status": "pass", "reason": "1.3x"}]})
+            res = self._run(
+                tmp, unitside_path=unit, budget=2,
+                apply=self._apply(accepted_fusions=[
+                    {"exec_id": "e02", "fusion": "fused_ar_rmsnorm"}]))
+            disp = {r["exec_id"]: r["disposition"] for r in res["results"]}
+            # rank 3 is the 2nd eligible row: inside the budget, so silence is a hole.
+            self.assertEqual(disp["e03"], "unaccounted")
+            self.assertEqual(res["status"], "fail")
 
     def test_a_row_with_no_unitside_verdict_says_where_the_gap_starts(self):
         with tempfile.TemporaryDirectory() as tmp:
