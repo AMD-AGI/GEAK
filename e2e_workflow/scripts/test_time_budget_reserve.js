@@ -114,7 +114,36 @@ console.log('\n# the default reserve is one hour');
   ok(reserveFor(3 * 3600 * 1000, {}) === Math.floor(0.2 * 3 * 3600 * 1000),
     'below a 5h budget the 20% cap binds instead of the default (3h -> 36min)');
   ok(reserveFor(12 * 3600 * 1000, { final_reserve_s: 5400 }) === 90 * 60000,
-    'GEAK_FINAL_RESERVE_S still widens it, up to the same 20% cap');
+    'an explicit 90-minute reserve is honored');
+  ok(reserveFor(H, { final_reserve_s: 21600 }) === 6 * 3600 * 1000,
+    'the explicit six-hour AgentX reserve is not truncated to 20%');
+  for (const value of [0, -1, 'bad', 43200, 50000]) {
+    let rejected = false;
+    try { reserveFor(H, { final_reserve_s: value }); } catch { rejected = true; }
+    ok(rejected, `invalid or unfundable explicit reserve ${value} is rejected`);
+  }
+}
+
+console.log('\n# explicit dispatch deadlines stay inside the real optimization window');
+{
+  const start = src.indexOf('const TIME_TAIL_CAP_MS');
+  const block = src.slice(start, src.indexOf('// ---- FAST MODE', start));
+  const deadline = (available, A) => new Function('TIME_BUDGET_EFFECTIVE_MS', 'A',
+    `${block}\nreturn TIME_HEAD_DEADLINE_MS;`)(available, A);
+  const sixHours = 21600000;
+  ok(deadline(sixHours, {}) === sixHours * 0.6, 'default dispatch arithmetic is unchanged');
+  ok(deadline(sixHours, { search_deadline_s: 14400 }) === 14400000, 'an explicit four-hour dispatch cutoff reaches the workflow');
+  for (const [available, value] of [[sixHours, 21601], [null, 100], [sixHours, 0]]) {
+    let rejected = false;
+    try { deadline(available, { search_deadline_s: value }); } catch { rejected = true; }
+    ok(rejected, `unfunded dispatch cutoff ${value} is rejected`);
+  }
+  const fastStart = src.indexOf('const REQUESTED_FAST_HEAD_DEADLINE_MS');
+  const fastEnd = src.indexOf('// Per-head nested', fastStart);
+  const fast = new Function('A', 'FAST_BUDGET_MS', 'TIME_TAIL_CAP_MS', 'EXPLICIT_SEARCH_DEADLINE_MS', 'TIME_HEAD_DEADLINE_MS',
+    src.slice(fastStart, fastEnd) + '\nreturn FAST_HEAD_DEADLINE_MS;');
+  ok(fast({fast_head_deadline_ms: 18000000}, sixHours, 10800000, 7200000, 7200000) === 7200000,
+    'fast mode cannot bypass the common explicit dispatch deadline');
 }
 
 console.log('\n# the reserve boundary is armed and gates the Finalize-gate');
@@ -145,10 +174,10 @@ const aStart = src.indexOf('let FINAL_PHASE_STARTED = false;');
 const aEnd = src.indexOf('\n}', src.indexOf('function agentTimeoutFor')) + 2;
 ok(aStart !== -1 && aEnd > aStart, 'agentTimeoutFor located');
 const mk = (TIME_BUDGET_MS, ELAPSED_MS) => new Function(
-  'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
+  'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs', 'EXPLICIT_FINAL_RESERVE_MS', 'CLOCK_TICK_MS',
   `${src.slice(aStart, aEnd)}
    return { agentTimeoutFor, enterFinalPhase: () => { FINAL_PHASE_STARTED = true; } };`)(
-  TIME_BUDGET_MS, 2 * 3600 * 1000, 60 * 60000, () => Math.max(0, TIME_BUDGET_MS - ELAPSED_MS));
+  TIME_BUDGET_MS, 2 * 3600 * 1000, 60 * 60000, () => Math.max(0, TIME_BUDGET_MS - ELAPSED_MS), null, 60000);
 
 const RESERVE = 60 * 60000, AGENT_MAX = 2 * 3600 * 1000;
 // 40min left of a 12h budget: less than the 60min reserve, so a capped agent floors at 2min.
@@ -165,9 +194,34 @@ ok(mid.agentTimeoutFor() === AGENT_MAX - RESERVE,
   'with 2h left an agent gets 2h minus the 60min reserve, not a flat 2h');
 
 // No budget => the feature is inert and every agent keeps the plain timeout.
-const noBudget = new Function('TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
-  `${src.slice(aStart, aEnd)}\nreturn agentTimeoutFor;`)(null, AGENT_MAX, null, () => Infinity);
+const noBudget = new Function('TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs', 'EXPLICIT_FINAL_RESERVE_MS', 'CLOCK_TICK_MS',
+  `${src.slice(aStart, aEnd)}\nreturn agentTimeoutFor;`)(null, AGENT_MAX, null, () => Infinity, null, 60000);
 ok(noBudget() === AGENT_MAX, 'no time_budget_s => byte-identical to a build without the feature');
+
+const explicit = new Function('TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs', 'EXPLICIT_FINAL_RESERVE_MS', 'CLOCK_TICK_MS',
+  `${src.slice(aStart, aEnd)}\nreturn { agentTimeoutFor, enterFinal: () => { FINAL_PHASE_STARTED = true; } };`)(
+  H, 21600000, 21600000, () => 21600000, 21600000, 60000);
+ok(explicit.agentTimeoutFor() === 0, 'an explicit reserve starts no more optimization agents at its boundary');
+explicit.enterFinal();
+ok(explicit.agentTimeoutFor() === 21600000 - 60000, 'final agents use actual remaining time with a clock margin');
+
+console.log('\n# nested lanes stop dispatching agents at their inherited time limit');
+{
+  const lane = fs.readFileSync(path.join(ROOT, 'kernel_workflow', 'kernel_lane.js'), 'utf8');
+  const start = lane.indexOf('const AGENT_TIMEOUT_MS =');
+  const block = lane.slice(start, lane.indexOf('async function agentT', start));
+  const timers = [];
+  const make = (A) => new Function('A', 'setTimeout', `${block}\nreturn laneAgentTimeout;`)(
+    A, (fn, delay) => { timers.push({ fn, delay }); return { unref() {} }; });
+  ok(make({})() === 3600000, 'unbounded standalone lanes retain the historical agent timeout');
+  ok(make({ time_budget_ms: 0 })() === 0, 'a drained parent cannot start a new lane agent');
+  const remaining = make({ time_budget_ms: 180000 });
+  ok(remaining() === 120000, 'a lane subtracts its own clock margin as well as the parent margin');
+  for (const timer of timers.filter(t => t.delay <= 120000).sort((a, b) => a.delay - b.delay)) timer.fn();
+  ok(remaining() === 0, 'later agents cannot reuse the lane original full timeout or its last uncertain clock step');
+  for (const timer of timers.filter(t => t.delay <= 180000).sort((a, b) => a.delay - b.delay)) timer.fn();
+  ok(remaining() === 0, 'the nested lane expires before the parent enters its final reserve');
+}
 
 // The flag must be granted in exactly ONE place, and that place must be the final phase entry.
 ok((src.match(/FINAL_PHASE_STARTED = true/g) || []).length === 1,

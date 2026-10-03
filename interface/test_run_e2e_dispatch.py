@@ -57,6 +57,10 @@ import types
 import unittest
 from pathlib import Path
 
+import pytest
+
+from interface.scheduling import LIMITS as _SCHEDULING_LIMITS, SWITCHES as _SCHEDULING_SWITCHES, SchedulingError
+
 _HERE = Path(__file__).resolve().parent
 
 _SENTINEL = object()
@@ -243,6 +247,63 @@ class TestMapArgs(_RunE2ECase):
         }
         h.update(extra)
         return h
+
+    def test_complete_launch_does_not_restore_removed_recipe_flags(self):
+        recipe = self.tmp / "baseline.yaml"
+        recipe.write_text(
+            "benchmark:\n  envs:\n"
+            "    EXTRA_SGLANG_ARGS: --disable-cuda-graph --moe-runner-backend triton "
+            "--disable-shared-experts-fusion --context-length 11264\n"
+            "    SGLANG_USE_AITER: '1'\n",
+            encoding="utf-8",
+        )
+        full_args = "--context-length 9728 --cuda-graph-max-bs 64 --mem-fraction-static 0.8"
+        h = self._handoff(
+            schema_version=2,
+            framework="sglang",
+            launch_recipe=str(recipe),
+            accepted_flags="--context-length 9728 --cuda-graph-max-bs 64",
+            baseline_env_spec={"config": {
+                "server_launch_flags": full_args,
+                "extra_server_args": "--context-length 9728 --cuda-graph-max-bs 64",
+            }},
+        )
+        ps = rx.map_args(h)
+        self.assertEqual(ps["initial_extra_server_args"], full_args)
+        self.assertEqual(ps["initial_args_mode"], "replace")
+        self.assertEqual(ps["initial_extra_env"], "SGLANG_USE_AITER=1")
+        self.assertEqual(ps["launch_script"], str(recipe))
+
+    def test_unavailable_launch_snapshot_keeps_recipe_arguments(self):
+        recipe = self.tmp / "baseline.yaml"
+        recipe.write_text(
+            "benchmark:\n  envs:\n    EXTRA_VLLM_ARGS: --block-size 128\n",
+            encoding="utf-8",
+        )
+        for config in ({}, {"server_launch_flags": ""}, {"server_launch_flags": "  "}):
+            with self.subTest(config=config):
+                h = self._handoff(
+                    schema_version=2,
+                    framework="vllm",
+                    launch_recipe=str(recipe),
+                    accepted_flags="--max-num-seqs 64",
+                    baseline_env_spec={"config": config},
+                )
+                ps = rx.map_args(h)
+                self.assertEqual(
+                    ps["initial_extra_server_args"], "--block-size 128 --max-num-seqs 64"
+                )
+                self.assertEqual(ps["initial_args_mode"], "replace")
+
+    def test_legacy_delta_is_not_labelled_a_complete_launch(self):
+        ps = rx.map_args(self._handoff(accepted_flags="--cuda-graph-max-bs 64"))
+        self.assertEqual(ps["initial_extra_server_args"], "--cuda-graph-max-bs 64")
+        self.assertNotIn("initial_args_mode", ps)
+
+    def test_complete_empty_launch_is_explicit(self):
+        ps = rx.map_args(self._handoff(schema_version=2, baseline_env_spec={}))
+        self.assertEqual(ps["initial_extra_server_args"], "")
+        self.assertEqual(ps["initial_args_mode"], "replace")
 
     def _write_roofline_trace(
         self,
@@ -1701,6 +1762,50 @@ class TestInvokeViaSdk(_RunE2ECase):
         self.assertEqual(raw, "first")
         self.assertNotIn(later, sdk.state["consumed"])
 
+    def test_phase_continuation_ignores_setup_marker_through_background_grace(self):
+        eval_dir = self.tmp / "e2e_continue"
+        eval_dir.mkdir()
+        marker = eval_dir / rx.WORKFLOW_RETURN_FILE
+        marker.write_text(json.dumps({"eval_dir": str(eval_dir), "phases_run": ["setup"],
+                                      "validation_status": "phase_partial"}))
+        invocation = rx.phase_invocation({"eval_dir": str(eval_dir), "phases": "head"})
+
+        def finish_head():
+            marker.write_text(json.dumps({"eval_dir": str(eval_dir), "phases_run": ["head"],
+                                          "validation_status": "phase_partial"}))
+
+        script = [AssistantMessage(text="before task start"), TaskStartedMessage(task_id="head"),
+                  TaskNotificationMessage(task_id="head", summary="detached work"),
+                  ResultMessage(result="turn done")]
+        anyio, sdk = self._install(script, sleep_hook=finish_head)
+        raw = rx._invoke_via_sdk("P", 120, str(eval_dir), invocation=invocation)
+        self.assertEqual(sdk.state["consumed"], script)
+        self.assertIn("turn done", raw)
+        self.assertEqual(anyio.calls["sleep"], [rx.DONE_POLL_S])
+        self.assertTrue(invocation.done())
+
+    def test_full_workflow_ignores_partial_setup_through_sdk_grace(self):
+        eval_dir = self.tmp / "e2e_full_after_setup"
+        eval_dir.mkdir()
+        marker = eval_dir / rx.WORKFLOW_RETURN_FILE
+        marker.write_text(json.dumps({"eval_dir": str(eval_dir), "phases_run": ["setup"],
+                                      "validation_status": "phase_partial"}))
+        invocation = rx.phase_invocation({"eval_dir": str(eval_dir)})
+        self.assertIsNotNone(invocation)
+
+        def finish_full():
+            marker.write_text(json.dumps({"eval_dir": str(eval_dir), "phases_run": ["all"],
+                                          "validation_status": "pass"}))
+
+        script = [AssistantMessage(text="before task start"), TaskStartedMessage(task_id="all"),
+                  TaskNotificationMessage(task_id="all", summary="detached final work"),
+                  ResultMessage(result="turn done")]
+        anyio, sdk = self._install(script, sleep_hook=finish_full)
+        rx._invoke_via_sdk("P", 120, str(eval_dir), invocation=invocation)
+        self.assertEqual(sdk.state["consumed"], script)
+        self.assertEqual(anyio.calls["sleep"], [rx.DONE_POLL_S])
+        self.assertTrue(invocation.done())
+
     def test_background_task_keeps_the_client_open_until_the_marker_lands(self):
         """The killer case: a task notified terminal and the turn ended, but the
         detached A/B is still running. The runner must poll for the marker
@@ -2844,6 +2949,152 @@ class TestMain(_RunE2ECase):
         self.assertEqual(out["result_source"], "workflow_return")
         self.assertEqual(out["final_throughput_tok_s"], 500.0)
 
+    def test_head_continuation_runs_and_preserves_setup_return(self):
+        prior = {"schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+                 "validation_status": "phase_partial", "state": {"headQueue": [{"name": "example"}]}}
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, prior)
+        original = (self.eval_dir / rx.WORKFLOW_RETURN_FILE).read_bytes()
+        calls = []
+
+        def run_head(prompt, timeout_s, eval_dir, ps_args=None, invocation=None):
+            calls.append(ps_args)
+            self.assertEqual(ps_args["state"], prior["state"])
+            self.assertFalse(invocation.done())
+            return {**prior, "phases_run": ["head"], "baseline_throughput_tok_s": 400.0,
+                    "final_throughput_tok_s": 400.0, "throughput_speedup": 1.0}
+
+        self.patch_rx("invoke_workflow", run_head)
+        rc, _ = self._run(self._handoff(phases="head", state=prior["state"]))
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(json.loads((self.eval_dir / rx.WORKFLOW_RETURN_FILE).read_text())["phases_run"], ["head"])
+        history = list((self.eval_dir / "workflow_invocations").glob("*/workflow_return.json"))
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].read_bytes(), original)
+
+    def test_failed_head_continuation_cannot_recover_setup_as_success(self):
+        prior = {"schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+                 "validation_status": "phase_partial", "state": {"headQueue": []},
+                 "baseline_throughput_tok_s": 400.0, "final_throughput_tok_s": 400.0}
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, prior)
+        original = (self.eval_dir / rx.WORKFLOW_RETURN_FILE).read_bytes()
+
+        def interrupted(*args, **kwargs):
+            raise TimeoutError("head has not returned")
+
+        self.patch_rx("invoke_workflow", interrupted)
+        rc, _ = self._run(self._handoff(phases="head", state=prior["state"]))
+        self.assertEqual(rc, 0)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "timeout")
+        self.assertNotIn("throughput_speedup", out)
+        self.assertEqual((self.eval_dir / rx.WORKFLOW_RETURN_FILE).read_bytes(), original)
+
+    def test_explicit_all_keeps_completed_rerun_idempotent(self):
+        self.write_json(self.eval_dir / "runtime_result.json", {
+            "eval_dir": str(self.eval_dir), "phases_run": ["setup"], "validation_status": "phase_partial"})
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, {
+            "schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["all"],
+            "baseline_throughput_tok_s": 400.0, "final_throughput_tok_s": 500.0,
+            "throughput_speedup": 1.25, "output_parity": "pass"})
+        self.patch_rx("invoke_workflow", lambda *a, **k: self.fail("completed all must remain cached"))
+        rc, _ = self._run(self._handoff(phases="all"))
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(self.result_path.read_text())["throughput_speedup"], 1.25)
+
+    def test_full_request_after_setup_invokes_and_cannot_recover_old_partial(self):
+        for phases in (None, "all"):
+            with self.subTest(phases=phases):
+                prior = {"schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+                         "validation_status": "phase_partial", "baseline_throughput_tok_s": 400.0,
+                         "final_throughput_tok_s": 400.0, "throughput_speedup": 1.0}
+                self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, prior)
+                calls = []
+
+                def interrupted(*args, _calls=calls, **kwargs):
+                    _calls.append(kwargs)
+                    self.assertIsNotNone(kwargs.get("invocation"))
+                    raise TimeoutError("full workflow not completed")
+
+                self.patch_rx("invoke_workflow", interrupted)
+                rc, _ = self._run(self._handoff(phases=phases))
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(rc, 0)
+                out = json.loads(self.result_path.read_text())
+                self.assertEqual(out["status"], "timeout")
+                self.assertNotIn("throughput_speedup", out)
+
+    def test_exit_recovery_does_not_reuse_partial_setup(self):
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, {
+            "schema_version": 1, "eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+            "validation_status": "phase_partial", "baseline_throughput_tok_s": 400.0,
+            "final_throughput_tok_s": 400.0, "throughput_speedup": 1.0})
+        callbacks = []
+        self.patch_rx("atexit", types.SimpleNamespace(register=callbacks.append))
+
+        def interrupted_install(signum, handler):
+            if getattr(handler, "__name__", "") == "_on_term":
+                raise RuntimeError("exit before workflow invocation")
+
+        self.patch_rx("signal", types.SimpleNamespace(
+            SIGTERM=signal.SIGTERM, SIG_IGN=signal.SIG_IGN, signal=interrupted_install))
+        with self.assertRaisesRegex(RuntimeError, "exit before workflow"):
+            self._run(self._handoff())
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["error_class"], "interrupted")
+        self.assertNotIn("throughput_speedup", out)
+
+    def test_full_continuation_preserves_damaged_prior_canonical_bytes(self):
+        for damaged in (b"{", b"\xff"):
+            with self.subTest(damaged=damaged):
+                prior = {"eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+                         "validation_status": "phase_partial"}
+                self.write_json(self.eval_dir / "runtime_result.json", prior)
+                canonical = self.eval_dir / rx.WORKFLOW_RETURN_FILE
+                canonical.write_bytes(damaged)
+                calls = []
+
+                def complete_full(*args, _damaged=damaged, _calls=calls, **kwargs):
+                    invocation = kwargs["invocation"]
+                    _calls.append(invocation)
+                    self.assertFalse(invocation.done())
+                    self.assertEqual((invocation.history / rx.WORKFLOW_RETURN_FILE).read_bytes(), _damaged)
+                    return {"eval_dir": str(self.eval_dir), "phases_run": ["all"],
+                            "validation_status": "pass", "baseline_throughput_tok_s": 400.0,
+                            "final_throughput_tok_s": 400.0, "throughput_speedup": 1.0, "output_parity": "pass"}
+
+                self.patch_rx("invoke_workflow", complete_full)
+                rc, _ = self._run(self._handoff())
+                self.assertEqual(rc, 0)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(json.loads(canonical.read_text())["phases_run"], ["all"])
+
+    def test_non_object_terminal_marker_emits_error_without_claiming_gain(self):
+        canonical = self.eval_dir / rx.WORKFLOW_RETURN_FILE
+        self.write_json(canonical, None)
+        original = canonical.read_bytes()
+        self.patch_rx("invoke_workflow", lambda *a, **k: self.fail("invalid cached return must be reported"))
+        rc, _ = self._run(self._handoff())
+        self.assertEqual(rc, 1)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["status"], "error")
+        self.assertNotIn("throughput_speedup", out)
+        self.assertEqual(canonical.read_bytes(), original)
+
+    def test_phase_continuation_rejects_wrong_phase_transport_return(self):
+        prior = {"eval_dir": str(self.eval_dir), "phases_run": ["setup"],
+                 "validation_status": "phase_partial"}
+        self.write_json(self.eval_dir / rx.WORKFLOW_RETURN_FILE, prior)
+        self.patch_rx("invoke_workflow", lambda *a, **k: prior)
+        rc, _ = self._run(self._handoff(phases="head"))
+        self.assertEqual(rc, 1)
+        out = json.loads(self.result_path.read_text())
+        self.assertEqual(out["error_class"], "workflow_parse_error")
+        self.assertNotIn("throughput_speedup", out)
+
     def test_resume_with_a_failing_recovery_still_emits_an_error_file(self):
         """Both recovery attempts (the short-circuit and the one inside _emit)
         blow up — result.json must STILL exist and be parseable."""
@@ -3077,6 +3328,196 @@ class TestE2EDenominatorIsPublished(_RunE2ECase):
         self.assertIsNone(e2e["base_tput"])
         self.assertIsNone(e2e["new_tput"])
         self.assertEqual(e2e["e2e_gain_pct"], 25.0)
+
+
+
+# Explicit finite scheduling: kept in this CI-selected module.
+_schedule_rx = _load("run_e2e_scheduling")
+
+def _schedule_handoff(**values):
+    return {"model_path": "/models/x", "exp_root": "/tmp/exp", **values}
+
+def _schedule_agentx(**values):
+    return _schedule_handoff(workload_spec={"kind": "agentx_trace_replay", "duration_s": 3600,
+                                  "geak_loop_duration_s": 900, "observed_isl": 4096,
+                                  "observed_osl": 1024}, **values)
+
+def _schedule_bounded(**values):
+    return _schedule_agentx(final_reserve_s=21600, agent_timeout_ms=21600000, **values)
+
+
+class TestBoundedScheduling:
+    @pytest.fixture(autouse=True)
+    def clean_schedule_env(self, monkeypatch):
+        names = [env for env, _ in _SCHEDULING_LIMITS.values()] + list(_SCHEDULING_SWITCHES.values())
+        names += ["GEAK_WARM_START", "GEAK_FINAL_RESERVE_S", "GEAK_AGENT_TIMEOUT_MS",
+                  "GEAK_TIME_TAIL_CAP_S", "GEAK_AGENTX_DURATION_S", "GEAK_AGENTX_LOOP_DURATION_S",
+                  "GEAK_E2E_TIMEOUT_S", "REPEATS"]
+        for name in names:
+            monkeypatch.delenv(name, raising=False)
+
+    def test_default_dispatch_is_unchanged(self):
+        args = _schedule_rx.map_args(_schedule_handoff(), timeout_s=43200)
+        assert not set(_SCHEDULING_LIMITS) & args.keys()
+        assert not set(_SCHEDULING_SWITCHES) & args.keys()
+        assert "schedule_validation" not in args
+
+    def test_legacy_tuning_switch_does_not_activate_scheduling_preflight(self):
+        args = _schedule_rx.map_args(_schedule_agentx(tuning_skillset=False), timeout_s=43200)
+        assert args["tuning_skillset"] == "false"
+        assert "schedule_validation" not in args
+
+    def test_normal_env_can_select_one_editable_kernel(self, monkeypatch):
+        settings = {"GEAK_KERNEL_TASK_BUDGET": "1", "GEAK_MIN_KERNEL_TASKS": "1",
+                    "GEAK_KERNEL_ROUND_BUDGET": "1", "GEAK_HEAD_BUDGET": "0",
+                    "GEAK_HEAD_CORRECTIVE_MAX": "0", "GEAK_AB_FINISH_RETRIES": "0",
+                    "GEAK_TUNING_SKILLSET": "false", "GEAK_WARM_START": "off",
+                    "GEAK_FINAL_RESERVE_S": "21600", "GEAK_AGENT_TIMEOUT_MS": "21600000",
+                    "GEAK_SEARCH_DEADLINE_S": "14400"}
+        for name, value in settings.items():
+            monkeypatch.setenv(name, value)
+        h = _schedule_agentx()
+        args = _schedule_rx.map_args(h, timeout_s=43200)
+        assert {k: args[k] for k in ("budget", "min_kernel_tasks", "kernel_budget", "head_budget",
+                                   "head_corrective_max", "ab_finish_retries")} == {
+            "budget": 1, "min_kernel_tasks": 1, "kernel_budget": 1, "head_budget": 0,
+            "head_corrective_max": 0, "ab_finish_retries": 0}
+        assert args["tuning_skillset"] == "false"
+        assert args["warm_start"] == "off"
+        assert args["schedule_validation"]["final_reserve_s"] == 21600
+        assert args["schedule_validation"]["search_deadline_s"] == 14400
+        assert args["schedule_validation"]["minimum_client_seconds"] == {
+            "setup": 7200, "one_integration": 3600, "validate": 14400, "final_phase": 16200}
+        assert h["workload_spec"]["duration_s"] == 3600
+        assert h["workload_spec"]["geak_loop_duration_s"] == 900
+        assert args["measurement_mode"] == args["validation_measurement_mode"] == "warm_server"
+        assert args["parity_replicas"] == args["search_replicas"] == 1
+        assert "phases" not in args  # normal all-phases entry, no external controller
+
+    def test_explicit_zero_handoff_wins_over_environment(self, monkeypatch):
+        monkeypatch.setenv("GEAK_HEAD_BUDGET", "4")
+        monkeypatch.setenv("GEAK_TUNING_SKILLSET", "true")
+        args = _schedule_rx.map_args(_schedule_handoff(head_budget=0, tuning_skillset=False), timeout_s=43200)
+        assert args["head_budget"] == 0
+        assert args["tuning_skillset"] == "false"
+
+    @pytest.mark.parametrize("value", [-1, "bad", "1.5", 1.5, True, 2**53])
+    def test_invalid_candidate_limit_fails_instead_of_falling_back(self, value):
+        with pytest.raises(SchedulingError):
+            _schedule_rx.map_args(_schedule_handoff(budget=value), timeout_s=43200)
+
+    @pytest.mark.parametrize("value", ["bad", "-1", "1.5"])
+    def test_invalid_environment_limit_fails(self, monkeypatch, value):
+        monkeypatch.setenv("GEAK_HEAD_BUDGET", value)
+        with pytest.raises(SchedulingError):
+            _schedule_rx.map_args(_schedule_handoff(), timeout_s=43200)
+
+    @pytest.mark.parametrize("extra, message", [
+        ({"final_reserve_s": 43200}, "smaller than"),
+        ({"search_deadline_s": 22000}, "precede"),
+        ({"final_reserve_s": 16200}, "must exceed 16200"),
+        ({"agent_timeout_ms": 14400000}, "must exceed 14400000"),
+    ])
+    def test_impossible_agentx_schedule_is_rejected(self, extra, message):
+        h = _schedule_bounded()
+        h.update(extra)
+        with pytest.raises(SchedulingError, match=message):
+            _schedule_rx.map_args(h, timeout_s=43200)
+
+    def test_actual_outer_timeout_wins_over_requested_policy(self):
+        with pytest.raises(SchedulingError, match="smaller than"):
+            _schedule_rx.map_args(_schedule_bounded(), timeout_s=21480)
+        with pytest.raises(SchedulingError, match="Setup measurements"):
+            _schedule_rx.map_args(_schedule_bounded(), timeout_s=28800)
+        with pytest.raises(SchedulingError, match="one candidate A/B"):
+            _schedule_rx.map_args(_schedule_bounded(), timeout_s=32400)
+
+    def test_dispatch_deadline_cannot_expire_during_the_mandatory_baseline(self):
+        with pytest.raises(SchedulingError, match="after the full Setup"):
+            _schedule_rx.map_args(_schedule_bounded(search_deadline_s=7200), timeout_s=43200)
+
+    @pytest.mark.parametrize("actual_budget", [44400, 46200])
+    def test_actual_normal_hyperloom_budget_probe_funds_six_hour_reserve(self, actual_budget):
+        args = _schedule_rx.map_args(_schedule_bounded(search_deadline_s=21600, budget=1, min_kernel_tasks=1,
+                                  head_budget=0, tuning_skillset=False), timeout_s=actual_budget)
+        report = args["schedule_validation"]
+        assert report["time_budget_s"] == actual_budget
+        assert report["final_reserve_s"] == report["search_deadline_s"] == 21600
+        assert report["minimum_client_seconds"]["one_integration"] == 3600
+
+    def test_explicit_agentx_limits_require_a_real_budget(self):
+        with pytest.raises(SchedulingError, match="finite"):
+            _schedule_rx.map_args(_schedule_bounded())
+
+    def test_protocol_preflight_uses_actual_round_count(self, monkeypatch):
+        monkeypatch.setenv("REPEATS", "2")
+        with pytest.raises(SchedulingError, match="24300"):
+            _schedule_rx.map_args(_schedule_bounded(), timeout_s=43200)
+
+    def test_normal_agentx_export_overrides_inherited_replicas(self, monkeypatch):
+        monkeypatch.setenv("REPLICAS", "9")
+        h = _schedule_bounded()
+        args = _schedule_rx.map_args(h, timeout_s=43200)
+        assert args["schedule_validation"]["minimum_client_seconds"]["validate"] == 14400
+        exports = _schedule_rx.apply_workload_spec(h)
+        assert exports["REPEATS"] == "1"  # bench_e2e resolves REPEATS before REPLICAS
+
+    def test_protocol_preflight_does_not_replace_invalid_duration(self):
+        h = _schedule_bounded()
+        h["workload_spec"]["duration_s"] = 0
+        with pytest.raises(SchedulingError, match="duration_s"):
+            _schedule_rx.map_args(h, timeout_s=43200)
+
+    def test_partial_setup_does_not_require_final_measurements(self):
+        args = _schedule_rx.map_args(_schedule_agentx(phases="setup", final_reserve_s=300, budget=1), timeout_s=14400)
+        assert "minimum_client_seconds" not in args["schedule_validation"]
+
+    def test_main_emits_error_before_preflight_or_source_staging(self, tmp_path, monkeypatch):
+        hpath, result = tmp_path / "handoff.json", tmp_path / "result.json"
+        hpath.write_text(json.dumps(_schedule_bounded()))
+        def unexpected(*args, **kwargs):
+            pytest.fail("Invalid schedule reached launch preparation")
+        monkeypatch.setattr(_schedule_rx, "agentx_preflight", unexpected)
+        monkeypatch.setattr(_schedule_rx, "prepare_baseline_source", unexpected)
+        assert _schedule_rx.main([str(hpath), str(result), "--timeout-s", "7200"]) == 1
+        out = json.loads(result.read_text())
+        assert out["status"] == "error"
+        assert out["error_class"] == "invalid_schedule"
+
+
+# Existing operator timing checks also run through this CI-selected module.
+_timing_rx = _load("run_e2e_timing")
+
+_OPERATOR_TIMING = {
+    "GEAK_AGENT_TIMEOUT_MS": ("agent_timeout_ms", 14400000),
+    "GEAK_TIME_TAIL_CAP_S": ("time_tail_cap_s", 3600),
+    "GEAK_FINAL_RESERVE_S": ("final_reserve_s", 900),
+}
+
+
+def test_timing_overrides_reach_the_unchanged_workflow(monkeypatch):
+    for name, (_, value) in _OPERATOR_TIMING.items():
+        monkeypatch.setenv(name, str(value))
+    args = _timing_rx.map_args({"model_path": "/models/x", "exp_root": "/tmp/exp"}, timeout_s=17820)
+    assert args["time_budget_s"] == 17820
+    for arg, value in _OPERATOR_TIMING.values():
+        assert args[arg] == value
+    assert args["measurement_mode"] == "warm_server"
+    assert args["validation_measurement_mode"] == "warm_server"
+    assert args["parity_replicas"] == 1
+    assert "phases" not in args
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "-1", "bad"])
+def test_absent_or_invalid_timing_keeps_workflow_defaults(monkeypatch, value):
+    for name in _OPERATOR_TIMING:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    args = _timing_rx.map_args({"model_path": "/models/x", "exp_root": "/tmp/exp"})
+    for arg, _ in _OPERATOR_TIMING.values():
+        assert arg not in args
 
 
 if __name__ == "__main__":

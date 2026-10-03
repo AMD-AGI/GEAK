@@ -455,6 +455,44 @@ async function testProviderDefaultModel() {
     'and the pinned value is the one that survives');
 }
 
+async function testWorkflowAgentDeadline() {
+  const originalNow = Date.now;
+  let now = 1000;
+  const observed = [];
+  try {
+    Date.now = () => now;
+    const backend = { name: 'fake', runAgent: async ({ timeoutMs }) => {
+      observed.push(timeoutMs);
+      now += observed.length === 1 ? 60 : 20;
+      return { text: observed.length === 1 ? 'invalid' : '{"ok":true}' };
+    } };
+    const runtime = createRuntime({ backend, agentTimeoutMs: 1000, log: silent });
+    const result = await runtime.agent('P', { timeout_ms: 100,
+      schema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } } });
+    eq(result, { ok: true }, 'a schema retry may complete within the shared workflow deadline');
+    eq(observed, [100, 40], 'schema retries share one deadline instead of each receiving the original timeout');
+    let invalid = false;
+    try { await runtime.agent('P', { timeout_ms: 0 }); } catch { invalid = true; }
+    ok(invalid, 'a depleted explicit timeout is refused rather than treated as unlimited');
+    observed.length = 0;
+    await runtime.agent('P', { timeout_ms: 2000 });
+    eq(observed, [1000], 'a workflow timeout cannot expand the runtime backstop');
+    observed.length = 0;
+    await runtime.agent('P');
+    eq(observed, [1000], 'callers without a workflow timeout retain the old backstop');
+    let calls = 0;
+    const exhausted = createRuntime({ agentTimeoutMs: 1000, log: silent, backend: {
+      name: 'fake', runAgent: async () => { calls++; now += 100; return { text: 'invalid' }; },
+    } });
+    let expired = false;
+    try { await exhausted.agent('P', { timeout_ms: 100, schema: { type: 'object' } }); }
+    catch (error) { expired = /deadline exhausted/.test(error.message); }
+    ok(expired && calls === 1, 'an expired schema attempt cannot start another backend call');
+  } finally {
+    Date.now = originalNow;
+  }
+}
+
 async function main() {
   await testSchemaUnit();
   await testConfig();
@@ -466,6 +504,7 @@ async function main() {
   await testSchemaAgent();
   await testRunScriptAndNesting();
   await testAgentCap();
+  await testWorkflowAgentDeadline();
 
   console.log(`\n${passed} checks passed, ${fails.length} failed.`);
   if (fails.length) process.exit(1);

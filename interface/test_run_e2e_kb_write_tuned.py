@@ -69,7 +69,8 @@ def _op(**extra) -> dict:
 
 def _tuning(**extra) -> dict:
     t = {
-        "gate": "accepted",
+        "gate": "accepted", "ab_complete": True, "engagement_verified": True,
+        "correctness_gate": "pass", "pre_tune_throughput_tok_s": 1000.0, "post_tune_throughput_tok_s": 1033.48,
         "ops_tuned": [_op()],
         "apply_env": "AITER_TUNE_GEMM_CONFIG=/opt/configs",
         "cache_invalidation": ["rm -rf /tmp/aiter_configs", "rm -rf ~/.cache/aiter"],

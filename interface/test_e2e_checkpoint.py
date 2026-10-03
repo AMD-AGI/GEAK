@@ -340,6 +340,10 @@ def test_recovers_accepted_tuning_markdown_report_without_ab_scan(tmp_path):
         "(2644.24 → 2678.23 tok/s) against a noise band.\n",
         encoding="utf-8",
     )
+    (eval_dir / "tuning" / "tuning_result.json").write_text(json.dumps({
+        "gate": "accepted", "ab_complete": True, "engagement_verified": True, "correctness_gate": "pass",
+        "pre_tune_throughput_tok_s": 2644.24, "post_tune_throughput_tok_s": 2678.23,
+    }))
     stale_leg = eval_dir / "tuning" / "ab" / "pre_n1"
     stale_leg.mkdir(parents=True)
     (stale_leg / "bench_summary.json").write_text(
@@ -440,11 +444,14 @@ def test_recovers_legacy_tuning_composite_as_provisional(tmp_path):
     }), encoding="utf-8")
 
     recovered = rx._recover_workflow_return(tmp_path)
-    normalized = rx.normalize_result({}, recovered)
 
     assert recovered["validation_status"] == "recovered_tuning_skillset_legacy_provisional"
     assert recovered["accepted_kernels"][0]["kernel_id"] == "gemm_a8w8"
-    assert normalized["result_source"] == "disk_tuning_skillset_legacy_provisional"
+    assert recovered["tuning_skillset"]["gate"] == "accepted_provisional"
+    assert recovered["recovered_tuning_legacy"] is True
+    assert recovered["recovery_evidence"]["original_gate"] == "not_persisted"
+    with pytest.raises(ValueError, match="Workflow banks tuning"):
+        rx.normalize_result({}, recovered)
 
     checkpoint = _checkpoint(eval_dir, "tuning_skillset")
     asset = eval_dir / "checkpoint_assets" / "bench_e2e.sh"

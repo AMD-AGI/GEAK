@@ -91,6 +91,9 @@ The mapping is owned by `run_e2e.py:map_args`.
 | `workload.{isl,osl,conc}` | `isl`, `osl`, `conc` | profile and bench workload |
 | `accepted_flags` | `initial_extra_server_args` | seeds the baseline from caller best config |
 | `accepted_env` | `initial_extra_env` | seeds baseline env |
+| resolved schema-v2 configuration | `initial_args_mode="replace"`, `initial_env_complete=true` | resolved args and env, including intentional empty strings, seed setup without restoring recipe values |
+| `baseline_env_spec.config.unset_envs` | `initial_unset_envs`, env `GEAK_UNSET_ENVS` | explicit removals from recipe and inherited launcher env; current assignments may re-add a name |
+| `baseline_env_spec.config.remove_args` | `initial_remove_args`, env `GEAK_REMOVE_ARGS` | remaining flag removals; the benchmark verifies that the live server honors them before measurement |
 | `launch_recipe` | `launch_script` | optional |
 | `raw_baseline_tput` | result audit metadata | pre-change session baseline; never used as the measurement-alignment signal |
 | `orchestrator_best_tput_same_config` | result alignment metadata | caller throughput on the accepted config GEAK uses for its baseline |
@@ -100,6 +103,53 @@ The mapping is owned by `run_e2e.py:map_args`.
 | `bench_protocol.*` | env `RANDOM_RANGE_RATIO`, `NUM_PROMPTS`, `NUM_WARMUPS`, `SEED` | `run_e2e.py:apply_bench_protocol` exports only the provided keys; absent keys keep `bench_e2e.sh` defaults |
 | — | `config_tune="false"` | caller already did config search; not repeated |
 | — | `apply_to_original="true"` | `final/final_launch.sh` and overlay are emitted for sweep reuse |
+
+For schema-v2 `baseline_env_spec.config`, nonempty observed `server_launch_flags`
+supplies the base. If that evidence is unavailable, `args_mode="replace"` uses
+the current argument fields, including an empty string; otherwise the original
+recipe supplies the base. `remove_args` removes inherited keys (or matching
+key/value pairs) before reconciled `extra_server_args` and `accepted_flags` are
+applied. `unset_envs` removes named recipe settings before `extra_envs` and
+`accepted_env` are applied. The resolver records remaining explicit environment
+removals in the effective digest. Missing assignments alone never imply deletion.
+
+`GEAK_UNSET_ENVS` is a JSON array of environment names inherited by the benchmark
+adapters. They remove those names from the child environment before applying the
+current `EXTRA_ENV` assignments. Magpie also filters the independent original
+recipe replay. Run-owned coordinates (GPU masks, model, port, profiler path and
+overlay import path) remain under the adapter's control. Setup, carried state and
+returned `accepted_config.unset_envs` preserve the removal controls; a final launch
+bundle must reproduce them.
+
+`GEAK_REMOVE_ARGS` is a JSON array of flag specifications. The resolver removes
+them from inherited arguments, and the benchmark checks remaining removals
+against the actual server argv before warmup, profiling or timed measurement.
+Flag parsing and explicit re-addition use the same implementation at both
+boundaries. A key removes that option; a key/value pair removes only the matching
+effective value. Later explicit assignments may re-enable it. Empty controls
+clear an inherited seed when resuming a different saved configuration.
+If the live argv repeats an option and contains the removed value, verification
+rejects it as ambiguous: the backend might append values instead of replacing
+them. A single replacement value and repeated values that do not match the
+removal remain valid.
+
+The live check supports direct local SGLang and vLLM entrypoints with a matching
+port and unchanged process identity. If an external script restores a removed
+default, or its command cannot be verified, the launch fails with
+`server_args_unverified` and is torn down before measurement. GEAK does not rewrite
+external scripts or guess inverse flags. A script that cannot honor the requested
+removal must be corrected in its owning component. The detailed outcome is in
+`OUT_DIR/server_args_validation.json`.
+This verifies active removals and process identity, not equality of every
+accepted argument, environment value or overlay. A conclusive rejection in
+either final-validation leg prevents carried throughput, disk recovery and
+deployment knowledge-base write-back from publishing that run as a win.
+
+For `REUSE_SERVER=1` with active removals, pass `GEAK_SERVER_ARGS_RECEIPT` pointing
+to a successful validation for that still-live server. The benchmark rechecks the
+process, arguments, controls and source identity; an old result or a remote
+endpoint is insufficient. Runs with no active removals retain their existing
+launch/reuse behavior. Final bundles must export the accepted removal controls.
 
 ### TraceLens prior autodiscovery
 
@@ -130,6 +180,15 @@ them: the feature is entirely additive.
 ## `result.json` (workflow → caller)
 
 The workflow writes the following fields to the result file.
+
+`accepted_config.args_mode="replace"` means `flags` is the complete serving
+argument string. A caller must replace inherited recipe/current-stack arguments
+instead of appending it, including when `flags` is empty. The workflow preserves
+this property in phase-to-phase `state.args_mode`. Missing mode means a legacy
+delta: retain the caller's current configuration and apply the returned flags.
+Recovered intermediate results do not acquire completeness from the handoff's
+schema version. Environment omission does not mean deletion; `env_map` remains
+a map of assignments, with deletions represented only by explicit `unset_envs`.
 
 ```jsonc
 {
@@ -286,3 +345,40 @@ agents run inherits them.
 
 - [API reference](./api-reference.md): Workflow arguments and run artifacts.
 - [Run a workflow](../how-to/run-agent.md): natural-language invocation.
+
+## Strict AgentX serving references
+
+Schema-3 AgentX handoffs require a process-bound accepted launch receipt before
+the normal interface prepares a workflow. `measurement_evidence` includes the
+`hyperloom.serving_launch.v1` receipt, captured tokens, completeness marker, and
+observed serving environment. The receipt binds a fresh nonce observed in the
+server environment, owned PID/start time and endpoint, config digest, workspace,
+and measurement artifact. Missing or partial evidence returns
+`reference_launch_mismatch`. YAML declarations and nearby command files cannot
+substitute for the observed launch.
+
+The captured environment uses `serving-knobs-v1`: stable backend, AITER, compiler,
+communication, and selected Python/threading knobs. It excludes credentials,
+control-plane variables, local paths, GPU selection, and profiling controls.
+`baseline_env_spec.config.server_env` must match this observation, including
+model-script exports that override YAML values. Source snapshots and candidate
+overlays continue through their existing contract.
+
+Native vLLM/SGLang adapters decode argument strings into literal argv arrays.
+Nested JSON, whitespace, and shell metacharacters remain in their tokens; no
+`eval` or shell word expansion interprets them. The existing explicit launcher
+selection remains available.
+
+Before any client warmup or measured round, the live-process validator checks
+serving arguments, the scoped environment, model/tokenizer/served-name binding,
+TP/DP/PP, node topology, and seed. Local host/port/device and profiling projection
+does not bypass these semantic checks. Parity binds the accepted reference;
+candidate purposes verify the declared current engine arguments and environment.
+The captured model, tokenizer, topology, and seed remain binding in every purpose. Existing PID/start/port ownership and
+removal checks still apply.
+
+The paired Hyperloom producer currently captures local Linux full-lifecycle
+vLLM `/agentic/` recipes. Other launch paths and historical runs without that
+receipt are unavailable as strict references. Admission outside schema-3 AgentX
+retains its prior behavior. Benchmark durations, warmup counts, quality rules,
+and measurement protocol are unchanged.

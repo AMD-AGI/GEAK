@@ -20,6 +20,7 @@
 //
 // Run:  node e2e_workflow/scripts/test_tuning_skillset_phase.js
 'use strict';
+require('./test_tuning_complete_pair.js');
 const fs = require('fs');
 const path = require('path');
 
@@ -268,7 +269,7 @@ if (role) {
 // ---------------------------------------------------------------------------
 console.log('\n## E. tuning reaches the final bundle');
 ok(/deploy_bundle: \{ type: 'string' \}/.test(src), 'TUNING_SCHEMA accepts a deploy bundle');
-ok(/const TUNING_FINALIZE_INPUTS = \(TUNING_SKILLSET_ENABLED && tuning && tuning\.gate === 'accepted'\)/.test(src),
+ok(/const TUNING_FINALIZE_INPUTS = \(TUNING_SKILLSET_ENABLED && tuningAccepted\(tuning\)\)/.test(src),
   'the deploy bundle is handed to Finalize only when tuning actually banked a win');
 ok(/\.\.\.TUNING_FINALIZE_INPUTS,/.test(src)
   && (src.match(/\.\.\.TUNING_FINALIZE_INPUTS/g) || []).length === 1,
@@ -287,7 +288,7 @@ ok(/before[\s\S]{0,40}the server launch/i.test(integrator),
 // reference leg that quietly lost it.
 ok(/live_tree_files: arrStr/.test(src), 'TUNING_SCHEMA carries the live-tree paths the deploy owns');
 ok(/function tuningIntegrateInputs\(\)/.test(src)
-  && /if \(!\(TUNING_SKILLSET_ENABLED && tuning && tuning\.gate === 'accepted'\)\) return \{\};/.test(src),
+  && /if \(!\(TUNING_SKILLSET_ENABLED && tuningAccepted\(tuning\)\)\) return \{\};/.test(src),
   'the carve-out is empty unless an accept was banked (integrate prompt unchanged without tuning)');
 ok((src.match(/\.\.\.tuningIntegrateInputs\(\)/g) || []).length === 2,
   'every integrate path gets the carve-out: runIntegrateBothLegs (covers head/milestone/corrective) + the deep lane');
@@ -303,7 +304,7 @@ ok(/covers \*\*data only\*\*/.test(integrator),
 ok(/apply_overlay: \{ type: 'string' \}/.test(src), 'the phase can return a routing/dispatch overlay');
 ok(/if \(tuning\.apply_overlay\) curOverlay = tuning\.apply_overlay;/.test(src),
   'an accepted tuning overlay is carried forward (the code half is not dropped at the phase boundary)');
-ok(/OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,/.test(src),
+ok(/OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, GEAK_UNSET_ENVS: JSON\.stringify\(curUnsetEnvs\),[^\n]*SKILL_DIR: WORKFLOW_DIR,/.test(src),
   'the post-tuning re-profile runs WITH the carried overlay, not an empty one');
 ok(/reversible \*\*overlay\*\*/.test(role) && /Never edit a `\.py` in/.test(role),
   'the role routes code through the overlay and forbids live-tree source edits');
@@ -378,6 +379,8 @@ async function main() {
       const calls = [];
       const deps = {
         tuning: tuningResult,
+        tuningAccepted: new Function('ACCURACY_GATE', src.slice(src.indexOf('function tuningAccepted('), src.indexOf('let tuning = ST.tuning')) + '\nreturn tuningAccepted;')('none'),
+        BASELINE_SOURCE_REQUEST: '',
         KB_DIMS: kbDims === undefined ? { gfx: 'gfx950', framework_version: 'sglang-1.2.3' } : kbDims,
         log: (m) => logs.push(String(m)),
         shq: (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'",

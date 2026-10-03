@@ -138,7 +138,7 @@ class TestPeaks(unittest.TestCase):
         for gfx in ("gfx942", "gfx950", "gfx1151"):
             p = rt.load_peaks(PEAKS_MD, gfx)
             self.assertEqual(p["flops"]["bf16"], p["flops"]["fp16"], gfx)
-            
+
     def test_r9700_peaks_require_product_identity(self):
         self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1201"))
         p = rt.resolve_peaks(PEAKS_MD, "gfx1201", product="r9700")

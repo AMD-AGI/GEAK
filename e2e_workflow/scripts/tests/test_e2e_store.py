@@ -724,7 +724,8 @@ def _tuned(tmp_path, *names, gate="accepted", live=()):
     for name in names:
         (tmp_path / name).write_text("M,N,K,kernel\n1024,8192,7168,ck_cshuffle_v3\n")
         paths.append(str(tmp_path / name))
-    return {"gate": gate, "artifacts": paths, "live_tree_files": [str(tmp_path / n) for n in live]}
+    return {"gate": gate, "ab_complete": True, "engagement_verified": True, "correctness_gate": "pass",
+            "pre_tune_throughput_tok_s": 1000.0, "post_tune_throughput_tok_s": 1033.48, "artifacts": paths, "live_tree_files": [str(tmp_path / n) for n in live]}
 
 
 def test_a_tuned_table_rides_along_with_the_record(tmp_path):
@@ -1141,3 +1142,51 @@ def test_the_reference_prose_names_ran_and_lost_separately(tmp_path):
     _run("resolve", "--store", str(tmp_path / "store"), "--refs-dir", str(tmp_path / "refs"))
     prose = "\n".join(p.read_text() for p in (tmp_path / "refs").glob("e2e_reference_*.md"))
     assert "2 ran and did not win" in prose
+
+
+@pytest.mark.parametrize("missing", ["ab_complete", "pre_tune_throughput_tok_s", "correctness_gate"])
+def test_unproven_tuning_cannot_enter_deployment_store(tmp_path, missing):
+    tuning = _tuned(tmp_path, "unproven.csv")
+    tuning.pop(missing)
+    with pytest.raises(SystemExit, match="Unproven tuning"):
+        _write(tmp_path, "bad", "tuning", tuning_skillset=tuning)
+    assert e2e_store._tuning_files({"tuning_skillset": tuning}, []) == {}
+
+
+@pytest.mark.parametrize("carrier", ["accepted_kernels", "accepted_heads"])
+@pytest.mark.parametrize("state", ["missing", "disabled", "incomplete", "disabled_complete"])
+def test_tagged_tuning_requires_an_accepted_section(tmp_path, carrier, state):
+    extra = {}
+    if state == "disabled":
+        extra["tuning_skillset"] = {"enabled": False, "ran": False}
+    elif state in ("incomplete", "disabled_complete"):
+        extra["tuning_skillset"] = _tuned(tmp_path, "unproven.csv")
+        if state == "incomplete":
+            extra["tuning_skillset"].pop("ab_complete")
+        else:
+            extra["tuning_skillset"]["enabled"] = False
+    extra[carrier] = [{"name": "unproven_tuned_op", "from_tuning_skillset": True}]
+    with pytest.raises(SystemExit, match="Unproven tuning"):
+        _write(tmp_path, "bad", "tuning", **extra)
+    assert not (tmp_path / "store").exists()
+
+
+@pytest.mark.parametrize("carrier", ["accepted_kernels", "accepted_heads"])
+@pytest.mark.parametrize("tuning", [None, {"enabled": False, "ran": False}])
+def test_independent_kernel_win_survives_without_tuning(tmp_path, carrier, tuning):
+    _write(tmp_path, "good", "kernels", tuning_skillset=tuning,
+           **{carrier: [{"name": "independent_op", "e2e_delta_pct": 20.0}]})
+    view = _run("resolve", "--store", str(tmp_path / "store"))["candidates"][0]
+    assert view["accepted_kernels"][0]["name"] == "independent_op"
+
+
+@pytest.mark.parametrize("carrier", ["accepted_kernels", "accepted_heads"])
+def test_complete_real_value_pair_keeps_tagged_tuning(tmp_path, carrier):
+    tuning = _tuned(tmp_path, "proven.csv")
+    tuning.update(pre_tune_throughput_tok_s=146069.366,
+                  post_tune_throughput_tok_s=150959.985, correctness_gate="none")
+    out = _write(tmp_path, "good", "tuning", tuning_skillset=tuning,
+                 **{carrier: [{"name": "proven_tuned_op", "from_tuning_skillset": True}]})
+    view = _run("resolve", "--store", str(tmp_path / "store"))["candidates"][0]
+    assert view["accepted_kernels"][0]["name"] == "proven_tuned_op"
+    assert "tuning/00_proven.csv" in out["files"]
