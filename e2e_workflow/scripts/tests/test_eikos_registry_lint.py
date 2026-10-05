@@ -364,3 +364,10 @@ def test_unconstrained_paths_are_reported_as_open(tmp_path):
     assert [(p["path"], p["kind"]) for p in f["roots"]["S"]["paths"]] == [("value", "open_object")]
     f = discover(tmp_path, UNTYPED_BASE.replace("VALUE", "{enum:['a','b']}"))
     assert [(p["path"], p["kind"]) for p in f["roots"]["S"]["paths"]] == [("value", "leaf")]   # enum constrains it
+
+
+def test_unsupported_keywords_in_items_are_errors_even_when_items_look_untyped(tmp_path):
+    """Review of a9595206: `items:{oneOf:[...]}` must not take the unconstrained shortcut."""
+    f = discover(tmp_path, UNTYPED_BASE.replace(
+        "VALUE", "{type:'array',items:{oneOf:[{type:'object',properties:{new_judgment:{type:'boolean'}},additionalProperties:false}]}}"))
+    assert any("unsupported schema keyword(s) oneOf" in e for e in f["errors"]) and "S" not in f["roots"]
