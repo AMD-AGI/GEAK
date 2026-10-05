@@ -134,6 +134,43 @@ def _template_parts(src, i):
     raise ValueError("unterminated template literal")
 
 
+ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+
+
+def js_string_value(text):
+    """The value of a JS string literal token (quotes included), escapes decoded, so a key's identity
+    never depends on its spelling ('sch\\u0065ma' is 'schema'). Raises ValueError if undecodable."""
+    body, out, i = text[1:-1], [], 0
+    while i < len(body):
+        c = body[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        n = body[i + 1] if i + 1 < len(body) else ""
+        if n in ESCAPES and not (n == "0" and body[i + 2:i + 3].isdigit()):
+            out.append(ESCAPES[n])
+            i += 2
+        elif n == "x":
+            out.append(chr(int(body[i + 2:i + 4], 16)))
+            i += 4
+        elif n == "u" and body[i + 2:i + 3] == "{":
+            j = body.index("}", i)
+            out.append(chr(int(body[i + 3:j], 16)))
+            i = j + 1
+        elif n == "u":
+            out.append(chr(int(body[i + 2:i + 6], 16)))
+            i += 6
+        elif n in "\r\n\u2028\u2029":
+            i += 3 if body[i + 1:i + 3] == "\r\n" else 2       # line continuation
+        elif n.isdigit():
+            raise ValueError("legacy octal escape in %s" % text)
+        else:
+            out.append(n)
+            i += 2
+    return "".join(out)
+
+
 def _skip_regex(src, i):
     i += 1
     in_class = False
@@ -225,6 +262,8 @@ def tokenize(src, lo=0, hi=None, starts=None):
         elif c.isalpha() or c in "_$":
             i = IDENT_RE.match(src, i).end()
             kind = "ident"
+        elif c == "\\":
+            raise ValueError("unicode-escaped identifier at line %d is not supported" % lineno(i))
         else:
             kind = "punct"
             for p in PUNCT3 + PUNCT2:
@@ -386,7 +425,7 @@ def _label_value(tok):
     if tok is None:
         return None
     if tok.kind == "string":
-        return tok.text[1:-1]
+        return js_string_value(tok.text)
     if tok.kind == "template":
         return _normalize_template(tok.text)
     return None
@@ -405,10 +444,10 @@ def _is_key(toks, k, name):
         if nxt in (",", "}"):
             return k, True
         return None
-    if t.kind == "string" and t.text[1:-1] == name and k + 1 < len(toks) and toks[k + 1].text == ":":
+    if t.kind == "string" and k + 1 < len(toks) and toks[k + 1].text == ":" and js_string_value(t.text) == name:
         return k + 1, False
-    if t.text == "[" and k + 3 < len(toks) and toks[k + 1].kind == "string" and \
-            toks[k + 1].text[1:-1] == name and toks[k + 2].text == "]" and toks[k + 3].text == ":":
+    if t.text == "[" and k + 3 < len(toks) and toks[k + 1].kind == "string" and toks[k + 2].text == "]" \
+            and toks[k + 3].text == ":" and js_string_value(toks[k + 1].text) == name:
         return k + 3, False
     return None
 
@@ -534,6 +573,33 @@ def closure(expr, defs):
     return order
 
 
+ASSIGN_OPS = {"=", "+=", "-=", "*=", "/=", "%=", "**=", "<<=", ">>=", ">>>=", "&=", "|=", "^=",
+              "&&=", "||=", "??=", "++", "--"}
+
+
+def construction_problem(expr, callable_names):
+    """'' if expr only BUILDS a value: literals, aliases, arrow helpers, and calls to the closure's own
+    helper names. Any assignment, increment, delete, new, member access, or call to anything else
+    (Object.assign, JSON.parse, a method ...) could mutate or depend on run-time state."""
+    toks = tokenize(expr)
+    for k, t in enumerate(toks):
+        if t.kind == "punct" and t.text in ASSIGN_OPS:
+            return "assignment %r" % t.text
+        if t.kind == "ident" and t.text in ("delete", "new", "await", "yield", "this"):
+            return "%r" % t.text
+        if t.kind == "punct" and t.text in (".", "?."):
+            return "member access"
+        if t.kind == "punct" and t.text == "[" and k and (toks[k - 1].kind == "ident" or toks[k - 1].text in (")", "]")):
+            return "computed member access"
+        if t.kind == "punct" and t.text == "(" and k:
+            callee = toks[k - 1]
+            if callee.kind == "ident" and callee.text not in callable_names and callee.text not in KEYWORDS:
+                return "call to %r" % callee.text
+            if callee.text in (")", "]"):
+                return "call of a computed value"
+    return ""
+
+
 def check_closure_use(names, defs, binds, toks, sites):
     """Supported boundary for names a schema depends on: exactly one binding, a `const`, and no use
     outside schema expressions and the initializers of other closure names. Returns problems."""
@@ -585,6 +651,22 @@ def resolve(targets, defs):
     return {tid: v for tid, v in out["values"].items() if tid not in errors}, errors
 
 
+def _structure(schema, where):
+    """'object', 'array' or 'scalar'. A schema that is both (type ['object','array'], or object
+    keywords next to items) is a structural union: rejected, never half-walked."""
+    t = schema.get("type")
+    types = set(t if isinstance(t, list) else [t]) - {None}
+    is_obj = "object" in types or "properties" in schema or "additionalProperties" in schema
+    is_arr = "array" in types or "items" in schema
+    if is_obj and is_arr:
+        raise ValueError("%s: structural union (object and array) is not supported" % where)
+    if types and is_obj and "object" not in types:
+        raise ValueError("%s: object keywords on a schema typed %s" % (where, sorted(types)))
+    if types and is_arr and "array" not in types:
+        raise ValueError("%s: items on a schema typed %s" % (where, sorted(types)))
+    return "object" if is_obj else "array" if is_arr else "scalar"
+
+
 def field_paths(schema, path=""):
     """Leaves, array nodes and open-object boundaries of a resolved JSON schema. Raises ValueError
     on vocabulary outside SCHEMA_KEYWORDS."""
@@ -596,8 +678,9 @@ def field_paths(schema, path=""):
         raise ValueError("%s: unsupported schema keyword(s) %s" % (where, ", ".join(extra)))
     t = schema.get("type")
     types = t if isinstance(t, list) else [t]
+    shape = _structure(schema, where)
     out = []
-    if "object" in types or "properties" in schema:
+    if shape == "object":
         for k, v in (schema.get("properties") or {}).items():
             out += field_paths(v, "%s.%s" % (path, k) if path else k)
         ap = schema.get("additionalProperties", True)  # JSON Schema: absent means allowed
@@ -610,7 +693,7 @@ def field_paths(schema, path=""):
         elif ap is not False:
             raise ValueError("%s: unsupported additionalProperties value %r" % (where, ap))
         return out
-    if "array" in types:
+    if shape == "array":
         node = {"path": path + "[]", "kind": "array"}
         out.append(node)
         items = schema.get("items")
@@ -618,14 +701,13 @@ def field_paths(schema, path=""):
             out.append({"path": path + "[].*", "kind": "open_object"})
         elif not isinstance(items, dict):
             raise ValueError("%s: tuple-form items are not supported" % where)
-        else:
+        elif _structure(items, where + "[]") == "scalar":    # scalar items: one entry, not two
             sub = field_paths(items, path + "[]")
-            if len(sub) == 1 and sub[0]["kind"] == "leaf":    # scalar items: one entry, not two
-                node["items_type"] = sub[0]["type"]
-                if "enum" in sub[0]:
-                    node["enum"] = sub[0]["enum"]
-            else:
-                out += sub
+            node["items_type"] = sub[0]["type"]
+            if "enum" in sub[0]:
+                node["enum"] = sub[0]["enum"]
+        else:
+            out += field_paths(items, path + "[]")
         return out
     leaf = {"path": path, "kind": "leaf", "type": t}
     if "enum" in schema:
@@ -638,7 +720,12 @@ def discover(root=GEAK_ROOT, files=ENTRY_FILES):
     result = {}
     for rel in files:
         src = open(os.path.join(root, rel), encoding="utf-8").read()
-        toks = tokenize(src)
+        try:
+            toks = tokenize(src)
+        except ValueError as exc:
+            result[rel] = {"roots": {}, "errors": ["tokenize: %s" % exc], "ignored": [],
+                           "unused_schemas": [], "site_count": 0}
+            continue
         defs = const_defs(toks, src)
         sites = call_sites(toks, src)
         targets, errors, ignored, used = [], [], [], []
@@ -672,11 +759,17 @@ def discover(root=GEAK_ROOT, files=ENTRY_FILES):
         pure = set(names)
         while True:
             more = {n for n, d in defs.items() if n not in pure and len(d) == 1 and
-                    references(d[0][0]) and references(d[0][0]) <= pure}
+                    references(d[0][0]) and references(d[0][0]) <= pure
+                    and not construction_problem(d[0][0], pure | {n})}
             if not more:
                 break
             pure |= more
         unused = sorted(pure - names)
+        for n in sorted(pure):
+            why = construction_problem(defs[n][0][0], pure)
+            if why:
+                errors.append("%r is not built by construction only (%s); the lint cannot see what it "
+                              "does to the schemas it touches" % (n, why))
         errors += check_closure_use(sorted(pure), defs, bindings(toks), toks, used)
         values, rerr = resolve([{"id": k, "expr": v} for k, v in uniq.items()], defs)
         errors += ["%s: %s" % (k, v) for k, v in sorted(rerr.items())]
