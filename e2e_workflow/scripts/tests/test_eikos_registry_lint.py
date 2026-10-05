@@ -336,3 +336,31 @@ def test_items_typed_against_object_keywords_are_rejected(tmp_path):
     f = discover(tmp_path, "const S = { type: 'string', properties: { a: { type: 'boolean' } } };\n"
                            "await agent('a', { phase: 'P', label: 'x', schema: S });\n")
     assert any("object keywords on a schema typed" in e for e in f["errors"])
+
+
+# ------------------------------------------------------------------ review of ce829685: unconstrained schemas
+UNTYPED_BASE = "const S={type:'object',properties:{value:VALUE},additionalProperties:false};\n" \
+               "await agent('a',{label:'plan',phase:'P',schema:S});\n"
+
+
+@pytest.mark.parametrize("before, after", [
+    ("{type:'string'}", "{}"),                                                   # field becomes "anything"
+    ("{type:'array',items:{type:'string'}}", "{type:'array',items:{}}"),         # items become "anything"
+])
+def test_an_unconstrained_schema_is_an_open_boundary_not_a_scalar(tmp_path, before, after):
+    rel = "wf.mjs"
+    (tmp_path / rel).write_text(UNTYPED_BASE.replace("VALUE", before))
+    first = rl.discover(str(tmp_path), (rel,))
+    reg = _registry_from(first, rel)
+    assert rl.lint(reg, first, str(tmp_path), (rel,)) == []
+    (tmp_path / rel).write_text(UNTYPED_BASE.replace("VALUE", after))
+    found = rl.discover(str(tmp_path), (rel,))
+    probs = rl.lint(reg, found, str(tmp_path), (rel,))
+    assert any("open-object boundary" in p or "not classified" in p for p in probs), probs
+
+
+def test_unconstrained_paths_are_reported_as_open(tmp_path):
+    f = discover(tmp_path, UNTYPED_BASE.replace("VALUE", "{}"))
+    assert [(p["path"], p["kind"]) for p in f["roots"]["S"]["paths"]] == [("value", "open_object")]
+    f = discover(tmp_path, UNTYPED_BASE.replace("VALUE", "{enum:['a','b']}"))
+    assert [(p["path"], p["kind"]) for p in f["roots"]["S"]["paths"]] == [("value", "leaf")]   # enum constrains it
