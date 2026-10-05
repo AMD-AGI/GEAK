@@ -1,0 +1,2904 @@
+{
+ "version": "decision_registry.v1",
+ "reviewed_source": "feat/geak-jev b229e992",
+ "design": "research/eikos_hard_rule_proposal_20261005.md rev 2 (accepted by Astra 2026-10-05)",
+ "scope": "registered explicit decision sites only; record-only; capture not implemented for any decision yet; a consultation counts only with a valid replay receipt",
+ "classes": {
+  "judgment": "discretionary decision; eligible for Eikos",
+  "mixed": "contains a judgment but also a measured/policy part; split before capture",
+  "unresolved": "judgment without a pre-decision boundary or declared vocabulary; recorded as a gap",
+  "derived_fact": "produced by a cited reducer/policy; never sent to Eikos",
+  "action_report": "says what was done",
+  "measurement_report": "agent-reported measurement or evidence check (not independently verified by orchestration)",
+  "identity": "names, ids, labels echoed or looked up",
+  "artifact_ref": "paths, commands, diffs",
+  "free_text": "prose",
+  "open_object": "additionalProperties boundary: undeclared extra fields are not classified (gap)"
+ },
+ "decisions": [
+  {
+   "id": "K1",
+   "class": "judgment",
+   "question": "Stop the round loop now?",
+   "options": [
+    "continue",
+    "stop"
+   ],
+   "option_rule": "host refuses a stop while DEADLINE_EPOCH && left > NO_STOP_S && forcedReplans < MAX_FORCED_REPLANS; empty directions also ends the loop (kernel_lane.js L1565/L1580)",
+   "notes": "record raw stop, effective host action and host reason separately; deterministic/ineligible stops recorded without an Eikos call",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "K2",
+   "class": "judgment",
+   "question": "Which specialty fits this already generated direction?",
+   "options": [
+    "algorithm",
+    "memory",
+    "compute",
+    "host_runtime",
+    "deep_explore"
+   ],
+   "option_rule": "enum in PLAN_SCHEMA",
+   "notes": "reduced task: conditional classification; the original specialty tag is withheld from Eikos",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "K3",
+   "class": "unresolved",
+   "question": "Engineer next step: continue line, switch approach or submit",
+   "options": [
+    "continue",
+    "switch",
+    "submit"
+   ],
+   "internal_files": [
+    "kernel_workflow/roles/engineer.md",
+    "kernel_workflow/roles/deep_engineer.md",
+    "kernel_workflow/knowledge/self_monitoring.md"
+   ],
+   "notes": "inside the engineer's own reasoning; no declaration in the role yet; partial/unobservable coverage",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "K4r",
+   "class": "unresolved",
+   "question": "Residual judgment in final validation (evidence sufficiency / diagnosis), apart from the fixed reducer",
+   "notes": "no pre-decision boundary: the Director measures and reports in one call",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "K5p",
+   "class": "unresolved",
+   "question": "Propose a reusable lesson, or which learned card to merge into",
+   "internal_files": [
+    "kernel_workflow/roles/update_experience.md"
+   ],
+   "notes": "made before the write; the returned action field reports the completed write",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "K6",
+   "class": "judgment",
+   "question": "Researcher: question mode, question status, direction specialty and confidence",
+   "notes": "opt-in (dra_enabled, default off); rank_score / expected_upside semantics undeclared; not covered until its snapshot builder exists",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "E1",
+   "class": "judgment",
+   "question": "Architect strategy: which kernel/head/config candidates, which to drop, in what order",
+   "notes": "reduction to an Eikos question undefined (cardinality, ordering, candidate-generation timing, no-candidate behaviour)",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "E2",
+   "class": "judgment",
+   "question": "Architect milestone: nominate next candidates, or none (stop)",
+   "option_rule": "code filters candidates below MILESTONE_MIN_PCT; effective stop = empty filtered set (e2e_workflow.js L4929-4954)",
+   "notes": "milestone 1 can reuse kernelQueue with no Architect call: no model decision exists there; reduction undefined",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "E3g",
+   "class": "mixed",
+   "question": "Bake-off gate: have_winner / author_recommended / no_win / harness_error / tamper",
+   "notes": "measured winner part is fact; whether an author target is worthwhile is judgment; record operative choice, mandatory policy and effective dispatch separately",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "E3d",
+   "class": "unresolved",
+   "question": "Bake-off harness diagnosis beyond op_bench.py's deterministic harness_suspect signal",
+   "internal_files": [
+    "e2e_workflow/roles/op_benchmarker.md"
+   ],
+   "notes": "free-text diagnosis today",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "E5",
+   "class": "unresolved",
+   "question": "Roofline target estimate (deep mode)",
+   "notes": "numeric estimate; semantics undeclared",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "B1",
+   "class": "mixed",
+   "question": "Benchmark reliable / workload-aligned",
+   "notes": "variance predicate derivable (roles/benchmark_engineer.md:165-167); investigate/re-measure is judgment; workload derivation needs an unknown state",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "P1",
+   "class": "unresolved",
+   "question": "Bottleneck classification (profile / analysis / memory)",
+   "notes": "free string, vocabulary undeclared",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "A1",
+   "class": "unresolved",
+   "question": "Kernel type / operator / language label",
+   "notes": "free string, vocabulary undeclared",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "G1",
+   "class": "unresolved",
+   "question": "Idea generation: directions, opportunities, questions, blind spots, next suggestion",
+   "notes": "free-form generation; no typed reduction; outside Eikos unless one is defined",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  },
+  {
+   "id": "R1",
+   "class": "unresolved",
+   "question": "Config-sweep launch-failure classification",
+   "notes": "vocabulary undeclared",
+   "mode": "record_only",
+   "capture": "not_implemented"
+  }
+ ],
+ "files": {
+  "kernel_workflow/kernel_lane.js": {
+   "CLOCK_SCHEMA": {
+    "call_sites": [
+     [
+      "clock",
+      "Optimize"
+     ]
+    ],
+    "fields": {
+     "epoch": {
+      "class": "measurement_report"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "EIKOS_ENVELOPE_SCHEMA": {
+    "call_sites": [
+     [
+      "eikos:round_continue",
+      "Optimize"
+     ]
+    ],
+    "fields": {
+     "status": {
+      "class": "action_report",
+      "note": "phase-1 carrier pilot relay envelope (eikos_decide.py status)"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "SETUP_SCHEMA": {
+    "call_sites": [
+     [
+      "director:setup",
+      "Setup"
+     ]
+    ],
+    "fields": {
+     "eval_dir": {
+      "class": "artifact_ref"
+     },
+     "workspace": {
+      "class": "artifact_ref"
+     },
+     "baseline_dir": {
+      "class": "artifact_ref"
+     },
+     "kernel_name": {
+      "class": "identity"
+     },
+     "source_files[]": {
+      "class": "artifact_ref"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "baseline_frozen": {
+      "class": "measurement_report",
+      "note": "agent-reported setup check"
+     },
+     "baseline_callable": {
+      "class": "identity"
+     },
+     "resumed": {
+      "class": "action_report"
+     },
+     "prior_state.cumulative": {
+      "class": "measurement_report"
+     },
+     "prior_state.insights[]": {
+      "class": "free_text"
+     },
+     "prior_state.ledger[]": {
+      "class": "free_text"
+     },
+     "prior_state.ledger[].*": {
+      "class": "open_object"
+     },
+     "prior_state.bottleneck_now": {
+      "class": "unresolved",
+      "decision": "P1"
+     },
+     "prior_state.best_per_case[]": {
+      "class": "measurement_report"
+     },
+     "prior_state.best_per_case[].name": {
+      "class": "identity"
+     },
+     "prior_state.best_per_case[].baseline_ms": {
+      "class": "measurement_report"
+     },
+     "prior_state.best_per_case[].optimized_ms": {
+      "class": "measurement_report"
+     },
+     "prior_state.best_per_case[].speedup": {
+      "class": "measurement_report"
+     },
+     "prior_state.best_per_case[].weight": {
+      "class": "measurement_report"
+     },
+     "prior_state.best_per_case[].count": {
+      "class": "measurement_report"
+     },
+     "prior_state.best_per_case[].dims[]": {
+      "class": "identity"
+     },
+     "prior_state.best_per_case[].dtypes[]": {
+      "class": "identity"
+     },
+     "prior_state.best_per_case[].weight_source": {
+      "class": "identity"
+     },
+     "prior_state.*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "AUTHOR_SCHEMA": {
+    "call_sites": [
+     [
+      "author:",
+      "Author"
+     ]
+    ],
+    "fields": {
+     "authored": {
+      "class": "action_report"
+     },
+     "target_language": {
+      "class": "identity"
+     },
+     "correctness": {
+      "class": "measurement_report"
+     },
+     "baseline_ms": {
+      "class": "measurement_report"
+     },
+     "kernel_src_path": {
+      "class": "artifact_ref"
+     },
+     "entry_point": {
+      "class": "identity"
+     },
+     "build": {
+      "class": "action_report"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "ANALYZE_SCHEMA": {
+    "call_sites": [
+     [
+      "tech_lead:analyze",
+      "Analyze"
+     ]
+    ],
+    "fields": {
+     "kernel_type": {
+      "class": "unresolved",
+      "decision": "A1"
+     },
+     "kernel_file": {
+      "class": "artifact_ref"
+     },
+     "entry_point": {
+      "class": "identity"
+     },
+     "modifiable_files[]": {
+      "class": "artifact_ref"
+     },
+     "bottleneck_guess": {
+      "class": "unresolved",
+      "decision": "P1"
+     },
+     "roadmap_summary": {
+      "class": "free_text"
+     },
+     "candidate_directions[]": {
+      "class": "unresolved",
+      "decision": "G1"
+     },
+     "candidate_directions[].*": {
+      "class": "open_object"
+     },
+     "kk_operator": {
+      "class": "unresolved",
+      "decision": "A1"
+     },
+     "kk_language": {
+      "class": "unresolved",
+      "decision": "A1"
+     },
+     "kk_refs[]": {
+      "class": "artifact_ref"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "BENCH_SCHEMA": {
+    "call_sites": [
+     [
+      "benchmark_engineer",
+      "Benchmark"
+     ]
+    ],
+    "fields": {
+     "commandment_path": {
+      "class": "artifact_ref"
+     },
+     "correctness_cmd": {
+      "class": "artifact_ref"
+     },
+     "benchmark_cmd": {
+      "class": "artifact_ref"
+     },
+     "profile_cmd": {
+      "class": "artifact_ref"
+     },
+     "parse_hint": {
+      "class": "free_text"
+     },
+     "baseline_per_case[]": {
+      "class": "measurement_report"
+     },
+     "baseline_per_case[].*": {
+      "class": "open_object"
+     },
+     "baseline_geomean_ms": {
+      "class": "measurement_report"
+     },
+     "num_test_cases": {
+      "class": "measurement_report"
+     },
+     "workload_aligned": {
+      "class": "mixed",
+      "decision": "B1",
+      "note": "workload identity/weights need an auditable derivation"
+     },
+     "baseline_weighted_total_ms": {
+      "class": "measurement_report"
+     },
+     "weights_provenance": {
+      "class": "free_text"
+     },
+     "reliable": {
+      "class": "mixed",
+      "decision": "B1",
+      "note": "variance predicate (3 runs, ~5%) mixed with an investigate/re-measure decision"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "PROFILE_SCHEMA": {
+    "call_sites": [
+     [
+      "profile_engineer:baseline",
+      "Profile"
+     ],
+     [
+      "reprofile",
+      "Optimize"
+     ],
+     [
+      "warm_start:reprofile",
+      "WarmStart"
+     ]
+    ],
+    "fields": {
+     "bottleneck": {
+      "class": "unresolved",
+      "decision": "P1"
+     },
+     "profiler_used": {
+      "class": "identity"
+     },
+     "dispatch_count": {
+      "class": "measurement_report"
+     },
+     "device": {
+      "class": "identity"
+     },
+     "key_metrics.*": {
+      "class": "open_object"
+     },
+     "top_kernels[]": {
+      "class": "measurement_report"
+     },
+     "top_kernels[].*": {
+      "class": "open_object"
+     },
+     "top_opportunities[]": {
+      "class": "unresolved",
+      "decision": "G1"
+     },
+     "summary_path": {
+      "class": "artifact_ref"
+     },
+     "shift_note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "RESEARCH_PLAN_SCHEMA": {
+    "call_sites": [
+     [
+      "researcher:plan",
+      "Research"
+     ]
+    ],
+    "fields": {
+     "facts.*": {
+      "class": "open_object"
+     },
+     "questions[]": {
+      "class": "unresolved",
+      "decision": "G1"
+     },
+     "questions[].id": {
+      "class": "identity"
+     },
+     "questions[].question": {
+      "class": "free_text"
+     },
+     "questions[].search_queries[]": {
+      "class": "free_text"
+     },
+     "questions[].rationale": {
+      "class": "free_text"
+     },
+     "questions[].tests_hypothesis": {
+      "class": "free_text"
+     },
+     "questions[].mode": {
+      "class": "judgment",
+      "decision": "K6"
+     },
+     "questions[].rank_score": {
+      "class": "unresolved",
+      "decision": "K6",
+      "note": "rating semantics undeclared"
+     },
+     "questions[].*": {
+      "class": "open_object"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "RESEARCH_QUESTION_SCHEMA": {
+    "call_sites": [
+     [
+      "researcher:q",
+      "Research"
+     ]
+    ],
+    "fields": {
+     "question_id": {
+      "class": "identity"
+     },
+     "question": {
+      "class": "free_text"
+     },
+     "mode": {
+      "class": "identity",
+      "note": "echo of the planned question mode"
+     },
+     "tests_hypothesis": {
+      "class": "free_text"
+     },
+     "answer": {
+      "class": "free_text"
+     },
+     "status": {
+      "class": "judgment",
+      "decision": "K6"
+     },
+     "affected[]": {
+      "class": "free_text"
+     },
+     "evidence[]": {
+      "class": "free_text"
+     },
+     "evidence[].*": {
+      "class": "open_object"
+     },
+     "taskgen_implications": {
+      "class": "free_text"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "RESEARCH_BLINDSPOT_SCHEMA": {
+    "call_sites": [
+     [
+      "researcher:blindspot",
+      "Research"
+     ]
+    ],
+    "fields": {
+     "blindspots[]": {
+      "class": "unresolved",
+      "decision": "G1"
+     },
+     "blindspots[].description": {
+      "class": "free_text"
+     },
+     "blindspots[].why_it_matters": {
+      "class": "free_text"
+     },
+     "blindspots[].follow_up_question": {
+      "class": "free_text"
+     },
+     "blindspots[].*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "RESEARCH_SCHEMA": {
+    "call_sites": [
+     [
+      "researcher:synthesize",
+      "Research"
+     ]
+    ],
+    "fields": {
+     "num_questions": {
+      "class": "measurement_report"
+     },
+     "num_directions": {
+      "class": "measurement_report"
+     },
+     "brief_path": {
+      "class": "artifact_ref"
+     },
+     "full_path": {
+      "class": "artifact_ref"
+     },
+     "json_path": {
+      "class": "artifact_ref"
+     },
+     "directions[]": {
+      "class": "unresolved",
+      "decision": "G1"
+     },
+     "directions[].id": {
+      "class": "identity"
+     },
+     "directions[].title": {
+      "class": "free_text"
+     },
+     "directions[].specialty": {
+      "class": "judgment",
+      "decision": "K6"
+     },
+     "directions[].mechanism": {
+      "class": "free_text"
+     },
+     "directions[].expected_upside": {
+      "class": "unresolved",
+      "decision": "K6",
+      "note": "estimate; semantics undeclared"
+     },
+     "directions[].confidence": {
+      "class": "judgment",
+      "decision": "K6"
+     },
+     "directions[].rank_score": {
+      "class": "unresolved",
+      "decision": "K6",
+      "note": "rating semantics undeclared"
+     },
+     "directions[].*": {
+      "class": "open_object"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "WARMSTART_RESOLVE_SCHEMA": {
+    "call_sites": [
+     [
+      "warm_start:resolve",
+      "WarmStart"
+     ]
+    ],
+    "fields": {
+     "read_reason": {
+      "class": "free_text"
+     },
+     "slug": {
+      "class": "identity"
+     },
+     "requested_slug": {
+      "class": "identity"
+     },
+     "match_tier": {
+      "class": "identity",
+      "note": "computed by experience_store.py resolve"
+     },
+     "canonical_id": {
+      "class": "identity"
+     },
+     "read_plane": {
+      "class": "identity"
+     },
+     "other_language_pages[]": {
+      "class": "artifact_ref"
+     },
+     "filtered.total": {
+      "class": "measurement_report"
+     },
+     "filtered.retired": {
+      "class": "measurement_report"
+     },
+     "filtered.below_min_speedup": {
+      "class": "measurement_report"
+     },
+     "filtered.same_direction_collapsed": {
+      "class": "measurement_report"
+     },
+     "filtered.demoted_by_hint": {
+      "class": "measurement_report"
+     },
+     "filtered.scanned": {
+      "class": "measurement_report"
+     },
+     "filtered.scan_saturated": {
+      "class": "measurement_report"
+     },
+     "filtered.*": {
+      "class": "open_object"
+     },
+     "candidates[]": {
+      "class": "measurement_report",
+      "note": "experience_store.py resolve output, verbatim"
+     },
+     "candidates[].rank": {
+      "class": "measurement_report"
+     },
+     "candidates[].slug": {
+      "class": "identity"
+     },
+     "candidates[].speedup": {
+      "class": "measurement_report"
+     },
+     "candidates[].exp_dir": {
+      "class": "artifact_ref"
+     },
+     "candidates[].arch": {
+      "class": "identity"
+     },
+     "candidates[].session_id": {
+      "class": "identity"
+     },
+     "candidates[].patch_path": {
+      "class": "artifact_ref"
+     },
+     "candidates[].prose_path": {
+      "class": "artifact_ref"
+     },
+     "candidates[].strategy": {
+      "class": "free_text"
+     },
+     "candidates[].status": {
+      "class": "identity"
+     },
+     "candidates[].direction": {
+      "class": "identity"
+     },
+     "candidates[].bench_key": {
+      "class": "identity"
+     },
+     "candidates[].comparable": {
+      "class": "derived_fact",
+      "policy": "bench-key identity match in experience_store.py resolve (kernel_lane.js L598-600)"
+     },
+     "candidates[].*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "VERIFY_SCHEMA": {
+    "call_sites": [
+     [
+      "verify",
+      "Verify"
+     ],
+     [
+      "warm_start:verify",
+      "WarmStart"
+     ]
+    ],
+    "fields": {
+     "status": {
+      "class": "measurement_report",
+      "note": "oracle run reported by the verify agent; code branches on it (kernel_lane L1251-1254, L1405)"
+     },
+     "correctness": {
+      "class": "measurement_report",
+      "note": "oracle correctness reported by the agent"
+     },
+     "verified_geomean": {
+      "class": "measurement_report"
+     },
+     "verified_arithmetic": {
+      "class": "measurement_report"
+     },
+     "verified_weighted": {
+      "class": "measurement_report"
+     },
+     "per_case[]": {
+      "class": "measurement_report"
+     },
+     "per_case[].name": {
+      "class": "identity"
+     },
+     "per_case[].baseline_ms": {
+      "class": "measurement_report"
+     },
+     "per_case[].optimized_ms": {
+      "class": "measurement_report"
+     },
+     "per_case[].speedup": {
+      "class": "measurement_report"
+     },
+     "per_case[].weight": {
+      "class": "measurement_report"
+     },
+     "per_case[].count": {
+      "class": "measurement_report"
+     },
+     "per_case[].dims[]": {
+      "class": "identity"
+     },
+     "per_case[].dtypes[]": {
+      "class": "identity"
+     },
+     "per_case[].weight_source": {
+      "class": "identity"
+     },
+     "variance_note": {
+      "class": "free_text"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "graph_safe": {
+      "class": "measurement_report",
+      "note": "capture-safety smoke result"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "COMMIT_SCHEMA": {
+    "call_sites": [
+     [
+      "commit",
+      "Merge"
+     ],
+     [
+      "warm_start:adopt",
+      "WarmStart"
+     ]
+    ],
+    "fields": {
+     "committed": {
+      "class": "action_report"
+     },
+     "current_best_diff": {
+      "class": "artifact_ref"
+     },
+     "note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:kb:attest@WarmStart": {
+    "call_sites": [
+     [
+      "kb:attest",
+      "WarmStart"
+     ]
+    ],
+    "fields": {
+     "ran": {
+      "class": "action_report"
+     },
+     "note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "PLAN_SCHEMA": {
+    "call_sites": [
+     [
+      "tech_lead:plan",
+      "Optimize"
+     ],
+     [
+      "tech_lead:replan",
+      "Optimize"
+     ]
+    ],
+    "fields": {
+     "stop": {
+      "class": "judgment",
+      "decision": "K1"
+     },
+     "reasoning": {
+      "class": "free_text"
+     },
+     "directions[]": {
+      "class": "unresolved",
+      "decision": "G1"
+     },
+     "directions[].id": {
+      "class": "identity"
+     },
+     "directions[].title": {
+      "class": "free_text"
+     },
+     "directions[].specialty": {
+      "class": "judgment",
+      "decision": "K2"
+     },
+     "directions[].focus_files[]": {
+      "class": "artifact_ref"
+     },
+     "directions[].expected_speedup": {
+      "class": "unresolved",
+      "decision": "G1",
+      "note": "estimate; semantics undeclared"
+     },
+     "directions[].prompt": {
+      "class": "free_text"
+     },
+     "directions[].kk_refs[]": {
+      "class": "artifact_ref"
+     },
+     "directions[].learned_refs[]": {
+      "class": "artifact_ref"
+     },
+     "directions[].*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "ENG_SCHEMA": {
+    "call_sites": [
+     [
+      "<dynamic>",
+      "Optimize"
+     ]
+    ],
+    "fields": {
+     "engineer_id": {
+      "class": "identity"
+     },
+     "specialty": {
+      "class": "identity",
+      "note": "echo of the assigned direction"
+     },
+     "task": {
+      "class": "free_text"
+     },
+     "strategy": {
+      "class": "free_text"
+     },
+     "speedup_geomean": {
+      "class": "measurement_report"
+     },
+     "speedup_arithmetic": {
+      "class": "measurement_report"
+     },
+     "speedup_weighted": {
+      "class": "measurement_report"
+     },
+     "per_case[]": {
+      "class": "measurement_report"
+     },
+     "per_case[].name": {
+      "class": "identity"
+     },
+     "per_case[].baseline_ms": {
+      "class": "measurement_report"
+     },
+     "per_case[].optimized_ms": {
+      "class": "measurement_report"
+     },
+     "per_case[].speedup": {
+      "class": "measurement_report"
+     },
+     "per_case[].weight": {
+      "class": "measurement_report"
+     },
+     "per_case[].count": {
+      "class": "measurement_report"
+     },
+     "per_case[].dims[]": {
+      "class": "identity"
+     },
+     "per_case[].dtypes[]": {
+      "class": "identity"
+     },
+     "per_case[].weight_source": {
+      "class": "identity"
+     },
+     "status": {
+      "class": "measurement_report",
+      "note": "engineer self-report; code branches on 'failed' (kernel_lane L1676-1680)"
+     },
+     "patch_file": {
+      "class": "artifact_ref"
+     },
+     "strategies_tried[]": {
+      "class": "free_text"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "INTEGRATE_SCHEMA": {
+    "call_sites": [
+     [
+      "integrate",
+      "Merge"
+     ]
+    ],
+    "fields": {
+     "attempted": {
+      "class": "action_report"
+     },
+     "combos_tried[]": {
+      "class": "measurement_report"
+     },
+     "combos_tried[].*": {
+      "class": "open_object"
+     },
+     "best.*": {
+      "class": "open_object"
+     },
+     "improved_over_best_individual": {
+      "class": "measurement_report",
+      "note": "measured comparison reported by the integrator"
+     },
+     "conclusion": {
+      "class": "derived_fact",
+      "policy": "kernel_workflow/roles/integrator.md:61-66 (improved | no_improvement | all_failed)"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "MEMORY_SCHEMA": {
+    "call_sites": [
+     [
+      "tech_lead:memory",
+      "Optimize"
+     ]
+    ],
+    "fields": {
+     "insights[]": {
+      "class": "free_text"
+     },
+     "ledger[]": {
+      "class": "free_text"
+     },
+     "ledger[].*": {
+      "class": "open_object"
+     },
+     "bottleneck_now": {
+      "class": "unresolved",
+      "decision": "P1"
+     },
+     "suggest_next": {
+      "class": "unresolved",
+      "decision": "G1"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:storage:reclaim@Optimize": {
+    "call_sites": [
+     [
+      "storage:reclaim",
+      "Optimize"
+     ]
+    ],
+    "fields": {
+     "ok": {
+      "class": "action_report"
+     },
+     "note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "REPORT_SCHEMA": {
+    "call_sites": [
+     [
+      "tech_lead:report",
+      "Report"
+     ]
+    ],
+    "fields": {
+     "final_speedup_geomean": {
+      "class": "measurement_report"
+     },
+     "final_speedup_arithmetic": {
+      "class": "measurement_report"
+     },
+     "final_speedup_weighted": {
+      "class": "measurement_report"
+     },
+     "rounds": {
+      "class": "measurement_report"
+     },
+     "budget_used": {
+      "class": "measurement_report"
+     },
+     "report_path": {
+      "class": "artifact_ref"
+     },
+     "final_patch": {
+      "class": "artifact_ref"
+     },
+     "per_case[]": {
+      "class": "measurement_report"
+     },
+     "per_case[].name": {
+      "class": "identity"
+     },
+     "per_case[].baseline_ms": {
+      "class": "measurement_report"
+     },
+     "per_case[].optimized_ms": {
+      "class": "measurement_report"
+     },
+     "per_case[].speedup": {
+      "class": "measurement_report"
+     },
+     "per_case[].weight": {
+      "class": "measurement_report"
+     },
+     "per_case[].count": {
+      "class": "measurement_report"
+     },
+     "per_case[].dims[]": {
+      "class": "identity"
+     },
+     "per_case[].dtypes[]": {
+      "class": "identity"
+     },
+     "per_case[].weight_source": {
+      "class": "identity"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "VALIDATE_SCHEMA": {
+    "call_sites": [
+     [
+      "director:validate",
+      "Validate"
+     ]
+    ],
+    "fields": {
+     "kernel_name": {
+      "class": "identity"
+     },
+     "director_verified_speedup_geomean": {
+      "class": "measurement_report"
+     },
+     "director_verified_speedup_arithmetic": {
+      "class": "measurement_report"
+     },
+     "director_verified_speedup_weighted": {
+      "class": "measurement_report"
+     },
+     "tech_lead_reported_speedup_geomean": {
+      "class": "measurement_report"
+     },
+     "validation_status": {
+      "class": "derived_fact",
+      "policy": "kernel_workflow/roles/director.md:307-341 (within 10% or higher -> accepted; >10% lower, correctness/apply/timing failure -> flagged); residual judgment = decision K4r"
+     },
+     "correctness": {
+      "class": "measurement_report"
+     },
+     "timing_basis": {
+      "class": "measurement_report",
+      "note": "clean | host_bound | unprimed | unknown | not_applicable"
+     },
+     "per_case[]": {
+      "class": "measurement_report"
+     },
+     "per_case[].name": {
+      "class": "identity"
+     },
+     "per_case[].baseline_ms": {
+      "class": "measurement_report"
+     },
+     "per_case[].optimized_ms": {
+      "class": "measurement_report"
+     },
+     "per_case[].speedup": {
+      "class": "measurement_report"
+     },
+     "per_case[].weight": {
+      "class": "measurement_report"
+     },
+     "per_case[].count": {
+      "class": "measurement_report"
+     },
+     "per_case[].dims[]": {
+      "class": "identity"
+     },
+     "per_case[].dtypes[]": {
+      "class": "identity"
+     },
+     "per_case[].weight_source": {
+      "class": "identity"
+     },
+     "applied_to_original": {
+      "class": "action_report"
+     },
+     "arbitration_note": {
+      "class": "free_text"
+     },
+     "final_patch": {
+      "class": "artifact_ref"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "UPDATE_EXPERIENCE_SCHEMA": {
+    "call_sites": [
+     [
+      "update_experience",
+      "Validate"
+     ]
+    ],
+    "fields": {
+     "action": {
+      "class": "action_report",
+      "note": "reported after write + lint (roles/update_experience.md:150-175); the pre-write judgment is decision K5p"
+     },
+     "card_path": {
+      "class": "artifact_ref"
+     },
+     "key": {
+      "class": "identity"
+     },
+     "note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:kb:cite@Validate": {
+    "call_sites": [
+     [
+      "kb:cite",
+      "Validate"
+     ]
+    ],
+    "fields": {
+     "filed": {
+      "class": "action_report"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "WARMSTART_WRITE_SCHEMA": {
+    "call_sites": [
+     [
+      "kb:write",
+      "Validate"
+     ]
+    ],
+    "fields": {
+     "written": {
+      "class": "action_report",
+      "note": "script-gated write (kernel_lane L2041)"
+     },
+     "reason": {
+      "class": "free_text"
+     },
+     "slug": {
+      "class": "identity"
+     },
+     "dir": {
+      "class": "artifact_ref"
+     },
+     "speedup": {
+      "class": "measurement_report"
+     },
+     "reproduced": {
+      "class": "measurement_report"
+     },
+     "reproductions": {
+      "class": "measurement_report"
+     },
+     "remote.written": {
+      "class": "action_report"
+     },
+     "remote.reason": {
+      "class": "free_text"
+     },
+     "remote.canonical_id": {
+      "class": "identity"
+     },
+     "remote.session_id": {
+      "class": "identity"
+     },
+     "remote.champion": {
+      "class": "derived_fact",
+      "policy": "kernel_workflow/scripts/experience_store.py:1843-1847 (one champion per identity: must beat 1.0x, highest wins)"
+     },
+     "remote.replaced": {
+      "class": "action_report"
+     },
+     "remote.*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   }
+  },
+  "kernel_workflow/kernel_workflow.js": {
+   "inline:file_writer:persist_llm_stats@Bakeoff": {
+    "call_sites": [
+     [
+      "file_writer:persist_llm_stats",
+      "Bakeoff"
+     ]
+    ],
+    "fields": {
+     "written": {
+      "class": "action_report"
+     },
+     "path": {
+      "class": "artifact_ref"
+     },
+     "ok": {
+      "class": "action_report"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:file_writer:persist_llm_stats@Report": {
+    "call_sites": [
+     [
+      "file_writer:persist_llm_stats",
+      "Report"
+     ]
+    ],
+    "fields": {
+     "written": {
+      "class": "action_report"
+     },
+     "path": {
+      "class": "artifact_ref"
+     },
+     "ok": {
+      "class": "action_report"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "FREEZE_SCHEMA": {
+    "call_sites": [
+     [
+      "oracle_freezer",
+      "Freeze"
+     ]
+    ],
+    "fields": {
+     "eval_dir": {
+      "class": "artifact_ref"
+     },
+     "op_kind": {
+      "class": "identity"
+     },
+     "task_dir": {
+      "class": "artifact_ref"
+     },
+     "live_backend": {
+      "class": "identity"
+     },
+     "candidate_backends[]": {
+      "class": "identity"
+     },
+     "baseline_frozen": {
+      "class": "measurement_report",
+      "note": "agent-reported freeze check"
+     },
+     "baseline_callable": {
+      "class": "identity"
+     },
+     "reference_io_sha256": {
+      "class": "identity"
+     },
+     "op_spec.*": {
+      "class": "open_object"
+     },
+     "workload_path": {
+      "class": "artifact_ref"
+     },
+     "smoke": {
+      "class": "measurement_report"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "OPBENCH_SCHEMA": {
+    "call_sites": [
+     [
+      "op_benchmarker:discover",
+      "Discover"
+     ]
+    ],
+    "fields": {
+     "short_name": {
+      "class": "identity"
+     },
+     "op_kind": {
+      "class": "identity"
+     },
+     "provenance_ok": {
+      "class": "measurement_report",
+      "note": "integrity/evidence claim reported by the agent"
+     },
+     "winner_backend": {
+      "class": "identity"
+     },
+     "winner_kind": {
+      "class": "identity"
+     },
+     "isolated_speedup": {
+      "class": "measurement_report"
+     },
+     "measured": {
+      "class": "measurement_report"
+     },
+     "winner_editable": {
+      "class": "measurement_report"
+     },
+     "best_known_ms": {
+      "class": "measurement_report"
+     },
+     "recommend_tier_c": {
+      "class": "mixed",
+      "decision": "E3g",
+      "note": "not operative alone; author_plan + gate drive dispatch"
+     },
+     "author_plan[]": {
+      "class": "mixed",
+      "decision": "E3g"
+     },
+     "author_plan[].*": {
+      "class": "open_object"
+     },
+     "tuning_artifact": {
+      "class": "artifact_ref"
+     },
+     "apply_env": {
+      "class": "artifact_ref"
+     },
+     "apply_flags": {
+      "class": "artifact_ref"
+     },
+     "code_patch": {
+      "class": "artifact_ref"
+     },
+     "per_backend[]": {
+      "class": "measurement_report"
+     },
+     "per_backend[].*": {
+      "class": "open_object"
+     },
+     "parity_note": {
+      "class": "free_text"
+     },
+     "gate": {
+      "class": "mixed",
+      "decision": "E3g",
+      "note": "plain string in kernel_workflow.js; same vocabulary as e2e (roles/op_benchmarker.md:323-341)"
+     },
+     "harness_suspect": {
+      "class": "derived_fact",
+      "policy": "e2e_workflow/scripts/op_bench.py:804-816 deterministic signal; agent diagnosis beyond it is decision E3d"
+     },
+     "reason": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     },
+     "baseline_ms": {
+      "class": "measurement_report"
+     },
+     "tuned_speedup": {
+      "class": "measurement_report"
+     }
+    }
+   },
+   "REPORT_SCHEMA": {
+    "call_sites": [
+     [
+      "bakeoff:report",
+      "Report"
+     ]
+    ],
+    "fields": {
+     "report_path": {
+      "class": "artifact_ref"
+     },
+     "applied_to_original": {
+      "class": "action_report"
+     },
+     "note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "UPDATE_EXPERIENCE_SCHEMA": {
+    "call_sites": [
+     [
+      "update_experience",
+      "Report"
+     ]
+    ],
+    "fields": {
+     "action": {
+      "class": "action_report",
+      "note": "reported after write + lint (roles/update_experience.md:150-175); the pre-write judgment is decision K5p"
+     },
+     "card_path": {
+      "class": "artifact_ref"
+     },
+     "key": {
+      "class": "identity"
+     },
+     "note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   }
+  },
+  "e2e_workflow/e2e_workflow.js": {
+   "CHECKPOINT_WRITE_SCHEMA": {
+    "call_sites": [
+     [
+      "persist-e2e-checkpoint:",
+      ""
+     ]
+    ],
+    "fields": {
+     "written": {
+      "class": "action_report"
+     },
+     "path": {
+      "class": "artifact_ref"
+     },
+     "checkpoint_sha256": {
+      "class": "identity"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "FLYDSL_GATE_SCHEMA": {
+    "call_sites": [
+     [
+      "architect:ensure_flydsl",
+      "Strategize"
+     ]
+    ],
+    "fields": {
+     "ok": {
+      "class": "action_report"
+     },
+     "built": {
+      "class": "action_report"
+     },
+     "env_file": {
+      "class": "artifact_ref"
+     },
+     "version": {
+      "class": "identity"
+     },
+     "reason": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "INTEGRATE_SCHEMA": {
+    "call_sites": [
+     [
+      "",
+      ""
+     ],
+     [
+      "<dynamic>",
+      ""
+     ],
+     [
+      "integrate",
+      "HeadKernel"
+     ]
+    ],
+    "fields": {
+     "short_name": {
+      "class": "identity"
+     },
+     "provenance_ok": {
+      "class": "measurement_report",
+      "note": "integrity/evidence claim reported by the agent"
+     },
+     "isolated_speedup": {
+      "class": "measurement_report"
+     },
+     "pct_gpu_time": {
+      "class": "measurement_report"
+     },
+     "e2e_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "e2e_delta_pct": {
+      "class": "measurement_report"
+     },
+     "ref_med": {
+      "class": "measurement_report"
+     },
+     "cand_med": {
+      "class": "measurement_report"
+     },
+     "ab_complete": {
+      "class": "measurement_report"
+     },
+     "output_parity": {
+      "class": "measurement_report"
+     },
+     "parity_kind": {
+      "class": "identity"
+     },
+     "gate": {
+      "class": "derived_fact",
+      "policy": "e2e_workflow/roles/e2e_integrator.md:64-76 (accepted: engagement, parity, delta > noise band, cand_min > ref_max; stack: engagement, parity, cand_med >= ref_med)"
+     },
+     "accepted_overlay": {
+      "class": "artifact_ref"
+     },
+     "reason": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "SURGEON_SCHEMA": {
+    "call_sites": [
+     [
+      "surgeon",
+      ""
+     ]
+    ],
+    "fields": {
+     "fixed": {
+      "class": "action_report"
+     },
+     "final_patch": {
+      "class": "artifact_ref"
+     },
+     "final_geomean": {
+      "class": "measurement_report"
+     },
+     "eval_dir": {
+      "class": "artifact_ref"
+     },
+     "root_cause": {
+      "class": "free_text"
+     },
+     "note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "SETUP_SCHEMA": {
+    "call_sites": [
+     [
+      "director:setup",
+      "Setup"
+     ]
+    ],
+    "fields": {
+     "eval_dir": {
+      "class": "artifact_ref"
+     },
+     "model_name": {
+      "class": "identity"
+     },
+     "baseline_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "baseline_spread_pct": {
+      "class": "measurement_report"
+     },
+     "noise_band_pct": {
+      "class": "measurement_report"
+     },
+     "baseline_summary_path": {
+      "class": "artifact_ref"
+     },
+     "server_flags.*": {
+      "class": "open_object"
+     },
+     "server_env": {
+      "class": "artifact_ref"
+     },
+     "tp": {
+      "class": "identity"
+     },
+     "workload.*": {
+      "class": "open_object"
+     },
+     "bench_script": {
+      "class": "artifact_ref"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "gfx": {
+      "class": "identity"
+     },
+     "precision": {
+      "class": "identity"
+     },
+     "framework_version": {
+      "class": "identity"
+     },
+     "rocm_version": {
+      "class": "identity"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "KB_RESOLVE_SCHEMA": {
+    "call_sites": [
+     [
+      "warm_start:resolve",
+      "WarmStart"
+     ]
+    ],
+    "fields": {
+     "tried[]": {
+      "class": "artifact_ref"
+     },
+     "canonical_id": {
+      "class": "identity"
+     },
+     "match_tier": {
+      "class": "identity"
+     },
+     "ranked_by": {
+      "class": "identity"
+     },
+     "candidates[]": {
+      "class": "measurement_report",
+      "note": "store resolve output"
+     },
+     "candidates[].*": {
+      "class": "open_object"
+     },
+     "read_reason": {
+      "class": "free_text"
+     },
+     "plane": {
+      "class": "identity"
+     },
+     "read_plane": {
+      "class": "identity"
+     },
+     "sorted_by": {
+      "class": "identity"
+     },
+     "champion_metric": {
+      "class": "identity"
+     },
+     "curation.*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "SWEEP_SCHEMA": {
+    "call_sites": [
+     [
+      "",
+      "WarmStart"
+     ],
+     [
+      "config_tuner:sweep",
+      "ConfigSweep"
+     ]
+    ],
+    "fields": {
+     "trials[]": {
+      "class": "measurement_report"
+     },
+     "trials[].*": {
+      "class": "open_object"
+     },
+     "accepted_flags": {
+      "class": "measurement_report",
+      "note": "config tuner's measured best"
+     },
+     "accepted_env": {
+      "class": "measurement_report",
+      "note": "config tuner's measured best"
+     },
+     "best_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "throughput_speedup_vs_baseline": {
+      "class": "measurement_report"
+     },
+     "summary": {
+      "class": "free_text"
+     },
+     "repair.attempted": {
+      "class": "action_report"
+     },
+     "repair.classification": {
+      "class": "unresolved",
+      "decision": "R1",
+      "note": "launch-failure classification; vocabulary not declared"
+     },
+     "repair.dropped_flags[]": {
+      "class": "action_report"
+     },
+     "repair.reason_by_flag.*": {
+      "class": "open_object"
+     },
+     "repair.launch_error": {
+      "class": "free_text"
+     },
+     "repair.*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:kb:attest@WarmStart": {
+    "call_sites": [
+     [
+      "kb:attest",
+      "WarmStart"
+     ]
+    ],
+    "fields": {
+     "ran": {
+      "class": "action_report"
+     },
+     "note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:warm_start:record-measurements@WarmStart": {
+    "call_sites": [
+     [
+      "warm_start:record-measurements",
+      "WarmStart"
+     ]
+    ],
+    "fields": {
+     "written": {
+      "class": "action_report"
+     },
+     "path": {
+      "class": "artifact_ref"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "PROFILE_SCHEMA": {
+    "call_sites": [
+     [
+      "profiler:baseline",
+      "Profile"
+     ],
+     [
+      "profiler:post-config",
+      "Profile"
+     ],
+     [
+      "profiler:post-head",
+      "Profile"
+     ],
+     [
+      "profiler:post-tuning",
+      "Profile"
+     ],
+     [
+      "profiler:reprofile",
+      "Profile"
+     ]
+    ],
+    "fields": {
+     "round": {
+      "class": "identity"
+     },
+     "profile_topN_json": {
+      "class": "artifact_ref"
+     },
+     "profile_topN_md": {
+      "class": "artifact_ref"
+     },
+     "profile_workload_json": {
+      "class": "artifact_ref"
+     },
+     "source": {
+      "class": "identity"
+     },
+     "total_gpu_time_ms": {
+      "class": "measurement_report"
+     },
+     "top_kernels[]": {
+      "class": "measurement_report"
+     },
+     "top_kernels[].*": {
+      "class": "open_object"
+     },
+     "shift_note": {
+      "class": "free_text"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "STRATEGY_SCHEMA": {
+    "call_sites": [
+     [
+      "architect:post-tuning-strategize",
+      "Strategize"
+     ],
+     [
+      "architect:re-strategize",
+      "Strategize"
+     ],
+     [
+      "architect:strategize",
+      "Strategize"
+     ]
+    ],
+    "fields": {
+     "regime_summary": {
+      "class": "free_text"
+     },
+     "config_directions[]": {
+      "class": "judgment",
+      "decision": "E1"
+     },
+     "config_directions[].*": {
+      "class": "open_object"
+     },
+     "head_candidates[]": {
+      "class": "judgment",
+      "decision": "E1"
+     },
+     "head_candidates[].*": {
+      "class": "open_object"
+     },
+     "kernel_candidates[]": {
+      "class": "judgment",
+      "decision": "E1"
+     },
+     "kernel_candidates[].*": {
+      "class": "open_object"
+     },
+     "drop_list[]": {
+      "class": "judgment",
+      "decision": "E1"
+     },
+     "drop_list[].*": {
+      "class": "open_object"
+     },
+     "order_of_work[]": {
+      "class": "judgment",
+      "decision": "E1"
+     },
+     "strategy_path": {
+      "class": "artifact_ref"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "TUNING_SCHEMA": {
+    "call_sites": [
+     [
+      "tuning_specialist:tune",
+      "TuningSkillset"
+     ]
+    ],
+    "fields": {
+     "ran": {
+      "class": "action_report"
+     },
+     "mode": {
+      "class": "identity"
+     },
+     "skills_used[]": {
+      "class": "identity"
+     },
+     "preflight.*": {
+      "class": "open_object"
+     },
+     "ops_tuned[]": {
+      "class": "measurement_report"
+     },
+     "ops_tuned[].*": {
+      "class": "open_object"
+     },
+     "artifacts[]": {
+      "class": "artifact_ref"
+     },
+     "deploy_bundle": {
+      "class": "artifact_ref"
+     },
+     "deploy_verified": {
+      "class": "measurement_report"
+     },
+     "cache_invalidation[]": {
+      "class": "action_report"
+     },
+     "live_tree_files[]": {
+      "class": "artifact_ref"
+     },
+     "apply_overlay": {
+      "class": "artifact_ref"
+     },
+     "apply_env": {
+      "class": "artifact_ref"
+     },
+     "apply_flags": {
+      "class": "artifact_ref"
+     },
+     "correctness_gate": {
+      "class": "measurement_report"
+     },
+     "accuracy_note": {
+      "class": "free_text"
+     },
+     "engagement_verified": {
+      "class": "measurement_report"
+     },
+     "engagement_evidence": {
+      "class": "free_text"
+     },
+     "pre_tune_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "post_tune_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "noise_floor_pct": {
+      "class": "measurement_report"
+     },
+     "tuning_delta_pct": {
+      "class": "measurement_report"
+     },
+     "tuning_speedup": {
+      "class": "measurement_report"
+     },
+     "ab_interleaved": {
+      "class": "measurement_report"
+     },
+     "ab_complete": {
+      "class": "measurement_report"
+     },
+     "gate": {
+      "class": "derived_fact",
+      "policy": "e2e_workflow/roles/tuning_specialist.md:218-221 (accepted | no_win | rejected | incomplete | skipped)"
+     },
+     "report_path": {
+      "class": "artifact_ref"
+     },
+     "summary": {
+      "class": "free_text"
+     },
+     "reason": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:kernel-kb:attest-tuned@TuningSkillset": {
+    "call_sites": [
+     [
+      "kernel-kb:attest-tuned",
+      "TuningSkillset"
+     ]
+    ],
+    "fields": {
+     "ran": {
+      "class": "action_report"
+     },
+     "note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:kernel-kb:write-tuned@TuningSkillset": {
+    "call_sites": [
+     [
+      "kernel-kb:write-tuned",
+      "TuningSkillset"
+     ]
+    ],
+    "fields": {
+     "results[]": {
+      "class": "action_report"
+     },
+     "results[].*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "EXTRACT_OP_SCHEMA": {
+    "call_sites": [
+     [
+      "extract_op",
+      "HeadKernel"
+     ]
+    ],
+    "fields": {
+     "short_name": {
+      "class": "identity"
+     },
+     "op_kind": {
+      "class": "identity"
+     },
+     "editable": {
+      "class": "measurement_report"
+     },
+     "task_dir": {
+      "class": "artifact_ref"
+     },
+     "shapes.*": {
+      "class": "open_object"
+     },
+     "workload_path": {
+      "class": "artifact_ref"
+     },
+     "dtype": {
+      "class": "identity"
+     },
+     "synthesized": {
+      "class": "action_report"
+     },
+     "regimes_captured[]": {
+      "class": "measurement_report"
+     },
+     "candidate_backends[]": {
+      "class": "identity"
+     },
+     "reference_io_sha256": {
+      "class": "identity"
+     },
+     "target_callable": {
+      "class": "identity"
+     },
+     "baseline_callable": {
+      "class": "identity"
+     },
+     "baseline_frozen": {
+      "class": "measurement_report",
+      "note": "agent-reported freeze check"
+     },
+     "device_kernel": {
+      "class": "identity"
+     },
+     "seam_candidates[]": {
+      "class": "measurement_report"
+     },
+     "seam_candidates[].*": {
+      "class": "open_object"
+     },
+     "selection_validation.*": {
+      "class": "open_object"
+     },
+     "smoke": {
+      "class": "measurement_report"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "OPBENCH_SCHEMA": {
+    "call_sites": [
+     [
+      "bakeoff",
+      "HeadKernel"
+     ]
+    ],
+    "fields": {
+     "short_name": {
+      "class": "identity"
+     },
+     "op_kind": {
+      "class": "identity"
+     },
+     "provenance_ok": {
+      "class": "measurement_report",
+      "note": "integrity/evidence claim reported by the agent"
+     },
+     "winner_backend": {
+      "class": "identity"
+     },
+     "winner_kind": {
+      "class": "identity"
+     },
+     "isolated_speedup": {
+      "class": "measurement_report"
+     },
+     "measured": {
+      "class": "measurement_report"
+     },
+     "winner_editable": {
+      "class": "measurement_report"
+     },
+     "best_known_ms": {
+      "class": "measurement_report"
+     },
+     "recommend_tier_c": {
+      "class": "mixed",
+      "decision": "E3g",
+      "note": "not operative alone; author_plan + gate drive dispatch"
+     },
+     "author_plan[]": {
+      "class": "mixed",
+      "decision": "E3g"
+     },
+     "author_plan[].*": {
+      "class": "open_object"
+     },
+     "tuning_artifact": {
+      "class": "artifact_ref"
+     },
+     "apply_env": {
+      "class": "artifact_ref"
+     },
+     "apply_flags": {
+      "class": "artifact_ref"
+     },
+     "code_patch": {
+      "class": "artifact_ref"
+     },
+     "per_backend[]": {
+      "class": "measurement_report"
+     },
+     "per_backend[].*": {
+      "class": "open_object"
+     },
+     "parity_note": {
+      "class": "free_text"
+     },
+     "gate": {
+      "class": "mixed",
+      "decision": "E3g",
+      "note": "have_winner|author_recommended|no_win|harness_error|tamper (roles/op_benchmarker.md:323-341); author_recommended/no_win include an author-target judgment"
+     },
+     "harness_suspect": {
+      "class": "derived_fact",
+      "policy": "e2e_workflow/scripts/op_bench.py:804-816 deterministic signal; agent diagnosis beyond it is decision E3d"
+     },
+     "reason": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "ROOFLINE_SCHEMA": {
+    "call_sites": [
+     [
+      "roofline",
+      "HeadKernel"
+     ]
+    ],
+    "fields": {
+     "roofline_note": {
+      "class": "free_text"
+     },
+     "target_geomean": {
+      "class": "unresolved",
+      "decision": "E5",
+      "note": "roofline target estimate; semantics undeclared"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "HARVEST_SCHEMA": {
+    "call_sites": [
+     [
+      "harvest",
+      "HeadKernel"
+     ]
+    ],
+    "fields": {
+     "lanes[]": {
+      "class": "measurement_report"
+     },
+     "lanes[].uid": {
+      "class": "identity"
+     },
+     "lanes[].has_state": {
+      "class": "measurement_report"
+     },
+     "lanes[].cumulative": {
+      "class": "measurement_report"
+     },
+     "lanes[].best_ms": {
+      "class": "measurement_report"
+     },
+     "lanes[].vs_live": {
+      "class": "measurement_report"
+     },
+     "lanes[].eval_dir": {
+      "class": "artifact_ref"
+     },
+     "lanes[].patch": {
+      "class": "artifact_ref"
+     },
+     "lanes[].*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "OKV": {
+    "call_sites": [
+     [
+      "curate",
+      "HeadKernel"
+     ],
+     [
+      "feedback",
+      "HeadKernel"
+     ]
+    ],
+    "fields": {
+     "ok": {
+      "class": "action_report"
+     },
+     "summary": {
+      "class": "free_text"
+     },
+     "feedback_path": {
+      "class": "artifact_ref"
+     },
+     "addendum_path": {
+      "class": "artifact_ref"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:reprofile@HeadKernel": {
+    "call_sites": [
+     [
+      "reprofile",
+      "HeadKernel"
+     ]
+    ],
+    "fields": {
+     "heads[]": {
+      "class": "measurement_report"
+     },
+     "heads[].*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "PLAN_SCHEMA": {
+    "call_sites": [
+     [
+      "architect:plan",
+      "Milestone"
+     ]
+    ],
+    "fields": {
+     "stop": {
+      "class": "judgment",
+      "decision": "E2"
+     },
+     "reasoning": {
+      "class": "free_text"
+     },
+     "config_directions[]": {
+      "class": "judgment",
+      "decision": "E2"
+     },
+     "config_directions[].*": {
+      "class": "open_object"
+     },
+     "head_candidates[]": {
+      "class": "judgment",
+      "decision": "E2"
+     },
+     "head_candidates[].*": {
+      "class": "open_object"
+     },
+     "kernel_candidates[]": {
+      "class": "judgment",
+      "decision": "E2"
+     },
+     "kernel_candidates[].*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "EXTRACT_SCHEMA": {
+    "call_sites": [
+     [
+      "extract",
+      "Milestone"
+     ]
+    ],
+    "fields": {
+     "short_name": {
+      "class": "identity"
+     },
+     "editable": {
+      "class": "measurement_report"
+     },
+     "task_dir": {
+      "class": "artifact_ref"
+     },
+     "source_path_in_sglang": {
+      "class": "artifact_ref"
+     },
+     "target_callable": {
+      "class": "identity"
+     },
+     "num_cases": {
+      "class": "measurement_report"
+     },
+     "regimes_captured[]": {
+      "class": "measurement_report"
+     },
+     "candidate_backends[]": {
+      "class": "identity"
+     },
+     "build": {
+      "class": "action_report"
+     },
+     "unittest_smoke": {
+      "class": "measurement_report"
+     },
+     "candidate_bind.*": {
+      "class": "open_object"
+     },
+     "baseline_overlay": {
+      "class": "artifact_ref"
+     },
+     "baseline_frozen": {
+      "class": "measurement_report",
+      "note": "agent-reported freeze check"
+     },
+     "device_kernel": {
+      "class": "identity"
+     },
+     "seam_candidates[]": {
+      "class": "measurement_report"
+     },
+     "seam_candidates[].*": {
+      "class": "open_object"
+     },
+     "selection_validation.*": {
+      "class": "open_object"
+     },
+     "reference_io_sha256": {
+      "class": "identity"
+     },
+     "notes": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "EXPERIENCE_SCHEMA": {
+    "call_sites": [
+     [
+      "architect:experience",
+      "Milestone"
+     ],
+     [
+      "architect:experience",
+      "Validate"
+     ]
+    ],
+    "fields": {
+     "playbook_appended": {
+      "class": "action_report"
+     },
+     "insights[]": {
+      "class": "free_text"
+     },
+     "ledger[]": {
+      "class": "free_text"
+     },
+     "ledger[].*": {
+      "class": "open_object"
+     },
+     "bottleneck_now": {
+      "class": "unresolved",
+      "decision": "P1"
+     },
+     "suggest_next": {
+      "class": "unresolved",
+      "decision": "G1"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "RECON_SCHEMA": {
+    "call_sites": [
+     [
+      "scan-incomplete-ab",
+      ""
+     ]
+    ],
+    "fields": {
+     "incomplete[]": {
+      "class": "measurement_report"
+     },
+     "incomplete[].short_name": {
+      "class": "identity"
+     },
+     "incomplete[].overlay_dir": {
+      "class": "artifact_ref"
+     },
+     "incomplete[].winner_kind": {
+      "class": "identity"
+     },
+     "incomplete[].apply_env": {
+      "class": "artifact_ref"
+     },
+     "incomplete[].apply_flags": {
+      "class": "artifact_ref"
+     },
+     "incomplete[].op_kind": {
+      "class": "identity"
+     },
+     "incomplete[].target_callable": {
+      "class": "identity"
+     },
+     "incomplete[].isolated": {
+      "class": "measurement_report"
+     },
+     "incomplete[].pct_gpu_time": {
+      "class": "measurement_report"
+     },
+     "incomplete[].ref_present": {
+      "class": "measurement_report"
+     },
+     "incomplete[].cand_present": {
+      "class": "measurement_report"
+     },
+     "incomplete[].*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "FINALIZE_SCHEMA": {
+    "call_sites": [
+     [
+      "e2e_integrator:finalize",
+      "Finalize"
+     ]
+    ],
+    "fields": {
+     "final_overlay": {
+      "class": "artifact_ref"
+     },
+     "final_patch": {
+      "class": "artifact_ref"
+     },
+     "final_launch_script": {
+      "class": "artifact_ref"
+     },
+     "final_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "throughput_speedup": {
+      "class": "measurement_report"
+     },
+     "accepted_kernels[]": {
+      "class": "measurement_report",
+      "note": "set accepted by the measured integrate gates"
+     },
+     "accepted_config.*": {
+      "class": "open_object"
+     },
+     "note": {
+      "class": "free_text"
+     },
+     "tuning_in_bundle": {
+      "class": "measurement_report"
+     },
+     "tuning_engagement_recheck": {
+      "class": "measurement_report"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "REPORT_SCHEMA": {
+    "call_sites": [
+     [
+      "architect:report",
+      "Report"
+     ]
+    ],
+    "fields": {
+     "baseline_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "final_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "throughput_speedup": {
+      "class": "measurement_report"
+     },
+     "accepted_config.*": {
+      "class": "open_object"
+     },
+     "accepted_kernels[]": {
+      "class": "measurement_report"
+     },
+     "accepted_kernels[].*": {
+      "class": "open_object"
+     },
+     "milestones": {
+      "class": "measurement_report"
+     },
+     "report_path": {
+      "class": "artifact_ref"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "VALIDATE_SCHEMA": {
+    "call_sites": [
+     [
+      "director:validate",
+      "Validate"
+     ]
+    ],
+    "fields": {
+     "model_name": {
+      "class": "identity"
+     },
+     "baseline_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "director_verified_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "throughput_speedup": {
+      "class": "measurement_report"
+     },
+     "claimed_throughput_tok_s": {
+      "class": "measurement_report"
+     },
+     "validation_status": {
+      "class": "derived_fact",
+      "policy": "e2e_workflow/roles/director.md:229-242 (validated_win | validated_no_win | flagged); residual judgment = decision K4r"
+     },
+     "output_parity": {
+      "class": "measurement_report"
+     },
+     "applied_to_original": {
+      "class": "action_report"
+     },
+     "final_overlay": {
+      "class": "artifact_ref"
+     },
+     "final_launch_script": {
+      "class": "artifact_ref"
+     },
+     "arbitration_note": {
+      "class": "free_text"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:persist-workflow-return@Validate": {
+    "call_sites": [
+     [
+      "persist-workflow-return",
+      "Validate"
+     ]
+    ],
+    "fields": {
+     "written": {
+      "class": "action_report"
+     },
+     "path": {
+      "class": "artifact_ref"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:kb:write@Validate": {
+    "call_sites": [
+     [
+      "kb:write",
+      "Validate"
+     ]
+    ],
+    "fields": {
+     "ok": {
+      "class": "action_report"
+     },
+     "applied": {
+      "class": "action_report"
+     },
+     "session_id": {
+      "class": "identity"
+     },
+     "files[]": {
+      "class": "artifact_ref"
+     },
+     "rungs[]": {
+      "class": "action_report"
+     },
+     "rungs[].*": {
+      "class": "open_object"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   },
+   "inline:file_writer:persist_llm_stats@Validate": {
+    "call_sites": [
+     [
+      "file_writer:persist_llm_stats",
+      "Validate"
+     ]
+    ],
+    "fields": {
+     "written": {
+      "class": "action_report"
+     },
+     "path": {
+      "class": "artifact_ref"
+     },
+     "ok": {
+      "class": "action_report"
+     },
+     "*": {
+      "class": "open_object"
+     }
+    }
+   }
+  }
+ }
+}
