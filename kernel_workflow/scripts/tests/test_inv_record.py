@@ -617,3 +617,47 @@ def test_a_special_file_in_a_declared_dependency_is_a_gap(ws, tmp_path):
     os.mkfifo(str(actual / "config.fifo"))                                  # reached through dep/nested
     f = fp(ws, tmp_path, declared)
     assert not f["complete"] and any("special file" in g and "config.fifo" in g for g in f["gaps"])
+
+
+# ------------------------------------------------------------- review of 0832e98c (2026-10-05)
+def test_a_real_short_raw_write_is_a_capture_problem(tmp_path):
+    """A real OS short write (file-size limit in a child process), not a patched write()."""
+    code = r"""
+import io,json,os,resource,signal,sys,threading
+sys.path.insert(0, sys.argv[1]); import inv_record as ir
+r, w = os.pipe(); payload = b'GEAK_RESULT_LATENCY_MS=1 caseA\n' + b'x' * 227
+os.write(w, payload); os.close(w)
+rec, keep, problems, sink = ir.Recorder(sys.argv[2]), [], [], io.BytesIO()
+raw = os.path.join(sys.argv[2], 'raw.out')
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+prev = resource.getrlimit(resource.RLIMIT_FSIZE)
+resource.setrlimit(resource.RLIMIT_FSIZE, (64, prev[1]))
+try: ir._tee(r, sink, raw, keep, rec, threading.Event(), problems)
+finally: resource.setrlimit(resource.RLIMIT_FSIZE, prev)
+print(json.dumps({'raw': os.path.getsize(raw), 'fwd': len(sink.getvalue()),
+                  'parse': sum(len(x) for x in keep if x is not None), 'problems': problems, 'errors': rec.errors}))
+"""
+    out = subprocess.run([sys.executable, "-B", "-c", code, SCRIPTS, str(tmp_path)], capture_output=True, timeout=60)
+    d = json.loads(out.stdout)
+    assert d["raw"] == 64 and d["fwd"] == 258 and d["parse"] == 258           # stream and parse still whole
+    assert set(d["problems"]) & {"raw_write_failed", "raw_write_short"} and d["errors"]
+
+
+def test_partial_writes_are_completed(tmp_path):
+    class Dribble:
+        def __init__(self):
+            self.data = b""
+
+        def write(self, b):
+            self.data += bytes(b[:3])                                      # 3 bytes per call, no error
+            return min(3, len(b))
+    raw, problems, rec = Dribble(), [], ir.Recorder(str(tmp_path))
+    assert ir._write_all(raw, b"0123456789", "x", rec, problems) and raw.data == b"0123456789" and not problems
+
+
+def test_a_write_that_stores_nothing_is_reported(tmp_path):
+    class Stuck:
+        def write(self, b):
+            return 0
+    problems, rec = [], ir.Recorder(str(tmp_path))
+    assert not ir._write_all(Stuck(), b"abc", "x", rec, problems) and problems == ["raw_write_short"]
