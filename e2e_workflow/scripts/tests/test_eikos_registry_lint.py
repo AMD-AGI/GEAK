@@ -43,7 +43,7 @@ await agent('plan', { phase: 'Optimize', label: `tech_lead:plan r${round}`, sche
                                        "directions[].*", "picks[]", "picks[].*", "notes[]", "*"]
     leaf = [p for p in f["roots"]["PLAN_SCHEMA"]["paths"] if p["path"] == "directions[].specialty"][0]
     assert leaf["enum"] == ["a", "b"]
-    assert f["roots"]["PLAN_SCHEMA"]["sites"] == [("tech_lead:plan", "Optimize")]
+    assert f["roots"]["PLAN_SCHEMA"]["sites"] == [["tech_lead:plan r${}", "Optimize"]]
 
 
 def test_alias_inline_literal_and_shorthand_resolve(tmp_path):
@@ -56,7 +56,7 @@ await agent('b', { phase: 'P', label: 'inline', schema: { type: 'object', proper
 """)
     assert f["errors"] == []
     assert paths(f, "ALIAS") == ["ok", "*"]
-    assert paths(f, "inline:inline@P") == ["n"]                         # closed literal: no open boundary
+    assert paths(f, "inline:inline@P") == ["n", "*"]                    # no additionalProperties = open (JSON Schema)
 
 
 def test_an_unresolvable_reference_is_an_error_not_an_empty_schema(tmp_path):
@@ -202,3 +202,79 @@ def test_the_shipped_registry_matches_the_real_workflow_sources():
     assert all(d["capture"] == "not_implemented" for d in reg["decisions"])   # nothing claimed yet
     classes = {e["class"] for f in reg["files"].values() for r in f.values() for e in r["fields"].values()}
     assert classes <= set(rl.CLASSES)
+
+
+
+# ------------------------------------------------------------------ review of 356f2ce0: silent passes
+# Each case adds a typed judgment or a call site through valid JavaScript; each must now fail.
+SCHEMA = "const S = {type:'object',properties:{known:{type:'boolean'},variant:{type:'string'}},additionalProperties:false};\n"
+CALL = "await agent('a', {phase:'P',label:'plan r1',schema:S});\n"
+BASE = SCHEMA + CALL
+EXTRA = "{type:'object',properties:{new_judgment:{type:'boolean'}},additionalProperties:false}"
+SILENT_CASES = {
+    "quoted_schema_key": (BASE, BASE + "await agent('b',{phase:'P',label:'new','schema':" + EXTRA + "});\n"),
+    "computed_literal_schema_key": (BASE, BASE + "await agent('b',{phase:'P',label:'new',['schema']:" + EXTRA + "});\n"),
+    "executable_template_interpolation": (BASE, BASE + "const text = `${await agent('b',{phase:'P',label:'new',schema:" + EXTRA + "})}`;\n"),
+    "mutated_schema_properties": (BASE, SCHEMA + "S.properties.new_judgment={type:'boolean'};\n" + CALL),
+    "parameter_shadows_schema": (BASE, SCHEMA + "async function f(S){" + CALL + "}\n"),
+    "new_call_same_label_prefix": (BASE, BASE + "await agent('b',{phase:'P',label:'plan r2',schema:S});\n"),
+    "repeated_identical_label": (BASE, BASE + CALL),
+    "oneof_nested_judgment": (BASE, BASE.replace("variant:{type:'string'}", "variant:{oneOf:[" + EXTRA + "]}")),
+    "nested_array_judgment": (
+        BASE.replace("variant:{type:'string'}", "variant:{type:'array',items:{type:'string'}}"),
+        BASE.replace("variant:{type:'string'}", "variant:{type:'array',items:{type:'array',items:" + EXTRA + "}}")),
+    "default_additional_properties": (BASE, BASE.replace(",additionalProperties:false", "")),
+    "schema_valued_additional_properties": (BASE, BASE.replace("additionalProperties:false", "additionalProperties:{type:'boolean'}")),
+}
+
+
+def _registry_from(found, rel):
+    return {"decisions": [], "files": {rel: {
+        rid: {"call_sites": [list(x) for x in r["sites"]],
+              "fields": {p["path"]: {"class": "open_object" if p["kind"] == "open_object" else "measurement_report"}
+                         for p in r["paths"]}}
+        for rid, r in found[rel]["roots"].items()}}}
+
+
+@pytest.mark.parametrize("case", sorted(SILENT_CASES))
+def test_a_source_change_that_adds_a_decision_surface_cannot_pass_silently(tmp_path, case):
+    before, after = SILENT_CASES[case]
+    rel = "wf.mjs"
+    (tmp_path / rel).write_text(before)
+    first = rl.discover(str(tmp_path), (rel,))
+    assert first[rel]["errors"] == []
+    reg = _registry_from(first, rel)
+    assert rl.lint(reg, first, str(tmp_path), (rel,)) == []
+    (tmp_path / rel).write_text(after)
+    found = rl.discover(str(tmp_path), (rel,))
+    assert found[rel]["errors"] or rl.lint(reg, found, str(tmp_path), (rel,)), case
+
+
+def test_explicitly_closed_objects_have_no_open_boundary(tmp_path):
+    f = discover(tmp_path, BASE)
+    assert paths(f, "S") == ["known", "variant"]
+
+
+def test_a_schema_valued_additional_properties_is_walked(tmp_path):
+    f = discover(tmp_path, BASE.replace("additionalProperties:false",
+                                        "additionalProperties:{type:'object',properties:{x:{type:'boolean'}},additionalProperties:false}"))
+    assert paths(f, "S") == ["known", "variant", "*", "<*>.x"]
+
+
+def test_literal_template_text_mentioning_schema_stays_ignored(tmp_path):
+    f = discover(tmp_path, BASE + "const prompt = `return JSON matching {schema: PLAN} please`;\n")
+    assert f["errors"] == [] and list(f["roots"]) == ["S"]
+
+
+def test_a_schema_only_definition_without_a_call_site_is_listed_not_hidden(tmp_path):
+    f = discover(tmp_path, "const USED = obj({ ok: { type: 'boolean' } }, []);\n"
+                           "const UNUSED = obj({ ran: { type: 'boolean' } }, []);\n"
+                           "await agent('a', { phase: 'P', label: 'x', schema: USED });\n")
+    assert f["errors"] == [] and f["unused_schemas"] == ["UNUSED"] and "UNUSED" not in f["roots"]
+
+
+def test_scalar_array_items_are_one_entry_with_their_type(tmp_path):
+    f = discover(tmp_path, "const S = obj({ tags: { type: 'array', items: { type: 'string', enum: ['a'] } } }, []);\n"
+                           "await agent('a', { phase: 'P', label: 'x', schema: S });\n")
+    node = [p for p in f["roots"]["S"]["paths"] if p["path"] == "tags[]"]
+    assert len(node) == 1 and node[0]["items_type"] == "string" and node[0]["enum"] == ["a"]

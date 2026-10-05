@@ -63,6 +63,12 @@ jobs:
       # module degrades to JSON without pyyaml, but then the test would be
       # asserting a format the real store never uses).
       - run: pip install pytest pytest-cov coverage pyyaml
+      # Node is required, not incidental: the Eikos decision-registry lint evaluates the workflow
+      # schema expressions in a node vm context. Pinned here rather than relying on whatever the
+      # runner image happens to ship.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
       # CPU-only tests (no claude_agent_sdk / GPU); the expert-skill test also uses PyYAML.
       # Files are listed explicitly rather than discovered, so that adding a test
       # under examples/ (torch/triton + GPU) can never silently break this job.
@@ -145,6 +151,7 @@ jobs:
             e2e_workflow/scripts/tests/test_roofline_skill.py \
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             scripts/tests/test_gpu_identity.py \
+            e2e_workflow/scripts/tests/test_eikos_registry_lint.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation
@@ -176,6 +183,10 @@ jobs:
           # now exits non-zero on failure, so this is a gate rather than a printout.
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned lint --cards
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned index --check
+          # Every typed field an agent returns must be classified in the Eikos decision registry, and
+          # the registry must match the workflow sources both ways. A new yes/no, choice or rating
+          # field, or a new call site, fails here until it is classified.
+          python3 e2e_workflow/scripts/eikos_registry_lint.py
 
       # Renders the per-file table + total into the run's Job Summary, which is
       # where the coverage percentage is read from the GitHub web UI. Runs even
