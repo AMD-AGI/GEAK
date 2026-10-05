@@ -343,6 +343,10 @@ def test_a_raw_file_failure_at_close_never_reaches_the_child_stream(ws, tmp_path
     assert (r.returncode, r.stdout, r.stderr) == (d.returncode, d.stdout, d.stderr)
     done = events(tmp_path)[1]
     assert done["recorder_error"] and any("fixed.stdout" in e for e in done["recorder_error"])
+    # the raw record is incomplete, though the child's streams and exit were fully preserved
+    assert done["raw_streams"] == "incomplete" and done["raw_capture"]["stdout"]["status"] == "incomplete"
+    assert set(done["raw_capture"]["stdout"]["problems"]) & {"raw_write_failed", "raw_close_failed"}
+    assert done["raw_capture"]["stderr"] == {"status": "complete", "problems": []}
 
 
 # 3b. descendants holding the streams; the outer-recorder -> lock -> shell shape
@@ -441,7 +445,7 @@ def test_parse_input_truncation_is_recorded(monkeypatch, tmp_path):
     os.write(w, b"0123456789")
     os.close(w)
     keep, rec, sink = [], ir.Recorder(str(tmp_path)), open(os.devnull, "wb")
-    ir._tee(r, sink, str(tmp_path / "raw.out"), keep, rec, threading.Event())
+    ir._tee(r, sink, str(tmp_path / "raw.out"), keep, rec, threading.Event(), [])
     assert keep == [b"0123", None] and (tmp_path / "raw.out").read_bytes() == b"0123456789"
 
 
@@ -515,7 +519,8 @@ def test_a_continuously_writing_descendant_cannot_keep_the_recorder_alive(ws, tm
         r = run(ws, tmp_path, sys.executable, str(script), env=env)
         assert time.monotonic() - t < 8 and r.returncode == 0
         done = events(tmp_path)[1]
-        assert done["child"]["descendants_held_streams"] is True and done["raw_streams"] == "cutoff_at_drain_deadline"
+        assert done["child"]["descendants_held_streams"] is True and done["raw_streams"] == "incomplete"
+        assert "drain_cutoff" in done["raw_capture"]["stdout"]["problems"]
         m = done["measurement"]
         assert m["stream_cutoff"] is True and m["status"] == "partial" and not m["parsed"]
     finally:
@@ -570,3 +575,45 @@ def test_a_dependency_link_cycle_terminates_and_a_dangling_link_is_a_gap(ws, tmp
     os.symlink(str(tmp_path / "missing"), dep / "dangling")
     g = fp(ws, tmp_path, declared)
     assert not g["complete"] and any("dangles" in x for x in g["gaps"])
+
+
+# ------------------------------------------------------------- review of 66c18c74 (2026-10-05)
+def test_a_complete_capture_says_complete(ws, tmp_path):
+    run(ws, tmp_path, "bash", "-c", "echo GEAK_RESULT_LATENCY_MS=1 a")
+    done = events(tmp_path)[1]
+    assert done["raw_streams"] == "complete" and done["raw_capture"]["stdout"] == {"status": "complete", "problems": []}
+
+
+def test_a_raw_write_failure_alone_keeps_a_fully_read_parse_usable(ws, tmp_path):
+    rec = tmp_path / "rec"
+    (rec / "raw").mkdir(parents=True)
+    os.symlink("/dev/full", rec / "raw" / "fixed.stdout")
+    code = ("import sys,types;sys.path.insert(0,sys.argv[1]);import inv_record as m;"
+            "m.uuid.uuid4=lambda:types.SimpleNamespace(hex='fixed');sys.exit(m.main(sys.argv[2:]))")
+    subprocess.run([sys.executable, "-B", "-c", code, SCRIPTS, "run", "--rec-dir", str(rec), "--workspace", str(ws),
+                    "--domain", str(tmp_path / "domain.json"), "--mode", "benchmark", "--",
+                    "bash", "-c", "echo GEAK_RESULT_LATENCY_MS=1 a"], capture_output=True, timeout=60)
+    done = events(tmp_path)[1]
+    assert done["raw_streams"] == "incomplete" and done["measurement"]["status"] == "usable"
+
+
+def test_a_read_failure_makes_the_parse_partial():
+    m = ir.parse_latencies(b"GEAK_RESULT_LATENCY_MS=1 a\n", read_failed=True)
+    assert m["status"] == "partial" and m["stream_read_failed"] is True
+
+
+def test_a_read_failure_is_a_capture_problem(tmp_path):
+    import threading
+    problems, rec = [], ir.Recorder(str(tmp_path))
+    r, w = os.pipe()
+    os.close(r)                                                            # reading a closed fd fails
+    ir._tee(r, open(os.devnull, "wb"), str(tmp_path / "raw.out"), [], rec, threading.Event(), problems)
+    os.close(w)
+    assert "read_failed" in problems and rec.errors
+
+
+def test_a_special_file_in_a_declared_dependency_is_a_gap(ws, tmp_path):
+    dep, actual, declared = _dep_layout(ws, tmp_path)
+    os.mkfifo(str(actual / "config.fifo"))                                  # reached through dep/nested
+    f = fp(ws, tmp_path, declared)
+    assert not f["complete"] and any("special file" in g and "config.fifo" in g for g in f["gaps"])
