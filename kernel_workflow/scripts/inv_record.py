@@ -10,25 +10,40 @@ allocates exist before the lock is taken and reach gpu_lock's use-log line:
 
 What it records (append-only, under R, which must lie outside the source domain):
   invocations.jsonl  a `start` event before the child runs and a `completion` event after it.
-                     A start with no completion is an incomplete observation, cause unknown.
+                     A start with no completion -- or a torn completion line -- is an incomplete
+                     observation, cause unknown.
   raw/<id>.stdout|.stderr  the child's streams, byte for byte.
 It observes; it does not decide. It never infers keep/revert/switch from source hashes -- those
 exist only as agent declarations (`declare`), stored apart and joined later as consistency evidence.
 
-Child semantics are preserved: stdout/stderr stream through unchanged, the exit status is passed
-back (a signal death is re-raised), and no recorder failure changes either. Recorder failures go
-to `recorder_error` in the completion event (or recorder_errors.jsonl), never to the child streams.
+Child semantics are preserved: stdout/stderr stream through unchanged and the exit status is passed
+back (a signal death is re-raised). The child runs in its own process group; a termination signal
+the recorder receives is forwarded to that whole group, as a terminal would deliver it. If
+descendants still hold the child's streams after the child exits, the recorder stops reading after
+a short grace period and says so; it does not kill them. No recorder failure (open, write, flush,
+close, read) reaches the child's streams: it goes to `recorder_error` (or recorder_errors.jsonl).
 
-Source identity: a tree hash of the DECLARED source domain, built with a private git index AND a
-private object directory (real objects reached read-only through alternates), so the repository's
-index, objects and refs are never written. Before == after shows no NET change during the command,
-not that no transient edit happened. Anything the domain cannot cover marks identity incomplete.
+Source identity: a tree hash of the DECLARED source domain -- the workspace subtree only, even when
+the workspace is a subdirectory of its repository -- built with a private git index AND a private
+object directory (real objects reached read-only through alternates), so the repository's index,
+objects and refs are never written. Ignored files present in the domain must be declared
+(`include_ignored`) or excluded; otherwise identity is incomplete. A symlink counts as covered only
+if its target is content the tree actually captured, or a declared external dependency.
+Before == after shows no NET change during the command, not that no transient edit happened.
+
+Scope of measurement identity in this version: command mode, argv hash, hashes of caller-named
+identity files (e.g. COMMANDMENT, harness, oracle), and the parsed case ids. Metric, weights and
+input regime are covered only through those files' hashes; the actual GPU comes from joining the
+gpu_lock use-log on recorder_inv_id (`summarize --gpu-use-log`). Whether two invocations are
+comparable is decided later (stage 2b), not here.
 """
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -38,17 +53,18 @@ import threading
 import time
 import uuid
 
-SCHEMA = "inv_record.v1"
+SCHEMA = "inv_record.v2"
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
-LATENCY_RE = re.compile(rb"GEAK_RESULT_LATENCY_MS=([-+0-9.eE]+)(.*)")
+LATENCY_RE = re.compile(rb"GEAK_RESULT_LATENCY_MS=(\S*)(.*)")
 MODES = ("correctness", "benchmark", "full_benchmark", "profile", "other")
 NEXT_CHOICES = ("continue", "switch", "submit")
 DECLARE_KINDS = ("keep", "revert", "line", "next", "submit")
 STDOUT_PARSE_CAP = 32 * 1024 * 1024
+DRAIN_GRACE_S = float(os.environ.get("GEAK_INV_RECORD_DRAIN_GRACE_S", "2.0"))
 
 
 def canonical(obj) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
 def sha256_bytes(b: bytes) -> str:
@@ -69,6 +85,21 @@ def file_sha256(path: str):
 def _inside(path: str, root: str) -> bool:
     path, root = os.path.realpath(path), os.path.realpath(root)
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _excluded(rel: str, excl) -> bool:
+    """rel is workspace-relative with '/' separators. An entry with a '/' is a path prefix; a bare
+    name (e.g. __pycache__) matches that component anywhere."""
+    rel = rel.strip("/")
+    parts = rel.split("/")
+    for e in excl:
+        e = e.strip("/")
+        if "/" in e:
+            if rel == e or rel.startswith(e + "/"):
+                return True
+        elif e in parts:
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------- source identity
@@ -99,60 +130,94 @@ def fingerprint(ws: str, baseline: str, domain, domain_err, rec_dir: str) -> dic
     """Identity of the measured source. `complete` is False whenever any part is uncovered."""
     gaps = [domain_err] if domain_err else []
     domain = domain or {"exclude": [], "include_ignored": [], "external_deps": []}
-    out = {"baseline": None, "tree": None, "external": {}, "complete": False, "gaps": gaps}
+    out = {"baseline": None, "tree": None, "workspace_prefix": None, "external": {},
+           "complete": False, "gaps": gaps}
     r = _git(["rev-parse", "--verify", baseline + "^{commit}"], ws)
     if r.returncode != 0:
         gaps.append("baseline %r is not a commit" % baseline)
         return out
     out["baseline"] = r.stdout.decode().strip()
     top = _git(["rev-parse", "--show-toplevel"], ws).stdout.decode().strip()
-    objects = _git(["rev-parse", "--git-path", "objects"], ws).stdout.decode().strip()
-    objects = os.path.abspath(os.path.join(ws, objects))
-    excl = [os.path.normpath(e) for e in domain["exclude"]]
-    if _inside(rec_dir, ws) and not any(_inside(rec_dir, os.path.join(ws, e)) for e in excl):
+    prefix = _git(["rev-parse", "--show-prefix"], ws).stdout.decode().strip()   # "" or "sub/dir/"
+    out["workspace_prefix"] = prefix
+    objects = os.path.abspath(os.path.join(ws, _git(["rev-parse", "--git-path", "objects"], ws).stdout.decode().strip()))
+    excl = domain["exclude"]
+    if _inside(rec_dir, ws) and not _excluded(os.path.relpath(os.path.realpath(rec_dir), os.path.realpath(ws)), excl):
         gaps.append("recorder output lies inside the source domain")
+    spec = prefix.rstrip("/") or "."
     tmp = tempfile.mkdtemp(prefix="inv_fp_")
+    index_paths = set()
     try:
         os.makedirs(os.path.join(tmp, "objects"))
         env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmp, "index"),
                    GIT_OBJECT_DIRECTORY=os.path.join(tmp, "objects"),
                    GIT_ALTERNATE_OBJECT_DIRECTORIES=objects, GIT_OPTIONAL_LOCKS="0")
-        # Excluded paths leave the private index entirely (an exclude pathspec on `add` errors when the
-        # path is also gitignored). --cached: the working tree is never touched.
-        steps = [["read-tree", out["baseline"]], ["add", "-A", "--", "."]]
-        steps += [["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", e] for e in excl]
+        # Only the workspace subtree is refreshed; the rest of the repo keeps its baseline content in
+        # the private index and is not part of the hashed subtree anyway. Excluded paths leave the
+        # private index entirely (an exclude pathspec on `add` errors on gitignored paths).
+        steps = [["read-tree", out["baseline"]], ["add", "-A", "--", spec]]
+        for e in excl:
+            e = e.strip("/")
+            specs = [prefix + e] if "/" in e else [":(glob)%s**/%s" % (prefix, e), ":(glob)%s**/%s/**" % (prefix, e)]
+            steps.append(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"] + specs)
         for p in domain["include_ignored"]:
             if not os.path.lexists(os.path.join(ws, p)):
                 gaps.append("declared ignored path missing: %s" % p)
             else:
-                steps.append(["add", "-f", "--", p])
+                steps.append(["add", "-f", "--", prefix + p.strip("/")])
         for args in steps:
             r = _git(args, top, env)
             if r.returncode != 0:
                 gaps.append("git %s failed: %s" % (args[0], r.stderr.decode(errors="replace").strip()[:200]))
                 return out
-        r = _git(["write-tree"], top, env)
+        r = _git(["write-tree"] + (["--prefix=" + prefix] if prefix else []), top, env)
         if r.returncode != 0:
-            gaps.append("git write-tree failed")
+            gaps.append("git write-tree failed: %s" % r.stderr.decode(errors="replace").strip()[:200])
             return out
         out["tree"] = r.stdout.decode().strip()
+        # Ignored content still present in the domain: the build may read it, the tree does not hold it.
+        r = _git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", spec], top, env)
+        if r.returncode != 0:
+            gaps.append("git ls-files (ignored) failed")
+        else:
+            undeclared = [p for p in (x.decode(errors="replace") for x in r.stdout.split(b"\0") if x)
+                          if not _excluded(p[len(prefix):], excl)
+                          and not _inside(os.path.join(top, p), rec_dir)]
+            if undeclared:
+                gaps.append("ignored content in the domain is neither declared nor excluded: %s"
+                            % ", ".join(sorted(undeclared)[:5]) + (" ..." if len(undeclared) > 5 else ""))
+        r = _git(["ls-files", "-z", "--", spec], top, env)
+        index_paths = {x.decode(errors="replace") for x in r.stdout.split(b"\0") if x}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    # Links are hashed as links (git stores the target string). What a link points at outside the
-    # workspace is runtime-read content the tree does not cover: it must be a declared external dep.
+    # Links are hashed as links (git stores the target string). A link is covered only if what it
+    # points at is content the tree captured, or a declared external dependency.
     ext = [os.path.realpath(p) for p in domain["external_deps"]]
+    rws = os.path.realpath(ws)
     for dirpath, dirnames, filenames in os.walk(ws):
-        rel = os.path.relpath(dirpath, ws)
-        dirnames[:] = [d for d in dirnames if d != ".git"
-                       and not any(_inside(os.path.join(dirpath, d), os.path.join(ws, e)) for e in excl)]
+        rel_dir = os.path.relpath(dirpath, ws)
+        keep = []
+        for d in dirnames:
+            rel = os.path.normpath(os.path.join(rel_dir, d)).replace(os.sep, "/")
+            if d != ".git" and not _excluded(rel, excl):
+                keep.append(d)
+        dirnames[:] = keep
         for name in filenames + [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]:
             p = os.path.join(dirpath, name)
-            if os.path.islink(p):
-                tgt = os.path.realpath(p)
-                covered = _inside(tgt, ws) and not any(_inside(tgt, os.path.join(ws, e)) for e in excl)
-                if not covered and not any(_inside(tgt, e) for e in ext):
-                    gaps.append("symlink %s points outside the hashed domain to an undeclared target"
-                                % os.path.normpath(os.path.join(rel, name)))
+            rel = os.path.normpath(os.path.join(rel_dir, name)).replace(os.sep, "/")
+            if not os.path.islink(p) or _excluded(rel, excl):
+                continue
+            tgt = os.path.realpath(p)
+            if any(_inside(tgt, e) for e in ext):
+                continue
+            covered = False
+            if _inside(tgt, rws) and os.path.exists(tgt):
+                rel_t = os.path.relpath(tgt, rws).replace(os.sep, "/")
+                if not _excluded(rel_t, excl):
+                    covered = os.path.isdir(tgt) or (prefix + rel_t) in index_paths
+            if not covered:
+                gaps.append("symlink %s points at content the tree did not capture and no declared "
+                            "external dependency covers" % rel)
     for dep in domain["external_deps"]:
         if os.path.isfile(dep):
             out["external"][dep] = file_sha256(dep)
@@ -168,14 +233,18 @@ def fingerprint(ws: str, baseline: str, domain, domain_err, rec_dir: str) -> dic
             gaps.append("declared external dependency missing: %s" % dep)
     out["complete"] = not gaps
     out["identity"] = sha256_bytes(canonical(
-        {"baseline": out["baseline"], "tree": out["tree"], "external": out["external"]}).encode())
+        {"baseline": out["baseline"], "prefix": prefix, "tree": out["tree"], "external": out["external"]}).encode())
     return out
 
 
 # --------------------------------------------------------------------------- recording helpers
 class Recorder:
     def __init__(self, rec_dir):
-        self.rec_dir, self.errors = rec_dir, []
+        self.rec_dir, self.errors, self._lock = rec_dir, [], threading.Lock()
+
+    def error(self, msg):
+        with self._lock:
+            self.errors.append(msg)
 
     def append(self, name, obj) -> bool:
         try:
@@ -184,52 +253,98 @@ class Recorder:
                 fh.write(canonical(obj) + "\n")
             return True
         except (OSError, TypeError, ValueError) as exc:
-            self.errors.append("append %s: %s" % (name, exc))
+            self.error("append %s: %s" % (name, exc))
             return False
 
 
-def parse_latencies(stdout: bytes) -> dict:
-    cases = []
+def parse_latencies(stdout: bytes, truncated: bool = False) -> dict:
+    """Usable only if every GEAK_RESULT_LATENCY_MS line has a finite value > 0 and a distinct,
+    non-empty case id, and the output was not truncated for parsing. Anything else is `partial`
+    (the bad lines are kept as raw text) or `none`."""
+    cases, invalid, seen, dup = [], [], set(), []
     for line in stdout.splitlines():
         m = LATENCY_RE.search(line)
         if not m:
             continue
+        raw_v, case = m.group(1).decode(errors="replace"), m.group(2).decode(errors="replace").strip()
         try:
-            ms = float(m.group(1))
+            ms = float(raw_v)
         except ValueError:
+            ms = None
+        if ms is None or not math.isfinite(ms) or ms <= 0 or not case:
+            invalid.append({"raw": line.decode(errors="replace")[:200],
+                            "why": "value" if (ms is None or not math.isfinite(ms) or ms <= 0) else "no case id"})
             continue
-        cases.append({"case": m.group(2).decode(errors="replace").strip(), "latency_ms": ms})
-    return {"parsed": bool(cases), "format": "GEAK_RESULT_LATENCY_MS.v1", "cases": cases}
+        if case in seen:
+            dup.append(case)
+        seen.add(case)
+        cases.append({"case": case, "latency_ms": ms})
+    status = "none" if not cases and not invalid else (
+        "usable" if cases and not invalid and not dup and not truncated else "partial")
+    return {"status": status, "parsed": status == "usable", "format": "GEAK_RESULT_LATENCY_MS.v1",
+            "cases": cases, "invalid": invalid, "duplicate_cases": sorted(set(dup)),
+            "stdout_truncated_for_parse": truncated}
 
 
-def _tee(src, sink, raw_path, keep, rec):
+def _tee(fd, sink, raw_path, keep, rec, stop):
+    """Copy the child's stream to our own stream and the raw file. Every recorder-side failure is
+    recorded, never raised: an uncaught thread exception would print into our stderr."""
     raw = None
     try:
-        raw = open(raw_path, "wb")
+        raw = open(raw_path, "wb", buffering=0)        # unbuffered: a full disk fails at write, not close
     except OSError as exc:
-        rec.errors.append("raw open %s: %s" % (raw_path, exc))
-    kept = 0
-    while True:
-        chunk = os.read(src.fileno(), 65536)
-        if not chunk:
-            break
-        try:
-            sink.write(chunk)
-            sink.flush()
-        except (OSError, ValueError):
-            pass                                    # our own reader went away; keep draining the child
+        rec.error("raw open %s: %s" % (raw_path, exc))
+    kept, truncated = 0, False
+    try:
+        while True:
+            try:
+                ready, _, _ = select.select([fd], [], [], 0.2)
+            except (OSError, ValueError) as exc:
+                rec.error("select: %s" % exc)
+                break
+            if not ready:
+                if stop.is_set():
+                    break                                   # child gone; descendants keep the pipe
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError as exc:
+                rec.error("read: %s" % exc)
+                break
+            if not chunk:
+                break
+            try:
+                sink.write(chunk)
+                sink.flush()
+            except (OSError, ValueError):
+                pass                                        # our reader went away; keep draining the child
+            if raw is not None:
+                try:
+                    raw.write(chunk)
+                except OSError as exc:
+                    rec.error("raw write %s: %s" % (raw_path, exc))
+                    try:
+                        raw.close()
+                    except OSError:
+                        pass
+                    raw = None
+            if keep is not None:
+                room = max(0, STDOUT_PARSE_CAP - kept)
+                if room:
+                    keep.append(chunk[:room])
+                    kept += min(room, len(chunk))
+                if len(chunk) > room:
+                    truncated = True                        # raw file still has every byte
+    except Exception as exc:  # noqa: BLE001 - last resort: record, never print
+        rec.error("tee: %s: %s" % (type(exc).__name__, exc))
+    finally:
         if raw is not None:
             try:
-                raw.write(chunk)
-            except OSError as exc:
-                rec.errors.append("raw write %s: %s" % (raw_path, exc))
                 raw.close()
-                raw = None
-        if keep is not None and kept < STDOUT_PARSE_CAP:
-            keep.append(chunk)
-            kept += len(chunk)
-    if raw is not None:
-        raw.close()
+            except OSError as exc:
+                rec.error("raw close %s: %s" % (raw_path, exc))
+        if keep is not None and truncated:
+            keep.append(None)                               # marker: parse input was truncated
 
 
 def cmd_run(a) -> int:
@@ -237,7 +352,7 @@ def cmd_run(a) -> int:
     inv = uuid.uuid4().hex
     engineer = a.engineer_id or os.environ.get("GEAK_ENGINEER_ID") or None
     if engineer is not None and not ID_RE.match(engineer):
-        rec.errors.append("engineer id rejected (charset/length)")
+        rec.error("engineer id rejected (charset/length)")
         engineer = None
     child_env = dict(os.environ, GEAK_RECORDER_INV_ID=inv)
     if engineer:
@@ -255,19 +370,18 @@ def cmd_run(a) -> int:
     measurement = {"mode": a.mode, "argv_sha256": sha256_bytes(canonical(a.cmd).encode()),
                    "identity_files": idfiles, "gpu_spec": a.gpu_spec,
                    "gpu_actual": "join gpu_lock use-log on recorder_inv_id"}
-    start = {"schema": SCHEMA, "event": "start", "inv": inv, "engineer_id": engineer, "t": time.time(),
-             "workspace": os.path.abspath(a.workspace), "cmd": a.cmd, "measurement": measurement,
-             "source_before": before}
-    rec.append("invocations.jsonl", start)
+    rec.append("invocations.jsonl", {"schema": SCHEMA, "event": "start", "inv": inv, "engineer_id": engineer,
+                                     "t": time.time(), "workspace": os.path.abspath(a.workspace), "cmd": a.cmd,
+                                     "measurement": measurement, "source_before": before})
     raw_dir = os.path.join(a.rec_dir, "raw")
     try:
         os.makedirs(raw_dir, exist_ok=True)
     except OSError as exc:
-        rec.errors.append("raw dir: %s" % exc)
+        rec.error("raw dir: %s" % exc)
     t0 = time.monotonic()
-    out_keep = []
     try:
-        proc = subprocess.Popen(a.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env)
+        proc = subprocess.Popen(a.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env,
+                                process_group=0)
     except OSError as exc:
         sys.stderr.write("inv_record: cannot execute %s: %s\n" % (a.cmd[0], exc))
         rec.append("invocations.jsonl", {"schema": SCHEMA, "event": "completion", "inv": inv, "t": time.time(),
@@ -279,25 +393,32 @@ def cmd_run(a) -> int:
     def forward(signum, _frame):
         forwarded.append(signum)
         try:
-            proc.send_signal(signum)
+            os.killpg(proc.pid, signum)                     # the whole managed tree, as a terminal would
         except OSError:
             pass
     for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(s, forward)
-    threads = [threading.Thread(target=_tee, args=(proc.stdout, sys.stdout.buffer,
-                                                  os.path.join(raw_dir, inv + ".stdout"), out_keep, rec)),
-               threading.Thread(target=_tee, args=(proc.stderr, sys.stderr.buffer,
-                                                  os.path.join(raw_dir, inv + ".stderr"), None, rec))]
+    stop, out_keep = threading.Event(), []
+    threads = [threading.Thread(target=_tee, args=(proc.stdout.fileno(), sys.stdout.buffer,
+                                                  os.path.join(raw_dir, inv + ".stdout"), out_keep, rec, stop)),
+               threading.Thread(target=_tee, args=(proc.stderr.fileno(), sys.stderr.buffer,
+                                                  os.path.join(raw_dir, inv + ".stderr"), None, rec, stop))]
     for t in threads:
         t.start()
     rc = proc.wait()
+    wall = time.monotonic() - t0
+    deadline = time.monotonic() + DRAIN_GRACE_S
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    held = any(t.is_alive() for t in threads)
+    stop.set()
     for t in threads:
         t.join()
-    wall = time.monotonic() - t0
     sig = -rc if rc < 0 else None
     completion = {"schema": SCHEMA, "event": "completion", "inv": inv, "t": time.time(),
                   "child": {"exit": None if sig else rc, "signal": sig, "forwarded_signals": forwarded,
-                            "wall_s": round(wall, 3)}}
+                            "pgid": proc.pid, "wall_s": round(wall, 3),
+                            "descendants_held_streams": held}}
     try:
         after = fingerprint(a.workspace, a.baseline, domain, derr, a.rec_dir)
         completion["source_after"] = after
@@ -305,14 +426,17 @@ def cmd_run(a) -> int:
         completion["source_status"] = ("incomplete" if not (before.get("complete") and after.get("complete"))
                                        else "no_net_change" if b == f else "source_changed_during_command")
     except Exception as exc:  # noqa: BLE001
-        rec.errors.append("fingerprint after: %s" % exc)
+        rec.error("fingerprint after: %s" % exc)
         completion["source_status"] = "incomplete"
-    completion["measurement"] = parse_latencies(b"".join(out_keep)) if a.mode in (
-        "benchmark", "full_benchmark") else {"parsed": False, "format": None, "cases": []}
-    # Correctness is evidence only from a correctness-mode command, on this source + oracle identity.
-    completion["correctness"] = ({"evidence": "correctness_command", "exit": None if sig else rc,
+    truncated = bool(out_keep) and out_keep[-1] is None
+    data = b"".join(c for c in out_keep if c is not None)
+    completion["measurement"] = (parse_latencies(data, truncated) if a.mode in ("benchmark", "full_benchmark")
+                                 else {"status": "not_parsed", "parsed": False, "cases": []})
+    # A caller-labelled correctness command's exit status, bound to this source and the named
+    # identity files. Evidence about that command, not a standalone correctness-pass claim.
+    completion["correctness"] = ({"evidence": "correctness_mode_command_exit", "exit": None if sig else rc,
                                   "signal": sig, "source_identity": before.get("identity"),
-                                  "identity_files": idfiles}
+                                  "source_complete": bool(before.get("complete")), "identity_files": idfiles}
                                  if a.mode == "correctness" else {"evidence": "none"})
     completion["recorder_error"] = rec.errors or None
     if not rec.append("invocations.jsonl", completion):
@@ -324,28 +448,55 @@ def cmd_run(a) -> int:
     return rc
 
 
-# --------------------------------------------------------------------------- declarations
-def _last_inv(rec_dir):
+# --------------------------------------------------------------------------- reading records
+def _read_jsonl(path):
+    """Valid records plus a count of torn/malformed lines (kept as a fact, never repaired)."""
+    good, bad = [], 0
     try:
-        with open(os.path.join(rec_dir, "invocations.jsonl"), encoding="utf-8") as fh:
-            starts = [json.loads(l)["inv"] for l in fh if '"event":"start"' in l]
-        return starts[-1] if starts else None
-    except (OSError, ValueError, KeyError):
-        return None
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    bad += 1
+                    continue
+                if isinstance(obj, dict):
+                    good.append(obj)
+                else:
+                    bad += 1
+    except OSError:
+        pass
+    return good, bad
 
 
+def _starts(rec_dir, engineer):
+    events, _ = _read_jsonl(os.path.join(rec_dir, "invocations.jsonl"))
+    return [e for e in events if e.get("event") == "start" and e.get("engineer_id") == engineer
+            and isinstance(e.get("inv"), str)]
+
+
+# --------------------------------------------------------------------------- declarations
 def cmd_declare(a) -> int:
-    """Agent-reported events, stored as declarations. `next` is a commitment: first one wins."""
+    """Agent-reported events, stored as declarations. `next` is a commitment: first one wins.
+    A declaration attaches only to an invocation of the SAME engineer."""
+    def reject(why):
+        print(canonical({"status": "rejected", "error": why}))
+        return 0
     if not ID_RE.match(a.engineer_id or ""):
-        print(canonical({"status": "rejected", "error": "bad engineer id"}))
-        return 0
+        return reject("bad engineer id")
     if a.kind not in DECLARE_KINDS or (a.kind == "next" and (a.value not in NEXT_CHOICES or a.seq is None)):
-        print(canonical({"status": "rejected", "error": "next needs --seq and a value in %s" % (NEXT_CHOICES,)}))
-        return 0
+        return reject("next needs --seq and a value in %s" % (NEXT_CHOICES,))
+    mine = [s["inv"] for s in _starts(a.rec_dir, a.engineer_id)]
+    if a.inv is not None and a.inv not in mine:
+        return reject("invocation %s is not one of this engineer's" % a.inv)
     rec = Recorder(a.rec_dir)
     did = uuid.uuid4().hex
     d = {"schema": SCHEMA, "decl": did, "engineer_id": a.engineer_id, "kind": a.kind, "value": a.value,
-         "seq": a.seq, "t": time.time(), "latest_inv": _last_inv(a.rec_dir), "reported_by": "agent"}
+         "seq": a.seq, "t": time.time(), "inv": a.inv if a.inv is not None else (mine[-1] if mine else None),
+         "inv_source": "explicit" if a.inv is not None else ("latest_of_engineer" if mine else "none"),
+         "reported_by": "agent"}
     status = "recorded"
     if a.kind == "next":
         cdir = os.path.join(a.rec_dir, "commitments")
@@ -359,7 +510,7 @@ def cmd_declare(a) -> int:
             status, d["conflict"] = "conflict_not_overwritten", True
         except OSError as exc:
             status = "write_failed"
-            rec.errors.append(str(exc))
+            rec.error(str(exc))
     if not rec.append("declarations.jsonl", d) and status == "recorded":
         status = "write_failed"
     print(canonical({"status": status, "decl": did}))
@@ -367,39 +518,54 @@ def cmd_declare(a) -> int:
 
 
 # --------------------------------------------------------------------------- summary (observed vs declared)
-def _read_jsonl(path):
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return [json.loads(l) for l in fh if l.strip()]
-    except OSError:
-        return []
-
-
-def summarize(rec_dir) -> dict:
-    events = _read_jsonl(os.path.join(rec_dir, "invocations.jsonl"))
-    starts = [e for e in events if e.get("event") == "start"]
-    done = {e["inv"]: e for e in events if e.get("event") == "completion"}
-    order = [s["inv"] for s in starts]
-    src = {s["inv"]: (s.get("source_before") or {}).get("identity") if (s.get("source_before") or {}).get("complete") else None
-           for s in starts}
-    joins = []
-    for d in _read_jsonl(os.path.join(rec_dir, "declarations.jsonl")):
-        j = {"decl": d.get("decl"), "kind": d.get("kind"), "value": d.get("value"), "consistency": "unknown"}
-        if d.get("kind") in ("keep", "revert") and d.get("latest_inv") in order:
-            i = order.index(d["latest_inv"])
-            cand, nxt = src.get(order[i]), (src.get(order[i + 1]) if i + 1 < len(order) else None)
-            prev = next((src[x] for x in reversed(order[:i]) if src.get(x) and src[x] != cand), None)
-            if cand and nxt and prev:
-                if d["kind"] == "revert":
-                    j["consistency"] = "consistent" if nxt == prev else "inconsistent" if nxt == cand else "unknown"
-                else:
-                    j["consistency"] = "inconsistent" if nxt == prev else "unknown"
-        joins.append(j)
-    return {"invocations": len(starts), "completed": sum(1 for i in order if i in done),
-            "incomplete_cause_unknown": sum(1 for i in order if i not in done),
-            "distinct_complete_sources": len({v for v in src.values() if v}),
-            "declarations": joins,
-            "note": "actions are never inferred from source hashes; consistency is evidence, not proof"}
+def summarize(rec_dir, gpu_use_log=None) -> dict:
+    events, bad_inv = _read_jsonl(os.path.join(rec_dir, "invocations.jsonl"))
+    decls, bad_decl = _read_jsonl(os.path.join(rec_dir, "declarations.jsonl"))
+    starts = [e for e in events if e.get("event") == "start" and isinstance(e.get("inv"), str)]
+    done = {e.get("inv") for e in events if e.get("event") == "completion"}
+    per = {}
+    for s in starts:
+        per.setdefault(s.get("engineer_id") or "unattributed", []).append(s)
+    engineers = {}
+    for eng, ss in per.items():
+        order = [s["inv"] for s in ss]
+        src = {s["inv"]: (s.get("source_before") or {}).get("identity")
+               if (s.get("source_before") or {}).get("complete") else None for s in ss}
+        joins = []
+        for d in (x for x in decls if x.get("engineer_id") == eng):
+            j = {"decl": d.get("decl"), "kind": d.get("kind"), "value": d.get("value"), "consistency": "unknown"}
+            if d.get("kind") in ("keep", "revert") and d.get("inv") in order:
+                i = order.index(d["inv"])
+                cand, nxt = src.get(order[i]), (src.get(order[i + 1]) if i + 1 < len(order) else None)
+                prev = next((src[x] for x in reversed(order[:i]) if src.get(x) and src[x] != cand), None)
+                if cand and nxt and prev:
+                    if d["kind"] == "revert":
+                        j["consistency"] = "consistent" if nxt == prev else "inconsistent" if nxt == cand else "unknown"
+                    else:
+                        j["consistency"] = "inconsistent" if nxt == prev else "unknown"
+            joins.append(j)
+        engineers[eng] = {"invocations": len(order), "completed": sum(1 for i in order if i in done),
+                          "incomplete_cause_unknown": sum(1 for i in order if i not in done),
+                          "distinct_complete_sources": len({v for v in src.values() if v}),
+                          "declarations": joins}
+    out = {"engineers": engineers, "malformed_records": {"invocations": bad_inv, "declarations": bad_decl},
+           "note": "actions are never inferred from source hashes; consistency is evidence, not proof"}
+    if gpu_use_log:
+        lines, bad = _read_jsonl(gpu_use_log)
+        ours = {s["inv"] for s in starts}
+        matched = {}
+        for l in lines:
+            if l.get("recorder_inv_id") in ours:
+                matched.setdefault(l["recorder_inv_id"], []).append(l.get("gpu"))
+        out["gpu_lock"] = {
+            "recorder_invocations_with_lock_line": len(matched),
+            "gpu_by_invocation": matched,
+            "lock_lines_with_engineer_but_no_recorder_id": sum(1 for l in lines if l.get("engineer_id")
+                                                               and not l.get("recorder_inv_id")),
+            "lock_lines_without_ids": sum(1 for l in lines if not l.get("engineer_id") and not l.get("recorder_inv_id")),
+            "malformed_lines": bad,
+            "outside_observed_population": "unknown"}
+    return out
 
 
 def main(argv=None) -> int:
@@ -421,8 +587,10 @@ def main(argv=None) -> int:
     d.add_argument("--kind", required=True)
     d.add_argument("--value", default=None)
     d.add_argument("--seq", type=int)
+    d.add_argument("--inv", default=None)
     s = sub.add_parser("summarize")
     s.add_argument("--rec-dir", required=True)
+    s.add_argument("--gpu-use-log")
     a = ap.parse_args(argv)
     if a.sub == "run":
         a.cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
@@ -431,7 +599,7 @@ def main(argv=None) -> int:
         return cmd_run(a)
     if a.sub == "declare":
         return cmd_declare(a)
-    print(json.dumps(summarize(a.rec_dir), indent=2))
+    print(json.dumps(summarize(a.rec_dir, a.gpu_use_log), indent=2))
     return 0
 
 
