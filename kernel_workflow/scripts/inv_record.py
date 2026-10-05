@@ -53,7 +53,7 @@ import threading
 import time
 import uuid
 
-SCHEMA = "inv_record.v4"
+SCHEMA = "inv_record.v5"
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 LATENCY_RE = re.compile(rb"GEAK_RESULT_LATENCY_MS=(\S*)(.*)")
 MODES = ("correctness", "benchmark", "full_benchmark", "profile", "other")
@@ -333,11 +333,31 @@ def parse_latencies(stdout: bytes, truncated: bool = False, stream_cutoff: bool 
             "stream_read_failed": read_failed}
 
 
+def _write_all(raw, chunk, raw_path, rec, problems) -> bool:
+    """Write every byte of chunk to the unbuffered raw file. An unbuffered write may store fewer
+    bytes than asked without raising (e.g. at a file-size limit): keep writing the remainder, and
+    treat an error or a write that stores nothing as a failed raw capture."""
+    view = memoryview(chunk)
+    while view:
+        try:
+            n = raw.write(view)
+        except OSError as exc:
+            rec.error("raw write %s: %s" % (raw_path, exc))
+            problems.append("raw_write_failed")
+            return False
+        if not n:
+            rec.error("raw write %s: no progress (%d bytes unwritten)" % (raw_path, len(view)))
+            problems.append("raw_write_short")
+            return False
+        view = view[n:]
+    return True
+
+
 def _tee(fd, sink, raw_path, keep, rec, stop, problems):
     """Copy the child's stream to our own stream and the raw file. Every recorder-side failure is
     recorded, never raised: an uncaught thread exception would print into our stderr. `problems`
-    collects what makes this stream's capture incomplete (raw_* = the raw file only; read_failed =
-    the stream itself was not fully read)."""
+    collects what makes this stream's capture incomplete (raw_* = the raw file only, including a
+    short write; read_failed = the stream itself was not fully read)."""
     raw = None
     try:
         raw = open(raw_path, "wb", buffering=0)        # unbuffered: a full disk fails at write, not close
@@ -368,17 +388,12 @@ def _tee(fd, sink, raw_path, keep, rec, stop, problems):
                 sink.flush()
             except (OSError, ValueError):
                 pass                                        # our reader went away; keep draining the child
-            if raw is not None:
+            if raw is not None and not _write_all(raw, chunk, raw_path, rec, problems):
                 try:
-                    raw.write(chunk)
-                except OSError as exc:
-                    rec.error("raw write %s: %s" % (raw_path, exc))
-                    problems.append("raw_write_failed")
-                    try:
-                        raw.close()
-                    except OSError:
-                        pass
-                    raw = None
+                    raw.close()
+                except OSError:
+                    pass
+                raw = None                                  # raw record stops here; the stream goes on
             if keep is not None:
                 room = max(0, STDOUT_PARSE_CAP - kept)
                 if room:
