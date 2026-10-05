@@ -278,3 +278,61 @@ def test_scalar_array_items_are_one_entry_with_their_type(tmp_path):
                            "await agent('a', { phase: 'P', label: 'x', schema: S });\n")
     node = [p for p in f["roots"]["S"]["paths"] if p["path"] == "tags[]"]
     assert len(node) == 1 and node[0]["items_type"] == "string" and node[0]["enum"] == ["a"]
+
+
+# ------------------------------------------------------------------ review of d41ae3a2: remaining boundaries
+S2 = "const S={type:'object',properties:{known:{type:'boolean'},variant:{type:'string'}},additionalProperties:false};\n"
+C2 = "await agent('a',{phase:'P',label:'plan',schema:S});\n"
+ITEM = "{type:'object',properties:{old_field:{type:'boolean'}},additionalProperties:false}"
+ARR = S2.replace("variant:{type:'string'}", "variant:{type:'array',items:" + ITEM + "}") + C2
+OBJ = S2.replace("variant:{type:'string'}", "variant:" + ITEM) + C2
+SILENT_CASES_2 = {
+    "mutation_in_other_const_initializer": (S2 + C2, S2 + "const EXTRA=Object.assign(S.properties,{new_judgment:{type:'boolean'}});\n" + C2),
+    "escaped_static_schema_key": (S2 + C2, S2 + C2 + "await agent('b',{phase:'P',label:'new','sch\\u0065ma':" + ITEM + "});\n"),
+    "one_property_object_array": (ARR, ARR.replace("old_field", "new_judgment")),
+    "object_array_union": (OBJ, OBJ.replace("variant:{type:'object'", "variant:{type:['object','array'],items:"
+                                             + ITEM.replace("old_field", "new_judgment"))),
+}
+
+
+@pytest.mark.parametrize("case", sorted(SILENT_CASES_2))
+def test_remaining_boundaries_cannot_pass_silently(tmp_path, case):
+    before, after = SILENT_CASES_2[case]
+    rel = "wf.mjs"
+    (tmp_path / rel).write_text(before)
+    first = rl.discover(str(tmp_path), (rel,))
+    assert first[rel]["errors"] == []
+    reg = _registry_from(first, rel)
+    assert rl.lint(reg, first, str(tmp_path), (rel,)) == []
+    (tmp_path / rel).write_text(after)
+    found = rl.discover(str(tmp_path), (rel,))
+    assert found[rel]["errors"] or rl.lint(reg, found, str(tmp_path), (rel,)), case
+
+
+@pytest.mark.parametrize("lit, value", [("'sch\\u0065ma'", "schema"), ("'a\\x41\\u{42}c'", "aABc"),
+                                        ("'it\\'s'", "it's"), ('"q\\"x"', 'q"x'), ("'a\\\nb'", "ab")])
+def test_string_keys_are_compared_by_value(lit, value):
+    assert rl.js_string_value(lit) == value
+
+
+def test_an_escaped_identifier_is_rejected_not_skipped(tmp_path):
+    f = discover(tmp_path, S2 + C2 + "await agent('b',{phase:'P',label:'new',sch\\u0065ma:" + ITEM + "});\n")
+    assert any("unicode-escaped identifier" in e for e in f["errors"])
+
+
+@pytest.mark.parametrize("init, ok", [
+    ("obj({ a: { type: 'boolean' } }, [])", True), ("BASE", True), ("{ type: 'array', items: BASE }", True),
+    ("Object.assign({}, BASE)", False), ("JSON.parse(JSON.stringify(BASE))", False), ("BASE.properties", False),
+    ("(BASE.x = 1, BASE)", False), ("mk(BASE)", False),
+])
+def test_only_construction_forms_may_build_on_a_schema(tmp_path, init, ok):
+    f = discover(tmp_path, "const BASE = obj({ k: { type: 'boolean' } }, []);\n"
+                           "const X = " + init + ";\n"
+                           "await agent('a', { phase: 'P', label: 'x', schema: X });\n")
+    assert (f["errors"] == []) == ok, f["errors"]
+
+
+def test_items_typed_against_object_keywords_are_rejected(tmp_path):
+    f = discover(tmp_path, "const S = { type: 'string', properties: { a: { type: 'boolean' } } };\n"
+                           "await agent('a', { phase: 'P', label: 'x', schema: S });\n")
+    assert any("object keywords on a schema typed" in e for e in f["errors"])
