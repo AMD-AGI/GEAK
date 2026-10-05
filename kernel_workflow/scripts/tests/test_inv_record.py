@@ -455,3 +455,118 @@ def test_summarize_joins_the_lock_log_by_recorder_id_only(ws, tmp_path):
     inv = events(tmp_path)[0]["inv"]
     assert g["gpu_by_invocation"] == {inv: [97]} and g["lock_lines_without_ids"] == 1
     assert g["outside_observed_population"] == "unknown"
+
+
+# ------------------------------------------------------------- review of 167c4713 (2026-10-05)
+def _run_patched(ws, tmp_path, patch, *cmd, env=None, mode="other"):
+    code = ("import sys,subprocess,os;sys.path.insert(0,sys.argv[1]);import inv_record as m;" + patch +
+            ";sys.exit(m.main(sys.argv[2:]))")
+    return subprocess.run([sys.executable, "-B", "-c", code, SCRIPTS, "run", "--rec-dir", str(tmp_path / "rec"),
+                           "--workspace", str(ws), "--domain", str(tmp_path / "domain.json"), "--mode", mode,
+                           "--engineer-id", "r1_d1", "--"] + list(cmd), capture_output=True, timeout=60, env=env)
+
+
+PGRP_PROBE = ["python3", "-c", "import os; print(os.getpgrp() == os.getpid())"]
+
+
+def test_older_python_path_still_runs_the_child_in_its_own_group(ws, tmp_path):
+    """GEAK supports Python >= 3.8; process_group= exists only from 3.11."""
+    r = _run_patched(ws, tmp_path, "m.sys.version_info=(3,8,0)", *PGRP_PROBE)
+    assert r.returncode == 0 and r.stdout == b"True\n"
+    c = events(tmp_path)[1]["child"]
+    assert c["grouped"] is True and events(tmp_path)[1]["recorder_error"] is None
+
+
+def test_a_refused_group_runs_the_child_ungrouped_and_says_so(ws, tmp_path):
+    patch = ("real=subprocess.Popen\n"
+             "def P(*a,**k):\n"
+             " if 'process_group' in k or 'preexec_fn' in k: raise TypeError('no group here')\n"
+             " return real(*a,**k)\n"
+             "m.subprocess.Popen=P")
+    r = _run_patched(ws, tmp_path, patch, *PGRP_PROBE)
+    assert r.returncode == 0 and r.stdout == b"False\n"                   # the child still ran
+    done = events(tmp_path)[1]
+    assert done["child"]["grouped"] is False and "no group here" in done["recorder_error"][0]
+
+
+def _launch_descendant(tmp_path, body):
+    """A parent that starts a descendant (same process group) and exits at once."""
+    script = tmp_path / "launch.py"
+    script.write_text("import subprocess,sys\nsubprocess.Popen([sys.executable,'-c',%r])\n%s" % body)
+    return script
+
+
+def _kill_group(tmp_path):
+    try:
+        os.killpg(events(tmp_path)[1]["child"]["pgid"], signal.SIGKILL)
+    except (ProcessLookupError, KeyError, IndexError, FileNotFoundError):
+        pass
+
+
+def test_a_continuously_writing_descendant_cannot_keep_the_recorder_alive(ws, tmp_path):
+    import time
+    script = tmp_path / "launch.py"
+    script.write_text("import subprocess,sys\n"
+                      "subprocess.Popen([sys.executable,'-c','import os,time\\nwhile True:\\n os.write(1,b\"tick\\\\n\");time.sleep(0.02)'])\n"
+                      "print('GEAK_RESULT_LATENCY_MS=0.5 caseA', flush=True)\n")
+    env = dict(os.environ, GEAK_INV_RECORD_DRAIN_GRACE_S="0.2")
+    t = time.monotonic()
+    try:
+        r = run(ws, tmp_path, sys.executable, str(script), env=env)
+        assert time.monotonic() - t < 8 and r.returncode == 0
+        done = events(tmp_path)[1]
+        assert done["child"]["descendants_held_streams"] is True and done["raw_streams"] == "cutoff_at_drain_deadline"
+        m = done["measurement"]
+        assert m["stream_cutoff"] is True and m["status"] == "partial" and not m["parsed"]
+    finally:
+        _kill_group(tmp_path)
+
+
+def test_a_quiet_descendant_cutoff_prefix_is_not_usable(ws, tmp_path):
+    script = tmp_path / "launch.py"
+    script.write_text("import subprocess,sys\n"
+                      "subprocess.Popen([sys.executable,'-c','import time\\ntime.sleep(5)\\nprint(\"GEAK_RESULT_LATENCY_MS=0.7 caseB\")'])\n"
+                      "print('GEAK_RESULT_LATENCY_MS=0.5 caseA', flush=True)\n")
+    try:
+        run(ws, tmp_path, sys.executable, str(script), env=dict(os.environ, GEAK_INV_RECORD_DRAIN_GRACE_S="0.2"))
+        m = events(tmp_path)[1]["measurement"]
+        assert [c["case"] for c in m["cases"]] == ["caseA"] and m["status"] == "partial" and m["stream_cutoff"]
+    finally:
+        _kill_group(tmp_path)
+
+
+def test_the_parse_cap_and_the_stream_cutoff_stay_distinct():
+    a = ir.parse_latencies(b"GEAK_RESULT_LATENCY_MS=1 a\n", truncated=True)
+    b = ir.parse_latencies(b"GEAK_RESULT_LATENCY_MS=1 a\n", stream_cutoff=True)
+    assert (a["stdout_truncated_for_parse"], a["stream_cutoff"]) == (True, False)
+    assert (b["stdout_truncated_for_parse"], b["stream_cutoff"]) == (False, True)
+    assert a["status"] == b["status"] == "partial"
+    assert ir.parse_latencies(b"", stream_cutoff=True)["status"] == "partial"
+
+
+def _dep_layout(ws, tmp_path):
+    dep, actual = tmp_path / "declared-dep", tmp_path / "indirect-dep"
+    dep.mkdir()
+    actual.mkdir()
+    (actual / "code.py").write_text("v=1\n")
+    os.symlink(str(actual), dep / "nested", target_is_directory=True)
+    os.symlink(str(dep), ws / "dep", target_is_directory=True)
+    return dep, actual, dict(DOMAIN, external_deps=[str(dep)])
+
+
+def test_content_behind_a_nested_link_in_a_declared_dependency_is_covered(ws, tmp_path):
+    dep, actual, declared = _dep_layout(ws, tmp_path)
+    a = fp(ws, tmp_path, declared)
+    (actual / "code.py").write_text("v=2\n")
+    b = fp(ws, tmp_path, declared)
+    assert a["complete"] and b["complete"] and a["identity"] != b["identity"]
+
+
+def test_a_dependency_link_cycle_terminates_and_a_dangling_link_is_a_gap(ws, tmp_path):
+    dep, actual, declared = _dep_layout(ws, tmp_path)
+    os.symlink(str(dep), actual / "loop", target_is_directory=True)         # dep/nested/loop -> dep
+    f = fp(ws, tmp_path, declared)
+    assert f["complete"], f["gaps"]
+    os.symlink(str(tmp_path / "missing"), dep / "dangling")
+    g = fp(ws, tmp_path, declared)
+    assert not g["complete"] and any("dangles" in x for x in g["gaps"])

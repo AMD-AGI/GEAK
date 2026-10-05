@@ -53,7 +53,7 @@ import threading
 import time
 import uuid
 
-SCHEMA = "inv_record.v2"
+SCHEMA = "inv_record.v3"
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 LATENCY_RE = re.compile(rb"GEAK_RESULT_LATENCY_MS=(\S*)(.*)")
 MODES = ("correctness", "benchmark", "full_benchmark", "profile", "other")
@@ -220,21 +220,59 @@ def fingerprint(ws: str, baseline: str, domain, domain_err, rec_dir: str) -> dic
                             "external dependency covers" % rel)
     for dep in domain["external_deps"]:
         if os.path.isfile(dep):
-            out["external"][dep] = file_sha256(dep)
+            digest = file_sha256(dep)
+            if digest is None:
+                gaps.append("declared external dependency unreadable: %s" % dep)
+            out["external"][dep] = digest
         elif os.path.isdir(dep):
-            h = hashlib.sha256()
-            for dirpath, dirnames, filenames in os.walk(dep):
-                dirnames.sort()
-                for name in sorted(filenames):
-                    p = os.path.join(dirpath, name)
-                    h.update(os.path.relpath(p, dep).encode() + b"\0" + (file_sha256(p) or "?").encode() + b"\0")
-            out["external"][dep] = h.hexdigest()
+            out["external"][dep] = _hash_dep_tree(dep, gaps)
         else:
             gaps.append("declared external dependency missing: %s" % dep)
     out["complete"] = not gaps
     out["identity"] = sha256_bytes(canonical(
         {"baseline": out["baseline"], "prefix": prefix, "tree": out["tree"], "external": out["external"]}).encode())
     return out
+
+
+def _hash_dep_tree(root: str, gaps: list) -> str:
+    """Content hash of a declared dependency directory AS IT IS READ: symlinks are recorded (link
+    text) AND followed, so content reached through a nested link is covered. A directory already
+    visited on the current path is a cycle: recorded, not re-entered. Unreadable or dangling
+    entries are gaps (identity incomplete), never silently skipped."""
+    h = hashlib.sha256()
+
+    def walk(path, rel, ancestors):
+        real = os.path.realpath(path)
+        if real in ancestors:
+            h.update(b"C" + rel.encode() + b"\0")
+            return
+        try:
+            names = sorted(os.listdir(path))
+        except OSError as exc:
+            gaps.append("external dependency unreadable: %s (%s)" % (path, exc.strerror))
+            return
+        for name in names:
+            p, r = os.path.join(path, name), (rel + "/" + name).lstrip("/")
+            if os.path.islink(p):
+                try:
+                    h.update(b"L" + r.encode() + b"\0" + os.readlink(p).encode() + b"\0")
+                except OSError as exc:
+                    gaps.append("external dependency link unreadable: %s (%s)" % (p, exc.strerror))
+                    continue
+            if os.path.isdir(p):
+                h.update(b"D" + r.encode() + b"\0")
+                walk(p, r, ancestors | {real})
+            elif os.path.isfile(p):
+                digest = file_sha256(p)
+                if digest is None:
+                    gaps.append("external dependency file unreadable: %s" % p)
+                h.update(b"F" + r.encode() + b"\0" + (digest or "?").encode() + b"\0")
+            elif not os.path.exists(p):
+                gaps.append("external dependency link dangles: %s" % p)
+            else:
+                h.update(b"S" + r.encode() + b"\0")    # socket/fifo/device: presence only
+    walk(root, "", frozenset())
+    return h.hexdigest()
 
 
 # --------------------------------------------------------------------------- recording helpers
@@ -257,10 +295,11 @@ class Recorder:
             return False
 
 
-def parse_latencies(stdout: bytes, truncated: bool = False) -> dict:
+def parse_latencies(stdout: bytes, truncated: bool = False, stream_cutoff: bool = False) -> dict:
     """Usable only if every GEAK_RESULT_LATENCY_MS line has a finite value > 0 and a distinct,
-    non-empty case id, and the output was not truncated for parsing. Anything else is `partial`
-    (the bad lines are kept as raw text) or `none`."""
+    non-empty case id, and the whole output was seen: neither cut by the parse-memory cap
+    (`truncated`) nor by the drain deadline (`stream_cutoff`). Anything else is `partial` (the bad
+    lines are kept as raw text) or `none`."""
     cases, invalid, seen, dup = [], [], set(), []
     for line in stdout.splitlines():
         m = LATENCY_RE.search(line)
@@ -280,10 +319,12 @@ def parse_latencies(stdout: bytes, truncated: bool = False) -> dict:
         seen.add(case)
         cases.append({"case": case, "latency_ms": ms})
     status = "none" if not cases and not invalid else (
-        "usable" if cases and not invalid and not dup and not truncated else "partial")
+        "usable" if cases and not invalid and not dup and not truncated and not stream_cutoff else "partial")
+    if status == "none" and stream_cutoff:
+        status = "partial"                          # nothing parsed in the prefix; the rest was never seen
     return {"status": status, "parsed": status == "usable", "format": "GEAK_RESULT_LATENCY_MS.v1",
             "cases": cases, "invalid": invalid, "duplicate_cases": sorted(set(dup)),
-            "stdout_truncated_for_parse": truncated}
+            "stdout_truncated_for_parse": truncated, "stream_cutoff": stream_cutoff}
 
 
 def _tee(fd, sink, raw_path, keep, rec, stop):
@@ -296,15 +337,13 @@ def _tee(fd, sink, raw_path, keep, rec, stop):
         rec.error("raw open %s: %s" % (raw_path, exc))
     kept, truncated = 0, False
     try:
-        while True:
+        while not stop.is_set():                            # checked every pass, data or not
             try:
                 ready, _, _ = select.select([fd], [], [], 0.2)
             except (OSError, ValueError) as exc:
                 rec.error("select: %s" % exc)
                 break
             if not ready:
-                if stop.is_set():
-                    break                                   # child gone; descendants keep the pipe
                 continue
             try:
                 chunk = os.read(fd, 65536)
@@ -379,9 +418,19 @@ def cmd_run(a) -> int:
     except OSError as exc:
         rec.error("raw dir: %s" % exc)
     t0 = time.monotonic()
+    # Own process group so a forwarded signal reaches the whole managed tree. process_group= only
+    # exists from Python 3.11 and GEAK supports 3.8+, so older interpreters use os.setpgrp in the
+    # child (no other thread exists yet at this point). If even that is refused, run the child
+    # without a group rather than not at all, and record why.
+    group = {"process_group": 0} if sys.version_info >= (3, 11) else {"preexec_fn": os.setpgrp}
+    grouped = True
     try:
-        proc = subprocess.Popen(a.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env,
-                                process_group=0)
+        try:
+            proc = subprocess.Popen(a.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env, **group)
+        except (TypeError, ValueError, subprocess.SubprocessError) as exc:
+            rec.error("process group unavailable, child runs ungrouped: %s: %s" % (type(exc).__name__, exc))
+            grouped = False
+            proc = subprocess.Popen(a.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env)
     except OSError as exc:
         sys.stderr.write("inv_record: cannot execute %s: %s\n" % (a.cmd[0], exc))
         rec.append("invocations.jsonl", {"schema": SCHEMA, "event": "completion", "inv": inv, "t": time.time(),
@@ -393,15 +442,19 @@ def cmd_run(a) -> int:
     def forward(signum, _frame):
         forwarded.append(signum)
         try:
-            os.killpg(proc.pid, signum)                     # the whole managed tree, as a terminal would
+            if grouped:
+                os.killpg(proc.pid, signum)                 # the whole managed tree, as a terminal would
+            else:
+                proc.send_signal(signum)
         except OSError:
             pass
     for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(s, forward)
     stop, out_keep = threading.Event(), []
-    threads = [threading.Thread(target=_tee, args=(proc.stdout.fileno(), sys.stdout.buffer,
+    # Daemon threads: a thread stuck writing to our own (unread) stdout must not keep us alive.
+    threads = [threading.Thread(target=_tee, daemon=True, args=(proc.stdout.fileno(), sys.stdout.buffer,
                                                   os.path.join(raw_dir, inv + ".stdout"), out_keep, rec, stop)),
-               threading.Thread(target=_tee, args=(proc.stderr.fileno(), sys.stderr.buffer,
+               threading.Thread(target=_tee, daemon=True, args=(proc.stderr.fileno(), sys.stderr.buffer,
                                                   os.path.join(raw_dir, inv + ".stderr"), None, rec, stop))]
     for t in threads:
         t.start()
@@ -410,15 +463,20 @@ def cmd_run(a) -> int:
     deadline = time.monotonic() + DRAIN_GRACE_S
     for t in threads:
         t.join(max(0.0, deadline - time.monotonic()))
-    held = any(t.is_alive() for t in threads)
+    held = any(t.is_alive() for t in threads)     # descendants still hold or feed the streams
     stop.set()
     for t in threads:
-        t.join()
+        t.join(2.0)                                 # each pass re-checks `stop` within ~0.2 s
+    stuck = any(t.is_alive() for t in threads)
+    if stuck:
+        rec.error("a stream copier did not stop within 2 s (blocked writing to our own output)")
     sig = -rc if rc < 0 else None
     completion = {"schema": SCHEMA, "event": "completion", "inv": inv, "t": time.time(),
                   "child": {"exit": None if sig else rc, "signal": sig, "forwarded_signals": forwarded,
                             "pgid": proc.pid, "wall_s": round(wall, 3),
-                            "descendants_held_streams": held}}
+                            "descendants_held_streams": held, "grouped": grouped}}
+    # Raw files stop at the drain cutoff: what was captured is a prefix, not the whole stream.
+    completion["raw_streams"] = "cutoff_at_drain_deadline" if held else "complete"
     try:
         after = fingerprint(a.workspace, a.baseline, domain, derr, a.rec_dir)
         completion["source_after"] = after
@@ -430,7 +488,8 @@ def cmd_run(a) -> int:
         completion["source_status"] = "incomplete"
     truncated = bool(out_keep) and out_keep[-1] is None
     data = b"".join(c for c in out_keep if c is not None)
-    completion["measurement"] = (parse_latencies(data, truncated) if a.mode in ("benchmark", "full_benchmark")
+    completion["measurement"] = (parse_latencies(data, truncated, stream_cutoff=held)
+                                 if a.mode in ("benchmark", "full_benchmark")
                                  else {"status": "not_parsed", "parsed": False, "cases": []})
     # A caller-labelled correctness command's exit status, bound to this source and the named
     # identity files. Evidence about that command, not a standalone correctness-pass claim.
