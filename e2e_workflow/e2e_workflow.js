@@ -2285,6 +2285,13 @@ if (want('setup')) {
     }),
     { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
   if (!setup || !setup.eval_dir) throw new Error('Setup failed: no eval_dir');
+  // A pinned eval dir is the only place run_e2e reads workflow_return.json and recovers results from disk, and run_e2e
+  // writes into it before the workflow starts. A Director that takes it for a used dir and builds a sibling sends every
+  // later stage's work where nothing reads it, so stop here rather than hours later.
+  const trimSlash = (p) => String(p || '').trim().replace(/\/+$/, '');
+  if (EVAL_DIR_OVERRIDE && trimSlash(setup.eval_dir) !== trimSlash(EVAL_DIR_OVERRIDE)) {
+    throw new Error(`Setup failed: Director built eval_dir ${setup.eval_dir}, not the pinned ${EVAL_DIR_OVERRIDE}`);
+  }
   const detectedGfx = String(setup.gfx || '').trim().toLowerCase();
   const detectedTarget = String(setup.device_target || '').trim().toLowerCase();
   const detectedPhysicalCuCount = Number(setup.physical_cu_count);
