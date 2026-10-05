@@ -53,7 +53,7 @@ import threading
 import time
 import uuid
 
-SCHEMA = "inv_record.v3"
+SCHEMA = "inv_record.v4"
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 LATENCY_RE = re.compile(rb"GEAK_RESULT_LATENCY_MS=(\S*)(.*)")
 MODES = ("correctness", "benchmark", "full_benchmark", "profile", "other")
@@ -238,7 +238,8 @@ def _hash_dep_tree(root: str, gaps: list) -> str:
     """Content hash of a declared dependency directory AS IT IS READ: symlinks are recorded (link
     text) AND followed, so content reached through a nested link is covered. A directory already
     visited on the current path is a cycle: recorded, not re-entered. Unreadable or dangling
-    entries are gaps (identity incomplete), never silently skipped."""
+    entries, and special files (fifo/socket/device, never opened), are gaps (identity incomplete),
+    never silently skipped."""
     h = hashlib.sha256()
 
     def walk(path, rel, ancestors):
@@ -270,7 +271,9 @@ def _hash_dep_tree(root: str, gaps: list) -> str:
             elif not os.path.exists(p):
                 gaps.append("external dependency link dangles: %s" % p)
             else:
-                h.update(b"S" + r.encode() + b"\0")    # socket/fifo/device: presence only
+                # FIFO/socket/device: presence says nothing about what a run reads from it. Not
+                # opened (a FIFO read could block or consume data) -- just an identity gap.
+                gaps.append("external dependency holds a special file (fifo/socket/device): %s" % p)
     walk(root, "", frozenset())
     return h.hexdigest()
 
@@ -295,11 +298,12 @@ class Recorder:
             return False
 
 
-def parse_latencies(stdout: bytes, truncated: bool = False, stream_cutoff: bool = False) -> dict:
+def parse_latencies(stdout: bytes, truncated: bool = False, stream_cutoff: bool = False,
+                    read_failed: bool = False) -> dict:
     """Usable only if every GEAK_RESULT_LATENCY_MS line has a finite value > 0 and a distinct,
     non-empty case id, and the whole output was seen: neither cut by the parse-memory cap
-    (`truncated`) nor by the drain deadline (`stream_cutoff`). Anything else is `partial` (the bad
-    lines are kept as raw text) or `none`."""
+    (`truncated`), by the drain deadline (`stream_cutoff`) nor by a failed read (`read_failed`).
+    Anything else is `partial` (the bad lines are kept as raw text) or `none`."""
     cases, invalid, seen, dup = [], [], set(), []
     for line in stdout.splitlines():
         m = LATENCY_RE.search(line)
@@ -319,22 +323,27 @@ def parse_latencies(stdout: bytes, truncated: bool = False, stream_cutoff: bool 
         seen.add(case)
         cases.append({"case": case, "latency_ms": ms})
     status = "none" if not cases and not invalid else (
-        "usable" if cases and not invalid and not dup and not truncated and not stream_cutoff else "partial")
-    if status == "none" and stream_cutoff:
+        "usable" if cases and not invalid and not dup and not truncated and not stream_cutoff
+        and not read_failed else "partial")
+    if status == "none" and (stream_cutoff or read_failed):
         status = "partial"                          # nothing parsed in the prefix; the rest was never seen
     return {"status": status, "parsed": status == "usable", "format": "GEAK_RESULT_LATENCY_MS.v1",
             "cases": cases, "invalid": invalid, "duplicate_cases": sorted(set(dup)),
-            "stdout_truncated_for_parse": truncated, "stream_cutoff": stream_cutoff}
+            "stdout_truncated_for_parse": truncated, "stream_cutoff": stream_cutoff,
+            "stream_read_failed": read_failed}
 
 
-def _tee(fd, sink, raw_path, keep, rec, stop):
+def _tee(fd, sink, raw_path, keep, rec, stop, problems):
     """Copy the child's stream to our own stream and the raw file. Every recorder-side failure is
-    recorded, never raised: an uncaught thread exception would print into our stderr."""
+    recorded, never raised: an uncaught thread exception would print into our stderr. `problems`
+    collects what makes this stream's capture incomplete (raw_* = the raw file only; read_failed =
+    the stream itself was not fully read)."""
     raw = None
     try:
         raw = open(raw_path, "wb", buffering=0)        # unbuffered: a full disk fails at write, not close
     except OSError as exc:
         rec.error("raw open %s: %s" % (raw_path, exc))
+        problems.append("raw_open_failed")
     kept, truncated = 0, False
     try:
         while not stop.is_set():                            # checked every pass, data or not
@@ -342,6 +351,7 @@ def _tee(fd, sink, raw_path, keep, rec, stop):
                 ready, _, _ = select.select([fd], [], [], 0.2)
             except (OSError, ValueError) as exc:
                 rec.error("select: %s" % exc)
+                problems.append("read_failed")
                 break
             if not ready:
                 continue
@@ -349,6 +359,7 @@ def _tee(fd, sink, raw_path, keep, rec, stop):
                 chunk = os.read(fd, 65536)
             except OSError as exc:
                 rec.error("read: %s" % exc)
+                problems.append("read_failed")
                 break
             if not chunk:
                 break
@@ -362,6 +373,7 @@ def _tee(fd, sink, raw_path, keep, rec, stop):
                     raw.write(chunk)
                 except OSError as exc:
                     rec.error("raw write %s: %s" % (raw_path, exc))
+                    problems.append("raw_write_failed")
                     try:
                         raw.close()
                     except OSError:
@@ -376,12 +388,14 @@ def _tee(fd, sink, raw_path, keep, rec, stop):
                     truncated = True                        # raw file still has every byte
     except Exception as exc:  # noqa: BLE001 - last resort: record, never print
         rec.error("tee: %s: %s" % (type(exc).__name__, exc))
+        problems.append("read_failed")
     finally:
         if raw is not None:
             try:
                 raw.close()
             except OSError as exc:
                 rec.error("raw close %s: %s" % (raw_path, exc))
+                problems.append("raw_close_failed")
         if keep is not None and truncated:
             keep.append(None)                               # marker: parse input was truncated
 
@@ -452,10 +466,13 @@ def cmd_run(a) -> int:
         signal.signal(s, forward)
     stop, out_keep = threading.Event(), []
     # Daemon threads: a thread stuck writing to our own (unread) stdout must not keep us alive.
+    problems = {"stdout": [], "stderr": []}
     threads = [threading.Thread(target=_tee, daemon=True, args=(proc.stdout.fileno(), sys.stdout.buffer,
-                                                  os.path.join(raw_dir, inv + ".stdout"), out_keep, rec, stop)),
+                                                  os.path.join(raw_dir, inv + ".stdout"), out_keep, rec, stop,
+                                                  problems["stdout"])),
                threading.Thread(target=_tee, daemon=True, args=(proc.stderr.fileno(), sys.stderr.buffer,
-                                                  os.path.join(raw_dir, inv + ".stderr"), None, rec, stop))]
+                                                  os.path.join(raw_dir, inv + ".stderr"), None, rec, stop,
+                                                  problems["stderr"]))]
     for t in threads:
         t.start()
     rc = proc.wait()
@@ -463,7 +480,11 @@ def cmd_run(a) -> int:
     deadline = time.monotonic() + DRAIN_GRACE_S
     for t in threads:
         t.join(max(0.0, deadline - time.monotonic()))
-    held = any(t.is_alive() for t in threads)     # descendants still hold or feed the streams
+    still = {"stdout": threads[0].is_alive(), "stderr": threads[1].is_alive()}
+    held = any(still.values())                    # descendants still hold or feed the streams
+    for name, alive in still.items():
+        if alive:
+            problems[name].append("drain_cutoff")
     stop.set()
     for t in threads:
         t.join(2.0)                                 # each pass re-checks `stop` within ~0.2 s
@@ -475,8 +496,12 @@ def cmd_run(a) -> int:
                   "child": {"exit": None if sig else rc, "signal": sig, "forwarded_signals": forwarded,
                             "pgid": proc.pid, "wall_s": round(wall, 3),
                             "descendants_held_streams": held, "grouped": grouped}}
-    # Raw files stop at the drain cutoff: what was captured is a prefix, not the whole stream.
-    completion["raw_streams"] = "cutoff_at_drain_deadline" if held else "complete"
+    # Capture status per stream, apart from the child's outcome: a drain cutoff, an unread stream or
+    # a failed raw-file open/write/close each make that stream's raw record incomplete.
+    capture = {n: {"status": "incomplete" if p else "complete", "problems": sorted(set(p))}
+               for n, p in problems.items()}
+    completion["raw_capture"] = capture
+    completion["raw_streams"] = "complete" if all(c["status"] == "complete" for c in capture.values()) else "incomplete"
     try:
         after = fingerprint(a.workspace, a.baseline, domain, derr, a.rec_dir)
         completion["source_after"] = after
@@ -488,7 +513,11 @@ def cmd_run(a) -> int:
         completion["source_status"] = "incomplete"
     truncated = bool(out_keep) and out_keep[-1] is None
     data = b"".join(c for c in out_keep if c is not None)
-    completion["measurement"] = (parse_latencies(data, truncated, stream_cutoff=held)
+    # The parse sees what was READ: a cutoff or read failure on stdout means it saw a prefix. A
+    # failed raw-file write alone does not: the in-memory copy is still the whole stream.
+    out_problems = set(problems["stdout"])
+    completion["measurement"] = (parse_latencies(data, truncated, stream_cutoff="drain_cutoff" in out_problems,
+                                                 read_failed="read_failed" in out_problems)
                                  if a.mode in ("benchmark", "full_benchmark")
                                  else {"status": "not_parsed", "parsed": False, "cases": []})
     # A caller-labelled correctness command's exit status, bound to this source and the named
