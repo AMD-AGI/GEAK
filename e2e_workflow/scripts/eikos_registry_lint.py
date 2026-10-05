@@ -656,6 +656,11 @@ def _structure(schema, where):
     or object keywords next to items) is a structural union: rejected, never half-walked. A schema with
     no type, no structural keyword and no enum (e.g. `{}`) admits ANY value, objects and arrays
     included: it is 'unconstrained', an open boundary, never a scalar."""
+    if not isinstance(schema, dict):
+        raise ValueError("%s: schema is not an object" % where)
+    extra = sorted(set(schema) - SCHEMA_KEYWORDS)           # checked before any shortcut
+    if extra:
+        raise ValueError("%s: unsupported schema keyword(s) %s" % (where, ", ".join(extra)))
     t = schema.get("type")
     if isinstance(t, list) and not t:
         raise ValueError("%s: empty type list" % where)
