@@ -301,6 +301,10 @@ def test_warning_is_silent_when_a_path_cannot_be_stated(tmp_path):
 def test_candidate_homes_follows_the_readers_precedence(tmp_path, monkeypatch):
     (tmp_path / "cfg").mkdir()
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    # candidate_homes() lists only homes that exist, so give the test its own ~/.claude
+    # instead of depending on the machine's (a CI runner has none).
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home" / ".claude").mkdir(parents=True)
     homes = ctm.candidate_homes()
     assert homes[0] == tmp_path / "cfg"
     assert Path.home() / ".claude" in homes
@@ -533,7 +537,9 @@ def test_mirror_trace_throttles_the_mid_run_pass(monkeypatch, tmp_path):
         lambda *a, **kw: calls.append(kw["render"]) or {"status": "ok"},
     )
     monkeypatch.setattr(rx, "TRACE_MIRROR_EVERY_S", 10_000.0)
-    rx._MIRROR_STATE["t"] = 0.0
+    # "Never mirrored". Not 0.0: time.monotonic() counts from boot, so on a machine up for
+    # less than the interval (a fresh CI runner) 0.0 is recent and the first pass throttles.
+    rx._MIRROR_STATE["t"] = float("-inf")
     assert rx._mirror_trace(tmp_path, throttle=True)["status"] == "ok"
     assert rx._mirror_trace(tmp_path, throttle=True)["status"] == "throttled"
     assert calls == [False], "the mid-run pass never renders a report"
