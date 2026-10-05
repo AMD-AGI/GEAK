@@ -652,9 +652,13 @@ def resolve(targets, defs):
 
 
 def _structure(schema, where):
-    """'object', 'array' or 'scalar'. A schema that is both (type ['object','array'], or object
-    keywords next to items) is a structural union: rejected, never half-walked."""
+    """'object', 'array', 'scalar' or 'unconstrained'. A schema that is both (type ['object','array'],
+    or object keywords next to items) is a structural union: rejected, never half-walked. A schema with
+    no type, no structural keyword and no enum (e.g. `{}`) admits ANY value, objects and arrays
+    included: it is 'unconstrained', an open boundary, never a scalar."""
     t = schema.get("type")
+    if isinstance(t, list) and not t:
+        raise ValueError("%s: empty type list" % where)
     types = set(t if isinstance(t, list) else [t]) - {None}
     is_obj = "object" in types or "properties" in schema or "additionalProperties" in schema
     is_arr = "array" in types or "items" in schema
@@ -664,7 +668,17 @@ def _structure(schema, where):
         raise ValueError("%s: object keywords on a schema typed %s" % (where, sorted(types)))
     if types and is_arr and "array" not in types:
         raise ValueError("%s: items on a schema typed %s" % (where, sorted(types)))
-    return "object" if is_obj else "array" if is_arr else "scalar"
+    if is_obj:
+        return "object"
+    if is_arr:
+        return "array"
+    if types:
+        return "scalar"
+    if "enum" in schema:
+        if any(isinstance(v, (dict, list)) for v in schema["enum"]):
+            raise ValueError("%s: enum of objects/arrays is not supported" % where)
+        return "scalar"
+    return "unconstrained"
 
 
 def field_paths(schema, path=""):
@@ -701,6 +715,8 @@ def field_paths(schema, path=""):
             out.append({"path": path + "[].*", "kind": "open_object"})
         elif not isinstance(items, dict):
             raise ValueError("%s: tuple-form items are not supported" % where)
+        elif _structure(items, where + "[]") == "unconstrained":
+            out.append({"path": path + "[].*", "kind": "open_object", "values": "any"})
         elif _structure(items, where + "[]") == "scalar":    # scalar items: one entry, not two
             sub = field_paths(items, path + "[]")
             node["items_type"] = sub[0]["type"]
@@ -709,6 +725,8 @@ def field_paths(schema, path=""):
         else:
             out += field_paths(items, path + "[]")
         return out
+    if shape == "unconstrained":                       # `{}`: any value -> an open boundary
+        return [{"path": path or "*", "kind": "open_object", "values": "any"}]
     leaf = {"path": path, "kind": "leaf", "type": t}
     if "enum" in schema:
         leaf["enum"] = schema["enum"]
