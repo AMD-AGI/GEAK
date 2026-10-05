@@ -180,7 +180,7 @@
    "CLOCK_SCHEMA": {
     "call_sites": [
      [
-      "clock",
+      "clock ${}",
       "Optimize"
      ]
     ],
@@ -196,7 +196,7 @@
    "EIKOS_ENVELOPE_SCHEMA": {
     "call_sites": [
      [
-      "eikos:round_continue",
+      "eikos:round_continue r${}",
       "Optimize"
      ]
     ],
@@ -286,11 +286,17 @@
      "prior_state.best_per_case[].dims[]": {
       "class": "identity"
      },
+     "prior_state.best_per_case[].dims[][]": {
+      "class": "identity"
+     },
      "prior_state.best_per_case[].dtypes[]": {
       "class": "identity"
      },
      "prior_state.best_per_case[].weight_source": {
       "class": "identity"
+     },
+     "prior_state.best_per_case[].*": {
+      "class": "open_object"
      },
      "prior_state.*": {
       "class": "open_object"
@@ -303,7 +309,7 @@
    "AUTHOR_SCHEMA": {
     "call_sites": [
      [
-      "author:",
+      "author:${}",
       "Author"
      ]
     ],
@@ -454,7 +460,7 @@
       "Profile"
      ],
      [
-      "reprofile",
+      "reprofile r${}",
       "Optimize"
      ],
      [
@@ -553,7 +559,7 @@
    "RESEARCH_QUESTION_SCHEMA": {
     "call_sites": [
      [
-      "researcher:q",
+      "researcher:q ${}${}",
       "Research"
      ]
     ],
@@ -801,11 +807,11 @@
    "VERIFY_SCHEMA": {
     "call_sites": [
      [
-      "verify",
+      "verify ${}${}",
       "Verify"
      ],
      [
-      "warm_start:verify",
+      "warm_start:verify c${}",
       "WarmStart"
      ]
     ],
@@ -851,11 +857,17 @@
      "per_case[].dims[]": {
       "class": "identity"
      },
+     "per_case[].dims[][]": {
+      "class": "identity"
+     },
      "per_case[].dtypes[]": {
       "class": "identity"
      },
      "per_case[].weight_source": {
       "class": "identity"
+     },
+     "per_case[].*": {
+      "class": "open_object"
      },
      "variance_note": {
       "class": "free_text"
@@ -875,11 +887,11 @@
    "COMMIT_SCHEMA": {
     "call_sites": [
      [
-      "commit",
+      "commit r${}",
       "Merge"
      ],
      [
-      "warm_start:adopt",
+      "warm_start:adopt c${}",
       "WarmStart"
      ]
     ],
@@ -920,11 +932,11 @@
    "PLAN_SCHEMA": {
     "call_sites": [
      [
-      "tech_lead:plan",
+      "tech_lead:plan r${}",
       "Optimize"
      ],
      [
-      "tech_lead:replan",
+      "tech_lead:replan r${}#${}",
       "Optimize"
      ]
     ],
@@ -978,7 +990,7 @@
    "ENG_SCHEMA": {
     "call_sites": [
      [
-      "<dynamic>",
+      "${} ${}:${}",
       "Optimize"
      ]
     ],
@@ -1029,11 +1041,17 @@
      "per_case[].dims[]": {
       "class": "identity"
      },
+     "per_case[].dims[][]": {
+      "class": "identity"
+     },
      "per_case[].dtypes[]": {
       "class": "identity"
      },
      "per_case[].weight_source": {
       "class": "identity"
+     },
+     "per_case[].*": {
+      "class": "open_object"
      },
      "status": {
       "class": "measurement_report",
@@ -1056,7 +1074,7 @@
    "INTEGRATE_SCHEMA": {
     "call_sites": [
      [
-      "integrate",
+      "integrate r${}",
       "Merge"
      ]
     ],
@@ -1092,7 +1110,7 @@
    "MEMORY_SCHEMA": {
     "call_sites": [
      [
-      "tech_lead:memory",
+      "tech_lead:memory r${}",
       "Optimize"
      ]
     ],
@@ -1122,7 +1140,7 @@
    "inline:storage:reclaim@Optimize": {
     "call_sites": [
      [
-      "storage:reclaim",
+      "storage:reclaim r${}",
       "Optimize"
      ]
     ],
@@ -1191,11 +1209,17 @@
      "per_case[].dims[]": {
       "class": "identity"
      },
+     "per_case[].dims[][]": {
+      "class": "identity"
+     },
      "per_case[].dtypes[]": {
       "class": "identity"
      },
      "per_case[].weight_source": {
       "class": "identity"
+     },
+     "per_case[].*": {
+      "class": "open_object"
      },
      "*": {
       "class": "open_object"
@@ -1260,11 +1284,17 @@
      "per_case[].dims[]": {
       "class": "identity"
      },
+     "per_case[].dims[][]": {
+      "class": "identity"
+     },
      "per_case[].dtypes[]": {
       "class": "identity"
      },
      "per_case[].weight_source": {
       "class": "identity"
+     },
+     "per_case[].*": {
+      "class": "open_object"
      },
      "applied_to_original": {
       "class": "action_report"
@@ -1620,7 +1650,7 @@
    "CHECKPOINT_WRITE_SCHEMA": {
     "call_sites": [
      [
-      "persist-e2e-checkpoint:",
+      "persist-e2e-checkpoint:${}",
       ""
      ]
     ],
@@ -1674,11 +1704,11 @@
       ""
      ],
      [
-      "<dynamic>",
+      "${} (finish ${})",
       ""
      ],
      [
-      "integrate",
+      "integrate ${} g${}",
       "HeadKernel"
      ]
     ],
@@ -1735,7 +1765,7 @@
    "SURGEON_SCHEMA": {
     "call_sites": [
      [
-      "surgeon",
+      "surgeon ${} (${})",
       ""
      ]
     ],
@@ -1991,7 +2021,7 @@
       "Profile"
      ],
      [
-      "profiler:reprofile",
+      "profiler:reprofile m${}",
       "Profile"
      ]
     ],
@@ -2232,7 +2262,15 @@
    "EXTRACT_OP_SCHEMA": {
     "call_sites": [
      [
-      "extract_op",
+      "extract_op ${}",
+      "HeadKernel"
+     ],
+     [
+      "extract_op ${}",
+      "HeadKernel"
+     ],
+     [
+      "extract_op ${}",
       "HeadKernel"
      ]
     ],
@@ -2306,7 +2344,15 @@
    "OPBENCH_SCHEMA": {
     "call_sites": [
      [
-      "bakeoff",
+      "bakeoff ${}",
+      "HeadKernel"
+     ],
+     [
+      "bakeoff ${}",
+      "HeadKernel"
+     ],
+     [
+      "bakeoff ${}",
       "HeadKernel"
      ]
     ],
@@ -2392,7 +2438,7 @@
    "ROOFLINE_SCHEMA": {
     "call_sites": [
      [
-      "roofline",
+      "roofline ${}",
       "HeadKernel"
      ]
     ],
@@ -2413,7 +2459,7 @@
    "HARVEST_SCHEMA": {
     "call_sites": [
      [
-      "harvest",
+      "harvest ${} ${}",
       "HeadKernel"
      ]
     ],
@@ -2453,11 +2499,11 @@
    "OKV": {
     "call_sites": [
      [
-      "curate",
+      "curate ${} ${}",
       "HeadKernel"
      ],
      [
-      "feedback",
+      "feedback g${}",
       "HeadKernel"
      ]
     ],
@@ -2482,7 +2528,7 @@
    "inline:reprofile@HeadKernel": {
     "call_sites": [
      [
-      "reprofile",
+      "reprofile g${}",
       "HeadKernel"
      ]
     ],
@@ -2501,7 +2547,7 @@
    "PLAN_SCHEMA": {
     "call_sites": [
      [
-      "architect:plan",
+      "architect:plan m${}",
       "Milestone"
      ]
     ],
@@ -2542,7 +2588,7 @@
    "EXTRACT_SCHEMA": {
     "call_sites": [
      [
-      "extract",
+      "extract ${}",
       "Milestone"
      ]
     ],
@@ -2613,12 +2659,12 @@
    "EXPERIENCE_SCHEMA": {
     "call_sites": [
      [
-      "architect:experience",
-      "Milestone"
+      "architect:experience final",
+      "Validate"
      ],
      [
-      "architect:experience",
-      "Validate"
+      "architect:experience m${}",
+      "Milestone"
      ]
     ],
     "fields": {
