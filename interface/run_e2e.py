@@ -1883,6 +1883,7 @@ def _invoke_via_sdk(
     prompt: str, timeout_s: int, eval_dir: str | None = None,
     *, workflow_request: dict | None = None, settings_profile: str | None = None,
     native_cwd: str | None = None,
+    quality_stop_controller=None,
 ) -> str:
     """Drive the JS workflow through the SDK, version-robustly.
 
@@ -1936,6 +1937,15 @@ def _invoke_via_sdk(
 
     cache_enabled = os.environ.get("GEAK_SHARED_TOOL_CACHE", "").strip().lower() in {"1", "true", "yes", "on"}
     helpers_enabled = os.environ.get("GEAK_LOCAL_HELPERS", "").strip().lower() in {"1", "true", "yes", "on"}
+    if quality_stop_controller is not None:
+        if helpers_enabled or cache_enabled or settings_profile != "isolated" or workflow_request is None or ClaudeSDKClient is None:
+            raise ValueError("Quality stopping requires isolated native settings with helper and cache controls disabled.")
+        try:
+            from native_cost_controls.sdk_quality_stop import QualityStopSDKClient
+        except ModuleNotFoundError:
+            from interface.native_cost_controls.sdk_quality_stop import QualityStopSDKClient
+    elif workflow_request is not None and workflow_request.get("args", {}).get("quality_stop") is not None:
+        raise ValueError("Quality stopping requires a trusted host controller.")
     if cache_enabled:
         try:
             from native_cost_controls.sdk_cache import CachedSDKClient, cached_query
@@ -1951,6 +1961,9 @@ def _invoke_via_sdk(
             from interface.native_cost_controls.sdk_helpers import WorkflowSDKClient
 
     def _client(options):
+        if quality_stop_controller is not None:
+            return QualityStopSDKClient(ClaudeSDKClient, options, workflow_request=workflow_request,
+                source_root=GEAK_ROOT / "kernel_workflow", controller=quality_stop_controller)
         if helpers_enabled and workflow_request is not None:
             return WorkflowSDKClient(ClaudeSDKClient, options, helpers_enabled=True, cache_enabled=cache_enabled,
                 workflow_request=workflow_request, source_root=GEAK_ROOT / "kernel_workflow")
@@ -2020,7 +2033,9 @@ def _invoke_via_sdk(
                         of = getattr(msg, "output_file", None)
                         if of:
                             try:
-                                native_output = Path(of).read_text(encoding="utf-8")
+                                boundary = getattr(quality_stop_controller, "boundary", None)
+                                native_output = (boundary.read_native_output(of) if boundary is not None
+                                                 else Path(of).read_text(encoding="utf-8"))
                                 chunks.append(native_output)
                                 if (workflow_request is not None and getattr(msg, "task_id", None) in kernel_tasks
                                         and getattr(msg, "status", None) == "completed"):
@@ -2086,6 +2101,12 @@ def _invoke_via_sdk(
                         if _workflow_done_on_disk(eval_dir):
                             break
                         await anyio.sleep(DONE_POLL_S)
+                if quality_stop_controller is not None:
+                    if not bg_started or kernel_return is None:
+                        raise WorkflowParseError("Quality stopping requires a bound asynchronous native Workflow result.")
+                    # The OS boundary must inspect the pinned, live CLI before
+                    # disconnecting it. Its final check seals later actor writes.
+                    quality_stop_controller.confirm_native_return(kernel_return)
         if workflow_request is not None and bg_started:
             if kernel_return is None:
                 raise WorkflowParseError("The native kernel Workflow did not return a bound result.")

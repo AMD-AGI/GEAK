@@ -21,7 +21,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # CI / local mirror of the L0 pytest job: `pip install -e ".[dev]"`.
-dev = ["pytest", "pytest-cov>=5.0", "coverage>=7.0"]
+dev = ["pytest", "pytest-cov>=5.0", "coverage>=7.0", "cryptography>=46.0.5"]
+# The optional quality controller signs decisions outside the native actor.
+quality-stop = ["cryptography>=46.0.5"]
 
 [project.urls]
 Homepage = "https://github.com/AMD-AGI/GEAK"
