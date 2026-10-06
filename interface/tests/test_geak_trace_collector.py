@@ -2045,3 +2045,438 @@ class LegacyPositionMigrationTest(unittest.TestCase):
         legacy = [b for b in migrated if b.get("source_pos") is None]
         self.assertEqual(len(legacy), 1)
         self.assertTrue(legacy[0]["legacy_position_unresolved"])
+
+
+# --------------------------------------------------------------------------- #
+# Command line, run identity, and failure containment
+# --------------------------------------------------------------------------- #
+from unittest import mock  # noqa: E402
+
+
+def _fake_claude_home(root, runs):
+    """A Claude home holding workflow records and their transcript dirs.
+
+    ``runs`` items: dict(run_id, status, args[, session, ts, journal_result]).
+    Returns (home, {run_id: workflow_dir}).
+    """
+    home = os.path.join(root, "claude-home")
+    dirs = {}
+    for r in runs:
+        sess = os.path.join(home, "projects", "p", r.get("session", "s1"))
+        os.makedirs(os.path.join(sess, "workflows"), exist_ok=True)
+        wf = os.path.join(sess, "subagents", "workflows", r["run_id"])
+        os.makedirs(wf, exist_ok=True)
+        with open(os.path.join(wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_rec(type="launched") + "\n")
+            fh.write(_rec(type="started", key="k", agentId="a1", label="director:setup",
+                          phase="Setup") + "\n")
+            if r.get("journal_result", True):
+                fh.write(_rec(type="result", key="k", agentId="a1", result={"ok": True}) + "\n")
+        with open(os.path.join(wf, "agent-a1.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_asst("m1", [{"type": "text", "text": "hi"}],
+                           usage={"output_tokens": 2}) + "\n")
+        rec = {"runId": r["run_id"], "status": r["status"], "args": r["args"],
+               "timestamp": r.get("ts", "2026-10-06T00:00:00Z")}
+        with open(os.path.join(sess, "workflows", r["run_id"] + ".json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        dirs[r["run_id"]] = wf
+    return home, dirs
+
+
+class _HomeIsolated(unittest.TestCase):
+    """Point the record scan at a private Claude home, never the machine's."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-cli-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.exp = os.path.join(self.dir, "exp")
+        os.makedirs(self.exp)
+        self.out = os.path.join(self.dir, "out")
+
+    def _home(self, runs):
+        home, dirs = _fake_claude_home(self.dir, runs)
+        empty = os.path.join(self.dir, "empty-user-home")
+        os.makedirs(empty, exist_ok=True)
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home, "HOME": empty})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return dirs
+
+    def _status(self, path):
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+
+class CollectorCliTest(_HomeIsolated):
+    def test_an_output_target_is_required(self):
+        with self.assertRaises(SystemExit):
+            C.main(["--workflow-dir", self.dir])
+
+    def test_a_workflow_dir_or_an_identity_is_required(self):
+        with self.assertRaises(SystemExit):
+            C.main(["--out-dir", self.out])
+
+    def test_a_known_workflow_dir_is_collected_once(self):
+        dirs = self._home([{"run_id": "wf_a", "status": "completed", "args": {"exp_root": self.exp}}])
+        self.assertEqual(C.main(["--workflow-dir", dirs["wf_a"], "--out-dir", self.out,
+                                 "--no-mirror"]), 0)
+        with open(os.path.join(self.out, "geak_trace_wf_a.json"), encoding="utf-8") as fh:
+            trace = json.load(fh)
+        self.assertEqual(trace["run"]["run_id"], "wf_a")
+        self.assertFalse(os.path.exists(os.path.join(self.out, "geak_trace_sources_wf_a")))
+
+    def test_sources_are_mirrored_by_default_beside_the_trace(self):
+        dirs = self._home([{"run_id": "wf_a", "status": "completed", "args": {"exp_root": self.exp}}])
+        C.main(["--workflow-dir", dirs["wf_a"], "--out-dir", self.out])
+        mirror = os.path.join(self.out, "geak_trace_sources_wf_a")
+        self.assertTrue(os.path.exists(os.path.join(mirror, "mirror_manifest.json")))
+        self.assertTrue(os.path.exists(os.path.join(mirror, "agent-a1.jsonl")))
+
+    def test_an_unresolved_run_is_recorded_not_raised(self):
+        self._home([])
+        self.assertEqual(C.main(["--exp-root", self.exp, "--out-dir", self.out,
+                                 "--resolve-timeout", "0", "--interval", "0.01"]), 0)
+        status = self._status(os.path.join(self.out, "geak_trace.status.json"))
+        self.assertEqual(status["state"], "unresolved")
+        out_file = os.path.join(self.dir, "t.json")
+        C.main(["--exp-root", self.exp, "--out", out_file, "--resolve-timeout", "0"])
+        self.assertEqual(self._status(out_file + ".status.json")["state"], "unresolved")
+
+    def test_bad_identity_json_warns_and_stays_unresolved(self):
+        self._home([{"run_id": "wf_a", "status": "running",
+                     "args": {"exp_root": self.exp, "geak_launch_nonce": "n1"}}])
+        with mock.patch("sys.stderr") as err:
+            C.main(["--exp-root", self.exp, "--identity-args", "{not json", "--out-dir", self.out,
+                    "--resolve-timeout", "0"])
+        self.assertIn("not JSON", "".join(c.args[0] for c in err.write.call_args_list))
+        self.assertEqual(self._status(os.path.join(self.out, "geak_trace.status.json"))["state"],
+                         "unresolved")
+
+    def test_a_launch_nonce_resolves_this_launch_and_tracks_it(self):
+        self._home([{"run_id": "wf_a", "status": "running",
+                     "args": {"exp_root": self.exp, "geak_launch_nonce": "n1"}},
+                    {"run_id": "wf_b", "status": "running", "session": "s2",
+                     "args": {"exp_root": self.exp, "geak_launch_nonce": "n2"}}])
+        C.main(["--exp-root", self.exp, "--identity-args", json.dumps({"geak_launch_nonce": "n2"}),
+                "--out-dir", self.out, "--resolve-timeout", "0", "--no-mirror"])
+        self.assertTrue(os.path.exists(os.path.join(self.out, "geak_trace_wf_b.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.out, "geak_trace_wf_a.json")))
+
+    def test_any_run_attaches_to_a_completed_record_by_run_id(self):
+        self._home([{"run_id": "wf_done", "status": "completed", "args": {"exp_root": self.exp}}])
+        C.main(["--exp-root", self.exp, "--any-run", "--run-id", "wf_done", "--out-dir", self.out,
+                "--resolve-timeout", "0", "--no-mirror"])
+        self.assertTrue(os.path.exists(os.path.join(self.out, "geak_trace_wf_done.json")))
+
+    def test_render_once_writes_the_tracker_view(self):
+        dirs = self._home([{"run_id": "wf_a", "status": "completed", "args": {"exp_root": self.exp}}])
+        C.main(["--workflow-dir", dirs["wf_a"], "--out-dir", self.out, "--no-mirror", "--render"])
+        self.assertTrue(os.path.exists(os.path.join(self.out, "geak_execution_trace_wf_a.html")))
+
+    def test_watch_runs_until_the_record_is_complete(self):
+        dirs = self._home([{"run_id": "wf_a", "status": "completed", "args": {"exp_root": self.exp}}])
+        C.main(["--workflow-dir", dirs["wf_a"], "--out-dir", self.out, "--no-mirror", "--watch",
+                "--interval", "0.01", "--max-seconds", "5"])
+        status = self._status(os.path.join(self.out, "geak_trace_wf_a.json.status.json"))
+        self.assertEqual(status["state"], "complete")
+
+
+class ResolverIdentityTest(_HomeIsolated):
+    def test_two_live_owners_are_ambiguous_unless_allowed(self):
+        self._home([{"run_id": "wf_old", "status": "running", "args": {"exp_root": self.exp},
+                     "ts": "2026-10-06T00:00:00Z"},
+                    {"run_id": "wf_new", "status": "running", "args": {"exp_root": self.exp},
+                     "ts": "2026-10-06T01:00:00Z", "session": "s2"}])
+        wf, info = C.resolve_workflow_dir(exp_root=self.exp)
+        self.assertIsNone(wf)
+        self.assertIn("ambiguous", info["error"])
+        wf, info = C.resolve_workflow_dir(exp_root=self.exp, allow_ambiguous=True)
+        self.assertEqual(info["run_id"], "wf_new")
+        self.assertEqual(info["identity"], "retrospective")
+        self.assertEqual(info["owned_fields"], ["exp_root"])
+
+    def test_a_nonce_mismatch_is_reported_not_adopted(self):
+        self._home([{"run_id": "wf_a", "status": "running",
+                     "args": {"exp_root": self.exp, "geak_launch_nonce": "other"}}])
+        wf, info = C.resolve_workflow_dir(exp_root=self.exp,
+                                          identity_args={"geak_launch_nonce": "mine"})
+        self.assertIsNone(wf)
+        self.assertEqual(info["args_mismatch_records"], ["wf_a"])
+        self.assertIn("args fingerprint", info["error"])
+
+    def test_args_without_a_nonce_are_not_identity(self):
+        self._home([{"run_id": "wf_a", "status": "running", "args": {"exp_root": self.exp}}])
+        wf, info = C.resolve_workflow_dir(exp_root=self.exp, prospective=True,
+                                          identity_args={"exp_root": self.exp})
+        self.assertIsNone(wf)
+        self.assertIn("identity_gap", info)
+        self.assertIn("integration_gap", info)
+
+    def test_one_nonce_on_two_records_is_ambiguous(self):
+        args = {"exp_root": self.exp, "geak_launch_nonce": "dup"}
+        self._home([{"run_id": "wf_a", "status": "running", "args": args},
+                    {"run_id": "wf_b", "status": "running", "args": args, "session": "s2"}])
+        wf, info = C.resolve_workflow_dir(exp_root=self.exp, prospective=True,
+                                          identity_args={"geak_launch_nonce": "dup"})
+        self.assertIsNone(wf)
+        self.assertIn("same launch nonce", info["error"])
+
+    def test_script_dir_session_and_liveness_filter_owners(self):
+        script = os.path.join(self.dir, "wfdir")
+        self._home([{"run_id": "wf_a", "status": "completed",
+                     "args": {"exp_root": self.exp, "workflow_dir": script}},
+                    {"run_id": "wf_b", "status": "running", "session": "s2",
+                     "args": {"exp_root": self.exp, "workflow_dir": "/elsewhere"}}])
+        wf, info = C.resolve_workflow_dir(exp_root=self.exp, script_dir=script, require_live=True)
+        self.assertIsNone(wf)
+        self.assertEqual(info["skipped_terminal"], 1)
+        self.assertIn("already terminal", info["error"])
+        wf, info = C.resolve_workflow_dir(exp_root=self.exp, session_id="s1")
+        self.assertEqual(info["run_id"], "wf_a")
+
+    def test_an_explicit_run_id_and_an_eval_dir_owner_are_named(self):
+        eval_dir = os.path.join(self.dir, "eval")
+        self._home([{"run_id": "wf_e", "status": "running",
+                     "args": {"exp_root": self.exp, "eval_dir": eval_dir}}])
+        wf, info = C.resolve_workflow_dir(eval_dir=eval_dir, exp_root=self.exp, run_id="wf_e",
+                                          prospective=True)
+        self.assertTrue(wf and wf.endswith("wf_e"))
+        self.assertEqual(info["identity"], "explicit-run-id")
+        self.assertEqual(info["owned_fields"], ["eval_dir", "exp_root"])
+
+    def test_a_nonce_match_is_named_as_such(self):
+        self._home([{"run_id": "wf_n", "status": "running",
+                     "args": {"exp_root": self.exp, "launch_nonce": "z"}}])
+        wf, info = C.resolve_workflow_dir(exp_root=self.exp, prospective=True,
+                                          identity_args={"launch_nonce": "z"})
+        self.assertEqual(info["identity"], "launch-nonce")
+
+    def test_waiting_for_a_record_gives_up_at_the_deadline(self):
+        self._home([])
+        wf, info = C._await_workflow_dir(self.exp, None, None, 0.05, 0.01)
+        self.assertIsNone(wf)
+        self.assertIn("error", info)
+
+    def test_record_start_time_reads_seconds_millis_and_iso(self):
+        self.assertEqual(C._record_start_ms({"startTime": 1_700_000_000}), 1_700_000_000_000)
+        self.assertEqual(C._record_start_ms({"startTime": 1_700_000_000_123}), 1_700_000_000_123)
+        self.assertEqual(C._record_start_ms({"timestamp": "2026-10-06T00:00:00Z"}),
+                         C._iso_to_ms("2026-10-06T00:00:00Z"))
+        self.assertIsNone(C._record_start_ms({"timestamp": "not a time"}))
+        self.assertIsNone(C._record_start_ms({}))
+
+
+class ReasoningAndMergeTest(unittest.TestCase):
+    def test_reasoning_state_distinguishes_absent_unreadable_and_text(self):
+        self.assertEqual(C._reasoning_state([{"type": "text", "text": "x"}])["state"], C.NOT_CAPTURED)
+        self.assertEqual(C._reasoning_state([{"type": "thinking", "thinking": ""}])["state"],
+                         C.RECORDED_UNREADABLE)
+        got = C._reasoning_state([{"type": "thinking", "thinking": "step one"},
+                                  {"type": "redacted_thinking"}])
+        self.assertEqual((got["state"], got["blocks"]), (C.TEXT, 2))
+        self.assertIn("step one", got["text"])
+
+    def test_merge_keeps_whichever_capture_has_more(self):
+        self.assertEqual(C._merge_call({"a": 1}, None), {"a": 1})
+        prev = {"output_text": "", "actions": [{"id": "t1", "name": "Bash", "args_preview": "long args",
+                                                "args_truncated": False, "args_bytes_total": 9}],
+                "reasoning": {"text": "rich", "blocks": 1}, "usage": {"output_tokens": 5}}
+        new = {"output_text": "", "actions": [{"id": "t1", "name": "Bash", "args_preview": "x"},
+                                              {"id": "t2", "name": "Read", "args_preview": ""}],
+               "reasoning": {"text": "", "blocks": 0}, "usage": {"output_tokens": 3}}
+        merged = C._merge_call(prev, new)
+        acts = {a["id"]: a for a in merged["actions"]}
+        self.assertEqual(acts["t1"]["args_preview"], "long args")
+        self.assertIn("t2", acts)
+        self.assertEqual(merged["reasoning"]["text"], "rich")
+
+
+class FailureContainmentTest(unittest.TestCase):
+    """The observer must never fail, or silently mislabel, the run it watches."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-fail-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.wf = os.path.join(self.dir, "sess", "subagents", "workflows", "wf_f")
+        os.makedirs(self.wf)
+        with open(os.path.join(self.wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_rec(type="launched") + "\n")
+            fh.write(_rec(type="started", key="k", agentId="a1", label="x", phase="P") + "\n")
+        with open(os.path.join(self.wf, "agent-a1.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(_asst("m1", [{"type": "text", "text": "hi"}]) + "\n")
+
+    def test_cost_support_merges_a_rates_file_and_survives_a_bad_one(self):
+        rates_path = os.path.join(self.dir, "rates.json")
+        with open(rates_path, "w", encoding="utf-8") as fh:
+            json.dump({"claude-opus-4-8": {"input": 1.0}}, fh)
+        rates, fns = C._load_cost_support(rates_path)
+        self.assertIsNotNone(rates)
+        self.assertEqual(C._load_cost_support(os.path.join(self.dir, "missing.json")), (None, None))
+
+    def test_unpriced_trace_says_unknown_cost_not_zero(self):
+        with mock.patch.object(C, "_load_cost_support", return_value=(None, None)):
+            trace = C.build_trace(self.wf)
+        self.assertTrue(all(a["totals"]["cost_usd"] is None for a in trace["agents"]))
+
+    def test_a_caller_supplied_status_is_labelled_as_such(self):
+        trace = C.build_trace(self.wf, run_status="partial")
+        self.assertEqual((trace["run"]["status"], trace["run"]["status_reason"]),
+                         ("partial", "caller-supplied"))
+
+    def test_a_linkage_failure_becomes_a_warning(self):
+        import geak_trace_events as ev
+        with mock.patch.object(ev, "attach", side_effect=RuntimeError("bad linkage")):
+            trace = C.build_trace(self.wf)
+        self.assertTrue(any("linkage attach failed" in w for w in trace["warnings"]))
+
+    def test_render_failures_return_none(self):
+        import geak_trace_report as tr
+        with mock.patch.object(tr, "write_reports", side_effect=RuntimeError("boom")):
+            self.assertIsNone(C.render_from_trace({"run": {}}, self.dir))
+        with mock.patch.dict(sys.modules, {"geak_trace_report": None}):
+            self.assertIsNone(C.render_from_trace({"run": {}}, self.dir))
+
+    def test_a_failing_pass_is_recorded_and_a_deadline_gives_a_partial(self):
+        out = os.path.join(self.dir, "t.json")
+        status = out + ".status.json"
+        calls = {"n": 0}
+        real = C.collect_once
+
+        def flaky(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient")
+            return real(*a, **kw)
+        with mock.patch.object(C, "collect_once", side_effect=flaky), \
+                mock.patch.object(C, "write_trace", side_effect=OSError("disk")):
+            C.watch(self.wf, out, interval=0.01, max_seconds=0.05, status_path=status)
+        with open(status, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["state"], "partial")
+        self.assertGreaterEqual(calls["n"], 2)
+
+    def test_mirror_reports_its_own_failures(self):
+        with mock.patch.dict(os.environ, {"GEAK_TRACE_MIRROR_MAX_MB": "lots"}):
+            ok = C.mirror_sources(self.wf, os.path.join(self.dir, "m1"))
+        self.assertEqual(ok["run_record"], "absent")
+        self.assertTrue(ok["complete"])
+        with mock.patch.object(C.os, "makedirs", side_effect=OSError("ro")):
+            bad = C.mirror_sources(self.wf, os.path.join(self.dir, "m2"))
+        self.assertIn("cannot create mirror dir", bad["error"])
+
+    def test_mirror_respects_the_byte_budget_when_appending_or_replacing(self):
+        src = os.path.join(self.dir, "src.jsonl")
+        dest = os.path.join(self.dir, "dest.jsonl")
+        with open(src, "w") as fh:
+            fh.write("aaaa")
+        self.assertEqual(C._mirror_one(src, dest, 100)[0], "copied")
+        with open(src, "a") as fh:
+            fh.write("bbbbbbbb")
+        self.assertEqual(C._mirror_one(src, dest, 2)[0], "skipped_budget")       # append too big
+        with open(src, "w") as fh:
+            fh.write("cccc")                                                       # same size, new bytes
+        with open(dest, "w") as fh:
+            fh.write("dddd")
+        self.assertEqual(C._mirror_one(src, dest, 1)[0], "skipped_budget")       # replace too big
+        with open(src, "w") as fh:
+            fh.write("dddd" + "e" * 4)
+        real_open = open
+
+        def failing_open(path, mode="r", *a, **kw):
+            if path == dest and "r+b" in mode:
+                raise OSError("io")
+            return real_open(path, mode, *a, **kw)
+        with mock.patch("builtins.open", side_effect=failing_open):
+            self.assertEqual(C._mirror_one(src, dest, 100)[0], "error")
+
+
+class ReconcileEdgesTest(unittest.TestCase):
+    def test_retain_missing_marks_history_but_leaves_conflicts_alone(self):
+        import geak_trace_reconcile as rc
+        store = rc.Reconciled()
+        store.absorb("a", {"id": 1})
+        store.absorb("b", {"id": 1}, identity_fields=("id",))
+        store.absorb("b", {"id": 2}, identity_fields=("id",))        # contradiction
+        self.assertEqual(store.retain_missing(set()), 1)              # only "a" becomes retained
+        self.assertEqual(store.states["a"], rc.RETAINED)
+        self.assertEqual(store.states["b"], rc.CONFLICTED)
+        self.assertEqual(store.retain_missing(set()), 0)              # already retained
+
+    def test_merge_action_never_loses_a_result_or_shrinks_a_payload(self):
+        import geak_trace_reconcile as rc
+        prev = {"result": {"status": "ok", "preview": "full output"}, "args_preview": "long args",
+                "args_truncated": False, "args_bytes_total": 9}
+        got = rc.merge_action(prev, {"result": {"status": "missing"}, "args_preview": "x"})
+        self.assertEqual(got["result"]["status"], "ok")
+        self.assertEqual(got["args_preview"], "long args")
+        self.assertTrue(got["retained_from_earlier_capture"])
+        got = rc.merge_action(prev, {"result": {"status": "ok", "preview": "short"},
+                                     "args_preview": "long args too"})
+        self.assertEqual(got["result"]["preview"], "full output")
+
+    def test_key_and_block_helpers_handle_empty_and_unknown_shapes(self):
+        import geak_trace_reconcile as rc
+        self.assertIsNone(rc.normalize_invalidation_key("not a key"))
+        self.assertEqual(rc.normalize_invalidation_key(["a", "b"]), ("a", "b"))
+        self.assertEqual(rc.migrate_blocks([]), [])
+
+
+class SmallContractsTest(unittest.TestCase):
+    """Small promises the collector makes about odd input and failing disks."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-small-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def test_preview_accepts_none_objects_and_unserializable_values(self):
+        self.assertEqual(C.preview(None), ("", False, 0))
+        self.assertIn('"a"', C.preview({"a": 1})[0])
+
+        class Odd:
+            def __str__(self):
+                return "odd"
+        with mock.patch.object(C.json, "dumps", side_effect=TypeError("no")):
+            self.assertEqual(C.preview(Odd())[0], "odd")
+
+    def test_args_fingerprint_is_none_when_args_cannot_be_serialized(self):
+        class Bad:
+            def __str__(self):
+                raise RuntimeError("no str")
+        self.assertIsNone(C.args_fingerprint({"x": Bad()}))
+        self.assertEqual(len(C.args_fingerprint({"x": 1})), 64)
+
+    def test_status_and_trace_writes_survive_a_failing_disk(self):
+        status = os.path.join(self.dir, "s.json")
+        with mock.patch.object(C.os, "replace", side_effect=OSError("ro")):
+            doc = C.write_status(status, "running", "r")
+        self.assertEqual(doc["state"], "running")
+        self.assertFalse(os.path.exists(status))
+        with mock.patch.object(C.os, "makedirs", side_effect=OSError("ro")):
+            C.write_trace({"run": {}}, os.path.join(self.dir, "t.json"))
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "t.json")))
+
+    def test_hashing_a_missing_or_short_file_is_none(self):
+        self.assertIsNone(C._sha256_of(os.path.join(self.dir, "missing")))
+        p = os.path.join(self.dir, "short")
+        with open(p, "wb") as fh:
+            fh.write(b"ab")
+        self.assertIsNone(C._sha256_of(p, 10))
+
+    def test_resolver_reports_a_missing_mirror_module_and_a_failed_scan(self):
+        with mock.patch.dict(sys.modules, {"claude_trace_mirror": None}):
+            wf, info = C.resolve_workflow_dir(exp_root=self.dir)
+        self.assertIsNone(wf)
+        self.assertIn("unavailable", info["error"])
+        import claude_trace_mirror as mirror
+        with mock.patch.object(mirror, "candidate_homes", side_effect=OSError("scan")):
+            wf, info = C.resolve_workflow_dir(exp_root=self.dir)
+        self.assertIn("record scan failed", info["error"])
+
+    def test_iso_and_journal_tolerate_junk(self):
+        self.assertIsNone(C._iso_to_ms(None))
+        self.assertIsNone(C._iso_to_ms(123))
+        j = os.path.join(self.dir, "journal.jsonl")
+        with open(j, "w", encoding="utf-8") as fh:
+            fh.write("\n" + _rec(type="started", key="k") + "\n")   # blank line; started with no agent
+        started, results, launched, ordinals = C.read_journal(self.dir)
+        self.assertEqual(started, [])                        # a start that names no agent is ignored

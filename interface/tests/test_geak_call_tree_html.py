@@ -382,3 +382,57 @@ class TestElapsedAndBreakdowns(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------- #
+# Reading, long durations, inferred scope, and the command line
+# --------------------------------------------------------------------------- #
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
+
+
+class TestCliAndEdges(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-ct-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def test_blank_and_corrupt_lines_are_skipped(self):
+        p = os.path.join(self.dir, "c.jsonl")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write('\n{"a": 1}\n{oops\n')
+        self.assertEqual(R.read_calls(p), [{"a": 1}])
+
+    def test_hours_are_shown_for_long_durations(self):
+        self.assertEqual(R._hms(3_725_000), "1h02m05s")
+
+    def test_cli_reports_a_missing_file_and_writes_a_present_one(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(R.main(["--calls", os.path.join(self.dir, "none.jsonl"),
+                                     "--out-dir", self.dir]), 2)
+        self.assertIn("no such file", err.getvalue())
+        p = os.path.join(self.dir, "c.jsonl")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"message_id": "m1", "agent_label": "director:setup",
+                                 "role": "director", "sub_phase": "setup",
+                                 "model": "claude-opus-4-8", "cost_usd": 0.1}) + "\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(R.main(["--calls", p, "--out-dir", self.dir, "--model", "m"]), 0)
+        self.assertIn("wrote", out.getvalue())
+
+    def test_a_journal_inferred_scope_is_called_inferred(self):
+        calls = os.path.join(self.dir, "llm_calls.jsonl")
+        with open(calls, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"message_id": "m1", "agent_label": "director:setup",
+                                 "role": "director", "sub_phase": "setup",
+                                 "model": "claude-opus-4-8", "cost_usd": 0.1}) + "\n")
+        with open(os.path.join(self.dir, "token_stats.json"), "w", encoding="utf-8") as fh:
+            json.dump({"meta": {"complete": True, "warnings": [],
+                                "transcript_scope": "run-scoped-inferred",
+                                "transcript_scope_anchor": "live-journal"}}, fh)
+        _, md_path = R.write(calls, self.dir, "m")
+        with open(md_path, encoding="utf-8") as fh:
+            self.assertIn("INFERRED", fh.read())

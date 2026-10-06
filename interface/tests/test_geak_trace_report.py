@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -289,3 +290,67 @@ class RecordedLinkageRenderTest(unittest.TestCase):
         t["run"]["linkage"]["complete"] = False
         md = R.render_markdown(R.build_view(t))
         self.assertIn("INCOMPLETE", md)
+
+
+# --------------------------------------------------------------------------- #
+# Formatting, phase provenance, warnings and the command line
+# --------------------------------------------------------------------------- #
+import contextlib  # noqa: E402
+import io  # noqa: E402
+
+
+class FormattingTest(unittest.TestCase):
+    def test_unknown_cost_and_long_durations_are_formatted(self):
+        self.assertEqual(R.fmt_usd(None), "—")
+        self.assertEqual(R.fmt_dur(125_000), "2m05s")
+        self.assertEqual(R.fmt_dur(3_725_000), "1h02m05s")
+
+
+class PhaseProvenanceTest(unittest.TestCase):
+    def test_timeline_and_journal_phases_are_used_and_labelled(self):
+        a = _agent("a1", label="director:setup")
+        a["timeline_phase"] = "Setup"
+        b = _agent("a2", label="tech_lead:plan", ordinal=1)
+        b["timeline_phase"] = "Setup"
+        b["timeline_attribution_ambiguous"] = True
+        view = R.build_view(_trace([a, b]))
+        setup = [p for p in view["phases"] if p["name"] == "Setup"][0]
+        self.assertEqual(setup["provenance"], "mixed")
+        self.assertTrue(any("by LABEL position" in w for w in view["warnings"]))
+
+    def test_journal_phases_are_trusted_when_they_distinguish_agents(self):
+        a = _agent("a1", label="x:one")
+        a["journal_phase"] = "Alpha"
+        b = _agent("a2", label="x:two", ordinal=1)
+        b["journal_phase"] = "Beta"
+        view = R.build_view(_trace([a, b]))
+        self.assertEqual([p["provenance"] for p in view["phases"]], ["journal", "journal"])
+        self.assertTrue(any("not inferred from labels" in w for w in view["warnings"]))
+
+    def test_unknown_usage_and_a_failed_outcome_are_warned(self):
+        c = _call()
+        a = _agent("a1", calls=[c])
+        trace = _trace([a])
+        trace["run"]["record_status"] = "failed"
+        with mock.patch.object(R, "build_view", wraps=R.build_view):
+            a["calls"][0]["usage_known"] = False
+            view = R.build_view(trace)
+        self.assertTrue(any("outcome was 'failed'" in w for w in view["warnings"]))
+
+
+class TraceReportCliTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-tr-cli-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def test_cli_renders_and_warns_on_an_unexpected_schema(self):
+        trace = _trace([_agent()])
+        trace["schema"] = "geak.trace/0"
+        path = os.path.join(self.dir, "t.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(trace, fh)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(R.main(["--trace", path, "--out-dir", self.dir]), 0)
+        self.assertIn("unexpected schema", err.getvalue())
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "geak_execution_trace.html")))

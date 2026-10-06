@@ -395,3 +395,52 @@ class LinkageGenerationTest(unittest.TestCase):
     def test_absent_everything_is_still_empty(self):
         events, problems = E.read_events(os.path.join(self.dir, "nope.jsonl"))
         self.assertEqual((events, problems), ([], []))
+
+
+# --------------------------------------------------------------------------- #
+# Malformed input and the no-reconciler fallback
+# --------------------------------------------------------------------------- #
+from unittest import mock  # noqa: E402
+
+
+class MalformedInputTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="geak-ev-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def test_a_non_object_event_is_rejected(self):
+        with self.assertRaises(E.EventError):
+            E.validate(["not", "an", "object"])
+
+    def test_bad_lines_are_reported_and_blank_lines_ignored(self):
+        p = os.path.join(self.dir, "linkage_events.jsonl")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("\n" + json.dumps({"type": "nonsense"}) + "\n" + json.dumps(spawn()) + "\n")
+        good, problems = E.read_events(p)
+        self.assertEqual(len(good), 1)
+        self.assertEqual(problems[0]["line"], 2)
+
+    def test_an_unreadable_file_is_a_problem_not_a_crash(self):
+        p = os.path.join(self.dir, "linkage_events.jsonl")
+        os.makedirs(p)                              # a directory where the file should be
+        good, problems = E.read_events(p)
+        self.assertEqual(good, [])
+        self.assertIn("unreadable", problems[0]["error"])
+
+    def test_without_the_reconciler_one_attempt_decides_and_two_are_unknown(self):
+        def val(evs):
+            out = []
+            for ev in evs:
+                kind, norm = E.validate(ev)
+                norm["_kind"] = kind
+                out.append(norm)
+            return out
+        one = val([spawn(), ret()])
+        two = val([spawn(), ret(), ret(attempt_id="a2", status="error")])
+        with mock.patch.object(E, "_rc", None):
+            edges1 = E.build_edges(one, {"p1", "c1"})[0]
+            edges2 = E.build_edges(two, {"p1", "c1"})[0]
+        self.assertEqual([e["return_status"] for e in edges1 if e["type"] == "agent_spawn"],
+                         ["returned"])
+        self.assertEqual([e["return_status"] for e in edges2 if e["type"] == "agent_spawn"],
+                         ["unknown"])
