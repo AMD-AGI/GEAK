@@ -2339,7 +2339,9 @@ class FailureContainmentTest(unittest.TestCase):
 
     def test_a_failing_pass_is_recorded_and_a_deadline_gives_a_partial(self):
         """Order is fixed by a controlled clock, not by machine speed: pass 1 fails at
-        t=0, pass 2 succeeds at t=5, and the 10 s deadline is reached at t=10."""
+        t=0, passes 2 and 3 succeed at t=5 and t=10, and the 10 s deadline is reached
+        after pass 3. Only the deadline's own trace write fails, so that failure is
+        the one the deadline branch has to absorb."""
         import types
         out = os.path.join(self.dir, "t.json")
         status = out + ".status.json"
@@ -2347,8 +2349,8 @@ class FailureContainmentTest(unittest.TestCase):
         fake_time = types.SimpleNamespace(
             time=lambda: clock[0],
             sleep=lambda s: clock.__setitem__(0, clock[0] + s))   # only sleeping advances time
-        attempts, states = [], []
-        real_collect, real_status = C.collect_once, C.write_status
+        attempts, states, injected = [], [], []
+        real_collect, real_status, real_write = C.collect_once, C.write_status, C.write_trace
 
         def flaky(*a, **kw):
             attempts.append(clock[0])
@@ -2359,15 +2361,32 @@ class FailureContainmentTest(unittest.TestCase):
         def recording_status(path, state, reason=None, **extra):
             states.append((state, reason))
             return real_status(path, state, reason, **extra)
+
+        def deadline_write_fails(trace, path):
+            reason = (trace.get("run") or {}).get("status_reason") or ""
+            if "observer deadline" in reason:
+                injected.append(reason)
+                raise OSError("disk full at the deadline")
+            return real_write(trace, path)
         with mock.patch.object(C, "time", fake_time), \
                 mock.patch.object(C, "collect_once", side_effect=flaky), \
                 mock.patch.object(C, "write_status", side_effect=recording_status), \
-                mock.patch.object(C, "write_trace", side_effect=OSError("disk")):
-            C.watch(self.wf, out, interval=5, max_seconds=10, status_path=status)
+                mock.patch.object(C, "write_trace", side_effect=deadline_write_fails):
+            last = C.watch(self.wf, out, interval=5, max_seconds=10, status_path=status)
         self.assertEqual(attempts, [0.0, 5.0, 10.0])
-        self.assertEqual(states[0][0], "error")                  # the failed pass is recorded
-        self.assertIn("collection pass failed (1 consecutive): transient", states[0][1])
-        self.assertEqual(states[-1][0], "partial")               # then the deadline, not "complete"
+        self.assertEqual(states[0], ("error", "collection pass failed (1 consecutive): transient"))
+        # The run recovered: no further error, a later pass completed (its status is
+        # the trace's own, non-terminal one), and that pass published a trace.
+        self.assertEqual([s for s, _ in states].count("error"), 1)
+        between = [s for s, _ in states[1:-1]]
+        self.assertTrue(between and all(s not in ("error", "partial", "complete") for s in between))
+        self.assertTrue(os.path.exists(out))
+        # The deadline produced a partial trace, and its own write failure was absorbed.
+        self.assertIsNotNone(last)
+        self.assertEqual(last["run"]["status"], "partial")
+        self.assertIn("observer deadline reached", last["run"]["status_reason"])
+        self.assertEqual(len(injected), 1)
+        self.assertEqual(states[-1][0], "partial")
         with open(status, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["state"], "partial")
 
