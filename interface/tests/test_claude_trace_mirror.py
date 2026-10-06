@@ -886,3 +886,97 @@ class TestAnOwnershipClaimNamesWhoMadeIt(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _ev, _home, site = self._site(tmp, {"type": "result", "key": "k7"})
             self.assertEqual(site["owner_provenance"], M.OWNER_UNATTRIBUTED)
+
+
+# --------------------------------------------------------------------------- #
+# Unreadable inputs, torn journals and ambiguous anchors
+# --------------------------------------------------------------------------- #
+from unittest import mock  # noqa: E402
+
+
+class UnreadableAndAmbiguousTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="ctm-edges-")
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_a_home_that_cannot_be_resolved_is_skipped(self):
+        real = Path.resolve
+
+        def flaky(self_, *a, **kw):
+            if self_.name == "bad-home":
+                raise OSError("stale handle")
+            return real(self_, *a, **kw)
+        good = self.tmp / "good-home"
+        good.mkdir()
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(good)}), \
+                mock.patch.object(Path, "resolve", flaky):
+            homes = M.candidate_homes(extra=[self.tmp / "bad-home"])
+        self.assertIn(good.resolve(), homes)
+        self.assertNotIn(self.tmp / "bad-home", homes)
+
+    def test_transcript_usability_ignores_non_transcripts_and_flags_unreadable(self):
+        d = self.tmp / "run"
+        d.mkdir()
+        (d / "agent-1.jsonl").write_text("{}\n", encoding="utf-8")
+        (d / "agent-2.jsonl").write_text("", encoding="utf-8")
+        (d / "journal.jsonl").write_text("{}\n", encoding="utf-8")
+        got = M.transcript_usability(str(d / "*.jsonl"))
+        self.assertEqual([Path(p).name for p in got["usable"]], ["agent-1.jsonl"])
+        self.assertEqual([Path(p).name for p in got["empty"]], ["agent-2.jsonl"])
+        self.assertEqual(M.classify_transcript(d / "gone.jsonl"), "unreadable")
+
+    def test_a_record_without_a_run_id_has_no_transcript_glob(self):
+        self.assertIsNone(M._glob_for_record(self.tmp / "s" / "workflows" / "wf.json", {}))
+
+    def test_journal_claims_skip_torn_and_foreign_rows(self):
+        j = self.tmp / "journal.jsonl"
+        ev = str(self.tmp / "ev")
+        j.write_text("\n".join([
+            "not json at all",
+            "{torn",
+            json.dumps({"type": "result", "result": "a string"}),
+            json.dumps({"type": "result", "result": {"eval_dir": ev}}),
+        ]) + "\n", encoding="utf-8")
+        claims, _ = M._journal_claims(j, ev)
+        self.assertEqual([c.get("eval_dir") for c in claims], [ev])
+        self.assertEqual(M._journal_claims(self.tmp / "missing.jsonl", ev), ([], False))
+
+    def test_owned_sites_and_anchor_need_an_eval_dir(self):
+        self.assertEqual(M._owned_sites([self.tmp], ""), [])
+        self.assertIsNone(M._anchor_top_by_exp_root([self.tmp], ""))
+
+    def test_two_runs_enclosing_an_eval_dir_equally_are_ambiguous(self):
+        exp = str(self.tmp / "exp")
+        # Neither record knows its own eval_dir yet, so both are candidate dispatchers.
+        _home(self.tmp / "h", "s1", "run_a", "/wf", holder_key="workflow_dir", exp_root=exp)
+        _home(self.tmp / "h", "s2", "run_b", "/wf", holder_key="workflow_dir", exp_root=exp)
+        sess = self.tmp / "h" / "projects" / "-home-aditysin-PROJECTS-GEAK" / "s3" / "workflows"
+        sess.mkdir(parents=True)
+        (sess / "wf_norun.json").write_text(json.dumps({"args": {"exp_root": exp}}), encoding="utf-8")
+        got = M._anchor_top_by_exp_root([self.tmp / "h"], os.path.join(exp, "e2e_run"))
+        self.assertEqual(got, M._ANCHOR_AMBIGUOUS)
+
+    def test_nested_lanes_skip_malformed_entries(self):
+        ev = self.tmp / "ev"
+        (ev / "reports" / "trace").mkdir(parents=True)
+        (ev / "reports" / "trace" / "agent_timeline.json").write_text(json.dumps(
+            {"nested": ["junk", {"instance": "/lane/a", "nested": [{"instance": "/lane/b"}]}]}),
+            encoding="utf-8")
+        self.assertEqual(M.nested_lane_dirs(ev), ["/lane/a", "/lane/b"])
+
+    def test_an_unreadable_invocation_is_recorded_not_dropped(self):
+        home = _home(self.tmp / "h", "s1", "run_a", str(self.tmp / "ev"))
+        sess = home / "projects" / "-home-aditysin-PROJECTS-GEAK" / "s1"
+        sites = [{"run_id": "run_a", "session_dir": sess,
+                  "record_path": sess / "workflows" / "wf_run_a.json"}]
+        with mock.patch.object(M, "_sources_at", side_effect=OSError("io")):
+            manifest = M.mirror_invocations(sites, self.tmp / "dest")
+        self.assertTrue(manifest["errors"])
+        self.assertEqual(manifest["invocations"][0]["status"], "unreadable")
+
+    def test_sources_for_a_record_reproduce_its_layout(self):
+        home = _home(self.tmp / "h", "s1", "run_a", str(self.tmp / "ev"))
+        rec = home / "projects" / "-home-aditysin-PROJECTS-GEAK" / "s1" / "workflows" / "wf_run_a.json"
+        pairs = M._sources(rec, "run_a")
+        self.assertTrue(pairs and all(isinstance(rel, Path) for _, rel in pairs))

@@ -38,6 +38,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import contextlib
+import io
+from unittest import mock
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GEAK_ROOT = os.path.dirname(os.path.dirname(SCRIPTS_DIR))
@@ -1595,3 +1598,138 @@ class TestTheRunWindowEndsAtTheLastFlushSeen(LedgerTestBase):
         self.assertIn("observed window", md)
         self.assertIn("last flush seen in the transcripts", md)
         self.assertNotIn("- window: ", md)
+
+
+# --------------------------------------------------------------------------- #
+# Content shapes, unreadable inputs, and the command line
+# --------------------------------------------------------------------------- #
+class TestContentShapes(unittest.TestCase):
+    def test_text_of_handles_none_strings_lists_and_others(self):
+        self.assertEqual(L._text_of(None), "")
+        self.assertEqual(L._text_of({"content": "plain"}), "plain")
+        self.assertEqual(L._text_of({"content": [{"type": "text", "text": "a"}, "junk",
+                                                 {"type": "image"}, {"text": "b"}]}), "a\nb")
+        self.assertEqual(L._text_of({"content": 42}), "")
+
+    def test_content_parts_split_response_and_reasoning(self):
+        self.assertEqual(L._content_parts("nope"), ("", ""))
+        self.assertEqual(L._content_parts({"content": "s"}), ("s", ""))
+        resp, think = L._content_parts({"content": ["junk", {"type": "redacted_thinking"},
+                                                    {"type": "thinking", "thinking": "t"}]})
+        self.assertEqual(think, "[redacted]\nt")
+
+    def test_content_blocks_keep_positions(self):
+        self.assertEqual(L._content_blocks("nope"), [])
+        self.assertEqual(L._content_blocks({"content": "s"}), [("resp", 0, "s")])
+        self.assertEqual(L._content_blocks({"content": ""}), [])
+        got = L._content_blocks({"content": ["junk", {"type": "redacted_thinking"}]})
+        self.assertEqual(got, [("think", 1, "[redacted]")])
+
+    def test_time_helpers_reject_garbage(self):
+        self.assertIsNone(L._iso_to_ms("not-a-time"))
+        self.assertEqual(L._secs(None), "")
+        self.assertEqual(L.row_end_ms({"last_seen_ms": None, "ts_ms": 5}), 5)
+        self.assertEqual(L.row_end_ms({"last_seen_ms": 7, "ts_ms": None}), 7)
+
+
+class TestUnreadableInputs(LedgerTestBase):
+    def test_read_jsonl_skips_blank_lines_and_survives_a_directory(self):
+        path = os.path.join(self.tmp, "x.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write('\n{"a": 1}\n\n')
+        self.assertEqual(list(L.read_jsonl(path)), [{"a": 1}])
+        self.assertEqual(list(L.read_jsonl(self.tmp)), [])
+
+    def test_mentions_is_safe_on_empty_needles_and_unreadable_paths(self):
+        path = os.path.join(self.tmp, "x.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("hello")
+        self.assertTrue(L._mentions(path, ""))
+        self.assertFalse(L._mentions(path, "absent"))
+        self.assertFalse(L._mentions(os.path.join(self.tmp, "missing"), "x"))
+
+    def test_agent_meta_needs_a_jsonl_and_a_described_object(self):
+        self.assertIsNone(L.agent_meta(os.path.join(self.tmp, "agent-a.txt")))
+        base = os.path.join(self.tmp, "agent-b")
+        with open(base + ".meta.json", "w", encoding="utf-8") as fh:
+            json.dump([1, 2], fh)
+        self.assertIsNone(L.agent_meta(base + ".jsonl"))
+        with open(base + ".meta.json", "w", encoding="utf-8") as fh:
+            json.dump({"description": " ", "workflowPhase": ""}, fh)
+        self.assertIsNone(L.agent_meta(base + ".jsonl"))
+
+    def test_a_corrupt_timeline_is_skipped(self):
+        d = os.path.join(self.eval_dir, "reports", "trace")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "agent_timeline.json"), "w", encoding="utf-8") as fh:
+            fh.write("{broken")
+        got = L.load_timeline(self.eval_dir)
+        self.assertEqual(got.get("events") or [], [])
+
+
+class TestAttributionEdges(LedgerTestBase):
+    def test_file_writer_turns_and_driver_turns_are_named(self):
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec("You are a file writer. Write the stats file for %s." % self.eval_dir, 0),
+            asst_rec(1, "msg_w", read=10, out=1, text="ok"),
+        ])
+        write_transcript(os.path.join(self.tdir, "b.jsonl"), [
+            user_rec("orchestrate the run in %s" % self.eval_dir, 2),
+            asst_rec(3, "msg_d", read=10, out=1, text=""),
+        ])
+        write_transcript(os.path.join(self.tdir, "c.jsonl"), [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 4),
+        ])
+        self.put_timeline(timeline([ev("Setup", "director:setup"), {"phase": "X", "label": ""}]))
+        rows, _, _, _ = self.build()
+        roles = {r["message_id"]: r for r in rows}
+        self.assertEqual(roles["msg_w"]["role"], "file_writer")
+        self.assertEqual(roles["msg_d"]["phase"], L.DRIVER)
+
+    def test_excluded_early_calls_are_stated_in_the_markdown(self):
+        rows, agent_rows, agg, meta = self.build()
+        meta["calls_excluded_outside_window"] = 3
+        out = L.write_outputs(self.eval_dir, rows, agent_rows, agg, meta)
+        md = [f for f in os.listdir(out) if f.endswith(".md")]
+        with open(os.path.join(out, md[0]), encoding="utf-8") as fh:
+            self.assertIn("excluded: 3 call(s)", fh.read())
+
+
+class TestLedgerCli(LedgerTestBase):
+    def _transcript(self):
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("director", "setup", self.eval_dir), 0),
+            asst_rec(1, "msg_1", read=1000, out=10, text="done"),
+        ])
+
+    def test_rates_file_is_merged_and_a_bad_one_is_ignored(self):
+        self._transcript()
+        good = os.path.join(self.tmp, "rates.json")
+        with open(good, "w", encoding="utf-8") as fh:
+            json.dump({"claude-opus-4-8": {"cache_read": 0.0}}, fh)
+        self.assertEqual(L.main(["--eval-dir", self.eval_dir, "--transcripts", self.glob()[0],
+                                 "--rates", good, "--quiet"]), 0)
+        bad = os.path.join(self.tmp, "bad.json")
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write("{nope")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            L.main(["--eval-dir", self.eval_dir, "--transcripts", self.glob()[0], "--rates", bad,
+                    "--quiet"])
+        self.assertIn("--rates ignored", err.getvalue())
+
+    def test_summary_names_scope_and_warnings(self):
+        self._transcript()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            L.main(["--eval-dir", self.eval_dir, "--transcripts", self.glob()[0],
+                    "--scope", "partial", "--scope-warning", "lane x unresolved"])
+        self.assertIn("transcript scope = partial", out.getvalue())
+        self.assertIn("incomplete", err.getvalue())
+
+    def test_an_internal_failure_never_fails_the_run(self):
+        err = io.StringIO()
+        with mock.patch.object(L, "build", side_effect=RuntimeError("bug")), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(L.main(["--eval-dir", self.eval_dir, "--quiet"]), 0)
+        self.assertIn("run is unaffected", err.getvalue())

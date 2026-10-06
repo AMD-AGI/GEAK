@@ -428,3 +428,157 @@ class TestAPartialCaptureReachesThePersistedLedger(unittest.TestCase):
                 meta = json.load(fh)["meta"]
             self.assertTrue(meta["complete"])
             self.assertEqual(meta["warnings"], [])
+
+
+# --------------------------------------------------------------------------- #
+# Command line, fallbacks and failure handling
+# --------------------------------------------------------------------------- #
+import contextlib  # noqa: E402
+import io  # noqa: E402
+
+
+class _Isolated(unittest.TestCase):
+    """A private Claude home and HOME, so no real record on this machine is read."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="geak_report_cli_")
+        self.tmp = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+        home = os.path.join(self.tmp, "claude-home")
+        empty = os.path.join(self.tmp, "user-home")
+        os.makedirs(home)
+        os.makedirs(empty)
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home, "HOME": empty})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _transcript(self, name="t"):
+        ev = os.path.join(self.tmp, "run")
+        os.makedirs(ev, exist_ok=True)
+        path = os.path.join(self.tmp, "tx", name, "agent-a.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_transcript(path, [user_rec(prompt_for("director", "setup", ev), 0),
+                                asst_rec(10, "msg_%s" % name, read=1000, out=10, text="done")])
+        return ev, path
+
+
+class TestReportCli(_Isolated):
+    def test_an_eval_dir_or_transcripts_is_required(self):
+        with self.assertRaises(SystemExit):
+            R.main([])
+
+    def test_a_report_is_written_and_its_scope_is_printed(self):
+        ev, path = self._transcript()
+        out = os.path.join(self.tmp, "report")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(R.main(["--eval-dir", ev, "--transcripts", path, "--out-dir", out]), 0)
+        self.assertIn("geak_report: wrote", buf.getvalue())
+        self.assertIn("transcript scope = explicit", buf.getvalue())
+
+    def test_a_failed_report_exits_one(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = R.main(["--eval-dir", os.path.join(self.tmp, "e"),
+                         "--transcripts", os.path.join(self.tmp, "absent", "*.jsonl")])
+        self.assertEqual(rc, 1)
+        self.assertIn("no-capture", err.getvalue())
+
+    def test_persist_copies_the_run_into_the_shared_layout(self):
+        ev, path = self._transcript()
+        shared = os.path.join(self.tmp, "shared")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            R.main(["--eval-dir", ev, "--transcripts", path, "--model", "m1", "--persist",
+                    "--persist-root", shared])
+        self.assertIn("persisted m1", buf.getvalue())
+        self.assertTrue(os.path.isdir(os.path.join(shared, "m1")))
+
+
+class TestRunPaths(_Isolated):
+    def test_without_an_eval_dir_a_temporary_one_is_used(self):
+        _, path = self._transcript()
+        out = os.path.join(self.tmp, "out")
+        res = R.run(transcripts=[path], out_dir=out, model="m")
+        self.assertEqual(res["status"], "ok")
+        self.assertTrue(os.path.isfile(res["html"]))
+
+    def test_a_rates_file_reaches_the_ledger(self):
+        ev, path = self._transcript()
+        rates = os.path.join(self.tmp, "rates.json")
+        with open(rates, "w", encoding="utf-8") as fh:
+            json.dump({"claude-opus-4-8": {"input": 1.0, "output": 1.0}}, fh)
+        with mock.patch.object(R, "_run_ledger", wraps=R._run_ledger) as led:
+            R.run(eval_dir=ev, transcripts=[path], rates_path=rates, model="m")
+        self.assertEqual(led.call_args.args[2], rates)
+
+    def test_a_ledger_that_writes_nothing_is_reported(self):
+        ev, path = self._transcript()
+        with mock.patch.object(R, "_run_ledger", return_value=None):
+            res = R.run(eval_dir=ev, transcripts=[path], model="m")
+        self.assertEqual(res["status"], "no-calls")
+
+
+class TestFallbacks(_Isolated):
+    def test_model_name_falls_back_to_the_run_directory(self):
+        with mock.patch.object(M, "_model_name", side_effect=RuntimeError("x")):
+            self.assertEqual(R._model_name("/runs/e2e_qwen3_20261006_120000_ab_cd"), "qwen3")
+            self.assertEqual(R._model_name("/runs/my_run"), "my_run")
+
+    def test_scope_helpers_degrade_without_the_mirror(self):
+        with mock.patch.dict(sys.modules, {"claude_trace_mirror": None}):
+            self.assertEqual(R._nested_eval_dirs(self.tmp), [])
+            self.assertIsNone(R._resolve_scope(self.tmp, ()))
+        with mock.patch.object(M, "nested_lane_dirs", side_effect=RuntimeError("x")):
+            self.assertEqual(R._nested_eval_dirs(self.tmp), [])
+        with mock.patch.object(M, "resolve_run_scope", side_effect=RuntimeError("x")):
+            self.assertIsNone(R._resolve_scope(self.tmp, ()))
+
+    def test_run_id_without_message_ids_is_derived_from_the_ledger_path(self):
+        calls = os.path.join(self.tmp, "llm_calls.jsonl")
+        with open(calls, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"model": "m"}) + "\n")
+        a = R._run_id(calls)
+        self.assertTrue(a.startswith("run-"))
+        self.assertEqual(a, R._run_id(calls))
+
+    def test_a_failed_promotion_rolls_back_to_the_prior_export(self):
+        shared = os.path.join(self.tmp, "shared")
+        dst, _ = _run_export(self.tmp, "same", 2, shared)
+        real_replace = os.replace
+
+        def fail_on_stage(src, dst_):
+            if ".stage-" in str(src):
+                raise OSError("disk full")
+            return real_replace(src, dst_)
+        with mock.patch.object(R.os, "replace", side_effect=fail_on_stage):
+            with self.assertRaises(OSError):
+                _run_export(self.tmp, "same", 3, shared)
+        self.assertTrue(os.path.isdir(dst))
+        model_dir = os.path.dirname(dst)
+        self.assertEqual([d for d in os.listdir(model_dir) if ".stage-" in d or ".old-" in d], [])
+
+
+class TestExecutionTraceFallbacks(_Isolated):
+    def _tracked(self, report_dir):
+        import geak_trace_collector as C
+        wf = os.path.join(self.tmp, "sess", "subagents", "workflows", "wf_t")
+        os.makedirs(wf)
+        with open(os.path.join(wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "launched"}) + "\n")
+        os.makedirs(report_dir, exist_ok=True)
+        C.write_trace(C.build_trace(wf), os.path.join(report_dir, "geak_trace.json"))
+
+    def test_without_sources_the_tracked_trace_is_summarised(self):
+        rep = os.path.join(self.tmp, "report")
+        self.assertEqual(R._write_execution_trace(self.tmp, rep)["status"], "no-workflow-record")
+        self._tracked(rep)
+        got = R._write_execution_trace(self.tmp, rep)
+        self.assertEqual((got["status"], got["run_id"]), ("ok-from-tracked-data", "wf_t"))
+
+    def test_trace_failures_never_break_the_report(self):
+        import geak_trace_collector as C
+        with mock.patch.dict(sys.modules, {"geak_trace_collector": None}):
+            self.assertIsNone(R._write_execution_trace(self.tmp, self.tmp))
+        with mock.patch.object(C, "resolve_workflow_dir", side_effect=RuntimeError("scan")):
+            self.assertEqual(R._write_execution_trace(self.tmp, self.tmp)["status"], "error")
