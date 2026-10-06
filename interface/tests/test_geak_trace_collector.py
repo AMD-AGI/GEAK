@@ -2338,22 +2338,38 @@ class FailureContainmentTest(unittest.TestCase):
             self.assertIsNone(C.render_from_trace({"run": {}}, self.dir))
 
     def test_a_failing_pass_is_recorded_and_a_deadline_gives_a_partial(self):
+        """Order is fixed by a controlled clock, not by machine speed: pass 1 fails at
+        t=0, pass 2 succeeds at t=5, and the 10 s deadline is reached at t=10."""
+        import types
         out = os.path.join(self.dir, "t.json")
         status = out + ".status.json"
-        calls = {"n": 0}
-        real = C.collect_once
+        clock = [0.0]
+        fake_time = types.SimpleNamespace(
+            time=lambda: clock[0],
+            sleep=lambda s: clock.__setitem__(0, clock[0] + s))   # only sleeping advances time
+        attempts, states = [], []
+        real_collect, real_status = C.collect_once, C.write_status
 
         def flaky(*a, **kw):
-            calls["n"] += 1
-            if calls["n"] == 1:
+            attempts.append(clock[0])
+            if len(attempts) == 1:
                 raise RuntimeError("transient")
-            return real(*a, **kw)
-        with mock.patch.object(C, "collect_once", side_effect=flaky), \
+            return real_collect(*a, **kw)
+
+        def recording_status(path, state, reason=None, **extra):
+            states.append((state, reason))
+            return real_status(path, state, reason, **extra)
+        with mock.patch.object(C, "time", fake_time), \
+                mock.patch.object(C, "collect_once", side_effect=flaky), \
+                mock.patch.object(C, "write_status", side_effect=recording_status), \
                 mock.patch.object(C, "write_trace", side_effect=OSError("disk")):
-            C.watch(self.wf, out, interval=0.01, max_seconds=0.05, status_path=status)
+            C.watch(self.wf, out, interval=5, max_seconds=10, status_path=status)
+        self.assertEqual(attempts, [0.0, 5.0, 10.0])
+        self.assertEqual(states[0][0], "error")                  # the failed pass is recorded
+        self.assertIn("collection pass failed (1 consecutive): transient", states[0][1])
+        self.assertEqual(states[-1][0], "partial")               # then the deadline, not "complete"
         with open(status, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["state"], "partial")
-        self.assertGreaterEqual(calls["n"], 2)
 
     def test_mirror_reports_its_own_failures(self):
         with mock.patch.dict(os.environ, {"GEAK_TRACE_MIRROR_MAX_MB": "lots"}):
