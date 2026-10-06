@@ -1659,6 +1659,15 @@ class TestClassifyError(_RunE2ECase):
         )
         self.assertEqual(rx._classify_error(ValueError("other")), "runner_error")
 
+    def test_a_usage_limit_notice_is_a_rate_limit_not_a_parse_error(self):
+        """The session ends on Claude Code's limit notice with no workflow return,
+        so the parse error carries the notice and must classify as rate_limit."""
+        notice = rx.WorkflowParseError(
+            "Could not parse a JSON workflow return (with eval_dir) from the agent output. "
+            "Last 2000 chars:\nYou've hit your session limit · resets 4:40am (UTC)"
+        )
+        self.assertEqual(rx._classify_error(notice), "rate_limit")
+
 
 # =========================================================================== #
 # SDK invocation + completion gate

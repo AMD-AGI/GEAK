@@ -423,6 +423,15 @@ def test_no_baseline_still_errors(tmp_path):
     assert rx._recover_completed_no_gain(eval_dir) is None
 
 
+def test_a_run_that_died_before_finalize_is_not_reported_as_no_gain(tmp_path):
+    """A measured baseline without the Finalize bundle is a run cut off mid-optimization
+    (a usage limit, a crash), not one that concluded nothing helps: no no_gain synthesis."""
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    (eval_dir / "final" / "final_launch.sh").unlink()
+    assert rx._recover_completed_no_gain(eval_dir) is None
+    assert rx._recover_workflow_return(eval_dir.parent) is None
+
+
 def test_workflow_done_marker_ignores_final_launch(tmp_path):
     """final/final_launch.sh (Finalize, pre-Validate) must NOT count as done;
     only the post-Validate terminal markers (director_e2e_validation.json /
