@@ -1,6 +1,6 @@
 {
  "version": "decision_registry.v1",
- "reviewed_source": "feat/geak-jev b229e992",
+ "reviewed_source": "main 243cb77a + feat/geak-jev (rebased 2026-10-06)",
  "design": "research/eikos_hard_rule_proposal_20261005.md rev 2 (accepted by Astra 2026-10-05)",
  "scope": "registered explicit decision sites only; record-only; capture not implemented for any decision yet; a consultation counts only with a valid replay receipt",
  "classes": {
@@ -303,6 +303,22 @@
      },
      "*": {
       "class": "open_object"
+     },
+     "device_gfx": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
+     },
+     "device_target": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
+     },
+     "device_name": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
+     },
+     "physical_cu_count": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
      }
     }
    },
@@ -1068,6 +1084,10 @@
      },
      "*": {
       "class": "open_object"
+     },
+     "measurement_valid": {
+      "class": "derived_fact",
+      "policy": "kernel_workflow/roles/engineer.md:148 (true only when the result used current-candidate sources and a valid measurement); the lane branches on it at kernel_lane.js:1771"
      }
     }
    },
@@ -1502,6 +1522,22 @@
      },
      "*": {
       "class": "open_object"
+     },
+     "device_gfx": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
+     },
+     "device_target": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
+     },
+     "device_name": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
+     },
+     "physical_cu_count": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
      }
     }
    },
@@ -1851,6 +1887,18 @@
      },
      "*": {
       "class": "open_object"
+     },
+     "device_target": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
+     },
+     "device_name": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
+     },
+     "physical_cu_count": {
+      "class": "identity",
+      "note": "device identity reported by the agent; the lane validates it against expected_* args"
      }
     }
    },
