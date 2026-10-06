@@ -941,16 +941,21 @@ It prints one JSON object. Return that object unchanged as StructuredOutput. Do 
 }
 
 // The shadow call at the effective decision point. The TechLead's decision is already final here.
-async function eikosShadowRound(roundNo, snap, firstChoice, finalPlan, forcedThisRound, leftS) {
-  const finalChoice = eikosRawChoice(finalPlan);
+// rawFinal / hostReason: when the harness itself changes the plan after the model answered (e.g. the
+// unknown-peaks filter empties it), the model's own final choice is read BEFORE that change and the
+// host's own stop reason is recorded, so a harness stop is never filed as the model's choice.
+async function eikosShadowRound(roundNo, snap, firstChoice, finalPlan, forcedThisRound, leftS,
+                                rawFinal, hostReason) {
+  const finalChoice = eikosRawChoice(finalPlan);          // what the host acts on
   const effective = finalChoice === 'continue' ? 'continue' : 'stop';
   const exhausted = DEADLINE_EPOCH && Number.isFinite(leftS) && leftS > NO_STOP_S && forcedReplans >= MAX_FORCED_REPLANS;
   const rec = {
     decision: 'round_continue', round: roundNo,
-    raw_model_choice: { first: firstChoice, final: finalChoice },
+    raw_model_choice: { first: firstChoice, final: rawFinal != null ? rawFinal : finalChoice },
     forced_replans_this_round: forcedThisRound,
     effective_baseline_action: effective,
-    host_stop_reason: effective === 'stop' ? (exhausted ? 'forced_window_exhausted' : 'tech_lead_stop') : 'none',
+    host_stop_reason: effective === 'stop'
+      ? (hostReason || (exhausted ? 'forced_window_exhausted' : 'tech_lead_stop')) : 'none',
     state: snap, eligibility: eikosStopPermitted(leftS),
     carrier: null, envelope: null, relay_ok: null, decision_ok: null, receipt_ok: null,
     outcome: effective === 'stop' ? { next_round: 'not_observed' } : null,
@@ -1649,6 +1654,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     left = await secondsLeft(`replan-r${round}`);
   }
 
+  // Eikos shadow: the model's own final choice, read before the harness filter below can change it.
+  const eikosFinalRaw = EIKOS_SHADOW_ON ? eikosRawChoice(plan) : null;
   if (plan && Array.isArray(plan.directions) && ROOFLINE_STATUS.startsWith('unknown')) {
     const before = plan.directions.length;
     plan.directions = plan.directions.filter((d) =>
@@ -1662,7 +1669,8 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     }
   }
   const eikosRec = EIKOS_SHADOW_ON
-    ? await eikosShadowRound(round, eikosSnap, eikosFirstChoice, plan, forcedReplans - forcedBeforeRound, left)
+    ? await eikosShadowRound(round, eikosSnap, eikosFirstChoice, plan, forcedReplans - forcedBeforeRound, left,
+                             eikosFinalRaw, plannerStopReason)
     : null;
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {

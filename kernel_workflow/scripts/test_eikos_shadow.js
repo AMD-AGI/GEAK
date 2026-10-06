@@ -169,6 +169,21 @@ function bashCarrier(env) {
        e.raw_model_choice.final === 'empty_directions' && e.forced_replans_this_round === 6);
   }
 
+  // ---- a harness stop (main's unknown-peaks filter) is not the model's choice
+  {
+    const H = load({ DEADLINE_EPOCH: 0, EVAL_DIR: evalDir2(), agent: () => { throw new Error('no carrier on a skipped point'); } });
+    const filtered = { stop: false, directions: [] };      // the model proposed directions; the filter removed them all
+    const h = await H.eikosShadowRound(5, H.eikosSnapshot(5, 3600, 'pre_plan_clock'), 'continue', filtered, 0, 3600,
+                                       'continue', 'all_directions_filtered_unknown_peaks');
+    ok('harness filter stop: raw model choice stays continue, host stop reason names the filter',
+       h.raw_model_choice.final === 'continue' && h.effective_baseline_action === 'stop' &&
+       h.host_stop_reason === 'all_directions_filtered_unknown_peaks');
+    const SRC2 = fs.readFileSync(path.join(__dirname, '..', 'kernel_lane.js'), 'utf8');
+    ok('the model\'s final choice is read before the unknown-peaks filter, and passed with the host reason',
+       SRC2.indexOf('const eikosFinalRaw') < SRC2.indexOf("ROOFLINE_STATUS.startsWith('unknown')") &&
+       /eikosFinalRaw, plannerStopReason\)/.test(SRC2));
+  }
+
   // ---- carrier failure modes
   {
     const fire = (fn) => { Promise.resolve().then(fn); return 1; };
