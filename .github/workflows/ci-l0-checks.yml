@@ -107,6 +107,9 @@ jobs:
             interface/tests/test_geak_trace_report.py \
             interface/tests/test_tracker_wiring.py \
             e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
+            e2e_workflow/scripts/tests/test_extra_env_transport.py \
+            e2e_workflow/scripts/tests/test_server_args.py \
+            e2e_workflow/scripts/tests/test_bench_server_args.py \
             e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
             e2e_workflow/scripts/tests/test_run_correctness_gate.py \
@@ -116,6 +119,7 @@ jobs:
             e2e_workflow/scripts/tests/test_capture_shapes.py \
             e2e_workflow/scripts/tests/test_llm_ledger.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
+            e2e_workflow/scripts/tests/test_overlay_module_startup.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
@@ -125,6 +129,7 @@ jobs:
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
             e2e_workflow/scripts/tests/test_tuning_skillset_sync.py \
+            e2e_workflow/scripts/tests/test_runtime_csv.py \
             ci/node/test_run_model_material_audit.py \
             perf_knowledge/expert_skills/_contribute/test_flydsl_skill_portability.py \
             perf_knowledge/expert_skills/_contribute/test_tuning_index.py \
@@ -303,6 +308,8 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      - name: complete and legacy returned configuration regression
+        run: node e2e_workflow/scripts/test_return_config_mode.js
       - name: gfx1201 fail-closed knowledge regression
         run: node kernel_workflow/scripts/test_rdna4_policy.js
       - name: R9700 E2E identity and knowledge policy

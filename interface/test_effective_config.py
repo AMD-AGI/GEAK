@@ -95,7 +95,7 @@ def test_deduplicates_identical_flag_across_all_sources(tmp_path: Path) -> None:
     assert result.conflicts == []
 
 
-def test_precedence_overrides_and_preserves_unknown_flags(tmp_path: Path) -> None:
+def test_complete_launch_replaces_recipe_and_preserves_unknown_flags(tmp_path: Path) -> None:
     recipe = _recipe(tmp_path, "vllm", "--block-size 8 --recipe-only")
     result = resolve_effective_config(
         _handoff(
@@ -109,14 +109,112 @@ def test_precedence_overrides_and_preserves_unknown_flags(tmp_path: Path) -> Non
     tokens = shlex.split(result.final_server_args)
     assert tokens.count("--block-size") == 1
     assert tokens[tokens.index("--block-size") + 1] == "32"
-    assert "--recipe-only" in tokens
+    assert "--recipe-only" not in tokens
     assert "--unknown-launch" in tokens
     assert "--delta-only" in tokens
     assert "--accepted-only" in tokens
     assert [entry["higher_source"] for entry in result.conflicts] == [
-        "server_launch_flags",
         "current_best_delta",
     ]
+
+
+@pytest.mark.parametrize("snapshot", ["", "  "])
+@pytest.mark.parametrize("current", ["", "--current 3"])
+def test_explicit_replace_suppresses_recipe_fallback(tmp_path, snapshot, current):
+    h = _handoff(_recipe(tmp_path, "vllm", "--recipe-only --block-size 128"),
+                 launch=snapshot, extra=current, accepted=current)
+    h["baseline_env_spec"]["config"]["args_mode"] = "replace"
+    assert resolve_effective_config(h).final_server_args == current
+
+
+def test_replace_preserves_available_observed_script_defaults(tmp_path):
+    h = _handoff(_recipe(tmp_path, "vllm", "--recipe-only"),
+                 launch="--observed-default 16 --current 3", extra="--current 3")
+    h["baseline_env_spec"]["config"]["args_mode"] = "replace"
+    assert resolve_effective_config(h).final_server_args == "--observed-default 16 --current 3"
+
+
+@pytest.mark.parametrize("removal,expected", [
+    (["--disable-cuda-graph"], "--block-size 128"),
+    (["--block-size=128"], "--disable-cuda-graph"),
+    (["--block-size 64"], "--disable-cuda-graph --block-size 128"),
+    ("--disable-cuda-graph --block-size", ""),
+])
+def test_explicit_removal_applies_before_current_flags(tmp_path, removal, expected):
+    h = _handoff(_recipe(tmp_path, "vllm", "--disable-cuda-graph --block-size 128"))
+    config = h["baseline_env_spec"]["config"]
+    config["remove_args"] = removal
+    assert resolve_effective_config(h).final_server_args == expected
+    config["extra_server_args"] = "--block-size 256"
+    assert "--block-size 256" in resolve_effective_config(h).final_server_args
+
+
+def test_unsets_are_explicit_and_later_assignments_win(tmp_path):
+    h = _handoff(_recipe(tmp_path, "sglang", "", SGLANG_AITER_MLA_PERSIST="1", KEEP="2"),
+                 framework="sglang")
+    original = resolve_effective_config(h)
+    h["baseline_env_spec"]["config"]["unset_envs"] = ["SGLANG_AITER_MLA_PERSIST", "AMBIENT_ONLY"]
+    removed = resolve_effective_config(h)
+    assert removed.final_env == {"KEEP": "2"}
+    assert removed.unset_envs == ("AMBIENT_ONLY", "SGLANG_AITER_MLA_PERSIST")
+    assert removed.digest != original.digest
+    h["accepted_env"] = "SGLANG_AITER_MLA_PERSIST=3"
+    added = resolve_effective_config(h)
+    assert added.final_env == {"KEEP": "2", "SGLANG_AITER_MLA_PERSIST": "3"}
+    assert added.unset_envs == ("AMBIENT_ONLY",)
+
+
+def test_reenabled_removal_is_auditable_and_not_returned_as_active():
+    h = _handoff("", launch="--keep 1 --disabled", extra="--disabled")
+    h["baseline_env_spec"]["config"]["remove_args"] = ["--disabled", "--absent"]
+    resolved = resolve_effective_config(h)
+    assert shlex.split(resolved.final_server_args) == ["--keep", "1", "--disabled"]
+    assert resolved.remove_args == ("--absent",)
+    assert resolved.manifest["remove_args"] == ["--absent"]
+    assert resolved.conflicts == [{
+        "kind": "server_flag", "key": "--disabled", "lower_source": "remove_args",
+        "lower_value": "--disabled", "higher_source": "current_best_delta", "higher_value": None,
+    }]
+
+
+def test_import_does_not_change_global_module_search_path():
+    import subprocess
+    import sys
+    subprocess.run([sys.executable, "-c",
+        "import sys; before=list(sys.path); import interface.effective_config; assert sys.path == before"],
+        cwd=Path(__file__).resolve().parents[1], check=True)
+
+
+def test_complete_result_normalizes_removal_controls():
+    from interface.run_e2e import _accepted_config_with_env_map
+    result = _accepted_config_with_env_map({
+        "flags": "--keep 2", "env": "RESET=2", "args_mode": "replace",
+        "remove_args": ["--keep", "--absent"], "unset_envs": ["RESET", "ABSENT"],
+    })
+    assert result["args_mode"] == "replace"
+    assert result["remove_args"] == ["--absent"]
+    assert result["unset_envs"] == ["ABSENT"]
+
+
+def test_absent_environment_and_explicit_ambient_removal_have_different_digests():
+    h = _handoff("")
+    original = resolve_effective_config(h)
+    h["baseline_env_spec"]["config"]["unset_envs"] = "AMBIENT_ONLY"
+    removed = resolve_effective_config(h)
+    assert original.final_env == removed.final_env == {}
+    assert original.digest != removed.digest
+
+
+@pytest.mark.parametrize("key,value", [
+    ("args_mode", "unknown"), ("remove_args", 12), ("remove_args", [None]),
+    ("unset_envs", 12), ("unset_envs", ["-u"]), ("unset_envs", ["X=1"]),
+    ("unset_envs", [None]), ("unset_envs", ["A B"]),
+])
+def test_malformed_controls_stop_resolution(key, value):
+    h = _handoff("")
+    h["baseline_env_spec"]["config"][key] = value
+    with pytest.raises((TypeError, ValueError)):
+        resolve_effective_config(h)
 
 
 def test_non_conflicting_extra_and_accepted_flags_form_union(tmp_path: Path) -> None:
@@ -215,6 +313,40 @@ def test_conflicting_extra_and_accepted_env_raises(tmp_path: Path) -> None:
                 accepted_env="MODE=safe",
             )
         )
+
+
+@pytest.mark.parametrize("quoting", ["bare", "assignment", "value"])
+@pytest.mark.parametrize("value", [
+    '{"b": 2, "a": 1}',
+    '["second", "first"]',
+    '{"scale": 1.00}',
+    '{ "label": "caf\u00e9" }',
+])
+def test_json_environment_values_roundtrip_without_normalization(
+    tmp_path: Path, value: str, quoting: str
+) -> None:
+    token = f"CONFIG={value}"
+    if quoting == "assignment":
+        token = shlex.quote(token)
+    elif quoting == "value":
+        token = f"CONFIG={shlex.quote(value)}"
+    result = resolve_effective_config(_handoff(
+        _recipe(tmp_path, "vllm", ""),
+        extra_envs={"CONFIG": value},
+        accepted_env=token,
+    ))
+
+    assert result.final_env["CONFIG"] == value
+    assert result.conflicts == []
+
+
+def test_distinct_json_environment_strings_still_conflict(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="conflicting environment variable.*CONFIG"):
+        resolve_effective_config(_handoff(
+            _recipe(tmp_path, "vllm", ""),
+            extra_envs={"CONFIG": '{"scale":1.0}'},
+            accepted_env=shlex.quote('CONFIG={"scale":1.00}'),
+        ))
 
 
 def test_manifest_digest_and_dict_are_deterministic(tmp_path: Path) -> None:
