@@ -365,6 +365,21 @@ class TestEntityEvidence(unittest.TestCase):
                          "void ns::gemm_kernel<bf16>(int)")
         self.assertEqual(stats["gpu_kernel"], 1)
 
+    def test_an_annotated_gpu_kernel_row_carries_the_profiled_symbol_as_device_kernel(self):
+        """The head gate adopts entity_kind only through device_kernel; an annotated Top-N row that
+        resolves to a gpu_kernel must carry the profiler's symbol there, and other kinds must not."""
+        host = {"aten::mm": {"calls": 2, "total_us": 4.0, "cat_counts": {"cpu_op": 2}}}
+        device = {"void ns::gemm_kernel<bf16>(int)": {"calls": 3, "total_us": 9.0,
+                                                      "cat_counts": {"kernel": 3}}}
+        rows, _ = pp.annotate_rows(
+            [{"name": "gemm_kernel"}, {"name": "aten::mm"},
+             {"name": "kept", "device_kernel": "already_named"}],
+            pp.merge_entity_evidence(host, device), "tracelens")
+        by_name = {r["name"]: r for r in rows}
+        self.assertEqual(by_name["gemm_kernel"]["device_kernel"], "void ns::gemm_kernel<bf16>(int)")
+        self.assertNotIn("device_kernel", by_name["aten::mm"])
+        self.assertEqual(by_name["kept"]["device_kernel"], "already_named")
+
     def test_c9_collision_resolution_is_merge_order_independent(self):
         # The setdefault bug made the collision winner depend on which aggregate was merged first.
         # Reversing the merge input order must yield IDENTICAL kinds for every row: neither the
