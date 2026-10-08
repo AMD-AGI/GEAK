@@ -34,8 +34,10 @@ class SemanticRuntimeCaptureTest(unittest.TestCase):
         logger._bucket_forwards = {}
         logger._context = {
             "phase": "DECODE", "batch_size": 4, "input_tokens": 4}
-        with mock.patch.object(logger, "active", return_value=True):
-            self.assertTrue(logger._layer_scope_allowed(17))
+        with mock.patch.object(logger, "active", return_value=True), \
+                mock.patch.object(capture, "_stream_capturing",
+                                  return_value=False):
+            self.assertEqual(logger._layer_scope_source(17), "eager")
         self.assertTrue(capture._MAIN_LAYER_RE.search("model.layers.17"))
         self.assertFalse(capture._MAIN_LAYER_RE.search("model.layers.17.mlp"))
 

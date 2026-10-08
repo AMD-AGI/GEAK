@@ -85,6 +85,15 @@ def _profiler_active():
         return False
 
 
+def _stream_capturing():
+    """Whether the current stream is recording a CUDA/HIP graph."""
+    try:
+        import torch
+        return bool(torch.cuda.is_current_stream_capturing())
+    except Exception:
+        return False
+
+
 def _distributed_rank():
     try:
         import torch.distributed as dist
@@ -495,33 +504,44 @@ class SemanticRuntimeLogger(object):
             self._context["input_tokens"])
         return self._bucket_forwards.get(key, 0) < self.max_forwards
 
-    def _layer_scope_allowed(self, layer_id):
-        """Whether a lightweight main-layer boundary marker should be emitted.
+    def _layer_scope_source(self, layer_id):
+        """Which main-layer boundary marker, if any, this forward emits.
 
         Unlike Shape logging this intentionally ignores ``self.layers``: the
-        boundary donor must cover the complete main stack.  It still observes
-        rank, phase and per-bucket forward limits, and it records no tensor
-        metadata for non-representative layers.
+        boundary donor must cover the complete main stack, and it records no
+        tensor metadata for non-representative layers.
+
+        ``"capture"``: the forward being recorded into a CUDA/HIP graph.  Its
+        kernel launches are exactly what graph replay -- the Clean Trace --
+        executes, while eager warmups may also run one-shot work (overlay
+        self-checks, lazy init) that never reaches the graph.  ``"eager"``: the
+        first per-bucket eager forward(s), kept for Shape marker containment
+        and as the donor fallback when no capture pass is available.
         """
         if not self.layer_scopes or not self.active() or layer_id < 0:
-            return False
+            return None
         if (self.phases
                 and not _phase_requested(self._context["phase"], self.phases)):
-            return False
+            return None
+        if _stream_capturing():
+            return "capture"
         key = (
             self._context["phase"], self._context["batch_size"],
             self._context["input_tokens"])
-        return self._bucket_forwards.get(key, 0) < self.max_forwards
+        if self._bucket_forwards.get(key, 0) < self.max_forwards:
+            return "eager"
+        return None
 
     def layer_scope(self, layer_id, op_path):
         """Return a record_function context for one complete main-layer body."""
-        if not self._layer_scope_allowed(layer_id):
+        source = self._layer_scope_source(layer_id)
+        if source is None:
             return contextlib.nullcontext()
         context = dict(self._context)
         marker = (
-            "GEAK_LAYER_SCOPE|phase=%s|bs=%s|toks=%s|layer=%s|path=%s"
+            "GEAK_LAYER_SCOPE|phase=%s|bs=%s|toks=%s|layer=%s|src=%s|path=%s"
             % (context["phase"], context["batch_size"],
-               context["input_tokens"], layer_id, op_path))
+               context["input_tokens"], layer_id, source, op_path))
         try:
             import torch
             factory = getattr(

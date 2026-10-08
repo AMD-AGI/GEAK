@@ -391,6 +391,10 @@ def _layer_scope_markers(events):
                 or event.get("dur") is None):
             continue
         fields = _marker_fields(name)
+        # Shape markers are emitted only by eager forwards; a graph-capture
+        # scope (boundary donor only) never contains them.
+        if fields.get("src") == "capture":
+            continue
         scopes.append({
             "index": index,
             "name": name,

@@ -835,6 +835,18 @@ def _apply_boundary_map(rows, map_path, pattern_doc, trace_paths=None,
                     "representative_eligible"]
             step_rows[start]["boundary_role"] = "body_start_kernel"
             step_rows[stop - 1]["boundary_role"] = "end_kernel"
+        # A graph-capture donor sets the cuts only.  Rows the capture launch
+        # records did not name stay in their layer, marked for audit.
+        for position in group.get("capture_unmatched_positions") or []:
+            position = int(position)
+            if position < 0 or position >= len(step_rows):
+                raise ValueError(
+                    "invalid capture-unmatched position for %s" % step_id)
+            row = step_rows[position]
+            if row.get("assignment") == "layer_body":
+                row["layer_evidence"] = (
+                    "validated_graph_capture_layer_scope_transfer"
+                    "_not_in_capture_launches")
         applied.add(step_id)
         diagnostics.append({
             "map_path": os.path.abspath(map_path),
