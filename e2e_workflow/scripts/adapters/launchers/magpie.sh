@@ -298,7 +298,7 @@ PY
   env "${_env_unset[@]}" -- \
     ${_recipe_env[@]+"${_recipe_env[@]}"} ${_extra_env[@]+"${_extra_env[@]}"} \
     "${_gpu_env[@]}" \
-    PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
+    PYTHONPATH="${PROFILE_PYTHONPATH:+$PROFILE_PYTHONPATH:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     MAGPIE_RUN_PHASE=server \
     MAGPIE_SERVER_PID_FILE="$_pidfile" \
     MODEL="$MODEL" \

@@ -547,6 +547,17 @@ LOG=${LOG:-$OUT_DIR/server.log}
 
 mkdir -p "$OUT_DIR"
 PROFILE_DIR="$OUT_DIR/profile"
+# A server process spawned after its parent touched the GPU (vLLM's EngineCore) inherits
+# ROCPROFILER_REGISTER_LIBRARY from the ROCm runtime, and its torch profiler then records no GPU
+# events. The adapters/profile_env shim drops it at interpreter start-up; the adapters put it ahead of the overlay.
+PROFILE_PYTHONPATH=""
+if [ "$PROFILE" = "1" ]; then
+  if _profile_env="$(_stage_lookup adapters/profile_env/sitecustomize.py)"; then
+    PROFILE_PYTHONPATH="$(dirname "$_profile_env")"
+  else
+    echo ">>> adapters/profile_env/sitecustomize.py not found; the trace may have no GPU events on ROCm." >&2
+  fi
+fi
 BASE_URL="http://${HOST}:${PORT}"
 RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 : > "$RESULT_JSONL"
@@ -557,7 +568,7 @@ COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
 
 # export everything the adapter reads
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
-export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
+export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_PYTHONPATH PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
 export PROFILE_WARMUP_SEC PROFILE_NUM_PROMPTS PROFILE_REQUEST_RATE PROFILE_WINDOW_TIMEOUT PROFILE_WINDOW_SEC
 export PROFILE_MAX_ITERS PROFILE_DELAY_ITERS
 export NUM_PROMPTS NUM_WARMUPS RANDOM_RANGE_RATIO BENCH_CLIENT
