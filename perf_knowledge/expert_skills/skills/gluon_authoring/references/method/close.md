@@ -30,6 +30,9 @@ the target line) and `gluon_anchor` (the working baseline) — and their identit
 
 ---
 
+A delivered per-shape dispatcher also follows [dispatch-table.md](dispatch-table.md): every row carries
+its evidence basis, every row passes compile/numerics, and the deployment boundary is explicit.
+
 ## Hard stops
 
 - Missing required entry artifacts, an unverified comparator, or a failed correctness oracle is a hard

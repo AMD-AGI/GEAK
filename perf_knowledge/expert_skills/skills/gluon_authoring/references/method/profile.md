@@ -21,6 +21,12 @@ round. When the kernel under test lives in a separate container, the pack's exec
 
 ## Profiler entry and tool locations
 
+Read [`geak-integration.md`](geak-integration.md) for analysis ownership. The native `kernel-roofline`
+runner owns roofline and its full-counter passes. `capture.sh` supplies supplementary trace/ATT/ISA
+artifacts and no longer starts rocprof-compute automatically. `profile_kernel.sh --pmc` remains an
+explicit diagnostic collection; its whole-process kernel selection does not implement the native
+measured-window contract. A local diagnostic cannot fill missing native model coverage.
+
 GEAK infrastructure is the single owner of the profiler entry and the GPU lock. All paths below are
 relative to the GEAK repo root.
 
@@ -206,7 +212,7 @@ report a missing number as missing — never as a zero) is in `climb.md ## 3. Th
 
 Every "% of roofline" or "gap" read off these rows carries `numerator_basis` (model | counters) and
 `denominator_basis` (datasheet | empirical@tool-version | in-shape probe); a datasheet denominator
-ranks only, and only a measured numerator over a probed/calibrated denominator may gate or close
+ranks only, and local estimates remain planning-only; GEAK measured evidence governs acceptance and closure
 (`budget.md`, and its checklist "3.3 Before you report a "% of roofline" or a "gap = X us"").
 
 | | what you must know | tool | bad-value tell |
@@ -731,38 +737,22 @@ gold / vendor kernel at runtime)`.
 
 ### rocprof-compute per-round (aggregate SOL + memory chart + occupancy limiter)
 
-For the **aggregate "which hardware block is the ceiling / which memory level binds / is occupancy
-resource-capped"** layer, `kernel_tools/rocprof_compute_probe.sh <name> <out> -- python <wrapper>`
-runs rocprof-compute (`profile --no-roof` then `analyze --block 2 3 6`) and parses it
-(`parse_rc.py`) to `rc_metrics.json`: System SOL block %-of-peak (MFMA/VALU/VMEM/LDS + IPC), the
-memory chart (vL1D/L2/sL1D hit, BW, **L2-Fabric latency**), and the SPI occupancy-limiter
-(Insufficient VGPR/LDS; empty = not resource-capped). Add `--roof` for the empirical hierarchical
-roofline (MI200+; on gfx95x `--roof-only` needs rocprof-compute >= 3.6.0); its peaks are
-`empirical@<tool-version>` denominators (`budget.md`). It is the Nsight-Compute analog and the
-richest aggregate source.
+Use `$KT/roofline.sh --engine rocprof --gpu <allocated-id> --workspace <workspace> -- ...` for
+native measured-window counter collection; pass native `--mode full` for the full-counter companion.
+A readable frozen `ROOFLINE_MIBENCH_CACHE` and the native runner's measured-window command are required.
+See [`geak-integration.md`](geak-integration.md). This is separately requested profiling, not a
+mandatory extra launch every round. Reuse matching reports with their provenance.
 
-- **Install / source of truth:** `ROCm/rocm-libraries` `projects/rocprofiler-compute/` (bundled from
-  ROCm 6.2+; on ROCm 7.1 at `/opt/rocm/bin/rocprof-compute`). Its Python dependencies
-  (`requirements.txt`) belong in the immutable image and are verified by fleet image-health before
-  dispatch; a GEAK role reports a missing dependency as an environment blocker rather than running
-  `pip install`. MI200+ only;
-  roofline needs MI200+.
-- **When to use:** once per optimization round (it is a **multi-pass replay** — re-runs the app per
-  counter group; cost-control by filtering to the dominant kernel). For per-micro-tweak iteration the
-  lighter `rocprofv3 --pmc` (`profile_kernel.sh --pmc` / `rocprofv3_safe.sh` + `parse_pmc.py`)
-  suffices; ATT gives the per-instruction bubble. rocprof-compute complements — it does NOT replace
-  ATT (no per-instruction attribution) or the static audit.
-- **Gotchas:** argv-JSON is stripped by its re-exec -> use a **config-embedded wrapper**, not JSON on
-  argv; if absent / PMC-blind (JIT), fall back to `rocprofv3 --pmc` + ATT + static.
-- **Aggregation:** read `att/mfma_eff.txt` + `ir/asm_audit.txt` directly; together with the SOL they
-  are the ATT rollup + the static audit + budget + timing into `round_<n>/record.json` (6-group
-  schema) and the 3 must-have figures.
+`rocprof_compute_probe.sh NAME OUT --full -- CMD...` delegates to the same native runner. Existing
+whole-process diagnostic data may be read with `--workload DIR`. Only an explicitly requested
+`--diagnostic` run uses the legacy no-roof collector; it cannot produce native roofline evidence.
+Collection and analysis run in the same locus. Missing analyzer dependencies are an environment
+issue; use the native installation guidance and version constraints, not a blanket pip upgrade.
 
-**Collection cost (ROCm 7).** `rocprofv3` defaults to a SQLite DB with a `rocpd` companion for
-"**profile once, analyze many**" (generate CSV/OTF2/Perfetto post-hoc without re-running).
-`rocprof-compute` collects counters in **multiple passes by default** (re-runs the app per pass);
-single-pass iteration-multiplexing is upcoming. Budget profiling time accordingly (affects
-`profile_kernel.sh` and `kernel_breakdown.py`).
+Raw PMC counts cannot be normalized into utilization. `parse_pmc.py` keeps absent absolute metrics
+null and raw activity separate. `MfmaUtil`, `VALUBusy`, lane utilization and bank-conflict rates are
+different quantities; do not infer an idle percentage from relative raw counts. Missing analysis
+is recorded with its reason; retain ATT/static evidence without relabelling it as measured counters.
 
 ## Asm hot-loop schedule audit (instruction + pipeline verification)
 
@@ -1117,14 +1107,13 @@ Pick the tool by the question, not by habit (ROCm Blogs "Introduction to profili
 | Question | Tool | Output |
 | --- | --- | --- |
 | **① Where should I focus?** (Amdahl / dominant kernel) | `rocprof-sys` (host+device timeline) / `rocprofv3 --kernel-trace` | timeline / hotspot ranking |
-| **② How well am I using the HW?** (mem vs compute) | `rocprof-compute` (roofline + SOL) | roofline position, %-of-peak (an `empirical@<tool-version>` denominator) |
+| **② What does the selected native model report?** | GEAK native `kernel-roofline` / TraceLens | native report, reference provenance, coverage and limitations |
 | **③ Why this performance?** (root cause) | `rocprofv3 --pmc` / `rocprof-compute` (block SOL, memory chart, SPI) | per-unit counters, occupancy limiter |
 
 Then hand ②/③ evidence to `../hardware/bound-class-signals.md ## Bound-class decision tree
 (exhaustive, ordered, defaulted)`. For a single nominated kernel (this skill's usual entry) ① is
-often already known; still run ② before deep counters. `rocprof-compute` is the Nsight-Compute
-analog and the richest single tool when installed; when it is absent or PMC is blind (JIT kernels),
-fall back to `rocprofv3 --pmc` + static ISA (`## Profiler-capability preflight (verify ONCE — do not
+often already known; reuse matching ② evidence before requesting additional counters. Counter diagnostics may use `rocprof-compute` or explicit `rocprofv3 --pmc`; when unavailable,
+retain static ISA as supplementary evidence, leaving native analysis unavailable (`## Profiler-capability preflight (verify ONCE — do not
 assume PMC is visible)`).
 
 ### Profiling / inspection
@@ -1132,7 +1121,7 @@ assume PMC is visible)`).
 | Tool | Use | Phase |
 | --- | --- | --- |
 | `rocprof` / `rocprofv3` | PMC counters, roofline | profile |
-| `rocprof-compute` | block-level SOL + memory chart + SPI occupancy-limiter + empirical roofline (Nsight-Compute analog) | profile (per round) |
+| native `kernel-roofline` runner | roofline / full-counter measurements | separately requested measurement; reuse matching reports |
 | `rocprof --hip-trace` | timeline / launch | profile (eager boundary) |
 | `amdgpu-disasm` / `llvm-objdump -d` | ISA hot-loop audit | profile / IR |
 | FlyDSL `FLYDSL_DUMP_IR=1` | MLIR → ISA chain | profile |

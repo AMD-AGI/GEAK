@@ -3,11 +3,11 @@
 **Downgrade / optional target** for the three AMD tile skills. **Do not mix** RDNA WMMA
 kernels with CDNA MFMA or gfx1250 WMMA+TDM binaries.
 
-**GEAK support scope:** gfx1201 (RDNA4, R9700) is a GEAK-supported client target — its GEAK cards
+**GEAK support scope:** gfx1201 (RDNA4, R9700 / R9600D) is a GEAK-supported client target — its GEAK cards
 are `perf_knowledge/hardware/rdna4_gfx1201/{arch,occupancy,pitfalls}.md` and
 `kernel_workflow/knowledge/amd_rdna4.md`; gfx1151 (RDNA 3.5 APU) via `kernel_workflow/knowledge/amd_ryzen.md`.
-**gfx1100 (RDNA3) and gfx1200 rows are not supported by GEAK** and are kept here for reference
-only. SKU peaks: `perf_knowledge/hardware/data/sku.json` (human view `amd-rdna*-skus.md`).
+**RX 9070 / XT (gfx1201) and gfx1100 (RDNA3) products remain reference-only**.
+A correct ISA target does not imply a GEAK-validated product path. SKU peaks: `perf_knowledge/hardware/data/sku.json` (human view `amd-rdna*-skus.md`).
 
 ISA references: [RDNA3 shader ISA (PDF)](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna3-shader-instruction-set-architecture-feb-2023.pdf),
 [RDNA4 shader ISA (PDF)](https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna4-instruction-set-architecture.pdf).

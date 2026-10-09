@@ -21,13 +21,10 @@ a run mode ([`## Optional bookkeeping tools`](#optional-bookkeeping-tools)).
 
 ## Who does which stage
 
-**Injection.** Off by default (opt-in `use_expert_skills="true"`; when off nothing is injected and the run
-is unchanged). Only the planning and authoring roles receive it (`EXPERT_SKILL_ROLES` in `kernel_lane.js`:
-`tech_lead`, `author_engineer`, `engineer`, `deep_engineer`). They read
-`kernel_workflow/roles/_fragments/expert_skills.md`, match the skill through `EXPERT_SKILLS_DIR/index.yaml`
-(`scope: kernel`, operator, gen, dtype, regime, `validation_status == validated`), and treat its procedure
-as a high-prior candidate to reproduce — advisory, never overriding the isolated A/B against the oracle.
-On a declared or detected gfx1201 (R9700) run the CDNA skills are isolated and not injected.
+**Injection.** On gfx942/gfx950, Triton/Gluon lanes receive this method by default as language
+reference (`use_gluon_skill=auto`); `false` disables it. The declared draft status remains visible.
+Validated expert recipes remain separately opt-in with `use_expert_skills=true`. See
+[geak-integration.md](geak-integration.md) for the role and backend routing contract.
 
 | method stage | GEAK phase | GEAK role | what this skill asks of it |
 | --- | --- | --- | --- |

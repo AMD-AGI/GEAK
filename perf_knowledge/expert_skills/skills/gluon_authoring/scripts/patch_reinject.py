@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """Splice plain's TTGIR software pipeliner into `gluon_to_ttgir`, reversibly.
 
-Why a patch and not a monkeypatch: `gluon_to_ttgir` builds its own pass manager
-inline, so there is no seam to wrap -- the pass list only exists inside that
-function body. Editing the installed file is what the procedure actually asks an
-author to do, and gating the inserted block on an env var means splice-ON and
-splice-OFF are the SAME binary, which is the only way the IR diff between them
-means anything.
+NOT THE PREFERRED MECHANISM -- prefer `gluon_swp.py`, or upstream's own
+`knobs.runtime.add_stages_inspection_hook`. An earlier version of this docstring
+claimed there was "no seam to wrap" because `gluon_to_ttgir` builds its pass
+manager inline. That inference was wrong: you do not have to insert into the pass
+manager it built. Both alternatives wrap the FUNCTION and run a second pass manager
+over the module it returns, which reaches the same IR -- `gluon_swp.py` by swapping
+the descriptor in-process, the upstream hook by replacing `stages["ttgir"]` through a
+documented, tested extension point that also carries the cache key.
+
+What editing the installed file still buys, and it is the only thing: the spliced pass
+list is visible on disk while you read it. What it costs: write access to
+site-packages, survival across `pip install --force-reinstall`, isolation from other
+processes sharing the environment, and a clean state if the process dies between apply
+and revert. Gating the inserted block on an env var keeps splice-ON and splice-OFF the
+SAME binary, which is what makes the IR diff between them meaningful -- the
+alternatives get that property from separate cache dirs instead.
 
 The splice point is version-dependent, and this is measured rather than assumed:
   3.6.0            `gluon_to_ttgir` ends after add_combine_tensor_select_and_if

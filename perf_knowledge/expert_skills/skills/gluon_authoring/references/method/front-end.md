@@ -236,6 +236,9 @@ benchmark evidence before more rounds (`../tile-programming/compiler-contract.md
 
 ## 8. P6 — shape-adaptive / visible dispatch
 
+When shipping a per-shape table, follow [dispatch-table.md](dispatch-table.md): distinguish measured,
+inferred and default rows, verify numerics on every row, and state the boundary and revalidation policy.
+
 Use visible shape/feature dispatch when winners differ by stable bucket. Options: `@triton.autotune`, 2-3
 explicit variants, no-mask/masked variants, invariant-specialized kernels, host-side dispatch.
 Escalation: generic cleanup -> structural fast path -> invariant-specialized variant -> visible dispatch.

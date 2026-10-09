@@ -265,7 +265,7 @@ Gluon objects 1:1:
 Preserve logical tiles, masks, dtype, launch config, and the measured boundary;
 only the layout / memory / pipeline expression becomes explicit. The result is
 the **equivalence anchor** (`../method/transcribe.md`). A lost vectorization in the anchor is a
-`lost_layout` case (the suspects are exactly `lost_pipeline` / `lost_layout` / `lost_RA`): the fix
+`lost_layout` case (the in-kernel suspects are `lost_pipeline` / `lost_layout` / `lost_RA`): the fix
 is to re-recover the layout from the IR, not to hand-push a wider vector.
 
 ## Wide / non-pow2 dim: recognize the pad-or-split decision (cue, not a recipe)

@@ -78,13 +78,13 @@ imprecise number — it leaves you arguing against the wrong denominator.
    memory floor, which is the model announcing it does not apply rather than an impossibility.
 2. **Which dtype's ridge, against which denominator.** The ridge is
    `peak_tflops[dtype] / peak_hbm_tb_s`, so it is a different number per dtype and per SKU, and the
-   SKU table — the single peak source, `perf_knowledge/hardware/data/sku.json` — deliberately stores
+   SKU table — the local specification source, `perf_knowledge/hardware/data/sku.json` — deliberately stores
    none (`_no_derived_ridge`); `scripts/hw_budget.py` recomputes it per call. A kernel whose
    intensity sits between two dtypes' ridges is compute-bound in one and memory-bound in the other,
    so a ridge quoted from the wrong row moves the whole dispatch boundary. Any "% of roofline" that
    follows carries its `numerator_basis` (model | counters) and `denominator_basis` (datasheet |
-   empirical@tool-version | in-shape probe): a datasheet denominator ranks only; only a measured
-   numerator over a probed or calibrated denominator may gate or close (`../method/budget.md`,
+   empirical@tool-version | in-shape probe): a datasheet denominator ranks hypotheses only; a measured
+   numerator over a probed or calibrated denominator remains supplementary evidence (`../method/budget.md`,
    `../hardware/roofline-models.md`).
 3. **Which counter convention the reading was taken under.** Matrix engagement is a union test
    rather than one counter — the scaled pipe and the generic one answer for different matrix ops,

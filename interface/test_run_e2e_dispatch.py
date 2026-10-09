@@ -235,6 +235,14 @@ class _RunE2ECase(unittest.TestCase):
 # handoff -> workflow args
 # =========================================================================== #
 class TestMapArgs(_RunE2ECase):
+    def test_gluon_method_mode_is_forwarded_without_changing_default(self):
+        self.assertNotIn("use_gluon_skill", rx.map_args(self._handoff()))
+        for value, expected in [(False, "false"), (True, "true"), ("auto", "auto")]:
+            with self.subTest(value=value):
+                self.assertEqual(rx.map_args(self._handoff(use_gluon_skill=value))["use_gluon_skill"], expected)
+        with self.assertRaisesRegex(ValueError, "use_gluon_skill"):
+            rx.map_args(self._handoff(use_gluon_skill="sometimes"))
+
     def _handoff(self, **extra):
         h = {
             "model_path": "/models/fake-8b",

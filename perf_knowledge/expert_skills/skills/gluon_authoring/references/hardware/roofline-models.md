@@ -21,11 +21,10 @@ How each combination may be used:
 
 - a **`datasheet`** denominator (or a **`model`** numerator) **ranks hypotheses and sets priors
   only**. It never gates a round and never closes a direction;
-- only a **`counters`** numerator over an **`empirical@…`** or **`in-shape probe`** denominator may
-  gate or close — and a close prefers the in-shape probe (`## Calibration`, `### The denominator
-  decides the verdict`);
-- a missing leg **degrades the label, not the verdict machinery**: report the lower-basis number
-  with its basis and keep going (GEAK's no-hard-verdict ladder), never silently promote it.
+- a **`counters`** numerator over an **`empirical@…`** or **`in-shape probe`** denominator is
+  supplementary diagnostic evidence, not an acceptance or closure gate (`## Calibration`);
+- missing native coverage stays unavailable. Local planning estimates may be recorded separately,
+  but cannot replace or be relabelled as TraceLens results.
 
 `hw_budget.py` prints `[datasheet]` vs `[calibrated]` on its output for exactly this reason; carry
 that tag into the record as `denominator_basis`. The method that consumes it is
@@ -85,7 +84,7 @@ use `python3 $KT/calc_perf.py roofline --sku <key>`:
 | R9700 | gfx1201 | ~298 |
 | AI_MAX_395 | gfx1151 | ~280 (bandwidth basis **measured** 0.212 TB/s, not the 0.256 datasheet) |
 | AI_MAX_495 | gfx1151 | ~225 |
-| RX9070XT | gfx1200 — not supported by GEAK, reference only | ~305 |
+| RX9070XT | gfx1201 — not supported by GEAK, reference only | ~305 |
 | RX7900XTX | gfx1100 — not supported by GEAK, reference only | ~128 |
 
 Full RDNA/W-series keys: `amd-rdna3-skus.md`, `amd-rdna35-skus.md`, `amd-rdna4-skus.md` + `calc_perf.py --sku`.
@@ -456,7 +455,7 @@ is the launch-overhead analogue of "occupancy gates latency-removing levers"
 after its boundary, clock, device fill, and workload model have been calibrated for the current run.
 In the reporting contract's terms (`## Every "% of roofline" carries two bases (the reporting
 contract)`): calibration is what moves a reading from `model`/`datasheet` to `counters` over
-`empirical@…`/`in-shape probe`, and only that pair may gate or close.
+`empirical@…`/`in-shape probe`, and that pair remains supplementary evidence, not a closure or acceptance gate.
 
 Use these checks before relying on a gap:
 

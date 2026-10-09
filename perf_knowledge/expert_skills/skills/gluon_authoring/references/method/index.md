@@ -21,7 +21,7 @@ merely because they exist.
 
 | | |
 | --- | --- |
-| who drives | GEAK `kernel_workflow` injects this skill (`use_expert_skills`) into its existing roles; GEAK's phases (Setup → Benchmark → Profile → Optimize → Verify → Merge → Report → Validate) are the stage machine. tech_lead dispatches **one** `deep_explore` direction; the deep_engineer carries entry → climb in its own loop |
+| who drives | GEAK `kernel_workflow` injects this skill (`use_gluon_skill=auto`, on supported Triton/Gluon lanes) into its existing roles; GEAK's phases (Setup → Benchmark → Profile → Optimize → Verify → Merge → Report → Validate) are the stage machine. tech_lead dispatches **one** `deep_explore` direction; the deep_engineer carries entry → climb in its own loop |
 | the skill's role | advisory: what to measure, which layer, which gate a round owes, the record contract |
 | acceptance timing | `verify_engineer` / `measure_legs` via `e2e_workflow/scripts/harness_lib.py`; commit gate `MIN_IMPROVE` = 2% (a measured noise band only stricter); Director validates and arbitrates; `ab_bench.py` is screening only |
 | GPU | `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_locks`), one GPU per engineer; the pack's broker (`scheduler/`) only with `GEAK_GPU_BROKER=1` |
@@ -210,8 +210,8 @@ DSL-neutral hard rules. They bind every round, whether or not this page is resid
   a probed one are the same float once they reach the denominator, so a percent-of-ceiling is only as
   credible as the provenance travelling with it: carry the probe's path, or mark the value hand-entered and
   read every percentage off it as an estimate. Every percentage carries `numerator_basis` /
-  `denominator_basis`, and only a measured numerator over a probed or calibrated denominator may gate or
-  close ([`budget.md`](budget.md)). This is a rule, not a tool behaviour — it binds hardest where the budget
+  `denominator_basis`, and local estimates remain planning-only; measured GEAK evidence governs acceptance and
+  closure ([`budget.md`](budget.md)). This is a rule, not a tool behaviour — it binds hardest where the budget
   is prose because no tool ships to check it there.
 - The first step is an **anchor**, not an optimization. An anchor's regression versus the roofline / a tuned
   reference is **expected, not a rejection**: it becomes the baseline to climb from. After anchoring,

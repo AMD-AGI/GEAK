@@ -238,7 +238,8 @@ unrecoverable (if any): probe build -> re-dump at ns=1 -> forced divergence (led
 equivalence: layout diff (ttgir_bridge verify) | oracle @ tol | determinism (~40 launches) | asm parity
 correctness == plain: pass | fail
 perf_delta_vs_plain: (regression expected, NOT a reject)
-residual attribution (suspects, exactly): lost_pipeline | lost_layout | lost_RA
+residual attribution (in-kernel suspects): lost_pipeline | lost_layout | lost_RA
+outside-kernel disposition, when evidenced: residual_outside_kernel (does not clear parity)
                        # lost vectorization is a lost_layout; fix = re-recover, not hand-patching
 parity: threshold (declared; default 0.95) / champion_ms / anchor_ms / status: reached | parity_unreached
 injected diagnostic (optional, labelled `injected`, never a win): lost_pipeline debt measured

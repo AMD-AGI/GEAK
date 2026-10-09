@@ -555,7 +555,7 @@ on one. Generate the reference from the run itself:
    reference-free "best any overlap could reach"; ATT splits that gap into buckets.
 3. **Absolute hardware ceilings** -- bubble = 100 - MfmaUtil; cadence vs 16/32 cyc; any WAIT > 0 =
    unhidden latency; achieved BW vs HBM peak — against the `sku.json` datasheet peak this **ranks**
-   only; to gate or close, divide by an in-shape probe (`roofline-models.md ## Calibration`).
+   only; a separately requested in-shape probe can test a diagnostic hypothesis (`roofline-models.md ## Calibration`).
 4. **Temporal self-baseline** -- the reference is the agent's OWN previous round's ATT (the
    checkpoint); a lever's effect = the targeted bucket's delta vs last round.
 5. **Sweep-internal oracle** -- the best point in the agent's own config sweep is a free relative

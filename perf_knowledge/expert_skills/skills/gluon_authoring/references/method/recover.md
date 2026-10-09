@@ -148,7 +148,8 @@ python3 "$SKILL/scripts/parity_gate.py" --champion-ms <C> --anchor-ms <A> \
     [--champion-lds <N> --anchor-lds <N>] \
     [--champion-arch gfx950 --anchor-arch gfx950] \
     [--champion-workgroup-size <threads> --anchor-workgroup-size <threads>] \
-    --threshold <declared, default 0.95> [--json parity.json]
+    --threshold <declared, default 0.95> [--json parity.json] \
+    [--residual-outside-kernel "<measured boundary evidence>"]
 ```
 
 It **exits 2** while `champion_ms / anchor_ms` is under the threshold, and names which of three suspects
@@ -178,10 +179,18 @@ that disagreement is the finding.
 | **`lost_layout`** | a load-width or LDS-op histogram narrowed (`dwordx4`→`ushort`, `ds_read_b128`→`ds_read_u16`), or `shared` bytes/WG crossed an LDS/CU divisor, or occupancy fell with the anchor's binding term the LDS one | the layout-diff was not clean, or the `ds_read` interval is off the conflict-free steady state | **re-recover** the layout from the IR (layer 3); never hand-derive a basis |
 | **`lost_RA`** | same instruction multiset, and the allocator serialized it anyway — VGPR rose (especially across a wave threshold), spill appeared, occupancy fell with the anchor **register**-bound, or the number of **distinct address registers** feeding the LDS read burst collapsed. The tell is an address **rematerialized** into a register immediately above the `ds_read` that consumes it, which puts every read behind a WAR hazard on that one register — no layout-equivalence check can see it (*equivalent layouts, equal counters, unequal address-register pressure*). Read the `ds_read` **operands**, not just the count | hot-loop `scratch_*`, or an AGPR/VGPR split the transcription did not preserve | slicing / register budget (layer 5) — an LLVM-stage concern, never in the TTGIR |
 
-**Signatures that are sub-cases, not extra suspects.** The gate emits exactly `lost_pipeline` /
-`lost_layout` / `lost_RA` and nothing else, so use those names verbatim in the ledger — a fourth name
-makes the attribution unmatchable against the gate's own output. Earlier GEAK tables carried more rows;
-they fold in as follows:
+**Residual outside the kernel.** If the three artifact-based suspects clear while the ratio remains
+below threshold, decompose wall time into wrapper / host / kernel. For a dispatch claim, also measure
+an empty kernel at the same grid and at grid `(1,1,1)`. Pass that evidence through
+`--residual-outside-kernel "<evidence>"` to record `disposition: residual_outside_kernel`. This is an
+asserted disposition: assembly cannot detect costs outside its kernel. It neither clears parity nor
+upgrades a timings-only call to artifact-backed evidence. Stop spending in-kernel recovery rounds on
+that cost, and carry the evidence and `parity_unreached` caveat into the close if parity remains unmet.
+
+**Signatures that are sub-cases, not extra in-kernel suspects.** The artifact-based suspects remain
+`lost_pipeline` / `lost_layout` / `lost_RA`; use those names verbatim. The separately asserted
+`residual_outside_kernel` describes the measurement boundary. Earlier GEAK tables carried more
+in-kernel rows; they fold in as follows:
 
 | older row | how it shows | belongs to | repair |
 | --- | --- | --- | --- |

@@ -3,7 +3,7 @@
 **What this stage decides.** The bound-class *prior* (intensity vs the SKU ridge), the MFMA-only
 floor and your multiple over it, the closed-form **ideal** budget, the **as-built** budget read off the
 artifact, and their **gap** — the headroom, and the input to the stay-plain / hand-off decision
-([`entry.md`](entry.md)). It also decides whether a number may be used to **gate or close**, or only
+([`entry.md`](entry.md)). It distinguishes local planning estimates from native evidence and measured acceptance, and when to
 to **rank**.
 
 **When you are here.** Before the first edit. Budget-first is the defining
@@ -13,11 +13,10 @@ trace and IR, and (b) every time a claim needs a "% of roofline" or a "gap = X u
 
 GEAK's `kernel_workflow` owns the round loop, but the budget still precedes the deep_engineer's first
 authored round, and every round's evidence still carries it (the deep_engineer refreshes it when it
-re-profiles in its own loop). GEAK's own roofline skill
-(`e2e_workflow/knowledge/analysis_skills/roofline/SKILL.md`, `roofline_tools.py`) reads the same peaks
-file and keeps its non-fatal degradation ladder; the basis rules below apply to its output too. (If the
-deep_engineer keeps the optional `toolctl` bookkeeping, `budget` is also a standing reference on every
-stage card.)
+re-profiles in its own loop). Native roofline reporting and full-counter measurement belong to the `kernel-roofline` skill.
+Local budgets are planning estimates; keep native results, calibration and coverage separate.
+The adapter and call contracts are in [`geak-integration.md`](geak-integration.md).
+The optional `toolctl` budget reference remains available on stage cards.
 
 **Read order:** `../hardware/atlas.md` table A → `../hardware/roofline-models.md` →
 `../hardware/amd-*-skus.md` (pick the chip) → `../hardware/planning-constants.md`. After the first
@@ -86,28 +85,19 @@ over it**. That number sizes the prize: a 1.1× gap and a 4× gap call for diffe
 
 ## Roofline method — every percentage carries its basis
 
-One rule, shared with GEAK's roofline skill and `perf_knowledge/profiling/roofline_on_mi.md`:
+Follow `perf_knowledge/profiling/roofline_on_mi.md` for ownership and evidence semantics.
+Local calculations name their numerator and denominator basis and remain `may_gate: false`,
+including when supplied measured inputs. They do not determine measured bottlenecks, attainable
+speedup, Top-N order or closure. Native TraceLens and rocprof results preserve their selected
+reference, resolved precision, scope, hashes and limitations; ratios above 100% remain visible.
 
-- **Every "% of roofline" carries two fields**: `numerator_basis` ∈ {`model`, `counters`} and
-  `denominator_basis` ∈ {`datasheet`, `empirical@<tool>-<version>`, `in-shape probe`}.
-- **A datasheet denominator ranks only.** It may order candidates and set a prior; it may not gate a
-  keep, a close or a "nothing left here" claim.
-- **Only a measured numerator over a probed or calibrated denominator may gate or close.** This keeps
-  GEAK's "do not hard-judge" degradation ladder (a missing input degrades one entry, it does not fail
-  the analysis) and adds the pack's interval form, refusal rules and floor probe on top.
-- **A ceiling called *calibrated* names the artifact it was measured from.** A hand-typed number and a
-  probed one are the same float once they reach the denominator, so a percent-of-ceiling is only as
-  credible as the provenance travelling with it: carry the probe's path, or mark the value hand-entered
-  and read every percentage off it as an estimate.
-
-**Single source of SKU peaks: `perf_knowledge/hardware/data/sku.json`** (per-SKU rows with `basis`,
-`cus`, and per-row `source`). Every consumer reads it — `hw_budget.py`, `calc_perf.py` (its `SKU_PEAKS`
-is loaded from the file; a missing dtype is **refused**, never back-filled with fp16/bf16), and GEAK's
-`roofline_tools.load_peaks`. Dense datasheet peaks (TF = TFLOP/s), gfx950 first:
+**SKU specification data:** `perf_knowledge/hardware/data/sku.json` is shared by `hw_budget.py` and
+`calc_perf.py`. A missing dtype is refused. TraceLens calibration is independent of this table.
+Dense datasheet peaks (TF = TFLOP/s), gfx950 first:
 
 | SKU | arch | bf16 = fp16 | fp8 | fp4 | fp32 | HBM | CUs | bf16 ridge (FLOP/B) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MI355X | gfx950 | 2500 | 5000 | 10000 | 157.3 | 8.0 TB/s | 256 | ≈312 |
+| MI355X | gfx950 | 2500 | 5000 | 10100 | 157.3 | 8.0 TB/s | 256 | ≈312 |
 | MI350X | gfx950 | 2300 | 4600 | 9200 | 144.2 | 8.0 TB/s | 256 | ≈287 |
 | MI300X (gfx942 downgrade) | gfx942 | 1307.4 | 2614.9 | — | 163.4 | 5.3 TB/s | 304 | ≈247 |
 | MI325X (gfx942 downgrade) | gfx942 | 1307.4 | 2614.9 | — | 163.4 | 6.0 TB/s | 304 | ≈218 |

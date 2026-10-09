@@ -45,11 +45,34 @@ echo "== 1d. layout-bridge, occupancy and capability self-tests =="
 python3 "$SCRIPT_DIR/ttgir_bridge.py" --selftest
 python3 "$SCRIPT_DIR/probe.py" --selftest
 # amd_occupancy is where probe DELEGATES the divisor, and its self-test cross-checks
-# hw_constants.json -- i.e. it is the one that catches a bad per-arch figure at the source
+# perf_knowledge/hardware/data/hw_constants.json -- i.e. it is the one that catches a bad per-arch figure at the source
 # rather than in the report. probe_levers degrades to available=None without triton rather
 # than failing, so it is offline-safe here too.
 python3 "$SCRIPT_DIR/amd_occupancy.py" --selftest
 python3 "$SCRIPT_DIR/probe_levers.py" --selftest
+
+echo "== 1e. GEAK shared kernel tools, through the pack shims =="
+# asm/ISA/occupancy tools moved to kernel_workflow/scripts/kernel_tools/ (GEAK shared); the
+# same-named files here are shims. Running each self-test THROUGH the shim checks the move and
+# the shim at once; every one is offline (no GPU, no network, no tool cache).
+KT_DIR="$(cd "$SCRIPT_DIR/../../../../.." && pwd)/kernel_workflow/scripts/kernel_tools"
+python3 "$KT_DIR/_hwdata.py" --selftest
+for t in asm_loop_audit asm_schedule_viz mfma_efficiency deep_mfma_analysis gfx950_isa layout_facts; do
+  python3 "$SCRIPT_DIR/$t.py" --selftest >/dev/null || { echo "SMOKE FAIL: $t.py --selftest"; exit 1; }
+  echo "   $t ok"
+done
+bash "$SCRIPT_DIR/hw_sources.sh" --selftest | tail -1
+bash "$SCRIPT_DIR/dump_ir.sh" --selftest | tail -1
+
+echo "== 1f. gates, lever index and harness/bench self-tests =="
+python3 "$SCRIPT_DIR/parity_gate.py" --selftest
+python3 "$SCRIPT_DIR/champion_gate.py" --selftest
+python3 "$SCRIPT_DIR/lever_index.py" --selftest | cut -c1-100
+python3 "$SCRIPT_DIR/check_term_index.py" --selftest
+python3 "$SCRIPT_DIR/check_term_index.py" --pack "$SCRIPT_DIR/.."
+python3 "$SCRIPT_DIR/ab_bench.py" --selftest
+python3 "$SCRIPT_DIR/create_harness.py" --selftest
+python3 "$SCRIPT_DIR/parse_correctness.py" --selftest
 
 if [ -f "$V5" ] && [ -f "$V3SW" ] && [ -f "$V3NO" ]; then
   echo "== 2. recover anchor (--with-pipeline) from a real plain .ttgir =="

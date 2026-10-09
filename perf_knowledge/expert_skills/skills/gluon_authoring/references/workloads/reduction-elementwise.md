@@ -31,7 +31,7 @@ anything, and more often than the others, because its footprints are the smalles
   wrong denominator for a mixed read/write stream at this archetype's program counts; probe it
   rather than quoting it (`../hardware/roofline-models.md`). Record the result with its
   `numerator_basis` and `denominator_basis` — a datasheet denominator (from
-  `perf_knowledge/hardware/data/sku.json`) ranks only; a probed one may gate or close.
+  `perf_knowledge/hardware/data/sku.json`) ranks only; a probed one remains supplementary diagnostic evidence.
 - **At small shapes neither may bind.** A byte account still returns a number when the kernel is
   actually gated on launch and dispatch, and then the correct action depends on the production
   boundary rather than on the bytes: fusing dispatches pays only while the launch is exposed, and

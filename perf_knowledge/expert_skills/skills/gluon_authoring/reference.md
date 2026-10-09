@@ -14,15 +14,17 @@ Onboarding is not here — read GEAK's language layer first if you have not writ
 
 | stage | read | then, only if needed |
 | --- | --- | --- |
+| GEAK/Claude Code discovery, script execution and TraceLens handoff | [`references/method/geak-integration.md`](references/method/geak-integration.md) | — |
 | the whole flow, the gates, the non-negotiable rules | [`references/method/index.md`](references/method/index.md) | — |
 | **entry** — modes A/B/C, champion assertion, comparator, depth contract, escalation seam, the launch args | [`references/method/entry.md`](references/method/entry.md) | [`references/method/front-end.md`](references/method/front-end.md) — what the plain front end already covered |
 | **budget** — `hw_budget`, bound-class prior, floor, roofline reporting contract | [`references/method/budget.md`](references/method/budget.md) | [`references/hardware/roofline-models.md`](references/hardware/roofline-models.md), [`planning-constants.md`](references/hardware/planning-constants.md) |
 | **transcribe** — recover, apply, compile, the four equivalence checks, divergence ledger | [`references/method/transcribe.md`](references/method/transcribe.md) | [`references/tile-programming/layout-recipes.md`](references/tile-programming/layout-recipes.md), [`references/gluon/index.md`](references/gluon/index.md) |
-| **recover** — attribution, `plain@ns=1`, the three suspects, parity gate, last-resort re-injection | [`references/method/recover.md`](references/method/recover.md) | [`references/gluon/pipeline/reinjection.md`](references/gluon/pipeline/reinjection.md) (diagnostic / last resort only) |
+| **recover** — attribution, `plain@ns=1`, in-kernel suspects / outside-kernel disposition, parity gate, last-resort re-injection | [`references/method/recover.md`](references/method/recover.md) | [`references/gluon/pipeline/reinjection.md`](references/gluon/pipeline/reinjection.md) (diagnostic / last resort only) |
 | **evidence** — profiler entry, the four dials, PMC / ATT / SOL reading | [`references/method/profile.md`](references/method/profile.md) | [`references/hardware/bound-class-signals.md`](references/hardware/bound-class-signals.md) |
 | **measure** — acceptance timing, screening, hygiene | [`references/method/benchmark-hygiene.md`](references/method/benchmark-hygiene.md) | [`references/method/records.md`](references/method/records.md) `9a. Anomaly validation` |
 | **climb** — Layer Backbone, reversed-intuition traps, one layer per round, AMD lever cards | [`references/method/climb.md`](references/method/climb.md) | the layer file below |
 | **close** — outcome enum, final report, closure self-review, cost discipline | [`references/method/close.md`](references/method/close.md) | [`references/method/records.md`](references/method/records.md) |
+| per-shape dispatch delivery — measured/inferred/default rows, numerics, boundary policy | [`references/method/dispatch-table.md`](references/method/dispatch-table.md) | [`references/method/close.md`](references/method/close.md) |
 | runtime failure, deadlock, missing doc | [`references/method/triage.md`](references/method/triage.md) | — |
 | which GEAK role runs which stage, GPU lock / broker, optional record tools (toolctl) | [`references/method/orchestration.md`](references/method/orchestration.md) | `skill.md ## Roles in GEAK` |
 

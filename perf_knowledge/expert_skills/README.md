@@ -68,6 +68,14 @@ AND validation.status == validated        (stale/draft/failed are NOT auto-appli
 There is **no ranking** here (same as `capability_index.yaml`). Every match enters the candidate set;
 the on-box A/B picks the winner.
 
+### Language method references
+
+Triton/Gluon lanes on gfx942/gfx950 also receive the in-tree `gluon_authoring` method as a language
+reference by default (`use_gluon_skill=auto`; `false` disables it). This is independent of registry
+selection and does not promote a draft to a validated recipe. Triton tasks keep their requested
+backend; Gluon migration requires a selected direction. See the
+[integration contract](skills/gluon_authoring/references/method/geak-integration.md).
+
 ## scope: kernel vs e2e vs tuning
 
 A skill declares `scope: kernel | e2e | tuning | dependency`. It controls which harness validates it and

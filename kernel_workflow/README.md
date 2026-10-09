@@ -324,3 +324,14 @@ scripts/             gpu_lock.sh (single-GPU, pool and multi-GPU group leases), 
 ```
 The bake-off references e2e's `op_benchmarker` role + `harness_lib.py` **in place** at
 `../e2e_workflow/` (single source, no copy).
+
+
+### Triton/Gluon method discovery
+
+On gfx942/gfx950, Triton and Gluon lanes automatically receive the in-tree
+[Gluon method](../perf_knowledge/expert_skills/skills/gluon_authoring/skill.md) as language guidance.
+`use_gluon_skill=auto` is the default; `false` disables it through nested and bakeoff calls.
+Triton remains Triton unless a Gluon direction is explicitly selected. Draft status remains visible;
+validated expert recipes still require `use_expert_skills=true`. See the
+[integration contract](../perf_knowledge/expert_skills/skills/gluon_authoring/references/method/geak-integration.md)
+for Claude Code invocation, role routing, scripts and native TraceLens analysis.

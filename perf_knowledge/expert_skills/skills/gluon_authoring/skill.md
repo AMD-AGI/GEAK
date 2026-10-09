@@ -55,6 +55,13 @@ supersedes: []
 
 ## When to use
 
+**GEAK discovery:** on gfx942/gfx950, Triton/Gluon lanes automatically receive this method as a
+language reference (`use_gluon_skill=auto`, default). Disable with `use_gluon_skill=false`.
+This does not promote `validation.status: draft` to a validated recipe. Triton lanes keep Triton
+unless a Gluon migration direction is explicitly chosen. Read
+[`references/method/geak-integration.md`](references/method/geak-integration.md) for the Claude Code
+Workflow call chain, entry modes, script contracts and TraceLens handoff.
+
 You are taking a GPU kernel to peak in **Gluon** (`triton.experimental.gluon`, explicit tile programming)
 on AMD CDNA. **gfx950 (CDNA4 — MI355X / MI350X) is the main line** of everything below; **gfx942 (CDNA3 —
 MI300X / MI325X) is the downgrade**, written as "what is unavailable or changes there" after each gfx950
@@ -79,7 +86,8 @@ Neither a bundle nor a measured incumbent is a **return to the front end** — t
 
 **How it runs in GEAK — existing roles, no extra agents**
 ([`references/method/orchestration.md`](references/method/orchestration.md)). GEAK's `kernel_workflow`
-injects this skill into its own roles (`use_expert_skills=true`); GEAK owns the round loop, the GPU lock,
+provides this method to its existing roles (`use_gluon_skill=auto`); validated expert recipes remain
+separately opt-in (`use_expert_skills=true`); GEAK owns the round loop, the GPU lock,
 timing (`harness_lib`) and acceptance (`verify_engineer`, Director, `MIN_IMPROVE`). The skill is an
 **advisory prior**: follow its stages and evidence rules inside GEAK's rounds; it never overrides an on-box
 measurement. Who does what is in `## Roles in GEAK` below.
@@ -125,7 +133,7 @@ Workflow({
   scriptPath: "<REPO>/kernel_workflow/kernel_workflow.js",
   args: {
     kernel_path: "<TASK_DIR>", workflow_dir: "<REPO>/kernel_workflow",
-    mode: "optimize", target_language: "gluon", use_expert_skills: "true",
+    mode: "optimize", target_language: "gluon", use_gluon_skill: "auto",
     budget: 20, max_no_improve: 6, candidate_floor: 0.5 /* reset from parity_gate */, progress_delta: -0.05,
     gpu_ids: "0",
   },
@@ -181,11 +189,16 @@ constructor. Any two agents transcribing the same pinned dump land on the same l
 **A faithful anchor sits below the champion by construction — a debt, not a ceiling.** `gluon_to_ttgir`
 runs no software pipeliner and no block ping-pong (on any of 3.6.0 – 3.8.0), so the overlap plain's
 `num_stages` bought does not survive transcription; nor does any allocator luck. The debt has exactly
-three owners — **`lost_pipeline`**, **`lost_layout`**, **`lost_RA`** — and `parity_gate.py` splits the
+three in-kernel owners — **`lost_pipeline`**, **`lost_layout`**, **`lost_RA`** — and `parity_gate.py` splits the
 anchor→champion gap across them from the compiled artifacts. The debt is repaid **by hand**, attributed,
 before any delta may be called a win. It is often zero: a champion that compiled at `num_stages=1` had no
 overlap to lose, and one whose shipped depth is a pessimisation would lose nothing worth recovering —
 which is why recovery opens with the `plain@ns=1` control rather than with a fix.
+
+If all three clear while parity remains unmet, measure wrapper / host / kernel time and the empty-kernel
+dispatch controls, then record `parity_gate.py --residual-outside-kernel "<evidence>"`. This disposition
+does not clear the gate or upgrade provenance; it records a cost that no in-kernel layer can repay
+(`references/method/recover.md`).
 
 **`num_stages` is dead on the Gluon path.** No 3.8.0 pass consumes it from a Gluon kernel; it survives
 only as a budget parameter and as part of the champion's record. Do not carry plain's value over as a
@@ -305,7 +318,7 @@ MFMA-only floor and your multiple over it, and the `workloads/index.md` row for 
 verdict is robust (`upper` → trust memory; `lower` → trust compute; `ambiguous` → measure, do not resolve from
 the model). Every "% of roofline" you later report carries **`numerator_basis`** (model | counters) and
 **`denominator_basis`** (datasheet | empirical@tool-version | in-shape probe): datasheet denominators **rank**,
-only a measured numerator over a probed or calibrated denominator may **gate or close**. gfx942 SKUs
+local estimates remain planning-only; native reports preserve their own provenance and measured A/B governs acceptance. gfx942 SKUs
 (MI300X / MI325X) are the downgrade rows of the same table. Detail, calibration, rocprof-compute caveats:
 [`references/method/budget.md`](references/method/budget.md).
 
@@ -590,8 +603,9 @@ always GEAK's `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_loc
 ## Sources
 
 - **What this skill is made of.** The complete upstream `tile-programming-gluon` pack —
-  `AMD-AGI/TileProgrammingAgentSkills@029f3d6f` plus that checkout's uncommitted working tree (its
-  `compose.py --check` passed), `.claude` flavor, all 209 files (the three upstream agents' contracts folded into GEAK's existing roles, the agent files themselves not kept) — **reorganized into
+  [`AMD-AGI/TileProgrammingAgentSkills@a649eaaf`](https://github.com/AMD-AGI/TileProgrammingAgentSkills/tree/a649eaaf0a989de949f38cd00916416c95d59b95)
+  (`main`, fetched 2026-11-05; `compose.py --check` passed), `.claude` flavor (the three upstream agents'
+  contracts folded into GEAK's existing roles, the agent files themselves not kept) — **reorganized into
   GEAK's structure** rather than vendored side by side. The upstream entry (`SKILL.md`) and its full method
   (`references/method-reference.md`) were folded into this file's chapters and into
   `references/method/*.md` (one file per stage); the loose upstream reference files were merged into
@@ -610,7 +624,8 @@ always GEAK's `kernel_workflow/scripts/gpu_lock.sh` (lock dir `/tmp/team_gpu_loc
   ones: re-injection is no longer the opening move of recovery or a lever on an already-Gluon kernel;
   `num_stages` is dead on the Gluon path (the old "carry plain's value over" advice is withdrawn); the
   "no full profile before the port" rule gave way to budget-first and re-profile-every-round; the residual
-  owners are exactly `lost_pipeline` / `lost_layout` / `lost_RA`; in-process interleaving of differently
+  in-kernel owners are `lost_pipeline` / `lost_layout` / `lost_RA`, with a separately asserted
+  `residual_outside_kernel` disposition for measured boundary costs; in-process interleaving of differently
   patched arms is withdrawn (one process per variant). Checked against the v3.8.0 source while merging:
   the coexec scheduling strategy is default-on only for gfx1250, opt-in on gfx950 / gfx942.
 - **Where GEAK infrastructure owns a concern, it wins.** GPU locking (`kernel_workflow/scripts/gpu_lock.sh`,
