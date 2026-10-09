@@ -2155,6 +2155,33 @@ def _gating_step_audits(step_audits):
             if item["status"] != "not_gating_unresolved_extra_step"]
 
 
+def _table_source_steps(representatives, analysis_steps):
+    """Per phase: the analysis step and the steps the representatives came from.
+
+    `gating_step_ids` is what the layer-order gate checks: the steps whose layer
+    cuts the tables stand on, or the analysis step when no representative of the
+    phase exists (nothing to stand on, so the gate must still see the failure).
+    """
+    used = {}
+    matches = {}
+    for rep in (representatives or {}).values():
+        for phase, chosen in (rep.get("selected_instances") or {}).items():
+            if chosen.get("step_id") is not None:
+                used.setdefault(phase, set()).add(chosen["step_id"])
+            if chosen.get("analysis_step_match"):
+                matches.setdefault(phase, set()).add(chosen["analysis_step_match"])
+    out = {}
+    for phase, chosen in sorted((analysis_steps or {}).items()):
+        used_ids = sorted(used.get(phase, ()))
+        out[phase] = {
+            "analysis_step_id": chosen["step_id"],
+            "table_step_ids": used_ids,
+            "fell_back": bool(matches.get(phase, set()) - {"analysis_step"}),
+            "gating_step_ids": used_ids or [chosen["step_id"]],
+        }
+    return out
+
+
 def _quality(
         pattern_doc, rows, instances, representatives, spans, out_of_scope,
         partition_diagnostics, tables, link_audit=None, analysis_steps=None):
@@ -2202,18 +2229,27 @@ def _quality(
                     and non_overlapping) else "fail"),
         })
     # Steps with no boundary evidence are marked first (an extra prefill step
-    # inside a DECODE file).  Tables are then built from one analysis step per
-    # phase; other captured steps (a test prompt, a step the profiler entered
-    # mid-way, a ramp-up step) are audited but do not gate.  An analysis step
-    # that is itself unresolved still gates: its rows are the tables.  Without
-    # analysis steps every step gates except the marked extra ones.  A step
-    # excused for incomplete link evidence never gates.
+    # inside a DECODE file).  With analysis steps, the gate checks the steps the
+    # tables were actually built from: normally the phase's analysis step, but
+    # when it yields no instance _analysis_candidates() falls back to another
+    # step, and that step's layer cuts are what the tables stand on.  The
+    # analysis step itself stops gating only when it carries no boundary
+    # evidence at all (marked above); one that was cut wrongly still gates.  A
+    # phase with no representative keeps its analysis step, so it still fails.
+    # Without analysis steps every step gates except the marked extra ones.  A
+    # step excused for incomplete link evidence never gates.
     _gating_step_audits(step_audits)
     analysis_ids = {item["step_id"]
                     for item in (analysis_steps or {}).values()}
+    table_sources = _table_source_steps(representatives, analysis_steps)
     if analysis_ids:
+        unresolved_extra = {item["step_id"] for item in step_audits
+                            if item["status"] == "not_gating_unresolved_extra_step"}
+        source_ids = {step_id for entry in table_sources.values()
+                      for step_id in entry["gating_step_ids"]}
+        source_ids |= analysis_ids - unresolved_extra
         gating_audits = [item for item in step_audits
-                         if item["step_id"] in analysis_ids]
+                         if item["step_id"] in source_ids]
     else:
         gating_audits = [item for item in step_audits
                          if item["status"] != "not_gating_unresolved_extra_step"]
@@ -2277,6 +2313,7 @@ def _quality(
                 "excused_incomplete_evidence_steps": [
                     dict(item, step_id=step_id)
                     for step_id, item in sorted(incomplete_evidence.items())],
+                "table_source_steps": table_sources,
             },
             "representative_layer_integrity": representative_integrity,
             "trace_pattern_consistency": trace_consistency,

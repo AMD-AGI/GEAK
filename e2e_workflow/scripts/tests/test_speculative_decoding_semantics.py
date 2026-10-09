@@ -663,6 +663,100 @@ class AnalysisStepGateTest(unittest.TestCase):
             self.assertEqual(len(gate["non_gating_steps"]), 1)
             self.assertEqual(quality["status"], "pass")
 
+    def _build(self, events):
+        with tempfile.TemporaryDirectory() as tmp:
+            patterns = os.path.join(tmp, "patterns.json")
+            with open(patterns, "w") as fh:
+                json.dump({"schema_version": 1, "num_hidden_layers_main": 2,
+                           "patterns": [{"pattern_id": "P0",
+                                         "pattern_display_name": "A",
+                                         "layer_ids": [0, 1]}],
+                           "coverage_check": {"total_main_layers": 2, "covered": 2,
+                                              "mutually_exclusive": True,
+                                              "full_coverage": True},
+                           "quality": {"status": "pass"}}, fh)
+            trace = os.path.join(tmp, "trace.json")
+            with open(trace, "w") as fh:
+                json.dump({"traceEvents": events}, fh)
+            result = mapping.build(trace, patterns, os.path.join(tmp, "out"),
+                                   require_phases=["prefill"])
+            with open(result["quality_json"]) as fh:
+                return json.load(fh)
+
+    @staticmethod
+    def _bare_kernels(ts, count, external_base):
+        """GPU work with no layer module span: no boundary evidence at all."""
+        events = []
+        for index in range(count):
+            start = ts + index * 100
+            ext = external_base + index
+            events.extend([
+                {"ph": "X", "cat": "cpu_op", "tid": 1, "name": "aten::mm",
+                 "ts": start + 5, "dur": 5,
+                 "args": {"External id": ext, "Input Dims": [[4, 8], [8, 8]],
+                          "Input type": ["c10::BFloat16", "c10::BFloat16"]}},
+                {"ph": "X", "cat": "kernel", "name": "bare_gemm_kernel_%d" % index,
+                 "ts": start + 20, "dur": 3, "args": {"External id": ext, "stream": 7}},
+            ])
+        return events
+
+    def test_unresolved_analysis_step_gates_on_the_step_the_tables_used(self):
+        # 20261009 Qwen3.5-397B: the largest prefill step carried no layer spans,
+        # so the tables fell back to another fully mapped prefill step.  The gate
+        # used to check the empty analysis step and turned the run partial.
+        events = []
+        events.extend(_step("step[EXTEND bs=3 toks=64]", 0, 400, 0, 400))
+        events.extend(self._bare_kernels(10, 2, external_base=0))
+        events.extend(_step("step[EXTEND bs=1 toks=16]", 1000, 400, 1000, 400))
+        events.extend(_layers("full", 1010, 2, external_base=100))
+        quality = self._build(events)
+        gate = quality["gates"]["step_layer_order"]
+        source = gate["table_source_steps"]["prefill"]
+        self.assertTrue(source["fell_back"])
+        self.assertNotEqual(source["analysis_step_id"], source["table_step_ids"][0])
+        self.assertEqual(source["gating_step_ids"], source["table_step_ids"])
+        self.assertEqual([s["step_id"] for s in gate["steps"]], source["table_step_ids"])
+        self.assertIn(source["analysis_step_id"], gate["non_gating_unresolved_steps"])
+        self.assertEqual(gate["status"], "pass")
+        self.assertEqual(quality["gates"]["layer_boundaries"]["status"], "pass")
+        self.assertEqual(quality["status"], "pass")
+
+    def test_phase_with_no_mapped_step_still_fails(self):
+        events = []
+        events.extend(_step("step[EXTEND bs=3 toks=64]", 0, 400, 0, 400))
+        events.extend(self._bare_kernels(10, 2, external_base=0))
+        quality = self._build(events)
+        gate = quality["gates"]["step_layer_order"]
+        self.assertEqual(gate["table_source_steps"]["prefill"]["table_step_ids"], [])
+        self.assertEqual(gate["status"], "fail")
+        self.assertNotEqual(quality["status"], "pass")
+
+    def test_wrongly_cut_analysis_step_still_gates(self):
+        # The analysis step was cut (it has instances) but its layers came out
+        # out of order: a bad cut, not missing evidence, so it must keep gating
+        # even though a representative was taken from another step.
+        def instance(step, layer, first):
+            return {"step_id": step, "phase": "prefill", "layer_id": layer,
+                    "pattern_id": "P0", "boundary_complete": True,
+                    "first_device_seq_index": first, "last_device_seq_index": first + 1}
+        instances = [instance("s-big", 1, 0), instance("s-big", 0, 10),
+                     instance("s-small", 0, 20), instance("s-small", 1, 30)]
+        diagnostics = [{"step_id": step, "phase": "prefill", "status": "mapped",
+                        "configured_layer_count": 2} for step in ("s-big", "s-small")]
+        representatives = {"P0": {"selected_instances": {"prefill": {
+            "step_id": "s-small", "analysis_step_match": "any_step_fallback",
+            "first_device_seq_index": 20, "last_device_seq_index": 31}}}}
+        analysis = {"prefill": {"step_id": "s-big"}}
+        table = {"pattern_id": "P0", "phase": "prefill", "rows": [],
+                 "representative_layer_id": 0, "pattern_layer_ids": [0, 1]}
+        quality = mapping._quality(
+            {"patterns": []}, [], instances, representatives, [(0, 1)], {},
+            diagnostics, [table], analysis_steps=analysis)
+        gate = quality["gates"]["step_layer_order"]
+        self.assertEqual(sorted(s["step_id"] for s in gate["steps"]), ["s-big", "s-small"])
+        self.assertEqual(gate["status"], "fail")
+        self.assertEqual(gate["table_source_steps"]["prefill"]["table_step_ids"], ["s-small"])
+
 
 if __name__ == "__main__":
     unittest.main()
