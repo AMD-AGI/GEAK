@@ -7,7 +7,7 @@ regimes: [both]
 updated: 2026-10-07
 sources:
   - ../data/hw_constants.json
-  - ../../expert_skills/skills/gluon_authoring/references/platform-known-issues.md
+  - ../../expert_skills/skills/gluon_authoring/references/pitfalls/platform-known-issues.md
   - https://gpuopen.com/learn/wmma-guide-amd-rdna-4-gpus-part-2/
 ---
 

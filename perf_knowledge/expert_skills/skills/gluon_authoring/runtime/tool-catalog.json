@@ -1,0 +1,1729 @@
+{
+  "schema": "toolctl.catalog/1",
+  "pack": {
+    "name": "tile-programming-gluon",
+    "dsl": "gluon",
+    "vendor": "amd",
+    "platform": "claude"
+  },
+  "role_policy": {
+    "enforcement": {
+      "claude": "agent_frontmatter_tools",
+      "cursor": "detectable_only"
+    },
+    "roles": {
+      "arm": {
+        "agents": [
+          "triton-bestof",
+          "tilelang-bestof",
+          "hip-bestof"
+        ],
+        "tools": [
+          "Read",
+          "Edit",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": true,
+        "may_spawn": false,
+        "allowed_work_kinds": [
+          "branch_arm",
+          "arm_result"
+        ],
+        "allowed_child_roles": []
+      },
+      "bounded_bench": {
+        "agents": [
+          "gluon-bench"
+        ],
+        "tools": [
+          "Read",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": false,
+        "allowed_work_kinds": [
+          "bounded_benchmark"
+        ],
+        "allowed_child_roles": []
+      },
+      "captain": {
+        "agents": [
+          "kernel-opt-run"
+        ],
+        "tools": [
+          "Read",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob",
+          "Agent"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": true,
+        "allowed_work_kinds": [
+          "resolve",
+          "preflight",
+          "boundary_budget",
+          "sweep",
+          "dispatch",
+          "arbitration",
+          "canonical_record",
+          "resweep",
+          "champion_gate",
+          "final_report"
+        ],
+        "allowed_child_roles": [
+          "triton_sweep",
+          "direction",
+          "independent_direction",
+          "deep",
+          "bounded_bench",
+          "arm",
+          "skeptic"
+        ]
+      },
+      "dashboard": {
+        "agents": [],
+        "tools": [
+          "Read",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": false,
+        "may_measure": false,
+        "allowed_work_kinds": [
+          "collection",
+          "dashboard_render"
+        ],
+        "allowed_child_roles": []
+      },
+      "deep": {
+        "agents": [
+          "gluon-direction",
+          "flydsl-direction"
+        ],
+        "tools": [
+          "Read",
+          "Edit",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": true,
+        "may_spawn": false,
+        "forbidden_actions": [
+          "branch",
+          "config_resweep",
+          "structure_rederive"
+        ],
+        "allowed_work_kinds": [
+          "anchor",
+          "climb",
+          "worker_result",
+          "structure_suspect",
+          "resweep_request"
+        ],
+        "allowed_child_roles": []
+      },
+      "direct_owner": {
+        "agents": [],
+        "tools": [
+          "Read",
+          "Edit",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob",
+          "Agent"
+        ],
+        "may_edit_kernel": true,
+        "may_spawn": true,
+        "allowed_work_kinds": [
+          "anchor",
+          "sweep",
+          "branch_request",
+          "climb",
+          "worker_result",
+          "branch_converge",
+          "resweep",
+          "canonical_record",
+          "final_report"
+        ],
+        "allowed_child_roles": [
+          "arm",
+          "bounded_bench"
+        ]
+      },
+      "direction": {
+        "agents": [
+          "triton-direction",
+          "tilelang-direction",
+          "hip-direction"
+        ],
+        "tools": [
+          "Read",
+          "Edit",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob",
+          "Agent"
+        ],
+        "may_edit_kernel": true,
+        "may_spawn": true,
+        "allowed_work_kinds": [
+          "anchor",
+          "sweep",
+          "branch_request",
+          "branch_converge",
+          "climb",
+          "worker_result",
+          "resweep",
+          "canonical_record",
+          "final_report"
+        ],
+        "allowed_child_roles": [
+          "arm",
+          "bounded_bench"
+        ]
+      },
+      "fleet": {
+        "agents": [
+          "kernel-opt-fleet"
+        ],
+        "tools": [
+          "Read",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob",
+          "Agent"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": true,
+        "allowed_work_kinds": [
+          "environment_snapshot",
+          "environment_repair",
+          "dispatch",
+          "collection",
+          "acceptance"
+        ],
+        "allowed_child_roles": [
+          "captain",
+          "direction",
+          "independent_direction"
+        ]
+      },
+      "independent_direction": {
+        "agents": [
+          "cutedsl-direction",
+          "cuda-direction"
+        ],
+        "tools": [
+          "Read",
+          "Edit",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": true,
+        "may_spawn": false,
+        "may_sweep_initial_contract": true,
+        "allowed_work_kinds": [
+          "anchor",
+          "sweep",
+          "climb",
+          "canonical_record",
+          "final_report"
+        ],
+        "allowed_child_roles": []
+      },
+      "skeptic": {
+        "agents": [
+          "amd-closure-skeptic"
+        ],
+        "tools": [
+          "Read",
+          "Write",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": false,
+        "may_measure": false,
+        "allowed_work_kinds": [
+          "closure_review"
+        ],
+        "allowed_child_roles": []
+      },
+      "triton_sweep": {
+        "agents": [
+          "triton-sweep"
+        ],
+        "tools": [
+          "Read",
+          "Bash"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": false,
+        "allowed_work_kinds": [
+          "sweep"
+        ],
+        "allowed_child_roles": []
+      }
+    }
+  },
+  "role_scope": [
+    "deep"
+  ],
+  "dedicated_stages": {},
+  "tools": [
+    {
+      "name": "ab_bench",
+      "classification": "internal",
+      "path": "scripts/ab_bench.py",
+      "command": [
+        "python3",
+        "scripts/ab_bench.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "amd_occupancy",
+      "classification": "internal",
+      "path": "scripts/amd_occupancy.py",
+      "command": [
+        "python3",
+        "scripts/amd_occupancy.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "asm_loop_audit",
+      "classification": "internal",
+      "path": "scripts/asm_loop_audit.py",
+      "command": [
+        "python3",
+        "scripts/asm_loop_audit.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "asm_schedule_viz",
+      "classification": "developer_only",
+      "path": "scripts/asm_schedule_viz.py",
+      "command": [
+        "python3",
+        "scripts/asm_schedule_viz.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "library, demo, graph/visualization, migration, or build helper"
+    },
+    {
+      "name": "att_merge_perfetto",
+      "classification": "developer_only",
+      "path": "scripts/att_merge_perfetto.py",
+      "command": [
+        "python3",
+        "scripts/att_merge_perfetto.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "library, demo, graph/visualization, migration, or build helper"
+    },
+    {
+      "name": "att_opclass",
+      "classification": "internal",
+      "path": "scripts/att_opclass.py",
+      "command": [
+        "python3",
+        "scripts/att_opclass.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "att_timeline",
+      "classification": "developer_only",
+      "path": "scripts/att_timeline.py",
+      "command": [
+        "python3",
+        "scripts/att_timeline.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "library, demo, graph/visualization, migration, or build helper"
+    },
+    {
+      "name": "att_to_perfetto",
+      "classification": "developer_only",
+      "path": "scripts/att_to_perfetto.py",
+      "command": [
+        "python3",
+        "scripts/att_to_perfetto.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "library, demo, graph/visualization, migration, or build helper"
+    },
+    {
+      "name": "audit_journal",
+      "classification": "internal",
+      "path": "scheduler/audit_journal.py",
+      "command": [
+        "python3",
+        "scheduler/audit_journal.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "calc_perf",
+      "classification": "internal",
+      "path": "scripts/calc_perf.py",
+      "command": [
+        "python3",
+        "scripts/calc_perf.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "canonical_record",
+      "classification": "public",
+      "path": "scripts/canonical_record.py",
+      "command": [
+        "python3",
+        "scripts/canonical_record.py"
+      ],
+      "flags": [
+        "--help",
+        "--selftest"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "captain",
+        "direct_owner",
+        "direction",
+        "independent_direction",
+        "arm",
+        "deep"
+      ],
+      "description": "Schema-checked writer for the canonical result artifacts (worker/arm result, branch request and convergence, resweep request/result, run state, final report). Use its subcommands instead of hand-writing these files: the close audit reads them as files and cannot tell a hand-written one from a validated one."
+    },
+    {
+      "name": "capture",
+      "classification": "internal",
+      "path": "scripts/capture.sh",
+      "command": [
+        "bash",
+        "scripts/capture.sh"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "champion_gate",
+      "classification": "public",
+      "path": "scripts/champion_gate.py",
+      "command": [
+        "python3",
+        "scripts/champion_gate.py"
+      ],
+      "flags": [
+        "--champion",
+        "--json"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "captain",
+        "direction",
+        "deep"
+      ],
+      "description": "Bounded champion identity gate. Its optional Claude MCP facade accepts only a champion artifact path.",
+      "optional_mcp": {
+        "feature": "optional_gate_mcp",
+        "platform": "claude",
+        "tool": "gate_champion",
+        "cli": "scripts/champion_gate.py",
+        "input_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "champion": {
+              "type": "string",
+              "minLength": 1,
+              "format": "path",
+              "path_kind": "file"
+            }
+          },
+          "required": [
+            "champion"
+          ]
+        },
+        "enabled": false
+      }
+    },
+    {
+      "name": "check_term_index",
+      "classification": "internal",
+      "path": "scripts/check_term_index.py",
+      "command": [
+        "python3",
+        "scripts/check_term_index.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "close_audit",
+      "classification": "public",
+      "path": "scripts/close_audit.py",
+      "command": [
+        "python3",
+        "scripts/close_audit.py"
+      ],
+      "flags": [
+        "--work-root",
+        "--json",
+        "--strict"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "fleet",
+        "captain",
+        "direction",
+        "deep",
+        "independent_direction"
+      ],
+      "description": "Bounded close audit. Its optional Claude MCP facade uses the strict gate and retains the audit artifact.",
+      "optional_mcp": {
+        "feature": "optional_gate_mcp",
+        "platform": "claude",
+        "tool": "gate_close_audit",
+        "cli": "scripts/close_audit.py",
+        "input_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "work_root": {
+              "type": "string",
+              "minLength": 1,
+              "format": "path",
+              "path_kind": "directory"
+            }
+          },
+          "required": [
+            "work_root"
+          ]
+        },
+        "enabled": false
+      }
+    },
+    {
+      "name": "context_contracts",
+      "classification": "internal",
+      "path": "scripts/context_contracts.py",
+      "command": [
+        "python3",
+        "scripts/context_contracts.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "context_query",
+      "classification": "public",
+      "path": "scripts/context_query.py",
+      "command": [
+        "python3",
+        "scripts/context_query.py"
+      ],
+      "flags": [
+        "--context",
+        "--selector",
+        "--ref",
+        "--out",
+        "--describe",
+        "--selftest"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "native",
+        "describe_argv": [
+          "--describe",
+          "--format=json"
+        ],
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "*"
+      ],
+      "description": "Select one named bounded slice or exact artifact reference from a stage-context package."
+    },
+    {
+      "name": "core",
+      "classification": "internal",
+      "path": "scheduler/core.py",
+      "command": [
+        "python3",
+        "scheduler/core.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "create_harness",
+      "classification": "internal",
+      "path": "scripts/create_harness.py",
+      "command": [
+        "python3",
+        "scripts/create_harness.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "debt",
+      "classification": "internal",
+      "path": "scripts/debt.py",
+      "command": [
+        "python3",
+        "scripts/debt.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "deep_mfma_analysis",
+      "classification": "internal",
+      "path": "scripts/deep_mfma_analysis.py",
+      "command": [
+        "python3",
+        "scripts/deep_mfma_analysis.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "dump_ir",
+      "classification": "internal",
+      "path": "scripts/dump_ir.sh",
+      "command": [
+        "bash",
+        "scripts/dump_ir.sh"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "env_gate",
+      "classification": "internal",
+      "path": "scripts/env_gate.sh",
+      "command": [
+        "bash",
+        "scripts/env_gate.sh"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "extract_sku",
+      "classification": "internal",
+      "path": "scripts/extract_sku.py",
+      "command": [
+        "python3",
+        "scripts/extract_sku.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "gfx950_isa",
+      "classification": "public",
+      "path": "scripts/gfx950_isa.py",
+      "command": [
+        "python3",
+        "scripts/gfx950_isa.py"
+      ],
+      "flags": [
+        "--help",
+        "--selftest"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "captain",
+        "direction",
+        "independent_direction",
+        "direct_owner",
+        "arm",
+        "deep",
+        "bounded_bench",
+        "skeptic"
+      ],
+      "description": "Offline gfx950/CDNA4 ISA reference -- the WHOLE 608-page ISA document is transcribed into three committed databases, so on gfx950 never render or fetch the PDF and never assert a hardware fact from memory. No network, no GPU, no PDF. START WITH `search <term>`: it queries all three at once. `layout`/`locate`/`facts`/`modifiers`/`sparse` = MFMA operand layout, lane/VGPR/byte for A,B,C,D (ch.7). `opcodes`/`encoding`/`format` = all 1240 instructions and 33 encodings plus their pseudo-code (ch.12-13). `regs`/`waitcnt`/`waits`/`hazard`/`lds`/`mem`/`limits`/`concepts`/`tables` = registers, wait states and manual NOPs, LDS and memory model, programming limits (ch.1-6, 8-11). `errata` = known errors in the printed document -- read it before hand-assembling or trusting a printed opcode. Every answer prints a `# provenance:` line with the ISA page to cite."
+    },
+    {
+      "name": "gluon_swp",
+      "classification": "internal",
+      "path": "scripts/gluon_swp.py",
+      "command": [
+        "python3",
+        "scripts/gluon_swp.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "gpu_broker",
+      "classification": "internal",
+      "path": "scheduler/gpu_broker.py",
+      "command": [
+        "python3",
+        "scheduler/gpu_broker.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "gpu_client",
+      "classification": "internal",
+      "path": "scheduler/gpu_client.py",
+      "command": [
+        "python3",
+        "scheduler/gpu_client.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "gpu_lock",
+      "classification": "internal",
+      "path": "scripts/gpu_lock.sh",
+      "command": [
+        "bash",
+        "scripts/gpu_lock.sh"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "group_identity",
+      "classification": "internal",
+      "path": "scheduler/group_identity.py",
+      "command": [
+        "python3",
+        "scheduler/group_identity.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "harness_stub_env",
+      "classification": "developer_only",
+      "path": "scripts/harness_stub_env.py",
+      "command": [
+        "python3",
+        "scripts/harness_stub_env.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "library, demo, graph/visualization, migration, or build helper"
+    },
+    {
+      "name": "hotspot_analyzer",
+      "classification": "internal",
+      "path": "scripts/hotspot_analyzer.py",
+      "command": [
+        "python3",
+        "scripts/hotspot_analyzer.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "hw_budget",
+      "classification": "internal",
+      "path": "scripts/hw_budget.py",
+      "command": [
+        "python3",
+        "scripts/hw_budget.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "hw_sources",
+      "classification": "public",
+      "path": "scripts/hw_sources.sh",
+      "command": [
+        "bash",
+        "scripts/hw_sources.sh"
+      ],
+      "flags": [
+        "--help"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "captain",
+        "direction",
+        "independent_direction",
+        "direct_owner",
+        "arm",
+        "deep",
+        "bounded_bench",
+        "skeptic"
+      ],
+      "description": "AMD hardware primary sources, tiered (references/hardware/primary-sources.md). START WITH `preflight`: it prints which architecture x question class is answerable in THIS environment and the exact repair command for anything that is not -- run it before you need an answer, not when a lever already failed. `layout <arch> <instr>` generates the operand layout table: for cdna1/2/3 and rdna3/4 from the AMD Matrix Instruction Calculator, for gfx950 from the in-pack ISA database (the calculator has no cdna4 support, which is why that arch ships one). `xml <arch>` fetches the machine-readable ISA XML; `decode <arch> <bytes>` disassembles raw encoding bytes; `pdf <doc> [p0 p1]` renders pages for prose no database carries. Tiers that fetch need TILE_HW_CACHE; preflight, --help and every in-pack database do not."
+    },
+    {
+      "name": "kernel_breakdown",
+      "classification": "internal",
+      "path": "scripts/kernel_breakdown.py",
+      "command": [
+        "python3",
+        "scripts/kernel_breakdown.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "layout_facts",
+      "classification": "public",
+      "path": "scripts/layout_facts.py",
+      "command": [
+        "python3",
+        "scripts/layout_facts.py"
+      ],
+      "flags": [
+        "--help",
+        "--layout",
+        "--list",
+        "--markdown"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "captain",
+        "direction",
+        "independent_direction",
+        "direct_owner",
+        "arm",
+        "deep",
+        "bounded_bench",
+        "skeptic"
+      ],
+      "description": "One-key MFMA/WMMA operand-layout preflight, and the single entry point for ISA questions on ANY AMD arch -- it routes to whichever source can answer. Run it BEFORE authoring a matrix / low-precision / transpose lever: a scale or operand LAYOUT mismatch is the top cause of a kernel that compiles and returns wrong numbers, and this generates the authoritative table instead of guessing. `layout_facts.py <arch> <instr> [--layout]` gives dims, cycles, dtypes and the A/B lane-VGPR table. The instruction chapters are reachable through the same entry point on gfx950, cdna3, rdna3 and rdna4: `layout_facts.py <arch> encoding|format|opcodes|search|errata ...` answers from the in-pack databases with no network and no calculator. Layout for cdna1/2/3 and rdna3/4 needs the Matrix Calculator -- check `hw_sources.sh preflight` first. Every answer prints a `# provenance:` line to cite."
+    },
+    {
+      "name": "lever_index",
+      "classification": "internal",
+      "path": "scripts/lever_index.py",
+      "command": [
+        "python3",
+        "scripts/lever_index.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "locus",
+      "classification": "internal",
+      "path": "scripts/locus.sh",
+      "command": [
+        "bash",
+        "scripts/locus.sh"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "mem_bw_probe",
+      "classification": "internal",
+      "path": "scripts/mem_bw_probe.py",
+      "command": [
+        "python3",
+        "scripts/mem_bw_probe.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "mfma_efficiency",
+      "classification": "internal",
+      "path": "scripts/mfma_efficiency.py",
+      "command": [
+        "python3",
+        "scripts/mfma_efficiency.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "parity_gate",
+      "classification": "internal",
+      "path": "scripts/parity_gate.py",
+      "command": [
+        "python3",
+        "scripts/parity_gate.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "parse_correctness",
+      "classification": "internal",
+      "path": "scripts/parse_correctness.py",
+      "command": [
+        "python3",
+        "scripts/parse_correctness.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "parse_pmc",
+      "classification": "internal",
+      "path": "scripts/parse_pmc.py",
+      "command": [
+        "python3",
+        "scripts/parse_pmc.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "parse_rc",
+      "classification": "internal",
+      "path": "scripts/parse_rc.py",
+      "command": [
+        "python3",
+        "scripts/parse_rc.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "patch_reinject",
+      "classification": "developer_only",
+      "path": "scripts/patch_reinject.py",
+      "command": [
+        "python3",
+        "scripts/patch_reinject.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "library, demo, graph/visualization, migration, or build helper"
+    },
+    {
+      "name": "pipeline_examples_cdna3",
+      "classification": "developer_only",
+      "path": "scripts/pipeline_examples_cdna3.py",
+      "command": [
+        "python3",
+        "scripts/pipeline_examples_cdna3.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "library, demo, graph/visualization, migration, or build helper"
+    },
+    {
+      "name": "pipeline_examples_cdna4",
+      "classification": "developer_only",
+      "path": "scripts/pipeline_examples_cdna4.py",
+      "command": [
+        "python3",
+        "scripts/pipeline_examples_cdna4.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "library, demo, graph/visualization, migration, or build helper"
+    },
+    {
+      "name": "pipeline_survey",
+      "classification": "internal",
+      "path": "scripts/pipeline_survey.py",
+      "command": [
+        "python3",
+        "scripts/pipeline_survey.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "probe",
+      "classification": "internal",
+      "path": "scripts/probe.py",
+      "command": [
+        "python3",
+        "scripts/probe.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "probe_levers",
+      "classification": "internal",
+      "path": "scripts/probe_levers.py",
+      "command": [
+        "python3",
+        "scripts/probe_levers.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "profile_payload",
+      "classification": "public",
+      "path": "scripts/profile_payload.py",
+      "command": [
+        "python3",
+        "scripts/profile_payload.py"
+      ],
+      "flags": [
+        "--payload"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "validate",
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "fleet",
+        "captain",
+        "direction",
+        "deep",
+        "independent_direction",
+        "arm"
+      ],
+      "description": "Validate a hash-addressed, shell-free profile payload before execution."
+    },
+    {
+      "name": "recordctl",
+      "classification": "public",
+      "path": "scripts/recordctl.py",
+      "command": [
+        "python3",
+        "scripts/recordctl.py"
+      ],
+      "flags": [
+        "--help",
+        "--describe",
+        "--format",
+        "--selftest"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "native",
+        "describe_argv": [
+          "--describe",
+          "--format=json"
+        ],
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "captain",
+        "direction",
+        "direct_owner",
+        "independent_direction",
+        "triton_sweep",
+        "arm",
+        "deep",
+        "bounded_bench"
+      ],
+      "description": "Restricted canonical optimization-journal facade for append, bounded recall/summary/query, and declared valid-measurement tracking."
+    },
+    {
+      "name": "recover_gluon",
+      "classification": "internal",
+      "path": "scripts/recover_gluon.py",
+      "command": [
+        "python3",
+        "scripts/recover_gluon.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "report_lint",
+      "classification": "public",
+      "path": "scripts/report_lint.py",
+      "command": [
+        "python3",
+        "scripts/report_lint.py"
+      ],
+      "flags": [
+        "--report",
+        "--json",
+        "--strict"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "fleet",
+        "captain",
+        "direction",
+        "deep",
+        "independent_direction"
+      ],
+      "description": "Bounded report lint. Its optional Claude MCP facade uses the strict gate and retains the lint artifact.",
+      "optional_mcp": {
+        "feature": "optional_gate_mcp",
+        "platform": "claude",
+        "tool": "gate_report_lint",
+        "cli": "scripts/report_lint.py",
+        "input_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "report": {
+              "type": "string",
+              "minLength": 1,
+              "format": "path",
+              "path_kind": "file"
+            }
+          },
+          "required": [
+            "report"
+          ]
+        },
+        "enabled": false
+      }
+    },
+    {
+      "name": "residency",
+      "classification": "internal",
+      "path": "scheduler/residency.py",
+      "command": [
+        "python3",
+        "scheduler/residency.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "rocprof_compute_probe",
+      "classification": "internal",
+      "path": "scripts/rocprof_compute_probe.sh",
+      "command": [
+        "bash",
+        "scripts/rocprof_compute_probe.sh"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "rocprofv3_safe",
+      "classification": "internal",
+      "path": "scripts/rocprofv3_safe.sh",
+      "command": [
+        "bash",
+        "scripts/rocprofv3_safe.sh"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "round_record",
+      "classification": "internal",
+      "path": "scripts/round_record.py",
+      "command": [
+        "python3",
+        "scripts/round_record.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "run_state",
+      "classification": "internal",
+      "path": "scripts/run_state.py",
+      "command": [
+        "python3",
+        "scripts/run_state.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "runtime_env",
+      "classification": "public",
+      "path": "scripts/runtime_env.sh",
+      "command": [
+        "bash",
+        "scripts/runtime_env.sh"
+      ],
+      "flags": [
+        "--help",
+        "--contract",
+        "--out"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "prepare",
+          "--help"
+        ],
+        "describe": "catalog",
+        "describe_argv": null,
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "fleet"
+      ],
+      "description": "Fleet-only generator and verifier for isolated container runtime environment contracts."
+    },
+    {
+      "name": "serve_traces",
+      "classification": "developer_only",
+      "path": "scripts/serve_traces.py",
+      "command": [
+        "python3",
+        "scripts/serve_traces.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "library, demo, graph/visualization, migration, or build helper"
+    },
+    {
+      "name": "served_envelope",
+      "classification": "internal",
+      "path": "scripts/served_envelope.py",
+      "command": [
+        "python3",
+        "scripts/served_envelope.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "skill_index",
+      "classification": "internal",
+      "path": "scripts/skill_index.py",
+      "command": [
+        "python3",
+        "scripts/skill_index.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "smoke_recover_gpu",
+      "classification": "internal",
+      "path": "scripts/smoke_recover_gpu.py",
+      "command": [
+        "python3",
+        "scripts/smoke_recover_gpu.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "smoke_test_recover",
+      "classification": "internal",
+      "path": "scripts/smoke_test_recover.sh",
+      "command": [
+        "bash",
+        "scripts/smoke_test_recover.sh"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "source_excerpt",
+      "classification": "public",
+      "path": "scripts/source_excerpt.py",
+      "command": [
+        "python3",
+        "scripts/source_excerpt.py"
+      ],
+      "flags": [
+        "--describe",
+        "--selftest"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "native",
+        "describe_argv": [
+          "--describe",
+          "--format=json"
+        ],
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "*"
+      ],
+      "description": "Issue a bounded source-read ticket and return only its audited symbol excerpt."
+    },
+    {
+      "name": "stage_context",
+      "classification": "public",
+      "path": "scripts/stage_context.py",
+      "command": [
+        "python3",
+        "scripts/stage_context.py"
+      ],
+      "flags": [
+        "--describe",
+        "--selftest"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "native",
+        "describe_argv": [
+          "--describe",
+          "--format=json"
+        ],
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "*"
+      ],
+      "description": "Build one bounded, hash-addressed stage-context package from explicitly named metadata references."
+    },
+    {
+      "name": "test_broker_integration",
+      "classification": "internal",
+      "path": "scheduler/tests/test_broker_integration.py",
+      "command": [
+        "python3",
+        "scheduler/tests/test_broker_integration.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "test_foreign_accounting",
+      "classification": "internal",
+      "path": "scheduler/tests/test_foreign_accounting.py",
+      "command": [
+        "python3",
+        "scheduler/tests/test_foreign_accounting.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "test_scheduler_core",
+      "classification": "internal",
+      "path": "scheduler/tests/test_scheduler_core.py",
+      "command": [
+        "python3",
+        "scheduler/tests/test_scheduler_core.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "tile_trace",
+      "classification": "developer_only",
+      "path": "scripts/tile_trace.py",
+      "command": [
+        "python3",
+        "scripts/tile_trace.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "library, demo, graph/visualization, migration, or build helper"
+    },
+    {
+      "name": "toolctl",
+      "classification": "public",
+      "path": "scripts/toolctl.py",
+      "command": [
+        "python3",
+        "scripts/toolctl.py"
+      ],
+      "flags": [
+        "--help",
+        "--catalog",
+        "--describe",
+        "--format",
+        "--selftest"
+      ],
+      "interface": {
+        "help": "verified",
+        "help_argv": [
+          "--help"
+        ],
+        "describe": "native",
+        "describe_argv": [
+          "--describe",
+          "--format=json"
+        ],
+        "side_effect_free": true
+      },
+      "reason": "listed in the verified public-tool registry",
+      "role_scope": [
+        "*"
+      ],
+      "description": "Inspect the generated tool registry, acquire/query/rotate/resume a bounded context lease, render the active stage card, or invoke a registry tool with executable provenance."
+    },
+    {
+      "name": "ttgir_bridge",
+      "classification": "internal",
+      "path": "scripts/ttgir_bridge.py",
+      "command": [
+        "python3",
+        "scripts/ttgir_bridge.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "ttgir_to_gluon",
+      "classification": "internal",
+      "path": "scripts/ttgir_to_gluon.py",
+      "command": [
+        "python3",
+        "scripts/ttgir_to_gluon.py"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    },
+    {
+      "name": "wait_for",
+      "classification": "internal",
+      "path": "scripts/wait_for.sh",
+      "command": [
+        "bash",
+        "scripts/wait_for.sh"
+      ],
+      "flags": [],
+      "interface": {
+        "help": "unverified",
+        "describe": "unavailable"
+      },
+      "reason": "legacy or unverified command contract"
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tritongluonagentskills.local/schemas/context-policy-v1.json",
+  "title": "Portable context policy",
+  "description": "Host-independent byte and event budgets for a derived working context. Token telemetry is optional and never controls correctness.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "policy_id",
+    "max_context_bytes",
+    "max_capsule_bytes",
+    "max_query_return_bytes",
+    "lease"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kernel_opt.context_policy/1"
+    },
+    "policy_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "max_context_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32768
+    },
+    "max_capsule_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8192
+    },
+    "max_query_return_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32768
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_stage_events",
+        "max_returned_bytes"
+      ],
+      "properties": {
+        "max_stage_events": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_returned_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "token_telemetry": {
+      "enum": [
+        "disabled",
+        "optional"
+      ],
+      "default": "optional"
+    }
+  }
+}

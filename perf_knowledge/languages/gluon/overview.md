@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [fp16, bf16, fp8_e5m2, fp8_e4m3, fp4_e2m1]
 regimes: [prefill, training, both]
 status: sota
-updated: 2026-06-09
+updated: 2026-10-07
 sources:
   - https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
   - https://github.com/ROCm/gfx950-gluon-tutorials
@@ -68,12 +68,15 @@ of warp-specialization as the route to peak.
   pipelining, MFMA intrinsics, MXFP4 scaled-MFMA, how it differs from Triton autoscheduling.
 - [gemm_cookbook.md](gemm_cookbook.md) — the near-peak GEMM recipe (v0→v9) + the measured ceilings.
 - [`expert_skills/skills/gluon_authoring`](../../expert_skills/skills/gluon_authoring/skill.md) — one level
-  down from this page: the per-construct **API reference** (layouts, MFMA, memory/async-copy, shared
-  allocation, barriers, launch/AOT, runnable gfx950 skeletons), a **do-not-write list** of things that
-  compile and then cost you, and the two mechanics for **migrating an existing Triton kernel** — recovering
-  the compiler-inferred layouts out of its `.ttgir` into explicit Gluon, and re-injecting plain's software
-  pipeliner into `gluon_to_ttgir` so the transcribed kernel does not lose plain's cross-iteration overlap.
-  Advisory, and only injected when `use_expert_skills` is on.
+  down from this page: the complete Gluon optimization method, written gfx950 (CDNA4) first with gfx942
+  (CDNA3) as the downgrade. Entry is [`skill.md`](../../expert_skills/skills/gluon_authoring/skill.md)
+  (entry modes A port / B incumbent / C re-entry; the stage spine entry → budget → transcribe → recover →
+  climb → close; a **hand-written pipeline** first, re-injecting plain's pipeliner only as a diagnostic or
+  last resort); [`reference.md`](../../expert_skills/skills/gluon_authoring/reference.md) routes each stage
+  and layer to one file under `references/` (method, gluon API, tile-programming layers, hardware,
+  workloads, pitfalls / do-not-write lists). Advisory, and only injected when `use_expert_skills` is on;
+  it runs inside GEAK's existing roles (one `deep_explore` direction carried by `deep_engineer`, acceptance by
+  `verify_engineer` and Director) — no extra roles or agents.
 
 ## Sources
 - From Naive to Near-Peak: GEMM Kernels with Gluon (MI350/MI355, ROCm 7.0): https://rocm.blogs.amd.com/software-tools-optimization/gluon-gemm-tutorial/README.html
