@@ -831,6 +831,13 @@ const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${CAPTURE_BYTE_BUDGET} CAPTURE_
 const TASK = A.task || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
+// The caller reads workflow_return.json and recovers results only from a pinned eval_dir, so a Director
+// that builds a sibling directory leaves the whole run where the caller never looks.
+function evalDirDivergence(override, returned) {
+  const norm = (p) => String(p || '').trim().replace(/(.)\/+$/, '$1');
+  if (!norm(override) || norm(returned) === norm(override)) return '';
+  return `Director returned eval_dir ${norm(returned) || '(none)'}, but the caller pinned ${norm(override)}`;
+}
 const MODEL_NAME_HINT = (MODEL_PATH || KERNEL_PATH).replace(/\/+$/, '').split('/').pop();
 
 // ---------------------------------------------------------------------------
@@ -2562,6 +2569,8 @@ if (want('setup')) {
     log(`Setup identity telemetry differs from the deterministic probe: physical_cu_count expected ` +
         `${EXPECTED_PHYSICAL_CU_COUNT}, Director returned ${detectedPhysicalCuCount}; using expected value.`);
   }
+  const divergence = evalDirDivergence(EVAL_DIR_OVERRIDE, setup.eval_dir);
+  if (divergence) throw new Error(`Setup failed: ${divergence}`);
   EVAL_DIR = setup.eval_dir;
   MODEL_NAME = setup.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = setup.baseline_throughput_tok_s;

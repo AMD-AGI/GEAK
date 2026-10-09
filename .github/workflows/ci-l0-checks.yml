@@ -307,6 +307,8 @@ jobs:
         run: node kernel_workflow/scripts/test_rdna4_policy.js
       - name: R9700 E2E identity and knowledge policy
         run: node e2e_workflow/scripts/test_rdna4_e2e_policy.js
+      - name: caller-pinned eval_dir regression
+        run: node e2e_workflow/scripts/test_pinned_eval_dir.js
       - name: kernel_workflow mode dispatch / R9700 bakeoff isolation
         run: node kernel_workflow/scripts/test_mode_dispatch.js
 
