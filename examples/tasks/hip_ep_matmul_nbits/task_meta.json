@@ -1,0 +1,60 @@
+{
+  "op": "matmul_nbits",
+  "oracle": "fast",
+  "arch": "gfx1151",
+  "kernel_file": "matmul_nbits_kernel.hip",
+  "target_functions": [
+    "matmul_nbits_kernel_u2",
+    "matmul_nbits_gemv_kernel_u2",
+    "GemmFp16U2Impl",
+    "dequant_u2_to_fp16",
+    "matmul_nbits_kernel_u3",
+    "matmul_nbits_gemv_kernel_u3",
+    "GemmFp16U3Impl",
+    "matmul_nbits_kernel_u4",
+    "matmul_nbits_gemv_kernel_u4",
+    "GemmFp16U4Impl"
+  ],
+  "frozen_symbols": [
+    "hip_matmul_nbits",
+    "ZeroPointsU2",
+    "zp_elem_size"
+  ],
+  "test_cpp": "test_matmul_nbits_u2.cpp",
+  "gen_data_py": "gen_matmul_nbits_u2_data.py",
+  "bits": [
+    2,
+    3,
+    4
+  ],
+  "shapes": [
+    {
+      "M": 128,
+      "K": 2880,
+      "N": 2880,
+      "gs": 128,
+      "no_zeros": false
+    },
+    {
+      "M": 128,
+      "K": 2880,
+      "N": 5120,
+      "gs": 128,
+      "no_zeros": true
+    },
+    {
+      "M": 1,
+      "K": 2880,
+      "N": 2880,
+      "gs": 128,
+      "no_zeros": false
+    },
+    {
+      "M": 1,
+      "K": 2880,
+      "N": 5120,
+      "gs": 128,
+      "no_zeros": true
+    }
+  ]
+}
