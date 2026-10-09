@@ -24,8 +24,8 @@
 #
 # bench_e2e.sh contract: sets global SERVER_PID; writes $LOG. Reads env:
 #   BACKEND MODEL TP PORT GPU EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
-#   PROFILE PROFILE_DIR LOG OUT_DIR MAX_MODEL_LEN PROFILE_MAX_ITERS
-#   PROFILE_DELAY_ITERS.
+#   PROFILE PROFILE_DIR PROFILE_PYTHONPATH LOG OUT_DIR MAX_MODEL_LEN
+#   PROFILE_MAX_ITERS PROFILE_DELAY_ITERS.
 #
 # TWO logs, deliberately: Magpie's script redirects the server with a
 # TRUNCATING '> $SERVER_LOG', so anything this adapter appended to the same file

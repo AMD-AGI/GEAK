@@ -1,9 +1,12 @@
 """Auto-import shim that keeps GPU activity in a spawned engine's torch-profiler trace.
 
-The ROCm runtime sets ``ROCPROFILER_REGISTER_LIBRARY`` in any process that initializes
-the GPU. A child spawned afterwards (vLLM's EngineCore) inherits it, and that child's
-torch profiler then records no ``kernel`` or ``cuda_runtime`` events. The variable must
-be gone before torch loads the HIP runtime, so it is dropped at interpreter start-up.
+Observed on ROCm 10.0.0 (pip SDK), torch 2.12.0+rocm10.0.0 and vLLM 0.27.1 on gfx1201:
+the parent process has ``ROCPROFILER_REGISTER_LIBRARY`` set once it has initialized the
+GPU, the EngineCore child spawned afterwards inherits it, and that child's torch profiler
+records no ``kernel`` or ``cuda_runtime`` events. It was not reproduced on ROCm 7.2 with
+torch 2.9.1, whose profiler uses the ROCTracer backend. The variable must be gone before
+torch loads the HIP runtime, so it is dropped at interpreter start-up; elsewhere this is
+a no-op.
 """
 
 from __future__ import annotations
@@ -40,18 +43,13 @@ def _chain_following_sitecustomize() -> None:
         candidate = os.path.join(resolved, "sitecustomize.py")
         if not os.path.isfile(candidate):
             continue
-        try:
-            spec = importlib.util.spec_from_file_location("_geak_following_sitecustomize", candidate)
-            if spec is None or spec.loader is None:
-                continue
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-        except Exception:  # noqa: BLE001, S110 - the following hook's failure is not ours
-            pass
+        spec = importlib.util.spec_from_file_location("_geak_following_sitecustomize", candidate)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
         return
 
 
-try:
-    _chain_following_sitecustomize()
-except Exception:  # noqa: BLE001, S110 - never block interpreter start-up
-    pass
+# An overlay hook that raises reaches site.execsitecustomize, which reports it, as it would without this shim.
+_chain_following_sitecustomize()

@@ -36,6 +36,7 @@
 #   adapter_launch                  -> launch the server in background; set global SERVER_PID; write $LOG.
 #                                      Reads: MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS
 #                                             EXTRA_ENV OVERLAY_PYTHONPATH PROFILE PROFILE_DIR
+#                                             PROFILE_PYTHONPATH (vllm only; others ignore it)
 #                                      MUST launch through the shared prefix:
 #                                        ${SERVER_LAUNCH_PREFIX:-} env ... <server> ... & SERVER_PID=$!
 #                                      That prefix (server_teardown.sh) puts the server in its OWN
@@ -547,9 +548,10 @@ LOG=${LOG:-$OUT_DIR/server.log}
 
 mkdir -p "$OUT_DIR"
 PROFILE_DIR="$OUT_DIR/profile"
-# A server process spawned after its parent touched the GPU (vLLM's EngineCore) inherits
-# ROCPROFILER_REGISTER_LIBRARY from the ROCm runtime, and its torch profiler then records no GPU
-# events. The adapters/profile_env shim drops it at interpreter start-up; the adapters put it ahead of the overlay.
+# On ROCm 10.0 with torch 2.12 and vLLM 0.27 (gfx1201), vLLM's EngineCore inherits
+# ROCPROFILER_REGISTER_LIBRARY from its parent, and its torch profiler then records no GPU events.
+# The adapters/profile_env shim drops it at interpreter start-up. The vllm adapter and the magpie
+# launcher put it ahead of the overlay; the other adapters ignore it.
 PROFILE_PYTHONPATH=""
 if [ "$PROFILE" = "1" ]; then
   if _profile_env="$(_stage_lookup adapters/profile_env/sitecustomize.py)"; then

@@ -42,6 +42,19 @@ class ProfileEnvShimTest(unittest.TestCase):
         )
         self.assertEqual(out.stdout.split(), ["<unset>", "x"])
 
+    def test_an_overlay_that_raises_is_reported_and_the_variable_is_still_dropped(self):
+        with open(os.path.join(self.overlay, "sitecustomize.py"), "w", encoding="utf-8") as fh:
+            fh.write("raise RuntimeError('overlay boom')\n")
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join([SHIM_DIR, self.overlay])
+        env["ROCPROFILER_REGISTER_LIBRARY"] = "/opt/rocm/lib/librocprofiler-sdk.so.1"
+        out = subprocess.run(
+            [sys.executable, "-c", "import os; print(os.environ.get('ROCPROFILER_REGISTER_LIBRARY', '<unset>'))"],
+            env=env, cwd=self.tmp, capture_output=True, text=True, timeout=60, check=True,
+        )
+        self.assertIn("overlay boom", out.stderr)
+        self.assertEqual(out.stdout.split(), ["<unset>"])
+
     @unittest.skipIf(BASH is None, "bash is required to exercise the shell adapter")
     def test_vllm_adapter_puts_the_shim_ahead_of_the_overlay(self):
         bin_dir = os.path.join(self.tmp, "bin")
