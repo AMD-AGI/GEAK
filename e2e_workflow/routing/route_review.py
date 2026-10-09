@@ -31,6 +31,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 import llm_ledger as L  # noqa: E402  (rates and cost functions: one source of truth)
 
 BRAIN_MODEL = "claude-opus-5-5"
+# Models on the tokenizer from before Claude Opus 4.7: the same text counts about 30% fewer tokens on them,
+# which repricing their tokens at BRAIN_MODEL rates cannot see.
+OLD_TOKENIZER = ("claude-opus-4-6", "claude-opus-4-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5")
 
 
 def scope_of(label):
@@ -153,14 +156,17 @@ def _usd(x):
 
 
 def render(R, routing):
+    # Name the decider the run actually used (it is in the lane's routing block), so a review of an older
+    # run is not relabelled with today's model.
+    decider = "`%s` decider" % routing["decider"] if routing and routing.get("decider") else "decider"
     L_ = ["# Routing review", ""]
     L_ += ["## Spend by lane", "", "| model | calls | spend | share |", "|---|---:|---:|---:|"]
     for m, v in sorted(R["by_model"].items(), key=lambda kv: -kv[1]["usd"]):
         L_.append("| `%s` | %d | %s | %.1f%% |" % (m, v["calls"], _usd(v["usd"]),
                                                   100 * v["usd"] / R["total"] if R["total"] else 0))
     L_ += ["", "- total: **%s** over %d calls" % (_usd(R["total"]), R["n_calls"]),
-           "- of which the router (Sonnet 5 decider): %s (%.1f%%)" % (
-               _usd(R["router"]), 100 * R["router"] / R["total"] if R["total"] else 0),
+           "- of which the router (%s): %s (%.1f%%)" % (
+               decider, _usd(R["router"]), 100 * R["router"] / R["total"] if R["total"] else 0),
            "- cache reuse: %.1f%% of input tokens were cache reads" % (100 * R["reads"] / R["inp"] if R["inp"] else 0), ""]
 
     L_ += ["## Savings", ""]
@@ -174,9 +180,11 @@ def render(R, routing):
         L_.append("No control run given, so there is **no measured saving**. Counterfactual only: the same tokens "
                   "billed at `%s` rates would cost %s, so routing's price difference is %s (%.1f%%)."
                   % (BRAIN_MODEL, _usd(R["repriced"]), _usd(d), 100 * d / R["repriced"] if R["repriced"] else 0))
-        L_.append("This is an estimate, not a fact: a different model writes different outputs, and Haiku 4.5 and "
-                  "Opus 4.6 use an older tokenizer that counts about 30% fewer tokens for the same text. Pass "
-                  "`--control` with a matched routing-OFF run to get the real number.")
+        old = sorted(m for m in R["by_model"] if L.rate_key(m, dict.fromkeys(OLD_TOKENIZER)))
+        tok = (", and %s use%s an older tokenizer that counts about 30%% fewer tokens for the same text"
+               % (" and ".join("`%s`" % m for m in old), "s" if len(old) == 1 else "")) if old else ""
+        L_.append("This is an estimate, not a fact: a different model writes different outputs%s. Pass "
+                  "`--control` with a matched routing-OFF run to get the real number." % tok)
     L_.append("")
 
     if routing:
@@ -206,7 +214,7 @@ def render(R, routing):
                      "evenly across each scope's dispatches on that model (an allocation, not a measurement):" % _usd(R["wasted"]))
         items += ["  - `%s` on `%s`: %d of %d failed, ~%s" % (sc, m, f, n, _usd(u)) for sc, m, f, n, u in R["wasted_rows"]]
     if R["router"]:
-        items.append("**Choosing cost %s.** Every Sonnet 5 classification is overhead; it pays only when it "
+        items.append("**Choosing cost %s.** Every decider classification is overhead; it pays only when it "
                      "moves work to a cheaper lane than the default would have." % _usd(R["router"]))
     top = [(sc, d) for sc, s in R["per"].items() for d in s["dispatches"] if d["lane"] == len(R["lanes"]) - 1]
     if top:

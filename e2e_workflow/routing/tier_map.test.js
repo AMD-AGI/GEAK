@@ -37,11 +37,11 @@ eq('env without GEAK_ROUTING -> disabled -> undefined',
 eq('enabled + mapped workflow-return -> Sonnet',
    R.routeFor({ phase: 'Validate', label: 'persist-workflow-return' },
               { enabled: true }),
-   'claude-sonnet-5');
+   'claude-sonnet-5-5');
 eq('enabled + mapped record-measurements -> Sonnet',
    R.routeFor({ phase: 'WarmStart', label: 'warm_start:record-measurements' },
               { enabled: true }),
-   'claude-sonnet-5');
+   'claude-sonnet-5-5');
 eq('enabled + UN-mapped reasoning role -> undefined (pinned)',
    R.routeFor({ phase: 'Optimize', label: 'system_architect:strategize' },
               { enabled: true }),
@@ -53,7 +53,7 @@ eq('enabled + right label but WRONG phase -> undefined (scope key is phase+label
 eq('enabled + mapped label carrying dynamic suffix still matches on static prefix',
    R.routeFor({ phase: 'WarmStart', label: 'warm_start:record-measurements extra' },
               { enabled: true }),
-   'claude-sonnet-5');
+   'claude-sonnet-5-5');
 
 // --- routeFor: a STRONG-tier map entry produces NO override -----------------------
 eq('strong tier -> no override (fall through to pinned)',
@@ -63,7 +63,7 @@ eq('strong tier -> no override (fall through to pinned)',
 
 // --- decideFor: returns model + validator for a mapped scope ----------------------
 const dec = R.decideFor({ phase: 'Validate', label: 'persist-workflow-return' }, { enabled: true });
-ok_('decideFor mapped -> model+validator', dec && dec.model === 'claude-sonnet-5' && typeof dec.validate === 'function' && dec.kind === 'verbatim_write');
+ok_('decideFor mapped -> model+validator', dec && dec.model === 'claude-sonnet-5-5' && typeof dec.validate === 'function' && dec.kind === 'verbatim_write');
 eq('decideFor un-mapped -> null', R.decideFor({ phase: 'Optimize', label: 'director:plan' }, { enabled: true }), null);
 eq('decideFor disabled -> null', R.decideFor({ phase: 'Validate', label: 'persist-workflow-return' }, { enabled: false }), null);
 
@@ -148,7 +148,7 @@ async function runEscalationTests() {
     const out = await R.escalate('p', { phase: 'Validate', label: 'persist-workflow-return' }, decision, run,
       { readFile: () => disk, expected: EXPECTED, record: a => attempts.push(a) });
     ok_('escalate: cheap-correct accepted at cheap', out.accepted === 'cheap');
-    ok_('escalate: cheap-correct made ONE call (no fallback)', calls.length === 1 && calls[0] === 'claude-sonnet-5');
+    ok_('escalate: cheap-correct made ONE call (no fallback)', calls.length === 1 && calls[0] === 'claude-sonnet-5-5');
     ok_('escalate: cheap-correct recorded exactly 1 attempt', attempts.length === 1 && attempts[0].ok === true);
   }
 
@@ -166,7 +166,7 @@ async function runEscalationTests() {
     const out = await R.escalate('p', { phase: 'Validate', label: 'persist-workflow-return' }, decision, run,
       { readFile: () => disk, expected: EXPECTED, record: a => attempts.push(a) });
     ok_('escalate: cheap-wrong -> accepted at strong', out.accepted === 'strong');
-    ok_('escalate: exactly 2 calls, cheap then strong', calls.length === 2 && calls[0] === 'claude-sonnet-5' && calls[1] === R.MODEL_STRONG);
+    ok_('escalate: exactly 2 calls, cheap then strong', calls.length === 2 && calls[0] === 'claude-sonnet-5-5' && calls[1] === R.MODEL_STRONG);
     ok_('escalate: BOTH attempts recorded (fail then pass)', attempts.length === 2 && attempts[0].ok === false && attempts[1].ok === true && attempts[1].escalated === true);
   }
 

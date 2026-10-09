@@ -13,7 +13,7 @@
 //   * kernel_lane.js — the four-lane COST LADDER (policy: routing/SKILL.md; no verbatim cascade). Proves:
 //       (1) OFF -> __routeModel undefined on EVERY scope, and agentT() short-circuits (byte-identical run).
 //       (2) inline ROUTE_TIER_MAP is exactly the 3 Haiku helper scopes; ROUTE_LANES == canonical LANES.
-//       (3) ON static: helpers -> Haiku, brain -> Opus 5.5, decider -> Sonnet 5, workers -> classified.
+//       (3) ON static: helpers -> Haiku 5.5, brain -> Opus 5.5, decider -> Sonnet 5.5, workers -> classified.
 //       (4) the ladder: first-sight gate, retry vs escalate after a failure, top-lane cap, floors,
 //           kill switch — each driven through the SHIPPED __routePick / __routeOutcome.
 //   Both: (6) PILOT REACHABILITY — at least one mapped scope is an ACTUAL call site in the entry point.
@@ -29,8 +29,8 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..', '..');   // /home/aditysin/PROJECTS/GEAK
 const CANON = require('./tier_map.js');
 const NUL = String.fromCharCode(0);
-const CHEAP = 'claude-sonnet-5';               // the e2e cascade's routed model
-const HAIKU = 'claude-haiku-4-5-20251001';     // the kernel ladder's SMALL lane / helper model
+const CHEAP = 'claude-sonnet-5-5';             // the e2e cascade's routed model
+const HAIKU = 'claude-haiku-5-5';              // the kernel ladder's SMALL lane / helper model
 
 // Per-entry-point config. `kind` selects which routing SURFACE to exercise. `mapped` lists the scopes
 // that SHOULD route, each with a `reach` token: the distinctive source substring that proves the scope
@@ -226,7 +226,7 @@ async function runModelMap(F, src) {
   ok_(`${F.name}: ON -> brain (tech_lead:*, director:*) -> Opus 5.5`,
       on.__routeModel({ phase: 'Optimize', label: 'tech_lead:plan r2' }) === OPUS55 &&
       on.__routeModel({ phase: 'Validate', label: 'director:validate' }) === OPUS55);
-  ok_(`${F.name}: ON -> decider (route:*) -> Sonnet 5, never classified itself`,
+  ok_(`${F.name}: ON -> decider (route:*) -> Sonnet 5.5, never classified itself`,
       on.__routeModel({ phase: 'Optimize', label: 'route:classify eng:memory' }) === CHEAP);
   ok_(`${F.name}: ON -> workers have no static model (they get classified)`,
       F.unmapped.every((s) => on.__routeModel(s) === undefined));
@@ -253,7 +253,7 @@ async function runModelMap(F, src) {
     const r2 = await L.__routePick('optimize again', W('eng d4:memory'));
     ok_(`${F.name}: unsure small lane (conf 0.40 < 0.70) -> classified lane (high -> Opus 4.6)`, r1.model === OPUS46);
     ok_(`${F.name}: decider asked ONCE per scope (same scope re-used, no re-classify on success)`, asked.length === 1 && r2.model === OPUS46);
-    ok_(`${F.name}: decider call: route:classify label, low effort, typed schema (agentT pins route:* to Sonnet 5)`,
+    ok_(`${F.name}: decider call: route:classify label, low effort, typed schema (agentT pins route:* to Sonnet 5.5)`,
         asked[0].o.model === undefined && asked[0].o.label === 'route:classify eng:memory' &&
         asked[0].o.effort === 'low' && asked[0].o.schema === L.ROUTE_DECISION_SCHEMA);
     ok_(`${F.name}: decider prompt carries the ledger role header (its cost lands in the router bucket)`,

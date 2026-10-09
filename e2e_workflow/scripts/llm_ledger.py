@@ -56,9 +56,13 @@ SCHEMA = "geak.llm_ledger/1"
 # message.model), so a run that mixes models — routing, a cheap helper, a model
 # switch mid-run — is priced call by call, not at one run-wide rate.
 # Source: the official table, platform.claude.com/docs/en/about-claude/pricing,
-# read 2026-09-28 (Sonnet 5.5 added 2026-10-01). Cache multipliers are 1.25x (5-minute write) and 2x (1-hour
-# write) everywhere; reads are 0.1x except Opus 5.5 (0.05x) and Fable/Mythos 5.1
-# (0.025x). `_default` (the Opus 4.8 / Opus 5 card) prices a call whose model is
+# read 2026-09-28 (Sonnet 5.5 added 2026-10-01, Haiku 5.5 2026-10-09). Cache multipliers are 1.25x (5-minute
+# write) and 2x (1-hour write) everywhere; reads are 0.1x except Opus 5.5 (0.05x) and Fable/Mythos 5.1
+# (0.025x). Sonnet 5.5 stays at 0.1x ($0.20): the pricing page read 2026-10-09 lists 0.05x, but Claude Code
+# 2.1.295 still charges 0.1x, and this table follows Claude Code so that sdk_check can hold it to its own cost.
+# Haiku 5.5 is priced per REQUEST by prompt length: a card's `long_prompt` tier replaces the whole card for a
+# request whose input + cache reads + cache writes exceed `above_prompt_tokens` (strictly, as Claude Code
+# 2.1.295 does for its own cost). `_default` (the Opus 4.8 / Opus 5 card) prices a call whose model is
 # unknown; a real model missing from this table is reported, never silently
 # priced (see unpriced_models). Override with --rates <file.json>: its keys are
 # merged over this table, so overriding one model leaves the others intact.
@@ -87,6 +91,8 @@ DEFAULT_RATES = {
     "claude-sonnet-4-6": _card(3.00, 15.00),
     "claude-sonnet-4-5": _card(3.00, 15.00),
     "claude-haiku-4-5": _card(1.00, 5.00),
+    "claude-haiku-5-5": dict(_card(0.10, 0.50),
+                             long_prompt=dict(_card(0.50, 2.50), above_prompt_tokens=100_000)),
 }
 
 # Not models: Claude Code writes "<synthetic>" for locally generated turns (for
@@ -109,9 +115,17 @@ def rate_key(model, rates):
     return base if base in rates else None
 
 
+def prompt_tokens(row):
+    """One request's prompt length as a prompt-length price counts it: input + cache reads + cache writes."""
+    return sum(int(row.get(k) or 0) for k in
+               ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
 def rates_for(row, rates):
     key = rate_key(row.get("model"), rates)
-    return rates[key] if key else rates["_default"]
+    card = rates[key] if key else rates["_default"]
+    tier = card.get("long_prompt")
+    return tier if tier and prompt_tokens(row) > tier["above_prompt_tokens"] else card
 
 
 def unpriced_models(rows, rates):
@@ -717,7 +731,10 @@ def total_input(row):
 
 
 def cost_of(row, rates):
-    r = rates_for(row, rates)
+    return _price(row, rates_for(row, rates))
+
+
+def _price(row, r):
     return (row["input_tokens"] * r["input"]
             + row["cache_read_input_tokens"] * r["cache_read"]
             + row["cache_write_5m_tokens"] * r["cache_write_5m"]
@@ -791,6 +808,15 @@ def load_sdk_results(eval_dir):
         return []
 
 
+def _ours_cell(v):
+    """The 'our rates' cell of the cross-check table; a per-request (prompt-length) card says how it was checked."""
+    if v.get("check") == "range":
+        return "$%.4f–$%.4f (priced per request; totals only bound it)" % tuple(v["ours_range_usd"])
+    if v.get("check") == "exact":
+        return "$%.4f (summed per request)" % v["ours_on_sdk_tokens_usd"]
+    return "$%.4f" % v["ours_on_sdk_tokens_usd"]
+
+
 def sdk_check(rows, sdk_results, rates):
     """Compare this ledger with the LAST ResultMessage. None when there is none to compare with."""
     if not sdk_results:
@@ -804,16 +830,33 @@ def sdk_check(rows, sdk_results, rates):
                "cache_creation_input_tokens": int(u.get("cacheCreationInputTokens") or 0),
                "output_tokens": int(u.get("outputTokens") or 0)}
         # model_usage does not split 5-minute from 1-hour writes; GEAK writes 5-minute only.
-        ours = cost_of(dict(tok, model=m, cache_write_5m_tokens=tok["cache_creation_input_tokens"],
-                            cache_write_1h_tokens=0), rates)
+        row = dict(tok, model=m, cache_write_5m_tokens=tok["cache_creation_input_tokens"], cache_write_1h_tokens=0)
         sdk_usd = float(u.get("costUSD") or 0.0)
-        ok = abs(ours - sdk_usd) <= max(SDK_RATE_TOLERANCE_USD, SDK_RATE_TOLERANCE_REL * sdk_usd)
-        rate_ok &= ok
+        tol = max(SDK_RATE_TOLERANCE_USD, SDK_RATE_TOLERANCE_REL * sdk_usd)
         mine = [r for r in rows if r.get("model") == m and (at_ms is None or (r.get("ts_ms") or 0) <= at_ms)]
         ledger_tok = {k: sum(int(r.get(k) or 0) for r in mine) for k in tok}
-        models[m] = {"sdk_usd": round(sdk_usd, 6), "ours_on_sdk_tokens_usd": round(ours, 6),
-                     "rate_ok": ok, "sdk_tokens": tok, "ledger_tokens_until_result": ledger_tok,
-                     "ledger_usd_until_result": round(sum(cost_of(r, rates) for r in mine), 6)}
+        ledger_usd = sum(cost_of(r, rates) for r in mine)
+        key = rate_key(m, rates)
+        card = rates[key] if key else rates["_default"]
+        tier = card.get("long_prompt")
+        check = {}
+        if not tier:
+            ours = cost_of(row, rates)
+            ok = abs(ours - sdk_usd) <= tol
+        else:
+            # model_usage sums a model's requests, but this card prices each request by its own prompt length,
+            # so the sum cannot be priced as one request. When this ledger holds exactly Claude Code's tokens,
+            # compare the per-request sums. Otherwise the totals still bound the cost -- every request at the
+            # base price below, every one at the long-prompt price above -- and a wrong card falls outside.
+            lo, hi = _price(row, card), _price(row, tier)
+            exact = ledger_tok == tok
+            ours = ledger_usd if exact else lo
+            ok = abs(ledger_usd - sdk_usd) <= tol if exact else lo - tol <= sdk_usd <= hi + tol
+            check = {"check": "exact" if exact else "range", "ours_range_usd": [round(lo, 6), round(hi, 6)]}
+        rate_ok &= ok
+        models[m] = dict({"sdk_usd": round(sdk_usd, 6), "ours_on_sdk_tokens_usd": round(ours, 6),
+                          "rate_ok": ok, "sdk_tokens": tok, "ledger_tokens_until_result": ledger_tok,
+                          "ledger_usd_until_result": round(ledger_usd, 6)}, **check)
     after = [r for r in rows if at_ms is not None and (r.get("ts_ms") or 0) > at_ms]
     return {"results_seen": len(sdk_results), "session_id": last.get("session_id"),
             "sdk_total_usd": round(float(last["total_cost_usd"]), 6), "rate_ok": rate_ok,
@@ -1234,7 +1277,7 @@ def render_md(agg, meta):
                  "tokens: **%s**." % (sdk["sdk_total_usd"], sdk["results_seen"],
                                     "match" if sdk["rate_ok"] else "DO NOT MATCH — a rate card is wrong"))
         L.append("")
-        rows = [["`%s`" % m, "$%.4f" % v["sdk_usd"], "$%.4f" % v["ours_on_sdk_tokens_usd"],
+        rows = [["`%s`" % m, "$%.4f" % v["sdk_usd"], _ours_cell(v),
                  "ok" if v["rate_ok"] else "**MISMATCH**",
                  _n(sum(v["sdk_tokens"].values())), _n(sum(v["ledger_tokens_until_result"].values()))]
                 for m, v in sorted(sdk["models"].items())]

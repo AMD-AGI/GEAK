@@ -720,14 +720,14 @@ function tlAgent(prompt, o, attempt) {
 // truthy (or GEAK_ROUTING=1 for a harness) -> agentT() never consults it -> the run is BYTE-IDENTICAL to
 // a non-routing build. Reversible via git on expt/3-routing.
 //   brain    director:* / tech_lead:*         -> Opus 5.5, fixed (planning, decomposition, adjudication)
-//   helper   the fixed-script scopes below    -> Haiku, fixed (their schema is the check)
-//   decider  route:* (the classifier itself)  -> Sonnet 5, fixed, never itself classified (no recursion)
+//   helper   the fixed-script scopes below    -> Haiku 5.5, fixed (their schema is the check)
+//   decider  route:* (the classifier itself)  -> Sonnet 5.5, fixed, never itself classified (no recursion)
 //   worker   every other scope                -> classified once by the decider, then moved UP the ladder
-//            only on a DETERMINISTIC failure: Haiku -> Sonnet 5 -> Opus 4.6 -> Opus 5.5
+//            only on a DETERMINISTIC failure: Haiku 5.5 -> Sonnet 5.5 -> Opus 4.6 -> Opus 5.5
 // Keys = `${phase}` + U+0000 + labelPrefix (everything before the first space), so dynamic round/tag
 // suffixes collapse to one stable scope identity.
 // <<ROUTING-INLINE-START>>
-const ROUTE_LANES = ['claude-haiku-4-5-20251001', 'claude-sonnet-5', 'claude-opus-4-6', 'claude-opus-5-5'];
+const ROUTE_LANES = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-4-6', 'claude-opus-5-5'];
 const ROUTE_LANE_OF = { small: 0, medium: 1, high: 2, escalate: 3 };
 const ROUTE_TOP = ROUTE_LANES.length - 1;
 const ROUTE_MODEL_BRAIN = ROUTE_LANES[ROUTE_TOP];
@@ -871,7 +871,7 @@ function __routeOverBudget() {
 async function __routeClassify(p, o, scope, st) {
   if (ROUTE_DECIDER !== 'sonnet' && !__routeJevWarned) {
     __routeJevWarned = true;
-    log(`  [route] decider '${ROUTE_DECIDER}' is not wired on this branch — using Sonnet 5.`);
+    log(`  [route] decider '${ROUTE_DECIDER}' is not wired on this branch — using Sonnet 5.5.`);
   }
   const cur = st ? st.lane : 0;
   const ph = String((o && o.phase) || 'Route').replace(/[^A-Za-z0-9_.-]/g, '') || 'Route';
