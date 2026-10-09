@@ -86,7 +86,8 @@ def pack_file(rel: str) -> Path | None:
 
 def _selftest() -> int:
     fails = []
-    for n in ("sku.json", "hw_constants.json", "thresholds.json", "workload_models.json"):
+    for n in ("sku.json", "hw_constants.json", "thresholds.json", "workload_models.json",
+              "gfx950-encoding.json.gz"):
         if find(n) is None:
             fails.append(f"missing {n}")
     try:

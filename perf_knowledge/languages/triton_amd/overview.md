@@ -20,7 +20,7 @@ Triton is the fastest way to **author and iterate** an MI300X/MI350X kernel, and
 PyTorch-Inductor `max-autotune` emits. The Python API is **identical** to NVIDIA; what changes is the
 lowering (`TritonGPU → TritonAMDGPU → AMDGCN`) and the hardware mapping. The recurring AMD facts that
 break CUDA habits: **wavefront = 64 lanes**, **LDS = 64 KB/CU** (CDNA3) / 160 KB (CDNA4),
-**512 VGPR/EU** (16-granule), **FNUZ fp8** on CDNA3, and **`num_stages` semantics differ** (a single
+**512 VGPR/EU** (8-granule, ArchVGPR + AGPR combined), **FNUZ fp8** on CDNA3, and **`num_stages` semantics differ** (a single
 GEMM pipelines best at 1–2, not 3–4). On a *plain* dense GEMM, AMD Triton still typically **loses to
 tuned hipBLASLt/aiter** — the honest win is **fusion** (epilogue/attention) or skinny split-K decode.
 Honest limit corroborated by HipKittens (arXiv 2511.08083): compiler backends including Triton

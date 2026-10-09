@@ -124,7 +124,7 @@ operand-bound split and which way each resolves.
 - A/B: sweep `waves_per_eu ∈ {1,2,3,4}` and `num_warps ∈ {4,8}`, keep the lowest latency with no spill.
 
 ## Sources
-- 512 VGPR/EU, 16-granule, worked 170→176→2-waves example, `waves_per_eu` hint: ROCm MI300X workload guide.
+- 512 VGPR/EU, worked 170→176→2-waves example (consistent with the 8-granule LLVM uses on gfx90a+: `AMDGPUBaseInfo.cpp getVGPRAllocGranule`; per-arch value in `perf_knowledge/hardware/data/hw_constants.json`), `waves_per_eu` hint: ROCm MI300X workload guide.
 - 256 architected + 256 AGPR pools, allocation granularity, `v_accvgpr_*`: AMD CDNA3 (MI300) ISA reference.
 - Register-pressure / occupancy reasoning (CDNA lab notes): AMD GPUOpen register-pressure note.
 - `v_accvgpr`-vs-scratch table, the 256-arch-VGPR-cap-regardless-of-occupancy corollary, and the

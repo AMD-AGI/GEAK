@@ -24,7 +24,7 @@ the budget collapses occupancy. HipKittens works around HIPCC's inability to fee
 **pinned register tiles**. Watch the disassembly, not just the config.
 
 ## Core concepts
-- **VGPR** — per-lane vector regs, allocated in **16-granules**; 512/lane budget shared with AGPR. Drives
+- **VGPR** — per-lane vector regs, allocated in **8-granules** (gfx90a+); 512/lane budget shared with AGPR. Drives
   how many waves fit per SIMD: 256 VGPR/lane → ≤2 waves/SIMD = 8 waves/CU.
 - **AGPR** — CDNA-specific accumulation regs; classic MFMA codegen keeps the C accumulator here.
   Reading/writing from VALU code costs `v_accvgpr_read_b32` / `v_accvgpr_write_b32`.

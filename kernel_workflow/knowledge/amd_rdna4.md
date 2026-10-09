@@ -65,7 +65,7 @@ products remain `unknown-device-not-r9700`.
 
 Regenerated on 2026-09-21 with AMD clang 23.0.0git from the pinned ROCm 10
 R9700 image using
-`perf_knowledge/expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py
+`kernel_workflow/scripts/kernel_tools/amd_occupancy.py
 --compiler-sweep --arch gfx1201`. The breakpoints matched the prior LLVM 22
 sweep.
 
@@ -83,8 +83,9 @@ sweep.
 | 256        | 5              |
 
 Re-derive on a new ROCm with
-`perf_knowledge/expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py
---compiler-sweep --arch gfx1201`.
+`python3 kernel_workflow/scripts/kernel_tools/amd_occupancy.py
+--compiler-sweep --arch gfx1201` (run under `kernel_workflow/scripts/gpu_lock.sh` only if a GPU is
+needed; the sweep itself is compile-only).
 Dividing 256 by a kernel's VGPR count (the old CDNA-style file budget) **under-reports** RDNA
 occupancy 2–3×.
 

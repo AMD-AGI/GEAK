@@ -38,8 +38,9 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
 
 - **Occupancy** follows from the machine model above — wave32, 1536 VGPR/SIMD, granule 24, cap 16
   waves/SIMD. 249 VGPRs is 5 waves/SIMD here. The per-arch table is
-  `perf_knowledge/hardware/data/hw_constants.json`; query
-  it with `scripts/amd_occupancy.py --vgpr N --arch gfx1151`.
+  `perf_knowledge/hardware/data/hw_constants.json`; query it with
+  `python3 kernel_workflow/scripts/kernel_tools/amd_occupancy.py --vgpr N --arch gfx1151` (the arch
+  is required -- the tool refuses rather than default to a CDNA model).
 - **VGPR cost per tile.** At wave32 a given tile occupies twice the VGPR per lane that it would at
   wave64, because half as many lanes share it.
 - **The Triton `matrix_instr_nonkdim` and `kpack` knobs are accepted and silently ignored** — they

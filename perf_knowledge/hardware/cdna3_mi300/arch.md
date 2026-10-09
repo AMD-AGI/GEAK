@@ -35,7 +35,7 @@ sources:
 | SIMD/CU | **4** (SIMD64) | occupancy is per-SIMD |
 | Wave slots | **8/SIMD → 32/CU** | hard occupancy cap |
 | Peak clock | **2100 MHz** | basis of all peak math |
-| VGPR | **512 ×4 B / SIMD**, 16-granule | #1 occupancy killer |
+| VGPR | **512 ×4 B / SIMD** (ArchVGPR + AGPR), 8-granule | #1 occupancy killer |
 | AGPR | up to **256** (MFMA accum) | big accumulators without crushing occupancy |
 | LDS | **64 KiB/CU**, 32 banks | bank conflicts mod 32 |
 | L1 vector | 32 KiB/CU, 128 B line | coalesce to 128 B |

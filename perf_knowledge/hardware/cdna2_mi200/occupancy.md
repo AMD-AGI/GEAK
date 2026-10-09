@@ -34,7 +34,7 @@ wg_from_vgpr             = floor(occ_vgpr * 4 / nW)  # 4 SIMDs/CU
 wg_per_CU                = min(wg_from_vgpr, occ_lds, floor(32 / nW))
 waves_per_CU             = wg_per_CU * nW
 ```
-N = VGPRs/wave rounded up to a multiple of 16; L = LDS bytes/workgroup. Same worked examples as
+N = ArchVGPR + AGPR per wave rounded up to a multiple of 8 (gfx90a); L = LDS bytes/workgroup. Same worked examples as
 [../cdna3_mi300/occupancy.md](../cdna3_mi300/occupancy.md) — the per-CU/per-SIMD resources are
 identical between gfx90a and gfx942.
 
@@ -53,7 +53,7 @@ identical between gfx90a and gfx942.
 
 ## Pitfalls
 - **Sizing a grid for "220 CUs"** — it's 2 separate 110-CU GPUs.
-- **16-granule VGPR rounding** crossing an occupancy tier.
+- **8-granule VGPR rounding** (ArchVGPR + AGPR) crossing an occupancy tier.
 - **Ignoring the LDS limiter** for attention.
 
 ## Verify

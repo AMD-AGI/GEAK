@@ -4,8 +4,10 @@ kind: hardware
 gens: [gfx908, gfx90a, gfx942, gfx950]
 dtypes: []
 regimes: [both]
-updated: 2026-06-08
+updated: 2026-10-07
 sources:
+  - perf_knowledge/hardware/data/hw_constants.json
+  - https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
@@ -17,7 +19,8 @@ sources:
 > CDNA is **wave64**: a wavefront = **64 work-items** in lockstep on one **SIMD64**; each CU has
 > **4 SIMDs** (= 4 EUs = 4 Matrix Cores). Occupancy is per-SIMD and is gated by the **minimum** of
 > VGPR limit, LDS limit, and the **8-waves/SIMD** hard cap. Register pressure is the #1 occupancy
-> killer; **AGPRs** let matmul keep big accumulators without spending the VGPR budget.
+> killer. On gfx90a/942/950 **ArchVGPRs and AGPRs share one 512-entry file** and the occupancy budget is
+> their combined count, allocated in **granules of 8**.
 
 ## Concepts
 
@@ -43,21 +46,29 @@ A **workgroup is dispatched to one CU** and never migrates; its waves stripe acr
 | File | CDNA1 (gfx908) | CDNA2/3/4 (gfx90a/942/950) | Access |
 |---|---|---|---|
 | VGPR (architected) | 256 ×4 B / wave-slot region | **512 ×4 B per SIMD/EU** | all VALU |
-| AGPR (accumulation) | up to **256** ×4 B | up to **256** ×4 B per SIMD | MFMA + `v_accvgpr_read/write_b32` only |
+| AGPR (accumulation) | up to **256** ×4 B (separate file) | up to **256** ×4 B per wave, **carved from the same 512 file** | MFMA + `v_accvgpr_read/write_b32` only |
 | SGPR (scalar) | ~800/CU (≤102/wave usable) | similar | scalar unit |
 
 - **CDNA1 introduced AGPRs** alongside the first Matrix Core; CDNA2 doubled architected VGPRs to 512
   and unified the VGPR/AGPR pool so a wave can flex between them.
-- **VGPRs allocate in blocks of 16.** A kernel reporting 170 VGPRs is rounded to **176** — this
-  rounding alone can drop an occupancy tier. Watch boundaries at 64/80/96/128/168/256.
-- **AGPRs** are the "escape hatch": park large FP32 matmul accumulators here so they don't consume the
-  architected VGPR budget that limits occupancy. The compiler inserts `v_accvgpr_read_b32` in the
-  epilogue before `global_store` (~5% cost).
+- **VGPRs allocate in blocks of 8 on CDNA2/3/4, counted over ArchVGPR + AGPR combined**
+  (`alignTo(arch, 4) + agpr` when AGPRs are used). `vgpr_alloc_granule` = 8 in
+  [`../data/hw_constants.json`](../data/hw_constants.json) is compiler-derived, and LLVM's
+  `getVGPRAllocGranule` returns 8 for every gfx90a+ target. A kernel at 170 rounds to **176** → 2
+  waves/SIMD, where 168 gives 3 — this rounding alone can drop an occupancy tier. Boundaries (last
+  count that fits): 64/72/80/96/128/168/256 → 8/7/6/5/4/3/2 waves (`vgpr_wave_steps`;
+  `kernel_workflow/scripts/kernel_tools/amd_occupancy.py` computes it). A 16-granule model, stated
+  in some guides, has no 7-wave tier and puts 168 at 2 waves; the compiler disagrees with it.
+- **AGPRs** are the "escape hatch" for large FP32 matmul accumulators. On gfx908 the AGPR file is
+  separate, so they do not consume the architected budget. On gfx90a/942/950 they come out of the
+  same 512-entry file and **count toward occupancy**; what they buy is headroom past the 256
+  arch-VGPR cap without spilling. The compiler inserts `v_accvgpr_read_b32` in the epilogue before
+  `global_store` (~5% cost).
 
 ### Occupancy math (per-SIMD)
 ```
-occ_vgpr (waves/SIMD)    = floor(VGPR_per_SIMD / N)     # cap at wave-slot limit (8, or 10 on CDNA1)
-                                                        # CDNA2-4: floor(512/N); CDNA1: floor(256/N)
+occ_vgpr (waves/SIMD)    = floor(VGPR_per_SIMD / roundup(N, granule))  # cap at wave-slot limit (8, or 10 on CDNA1)
+                          # CDNA2-4: floor(512 / roundup8(N)), N = ArchVGPR + AGPR combined
 occ_lds  (workgroups/CU) = floor(LDS_per_CU / L)        # 65536 (CDNA1-3) or 163840 (CDNA4)
 nW                       = ceil(threads_per_block / 64) # waves per workgroup
 wg_from_vgpr             = floor(occ_vgpr * 4 / nW)     # 4 SIMDs/CU
@@ -67,7 +78,7 @@ waves_per_CU             = wg_per_CU * nW
 Worked examples per generation live in each gen's `occupancy.md`.
 
 ## The levers
-1. **Cut VGPRs to gain occupancy** — but watch the 16-granule rounding and the LDS limit, which often
+1. **Cut VGPRs to gain occupancy** — but watch the 8-granule rounding (over ArchVGPR + AGPR) and the LDS limit, which often
    binds first for attention/softmax.
 2. **`__launch_bounds__(threads, waves_per_eu)`** / `-mllvm -amdgpu-waves-per-eu=N` tells LLVM to cap
    VGPRs so N waves fit per EU.
@@ -98,7 +109,14 @@ Worked examples per generation live in each gen's `occupancy.md`.
   https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html
 - AMD CDNA3 ISA Reference Guide (register files, EXEC mask, v_accvgpr, s_waitcnt):
   https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
-- ROCm MI300X workload optimization (512 VGPR/EU, 16-granule, waves_per_eu, occ.sh):
+- GEAK hardware constants (`vgpr_alloc_granule` = 8, `vgpr_wave_steps`, combined ArchVGPR+AGPR budget;
+  compiler-derived on ROCm 7.2.1 / LLVM 22 — the single source for these numbers):
+  `perf_knowledge/hardware/data/hw_constants.json`
+- LLVM `AMDGPUBaseInfo.cpp` (`getVGPRAllocGranule` = 8 for `FeatureGFX90AInsts`; `getTotalNumVGPRs` =
+  `alignTo(ArchVGPR, 4) + AGPR`; `getAddressableNumVGPRs` = 512):
+  https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/Utils/AMDGPUBaseInfo.cpp
+- ROCm MI300X workload optimization (512 VGPR/EU, waves_per_eu, occ.sh; its 16-granule statement is
+  superseded by the compiler-derived granule above):
   https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
 - AMD Instinct MI100 microarchitecture (256 VGPR/CU, 10 waves, first-gen AGPR/Matrix Core):
   https://rocm.docs.amd.com/en/latest/conceptual/gpu-arch/mi100.html

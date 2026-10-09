@@ -26,7 +26,7 @@ sources:
 ### The ladder (per GCD)
 | Level | Capacity | Scope | Bandwidth | Notes |
 |---|---|---|---|---|
-| VGPR | 512 ×4 B/SIMD | wave | — | 16-granule alloc |
+| VGPR | 512 ×4 B/SIMD | wave | — | 8-granule alloc (ArchVGPR + AGPR) |
 | AGPR | ≤256 ×4 B/SIMD | wave | — | MFMA accumulators |
 | LDS | 64 KiB/CU, 32 banks | workgroup | up to 128 B/clk | bank = `(addr/4) mod 32` |
 | L1 vector | 32 KiB/CU, 128 B line | CU | — | write-through |
