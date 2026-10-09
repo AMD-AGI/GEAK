@@ -9,6 +9,13 @@ Design rules, per knowledge/analysis_skills/INDEX.md:
   * every helper is defensive and returns a value or None -- it never raises at the caller
   * nothing here decides anything; the routing rules live in SKILL.md
 
+Data: peaks come from perf_knowledge/hardware/data/sku.json (GEAK's single per-SKU source; peaks.md
+next to this file is a GENERATED rendering of it), keyed by the gpu_identity `sku` (then `target`) when
+there is one and by the row sku.json flags as the arch default otherwise. Bound-classification
+thresholds come from perf_knowledge/hardware/data/thresholds.json (`bound_classification`).
+`$GEAK_HW_DATA_DIR` overrides the data directory. Every metric carries numerator_basis /
+denominator_basis; a datasheet denominator ranks, it never gates or closes.
+
 Self-test:  python3 roofline_tools.py --selftest
 """
 from __future__ import annotations
@@ -19,7 +26,48 @@ import os
 import re
 
 SKILL_NAME = "roofline"
-SKILL_VERSION = "1"
+SKILL_VERSION = "2"
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.normpath(os.path.join(_HERE, "..", "..", "..", ".."))
+_DATA_REL = os.path.join("perf_knowledge", "hardware", "data")
+
+
+def hw_data_file(name):
+    """Path of a GEAK shared hardware data file ($GEAK_HW_DATA_DIR first, then this checkout's
+    perf_knowledge/hardware/data). Returns the checkout path even when it is absent, so a caller
+    that opens it gets a clean miss (None from the loaders) rather than an exception."""
+    env = os.environ.get("GEAK_HW_DATA_DIR")
+    if env and os.path.isfile(os.path.join(env, name)):
+        return os.path.join(env, name)
+    return os.path.join(_REPO_ROOT, _DATA_REL, name)
+
+
+#: THE per-SKU peak table. peaks.md is its generated rendering (extract_sku.py --sync-docs).
+SKU_JSON = hw_data_file("sku.json")
+THRESHOLDS_JSON = hw_data_file("thresholds.json")
+PEAKS_MD = os.path.join(_HERE, "peaks.md")
+
+
+def _load_bound_classification(path=None):
+    """thresholds.json `bound_classification`, or {} (the module then keeps its built-in values,
+    which the test suite asserts equal to the file's)."""
+    try:
+        with open(path or THRESHOLDS_JSON, "r", encoding="utf-8") as fh:
+            return json.load(fh).get("bound_classification") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+_BC = _load_bound_classification()
+
+
+def _bc(block, key, default):
+    try:
+        v = _BC[block][key]
+        return type(default)(v)
+    except (KeyError, TypeError, ValueError):
+        return default
 
 # element size in bytes, keyed by the dtype spellings that show up in profiles/configs
 _DTYPE_BYTES = {
@@ -75,14 +123,24 @@ DEFAULT_TOP_N = 8
 #: is timed by dispatch, not by its transfer or its math, so a roofline ratio is meaningless for it
 #: (its lever is fusion / graph capture, not kernel tuning). Order-of-magnitude runtime constant,
 #: not a per-model tuning knob -- override per box if measured.
-LAUNCH_OVERHEAD_S = 5e-6
-LATENCY_BOUND_FACTOR = 2.0
+LAUNCH_OVERHEAD_S = _bc("dispatch", "launch_overhead_s", 5e-6)
+LATENCY_BOUND_FACTOR = _bc("dispatch", "latency_bound_factor", 2.0)
 
 #: A roof (memory or compute) counts as the binding limiter only when the kernel actually gets near
-#: it. Below this utilization on BOTH axes -- and above the dispatch floor -- the kernel is
+#: it. Below this utilization on EVERY tabulated axis -- and above the dispatch floor -- the kernel is
 #: latency/occupancy-bound, NOT bandwidth- or compute-bound. This is the single most common mislabel:
 #: a small arithmetic intensity does not by itself make a kernel memory-bound.
-UTIL_BOUND_THRESHOLD = 0.60
+#: (thresholds.json bound_classification.roof_util -- the same 60 cut point as the SoL ladder.)
+UTIL_BOUND_THRESHOLD = _bc("roof_util", "bound_min", 0.60)
+UTIL_SATURATED_THRESHOLD = _bc("roof_util", "saturated_min", 0.80)
+HEADROOM_SATURATED = _bc("headroom_vs_target_eff", "saturated_min", 0.90)
+HEADROOM_MODERATE = _bc("headroom_vs_target_eff", "moderate_min", 0.60)
+FEASIBLE_MIN = _bc("feasibility", "min", 0.001)
+FEASIBLE_MAX = _bc("feasibility", "max", 1.0)
+
+#: numerator_basis vocabulary (bytes/FLOPs) and denominator_basis vocabulary (the peak).
+NUMERATOR_BASES = ("model", "counters")
+DATASHEET = "datasheet"
 
 #: The only bound types this skill may emit. Anything else is a modelling escape and must degrade
 #: to "unknown" rather than inventing a category the consumer has no routing rule for.
@@ -120,30 +178,79 @@ def dtype_bytes(name, default=2):
 
 # ---------------------------------------------------------------- peaks
 
-def load_peaks(peaks_md_path, gfx, product=None):
-    """Parse the ```yaml blocks in peaks.md and return the matching section.
+def _want_product(product):
+    p = str(product or "").strip().lower()
+    return "" if p == "unknown" else p
 
-    Product-scoped blocks (``product: r9700``) match only when `product` is that
-    identity. A gfx1201 lookup without an R9700 product must not inherit R9700 peaks.
-    ``product="unknown"`` (what gpu_identity reports for every non-R9700 card,
-    MI300/MI355 included) is no product constraint: ISA-keyed blocks still match.
 
-    Returns {"hbm_bw_bytes_s": float, "flops": {dtype: float}, "cu": int, "source": "table",
-             "confidence": "high"} or None when the file or the section is absent.
-    """
+def product_from_identity(identity=None, sku=None, target=None):
+    """The peak-table product key from a gpu_identity record: `sku` first (the Instinct /
+    R9700 row name), then `target` (the r9700|unknown product pin), else "" (-> arch default).
+    Accepts the identity dict or the two fields (e.g. env_report device_sku / device_target)."""
+    if isinstance(identity, dict):
+        sku = identity.get("sku", sku)
+        target = identity.get("target", target)
+    for v in (sku, target):
+        w = _want_product(v)
+        if w:
+            return w
+    return ""
+
+
+def _peaks_from_row(name, row, product=""):
+    """The roofline view of one sku.json row. Memory = the DATASHEET pin rate (a rank-only
+    denominator); a row whose stored ceiling is measured (gfx1151) still ranks on its pin rate, and
+    the measured figure stays available as measured_ceilings."""
     try:
-        with open(peaks_md_path, "r", encoding="utf-8") as fh:
-            text = fh.read()
-    except (OSError, UnicodeDecodeError):
+        bw = float(row.get("datasheet_hbm_tb_s") or row["peak_hbm_tb_s"]) * 1e12
+        l2 = row.get("l2_per_xcd_mb") or row.get("l2_mb")
+        out = {
+            "gfx": row["arch"], "sku": name, "cu": int(row["cus"]),
+            "hbm_bw_bytes_s": bw,
+            "flops": {dt: float(tf) * 1e12 for dt, tf in (row.get("peak_tflops") or {}).items()},
+            "l2_bytes": int(l2 * (1 << 20)) if l2 else None,
+            "mall_bytes": int(row["mall_mb"] * (1 << 20)) if row.get("mall_mb") else None,
+            "source": "table",
+            "confidence": "medium" if "orc-derived" in (row.get("basis"), row.get("peak_hbm_basis"))
+                          else "high",
+            "basis": row.get("basis"),
+            "denominator_basis": DATASHEET,
+            "measured_ceilings": list(row.get("measured_ceilings") or []),
+        }
+    except (KeyError, TypeError, ValueError):
         return None
+    if product:
+        out["product"] = product
+    return out
 
-    want_product = str(product or "").strip().lower()
-    if want_product == "unknown":
-        want_product = ""
+
+def _peaks_from_sku(doc, gfx, product=None):
+    skus = (doc or {}).get("skus") or {}
+    want = _want_product(product)
+    gfx = str(gfx or "").strip().lower()
+    supported = [(n, r) for n, r in skus.items()
+                 if isinstance(r, dict) and r.get("geak_support") == "supported"
+                 and str(r.get("arch", "")).lower() == gfx]
+    if want:
+        for n, r in supported:
+            if str(r.get("identity_target") or "").lower() == want:
+                return _peaks_from_row(n, r, product=want)
+    for n, r in supported:
+        if r.get("roofline_default_for_arch"):
+            return _peaks_from_row(n, r)
+    return None
+
+
+def _peaks_from_md(text, gfx, product=None):
+    """Fallback parser for the GENERATED peaks.md yaml blocks (used only when sku.json itself is
+    unreachable). Same selection rule as _peaks_from_sku."""
+    want = _want_product(product)
+    default = None
     for block in re.findall(r"```yaml\s*\n(.*?)```", text, re.S):
         if not re.search(r"^\s*gfx:\s*%s\s*$" % re.escape(str(gfx)), block, re.M):
             continue
-        out = {"flops": {}, "source": "table", "confidence": "high"}
+        out = {"flops": {}, "source": "table", "confidence": "high",
+               "denominator_basis": DATASHEET}
         in_flops = False
         for line in block.splitlines():
             if not line.strip() or line.strip().startswith("#"):
@@ -165,19 +272,55 @@ def load_peaks(peaks_md_path, gfx, product=None):
             in_flops = False
             if not val:
                 continue
-            try:
-                out[key] = float(val) if re.match(r"^[-+0-9.eE]+$", val) else val
-            except ValueError:
-                out[key] = val
-        block_product = str(out.get("product") or "").strip().lower()
-        if block_product:
-            if want_product != block_product:
-                continue
-        elif want_product:
+            out[key] = float(val) if re.match(r"^[-+0-9.eE]+$", val) else val
+        if not out.get("hbm_bw_bytes_s"):
             continue
-        if out.get("hbm_bw_bytes_s"):
+        block_product = str(out.pop("product", "") or "").strip().lower()
+        is_default = str(out.pop("default_for_gfx", "")).lower() == "true"
+        if "cu" in out:
+            out["cu"] = int(out["cu"])
+        for k in ("l2_bytes", "mall_bytes"):
+            out[k] = int(out[k]) if k in out else None
+        if out.get("basis") == "orc-derived":
+            out["confidence"] = "medium"
+        if want and block_product == want:
+            out["product"] = want
             return out
-    return None
+        if is_default and default is None:
+            default = out
+    return default
+
+
+def load_peaks(peaks_path, gfx, product=None):
+    """Peaks for `gfx` (and a product key -- gpu_identity `sku`, else `target` -- if any), or None.
+
+    `peaks_path` names the peak table: sku.json itself, or the generated peaks.md next to this file
+    (then the sku.json it was rendered from is read; the md blocks are parsed only if that json is
+    unreachable). A missing `peaks_path` -> None, never an exception.
+
+    Selection: the supported row whose identity_target == product (and whose arch == gfx); else the
+    row flagged roofline_default_for_arch for gfx (gfx950 -> MI355X, gfx942 -> MI300X, gfx1151 ->
+    AI_MAX_395). gfx1201 has no default ON PURPOSE: R9700 peaks need product='r9700'.
+    ``product="unknown"`` is no product constraint. Rows marked geak_support=unsupported (gfx1100,
+    gfx1200) are never returned.
+
+    Returns {"hbm_bw_bytes_s", "flops": {dtype: FLOP/s}, "cu", "gfx", "sku", "l2_bytes",
+    "mall_bytes", "source": "table", "confidence", "denominator_basis": "datasheet", ...} plus
+    "product" when the row was selected by product.
+    """
+    try:
+        if not peaks_path or not os.path.isfile(peaks_path):
+            return None
+        if str(peaks_path).endswith(".json"):
+            with open(peaks_path, "r", encoding="utf-8") as fh:
+                return _peaks_from_sku(json.load(fh), gfx, product)
+        if os.path.isfile(SKU_JSON):
+            with open(SKU_JSON, "r", encoding="utf-8") as fh:
+                return _peaks_from_sku(json.load(fh), gfx, product)
+        with open(peaks_path, "r", encoding="utf-8") as fh:
+            return _peaks_from_md(fh.read(), gfx, product)
+    except (OSError, UnicodeDecodeError, ValueError, AttributeError, TypeError):
+        return None
 
 
 def derive_peaks_from_props(device=0):
@@ -203,6 +346,7 @@ def derive_peaks_from_props(device=0):
         "cu": int(getattr(p, "multi_processor_count", 0) or 0),
         "source": "derived",
         "confidence": "low",
+        "denominator_basis": "derived",
     }
 
 
@@ -215,8 +359,8 @@ def is_client_rdna4(gfx):
     return bool(re.fullmatch(r"gfx120\d+", str(gfx or "").lower()))
 
 
-def resolve_peaks(peaks_md_path, gfx, device=0, product=None):
-    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA4.
+def resolve_peaks(peaks_path, gfx, device=0, product=None, identity=None):
+    """Resolve tabulated peaks (sku.json, see load_peaks); never derive one for client RDNA4.
 
     Navi 48 reports properties that are insufficient to derive WMMA throughput,
     and its GDDR clock interpretation is toolchain-dependent. An absent table
@@ -224,7 +368,10 @@ def resolve_peaks(peaks_md_path, gfx, device=0, product=None):
     numeric denominator. R9700 peaks require product='r9700'. CDNA5 gfx1250
     is not in that family and may derive.
     """
-    peaks = load_peaks(peaks_md_path, gfx, product=product)
+    if identity is not None:
+        # sku first, then target; an explicit `product` still wins when it names something
+        product = _want_product(product) or product_from_identity(identity)
+    peaks = load_peaks(peaks_path, gfx, product=product)
     if peaks:
         return peaks
     if is_client_rdna4(gfx):
@@ -279,8 +426,19 @@ def experts_hit(num_experts, pairs):
 # ---------------------------------------------------------------- the metric
 
 def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_eff,
-                     pct_gpu_time=0.0, launch_overhead_s=LAUNCH_OVERHEAD_S):
+                     pct_gpu_time=0.0, launch_overhead_s=LAUNCH_OVERHEAD_S,
+                     numerator_basis="model", denominator_basis=DATASHEET):
     """Core arithmetic of SKILL.md section 3 step 5. Returns a dict, or None on unusable input.
+
+    Every result carries its basis pair: `numerator_basis` (model | counters -- where bytes/FLOPs
+    came from) and `denominator_basis` (datasheet | empirical@<tool>-<version> | in-shape probe |
+    derived -- where the peak came from). `may_gate` is True only for a counters numerator over a
+    non-datasheet, non-derived denominator: a datasheet roofline RANKS, it never gates or closes.
+
+    A missing compute peak (dtype not tabulated) makes compute_util None -- unknown, never 0.0. With
+    FLOPs present and the memory axis below the bound threshold, the bound is then "unknown" with no
+    verdict: reading the unknown axis as idle is how a compute-bound kernel was sold as
+    latency-bound with the memory axis's headroom.
 
     Two outcomes deliberately produce NO verdict (`headroom_class="unknown"`), because in both the
     ratio is not evidence about the kernel:
@@ -300,13 +458,18 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     achieved_flops = (f / t) if f > 0 else 0.0
     ai = (f / b) if b > 0 else float("inf")
     ridge = (pfl / pbw) if (pfl > 0 and pbw > 0) else None
+    num_basis = str(numerator_basis or "model")
+    den_basis = str(denominator_basis or DATASHEET)
+    basis = {"numerator_basis": num_basis, "denominator_basis": den_basis,
+             "may_gate": bool(num_basis == "counters" and den_basis not in (DATASHEET, "derived"))}
 
     # AI picks which roof the kernel is walking TOWARD (the ceiling it would hit if it stopped
     # stalling); utilization tells whether it is actually near that roof. Both are needed -- a small
     # AI does NOT by itself mean memory-bound. roofline_pct is measured on the AI-selected roof.
     compute_bound = bool(ridge is not None and pfl > 0 and ai > ridge)
     hbm_util = achieved_bw / pbw
-    compute_util = (achieved_flops / pfl) if pfl > 0 else 0.0
+    # None = no tabulated peak for this dtype (unknown), NOT "the compute axis is idle"
+    compute_util = (achieved_flops / pfl) if pfl > 0 else None
     raw_pct = compute_util if compute_bound else hbm_util
     roof_axis = "compute" if compute_bound else "memory"
 
@@ -316,6 +479,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
         "hbm_util": hbm_util, "compute_util": compute_util,
         "arithmetic_intensity": ai, "ridge_point": ridge,
         "roofline_pct_raw": raw_pct, "target_eff": tgt, "suspect": False,
+        **basis,
     }
 
     # (1) Dispatch-bound by time: the launch is timed by scheduling overhead, not by its own transfer
@@ -332,7 +496,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     # at the wall -- so it must not yield a verdict. (A compute-axis >100% is usually an unvalidated
     # peak, e.g. the BF16 MFMA microbench reading ~2x low.) Clamp for display, refuse to classify, and
     # hand back the feasibility bound the model violated so stage C knows what to measure.
-    if not (0.001 <= raw_pct <= 1.0):
+    if not (FEASIBLE_MIN <= raw_pct <= FEASIBLE_MAX):
         out.update(bound_type=roof_axis, roofline_pct=min(max(raw_pct, 0.0), 1.0),
                    attainable_speedup=1.0, expected_e2e_gain_pct=0.0,
                    headroom_class="unknown", suspect=True,
@@ -347,7 +511,17 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     # keep the verdict, so a low-utilization head like paged attention still ranks by its headroom --
     # but the lever is occupancy / shorter dependency chains / fusion, NOT byte reduction (which only
     # helps a genuinely bandwidth-bound, high-util head).
-    if compute_util < UTIL_BOUND_THRESHOLD and hbm_util < UTIL_BOUND_THRESHOLD:
+    if f > 0 and compute_util is None and hbm_util < UTIL_BOUND_THRESHOLD:
+        # The compute axis is UNKNOWN (no peak for this dtype) and the memory axis is not near its
+        # roof: it may be compute-bound or latency-bound, and nothing here can say which. No verdict.
+        out.update(bound_type="unknown", roofline_pct=raw_pct, attainable_speedup=1.0,
+                   expected_e2e_gain_pct=0.0, headroom_class="unknown",
+                   note="no compute peak for this dtype (compute_util unknown) and memory below "
+                        "%.2f of its roof -> compute- vs latency-bound undecidable; tabulate or "
+                        "measure the dtype's peak" % UTIL_BOUND_THRESHOLD)
+        return out
+    if (compute_util is None or compute_util < UTIL_BOUND_THRESHOLD) \
+            and hbm_util < UTIL_BOUND_THRESHOLD:
         bound = "latency"
     else:
         bound = roof_axis
@@ -372,9 +546,9 @@ def classify_headroom(roofline_pct, target_eff):
         return "unknown"
     if p <= 0 or t <= 0:
         return "unknown"
-    if p >= 0.9 * t:
+    if p >= HEADROOM_SATURATED * t:
         return "saturated"
-    if p >= 0.6 * t:
+    if p >= HEADROOM_MODERATE * t:
         return "moderate"
     return "underperforming"
 
@@ -446,16 +620,17 @@ def flops_from_counters(counters, mfma_flops_per_mop_f8=512.0):
 
 def _selftest():
     """Reproduces the SKILL.md section 9 worked example from real measured numbers."""
-    here = os.path.dirname(os.path.abspath(__file__))
     ok = True
 
-    peaks = load_peaks(os.path.join(here, "peaks.md"), "gfx950")
+    peaks = load_peaks(SKU_JSON, "gfx950")
+    assert peaks == load_peaks(PEAKS_MD, "gfx950"), "peaks.md path must resolve to the same sku.json row"
     assert peaks and abs(peaks["hbm_bw_bytes_s"] - 8.0e12) < 1e9, peaks
     assert abs(peak_flops_for(peaks, "fp8") - 5.0e15) < 1e12, peaks["flops"]
     assert abs(peak_flops_for(peaks, "fp8_e4m3") - 5.0e15) < 1e12
     assert abs(peak_flops_for(peaks, "float8_e4m3fn") - 5.0e15) < 1e12
     assert abs(peak_flops_for(peaks, "half") - 2.5e15) < 1e12
-    assert load_peaks(os.path.join(here, "peaks.md"), "gfxNOPE") is None      # L1 path
+    assert load_peaks(SKU_JSON, "gfxNOPE") is None                              # L1 path
+    assert load_peaks(SKU_JSON, "gfx950", product="mi350x")["flops"]["fp16"] == 2.3e15
     print("peaks: gfx950 %.2f TB/s, fp8 %.2f PFLOP/s; unknown gfx -> None  OK"
           % (peaks["hbm_bw_bytes_s"] / 1e12, peak_flops_for(peaks, "fp8") / 1e15))
 
@@ -518,12 +693,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true", help="reproduce the SKILL.md worked example")
     ap.add_argument("--peaks", metavar="GFX", help="print the peak table entry for GFX as JSON")
+    ap.add_argument("--product", default=None,
+                    help="gpu_identity `sku` (mi355x, mi350x, ...) or `target` (r9700) that "
+                         "selects a product row")
     a = ap.parse_args()
     if a.peaks:
-        p = resolve_peaks(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "peaks.md"),
-            a.peaks,
-        )
+        p = resolve_peaks(SKU_JSON, a.peaks, product=a.product)
         print(json.dumps(p or {"error": "no calibrated peaks for %s" % a.peaks}, indent=2))
         raise SystemExit(0)
     raise SystemExit(_selftest() if a.selftest else ap.print_help())

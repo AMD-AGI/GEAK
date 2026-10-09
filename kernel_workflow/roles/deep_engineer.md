@@ -72,28 +72,43 @@ flydsl→`flydsl`, tilelang→`tilelang`; read `overview.md`/`patterns.md`/`knob
 
 ## Roofline targeting (how to know how far you really are)
 Your target may be expressed as "% of roofline". Estimate the ceiling, then drive toward it:
-0. **Detect the card first** (`rocminfo` → gfx arch + CU/WGP count, `rocm-smi` → name), then read the matching
-   hardware reference — `amd_instinct.md` for `gfx94*`/`gfx95*`, `amd_ryzen.md` for `gfx11*`, `amd_rdna4.md`
-   for `gfx1201` — and use ITS peaks below. Never assume a default: peaks differ by integer factors across
-   cards, and so do the fp8 format and the matrix ISA. On RDNA4, MFMA/MX peaks do not exist — use a
-   R9700 datasheet ceilings only when `ROOFLINE_STATUS=calibrated-r9700`;
-   pair them with measured on-box rates when available.
+0. **Detect the card first** (`python3 "$SKILL_DIR/../scripts/gpu_identity.py"` → gfx arch, `target`
+   product pin (`r9700` | `unknown`), `sku` peak-row key (`mi355x`, `mi350x`, `mi300x`, `mi325x`,
+   `mi308x`, `r9700`, `unknown`), physical CU count), then read the matching hardware reference — `amd_instinct.md` for
+   `gfx94*`/`gfx95*`, `amd_ryzen.md` for `gfx11*`, `amd_rdna4.md` for `gfx1201` — and use THAT
+   product's row. Never assume a default: peaks differ by integer factors across cards (MI350X ≠
+   MI355X, MI325X ≠ MI300X on bandwidth), and so do the fp8 format and the matrix ISA. The per-SKU
+   peaks all come from one table, `perf_knowledge/hardware/data/sku.json`. On RDNA4, MFMA/MX peaks
+   do not exist — use R9700 datasheet ceilings only when `ROOFLINE_STATUS=calibrated-r9700`; pair
+   them with measured on-box rates when available.
 1. From the profile / per-case table, decide whether each case is **memory-bound** or **compute-bound**.
-2. **Memory-bound ceiling**: `min_time ≈ bytes_moved / mem_BW` — use this card's achievable memory
-   bandwidth (~0.7–0.85× nameplate; e.g. ≈5.3 TB/s on MI300X, ~6 on MI325X, ~8 on MI350/355; see the
-   reference for the detected card). RDNA4: §4 contains the 640 GB/s datasheet
-   ceiling; use a streaming-copy measurement for an achievable rate and label
-   clearly which denominator you used. Achieved % = that min_time / your measured time.
-3. **Compute-bound ceiling**: `min_time ≈ FLOPs / peak_FLOPS` for the dtype — use the matrix-core peak
-   for that precision on THIS card (MFMA on CDNA, WMMA on RDNA3.5 and RDNA4) from its reference.
-   RDNA4: R9700 datasheet WMMA peak from `amd_rdna4.md` §4, not a measured
-   peak. Use it only for `calibrated-r9700`; other gfx1201 products have no
-   calibrated compute denominator. Achieved % similarly.
-4. Report the achieved % per representative case in your notes. If you are far below the ceiling, the
-   kernel still has headroom — keep going. If you are near it, the remaining wall-clock is likely the
-   launch/host floor → switch to `geomean_levers.md` Levers 1–3/6 (dispatch collapse, native layout,
-   wrapper-level graph capture). A genuinely done kernel is near roofline on big shapes AND near the
-   launch floor on small ones.
+2. **Memory-bound ceiling**: `min_time ≈ bytes_moved / mem_BW`. There are two different denominators
+   and you must name which one you used:
+   - **nameplate (datasheet)** — the `sku.json` / `amd_instinct.md` §1 figure (MI355X / MI350X 8.0,
+     MI325X 6.0, MI300X 5.3 TB/s; R9700 0.64 TB/s in `amd_rdna4.md` §4). It is NOT reachable at any
+     real access shape; a well-written memory-bound kernel typically lands at ~0.7–0.85× of it.
+   - **achievable (measured)** — an in-shape probe on THIS box
+     (`kernel_workflow/scripts/kernel_tools/mem_bw_probe.py --sku <SKU> ...`, or a labelled streaming
+     copy). This is the only memory denominator against which "at the ceiling" means anything.
+   Achieved % = that min_time / your measured time.
+3. **Compute-bound ceiling**: `min_time ≈ FLOPs / peak_FLOPS[dtype]` — the matrix-core peak for that
+   precision on THIS card (MFMA on CDNA, WMMA on RDNA3.5 and RDNA4), nameplate from `sku.json`. A
+   dtype the row does not list has NO peak — do not substitute the fp16 one. RDNA4: the R9700
+   datasheet WMMA peak from `amd_rdna4.md` §4, usable only for `calibrated-r9700`; other gfx1201
+   products have no calibrated compute denominator. A dense back-to-back MFMA loop at the kernel's
+   dtype is the achievable compute ceiling.
+4. **Every "% of roofline" you report carries its basis pair**: `numerator_basis` = `model` (analytic
+   bytes/FLOPs) or `counters` (rocprofv3 FETCH_SIZE/WRITE_SIZE, MFMA counters), and
+   `denominator_basis` = `datasheet`, `empirical@<tool>-<version>`, or `in-shape probe`. A datasheet
+   denominator may **rank** cases and set priorities only; a claim that a kernel is "at roofline" (and
+   so done) requires a measured numerator over a probed/calibrated denominator. gfx950 caveat:
+   `FETCH_SIZE` / `TCC_BUBBLE` under-count read bytes there, so a counters numerator needs a
+   cross-check route (`perf_knowledge/profiling/roofline_on_mi.md`).
+5. Report the achieved % (with its basis) per representative case in your notes. If you are far below
+   the ceiling, the kernel still has headroom — keep going. If you are near a measured ceiling, the
+   remaining wall-clock is likely the launch/host floor → switch to `geomean_levers.md` Levers 1–3/6
+   (dispatch collapse, native layout, wrapper-level graph capture). A genuinely done kernel is near
+   roofline on big shapes AND near the launch floor on small ones.
 
 ## Rules (NON-NEGOTIABLE)
 1. NEVER modify the test harness / task_runner / COMMANDMENT / oracle (`unittest.py`, `meta.json`,

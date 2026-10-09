@@ -64,7 +64,9 @@ Steps:
    `python3 "$SKILL_DIR/../scripts/gpu_identity.py"` and use its JSON as the
    only product/ISA/CU source. `target=r9700` is emitted only for the exact
    marketing name `AMD Radeon AI PRO R9700`; a different gfx1201 product remains
-   `unknown`. Hard-stop if it disagrees with `EXPECTED_GFX`,
+   `unknown`. Its separate `sku` field (e.g. `mi355x`, or `unknown`) names the roofline peak row;
+   copy it into `env_report.json` as `device_sku` next to `device_target` (whose `r9700|unknown`
+   meaning is unchanged). Hard-stop if it disagrees with `EXPECTED_GFX`,
    `EXPECTED_TARGET=r9700`, or a positive `EXPECTED_PHYSICAL_CU_COUNT`.
    Then follow `SKILL_DIR/knowledge/preflight.md` (judgment guide,
    not a script). Confirm the chosen `BACKEND` stack imports/launches, `MODEL` resolves, the GPU(s)

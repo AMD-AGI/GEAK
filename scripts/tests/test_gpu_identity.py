@@ -47,6 +47,7 @@ def test_exact_r9700_product_is_structured() -> None:
         "gfx": "gfx1201",
         "marketing_name": "AMD Radeon AI PRO R9700",
         "target": "r9700",
+        "sku": "r9700",
         "physical_cu_count": 64,
         "visible_gpu_agents": 1,
     }
@@ -65,15 +66,116 @@ def test_gfx1201_does_not_imply_r9700(product: str) -> None:
     identity = gpu_identity.parse_rocminfo(_rocminfo("gfx1201", product))
     assert identity["gfx"] == "gfx1201"
     assert identity["target"] == "unknown"
+    assert identity["sku"] == "unknown"
 
 
-def test_instinct_identity_stays_unknown_product() -> None:
-    identity = gpu_identity.parse_rocminfo(
-        _rocminfo("gfx950", "AMD Instinct MI355X", cu=256)
-    )
-    assert identity["gfx"] == "gfx950"
+@pytest.mark.parametrize(
+    ("gfx", "product", "cu", "sku"),
+    [
+        ("gfx950", "AMD Instinct MI355X", 256, "mi355x"),
+        ("gfx950", "AMD Instinct MI350X", 256, "mi350x"),
+        ("gfx942", "AMD Instinct MI300X", 304, "mi300x"),
+        ("gfx942", "AMD Instinct MI325X", 304, "mi325x"),
+        ("gfx942", "AMD Instinct MI308X", 80, "mi308x"),
+    ],
+)
+def test_instinct_marketing_names_map_to_sku_not_target(
+    gfx: str, product: str, cu: int, sku: str
+) -> None:
+    """`target` is the r9700|unknown product-pin contract and must not widen; the Instinct
+    mapping lives in the separate `sku` field."""
+    identity = gpu_identity.parse_rocminfo(_rocminfo(gfx, product, cu=cu))
+    assert identity == {
+        "gfx": gfx,
+        "marketing_name": product,
+        "target": "unknown",
+        "sku": sku,
+        "physical_cu_count": cu,
+        "visible_gpu_agents": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("gfx", "product", "cu"),
+    [
+        # a partitioned device (CPX: one XCD per agent) is not the full product
+        ("gfx942", "AMD Instinct MI300X", 38),
+        ("gfx950", "AMD Instinct MI355X", 32),
+        # the name must agree with the ISA
+        ("gfx942", "AMD Instinct MI355X", 256),
+        ("gfx950", "AMD Instinct MI300X", 304),
+        # exact names only: no VF / suffix / prefix matching, no unlisted Instinct parts
+        ("gfx942", "AMD Instinct MI300X VF", 304),
+        ("gfx942", "Instinct MI300X", 304),
+        ("gfx90a", "AMD Instinct MI250X", 110),
+        ("gfx950", "", 256),
+    ],
+)
+def test_instinct_identity_without_exact_product_stays_unknown(
+    gfx: str, product: str, cu: int
+) -> None:
+    identity = gpu_identity.parse_rocminfo(_rocminfo(gfx, product, cu=cu))
+    assert identity["gfx"] == gfx
     assert identity["target"] == "unknown"
-    assert identity["physical_cu_count"] == 256
+    assert identity["sku"] == "unknown"
+    assert identity["physical_cu_count"] == cu
+
+
+def test_target_contract_is_unchanged() -> None:
+    """Every identity ever emitted has target in exactly {r9700, unknown}."""
+    for gfx, product, cu in (("gfx950", "AMD Instinct MI355X", 256),
+                             ("gfx942", "AMD Instinct MI325X", 304),
+                             ("gfx1201", gpu_identity.R9700_MARKETING_NAME, 64),
+                             ("gfx1201", "Another gfx1201 Product", 64)):
+        identity = gpu_identity.parse_rocminfo(_rocminfo(gfx, product, cu=cu))
+        assert identity["target"] in {"r9700", "unknown"}
+        assert identity["target"] == ("r9700" if identity["sku"] == "r9700" else "unknown")
+
+
+def test_instinct_skus_agree_with_sku_table() -> None:
+    """Every sku value names exactly one supported sku.json row with the same arch and
+    full-device CU count (perf_knowledge/hardware/data/sku.json is the single SKU source)."""
+    import json
+
+    sku_json = SCRIPT.parents[1] / "perf_knowledge" / "hardware" / "data" / "sku.json"
+    skus = json.loads(sku_json.read_text(encoding="utf-8"))["skus"]
+    by_target = {
+        row["identity_target"]: (name, row)
+        for name, row in skus.items()
+        if row.get("identity_target")
+    }
+    expected = {t for t, _, _ in gpu_identity.INSTINCT_PRODUCTS.values()} | {"r9700"}
+    assert set(by_target) == expected
+    for marketing, (target, gfx, cu) in gpu_identity.INSTINCT_PRODUCTS.items():
+        name, row = by_target[target]
+        assert row["arch"] == gfx, (marketing, name)
+        assert row["cus"] == cu, (marketing, name)
+        assert row["product"] == marketing, (marketing, name)
+        assert row["geak_support"] == "supported", name
+    assert by_target["r9700"][1]["product"] == gpu_identity.R9700_MARKETING_NAME
+    assert gpu_identity.KNOWN_SKUS == expected | {"unknown"}
+
+
+def test_homogeneous_instinct_agents_are_accepted() -> None:
+    identity = gpu_identity.parse_rocminfo(
+        _rocminfo("gfx950", "AMD Instinct MI355X", cu=256, count=8)
+    )
+    assert (identity["target"], identity["sku"]) == ("unknown", "mi355x")
+    assert identity["visible_gpu_agents"] == 8
+
+
+def test_mixed_partitioned_and_full_instinct_agents_fail_closed() -> None:
+    text = _rocminfo("gfx942", "AMD Instinct MI300X", cu=304)
+    text += """
+*******
+Agent 3
+*******
+  Name:                    gfx942
+  Marketing Name:          AMD Instinct MI300X
+  Compute Unit:            38
+"""
+    with pytest.raises(gpu_identity.IdentityError, match="mixed identities"):
+        gpu_identity.parse_rocminfo(text)
 
 
 def test_homogeneous_visible_agents_are_accepted() -> None:

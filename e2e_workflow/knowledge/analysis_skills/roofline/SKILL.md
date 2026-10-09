@@ -31,7 +31,12 @@ key and the measurement remains the judge. This skill may never prune a candidat
   `model_arch_class`, `model_dtype`, `workload` (required).
 - The model's `config.json` — layer count, expert count, hidden/intermediate sizes, head counts
   (optional but needed for a good MoE/attention byte model).
-- `peaks.md` — hardware denominators, keyed by `gfx`.
+- Hardware denominators: `perf_knowledge/hardware/data/sku.json` (GEAK's single per-SKU peak table),
+  selected by the identity's product key (`sku`, then `target`) when it has one, else by the arch-default row for
+  `gfx`. `peaks.md` next to this file is its **generated** rendering for reading by hand — never edit
+  numbers there.
+- Bound-classification thresholds: `perf_knowledge/hardware/data/thresholds.json`
+  (`bound_classification`; `roofline_tools.py` reads them — the cut points quoted below are its values).
 - Optionally, captured shapes from the Kernel Extractor and/or rocprofv3 counters (stage B/C, §5).
 
 ## 2. Output artifact
@@ -40,10 +45,12 @@ Write `profile/round_<R>/profile_roofline.json` and a human-readable `profile_ro
 
 ```jsonc
 {
-  "skill": "roofline", "skill_version": "1",
+  "skill": "roofline", "skill_version": "2",
   "gfx": "gfx950",
-  "peaks": { "hbm_bw_bytes_s": 8.0e12, "flops": {"fp8": 5.0e15},
-             "source": "table|derived", "confidence": "high|low" },
+  "peaks": { "hbm_bw_bytes_s": 8.0e12, "flops": {"fp8": 5.0e15}, "sku": "MI355X",
+             "product": "mi355x",          // present only when selected by product identity
+             "source": "table|derived", "confidence": "high|medium|low",
+             "denominator_basis": "datasheet|derived" },
   "stage": "A|B|C",
   "entries": [{
     "name": "...", "short_name": "...",
@@ -56,6 +63,10 @@ Write `profile/round_<R>/profile_roofline.json` and a human-readable `profile_ro
     "bytes_est": 0, "flops_est": 0,
     "achieved_bw_bytes_s": 0, "achieved_flops": 0,
     "hbm_util": 0.88, "compute_util": 0.01,   // achieved/peak on each axis; the pair decides bound_type
+                                        // compute_util = null when the dtype has no tabulated peak (unknown, NOT 0)
+    "numerator_basis": "model|counters",          // where bytes/FLOPs came from (stage A/B model, stage C counters)
+    "denominator_basis": "datasheet|empirical@<tool>-<version>|in-shape probe|derived",
+    "may_gate": false,                  // true only for counters over a probed/calibrated denominator
     "arithmetic_intensity": 4.6, "ridge_point": 625.0,
     "bound_type": "memory|compute|latency|unknown",  // latency = neither roof near its ceiling
     "roofline_pct": 0.88,               // achieved / peak on the AI-selected roof
@@ -85,16 +96,23 @@ see the disagreement rather than a single blended number that hides it.
    what the roofline says, so a headroom estimate cannot change a decision — modelling those kernels
    only adds failure modes. Skipped entries are **absent** from the artifact; they are NOT `degraded[]`
    (a kernel too small to matter is not a modelling failure and must not read as one).
-1. Resolve peaks from `peaks.md` via
-   `resolve_peaks(gfx, product=env_report.device_target)`.
-   `device_target=unknown` (every non-R9700 card, MI300/MI355 included) is no
-   product constraint: the ISA-keyed tables still resolve. Client RDNA4
-   numeric peaks exist only for product `r9700`. A bare gfx1201 (or any other
-   gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
-   unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4
-   — it must not use that gate. Other unknown architectures may derive from
-   device props with `peaks.confidence="low"` (§6 L1). Use `peak_flops_for()`
-   canonical dtype keys; a missing dtype is unknown, never the table maximum.
+1. Resolve peaks from `sku.json` via
+   `resolve_peaks(roofline_tools.SKU_JSON, gfx, identity={"sku": env_report.device_sku,
+   "target": env_report.device_target})` — the product key is `sku` first, then `target`
+   (`roofline_tools.product_from_identity`). `scripts/gpu_identity.py` emits two fields: `target`,
+   the product-pin contract, is exactly `r9700` | `unknown`; `sku` names the peak-table row
+   (`mi355x`, `mi350x`, `mi300x`, `mi325x`, `mi308x`, `r9700`, else `unknown`) and is set for an
+   Instinct part only for the exact marketing name on the expected gfx with the full-device CU
+   count. A product key selects that product's row: an MI350X gets 2.3 PF, an MI325X 6.0 TB/s. No
+   key (`unknown`, a partitioned or unlisted card, or an env_report without `device_sku`) is no
+   product constraint: the arch default row still resolves (gfx950 → MI355X, gfx942 → MI300X,
+   gfx1151 → Ryzen AI Max+ 395).
+   Client RDNA4 numeric peaks exist only for product `r9700`. A bare gfx1201 (or any other gfx120x
+   SKU) is a hard unknown: do not derive a numeric denominator, emit unknown headroom, and do not
+   rank on roofline. `gfx125x` is CDNA5, not RDNA4 — it must not use that gate. Other unknown
+   architectures may derive from device props with `peaks.confidence="low"` (§6 L1). Use
+   `peak_flops_for()` canonical dtype keys; a missing dtype is unknown (`compute_util: null`), never
+   the table maximum and never the fp16 rate.
 2. For each selected entry, pick the **e2e-critical regime** — the one carrying the launches
    (`serving.n_decode_steps` vs `n_prefill_steps`; a decode-dominated run means decode). Use that
    regime's `base_latency_ms` as `t_ms`.
@@ -115,9 +133,12 @@ see the disagreement rather than a single blended number that hides it.
 
    # But which roof actually BINDS is decided by utilization, not by AI alone. A small AI does NOT
    # by itself mean memory-bound — that is the most common mislabel. If neither roof is near its
-   # ceiling (both utils < 0.60) and the launch is above the dispatch floor, the kernel is
-   # LATENCY / occupancy-bound, not bandwidth- or compute-bound.
+   # ceiling (both utils < roof_util.bound_min = 0.60, thresholds.json) and the launch is above the
+   # dispatch floor, the kernel is LATENCY / occupancy-bound, not bandwidth- or compute-bound.
    bound_type   = "latency" if (hbm_util < 0.60 and compute_util < 0.60) else roof_axis
+   # compute_util is null when the dtype has no tabulated peak. Then: FLOPs present and
+   # hbm_util < 0.60 -> bound_type "unknown", headroom "unknown" (compute- vs latency-bound is
+   # undecidable); hbm_util >= 0.60 -> memory as usual. Never read the unknown axis as 0.
 
    attainable_speedup    = max(1.0, target_eff / roofline_pct)
    expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable_speedup)
@@ -148,7 +169,15 @@ see the disagreement rather than a single blended number that hides it.
      **unvalidated peak** (the BF16 MFMA microbench commonly reads ~2× low; see §4). See §6 L3.
 
    `bound_type` is a CLOSED set: `memory | compute | latency | unknown`. If none fits, emit `unknown`
-   — never invent a category the consumer has no routing rule for.
+   — never invent a category the consumer has no routing rule for. (The SoL `balanced` class in
+   `kernel_workflow/knowledge/profiling_guide.md` needs per-pipe counters; this skill has two axes and
+   reports such a kernel as `latency` — not near either roof.)
+
+   **Basis pair.** Every entry carries `numerator_basis` (`model` at stages A/B, `counters` at stage
+   C) and `denominator_basis` (`datasheet` for every `sku.json` table peak). A datasheet denominator
+   may **rank only**; `may_gate` is true only for a counters numerator over a probed or calibrated
+   denominator (`empirical@<tool>-<version>` or `in-shape probe`). This skill never gates — the rule
+   is stated so a downstream consumer cannot promote one of its numbers into a gate.
 7. Sanity-check (§6 L3), emit both rankings, write the artifact.
 
 **Per-launch, not aggregate.** Compare bytes for ONE launch against ONE launch's `base_latency_ms`. If
@@ -163,7 +192,7 @@ Weight bytes use the **weight** dtype (fp8 = 1 B/elem, bf16 = 2 B). Activation b
 dtype. Only count HBM traffic — a tensor re-read within one launch and small enough to sit in L2
 (`l2_bytes`) counts once.
 
-**Trust the memory axis over the compute axis, especially at decode.** The compute peaks in `peaks.md`
+**Trust the memory axis over the compute axis, especially at decode.** The compute peaks in `sku.json`
 are validated for fp8, but empirical MFMA peaks are not always right — the BF16 microbench commonly
 reads ~2× low, which makes a BF16 `compute_util` read ~2× high (and can push `roofline_pct` above 1.0,
 where §6 L3 catches it as `suspect`). A decode workload is memory-bound anyway, so prefer `hbm_util`;
@@ -242,7 +271,7 @@ counter degrades to stage A/B (§6 L4), it does not fail the skill.
 | level | trigger | behavior |
 |---|---|---|
 | **L0** | `analysis_skill=none`, skill dir missing/unreadable | Emit nothing. Caller behaves exactly as before this feature existed. |
-| **L1** | `gfx` absent from `peaks.md` | Derive peaks from device props; `peaks.confidence="low"` → every entry is `confidence: low` → display-only. |
+| **L1** | no `sku.json` row for the product or the `gfx` | Derive peaks from device props; `peaks.confidence="low"`, `denominator_basis="derived"` → every entry is `confidence: low` → display-only. (gfx120x never derives — hard unknown.) |
 | **L2** | an op class cannot be modelled | Degrade **that entry only**: `modeled:false`, `headroom_class:"unknown"`, add to `degraded[]`. Other entries are unaffected and the consumer falls back to the pre-skill prior for this one. |
 | **L3** | result is impossible: `roofline_pct > 1.0`, or `< 0.001`, or a negative/zero byte count | Clamp for display, set `suspect:true`, **force `headroom_class:"unknown"`** (an infeasible ratio is not a verdict), keep `roofline_pct_raw`, emit `bytes_upper_bound = peak_bw × t` (what the model violated), and flag the entry as a **stage-C counter-measurement candidate**. |
 | **L4** | counters unavailable / unstable | Keep the stage-A/B analytic result; do not raise confidence. |
@@ -320,7 +349,8 @@ make the kernel move **fewer bytes for the same work**:
 1. **Sanity band** — §6 L3.
 2. **Validate the denominator before believing a `roofline_pct`.** The table
    records datasheet ceilings; any separately measured achievable peak must be
-   labeled with its product, toolchain, and workload. The load-bearing cross-check:
+   labeled with its product, toolchain, and workload (`sku.json` `measured_ceilings`: tool +
+   version), and the entry's `denominator_basis` must name it. The load-bearing cross-check:
    BF16 and FP16 run at the same rate on the
    matrix core of every tabulated part (MFMA on CDNA, WMMA on RDNA), so their peaks must be equal —
    when they are not, the compute-axis number is inflated

@@ -4,8 +4,10 @@ kind: hardware
 gens: [gfx950]
 dtypes: []
 regimes: [both]
-updated: 2026-06-08
+updated: 2026-10-07
 sources:
+  - https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html
+  - https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
   - https://www.servethehome.com/amd-mi350-and-cdna-4-architecture-launched-with-rocm-7/
   - https://www.guru3d.com/story/amd-instinct-mi350-gpus-with-288gb-hbm3e-and-1400w-tdp-announced/
@@ -17,9 +19,11 @@ sources:
 > variance behaves like CDNA3 — see [../cdna3_mi300/xcd_chiplet.md](../cdna3_mi300/xcd_chiplet.md).
 
 ## TL;DR
-> Two SKUs differ mainly in cooling/power: **MI350X air-cooled, 1000 W**; **MI355X liquid-cooled,
-> 1400 W**, the higher envelope holding higher sustained clocks (MI355X up to ~2400 MHz). N3P process,
-> 185 B transistors. As always, **sustained < peak** — compute achieved FLOP/s from measured time.
+> Two SKUs of one gfx950 die differ in **peak engine clock and power**: **MI350X air-cooled, 1000 W,
+> 2200 MHz**; **MI355X liquid-cooled, 1400 W, 2400 MHz**. The clock difference makes their **datasheet
+> peaks differ** (FP16 2.3 vs 2.5 PF, FP32 144.2 vs 157.3 TF — see [peak_tables.md](peak_tables.md));
+> the power difference additionally lets MI355X *sustain* more of its peak. N3P process, 185 B
+> transistors. As always, **sustained < peak** — compute achieved FLOP/s from measured time.
 
 ## Concepts
 
@@ -29,15 +33,17 @@ sources:
 | Arch / ISA | CDNA4 / gfx950 | CDNA4 / gfx950 |
 | Cooling | air | liquid |
 | TDP | **1000 W** | **1400 W** |
-| Peak engine clock | ~2.2–2.4 GHz | up to **~2400 MHz** |
+| Peak engine clock | **2200 MHz** | **2400 MHz** |
+| Dense FP16 / FP8 / FP4 peak | 2.3 / 4.6 / 9.2 PF | 2.5 / 5.0 / 10 PF |
 | Process | TSMC **N3P** (XCD) + N6 (IOD) | N3P + N6 |
 | Transistors | 185 B | 185 B |
 | HBM | 288 GB HBM3E, 8 TB/s | 288 GB HBM3E, 8 TB/s |
 | Rack density | up to 10U (air) | 5U (liquid) |
 
-Both have the **same compute** (256 CU, identical per-CU matrix core); MI355X's higher power/cooling
-sustains higher clocks under heavy AI load → higher realized throughput than MI350X for compute-bound
-work, despite identical peak-FLOP tables at a given clock.
+Both have the **same CU design** (256 CU, identical per-CU per-clock matrix rate), so their peaks are
+in the ratio of their peak clocks, 2200 : 2400 — MI350X's datasheet peaks are ~8% lower, not equal.
+On top of that, MI355X's higher power/cooling sustains a larger fraction of its own peak under heavy
+AI load. Peaks per SKU: `perf_knowledge/hardware/data/sku.json` (single source).
 
 ### Clock dynamics that bite kernels
 - **Peak ≠ sustained.** Like CDNA3, sustained AI-load clock settles below boost; the higher 1400 W
@@ -59,8 +65,9 @@ work, despite identical peak-FLOP tables at a given clock.
 
 ## Pitfalls
 - **Using peak clock in efficiency claims** — overstates utilization.
-- **Comparing MI350X vs MI355X by peak tables** — they're identical at equal clock; the difference is
-  *sustained* clock under the power cap.
+- **Quoting MI355X peaks for an MI350X (or the reverse)** — the datasheet peaks differ by the
+  2200/2400 clock ratio, and the sustained clock under the power cap differs again on top of that.
+  Take the product from `scripts/gpu_identity.py` (field `sku`: `mi350x` / `mi355x`) and use its own row.
 - **Cold-launch timing** captures pre-ramp clock.
 
 ## Verify
@@ -74,5 +81,8 @@ work, despite identical peak-FLOP tables at a given clock.
   https://www.servethehome.com/amd-mi350-and-cdna-4-architecture-launched-with-rocm-7/
 - Guru3D, "AMD Instinct MI350 GPUs with 288GB HBM3E and 1400W TDP" (TDP, ~2400 MHz MI355X):
   https://www.guru3d.com/story/amd-instinct-mi350-gpus-with-288gb-hbm3e-and-1400w-tdp-announced/
+- AMD Instinct MI350X / MI355X product pages (peak engine clock 2200 / 2400 MHz; per-SKU peaks):
+  https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html ,
+  https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
 - AMD Instinct MI350X GPU datasheet (1000 W air, clocks):
   https://www.koicomputers.com/wp-content/uploads/2025/08/amd-instinct-mi350x-gpu-datasheet.pdf

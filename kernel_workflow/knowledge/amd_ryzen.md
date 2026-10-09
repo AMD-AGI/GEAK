@@ -16,7 +16,7 @@ rocminfo | awk '/Name:.*gfx/{f=1} f&&/Compute Unit:/{print $3; exit}'
 
 | Part | Arch | CU | Memory | Peak BW | fp8 matrix |
 |---|---|---|---|---|---|
-| Radeon 8060S | RDNA3.5 / `gfx1151` | 40 | unified, BIOS-sliced | ~0.26 TB/s | none |
+| Radeon 8060S | RDNA3.5 / `gfx1151` | 40 | unified, BIOS-sliced | 0.212 TB/s measured (0.256 datasheet) | none |
 
 Memory is a BIOS-configured slice of system LPDDR5X shared with the CPU, not a fixed VRAM pool. The
 cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of DRAM. Single die.
@@ -38,7 +38,7 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
 
 - **Occupancy** follows from the machine model above — wave32, 1536 VGPR/SIMD, granule 24, cap 16
   waves/SIMD. 249 VGPRs is 5 waves/SIMD here. The per-arch table is
-  `perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json`; query
+  `perf_knowledge/hardware/data/hw_constants.json`; query
   it with `scripts/amd_occupancy.py --vgpr N --arch gfx1151`.
 - **VGPR cost per tile.** At wave32 a given tile occupies twice the VGPR per lane that it would at
   wave64, because half as many lanes share it.
@@ -54,8 +54,10 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
 - **Backend availability is a probe result, not an arch inference.** aiter, CK and hipBLASLt all
   build for gfx11. Probe the install rather than inferring availability from the arch.
 - **No LDS-per-CU number is defined** — shared memory is 128 KB per WGP with a 64 KB per-workgroup
-  cap, so `amd_occupancy.lds_per_cu("gfx1151")` returns `None`. Read `lds_per_wgp_kib` and
-  `lds_per_wg_kib` separately rather than deriving a per-CU figure.
+  cap, so `amd_occupancy.lds_per_cu("gfx1151")` returns `None`. `perf_knowledge/hardware/data/hw_constants.json` records only
+  `lds_per_wg_kib` for gfx1151; `lds_per_wgp_kib` is deliberately absent (its `_lds_basis` explains
+  why the per-WGP scope is not established for RDNA3.5), so LDS occupancy is reported as not priced
+  rather than derived. Do not fill it in from gfx1100 / gfx1200.
 - **fp8 regimes run on an emulated path.** torch exposes `float8_e4m3fn` as a storage dtype
   independently of the hardware, so an fp8 regime allocates and executes on a part with no fp8 matrix
   unit, at a fraction of the bf16 rate. A measurement taken that way describes the emulation.

@@ -4,49 +4,80 @@
 **stop**. This file's wave64 / MFMA / FNUZ / MX rules are wrong on that box. Read
 `amd_rdna4.md` instead. (`gfx125x` is CDNA5, not RDNA4 — do not send it to `amd_rdna4.md`.)
 
-This workflow runs on AMD Instinct MI-series accelerators — **CDNA 3** (MI300X / MI300A / MI308X /
-MI325X, `gfx942`) and **CDNA 4** (MI350X / MI355X, `gfx950`). They differ in CU count, HBM bandwidth,
-peak FLOPS, and — critically for quantized kernels — the **fp8 number format**. Do NOT assume MI300X.
+This workflow runs on AMD Instinct MI-series accelerators — **CDNA 4** (MI355X / MI350X, `gfx950`,
+the main line every recipe here is written for first) and **CDNA 3** (MI300X / MI325X / MI308X /
+MI300A, `gfx942`, the downgrade). They differ in CU count, LDS size, HBM bandwidth, peak FLOPS, and —
+critically for quantized kernels — the **fp8 number format**. Do NOT assume one from the other.
 
 ## 0. Detect THIS box first (source of truth > this table)
 Always identify the actual accelerator at the start of analysis/profiling, and prefer the detected
-values + your measured benchmark over any number written here (this table is a dated hint, like all
-reference material in this workflow):
+values + your measured benchmark over any number written here:
 
 ```bash
-# rocminfo lists the CPU agent FIRST, so a bare `grep -m1 'Compute Unit'` returns the CPU CORE
-# COUNT, not the GPU's. Scope every field to the gfx agent:
+python3 "$SKILL_DIR/../scripts/gpu_identity.py"   # {"gfx", "target", "sku", "marketing_name", "physical_cu_count"}
+# target (product pin) is only r9700 | unknown. sku is mi355x | mi350x | mi300x | mi325x | mi308x
+# only for the exact marketing name on the expected gfx with the full-device CU count; a
+# partitioned (CPX) or unlisted card has sku "unknown". Use sku to pick the peak row.
+# Raw fallback -- rocminfo lists the CPU agent FIRST, so scope every field to the gfx agent:
 rocminfo 2>/dev/null | awk '/^ *Name: *gfx/{print $2; exit}'                        # gfx target
 rocminfo 2>/dev/null | awk '/Name:.*gfx/{f=1} f&&/Compute Unit:/{print $3; exit}'   # CU count
 rocminfo 2>/dev/null | awk '/Name:.*gfx/{f=1} f&&/Wavefront Size:/{print $3; exit}' # wavefront
 rocminfo 2>/dev/null | awk '/Name:.*gfx/{f=1} f&&/Marketing Name:/{$1=$2=""; print; exit}'
 rocm-smi --showmeminfo vram 2>/dev/null | head              # HBM capacity
 ```
-- The `gfx` id is what matters for code paths (fp8 format, MFMA shapes, MX support). The CU count is
-  what matters for grid sizing / occupancy. Take BOTH from `rocminfo`, not from the card name.
-- For the roofline ceiling, prefer an **empirically achievable** HBM bandwidth (a memory-bound kernel
-  typically reaches ~0.7–0.85× nameplate) over the nameplate peak below. When in doubt, MEASURE.
+- The `gfx` id is what matters for code paths (fp8 format, MFMA shapes, MX support, LDS size). The CU
+  count is what matters for grid sizing / occupancy. Take BOTH from `rocminfo`, not from the card name.
+- **Peaks are nameplate, not achievable.** The table in §1 is the datasheet (`sku.json`). A
+  memory-bound kernel typically reaches ~0.7–0.85× the nameplate HBM rate; a dense MFMA loop
+  likewise sits below the nameplate FLOPS. A nameplate denominator may **rank** kernels; it may not
+  gate or close one — for that, measure the achievable ceiling on this box (in-shape probe:
+  `kernel_workflow/scripts/kernel_tools/mem_bw_probe.py`) and say which denominator you used
+  (`perf_knowledge/profiling/roofline_on_mi.md`).
 
-## 1. Card comparison (reference hint — verify on-box)
-| Card    | Arch / gfx        | CUs (≈) | HBM cap | HBM BW (≈) | fp8 format | MX (fp4/fp6) |
-|---------|-------------------|---------|---------|------------|------------|--------------|
-| MI300X  | CDNA3 / `gfx942`  | 304     | 192 GB  | 5.3 TB/s   | **FNUZ**   | no           |
-| MI300A  | CDNA3 / `gfx942`  | 228     | 128 GB  | 5.3 TB/s   | **FNUZ**   | no           |
-| MI308X  | CDNA3 / `gfx942`  | reduced | 192 GB  | ~5.3 TB/s  | **FNUZ**   | no           |
-| MI325X  | CDNA3 / `gfx942`  | 304     | 256 GB  | ~6.0 TB/s  | **FNUZ**   | no           |
-| MI350X  | CDNA4 / `gfx950`  | 256     | 288 GB  | ~8 TB/s    | **OCP**    | **yes**      |
-| MI355X  | CDNA4 / `gfx950`  | 256     | 288 GB  | ~8 TB/s    | **OCP**    | **yes**      |
+## 1. Card comparison (datasheet — verify on-box)
 
-CU counts/BW are nameplate and vary by SKU/firmware (MI308X is a reduced-CU variant) — `rocminfo` is
-authoritative. CDNA4 (gfx950) is a large generational step up in matrix throughput over CDNA3 and adds
-native FP6/FP4 — do NOT carry MI300X compute peaks onto it; look it up or measure.
+The peak rows below are generated from `perf_knowledge/hardware/data/sku.json`, GEAK's single
+per-SKU peak table (`kernel_workflow/scripts/kernel_tools/extract_sku.py --sync-docs`); do not edit
+them by hand. MI300A (APU, 228 CU, 128 GB unified, gfx942) has no row there yet — treat it as
+unknown peaks.
 
-## 2. CDNA fundamentals (common across gfx942 & gfx950)
+<!-- BEGIN GENERATED by extract_sku.py: table gfx950,gfx942 -->
+| SKU | arch | CUs | clock (MHz) | mem BW TB/s | L2 / MALL (MB) | FP16 = BF16 | FP8 | FP4 | INT8 | FP32 | FP64 | basis | GEAK |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| MI355X | gfx950 | 256 | peak 2400 | 8 | 32 / 256 | 2500 | 5000 | 10000 | 5000 | 157.3 | 78.6 | datasheet | yes |
+| MI350X | gfx950 | 256 | peak 2200 | 8 | 32 / 256 | 2300 | 4600 | 9200 | 4600 | 144.2 | 72.1 | datasheet | yes |
+| MI300X | gfx942 | 304 | peak 2100 | 5.3 | 32 / 256 | 1307.4 | 2614.9 | — | 2614.9 | 163.4 | 163.4 (vec 81.7) | datasheet | yes |
+| MI325X | gfx942 | 304 | peak 2100 | 6 | 32 / 256 | 1307.4 | 2614.9 | — | 2614.9 | 163.4 | 163.4 (vec 81.7) | datasheet | yes |
+| MI308X | gfx942 | 80 | — | 5.3 orc-derived | 16 / — | 344 | 688 | — | — | 43 | — | orc-derived | yes |
+
+Dense TFLOP/s (TOPS for INT8), no sparsity; `—` = no rate on record (a consumer refuses, never substitutes FP16). Generated from `perf_knowledge/hardware/data/sku.json` by `kernel_workflow/scripts/kernel_tools/extract_sku.py`; edit the json, then `extract_sku.py --sync-docs`.
+<!-- END GENERATED by extract_sku.py -->
+
+| Card | Arch / gfx | HBM cap | fp8 format | MX (fp4/fp6) | LDS / CU |
+|------|-----------|---------|------------|--------------|----------|
+| MI355X | CDNA4 / `gfx950` | 288 GB HBM3E | **OCP** | **yes** | **160 KiB, 64 banks** |
+| MI350X | CDNA4 / `gfx950` | 288 GB HBM3E | **OCP** | **yes** | **160 KiB, 64 banks** |
+| MI300X | CDNA3 / `gfx942` | 192 GB HBM3 | **FNUZ** | no | 64 KiB, 32 banks |
+| MI325X | CDNA3 / `gfx942` | 256 GB HBM3E | **FNUZ** | no | 64 KiB, 32 banks |
+| MI308X | CDNA3 / `gfx942` | 192 GB HBM3 | **FNUZ** | no | 64 KiB, 32 banks |
+
+MI350X and MI355X are the same silicon at different clocks (2200 vs 2400 MHz) — their peaks differ
+(2.3 vs 2.5 PF dense FP16); never quote one for the other. MI325X has MI300X's compute and **6.0 TB/s**
+HBM3E. MI308X is a reduced-CU (80) variant whose peaks are ORC-derived estimates. CDNA4 adds native
+FP6/FP4 (block-scaled MFMA) — do NOT carry MI300X compute peaks onto it.
+
+## 2. CDNA fundamentals (common across gfx950 & gfx942)
 - **Wavefront size**: 64 threads (NOT 32 like an NVIDIA warp). `__shfl_xor`/`__ballot`/`__any`/`__all`
   operate over 64 lanes; `__ballot` returns a 64-bit mask.
-- **Registers**: up to 256 VGPRs/thread (512 with VGPR pairs), ~106 SGPRs/thread.
-- **LDS**: 64 KB per CU, 32 banks × 4 bytes/cycle. Stride 4 B → 32-way conflict; pad to avoid it.
-- **L1**: 32 KB/CU. **L2**: large, shared across CUs (256 MB on MI300X-class; varies).
+- **Registers**: 512 VGPRs per SIMD lane, shared by ArchVGPRs and AGPRs (the combined
+  `.amdhsa_next_free_vgpr` budget; up to 256 of each per wave); ~106 SGPRs per wave.
+- **LDS**: **gfx950: 160 KiB per CU, 64 banks × 4 B** (256 B/clk; full-conflict `ds_read_b128`
+  stride 256 B). **gfx942 downgrade: 64 KiB per CU, 32 banks × 4 B** (128 B/clk; full-conflict stride
+  128 B). Pad or swizzle to avoid bank conflicts; a tile that fits gfx950's 160 KiB may not fit gfx942.
+- **Caches**: L1 (vL1D) 32 KB/CU. **L2 is 4 MB per XCD** (8 XCDs → 32 MB aggregate on MI300X /
+  MI325X / MI350X / MI355X; each XCD's CUs see only their own slice). The **256 MB is the Infinity
+  Cache (MALL)** — a memory-side cache behind the Infinity Fabric, NOT L2. A footprint that clears
+  the L2 but fits the MALL is still served from cache in a repeated benchmark.
 - **Global memory coalescing granularity**: 64 bytes (one cache line).
 - **Launch**: max 1024 threads/block; block sizes multiples of 64 (64/128/256 typical).
 
@@ -64,29 +95,37 @@ native FP6/FP4 — do NOT carry MI300X compute peaks onto it; look it up or meas
 
 Prefer `__launch_bounds__(max_threads, min_waves)` to steer register allocation.
 
-## 3. Arch-specific: dtype, fp8 format, MFMA (gfx942 vs gfx950)
+## 3. Arch-specific: dtype, fp8 format, MFMA (gfx950 first, gfx942 downgrade)
 **This is the part you MUST branch on `gfx`** — picking the wrong fp8 format silently fails correctness.
-- **gfx942 (CDNA3)** — fp8 is **FNUZ**: `torch.float8_e4m3fnuz` / `torch.float8_e5m2fnuz` (note the
-  different bias/range vs OCP). No native MX (fp4/fp6). MFMA tile shapes: 4x4x4, 16x16x16, 32x32x8
-  (also 16x16x32 / 32x32x16 for 8-bit). Prefer `matrix_instr_nonkdim=16` for triton GEMM on gfx942.
 - **gfx950 (CDNA4)** — fp8 is **OCP**: `torch.float8_e4m3fn` / `torch.float8_e5m2` (standard OCP), and
   it adds native **MXFP4 / MXFP6 / MXFP8** (block-scaled) matrix ops — a major lever for low-precision
-  GEMM that does NOT exist on gfx942. New/wider MFMA variants; consult the perf_knowledge cards
-  (`quantization/fnuz_vs_ocp.md`, `optimization/mfma_scheduling.md`) when authoring quantized kernels.
+  GEMM that does NOT exist on gfx942. New/wider MFMA variants (e.g. 16x16x32 / 32x32x16 for 16-bit),
+  `ds_read_tr` transposing LDS reads, 128-bit direct-to-LDS async loads; consult the perf_knowledge
+  cards (`quantization/fnuz_vs_ocp.md`, `optimization/mfma_scheduling.md`) when authoring quantized
+  kernels.
+- **gfx942 (CDNA3) downgrade** — fp8 is **FNUZ**: `torch.float8_e4m3fnuz` / `torch.float8_e5m2fnuz`
+  (different bias/range vs OCP). No native MX (fp4/fp6), no `ds_read_tr`, direct-to-LDS only 32-bit.
+  MFMA tile shapes: 4x4x4, 16x16x16, 32x32x8 (also 16x16x32 / 32x32x16 for 8-bit). Prefer
+  `matrix_instr_nonkdim=16` for triton GEMM on gfx942.
 - Always match the dtype/tolerance the unittest/oracle encodes; fix the math, never loosen tolerance.
 
-## 4. Peak FLOPS (MI300X concrete; others: detect/measure)
-MI300X (gfx942), dense MFMA, as a reference anchor for roofline math:
-- FP32 (vector): ~163 TFLOPS · FP16/BF16 (MFMA): ~1.3 PFLOPS · FP8 (MFMA): ~2.6 PFLOPS · INT8: ~2.6 POPS.
-MI325X ≈ MI300X compute (same gfx942 core; more/faster HBM). CDNA4 (MI350X/MI355X) is materially higher
-and adds FP6/FP4 — treat the MI300X numbers as a LOWER bound there and look up / measure the real peak.
-For a roofline estimate: memory-bound `min_time ≈ bytes_moved / achievable_HBM_BW`; compute-bound
-`min_time ≈ FLOPs / peak_FLOPS_for_dtype`. Report achieved % per case; measurement is the final word.
+## 4. Peak FLOPS and the roofline
+The per-dtype dense peaks for every Instinct SKU are in the §1 table (from `sku.json`). Use the
+**detected product's** row (MI350X ≠ MI355X; MI325X ≠ MI300X on bandwidth), at the **kernel's dtype**
+— a dtype with no entry (e.g. fp4 on gfx942) has no peak; do not substitute the fp16 one.
+For a roofline estimate: memory-bound `min_time ≈ bytes_moved / HBM_BW`; compute-bound
+`min_time ≈ FLOPs / peak_FLOPS[dtype]`. Every "% of roofline" you report must state its
+**numerator basis** (analytic model vs measured counters) and **denominator basis** (datasheet vs
+empirical@tool-version vs in-shape probe): a datasheet denominator ranks only; only a measured
+numerator over a probed/calibrated denominator may gate or close a kernel. Measurement is the final
+word. Tools: `kernel_workflow/scripts/kernel_tools/hw_budget.py --sku MI355X ...` (budget + floors),
+`calc_perf.py`, `mem_bw_probe.py` (in-shape HBM ceiling).
 
 ## Critical Rules
 1. **NEVER** set `HIP_VISIBLE_DEVICES` inline with profiler commands — always go through `gpu_lock.sh`.
-2. Branch quantized code on the detected `gfx` (FNUZ on gfx942, OCP + MX on gfx950) — never hard-code one.
+2. Branch quantized code on the detected `gfx` (OCP + MX on gfx950, FNUZ on gfx942) — never hard-code one.
 3. Wavefront-level ops operate on 64 threads, not 32. `__syncthreads()` is block-level only.
-4. Memory coalescing granularity is 64 bytes; LDS has 32 banks (pad to avoid 32-way conflicts).
-5. Size the grid to the DETECTED CU count (`rocminfo`), not a hard-coded 304.
+4. Memory coalescing granularity is 64 bytes; LDS has 64 banks on gfx950 and 32 on gfx942 — pad or
+   swizzle for the detected arch.
+5. Size the grid to the DETECTED CU count (`rocminfo`), not a hard-coded 256 or 304.
 6. Prefer `__launch_bounds__(max_threads, min_waves)` to help the compiler with register allocation.

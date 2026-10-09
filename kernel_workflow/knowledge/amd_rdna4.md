@@ -6,9 +6,8 @@ validation, serving images, and calibrated peaks apply specifically to the
 is not Instinct CDNA. Do **not** apply
 `amd_instinct.md` §2–3 (wave64, MFMA tiles, FNUZ/MX, 512-VGPR combined formula) to this box.
 
-Numeric occupancy / LDS constants below are copied from the Gluon skill
-`perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json`
-(`gfx1201`). Peak TFLOPS and memory bandwidth for roofline math come from the public
+Numeric occupancy / LDS constants below are copied from GEAK's shared hardware data
+`perf_knowledge/hardware/data/hw_constants.json` (`gfx1201`). Peak TFLOPS and memory bandwidth for roofline math come from the public
 R9700 datasheet in `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`.
 
 ## 0. Detect THIS box first (source of truth > this table)

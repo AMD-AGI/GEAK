@@ -1,0 +1,337 @@
+{
+  "_doc": "Calibrated discriminator cutoffs for reading a profile, shared by GEAK and the Gluon pack (perf_knowledge/hardware/data/). `bound_classification` is the ONE GEAK-wide bound-classification table (read by e2e roofline_tools; see its own _doc). Every other block is a soft threshold YOU apply: there is no rule engine, so each number is compared against your measurement, not a branch condition. Every entry carries a `basis` naming where the number comes from -- when your measurement disagrees with a cutoff, trust the measurement and say which cutoff you overrode. `source` paths are relative to the Gluon pack's references/ unless they start with a repo directory. Search-policy knobs (direction/arm budgets, coverage floors, combo caps) are NOT here: they belonged to a gated pipeline neither GEAK nor the pack ships.",
+  "bound_classification": {
+    "_doc": "THE ONE bound-classification threshold table for GEAK. It reconciles three sets that used to live apart -- e2e roofline_tools' 0.60 latency rule, kernel_workflow profiling_guide's SoL 60/40 (+ balanced band) and the pack's 80% bandwidth-saturation cutoff -- into one ladder on a 0-100 '% of a ceiling' scale: >=80 saturated, >=60 bound, [40,60) middle band, <40 low. The SAME ladder is applied to different metrics, and each metric below says what its percentage is OF and what a reader may conclude from it. e2e_workflow/knowledge/analysis_skills/roofline/roofline_tools.py reads roof_util, headroom, feasibility and dispatch from here (its module constants are asserted equal to these values by e2e_workflow/scripts/tests/test_roofline_skill.py). Every number is a soft threshold (basis: heuristic) except where noted; when a measurement disagrees, trust the measurement and name the cutoff you overrode. A percentage whose denominator_basis is 'datasheet' may only RANK; gating or closing needs a measured numerator over a probed/calibrated denominator (perf_knowledge/profiling/roofline_on_mi.md).",
+    "ladder_pct": {
+      "saturated": 80,
+      "bound": 60,
+      "low": 40,
+      "_note": "shared cut points; the metric blocks below reference them so the three sets cannot drift apart again"
+    },
+    "roof_util": {
+      "metric": "achieved/peak on each roofline axis: hbm_util = bytes/t / peak_bw, compute_util = flops/t / peak_flops[dtype] (roofline_tools.roofline_metrics). Fraction 0-1.",
+      "bound_min": 0.6,
+      "saturated_min": 0.8,
+      "basis": "heuristic",
+      "rule": "the AI-selected roof is the binding limiter only if its util >= bound_min; if NO tabulated axis reaches bound_min (and the launch is above the dispatch floor) the kernel is latency/occupancy-bound -- a small arithmetic intensity alone never makes a kernel memory-bound. A missing compute peak for the dtype is UNKNOWN (compute_util=None), not 0: with FLOPs present and memory below bound_min the bound is 'unknown', never 'latency'. >= saturated_min on the memory axis = at the wall: cut bytes, do not add in-flight. roofline_tools emits only memory|compute|latency|unknown; the latency/balanced split below needs counters.",
+      "source": "e2e_workflow/knowledge/analysis_skills/roofline/SKILL.md section 3 (UTIL_BOUND_THRESHOLD); calibrated against the gfx950 Qwen3.5-35B run in test_roofline_skill.py"
+    },
+    "sol_pipe_pct": {
+      "metric": "rocprof-compute System Speed-of-Light busy % of the VALU / MFMA / VMEM pipes (counters; read VALUBusy/MfmaUtil busy counters, not duty-cycle VALUUtilization)",
+      "high": 60,
+      "low": 40,
+      "balanced_band": [
+        40,
+        60
+      ],
+      "lead_margin_pct": 15,
+      "basis": "heuristic",
+      "rule": "one pipe >= high and every other < low -> bound on that pipe (VALU/MFMA -> compute, VMEM -> memory). Every pipe < low -> latency candidate: split with the stall reasons (dependency wait = C1 latency, NOT memory-bound; issue wait = C2 occupancy). Every pipe inside balanced_band, or the top pipe leads the second by < lead_margin_pct -> balanced (ranked stack, not one bound). One pipe >= high and another in the band -> bound on the leader only if it leads by >= lead_margin_pct.",
+      "source": "kernel_workflow/knowledge/profiling_guide.md Section 2 (SoL 60/40) + the pack's relative.sol_lead_margin_pct; the pack's old fallback balanced band [20,60] is narrowed to [40,60] so 'both < 40' means latency in every reader"
+    },
+    "vmem_pct_of_peak": {
+      "metric": "memory-pipe achieved bandwidth as % of the HBM ceiling (counters or model numerator)",
+      "saturated": 80,
+      "basis": "heuristic",
+      "rule": "= confirm.hbm_bw_saturated_pct: memory sub=bandwidth at/above this -- cut bytes, do NOT add in-flight. Below it with high VMEM SoL -> in-flight/latency sub-class.",
+      "source": "confirm.hbm_bw_saturated_pct (pack bound-class-signals.md ## Bound-class decision tree)"
+    },
+    "headroom_vs_target_eff": {
+      "metric": "roofline_pct / target_eff (op-class realistic efficiency prior, e2e_workflow/knowledge/analysis_skills/roofline/SKILL.md section 7)",
+      "saturated_min": 0.9,
+      "moderate_min": 0.6,
+      "basis": "heuristic",
+      "rule": ">= saturated_min of the target: tuning has nothing left to give; >= moderate_min: moderate; below: underperforming. Banded against target_eff, never against the raw roofline."
+    },
+    "feasibility": {
+      "metric": "raw roofline_pct on the AI-selected roof",
+      "min": 0.001,
+      "max": 1.0,
+      "basis": "physics",
+      "rule": "outside [min,max] the byte/FLOP model (or an unvalidated peak) is wrong: clamp for display, emit suspect=True and NO verdict; never read a clamped 100% as saturated."
+    },
+    "dispatch": {
+      "metric": "per-launch time vs kernel launch + scheduling overhead",
+      "launch_overhead_s": 5e-06,
+      "latency_bound_factor": 2.0,
+      "basis": "runtime order of magnitude; override per box if measured",
+      "rule": "t <= launch_overhead_s x latency_bound_factor -> dispatch-bound: bound_type latency with NO verdict; the lever is fusion / graph capture."
+    }
+  },
+  "confirm": {
+    "ds_read_b128_interval_cyc": {
+      "value": 16,
+      "basis": "hardware",
+      "rel_or_abs": "abs",
+      "role": "confirm-lds-conflict",
+      "note": ">16cyc steady = bank conflict; full-conflict stride is arch-specific (hw_constants)",
+      "source": "hardware/planning-constants.md ## LDS throughput / conflict (planning)"
+    },
+    "mfma_cadence_ideal_cyc": {
+      "value": {
+        "fp16": 16,
+        "bf16": 16,
+        "fp8": 32
+      },
+      "basis": "hardware",
+      "rel_or_abs": "abs",
+      "role": "confirm-mfma-issue",
+      "note": "median cadence ~ ideal => genuine MFMA-issue-bound; >> ideal => bubble-diluted",
+      "source": "hardware/roofline-models.md ## MFMA efficiency"
+    },
+    "mfma_efficiency_target_pct": {
+      "value": 98,
+      "basis": "calibrated",
+      "rel_or_abs": "abs",
+      "role": "confirm-compute-ceiling",
+      "note": "target for a compute-bound hot loop",
+      "source": "hardware/roofline-models.md"
+    },
+    "vgpr_wave_cliff": {
+      "value": [
+        64,
+        72,
+        80,
+        96,
+        128,
+        168,
+        256,
+        512
+      ],
+      "basis": "hardware",
+      "rel_or_abs": "abs",
+      "role": "confirm-occupancy-cliff",
+      "note": "next_free_vgpr steps (CDNA, granule 8, cap 8 waves): <=64->8w <=72->7w <=80->6w <=96->5w <=128->4w <=168->3w <=256->2w <=512->1w >512 spill. The arbiter is scripts/amd_occupancy.py waves_by_vgpr; an earlier revision of this list used granule 4, which dropped the whole 5-8 wave range and put the 3-wave boundary at 170, a value no granule produces. TWO INPUT CAVEATS. (1) The rungs consume the ALLOCATED count, ceil8(ceil4(next_free_vgpr)) = (COMPUTE_PGM_RSRC1[5:0] + 1) * 8, not the printed .vgpr_count / n_regs -- round before comparing two configurations, or unequal printed counts will compare as unequal while allocating identically. (2) These are waves/SIMD. Residency is wg/CU = waves_per_SIMD * simd_per_cu // num_warps and a workgroup is indivisible, so at num_warps=8 only the 64/128/256 rungs move anything. See hardware/planning-constants.md.",
+      "source": "hardware/planning-constants.md ## VGPR / occupancy thresholds (CDNA combined budget)"
+    },
+    "tcp_inflight_cap_kib": {
+      "value": 32,
+      "basis": "hardware",
+      "rel_or_abs": "abs",
+      "role": "confirm-hbm-inflight",
+      "source": "hardware/planning-constants.md"
+    },
+    "full_drain_schedule_gap_pct": {
+      "value": 50,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "confirm-schedule-overlap",
+      "note": "hot-loop share of full-drain s_waitcnt lgkmcnt(0) (asm_loop_audit). High + LOWER MfmaUtil at EQUAL occupancy vs the plain anchor => schedule/overlap gap, NOT a ceiling. Distinct from memory-bandwidth (stalled-on-L2 dominant). The move it triggers is the hand-written pipeline, in its fixed order: register-level prefetch, then an authored LDS ring (gfx950: async_copy + commit_group/wait_group; gfx942 downgrade: sync staging), then warp_pipeline_stage + a scheduling-model choice (num_warps>=8), then pace it (tile-programming/instruction-scheduling.md). This holds below the parity gate too: the lost_pipeline debt is repaid by authoring the overlap. Re-injecting plain's TTGIR pipeliner (reinject_ttgir_pipeliner) is the LAST resort -- a diagnostic that measures the lost_pipeline debt, or a fallback when the hand-written form cannot reach parity -- its ceiling is plain parity, its numbers are labelled injected and never a win, and it never runs on an already-Gluon incumbent. Routing a schedule-overlap reading to re-injection first is how a round gets spent on a debt-measurement tool.",
+      "source": "tile-programming/pipeline.md ## Authoring the overlap yourself (fallback: ## Reproduce plain's software pipeline on the Gluon path)"
+    },
+    "longest_valu_run_high": {
+      "value": 96,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "confirm-underfill",
+      "note": "longest exposed VALU-only run (no MFMA to hide it) in the hot loop (asm_loop_audit static.longest_valu_run). High while MfmaUtil is low AND occupancy is already adequate (>=2 waves, not the limiter) => the matrix engine is starved by a too-small tile => classify compute/mfma-issue (under-fill) so the grow-tile levers surface on-bound; the fix is a BIGGER tile (raise arithmetic intensity), NOT occupancy relief. Distinct from a genuinely occupancy-capped kernel (waves<2 or a VGPR/LDS limiter), which stays latency.",
+      "source": "hardware/bound-class-signals.md ## under-fill vs occupancy"
+    },
+    "mfma_underfill_max_pct": {
+      "value": 25,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "confirm-underfill-ceiling",
+      "note": "the coarse tile_underfill signal (grow_tile) fires ONLY when MfmaUtil is this-low or below -- the matrix engine is genuinely STARVED, not merely below the compute-confirm bar (mfma_util_compute_pct). A partially-fed matrix engine with a long VALU run is VALU-VOLUME-bound (compute/valu), NOT under-fill: growing the tile there does not help. Between this ceiling and the compute-confirm bar -> not coarse-universal; let the fine bound-class decide (valu vs mfma-issue). The under-fill signal is a starved matrix engine; a partially-fed one is a VALU-volume signal.",
+      "source": "hardware/bound-class-signals.md ## Universal (coarse) vs fine levers"
+    },
+    "layout_convert_share_high": {
+      "value": 15,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "coarse-universal-signal",
+      "note": "hot-loop VALU op-class share (asm_loop_audit static.op_class_pct.layout_convert) that is layout-convert / cast / transpose. Above this a tier:universal lever fires on its own signal REGARDLESS of bound_class: eliminate_inloop_transpose (a dead in-loop transpose) and downcast_rounding_rtz (an fp32->bf16 cast). Self-evident, cost-neutral direction -> surfaced pre-classification so a mis-classified round does not bury it.",
+      "source": "hardware/bound-class-signals.md ## Lever cards"
+    },
+    "addr_iops_share_high": {
+      "value": 25,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "coarse-universal-signal",
+      "note": "hot-loop integer/address IOPs share (asm_loop_audit static.op_class_pct.iops). Above this the tier:universal cut_address_arith_iops lever fires regardless of bound_class: loop-invariant address math is a static fact, hoist/coalesce it.",
+      "source": "hardware/bound-class-signals.md ## Lever cards"
+    },
+    "coalescing_low_pct": {
+      "value": 60,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "disambiguate-l2-locality-vs-access-pattern",
+      "note": "memory coalescing efficiency (metrics.memory.coalescing_pct). A low L2-hit is ambiguous: it can be a REUSE/traversal problem (fix = GROUP_SIZE_M / XCD grid remap => memory/l2-locality) OR a downstream SYMPTOM of an uncoalesced / small-strided access pattern (fix = coalesce the access / grow the tile, NOT grid remap). When coalescing is also below this cutoff, the low L2-hit is an access-pattern symptom, so do NOT commit to l2-locality (grid remap would be inert) -- fall back to generic memory and let the access-pattern / under-fill signals decide. Only call l2-locality when access is well-coalesced yet L2-hit is still low (a genuine reuse gap).",
+      "source": "hardware/bound-class-signals.md ## Bound-class decision tree"
+    },
+    "reduction_writeout_share": {
+      "value": 0.3,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "fire-reduction-landing-router",
+      "note": "B1: share of the reduction write-out work (atomic/RMW/materialize) that is atomic/RMW, above which the Layer-0 structural router fires for a multi-reduction op. A cheap static-isa-estimate (normalize._structural) is enough to FIRE the router and hoist the structural cards; a real floor-probe (structural._source != 'static-isa-estimate') is REQUIRED before the closure gate accepts an at-ceiling / keep-baseline / negative close.",
+      "source": "hardware/bound-class-signals.md ## Lever gating laws"
+    },
+    "hbm_bw_saturated_pct": {
+      "value": 80,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "confirm-memory-bandwidth",
+      "arch_scope": "U-concept (NCU Max-Bandwidth analog); the PEAK it is a %-of is A-number (sku.json per-SKU)",
+      "note": "memory-bound sub=bandwidth when the memory pipe (vmem %-of-peak) is at/above this — cut bytes, do NOT add in-flight. round_10 gfx950 saw ~86% (5.58/5.24 TB/s); % cutoff is portable, the TB/s is gfx950-only. Same cut point as bound_classification.ladder_pct.saturated.",
+      "source": "hardware/bound-class-signals.md ## Bound-class decision tree"
+    },
+    "l2_fabric_latency_cyc": {
+      "value": 300,
+      "basis": "hardware",
+      "rel_or_abs": "abs",
+      "arch_specific": true,
+      "role": "confirm-memory-latency",
+      "note": "A-NUMBER (gfx950/CDNA4-calibrated fallback ONLY). your own reading PREFERS hw_constants.arch.<gfx>.l2_fabric_latency_high_cyc (Infinity-Fabric topology / XCD count differ per arch); this top-level value is used only when the arch has no per-gfx entry. round_44/49 gfx950 read-latency 256-317 cyc under-fill. Recalibrate per arch; do not treat as gfx942/gfx1250 truth.",
+      "source": "hw_constants.arch.<gfx>.l2_fabric_latency_high_cyc"
+    },
+    "valu_active_threads_min_frac": {
+      "value": 0.875,
+      "basis": "heuristic",
+      "rel_or_abs": "rel",
+      "role": "confirm-divergence",
+      "arch_scope": "U-concept; compared against wave_size (hw_constants; CDNA=64, RDNA/gfx1250=32) so it is wave-width-agnostic — never hardcode 64",
+      "note": "compute sub=divergence when VALU active-threads/wave < this fraction of the arch wave_size (NCU Branch-Efficiency / predicated-off analog). 0.875 = 56/64 on wave64.",
+      "source": "hardware/bound-class-signals.md ## Bound-class decision tree"
+    },
+    "branch_util_high_pct": {
+      "value": 15,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "confirm-divergence",
+      "note": "SOL 2.1.12 Branch Util above this co-signals divergence (with low active-threads/wave).",
+      "source": "hardware/bound-class-signals.md ## Bound-class decision tree"
+    },
+    "lds_bank_conflict_frac_high": {
+      "value": 0.5,
+      "basis": "heuristic",
+      "rel_or_abs": "rel",
+      "role": "confirm-lds-bank-conflict",
+      "arch_scope": "U-concept PMC counters (SQ_LDS_BANK_CONFLICT/SQ_LDS_IDX_ACTIVE); portable heuristic cutoff",
+      "note": "degraded-mode LDS discriminator (when ATT is unavailable): bank-conflict fraction at/above this -> lds/bank-conflict (swizzle). Heuristic policy default, not calibrated from any single run.",
+      "source": "hardware/bound-class-signals.md ## Degraded-mode PMC discriminators"
+    },
+    "lds_ops_per_mfma_high": {
+      "value": 3,
+      "basis": "heuristic",
+      "rel_or_abs": "rel",
+      "role": "confirm-lds-issue-rate",
+      "arch_scope": "U-concept (LDS-op count per MFMA); portable heuristic cutoff",
+      "note": "high LDS-ops-per-MFMA AND low bank-conflict AND sync-removal floor-probe flat -> lds/issue-rate (~ NCU mio_throttle). Heuristic policy default, not calibrated from any single run.",
+      "source": "hardware/bound-class-signals.md ## Degraded-mode PMC discriminators"
+    },
+    "instr_cache_hit_min_pct": {
+      "value": 90,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "confirm-ifetch",
+      "arch_scope": "U-concept; L1I capacity is A-number (hw_constants) but the hit% cutoff is portable",
+      "note": "latency sub=ifetch when Instr Cache Hit Rate < this (NCU no_instructions stall analog): big unrolled bodies / short kernels. Low-frequency.",
+      "source": "hardware/bound-class-signals.md ## Bound-class decision tree"
+    }
+  },
+  "fallback": {
+    "mfma_util_compute_pct": {
+      "value": 60,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "degrade-fallback",
+      "note": "DEMOTED: prefer 'MFMA is top SOL block AND cadence~=ideal'. Only used when relative rank unavailable (PMC-blind). Same cut point as bound_classification.ladder_pct.bound.",
+      "source": "hardware/bound-class-signals.md discriminator"
+    },
+    "lds_bank_conflict_pct": {
+      "value": 10,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "trigger-investigate",
+      "note": "DEMOTED: rate can stay flat while cycles drop; prefer ds_read interval>16cyc. This only TRIGGERS a Layer-3 look, never a ceiling.",
+      "source": "hardware/bound-class-signals.md"
+    },
+    "dependency_over_active_ratio": {
+      "value": 3.0,
+      "basis": "heuristic",
+      "rel_or_abs": "rel",
+      "role": "confirm-dep-stall",
+      "note": "Dependency Wait / Active > 3x => dependency-chain wait; prefer the scheduler_proxy (issue vs latency limited).",
+      "source": "hardware/bound-class-signals.md ## Stall-reason"
+    },
+    "balanced_band_pct": {
+      "value": [
+        40,
+        60
+      ],
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "degrade-fallback",
+      "note": "DEMOTED: every SoL pipe inside this band, no single saturation => balanced. Prefer relative: no SOL block leads by > lead_margin. Unified with bound_classification.sol_pipe_pct.balanced_band (was [20,60]; below 40 on every pipe is now latency in every reader, matching GEAK profiling_guide).",
+      "source": "hardware/bound-class-signals.md tree residual-2"
+    },
+    "l2_hit_locality_pct": {
+      "value": 50,
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "confirm-l2-locality",
+      "arch_scope": "U-concept (NCU L2-hit analog); L2 size is A-number (sku.json)",
+      "note": "memory-bound sub=l2-locality when L2 hit < this AND the pipe is not bandwidth-saturated -> GROUP_SIZE_M / XCD-remap. round_44 gfx950 L2_hit 71% + l2_hit_group_n8 66% showed locality is measurable.",
+      "source": "hardware/bound-class-signals.md ## Bound-class decision tree"
+    }
+  },
+  "relative": {
+    "sol_lead_margin_pct": {
+      "value": 15,
+      "basis": "heuristic",
+      "rel_or_abs": "rel",
+      "role": "primary-classify",
+      "note": "#1 SOL block must lead #2 by this margin to be called the sole bound; else balanced/ranked-stack.",
+      "source": "Nsight 'address largest limiter' + skill ranked-stack"
+    },
+    "occupancy_useful_pct": {
+      "value": [
+        25,
+        50
+      ],
+      "basis": "heuristic",
+      "rel_or_abs": "abs",
+      "role": "occupancy-is-a-means",
+      "note": "occupancy is a lever not a goal; >25-50% diminishing returns. Condition on bound class (compute needs less, latency more). ONE-SIDED: use an occupancy LOSS to veto a change that spends LDS/VGPR, never a projected GAIN to fund one -- measured on a CDNA4 part, a +28.6% computed-occupancy arm (bit-exact, 0 spill) returned +0.16% and a -2.9% regression where the theory is strongest, and a deliberate -50% cost only -2.81%. Those two points are a veto rule, NOT a curve: they do not license 'occupancy is useless' and they do not license reading a magnitude off the line between them -- below some point too few waves still hurts, and where that point sits is a per-kernel measurement. Percentages here are of max_waves_per_simd, i.e. waves/SIMD, NOT wg/CU.",
+      "source": "method/climb.md ## 2. Reversed-intuition traps — read this once"
+    }
+  },
+  "regime": {
+    "_doc": "intensity-bracket [lower,upper] vs sku.ridge -> the tree's FIRST branch. lower<ridge<upper => resolve by measured L2-hit.",
+    "compute_if_lower_ge_ridge": {
+      "value": true,
+      "basis": "hardware",
+      "role": "first-branch"
+    },
+    "memory_if_upper_le_ridge": {
+      "value": true,
+      "basis": "hardware",
+      "role": "first-branch"
+    }
+  },
+  "plain_autotune": {
+    "_doc": "Config-sweep policy knobs. The SWEEP tier owns the config sweep and its runner (scripts/plain_autotune.py) ships in the TRITON pack only; other AMD DSLs inherit this block but ship no runner that reads it -- additive-optional, and a sweep there is batched by hand. NOTE the runner no longer reads a config CAP from here: the candidate values are DERIVED per part and shape (tuning_laws.py) and the space is SEARCHED under a point/time budget, so a constant cap would be a number with no relationship to the space it caps. What survives here is policy: how many configs a SHIPPED online autotune table should carry, and which divergent cards fold into the sweep instead of fanning out as arms.",
+    "online_config_cap": {
+      "value": 12,
+      "basis": "heuristic",
+      "role": "max configs kept for an online @triton.autotune table",
+      "note": "Keep ~8-12 high-confidence configs online; beyond this, use an offline sweep. Matches method/front-end.md P8."
+    },
+    "offline_config_threshold": {
+      "value": 20,
+      "basis": "heuristic",
+      "role": "config count above which to run an offline sweep rather than online autotune",
+      "note": "20+ candidate configs -> offline sweep, then ship the winning bucket table."
+    },
+    "absorb_native_groups": {
+      "value": [
+        "dispatch",
+        "wave_quantization"
+      ],
+      "basis": "policy",
+      "role": "native_group set whose knob divergent cards fold into the plain config grid (① ②)",
+      "note": "your own reading stamps t0_autotune_absorbable for a knob divergent card in these groups (or any card carrying plain_autotune_absorbable:true), so the plain runner sweeps it as a grid dim instead of a T0 fan-out arm. requires_anchor (④) cards are always excluded."
+    }
+  }
+}

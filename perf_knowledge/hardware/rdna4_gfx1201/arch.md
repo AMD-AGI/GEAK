@@ -4,9 +4,9 @@ kind: hardware
 gens: [gfx1201]
 dtypes: [fp32, bf16, fp16, fp8_e4m3, fp8_e5m2, int8, int4]
 regimes: [both]
-updated: 2026-09-10
+updated: 2026-10-07
 sources:
-  - ../../expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json
+  - ../data/hw_constants.json
   - ../../expert_skills/skills/gluon_authoring/references/platform-known-issues.md
   - https://gpuopen.com/learn/wmma-guide-amd-rdna-4-gpus-part-2/
 ---
@@ -16,7 +16,8 @@ sources:
 > Validated client RDNA 4 (`gfx1201`). **Not** Instinct CDNA. Workflow agents should prefer
 > [`kernel_workflow/knowledge/amd_rdna4.md`](../../../kernel_workflow/knowledge/amd_rdna4.md).
 > Occupancy numbers live in [occupancy.md](occupancy.md); pitfalls in [pitfalls.md](pitfalls.md).
-> Do **not** duplicate Gluon `hw_constants.json` beyond the cheat sheet — that file is the source.
+> Do **not** duplicate [`hw_constants.json`](../data/hw_constants.json) (GEAK's shared hardware data)
+> beyond the cheat sheet — that file is the source.
 > These ISA facts apply to gfx1201 products. GEAK's product validation, serving
 > image, and calibrated peaks are **R9700-only**; RX 9070 XT and other gfx1201
 > products remain uncalibrated.
@@ -35,7 +36,7 @@ sources:
 | Wavefront | **32 lanes** | shuffles, `num_warps`, block multiples of 32 |
 | Matrix ISA | **WMMA** | `tl.dot` is not MFMA; no VALU co-issue |
 | LDS | 64 KiB/WG, 128 KiB/WGP, 32 banks | CDNA4 160 KiB/CU does not apply |
-| VGPR/wave | 256 addressable (static) | occupancy from Gluon `vgpr_wave_steps` |
+| VGPR/wave | 256 addressable (static) | occupancy from `hw_constants.json` `vgpr_wave_steps` |
 | fp8 | OCP `e4m3fn` / `e5m2` | FNUZ and MXFP4/6/8 are wrong here |
 | INT4 | native gfx12 WMMA, INT32 accumulate | verify `v_wmma_i32_16x16x{16,32}_iu4` in ISA |
 | Memory | 8 MiB L2 + 64 MiB Infinity Cache + 640 GB/s GDDR6 | cache-resident bandwidth may exceed the external pin rate |
