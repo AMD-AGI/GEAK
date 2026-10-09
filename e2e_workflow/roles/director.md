@@ -82,6 +82,10 @@ Steps:
    infer either product from gfx1201. Hard-stop if it disagrees with
    `EXPECTED_GFX`, a non-empty `EXPECTED_TARGET`, or a positive
    `EXPECTED_PHYSICAL_CU_COUNT`.
+   Copy its separate `sku` field into `env_report.json` as `device_sku` next to
+   `device_target`; it records product identity for explicit local planning with
+   `kernel_tools/calc_perf.py --sku`. Native TraceLens and the legacy e2e roofline
+   engine retain their own model and calibration selection.
    Then follow `SKILL_DIR/knowledge/preflight.md` (judgment guide,
    not a script). Confirm the chosen `BACKEND` stack imports/launches, `MODEL` resolves, the GPU(s)
    are visible; detect gfx, trace sources (rocprofv3?), available op backends (aiter / flydsl via
