@@ -57,6 +57,7 @@ TAR_EXCLUDES=(
   --exclude='./__pycache__' --exclude='*/__pycache__'
   --exclude='./.torch_ext' --exclude='*/.torch_ext'
   --exclude='./.rocprofv3' --exclude='*/.rocprofv3'
+  --exclude='./.tile-runtime' --exclude='*/.tile-runtime'
   --exclude='./reference_io.pt' --exclude='*/reference_io.pt'
   --exclude='./aiter/jit' --exclude='*/aiter/jit'
   --exclude='./aiter/aiter/jit' --exclude='*/aiter/aiter/jit'
