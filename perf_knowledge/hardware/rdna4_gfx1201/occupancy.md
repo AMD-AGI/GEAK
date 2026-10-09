@@ -4,9 +4,9 @@ kind: hardware
 gens: [gfx1201]
 dtypes: []
 regimes: [both]
-updated: 2026-09-21
+updated: 2026-10-07
 sources:
-  - ../../expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json
+  - ../data/hw_constants.json
   - ../../expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py
 ---
 
@@ -16,7 +16,8 @@ This card is a pointer, not a second prose copy of the occupancy table.
 
 - Workflow-facing rules and the human-readable table:
   [`kernel_workflow/knowledge/amd_rdna4.md`](../../../kernel_workflow/knowledge/amd_rdna4.md)
-- Machine-readable constants: Gluon `hw_constants.json`, key `gfx1201`
+- Machine-readable constants: [`perf_knowledge/hardware/data/hw_constants.json`](../data/hw_constants.json),
+  key `gfx1201`
 - Reproduction command:
   `amd_occupancy.py --compiler-sweep --arch gfx1201 --format json`
 
