@@ -50,7 +50,9 @@ adapter_profile_window
         env.update(
             PROFILE_DIR=str(profile), BASE_URL="http://127.0.0.1:8888", TP="2",
             TRACE_RANKS=str(ranks), PROFILE_WINDOW_SEC="17", PROFILE_WINDOW_TIMEOUT="1",
-            ATOM_PROFILE_FINALIZE_TIMEOUT="1",
+            # The partial-capture case ends on PROFILE_WINDOW_TIMEOUT. A 1 s hard deadline let
+            # the complete case fail when the clock ticked over before the first rank census.
+            ATOM_PROFILE_FINALIZE_TIMEOUT="5",
         )
         return subprocess.run([BASH, str(driver)], env=env, capture_output=True,
                               text=True, timeout=10)
