@@ -2,7 +2,7 @@
 
 File-backed starting points for probes plus the capability-level + feasibility
 gate that decides whether a Gluon probe is worth building. The feasibility gate
-also feeds the escalation gate (`../escalation-gate.md`). Re-derive tile
+also feeds the escalation gate (`../method/entry.md`). Re-derive tile
 constants, layouts, and dtype choices for the real operator before benchmarking.
 
 ## Runnable Smoke Copy (toolchain validation only)
@@ -83,7 +83,7 @@ for Level 4/5.
 
 ## Quick Feasibility Gate (is a Gluon probe worth it?)
 
-Answer before a full Gluon mechanism probe — these feed `../escalation-gate.md`:
+Answer before a full Gluon mechanism probe — these feed `../method/entry.md`:
 
 ```text
 hot_path_in_measured_boundary:
@@ -98,7 +98,7 @@ gluon_extra_mechanism:
 Skip or sharply limit a Gluon probe when all hold:
 
 - the kernel is launch/wrapper dominated or <50us (sub-ms table in
-  `../phases/harness.md`);
+  `../method/benchmark-hygiene.md`);
 - there is no matrix, reduction, scan, or layout-aware memory mechanism to target;
 - the plain Triton path already lowers to the desired matrix instruction;
 - the proposed Gluon path would only rewrite spelling, not reduce traffic,
@@ -121,4 +121,4 @@ Classify every failed probe: `environment_toolchain_blocker`,
 `correctness_failure`, `performance_or_integration_no_win`. The first two only
 decide whether the next probe is allowed — they are not proof that Gluon lacks a
 mechanism. Fair-comparison and no-extra-mechanism rules live in
-`../gluon-negative-patterns.md`.
+`../pitfalls/negative-patterns.md`.
