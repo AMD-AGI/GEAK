@@ -922,4 +922,17 @@ fi
 # ---- summarize (median throughput across repeats) — backend-independent ----
 python3 "$SUMMARIZE" from-runs "$RESULT_JSONL" "$OUT_DIR/bench_summary.json" "$COLD_JSONL"
 
+# ---- optional post-bench hook on the SAME live server (before teardown) ----
+# POST_BENCH_HOOK is a shell command run after the timed rounds while the measured server is
+# still up, e.g. an accuracy eval that must score exactly the server that was timed. It sees
+# BASE_URL/MODEL/OUT_DIR/LOG. Its failure never voids the throughput summary above; the exit
+# code is recorded in $OUT_DIR/post_bench_hook.rc. Not run inside an isolated replica.
+if [ -n "${POST_BENCH_HOOK:-}" ] && [ "${GEAK_ISOLATED_REPLICA:-0}" != "1" ]; then
+  echo ">>> Post-bench hook on the live server ..."
+  BASE_URL="$BASE_URL" MODEL="$MODEL" OUT_DIR="$OUT_DIR" LOG="$LOG" bash -c "$POST_BENCH_HOOK"
+  _hook_rc=$?
+  echo "$_hook_rc" > "$OUT_DIR/post_bench_hook.rc"
+  echo ">>> Post-bench hook rc=$_hook_rc"
+fi
+
 echo ">>> Done. Summary: $OUT_DIR/bench_summary.json"

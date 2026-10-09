@@ -225,3 +225,115 @@ const safeAgent = async (inputs) => {{
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(NODE, "node not available")
+class CombinedApplyBackBehaviourTest(unittest.TestCase):
+    """Runs the real apply-back block (combined + serial fallback) with stub agents."""
+
+    ENTRIES = [{"exec_id": "e%02d" % i, "candidate_ids": ["c%02d" % i]} for i in range(1, 6)]
+    ELIGIBLE = ["c02", "c03", "c05"]
+
+    def _run(self, mode="combined", decision="accept", gpus="0,1"):
+        src = _source()
+        start = src.index("    let applyState = {")
+        end = src.index("        commitStep(step, accuracyKey, applyEntry.exec_id);\n      }\n    }\n")
+        end += len("        commitStep(step, accuracyKey, applyEntry.exec_id);\n      }\n    }\n")
+        block = src[start:end]
+        harness = f"""
+const calls = [];
+const log = () => {{}};
+const EVAL_DIR = '/e', MODEL_PATH = '/m', SERVING_TP = 8, SERVING_GPU = '0-7', WORKLOAD = {{}};
+const WORKFLOW_DIR = '/w', BASELINE_TPUT = 190, NOISE_BAND = 0.5, FUSION_APPLY_TIMEOUT_MS = 0;
+const FUSION_RUNTIME_INPUTS = {{}}, ACCURACY_INPUTS = {{}}, FUSION_AUTHOR_SCHEMA = {{}}, FUSION_APPLY_SCHEMA = {{}};
+const FUSION_APPLYBACK_MODE = {json.dumps(mode)}, FUSION_BUDGET = 10, FUSION_UNIT_PARALLEL = 8;
+const FUSION_COMBINED_AB_REPEATS = 3, FUSION_GSM8K_THINKING = false, FUSION_AB_MAX_PAIRS = 3;
+const GPU_LIST = {json.dumps(gpus)}.split(',');
+const FUSION_INPUTS = {{ FUSION_TOPK_JSON: '/t', FUSION_UNITSIDE_JSON: '/u' }};
+const fusionApplyEntries = {json.dumps(self.ENTRIES)};
+const fusionUnitEligibleIds = {json.dumps(self.ELIGIBLE)};
+const fusionGsm8kConcurrency = () => 4;
+let curOverlay = '', curFlags = '', curEnv = '', curTput = 190;
+let fapply = null, fusionApplyFailedExec = '', fusionApplyUnprocessed = [];
+let fusionFailureStage = '', fusionAccuracyRef = null;
+const acceptedFusions = [], fusionRecoveryState = {{}};
+const fusionStackKey = () => JSON.stringify(acceptedFusions.map((r) => r.exec_id));
+const roleAgent = (role, phase, intro, inputs) => ({{ phase, inputs }});
+const safeAgent = async (call) => {{
+  calls.push({{ phase: call.phase, exec: call.inputs.TARGET_EXEC_ID || '', gpu: call.inputs.GPU_ID || '',
+                authored: call.inputs.AUTHORED_OVERLAY ? call.inputs.AUTHORED_OVERLAY.overlay_dir : '' }});
+  if (call.phase === 'author_one') {{
+    const id = call.inputs.TARGET_EXEC_ID;
+    return id === 'e03' ? {{ exec_id: id, status: 'blocked', reason: 'no seam' }}
+                        : {{ exec_id: id, status: 'authored', overlay_dir: '/o/' + id, banner_tag: id }};
+  }}
+  if (call.phase === 'combined_ab') {{
+    if ({json.dumps(decision)} !== 'accept') return {{ combined_decision: 'reject', accepted_fusions: [] }};
+    return {{ combined_decision: 'accept', final_overlay: '/o/combined', e2e_throughput_tok_s: 247,
+             accepted_fusions: [{{ exec_id: 'e02' }}, {{ exec_id: 'e05' }}],
+             rejected: [{{ exec_id: 'e03', reason: 'no seam' }}] }};
+  }}
+  return {{ accepted_fusions: [{{ exec_id: call.inputs.TARGET_EXEC_ID }}],
+           final_overlay: '/o/serial', e2e_throughput_tok_s: curTput + 1 }};
+}};
+(async () => {{
+{block}
+  console.log(JSON.stringify({{ calls, curTput, curOverlay,
+    accepted: acceptedFusions.map((r) => r.exec_id) }}));
+}})();
+"""
+        return _run_node(harness)
+
+    def test_accepted_stack_needs_no_per_entry_ab(self):
+        out = self._run()
+        phases = [c["phase"] for c in out["calls"]]
+        self.assertEqual(phases.count("author_one"), 3)        # only unit-side passes
+        self.assertEqual(phases.count("combined_ab"), 1)
+        self.assertNotIn("apply_one", phases)
+        self.assertEqual(out["accepted"], ["e02", "e05"])
+        self.assertEqual(out["curTput"], 247)
+        self.assertEqual(out["curOverlay"], "/o/combined")
+
+    def test_authoring_is_pinned_one_gpu_each(self):
+        out = self._run(gpus="0,1")
+        authored = [c for c in out["calls"] if c["phase"] == "author_one"]
+        self.assertEqual([c["gpu"] for c in authored], ["0", "1", "0"])   # waves of 2
+
+    def test_rejected_stack_falls_back_to_serial_and_reuses_overlays(self):
+        out = self._run(decision="reject")
+        serial = [c for c in out["calls"] if c["phase"] == "apply_one"]
+        self.assertEqual([c["exec"] for c in serial], [e["exec_id"] for e in self.ENTRIES])
+        reuse = {c["exec"]: c["authored"] for c in serial}
+        self.assertEqual(reuse["e02"], "/o/e02")
+        self.assertEqual(reuse["e03"], "")                     # blocked at authoring
+
+    def test_serial_mode_never_authors_separately(self):
+        phases = [c["phase"] for c in self._run(mode="serial")["calls"]]
+        self.assertNotIn("author_one", phases)
+        self.assertNotIn("combined_ab", phases)
+        self.assertEqual(phases.count("apply_one"), len(self.ENTRIES))
+
+
+class CombinedModeDefaultsTest(unittest.TestCase):
+    def test_combined_is_default_and_widens_the_budget(self):
+        src = _source()
+        self.assertIn("String(A.fusion_applyback_mode || 'combined').trim() === 'serial'", src)
+        self.assertIn("(FUSION_APPLYBACK_MODE === 'combined' ? 10 : 6)", src)
+
+    def test_combined_ab_gets_the_script_and_gsm8k_harness(self):
+        src = _source()
+        block = src[src.index("roleAgent('fusion_integrator', 'combined_ab'"):]
+        block = block[:block.index("schema: FUSION_APPLY_SCHEMA")]
+        for key in ("COMBINED_AB_SCRIPT:", "AB_REPEATS: FUSION_COMBINED_AB_REPEATS",
+                    "GSM8K_CONCURRENCY: fusionGsm8kConcurrency(curFlags)", "AUTHORED: authored"):
+            self.assertIn(key, block)
+
+    def test_role_documents_both_phases(self):
+        role = _role("fusion_integrator.md")
+        self.assertIn("## PHASE=author_one", role)
+        self.assertIn("## PHASE=combined_ab", role)
+        self.assertIn('bash "$COMBINED_AB_SCRIPT"', role)
+
+    def test_run_e2e_forwards_the_mode(self):
+        with open(os.path.join(os.path.dirname(WORKFLOW), "interface", "run_e2e.py")) as fh:
+            self.assertIn('"fusion_applyback_mode"', fh.read())

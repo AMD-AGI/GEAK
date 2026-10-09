@@ -6,7 +6,10 @@ engages, and gate it with a tight A/B + accuracy. This codifies the pattern that
 DSR1's AR+norm+quant (+1.56% TPOT-driven) and norm+quant (+1.49%) — so it is repeatable,
 not re-discovered each time.
 
-You are invoked once per fusion (maximal-first per the degrade ladder). Inputs:
+In combined mode (the default) you are invoked once per fusion to author its overlay
+(PHASE=author_one) and once to gate the whole stack with one A/B (PHASE=combined_ab); a
+rejected stack falls back to serial mode, where you are invoked once per fusion
+(PHASE=apply_one, maximal-first per the degrade ladder). Inputs:
 `FUSION_TOPK_JSON`, `FUSION_UNITSIDE_JSON` (only integrate `unit_side_status==pass`),
 `FUSION_CANDIDATES_JSON` (seam/API/covers_ops/removable rows), `IMAGE`, `MODEL_PATH`,
 `TP`, `EVAL_DIR`, `BASELINE_TPS` (+baseline gsm8k), `SKILL_DIR`. A prior accepted overlay
@@ -155,12 +158,65 @@ control with 100s of MB of trace/bench. Return StructuredOutput: `{fusion, accep
 engaged (bool), ttft_delta_pct, tpot_delta_pct, throughput_delta_pct, nonoverlap (bool),
 gsm8k_base, gsm8k_cand, reprofile_ok, overlay_path, skipped_branches, notes}`.
 
+## PHASE=author_one — author one overlay, no server (combined mode)
+Inputs: `TARGET_EXEC_ID`, `TARGET_EXECUTION`, `GPU_ID`, `FUSION_TOPK_JSON`,
+`FUSION_CANDIDATES_JSON`, `FUSION_UNITSIDE_JSON`, `CURRENT_OVERLAY/FLAGS/ENV`,
+`FUSION_OVERLAYS_DIR`. Several entries are authored at once, one GPU each.
+
+1. Locate `TARGET_EXEC_ID`. Author only this entry: its ladder rungs are separate
+   execution-list entries and are authored by their own calls.
+2. Follow **The adapter pattern** above (seam from installed source, kernel-availability
+   gate, lazy-load overlay with an `[overlay-<tag>] ENGAGED` banner, stderr-only logging).
+   Write it to `FUSION_OVERLAYS_DIR/<model>/<tag>/<tag>_overlay.py`.
+3. Check parity on `GPU_ID` only (`HIP_VISIBLE_DEVICES=$GPU_ID`): call the patched seam and
+   the split path on the candidate's captured member shape and compare. Do NOT launch a
+   serving server and do NOT touch the other GPUs.
+4. Return `{exec_id, status: "authored", fusion, overlay_dir, banner_tag, candidate_ids,
+   parity}`, or `{exec_id, status: "blocked", reason}` stating what was attempted (missing
+   kernel, no seam, parity failure with the measured error).
+
+## PHASE=combined_ab — one A/B for every authored overlay (combined mode)
+Inputs add `AUTHORED` (the author_one results), `PRIOR_APPLY_RESULT`, `COMBINED_AB_SCRIPT`,
+`AB_REPEATS`, `GSM8K_*`, `CURRENT_*`, `NOISE_BAND_PCT`, `FUSION_BUDGET`.
+
+1. Take every `AUTHORED` row with `status: "authored"`. When two conflict (the Top-K
+   `conflict_edges`, or a ladder top and its rung), keep the ladder top, else the better
+   rank. Write ONE combined-loader dir `FUSION_OVERLAYS_DIR/<model>/combined/` whose
+   `sitecustomize.py` runs `CURRENT_OVERLAY`'s overlays (if any) and then every kept
+   overlay (see **Stacking**).
+2. Run the A/B once, with the run's serving env (`BACKEND TP GPU MODEL ISL OSL CONC
+   EXTRA_SERVER_ARGS=CURRENT_FLAGS EXTRA_ENV=CURRENT_ENV EVAL_DIR`, bench protocol):
+   ```bash
+   OUT_DIR="$EVAL_DIR/fusion/combined_ab" BASE_OVERLAY="$CURRENT_OVERLAY" \
+   CAND_OVERLAY="<combined dir>" EXPECT_BANNERS="<kept banner tags>" \
+   AB_REPEATS="$AB_REPEATS" NOISE_BAND_PCT="$NOISE_BAND_PCT" \
+   GSM8K_EVAL_SCRIPT="$GSM8K_EVAL_SCRIPT" GSM8K_CONCURRENCY="$GSM8K_CONCURRENCY" \
+   GSM8K_THINKING="$GSM8K_THINKING" bash "$COMBINED_AB_SCRIPT"
+   ```
+   It runs one base server and one stacked server (each: warm-up round, `AB_REPEATS` timed
+   rounds, gsm8k on the same server) and writes `combined_ab/combined_decision.json`. Do not
+   re-run it to chase a different answer.
+3. **accept** → every kept overlay that is not in `not_engaged` goes into
+   `accepted_fusions` (`throughput_delta_pct`/`tpot_delta_pct`: null — only the stack was
+   measured; the post-fusion re-profile attributes it). Overlays in `not_engaged`, and
+   `blocked` author rows, go into `rejected` with their reason. Return `final_overlay` (the
+   combined dir), `e2e_throughput_tok_s` = cand median, `accepted_accuracy` = cand gsm8k,
+   `combined_decision: "accept"`, `combined_ab` = the decision JSON. Write
+   `apply_result.json` and run the harness below WITHOUT `--allow-partial-coverage`.
+4. **reject** → return `combined_decision: "reject"`, `combined_ab`, and
+   `PRIOR_APPLY_RESULT` unchanged. The orchestrator falls back to `apply_one` per entry.
+
+Knowledge cards: a fusion accepted only through the combined A/B has no single-fusion
+A/B, so it can be curated at ★ at most.
+
 ## PHASE=apply_one — apply one execution-list entry/degrade ladder (called serially by KernelFusion)
 Inputs add `FUSION_TOPK_JSON`, `FUSION_CANDIDATES_JSON`, `FUSION_UNITSIDE_JSON`,
 `TARGET_EXEC_ID`, `TARGET_EXECUTION`, `PRIOR_APPLY_RESULT`,
 `CURRENT_OVERLAY/FLAGS/ENV/THROUGHPUT`, `FUSION_BUDGET`, `FUSION_OVERLAYS_DIR`, `ACCURACY_*`,
 `AB_DECIDE_SCRIPT`, `AB_MAX_PAIRS`, `GSM8K_EVAL_SCRIPT`, `GSM8K_CONCURRENCY`, `GSM8K_THINKING`,
-`ACCURACY_STACK_KEY`, `ACCURACY_REFERENCE` (null unless a base score for this exact stack exists).
+`ACCURACY_STACK_KEY`, `ACCURACY_REFERENCE` (null unless a base score for this exact stack exists),
+`AUTHORED_OVERLAY` (set when a rejected combined A/B already authored this entry's overlay:
+reuse it instead of authoring again).
 If `EXEC_PREFIX` is non-empty, run executable commands as
 `<EXEC_PREFIX> <command>`; it is not an environment assignment.
 The orchestrator invokes this role serially, once per execution-list entry. Process exactly

@@ -132,6 +132,20 @@ const FUSION_GSM8K_THINKING = String(
 // lives in scripts/fusion_ab_decide.py.
 const FUSION_AB_MAX_PAIRS = parseInt(
   A.fusion_ab_max_pairs != null ? A.fusion_ab_max_pairs : 3, 10);
+// Apply-back mode. 'combined': author every in-budget unit-side pass without a server
+// (parallel, one GPU each), stack them all, and gate the stack with ONE A/B (one base
+// server vs one stacked server, each warm_server REPEATS rounds + gsm8k on the same
+// server; scripts/fusion_combined_ab.sh). A rejected stack falls back to 'serial'.
+// 'serial': one interleaved A/B per execution-list entry, stacked one at a time.
+const FUSION_APPLYBACK_MODE = String(A.fusion_applyback_mode || 'combined').trim() === 'serial'
+  ? 'serial' : 'combined';
+// Apply-back budget (execution-list entries with a unit-side pass). Combined mode
+// adds only an overlay per entry, so it takes more entries than serial A/B can afford.
+const FUSION_BUDGET = parseInt(A.fusion_budget != null ? A.fusion_budget
+  : (FUSION_APPLYBACK_MODE === 'combined' ? 10 : 6), 10);
+// Timed rounds per side of the combined A/B.
+const FUSION_COMBINED_AB_REPEATS = parseInt(
+  A.fusion_combined_ab_repeats != null ? A.fusion_combined_ab_repeats : 3, 10);
 let FUSION_INPUTS = {
   FUSION_TOPK_JSON: '',
   FUSION_CANDIDATES_JSON: '',
@@ -880,8 +894,25 @@ const FUSION_APPLY_SCHEMA = obj({
   // score this call measured for ACCURACY_STACK_KEY, and the candidate score of a
   // fusion it accepted, which becomes the base for the next stack.
   accuracy_reference: obj({}), accepted_accuracy: obj({}),
+  // Combined mode only: 'accept' | 'reject' for the stacked A/B, and its numbers
+  // ({base_tok_s, cand_tok_s, delta_pct, gsm8k_base, gsm8k_cand, not_engaged, decision_json}).
+  combined_decision: { type: 'string' }, combined_ab: obj({}),
   notes: { type: 'string' },
 }, ['accepted_fusions']);
+
+// Combined apply-back, one overlay authored without a server (PHASE=author_one).
+// status 'authored' carries the overlay dir (the dir holding the overlay file) and the
+// tag its "[overlay-<tag>] ENGAGED" banner prints; 'blocked' says what was attempted.
+const FUSION_AUTHOR_SCHEMA = obj({
+  exec_id: { type: 'string' },
+  status: { type: 'string', enum: ['authored', 'blocked'] },
+  fusion: { type: 'string' },
+  overlay_dir: { type: 'string' },
+  banner_tag: { type: 'string' },
+  candidate_ids: { type: 'array', items: { type: 'string' } },
+  parity: { type: 'string' },
+  reason: { type: 'string' },
+}, ['exec_id', 'status']);
 
 // Result of the ensure_flydsl provisioning gate (build-on-demand). ok=true iff flydsl is importable
 // (flydsl + kernels.moe_gemm_2stage) after sourcing env_file; built distinguishes a fresh build from reuse.
@@ -3649,7 +3680,6 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
   let fusionApplyFailedExec = '';
   let fusionApplyUnprocessed = [];
   if (FUSION_INPUTS.FUSION_TOPK_JSON && FUSION_INPUTS.FUSION_UNITSIDE_JSON) {
-    const FUSION_BUDGET = parseInt(A.fusion_budget != null ? A.fusion_budget : 6, 10);
     const fusionApplyEntries = fusionApplyBudgetEntries(
       fusionExecutionList, fusionUnitEligibleIds, FUSION_BUDGET);
     let applyState = {
@@ -3683,55 +3713,10 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
       (applyState.accepted_fusions || []).concat(applyState.rejected || [], applyState.deferred || [])
         .map(rowKey).filter(Boolean));
 
-    log(`KernelFusion apply-back: ${fusionApplyEntries.length} execution-list entry/ladder call(s), ` +
-        `budget ${FUSION_BUDGET}; terminal results are committed after each call.`);
-    for (let applyIndex = 0; applyIndex < fusionApplyEntries.length; applyIndex++) {
-      const applyEntry = fusionApplyEntries[applyIndex];
-      if (!applyEntry || !applyEntry.exec_id || dispositionIds().has(String(applyEntry.exec_id))) continue;
-      fusionFailureStage = `apply_back:${applyEntry.exec_id}`;
+    // Merge one apply-back call's aggregate into applyState and, when it accepted
+    // fusions, make its stack the current one. Shared by combined and serial mode.
+    const commitStep = (step, accuracyKey, label) => {
       const acceptedBefore = new Set((applyState.accepted_fusions || []).map(rowKey).filter(Boolean));
-      const accuracyKey = fusionStackKey();
-      const step = await safeAgent(
-        roleAgent('fusion_integrator', 'apply_one',
-          'Apply exactly TARGET_EXEC_ID and its declared degrade ladder; do not loop unrelated execution-list entries. ' +
-          'Read FUSION_TOPK_JSON and FUSION_UNITSIDE_JSON, and act only when the selected tier-A/B row has ' +
-          'unit_side_status pass/equivalent_pass/subsumed_pass. Start from CURRENT_OVERLAY/FLAGS/ENV/THROUGHPUT, ' +
-          'which already include earlier terminal wins. For the selected ladder, author a reversible lazy-load overlay, ' +
-          'prove ENGAGED on every TP rank, run the interleaved serving A/B with AB_DECIDE_SCRIPT deciding each pair, then ' +
-          'run the accuracy gate only if the A/B passed (reuse ACCURACY_REFERENCE as the base score when it is set), and descend its ' +
-          'declared ladder only when the wider rung fails. Preserve PRIOR_APPLY_RESULT dispositions verbatim and merge ' +
-          'only this call\'s terminal result into it. Write the full aggregate apply_result.json, run ' +
-          'fusion_applyback_harness.py with --allow-partial-coverage (later calls still have legitimate unprocessed rows), ' +
-          'and return the full aggregate FUSION_APPLY_SCHEMA. Curate knowledge only for a fusion newly accepted by this call.', {
-            EVAL_DIR, MODEL_PATH, SERVING_GPU, TP: SERVING_TP, WORKLOAD,
-            TARGET_EXEC_ID: applyEntry.exec_id, TARGET_EXECUTION: applyEntry,
-            PRIOR_APPLY_RESULT: applyState,
-            FUSION_TOPK_JSON: FUSION_INPUTS.FUSION_TOPK_JSON,
-            FUSION_CANDIDATES_JSON: FUSION_INPUTS.FUSION_CANDIDATES_JSON,
-            FUSION_UNITSIDE_JSON: FUSION_INPUTS.FUSION_UNITSIDE_JSON,
-            CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
-            CURRENT_THROUGHPUT: curTput, BASELINE_THROUGHPUT: BASELINE_TPUT,
-            NOISE_BAND_PCT: NOISE_BAND, FUSION_BUDGET,
-            FUSION_OVERLAYS_DIR: `${EVAL_DIR}/fusion/fusion_overlays`,
-            AB_DECIDE_SCRIPT: `${WORKFLOW_DIR}/scripts/fusion_ab_decide.py`, AB_MAX_PAIRS: FUSION_AB_MAX_PAIRS,
-            GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py`,
-            GSM8K_CONCURRENCY: fusionGsm8kConcurrency(curFlags), GSM8K_THINKING: FUSION_GSM8K_THINKING,
-            ACCURACY_STACK_KEY: accuracyKey,
-            ACCURACY_REFERENCE: (fusionAccuracyRef && fusionAccuracyRef.stack_key === accuracyKey)
-              ? fusionAccuracyRef : null,
-            ...ACCURACY_INPUTS, ...FUSION_RUNTIME_INPUTS, SKILL_DIR: WORKFLOW_DIR,
-          }),
-        { phase: 'KernelFusion', label: `fusion_integrator:apply_one:${applyEntry.exec_id}`,
-          schema: FUSION_APPLY_SCHEMA, timeoutMs: FUSION_APPLY_TIMEOUT_MS }, 1);
-      if (!step) {
-        fusionApplyFailedExec = String(applyEntry.exec_id);
-        fusionApplyUnprocessed = fusionApplyEntries.slice(applyIndex).map((e) => e.exec_id).filter(Boolean);
-        log(`KernelFusion apply-back ${applyEntry.exec_id} failed or returned no terminal result; ` +
-            `stopping the remaining ${Math.max(0, fusionApplyUnprocessed.length - 1)} apply-back call(s) ` +
-            'and continuing to Strategize with earlier terminal wins preserved.');
-        break;
-      }
-
       const mergedAccepted = mergeRows(applyState.accepted_fusions, step.accepted_fusions);
       const acceptedIds = new Set(mergedAccepted.map(rowKey).filter(Boolean));
       const mergedRejected = mergeRows(applyState.rejected, step.rejected)
@@ -3769,7 +3754,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
         const acc = step.accepted_accuracy;
         fusionAccuracyRef = (acc && Number(acc.exact_match) >= 0)
           ? { ...acc, stack_key: fusionStackKey() } : null;
-        log(`KernelFusion apply-back ${applyEntry.exec_id}: committed ${newlyAccepted.length} ` +
+        log(`KernelFusion apply-back ${label}: committed ${newlyAccepted.length} ` +
             `terminal fusion win(s); e2e now ${curTput} tok/s.`);
       }
       // The outer catch restores the latest terminal checkpoint, not the state from
@@ -3781,6 +3766,138 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
       fusionRecoveryState.acceptedFusionCount = acceptedFusions.length;
       fusionRecoveryState.inputs = { ...FUSION_INPUTS };
       fusionRecoveryState.applyResult = fapply;
+    };
+
+    // ---- combined mode: author every pass, then ONE A/B for the whole stack ----
+    // Authoring needs no server, so in-budget unit-side passes are authored in waves,
+    // one GPU each (for the overlay's parity self-check). The stack is then gated by
+    // one base server vs one stacked server. A rejected (or failed) combined A/B falls
+    // through to the serial loop below, which may reuse the authored overlays.
+    const authoredByExec = new Map();
+    let combinedAccepted = false;
+    if (FUSION_APPLYBACK_MODE === 'combined') {
+      const eligible = new Set((fusionUnitEligibleIds || []).map(String));
+      const toAuthor = fusionApplyEntries.filter((e) => e && e.exec_id &&
+        (!Array.isArray(fusionUnitEligibleIds) ||
+         (e.candidate_ids || []).some((cid) => eligible.has(String(cid)))));
+      const authorWidth = Math.max(1, Math.min(FUSION_UNIT_PARALLEL, GPU_LIST.length || 1));
+      fusionFailureStage = 'apply_back:author';
+      log(`KernelFusion apply-back (combined): authoring ${toAuthor.length} overlay(s), ` +
+          `${authorWidth} at a time; budget ${FUSION_BUDGET}.`);
+      const authored = [];
+      for (let i = 0; i < toAuthor.length; i += authorWidth) {
+        const chunk = toAuthor.slice(i, i + authorWidth);
+        const rs = await Promise.all(chunk.map((entry, slot) => safeAgent(
+          roleAgent('fusion_integrator', 'author_one',
+            'Author the overlay for exactly TARGET_EXEC_ID and check its parity on GPU_ID only. ' +
+            'Do not launch a serving server; other entries are being authored on the other cards.', {
+              EVAL_DIR, MODEL_PATH, GPU_ID: String(GPU_LIST[slot % GPU_LIST.length] || GPU_LIST[0] || '0'),
+              TP: SERVING_TP, TARGET_EXEC_ID: entry.exec_id, TARGET_EXECUTION: entry,
+              FUSION_TOPK_JSON: FUSION_INPUTS.FUSION_TOPK_JSON,
+              FUSION_CANDIDATES_JSON: FUSION_INPUTS.FUSION_CANDIDATES_JSON,
+              FUSION_UNITSIDE_JSON: FUSION_INPUTS.FUSION_UNITSIDE_JSON,
+              CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+              FUSION_OVERLAYS_DIR: `${EVAL_DIR}/fusion/fusion_overlays`,
+              ...FUSION_RUNTIME_INPUTS, SKILL_DIR: WORKFLOW_DIR,
+            }),
+          { phase: 'KernelFusion', label: `fusion_integrator:author_one:${entry.exec_id}`,
+            schema: FUSION_AUTHOR_SCHEMA }, 1)));
+        chunk.forEach((entry, k) => {
+          const r = rs[k] || { exec_id: entry.exec_id, status: 'blocked',
+            reason: 'author_one returned no result' };
+          authored.push(r);
+          if (r.status === 'authored' && r.overlay_dir) authoredByExec.set(String(entry.exec_id), r);
+        });
+      }
+      if (authoredByExec.size) {
+        fusionFailureStage = 'apply_back:combined_ab';
+        const accuracyKey = fusionStackKey();
+        const step = await safeAgent(
+          roleAgent('fusion_integrator', 'combined_ab',
+            'Stack every AUTHORED overlay that does not conflict with a better-ranked one, gate the stack with ' +
+            'ONE run of COMBINED_AB_SCRIPT (one base server vs one stacked server), and return the full aggregate ' +
+            'FUSION_APPLY_SCHEMA with combined_decision. On reject, record no dispositions: the serial fallback owns them.', {
+              EVAL_DIR, MODEL_PATH, SERVING_GPU, TP: SERVING_TP, WORKLOAD,
+              AUTHORED: authored, PRIOR_APPLY_RESULT: applyState,
+              FUSION_TOPK_JSON: FUSION_INPUTS.FUSION_TOPK_JSON,
+              FUSION_CANDIDATES_JSON: FUSION_INPUTS.FUSION_CANDIDATES_JSON,
+              FUSION_UNITSIDE_JSON: FUSION_INPUTS.FUSION_UNITSIDE_JSON,
+              CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+              CURRENT_THROUGHPUT: curTput, BASELINE_THROUGHPUT: BASELINE_TPUT,
+              NOISE_BAND_PCT: NOISE_BAND, FUSION_BUDGET,
+              FUSION_OVERLAYS_DIR: `${EVAL_DIR}/fusion/fusion_overlays`,
+              COMBINED_AB_SCRIPT: `${WORKFLOW_DIR}/scripts/fusion_combined_ab.sh`,
+              AB_REPEATS: FUSION_COMBINED_AB_REPEATS,
+              GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py`,
+              GSM8K_CONCURRENCY: fusionGsm8kConcurrency(curFlags), GSM8K_THINKING: FUSION_GSM8K_THINKING,
+              ACCURACY_STACK_KEY: accuracyKey,
+              ...ACCURACY_INPUTS, ...FUSION_RUNTIME_INPUTS, SKILL_DIR: WORKFLOW_DIR,
+            }),
+          { phase: 'KernelFusion', label: 'fusion_integrator:combined_ab',
+            schema: FUSION_APPLY_SCHEMA, timeoutMs: FUSION_APPLY_TIMEOUT_MS }, 1);
+        if (step && step.combined_decision === 'accept') {
+          commitStep(step, accuracyKey, 'combined');
+          combinedAccepted = true;
+        } else {
+          log(`KernelFusion apply-back (combined): ${step ? `stack rejected (${step.notes || 'see combined_ab'})`
+            : 'combined A/B returned no result'}; falling back to one A/B per entry.`);
+        }
+      } else {
+        log('KernelFusion apply-back (combined): no overlay was authored; falling back to one A/B per entry.');
+      }
+    }
+
+    if (!combinedAccepted) {
+      log(`KernelFusion apply-back: ${fusionApplyEntries.length} execution-list entry/ladder call(s), ` +
+          `budget ${FUSION_BUDGET}; terminal results are committed after each call.`);
+      for (let applyIndex = 0; applyIndex < fusionApplyEntries.length; applyIndex++) {
+        const applyEntry = fusionApplyEntries[applyIndex];
+        if (!applyEntry || !applyEntry.exec_id || dispositionIds().has(String(applyEntry.exec_id))) continue;
+        fusionFailureStage = `apply_back:${applyEntry.exec_id}`;
+        const accuracyKey = fusionStackKey();
+        const step = await safeAgent(
+          roleAgent('fusion_integrator', 'apply_one',
+            'Apply exactly TARGET_EXEC_ID and its declared degrade ladder; do not loop unrelated execution-list entries. ' +
+            'Read FUSION_TOPK_JSON and FUSION_UNITSIDE_JSON, and act only when the selected tier-A/B row has ' +
+            'unit_side_status pass/equivalent_pass/subsumed_pass. Start from CURRENT_OVERLAY/FLAGS/ENV/THROUGHPUT, ' +
+            'which already include earlier terminal wins. For the selected ladder, author a reversible lazy-load overlay, ' +
+            'prove ENGAGED on every TP rank, run the interleaved serving A/B with AB_DECIDE_SCRIPT deciding each pair, then ' +
+            'run the accuracy gate only if the A/B passed (reuse ACCURACY_REFERENCE as the base score when it is set), and descend its ' +
+            'declared ladder only when the wider rung fails. Preserve PRIOR_APPLY_RESULT dispositions verbatim and merge ' +
+            'only this call\'s terminal result into it. Write the full aggregate apply_result.json, run ' +
+            'fusion_applyback_harness.py with --allow-partial-coverage (later calls still have legitimate unprocessed rows), ' +
+            'and return the full aggregate FUSION_APPLY_SCHEMA. Curate knowledge only for a fusion newly accepted by this call.', {
+              EVAL_DIR, MODEL_PATH, SERVING_GPU, TP: SERVING_TP, WORKLOAD,
+              TARGET_EXEC_ID: applyEntry.exec_id, TARGET_EXECUTION: applyEntry,
+              PRIOR_APPLY_RESULT: applyState,
+              FUSION_TOPK_JSON: FUSION_INPUTS.FUSION_TOPK_JSON,
+              FUSION_CANDIDATES_JSON: FUSION_INPUTS.FUSION_CANDIDATES_JSON,
+              FUSION_UNITSIDE_JSON: FUSION_INPUTS.FUSION_UNITSIDE_JSON,
+              CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+              CURRENT_THROUGHPUT: curTput, BASELINE_THROUGHPUT: BASELINE_TPUT,
+              NOISE_BAND_PCT: NOISE_BAND, FUSION_BUDGET,
+              FUSION_OVERLAYS_DIR: `${EVAL_DIR}/fusion/fusion_overlays`,
+              AB_DECIDE_SCRIPT: `${WORKFLOW_DIR}/scripts/fusion_ab_decide.py`, AB_MAX_PAIRS: FUSION_AB_MAX_PAIRS,
+              GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py`,
+              GSM8K_CONCURRENCY: fusionGsm8kConcurrency(curFlags), GSM8K_THINKING: FUSION_GSM8K_THINKING,
+              ACCURACY_STACK_KEY: accuracyKey,
+              ACCURACY_REFERENCE: (fusionAccuracyRef && fusionAccuracyRef.stack_key === accuracyKey)
+                ? fusionAccuracyRef : null,
+              AUTHORED_OVERLAY: (authoredByExec.get(String(applyEntry.exec_id)) || null),
+              ...ACCURACY_INPUTS, ...FUSION_RUNTIME_INPUTS, SKILL_DIR: WORKFLOW_DIR,
+            }),
+          { phase: 'KernelFusion', label: `fusion_integrator:apply_one:${applyEntry.exec_id}`,
+            schema: FUSION_APPLY_SCHEMA, timeoutMs: FUSION_APPLY_TIMEOUT_MS }, 1);
+        if (!step) {
+          fusionApplyFailedExec = String(applyEntry.exec_id);
+          fusionApplyUnprocessed = fusionApplyEntries.slice(applyIndex).map((e) => e.exec_id).filter(Boolean);
+          log(`KernelFusion apply-back ${applyEntry.exec_id} failed or returned no terminal result; ` +
+              `stopping the remaining ${Math.max(0, fusionApplyUnprocessed.length - 1)} apply-back call(s) ` +
+              'and continuing to Strategize with earlier terminal wins preserved.');
+          break;
+        }
+        commitStep(step, accuracyKey, applyEntry.exec_id);
+      }
     }
   // KernelFusion is an optional optimization track. If apply-back fails to return a
   // terminal result, preserve the exact pre-Fusion runtime state and continue with Strategize. Record the failure explicitly so reports do not confuse "Fusion

@@ -157,18 +157,20 @@ class FusionCaptureManifestContractTest(unittest.TestCase):
 
     def test_applyback_commits_each_terminal_win_before_the_next_call(self):
         source = self._workflow_source()
+        # The commit lives in commitStep(), shared with combined mode; the serial loop
+        # calls it after every apply_one call, before the next one.
+        helper = source.index("const commitStep = (step, accuracyKey, label) => {")
+        helper_body = source[helper:source.index("\n    };\n", helper)]
+        self.assertIn("for (const accepted of newlyAccepted) acceptedFusions.push(accepted);",
+                      helper_body)
+        self.assertIn("fusionRecoveryState.acceptedFusionCount = acceptedFusions.length;",
+                      helper_body)
         call = source.index("roleAgent('fusion_integrator', 'apply_one'")
-        commit = source.index(
-            "for (const accepted of newlyAccepted) acceptedFusions.push(accepted);",
-            call,
-        )
+        commit = source.index("commitStep(step, accuracyKey, applyEntry.exec_id);", call)
         profile = source.index("phase('Strategize');", commit)
+        self.assertLess(helper, call)
         self.assertLess(call, commit)
         self.assertLess(commit, profile)
-        self.assertIn(
-            "fusionRecoveryState.acceptedFusionCount = acceptedFusions.length;",
-            source[commit:profile],
-        )
         failure = source.index("if (!step) {", call)
         stop = source.index("break;", failure)
         self.assertLess(failure, stop)
