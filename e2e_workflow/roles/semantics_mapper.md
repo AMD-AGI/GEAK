@@ -58,6 +58,19 @@ Phase 1.2 additionally receives `STRUCTURAL_PATTERNS_JSON`, `SEMANTIC_TABLE_JSON
      shape-affecting parameters, and resolved quantization implementation. Names such as attention,
      linear attention, Mamba, MoE, or dense are opaque values for reporting; GEAK does not enumerate
      them as supported kinds.
+   - **Declare `runtime_dispatch_branch` in `body_signature` whenever the runtime routes the layer
+     through a NAMED custom op** — the op's exact registered name (e.g.
+     `vllm::qwen_gdn_attention_core`, `vllm::unified_attention_with_output`). It is load-bearing,
+     not documentation: the deterministic mapper uses it as a per-layer boundary anchor when the
+     trace has no `nn.Module` frames, which is the DEFAULT on vLLM (its V1 engine compiles the model,
+     so per-layer python frames disappear into the compiled graph; these ops survive precisely
+     because they are the graph's `splitting_ops`).
+     * **Every Pattern must declare one, or none is used.** The mapper refuses a partial anchor set
+       rather than half-mapping: on a hybrid model, anchoring only some layer kinds produces layer
+       "bodies" that silently span several real layers.
+     * **A wrong name is caught, not believed.** The mapper checks that the i-th anchor's op is the
+       one the Pattern owning layer i declared, and declines the whole step if not. Write the name
+       you verified in the source; do not guess a plausible one.
    - Put first/last position, model entry/exit, terminal postprocess, collective/residual handoff,
      and pre/post-layer loop behavior in `instance_context`. These facts never participate in the
      Pattern hash. A last layer with the same core body as an interior layer remains in that Pattern.
@@ -89,9 +102,13 @@ Phase 1.2 additionally receives `STRUCTURAL_PATTERNS_JSON`, `SEMANTIC_TABLE_JSON
      --trace "<analysis_rank_trace>" \
      --patterns "$EVAL_DIR/profile/round_${ROUND}/semantics/STRUCTURAL_LAYER_PATTERNS.json" \
      --out-dir "$EVAL_DIR/profile/round_${ROUND}/semantics" \
-     --table-phases all \
+     --table-phases all --require-phases prefill,decode \
      --result-json "$EVAL_DIR/profile/round_${ROUND}/semantics/semantics_result.json"
    ```
+
+   `--require-phases prefill,decode` makes a missing phase a `partial` table with
+   `phase_coverage.missing_required_phases` set, never a quiet single-phase `pass`: Fusion
+   Discovery works from these tables, and a phase they lack is a phase no candidate exists for.
 
    Never call `structural_pattern_mapping.py` from this role. There is no fixed-dialect or
    config-only fallback.
@@ -100,6 +117,24 @@ Phase 1.2 additionally receives `STRUCTURAL_PATTERNS_JSON`, `SEMANTIC_TABLE_JSON
    **Prefill tables first, then Decode tables**. Keep `--table-phases all`;
    the deterministic script owns this ordering.
 
+4b. **Read the boundary provenance before you trust the table.** In
+   `layer_instance_audit.json`, each `boundary_partition_diagnostics[]` entry has a
+   `partition_method` (`authoritative_scope_ownership`, or `none` when the step stayed
+   `boundary_unresolved`) and a `boundary_evidence` list naming what cut the layers:
+   `python_module_span*` / `validated_graph_capture_layer_scope*` (strongest), then
+   `explicit_layer_marker*` and `declared_dispatch_op_span` (the Pattern-declared dispatch-op
+   anchors, phase-shifted within the layer). Report the mix per phase in `notes`. On vLLM the
+   normal picture is prefill steps cut by `declared_dispatch_op_span` and DECODE steps
+   unresolved until the graph-construction boundary transfer below runs — decode replays
+   under a CUDA graph and emits no per-layer CPU op at all.
+   **Dispatch-cut tables are keyed by segment, not by Pattern.** A declared dispatch op sits in the
+   middle of a layer, so a dispatch cut holds layer *i*'s core and tail plus layer *i+1*'s head, and
+   its content depends on the next layer's Pattern. The mapper therefore publishes one table per
+   segment kind — `pattern_id` `P0>P1` (core `P0`, successor head `P1`), last layer `Pn>END` — with
+   `core_pattern_id`, `successor_pattern_id` and `pattern_layer_ids` = the layers of that kind. This
+   is what puts a full-attention head (qkv GEMM, qk-norm, RoPE, KV write) into a table on a hybrid
+   model. Do not "fix" it by re-cutting at the layer's first kernel: in fused-residual models the
+   previous residual add and this layer's input norm are one kernel.
 5. Read `semantic_mapping_quality.json` and return its real status:
    - `pass`: structural coverage and every required phase have authoritative layer boundaries,
      representative integrity, exact layer order, and conservation.
@@ -144,6 +179,82 @@ No background notification will ever wake you up again. Run every replay exactly
    replay is running.
 4. Call StructuredOutput only after `DONE` and after reading `SEMANTICS_1_2_RUN.json` (pass or
    fail). If the runner exited without writing it, return `failed` with the log tail in `notes`.
+
+**On vLLM, a CUDA-graph-off capture replaces the graph-construction replay.** The replay below relies
+on module hooks that emit `GEAK_LAYER_SCOPE`; on vLLM those hooks sit inside the torch.compile region
+and stop the engine from starting, so they cannot be used. The numbered steps below map as follows on
+vLLM — this list overrides them:
+
+- Steps 1–3 (capture plan filters, `SHAPE_CAPTURE_SETUP`, operator probe plan): skip. They configure
+  the replay, which does not run; `SHAPE_CAPTURE_SETUP` may be `{}`.
+- Steps 4–6: the donor capture, transfer and rebuild described in the bullets below.
+- Steps 7–9: replaced by donor Shape projection (below). No shape log, operator schema manifest,
+  targeted probe or `semantic_shape_merge.py` run.
+- Step 10: unchanged — verify row identity against the rebuilt table.
+- Return: `semantic_table_json` / `semantic_table_md` are the projection's outputs;
+  `shape_type_verification_json` is its `DONOR_SHAPE_PROJECTION.json`; `shape_log_jsonl`,
+  `op_coverage_manifest` and `kernel_semantic_evidence_jsonl` are empty.
+
+- **Step 4 (donor capture).** Run `EVAL_DIR/bench_e2e.sh` again with the SAME workload, `CONC`, flags,
+  env and overlay as the Clean Trace, plus `--compilation-config.cudagraph_mode=NONE` (dotted form —
+  a JSON `--compilation-config` replaces the object and drops the platform defaults) and a separate
+  `OUT_DIR`; pass `SKILL_DIR` too so the capture writes its trace manifest. Graph replay off keeps torch.compile, so the kernel set stays the production one, and the
+  CPU walks the model on every step, so every decode step carries the Patterns' declared dispatch ops.
+  Never use `--enforce-eager`: it also disables torch.compile and describes a different graph. This
+  capture supplies layer cuts (and later Shape evidence) only; its timing is never used.
+  It loads the full model and outlives one Bash call: launch it detached and wait for it exactly as in
+  *Running and waiting for a replay* above (poll for its `profile_trace_manifest.json`).
+  Keep `GEAK_TRITON_LAUNCH_SHAPES=1` in its `EXTRA_ENV` (the Clean Trace already carries it on
+  vLLM); `bench_e2e.sh` then seeds a probe overlay from `OVERLAY_PYTHONPATH`. A Triton kernel
+  launched from Python has no dispatcher op, so `record_shapes` gives it no dims in any trace; the
+  probe annotates each launch with its tensor arguments, and its rows come out `triton_launch_args`
+  (the kernel's own inputs). Confirm `[GEAK_TRITON_LAUNCH_PROBE] armed` in the server log.
+- **Step 5 (transfer).** Run `semantic_layer_boundary_transfer.py` with the donor capture's rank-0
+  trace. With no `GEAK_LAYER_SCOPE` markers it builds donor layer scopes from the declared
+  `runtime_dispatch_branch` ops and applies the same exact / stable-projection rules; the map records
+  `donor.scope_source=declared_dispatch_op_span`. Steps already cut by dispatch ops in the Clean Trace
+  (normally prefill) are skipped as authoritative.
+- **Step 6** is unchanged.
+- **Steps 7–9 (Shape).** Graph replay records no `Input Dims`, so the rebuilt table's decode rows are
+  `unresolved`. Instead of a shape log, project Shape and parent operator from the donor over the
+  correspondence the boundary map already validated:
+
+  ```bash
+  python3 "$SKILL_DIR/scripts/semantic_donor_shape_projection.py" \
+    --table "<table rebuilt with --layer-boundary-map>/pattern_layer_kernel_table.json" \
+    --boundary-map "<boundary map>" --recipient-trace "<Clean Trace rank-0>" \
+    --donor-trace "<donor rank-0>" --patterns "$STRUCTURAL_PATTERNS_JSON" \
+    --out-dir "$EVAL_DIR/profile/round_${ROUND}/semantics_1_2"
+  ```
+
+  A row is paired only through the boundary map's own rule (exact sequence, or stable identity
+  projection) or, inside a transferred layer cut, when the donor and Clean Trace layer sequences are
+  identical. It is projected only if every same-bucket donor pass gives it the same shape and parent
+  operator. Projected rows are `P` (`source=donor_trace_stable_projection`); anything else stays `U`
+  with a reason in `DONOR_SHAPE_PROJECTION.json`. Row identity, order, counts and durations are never
+  changed. Then continue with step 10.
+
+Measured on Qwen3.5-35B-A3B-FP8 (vllm-openai-rocm v0.27.1, gfx942, CONC 16): the Clean Trace mapped
+prefill 3/3 and decode 0/13; the donor transferred all 13 decode steps (stable identity projection,
+~59% event coverage), the rebuilt table passed every gate, and donor projection resolved decode Shape
+and parent operator for 59/59 representative rows. Coverage near the 50% floor is the
+risk to watch on other models — report `stable_projection.donor_event_fraction` in `notes`.
+MiniMax-M3-MXFP8 (v0.30.0, TP8, ISL 8096/OSL 1024/CONC 16): coverage ~0.81 on the recommended
+recipe (single-stream decode, exact rule). On the default config routed and shared experts run on
+two streams, so the order inside each MoE layer follows device timing; those steps transfer under
+`equal_multiplicity_stable_identity_per_layer_multiset` (each layer's multiset must match; reordering
+across a layer is still rejected), ~0.78 coverage. Report `stable_projection.order_rule` and
+`reordered_layer_count` alongside the fraction. A step no donor pass validates (a batch size the
+donor never ran) leaves the transfer `partial` and the step unresolved; a step of a phase the donor
+never captured is listed under `untransferable_steps`. Either way the step has no instances, so the
+quality gate does not count it while another step of its phase mapped
+(`step_layer_order.non_gating_unresolved_steps`). List such steps in `notes`.
+An unresolved step whose trace cannot support ownership is excused while its phase has a mapped
+step (`step_layer_order.excused_incomplete_evidence_steps`): `device_records_dropped` (the profiler
+lost GPU records -- launches with no device event; Kimi-K2.5 TP8 on vLLM 0.21 lost 98-968 of a
+prefill step's 2703) or `graph_replay_rows_unowned` (a small mixed step replayed part of its layers
+from a CUDA graph). Representatives come only from mapped steps. If most of a phase is
+`device_records_dropped`, say so in `notes` and suggest a shorter capture (`GEAK_FUSION_MAX_ITERS`).
 
 1. Read `SHAPE_CAPTURE_PLAN_JSON`; its representative layers and selected buckets are the only
    allowed layer/bucket filters. Never copy filters from a historical run.
@@ -193,7 +304,9 @@ No background notification will ever wake you up again. Run every replay exactly
    copied. If neither exact full matching nor the strict projection yields one unique result, keep the
    phase unresolved. Never fall back to LCS/edit-distance similarity, stage recurrence,
    attention/GEMM/MoE anchors, proportional cuts, or best-effort sequence alignment.
-6. Re-run `semantic_kernel_mapping.py --layer-boundary-map <map>` on the original Clean Trace, then
+6. Re-run `semantic_kernel_mapping.py --layer-boundary-map <map> --require-phases prefill,decode`
+   on the original Clean Trace (the requirement `run_semantics_1_2.py` applies by default; on vLLM,
+   where this step is run by hand, it must be passed explicitly), then
    regenerate `SHAPE_CAPTURE_PLAN.json`. Only this rebuilt authoritative table may receive Shape
    evidence. Filter detailed logging at the source to representative layers and unresolved/candidate
    OPs plus their necessary parent wrappers. Do not record Tensor values or synchronize the device.

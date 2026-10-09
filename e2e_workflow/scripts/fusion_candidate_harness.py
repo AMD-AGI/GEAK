@@ -2,6 +2,7 @@
 """Validate Fusion 2.1 facts/coverage and render the mandatory total table."""
 import argparse
 import copy
+import fnmatch
 import json
 import math
 import os
@@ -48,7 +49,13 @@ API_SOURCE_KIND = {
 # write) and must not be silently dropped into a fusion_opportunity=false stage.
 DONOR_STAGES = {
     "gemm", "attn", "attention", "communication", "collective",
-    "moe", "expert_gemm"}
+    "moe", "expert_gemm",
+    # `linear_attn` is the MAIN COMPUTE of a gated-delta / Mamba / linear-attention
+    # layer -- an anchor in exactly the sense `attn` is, not a helper that fusion
+    # could absorb. Leaving it out made the escalation gate demand fusion candidates
+    # for the model's own attention: on Qwen3.5-2B every ChunkGatedDeltaRuleFunction
+    # row (40-94us each) was counted as a helper "dropped without a candidate".
+    "linear_attn"}
 # Helper rows at or above this duration may not vanish: each must be a candidate
 # member or a deferred required_followups[].row_ids entry.
 DEFAULT_HELPER_FLOOR_US = 5.0
@@ -797,30 +804,56 @@ def _catalog_falsify(payload, catalog_path, errors, warnings,
         author = candidate.get("implementation_class") in AUTHOR_CLASSES
         similar_only = bool(apis) and all(
             api.get("coverage") == "similar" for api in apis)
-        # The escape this error names: the hit kernel is cited with the
-        # constraints that rule it out, and the absence search is recorded.
-        justified = any(
-            api.get("name") == best and api.get("constraints")
-            for api in apis) and bool(candidate.get("absence_search"))
-        if op_tags and hits and (author or similar_only) and justified:
-            # Ruled out: keep it auditable but do not let Top-K floor the
-            # tier at B on a kernel the candidate shows does not apply.
-            matches[cid]["match"] = None
-            matches[cid]["match_ruled_out"] = best
-            warnings.append(
-                "%s keeps %s despite catalog kernel '%s' covering op-set %s: "
-                "constraints recorded (%s)"
-                % (cid, "author-track" if author else "similar-only", best,
-                   op_tags, "; ".join(
-                       str(item) for api in apis if api.get("name") == best
-                       for item in api.get("constraints") or [])))
-        elif op_tags and hits and (author or similar_only):
-            errors.append(
-                "%s is %s but catalog kernel '%s' covers its op-set %s "
-                "(dtype %s) — reclassify as existing_api (tier B), or record in "
-                "existing_apis[].constraints why '%s' does not apply here"
-                % (cid, "author-track" if author else "similar-only", best,
-                   op_tags, dtype_tags or "-", best))
+        if op_tags and hits and (author or similar_only):
+            # The op-tag containment test over-matches (an MX/fp4 or MLA kernel, or
+            # a name token like 'gating' read as topk). A match is answered by an
+            # existing_apis entry that names that kernel, does not claim `full`
+            # coverage, and says in `constraints` why it does not apply. Every
+            # matched kernel must be answered; the answers are kept as warnings so
+            # a reviewer can audit them.
+            # Answers come from existing_apis entries naming one kernel, or from
+            # catalog_rebuttals [{kernels: <glob>, reason}] -- a match set can run to
+            # hundreds of kernels (every MX/fp4 MoE-sort variant for one `topk` tag),
+            # so one reason may cover a family, but every hit must be covered.
+            rebutted = {
+                api.get("name"): api.get("constraints") for api in apis
+                if api.get("name") and api.get("coverage") != "full"
+                and api.get("constraints")}
+            rules = [
+                rule for rule in candidate.get("catalog_rebuttals") or []
+                if isinstance(rule, dict) and rule.get("kernels")
+                and str(rule.get("reason") or "").strip()]
+            for hit in hits:
+                if hit["name"] in rebutted:
+                    continue
+                for rule in rules:
+                    if fnmatch.fnmatchcase(hit["name"], rule["kernels"]):
+                        rebutted[hit["name"]] = "%s (via %s)" % (
+                            rule["reason"], rule["kernels"])
+                        break
+            open_hits = [hit["name"] for hit in hits if hit["name"] not in rebutted]
+            if open_hits:
+                errors.append(
+                    "%s is %s but catalog kernel '%s' covers its op-set %s "
+                    "(dtype %s) — reclassify as existing_api (tier B), or say why it "
+                    "does not apply: existing_apis[].constraints for '%s', or "
+                    "catalog_rebuttals [{kernels: <glob>, reason}] for a family"
+                    "%s" % (cid, "author-track" if author else "similar-only",
+                            open_hits[0], op_tags, dtype_tags or "-", open_hits[0],
+                            " (%d more unanswered: %s)" % (
+                                len(open_hits) - 1, ", ".join(open_hits[1:4]))
+                            if len(open_hits) > 1 else ""))
+            else:
+                # Answered: nothing installed covers it, so Top-K must not floor
+                # its tier at B off this match.
+                matches[cid]["rebutted"] = {
+                    hit["name"]: rebutted[hit["name"]] for hit in hits}
+                matches[cid]["match"] = None
+                matches[cid]["match_ruled_out"] = best
+                warnings.append(
+                    "%s: catalog matches %s answered as not applicable in "
+                    "existing_apis[].constraints" % (
+                        cid, ", ".join(hit["name"] for hit in hits)))
         # Prior-fill: the scan found nothing installed, but is this a KNOWN
         # fusion? Record it so an author-track lead carries a reference instead
         # of a blind "no kernel".
@@ -959,22 +992,30 @@ def validate(semantic_table_path, candidates_path,
         # Collective fused-AR size guard becomes a machine-checked fact so the
         # prefill=no / decode=yes Exact decision is deterministic instead of
         # re-derived (and mis-numbered) by the model each run.
+        # Both are required only when the table has a collective to guard: at TP=1
+        # there is none, and demanding them made the agent record an inapplicable
+        # threshold just to pass.
+        has_collective = any(
+            row.get("stage") == "communication" for row in source_rows.values())
+        missing = errors if has_collective else warnings
         collective_guard = environment.get("collective_fused_ar_guard")
         if (not isinstance(collective_guard, dict)
                 or not isinstance(collective_guard.get("threshold_bytes"), int)
                 or not collective_guard.get("source_expr")
                 or not collective_guard.get("source_ref")):
-            errors.append(
-                "environment API inventory must record collective_fused_ar_guard "
-                "{threshold_bytes:int, source_expr, source_ref}")
+            if has_collective or collective_guard is not None:
+                missing.append(
+                    "environment API inventory must record collective_fused_ar_guard "
+                    "{threshold_bytes:int, source_expr, source_ref}")
             collective_guard = None
         model_dims = environment.get("model_dims")
         if (not isinstance(model_dims, dict)
                 or not isinstance(model_dims.get("hidden_size"), int)
                 or not isinstance(model_dims.get("dtype_bytes"), int)):
-            errors.append(
-                "environment API inventory must record model_dims "
-                "{hidden_size:int, dtype_bytes:int}")
+            if has_collective or model_dims is not None:
+                missing.append(
+                    "environment API inventory must record model_dims "
+                    "{hidden_size:int, dtype_bytes:int}")
             model_dims = None
         # Cross-check the declared threshold against the guard registry keyed by
         # the recorded aiter commit, so the threshold number itself cannot drift.

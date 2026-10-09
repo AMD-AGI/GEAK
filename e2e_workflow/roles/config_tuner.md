@@ -13,7 +13,9 @@ After your wins, the profile is re-taken because you change
 which kernels dominate.
 
 You are invoked per PHASE. Read first: `SKILL_DIR/knowledge/e2e_optimization.md` (Tier 0 knobs),
-`SKILL_DIR/knowledge/sglang_internals.md` (the exact flags/env + how to verify a swap took effect),
+`SKILL_DIR/knowledge/sglang_internals.md` (the exact flags/env + how to verify a swap took effect;
+on vLLM verify from `server.log` instead — it names the MoE backend, attention backend, IR op priority
+and `kv_cache_dtype` it selected — and read `SKILL_DIR/scripts/adapters/vllm.sh`),
 `SKILL_DIR/knowledge/backend_playbook.md` (which backend the Architect ranked for each shape), and
 `SKILL_DIR/knowledge/learned/INDEX.md` (distilled flag/env levers — open cards matching this run's gfx,
 e.g. `--attention-backend triton`).
@@ -26,7 +28,13 @@ e.g. `--attention-backend triton`).
   full warmup round, then the timed round(s). A win must exceed the noise band to count.
 - **Always check output parity** for any change that can alter numerics (quant, kv-cache-dtype,
   a different attention/GEMM backend): greedy/temp=0 fixed-seed, diff vs baseline. A faster wrong
-  server is a regression — reject it (unless it's an accuracy-approved quantization).
+  server is a regression — reject it (unless it's an accuracy-approved quantization). On vLLM a
+  byte diff is not a usable gate: greedy decoding is not deterministic under concurrent serving (two
+  identical baselines flip ~12% of gsm8k answers), and every backend swap re-rounds. Gate those swaps
+  with `gsm8k_eval.py` + `accuracy_gate.py` against a reference leg on the CURRENT stack instead.
+- **Re-measure after a later accept.** An axis measured before another axis was accepted was measured
+  on a different stack; when an accept changes the kernels a rejected axis targets, re-run that axis
+  (measured: fp8 KV cache went from −5.8% to +1.4% once the attention backend changed).
 - Verify the swap actually took effect (grep the server log for the backend banner / the
   "not found tuned config" warnings disappearing), not just that throughput moved.
 
@@ -112,10 +120,14 @@ even engage the live GEMM path). Your axes:
 - **scheduling / memory knobs** that don't change numerics: `--chunked-prefill-size`, `--kv-cache-dtype`
   (auto vs fp8 — fp8 is an accuracy-gated change), `--mem-fraction-static`.
 - **backend env toggles**: `SGLANG_USE_AITER` and similar stack-level switches.
-- **FP8 quant** (only if `ENABLE_FP8=true`; **parity BREAKS by design**): `--quantization fp8` /
-  `--kv-cache-dtype fp8_e4m3`. Do NOT use byte parity here — run a small task-accuracy probe
-  (e.g. a few gsm8k / translation prompts, compare answer quality, not bytes) and keep ONLY if both
-  faster AND accuracy within tolerance. Record it as an accuracy-gated accept, never a silent one.
+- **FP8 quant** (only if `ENABLE_FP8=true` — when it is `false`, skip every lossy FP8 direction the
+  Architect listed, e.g. `--kv-cache-dtype fp8`, with that reason; **parity BREAKS by design**): `--quantization fp8` /
+  `--kv-cache-dtype fp8_e4m3`. Do NOT use byte parity here — run `scripts/gsm8k_eval.py` on the
+  current stack and the candidate with the same `--limit` (start at 200, `--max-tokens 4096`) and decide
+  with `scripts/accuracy_gate.py --base … --cand … --tol ${ACCURACY_TOL:-0.01}`: keep ONLY if faster AND
+  the gate says `pass`; on `inconclusive` re-run both legs larger (up to 1319) before deciding. A handful
+  of prompts cannot tell a real drop from serving noise (two identical vLLM baselines differ by ~1pt on
+  the full set). Record it as an accuracy-gated accept with the gate json, never a silent one.
 Each is still "one axis at a time + measure + parity/accuracy gate + compound". Use the same
 search-purpose protocol as the Integrator, in the same `MEASUREMENT_MODE`; the Director's independent
 validation arbitrates a borderline final result.

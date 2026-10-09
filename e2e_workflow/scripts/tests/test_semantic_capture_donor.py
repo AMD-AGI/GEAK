@@ -223,6 +223,8 @@ class RuntimeLayerScopeSourceTest(unittest.TestCase):
         logger.layer_scopes = True
         logger.phases = set()
         logger.max_forwards = 1
+        logger.require_profiler = False
+        logger._profile_seen = False
         logger._bucket_forwards = {}
         logger._context = {"phase": "DECODE", "batch_size": 64,
                            "input_tokens": 64}

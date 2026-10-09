@@ -59,7 +59,25 @@ class SemanticReportTest(unittest.TestCase):
         rep, _ = self._build(_table(rows=rows))
         self.assertEqual(rep["phase_coverage_measured"]["decode"],
                          {"rows": 3, "resolved": 2, "resolved_fraction": 0.6667,
+                          "kernel_level": 0, "operator_level": 2,
+                          "unresolved_time_fraction": 0.3333,
                           "patterns": 1, "layer_us": 30.0})
+
+    def test_operator_level_dims_are_not_counted_as_kernel_shapes(self):
+        rows = [_row("a", "norm", 10.0, dims=[[8, 16]]),
+                _row("b", "moe", 30.0, dims=[[8, 16]]),
+                _row("c", "act", 10.0)]
+        rows[0]["shape"]["source"] = "kernel_exact"
+        rows[1]["shape"]["source"] = "parent_context"
+        rep, md = self._build(_table(rows=rows))
+        cov = rep["phase_coverage_measured"]["decode"]
+        self.assertEqual((cov["resolved"], cov["kernel_level"], cov["operator_level"]),
+                         (2, 1, 1))
+        self.assertEqual(cov["unresolved_time_fraction"], 0.2)
+        detail = {r["row_id"]: r["granularity"] for r in rep["patterns"][0]["row_detail"]}
+        self.assertEqual(detail, {"a": "kernel", "b": "operator", "c": None})
+        self.assertIn("只有算子级 shape", md)
+        self.assertIn("| 算子级 |", md)
 
     def test_a_stale_declared_record_is_reported_not_trusted(self):
         # A later shape graft can populate rows and leave phase_coverage behind.

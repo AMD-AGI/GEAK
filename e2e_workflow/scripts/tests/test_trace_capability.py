@@ -12,6 +12,51 @@ import trace_capability
 
 
 class TraceCapabilityTest(unittest.TestCase):
+    @staticmethod
+    def _steps(tmp, name, steps):
+        """One rank trace whose gpu steps each hold one kernel."""
+        events = []
+        for index, step in enumerate(steps):
+            start = index * 100
+            events.append({"cat": "gpu_user_annotation", "name": step,
+                           "ts": start, "dur": 50})
+            events.append({"cat": "kernel", "name": "k", "ts": start + 10, "dur": 5})
+        with gzip.open(os.path.join(tmp, name), "wt") as fh:
+            json.dump({"traceEvents": events}, fh)
+
+    PREFILL = "execute_context_1(8)_generation_0(0)"
+    DECODE = "execute_context_0(0)_generation_4(4)"
+
+    def test_a_decode_only_trace_fails_a_two_phase_requirement(self):
+        """A Profile shaped for steady decode can skip the prefill ramp entirely."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._steps(tmp, "rank_0.pt.trace.json.gz", [self.DECODE, self.DECODE])
+            plain = trace_capability.build_manifest(tmp, auto_select_rank=True)
+            self.assertEqual(plain["status"], "pass")
+            required = trace_capability.build_manifest(
+                tmp, auto_select_rank=True, require_phases=["prefill", "decode"])
+            self.assertEqual(required["status"], "failed")
+            self.assertEqual(required["phases_present"], ["decode"])
+            self.assertEqual(required["missing_required_phases"], ["prefill"])
+
+    def test_both_phases_in_one_mixed_trace_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._steps(tmp, "rank_0.pt.trace.json.gz", [self.PREFILL, self.DECODE])
+            result = trace_capability.build_manifest(
+                tmp, auto_select_rank=True, require_phases=["prefill", "decode"])
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(result["missing_required_phases"], [])
+
+    def test_phases_split_across_a_ranks_files_count_together(self):
+        """sglang writes EXTEND and DECODE as two traces of the same rank."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._steps(tmp, "rank_0-EXTEND.pt.trace.json.gz", [self.PREFILL])
+            self._steps(tmp, "rank_0-DECODE.pt.trace.json.gz", [self.DECODE])
+            result = trace_capability.build_manifest(
+                tmp, auto_select_rank=True, require_phases=["prefill", "decode"])
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(result["phases_present"], ["decode", "prefill"])
+
     def test_rank_sorted_manifest_and_capabilities(self):
         with tempfile.TemporaryDirectory() as tmp:
             events = [
@@ -53,6 +98,43 @@ class TraceCapabilityTest(unittest.TestCase):
             result = trace_capability.build_manifest(tmp)
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["analysis_rank_trace"], "")
+
+    def test_discovery_ignores_hidden_scratch_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, ".vllm_bench_1_2.json"), "w").write("{}")
+            trace = os.path.join(tmp, "dp0_pp0_tp0_dcp0_ep0_rank0.1.pt.trace.json.gz")
+            with gzip.open(trace, "wt") as fh:
+                json.dump({"traceEvents": []}, fh)
+            self.assertEqual(trace_capability.discover(tmp), [trace])
+
+    def test_auto_select_reads_vllm_execute_annotations(self):
+        # vLLM has no profile_by_stage: one trace per rank, phases told apart only by the
+        # execute_* step annotation. Without reading it every rank looked like it had
+        # "missing_decode_annotation" and every vLLM fusion capture failed its manifest.
+        with tempfile.TemporaryDirectory() as tmp:
+            events = [
+                {"cat": "gpu_user_annotation", "ts": 100, "dur": 50,
+                 "name": "execute_1024_context_1(sq1024sk1024sqsq1048576sqsk1048576)"
+                         "_generation_0(sq0sk0sqsq0sqsk0)"},
+                {"cat": "gpu_user_annotation", "ts": 200, "dur": 50,
+                 "name": "execute_16_context_0(sq0sk0sqsq0sqsk0)"
+                         "_generation_16(sq16sk16409sqsq16sqsk16409)"},
+            ]
+            events.extend({"cat": "kernel", "name": "k%d" % index, "ts": ts,
+                           "dur": 1, "args": {"stream": 1}}
+                          for index, ts in enumerate((110, 120, 210, 220, 230)))
+            path = os.path.join(
+                tmp, "dp0_pp0_tp0_dcp0_ep0_rank0.1790.pt.trace.json.gz")
+            with gzip.open(path, "wt") as fh:
+                json.dump({"traceEvents": events}, fh)
+
+            result = trace_capability.build_manifest(tmp, auto_select_rank=True)
+
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(result["analysis_rank"], 0)
+            entry = result["trace_files"][0]
+            self.assertEqual(entry["device_events_by_phase"],
+                             {"decode": 3, "prefill": 2})
 
     def test_auto_selects_rank_with_largest_decode_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

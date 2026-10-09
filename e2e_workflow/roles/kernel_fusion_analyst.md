@@ -79,6 +79,12 @@ make the degradation explicit per candidate.
 
 ### 2. Analyze in execution order
 
+On a dispatch-cut table (`pattern_id` like `P0>P1`, see `core_pattern_id` / `successor_pattern_id`),
+the rows run from the core Pattern's dispatch op through its tail and into the **successor layer's
+head**. Seams across that boundary (MoE tail → residual add+norm+quant → next layer's projection,
+and the successor's qk-norm/RoPE/KV write) are real, analysable regions; weight a table by its own
+`pattern_layer_count`, which counts only the layers of that segment kind.
+
 Process tables in this order:
 
 1. Prefill, then Decode.
@@ -325,6 +331,27 @@ When `RUNTIME_SETUP_FILE` or `RUNTIME_IMAGE` is available:
 5. If the environment cannot be inspected, you cannot prove a kernel exists, so
    default 现成算子=`no` (treat as author-track until an installed kernel is cited).
 
+**On vLLM (`BACKEND=vllm`)** the same inspection applies with these substitutions:
+
+- Inspect the installed **vLLM and aiter** in the runtime container (`EXEC_PREFIX`), not SGLang.
+  The fused ops vLLM can route to on ROCm are wrapped in `vllm/_aiter_ops.py`; the graph-level
+  fusions are the passes under `vllm/compilation/passes/`; GDN chunk kernels live in
+  `vllm/third_party/flash_linear_attention/`.
+- Flag-routed levers (`flag_routed_signature`) are the env `VLLM_ROCM_USE_AITER` and its
+  `VLLM_ROCM_USE_AITER_*` sub-flags, and `--compilation-config` `pass_config` keys (`fuse_norm_quant`,
+  `fuse_act_quant`, …). Cite the vLLM file:line that reads the flag. `VLLM_ROCM_USE_AITER` switches
+  several backends at once (linear, rmsnorm, MoE, attention), so name the sub-flag that isolates the
+  one a candidate needs.
+- **"Already fused" is decided by the kernel sequence, and only by it.** A boundary is fused when the
+  table has no separate kernel for the op. A `fuse_*` pass being on is not evidence — its pattern may
+  not match this model (measured on Qwen3.5-35B-A3B-FP8: `fuse_norm_quant=True`, yet every add+RMSNorm
+  is followed by its own `per_token_group_quant_8bit_kernel`, because a dtype guard rejects the fp32
+  `(1+w)` Gemma-style norm weight). Nor is an inductor kernel's name: inductor names a fused kernel
+  after every op in its graph node, including ops it could not lower and runs separately
+  (`triton_poi_fused_…_per_token_group_fp8_quant_…` is still followed by the quant kernel).
+- At `TP=1` the table has no `communication` rows; `collective_fused_ar_guard` and `model_dims` may
+  then be omitted (the harness only warns).
+
 ### 4a. Build the deterministic kernel catalog (mandatory — the authority for existence)
 
 Your own recall of "which kernels exist" is not trustworthy and never has been:
@@ -499,6 +526,15 @@ finding a *similar* kernel at the wrong precision (e.g. an FP4 rope+cache kernel
 does NOT justify author-track when a dtype-compatible one exists — the catalog's
 dtype tags (fp8_blockscale ⇒ fp8) make that a covered region. "No kernel" must
 carry the catalog result that proves it.
+
+The op-tag containment test over-matches: a region whose only tag is `topk` is "covered" by every
+kernel carrying that tag (on vLLM/aiter, all ~77 MX/fp4 MoE-sort variants), and a match set can run to
+hundreds of kernels. When the matches are genuinely not applicable, answer **every** matched kernel —
+one by name in `existing_apis[]` (non-`full` coverage + `constraints`), or a family at once with
+`catalog_rebuttals: [{"kernels": "<glob, e.g. *mxfp4*>", "reason": "<why this family cannot run the
+region>"}]`. The harness names any match still unanswered; answered matches become warnings (kept for
+review) and no longer floor the Top-K tier at B. A rebuttal is a claim a reviewer will read: never
+write a glob broader than the reason actually covers.
 
 Every plan variant must populate an API assessment, even when the answer is
 negative:
@@ -935,7 +971,9 @@ The ranker is deterministic and encodes these rules — do not hand-rank:
 - **实现难度 tier** — three levels by realization cost (authoritative), keyed by
   `implementation_class` (现成算子 follows: A/B=有, C=无):
   - `A` — **env var / flag only, no code** (`existing_flag_or_env`) →
-    KernelFusion apply-back.
+    **config tuner, not KernelFusion**: the ranker lists it under `config_levers`, off the
+    execution list (one switch often changes several backends, so it cannot be credited
+    per fusion).
   - `B` — **integrate an existing kernel (code)**: an installed fused kernel
     wired in / adapted / re-configured to cover this chain
     (`existing_api_integrated`, `existing_api_needs_adapter`,
@@ -1036,7 +1074,9 @@ For `PHASE=rank_topk`, return the board path and copy the deterministic
 `execution_list` into StructuredOutput **verbatim** so the filesystem-less workflow can
 iterate the concrete candidate ids. Copy every field the ranker emitted, including
 `subsumed_by` / `ladder_top` / `subsumes` / `unit_cost` — dropping them silently
-reverts unit-side scheduling to flat board order:
+reverts unit-side scheduling to flat board order. Also copy the ranker's `config_levers`
+verbatim: tier-A flag/env levers are not on the execution list — the workflow hands them to
+the config tuner, or back to the caller when it may not tune config:
 
 ```json
 {"status":"pass|partial|failed","round":"fusion_capture",
@@ -1045,6 +1085,8 @@ reverts unit-side scheduling to flat board order:
                    "subsumed_by":null,"ladder_top":null,"subsumes":["e04"],"unit_cost":1},
                   {"exec_id":"e04","candidate_ids":["c7"],
                    "subsumed_by":"e01","ladder_top":"e01","subsumes":[],"unit_cost":0}],
+ "config_levers":[{"lever_id":"c01","handle":"env VLLM_ROCM_USE_AITER=1","route":"config_tuner",
+                   "candidate_ids":["c3","c4"],"covers":[{"phase":"decode","workload_forward_pct":4.3}]}],
  "notes":"..."}
 ```
 

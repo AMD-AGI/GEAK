@@ -6,8 +6,9 @@ capture a trace from a WARM server under the SAME workload as the throughput ben
 hand the Architect a clean, classified bottleneck table with per-entry shapes. You do not optimize.
 
 You are invoked per PHASE. Read first: `SKILL_DIR/knowledge/profile_parse.md` (the contract +
-classification semantics), `SKILL_DIR/knowledge/sglang_internals.md` for SGLang, and the ATOM
-profiling contract at the top of `SKILL_DIR/scripts/adapters/atom.sh` when `BACKEND=atom`.
+classification semantics) and, for the serving stack's profiler env + flags,
+`SKILL_DIR/knowledge/sglang_internals.md` (sglang), `SKILL_DIR/scripts/adapters/vllm.sh` (vllm),
+or the ATOM profiling contract at the top of `SKILL_DIR/scripts/adapters/atom.sh` (`BACKEND=atom`).
 
 ## Discipline (a bad trace misroutes the whole run)
 - Profile with the EXACT ISL/OSL/concurrency as the throughput bench, AFTER warmup.
@@ -27,40 +28,57 @@ profiling contract at the top of `SKILL_DIR/scripts/adapters/atom.sh` when `BACK
   - `bench_e2e.sh` auto-sizes the window from `ISL/OSL/CONC`: `TARGET_STEPS = ceil(CONC·ISL/chunk) [prefill
     ramp] + max(30, 5·ceil(OSL/CONC)) [steady decode] + margin`, and bumps `PROFILE_NUM_PROMPTS` so the
     queue stays saturated through it. **sglang** (step-controlled) records `PROFILE_NUM_STEPS = TARGET_STEPS`
-    forward steps. **vLLM and ATOM** are time-controlled: the workflow auto-derives `TPOT_MS` from the
-    timed bench and sizes the common window to `TARGET_STEPS·TPOT·1.5`, bounded by
-    `PROFILE_WINDOW_SEC`/`PROFILE_WINDOW_SEC_MAX`; ATOM then applies its backend-specific
+    forward steps. **vLLM** 0.26+ is step-bounded too: the adapter passes `max_iterations =
+    PROFILE_MAX_ITERS` (the step target, capped at `PROFILE_NUM_STEPS_MAX`, default 64), so the profiler
+    self-stops after that many engine steps (`Max profiling iterations reached` in server.log). The time
+    window (`TARGET_STEPS·TPOT·1.5` when `TPOT_MS` is derived, clamped to `[PROFILE_WINDOW_SEC(20),
+    PROFILE_WINDOW_SEC_MAX(30)]`) is then only a safety cap; on <0.26 it is the only bound. **ATOM** is
+    time-controlled: the same common window, then its backend-specific
     `ATOM_PROFILE_WINDOW_SEC`/`ATOM_PROFILE_WINDOW_MAX_SEC` guard
     — so it spans the prefill ramp + a steady decode sample while the cap bounds trace size (warmup=0 records
     the whole ramp). Override with `PREFILL_CHUNK` (chunk budget; raises RAMP so sglang's step budget doesn't
     get eaten by prefill at high CONC), `TPOT_MS`, `PROFILE_WINDOW_SEC_MAX`, or set
     `PROFILE_NUM_STEPS`/`PROFILE_WINDOW_SEC` explicitly.
-  - **Step-span annotations are OFF here — but not for the reason you'd guess.** vLLM's
-    `execute_context_*_generation_*` step spans ARE real torch `record_function` ranges that DO appear as
-    `gpu_user_annotation` in the ROCm torch trace (verified in real AMD traces — a steady conc64 decode
-    trace shows `generation_64(64)`), and `parse_profile` CAN split prefill/decode + verify decode batch ≈
-    CONC from them. On vLLM **0.26+** the adapter now emits `detailed_trace_annotation` again (see below):
-    the field is FIELD-GATED — `adapter_launch` probes `ProfilerConfig` for it and only passes it when the
-    installed build declares it, so the strict schema (pydantic `extra=forbid`) that used to ABORT the
-    server on an unknown key can no longer be tripped. On builds that lack the field the trace still has no
-    step spans and the split falls back to the analytic path (below). sglang uses a different profiler and
-    does NOT emit that vLLM-specific `execute_context_*` format. Two gotchas when annotations ARE present:
-    (i) `parse_profile` reads them only from the `gpu_user_annotation` category — some captures put
+  - **Step-span annotations are PRESENT on vLLM ≥ 0.27 with nothing to configure.** Verified on
+    `vllm/vllm-openai-rocm:v0.27.1`, gfx942, Qwen3.5-2B, conc 8: `gpu_worker.py` wraps every `execute_model`
+    in `annotate_profile()` **unconditionally**, and its default branch emits
+    `execute_context_<nreq>(<ntok>)_generation_<nreq>(<ntok>)` as a `record_function` — 774 landed in
+    `gpu_user_annotation` in a 25 s window. `parse_profile._seg` reads that dialect, giving
+    `serving = {n_prefill_steps: 12, n_decode_steps: 762, decode_batch_captured: 8, decode_batch_steady: 8,
+    steady: true}` plus a per-kernel `phase`. **So DO read the trace's `serving` block and DO use it to
+    verify steadiness** — the measured decode batch should equal CONC; if it does not, the window or the
+    load was wrong and re-profiling is the right move. On **0.26+** the adapter additionally passes the
+    richer `detailed_trace_annotation`, FIELD-GATED — `adapter_launch` probes `ProfilerConfig` and only
+    passes it when the installed build declares it, so the strict schema (pydantic `extra=forbid`) that
+    used to ABORT the server on an unknown key can no longer be tripped. sglang uses a different profiler
+    and emits `step[EXTEND|DECODE ...]` instead; both dialects are understood. Two gotchas:
+    (i) `parse_profile` reads annotations only from the `gpu_user_annotation` category — some captures put
     `execute_*` in `user_annotation` (CPU) only, and those are silently missed; (ii) parse the rank0 WORKER
     trace (`dp0_pp0_tp0..._rank0`), NOT the `*.async_llm.*` engine-process trace (python_function only, no
-    kernels). With TP>1 the dir holds one trace per rank; the parser already selects `*rank0*` (see the
-    `TLT=$(ls ... *rank0* ...)` selection below), so the extra per-rank files are harmless, just unused.
-  - Consequence on a build WITHOUT `detailed_trace_annotation`: `parse_profile` CANNOT measure the decode
-    batch or a per-kernel `phase` from the trace (no `serving` block, no per-kernel `phase`), and the
-    decode-step count is only a COARSE shape-visibility proxy. Do NOT expect to verify steadiness from the
-    trace — trust the up-front analytic sizing + the saturated load. The prefill/decode split is recovered
-    downstream ANALYTICALLY (parse_profile's `analytic_calls` / `est_shape`), not from the trace.
+    kernels, ~1 KB — it looks like an empty profile). With TP>1 the dir holds one trace per rank; the
+    parser already selects `*rank0*` (see the `TLT=$(ls ... *rank0* ...)` selection below), so the extra
+    per-rank files are harmless, just unused.
+  - Consequence on an OLD build that emits no annotation: `parse_profile` CANNOT measure the decode batch or
+    a per-kernel `phase` from the trace (no `serving` block, no per-kernel `phase`), and the decode-step
+    count is only a COARSE shape-visibility proxy. Trust the up-front analytic sizing + the saturated load;
+    the prefill/decode split is recovered downstream ANALYTICALLY (parse_profile's `analytic_calls` /
+    `est_shape`). For the KernelFusion capture only, `scripts/vllm_phase_annotate.py` (a capture-only
+    overlay hook, `overlay_setup.py add-vllm-phase-annotation`, armed by `GEAK_VLLM_PHASE_ANNOTATE=1`)
+    supplies sglang's `step[...]` dialect; reach for it only when `trace_capability.py` reports
+    `phase_annotation_count: 0`.
   - Profiler memory bound: the torch profiler event buffer drove the host-RAM OOMs. `adapter_launch` now
     sets `torch_profiler_with_stack=false` (drops the biggest per-event cost; sglang already did) and, on
     0.26+, `max_iterations` (`PROFILE_MAX_ITERS`, derived from the ISL/OSL/CONC step target and clamped to
     `PROFILE_NUM_STEPS_MAX`) so the profiler SELF-STOPS after N worker steps — step-bounded by construction,
     not just by the `PROFILE_WINDOW_SEC` sleep (20–30s band). On <0.26 the shorter time window is the only
-    bound. Grep server.log for `Max profiling iterations reached` to confirm the self-stop fired.
+    bound. Grep server.log for `Max profiling iterations reached` to confirm the self-stop fired. (The
+    KernelFusion capture is the one exception: stacks ON and `GEAK_FUSION_MAX_ITERS`, see adapters/vllm.sh.)
+  - Triton launch probe: on vLLM the round-0 `EXTRA_ENV` carries `GEAK_TRITON_LAUNCH_SHAPES=1`, and
+    `bench_e2e.sh` builds a probe overlay seeded from `OVERLAY_PYTHONPATH` (pass both through
+    unchanged). It names a record_function after each Python-launched Triton kernel's tensor
+    arguments, the only shape evidence those kernels can have. GPU timing is unaffected (same-boot
+    A/B, MiniMax-M3 TP8: prefill step +0.07%, kernel time +0.17%), so the Top-N stays valid. Confirm
+    `[GEAK_TRITON_LAUNCH_PROBE] armed` in server.log; a `!!!` line from bench_e2e.sh means it was not.
   - The old adaptive "enlarge window + re-capture until N decode steps" gate is DISABLED — that proxy loop
     used to double the window until the trace bloated / OOMed the profiler buffer. `bench_e2e.sh` now
     captures ONCE with the up-front-sized window; trust the sizing.
@@ -222,9 +240,12 @@ PY
    Pass `--isl/--osl/--conc` (the SAME values as the bench). IF the trace carries `gpu_user_annotation`
    `execute_*` step spans, each top kernel is annotated with its MEASURED serving **phase**
    (`prefill`/`decode`/`both`), per-phase `base_latency_ms`, and a top-level `serving` block with the
-   prefill/decode step counts + steady-state gate. On current vllm/sglang/ATOM builds those spans are ABSENT
-   (see the steady-state note above), so these MEASURED fields will typically be MISSING — that is
-   EXPECTED, not a capture error; do not re-profile chasing them. Regardless, the parser ALWAYS emits
+   prefill/decode step counts + steady-state gate. On vLLM ≥ 0.27 those spans ARE present by default
+   (see the steady-state note above) — **check for them and report `serving.steady`**; their ABSENCE on
+   such a build means the capture went wrong (wrong trace file, profiler not configured), not that the
+   feature is unavailable. On current sglang/ATOM builds they are ABSENT, so these MEASURED fields will
+   typically be MISSING there — that is EXPECTED, not a capture error; do not re-profile chasing them.
+   Where they really are missing, the parser ALWAYS emits
    `est_shape` (prefill M = token budget + remainders; decode M = concurrency snapped to a capture size)
    and `est_calls` (== the analytic `serving_weight_model.analytic_calls` the immutable unittest
    self-weights by), computed ANALYTICALLY from `--isl/--osl/--conc` — this is the prefill/decode split

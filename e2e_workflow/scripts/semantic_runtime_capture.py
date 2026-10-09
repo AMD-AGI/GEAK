@@ -475,6 +475,18 @@ class SemanticRuntimeLogger(object):
         }
 
     def mark_forward(self):
+        # Count only forwards that were ELIGIBLE to be recorded. `_allowed` already
+        # refuses everything before the profiler is live (so a warmup forward leaves no
+        # trace marker to match), but this counter used to be incremented regardless --
+        # so the warmup silently exhausted every bucket and the capture window then found
+        # them all full. The shape log came out EMPTY, which downstream cannot tell apart
+        # from "this phase genuinely has no shapes".
+        #
+        # sglang never saw it because its dedicated replay arms the profiler at load
+        # start. Any driver that warms up first -- bench_e2e.sh does, by design -- hits it
+        # every time. Guard the counter with the same latch that guards the recording.
+        if self.require_profiler and not self._profile_seen:
+            return
         key = (
             self._context["phase"], self._context["batch_size"],
             self._context["input_tokens"])
@@ -851,6 +863,27 @@ def _register_hooks(model):
     sys.stderr.write(
         "[GEAK_SEMANTICS] registered %d all-layer scopes and %d "
         "marker+metadata hooks\n" % (layer_scope_count, count))
+
+
+def install_hooks_only(model):
+    """Register the marker+metadata hooks WITHOUT wrapping the model's forward.
+
+    `install_on_model` below also wraps `Model.forward` to read sglang's `forward_batch`
+    out of the positional args and derive (phase, bs, toks) from it. vLLM's model forward
+    has no such argument -- the batch description lives on the ENGINE side, in the
+    scheduler output handed to `GPUModelRunner.execute_model`. So on vLLM the phase
+    context is driven externally (see vllm_semantic_capture) and only the module hooks
+    are installed here. The hooks themselves are framework-agnostic: they walk
+    `named_modules()` and key off class names and the `layers.<n>` path.
+    """
+    logger = get_logger()
+    if not logger.active():
+        return model
+    if not getattr(model, "_geak_semantics_hooked", False):
+        _register_hooks(model)
+        model._geak_semantics_hooked = True
+    _install_callable_probes()
+    return model
 
 
 def install_on_model(model, is_draft=False):

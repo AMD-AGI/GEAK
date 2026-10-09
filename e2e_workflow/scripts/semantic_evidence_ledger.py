@@ -102,6 +102,77 @@ def _reason_from_attempts(row, attempts):
         "available probe runs did not produce a unique shape attribution")
 
 
+# Shape sources whose dims are the kernel's OWN inputs: a 1:1 launch under its
+# trace op, a probe scoped to the kernel, or the kernel's Triton launch arguments. Dims from any other source belong to
+# the enclosing operator (a 1:N parent, a time-scope match, a wrapper probe) --
+# e.g. every fused_moe_kernel launch under vllm::moe_forward_shared carries the
+# MoE layer's inputs, not the expert GEMM's.
+KERNEL_SHAPE_SOURCES = ("kernel_exact", "clean_trace_external_id",
+                        "runtime_probe_kernel", "triton_launch_args")
+
+
+def shape_granularity(row):
+    """'kernel', 'operator', or None when the row carries no dims."""
+    shape = row.get("shape") or {}
+    if not shape.get("input_dims"):
+        return None
+    if shape.get("granularity") in ("kernel", "operator"):
+        return shape["granularity"]
+    if shape.get("source") in KERNEL_SHAPE_SOURCES:
+        return "kernel"
+    scope = (row.get("semantic_evidence") or {}).get("probe_scope")
+    return "kernel" if scope == "kernel" else "operator"
+
+
+def refresh_phase_coverage(output):
+    """Recompute the table's shape coverage summary from its rows.
+
+    Any step that fills row shapes after the table was built must call this, or
+    downstream readers see the pre-fill \"0/N\" beside rows that now carry shapes.
+    `resolved` counts any dims; `kernel_level` only the kernel's own inputs.
+    """
+    phase_stats = {}
+    for table in output.get("tables", []):
+        phase = table.get("phase")
+        if not phase:
+            continue
+        stat = phase_stats.setdefault(
+            phase, {"rows": 0, "resolved": 0, "kernel_level": 0})
+        for row in table.get("rows", []):
+            stat["rows"] += 1
+            granularity = shape_granularity(row)
+            if granularity:
+                stat["resolved"] += 1
+            if granularity == "kernel":
+                stat["kernel_level"] += 1
+    for stat in phase_stats.values():
+        stat["resolved_fraction"] = (
+            round(stat["resolved"] / float(stat["rows"]), 4)
+            if stat["rows"] else 0.0)
+        stat["kernel_level_fraction"] = (
+            round(stat["kernel_level"] / float(stat["rows"]), 4)
+            if stat["rows"] else 0.0)
+    phase_coverage = output.setdefault("phase_coverage", {})
+    phase_coverage["shape_resolution_by_phase"] = phase_stats
+    # decode_* fields describe the generation phase (decode or verify).
+    generation = sglang_step_modes.generation_phase(phase_stats)
+    phase_coverage["generation_phase"] = generation
+    decode = phase_stats.get(generation, {"resolved": 0})
+    decode_sequence = bool(
+        phase_coverage.get("decode_sequence_covered")
+        or generation in phase_stats)
+    phase_coverage["decode_shapes_covered"] = decode["resolved"] > 0
+    phase_coverage["decode_covered"] = bool(
+        decode_sequence and decode["resolved"] > 0)
+    phase_coverage["decode_requires_graph_capture"] = bool(
+        generation in phase_stats and decode["resolved"] == 0)
+    if generation in phase_stats:
+        phase_coverage["decode_evidence"] = (
+            "sequence_and_shapes" if phase_coverage["decode_covered"]
+            else "sequence_only_shapes_unresolved"
+            if decode_sequence else "no_decode_trace_analysed")
+
+
 def merge(clean_table_path, probe_table_paths, out_dir):
     clean = _load(clean_table_path)
     output = copy.deepcopy(clean)
@@ -255,39 +326,7 @@ def merge(clean_table_path, probe_table_paths, out_dir):
     # Probe merges change row-level shape evidence.  Refresh the embedded phase
     # summary so downstream consumers do not see the pre-probe "0/N" beside
     # rows that now carry resolved shapes.
-    phase_stats = {}
-    for table in output.get("tables", []):
-        phase = table.get("phase")
-        if not phase:
-            continue
-        stat = phase_stats.setdefault(phase, {"rows": 0, "resolved": 0})
-        for row in table.get("rows", []):
-            stat["rows"] += 1
-            if (row.get("shape") or {}).get("input_dims"):
-                stat["resolved"] += 1
-    for stat in phase_stats.values():
-        stat["resolved_fraction"] = (
-            round(stat["resolved"] / float(stat["rows"]), 4)
-            if stat["rows"] else 0.0)
-    phase_coverage = output.setdefault("phase_coverage", {})
-    phase_coverage["shape_resolution_by_phase"] = phase_stats
-    # decode_* fields describe the generation phase (decode or verify).
-    generation = sglang_step_modes.generation_phase(phase_stats)
-    phase_coverage["generation_phase"] = generation
-    decode = phase_stats.get(generation, {"resolved": 0})
-    decode_sequence = bool(
-        phase_coverage.get("decode_sequence_covered")
-        or generation in phase_stats)
-    phase_coverage["decode_shapes_covered"] = decode["resolved"] > 0
-    phase_coverage["decode_covered"] = bool(
-        decode_sequence and decode["resolved"] > 0)
-    phase_coverage["decode_requires_graph_capture"] = bool(
-        generation in phase_stats and decode["resolved"] == 0)
-    if generation in phase_stats:
-        phase_coverage["decode_evidence"] = (
-            "sequence_and_shapes" if phase_coverage["decode_covered"]
-            else "sequence_only_shapes_unresolved"
-            if decode_sequence else "no_decode_trace_analysed")
+    refresh_phase_coverage(output)
     os.makedirs(out_dir, exist_ok=True)
     table_out = os.path.join(out_dir, "pattern_layer_kernel_table.json")
     markdown_out = os.path.join(out_dir, "ORDERED_UNIQUE_LAYER_TABLES.md")

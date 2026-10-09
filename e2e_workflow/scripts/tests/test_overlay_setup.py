@@ -40,6 +40,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import types
@@ -59,7 +60,7 @@ def _load(mod_name, filename):
 
 ov = _load("overlay_setup", "overlay_setup.py")
 
-EMPTY_MANIFEST = {"modules": [], "rebinds": [], "markers": [], "captures": []}
+EMPTY_MANIFEST = {"modules": [], "rebinds": [], "markers": [], "captures": [], "hooks": []}
 
 
 class _RecordingRun:
@@ -649,6 +650,132 @@ class TestAddMarker(_OverlayCase):
         self._main(["add-marker", "--overlay", probe, "--target", "m:inner",
                     "--marker-file", marker, "--from", base])
         self.assertEqual([e["target"] for e in self._manifest(probe)["markers"]], ["m:inner"])
+
+
+# --------------------------------------------------------------------------- #
+# add-hook -- LAZY post-import callbacks (the only safe kind for the serving stack)
+# --------------------------------------------------------------------------- #
+class TestAddHook(_OverlayCase):
+    MODULE = "vllm.v1.worker.gpu_model_runner"
+
+    def _ns_hook(self, **kw):
+        base = {"overlay": self.overlay, "module": self.MODULE,
+                "impl_module": "vllm_phase_annotate", "impl_attr": "install",
+                "impl_file": ""}
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_records_the_hook_and_copies_the_impl_file_under_its_own_name(self):
+        impl = self._write("vllm_phase_annotate.py", "def install():\n    return True\n")
+        out = self._run(ov.cmd_add_hook, self._ns_hook(impl_file=impl))
+
+        self.assertEqual(self._manifest()["hooks"],
+                         [{"module": self.MODULE, "impl_module": "vllm_phase_annotate",
+                           "impl_attr": "install"}])
+        # Unlike add-capture (which must land on the fixed name `capture_shapes.py` because
+        # the shim does a bare import of it), a hook names its own impl_module, so the
+        # basename is preserved.
+        self.assertEqual(self._read(os.path.join(self.overlay, "vllm_phase_annotate.py")),
+                         "def install():\n    return True\n")
+        self.assertEqual(out[1], "add-hook after import %s -> vllm_phase_annotate.install()"
+                         % self.MODULE)
+
+    def test_re_adding_the_same_module_and_impl_replaces_it(self):
+        self._run(ov.cmd_add_hook, self._ns_hook(impl_attr="install"))
+        self._run(ov.cmd_add_hook, self._ns_hook(impl_attr="install_v2"))
+        self.assertEqual(len(self._manifest()["hooks"]), 1)
+        self.assertEqual(self._manifest()["hooks"][0]["impl_attr"], "install_v2")
+
+    def test_two_impls_on_one_module_compound(self):
+        # Dedupe is on (module, impl_module) -- two DIFFERENT hooks on the same target
+        # must both survive, or stacking a fusion overlay onto a capture overlay
+        # silently drops one of them.
+        self._run(ov.cmd_add_hook, self._ns_hook(impl_module="a"))
+        self._run(ov.cmd_add_hook, self._ns_hook(impl_module="b"))
+        self.assertEqual([e["impl_module"] for e in self._manifest()["hooks"]], ["a", "b"])
+
+    def test_hooks_compound_with_the_other_manifest_kinds(self):
+        self._run(ov.cmd_add_hook, self._ns_hook())
+        self._run(ov.cmd_add_rebind, argparse.Namespace(
+            overlay=self.overlay, target="m:a", impl_module="i", impl_attr="f", impl_file=""))
+        man = self._manifest()
+        self.assertEqual(len(man["hooks"]), 1)
+        self.assertEqual(len(man["rebinds"]), 1)
+
+
+class TestAddVllmPhaseAnnotation(_OverlayCase):
+    def test_wires_the_repo_copy_with_the_model_runner_defaults(self):
+        out = self._run(ov.cmd_add_vllm_phase_annotation, argparse.Namespace(
+            overlay=self.overlay, module="vllm.v1.worker.gpu_model_runner", impl_file=""))
+
+        self.assertEqual(self._manifest()["hooks"],
+                         [{"module": "vllm.v1.worker.gpu_model_runner",
+                           "impl_module": "vllm_phase_annotate", "impl_attr": "install"}])
+        copied = self._read(os.path.join(self.overlay, "vllm_phase_annotate.py"))
+        self.assertEqual(copied, self._read(os.path.join(SCRIPTS_DIR, "vllm_phase_annotate.py")))
+        self.assertEqual(out[0], "OVERLAY_DIR=%s" % self.overlay)
+
+    def test_missing_impl_file_aborts_instead_of_writing_a_dangling_manifest(self):
+        with self.assertRaises(SystemExit):
+            self._run(ov.cmd_add_vllm_phase_annotation, argparse.Namespace(
+                overlay=self.overlay, module="m",
+                impl_file=os.path.join(self.tmp, "nope.py")))
+        self.assertFalse(os.path.exists(os.path.join(self.overlay, "_overlay_manifest.json")))
+
+
+class TestPostImportShimBehavior(_OverlayCase):
+    """The load-bearing half: the GENERATED sitecustomize, exercised in a real interpreter.
+
+    The manifest tests above only prove bookkeeping. What actually decides whether a fusion
+    capture works is whether the shim's meta_path finder fires the callback AFTER the target
+    module body runs, WITHOUT importing it eagerly -- an eager `import vllm...` at
+    sitecustomize time runs before the engine builds its distributed env and hangs every TP
+    rank. That is only observable in a subprocess, so these run one.
+    """
+
+    def _build(self, hook_body="def install():\n    import fakepkg.sub as s\n"
+                               "    s.target = lambda: 'WRAPPED'\n"):
+        self._write("pkgsrc/fakepkg/__init__.py", "")
+        self._write("pkgsrc/fakepkg/sub.py",
+                    "def target():\n    return 'ORIGINAL'\n")
+        impl = self._write("myhook.py", hook_body)
+        self._run(ov.cmd_add_hook, argparse.Namespace(
+            overlay=self.overlay, module="fakepkg.sub", impl_module="myhook",
+            impl_attr="install", impl_file=impl))
+        return os.pathsep.join([self.overlay, self.tmp, os.path.join(self.tmp, "pkgsrc")])
+
+    def _py(self, pythonpath, code):
+        env = dict(os.environ, PYTHONPATH=pythonpath)
+        env.pop("PYTHONDONTWRITEBYTECODE", None)
+        return subprocess.run([sys.executable, "-c", code], env=env,
+                              capture_output=True, text=True)
+
+    def test_callback_runs_after_the_target_module_body(self):
+        pp = self._build()
+        r = self._py(pp, "import fakepkg.sub as s; print(s.target())")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "WRAPPED")
+
+    def test_target_is_not_imported_when_nothing_asks_for_it(self):
+        pp = self._build()
+        r = self._py(pp, "import sys; print('fakepkg.sub' in sys.modules)")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "False")
+
+    def test_a_raising_hook_does_not_break_the_import(self):
+        # Capture instrumentation must never be able to take the server down.
+        pp = self._build(hook_body="def install():\n    raise RuntimeError('boom')\n")
+        r = self._py(pp, "import fakepkg.sub as s; print(s.target())")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "ORIGINAL")
+        self.assertIn("hook myhook.install on fakepkg.sub FAILED", r.stderr)
+
+    def test_shim_is_inert_when_no_hooks_are_registered(self):
+        self._run(ov.cmd_add_rebind, argparse.Namespace(
+            overlay=self.overlay, target="m:a", impl_module="i", impl_attr="f", impl_file=""))
+        r = self._py(self.overlay, "import sys; print(len(sys.meta_path))")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("armed", r.stderr)
 
 
 # --------------------------------------------------------------------------- #

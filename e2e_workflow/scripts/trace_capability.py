@@ -12,6 +12,7 @@ import os
 import re
 from collections import Counter
 
+import parse_profile
 import sglang_step_modes
 
 
@@ -48,7 +49,9 @@ def discover(trace_dir):
     elif os.path.isdir(trace_dir):
         for name in os.listdir(trace_dir):
             path = os.path.join(trace_dir, name)
-            if os.path.isfile(path) and name.endswith(TRACE_SUFFIXES):
+            # Hidden files are tool scratch (e.g. a bench result), never a trace.
+            if (os.path.isfile(path) and not name.startswith(".")
+                    and name.endswith(TRACE_SUFFIXES)):
                 files.append(os.path.abspath(path))
     files.sort(key=lambda p: (_rank(p) is None, _rank(p) or 0, os.path.basename(p)))
     return files
@@ -171,14 +174,25 @@ def _stage_device_coverage(path):
     for event in events:
         if not isinstance(event, dict) or event.get("cat") != "gpu_user_annotation":
             continue
-        step = sglang_step_modes.parse_step(event.get("name"))
-        if step is None or event.get("ts") is None or event.get("dur") is None:
+        if event.get("ts") is None or event.get("dur") is None:
             continue
-        # Speculative decoding runs target generation as TARGET_VERIFY (phase
-        # "verify"). Draft steps are reported under their own "draft" phase and
-        # never compete for generation-step selection.
-        phase = step["phase"]
-        modes[step["mode"]] += 1
+        name = str(event.get("name", ""))
+        step = sglang_step_modes.parse_step(name)
+        if step is not None:
+            # Speculative decoding runs target generation as TARGET_VERIFY (phase
+            # "verify"). Draft steps are reported under their own "draft" phase and
+            # never compete for generation-step selection.
+            phase = step["phase"]
+            modes[step["mode"]] += 1
+        else:
+            # vLLM writes ONE mixed-phase trace annotated execute_*_context_*_generation_*;
+            # classify each step the way parse_profile does, under sglang_step_modes'
+            # phase names.
+            vllm_step = (parse_profile._classify_step(name)
+                         if name.startswith("execute_") else None)
+            if not vllm_step:
+                continue
+            phase = "prefill" if vllm_step[0] else "decode"
         start = float(event["ts"])
         end = start + float(event["dur"])
         # A retry may contain several steps. Use the best single step rather
@@ -193,6 +207,27 @@ def _stage_device_coverage(path):
         "annotation_count_by_phase": dict(sorted(annotation_count.items())),
         "step_mode_counts": dict(sorted(modes.items())),
     }
+
+
+def _phase_coverage(entries, analysis_rank, require_phases):
+    """Phases the selected rank's traces hold device work for, and which required ones are missing.
+
+    All files of the rank count: sglang writes EXTEND and DECODE as separate traces,
+    vLLM writes one mixed trace. A phase is present when some annotated step of it
+    carried device events. Phase names follow sglang_step_modes; a required
+    "decode" means the generation phase, i.e. "verify" under speculative decoding.
+    """
+    present = sorted({
+        phase
+        for entry in entries if entry.get("rank") == analysis_rank
+        for phase, count in (entry.get("device_events_by_phase") or {}).items()
+        if count})
+    generation = sglang_step_modes.generation_phase(present)
+    required = sorted({
+        generation if sglang_step_modes.is_generation_phase(phase) else phase
+        for phase in (sglang_step_modes.canonical_phase(p)
+                      for p in (require_phases or []) if p)})
+    return present, required, [p for p in required if p not in present]
 
 
 _SERVER_ARGS_RE = re.compile(r"server_args=ServerArgs\((?P<body>.*)\)")
@@ -287,7 +322,7 @@ def _speculative_block(entries, server_log):
 
 
 def build_manifest(trace_dir, analysis_rank=0, auto_select_rank=False,
-                   server_log=None):
+                   require_phases=None, server_log=None):
     files = discover(trace_dir)
     entries = []
     for path in files:
@@ -366,6 +401,15 @@ def build_manifest(trace_dir, analysis_rank=0, auto_select_rank=False,
         "capabilities": {},
         "error": "no top-level torch trace found",
     }
+    present, required, missing = _phase_coverage(
+        entries, analysis_rank, require_phases)
+    status = "pass" if selected else "failed"
+    if selected and missing:
+        # KernelFusion reuses the formal Profile trace, and a Profile shaped for
+        # steady-state decode skips the prefill ramp: Kimi-K2.5 TP8 came back
+        # decode-only and every fusion table, candidate and Top-K row was
+        # decode-only, reported as "prefill ~ 0 us". Refuse instead.
+        status = "failed"
     speculative = _speculative_block(entries, server_log)
     observed_phases = {phase for entry in entries
                        for phase in entry.get("device_events_by_phase", {})}
@@ -396,7 +440,10 @@ def build_manifest(trace_dir, analysis_rank=0, auto_select_rank=False,
         "target_phases": sglang_step_modes.target_phases(observed_phases),
         "speculative": speculative,
         "capability": capabilities,
-        "status": "pass" if selected else "failed",
+        "phases_present": present,
+        "required_phases": required,
+        "missing_required_phases": missing,
+        "status": status,
     }
 
 
@@ -407,12 +454,18 @@ def main():
     parser.add_argument("--auto-select-rank", action="store_true")
     parser.add_argument("--out", required=True)
     parser.add_argument(
+        "--require-phases", default="",
+        help="comma list (prefill,decode); the manifest fails when the selected "
+             "rank has no device work in one of them")
+    parser.add_argument(
         "--server-log", default="",
         help="optional server log; only enriches speculative parameters")
     args = parser.parse_args()
     doc = build_manifest(
         args.trace_dir, args.analysis_rank,
         auto_select_rank=args.auto_select_rank,
+        require_phases=[p.strip() for p in args.require_phases.split(",")
+                        if p.strip()],
         server_log=args.server_log or None)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as fh:

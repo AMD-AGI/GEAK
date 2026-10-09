@@ -92,15 +92,18 @@ class FusionTopkTest(unittest.TestCase):
             self.assertEqual(layout["tier"], "C1")
             self.assertTrue(layout["per_phase"]["prefill"]["actionable_us"] > 0)
 
-    def test_merged_actions_only_A_B_sorted_and_C_deferred(self):
+    def test_merged_actions_B_only_A_to_config_and_C_deferred(self):
         with tempfile.TemporaryDirectory() as tmp:
             result, actions, _ = self._run(tmp)
-            # one merged list; only A/B shown; decode A collective present
-            self.assertTrue(all(a["tier"] in ("A", "B") for a in actions))
-            self.assertEqual(actions[0]["tier"], "A")
-            self.assertEqual(actions[0]["phase"], "decode")
-            self.assertIn("collective_norm", actions[0]["recipe_key"])
-            self.assertIn("KernelFusion", actions[0]["route"])
+            # one merged list of code actions; the decode A collective is a flag
+            # lever, handed to the config tuner instead of ranked here
+            self.assertTrue(all(a["tier"] == "B" for a in actions))
+            lever = result["config_levers"][0]
+            self.assertEqual(lever["route"], "config_tuner")
+            self.assertEqual(lever["covers"][0]["phase"], "decode")
+            self.assertEqual(lever["candidate_ids"], ["dc_ar"])
+            self.assertEqual(result["config_lever_candidate_ids"],
+                             lever["candidate_ids"])
             # prefill AR (exact=no B) is not actionable -> not in the list
             self.assertFalse(any(
                 a["phase"] == "prefill" and "collective_norm" in a["recipe_key"]
@@ -215,13 +218,11 @@ class FusionTopkTest(unittest.TestCase):
                 self._write(tmp, "c.json", cands),
                 self._write(tmp, "v.json", val),
                 self._write(tmp, "t.json", table), 10)
-            tiers = sorted(a["tier"] for a in actions)
-            # different-tier mutually-exclusive options are BOTH listed (a
-            # partial-cheap A and a fuller-costlier B are a tradeoff, not a dedup)
-            self.assertEqual(len(actions), 2)
-            self.assertEqual(tiers, ["A", "B"])
-            # and both are flagged mutually exclusive (share the removable row q)
-            self.assertTrue(all(a["mutually_exclusive_with"] for a in actions))
+            # the flag option goes to the config tuner; the code option stays on
+            # the board, still flagged mutually exclusive with it (row q)
+            self.assertEqual([a["tier"] for a in actions], ["B"])
+            self.assertTrue(actions[0]["mutually_exclusive_with"])
+            self.assertEqual(result["config_lever_candidate_ids"], ["big"])
 
     def test_renders_action_table(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,17 +258,20 @@ class FusionTopkTest(unittest.TestCase):
     def test_truncation_is_recorded_not_silent(self):
         with tempfile.TemporaryDirectory() as tmp:
             candidates = self._candidates()
-            candidates["candidates"].append({
-                "candidate_id": "dc_nq", "phase": "decode", "pattern_id": "P0",
-                "family": "norm_quant",
-                "implementation_class": "existing_api_needs_adapter",
-                "readiness": "ready_for_api_validation",
-                "exact_kernel_status": "yes", "removable_row_ids": ["dn2"],
-                "existing_apis": [{"name": "rmsnorm_quant"}]})
+            # two code (B) actions: the flag lever (dc_ar) no longer occupies a slot
+            for cid, row, est in (("dc_nq", "dn2", 1.0), ("dc_nq3", "dn3", 2.0)):
+                candidates["candidates"].append({
+                    "candidate_id": cid, "phase": "decode", "pattern_id": "P0",
+                    "family": "norm_quant_%s" % cid,
+                    "implementation_class": "existing_api_needs_adapter",
+                    "readiness": "ready_for_api_validation",
+                    "exact_kernel_status": "yes", "removable_row_ids": [row],
+                    "existing_apis": [{"name": "rmsnorm_quant"}]})
             validation = self._validation()
-            validation["metrics"]["candidate_savings"].append(
-                {"candidate_id": "dc_nq", "estimate_us": 1.0,
-                 "stack_estimate_us": 10.0, "basis": "roofline"})
+            for cid, est in (("dc_nq", 1.0), ("dc_nq3", 2.0)):
+                validation["metrics"]["candidate_savings"].append(
+                    {"candidate_id": cid, "estimate_us": est,
+                     "stack_estimate_us": 10.0 * est, "basis": "roofline"})
             result, actions, _ = topk.rank(
                 self._write(tmp, "c.json", candidates),
                 self._write(tmp, "v.json", validation),
@@ -275,7 +279,7 @@ class FusionTopkTest(unittest.TestCase):
             self.assertEqual(len(actions), 1)
             self.assertEqual(result["truncated_count"], 1)
             self.assertTrue(result["truncated_actions"])
-            self.assertEqual(result["candidate_total"], 4)
+            self.assertEqual(result["candidate_total"], 5)
             self.assertIn("截断 1 条", topk.render_markdown(result, actions))
 
     def test_board_carries_the_coverage_it_was_built_on(self):
@@ -634,3 +638,23 @@ class SubsumptionLadderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfigLeverTest(unittest.TestCase):
+    def test_one_lever_per_switch_even_when_handle_text_differs(self):
+        rows = [
+            {"handle": "env VLLM_ROCM_USE_AITER=1 (VLLM_ROCM_USE_AITER_MOE default 1) -> AITER MoE",
+             "action": "moe", "phase": "decode", "candidate_ids": ["a"],
+             "workload_forward_pct": 4.3, "forward_pct": 4.5},
+            {"handle": "env VLLM_ROCM_USE_AITER=1 (pass_config.fuse_norm_quant already True)",
+             "action": "norm", "phase": "decode", "candidate_ids": ["b"],
+             "workload_forward_pct": 3.2, "forward_pct": 3.4},
+            {"handle": "--enable-aiter-allreduce-fusion", "action": "ar",
+             "phase": "decode", "candidate_ids": ["c"],
+             "workload_forward_pct": None, "forward_pct": 1.0},
+        ]
+        levers = topk._config_levers(rows)
+        self.assertEqual([l["switches"] for l in levers],
+                         [["VLLM_ROCM_USE_AITER=1"], ["--enable-aiter-allreduce-fusion"]])
+        self.assertEqual(levers[0]["candidate_ids"], ["a", "b"])
+        self.assertEqual(len(levers[0]["handles"]), 2)

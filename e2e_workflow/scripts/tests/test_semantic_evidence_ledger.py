@@ -155,7 +155,8 @@ class SemanticEvidenceLedgerTest(unittest.TestCase):
             self.assertEqual(
                 document["phase_coverage"]["shape_resolution_by_phase"]
                 ["decode"],
-                {"rows": 3, "resolved": 1, "resolved_fraction": 0.3333})
+                {"rows": 3, "resolved": 1, "resolved_fraction": 0.3333,
+                 "kernel_level": 1, "kernel_level_fraction": 0.3333})
             with open(result["coverage_manifest"]) as fh:
                 coverage = json.load(fh)
             self.assertEqual(coverage["probe_scope_counts"], {

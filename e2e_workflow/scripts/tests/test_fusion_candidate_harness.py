@@ -200,6 +200,23 @@ class FusionCandidateHarnessTest(unittest.TestCase):
             }],
         }
 
+    def test_linear_attention_is_a_donor_not_a_fusable_helper(self):
+        """A gated-delta / Mamba layer's main compute is an anchor, like attn.
+
+        Leaving `linear_attn` out of DONOR_STAGES made the escalation gate demand fusion
+        candidates for the model's own attention: on Qwen3.5-2B every
+        ChunkGatedDeltaRuleFunction row (40-94 us each) counted as a helper "dropped
+        without a candidate", and the reported fusible surface was 5.5x too large because
+        it included the donors.
+        """
+        self.assertIn("linear_attn", harness.DONOR_STAGES)
+        for stage in ("gemm", "attn", "attention", "moe", "expert_gemm",
+                      "collective", "communication"):
+            self.assertIn(stage, harness.DONOR_STAGES)
+        # helpers must stay helpers
+        for stage in ("elementwise", "norm", "activation", "quant", "kv_cache"):
+            self.assertNotIn(stage, harness.DONOR_STAGES)
+
     def test_cited_api_gate_backfills_inventory_and_warns_on_spread(self):
         with tempfile.TemporaryDirectory() as tmp:
             env_path = self._write(tmp, "env.json", {
@@ -226,6 +243,64 @@ class FusionCandidateHarnessTest(unittest.TestCase):
             self.assertEqual(
                 inventory["available_apis"][0]["source"],
                 "cited_not_inventoried")
+
+    def _falsify(self, existing_apis, rebuttals=None):
+        from unittest import mock
+        hits = [{"name": "fused_dynamic_mx_quant_moe_sort"}, {"name": "mla_topk"}]
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(harness, "_region_op_tags", return_value=["topk"]), \
+                mock.patch.object(harness, "_region_dtype_tags", return_value=[]), \
+                mock.patch.object(harness.fusion_catalog, "load_index",
+                                  return_value=({}, [])), \
+                mock.patch.object(harness.fusion_catalog, "covers", return_value=hits):
+            catalog = self._write(tmp, "catalog.json", {"kernels": []})
+            errors, warnings = [], []
+            matches = harness._catalog_falsify(
+                {"candidates": [{"candidate_id": "c0",
+                                 "implementation_class": "new_helper_kernel",
+                                 "existing_apis": existing_apis,
+                                 "catalog_rebuttals": rebuttals or []}]},
+                catalog, errors, warnings)
+        return matches["c0"], errors, warnings
+
+    def test_catalog_match_answered_in_constraints_is_not_an_error(self):
+        # 'gating' in a GDN kernel name reads as topk; an MX quant+MoE-sort kernel
+        # "covers" it. Answered per kernel, the author-track candidate stands.
+        why = ["MX quant + MoE sort; matched only via the name token 'gating'"]
+        match, errors, warnings = self._falsify([
+            {"name": "fused_dynamic_mx_quant_moe_sort", "coverage": "similar",
+             "constraints": why},
+            {"name": "mla_topk", "coverage": "similar", "constraints": ["MLA only"]}])
+        self.assertEqual(errors, [])
+        self.assertIsNone(match["match"])  # Top-K must not floor the tier at B
+        self.assertEqual(match["rebutted"]["fused_dynamic_mx_quant_moe_sort"], why)
+        self.assertTrue(any("answered as not applicable" in w for w in warnings))
+
+    def test_catalog_match_needs_every_kernel_answered(self):
+        match, errors, _ = self._falsify([
+            {"name": "fused_dynamic_mx_quant_moe_sort", "coverage": "similar",
+             "constraints": ["not applicable"]}])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("'mla_topk'", errors[0])
+        self.assertEqual(match["match"], "fused_dynamic_mx_quant_moe_sort")
+
+    def test_catalog_rebuttal_glob_answers_a_kernel_family(self):
+        match, errors, _ = self._falsify([], [
+            {"kernels": "*mx*_quant_moe_sort", "reason": "MX-format quant + MoE sort"},
+            {"kernels": "mla_*", "reason": "MLA only; this model has no MLA"}])
+        self.assertEqual(errors, [])
+        self.assertIn("via mla_*", match["rebutted"]["mla_topk"])
+
+    def test_catalog_rebuttal_without_reason_does_not_count(self):
+        _, errors, _ = self._falsify([], [{"kernels": "*", "reason": " "}])
+        self.assertEqual(len(errors), 1)
+
+    def test_full_coverage_claim_cannot_rebut_a_match(self):
+        _, errors, _ = self._falsify([
+            {"name": "fused_dynamic_mx_quant_moe_sort", "coverage": "full",
+             "constraints": ["x"]},
+            {"name": "mla_topk", "coverage": "similar", "constraints": ["MLA only"]}])
+        self.assertEqual(len(errors), 1)
 
     def test_author_track_catalog_hit_needs_named_constraint_and_absence(self):
         """sigmoid(gate)*o + fp8 quant: the elementwise members carry no op tag,
@@ -693,7 +768,10 @@ class FusionCandidateHarnessTest(unittest.TestCase):
 
     def test_missing_collective_guard_fields_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
-            table = self._write(tmp, "table.json", self._table())
+            # The guard is required only when the table has a collective to guard.
+            doc = self._table()
+            doc["tables"][0]["rows"][0]["stage"] = "communication"
+            table = self._write(tmp, "table.json", doc)
             payload = self._payload()
             env = {
                 "image": "test/image:latest",
@@ -710,6 +788,26 @@ class FusionCandidateHarnessTest(unittest.TestCase):
             self.assertTrue(any(
                 "collective_fused_ar_guard" in error
                 for error in result["errors"]))
+
+    def test_collective_guard_not_required_without_collective_rows(self):
+        # TP=1: nothing to guard, so the guard's absence is a warning, not an error.
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = self._table()
+            for table in doc["tables"]:
+                for row in table["rows"]:
+                    if row.get("stage") == "communication":
+                        row["stage"] = "elementwise"
+            table = self._write(tmp, "table.json", doc)
+            env = {"image": "test/image:latest", "inspection_evidence": ["src"]}
+            payload = self._payload()
+            payload["environment_api_inventory_json"] = self._write(
+                tmp, "environment.json", env)
+            candidates = self._write(tmp, "candidates.json", payload)
+            result = harness.run(
+                table, candidates, os.path.join(tmp, "report.md"),
+                os.path.join(tmp, "validation.json"))
+            self.assertFalse(any("collective_fused_ar_guard" in e or "model_dims" in e
+                                 for e in result["errors"]), result["errors"])
 
     def test_threshold_disagreeing_with_registry_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

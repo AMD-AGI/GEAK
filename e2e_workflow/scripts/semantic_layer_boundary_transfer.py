@@ -12,11 +12,15 @@ device sequence to occur as one exact, contiguous normalized sequence inside a
 workload-compatible Clean Trace step.  When graph construction and graph replay
 expose different backend events, it may instead use an exact stable projection:
 retain only raw identities with equal total multiplicity on both sides, require
-the complete projected sequences to be identical, and require multiple distinct
-anchors in every layer plus majority coverage.  A one-sided unmatched internal
+the complete projected sequences to be identical -- or, when concurrent streams
+reorder work inside a layer, each donor layer's projected multiset to occupy the
+matching consecutive chunk of the recipient projection -- and require multiple
+distinct anchors in every layer plus majority coverage.  A one-sided unmatched internal
 gap follows the marker-proven side.  A two-sided or otherwise unsupported gap
 remains an explicit inter-layer residual while both proven layer cores remain
-eligible as representatives.  Outer prefix/suffix work remains global. Stage
+eligible as representatives.  Outer prefix/suffix work remains global.  A step
+no donor pass validates stays unresolved and makes the map ``partial``; it does
+not void the steps that did transfer.  Stage
 names, model names, attention kinds and recurring subsequences are never used to
 invent a boundary.
 
@@ -46,6 +50,8 @@ STABLE_MIN_ANCHOR_EVENTS_PER_LAYER = 2
 STABLE_MIN_DISTINCT_IDENTITIES_PER_LAYER = 2
 STABLE_MIN_DONOR_EVENT_FRACTION = 0.5
 STABLE_MIN_RECIPIENT_BODY_FRACTION = 0.5
+STABLE_RULE = "exact_equal_multiplicity_stable_identity_projection"
+STABLE_PER_LAYER_RULE = "equal_multiplicity_stable_identity_per_layer_multiset"
 # Capture donor: share of its kernels that must be found, in order, in the
 # Clean Trace step, and how far ahead one missing kernel may be searched for
 # before it is skipped instead of consuming later work.
@@ -124,6 +130,40 @@ def _scope_markers(events):
             "entries": [],
         })
     markers.sort(key=lambda item: (item["event_index"], item["ts"]))
+    return markers
+
+
+def _dispatch_scope_markers(events, pattern_doc):
+    """Donor layer scopes from the Pattern-declared dispatch ops.
+
+    Used when the donor carries no GEAK_LAYER_SCOPE markers. On vLLM the module
+    hooks that emit those markers cannot run inside torch.compile, but a capture
+    with CUDA-graph replay off walks the model on every step, so each layer's
+    declared dispatch op is present and semantic_kernel_mapping cuts exact
+    per-layer scopes from them. They are shaped like markers so every matching
+    rule below applies unchanged.
+    """
+    spans = semantic_kernel_mapping._collect_step_spans(events)
+    scopes, _ = semantic_kernel_mapping._dispatch_anchor_scopes(
+        events, spans, pattern_doc)
+    markers = []
+    for index, scope in enumerate(scopes):
+        markers.append({
+            "event_index": index,
+            "name": scope["name"],
+            "phase": _phase(scope.get("phase")),
+            "batch_size": _integer(scope.get("batch_size")),
+            "input_tokens": _integer(scope.get("input_tokens")),
+            "layer_id": scope["layer_id"],
+            # A dispatch-op donor walks the model eagerly (graph replay off).
+            "source": "eager",
+            "op_path": scope["name"],
+            "pid": scope.get("pid"),
+            "tid": scope.get("tid"),
+            "ts": float(scope["ts"]),
+            "end": float(scope["end"]),
+            "entries": [],
+        })
     return markers
 
 
@@ -210,8 +250,9 @@ def _attach_device_entries(events, markers):
             item["runtime_event_index"], item["device_event_index"]))
 
 
-def _complete_donor_passes(events, expected_layers):
-    markers = _scope_markers(events)
+def _complete_donor_passes(events, expected_layers, markers=None):
+    if markers is None:
+        markers = _scope_markers(events)
     _attach_device_entries(events, markers)
     passes = []
     by_bucket = {}
@@ -255,7 +296,8 @@ def _complete_authoritative_step(step_rows, expected_layers):
     for row in step_rows:
         instance_id = row.get("layer_instance_id")
         evidence = str(row.get("layer_evidence") or "")
-        if instance_id and evidence.startswith("python_module_span"):
+        if instance_id and (evidence.startswith("python_module_span")
+                            or evidence == "declared_dispatch_op_span"):
             groups.setdefault(instance_id, []).append(row)
     ordered = sorted(groups.values(), key=lambda group: min(
         row["device_seq_index"] for row in group))
@@ -317,29 +359,23 @@ def _subsequence_starts(sequence, needle):
     return starts
 
 
-def _stable_projection_map(sequence, donor, expected_layers):
-    """Map a marker-labelled donor when graph capture omits replay kernels.
+def stable_projection_pairs(sequence, donor_sequence, layer_starts):
+    """Pair the equal-multiplicity projections of a recipient step and a donor pass.
 
-    HIP/CUDA graph construction and graph replay do not necessarily expose the
-    same device events to the profiler.  In particular, a collective recorded
-    into a graph may appear only when the graph is replayed, while temporary
-    fill/memset work may appear only during construction.  Requiring the full
-    raw sequences to be identical therefore rejects a valid donor.
+    Returns ([(identity, donor_position, recipient_position)], info) or
+    (None, failure). The projections pair in order when they are byte-equal.
+    Otherwise they still pair when the recipient projection, cut into consecutive
+    chunks sized by the donor's per-layer stable counts, holds exactly each donor
+    layer's multiset; inside a chunk the k-th occurrence of an identity pairs with
+    the k-th. That admits reordering WITHIN a layer and nothing across one.
 
-    This fallback is still exact rather than fuzzy:
-
-    * retain only raw kernel identities whose total multiplicity is identical
-      in donor and recipient;
-    * require the two complete projected sequences to be byte-for-byte equal;
-    * require multiple distinct matched anchors inside every marker-labelled
-      layer and majority event coverage on both sides;
-    * place an unmatched boundary gap on one side only when the donor marker
-      proves that only that side has unmatched boundary-local events.
-
-    There is no LCS, similarity score, stage taxonomy, model name, kernel-name
-    allow-list, proportional partition, or best-effort layer completion here.
+    Why: a model that runs two streams concurrently inside a layer (MiniMax-M3
+    TP8, default config: routed experts on one stream, the shared expert on
+    another) interleaves them by device timing, and eager and graph replay place
+    the work on different streams, so neither the full order nor a per-stream
+    order is reproducible between donor and recipient -- but each layer's kernel
+    multiset is. Measured: 0/13 decode steps byte-equal, 12/12 per-layer equal.
     """
-    donor_sequence = list(donor.get("sequence") or [])
     donor_counts = collections.Counter(donor_sequence)
     recipient_counts = collections.Counter(sequence)
     stable_identities = {
@@ -356,16 +392,83 @@ def _stable_projection_map(sequence, donor, expected_layers):
         for position, identity in enumerate(sequence)
         if identity in stable_identities
     ]
-    donor_values = [item[0] for item in donor_projection]
-    recipient_values = [item[0] for item in recipient_projection]
-    if not donor_values or donor_values != recipient_values:
-        return None, {
-            "reason": "stable_identity_projection_mismatch",
-            "stable_identity_count": len(stable_identities),
-            "donor_projected_event_count": len(donor_values),
-            "recipient_projected_event_count": len(recipient_values),
-        }
+    info = {
+        "stable_identity_count": len(stable_identities),
+        "donor_projected_event_count": len(donor_projection),
+        "recipient_projected_event_count": len(recipient_projection),
+    }
+    if not donor_projection or len(donor_projection) != len(recipient_projection):
+        return None, dict(info, reason="stable_identity_projection_mismatch")
+    if [item[0] for item in donor_projection] == [
+            item[0] for item in recipient_projection]:
+        return [
+            (identity, donor_position, recipient_position)
+            for (identity, donor_position), (_, recipient_position)
+            in zip(donor_projection, recipient_projection)
+        ], dict(info, order_rule="exact_sequence",
+                reordered_layer_count=0, reordered_event_count=0)
 
+    chunks = []
+    for identity, position in donor_projection:
+        layer_id = bisect.bisect_right(layer_starts, position) - 1
+        if not chunks or chunks[-1][0] != layer_id:
+            chunks.append((layer_id, []))
+        chunks[-1][1].append((identity, position))
+    pairs = []
+    cursor = 0
+    reordered_layers = 0
+    reordered_events = 0
+    for layer_id, donor_chunk in chunks:
+        recipient_chunk = recipient_projection[cursor:cursor + len(donor_chunk)]
+        cursor += len(donor_chunk)
+        donor_ids = [item[0] for item in donor_chunk]
+        recipient_ids = [item[0] for item in recipient_chunk]
+        if collections.Counter(donor_ids) != collections.Counter(recipient_ids):
+            return None, dict(
+                info, reason="stable_identity_projection_mismatch",
+                order_rule="per_layer_multiset",
+                first_mismatch_layer=layer_id)
+        queues = collections.defaultdict(collections.deque)
+        for identity, position in recipient_chunk:
+            queues[identity].append(position)
+        for identity, position in donor_chunk:
+            pairs.append((identity, position, queues[identity].popleft()))
+        moved = sum(1 for left, right in zip(donor_ids, recipient_ids)
+                    if left != right)
+        if moved:
+            reordered_layers += 1
+            reordered_events += moved
+    return pairs, dict(info, order_rule="per_layer_multiset",
+                       reordered_layer_count=reordered_layers,
+                       reordered_event_count=reordered_events)
+
+
+def _stable_projection_map(sequence, donor, expected_layers):
+    """Map a marker-labelled donor when graph capture omits replay kernels.
+
+    HIP/CUDA graph construction and graph replay do not necessarily expose the
+    same device events to the profiler.  In particular, a collective recorded
+    into a graph may appear only when the graph is replayed, while temporary
+    fill/memset work may appear only during construction.  Requiring the full
+    raw sequences to be identical therefore rejects a valid donor.
+
+    This fallback is still exact rather than fuzzy:
+
+    * retain only raw kernel identities whose total multiplicity is identical
+      in donor and recipient;
+    * require the two complete projected sequences to be byte-for-byte equal,
+      or failing that, each donor layer's projected multiset to fill the matching
+      consecutive chunk of the recipient projection (reordering inside a layer,
+      never across one -- see stable_projection_pairs);
+    * require multiple distinct matched anchors inside every marker-labelled
+      layer and majority event coverage on both sides;
+    * place an unmatched boundary gap on one side only when the donor marker
+      proves that only that side has unmatched boundary-local events.
+
+    There is no LCS, similarity score, stage taxonomy, model name, kernel-name
+    allow-list, proportional partition, or best-effort layer completion here.
+    """
+    donor_sequence = list(donor.get("sequence") or [])
     layer_starts = [int(value) for value in donor.get(
         "layer_starts", [])]
     if (len(layer_starts) != expected_layers
@@ -373,11 +476,16 @@ def _stable_projection_map(sequence, donor, expected_layers):
             or len(set(layer_starts)) != expected_layers):
         return None, {"reason": "donor_layer_starts_invalid"}
 
+    pairs, projection = stable_projection_pairs(
+        sequence, donor_sequence, layer_starts)
+    if pairs is None:
+        return None, projection
+    donor_values = [item[0] for item in pairs]
+
     donor_anchor_positions = [[] for _ in range(expected_layers)]
     recipient_anchor_positions = [[] for _ in range(expected_layers)]
     donor_anchor_identities = [set() for _ in range(expected_layers)]
-    for (identity, donor_position), (_, recipient_position) in zip(
-            donor_projection, recipient_projection):
+    for identity, donor_position, recipient_position in pairs:
         layer_id = bisect.bisect_right(
             layer_starts, donor_position) - 1
         if layer_id < 0 or layer_id >= expected_layers:
@@ -388,6 +496,9 @@ def _stable_projection_map(sequence, donor, expected_layers):
         donor_anchor_positions[layer_id].append(donor_position)
         recipient_anchor_positions[layer_id].append(recipient_position)
         donor_anchor_identities[layer_id].add(identity)
+    # A per-layer multiset pairing leaves a layer's recipient positions out of order.
+    for positions in recipient_anchor_positions:
+        positions.sort()
 
     weak_layers = []
     for layer_id in range(expected_layers):
@@ -416,7 +527,7 @@ def _stable_projection_map(sequence, donor, expected_layers):
     last_recipient_anchor = recipient_anchor_positions[-1][-1]
     donor_fraction = float(len(donor_values)) / max(1, len(donor_sequence))
     recipient_body_span = last_recipient_anchor - first_recipient_anchor + 1
-    recipient_fraction = float(len(recipient_values)) / max(
+    recipient_fraction = float(len(donor_values)) / max(
         1, recipient_body_span)
     if (donor_fraction < STABLE_MIN_DONOR_EVENT_FRACTION
             or recipient_fraction < STABLE_MIN_RECIPIENT_BODY_FRACTION):
@@ -554,11 +665,14 @@ def _stable_projection_map(sequence, donor, expected_layers):
         "prefix_row_count": starts[0],
         "suffix_row_count": len(sequence) - end,
         "match_rule": (
-            "exact_equal_multiplicity_stable_identity_projection_with_residuals"
-            if residual_ranges else
-            "exact_equal_multiplicity_stable_identity_projection"),
+            (STABLE_RULE if projection["order_rule"] == "exact_sequence"
+             else STABLE_PER_LAYER_RULE)
+            + ("_with_residuals" if residual_ranges else "")),
         "stable_projection": {
-            "stable_identity_count": len(stable_identities),
+            "stable_identity_count": projection["stable_identity_count"],
+            "order_rule": projection["order_rule"],
+            "reordered_layer_count": projection["reordered_layer_count"],
+            "reordered_event_count": projection["reordered_event_count"],
             "stable_event_count": len(donor_values),
             "donor_event_fraction": round(donor_fraction, 6),
             "recipient_body_fraction": round(recipient_fraction, 6),
@@ -841,6 +955,12 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
     donor_events = semantic_kernel_mapping._load_events(donor_trace)
     markers, donor_passes = _complete_donor_passes(
         donor_events, expected_layers)
+    donor_scope_source = "geak_layer_scope_markers"
+    if not markers:
+        markers, donor_passes = _complete_donor_passes(
+            donor_events, expected_layers,
+            _dispatch_scope_markers(donor_events, pattern_doc))
+        donor_scope_source = "declared_dispatch_op_span"
     recipient_events = semantic_kernel_mapping._load_events_multi(
         recipient_traces)
     rows, spans, _, _, _ = semantic_kernel_mapping._event_rows(
@@ -895,7 +1015,9 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
 
     if not markers:
         failures.append({
-            "reason": "donor_has_no_geak_layer_scope_markers"})
+            "reason": "donor_has_no_layer_scopes",
+            "detail": ("no GEAK_LAYER_SCOPE markers, and no step carries a "
+                       "complete, Pattern-ordered set of declared dispatch ops")})
     elif not donor_passes:
         failures.append({
             "reason": "donor_has_no_complete_nonempty_layer_pass",
@@ -906,9 +1028,14 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
         failures, analysis_step_ids)
     has_residuals = any(
         group.get("residual_ranges") for group in groups)
+    # A step no donor pass validates (typically a batch size the donor never ran)
+    # stays unresolved; it does not void the steps that did transfer. Only a
+    # donor-wide failure, or nothing transferred at all, fails the map.
+    unmapped_steps = [item for item in failures if item.get("step_id")]
+    donor_failures = [item for item in failures if not item.get("step_id")]
     status = (
-        "fail" if failures or not groups else
-        "partial" if has_residuals else
+        "fail" if donor_failures or not groups else
+        "partial" if has_residuals or unmapped_steps else
         "pass")
     if skipped_authoritative and not groups and not failures:
         status = "not_needed"
@@ -929,6 +1056,7 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
         "donor": {
             "path": os.path.abspath(donor_trace),
             "sha256": _sha256(donor_trace),
+            "scope_source": donor_scope_source,
             "layer_scope_marker_count": len(markers),
             "complete_pass_count": len(donor_passes),
             "buckets": sorted({
@@ -949,6 +1077,7 @@ def transfer(donor_trace, recipient_traces, pattern_path, out_path=""):
             len(group.get("residual_ranges") or []) for group in groups),
         "skipped_authoritative_steps": skipped_authoritative,
         "untransferable_steps": untransferable,
+        "unmapped_step_count": len(unmapped_steps),
         "failures": failures,
     }
     if out_path:

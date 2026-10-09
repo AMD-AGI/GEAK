@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -140,6 +141,59 @@ class SemanticRuntimeCaptureTest(unittest.TestCase):
         self.assertTrue(
             record["arguments"][0]["alias_info"]["is_write"])
         self.assertTrue(record["arguments"][3]["has_default"])
+
+
+
+class TestBucketAccountingUnderAWarmupDriver(unittest.TestCase):
+    """The bucket counter must not be spent by forwards the recorder refused.
+
+    `_allowed` blocks recording until torch.profiler is live, so a warmup forward can
+    leave no trace marker to match. `mark_forward` used to increment anyway, so a driver
+    that warms up BEFORE opening the profile window -- bench_e2e.sh, by design -- arrived
+    at the capture window with every bucket already full and wrote an EMPTY shape log.
+    Empty is indistinguishable downstream from "this phase has no shapes", so this failed
+    silently; observed on the first vLLM eager probe.
+    """
+
+    def _logger(self, tmp, require_profiler=True):
+        env = {
+            "GEAK_SEMANTICS_CAPTURE": "1",
+            "GEAK_SEMANTICS_SHAPE_LOG": os.path.join(tmp, "shape.jsonl"),
+            "GEAK_SEMANTICS_FORWARDS_PER_BUCKET": "1",
+            "GEAK_SEMANTICS_REQUIRE_PROFILER": "1" if require_profiler else "0",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            return capture.SemanticRuntimeLogger()
+
+    def test_warmup_forwards_do_not_consume_the_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = self._logger(tmp)
+            logger.set_context("DECODE", 8, 8)
+            for _ in range(50):                 # a whole warmup + timed-repeat phase
+                logger.mark_forward()
+            self.assertEqual(logger._bucket_forwards, {},
+                             "no bucket may be spent before the profiler is live")
+
+            # Profiler comes up; the very next forward must still be admitted.
+            logger._profile_seen = True
+            logger.mark_forward()
+            self.assertEqual(logger._bucket_forwards[("DECODE", 8, 8)], 1)
+
+    def test_the_limit_still_applies_once_the_profiler_is_live(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = self._logger(tmp)
+            logger._profile_seen = True
+            logger.set_context("DECODE", 8, 8)
+            logger.mark_forward()
+            logger.mark_forward()
+            self.assertEqual(logger._bucket_forwards[("DECODE", 8, 8)], 2)
+
+    def test_counting_is_unconditional_when_no_profiler_is_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = self._logger(tmp, require_profiler=False)
+            logger.set_context("EXTEND", 2, 4096)
+            logger.mark_forward()
+            self.assertEqual(logger._bucket_forwards[("EXTEND", 2, 4096)], 1)
 
 
 if __name__ == "__main__":

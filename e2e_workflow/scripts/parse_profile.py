@@ -88,9 +88,26 @@ RULES = [
 ]
 
 
-def classify(name):
+# A JIT module launch (Triton) vs a kernel compiled into a library. The launching runtime
+# call says which, for any launch that was not a graph replay: Triton goes through
+# hip/cuModuleLaunchKernel, compiled C++ through hipLaunchKernel, hipBLASLt through
+# hipExtModuleLaunchKernel. aiter's asm kernels are loaded modules too, so the name must not
+# look like one of theirs (or like a C++ symbol) before the launch overrides the name rules.
+MODULE_LAUNCH_APIS = ("hipModuleLaunchKernel", "cuModuleLaunchKernel")
+NOT_TRITON_NAME = re.compile(r"fmha|_ZN|aiter|ck_|asm|::|<|\(", re.IGNORECASE)
+
+
+def classify(name, launch_apis=None):
     for rx, cls, backend, editable, hint in RULES:
         if re.search(rx, name, re.IGNORECASE):
+            if (cls == "library_attn" and launch_apis
+                    and any(api in launch_apis for api in MODULE_LAUNCH_APIS)
+                    and not NOT_TRITON_NAME.search(name)):
+                # vLLM's in-tree kernel_paged_attention_2d matched 'paged|attention' and was
+                # routed as an uneditable CK library kernel.
+                return ("triton", "triton", True,
+                        "Triton attention kernel (JIT module launch) — source-editable; tune or "
+                        "rewrite, and compare against a backend swap.")
             return cls, backend, editable, hint
     # Fallback: a snake_case symbol ending in 'kernel' (and not a mangled C++ symbol) is almost
     # always a Triton/custom JIT kernel -> editable.
@@ -271,6 +288,14 @@ def parse_torch_trace(path):
             return "prefill", ctx_tok + dec_batch      # dense/MoE M = all tokens in the step
         return "decode", dec_batch
 
+    # correlation -> launching runtime call (graph replays carry no per-kernel launch API)
+    runtime_by_corr = {}
+    for e in events:
+        if isinstance(e, dict) and e.get("cat") in ("cuda_runtime", "hip_runtime"):
+            corr = (e.get("args") or {}).get("correlation")
+            if corr is not None:
+                runtime_by_corr[corr] = e.get("name")
+
     agg = {}  # name -> dict
     total_us = 0.0
     launches = 0
@@ -288,6 +313,10 @@ def parse_torch_trace(path):
         d["total_us"] += dur
         cat = e.get("cat", "")
         d["cat_counts"][cat] = d["cat_counts"].get(cat, 0) + 1
+        api = runtime_by_corr.get((e.get("args") or {}).get("correlation"))
+        if api and "Graph" not in api:
+            apis = d.setdefault("launch_apis", {})
+            apis[api] = apis.get(api, 0) + 1
         # attribute this launch to its serving phase (measured from the step span it falls in)
         phase, stepM = _phase_of(e.get("ts"))
         if phase:
@@ -711,7 +740,7 @@ def build_summary(agg, total_us, launches, source, top_n, enrich=None,
 
     top = []
     for rank, (name, d) in enumerate(items[:top_n], 1):
-        cls, backend, editable, hint = classify(name)
+        cls, backend, editable, hint = classify(name, d.get("launch_apis"))
         shapes = sorted(d["shapes"]) if d["shapes"] else []
         dtypes = sorted(d["dtypes"]) if d["dtypes"] else []
         if not shapes and enrich:
@@ -794,7 +823,7 @@ def build_workload(agg, total_us, top_n, target=""):
         items = [(n, d) for (n, d) in items if target.lower() in n.lower()]
     kernels = []
     for name, d in items[:top_n]:
-        cls, backend, editable, hint = classify(name)
+        cls, backend, editable, hint = classify(name, d.get("launch_apis"))
         by_case = d.get("by_case") or {}
         cases = []
         for (sig, dtype_sig), c in by_case.items():

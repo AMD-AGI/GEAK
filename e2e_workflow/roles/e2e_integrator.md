@@ -112,8 +112,15 @@ differently → flips borderline argmaxes → over-rejects valid kernels). Inste
   greedy/temp=0, and run `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1 --model <MODEL_PATH>
   --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` against each (it prints `GSM8K_EXACT_MATCH=<s>`).
   The script samples the SAME fixed gsm8k subset for both (seed-pinned), so the scores are comparable.
-- ACCEPT the candidate iff `cand_score >= baseline_score - $ACCURACY_TOL` (quality preserved); otherwise
-  `rejected` with reason `accuracy_regression` (record both scores). This REPLACES byte-parity for the
+- Decide with the shared gate (not a flat `cand_score >= baseline_score - $ACCURACY_TOL`):
+  run `python3 "$SKILL_DIR/scripts/accuracy_gate.py" --base <gsm8k_base.json> --cand
+  <gsm8k_cand.json> --tol "$ACCURACY_TOL" --out <dir>/accuracy_gate.json` (exit 0 pass, 1 fail,
+  3 inconclusive). It pairs the two legs question by question (one-sided exact McNemar):
+  **pass** = drop ≤ `ACCURACY_TOL`; **fail** = drop > `ACCURACY_TOL` AND significant; **inconclusive**
+  = drop > `ACCURACY_TOL` but n cannot resolve it → re-run BOTH legs with a larger `--limit` (up to the
+  full 1319) and gate again; never accept or reject on an inconclusive verdict.
+  ACCEPT on pass; on fail `rejected` with reason `accuracy_regression` (record both scores and
+  the gate json). This REPLACES byte-parity for the
   quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply the
   throughput + engagement + memory gates as usual. (You can reuse the same two servers for the throughput
   A/B to avoid extra launches.)

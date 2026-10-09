@@ -165,6 +165,13 @@ const RUNTIME_IMAGE = String(A.runtime_image || A.image || '');
 const EXEC_PREFIX = String(A.exec_prefix || '');
 const FUSION_RUNTIME_INPUTS = EXEC_PREFIX ? { EXEC_PREFIX } : {};
 const BACKEND = String(A.backend != null ? A.backend : 'sglang').trim() || 'sglang';  // serving adapter
+// Fallback for a vLLM build that emits NO step annotation (pre-0.27, or a fork that dropped
+// annotate_profile). Arms scripts/vllm_phase_annotate.py in the fusion capture overlay so the
+// trace carries sglang-dialect step[...] spans. OFF by default: current vLLM annotates natively,
+// and wrapping execute_model on every step when it is not needed is pure capture overhead.
+// Decide it from evidence, not by guessing: `trace_capability.py` reporting
+// `phase_annotation_count: 0` on a profiled trace is what justifies turning this on.
+const VLLM_PHASE_ANNOTATE = String(A.vllm_phase_annotate != null ? A.vllm_phase_annotate : 'false') === 'true';
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // Serving tensor-parallel: TP size + the GPU set used for EVERY e2e SERVING launch (baseline, config
@@ -478,7 +485,7 @@ const DEEP_FINAL_ACCURACY_LIMIT = parseInt(A.deep_final_accuracy_limit != null ?
 // (over-strict) byte-parity. Default 'none' => unchanged byte/greedy parity (normal/fast untouched).
 const ACCURACY_GATE = String(A.accuracy_gate || 'none').trim();          // 'none' | 'gsm8k'
 const ACCURACY_LIMIT = parseInt(A.accuracy_limit != null ? A.accuracy_limit : 200, 10); // sampled gsm8k subset size
-const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);        // allowed absolute exact_match drop vs baseline
+const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);        // largest exact_match drop that is not material; scripts/accuracy_gate.py fails only a significant drop above it
 const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
   ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
   : {};
@@ -841,7 +848,7 @@ const FUSION_DISCOVER_SCHEMA = obj({
 const FUSION_RANK_SCHEMA = obj({
   status: { type: 'string' }, round: { type: ['number', 'string'] },
   fusion_topk_json: { type: 'string' }, fusion_topk_md: { type: 'string' },
-  execution_list: arrObj, notes: { type: 'string' },
+  execution_list: arrObj, config_levers: arrObj, notes: { type: 'string' },
 }, ['fusion_topk_json', 'execution_list']);
 
 const FUSION_UNIT_SCHEMA = obj({
@@ -2464,6 +2471,10 @@ let curOverlay = ST.overlay || '';
 let curTput = ST.throughput || 0;
 const acceptedFusions = (ST.accepted_fusions || []).slice();
 let fusionDisposition = ST.fusion_disposition || null;
+// Flag/env levers found by fusion ranking (tier A). They are configuration changes, not
+// fusions, so they go to the config tuner -- or, when this run may not tune config, back
+// to the caller as config_recommendations.
+let fusionConfigLevers = ST.fusion_config_levers || [];
 
 if (want('setup')) {
   phase('Setup');
@@ -3334,8 +3345,16 @@ if (want('setup')) {
   // BASELINE capture (only) when semantics mapping is enabled, so the shared clean
   // trace carries the module hierarchy semantics needs. Reprofiles keep curEnv
   // (the optimization Top-N does not need stacks, which bloat the trace).
-  const baselineExtraEnv = SEMANTICS_MAPPING_ON
-    ? (curEnv ? curEnv + ' ' : '') + 'SGLANG_PROFILE_WITH_STACK=true'
+  // Each adapter has its own with_stack switch; the sglang one is a no-op env on vllm.
+  // vLLM also arms the Triton launch probe here: a Python-launched Triton kernel has no
+  // dispatcher op, so this trace -- the Clean Trace semantics reads prefill shapes from --
+  // gives it no dims otherwise (bench_e2e.sh builds the probe overlay; GPU timing unchanged).
+  const PROFILE_WITH_STACK_ENV = {
+    sglang: 'SGLANG_PROFILE_WITH_STACK=true',
+    vllm: 'VLLM_PROFILE_WITH_STACK=true GEAK_TRITON_LAUNCH_SHAPES=1',
+  }[BACKEND];
+  const baselineExtraEnv = (SEMANTICS_MAPPING_ON && PROFILE_WITH_STACK_ENV)
+    ? (curEnv ? curEnv + ' ' : '') + PROFILE_WITH_STACK_ENV
     : curEnv;
   const profileTraceLensInputs = acceptedFusions.length ? {} : TRACELENS_INPUTS;
   profile = await safeAgent(
@@ -3355,17 +3374,20 @@ if (want('setup')) {
 // (captured on the same stack, with Python stacks). Failures are non-fatal: when a
 // fusion lands the stack is re-profiled, then Strategize routes on that Top-N.
 // ===========================================================================
-// The clean-trace capture (GEAK_FUSION_TRACE, profile_by_stage) and the Semantic
-// shape replay are implemented for sglang only. On any other backend skip the
-// phase up front and say so, instead of failing somewhere inside it.
-if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND !== 'sglang') {
-  log(`KernelFusion skipped: BACKEND=${BACKEND} is not supported (sglang only).`);
+// The clean-trace capture and the Semantic completion exist for sglang
+// (GEAK_FUSION_TRACE, profile_by_stage, graph-construction shape replay) and for
+// vllm (step-bounded capture, dispatch-op anchors, CUDA-graph-off boundary donor).
+// On any other backend skip the phase up front and say so, instead of failing
+// somewhere inside it.
+const FUSION_BACKENDS = new Set(['sglang', 'vllm']);
+if (!FAST_MODE && FUSION_DISCOVERY_ON && !FUSION_BACKENDS.has(BACKEND)) {
+  log(`KernelFusion skipped: BACKEND=${BACKEND} is not supported (sglang, vllm).`);
   fusionDisposition = {
     status: 'skipped_backend', applied: [], blocked: [], deferred: [],
-    notes: `KernelFusion supports BACKEND=sglang only; this run uses ${BACKEND}.`,
+    notes: `KernelFusion supports BACKEND=sglang or vllm; this run uses ${BACKEND}.`,
   };
 }
-if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
+if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
   phase('KernelFusion');
   fusionSemanticsAttempted = SEMANTICS_MAPPING_ON;
   const fusionEntryTput = curTput;
@@ -3386,22 +3408,51 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
     const fusionRound = 'fusion_capture';
     const fusionCaptureDir = `${EVAL_DIR}/${fusionRound}`;
     const expectedFusionManifest = `${fusionCaptureDir}/profile_trace_manifest.json`;
-    // Fusion needs call/module hierarchy, not the long statistical window used by
-    // the native Top-N profiler. Keep this mode scoped to the dedicated sglang
-    // Fusion capture: three steps per separately captured stage with Python
-    // stacks, and no client warmup inside the window (bench_e2e.sh), so prefill
-    // reaches a real batch and decode/verify reaches full concurrency.
-    // bench_e2e.sh leaves normal Profile/reprofile sizing unchanged otherwise.
-    const captureEnv = BACKEND === 'sglang'
-      ? (curEnv ? curEnv + ' ' : '') +
-        'GEAK_FUSION_TRACE=1 GEAK_FUSION_PROFILE_STEPS=3 GEAK_FUSION_PROFILE_WARMUPS=0 ' +
-        'SGLANG_PROFILE_WITH_STACK=true'
+    // Fusion needs call/module hierarchy and phase-tagged steps, not the long statistical
+    // window used by the native Top-N profiler. bench_e2e.sh leaves normal Profile/reprofile
+    // sizing unchanged; only this capture is switched into fusion evidence mode.
+    //
+    // The two stacks reach that mode differently and NEITHER can be left at its default:
+    //   sglang - profile_by_stage writes EXTEND and DECODE as separate traces; three steps
+    //            per stage with no client warmup inside the window (bench_e2e.sh), so prefill
+    //            reaches a real batch and decode/verify reaches full concurrency. with_stack
+    //            must be forced ON (the adapter defaults it off).
+    //   vllm   - has no profile_by_stage, so a SINGLE window has to contain both phases. It DOES
+    //            annotate natively: gpu_worker wraps every execute_model in annotate_profile(),
+    //            whose default branch emits execute_context_<n>(<t>)_generation_<n>(<t>) as a
+    //            record_function -- the legacy dialect parse_profile/semantic_kernel_mapping
+    //            already read. Measured on v0.27.1/gfx942: 774 spans in a 25s window, giving a
+    //            full serving block (steady=true, decode_batch==CONC) and a per-kernel phase.
+    //            So no annotation flag is needed; with_stack + the iteration bound are set by
+    //            scripts/adapters/vllm.sh. On an OLD build that emits nothing, set
+    //            args.vllm_phase_annotate:"true" to arm the capture overlay's post-import hook
+    //            (scripts/vllm_phase_annotate.py), which supplies sglang's step[...] dialect
+    //            instead. Opt-in, because on a build that already annotates it is pure overhead.
+    const FUSION_CAPTURE_ENV = {
+      sglang: 'GEAK_FUSION_TRACE=1 GEAK_FUSION_PROFILE_STEPS=3 GEAK_FUSION_PROFILE_WARMUPS=0 ' +
+        'SGLANG_PROFILE_WITH_STACK=true',
+      vllm: 'GEAK_FUSION_TRACE=1 GEAK_TRITON_LAUNCH_SHAPES=1' +
+        (VLLM_PHASE_ANNOTATE ? ' GEAK_VLLM_PHASE_ANNOTATE=1' : ''),
+    };
+    // An UNADAPTED backend keeps its previous env verbatim rather than being handed a
+    // fusion flag no adapter honors: it would disable bench_e2e.sh's window sizing and
+    // leave nothing in its place. Say so instead of degrading quietly.
+    const captureEnv = FUSION_CAPTURE_ENV[BACKEND]
+      ? (curEnv ? curEnv + ' ' : '') + FUSION_CAPTURE_ENV[BACKEND]
       : curEnv;
     // The formal Profile already captured this stack with Python stacks; the collector
     // only builds the manifest from it, and captures on its own only as a fallback
     // (e.g. a TraceLens profile that skipped the raw capture).
     const profileTraceDir = (profile && (profile.trace_dir ||
       (profile.trace_manifest_json ? `${EVAL_DIR}/profile/round_0/profile` : ''))) || '';
+    if (!FUSION_CAPTURE_ENV[BACKEND]) {
+      log(`KernelFusion: backend '${BACKEND}' has no fusion-capture profile; capturing with the ` +
+          'default profiler window (expect degraded module/phase evidence in Phase 1).');
+    }
+    // Only when the fallback is armed does the collector build the capture-only overlay that
+    // carries the hook (the orchestrator has no fs access, so the role does it).
+    const PHASE_ANNOTATION = (BACKEND === 'vllm' && VLLM_PHASE_ANNOTATE)
+      ? 'vllm_overlay_hook' : 'native';
     fusionCapture = await safeAgent(
       roleAgent('fusion_trace_collector', 'capture',
         'Build the fusion trace manifest from PROFILE_TRACE_DIR when it is usable; capture only as a fallback. Do not build Top-N.', {
@@ -3412,7 +3463,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
           CAPTURE_REPEATS: 1,
           CAPTURE_NUM_PROMPTS: Math.max(CONC * 5, CONC),
           OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags,
-          EXTRA_ENV: captureEnv, SKILL_DIR: WORKFLOW_DIR,
+          EXTRA_ENV: captureEnv, PHASE_ANNOTATION, SKILL_DIR: WORKFLOW_DIR,
           ...FUSION_RUNTIME_INPUTS, ...TRACELENS_INPUTS,
         }),
       { phase: 'KernelFusion', label: 'fusion-trace-collector:capture', schema: CAPTURE_SCHEMA }, 1);
@@ -3495,6 +3546,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
           FUSION_INPUTS.FUSION_TOPK_JSON = ranked.fusion_topk_json;
           fusionExecutionList = Array.isArray(ranked.execution_list)
             ? ranked.execution_list.slice() : [];
+          if (Array.isArray(ranked.config_levers)) fusionConfigLevers = ranked.config_levers;
           fusionFailureStage = 'unit_validation';
           // ---- unit-side scheduling: spend the budget on LADDER TOPS ------
           // The budget is a microbench-run count, and it used to be spent in
@@ -3862,7 +3914,9 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang') {
             'unit_side_status pass/equivalent_pass/subsumed_pass. Start from CURRENT_OVERLAY/FLAGS/ENV/THROUGHPUT, ' +
             'which already include earlier terminal wins. For the selected ladder, author a reversible lazy-load overlay, ' +
             'prove ENGAGED on every TP rank, run the interleaved serving A/B with AB_DECIDE_SCRIPT deciding each pair, then ' +
-            'run the accuracy gate only if the A/B passed (reuse ACCURACY_REFERENCE as the base score when it is set), and descend its ' +
+            'run the accuracy gate only if the A/B passed and the unit-side parity is not bit-exact (gsm8k, then ' +
+            'scripts/accuracy_gate.py with ACCURACY_TOL; reuse ACCURACY_REFERENCE.path as the base leg when it is set; ' +
+            're-run both legs larger on inconclusive), and descend its ' +
             'declared ladder only when the wider rung fails. Preserve PRIOR_APPLY_RESULT dispositions verbatim and merge ' +
             'only this call\'s terminal result into it. Write the full aggregate apply_result.json, run ' +
             'fusion_applyback_harness.py with --allow-partial-coverage (later calls still have legitimate unprocessed rows), ' +
@@ -4057,8 +4111,9 @@ if (acceptedFusions.length > fusionAcceptedAtEntry) {
       EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '',
       // Same field name as native strategize; value is the profiled stack (post-Fusion curTput).
       BASELINE_THROUGHPUT: curTput, WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT,
-      CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+      CONFIG_TUNE_ENABLED, ENABLE_FP8, SKILL_DIR: WORKFLOW_DIR,
       FUSION_TOPK_JSON: FUSION_INPUTS.FUSION_TOPK_JSON,
+      FUSION_CONFIG_LEVERS: CONFIG_TUNE_ENABLED ? fusionConfigLevers : [],
       FUSION_UNITSIDE_JSON: FUSION_INPUTS.FUSION_UNITSIDE_JSON,
       ACCEPTED_FUSIONS: acceptedFusions,
       FUSION_DISPOSITION: fusionDisposition,
@@ -4166,6 +4221,8 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       // Gate vs the current accepted stack (fused if Fusion won), not Setup's original baseline.
       BASELINE_THROUGHPUT: curTput,
       NOISE_BAND_PCT: NOISE_BAND, CONFIG_DIRECTIONS: strategy.config_directions,
+      // Gates the lossy FP8 axis (kv-cache / quantization); the role reads it, it was never passed.
+      ENABLE_FP8,
       CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
       MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
       REQUIRED_FUSION_ENGAGEMENT: acceptedFusions,
@@ -6085,6 +6142,7 @@ const carryState = {
   config_directions: (strategy && strategy.config_directions) || [],
   accepted_fusions: acceptedFusions,       // KernelFusion wins banked into curOverlay
   fusion_disposition: fusionDisposition,   // blocked/deferred/coverage — PHASE=report needs these
+  fusion_config_levers: fusionConfigLevers,
   semantics_mapping: semantics || { status: 'unavailable' },
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
   // Full tuning-phase result, so a phase-by-phase resume does not re-run the tuning loop and the Report
@@ -6189,6 +6247,9 @@ const wfReturn = {
        : (want('final') ? 'unknown' : 'phase_partial')),
   output_parity: validation ? validation.output_parity : 'unknown',
   accepted_config: { flags: curFlags, env: curEnv },
+  // Levers this run was not allowed to measure (config_tune=false): the caller owns
+  // config, so they are handed back untested rather than applied or dropped.
+  config_recommendations: CONFIG_TUNE_ENABLED ? [] : fusionConfigLevers,
   semantics_mapping: semantics || { status: 'unavailable' },
   accepted_fusions: acceptedFusions,
   fusion_disposition: fusionDisposition,

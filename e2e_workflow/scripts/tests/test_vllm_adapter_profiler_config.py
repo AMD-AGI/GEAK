@@ -58,7 +58,8 @@ class VllmProfilerConfigTest(unittest.TestCase):
         self._write(os.path.join(self.bin, "vllm"),
                     '#!/usr/bin/env bash\n'
                     'printf \'VLLM_ARGV: %s\\n\' "$*"\n'
-                    'printf \'VLLM_ENV: VLLM_TORCH_PROFILER_DIR=%s\\n\' "${VLLM_TORCH_PROFILER_DIR:-}"\n')
+                    'printf \'VLLM_ENV: VLLM_TORCH_PROFILER_DIR=%s\\n\' "${VLLM_TORCH_PROFILER_DIR:-}"\n'
+                    'printf \'VLLM_RPC_TIMEOUT=%s\\n\' "${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-}"\n')
 
     def _write(self, path, body):
         with open(path, "w", encoding="utf-8") as fh:
@@ -121,6 +122,69 @@ class VllmProfilerConfigTest(unittest.TestCase):
     def test_026_capture_opt_in(self):
         self._run("adapter_launch", probe_fields=FIELDS_026, PROFILE_CAPTURE_TRACES="1")
         self.assertIn('"capture_torch_profiler":true', self._argv())
+
+    def test_fusion_capture_turns_stacks_on_and_uses_fusion_iteration_bound(self):
+        # KernelFusion needs the nn.Module hierarchy (stacks ON) in a SHORT window, and must
+        # not inherit the ordinary Profile round's workload-derived PROFILE_MAX_ITERS.
+        self._run("adapter_launch", probe_fields=FIELDS_026, PROFILE_MAX_ITERS="48",
+                  EXTRA_ENV="GEAK_FUSION_TRACE=1", GEAK_FUSION_MAX_ITERS="12")
+        argv = self._argv()
+        self.assertIn('"torch_profiler_with_stack":true', argv)
+        self.assertIn('"max_iterations":12', argv)
+        self.assertNotIn('"max_iterations":48', argv)
+        self.assertIn('"detailed_trace_annotation":true', argv)
+
+    def test_fusion_capture_delays_by_engine_steps(self):
+        # GEAK_FUSION_DELAY_ITERS clears the prefill ramp in ENGINE STEPS; unset, the
+        # ordinary PROFILE_DELAY_ITERS (default 0) still applies.
+        self._run("adapter_launch", probe_fields=FIELDS_026,
+                  EXTRA_ENV="GEAK_FUSION_TRACE=1", GEAK_FUSION_DELAY_ITERS="45")
+        self.assertIn('"delay_iterations":45', self._argv())
+        self._run("adapter_launch", probe_fields=FIELDS_026, EXTRA_ENV="GEAK_FUSION_TRACE=1")
+        self.assertIn('"delay_iterations":0', self._argv())
+        self._run("adapter_launch", probe_fields=FIELDS_019,
+                  EXTRA_ENV="GEAK_FUSION_TRACE=1", GEAK_FUSION_DELAY_ITERS="45")
+        self.assertNotIn("delay_iterations", self._argv())
+
+    def test_with_stack_can_be_requested_through_extra_env(self):
+        # The orchestrator's formal profile asks for stacks via EXTRA_ENV, which reaches the
+        # server process, not the adapter shell that writes --profiler-config.
+        self._run("adapter_launch", probe_fields=FIELDS_026,
+                  EXTRA_ENV="FOO=1 VLLM_PROFILE_WITH_STACK=true")
+        self.assertIn('"torch_profiler_with_stack":true', self._argv())
+        self._run("adapter_launch", probe_fields=FIELDS_026,
+                  EXTRA_ENV="GEAK_FUSION_TRACE=1 VLLM_PROFILE_WITH_STACK=false")
+        self.assertIn('"torch_profiler_with_stack":false', self._argv())
+
+    def test_fusion_capture_without_max_iterations_warns(self):
+        proc = self._run("adapter_launch", probe_fields=FIELDS_019,
+                         EXTRA_ENV="GEAK_FUSION_TRACE=1")
+        self.assertIn('"torch_profiler_with_stack":true', self._argv())
+        self.assertNotIn("max_iterations", self._argv())
+        self.assertIn("NOT iteration-bounded", proc.stderr)
+
+    def _rpc_timeout(self):
+        for line in self._log().splitlines():
+            if line.startswith("VLLM_RPC_TIMEOUT="):
+                return line.split("=", 1)[1]
+        self.fail("fake vllm printed no VLLM_RPC_TIMEOUT line")
+
+    def test_with_stack_profile_raises_the_rpc_timeout(self):
+        # Kimi-K2.5 TP8 / vLLM 0.21: a 192-step with_stack window outlived the 300s
+        # execute_model RPC timeout and killed the engine before any trace was written.
+        self._run("adapter_launch", probe_fields=FIELDS_026,
+                  EXTRA_ENV="VLLM_PROFILE_WITH_STACK=true")
+        self.assertEqual(self._rpc_timeout(), "1800")
+        self._run("adapter_launch", probe_fields=FIELDS_026,
+                  EXTRA_ENV="GEAK_FUSION_TRACE=1")
+        self.assertEqual(self._rpc_timeout(), "1800")
+
+    def test_stackless_profile_and_caller_setting_leave_the_timeout_alone(self):
+        self._run("adapter_launch", probe_fields=FIELDS_026)
+        self.assertEqual(self._rpc_timeout(), "")
+        self._run("adapter_launch", probe_fields=FIELDS_026,
+                  EXTRA_ENV="VLLM_PROFILE_WITH_STACK=true VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=600")
+        self.assertEqual(self._rpc_timeout(), "600")
 
     def test_019_probe_omits_026_only_fields(self):
         self._run("adapter_launch", probe_fields=FIELDS_019)

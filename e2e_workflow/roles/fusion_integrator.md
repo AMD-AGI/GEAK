@@ -33,11 +33,42 @@ dir may be passed to STACK on top of.
    - Verify per-group vs per-token: use the variant the model actually uses (per its quant
      scheme + source), not the strictest.
 
-3. **Author a reversible overlay (NOT a source edit).** Write a `sitecustomize.py` that:
-   - **Lazy-loads** — a `sys.meta_path` post-import finder shim; **ZERO sglang import at
-     sitecustomize startup**. Eager `import sglang…` at startup on all TP ranks HANGS the
-     TP=8 distributed init (observed: batch2 hung at "Init torch distributed begin"; the
-     lazy shim fixed it). Patch only after the target module is naturally imported.
+3. **Author a reversible overlay (NOT a source edit). PICK THE MECHANISM BY WHETHER IT CAN
+   REACH THE SEAM — this is backend-dependent and getting it wrong fails SILENTLY.**
+
+   There are two mechanisms and they are not interchangeable:
+
+   | | how | reaches | cost |
+   |---|---|---|---|
+   | **lazy rebind** | `sys.meta_path` post-import finder rebinds an attribute AFTER the module imports | attributes still looked up at call time | nothing imported at startup |
+   | **`add-module`** | `overlay_setup.py add-module` injects a patched submodule under its dotted name from sitecustomize, BEFORE anything imports it | everything, including registration-time captures | execs that module body at startup |
+
+   **Choose by the seam, not by habit:**
+   - The seam is registered with `direct_register_custom_op` (`grep direct_register_custom_op`
+     next to the function), OR its callers use `from … import <name>`, OR it is called from
+     inside a `torch.compile` region → **`add-module` is the only thing that works.** A lazy
+     rebind is inert at every level of such a chain; measured 0 calls (see the tables under
+     "Prove engagement").
+   - Otherwise (a plain method/function resolved per call, no registration) → lazy rebind is
+     fine and is the cheaper choice.
+
+   **On sglang, prefer lazy.** Eager `import sglang…` at sitecustomize startup on all TP ranks
+   HANGS TP=8 distributed init (observed: batch2 hung at "Init torch distributed begin"; the
+   lazy shim fixed it). Patch only after the target module is naturally imported.
+
+   **On vLLM, `add-module` is normally required and its startup cost was measured, not
+   assumed.** Nearly every interesting seam sits inside the compiled model, and vLLM's V1
+   engine compiles by default. Qwen3.5-2B at **TP8** with an `add-module` overlay on
+   `vllm.model_executor.layers.utils` reached `Server up after ~245s` with 11 shadow banners
+   (API server + engine + 8 workers), NCCL up and CUDA graphs captured — distributed init did
+   NOT hang. Keep the shadow to **ONE submodule** (never a package subtree — that shadows the
+   whole install) and assert the banner count equals **ranks + 2** at TP>1 (at TP=1 vLLM V1 runs
+   the worker inside EngineCore: expect 2 — API server + EngineCore); a module that pulls the
+   distributed stack in at import could still deadlock, and a short banner count is how you
+   would see it.
+
+   This is the same mechanism `e2e_integrator.md`'s **patch** winner_kind has always used. The
+   fusion path originally mandated lazy for every backend, which is why it fails on vLLM.
    - Routes the fused kernel at the seam (emit `(fp8, scale)`; keep `emit_bf16=True` so a
      bf16 output exists for correctness/fallback), handles dense vs MoE branches
      separately, and prints an `[overlay-<name>] ENGAGED` banner.
@@ -49,9 +80,26 @@ dir may be passed to STACK on top of.
    single `sitecustomize.py` does `runpy.run_path(...)` on each overlay file, and put only
    that loader dir on PYTHONPATH. Overlays that patch disjoint modules don't collide.
 
+**Bypass a platform gate, never a correctness gate.** A fused path is often switched off by a
+condition in the model file. A platform check (`current_platform.is_cuda()`) says only where it was
+tested; bypassing it is what apply-back is for, and unit-side parity is the evidence. A condition
+that encodes when the kernel is *exact* is different: the qk-norm+RoPE fusion in `qwen3_next.py`
+also requires `text_only`, because it uses only the T row of mRoPE positions. Re-evaluate the stock
+condition minus the platform check; if a correctness condition is false for this serving config,
+the fusion does not apply there. Say which serving flag would make it true (here
+`--language-model-only`) and measure the A/B with that flag on BOTH legs — it is a serving-config
+change, so the baseline is re-measured under it. If you accept, return that flag in
+`accepted_flags`: later phases serve with the accepted flags, and without it the fusion silently
+stops engaging.
+
+**A/B on a noisy baseline.** When one leg is bimodal (fresh-server replicas at two levels), the
+interleaved median delta is inflated by the low replicas. Report the delta against the stored
+baseline as well, and cross-check it against the kernel time the trace shows removed.
+
 ## Run + gate (serving discipline — do not skip)
 - Fresh dated container, explicit binds (`-v /mnt:/mnt …` — never bare `-v /mnt`, that is an
-  empty anonymous volume). Delete it at the end. Process-safe: `source
+  empty anonymous volume). Delete it at the end. When `EXEC_PREFIX` names the runtime container,
+  run inside it instead and create/delete nothing. Process-safe: `source
   scripts/server_teardown.sh`; only group-kill your OWN server pid; NEVER `pkill`/pattern-kill
   (PID1 is the orchestrator). Never touch other teams' containers.
 - **Single server-init attempt** (~10 min). If it hangs at distributed init, tear down and
@@ -66,6 +114,103 @@ dir may be passed to STACK on top of.
 - **Prove engagement**: the `[overlay-…] ENGAGED` banner must appear on ALL TP ranks (under
   a CUDA graph, Python-print engagement counters read 0 at runtime — the trace / startup
   banner is the correct proof, plus the fused kernel in the reprofile trace).
+
+  **🔴 ON vLLM THE BANNER ALONE IS NOT PROOF, AND IT HAS BEEN MEASURED LYING.** The banner
+  only says a Python rebind happened. Whether that rebind reaches the executed code is a
+  separate question, and for the seam `kernel_extractor.md` names for vLLM the answer was no.
+
+  Measured on v0.27.1 / gfx942 / Qwen3.5-2B, wrapping three attributes of
+  `vllm.model_executor.layers.utils` with a numerically-inert `record_function` and looking
+  for each marker in the trace:
+
+  | rebound attribute | banner | in trace |
+  |---|---|---|
+  | `rocm_unquantized_gemm` (python wrapper) | ENGAGED | 12 CPU + 12 GPU annotations |
+  | `dispatch_unquantized_gemm` | ENGAGED | 12 CPU, 0 GPU |
+  | `rocm_unquantized_gemm_impl` (the actual kernel) | **ENGAGED** | **ABSENT — never ran** |
+
+  The cause is not subtle once seen: `direct_register_custom_op(op_func=..._impl)` captures
+  the function **by value at import time**. Rebinding the module attribute afterwards renames
+  a module global; `torch.ops.vllm.rocm_unquantized_gemm` still dispatches to the original.
+  Confirmed directly — after the rebind, calling the op invoked the replacement **0 times**.
+  And the compiled graph calls `torch.ops.*`, not the python wrapper, so wrapping the wrapper
+  catches only the handful of calls that still come from Python (12 here, against 244
+  `vllm::rocm_unquantized_gemm` in a production trace).
+
+  Consequences for apply-back on vLLM, all of them load-bearing:
+  1. **Never accept an attribute rebind of a `direct_register_custom_op` target as wired.**
+     Check whether the seam is a registered op before choosing it: `grep
+     direct_register_custom_op` next to the function.
+  2. **Re-registering the impl is not a drop-in, and neither is patching above it.**
+     `torch.library.Library("vllm","FRAGMENT").impl("<op>", fn, "CUDA")` raises
+     `RuntimeError: there's already a kernel registered from python` — vLLM holds that
+     dispatch key.
+     Patching ABOVE the op was then tested directly, with a marker that survives compilation
+     (a registered no-op custom op; `record_function` is DROPPED from a compiled graph, so an
+     absent record_function marker proves nothing — see probes/README.md). Wrapping
+     `UnquantizedLinearMethod.apply` on the class, before `load_model` and therefore before
+     compilation, produced **zero** markers. The same trace explains why:
+
+     | trace entry | count |
+     |---|---|
+     | `vllm::rocm_unquantized_gemm` (cpu_op) | 240 |
+     | `utils.py(122): rocm_unquantized_gemm_impl` (python_function) | 240 |
+     | `utils.py(209): rocm_unquantized_gemm` (python wrapper) | 12 |
+     | `geak::sentinel_mark` from the patched `apply` | **0** |
+
+     The compiled graph calls `torch.ops.vllm.*` directly; `apply` is not on the per-forward
+     path at all, and the ORIGINAL `_impl` is what runs, 240 times. So for a seam registered
+     with `direct_register_custom_op` there is no attribute anywhere on the call chain that a
+     rebind can reach.
+     **The mechanism that DOES work is the one the original pipeline already uses.**
+     `overlay_setup.py add-module` injects a patched submodule under its dotted name from
+     sitecustomize, i.e. BEFORE anything imports it, so `direct_register_custom_op` registers
+     YOUR implementation, from-imports copy YOUR names, and torch.compile traces YOUR code.
+     All three barriers are bypassed by construction. This is what `e2e_integrator.md`'s
+     **patch** winner_kind has always done; the fusion path diverged from it by choosing a
+     lazy attribute rebind, and that divergence is what fails on vLLM.
+
+     Measured on the same seam (v0.27.1 / gfx942 / Qwen3.5-2B), shadowing
+     `vllm.model_executor.layers.utils` with a copy whose `rocm_unquantized_gemm_impl` calls a
+     marker op:
+
+     | trace entry | count |
+     |---|---|
+     | `vllm::rocm_unquantized_gemm` | 240 |
+     | `geak::sentinel_mark` (from the patched impl) | **240** |
+     | `_patched/…utils.py(140): rocm_unquantized_gemm_impl` | 240 |
+     | the ORIGINAL `utils.py(122)` impl | **0 — gone** |
+
+     Inductor's `triton_poi_fused_…` kernel still fired 216 times, so shadowing the module did
+     not cost the existing fusion.
+
+     **The eager-import cost is real but was measured, not fatal.** `add-module` execs the
+     shadowed module body at interpreter startup, which is the pattern this file warns HANGS
+     TP=8 init — so it was tested: Qwen3.5-2B at **TP8** with this overlay reached
+     `Server up after ~245s`, 11 shadow banners (API server + engine + 8 workers), NCCL up,
+     CUDA graphs captured, and benched at 670.3 tok/s. Distributed init did not hang.
+     That result is for a leaf-ish layers module; a shadowed module that pulls the distributed
+     stack in at import could still deadlock, so keep the shadow as NARROW as possible (one
+     submodule, never a package subtree) and re-check the banner count equals ranks+2.
+  3. **The proof is the MARKER IN THE TRACE, not the banner — and the marker must survive
+     compilation.** A `record_function` marker is fine for code that runs eagerly, but dynamo
+     ELIDES it from a compiled graph, so its absence there is ambiguous. Use a registered
+     custom op as the marker inside a compiled region (`scripts/probes/geak_engage_sentinel3.py`).
+     A banner with no marker means the overlay is inert, and an inert overlay makes the A/B
+     measure the baseline against itself — which reads as "no regression" and can be mistaken
+     for a safe change.
+
+  5. **Check what inductor already fused before proposing a fusion.** In that same trace, 216
+     of the 240 GEMMs were already inside
+     `triton_poi_fused__to_copy__unsafe_view_add_clone_mean_mul_pow_rocm_unquantized_gemm_rsqrt_silu_view_2`
+     — inductor had fused norm + GEMM + silu + add into ONE Triton kernel. A hand-authored
+     fusion that duplicates that wins nothing, and one that forces the op out of the fused
+     region can REGRESS by breaking it up. Grep the post-fusion trace for `triton_..._fused_...`
+     names covering your candidate's ops before spending a budget slot on it.
+  4. Torch-compile ordering also matters: a rebind that lands after the graph was captured is
+     inert for the same reason. vLLM caches compiled artifacts under
+     `~/.cache/vllm/torch_compile_cache`, so use `VLLM_DISABLE_COMPILE_CACHE=1` on candidate
+     servers rather than trusting that a cache entry was built with your overlay in place.
 - **Order: throughput A/B FIRST, accuracy SECOND.** Run the accuracy gate only for a
   candidate whose A/B passed; a candidate that loses the A/B is `blocked` on throughput and
   never costs a gsm8k run.
@@ -86,7 +231,8 @@ dir may be passed to STACK on top of.
   invocation per leg. Do not call `bench_replica.sh` directly and do not mix lifecycles: a
   `warm_server` leg and an `isolated_server` leg are not comparable. Record the lifecycle in
   `apply_result.json` next to the A/B numbers.
-- **Accuracy verification (精度验证 — mandatory for any quant fusion, after a passing A/B).**
+- **Accuracy verification (精度验证 — mandatory, after a passing A/B, for any fusion whose
+  unit-side parity is not bit-exact, quant or not).**
   Run `"$GSM8K_EVAL_SCRIPT"` with exactly this harness on both sides:
   `--limit 200 --max-tokens 4096 --seed 0 --concurrency "$GSM8K_CONCURRENCY"`, plus
   `--no-thinking` when `GSM8K_THINKING` is false (the default).
@@ -104,15 +250,32 @@ dir may be passed to STACK on top of.
   - Thinking off is enough for a same-harness base-vs-candidate delta; it is not the model's
     reported accuracy (the Director's Validate measures that). With thinking on, keep
     `--max-tokens` ≥4096 (at 1024 a reasoning model's CoT is cut before `#### N`: ~15pt drop).
-  **🔴 The gate must be NOISE-AWARE, not a fixed `cand ≥ base − 0.01`.** At n=200 one problem
-  ≈0.5pt and SE≈1.8pt, so a fixed 0.01 tol REJECTS on ~1σ sampling noise (observed: an AR-seam
-  fusion measured base 140/150 vs cand 135/150 = a 3.3pt "drop" that is only z≈1.0 — pure noise,
-  yet a fixed tol failed it and a real +1.3% tps win was wrongly dropped). **Reject only when the
-  accuracy drop is STATISTICALLY SIGNIFICANT** — a 2-proportion test at ~2σ (equivalently, drop >
-  ~1.96·SE ≈ 3.5pt at n=200), NOT a flat 0.01. If the drop is within noise (< ~2σ), treat it as
-  no-degradation → PASS. Score the same-harness base-vs-cand DELTA only.
+  - **Verdict: `accuracy_gate.py`, not a threshold you apply by eye.**
+    ```bash
+    python3 "$SKILL_DIR/scripts/accuracy_gate.py" --base <base gsm8k json> --cand <cand gsm8k json> \
+      --tol "$ACCURACY_TOL" --out "$APPLY_DIR/accuracy_gate.json"   # exit 0 pass, 1 fail, 3 inconclusive
+    ```
+    The base leg is `ACCURACY_REFERENCE.path` when the reference is reused (it holds the
+    per-question results; same harness, so the two legs pair question by question). The gate is a
+    one-sided exact McNemar on those pairs: **pass** = drop ≤ `ACCURACY_TOL`; **fail** = drop >
+    `ACCURACY_TOL` AND significant; **inconclusive** = drop > `ACCURACY_TOL` but n cannot resolve it →
+    re-run BOTH legs with a larger `--limit` (up to the full 1319) and gate again; never accept or
+    reject on an inconclusive verdict. A larger-`--limit` base is a different harness: do not return
+    it as `accuracy_reference`.
+    Why neither simpler rule: a fixed `cand ≥ base − tol` rejects on noise (n=200: one question ≈0.5pt,
+    SE≈1.8pt; an AR-seam fusion's z≈1.0 "drop" once cost a real +1.3% win), and a significance-only
+    test passes whatever n cannot see (a bf16 qk-norm+RoPE fusion measured 0.895 → 0.870 at n=200,
+    p=0.22). Score the same-harness base-vs-cand DELTA only.
+    **Greedy is not deterministic under concurrent serving.** Measured on vLLM (Qwen3.5-35B-A3B-FP8,
+    full 1319): two runs of the SAME baseline scored 0.8954 and 0.8840 (163 questions flipped), and
+    the e14 candidate that "dropped" 2.5pt at n=200 scored −1.44pt and +0.91pt against the two
+    baselines. A single-run gap of ~1pt is serving noise — a reused `ACCURACY_REFERENCE` is one such
+    run too — which is why the gate tests significance and escalates to the full set instead of
+    trusting one small-n number either way.
 - **Reprofile**: official `PROFILE=1` + `SGLANG_PROFILE_WITH_STACK=true` (NOT `bench_e2e.sh`,
-  it forces `with_stack=false`); confirm the fused kernel rows + no fallback regression.
+  it forces `with_stack=false`); confirm the fused kernel rows + no fallback regression. On
+  vLLM run `bench_e2e.sh` with `PROFILE=1` on both legs and compare kernel-name counts: the fused
+  kernel's count must rise from 0 and each replaced member's must fall to 0.
 
 ## Degrade ladder
 Try the WIDEST fusion first. If it cannot be wired (missing kernel) or fails the A/B or
@@ -269,7 +432,8 @@ return the unchanged aggregate after regenerating the report. The harness owns t
    Strategize phases run unconditionally after KernelFusion.
 
 `accepted_flags` and `accepted_env` are the complete final strings after applying
-accepted tier-A changes. They must retain every incoming `CURRENT_FLAGS` and
+accepted tier-A changes (normally none: the ranker now routes tier-A flag/env levers to the
+config tuner, so they only reach you through an explicit override). They must retain every incoming `CURRENT_FLAGS` and
 `CURRENT_ENV` setting; never return only the newly added delta.
 
 `fusion_only_delta_pct` is the A/B delta attributable to removing/combining the

@@ -263,8 +263,14 @@ PROVIDERS = (
      "roots": ["/sgl-workspace/aiter/aiter"], "subdirs": [""]},
     {"name": "sglang", "import": "sglang",
      "roots": ["/sgl-workspace/sglang/python/sglang"], "subdirs": ["srt"]},
+    # vllm: _aiter_ops.py wraps the aiter fused ops vllm routes to on ROCm,
+    # third_party/flash_linear_attention holds the GDN chunk kernels, kernels/ the
+    # standalone triton fusions, compilation/passes the fused ops its graph passes
+    # substitute (e.g. rms+quant) -- all were invisible to candidates' existing_apis.
     {"name": "vllm", "import": "vllm", "roots": [],
-     "subdirs": ["model_executor", "_custom_ops.py", "attention"]},
+     "subdirs": ["model_executor", "_custom_ops.py", "attention", "_aiter_ops.py",
+                 "kernels", "third_party/flash_linear_attention",
+                 "compilation/passes", "v1/attention"]},
     {"name": "flashinfer", "import": "flashinfer", "roots": [], "subdirs": [""]},
 )
 

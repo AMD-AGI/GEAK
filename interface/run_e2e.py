@@ -3737,6 +3737,11 @@ def normalize_result(h: dict, wf: dict) -> dict:
     tuning_section = _tuning_skillset_section(wf, eval_dir)
     if tuning_section is not None:
         result["tuning_skillset"] = tuning_section
+    # Flag/env levers fusion ranking found but this run was not allowed to measure
+    # (config_tune=false: the caller owns config). Untested; for the caller's search.
+    config_recommendations = wf.get("config_recommendations") or []
+    if config_recommendations:
+        result["config_recommendations"] = config_recommendations
     return result
 
 

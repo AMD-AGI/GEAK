@@ -822,12 +822,25 @@ def render_markdown(result):
     c = result["counts"]
     cov = result.get("coverage") or {}
     pg = result.get("phase_generalization") or {}
-    if c.get("needs_diagnosis"):
+    # The status stays needs_diagnosis either way (never eligible, never a `fail`); the
+    # banner must still say which rows are open and which were diagnosed functional, or a
+    # diagnosed layout incompatibility reads as "not refuted, just unmeasured".
+    diagnosed = sum(1 for r in result.get("results", [])
+                    if r.get("unit_side_status") == "needs_diagnosis"
+                    and r.get("failure_kind") == "functional")
+    undiagnosed = c.get("needs_diagnosis", 0) - diagnosed
+    if undiagnosed:
         lines.append(
-            "> 🔴 **%d 条 `needs_diagnosis`**：parity 未通过 ⇒ 该条的 "
+            "> 🔴 **%d 条 `needs_diagnosis`（未诊断）**：parity 未通过 ⇒ 该条的 "
             "`isolated_speedup` 是**未定义**，不是「慢」。喂错的 kernel 会走错分支、"
             "选错 tile，测出来的时间不属于这个候选。这些候选**没有被证伪**，只是"
-            "**没测成**，不得当作 `fail` 结案。" % c["needs_diagnosis"])
+            "**没测成**，不得当作 `fail` 结案。" % undiagnosed)
+        lines.append("")
+    if diagnosed:
+        lines.append(
+            "> ⚫ **%d 条 `needs_diagnosis`（已诊断 → `functional`）**：parity 未通过，且 "
+            "`parity_diagnosis` 已排除喂错的常见原因，确认为功能性不兼容。速度未定义、"
+            "不进入 apply-back；理由见各条 `parity_diagnosis`。" % diagnosed)
         lines.append("")
     if pg.get("open_gaps"):
         lines.append(
@@ -904,7 +917,10 @@ def render_markdown(result):
         fk = r.get("failure_kind") or "—"
         lines.append("| `%s` | %s | %s | **%s** | %s | %s | %s | %s | %s | %s | %s | `%s` | %s |" % (
             _esc(r["candidate_id"]), _esc(r["phase"]), _esc(r["family"]),
-            r["unit_side_status"], _esc(r.get("correctness_status") or "—"),
+            r["unit_side_status"] + (
+                " (functional)" if r["unit_side_status"] == "needs_diagnosis"
+                and r.get("failure_kind") == "functional" else ""),
+            _esc(r.get("correctness_status") or "—"),
             _esc(r.get("perf_status") or "—"), _esc(fk),
             _esc(r["parity"]), sp, _esc(r["engaged"]),
             _esc(r["tested_shape"]), _esc(r["fused_fn"]), _esc(r["reason"])))

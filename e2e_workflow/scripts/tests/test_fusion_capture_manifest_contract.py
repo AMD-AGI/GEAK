@@ -98,15 +98,18 @@ class FusionCaptureManifestContractTest(unittest.TestCase):
         self.assertNotIn("const FU =", source)
         self.assertNotIn("(A.fusion && typeof A.fusion === 'object')", source)
         self.assertNotIn("complete fusion prior/state supplied", source)
-        self.assertIn("if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang')", source)
+        self.assertIn("if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND))", source)
         self.assertIn("FUSION_TOPK_JSON: ''", source)
         self.assertIn("FUSION_CANDIDATES_JSON: ''", source)
         self.assertIn("FUSION_UNITSIDE_JSON: ''", source)
 
-    def test_non_sglang_backend_skips_fusion_with_a_recorded_reason(self):
+    def test_unsupported_backend_skips_fusion_with_a_recorded_reason(self):
         source = self._workflow_source()
-        guard = source.index("if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND !== 'sglang')")
-        body = source.index("if (!FAST_MODE && FUSION_DISCOVERY_ON && BACKEND === 'sglang')")
+        # vllm has its own capture + semantics path; dropping it from this set
+        # silently skips every vllm KernelFusion run.
+        self.assertIn("const FUSION_BACKENDS = new Set(['sglang', 'vllm']);", source)
+        guard = source.index("if (!FAST_MODE && FUSION_DISCOVERY_ON && !FUSION_BACKENDS.has(BACKEND))")
+        body = source.index("if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND))")
         self.assertLess(guard, body)
         self.assertIn("status: 'skipped_backend'", source[guard:body])
         # KernelFusion now runs after the formal Profile and before Strategize.
@@ -130,6 +133,22 @@ class FusionCaptureManifestContractTest(unittest.TestCase):
             role = fh.read()
         self.assertLess(role.index("PROFILE_TRACE_DIR"), role.index("TRACELENS_TRACE_FILE` only when"))
         self.assertIn("--auto-select-rank", role)
+
+    def test_a_reused_or_captured_trace_must_hold_both_phases(self):
+        # The Profile may skip the prefill ramp to reach steady decode; reusing that
+        # trace made every Kimi-K2.5 fusion table decode-only, reported as a pass.
+        with open(os.path.join(ROLES, "fusion_trace_collector.md")) as fh:
+            collector = fh.read()
+        reuse = collector[collector.index("Reuse the formal Profile trace first"):
+                          collector.index("TRACELENS_TRACE_FILE` only when")]
+        self.assertIn("--require-phases prefill,decode", reuse)
+        validate = collector[collector.index("5. Require the completed capture"):]
+        self.assertIn("--require-phases prefill,decode", validate)
+        with open(os.path.join(ROLES, "semantics_mapper.md")) as fh:
+            mapper = fh.read()
+        build = mapper[mapper.index("## PHASE=build_table"):mapper.index("## PHASE=complete_table")]
+        self.assertIn("--require-phases prefill,decode", build)
+        self.assertIn("--layer-boundary-map <map> --require-phases prefill,decode", mapper)
 
     def test_applyback_cannot_time_out_into_a_stale_profile(self):
         source = self._workflow_source()

@@ -79,6 +79,13 @@ accepted KernelFusion changes), `WORKLOAD` (isl/osl/conc → tells you prefill v
 Optional KernelFusion ownership inputs are `FUSION_TOPK_JSON`, `FUSION_UNITSIDE_JSON`,
 `ACCEPTED_FUSIONS`, and `FUSION_DISPOSITION`. Do not schedule an already-applied fusion again;
 an unapplied unit-side result must be routed to a fallback track or explicitly dropped with a reason.
+`FUSION_CONFIG_LEVERS` (list, may be empty) are flag/env switches fusion ranking found (tier A):
+configuration changes, not fusions, so KernelFusion does not apply them. When `CONFIG_TUNE_ENABLED`,
+emit one `config_directions` entry per lever — `axis` = the flag/env name, `swaps` = the lever's
+`handle` value vs. the current setting, `target_kernels` = the rows its `covers` would remove,
+`expected_pct_gpu` = its largest single `covers[].workload_forward_pct` (never the sum: one switch
+often changes several backends at once, e.g. `VLLM_ROCM_USE_AITER`), and cite the `lever_id` in
+`rationale`. Only a measured config A/B credits it.
 OPTIONAL profile-analysis prior (empty string = not provided): `ANALYSIS_SKILL`, `ANALYSIS_SKILL_DIR`
 (+ the Profiler's `profile_roofline_json`) — see step 1c.
 OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing as "not provided"):
@@ -317,6 +324,33 @@ Return JSON:
 ```
 
 ---
+
+### On vLLM (`BACKEND=vllm`)
+
+The steps above name SGLang seams and switches. On vLLM (verified on 0.27.1 / gfx942, FP8 block-scale MoE):
+
+- **Where the live kernels come from — read `server.log`, it says.**
+  - Dense FP8 linear: `Selected TritonFp8BlockScaledMMKernel for Fp8LinearMethod` → the op
+    `torch.ops.vllm.w8a8_triton_block_scaled_mm_func` (opaque to torch.compile), which calls
+    `vllm.model_executor.layers.quantization.utils.fp8_utils:w8a8_triton_block_scaled_mm`. That is imported
+    lazily inside the op body, so a module-attribute overlay reaches it. vLLM ships tuned per-(N,K) configs for
+    MI300X (`Using configuration from …`), so Triton re-tuning has little headroom; the lever is a backend swap.
+  - MoE: `Using TRITON Fp8 MoE backend` → `fused_moe.fused_experts_impl` → `fused_moe_kernel`. Its tuning hook is a
+    config JSON per (E, N, device, dtype, block) read through `VLLM_TUNED_CONFIG_FOLDER`; the log line
+    `Using default MoE config` means none exists for this shape — the cheapest head win (`fused-op-tune-hook`).
+- **aiter is a set of switches, not one.** `VLLM_ROCM_USE_AITER=1` turns on its sub-flags by default
+  (`…_LINEAR`, `…_MOE`, `…_RMSNORM`, `…_MHA`, `…_FUSION_SHARED_EXPERTS`), which swaps several backends at once. Every
+  config direction must name the ONE sub-flag it tests and pin the others (`=0`), or the A/B credits the wrong
+  change. A kernel-engagement prerequisite (e.g. `VLLM_ROCM_USE_AITER_LINEAR=1` for a CK GEMM head) is `apply_env`
+  on that head, not a config direction.
+- **Attention backends** are `--attention-backend ROCM_ATTN | ROCM_AITER_UNIFIED_ATTN | TRITON_ATTN`. With a KV block
+  size that is not a power of two, ROCM_ATTN runs the in-tree Triton `kernel_paged_attention_2d` (editable), not CK.
+- **Lossy directions need `ENABLE_FP8=true`.** `--kv-cache-dtype fp8` and `--quantization fp8` change numerics by
+  design; with `ENABLE_FP8=false` (the default) do not route them.
+- **Serving flags an accepted fusion needs** (e.g. `--language-model-only`) are part of the stack: keep them on every
+  direction's legs and re-check that fusion's engagement after any backend swap.
+- `FUSION_CONFIG_LEVERS[].covers[].workload_forward_pct` is a share of the workload's forward time, not a Top-N
+  `pct_gpu_time`; say which one `expected_pct_gpu` carries.
 
 ## PHASE=plan_milestone  (between milestones, decide what to do next / whether to stop)
 

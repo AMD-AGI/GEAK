@@ -41,6 +41,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fusion_candidate_harness import DONOR_STAGES, _fusible_regions
+from semantic_evidence_ledger import shape_granularity
 
 # A decode-only or prefill-only table is a legitimate artifact, but it is never a
 # legitimate SILENCE. The DSR1 failure was a table with no decode tables at all and no
@@ -77,13 +78,20 @@ def _measure_phases(table):
     for item in table.get("tables", []):
         phase = str(item.get("phase") or "")
         stat = measured.setdefault(phase, {"rows": 0, "resolved": 0, "us": 0.0,
-                                           "patterns": 0})
+                                           "patterns": 0, "kernel_level": 0,
+                                           "unresolved_us": 0.0})
         stat["patterns"] += 1
         for row in item.get("rows", []):
+            us = float(row.get("duration_us", 0.0) or 0.0)
             stat["rows"] += 1
-            stat["us"] += float(row.get("duration_us", 0.0) or 0.0)
-            if (row.get("shape") or {}).get("input_dims"):
+            stat["us"] += us
+            granularity = shape_granularity(row)
+            if granularity:
                 stat["resolved"] += 1
+            else:
+                stat["unresolved_us"] += us
+            if granularity == "kernel":
+                stat["kernel_level"] += 1
     return measured
 
 
@@ -240,6 +248,7 @@ def build(table_path, helper_floor=5.0, top_rows=8):
                  "duration_us": round(float(r.get("duration_us", 0.0) or 0.0), 3),
                  "provider": r.get("provider"),
                  "shape_source": (r.get("shape") or {}).get("source"),
+                 "granularity": shape_granularity(r),
                  "input_dims": (r.get("shape") or {}).get("input_dims"),
                  "input_types": (r.get("shape") or {}).get("input_types"),
                  "named_operands": (((r.get("shape") or {}).get(
@@ -285,6 +294,10 @@ def build(table_path, helper_floor=5.0, top_rows=8):
         "phase_coverage_measured": {
             k: {"rows": v["rows"], "resolved": v["resolved"],
                 "resolved_fraction": round(v["resolved"] / v["rows"], 4) if v["rows"] else 0.0,
+                "kernel_level": v["kernel_level"],
+                "operator_level": v["resolved"] - v["kernel_level"],
+                "unresolved_time_fraction": (
+                    round(v["unresolved_us"] / v["us"], 4) if v["us"] else 0.0),
                 "patterns": v["patterns"], "layer_us": round(v["us"], 3)}
             for k, v in sorted(measured.items())},
         "stale_record_notes": stale,
@@ -295,6 +308,9 @@ def build(table_path, helper_floor=5.0, top_rows=8):
         "fusible_region_count": len(regions),
         "fusible_region_us": round(sum(r["total_us"] for r in regions), 3),
     }
+
+
+GRANULARITY_LABEL = {"kernel": "kernel", "operator": "算子级"}
 
 
 def _esc(value):
@@ -312,13 +328,20 @@ def render_markdown(rep):
     lines.append("## 1. 覆盖与证据（先看这里）")
     lines.append("")
     meas = rep["phase_coverage_measured"]
-    lines.append("| 阶段 | pattern 数 | 行数 | shape 已解析 | 解析率 | 单层耗时 | 该阶段 forward |")
-    lines.append("|:--:|---:|---:|---:|---:|---:|---:|")
+    lines.append("| 阶段 | pattern 数 | 行数 | shape 已解析 | 其中 kernel 级 | 仅算子级 | 解析率 "
+                 "| 未解析耗时占比 | 单层耗时 | 该阶段 forward |")
+    lines.append("|:--:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for phase, v in meas.items():
-        lines.append("| **%s** | %d | %d | %d | %.0f%% | %.1f µs | %.0f µs |" % (
-            phase, v["patterns"], v["rows"], v["resolved"],
-            100.0 * v["resolved_fraction"], v["layer_us"],
+        lines.append("| **%s** | %d | %d | %d | %d | %d | %.0f%% | %.1f%% | %.1f µs | %.0f µs |" % (
+            phase, v["patterns"], v["rows"], v["resolved"], v["kernel_level"],
+            v["operator_level"], 100.0 * v["resolved_fraction"],
+            100.0 * v["unresolved_time_fraction"], v["layer_us"],
             rep["phase_forward_us"].get(phase, 0.0)))
+    lines.append("")
+    lines.append(
+        "**kernel 级** = 该 kernel 自己的输入（trace 里 1:1 launch 或 kernel 级 probe）；"
+        "**仅算子级** = 外层算子的输入（一个算子 launch 了多个 kernel，或按时间范围归属），"
+        "它说明这一行在哪个算子里跑，但**不是**这个 kernel 的输入，不能直接当 microbench 张量。")
     lines.append("")
     absent = rep.get("phases_absent") or []
     if absent:
@@ -392,26 +415,30 @@ def render_markdown(rep):
         lines.append("")
         detail = p.get("row_detail") or []
         if detail:
-            unresolved = [r for r in detail if not r.get("input_dims")]
+            unresolved = [r for r in detail if not r.get("granularity")]
+            operator_only = [r for r in detail if r.get("granularity") == "operator"]
             lines.append(
                 "这一层的**全部 %d 行**，按 trace 顺序（`pos`），donor 行也在内。"
                 "`input_dims` / `dtypes` 是 trace 里量到的原文，"
                 "`具名 operands` 只在 operator schema 唯一匹配时显示参数名；"
                 "**下游构造融合参考侧和单侧 microbench 时必须从这里抄，不要从配置字段拼**。%s"
                 % (len(detail),
-                   ("其中 **%d 行没有解出 shape**（`—`）——它们对下游是盲区。"
-                    % len(unresolved)) if unresolved else "全部 %d 行都解出了 shape。" % len(detail)))
+                   (("其中 **%d 行没有解出 shape**（`—`）——它们对下游是盲区。"
+                     % len(unresolved)) if unresolved else "全部 %d 行都解出了 shape。" % len(detail))
+                   + (("另有 **%d 行只有算子级 shape**（粒度列 `算子级`）——那是外层算子的输入，"
+                       "不是该 kernel 的输入。" % len(operator_only)) if operator_only else "")))
             lines.append("")
-            lines.append("| pos | row | stage | kernel | 算子 | µs/层 | input_dims | dtypes | 具名 operands |")
-            lines.append("|---:|---|---|---|---|---:|---|---|---|")
+            lines.append("| pos | row | stage | kernel | 算子 | µs/层 | input_dims | dtypes | 粒度 | 具名 operands |")
+            lines.append("|---:|---|---|---|---|---:|---|---|:--:|---|")
             for r in detail:
                 mark = " *(donor)*" if r.get("donor") else ""
-                lines.append("| %s | `%s` | %s%s | `%s` | `%s` | %.2f | %s | %s | %s |" % (
+                lines.append("| %s | `%s` | %s%s | `%s` | `%s` | %.2f | %s | %s | %s | %s |" % (
                     _esc(r.get("pos")), _esc(r.get("row_id")),
                     _esc(r.get("stage")), mark,
                     _esc(r.get("short_name")), _esc(_op_name(r.get("parent_operator"))),
                     r.get("duration_us") or 0.0,
                     _fmt_dims(r.get("input_dims")), _fmt_types(r.get("input_types")),
+                    GRANULARITY_LABEL.get(r.get("granularity"), "—"),
                     _fmt_named_operands(r.get("named_operands"))))
             lines.append("")
 
@@ -472,7 +499,8 @@ def main():
     args = parser.parse_args()
     rep = run(args.semantic_table, args.out_md, args.out_json, args.helper_floor)
     print(json.dumps({
-        "phases": {k: "%d/%d shapes" % (v["resolved"], v["rows"])
+        "phases": {k: "%d/%d shapes (%d kernel-level)"
+                   % (v["resolved"], v["rows"], v["kernel_level"])
                    for k, v in rep["phase_coverage_measured"].items()},
         "patterns": len(rep["patterns"]),
         "fusible_regions": rep["fusible_region_count"],

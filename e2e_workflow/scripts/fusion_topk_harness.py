@@ -20,13 +20,18 @@ import json
 import math
 import os
 import sys
+import re
 from collections import Counter, defaultdict
 
 
 # Difficulty tiers, ordered by build cost, mapped to the 3.1 routing.
 TIER_WEIGHT = {"A": 1.0, "B": 3.0, "C1": 6.0, "C2": 10.0, "C3": 20.0}
 TIER_ROUTE = {
-    "A": "KernelFusion apply-back (flag/env)",
+    # A flag/env lever is a configuration change, not a fusion: it often switches
+    # several backends at once (VLLM_ROCM_USE_AITER flips linear, rmsnorm, MoE and
+    # attention), so per-fusion credit is impossible and ranking each covered fusion
+    # as its own action double-counts one switch. Tier A goes to the config tuner.
+    "A": "config_tuner (flag/env lever; not a fusion action)",
     "B": "KernelFusion apply-back (wire existing API)",
     "C1": "kernel_workflow author — single helper, same language",
     "C2": "kernel_workflow author — single helper, cross language",
@@ -289,6 +294,59 @@ def _is_actionable(candidate, savings, tier, guard_blocked_ids):
     return True
 
 
+_SWITCH_RE = re.compile(r"(?<![\w.])(?:[A-Z][A-Z0-9_]*=[^\s,;()]+|--[\w.-]+(?:=[^\s,;()]+)?)")
+
+
+def _lever_switches(handle):
+    """The concrete env/CLI settings a free-text handle names, e.g. ['VLLM_ROCM_USE_AITER=1'].
+
+    Handles carry the analyst's commentary ('... -> Fp8 MoE oracle selects AITER'), so
+    two rows for one switch rarely share the text; they share the setting.
+    """
+    return sorted(set(_SWITCH_RE.findall(handle or "")))
+
+
+def _config_levers(lever_rows):
+    """One lever per flag/env handle: the switch, what it covers, and its phases.
+
+    Benefits are reported per covered fusion and phase, never summed: one switch
+    may change several backends, so only a measured config A/B can credit it.
+    """
+    by_handle = {}
+    for row in lever_rows:
+        switches = _lever_switches(row["handle"])
+        key = tuple(switches) or (row["handle"] or row["action"],)
+        lever = by_handle.setdefault(key, {
+            "switches": switches,
+            "handle": row["handle"],
+            "handles": [],
+            "route": "config_tuner",
+            "candidate_ids": set(),
+            "covers": [],
+        })
+        if row["handle"] and row["handle"] not in lever["handles"]:
+            lever["handles"].append(row["handle"])
+        lever["candidate_ids"].update(row["candidate_ids"])
+        lever["covers"].append({
+            "phase": row["phase"],
+            "action": row["action"],
+            "workload_forward_pct": row["workload_forward_pct"],
+            "forward_pct": row["forward_pct"],
+            "ranking_pct": _ranking_pct(row),
+            "candidate_ids": row["candidate_ids"],
+        })
+    levers = []
+    for index, (_, lever) in enumerate(sorted(
+            by_handle.items(),
+            key=lambda item: -max(c["ranking_pct"]
+                                  for c in item[1]["covers"])), 1):
+        lever["lever_id"] = "c%02d" % index
+        lever["candidate_ids"] = sorted(lever["candidate_ids"])
+        lever["covers"].sort(key=lambda c: -c["ranking_pct"])
+        levers.append(lever)
+    return levers
+
+
 def rank(candidates_path, validation_path, semantic_table_path, top_k,
          tiers="A,B", workload=None):
     payload = _load(candidates_path)
@@ -520,6 +578,7 @@ def rank(candidates_path, validation_path, semantic_table_path, top_k,
     show_tiers = {t.strip() for t in (tiers or "A,B").split(",") if t.strip()}
     actions = []
     deferred_author = []
+    lever_rows = []
     for recipe in ranked_recipes:
         for phase, pp in recipe["per_phase"].items():
             if (pp.get("actionable_us") or 0.0) <= 0:
@@ -553,7 +612,9 @@ def rank(candidates_path, validation_path, semantic_table_path, top_k,
                 "candidate_ids": pp.get("candidate_ids") or [],
                 "mutually_exclusive_with": recipe["mutually_exclusive_with"],
             }
-            if pp["tier"] in show_tiers:
+            if pp["tier"] == "A":
+                lever_rows.append(row)
+            elif pp["tier"] in show_tiers:
                 actions.append(row)
             else:
                 deferred_author.append(row)
@@ -633,8 +694,9 @@ def rank(candidates_path, validation_path, semantic_table_path, top_k,
             top = actions[top]["_subsumed_by_index"]
         a["_ladder_top_index"] = top
 
-    for a in actions + truncated + deferred_author:  # drop unserializable key
-        a.pop("removable_key", None)
+    for a in actions + truncated + deferred_author + lever_rows:
+        a.pop("removable_key", None)  # unserializable
+    config_levers = _config_levers(lever_rows)
 
     # ---- the binding execution list -------------------------------------
     # Top-K used to describe itself as an ADVISORY routing prior, and Phase 3
@@ -806,6 +868,12 @@ def rank(candidates_path, validation_path, semantic_table_path, top_k,
         "truncated_count": len(truncated),
         "truncated_actions": truncated,
         "execution_list": exec_list,
+        # Handed to the config tuner (or, when this run may not tune config, reported
+        # back to the caller); each covered candidate's disposition is
+        # handed_to_config_tuner, never "not mentioned".
+        "config_levers": config_levers,
+        "config_lever_candidate_ids": sorted({
+            cid for lever in config_levers for cid in lever["candidate_ids"]}),
         "exclusive_groups": exclusive_groups,
         "family_coverage": family_coverage,
         "shown_tiers": sorted(show_tiers),
@@ -1041,6 +1109,23 @@ def render_markdown(result, actions):
             "> 互斥（✳）：同一位置的这些融合共享同批算子，**每处只落一个**——"
             "它们是「便宜但部分（如 AR+Norm，A）」vs「更完整但需集成（如 AR+Norm+Quant，B）」"
             "的取舍，都列出供你/3.2 选，不替你择优。")
+        lines.append("")
+    if result.get("config_levers"):
+        lines.append("## 配置开关（A 档，交给 config tuner，不在本执行清单内，共 %d 个）"
+                     % len(result["config_levers"]))
+        lines.append("")
+        lines.append("一个开关常同时切换多个后端，各项收益**不可相加**，只能由配置 A/B 实测归因。"
+                     "本次运行不允许调配置时，它们作为 `config_recommendations` 回报给调用方。")
+        lines.append("")
+        lines.append("| 开关 | 覆盖的融合（阶段：预估 workload forward 收益） | 候选数 |")
+        lines.append("|---|---|---:|")
+        for lever in result["config_levers"]:
+            covers = "；".join("%s（%s：%.2f%%）" % (
+                _esc(c["action"]), c["phase"], c["ranking_pct"])
+                for c in lever["covers"])
+            lines.append("| `%s` | %s | %d |" % (
+                _esc(" ".join(lever.get("switches") or []) or lever["handle"] or "-"),
+                covers, len(lever["candidate_ids"])))
         lines.append("")
     if result.get("deferred_author_count"):
         # C 类：与 A/B 完全相同的列，只是现成算子=无、暂缓。

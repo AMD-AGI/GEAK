@@ -2,6 +2,7 @@
 """Build Pattern/Phase/Layer ordered device-event tables from one clean trace."""
 import argparse
 import bisect
+import collections
 import difflib
 import gzip
 import hashlib
@@ -12,6 +13,7 @@ import re
 import statistics
 
 import parse_profile
+import triton_launch_probe
 import sglang_step_modes
 
 
@@ -53,6 +55,96 @@ def _layer_id(event):
 
 def _phase_name(tag):
     return {"P": "prefill", "V": "verify"}.get(tag, "decode")
+
+
+def _legacy_step_spans(events):
+    """vLLM execute_* GPU windows, one per step: [(ts, end, tag, tokens, batch, name)].
+
+    vLLM 0.30 emits the step's `gpu_user_annotation` once per GPU stream that ran work in
+    it (MiniMax-M3 TP8: stream 4 every step, stream 2 on some), same name, overlapping
+    windows. Read one per annotation, as parse_profile does, and a single step became two
+    (legacy-0 held 4 of 60 prefill layers, legacy-1 the other 56) and nothing mapped.
+    Same-name windows that overlap are the same step: take their union. Consecutive
+    steps never overlap, so this cannot merge two real steps.
+    """
+    raw = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("cat") != "gpu_user_annotation":
+            continue
+        name = event.get("name")
+        if (not isinstance(name, str) or not name.startswith("execute_")
+                or event.get("ts") is None or event.get("dur") is None):
+            continue
+        kind = parse_profile._classify_step(name)
+        if kind:
+            raw.append((event["ts"], event["ts"] + event["dur"],
+                        "P" if kind[0] else "D", kind[1], kind[2], name))
+    raw.sort()
+    merged = []
+    open_by_name = {}
+    for span in raw:
+        index = open_by_name.get(span[5])
+        if index is not None and span[0] < merged[index][1]:
+            lo, hi = merged[index][0], max(merged[index][1], span[1])
+            merged[index] = (lo, hi) + merged[index][2:]
+            continue
+        open_by_name[span[5]] = len(merged)
+        merged.append(span)
+    merged.sort()
+    return merged
+
+
+def _launch_voted_host_windows(events, legacy_spans):
+    """{span index: (lo, hi)}: the execute_* host window that launched a step's kernels.
+
+    Each device event inside the step's device window votes, through its correlation
+    id, for the host annotation its launch fell in; the window with a strict majority
+    wins. Names cannot pair them: vLLM before 0.30 names a step only by its request
+    counts, so a chunked prefill repeats `execute_context_2(8181)_generation_11(11)`
+    step after step, and with the host more than a step ahead the latest same-name
+    window before the device start is the NEXT step's (Kimi-K2.5 TP8: 4 of 17
+    prefill steps shifted, each cutting one host pass across two device steps).
+    """
+    host = sorted(
+        (event["ts"], event["ts"] + event["dur"])
+        for event in events
+        if isinstance(event, dict) and event.get("cat") == "user_annotation"
+        and isinstance(event.get("name"), str)
+        and event["name"].startswith("execute_")
+        and event.get("ts") is not None and event.get("dur") is not None)
+    if not host or not legacy_spans:
+        return {}
+    host_starts = [item[0] for item in host]
+    launch_ts = {}
+    for event in events:
+        if (isinstance(event, dict)
+                and event.get("cat") in ("cuda_runtime", "hip_runtime")
+                and event.get("ts") is not None):
+            correlation = (event.get("args") or {}).get("correlation")
+            if correlation is not None:
+                launch_ts[correlation] = event["ts"]
+    device_starts = [span[0] for span in legacy_spans]
+    votes = [collections.Counter() for _ in legacy_spans]
+    for event in events:
+        if (not isinstance(event, dict) or event.get("cat") not in DEVICE_CATEGORIES
+                or event.get("ts") is None):
+            continue
+        index = bisect.bisect_right(device_starts, event["ts"]) - 1
+        if index < 0 or event["ts"] >= legacy_spans[index][1]:
+            continue
+        launched = launch_ts.get((event.get("args") or {}).get("correlation"))
+        if launched is None:
+            continue
+        position = bisect.bisect_right(host_starts, launched) - 1
+        if position >= 0 and launched < host[position][1]:
+            votes[index][position] += 1
+    paired = {}
+    for index, counter in enumerate(votes):
+        if counter:
+            position, count = counter.most_common(1)[0]
+            if 2 * count > sum(counter.values()):
+                paired[index] = host[position]
+    return paired
 
 
 def _collect_step_spans(events):
@@ -101,10 +193,15 @@ def _collect_step_spans_with_draft(events):
     """
     spans = []
     step_names = {}
-    legacy = parse_profile._collect_step_spans(events)
+    legacy_ids = set()
+    legacy = _legacy_step_spans(events)
+    voted = {"legacy-%d" % index: window for index, window
+             in _launch_voted_host_windows(events, legacy).items()}
     for index, span in enumerate(legacy):
         spans.append((span[0], span[1], span[2], span[3], span[4],
                       "legacy-%d" % index, "legacy_execute"))
+        step_names["legacy-%d" % index] = span[5]
+        legacy_ids.add("legacy-%d" % index)
     for raw_index, event in enumerate(events):
         if not isinstance(event, dict) or event.get("cat") != "gpu_user_annotation":
             continue
@@ -138,13 +235,17 @@ def _collect_step_spans_with_draft(events):
     #
     # Carry the CPU window alongside each span (indices 7,8) so CPU-side
     # containment can use it.  Falls back to the GPU window when a trace has no
-    # CPU-side annotation (older captures).
+    # CPU-side annotation (older captures).  vLLM's execute_* has the same CPU/GPU
+    # pair; an eager vLLM model (MiniMax-M3 on ROCm: no torch.compile) has
+    # `nn.Module:` spans in prefill, which need the CPU window just the same.
     cpu_by_name = {}
     for event in events:
         if not isinstance(event, dict) or event.get("cat") != "user_annotation":
             continue
         name = event.get("name")
-        if (sglang_step_modes.parse_step(name) is None
+        if (not isinstance(name, str)
+                or not (sglang_step_modes.parse_step(name) is not None
+                        or name.startswith("execute_"))
                 or event.get("ts") is None or event.get("dur") is None):
             continue
         cpu_by_name.setdefault(name, []).append(
@@ -162,6 +263,26 @@ def _collect_step_spans_with_draft(events):
         cpu_lo, cpu_hi = span[0], span[1]
         cpu_window = None
         name = step_names.get(span[5], _step_span_name(span))
+        if span[5] in legacy_ids:
+            # vLLM: the host annotation alone, paired by name (it carries the step's
+            # cumulative sequence lengths) as the latest one opened before the device
+            # window. Not by overlap: under --async-scheduling the host runs a whole
+            # step ahead (~490ms in MiniMax-M3 prefill), so the pair never overlaps.
+            # Not a union: eager decode's device work trails the host by ~40ms, and
+            # a union reached into the next step's host window, so the last layer's
+            # donor scope swallowed the next step's input prep, embedding and layer-0
+            # head (MiniMax-M3 TP8) and no donor pass matched any decode step.
+            # The launch vote decides when the trace carries correlations; the name
+            # is the fallback (unique on 0.30, whose names carry sequence lengths).
+            # vLLM has no speculative draft step annotation, so no draft check here.
+            opened = [(lo, hi) for lo, hi, _tid in cpu_by_name.get(name, ())
+                      if lo <= span[0]]
+            if span[5] in voted:
+                cpu_lo, cpu_hi = voted[span[5]]
+            elif opened:
+                cpu_lo, cpu_hi = opened[-1]
+            widened.append(tuple(span) + (cpu_lo, cpu_hi))
+            continue
         for index, (lo, hi, tid) in enumerate(cpu_by_name.get(name, ())):
             if (name, index) in used_cpu:
                 continue
@@ -244,7 +365,11 @@ def _cpu_step_at(ts, spans, starts):
     return None
 
 
-STAGE_RULESET_VERSION = "semantic-stage-v2"
+STAGE_RULESET_VERSION = "semantic-stage-v4"
+# Kernel names are snake_case, and `\b` treats `_` as a word character, so `\bmoe\b` never
+# matched fused_moe_kernel and `\bmm\b` never matched _w8a8_triton_block_scaled_mm: the
+# largest expert and FP8 GEMM rows on both sglang and vllm landed as `unknown`. These
+# tokens are bounded by any non-alphanumeric instead.
 STAGE_RULES = (
     ("communication.collective", "communication",
      r"all.?reduce|reduce.?scatter|all.?gather|nccl|rccl|quickreduce|cross_device"),
@@ -259,8 +384,8 @@ STAGE_RULES = (
     ("attention.full_or_mla", "attn",
      r"fmha|attention|attn|paged|mla_|^_fwd_kernel(_stage\d+)?$"),
     ("router.topk", "topk", r"topk|routing|router|gate_kernel"),
-    ("experts.moe", "moe", r"\bmoe\b|expert|sorting|fmoe"),
-    ("linear.gemm", "gemm", r"gemm|cijk|tensile|matmul|\bmm\b"),
+    ("experts.moe", "moe", r"(?<![a-z0-9])moe(?![a-z0-9])|expert|sorting|fmoe"),
+    ("linear.gemm", "gemm", r"gemm|cijk|tensile|matmul|(?<![a-z0-9])mm(?![a-z0-9])"),
     ("cache.kv", "kv_cache", r"cache|index_put"),
     ("activation", "activation", r"silu|gelu|swiglu|act_and_mul"),
     ("quantization", "quant", r"quant|dequant|float8|fp8"),
@@ -276,8 +401,20 @@ def _stage_detail(name, category, parent_name=""):
         if re.search(regex, value):
             return stage, rule_id, "kernel_name"
     parent_value = parent_name.lower()
-    if re.search(r"gated.?delta|linear.?attention|causal.?conv", parent_value):
+    # `gdn`: vLLM registers the whole gated-delta core as vllm::qwen_gdn_attention_core.
+    if re.search(r"gated.?delta|linear.?attention|causal.?conv|(?<![a-z0-9])gdn(?![a-z0-9])",
+                 parent_value):
         return "linear_attn", "attention.linear.parent", "parent_operator"
+    # The kernel-name rules key off names like fmha/paged/mla_. A backend whose
+    # kernel is generically named slips through: vLLM's TRITON_ATTN launches
+    # `_fwd_kernel` under `vllm::unified_attention_with_output`, and that landed
+    # as `unknown` -- so the model's LARGEST prefill row (298.5us on Qwen3.5-2B)
+    # was not a donor, and Phase 2.1's escalation gate then demanded a fusion
+    # candidate for the attention operator itself. The parent op is authoritative
+    # evidence: it is the registered op the kernel actually ran under.
+    if re.search(r"unified.?attention|attention.?with.?output|paged.?attention"
+                 r"|flash.?attn|fmha", parent_value):
+        return "attn", "attention.full.parent", "parent_operator"
     return "unknown", "unresolved", "unresolved"
 
 
@@ -357,6 +494,52 @@ def _load_events_multi(paths):
     for _, _, events in streams:
         merged.extend(events)
     return merged
+
+
+def _triton_launch_evidence(events):
+    """{correlation: launch-probe evidence} for kernels a Triton launch probe annotated.
+
+    The probe's annotation and the launch runtime event share a thread, and Kineto
+    links neither the annotation nor the kernel by External id, so the kernel is
+    attributed through its runtime event's correlation to the probe annotation
+    whose span holds that launch. See triton_launch_probe.py.
+    """
+    by_tid = collections.defaultdict(list)
+    for index, event in enumerate(events):
+        if (not isinstance(event, dict) or event.get("cat") != "user_annotation"
+                or event.get("ts") is None or event.get("dur") is None):
+            continue
+        parsed = triton_launch_probe.parse_annotation(event.get("name"))
+        if parsed:
+            by_tid[event.get("tid")].append(
+                (event["ts"], event["ts"] + event["dur"], parsed, index))
+    if not by_tid:
+        return {}
+    starts = {}
+    for tid, spans in by_tid.items():
+        spans.sort(key=lambda item: item[0])
+        starts[tid] = [item[0] for item in spans]
+    evidence = {}
+    for event in events:
+        if (not isinstance(event, dict)
+                or event.get("cat") not in ("cuda_runtime", "hip_runtime")):
+            continue
+        correlation = (event.get("args") or {}).get("correlation")
+        spans = by_tid.get(event.get("tid"))
+        if correlation is None or not spans or event.get("ts") is None:
+            continue
+        pos = bisect.bisect_right(starts[event["tid"]], event["ts"]) - 1
+        if pos < 0 or event["ts"] > spans[pos][1]:
+            continue
+        kernel_name, dims, types, names = spans[pos][2]
+        evidence[correlation] = {"kernel_name": kernel_name, "input_dims": dims,
+                                 "input_types": types, "operand_names": names,
+                                 "event_index": spans[pos][3]}
+    return evidence
+
+
+def _launched_kernel_name(name):
+    return name[:-len(".kd")] if name.endswith(".kd") else name
 
 
 def _cpu_evidence(events):
@@ -470,6 +653,156 @@ def _module_layer_scopes(events, spans, pattern_doc, draft_windows=()):
                 })
                 scopes.append(item)
     scopes.sort(key=lambda item: (item["ts"], item["end"]))
+    if not scopes:
+        # No module frame resolved a single layer (torch.compile erases them). Try the
+        # anchor the Patterns themselves declare before leaving the step unresolved.
+        fallback, fallback_diag = _dispatch_anchor_scopes(events, spans, pattern_doc)
+        diagnostics.append(dict(fallback_diag,
+                                source=("declared_dispatch_op_span" if fallback
+                                        else "declared_dispatch_op_span_declined")))
+        if fallback:
+            return fallback, diagnostics
+    return scopes, diagnostics
+
+
+def _declared_dispatch_branches(pattern_doc):
+    """{op_name: [pattern_id, ...]} from the AGENT's structural signatures.
+
+    `runtime_dispatch_branch` is a REQUIRED signature field (see
+    validate_structural_patterns.REQUIRED_SIGNATURE_FIELDS) that the agent fills from
+    runtime SOURCE analysis. Using it as a layer anchor therefore keeps the Phase-1
+    contract intact -- the agent defines structure, this code only validates it against
+    the trace; the trace never defines a Pattern.
+    """
+    branches = {}
+    for pattern in pattern_doc.get("patterns", []):
+        signature = pattern.get("structural_signature") or {}
+        branch = str(signature.get("runtime_dispatch_branch") or "").strip()
+        if branch:
+            branches.setdefault(branch, []).append(pattern.get("pattern_id"))
+    return branches
+
+
+def _dispatch_anchor_scopes(events, spans, pattern_doc):
+    """Per-layer scopes cut at the dispatch op each Pattern declares it routes through.
+
+    WHY THIS EXISTS. Under torch.compile the per-layer `nn.Module` python frames are
+    gone -- the layer stack lives inside a compiled graph. vLLM's V1 engine compiles by
+    default, so on vllm the module-span path finds NOTHING and every step is left
+    boundary_unresolved. Kernel-stage recurrence cannot stand in for it: on a HYBRID
+    model it is WRONG, not merely incomplete. Measured on Qwen3.5-2B (24 layers = 18
+    gated-delta + 6 full-attention, full_attention_interval 4) the `attn` stage fires
+    only in the 6 full-attention layers, at a perfectly regular spacing, so a repeat
+    heuristic produced 6 "layer bodies" each holding FOUR real layers.
+
+    The dispatch ops do not have that problem: they survive compilation precisely BECAUSE
+    they are the graph's splitting points, and every layer kind has one. On that same
+    trace `vllm::qwen_gdn_attention_core` (x18) + `vllm::unified_attention_with_output`
+    (x6) = exactly 24 anchors per step.
+
+    DECLINES rather than guesses. Returns [] unless ALL of:
+      * every Pattern declares a dispatch branch -- one that does not is a layer kind with
+        no anchor, which is precisely the 6-of-24 failure above;
+      * the step carries exactly `num_hidden_layers_main` anchor events;
+      * the anchor ORDER agrees with the declared per-layer Patterns (the i-th anchor's op
+        is the one the Pattern owning layer i declared).
+    That last check is what makes this evidence rather than an assumption: it fails loudly
+    on a model whose layers do not execute in config order.
+
+    Boundary semantics: layer i spans [anchor_i, anchor_i+1). Like the existing
+    anchor_stage_rotation path this is phase-shifted within the layer (the segment holds
+    layer i's core and tail plus layer i+1's head), so it is a partition into N correctly
+    ORDERED and correctly CLASSIFIED segments -- not a claim about where nn.Module would
+    have opened. Downstream reads it as `declared_dispatch_op_span`, never as a module span.
+    """
+    expected_count = int(pattern_doc.get("num_hidden_layers_main", 0) or 0)
+    patterns = pattern_doc.get("patterns", [])
+    if expected_count <= 0 or not patterns:
+        return [], {"status": "no_pattern_doc"}
+    undeclared = [p.get("pattern_id") for p in patterns
+                  if not str((p.get("structural_signature") or {}).get(
+                      "runtime_dispatch_branch") or "").strip()]
+    if undeclared:
+        return [], {"status": "patterns_without_dispatch_branch",
+                    "patterns_missing_branch": undeclared}
+    branches = _declared_dispatch_branches(pattern_doc)
+    branch_by_pattern = {
+        p.get("pattern_id"): str(
+            (p.get("structural_signature") or {})["runtime_dispatch_branch"]).strip()
+        for p in patterns}
+    pattern_by_layer = _pattern_index(pattern_doc)
+
+    cpu_spans, span_starts = _cpu_step_index(spans)
+    if not cpu_spans:
+        cpu_spans, span_starts = spans, [span[0] for span in spans]
+    by_step = {}
+    for event in events:
+        if not isinstance(event, dict) or event.get("cat") != "cpu_op":
+            continue
+        name = event.get("name")
+        if not isinstance(name, str) or name not in branches:
+            continue
+        if event.get("ts") is None:
+            continue
+        step = _cpu_step_at(event["ts"], cpu_spans, span_starts)
+        if step is None:
+            continue
+        by_step.setdefault(step[5], []).append(
+            (event["ts"], name, step, event.get("pid"), event.get("tid")))
+
+    scopes = []
+    diagnostics = {"status": "mapped", "anchor_ops": sorted(branches),
+                   "expected_layer_count": expected_count, "steps": []}
+    for step_id, anchors in sorted(by_step.items()):
+        anchors.sort(key=lambda item: item[0])
+        record = {"step_id": step_id, "anchor_count": len(anchors)}
+        if len(anchors) != expected_count:
+            record["status"] = "anchor_count_mismatch"
+            diagnostics["steps"].append(record)
+            continue
+        step = anchors[0][2]
+        # The CPU-side step window closes the last layer; indices 7,8 carry it when the
+        # trace has a CPU annotation, otherwise the GPU window end is the best available.
+        step_end = step[8] if len(step) >= 9 else step[1]
+        ordered = []
+        for layer_id, (ts, name, _step, pid, tid) in enumerate(anchors):
+            pattern = pattern_by_layer.get(layer_id) or {}
+            if branch_by_pattern.get(pattern.get("pattern_id")) != name:
+                ordered = None
+                record["status"] = "anchor_order_disagrees_with_patterns"
+                record["first_mismatch_layer"] = layer_id
+                break
+            end = anchors[layer_id + 1][0] if layer_id + 1 < len(anchors) else step_end
+            ordered.append({
+                "name": name,
+                "class_local_id": layer_id,
+                "ts": ts,
+                "end": end,
+                "event_index": layer_id,
+                "step_id": step_id,
+                "phase": _phase_name(step[2]),
+                "layer_id": layer_id,
+                "pattern_id": pattern.get("pattern_id"),
+                "pass_index": 0,
+                "layer_instance_id": "%s:pass-0:layer-%d" % (step_id, layer_id),
+                "type_validation": "pass",
+                "scope_source": "declared_dispatch_op",
+                # The launching thread and the step bucket let a boundary transfer
+                # use these scopes as a donor exactly like GEAK_LAYER_SCOPE markers.
+                "pid": pid,
+                "tid": tid,
+                "batch_size": step[4],
+                "input_tokens": step[3],
+            })
+        if ordered is None:
+            diagnostics["steps"].append(record)
+            continue
+        record["status"] = "mapped"
+        diagnostics["steps"].append(record)
+        scopes.extend(ordered)
+    scopes.sort(key=lambda item: (item["ts"], item["end"]))
+    if not scopes:
+        diagnostics["status"] = "no_usable_step"
     return scopes, diagnostics
 
 
@@ -552,6 +885,7 @@ def _event_rows(events, pattern_doc):
     span_starts = [span[0] for span in spans]
     draft_starts = [item["ts"] for item in draft_spans]
     cpu_by_ext, scopes, scope_starts = _cpu_evidence(events)
+    triton_launches = _triton_launch_evidence(events)
     module_scopes, module_diagnostics = _module_layer_scopes(
         events, spans, pattern_doc, draft_windows=[
             (item["cpu_ts"], item["cpu_end"]) for item in draft_spans
@@ -599,7 +933,13 @@ def _event_rows(events, pattern_doc):
         if module_scope is not None:
             layer_id = module_scope["layer_id"]
             layer_instance_id = module_scope["layer_instance_id"]
-            layer_evidence = "python_module_span_external_id"
+            # Do not call a dispatch-op cut a python module span. Both are authoritative
+            # per-layer scopes, but only one of them is a module frame, and a reader
+            # auditing boundary provenance has to be able to tell them apart.
+            layer_evidence = (
+                "declared_dispatch_op_span"
+                if module_scope.get("scope_source") == "declared_dispatch_op"
+                else "python_module_span_external_id")
         elif flow_scope is not None:
             layer_id = flow_scope["layer_id"]
             layer_instance_id = flow_scope["layer_instance_id"]
@@ -629,6 +969,14 @@ def _event_rows(events, pattern_doc):
             ext is not None and external_id_launch_count.get(ext) == 1)
         shape_source = "kernel_exact" if dims and one_to_one_launch else (
             "parent_context" if parent else "unresolved")
+        launch = triton_launches.get(args.get("correlation"))
+        operand_names = None
+        if (shape_source != "kernel_exact" and launch
+                and launch["kernel_name"] == _launched_kernel_name(name)):
+            # The kernel's own arguments beat its enclosing operator's inputs.
+            dims, types = launch["input_dims"], launch["input_types"]
+            operand_names = launch["operand_names"]
+            shape_source = "triton_launch_args"
         stage, stage_rule_id, stage_source = _stage_detail(
             name, event.get("cat"), (parent or {}).get("name", ""))
         rows.append({
@@ -674,11 +1022,11 @@ def _event_rows(events, pattern_doc):
                     "medium" if scope else "low"),
                 "evidence_event_index": (parent or {}).get("event_index"),
             },
-            "shape": {
+            "shape": dict({
                 "source": shape_source,
                 "input_dims": dims,
                 "input_types": types,
-            },
+            }, **({"operand_names": operand_names} if operand_names else {})),
         })
     out_of_scope["duration_us"] = round(out_of_scope["duration_us"], 6)
     if draft_spans:
@@ -720,6 +1068,10 @@ def _apply_boundary_map(rows, map_path, pattern_doc, trace_paths=None,
     """Apply a validated all-layer boundary artifact by step-local positions."""
     with open(map_path) as fh:
         document = json.load(fh)
+    # Cuts from a dispatch-op donor are phase-shifted like direct dispatch cuts
+    # (see _segment_pattern_doc), so the rows they place must say so.
+    dispatch_donor = ((document.get("donor") or {}).get("scope_source")
+                      == "declared_dispatch_op_span")
     if document.get("status") not in ("pass", "partial"):
         raise ValueError(
             "refusing non-passing layer boundary map %s: %s" % (
@@ -833,6 +1185,8 @@ def _apply_boundary_map(rows, map_path, pattern_doc, trace_paths=None,
                 row["layer_region"] = "layer_body"
                 row["representative_eligible"] = item[
                     "representative_eligible"]
+                if dispatch_donor:
+                    row["boundary_alignment"] = "dispatch_op_span"
             step_rows[start]["boundary_role"] = "body_start_kernel"
             step_rows[stop - 1]["boundary_role"] = "end_kernel"
         # A graph-capture donor sets the cuts only.  Rows the capture launch
@@ -958,6 +1312,7 @@ def _authoritative_instances(step_rows):
         if (instance_id and (
                 evidence.startswith("python_module_span")
                 or evidence.startswith("explicit_layer_marker")
+                or evidence == "declared_dispatch_op_span"
                 or evidence.startswith(
                     "validated_graph_capture_layer_scope"))):
             grouped.setdefault(instance_id, []).append(row)
@@ -1192,6 +1547,81 @@ def _authoritative_layer_partition(rows, pattern_doc):
     return diagnostics, template_evidence
 
 
+def _dispatch_aligned(row):
+    return (row.get("layer_evidence") == "declared_dispatch_op_span"
+            or row.get("boundary_alignment") == "dispatch_op_span")
+
+
+def _segment_pattern_doc(pattern_doc, rows):
+    """Key dispatch-cut layer bodies by (Pattern, successor Pattern).
+
+    A declared dispatch op sits in the MIDDLE of a layer, so a dispatch cut
+    [anchor_i, anchor_i+1) holds layer i's core and tail plus layer i+1's head.
+    Its content therefore depends on the next layer's Pattern too: on a hybrid
+    model the full-attention head (qkv GEMM, qk-norm, RoPE, KV write) only
+    occurs in segments whose successor is a full-attention layer. Keyed by the
+    core Pattern alone, a representative followed by a same-Pattern layer never
+    contained it, and the highest-value fusion seams were in no table.
+
+    The cut cannot simply be moved to the "real" layer start: in fused-residual
+    models the previous layer's residual add and this layer's input norm are one
+    kernel, so there is no clean boundary, and locating one would need stage
+    inference, which may never define a boundary. Instead each segment kind
+    (`P0>P1`, last layer `Pn>END`) becomes its own table Pattern. Every kernel
+    lands in some table, each table is sequence-consistent, and layer-weighted
+    time is conserved. Rows cut by module spans keep their Pattern.
+    """
+    aligned = [row for row in rows
+               if row.get("assignment") == "layer_body" and _dispatch_aligned(row)]
+    if not aligned:
+        return pattern_doc
+    patterns = _pattern_index(pattern_doc)
+    count = int(pattern_doc.get("num_hidden_layers_main", 0) or 0)
+
+    def kind(layer_id):
+        core = (patterns.get(layer_id) or {}).get("pattern_id")
+        succ = ((patterns.get(layer_id + 1) or {}).get("pattern_id")
+                if layer_id + 1 < count else "END")
+        return "%s>%s" % (core, succ)
+
+    for row in aligned:
+        row["core_pattern_id"] = row.get("pattern_id")
+        row["pattern_id"] = kind(int(row["layer_id"]))
+    used = {row.get("pattern_id") for row in rows
+            if row.get("assignment") == "layer_body"}
+    by_id = {pattern.get("pattern_id"): pattern
+             for pattern in pattern_doc.get("patterns", [])}
+    segments = {}
+    for layer_id in range(count):
+        segments.setdefault(kind(layer_id), []).append(layer_id)
+    out_patterns = [pattern for pattern in pattern_doc.get("patterns", [])
+                    if pattern.get("pattern_id") in used]
+    for segment_id, layer_ids in sorted(segments.items()):
+        if segment_id not in used:
+            continue
+        core_id, succ_id = segment_id.split(">", 1)
+        core = by_id.get(core_id) or {}
+        allowed = set(core.get("representative_candidates",
+                               core.get("layer_ids", [])))
+        candidates = [layer for layer in layer_ids if layer in allowed]
+        out_patterns.append({
+            **{key: value for key, value in core.items()
+               if key not in ("pattern_id", "layer_ids",
+                              "representative_candidates")},
+            "pattern_id": segment_id,
+            "core_pattern_id": core_id,
+            "successor_pattern_id": succ_id,
+            "segment_basis": "dispatch_op_span",
+            "pattern_display_name": "%s -> %s head" % (
+                core.get("pattern_display_name") or core_id,
+                (by_id.get(succ_id) or {}).get("pattern_display_name") or succ_id),
+            "layer_ids": layer_ids,
+            "representative_candidates": candidates or layer_ids,
+        })
+    return {**pattern_doc, "patterns": out_patterns,
+            "segment_patterns_from": "dispatch_op_span"}
+
+
 def _layer_instances(rows):
     explicit = {}
     groups = []
@@ -1282,6 +1712,10 @@ def _boundary_rank(instance):
         elif text.startswith("validated_graph_capture_layer_scope"):
             rank = 0
         elif text.startswith("explicit_layer_marker"):
+            rank = 1
+        elif text == "declared_dispatch_op_span":
+            # A runtime op boundary, but phase-shifted within the layer (see
+            # _dispatch_anchor_scopes), so it ranks with explicit markers.
             rank = 1
         elif text == "module_sequence_interpolation":
             rank = 2
@@ -1621,6 +2055,84 @@ def _trace_pattern_consistency(instances):
     }
 
 
+def _step_link_audit(events, spans):
+    """Per step: how intact the host-launch <-> device-record link is.
+
+    {step_id: {"host_launches", "launches_without_device_record",
+    "graph_replay_rows"}}. A launch with no device record means the profiler
+    dropped GPU activity (Kimi-K2.5 TP8, vLLM 0.21: 356-968 of a prefill step's
+    2703 launches lost in contiguous ~310ms holes; every Qwen3.5 / MiniMax-M3
+    step lost 0). A device row carried by a graph launch has no per-kernel host
+    launch, so a host scope cannot own it.
+    """
+    runtime = [event for event in events
+               if isinstance(event, dict)
+               and event.get("cat") in ("cuda_runtime", "hip_runtime")
+               and event.get("ts") is not None]
+    device = [event for event in events
+              if isinstance(event, dict) and event.get("cat") in DEVICE_CATEGORIES
+              and event.get("ts") is not None]
+    recorded = {(event.get("args") or {}).get("correlation") for event in device}
+    graph_launches = {(event.get("args") or {}).get("correlation")
+                      for event in runtime if "GraphLaunch" in str(event.get("name"))}
+    graph_launches.discard(None)
+    audit = {span[5]: {"host_launches": 0, "launches_without_device_record": 0,
+                       "graph_replay_rows": 0} for span in spans}
+    host = sorted((span[7], span[8], span[5]) for span in spans if len(span) >= 9)
+    host_starts = [item[0] for item in host]
+    for event in runtime:
+        name = str(event.get("name"))
+        if "Launch" not in name or "Graph" in name:
+            continue
+        position = bisect.bisect_right(host_starts, event["ts"]) - 1
+        if position < 0 or event["ts"] >= host[position][1]:
+            continue
+        entry = audit[host[position][2]]
+        entry["host_launches"] += 1
+        if (event.get("args") or {}).get("correlation") not in recorded:
+            entry["launches_without_device_record"] += 1
+    device_starts = [span[0] for span in spans]
+    for event in device:
+        index = bisect.bisect_right(device_starts, event["ts"]) - 1
+        if index < 0 or event["ts"] >= spans[index][1]:
+            continue
+        if (event.get("args") or {}).get("correlation") in graph_launches:
+            audit[spans[index][5]]["graph_replay_rows"] += 1
+    return audit
+
+
+def _excused_incomplete_steps(partition_diagnostics, link_audit):
+    """Unresolved steps whose trace evidence cannot support layer ownership.
+
+    {step_id: {"reason", ...counts}}. Excused only while the phase still has a
+    mapped step to draw its representatives from:
+      * device_records_dropped -- the profiler lost some of the step's GPU records,
+        so its layers are missing kernels no mapping can restore;
+      * graph_replay_rows_unowned -- every layer anchor is present, but part of the
+        step replayed from a CUDA graph (a small mixed step under the capture size)
+        and those rows have no host launch to own them. A step with no anchors at
+        all (plain graph decode) is not excused here; it needs the boundary donor.
+    """
+    mapped = collections.Counter(
+        item.get("phase") for item in partition_diagnostics
+        if item.get("status") == "mapped")
+    excused = {}
+    for item in partition_diagnostics:
+        if item.get("status") == "mapped" or not mapped[item.get("phase")]:
+            continue
+        link = link_audit.get(item["step_id"]) or {}
+        if link.get("launches_without_device_record", 0) > 0:
+            reason = "device_records_dropped"
+        elif (link.get("graph_replay_rows", 0) > 0
+              and item.get("module_instance_count")
+              == item.get("configured_layer_count")):
+            reason = "graph_replay_rows_unowned"
+        else:
+            continue
+        excused[item["step_id"]] = dict(link, reason=reason)
+    return excused
+
+
 def _gating_step_audits(step_audits):
     """Mark extra unresolved steps non-gating and return the gating audits.
 
@@ -1645,7 +2157,7 @@ def _gating_step_audits(step_audits):
 
 def _quality(
         pattern_doc, rows, instances, representatives, spans, out_of_scope,
-        partition_diagnostics, tables, analysis_steps=None):
+        partition_diagnostics, tables, link_audit=None, analysis_steps=None):
     input_count = len(rows)
     assigned_count = sum(1 for row in rows if row["assignment"] in (
         "layer_body", "transition_global", "concurrent_unresolved"))
@@ -1659,6 +2171,8 @@ def _quality(
     instances_by_step = {}
     for instance in instances:
         instances_by_step.setdefault(instance.get("step_id"), []).append(instance)
+    incomplete_evidence = _excused_incomplete_steps(
+        partition_diagnostics, link_audit or {})
     step_audits = []
     for diagnostic in partition_diagnostics:
         step_instances = sorted(
@@ -1679,17 +2193,21 @@ def _quality(
             "layer_order_valid": actual_order == expected_order,
             "non_overlapping": non_overlapping,
             "boundary_source_status": diagnostic.get("status"),
-            "status": "pass" if (
-                diagnostic.get("status") == "mapped"
-                and actual_order == expected_order
-                and non_overlapping) else "fail",
+            "status": (
+                "excused_incomplete_evidence"
+                if diagnostic["step_id"] in incomplete_evidence else
+                "pass" if (
+                    diagnostic.get("status") == "mapped"
+                    and actual_order == expected_order
+                    and non_overlapping) else "fail"),
         })
     # Steps with no boundary evidence are marked first (an extra prefill step
     # inside a DECODE file).  Tables are then built from one analysis step per
     # phase; other captured steps (a test prompt, a step the profiler entered
     # mid-way, a ramp-up step) are audited but do not gate.  An analysis step
     # that is itself unresolved still gates: its rows are the tables.  Without
-    # analysis steps every step gates except the marked extra ones.
+    # analysis steps every step gates except the marked extra ones.  A step
+    # excused for incomplete link evidence never gates.
     _gating_step_audits(step_audits)
     analysis_ids = {item["step_id"]
                     for item in (analysis_steps or {}).values()}
@@ -1699,6 +2217,8 @@ def _quality(
     else:
         gating_audits = [item for item in step_audits
                          if item["status"] != "not_gating_unresolved_extra_step"]
+    gating_audits = [item for item in gating_audits
+                     if item["status"] != "excused_incomplete_evidence"]
     gated_step_ids = {item["step_id"] for item in gating_audits}
     non_gating_audits = [item for item in step_audits
                          if item["step_id"] not in gated_step_ids]
@@ -1754,6 +2274,9 @@ def _quality(
                 "non_gating_unresolved_steps": [
                     item["step_id"] for item in step_audits
                     if item["status"] == "not_gating_unresolved_extra_step"],
+                "excused_incomplete_evidence_steps": [
+                    dict(item, step_id=step_id)
+                    for step_id, item in sorted(incomplete_evidence.items())],
             },
             "representative_layer_integrity": representative_integrity,
             "trace_pattern_consistency": trace_consistency,
@@ -1764,7 +2287,8 @@ def _quality(
 
 
 def _phase_coverage(instances, tables, trace_paths, adopted_siblings,
-                    table_phases, require_phases, observed_phases=()):
+                    table_phases, require_phases, step_phases=None,
+                    observed_phases=()):
     """Describe what phase coverage this build actually achieved.
 
     Exists because `table_phases: ["all"]` used to be emitted whenever no
@@ -1779,12 +2303,17 @@ def _phase_coverage(instances, tables, trace_paths, adopted_siblings,
 
     in_tables = sorted({_norm(t.get("phase")) for t in tables if t.get("phase")})
     in_trace = sorted({_norm(i.get("phase")) for i in instances if i.get("phase")})
+    # Phases of the annotated steps themselves, whether or not any layer in them was
+    # resolved. `in_trace` only sees steps that produced layer instances, so a graph-
+    # replayed decode step with no boundary looked like no decode step at all.
+    with_steps = sorted({_norm(p) for p in (step_phases or ()) if p})
     tags = sorted({tag for tag in (_phase_tag(p) for p in trace_paths) if tag})
     # The trace decides the generation phase: "verify" when the target ran
     # TARGET_VERIFY steps (speculative decoding), else "decode".  A caller's
     # "decode"/"verify" requirement means "the generation phase".
     generation = sglang_step_modes.generation_phase(
-        set(in_tables) | set(in_trace) | {_norm(p) for p in observed_phases})
+        set(in_tables) | set(in_trace) | set(with_steps)
+        | {_norm(p) for p in observed_phases})
     if require_phases is None:
         required = sglang_step_modes.target_phases([generation])
     else:
@@ -1828,6 +2357,18 @@ def _phase_coverage(instances, tables, trace_paths, adopted_siblings,
         "decode_shapes_covered": decode_shapes,
         "decode_covered": decode_seq and decode_shapes,
         "trace_phase_tags": tags,
+        # A trace with NO step annotation at all cannot phase-tag a single row. On sglang
+        # that never happens (its profiler always writes step[...]); on vllm it is the
+        # DEFAULT unless the capture overlay's phase-annotation hook is armed, so make the
+        # distinction machine-readable instead of leaving it to be inferred from an empty
+        # phases_in_trace.
+        "phase_annotation_present": bool(in_trace),
+        "phases_with_steps": with_steps,
+        # Decode steps are in the window but none got layer boundaries (on vLLM: graph
+        # replay walks no per-layer op). The remedy is the Phase-1.2 boundary donor,
+        # not a different capture window.
+        "decode_requires_boundary_donor": (
+            generation in with_steps and not decode_seq),
         "traces_analysed": [os.path.abspath(p) for p in trace_paths],
         "siblings_auto_adopted": adopted_siblings,
         "filter_requested": sorted(table_phases) if table_phases else None,
@@ -1838,10 +2379,23 @@ def _phase_coverage(instances, tables, trace_paths, adopted_siblings,
         # nn.Module spans.  The ordered sequence survives; the shapes do not.
         # Only the shape half needs a separate graph-construction capture.
         "decode_requires_graph_capture": decode_seq and not decode_shapes,
+        # Naming WHY decode is missing, because the remedies are different and only one of
+        # them is "capture again".  The last two arms exist for single-file mixed-phase
+        # captures: sglang's profile_by_stage puts the phase in the FILENAME, so an absent
+        # DECODE file is conclusive -- but vllm writes one un-split trace, where no phase
+        # tag is normal and "no_decode_trace_analysed" would libel a capture that did in
+        # fact cover decode.  Split that bucket by whether the trace carried step spans:
+        #   no spans   -> the annotation itself is missing (on vllm: the capture overlay's
+        #                 hook was not armed). Nothing is phase-tagged, prefill included.
+        #   spans, but no decode -> annotation worked; the WINDOW held no decode step.
         "decode_evidence": (
             "sequence_and_shapes" if (decode_seq and decode_shapes) else
             "sequence_only_shapes_unresolved" if decode_seq else
             "trace_present_but_no_decode_tables" if "DECODE" in tags else
+            "decode_steps_present_boundaries_unresolved" if (
+                generation in with_steps) else
+            "no_phase_annotation_in_trace" if (not tags and not in_trace) else
+            "mixed_trace_no_decode_steps_in_window" if not tags else
             "no_decode_trace_analysed"),
     }
 
@@ -1875,7 +2429,8 @@ def _shape_capture_plan(tables, pattern_doc, trace_path,
         })
         target_buckets.append(bucket)
         for row in table["rows"]:
-            if row["shape"]["source"] == "kernel_exact":
+            # Both carry the kernel's own inputs; nothing left to capture.
+            if row["shape"]["source"] in ("kernel_exact", "triton_launch_args"):
                 continue
             needs.append({
                 "phase": table["phase"],
@@ -1939,6 +2494,12 @@ def _shape_capture_plan(tables, pattern_doc, trace_path,
             "decode_capture_requires": (
                 [] if (coverage and coverage.get("decode_covered")) else
                 ([] if (coverage and coverage.get("decode_sequence_covered"))
+                 else ["run the Phase-1.2 boundary donor (on vLLM a "
+                       "cudagraph_mode=NONE capture), then rebuild with "
+                       "--layer-boundary-map: the trace holds decode steps "
+                       "but none has layer boundaries"]
+                 if (coverage and coverage.get(
+                     "decode_requires_boundary_donor"))
                  else ["analyse the -TP-0-DECODE trace (auto-adopted by "
                        "default; --no-auto-sibling disables)"]) +
                 ([] if (coverage and coverage.get("decode_shapes_covered"))
@@ -2061,6 +2622,7 @@ def build(trace_path, pattern_path, out_dir, table_phases=None,
     # kernels outside a layer only when ownership evidence says so; do not
     # rewrite an authoritative boundary from sequence similarity.
     prefix_demotions = []
+    pattern_doc = _segment_pattern_doc(pattern_doc, rows)
     instances = _layer_instances(rows)
     representative_instances = [
         instance for instance in instances
@@ -2072,10 +2634,13 @@ def build(trace_path, pattern_path, out_dir, table_phases=None,
     tables = _table(pattern_doc, rows, representatives, table_phases)
     quality = _quality(
         pattern_doc, rows, instances, representatives, spans, out_of_scope,
-        partition_diagnostics, tables, analysis_steps)
+        partition_diagnostics, tables, _step_link_audit(events, spans),
+        analysis_steps)
     coverage = _phase_coverage(
         instances, tables, trace_paths, adopted_siblings, table_phases,
-        require_phases, observed_phases=analysis_steps.keys())
+        require_phases,
+        step_phases={row.get("phase") for row in rows if row.get("step_id")},
+        observed_phases=analysis_steps.keys())
     coverage["analysis_steps"] = analysis_steps
     quality["phase_coverage"] = coverage
     quality.setdefault("warnings", []).extend(
@@ -2109,6 +2674,12 @@ def build(trace_path, pattern_path, out_dir, table_phases=None,
             "traces analysed: %s" % (
                 ", ".join(coverage["missing_required_phases"]),
                 ", ".join(os.path.basename(p) for p in trace_paths)))
+    elif coverage["decode_requires_boundary_donor"]:
+        quality.setdefault("warnings", []).append(
+            "phase coverage: the trace holds decode steps but none has "
+            "authoritative layer boundaries (graph replay walks no per-layer "
+            "op). Run the Phase-1.2 boundary donor; widening the capture "
+            "window will not help.")
     elif coverage["decode_requires_graph_capture"]:
         generation = coverage["generation_phase"]
         quality.setdefault("warnings", []).append(

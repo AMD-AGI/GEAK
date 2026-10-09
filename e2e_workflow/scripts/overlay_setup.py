@@ -27,6 +27,25 @@ Commands:
                 --overlay O --target sglang...:fn --out <task_dir> [--max 5] [--capture-file capture_shapes.py]
   add-marker    install a marker-only hook on one candidate seam (uses seam_trace.py)
                 --overlay O --target sglang...:fn [--marker-file seam_trace.py]
+  add-hook      run impl_module.impl_attr() lazily, right AFTER a module finishes importing
+                (the ONLY safe kind for callbacks that touch the serving stack -- add-rebind
+                imports eagerly at startup, which hangs the TP ranks)
+                --overlay O --module vllm.v1.worker.gpu_model_runner
+                --impl-module vllm_phase_annotate [--impl-attr install] [--impl-file F]
+  add-vllm-semantic-capture
+                wire scripts/vllm_semantic_capture.py (+ the capture engine and the shared
+                phase rule) so a vLLM run logs per-op shapes. This is the EAGER PROBE that
+                supplies decode shapes the cudagraph-replayed production trace cannot.
+                Inert unless GEAK_SEMANTICS_CAPTURE=1.   --overlay O
+  add-vllm-phase-annotation
+                shorthand: wire scripts/vllm_phase_annotate.py so a vLLM trace carries the
+                sglang-dialect step[EXTEND|DECODE ...] spans the fusion semantics layer needs.
+                Inert unless GEAK_VLLM_PHASE_ANNOTATE=1.   --overlay O
+  add-triton-launch-probe
+                wire scripts/triton_launch_probe.py so every Triton launch made while a
+                torch profiler records carries its tensor arguments in the trace (the only
+                shape a Python-launched Triton kernel can get). Inert unless
+                GEAK_TRITON_LAUNCH_SHAPES=1.   --overlay O [--from BASE]
   check         print where a module resolves from (run with the overlay on PYTHONPATH)
                 --module sglang.srt.layers.activation [--path-only]
   Every add-* takes --from BASE to SEED a new overlay from an existing one, so a candidate overlay is
@@ -47,7 +66,7 @@ try:
     with open(_MAN) as _fh:
         _m = json.load(_fh)
 except Exception as _e:
-    _m = {"modules": [], "rebinds": [], "markers": [], "captures": []}
+    _m = {"modules": [], "rebinds": [], "markers": [], "captures": [], "hooks": []}
 
 # (a) inject patched submodules under their dotted names BEFORE anything imports them.
 for _e in _m.get("modules", []):
@@ -96,6 +115,70 @@ for _e in _m.get("markers", []):
         seam_trace.install(_e["target"])
     except Exception as _ex:
         sys.stderr.write("[overlay] seam marker install FAILED %r: %r\n" % (_e, _ex))
+
+# (e) LAZY post-import hooks: run <impl_module>.<impl_attr>() right AFTER a target module
+# finishes importing. This is the only safe shape for anything that must touch the serving
+# stack: section (b) above calls importlib.import_module() EAGERLY at interpreter startup,
+# and an eager `import vllm...`/`import sglang...` there runs before the engine has built
+# its distributed environment -- which HANGS every TP rank. Here nothing is imported until
+# the engine itself imports the target, and a module that is never imported costs nothing.
+#
+# Mechanism: a meta_path finder that resolves the real spec, then wraps the loader's
+# exec_module so the callback fires after the module body has executed. find_spec alone
+# cannot do this -- it runs BEFORE the module exists.
+_hooks = {}
+for _e in _m.get("hooks", []):
+    _hooks.setdefault(_e["module"], []).append((_e["impl_module"], _e["impl_attr"]))
+
+if _hooks:
+    def _run_hooks(_dotted, _entries):
+        for _impl_module, _impl_attr in _entries:
+            try:
+                getattr(importlib.import_module(_impl_module), _impl_attr)()
+            except Exception as _ex:
+                sys.stderr.write("[overlay] hook %s.%s on %s FAILED: %r\n"
+                                 % (_impl_module, _impl_attr, _dotted, _ex))
+
+    class _GeakPostImportFinder:
+        def __init__(self, hooks):
+            self._hooks = hooks
+            self._busy = set()
+
+        def find_spec(self, fullname, path=None, target=None):
+            _entries = self._hooks.get(fullname)
+            # _busy guards the re-entrant find_spec below: without it our own lookup
+            # would hit this finder again and recurse forever.
+            if not _entries or fullname in self._busy:
+                return None
+            self._busy.add(fullname)
+            try:
+                _spec = importlib.util.find_spec(fullname)
+            except Exception:
+                _spec = None
+            finally:
+                self._busy.discard(fullname)
+            if _spec is None or getattr(_spec, "loader", None) is None:
+                return None
+            _loader = _spec.loader
+            _orig_exec = _loader.exec_module
+
+            def _exec_module(_module, __orig=_orig_exec, __e=_entries, __n=fullname):
+                __orig(_module)
+                _run_hooks(__n, __e)
+
+            try:
+                _loader.exec_module = _exec_module
+            except Exception:
+                return None          # immutable loader -> decline, don't break the import
+            return _spec
+
+    sys.meta_path.insert(0, _GeakPostImportFinder(_hooks))
+    # A target already imported before sitecustomize ran would never trip the finder.
+    for _dotted, _entries in _hooks.items():
+        if _dotted in sys.modules:
+            _run_hooks(_dotted, _entries)
+    sys.stderr.write("[overlay] armed %d post-import hook target(s): %s\n"
+                     % (len(_hooks), ", ".join(sorted(_hooks))))
 '''
 
 
@@ -132,7 +215,7 @@ def _ensure_overlay(overlay, base=""):
     man = os.path.join(overlay, "_overlay_manifest.json")
     if not os.path.exists(man):
         with open(man, "w") as fh:
-            json.dump({"modules": [], "rebinds": [], "markers": [], "captures": []}, fh, indent=2)
+            json.dump({"modules": [], "rebinds": [], "markers": [], "captures": [], "hooks": []}, fh, indent=2)
     return man
 
 
@@ -224,6 +307,88 @@ def cmd_add_marker(a):
     print(f"launch with: PYTHONPATH={a.overlay}:$PYTHONPATH")
 
 
+def cmd_add_hook(a):
+    """Register a lazy post-import hook: after MODULE imports, call IMPL_MODULE.IMPL_ATTR().
+
+    Use this (never add-rebind) whenever the callback has to touch the serving stack, and
+    for anything that must run after the engine has built the object it patches.
+    """
+    man = _ensure_overlay(a.overlay)
+    if a.impl_file:
+        shutil.copy2(a.impl_file, os.path.join(a.overlay, os.path.basename(a.impl_file)))
+    m = _load_man(man)
+    m.setdefault("hooks", [])
+    m["hooks"] = [e for e in m["hooks"]
+                  if not (e["module"] == a.module and e["impl_module"] == a.impl_module)]
+    m["hooks"].append({"module": a.module, "impl_module": a.impl_module,
+                       "impl_attr": a.impl_attr})
+    _save_man(man, m)
+    print(f"OVERLAY_DIR={a.overlay}")
+    print(f"add-hook after import {a.module} -> {a.impl_module}.{a.impl_attr}()")
+    print(f"launch with: PYTHONPATH={a.overlay}:$PYTHONPATH")
+
+
+def cmd_add_vllm_phase_annotation(a):
+    """One-liner for the KernelFusion capture overlay on vLLM.
+
+    Wires scripts/vllm_phase_annotate.py as a post-import hook on the vLLM model runner so
+    the trace carries sglang-dialect `step[EXTEND|DECODE ...]` spans. The hook stays inert
+    until GEAK_VLLM_PHASE_ANNOTATE=1, so this overlay is safe to leave on a normal run.
+    """
+    impl = a.impl_file or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "vllm_phase_annotate.py")
+    if not os.path.exists(impl):
+        raise SystemExit(f"vllm_phase_annotate.py not found at {impl}")
+    a.impl_file = impl
+    a.impl_module = "vllm_phase_annotate"
+    a.impl_attr = "install"
+    cmd_add_hook(a)
+
+
+def cmd_add_vllm_semantic_capture(a):
+    """Wire the vLLM eager shape probe (GEAK Semantics 1.2) as a post-import hook.
+
+    Unlike the phase-annotation overlay this needs THREE modules on the path -- the hook
+    entry, the shared capture engine it drives, and the phase rule both it and the trace
+    annotation read -- so copy them together. A partially-populated overlay fails at
+    import time inside the server, where the only symptom is an empty shape log.
+
+    Armed by the capture engine's own switch, GEAK_SEMANTICS_CAPTURE=1 (plus
+    GEAK_SEMANTICS_SHAPE_LOG / _LAYERS / _PHASES). Inert otherwise.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    needed = ["vllm_semantic_capture.py", "semantic_runtime_capture.py",
+              "vllm_phase_annotate.py"]
+    missing = [n for n in needed if not os.path.exists(os.path.join(here, n))]
+    if missing:
+        raise SystemExit("missing capture module(s) beside overlay_setup.py: %s"
+                         % ", ".join(missing))
+    _ensure_overlay(a.overlay)
+    for name in needed:
+        shutil.copy2(os.path.join(here, name), os.path.join(a.overlay, name))
+    a.impl_file = ""            # already copied, all three of them
+    a.impl_module = "vllm_semantic_capture"
+    a.impl_attr = "install"
+    cmd_add_hook(a)
+
+
+def cmd_add_triton_launch_probe(a):
+    """Wire scripts/triton_launch_probe.py as a post-import hook on triton.runtime.jit.
+
+    Every Triton launch made while a torch profiler records is then annotated with its
+    tensor arguments, which is the only shape evidence a Python-launched Triton kernel
+    can have (it has no dispatcher op). Inert unless GEAK_TRITON_LAUNCH_SHAPES=1.
+    """
+    impl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "triton_launch_probe.py")
+    if not os.path.exists(impl):
+        raise SystemExit(f"triton_launch_probe.py not found at {impl}")
+    _ensure_overlay(a.overlay, a.base)
+    a.impl_file = impl
+    a.impl_module = "triton_launch_probe"
+    a.impl_attr = "install"
+    cmd_add_hook(a)
+
+
 def cmd_check(a):
     f = module_file(a.module)
     if getattr(a, "path_only", False):
@@ -276,6 +441,33 @@ def main():
     p.add_argument("--marker-file", default="", dest="marker_file")
     p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
     p.set_defaults(func=cmd_add_marker)
+
+    p = sub.add_parser("add-hook")
+    p.add_argument("--overlay", required=True)
+    p.add_argument("--module", required=True,
+                   help="dotted module whose import triggers the hook, "
+                        "e.g. vllm.v1.worker.gpu_model_runner")
+    p.add_argument("--impl-module", required=True, dest="impl_module")
+    p.add_argument("--impl-attr", default="install", dest="impl_attr")
+    p.add_argument("--impl-file", default="", dest="impl_file")
+    p.set_defaults(func=cmd_add_hook)
+
+    p = sub.add_parser("add-vllm-phase-annotation")
+    p.add_argument("--overlay", required=True)
+    p.add_argument("--module", default="vllm.v1.worker.gpu_model_runner")
+    p.add_argument("--impl-file", default="", dest="impl_file")
+    p.set_defaults(func=cmd_add_vllm_phase_annotation)
+
+    p = sub.add_parser("add-vllm-semantic-capture")
+    p.add_argument("--overlay", required=True)
+    p.add_argument("--module", default="vllm.v1.worker.gpu_model_runner")
+    p.set_defaults(func=cmd_add_vllm_semantic_capture)
+
+    p = sub.add_parser("add-triton-launch-probe")
+    p.add_argument("--overlay", required=True)
+    p.add_argument("--module", default="triton.runtime.jit")
+    p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
+    p.set_defaults(func=cmd_add_triton_launch_probe)
 
     p = sub.add_parser("check")
     p.add_argument("--module", required=True)

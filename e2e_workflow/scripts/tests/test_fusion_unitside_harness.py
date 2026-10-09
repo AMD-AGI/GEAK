@@ -96,6 +96,20 @@ class FusionUnitsideTest(_UnitsideFixture, unittest.TestCase):
         self.assertEqual(res["status"], "pass")
         self.assertEqual(self._status(res, "dc_ar"), "needs_diagnosis")
 
+    def test_report_separates_diagnosed_from_open_parity_failures(self):
+        # A diagnosed functional failure must not read as "not refuted, just unmeasured".
+        diagnosed = self._run(self._candidates(),
+                              [self._verdict(parity="fail",
+                                             parity_diagnosis="KV-cache layout not addressable")])
+        md = uh.render_markdown(diagnosed)
+        self.assertIn("已诊断 → `functional`", md)
+        self.assertIn("needs_diagnosis (functional)", md)
+        self.assertNotIn("（未诊断）", md)
+        open_row = uh.render_markdown(
+            self._run(self._candidates(), [self._verdict(parity="fail")]))
+        self.assertIn("（未诊断）", open_row)
+        self.assertNotIn("needs_diagnosis (functional)", open_row)
+
     def test_no_speedup_fails(self):
         res = self._run(self._candidates(), [self._verdict(isolated_speedup=0.98)])
         self.assertEqual(self._status(res, "dc_ar"), "fail")

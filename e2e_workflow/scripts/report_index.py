@@ -83,6 +83,7 @@ def _summarise(kind, data):
     if kind == "semantic":
         meas = data.get("phase_coverage_measured") or {}
         parts = ["%s %d/%d shape" % (ph, v.get("resolved", 0), v.get("rows", 0))
+                 + ("（kernel 级 %d）" % v["kernel_level"] if "kernel_level" in v else "")
                  for ph, v in sorted(meas.items())]
         parts.append("可融合区间 %d 个" % data.get("fusible_region_count", 0))
         blind = [ph for ph, v in sorted(meas.items())

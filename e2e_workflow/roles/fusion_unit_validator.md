@@ -139,7 +139,10 @@ Read the candidate object for `CANDIDATE_ID` from `FUSION_CANDIDATES_JSON`:
   `activation_quant`, `quant_gemm_prologue`).
 - `members[].shape.input_dims` / `input_types` — the EXACT captured shapes+dtypes the
   ops ran on (source `kernel_exact`). These ARE your microbench inputs — build tensors
-  of exactly these shapes/dtypes. Your `tested_shape` MUST be one of these member rows
+  of exactly these shapes/dtypes. A member whose `shape.granularity` is `operator`
+  carries the ENCLOSING operator's inputs (one op launched several kernels), not that
+  kernel's own: drive the reference and fused paths through that operator with those
+  inputs, never by feeding those dims straight to the inner kernel. Say which in `notes`. Your `tested_shape` MUST be one of these member rows
   (the harness rejects a verdict tested on any other shape).
 - `members[].parent_operator` / `kernel` — the SPLIT reference ops, in `pos` order
   (e.g. `sgl_kernel::qr_all_reduce` → `aiter::rmsnorm` [→ `aiter::dynamic_..._scaled_quant`]).
@@ -300,6 +303,35 @@ Read the candidate object for `CANDIDATE_ID` from `FUSION_CANDIDATES_JSON`:
 
 7. Tear down + DELETE only a container you created. Never delete the runtime
    represented by `EXEC_PREFIX`.
+
+## On vLLM (`BACKEND=vllm`)
+
+The procedure is unchanged; these are the places it assumed SGLang. Each was hit on
+Qwen3.5-35B-A3B-FP8 / vllm-openai-rocm v0.27.1.
+
+- **Members are often Inductor kernels, not library ops.** Under torch.compile a chain such
+  as qk-norm + RoPE is lowered to `triton_poi_fused_N` / `triton_red_fused_N` that no module
+  exports. Do not rebuild the reference in eager PyTorch — it rounds differently and is not the
+  live path. Take the literal kernels from the server's compile cache
+  (`$VLLM_CACHE_ROOT/torch_compile_cache/<hash>/…`, the hash `server.log` names; grep the
+  subgraph file for the member kernel names) and replay its `call()` with the same arguments.
+- **Paged KV-cache fusions: feed the live cache, in the live layout.** The attention backend
+  owns the layout, and it is not always NHD/HND: ROCM_ATTN stores K as
+  `[blocks, kv_heads, head_dim/x, block_size, x]` (x=8 for bf16) and V as
+  `[blocks, kv_heads, head_dim, block_size]`. Build the cache through the backend's own
+  allocation/split helpers and its real `block_size` / `slot_mapping`. A fused kernel that
+  cannot address that layout is a **functional** failure with a `parity_diagnosis` stating the
+  layout — not a mis-feed to be worked around by writing its preferred layout (that corrupts
+  the cache the backend reads).
+- **Time decode in graph mode.** vLLM replays decode under a CUDA graph; `time_op` with graph
+  capture is the representative number. Report eager as a sensitivity.
+- **The reference is everything the fused kernel does.** If it also emits an output whose
+  producer is outside `removable_row_ids` (e.g. a gate copy), include that producer in the
+  reference and report the removable-rows-only speedup as a sensitivity.
+- **Caller-side gates** that keep the fused path off on this platform (e.g. `is_cuda()` in the
+  model file) do not fail the candidate: run the kernel directly and record the gate in
+  `dispatch_gate_note` for apply-back. Distinguish a platform gate from a correctness gate
+  (e.g. `text_only` for an mRoPE shortcut) and name which one it is.
 
 ## Rules
 - NEVER edit `fusion_unitside_harness.py` or weaken it. Your verdict is the input it

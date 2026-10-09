@@ -193,3 +193,14 @@ def test_enabled_but_not_run(tmp_path):
     assert t["gate"] == "not_run"
     assert "did not run" in t["explanation"]
     assert "pre_tune_throughput_tok_s" not in t
+
+
+def test_config_recommendations_are_additive(tmp_path):
+    """Fusion flag levers the run could not measure are handed back; absent when there are none."""
+    assert "config_recommendations" not in _norm(tmp_path, _wf())
+    lever = {"lever_id": "c01", "handle": "env VLLM_ROCM_USE_AITER=1",
+             "route": "config_tuner", "candidate_ids": ["dc_moe"], "covers": []}
+    plain = _norm(tmp_path, _wf())
+    with_recs = _norm(tmp_path, _wf(config_recommendations=[lever]))
+    assert with_recs["config_recommendations"] == [lever]
+    assert {k: v for k, v in with_recs.items() if k != "config_recommendations"} == plain

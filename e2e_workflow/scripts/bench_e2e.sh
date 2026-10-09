@@ -98,6 +98,26 @@ if [ -z "$SUMMARIZE" ]; then
   exit 3
 fi
 
+# ---- pin the whole benchmark (server + client) to the serving GPUs' NUMA node ----
+# Done once, first, by re-exec, so the isolated-mode scheduler, every replica's server and the
+# bench client all inherit it. See numa_pin.sh for the measured ~5% bimodal spread it removes.
+# GEAK_NUMA_PIN=0 disables; GPUs spanning nodes, or unknown topology, run unpinned with a note.
+if [ "${GEAK_NUMA_PIN:-1}" = "1" ] && [ -z "${GEAK_NUMA_PINNED:-}" ]; then
+  export GEAK_NUMA_PINNED="none"
+  _geak_numa_lib="$(_stage_lookup numa_pin.sh)" || _geak_numa_lib=""
+  if [ -n "$_geak_numa_lib" ] && command -v taskset >/dev/null 2>&1; then
+    source "$_geak_numa_lib"
+    if _geak_cpus="$(geak_numa_cpus "${GPU:-0}")" && [ -n "$_geak_cpus" ]; then
+      export GEAK_NUMA_PINNED="$_geak_cpus"
+      echo ">>> NUMA: pinning to CPUs $_geak_cpus (node of GPU ${GPU:-0})"
+      exec taskset -c "$_geak_cpus" bash "$0" "$@"
+    fi
+    echo "!!! NUMA: GPU ${GPU:-0} topology unknown or spans nodes; running unpinned" >&2
+  else
+    echo "!!! NUMA: numa_pin.sh or taskset missing; running unpinned (throughput may be bimodal)" >&2
+  fi
+fi
+
 # ---- default lifecycle ----
 # No mode named => the Hyperloom one, since "the caller forgot to forward MEASUREMENT_MODE" is the
 # likeliest way a number ends up measured under a different lifecycle than the rest of the run.
@@ -555,6 +575,35 @@ RESULT_JSONL="$OUT_DIR/bench_runs.jsonl"
 COLD_JSONL="$OUT_DIR/bench_runs.cold.jsonl"
 : > "$COLD_JSONL"
 
+# ---- Triton launch probe (shape evidence for capture runs) ----
+# GEAK_TRITON_LAUNCH_SHAPES=1 in EXTRA_ENV asks for a trace whose Python-launched Triton kernels
+# carry their tensor arguments (triton_launch_probe.py) -- the only shape such a kernel can get.
+# The probe is a post-import hook, so it rides in an overlay, SEEDED from the current one: only
+# the first sitecustomize on PYTHONPATH runs, so prepending a second overlay dir would silently
+# drop one of the two. Same-boot A/B on MiniMax-M3 TP8: prefill step +0.07%, kernel time +0.17%.
+# A missing helper degrades to an unprobed trace (it is still the Top-N source), loudly.
+case " $EXTRA_ENV " in *" GEAK_TRITON_LAUNCH_SHAPES=1 "*)
+  _OVERLAY_SETUP="$(_stage_lookup overlay_setup.py || true)"
+  _PROBE_OVERLAY="$OUT_DIR/triton_launch_probe_overlay"
+  _OVL_FIRST="${OVERLAY_PYTHONPATH%%:*}"
+  _OVL_REST=""; [ "$_OVL_FIRST" != "$OVERLAY_PYTHONPATH" ] && _OVL_REST="${OVERLAY_PYTHONPATH#*:}"
+  if [ -z "$_OVERLAY_SETUP" ] || [ ! -f "$(dirname "$_OVERLAY_SETUP")/triton_launch_probe.py" ]; then
+    echo "!!! GEAK_TRITON_LAUNCH_SHAPES=1 but overlay_setup.py + triton_launch_probe.py are not staged" \
+         "next to this script or under SKILL_DIR: Triton rows will stay shape-less." >&2
+  elif [ -n "$_OVL_FIRST" ] && [ -f "$_OVL_FIRST/sitecustomize.py" ] \
+       && [ ! -f "$_OVL_FIRST/_overlay_manifest.json" ]; then
+    echo "!!! GEAK_TRITON_LAUNCH_SHAPES=1 but $_OVL_FIRST has its own sitecustomize and no overlay" \
+         "manifest to seed from: Triton launch probe NOT armed." >&2
+  else
+    rm -rf "$_PROBE_OVERLAY"
+    python3 "$_OVERLAY_SETUP" add-triton-launch-probe --overlay "$_PROBE_OVERLAY" \
+      ${_OVL_FIRST:+--from "$_OVL_FIRST"} >/dev/null \
+      && OVERLAY_PYTHONPATH="$_PROBE_OVERLAY${_OVL_REST:+:$_OVL_REST}" \
+      || echo "!!! failed to build the Triton launch probe overlay; capturing without it." >&2
+  fi
+  ;;
+esac
+
 # export everything the adapter reads
 export MODEL HOST PORT TP GPU MEM_FRACTION EXTRA_SERVER_ARGS EXTRA_ENV OVERLAY_PYTHONPATH
 export ISL OSL CONC SEED PROFILE PROFILE_DIR PROFILE_NUM_STEPS BASE_URL RESULT_JSONL LOG
@@ -809,21 +858,31 @@ PY
     case "${TPOT_MS:-}" in ''|*[!0-9.]*) TPOT_MS="" ;; esac   # keep only a clean number
     [ -n "${TPOT_MS:-}" ] && echo ">>> steady-state sizing: derived TPOT_MS=${TPOT_MS}ms from timed bench (vllm window auto-scale)"
   fi
-  # KernelFusion has a different evidence goal from the native Top-N profiler:
-  # it needs Python/module spans and a few representative forwards per sglang
-  # stage, not a long statistical sample.  Its caller sets GEAK_FUSION_TRACE=1.
-  # Three steps per stage (GEAK_FUSION_PROFILE_STEPS) reach a real prefill
-  # batch and a full-concurrency decode/verify step once the client warmup is
-  # kept out of the window (see _BG_WARMUPS below); semantics then picks one
-  # analysis step per phase. Other backends retain their existing behavior.
+  # KernelFusion has a different evidence goal from the native Top-N profiler: it needs
+  # Python/module spans and a SHORT window, not a long statistical sample.  Its caller sets
+  # GEAK_FUSION_TRACE=1, and the auto-sizing below is skipped for EVERY backend -- the window
+  # is owned by the adapter in fusion mode:
+  #   sglang -> PROFILE_NUM_STEPS=GEAK_FUSION_PROFILE_STEPS (default 3) per separately captured
+  #             stage (profile_by_stage splits EXTEND/DECODE into their own traces). Three steps
+  #             reach a real prefill batch and a full-concurrency decode/verify step once the
+  #             client warmup is kept out of the window (see _BG_WARMUPS below); semantics then
+  #             picks one analysis step per phase.
+  #   vllm   -> ProfilerConfig.max_iterations (GEAK_FUSION_MAX_ITERS, see adapters/vllm.sh).
+  #             There is NO profile_by_stage, so one window must contain BOTH phases.
+  # (Gating this on BACKEND = sglang let a vllm fusion capture fall into the full statistical
+  # window with stacks on: a multi-GB trace that may never flush.)
   _GEAK_FUSION_CAPTURE=0
   case " ${EXTRA_ENV:-} " in
     *" GEAK_FUSION_TRACE=1 "*) _GEAK_FUSION_CAPTURE=1 ;;
   esac
   [ "${GEAK_FUSION_TRACE:-0}" = "1" ] && _GEAK_FUSION_CAPTURE=1
-  if [ "$_GEAK_FUSION_CAPTURE" = "1" ] && [ "$BACKEND" = "sglang" ]; then
-    PROFILE_NUM_STEPS="${GEAK_FUSION_PROFILE_STEPS:-3}"
-    echo ">>> Fusion semantic capture: preserving PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS} (steady-state auto-sizing disabled)"
+  if [ "$_GEAK_FUSION_CAPTURE" = "1" ]; then
+    if [ "$BACKEND" = "sglang" ]; then
+      PROFILE_NUM_STEPS="${GEAK_FUSION_PROFILE_STEPS:-3}"
+      echo ">>> Fusion semantic capture (sglang): PROFILE_NUM_STEPS=${PROFILE_NUM_STEPS} per stage (steady-state auto-sizing disabled)"
+    else
+      echo ">>> Fusion semantic capture (${BACKEND}): window owned by the adapter (steady-state auto-sizing disabled)"
+    fi
   else
     # Native profiling keeps main's deterministic target computed at launch.
     if [ "${PROFILE_NUM_STEPS:-0}" -lt "$PROFILE_TARGET_STEPS" ]; then
@@ -850,19 +909,33 @@ PY
   fi
   export PROFILE_NUM_STEPS PROFILE_NUM_PROMPTS PROFILE_WINDOW_SEC
   if declare -F adapter_profile_window >/dev/null; then
+    # Report the window the ADAPTER will actually use. In fusion mode the sizing above is skipped,
+    # so printing PROFILE_NUM_STEPS/PROFILE_WINDOW_SEC there would name knobs nobody reads -- a log
+    # line that misstates the capture is how a mis-sized window survives review.
+    _win_desc="${PROFILE_NUM_STEPS} steps / ${PROFILE_WINDOW_SEC}s"
+    if [ "${_GEAK_FUSION_CAPTURE:-0}" = "1" ]; then
+      case "$BACKEND" in
+        sglang) _win_desc="fusion: ${PROFILE_NUM_STEPS} step(s) per stage" ;;
+        vllm)   _win_desc="fusion: max_iterations=${GEAK_FUSION_MAX_ITERS:-16} iters, <=${GEAK_FUSION_WINDOW_SEC:-20}s" ;;
+        *)      _win_desc="fusion: adapter-owned window" ;;
+      esac
+    fi
     echo ">>> Profiling from load start (warmup ${PROFILE_WARMUP_SEC}s) on a saturated load " \
          "(${PROFILE_NUM_PROMPTS} prompts, conc ${CONC}${PROFILE_REQUEST_RATE:+, rate ${PROFILE_REQUEST_RATE}/s}); " \
-         "SINGLE capture of ${PROFILE_NUM_STEPS} steps / ${PROFILE_WINDOW_SEC}s (adaptive re-capture OFF) ..."
+         "SINGLE capture of ${_win_desc} (adaptive re-capture OFF) ..."
     # SINGLE deterministic capture (adaptive re-capture is off — see the sizing note above). Start the
     # sustained, replenishing background load (>CONC prompts, realistic prefill+decode mix; NOT timed, NOT
     # profiled). With PROFILE_WARMUP_SEC=0 the profiler is armed at load start so the capture includes the
     # initial prefill burst (prefill shapes stay visible for head selection).
-    # The fusion window opens at load start. The client's own warmup requests
+    # The sglang fusion window opens at load start. The client's own warmup requests
     # (NUM_WARMUPS, 8 by default) would then be what the window captures:
     # Qwen3.5 NEXTN recorded 16/16 verify steps at bs=8 instead of 64. The timed
     # run above already warmed the server, so the profiled load skips warmup.
+    # vllm places its window by iteration delay (GEAK_FUSION_DELAY_ITERS), tuned
+    # with the client warmup in place, so it keeps NUM_WARMUPS.
     _BG_WARMUPS="${NUM_WARMUPS:-}"
-    [ "$_GEAK_FUSION_CAPTURE" = "1" ] && _BG_WARMUPS="${GEAK_FUSION_PROFILE_WARMUPS:-0}"
+    [ "$_GEAK_FUSION_CAPTURE" = "1" ] && [ "$BACKEND" = "sglang" ] && \
+      _BG_WARMUPS="${GEAK_FUSION_PROFILE_WARMUPS:-0}"
     NUM_WARMUPS="$_BG_WARMUPS" REQUEST_RATE="${PROFILE_REQUEST_RATE}" \
       adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 0 >/dev/null 2>&1 &
     _bg_load=$!
@@ -888,7 +961,10 @@ PY
   # directory directly. Generate it in the capture process so the pipeline does
   # not depend on an agent remembering to run trace_capability.py afterward.
   if [ "$_GEAK_FUSION_CAPTURE" = "1" ]; then
-    _TRACE_CAPABILITY="${SKILL_DIR:-}/scripts/trace_capability.py"
+    # SKILL_DIR is not always in the capture's env (a role running a second, donor capture);
+    # the Director copies trace_capability.py next to this script, so fall back to it.
+    _TRACE_CAPABILITY="${SKILL_DIR:+$SKILL_DIR/scripts/trace_capability.py}"
+    [ -n "$_TRACE_CAPABILITY" ] || _TRACE_CAPABILITY="$HERE/trace_capability.py"
     _TRACE_MANIFEST="$OUT_DIR/profile_trace_manifest.json"
     if [ ! -f "$_TRACE_CAPABILITY" ]; then
       echo "!!! KernelFusion manifest builder missing: $_TRACE_CAPABILITY" >&2

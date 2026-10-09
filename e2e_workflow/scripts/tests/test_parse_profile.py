@@ -254,6 +254,50 @@ class TestClassify(unittest.TestCase):
         self.assertEqual((cls, backend, editable), ("other", "unknown", True))
 
 
+class TestLaunchApiClassification(unittest.TestCase):
+    """A Triton attention kernel was routed as an uneditable CK library kernel.
+
+    vLLM's in-tree kernel_paged_attention_2d matches the attention name rule. Its eager
+    launches go through hipModuleLaunchKernel (a JIT module), which the trace records.
+    """
+
+    def test_module_launch_turns_a_named_attention_kernel_into_triton(self):
+        cls, backend, editable, _ = pp.classify(
+            "kernel_paged_attention_2d", {"hipModuleLaunchKernel": 30})
+        self.assertEqual((cls, backend, editable), ("triton", "triton", True))
+
+    def test_without_launch_evidence_the_name_rule_stands(self):
+        self.assertEqual(pp.classify("kernel_paged_attention_2d")[0], "library_attn")
+
+    def test_asm_and_compiled_attention_kernels_are_not_reclassified(self):
+        # aiter's asm fmha is a loaded module too; CK templates launch via hipLaunchKernel
+        self.assertEqual(pp.classify("fmha_fwd_hd128_bf16",
+                                     {"hipModuleLaunchKernel": 3})[0], "library_attn")
+        self.assertEqual(pp.classify(
+            "void paged_attention_ll4mi_QKV_mfma16_kernel<float>(int)",
+            {"hipModuleLaunchKernel": 3})[0], "library_attn")
+
+    def test_parser_records_eager_launch_apis_and_skips_graph_replays(self):
+        events = [
+            {"cat": "hip_runtime", "name": "hipModuleLaunchKernel", "ts": 1, "dur": 1,
+             "args": {"correlation": 7}},
+            {"cat": "kernel", "name": "kernel_paged_attention_2d", "ts": 2, "dur": 5,
+             "args": {"correlation": 7}},
+            {"cat": "hip_runtime", "name": "hipGraphLaunch", "ts": 10, "dur": 1,
+             "args": {"correlation": 8}},
+            {"cat": "kernel", "name": "kernel_paged_attention_2d", "ts": 11, "dur": 5,
+             "args": {"correlation": 8}},
+        ]
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "t.json")
+        with open(path, "w") as fh:
+            json.dump({"traceEvents": events}, fh)
+        agg = pp.parse_torch_trace(path)[0]
+        self.assertEqual(agg["kernel_paged_attention_2d"]["launch_apis"],
+                         {"hipModuleLaunchKernel": 1})
+
+
 class TestShortNameAndNormKey(unittest.TestCase):
     def test_strips_void_template_and_namespace(self):
         self.assertEqual(pp.short_name(GEMM), "gemm_kernel")
