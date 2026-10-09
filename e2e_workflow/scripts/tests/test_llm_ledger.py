@@ -627,11 +627,12 @@ class TestSdkCheck(unittest.TestCase):
         self.assertFalse(c["rate_ok"])
         self.assertFalse(c["models"]["claude-sonnet-5"]["rate_ok"])
 
-    def _haiku55(self, rows, cost_usd):
-        u = {"inputTokens": 200_000, "outputTokens": 2_000, "cacheReadInputTokens": 0,
+    def _haiku55(self, rows, cost_usd, inp=200_000, out=2_000, extra=None):
+        u = {"inputTokens": inp, "outputTokens": out, "cacheReadInputTokens": 0,
              "cacheCreationInputTokens": 0, "costUSD": cost_usd}
+        usage = dict({"claude-haiku-5-5": u}, **(extra or {}))
         return L.sdk_check(rows, [{"captured_at_unix": 10.0, "total_cost_usd": cost_usd,
-                                   "model_usage": {"claude-haiku-5-5": u}}], L.DEFAULT_RATES)
+                                   "model_usage": usage}], L.DEFAULT_RATES)
 
     def _haiku55_rows(self):
         short = dict(self._row(1.0, "claude-haiku-5-5", out=1_000), input_tokens=50_000)    # base price
@@ -643,7 +644,7 @@ class TestSdkCheck(unittest.TestCase):
         per_request = sum(L.cost_of(r, L.DEFAULT_RATES) for r in rows)                   # $0.0830
         c = self._haiku55(rows, per_request)
         m = c["models"]["claude-haiku-5-5"]
-        self.assertTrue(c["rate_ok"])
+        self.assertIs(c["rate_ok"], True)
         self.assertEqual(m["check"], "exact")
         self.assertEqual(L._ours_cell(m), "$0.0830 (summed per request)")
         # The old check priced the summed totals as ONE request: 200k > 100k, all long-prompt, $0.105.
@@ -652,14 +653,71 @@ class TestSdkCheck(unittest.TestCase):
                   "output_tokens": 2_000}
         self.assertGreater(L.cost_of(summed, L.DEFAULT_RATES) - per_request, L.SDK_RATE_TOLERANCE_USD)
 
-    def test_without_the_calls_a_per_request_card_is_bounded_and_a_wrong_one_still_caught(self):
+    def test_totals_under_the_threshold_are_checked_exactly_without_the_calls(self):
+        """Astra's counterexample: 90k prompt tokens in total means no request can be long, so the price is
+        known exactly ($0.019) and a fivefold overcharge is a proven mismatch, not a value inside the bounds."""
+        right = self._haiku55([], 0.019, inp=90_000, out=20_000)
+        self.assertIs(right["rate_ok"], True)
+        self.assertEqual(right["models"]["claude-haiku-5-5"]["check"], "below_threshold")
+        wrong = self._haiku55([], 0.095, inp=90_000, out=20_000)
+        self.assertIs(wrong["rate_ok"], False)
+        self.assertIs(wrong["models"]["claude-haiku-5-5"]["rate_ok"], False)
+
+    def test_without_the_calls_bounds_are_not_a_match_but_a_cost_outside_them_is_a_mismatch(self):
         per_request = sum(L.cost_of(r, L.DEFAULT_RATES) for r in self._haiku55_rows())
         c = self._haiku55([], per_request)
         m = c["models"]["claude-haiku-5-5"]
-        self.assertTrue(c["rate_ok"])
-        self.assertEqual((m["check"], m["ours_range_usd"]), ("range", [0.021, 0.105]))
-        self.assertIn("totals only bound it", L._ours_cell(m))
-        self.assertFalse(self._haiku55([], 0.50)["rate_ok"])          # a card off by ~5x falls outside
+        self.assertIsNone(c["rate_ok"])
+        self.assertIsNone(m["rate_ok"])
+        self.assertEqual((m["check"], m["ours_range_usd"]), ("bounded", [0.021, 0.105]))
+        self.assertIn("bounds only", L._ours_cell(m))
+        # Astra's second counterexample: $0.040 is no real mix of 200k-token requests, yet lies inside the bounds.
+        self.assertIsNone(self._haiku55([], 0.040, out=0)["rate_ok"])
+        self.assertIs(self._haiku55([], 0.50)["rate_ok"], False)          # outside the bounds: proven wrong
+
+    def test_a_proven_mismatch_wins_over_an_unconfirmed_model(self):
+        wrong_sonnet = {"claude-sonnet-5": {"inputTokens": 0, "outputTokens": 1_000_000, "cacheReadInputTokens": 0,
+                                            "cacheCreationInputTokens": 0, "costUSD": 15.0}}
+        c = self._haiku55([], 0.083, extra=wrong_sonnet)
+        self.assertIs(c["rate_ok"], False)
+        self.assertIsNone(c["models"]["claude-haiku-5-5"]["rate_ok"])
+        self.assertIs(c["models"]["claude-sonnet-5"]["rate_ok"], False)
+
+    def _report(self, usage):
+        """build() + render_md() on an eval dir holding only Claude Code's result: JSON, Markdown, warnings."""
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "reports"))
+            os.makedirs(os.path.join(d, "empty"))
+            total = sum(u["costUSD"] for u in usage.values())
+            with open(os.path.join(d, "reports", "sdk_results.json"), "w") as fh:
+                json.dump([{"captured_at_unix": 10.0, "total_cost_usd": total, "model_usage": usage}], fh)
+            _rows, _agents, agg, meta = L.build(d, [os.path.join(d, "empty", "*.jsonl")], L.DEFAULT_RATES,
+                                                roots=[os.path.join(d, "empty")], scope="explicit")
+            return meta, L.render_md(agg, meta)
+
+    def test_report_status_and_warnings_agree_with_the_check(self):
+        def haiku(cost, inp=200_000, out=2_000):
+            return {"claude-haiku-5-5": {"inputTokens": inp, "outputTokens": out, "cacheReadInputTokens": 0,
+                                         "cacheCreationInputTokens": 0, "costUSD": cost}}
+        warn_wrong = "our rates do not reproduce"
+        warn_unconfirmed = "could not be confirmed"
+        meta, md = self._report(haiku(0.083))                                  # unconfirmed only
+        self.assertIsNone(meta["sdk_check"]["rate_ok"])
+        self.assertIn("tokens: **not confirmed", md)
+        self.assertNotIn("**match**", md)
+        self.assertIn("| not confirmed |", md)
+        self.assertTrue(any(warn_unconfirmed in w for w in meta["warnings"]))
+        self.assertFalse(any(warn_wrong in w for w in meta["warnings"]))
+        meta, md = self._report(haiku(0.095, inp=90_000, out=20_000))          # proven wrong, below threshold
+        self.assertIs(meta["sdk_check"]["rate_ok"], False)
+        self.assertIn("DO NOT MATCH", md)
+        self.assertIn("**MISMATCH**", md)
+        self.assertTrue(any(warn_wrong in w for w in meta["warnings"]))
+        self.assertFalse(any(warn_unconfirmed in w for w in meta["warnings"]))
+        meta, md = self._report(haiku(0.019, inp=90_000, out=20_000))          # exactly right
+        self.assertIs(meta["sdk_check"]["rate_ok"], True)
+        self.assertIn("tokens: **match**", md)
+        self.assertFalse(any(warn_wrong in w or warn_unconfirmed in w for w in meta["warnings"]))
 
     def test_calls_after_the_result_mark_it_partial(self):
         at = self.REAL["captured_at_unix"]

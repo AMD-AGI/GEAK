@@ -792,6 +792,9 @@ def list_cost_of(row, rates):
 # reasons:
 #   rate      our rates applied to the SDK's OWN tokens must reproduce the SDK's dollars. A miss means
 #             a wrong or missing rate card — the failure a routed, multi-model run is most exposed to.
+#             `rate_ok` is True (reproduced), False (a card is proven wrong) or None (cannot tell: a model
+#             priced per request whose request sizes this ledger does not hold; its totals only bound
+#             the cost, and a bound is not a match). A False anywhere wins over a None.
 #   coverage  our tokens vs the SDK's, over calls finished by the time that result arrived. A result
 #             can arrive before a background workflow finishes; calls after it are not in its total.
 SDK_RATE_TOLERANCE_USD = 0.01
@@ -810,11 +813,19 @@ def load_sdk_results(eval_dir):
 
 def _ours_cell(v):
     """The 'our rates' cell of the cross-check table; a per-request (prompt-length) card says how it was checked."""
-    if v.get("check") == "range":
-        return "$%.4f–$%.4f (priced per request; totals only bound it)" % tuple(v["ours_range_usd"])
+    if v.get("check") == "bounded":
+        return "$%.4f–$%.4f (request sizes unknown; bounds only)" % tuple(v["ours_range_usd"])
     if v.get("check") == "exact":
         return "$%.4f (summed per request)" % v["ours_on_sdk_tokens_usd"]
+    if v.get("check") == "below_threshold":
+        return "$%.4f (every request below the long-prompt threshold)" % v["ours_on_sdk_tokens_usd"]
     return "$%.4f" % v["ours_on_sdk_tokens_usd"]
+
+
+_RATE_CELL = {True: "ok", False: "**MISMATCH**", None: "not confirmed"}
+_RATE_HEADLINE = {True: "match", False: "DO NOT MATCH — a rate card is wrong",
+                  None: "not confirmed — a model priced per request has calls missing from this ledger, "
+                        "so its totals only bound the cost"}
 
 
 def sdk_check(rows, sdk_results, rates):
@@ -845,15 +856,27 @@ def sdk_check(rows, sdk_results, rates):
             ok = abs(ours - sdk_usd) <= tol
         else:
             # model_usage sums a model's requests, but this card prices each request by its own prompt length,
-            # so the sum cannot be priced as one request. When this ledger holds exactly Claude Code's tokens,
-            # compare the per-request sums. Otherwise the totals still bound the cost -- every request at the
-            # base price below, every one at the long-prompt price above -- and a wrong card falls outside.
+            # so the sum cannot be priced as one request.
             lo, hi = _price(row, card), _price(row, tier)
-            exact = ledger_tok == tok
-            ours = ledger_usd if exact else lo
-            ok = abs(ledger_usd - sdk_usd) <= tol if exact else lo - tol <= sdk_usd <= hi + tol
-            check = {"check": "exact" if exact else "range", "ours_range_usd": [round(lo, 6), round(hi, 6)]}
-        rate_ok &= ok
+            if ledger_tok == tok:
+                # This ledger holds exactly Claude Code's tokens: price them request by request.
+                kind, ours = "exact", ledger_usd
+                ok = abs(ledger_usd - sdk_usd) <= tol
+            elif prompt_tokens(row) <= tier["above_prompt_tokens"]:
+                # Every request's prompt is part of this total, so none can pass the threshold: all base price.
+                kind, ours = "below_threshold", lo
+                ok = abs(lo - sdk_usd) <= tol
+            else:
+                # Request sizes unknown. Every request at the base price is the floor, every one at the
+                # long-prompt price the ceiling. Outside them the card is proven wrong; inside them nothing is
+                # proven, because a value between the two need not be any real mix of requests.
+                kind, ours = "bounded", lo
+                ok = None if lo - tol <= sdk_usd <= hi + tol else False
+            check = {"check": kind, "ours_range_usd": [round(lo, 6), round(hi, 6)]}
+        if ok is False:
+            rate_ok = False
+        elif ok is None and rate_ok is not False:
+            rate_ok = None
         models[m] = dict({"sdk_usd": round(sdk_usd, 6), "ours_on_sdk_tokens_usd": round(ours, 6),
                           "rate_ok": ok, "sdk_tokens": tok, "ledger_tokens_until_result": ledger_tok,
                           "ledger_usd_until_result": round(ledger_usd, 6)}, **check)
@@ -1275,10 +1298,10 @@ def render_md(agg, meta):
         L.append("")
         L.append("Claude Code reported **$%.2f** in its last ResultMessage (%d seen). Our rates on its own "
                  "tokens: **%s**." % (sdk["sdk_total_usd"], sdk["results_seen"],
-                                    "match" if sdk["rate_ok"] else "DO NOT MATCH — a rate card is wrong"))
+                                    _RATE_HEADLINE[sdk["rate_ok"]]))
         L.append("")
         rows = [["`%s`" % m, "$%.4f" % v["sdk_usd"], _ours_cell(v),
-                 "ok" if v["rate_ok"] else "**MISMATCH**",
+                 _RATE_CELL[v["rate_ok"]],
                  _n(sum(v["sdk_tokens"].values())), _n(sum(v["ledger_tokens_until_result"].values()))]
                 for m, v in sorted(sdk["models"].items())]
         L += _table(["model", "Claude Code $", "our rates, its tokens", "rate check",
@@ -1516,9 +1539,13 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
         warnings.append("no rate card for %s; priced at the default card, so their dollars are "
                         "unreliable" % ", ".join(unpriced))
     sdk = sdk_check(rows, load_sdk_results(eval_dir), rates)
-    if sdk and not sdk["rate_ok"]:
+    if sdk and sdk["rate_ok"] is False:
         warnings.append("our rates do not reproduce Claude Code's own cost for: %s" % ", ".join(
-            m for m, v in sdk["models"].items() if not v["rate_ok"]))
+            m for m, v in sdk["models"].items() if v["rate_ok"] is False))
+    unconfirmed = [m for m, v in (sdk or {}).get("models", {}).items() if v["rate_ok"] is None]
+    if unconfirmed:
+        warnings.append("Claude Code's own cost could not be confirmed for: %s (priced per request, and this "
+                        "ledger is missing some of those calls, so the totals only bound it)" % ", ".join(unconfirmed))
     meta = {
         "schema": SCHEMA, "eval_dir": eval_dir, "attribution_mode": mode,
         "transcripts": transcripts, "timeline_sources": timeline["sources"],
