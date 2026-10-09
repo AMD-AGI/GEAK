@@ -38,7 +38,7 @@ sources:
 
 ## Occupancy: predict it before you measure
 ```
-occ_vgpr = floor(512 / round_up_16(vgpr_used))   # waves/SIMD from VGPR
+occ_vgpr = floor(512 / round_up_8(arch_vgpr + agpr))   # waves/SIMD from VGPR (gfx90a+, cap 8)
 occ_lds  = floor(LDS_CAP / lds_bytes_used)        # blocks/CU from LDS (65536 / 163840)
 occ (wg/CU) = min(floor(occ_vgpr * 4 / num_warps), occ_lds)   # 4 SIMD/CU
 ```

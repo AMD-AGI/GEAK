@@ -7,7 +7,7 @@ regimes: [both]
 updated: 2026-10-07
 sources:
   - ../data/hw_constants.json
-  - ../../expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py
+  - ../../../kernel_workflow/scripts/kernel_tools/amd_occupancy.py
 ---
 
 # RDNA4 / gfx1201 — occupancy
@@ -19,7 +19,7 @@ This card is a pointer, not a second prose copy of the occupancy table.
 - Machine-readable constants: [`perf_knowledge/hardware/data/hw_constants.json`](../data/hw_constants.json),
   key `gfx1201`
 - Reproduction command:
-  `amd_occupancy.py --compiler-sweep --arch gfx1201 --format json`
+  `python3 kernel_workflow/scripts/kernel_tools/amd_occupancy.py --compiler-sweep --arch gfx1201 --format json`
 
 ## TL;DR
 > GEAK's HIP/Triton workflow uses the compiler-derived static occupancy model:

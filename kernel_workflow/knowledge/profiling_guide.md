@@ -188,7 +188,15 @@ diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly 
 
 ## Occupancy (architecture-specific)
 
-**CDNA (gfx942/gfx950):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. ArchVGPR and Accum_VGPR share one file.
+**CDNA (gfx950 main line; gfx942 identical register model):** ArchVGPR and AGPR (Accum_VGPR) share
+**one** 512-entry VGPR file per SIMD, allocated in granules of 8, capped at 8 waves/SIMD:
+`waves/SIMD = min(8, ⌊512 / (8·⌈(Arch_VGPR + Accum_VGPR)/8⌉)⌋)`. The combined count is the kernel
+descriptor's `.amdhsa_next_free_vgpr` (AGPRs are placed after the arch VGPRs) — prefer it, or LLVM's
+`; Occupancy: N` from the `.s`, over summing CSV columns; `kernel_tools/amd_occupancy.py --asm k.s`
+does exactly this (`--vgpr N --arch gfx950` for a planned tile). 1–2 waves is register-starved. The
+register term is not the whole answer: take `min()` with the LDS term (LDS per CU from
+`perf_knowledge/hardware/data/hw_constants.json` — 160 KiB on gfx950; gfx942 downgrade: 64 KiB, so the
+same tile fits 2.5× fewer workgroups per CU).
 
 **R9700 / gfx1201:** do **not** use the 512 combined-VGPR formula. GEAK's HIP/Triton workflow uses the static ≤256 VGPR/wave model, granule 24, cap 16 waves/SIMD. Read `amd_rdna4.md` and re-derive with `amd_occupancy.py --compiler-sweep --arch gfx1201` on this ROCm. Dividing 256 by kernel VGPRs under-reports occupancy 2–3×.
 - Branch Divergence > 10% → significant divergence penalty
@@ -262,7 +270,9 @@ real mislabel. Run them before forming a hypothesis.
   occupy the GPU — no tile or register tuning helps; you must partition more (split-K, finer tiles,
   more blocks). This is separate from occupancy: a kernel can hit its per-wave occupancy ceiling and
   still leave most of the GPU idle because it never launched enough work.
-- **Occupancy ceiling (CDNA):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. **R9700:** use the gfx1201 table in `amd_rdna4.md` / `hardware/rdna4_gfx1201/occupancy.md`, not this formula.
+- **Occupancy ceiling (CDNA):** `waves/SIMD = min(8, ⌊512 / (8·⌈(Arch_VGPR + Accum_VGPR)/8⌉)⌋)`, then
+  `min()` with the LDS term — see "Occupancy" above (`amd_occupancy.py`); 1–2 is register-starved.
+  **R9700:** use the gfx1201 table in `amd_rdna4.md` / `hardware/rdna4_gfx1201/occupancy.md`, not this formula.
 - **Spill:** any nonzero `Scratch_Per_Workitem` comes first, before other register work.
 - **LDS bank conflict:** `SQ_LDS_BANK_CONFLICT / SQ_LDS_IDX_ACTIVE > 20%` → pad the row stride / swizzle.
 - **Coalescing:** `TD_COALESCABLE_WAVEFRONT_sum / TD_LOAD_WAVEFRONT_sum < 50%` → fix access pattern.
