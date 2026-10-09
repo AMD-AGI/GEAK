@@ -1,0 +1,584 @@
+"""Tests for the report driver (geak_report): persistence isolation + status.
+
+These lock the two driver-level guarantees Astra's review asked for: two runs of
+the same model must never overwrite or mix each other's exported artifacts, and a
+run that captured nothing must report that rather than a healthy zero-call "ok".
+"""
+
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))                      # interface/
+_SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(_HERE)),
+                        "e2e_workflow", "scripts")
+sys.path.insert(0, _SCRIPTS)                                    # ledger deps
+sys.path.insert(0, os.path.join(_SCRIPTS, "tests"))            # ledger test fixtures
+
+import geak_report as R  # noqa: E402
+import claude_trace_mirror as M  # noqa: E402
+from test_llm_ledger import (asst_rec, ev, prompt_for, timeline,  # noqa: E402
+                             user_rec, write_transcript)
+
+
+def _row(mid, output):
+    return {"message_id": mid, "agent_label": "engineer:compute", "role": "engineer",
+            "sub_phase": "compute", "transcript": "agent-a.jsonl", "group_id": "agent-a.jsonl#0",
+            "model": "claude-opus-4-8", "cost_usd": 1.0, "output": output}
+
+
+def _run_export(base, name, count, persist_root, model="same-model"):
+    """Persist a synthetic run of `count` calls; return _persist's destination."""
+    ev = os.path.join(base, name)
+    trace = os.path.join(ev, "reports", "trace")
+    os.makedirs(trace, exist_ok=True)
+    calls = os.path.join(trace, "llm_calls.jsonl")
+    with open(calls, "w", encoding="utf-8") as fh:
+        for i in range(count):
+            fh.write(json.dumps(_row("%s_%d" % (name, i), "%s_output_%d" % (name, i))) + "\n")
+    report = os.path.join(ev, "report")
+    os.makedirs(report, exist_ok=True)
+    with open(os.path.join(report, "report.md"), "w", encoding="utf-8") as fh:
+        fh.write(name)
+    return R._persist(ev, calls, report, model, persist_root)
+
+
+class TestPersistIsolation(unittest.TestCase):
+    def test_two_runs_same_model_do_not_mix_or_overwrite(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
+            shared = os.path.join(tmp, "shared")
+            dst1, _ = _run_export(tmp, "first", 2, shared)
+            dst2, _ = _run_export(tmp, "second", 1, shared)
+            # distinct run directories under the same model
+            self.assertNotEqual(dst1, dst2)
+            self.assertTrue(dst1.startswith(os.path.join(shared, "same-model")))
+            # the second run's export holds ONLY its own artifacts
+            arts = sorted(os.listdir(os.path.join(dst2, "geak_llm_artifacts")))
+            self.assertEqual(len(arts), 1)
+            got = json.load(open(os.path.join(dst2, "geak_llm_artifacts", arts[0])))
+            self.assertEqual(got["output"], "second_output_0")
+            # the first run stays individually recoverable
+            self.assertEqual(len(os.listdir(os.path.join(dst1, "geak_llm_artifacts"))), 2)
+
+    def test_manifest_carries_run_id_and_counts_only_this_run(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
+            shared = os.path.join(tmp, "shared")
+            dst, _ = _run_export(tmp, "solo", 3, shared)
+            man = json.load(open(os.path.join(dst, "_manifest.json")))
+            self.assertTrue(man["run_id"].startswith("run-"))
+            self.assertEqual(man["per_call_artifacts"], 3)
+            self.assertIn(man["run_id"], dst)
+
+    def test_regenerating_the_same_run_replaces_it_in_place(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
+            shared = os.path.join(tmp, "shared")
+            dst_a, _ = _run_export(tmp, "same", 2, shared)
+            dst_b, _ = _run_export(tmp, "same", 2, shared)  # identical content
+            self.assertEqual(dst_a, dst_b)                  # same run id -> same dir
+            self.assertEqual(len(os.listdir(os.path.join(dst_b, "geak_llm_artifacts"))), 2)
+
+
+class TestPersistAtomicRegen(unittest.TestCase):
+    """Astra Finding 3: regenerating a run's export must not destroy the prior valid
+    export if the new one fails to write. The old code rmtree'd the run dir BEFORE
+    copying, so any mid-copy failure left a half-deleted export and nothing to fall
+    back to. Regeneration now stages then atomically swaps, so a staging failure
+    leaves the previous export exactly as it was."""
+
+    def test_failed_regeneration_leaves_prior_export_intact(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
+            shared = os.path.join(tmp, "shared")
+            dst, _ = _run_export(tmp, "same", 2, shared)          # a good export exists
+            good = sorted(os.listdir(os.path.join(dst, "geak_llm_artifacts")))
+            self.assertEqual(len(good), 2)
+
+            def _boom(*a, **k):
+                raise RuntimeError("disk full mid-copy")
+
+            orig = R._write_per_call_artifacts
+            R._write_per_call_artifacts = _boom
+            try:
+                with self.assertRaises(RuntimeError):
+                    _run_export(tmp, "same", 2, shared)           # regenerate -> fails mid-stage
+            finally:
+                R._write_per_call_artifacts = orig
+
+            # The prior export is untouched: same dir, same two artifacts, still readable.
+            self.assertTrue(os.path.isdir(dst))
+            self.assertEqual(sorted(os.listdir(os.path.join(dst, "geak_llm_artifacts"))), good)
+            # No stage/retired debris is left behind under the model directory.
+            model_dir = os.path.dirname(dst)
+            debris = [d for d in os.listdir(model_dir) if ".stage-" in d or ".old-" in d]
+            self.assertEqual(debris, [])
+
+
+class TestNoCaptureStatus(unittest.TestCase):
+    def test_empty_transcript_glob_reports_no_capture(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
+            res = R.run(eval_dir=os.path.join(tmp, "empty"),
+                        transcripts=[os.path.join(tmp, "absent", "*.jsonl")],
+                        model="missing")
+            self.assertEqual(res["status"], "no-capture")
+
+
+class TestTranscriptScopeVisibility(unittest.TestCase):
+    """Fix 3 (Astra re-review): however transcripts were selected, the choice is
+    surfaced — persisted in the ledger meta AND rendered in the report — never
+    a silent scope with a null saved value and no mention of a fallback."""
+
+    def _one_call_transcript(self, path, eval_dir):
+        write_transcript(path, [
+            user_rec(prompt_for("director", "setup", eval_dir), 0),
+            asst_rec(10, "msg_1", read=1000, out=10,
+                     text="done", thinking="thinking"),
+        ])
+
+    def _meta(self, eval_dir):
+        p = os.path.join(eval_dir, "reports", "trace", "token_stats.json")
+        with open(p, encoding="utf-8") as fh:
+            return json.load(fh).get("meta", {})
+
+    def _md(self, res):
+        with open(res["md"], encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_explicit_scope_is_persisted_and_rendered(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
+            ev = os.path.join(tmp, "run")
+            tdir = os.path.join(tmp, "t"); os.makedirs(tdir)
+            self._one_call_transcript(os.path.join(tdir, "a.jsonl"), ev)
+            res = R.run(eval_dir=ev,
+                        transcripts=[os.path.join(tdir, "*.jsonl")],
+                        model="m")
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(res["transcript_scope"], "explicit")
+            self.assertEqual(self._meta(ev).get("transcript_scope"), "explicit")
+            self.assertIn("transcript scope", self._md(res))
+
+    def test_substring_fallback_is_visible_not_silent(self):
+        # No workflow record owns this eval-dir, so scope resolution cannot claim
+        # a whole-run scope: the driver falls back to substring discovery, and
+        # that fallback must be recorded in meta AND flagged in the markdown.
+        with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
+            home = os.path.join(tmp, "home", ".claude")
+            proj = os.path.join(home, "projects", "p"); os.makedirs(proj)
+            ev = os.path.join(tmp, "run")
+            # A transcript substring-discovery will find (mentions eval-dir), but
+            # NO wf_*.json record naming it -> resolve_run_scope is 'unresolved'.
+            self._one_call_transcript(os.path.join(proj, "drv.jsonl"), ev)
+            old = os.environ.get("CLAUDE_CONFIG_DIR")
+            os.environ["CLAUDE_CONFIG_DIR"] = home
+            try:
+                res = R.run(eval_dir=ev, model="m")   # no explicit transcripts
+            finally:
+                if old is None:
+                    os.environ.pop("CLAUDE_CONFIG_DIR", None)
+                else:
+                    os.environ["CLAUDE_CONFIG_DIR"] = old
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(res["transcript_scope"], "substring-fallback")
+            self.assertTrue(res.get("scope_warnings"))
+            self.assertEqual(self._meta(ev).get("transcript_scope"),
+                             "substring-fallback")
+            self.assertIn("FALLBACK", self._md(res))
+
+
+class TestMidRunReportBeforeReturn(unittest.TestCase):
+    """P2 (Astra re-review): the report is emitted from INSIDE the dispatcher,
+    before it returns — so the record has ``args.exp_root`` (+ kernel_path etc.)
+    but NO ``result.eval_dir`` yet, and the report's ``--eval-dir`` (the lane's
+    generated dir) is not named by any record. The mid-run report must still scope
+    to the run's OWN dir by anchoring on the enclosing exp_root, never fall back to
+    substring discovery and over-attribute concurrent sessions."""
+
+    def _native_home(self, tmp, *, with_result):
+        """Materialize the ACTUAL native mid-run kernel record shape and one real
+        agent transcript. Returns (home, eval_dir, record_path, record)."""
+        home = os.path.join(tmp, "home", ".claude")
+        exp = os.path.join(tmp, "exp")
+        eval_dir = os.path.join(exp, "team_task_x", "task")
+        sess = os.path.join(home, "projects", "proj", "sess")
+        wfdir = os.path.join(sess, "workflows")
+        os.makedirs(wfdir)
+        # args carries exp_root + kernel_path + workflow_dir (no eval_dir); result
+        # is written ONLY once the dispatcher returns.
+        record = {"runId": "wf_live", "timestamp": "2026-09-16T01:00:00Z",
+                  "args": {"exp_root": exp,
+                           "kernel_path": "/tasks/fused_moe_int4",
+                           "workflow_dir": "/GEAK/kernel_workflow"}}
+        if with_result:
+            record["result"] = {"eval_dir": eval_dir}
+        rp = os.path.join(wfdir, "wf_live.json")
+        with open(rp, "w", encoding="utf-8") as fh:
+            json.dump(record, fh)
+        rundir = os.path.join(sess, "subagents", "workflows", "wf_live")
+        os.makedirs(rundir)
+        write_transcript(os.path.join(rundir, "agent-director.jsonl"), [
+            user_rec(prompt_for("director", "setup", eval_dir), 9),
+            asst_rec(10, "msg_1", read=1000, out=10, text="done", thinking="t"),
+        ])
+        # the timeline the dispatcher persists just before the report (nested=[])
+        tl = os.path.join(eval_dir, "reports", "trace", "agent_timeline.json")
+        os.makedirs(os.path.dirname(tl))
+        doc = timeline([ev("Setup", "director:setup")], workflow="kernel_lane")
+        doc["instance"] = eval_dir
+        with open(tl, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return home, eval_dir, rp, record
+
+    def _scope_from(self, eval_dir, home):
+        with mock.patch.object(M, "candidate_homes", return_value=[Path(home)]):
+            return R.run(eval_dir=eval_dir)
+
+    def _meta(self, eval_dir):
+        p = os.path.join(eval_dir, "reports", "trace", "token_stats.json")
+        with open(p, encoding="utf-8") as fh:
+            return json.load(fh).get("meta", {})
+
+    def _md(self, res):
+        with open(res["md"], encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_before_return_anchors_on_exp_root_not_substring(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_p2_") as tmp:
+            home, eval_dir, _rp, _rec = self._native_home(tmp, with_result=False)
+            res = self._scope_from(eval_dir, home)
+            self.assertEqual(res["status"], "ok")
+            # NOT substring-fallback: it anchored on the enclosing exp_root. But the
+            # run's OWN eval_dir is not yet on record, so ownership is INFERRED by
+            # containment, not proven — scope is the weaker inferred variant and the
+            # anchor/incompleteness is persisted (Astra r3: never promote containment
+            # to complete ownership).
+            self.assertEqual(res["transcript_scope"], "run-scoped-inferred")
+            self.assertEqual(res.get("transcript_scope_anchor"), "exp_root-ancestor")
+            self.assertTrue(res.get("scope_warnings"))
+            meta = self._meta(eval_dir)
+            self.assertEqual(meta.get("transcript_scope"), "run-scoped-inferred")
+            self.assertEqual(meta.get("transcript_scope_anchor"), "exp_root-ancestor")
+            # inferred scope is never billed as a complete/final usage record.
+            self.assertFalse(meta.get("complete"))
+            self.assertIn("INFERRED", self._md(res))
+
+    def test_after_return_uses_the_runs_own_eval_dir(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_p2_") as tmp:
+            home, eval_dir, _rp, _rec = self._native_home(tmp, with_result=True)
+            res = self._scope_from(eval_dir, home)
+            self.assertEqual(res["transcript_scope"], "run-scoped")
+            # own eval-dir on record -> no weaker exp_root anchor is reported
+            self.assertNotIn("transcript_scope_anchor", res)
+
+    def test_completed_sibling_never_owns_an_absent_target(self):
+        """Astra r3 blocker: a COMPLETED sibling run (runB) that shares the target's
+        exp_root but KNOWS its own, different eval_dir (runB) must never be promoted
+        to the enclosing dispatcher of an absent target (runA). Reporting runA must
+        NOT bill runB's completed transcript as runA's run-scoped-complete usage."""
+        with tempfile.TemporaryDirectory(prefix="geak_report_sib_") as tmp:
+            home = os.path.join(tmp, "home", ".claude")
+            exp = os.path.join(tmp, "exp")
+            target = os.path.join(exp, "runA", "task")   # requested; NO record
+            other = os.path.join(exp, "runB", "task")    # completed sibling
+            os.makedirs(target)
+            os.makedirs(other)
+            sess = os.path.join(home, "projects", "proj", "B")
+            wfdir = os.path.join(sess, "workflows"); os.makedirs(wfdir)
+            record = {"runId": "wf_B", "timestamp": "2026-09-16T01:00:00Z",
+                      "status": "completed",
+                      "args": {"exp_root": exp},
+                      "result": {"eval_dir": other}}
+            with open(os.path.join(wfdir, "wf_B.json"), "w", encoding="utf-8") as fh:
+                json.dump(record, fh)
+            rundir = os.path.join(sess, "subagents", "workflows", "wf_B")
+            os.makedirs(rundir)
+            write_transcript(os.path.join(rundir, "agent-B.jsonl"), [
+                user_rec(prompt_for("director", "setup", other), 9),
+                asst_rec(10, "msg_from_B", read=1000, out=10, text="ok"),
+            ])
+            # Resolver must NOT select the sibling for the absent target.
+            with mock.patch.object(M, "candidate_homes",
+                                   return_value=[Path(home)]):
+                info = M.resolve_run_scope([Path(home)], eval_dir=target)
+            self.assertEqual(info["scope"], "unresolved")
+            self.assertEqual(info["globs"], [])
+            self.assertFalse(info["complete"])
+            # And the driver never reports runA as run-scoped-complete off runB.
+            res = self._scope_from(target, home)
+            self.assertNotIn(res.get("transcript_scope"),
+                             ("run-scoped", "run-scoped-inferred"))
+            if res.get("status") == "ok":
+                self.assertFalse(self._meta(target).get("complete"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestOneReportPage(unittest.TestCase):
+    """A run has exactly one HTML page: report/geak_run_report_<model>.html.
+
+    The execution tracker still collects its JSON beside it (it survives the
+    transcripts being pruned), but renders no page of its own."""
+
+    def test_report_dir_holds_exactly_one_page(self):
+        import geak_trace_collector as C
+        with tempfile.TemporaryDirectory(prefix="geak_report_test_") as tmp:
+            ev = os.path.join(tmp, "run")
+            os.makedirs(ev)
+            sess = Path(tmp) / "home" / "projects" / "slug" / "sess"
+            (sess / "workflows").mkdir(parents=True)
+            (sess / "workflows" / "wf_r.json").write_text(
+                json.dumps({"runId": "wf_r", "args": {"eval_dir": ev}}), encoding="utf-8")
+            wf = sess / "subagents" / "workflows" / "wf_r"
+            wf.mkdir(parents=True)
+            write_transcript(str(wf / "agent-a1.jsonl"), [
+                user_rec(prompt_for("director", "setup", ev), 0),
+                asst_rec(10, "m1", read=100, out=1, text="ok"),
+            ])
+            (wf / "agent-a1.meta.json").write_text(
+                json.dumps({"description": "director:setup", "workflowPhase": "Setup"}),
+                encoding="utf-8")
+            (wf / "journal.jsonl").write_text(
+                json.dumps({"type": "started", "key": "k", "agentId": "a1",
+                            "label": "director:setup", "phase": "Setup"}) + "\n"
+                + json.dumps({"type": "result", "key": "k", "agentId": "a1",
+                              "result": {"eval_dir": ev}}) + "\n", encoding="utf-8")
+            with mock.patch.object(M, "candidate_homes", return_value=[Path(tmp) / "home"]), \
+                    mock.patch.object(C, "resolve_workflow_dir",
+                                      return_value=(str(wf), {"run_id": "wf_r"})):
+                res = R.run(eval_dir=ev, model="m")
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(res["transcript_scope"], "run-scoped")
+            report = os.path.join(ev, "report")
+            self.assertEqual(sorted(f for f in os.listdir(report) if f.endswith(".html")),
+                             ["geak_run_report_m.html"])
+            self.assertEqual(res["trace"]["status"], "ok")
+            self.assertNotIn("html", res["trace"])
+            self.assertTrue(os.path.isfile(os.path.join(report, "geak_trace.json")))
+
+
+class TestAPartialCaptureReachesThePersistedLedger(unittest.TestCase):
+    """Astra re-review P1: the hole has to survive into the report (2026-09-25).
+
+    Fixing only the mirror manifest leaves the report driver unaware: the
+    resolver certified a zero-byte transcript as coverage, so an unmodified
+    ``geak_report.run`` wrote ``token_stats.json`` with ``complete: true`` and
+    ``warnings: []`` over an invocation the mirror had already called unusable.
+    The captured calls stay counted; the coverage claim is what changes.
+    """
+
+    def _home_with_one_empty(self, tmp):
+        eval_dir = os.path.join(tmp, "eval")
+        sess = Path(tmp) / "home" / "projects" / "slug" / "sess"
+        (sess / "workflows").mkdir(parents=True)
+        (sess / "workflows" / "wf_m.json").write_text(
+            json.dumps({"runId": "wf_m", "args": {"eval_dir": eval_dir}}),
+            encoding="utf-8")
+        wf = sess / "subagents" / "workflows" / "wf_m"
+        wf.mkdir(parents=True)
+        write_transcript(str(wf / "agent-a1.jsonl"), [
+            user_rec(prompt_for("director", "setup", eval_dir), 0),
+            asst_rec(10, "m_kept", read=100, out=1, text="ok"),
+        ])
+        # the agent that was created and never flushed
+        (wf / "agent-a2.jsonl").write_text("", encoding="utf-8")
+        tl = Path(eval_dir) / "reports" / "trace" / "agent_timeline.json"
+        tl.parent.mkdir(parents=True)
+        tl.write_text(json.dumps(timeline([ev("Setup", "director:setup")])),
+                      encoding="utf-8")
+        return eval_dir, Path(tmp) / "home"
+
+    def test_the_report_counts_the_calls_and_states_the_hole(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_partial_") as tmp:
+            eval_dir, home = self._home_with_one_empty(tmp)
+            with mock.patch.object(M, "candidate_homes", return_value=[home]):
+                res = R.run(eval_dir=eval_dir, model="empty-transcript-review")
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(res["transcript_scope"], "partial")
+            with open(os.path.join(eval_dir, "reports", "trace", "token_stats.json"),
+                      encoding="utf-8") as fh:
+                meta = json.load(fh)["meta"]
+            self.assertFalse(meta["complete"])
+            joined = " ".join(meta["warnings"])
+            self.assertIn("agent-a2.jsonl", joined)
+            self.assertIn("partially captured", joined)
+            # the transcript that DID flush is still billed -- a hole is reported,
+            # not a reason to drop real spend.
+            with open(res["calls"], encoding="utf-8") as fh:
+                ids = [json.loads(l)["message_id"] for l in fh if l.strip()]
+            self.assertEqual(ids, ["m_kept"])
+
+    def test_a_fully_flushed_run_still_reports_complete(self):
+        with tempfile.TemporaryDirectory(prefix="geak_report_whole_") as tmp:
+            eval_dir, home = self._home_with_one_empty(tmp)
+            # give the second agent a real transcript: the same run, no hole
+            wf = home / "projects" / "slug" / "sess" / "subagents" / "workflows" / "wf_m"
+            write_transcript(str(wf / "agent-a2.jsonl"), [
+                user_rec(prompt_for("engineer", "compute", eval_dir), 0),
+                asst_rec(20, "m_second", read=100, out=1, text="ok"),
+            ])
+            with mock.patch.object(M, "candidate_homes", return_value=[home]):
+                res = R.run(eval_dir=eval_dir, model="empty-transcript-review")
+            self.assertEqual(res["transcript_scope"], "run-scoped")
+            with open(os.path.join(eval_dir, "reports", "trace", "token_stats.json"),
+                      encoding="utf-8") as fh:
+                meta = json.load(fh)["meta"]
+            self.assertTrue(meta["complete"])
+            self.assertEqual(meta["warnings"], [])
+
+
+# --------------------------------------------------------------------------- #
+# Command line, fallbacks and failure handling
+# --------------------------------------------------------------------------- #
+import contextlib  # noqa: E402
+import io  # noqa: E402
+
+
+class _Isolated(unittest.TestCase):
+    """A private Claude home and HOME, so no real record on this machine is read."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="geak_report_cli_")
+        self.tmp = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+        home = os.path.join(self.tmp, "claude-home")
+        empty = os.path.join(self.tmp, "user-home")
+        os.makedirs(home)
+        os.makedirs(empty)
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home, "HOME": empty})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _transcript(self, name="t"):
+        ev = os.path.join(self.tmp, "run")
+        os.makedirs(ev, exist_ok=True)
+        path = os.path.join(self.tmp, "tx", name, "agent-a.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_transcript(path, [user_rec(prompt_for("director", "setup", ev), 0),
+                                asst_rec(10, "msg_%s" % name, read=1000, out=10, text="done")])
+        return ev, path
+
+
+class TestReportCli(_Isolated):
+    def test_an_eval_dir_or_transcripts_is_required(self):
+        with self.assertRaises(SystemExit):
+            R.main([])
+
+    def test_a_report_is_written_and_its_scope_is_printed(self):
+        ev, path = self._transcript()
+        out = os.path.join(self.tmp, "report")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(R.main(["--eval-dir", ev, "--transcripts", path, "--out-dir", out]), 0)
+        self.assertIn("geak_report: wrote", buf.getvalue())
+        self.assertIn("transcript scope = explicit", buf.getvalue())
+
+    def test_a_failed_report_exits_one(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = R.main(["--eval-dir", os.path.join(self.tmp, "e"),
+                         "--transcripts", os.path.join(self.tmp, "absent", "*.jsonl")])
+        self.assertEqual(rc, 1)
+        self.assertIn("no-capture", err.getvalue())
+
+    def test_persist_copies_the_run_into_the_shared_layout(self):
+        ev, path = self._transcript()
+        shared = os.path.join(self.tmp, "shared")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            R.main(["--eval-dir", ev, "--transcripts", path, "--model", "m1", "--persist",
+                    "--persist-root", shared])
+        self.assertIn("persisted m1", buf.getvalue())
+        self.assertTrue(os.path.isdir(os.path.join(shared, "m1")))
+
+
+class TestRunPaths(_Isolated):
+    def test_without_an_eval_dir_a_temporary_one_is_used(self):
+        _, path = self._transcript()
+        out = os.path.join(self.tmp, "out")
+        res = R.run(transcripts=[path], out_dir=out, model="m")
+        self.assertEqual(res["status"], "ok")
+        self.assertTrue(os.path.isfile(res["html"]))
+
+    def test_a_rates_file_reaches_the_ledger(self):
+        ev, path = self._transcript()
+        rates = os.path.join(self.tmp, "rates.json")
+        with open(rates, "w", encoding="utf-8") as fh:
+            json.dump({"claude-opus-4-8": {"input": 1.0, "output": 1.0}}, fh)
+        with mock.patch.object(R, "_run_ledger", wraps=R._run_ledger) as led:
+            R.run(eval_dir=ev, transcripts=[path], rates_path=rates, model="m")
+        self.assertEqual(led.call_args.args[2], rates)
+
+    def test_a_ledger_that_writes_nothing_is_reported(self):
+        ev, path = self._transcript()
+        with mock.patch.object(R, "_run_ledger", return_value=None):
+            res = R.run(eval_dir=ev, transcripts=[path], model="m")
+        self.assertEqual(res["status"], "no-calls")
+
+
+class TestFallbacks(_Isolated):
+    def test_model_name_falls_back_to_the_run_directory(self):
+        with mock.patch.object(M, "_model_name", side_effect=RuntimeError("x")):
+            self.assertEqual(R._model_name("/runs/e2e_qwen3_20261006_120000_ab_cd"), "qwen3")
+            self.assertEqual(R._model_name("/runs/my_run"), "my_run")
+
+    def test_scope_helpers_degrade_without_the_mirror(self):
+        with mock.patch.dict(sys.modules, {"claude_trace_mirror": None}):
+            self.assertEqual(R._nested_eval_dirs(self.tmp), [])
+            self.assertIsNone(R._resolve_scope(self.tmp, ()))
+        with mock.patch.object(M, "nested_lane_dirs", side_effect=RuntimeError("x")):
+            self.assertEqual(R._nested_eval_dirs(self.tmp), [])
+        with mock.patch.object(M, "resolve_run_scope", side_effect=RuntimeError("x")):
+            self.assertIsNone(R._resolve_scope(self.tmp, ()))
+
+    def test_run_id_without_message_ids_is_derived_from_the_ledger_path(self):
+        calls = os.path.join(self.tmp, "llm_calls.jsonl")
+        with open(calls, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"model": "m"}) + "\n")
+        a = R._run_id(calls)
+        self.assertTrue(a.startswith("run-"))
+        self.assertEqual(a, R._run_id(calls))
+
+    def test_a_failed_promotion_rolls_back_to_the_prior_export(self):
+        shared = os.path.join(self.tmp, "shared")
+        dst, _ = _run_export(self.tmp, "same", 2, shared)
+        real_replace = os.replace
+
+        def fail_on_stage(src, dst_):
+            if ".stage-" in str(src):
+                raise OSError("disk full")
+            return real_replace(src, dst_)
+        with mock.patch.object(R.os, "replace", side_effect=fail_on_stage):
+            with self.assertRaises(OSError):
+                _run_export(self.tmp, "same", 3, shared)
+        self.assertTrue(os.path.isdir(dst))
+        model_dir = os.path.dirname(dst)
+        self.assertEqual([d for d in os.listdir(model_dir) if ".stage-" in d or ".old-" in d], [])
+
+
+class TestExecutionTraceFallbacks(_Isolated):
+    def _tracked(self, report_dir):
+        import geak_trace_collector as C
+        wf = os.path.join(self.tmp, "sess", "subagents", "workflows", "wf_t")
+        os.makedirs(wf)
+        with open(os.path.join(wf, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "launched"}) + "\n")
+        os.makedirs(report_dir, exist_ok=True)
+        C.write_trace(C.build_trace(wf), os.path.join(report_dir, "geak_trace.json"))
+
+    def test_without_sources_the_tracked_trace_is_summarised(self):
+        rep = os.path.join(self.tmp, "report")
+        self.assertEqual(R._write_execution_trace(self.tmp, rep)["status"], "no-workflow-record")
+        self._tracked(rep)
+        got = R._write_execution_trace(self.tmp, rep)
+        self.assertEqual((got["status"], got["run_id"]), ("ok-from-tracked-data", "wf_t"))
+
+    def test_trace_failures_never_break_the_report(self):
+        import geak_trace_collector as C
+        with mock.patch.dict(sys.modules, {"geak_trace_collector": None}):
+            self.assertIsNone(R._write_execution_trace(self.tmp, self.tmp))
+        with mock.patch.object(C, "resolve_workflow_dir", side_effect=RuntimeError("scan")):
+            self.assertEqual(R._write_execution_trace(self.tmp, self.tmp)["status"], "error")

@@ -43,8 +43,10 @@ Inputs: `LAUNCH_SCRIPT` (path to a bench/launch script; may be empty), `MODEL_PA
 
 Steps:
 1. Collision-proof run id: `TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}`.
-2. Decide `EVAL_DIR`: if `EVAL_DIR_OVERRIDE` set use it; else
-   `EXP_ROOT/e2e_${MODEL_NAME}_${TS}`. If it exists & non-empty, append `_${RANDOM}` until fresh.
+2. Decide `EVAL_DIR`: if `EVAL_DIR_OVERRIDE` is set, `EVAL_DIR` is exactly that path, even when it
+   already exists and holds files (the caller writes there first and reads results only from there).
+   Otherwise use `EXP_ROOT/e2e_${MODEL_NAME}_${TS}`, and if that generated path exists & is non-empty,
+   append `_${RANDOM}` until fresh.
 3. Build the layout and copy the launch script in (never edit the original):
    ```bash
    mkdir -p "$EVAL_DIR"/{baseline,profile,overlay,kernels,config,logs}

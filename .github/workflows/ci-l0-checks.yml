@@ -96,6 +96,16 @@ jobs:
             interface/test_run_e2e_measurement_basis.py \
             interface/test_run_e2e_kb_write_tuned.py \
             e2e_workflow/scripts/tests/test_atom_adapter_lifecycle.py \
+            interface/test_run_e2e_trace_mirror.py \
+            interface/test_geak_outcome_report.py \
+            interface/tests/test_geak_call_tree_html.py \
+            interface/tests/test_geak_report.py \
+            interface/tests/test_claude_trace_mirror.py \
+            interface/tests/test_no_hyperloom_dependency.py \
+            interface/tests/test_geak_trace_collector.py \
+            interface/tests/test_geak_trace_events.py \
+            interface/tests/test_geak_trace_report.py \
+            interface/tests/test_tracker_wiring.py \
             e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
             e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
@@ -104,6 +114,7 @@ jobs:
             e2e_workflow/scripts/tests/test_gsm8k_eval.py \
             e2e_workflow/scripts/tests/test_parse_profile.py \
             e2e_workflow/scripts/tests/test_capture_shapes.py \
+            e2e_workflow/scripts/tests/test_llm_ledger.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
@@ -296,6 +307,8 @@ jobs:
         run: node kernel_workflow/scripts/test_rdna4_policy.js
       - name: R9700 E2E identity and knowledge policy
         run: node e2e_workflow/scripts/test_rdna4_e2e_policy.js
+      - name: caller-pinned eval_dir regression
+        run: node e2e_workflow/scripts/test_pinned_eval_dir.js
       - name: kernel_workflow mode dispatch / R9700 bakeoff isolation
         run: node kernel_workflow/scripts/test_mode_dispatch.js
       # Extraction smoke must be exactly "pass"/"fail": a prose "PASS (exit 0) ..." once read as a
