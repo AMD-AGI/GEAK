@@ -87,6 +87,48 @@ class ValidateStructuralPatternsTest(unittest.TestCase):
         with open(self.patterns, "w") as fh:
             json.dump(document, fh)
 
+    def _with_layer_entries(self, entries):
+        self._write()
+        with open(self.patterns) as fh:
+            document = json.load(fh)
+        document["layer_entry_callables"] = entries
+        with open(self.patterns, "w") as fh:
+            json.dump(document, fh)
+
+    def _entry(self, kind, target):
+        return {"kind": kind, "target": target, "source_evidence": [{
+            "path": self.source, "line_start": 3, "line_end": 3,
+            "symbol": "build", "claim": "the layer loop enters each layer here",
+        }]}
+
+    def test_layer_entry_callables_are_validated_and_kept(self):
+        self._with_layer_entries([
+            self._entry("method", "forward_entry"),
+            self._entry("function", "pkg.model:run_layer"),
+        ])
+        result = validator.validate(self.patterns, self.config, [self.source])
+        entries = result["layer_entry_callables"]
+        self.assertEqual([item["target"] for item in entries],
+                         ["forward_entry", "pkg.model:run_layer"])
+        self.assertTrue(entries[0]["source_evidence"][0]["sha256"])
+
+    def test_layer_entry_callables_are_absent_by_default(self):
+        self._write()
+        result = validator.validate(self.patterns, self.config, [self.source])
+        self.assertNotIn("layer_entry_callables", result)
+
+    def test_rejects_malformed_or_unsourced_layer_entries(self):
+        bad = [
+            [self._entry("function", "run_layer")],
+            [self._entry("method", "pkg.model:run_layer")],
+            [self._entry("hook", "forward_entry")],
+            [{"kind": "method", "target": "forward_entry"}],
+        ]
+        for entries in bad:
+            self._with_layer_entries(entries)
+            with self.assertRaises(ValueError):
+                validator.validate(self.patterns, self.config, [self.source])
+
     def test_validator_derives_patterns_from_body_not_context(self):
         self._write()
         result = validator.validate(

@@ -125,6 +125,13 @@ Phase 1.2 additionally receives `STRUCTURAL_PATTERNS_JSON`, `SEMANTIC_TABLE_JSON
      `STRUCTURAL_LAYER_PATTERNS.agent.json` and re-validate, so `complete_table` and the boundary
      transfer use the same anchor.
    - Cite the runtime source (`path`, `line_start`, `symbol`) for the anchor in `notes`.
+   - If that entry is not `layer.forward`, also list it as top-level `layer_entry_callables` in
+     `STRUCTURAL_LAYER_PATTERNS.agent.json`, so the Semantics 1.2 capture server marks the same
+     layer body: `{"kind": "method", "target": "<attribute on the main-layer module>"}` or
+     `{"kind": "function", "target": "<module that calls it>:<function>"}` (layer is its first
+     argument; name the calling module, where the name is looked up at call time), each with
+     `source_evidence` in the same form as a layer descriptor. Leave it out when the default
+     `DecoderLayer` anchor matches.
    Every boundary gate still applies to an explicit anchor. If it does not produce complete
    passes, report the failure; never loosen a gate or partition from recurring stages.
 

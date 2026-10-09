@@ -442,6 +442,7 @@ class SemanticRuntimeLogger(object):
         self.layers = _csv_int("GEAK_SEMANTICS_LAYERS")
         self.phases = _csv_upper("GEAK_SEMANTICS_PHASES")
         self.layer_scopes = _flag("GEAK_SEMANTICS_LAYER_SCOPES", "1")
+        self._scope_state = threading.local()
         self.require_profiler = _flag(
             "GEAK_SEMANTICS_REQUIRE_PROFILER")
         self._profile_seen = False
@@ -553,6 +554,11 @@ class SemanticRuntimeLogger(object):
 
     def layer_scope(self, layer_id, op_path):
         """Return a record_function context for one complete main-layer body."""
+        open_layers = self._open_layer_scopes()
+        if layer_id in open_layers:
+            # Already inside this layer's scope (e.g. a configured layer entry
+            # called from the wrapped ``forward``): one marker per layer body.
+            return contextlib.nullcontext()
         source = self._layer_scope_source(layer_id)
         if source is None:
             return contextlib.nullcontext()
@@ -567,9 +573,26 @@ class SemanticRuntimeLogger(object):
                 getattr(torch, "profiler", None), "record_function", None)
             if factory is None:
                 factory = torch.autograd.profiler.record_function
-            return factory(marker)
+            scope = factory(marker)
         except Exception:
             return contextlib.nullcontext()
+        return self._tracked_layer_scope(scope, layer_id, open_layers)
+
+    def _open_layer_scopes(self):
+        """Layer ids whose scope is open on this thread."""
+        layers = getattr(self._scope_state, "layers", None)
+        if layers is None:
+            layers = self._scope_state.layers = set()
+        return layers
+
+    @contextlib.contextmanager
+    def _tracked_layer_scope(self, scope, layer_id, open_layers):
+        open_layers.add(layer_id)
+        try:
+            with scope:
+                yield
+        finally:
+            open_layers.discard(layer_id)
 
     def _stack(self):
         if not hasattr(self._stacks, "value"):
@@ -867,6 +890,7 @@ def _register_hooks(model):
             # tensor roles; fail explicitly instead of silently mislabelling.
             raise RuntimeError(
                 "runtime torch lacks kwargs-capable forward hooks")
+    layer_scope_count += _wrap_layer_entry_functions(model, logger)
     sys.stderr.write(
         "[GEAK_SEMANTICS] registered %d all-layer scopes and %d "
         "marker+metadata hooks\n" % (layer_scope_count, count))
@@ -891,6 +915,91 @@ def install_hooks_only(model):
         model._geak_semantics_hooked = True
     _install_callable_probes()
     return model
+
+
+# Per-layer entries that bypass ``layer.forward``.  Some runtimes drive each
+# main layer through another method of the layer module, or through a plain
+# function that takes the layer as its first argument, so the ``forward``
+# wrapper above never fires.  The semantics mapper finds that entry in the
+# runtime source and lists it as ``layer_entry_callables`` in the structural
+# pattern document; run_semantics_1_2 hands it to this process as
+#   GEAK_SEMANTICS_LAYER_ENTRY_METHODS    method names on main-layer modules
+#   GEAK_SEMANTICS_LAYER_ENTRY_FUNCTIONS  ``module:function`` (layer is arg 0)
+# Both are empty by default; nothing beyond ``forward`` is wrapped then.
+def _layer_entry_names(variable):
+    return tuple(dict.fromkeys(
+        item.strip() for item in os.environ.get(variable, "").split(",")
+        if item.strip()))
+
+
+def _wrap_layer_entry_functions(model, logger):
+    methods = _layer_entry_names("GEAK_SEMANTICS_LAYER_ENTRY_METHODS")
+    functions = _layer_entry_names("GEAK_SEMANTICS_LAYER_ENTRY_FUNCTIONS")
+    if not methods and not functions:
+        return 0
+    layer_paths = {}
+    for raw_path, module in model.named_modules():
+        path = _op_path(raw_path) if raw_path else ""
+        if path and _MAIN_LAYER_RE.search(path):
+            layer_paths[id(module)] = (module, _layer_id(path), path)
+    if not layer_paths:
+        raise RuntimeError(
+            "GEAK layer entry callables are configured but the model has no "
+            "main-layer modules")
+    wrapped = 0
+    for name in methods:
+        found = 0
+        for module, layer, path in layer_paths.values():
+            flag = "_geak_semantics_entry_wrapped_" + name
+            original = getattr(module, name, None)
+            if original is None:
+                continue
+            found += 1
+            if getattr(module, flag, False):
+                continue
+
+            @functools.wraps(original)
+            def scoped_method(*args, __fn=original, __layer=layer,
+                              __path=path, **kwargs):
+                with logger.layer_scope(__layer, __path):
+                    return __fn(*args, **kwargs)
+
+            setattr(module, name, scoped_method)
+            setattr(module, flag, True)
+            wrapped += 1
+        if not found:
+            raise RuntimeError(
+                "GEAK layer entry method %r is not defined on any main-layer "
+                "module" % name)
+    by_module = {id(m): (layer, path) for m, layer, path in layer_paths.values()}
+    for target in functions:
+        module_name, sep, attr = target.partition(":")
+        if not sep or not module_name or not attr:
+            raise RuntimeError(
+                "invalid GEAK layer entry function %r; expected module:function"
+                % target)
+        namespace = importlib.import_module(module_name)
+        original = getattr(namespace, attr, None)
+        if not callable(original):
+            raise RuntimeError(
+                "GEAK layer entry function is not callable: %s" % target)
+        if getattr(original, "_geak_semantics_entry_wrapped", False):
+            continue
+
+        @functools.wraps(original)
+        def scoped_function(layer_module, *args, __fn=original, **kwargs):
+            owner = by_module.get(id(layer_module))
+            if owner is None:
+                return __fn(layer_module, *args, **kwargs)
+            with logger.layer_scope(owner[0], owner[1]):
+                return __fn(layer_module, *args, **kwargs)
+
+        scoped_function._geak_semantics_entry_wrapped = True
+        setattr(namespace, attr, scoped_function)
+        wrapped += len(layer_paths)
+        sys.stderr.write(
+            "[GEAK_SEMANTICS] layer scope wrapped %s\n" % target)
+    return wrapped
 
 
 def install_on_model(model, is_draft=False):

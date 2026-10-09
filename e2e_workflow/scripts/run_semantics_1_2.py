@@ -76,6 +76,9 @@ def run(config_path, trace_path, shape_log_path, out_dir,
     structural_validation = validate_structural_patterns.validate(
         structural_patterns_input, config_path, runtime_sources,
         patterns_path)
+    layer_entry_callables = (
+        structural_validation.get("layer_entry_callables") or []
+        if isinstance(structural_validation, dict) else [])
 
     # trace_path may be a single trace or a list; the mapper auto-adopts the
     # EXTEND/DECODE phase sibling so a run cannot silently cover one phase.
@@ -141,7 +144,8 @@ def run(config_path, trace_path, shape_log_path, out_dir,
     if capture_setup_path:
         capture_results.append(run_semantic_shape_capture.capture(
             capture_setup_path, source_plan_path,
-            os.path.join(out_dir, "capture")))
+            os.path.join(out_dir, "capture"),
+            layer_entry_callables=layer_entry_callables))
     result_paths = list(capture_result_paths or [])
     if capture_result_path:
         if isinstance(capture_result_path, (list, tuple)):
@@ -267,7 +271,8 @@ def run(config_path, trace_path, shape_log_path, out_dir,
             retry_capture = run_semantic_shape_capture.capture(
                 retry_setup_path, retry_plan_path,
                 os.path.join(out_dir, "capture_targeted"),
-                phases=targeted_shape_retry["capture_phases"])
+                phases=targeted_shape_retry["capture_phases"],
+                layer_entry_callables=layer_entry_callables)
             retry_run_dir = os.path.join(
                 out_dir, "probe_runs", "targeted")
             os.makedirs(retry_run_dir, exist_ok=True)
@@ -408,6 +413,7 @@ def run(config_path, trace_path, shape_log_path, out_dir,
         "capture_phase_coverage_complete": (
             capture_phase_coverage_complete),
         "capture_phase_coverage_gating": False,
+        "layer_entry_callables": layer_entry_callables,
         "capture_uncovered_marker_buckets": capture_uncovered_marker_buckets,
         "boundary_evidence": boundary_evidence,
         "phase_boundary_evidence": phase_boundary_evidence,

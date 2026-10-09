@@ -162,6 +162,48 @@ def _validate_source_evidence(owner, source_by_path):
         item["sha256"] = source_by_path[path]["sha256"]
 
 
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
+def _validate_layer_entry_callables(entries, source_by_path):
+    """Check the per-layer entries the Agent found in runtime source.
+
+    Needed only when main layers bypass ``layer.forward``. A ``method`` is an
+    attribute name on the main-layer module; a ``function`` is
+    ``module:function`` in the module that calls it, taking the layer as its
+    first argument. Each entry cites the runtime source like a layer does.
+    """
+    if entries in (None, []):
+        return []
+    if not isinstance(entries, list):
+        raise ValueError("layer_entry_callables must be a list")
+    validated = []
+    for raw in entries:
+        if not isinstance(raw, dict):
+            raise ValueError("layer_entry_callables entries must be objects")
+        entry = copy.deepcopy(raw)
+        kind = entry.get("kind")
+        target = str(entry.get("target") or "").strip()
+        if kind == "method":
+            if not _IDENTIFIER_RE.match(target):
+                raise ValueError(
+                    "layer entry method must be an attribute name: %r" % target)
+        elif kind == "function":
+            module_name, sep, attr = target.partition(":")
+            if not (sep and _MODULE_RE.match(module_name)
+                    and _IDENTIFIER_RE.match(attr)):
+                raise ValueError(
+                    "layer entry function must be module:function: %r" % target)
+        else:
+            raise ValueError(
+                "layer entry kind must be method or function: %r" % kind)
+        entry["target"] = target
+        _validate_source_evidence(entry, source_by_path)
+        validated.append(entry)
+    return validated
+
+
 def _is_contextual_representative(layer):
     context = layer.get("instance_context") or {}
     return any(bool(context.get(key)) for key in (
@@ -331,7 +373,12 @@ def validate(pattern_path, config_path, runtime_sources, out_path=""):
             pattern["ffn_type"] = ffn_type
         patterns.append(pattern)
 
+    layer_entries = _validate_layer_entry_callables(
+        draft.get("layer_entry_callables"), source_by_path)
+
     result = copy.deepcopy(draft)
+    if layer_entries:
+        result["layer_entry_callables"] = layer_entries
     result["schema_version"] = 3
     result["config_path"] = os.path.abspath(config_path)
     result["config_sha256"] = _sha256(config_path)

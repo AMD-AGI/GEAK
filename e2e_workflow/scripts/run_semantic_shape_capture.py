@@ -367,8 +367,25 @@ def _normalized_probe_plan(setup, plan, setup_path):
     }
 
 
+def layer_entry_env(layer_entry_callables):
+    """(methods, functions) csv values for the capture process environment.
+
+    ``layer_entry_callables`` comes from the structural pattern document: the
+    per-layer entries the semantics mapper found in the runtime source for a
+    model whose layers bypass ``layer.forward``.
+    """
+    methods, functions = [], []
+    for item in layer_entry_callables or []:
+        target = str(item.get("target") or "").strip()
+        if item.get("kind") == "method":
+            methods.append(target)
+        elif item.get("kind") == "function":
+            functions.append(target)
+    return ",".join(methods), ",".join(functions)
+
+
 def capture(setup_path, capture_plan_path, out_dir, phases=None,
-            forwards_per_bucket=1):
+            forwards_per_bucket=1, layer_entry_callables=None):
     with open(setup_path) as fh:
         setup = json.load(fh)
     phases = list(phases or setup.get("capture_phases", []))
@@ -448,6 +465,7 @@ def capture(setup_path, capture_plan_path, out_dir, phases=None,
         extra_server_args = (
             extra_server_args + " --enable-profile-cuda-graph").strip()
     extra_env = str(setup.get("extra_env", "")).strip()
+    entry_methods, entry_functions = layer_entry_env(layer_entry_callables)
     probe_plan = _normalized_probe_plan(setup, plan, setup_path)
     callable_targets = [
         item["callable"] for item in probe_plan["callable_targets"]]
@@ -479,6 +497,8 @@ export GEAK_SEMANTICS_OPERATOR_TARGETS=%s
 export GEAK_SEMANTICS_OPERATOR_SCHEMA_MANIFEST=%s
 export GEAK_SEMANTICS_REQUIRE_PROFILER=0
 export GEAK_SEMANTICS_GRAPH_CAPTURE_TRACE=%s
+export GEAK_SEMANTICS_LAYER_ENTRY_METHODS=%s
+export GEAK_SEMANTICS_LAYER_ENTRY_FUNCTIONS=%s
 export EXTRA_SERVER_ARGS=%s
 export EXTRA_ENV=%s
 export PROFILE=0
@@ -518,6 +538,7 @@ wait "$geak_wrapper"
         ",".join(operator_targets),
         operator_schema_manifest,
         graph_capture_trace,
+        shlex.quote(entry_methods), shlex.quote(entry_functions),
         shlex.quote(extra_server_args), shlex.quote(extra_env),
         int(setup.get("repeats", 1)),
         int(setup.get("profile_num_steps", 1)),

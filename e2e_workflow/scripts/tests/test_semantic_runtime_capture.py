@@ -1,3 +1,4 @@
+import contextlib
 import os
 import sys
 import tempfile
@@ -194,6 +195,108 @@ class TestBucketAccountingUnderAWarmupDriver(unittest.TestCase):
             logger.set_context("EXTEND", 2, 4096)
             logger.mark_forward()
             self.assertEqual(logger._bucket_forwards[("EXTEND", 2, 4096)], 1)
+
+
+class _ScopeLogger(object):
+    def __init__(self):
+        self.scopes = []
+
+    def layer_scope(self, layer_id, op_path):
+        self.scopes.append((layer_id, op_path))
+        return contextlib.nullcontext()
+
+
+class _Layer(object):
+    def forward_entry(self, value):
+        return value + 1
+
+
+class _Model(object):
+    def __init__(self):
+        self.layer0, self.layer1, self.mlp = _Layer(), _Layer(), object()
+
+    def named_modules(self):
+        return [("", self), ("model.layers.0", self.layer0),
+                ("model.layers.1", self.layer1),
+                ("model.layers.0.mlp", self.mlp)]
+
+
+class LayerEntryCallablesTest(unittest.TestCase):
+    def _wrap(self, env, module=None):
+        model, logger = _Model(), _ScopeLogger()
+        clean = {key: value for key, value in os.environ.items()
+                 if not key.startswith("GEAK_SEMANTICS_LAYER_ENTRY_")}
+        clean.update(env)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, clean, clear=True))
+            if module is not None:
+                stack.enter_context(mock.patch.object(
+                    capture.importlib, "import_module", return_value=module))
+            wrapped = capture._wrap_layer_entry_functions(model, logger)
+        return model, logger, wrapped
+
+    def test_nothing_beyond_forward_is_wrapped_by_default(self):
+        model, logger, wrapped = self._wrap({})
+        self.assertEqual(wrapped, 0)
+        self.assertEqual(model.layer0.forward_entry(1), 2)
+        self.assertEqual(logger.scopes, [])
+
+    def test_configured_method_marks_each_main_layer(self):
+        model, logger, wrapped = self._wrap(
+            {"GEAK_SEMANTICS_LAYER_ENTRY_METHODS": "forward_entry"})
+        self.assertEqual(wrapped, 2)
+        self.assertEqual(model.layer1.forward_entry(1), 2)
+        self.assertEqual(logger.scopes, [(1, "model.layers.1")])
+
+    def test_configured_function_is_replaced_in_its_calling_module(self):
+        module = types.SimpleNamespace(run_layer=lambda layer, value: value * 2)
+        model, logger, _ = self._wrap(
+            {"GEAK_SEMANTICS_LAYER_ENTRY_FUNCTIONS": "pkg.model:run_layer"},
+            module)
+        self.assertEqual(module.run_layer(model.layer0, 3), 6)
+        self.assertEqual(module.run_layer(object(), 3), 6)
+        self.assertEqual(logger.scopes, [(0, "model.layers.0")])
+
+    def test_misconfigured_entries_fail_loudly(self):
+        with self.assertRaises(RuntimeError):
+            self._wrap({"GEAK_SEMANTICS_LAYER_ENTRY_METHODS": "no_such_method"})
+        with self.assertRaises(RuntimeError):
+            self._wrap({"GEAK_SEMANTICS_LAYER_ENTRY_FUNCTIONS": "no_colon"})
+        with self.assertRaises(RuntimeError):
+            self._wrap({"GEAK_SEMANTICS_LAYER_ENTRY_FUNCTIONS": "pkg.model:missing"},
+                       types.SimpleNamespace())
+
+    def test_nested_scope_for_the_same_layer_emits_one_marker(self):
+        markers = []
+
+        class _Record(object):
+            def __init__(self, name):
+                self.name = name
+
+            def __enter__(self):
+                markers.append(self.name)
+
+            def __exit__(self, *exc):
+                return False
+
+        fake_torch = types.SimpleNamespace(
+            profiler=types.SimpleNamespace(record_function=_Record))
+        logger = capture.SemanticRuntimeLogger.__new__(
+            capture.SemanticRuntimeLogger)
+        logger._scope_state = capture.threading.local()
+        logger._context = {"phase": "DECODE", "batch_size": 4, "input_tokens": 4}
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}), \
+                mock.patch.object(logger, "_layer_scope_source",
+                                  return_value="capture"):
+            with logger.layer_scope(3, "model.layers.3"):
+                with logger.layer_scope(3, "model.layers.3"):
+                    pass
+                with logger.layer_scope(4, "model.layers.4"):
+                    pass
+            with logger.layer_scope(3, "model.layers.3"):
+                pass
+        self.assertEqual([m.split("|layer=")[1].split("|")[0] for m in markers],
+                         ["3", "4", "3"])
 
 
 if __name__ == "__main__":

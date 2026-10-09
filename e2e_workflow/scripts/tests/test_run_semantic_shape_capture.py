@@ -253,5 +253,16 @@ class DecodeProbeTest(unittest.TestCase):
             self.assertEqual(result["port"], 32123)
 
 
+class LayerEntryEnvTest(unittest.TestCase):
+    def test_layer_entry_callables_become_capture_env(self):
+        methods, functions = capture.layer_entry_env([
+            {"kind": "method", "target": "forward_entry"},
+            {"kind": "function", "target": "pkg.model:run_layer"},
+        ])
+        self.assertEqual(methods, "forward_entry")
+        self.assertEqual(functions, "pkg.model:run_layer")
+        self.assertEqual(capture.layer_entry_env(None), ("", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
