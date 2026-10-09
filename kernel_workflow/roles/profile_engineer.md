@@ -45,7 +45,21 @@ kernel-trace + latency table (`amd_rdna4.md` §5).
    `profiling_guide.md` ("Profiler failed?"): use `<tool> --help` to find the renamed flag, re-run once
    with the named env override, then degrade deliberately — and record which tool actually ran + why in
    `profiler_used` / your summary. Do not accept a silent degrade.
-3. Read the report. Extract what's available: VALU/VMEM/LDS utilization, effective HBM bandwidth,
+   **Optional deeper layers** (only when the default report cannot discriminate the bound — each costs
+   extra replays): append `--pmc` (all `parse_pmc.py` counter groups: busy counters + achieved DRAM
+   bandwidth by independent routes) or the cheaper `--derived` (busy/stall groups only), `--att`
+   (per-instruction thread trace + `hotspot_analyzer.py`; needs `ROCPROF_ATT_LIBRARY_PATH` pointing at
+   the rocprof-trace-decoder, which GEAK does not ship), `--spi` (occupancy-limiter blocks), and
+   `--kernel <regex>` to pick the kernel (default: the dominant non-helper kernel). Same argv, same
+   gpu_lock routing; extra output lands in `pmc/`, `att/`, `spi/` subdirs, a section per layer is
+   appended to `profile_report.txt`, and `profile_layers.json` records each layer's state. A layer
+   that reports `degraded:<why>` (non-CDNA arch, no decoder, no rocprofv3) is a limitation to state,
+   not a failure. Parsers for those outputs live in `SKILL_DIR/scripts/kernel_tools/` (`parse_pmc.py`,
+   `parse_rc.py`, `kernel_breakdown.py` to merge PMC with the static ISA audit, `hotspot_analyzer.py`,
+   `att_opclass.py`); never call `rocprofv3` bare or set `HIP_VISIBLE_DEVICES` inline — use
+   `kernel_tools/rocprofv3_safe.sh --gpu $GPU_ID ...` for an ad-hoc pass.
+3. Read the report. Extract what's available: VALU/VMEM/LDS utilization (the **busy** counters —
+   `VALUBusy` / `MfmaUtil` / SoL %-of-peak — not the `VALUUtilization` lane duty-cycle), effective HBM bandwidth,
    active vs total cycles, dependency/issue wait, L1/L2 hit rate, coalescing %, branch divergence,
    active threads/instr, VGPR/SGPR usage, scratch bytes, **and the per-kernel dispatch breakdown
    (how many distinct kernels launch per call and their % of time)** — the dispatch count is a key

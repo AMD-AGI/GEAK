@@ -98,7 +98,7 @@ Do this instead of the optimize-mode steps below:
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
    done
    cd "$EVAL_DIR/workspace"
-   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '.tile-runtime/' '*.o' '/.geak/' > .gitignore
    export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
    git init -q
    git -c user.email=team@workflow -c user.name=team add -A
@@ -148,7 +148,7 @@ Steps:
    [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -sfn "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
    cd "$EVAL_DIR/workspace"
    # Keep build artifacts out of git so patches (git diff) stay clean source-only across all roles.
-   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '*.o' '/.geak/' > .gitignore
+   printf '%s\n' 'build/' '__pycache__/' '*.pyc' 'results.*' '*.so' '.torch_ext/' '.rocprofv3/' '.tile-runtime/' '*.o' '/.geak/' > .gitignore
    # Avoid git hangs/failures in non-interactive agents: no pager, no prompts, and ALWAYS pass an
    # identity (the machine may have no global git user). Fresh repo (the source .git was never copied
    # in) so HEAD is exactly this baseline.
