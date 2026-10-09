@@ -416,6 +416,15 @@ def test_recover_workflow_return_no_gain_not_parse_error(tmp_path):
     assert out["final_launch_script"].endswith("final/final_launch.sh")
 
 
+def test_a_run_cut_off_before_finalize_is_not_no_gain(tmp_path):
+    """A run stopped mid-optimization has a measured baseline too; without the
+    Finalize bundle it must surface as an error, not as "finished, found nothing"."""
+    eval_dir = _make_no_gain_eval_dir(tmp_path)
+    (eval_dir / "final" / "final_launch.sh").unlink()
+    assert rx._recover_completed_no_gain(eval_dir) is None
+    assert rx._recover_workflow_return(eval_dir.parent) is None
+
+
 def test_no_baseline_still_errors(tmp_path):
     """No measured baseline at all => genuinely nothing => None (-> error)."""
     eval_dir = tmp_path / "e2e_bare"
