@@ -1,0 +1,53 @@
+{
+  "_generated_by": "compose.py _stamp_pack_facts -- do not edit; edit the manifest and re-run `make skills`",
+  "_source": "skills-src/lang/gluon/manifest.yaml",
+  "_why": "the per-pack answers a tool shared by every pack cannot hardcode. Read this instead of branching on a DSL name: a pack that changes its regime, renames an artifact or loses a tool changes this file in the same commit.",
+  "dsl": "gluon",
+  "vendor": "amd",
+  "family": "triton",
+  "round_contract": "tool_first",
+  "breadth_enabled": false,
+  "artifacts": {
+    "produces": {
+      "worker_result.json": "scripts/canonical_record.py",
+      "structure_suspect.json": "scripts/canonical_record.py",
+      "resweep_request.json": "scripts/canonical_record.py",
+      "resweep_result.json": "scripts/canonical_record.py",
+      "canonical_record.json": "scripts/canonical_record.py",
+      "run_state.json": "scripts/canonical_record.py",
+      "final_report.json": "scripts/canonical_record.py",
+      "close_audit.json": "scripts/close_audit.py"
+    },
+    "consumes": {
+      "plain_champion.json": "scripts/champion_gate.py",
+      "worker_result.json": "agent",
+      "branch_request.json": "agent",
+      "structure_suspect.json": "agent",
+      "resweep_request.json": "agent",
+      "resweep_result.json": "agent"
+    }
+  },
+  "evidence_tools": {
+    "ab_interleave": "scripts/ab_bench.py",
+    "budget": "scripts/hw_budget.py",
+    "ceiling_probe": "scripts/mem_bw_probe.py",
+    "static_audit": "scripts/asm_loop_audit.py",
+    "served_weighting": "scripts/served_envelope.py",
+    "occupancy": "scripts/amd_occupancy.py",
+    "matrix_efficiency": "scripts/mfma_efficiency.py"
+  },
+  "tool_gaps": {},
+  "standing_references": {
+    "budget": "references/method/budget.md",
+    "roofline": "references/hardware/roofline-models.md",
+    "profile": "references/method/profile.md",
+    "hardware": "references/hardware/capability-matrix.md",
+    "experience": "references/pitfalls/negative-patterns.md",
+    "workload": "references/workloads/index.md",
+    "dsl_api": "references/gluon/index.md",
+    "toolchain": "references/method/profile.md"
+  },
+  "reference_gaps": {},
+  "entry_gate": null,
+  "authoring_gap": null
+}

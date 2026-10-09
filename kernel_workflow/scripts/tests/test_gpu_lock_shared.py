@@ -1,10 +1,10 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""GEAK's gpu_lock.sh: one lock namespace, --help / --selftest, use-log mode, broker off by default.
+"""One GPU lock: the Gluon pack's scripts/gpu_lock.sh is a shim onto GEAK's gpu_lock.sh.
 
-CPU-only. Two processes asking for the same GPU id must serialize, because both flock the same file
-in the same namespace. Also checks --help / --selftest and that the optional broker stays OFF unless
-GEAK_GPU_BROKER=1.
+CPU-only. Two processes asking for the same GPU id -- one through the pack shim, one through GEAK's
+wrapper -- must serialize, because both flock the same file in the same namespace. Also checks the
+absorbed --help / --selftest and that the optional broker stays OFF unless GEAK_GPU_BROKER=1.
 """
 
 import os
@@ -17,6 +17,7 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[1]
 REPO = SCRIPTS.parents[1]
 GEAK_LOCK = SCRIPTS / "gpu_lock.sh"
+SHIM = REPO / "perf_knowledge/expert_skills/skills/gluon_authoring/scripts/gpu_lock.sh"
 DEFAULT_DIR = "/tmp/team_gpu_locks"
 
 
@@ -44,12 +45,15 @@ def _intervals(log):
 
 def _assert_serialized(log):
     t = _intervals(log)
-    assert set(t) == {"first", "geak"}, log.read_text()
+    assert set(t) == {"shim", "geak"}, log.read_text()
     a, b = sorted(t.values(), key=lambda x: x["start"])
     assert b["start"] >= a["end"], f"holders of one GPU id overlapped: {t}"
 
 
-def test_lock_dir_defaults_to_the_shared_namespace():
+def test_shim_execs_the_geak_lock_and_defines_no_namespace():
+    code = "\n".join(ln for ln in SHIM.read_text().splitlines() if not ln.lstrip().startswith("#"))
+    assert "kernel_workflow/scripts/gpu_lock.sh" in code and "exec bash" in code
+    assert "LOCK_DIR" not in code and "flock" not in code, "the shim must not define its own lock"
     geak = GEAK_LOCK.read_text()
     assert f'LOCK_DIR="${{GEAK_GPU_LOCK_DIR:-{DEFAULT_DIR}}}"' in geak
 
@@ -60,7 +64,7 @@ def _race(tmp_path, gpu_id, lock_dir):
     log = tmp_path / f"order_{gpu_id}.log"
     log.write_text("")
     env = _env(lock_dir)
-    a = subprocess.Popen(["bash", str(GEAK_LOCK), str(gpu_id), "bash", "-c", HOLD, "_", "first", str(log)],
+    a = subprocess.Popen(["bash", str(SHIM), str(gpu_id), "bash", "-c", HOLD, "_", "shim", str(log)],
                          cwd=ws, env=env)
     time.sleep(0.4)
     b = subprocess.Popen(["bash", str(GEAK_LOCK), str(gpu_id), "bash", "-c", HOLD, "_", "geak", str(log)],
@@ -69,13 +73,13 @@ def _race(tmp_path, gpu_id, lock_dir):
     return log
 
 
-def test_two_holders_serialize_on_one_gpu_id(tmp_path):
+def test_shim_and_geak_serialize_on_one_gpu_id(tmp_path):
     # Private namespace (test-only override): both wrappers resolve it identically, and a test must
     # never queue behind -- or block -- a real tenant of /tmp/team_gpu_locks.
     _assert_serialized(_race(tmp_path, 3, tmp_path / "locks"))
 
 
-def test_two_holders_serialize_in_the_default_namespace(tmp_path):
+def test_shim_and_geak_serialize_in_the_default_namespace(tmp_path):
     gpu_id = 40000 + os.getpid() % 10000      # an id no real run uses
     lock = Path(DEFAULT_DIR) / f"gpu_{gpu_id}.lock"
     if not lock.exists() and not (os.access(DEFAULT_DIR, os.W_OK) or not Path(DEFAULT_DIR).exists()):
@@ -89,11 +93,11 @@ def test_two_holders_serialize_in_the_default_namespace(tmp_path):
             lock.unlink()
 
 
-def test_help_and_selftest(tmp_path):
-    r = subprocess.run(["bash", str(GEAK_LOCK), "--help"], capture_output=True, text=True, env=_env())
+def test_absorbed_help_and_selftest(tmp_path):
+    r = subprocess.run(["bash", str(SHIM), "--help"], capture_output=True, text=True, env=_env())
     assert r.returncode == 0 and "gpu_lock.sh" in r.stdout and "GEAK_GPU_USE_LOG" in r.stdout
     assert not (Path.cwd() / "gpu_--help.lock").exists()
-    r = subprocess.run(["bash", str(GEAK_LOCK), "--selftest"], capture_output=True, text=True,
+    r = subprocess.run(["bash", str(SHIM), "--selftest"], capture_output=True, text=True,
                        env=_env(), cwd=tmp_path, timeout=120)
     assert r.returncode == 0 and "GPU_LOCK SELFTEST PASS" in r.stdout, r.stdout + r.stderr
 
@@ -117,6 +121,6 @@ def test_broker_off_by_default(tmp_path):
 
 
 def test_command_exit_code_is_preserved(tmp_path):
-    r = subprocess.run(["bash", str(GEAK_LOCK), "1", "bash", "-c", "exit 7"], cwd=tmp_path,
+    r = subprocess.run(["bash", str(SHIM), "1", "bash", "-c", "exit 7"], cwd=tmp_path,
                        env=_env(tmp_path / "locks"), timeout=120)
     assert r.returncode == 7

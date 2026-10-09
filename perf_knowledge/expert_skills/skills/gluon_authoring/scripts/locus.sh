@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
-# locus.sh - run profilers WHERE THE KERNEL runs (sourced by capture.sh /
-# rocprof_compute_probe.sh / profile_kernel.sh).
+# locus.sh - run profilers WHERE THE KERNEL runs (sourced by GEAK's
+# kernel_workflow/scripts/kernel_tools/{capture.sh,rocprof_compute_probe.sh} through _kt_common.sh,
+# and by env_gate.sh).
+#
+# OPTIONAL. In GEAK, roles run inside GEAK's own workspace under kernel_workflow/scripts/gpu_lock.sh,
+# leave TILE_KERNEL_CONTAINER unset, and every helper below is then an exact host passthrough -- so
+# GEAK behaviour is unchanged. The container locus is only for a kernel that lives in a separate
+# container (TILE_KERNEL_CONTAINER set, e.g. via runtime_env.sh). GEAK's own profiler entry
+# (kernel_workflow/scripts/profile_kernel.sh) does not use a locus.
 #
 # Root cause this closes: the candidate JIT-dlopens inside a container while the profiler
 # script runs host-side -> the host cannot see the in-container kernel -> every profiler
 # silently degrades (sol_pmc_no_kernel_rows / analyze-blind / ATT code:null). See
-# ../references/phases/profile.md ## Execution locus and ../references/failure-triage.md
-# ## Profiler layer unavailable. This is a FIXABLE mis-config, NOT a blind mode.
+# ../references/method/profile.md ### Execution locus and ../references/method/triage.md
+# ('Profiler layer unavailable'). This is a FIXABLE mis-config, NOT a blind mode.
 #
 # Contract (generic; nothing container-specific is baked): the container id comes from the
 # env var TILE_KERNEL_CONTAINER (resolve_context.py records it as context.env.kernel_container;
@@ -18,8 +25,10 @@
 #   locus_active            -> rc 0 if a live kernel container is configured, else rc 1
 #   locus_run <cmd...>      -> run <cmd> in the kernel container (docker exec) or host-side.
 #                              Forwards host env into the container via -e (see LOCUS_ENV below).
+#   locus_timeout <s> <cmd...> -> enforce the timeout INSIDE the kernel locus/payload.
 #   locus_fetch <cpath> <hpath> -> copy an artifact OUT of the container (noop on host / bind mount)
 #   locus_push  <hpath> <cpath> -> copy a file INTO the container (noop host-side / bind mount)
+#   locus_workdir_shared <path> -> verify host<->container visibility for artifact workdirs.
 #   locus_preflight         -> verify container alive + rocprofv3/rocprof-compute present in it;
 #                              on failure echoes a structured probe line + sets LOCUS_DEGRADE_CAUSE
 #
@@ -37,7 +46,32 @@
 # Structurally-universal env names to forward into the locus. NOT kernel/repo-specific: the GPU
 # selector(s), Triton's cache + recompile controls, and the import path. Callers append their own
 # names to LOCUS_ENV; they are only forwarded if set in the host env.
-: "${LOCUS_ENV:=HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES TRITON_CACHE_DIR TRITON_ALWAYS_COMPILE PYTHONPATH}"
+: "${LOCUS_ENV:=HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES TRITON_CACHE_DIR TRITON_ALWAYS_COMPILE PYTHONPATH HOME XDG_CACHE_HOME MPLCONFIGDIR TMPDIR TMP TEMP TILE_HW_CACHE TILE_HW_SEED TILE_HW_TOOLS ROCM_PATH ROCPROF_ATT_LIBRARY_PATH LD_LIBRARY_PATH}"
+
+_locus_path() {
+  # Translate an absolute host work path to its container mount path. This is
+  # needed when `/apps/...` on the host is mounted beneath `/work/...`.
+  local host="${1:?host path required}" host_root="${TILE_KERNEL_HOST_WORKDIR:-}"
+  local container_root="${TILE_KERNEL_CONTAINER_WORKDIR:-}" relative
+  if [ -z "$host_root" ] || [ -z "$container_root" ]; then
+    printf '%s' "$host"
+    return 0
+  fi
+  host_root="$(cd "$host_root" 2>/dev/null && pwd -P)" || {
+    printf '%s' "$host"; return 0;
+  }
+  case "$host" in
+    "$host_root"|"$host_root"/*)
+      relative="${host#"$host_root"}"
+      printf '%s%s' "${container_root%/}" "$relative"
+      ;;
+    *) printf '%s' "$host" ;;
+  esac
+}
+
+locus_path() {
+  _locus_path "$@"
+}
 
 _locus_env_args() {
   # Print `-e NAME=value` tokens (one pair per arg) for every name in LOCUS_ENV that is set in the
@@ -77,14 +111,56 @@ locus_run() {
   # env is already inherited, so passthrough is unchanged.
   if locus_active; then
     local eng; eng="$(_locus_engine)"
-    local -a eargs=()
+    local -a eargs=() wargs=()
     local tok
     while IFS= read -r -d '' tok; do eargs+=("$tok"); done < <(_locus_env_args)
-    "$eng" exec ${TILE_KERNEL_CONTAINER_WORKDIR:+-w "$TILE_KERNEL_CONTAINER_WORKDIR"} \
+    [ -n "${TILE_KERNEL_CONTAINER_CWD:-}" ] && wargs=(-w "$TILE_KERNEL_CONTAINER_CWD")
+    [ -z "${TILE_KERNEL_CONTAINER_CWD:-}" ] && [ -n "${TILE_KERNEL_CONTAINER_WORKDIR:-}" ] \
+      && wargs=(-w "$TILE_KERNEL_CONTAINER_WORKDIR")
+    "$eng" exec "${wargs[@]}" \
       "${eargs[@]}" "$TILE_KERNEL_CONTAINER" "$@"
   else
     "$@"
   fi
+}
+
+locus_timeout() {
+  # Do NOT put host `timeout` around `docker exec`: that only kills the client-side exec process
+  # and can leave the profiler payload running in the container. `locus_run` wraps `timeout`
+  # itself, so the process receiving SIGTERM/KILL is in the same namespace as the kernel.
+  local seconds="${1:?locus_timeout <seconds> <cmd...>}"
+  shift
+  [ "$#" -gt 0 ] || { echo "[locus] timeout needs a command" >&2; return 2; }
+  locus_run timeout "$seconds" "$@"
+}
+
+locus_workdir_shared() {
+  # Artifact collection writes in the container and analysis reads on the host. Test BOTH
+  # directions before profiling so an unshared bind mount is not misreported as a profiler fault.
+  local root="${1:?locus_workdir_shared <host-path>}" probe container_probe want got rc=0
+  root="$(cd "$root" 2>/dev/null && pwd)" || return 1
+  [ -d "$root" ] || return 1
+  locus_active || return 0
+  # Per-process probe, renamed onto one fixed name afterwards: nothing is rm'd (GEAK convention).
+  probe="$root/.locus_share.$$"
+  : > "$probe" 2>/dev/null || return 1
+  container_probe="$(_locus_path "$probe")"
+  want="host-${RANDOM}-${RANDOM}"
+  printf '%s\n' "$want" > "$probe"
+  if ! locus_run bash -lc 'test -r "$1" && IFS= read -r v < "$1" && [ "$v" = "$2" ]' \
+      _ "$container_probe" "$want"; then
+    rc=1
+  else
+    want="container-${RANDOM}-${RANDOM}"
+    if ! locus_run bash -lc 'printf "%s\n" "$2" > "$1"' _ "$container_probe" "$want"; then
+      rc=1
+    else
+      got="$(<"$probe")"
+      [ "$got" = "$want" ] || rc=1
+    fi
+  fi
+  mv -f "$probe" "$root/.locus_share_probe" 2>/dev/null || true
+  return "$rc"
 }
 
 locus_fetch() {
@@ -101,13 +177,30 @@ locus_fetch() {
 
 locus_push() {
   # copy <host_path> -> <container_path> (docker cp IN). Needed to run a host-side helper script
-  # (e.g. dump_ir.sh) INSIDE the locus where triton is importable. Noop host-side; tolerant when the
-  # working root is bind-mounted (the file is already visible in the container) -> ignore a failure.
+  # (e.g. dump_ir.sh) INSIDE the locus where triton is importable. Noop host-side.
+  #
+  # -L (FOLLOW the link) is load-bearing, not hygiene. `docker cp` copies a symlink VERBATIM, and a
+  # relative target does not resolve on the far side, so the daemon rejects it outright:
+  #     Error response from daemon: invalid symlink ".../.dump_ir.sh" -> "../../.../dump_ir.sh"
+  # A port that keeps one copy of a shared script and symlinks the rest -- the normal way to avoid a
+  # third variant -- therefore could not push it at all. The whole static-ISA layer went missing that
+  # way: the push failed, `bash <pushed script>` reported "No such file or directory", and capture
+  # recorded it as "non-triton app or no cache". Three layers of wrong diagnosis, from one flag.
+  #
+  # And the failure is REPORTED now (rc 1 + a line on stderr) rather than swallowed by
+  # `2>/dev/null || true`. Tolerance is still correct when the working root is bind-mounted, since
+  # the file is already visible in the container -- so that case is CHECKED rather than assumed, and
+  # only a push that left nothing behind is an error.
   local hpath="${1:?locus_push <host_path> <container_path>}"
   local cpath="${2:?locus_push <host_path> <container_path>}"
   if locus_active; then
-    local eng; eng="$(_locus_engine)"
-    "$eng" cp "$hpath" "$TILE_KERNEL_CONTAINER:$cpath" 2>/dev/null || true
+    local eng err; eng="$(_locus_engine)"
+    err="$("$eng" cp -L "$hpath" "$TILE_KERNEL_CONTAINER:$cpath" 2>&1)" && return 0
+    if "$eng" exec "$TILE_KERNEL_CONTAINER" test -f "$cpath" 2>/dev/null; then
+      return 0                       # bind-mounted / already there: the copy was unnecessary
+    fi
+    echo "[locus] push FAILED: $hpath -> $TILE_KERNEL_CONTAINER:$cpath :: ${err:-unknown}" >&2
+    return 1
   fi
   return 0
 }
@@ -165,6 +258,9 @@ _locus_selftest() {
   # (b2) locus_have host-side == command -v, including for a name with no match.
   locus_have bash || { echo "FAIL: locus_have should find bash host-side"; fail=1; }
   if locus_have tile_no_such_tool_$$; then echo "FAIL: locus_have found a nonexistent tool"; fail=1; fi
+  tmp="$(mktemp -d)"
+  locus_workdir_shared "$tmp" || { echo "FAIL: host workdir should be shared with itself"; fail=1; }
+  locus_timeout 5 bash -c 'exit 0' || { echo "FAIL: host-side payload timeout helper"; fail=1; }
   # (c) _locus_env_args: pure-argv env forwarding. No docker needed.
   # count the "-e" tokens emitted (null-delimited pairs -> one "-e" per forwarded name).
   _count_e() { local n=0 tok; while IFS= read -r -d '' tok; do [ "$tok" = "-e" ] && n=$((n+1)); done < <(_locus_env_args); echo "$n"; }

@@ -15,6 +15,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1]
 GPU_LOCK = SCRIPTS / "gpu_lock.sh"
 SAFE = SCRIPTS / "kernel_tools" / "rocprofv3_safe.sh"
+SHIM = SCRIPTS.parents[1] / "perf_knowledge/expert_skills/skills/gluon_authoring/scripts/rocprofv3_safe.sh"
 
 FAKE = """#!/usr/bin/env bash
 out=""; while [ $# -gt 0 ]; do [ "$1" = "-d" ] && out="$2"; [ "$1" = "--" ] && { shift; break; }; shift; done
@@ -54,7 +55,7 @@ def test_hip_only_is_not_unset_under_gpu_lock(tmp_path):
 def test_self_locks_with_gpu_id_and_keeps_hip(tmp_path):
     env = _setup(tmp_path)
     out = tmp_path / "o2"
-    r = subprocess.run(["bash", str(SAFE), "--gpu", "6", "--kernel", "k", "--out", str(out),
+    r = subprocess.run(["bash", str(SHIM), "--gpu", "6", "--kernel", "k", "--out", str(out),
                         "--pmc", "SQ_WAVES", "--", "true"], cwd=tmp_path, env=env,
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr

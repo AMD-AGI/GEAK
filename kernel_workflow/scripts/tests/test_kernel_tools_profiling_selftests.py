@@ -1,7 +1,8 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Every profiling tool in kernel_workflow/scripts/kernel_tools passes --selftest (CPU-only; no GPU,
-profiler or ATT decoder needed -- the tools degrade, and their selftests use synthetic fixtures)."""
+"""Every profiling tool in kernel_workflow/scripts/kernel_tools passes --selftest, both from its GEAK
+location and through the Gluon pack's shim at the old scripts/ path (CPU-only; no GPU, profiler or
+ATT decoder needed -- the tools degrade, and their selftests use synthetic fixtures)."""
 
 import os
 import subprocess
@@ -12,6 +13,7 @@ import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 KT = SCRIPTS / "kernel_tools"
+PACK = SCRIPTS.parents[1] / "perf_knowledge/expert_skills/skills/gluon_authoring/scripts"
 
 TOOLS = [
     "capture.sh", "rocprof_compute_probe.sh", "rocprofv3_safe.sh",
@@ -29,12 +31,19 @@ def _run(path, tmp_path):
 
 
 @pytest.mark.parametrize("tool", TOOLS)
-def test_selftest_passes(tool, tmp_path):
-    path = KT / tool
+@pytest.mark.parametrize("where", ["kernel_tools", "pack_shim"])
+def test_selftest_passes(tool, where, tmp_path):
+    path = (KT if where == "kernel_tools" else PACK) / tool
     assert path.is_file(), path
     r = _run(path, tmp_path)
     out = r.stdout + r.stderr
     assert r.returncode == 0 and "PASS" in out and "FAIL" not in out.replace("FAILED", ""), out[-2000:]
+
+
+@pytest.mark.parametrize("tool", TOOLS)
+def test_pack_path_is_a_shim(tool):
+    text = (PACK / tool).read_text()
+    assert f"kernel_workflow/scripts/kernel_tools/{tool}" in text and len(text.splitlines()) < 30
 
 
 def test_profiler_wrappers_follow_geak_conventions():
