@@ -6021,8 +6021,11 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
 
     With NO accepted change the served path is unchanged, so final == baseline by
     construction (do-no-harm); speedup 1.0 -> :func:`normalize_result` => no_gain.
-    Returns ``None`` only when no baseline throughput was ever measured (the run
-    genuinely produced nothing to keep).
+    Returns ``None`` when no baseline throughput was ever measured (the run
+    genuinely produced nothing to keep), or when the Finalize bundle
+    (``final/final_launch.sh``) is missing: a run cut off mid-optimization also has
+    a measured baseline, and reporting it as no_gain tells the caller GEAK finished
+    and found nothing. ``None`` surfaces the run's classified error instead.
 
     This is the LAST recovery tier: :func:`_recover_workflow_return` reaches it only
     after ruling out an accepted kernel win AND an adopted serving config
@@ -6041,6 +6044,8 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
     try:
         baseline_tput = float(baseline_tput)
     except (TypeError, ValueError):
+        return None
+    if not (eval_dir / "final" / "final_launch.sh").is_file():
         return None
     return {
         "eval_dir": str(eval_dir),
