@@ -658,6 +658,8 @@ def annotate_rows(rows, agg, source):
         if hit:
             kind, ev = classify_entity(hit[1], source)
             ev["matched_profiled_kernel"] = hit[0]
+            if kind == "gpu_kernel" and not r.get("device_kernel"):
+                r["device_kernel"] = hit[0]        # the head gate adopts entity_kind only through this field
         elif k in norm_collisions:
             kind = "unresolved"                    # fail closed: refuse to guess which colliding entity
             ev = {"basis": "ambiguous_name_match",

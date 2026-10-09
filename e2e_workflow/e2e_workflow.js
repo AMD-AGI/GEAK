@@ -893,16 +893,27 @@ const SETUP_SCHEMA = obj({
   framework_version: { type: 'string' }, rocm_version: { type: 'string' },
 }, ['eval_dir', 'baseline_throughput_tok_s', 'gfx', 'device_target', 'physical_cu_count']);
 
+// admitHeads adopts entity_kind from these rows, so a row without it silently refuses every head.
+// device_kernel is required on gpu_kernel rows too; admitHeads checks that (no conditional schema here).
+const PROFILE_ROW_SCHEMA = obj({
+  entity_kind: { type: 'string',
+    enum: ['gpu_kernel', 'memory_op', 'dispatcher_op', 'python_launcher', 'unresolved'] },
+  device_kernel: { type: 'string' },
+}, ['entity_kind']);
 const PROFILE_SCHEMA = obj({
   round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
   profile_workload_json: { type: 'string' }, // per-(shape,dtype) weighted workload model (optional)
-  source: { type: 'string' }, total_gpu_time_ms: { type: 'number' }, top_kernels: arrObj,
+  source: { type: 'string' }, total_gpu_time_ms: { type: 'number' },
+  top_kernels: { type: 'array', items: PROFILE_ROW_SCHEMA },
   shift_note: { type: 'string' }, notes: { type: 'string' },
 }, ['profile_topN_json', 'top_kernels']);
 
 const STRATEGY_SCHEMA = obj({
   regime_summary: { type: 'string' }, config_directions: arrObj,
-  head_candidates: arrObj, kernel_candidates: arrObj,
+  head_candidates: { type: 'array', items: obj({
+    short_name: { type: 'string' }, entity_kind: { type: 'string' }, device_kernel: { type: 'string' },
+  }, ['short_name', 'entity_kind', 'device_kernel']) },
+  kernel_candidates: arrObj,
   drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
 }, ['kernel_candidates']);
 
@@ -1795,11 +1806,42 @@ function kernelSelectionVerified(h, ext) {
   return { ok: true, why: `${target} launches profiled kernel ${required}` };
 }
 
+// The Architect restates each head and has emitted the row's classification (library_gemm,
+// triton_kernel) as entity_kind. The profiled row is the authority: a head whose device_kernel
+// matches a profiled gpu_kernel row takes that row's entity_kind.
+// Every row kind is evidence, not only gpu_kernel rows: canonicalization drops the namespace, so
+// `aten::mul` (dispatcher_op) and `mul` (gpu_kernel) fold together, as parse_profile.py guards.
+// Exact names decide first; a canonical match that reaches rows of different kinds is ambiguous.
+// A row is identified by its most specific name only: a display short_name is shared across
+// distinct kernels (every vectorized_elementwise_kernel instantiation), so it must not stand in for
+// a concrete symbol the row already carries.
+function adoptProfiledEntityKind(head, rows) {
+  if (!head || head.entity_kind === 'gpu_kernel' || !head.device_kernel) return false;
+  const want = String(head.device_kernel).trim();
+  const identity = (r) => [r.device_kernel, r.name, r.short_name]
+    .map((v) => String(v || '').trim()).find(Boolean) || '';
+  const profiled = (rows || []).filter((r) => r && identity(r));
+  let matched = profiled.filter((r) => identity(r) === want);
+  if (!matched.length) matched = profiled.filter((r) => kernelIdentitiesMatch(identity(r), want));
+  if (!matched.length || matched.some((r) => r.entity_kind !== 'gpu_kernel' || !r.device_kernel)) return false;
+  head.entity_kind = 'gpu_kernel';
+  return true;
+}
+
 const PRE_FLAGGED_HEADS = [];
 function admitHeads(queue, stage) {
   const admitted = [];
+  const profiledRows = (profile && profile.top_kernels) || [];
+  const unnamed = profiledRows.filter((r) => r && r.entity_kind === 'gpu_kernel' && !r.device_kernel);
+  if (unnamed.length)
+    log(`  ⚠️ profile contract: ${unnamed.length} gpu_kernel row(s) carry no device_kernel ` +
+      `(${unnamed.map((r) => r.short_name || r.name || '?').join(', ')}); heads cannot adopt ` +
+      `entity_kind from them (${stage}).`);
   for (const head of (queue || []).filter(Boolean)) {
     const label = head.short_name || head.name || '(unnamed)';
+    const restated = head.entity_kind;
+    if (adoptProfiledEntityKind(head, profiledRows))
+      log(`  [admit] ${label}: entity_kind=${restated || 'missing'} -> gpu_kernel from the profiled row (${stage}).`);
     if (head.entity_kind !== 'gpu_kernel') {
       log(`  ⚠️ FLAG ${label}: entity_kind=${head.entity_kind || 'missing'}; ` +
         `the head track requires a profiler-confirmed gpu_kernel (${stage}).`);
