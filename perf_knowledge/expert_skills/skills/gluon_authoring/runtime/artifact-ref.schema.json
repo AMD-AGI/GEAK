@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json",
+  "title": "Portable artifact reference",
+  "description": "A content-addressed file reference whose identity is independent of the host filesystem root. Parsers additionally reject dot segments, symlink escapes, and hash mismatches.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "uri",
+    "sha256"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kernel_opt.artifact_ref/1"
+    },
+    "uri": {
+      "type": "string",
+      "pattern": "^(?:work|pack|snapshot):/(?!/)(?!\\.\\.?(?:/|$))(?!.*(?:/)\\.\\.?(?:/|$))[^\\\\\\u0000]+$",
+      "description": "Root-relative URI. Only work:/, pack:/, and snapshot:/ schemes are portable."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

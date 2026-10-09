@@ -4,14 +4,16 @@ kind: hardware
 gens: [gfx1201]
 dtypes: [bf16, fp16, fp8_e4m3]
 regimes: [both]
-updated: 2026-09-10
+updated: 2026-10-07
 sources:
-  - ../../expert_skills/skills/gluon_authoring/references/platform-known-issues.md
+  - ../../expert_skills/skills/gluon_authoring/references/pitfalls/platform-known-issues.md
 ---
 
 # RDNA4 / gfx1201 — pitfalls
 
-Details and decision rules: Gluon `platform-known-issues.md` (RDNA4 PMC + `int64_strides`).
+Details and decision rules: Gluon
+[`pitfalls/platform-known-issues.md`](../../expert_skills/skills/gluon_authoring/references/pitfalls/platform-known-issues.md)
+(RDNA4 PMC + `int64_strides`).
 
 ## Profiling
 - Kernel-trace usually works. CDNA PMC names (`MfmaUtil`, `SQ_WAVES`, …) may be absent.

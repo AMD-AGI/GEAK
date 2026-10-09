@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tritongluonagentskills.local/schemas/toolctl-stage-card-v1.json",
+  "title": "Toolctl stage card",
+  "description": "Generated, methodology-only runtime view of one pack stage.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "pack",
+    "stage",
+    "order",
+    "next",
+    "skill",
+    "lifecycle_profile",
+    "stage_spec",
+    "required",
+    "tools",
+    "artifacts",
+    "evidence_roles",
+    "standing_references",
+    "role_policy"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "../stage-card.schema.json"
+    },
+    "schema": {
+      "const": "toolctl.stage-card/1"
+    },
+    "pack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "platform"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dsl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vendor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "platform": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "stage": {
+      "type": "string",
+      "minLength": 1
+    },
+    "order": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "next": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "lifecycle_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "stage_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "order",
+        "next",
+        "purpose",
+        "reference"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "required": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifacts",
+        "optional_artifacts",
+        "conditional_artifacts",
+        "entry_gate",
+        "anchor",
+        "evidence_roles"
+      ],
+      "properties": {
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "optional_artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "conditional_artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "entry_gate": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "anchor": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "evidence_roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed",
+        "allowed_by_role",
+        "public",
+        "internal",
+        "developer_only"
+      ],
+      "properties": {
+        "allowed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_by_role": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "public": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "internal": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "developer_only": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "produces",
+        "consumes"
+      ],
+      "properties": {
+        "produces": {
+          "type": "object"
+        },
+        "consumes": {
+          "type": "object"
+        }
+      }
+    },
+    "evidence_roles": {
+      "type": "object"
+    },
+    "standing_references": {
+      "type": "object",
+      "description": "Cross-cutting knowledge every stage of this pack carries: topic -> shipped document, or null where the pack documents no such topic. Unlike stage_spec.reference these are not routed per stage, because a kernel edit needs the budget, roofline, profile, hardware surface and prior negatives at BRANCH-arm and CLIMB, not only at authoring."
+    },
+    "role_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enforcement",
+        "roles"
+      ],
+      "properties": {
+        "enforcement": {
+          "type": "object"
+        },
+        "roles": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

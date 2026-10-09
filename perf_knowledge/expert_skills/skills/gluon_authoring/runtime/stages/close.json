@@ -1,0 +1,409 @@
+{
+  "$schema": "../stage-card.schema.json",
+  "schema": "toolctl.stage-card/1",
+  "pack": {
+    "name": "tile-programming-gluon",
+    "dsl": "gluon",
+    "vendor": "amd",
+    "platform": "claude"
+  },
+  "stage": "close",
+  "order": 5,
+  "next": null,
+  "skill": {
+    "id": "tile-programming-gluon",
+    "version": "1"
+  },
+  "lifecycle_profile": {
+    "id": "bounded-query-record-v1"
+  },
+  "stage_spec": {
+    "id": "close",
+    "order": 5,
+    "next": null,
+    "purpose": "close against champion_ms with audits and deferred work recorded",
+    "reference": "references/method/close.md#Stop conditions"
+  },
+  "required": {
+    "artifacts": [
+      "close_audit.json",
+      "final_report.json"
+    ],
+    "optional_artifacts": [
+      "canonical_record.json",
+      "run_state.json"
+    ],
+    "conditional_artifacts": [
+      "branch_request.json",
+      "resweep_request.json",
+      "resweep_result.json",
+      "structure_suspect.json",
+      "worker_result.json"
+    ],
+    "entry_gate": null,
+    "anchor": null,
+    "evidence_roles": []
+  },
+  "tools": {
+    "allowed": [
+      "canonical_record",
+      "close_audit",
+      "context_query",
+      "gfx950_isa",
+      "hw_sources",
+      "layout_facts",
+      "recordctl",
+      "report_lint",
+      "source_excerpt",
+      "stage_context",
+      "toolctl"
+    ],
+    "allowed_by_role": {
+      "deep": [
+        "canonical_record",
+        "close_audit",
+        "context_query",
+        "gfx950_isa",
+        "hw_sources",
+        "layout_facts",
+        "recordctl",
+        "report_lint",
+        "source_excerpt",
+        "stage_context",
+        "toolctl"
+      ]
+    },
+    "public": [
+      "canonical_record",
+      "close_audit",
+      "context_query",
+      "gfx950_isa",
+      "hw_sources",
+      "layout_facts",
+      "recordctl",
+      "report_lint",
+      "source_excerpt",
+      "stage_context",
+      "toolctl"
+    ],
+    "internal": [],
+    "developer_only": []
+  },
+  "artifacts": {
+    "produces": {
+      "worker_result.json": "scripts/canonical_record.py",
+      "structure_suspect.json": "scripts/canonical_record.py",
+      "resweep_request.json": "scripts/canonical_record.py",
+      "resweep_result.json": "scripts/canonical_record.py",
+      "canonical_record.json": "scripts/canonical_record.py",
+      "run_state.json": "scripts/canonical_record.py",
+      "final_report.json": "scripts/canonical_record.py",
+      "close_audit.json": "scripts/close_audit.py"
+    },
+    "consumes": {
+      "plain_champion.json": "scripts/champion_gate.py",
+      "worker_result.json": "agent",
+      "branch_request.json": "agent",
+      "structure_suspect.json": "agent",
+      "resweep_request.json": "agent",
+      "resweep_result.json": "agent"
+    }
+  },
+  "evidence_roles": {
+    "ab_interleave": "scripts/ab_bench.py",
+    "budget": "scripts/hw_budget.py",
+    "ceiling_probe": "scripts/mem_bw_probe.py",
+    "static_audit": "scripts/asm_loop_audit.py",
+    "served_weighting": "scripts/served_envelope.py",
+    "occupancy": "scripts/amd_occupancy.py",
+    "matrix_efficiency": "scripts/mfma_efficiency.py"
+  },
+  "standing_references": {
+    "budget": "references/method/budget.md",
+    "roofline": "references/hardware/roofline-models.md",
+    "profile": "references/method/profile.md",
+    "hardware": "references/hardware/capability-matrix.md",
+    "experience": "references/pitfalls/negative-patterns.md",
+    "workload": "references/workloads/index.md",
+    "dsl_api": "references/gluon/index.md",
+    "toolchain": "references/method/profile.md"
+  },
+  "role_policy": {
+    "enforcement": {
+      "claude": "agent_frontmatter_tools",
+      "cursor": "detectable_only"
+    },
+    "roles": {
+      "arm": {
+        "agents": [
+          "triton-bestof",
+          "tilelang-bestof",
+          "hip-bestof"
+        ],
+        "tools": [
+          "Read",
+          "Edit",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": true,
+        "may_spawn": false,
+        "allowed_work_kinds": [
+          "branch_arm",
+          "arm_result"
+        ],
+        "allowed_child_roles": []
+      },
+      "bounded_bench": {
+        "agents": [
+          "gluon-bench"
+        ],
+        "tools": [
+          "Read",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": false,
+        "allowed_work_kinds": [
+          "bounded_benchmark"
+        ],
+        "allowed_child_roles": []
+      },
+      "captain": {
+        "agents": [
+          "kernel-opt-run"
+        ],
+        "tools": [
+          "Read",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob",
+          "Agent"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": true,
+        "allowed_work_kinds": [
+          "resolve",
+          "preflight",
+          "boundary_budget",
+          "sweep",
+          "dispatch",
+          "arbitration",
+          "canonical_record",
+          "resweep",
+          "champion_gate",
+          "final_report"
+        ],
+        "allowed_child_roles": [
+          "triton_sweep",
+          "direction",
+          "independent_direction",
+          "deep",
+          "bounded_bench",
+          "arm",
+          "skeptic"
+        ]
+      },
+      "dashboard": {
+        "agents": [],
+        "tools": [
+          "Read",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": false,
+        "may_measure": false,
+        "allowed_work_kinds": [
+          "collection",
+          "dashboard_render"
+        ],
+        "allowed_child_roles": []
+      },
+      "deep": {
+        "agents": [
+          "gluon-direction",
+          "flydsl-direction"
+        ],
+        "tools": [
+          "Read",
+          "Edit",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": true,
+        "may_spawn": false,
+        "forbidden_actions": [
+          "branch",
+          "config_resweep",
+          "structure_rederive"
+        ],
+        "allowed_work_kinds": [
+          "anchor",
+          "climb",
+          "worker_result",
+          "structure_suspect",
+          "resweep_request"
+        ],
+        "allowed_child_roles": []
+      },
+      "direct_owner": {
+        "agents": [],
+        "tools": [
+          "Read",
+          "Edit",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob",
+          "Agent"
+        ],
+        "may_edit_kernel": true,
+        "may_spawn": true,
+        "allowed_work_kinds": [
+          "anchor",
+          "sweep",
+          "branch_request",
+          "climb",
+          "worker_result",
+          "branch_converge",
+          "resweep",
+          "canonical_record",
+          "final_report"
+        ],
+        "allowed_child_roles": [
+          "arm",
+          "bounded_bench"
+        ]
+      },
+      "direction": {
+        "agents": [
+          "triton-direction",
+          "tilelang-direction",
+          "hip-direction"
+        ],
+        "tools": [
+          "Read",
+          "Edit",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob",
+          "Agent"
+        ],
+        "may_edit_kernel": true,
+        "may_spawn": true,
+        "allowed_work_kinds": [
+          "anchor",
+          "sweep",
+          "branch_request",
+          "branch_converge",
+          "climb",
+          "worker_result",
+          "resweep",
+          "canonical_record",
+          "final_report"
+        ],
+        "allowed_child_roles": [
+          "arm",
+          "bounded_bench"
+        ]
+      },
+      "fleet": {
+        "agents": [
+          "kernel-opt-fleet"
+        ],
+        "tools": [
+          "Read",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob",
+          "Agent"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": true,
+        "allowed_work_kinds": [
+          "environment_snapshot",
+          "environment_repair",
+          "dispatch",
+          "collection",
+          "acceptance"
+        ],
+        "allowed_child_roles": [
+          "captain",
+          "direction",
+          "independent_direction"
+        ]
+      },
+      "independent_direction": {
+        "agents": [
+          "cutedsl-direction",
+          "cuda-direction"
+        ],
+        "tools": [
+          "Read",
+          "Edit",
+          "Write",
+          "Bash",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": true,
+        "may_spawn": false,
+        "may_sweep_initial_contract": true,
+        "allowed_work_kinds": [
+          "anchor",
+          "sweep",
+          "climb",
+          "canonical_record",
+          "final_report"
+        ],
+        "allowed_child_roles": []
+      },
+      "skeptic": {
+        "agents": [
+          "amd-closure-skeptic"
+        ],
+        "tools": [
+          "Read",
+          "Write",
+          "Grep",
+          "Glob"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": false,
+        "may_measure": false,
+        "allowed_work_kinds": [
+          "closure_review"
+        ],
+        "allowed_child_roles": []
+      },
+      "triton_sweep": {
+        "agents": [
+          "triton-sweep"
+        ],
+        "tools": [
+          "Read",
+          "Bash"
+        ],
+        "may_edit_kernel": false,
+        "may_spawn": false,
+        "allowed_work_kinds": [
+          "sweep"
+        ],
+        "allowed_child_roles": []
+      }
+    }
+  }
+}

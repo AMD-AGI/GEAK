@@ -278,7 +278,7 @@ function mustInclude(hay, needle, msg) {
   mustInclude(pitfalls, 'rocprofv3 -L');
   mustInclude(pitfalls, 'CLI rename');
   const platformIssues = fs.readFileSync(
-    path.join(geakRoot, 'perf_knowledge/expert_skills/skills/gluon_authoring/references/platform-known-issues.md'),
+    path.join(geakRoot, 'perf_knowledge/expert_skills/skills/gluon_authoring/references/pitfalls/platform-known-issues.md'),
     'utf8');
   mustInclude(platformIssues, 'rocprofv3 -L');
   mustInclude(platformIssues, 'R9700-only');

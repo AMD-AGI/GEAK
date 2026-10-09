@@ -1,0 +1,63 @@
+{
+  "schema": "toolctl.skill-index/1",
+  "skill": {
+    "id": "tile-programming-gluon",
+    "version": "1"
+  },
+  "pack": {
+    "name": "tile-programming-gluon",
+    "dsl": "gluon",
+    "vendor": "amd",
+    "platform": "claude"
+  },
+  "lifecycle_profile": {
+    "id": "bounded-query-record-v1"
+  },
+  "stage_graph": {
+    "start": "entry",
+    "stages": [
+      {
+        "id": "entry",
+        "order": 0,
+        "next": "transcribe",
+        "purpose": "settle the entry mode (ported champion vs already-explicit incumbent), assert that bundle, pin the comparator",
+        "reference": "references/method/entry.md#Stage-Entry: the champion assertion"
+      },
+      {
+        "id": "transcribe",
+        "order": 1,
+        "next": "recover",
+        "purpose": "recover the champion layouts into a faithful explicit anchor",
+        "reference": "references/method/transcribe.md#Stage-Anchor: the transcription, and what it is allowed to be"
+      },
+      {
+        "id": "recover",
+        "order": 2,
+        "next": "evidence",
+        "purpose": "attribute and repay transcription debt before a win claim",
+        "reference": "references/method/recover.md#Stage-Recover: pay the transcription debt, then satisfy the parity gate"
+      },
+      {
+        "id": "evidence",
+        "order": 3,
+        "next": "climb",
+        "purpose": "refresh the budget, profile, timing, correctness, and lowered-code evidence",
+        "reference": "references/method/profile.md#3.1 Required evidence \u2014 the four dials, every round"
+      },
+      {
+        "id": "climb",
+        "order": 4,
+        "next": "close",
+        "purpose": "climb one coupled explicit-tile layer without sweep or branch",
+        "reference": "references/method/climb.md#Stage-Climb: one search kind, and it is depth"
+      },
+      {
+        "id": "close",
+        "order": 5,
+        "next": null,
+        "purpose": "close against champion_ms with audits and deferred work recorded",
+        "reference": "references/method/close.md#Stop conditions"
+      }
+    ]
+  }
+}
