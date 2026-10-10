@@ -1646,6 +1646,17 @@ class TestResolveEp(_RunE2ECase):
             rx._resolve_ep({}, self._effective("--enable-expert-parallel"), tp=8), 8
         )
 
+    def test_vllm_ep_includes_dp_and_outranks_recipe_env(self):
+        h = {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 1\n")}
+        for dp_flag in ("--data-parallel-size", "-dp"):
+            effective = self._effective(f"--enable-expert-parallel {dp_flag} 2")
+            self.assertEqual(rx._resolve_ep(h, effective, tp=8), 16)
+
+    def test_effective_env_outranks_recipe_ep(self):
+        h = {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 1\n")}
+        effective = types.SimpleNamespace(final_server_args="", final_env={"EP_SIZE": "4"})
+        self.assertEqual(rx._resolve_ep(h, effective, tp=8), 4)
+
     def test_nothing_stated_is_one(self):
         self.assertEqual(rx._resolve_ep({}, self._effective(""), tp=8), 1)
         self.assertEqual(rx._resolve_ep({}, None, tp=8), 1)

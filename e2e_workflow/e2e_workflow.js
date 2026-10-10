@@ -269,8 +269,29 @@ const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
 // the same model on the same stack with the experts sharded differently is a different deployment.
 // Unlike TP it is also a knob the Config Tuner may move mid-run (--ep-size rides EXTRA_SERVER_ARGS),
 // so this constant states the baseline's value and the accepted one lives in accepted_config.
-// Default 1 = no expert parallelism, which is also the right answer for a dense model.
-const SERVING_EP = parseInt(A.ep != null ? A.ep : 1, 10);
+// Standalone runs resolve through the same Python parser as interface dispatch.
+function resolveServingEp() {
+  if (A.ep != null) {
+    const ep = Number(A.ep);
+    if (!Number.isInteger(ep) || ep < 1) throw new Error('args.ep must be a positive integer');
+    return ep;
+  }
+  if (!A.initial_extra_server_args && !A.initial_extra_env && !A.launch_recipe) return 1;
+  const { execFileSync } = require('child_process');
+  const value = execFileSync('python3', ['-c', `
+import json, os, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+from interface.run_e2e import _resolve_ep
+a = json.loads(sys.argv[2])
+print(_resolve_ep(a, None, int(sys.argv[3])))
+`, WORKFLOW_DIR, JSON.stringify({ accepted_flags: A.initial_extra_server_args || '',
+    accepted_env: A.initial_extra_env || '', launch_recipe: A.launch_recipe || '' }),
+  String(SERVING_TP)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 });
+  const ep = Number(value.trim());
+  if (!Number.isInteger(ep) || ep < 1) throw new Error('could not resolve baseline expert parallelism');
+  return ep;
+}
+const SERVING_EP = resolveServingEp();
 // ---- WALL-CLOCK BUDGET (opt-in; default OFF when absent => byte-identical) ---------------------------
 // time_budget_s is the EXTERNAL orchestrator's HARD kill budget (run_e2e.py GEAK_E2E_TIMEOUT_S),
 // forwarded so GEAK can self-pace and FINISH (Finalize/Report/Validate + workflow_return flush) BEFORE
@@ -1564,6 +1585,21 @@ function kbIdentityFlags() {
     // would mis-file precisely the degraded AgentX runs that most need a stable address.
     `--workload-kind ${shq(WORKLOAD_KIND)}`,
     `--isl ${ISL}`, `--osl ${OSL}`, `--conc ${CONC}`].join(' ');
+}
+
+// Metadata shared by the persisted return and the KB writer.
+function kbResultMetadata() {
+  return {
+    // Only tp/ep/conc address AgentX. Observed shape is retained outside the content digest.
+    workload: Object.assign({}, WORKLOAD, {
+      kind: WORKLOAD_KIND, tp: SERVING_TP, ep: SERVING_EP,
+    }, AGENTX ? {
+      scenario: AGENTX.scenario, corpus: AGENTX.corpus, num_entries: AGENTX.num_entries,
+      duration_s: AGENTX.duration_s, metric_basis: AGENTX_METRIC_BASIS,
+    } : {}),
+    metric_basis: AGENTX ? AGENTX_METRIC_BASIS : '',
+    comparability: A.comparability || {},
+  };
 }
 
 // --store is what the local plane writes into and is meaningless to a remote-only run; open_plane()
@@ -6068,22 +6104,7 @@ const wfReturn = {
   // report nor the KB (e2e_store.py's _ARTIFACT_KEYS looks up exactly result["final_patch"]).
   // final_overlay cannot stand in for it: that is a DIRECTORY, and the store's os.path.isfile filter
   // drops it, so a run with no final_patch uploads no reproducible code at all.
-  // What this run SERVED, as opposed to what its address says. The KB writer splits this two ways
-  // (e2e_store.build_record): the addressing dimensions go in value.workload, and the OBSERVED
-  // shape goes in value.observed_shape, deliberately outside the content digest — on a trace
-  // replay isl/osl are a measurement of the corpus, they move every run, and hashing them would
-  // mint a new record per run instead of replacing the previous one.
-  workload: Object.assign({}, WORKLOAD, {
-    kind: WORKLOAD_KIND, tp: SERVING_TP, ep: SERVING_EP,
-  }, AGENTX ? {
-    scenario: AGENTX.scenario, corpus: AGENTX.corpus, num_entries: AGENTX.num_entries,
-    duration_s: AGENTX.duration_s, metric_basis: AGENTX.metric_basis,
-  } : {}),
-  // The axis these numbers are on, recorded beside them so a later reader never has to infer it
-  // from their magnitude. Stated only when the run declared one and Setup confirmed the baseline
-  // summary agreed (AgentX): a synthetic run asserts nothing, and "" means unstated, which is a
-  // different claim from any particular basis. Never addressed -- see kbMetricBasisFlag.
-  metric_basis: AGENTX ? AGENTX_METRIC_BASIS : '',
+  ...kbResultMetadata(),
   final_patch: (finalize && finalize.final_patch) || '',
   final_launch_script: (validation && validation.final_launch_script) || (finalize && finalize.final_launch_script) || '',
   report_path: report ? report.report_path : `${EVAL_DIR}/architect_report.md`,

@@ -37,6 +37,18 @@ const src = fs.readFileSync(WF, 'utf8');
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) { console.error('  FAIL:', msg); failures++; } else console.log('  ok:', msg); };
 
+const epSource = src.match(/function resolveServingEp\(\) \{[\s\S]*?\n\}/)[0];
+const standaloneEp = (args) => new Function('A', 'SERVING_TP', 'WORKFLOW_DIR', 'require',
+  epSource + '\nreturn resolveServingEp();')(args, 8, path.join(ROOT, 'e2e_workflow'), require);
+ok(standaloneEp({ initial_extra_server_args: '--ep-size=4' }) === 4,
+  'standalone initial flags resolve EP through the same parser as dispatch');
+ok(standaloneEp({ initial_extra_env: 'EP_SIZE=4' }) === 4,
+  'standalone EP_SIZE environment is part of baseline identity');
+ok(standaloneEp({ initial_extra_server_args: '--enable-expert-parallel --data-parallel-size 2' }) === 16,
+  'standalone vLLM EP includes data parallelism');
+ok(standaloneEp({ ep: 2, initial_extra_server_args: '--ep-size=4' }) === 2,
+  'an explicit standalone degree remains authoritative');
+
 // ── Rebuild the declaration block + the prompt injector with controlled inputs ──────────────────
 // Slice the contiguous region that defines WORKLOAD_SPEC..AGENTX_ENV, plus the standalone
 // workloadIdentityBlock() function, and evaluate them with args/ISL/OSL/CONC injected.
@@ -415,16 +427,32 @@ function buildIdentity(args) {
     + `const KB_DIMS = { model: 'M', gfx: 'gfx950', framework_version: '0.5.19',`
     + ` precision: 'mxfp4', rocm_version: '7.2.0' };\n`;
   return new Function('A', 'ISL_DECLARED', 'OSL_DECLARED',
-    `${preamble}${decl}\n${kbFlagsSrc}\n`
-    + `return { kbIdentityFlags, adoptMeasuredShape, get ISL() { return ISL; }, `
+    `${preamble}${decl}\n${kbFlagsSrc}\n${kbMetadataSrc}\n`
+    + `return { kbIdentityFlags, kbResultMetadata, adoptMeasuredShape, get ISL() { return ISL; }, `
     + `get OSL() { return OSL; }, get PROV() { return WORKLOAD_SHAPE_PROVENANCE; } };`
   )(args, islDeclared, oslDeclared);
 }
 const kbFlagsMatch = src.match(/function kbIdentityFlags\(\) \{[\s\S]*?\n\}/);
 ok(!!kbFlagsMatch, 'kbIdentityFlags() defined');
 const kbFlagsSrc = kbFlagsMatch ? kbFlagsMatch[0] : 'function kbIdentityFlags() { return ""; }';
+const kbMetadataSrc = src.match(/function kbResultMetadata\(\) \{[\s\S]*?\n\}/)[0];
 const shqSrc = src.match(/^const shq = .*$/m)[0];
 const adoptAt = src.indexOf('function adoptMeasuredShape');
+{
+  const comparability = { comparable: false, geak_workload_kind: 'synthetic_isl_osl',
+    orchestrator_workload_kind: 'agentx_trace_replay' };
+  const run = buildIdentity({ workload_kind: 'agentx_trace_replay', comparability,
+    workload_spec: { metric_basis: 'total' } });
+  run.adoptMeasuredShape(89000, 900, 'baseline');
+  const metadata = run.kbResultMetadata();
+  ok(metadata.comparability === comparability && metadata.comparability.comparable === false,
+    'the persisted KB input carries the dispatch comparability verdict');
+  ok(metadata.metric_basis === 'aggregate_total_token_tok_s'
+    && metadata.workload.metric_basis === metadata.metric_basis,
+    'the workload metadata uses the resolved metric, including aliases');
+  ok(metadata.workload.isl === 89000 && metadata.workload.osl === 900,
+    'the persisted metadata carries the shape observed after baseline');
+}
 ok(adoptAt > declStart && adoptAt < declEnd,
   'adoptMeasuredShape() lives inside the sliced region, so the real one is under test');
 

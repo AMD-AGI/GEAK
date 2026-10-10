@@ -81,6 +81,24 @@ def _handoff(eval_dir: Path) -> dict:
     }
 
 
+def test_kb_recovery_persists_metadata_on_the_actual_writer_input(tmp_path, monkeypatch):
+    monkeypatch.setenv("BENCH_CLIENT", "agentx")
+    eval_dir = _make_eval_dir(tmp_path)
+    h = _handoff(eval_dir)
+    h["workload_spec"] = {"kind": "agentx_trace_replay", "corpus": "trace_a", "duration_s": 3600}
+    wf = {"eval_dir": str(eval_dir), "baseline_throughput_tok_s": 100,
+          "final_throughput_tok_s": 110, "metric_basis": "p90_intvty_inferencex",
+          "workload": {"isl": 89000, "osl": 900, "shape_provenance": "agentx_measured_this_run"}}
+    result = rx.normalize_result(h, wf)
+    enriched = rx._enrich_kb_return(wf, result)
+    rx._persist_workflow_return(eval_dir, enriched)
+    stored = json.loads((eval_dir / rx.WORKFLOW_RETURN_FILE).read_text())
+    assert stored["comparability"]["geak_workload_kind"] == "agentx_trace_replay"
+    assert stored["workload"]["corpus"] == "trace_a"
+    assert stored["workload"]["isl"] == 89000
+    assert stored["metric_basis"] == "p90_intvty_inferencex"
+
+
 # ── intermediate-win recovery ───────────────────────────────────────────────
 
 def test_recover_best_intermediate_win_config(tmp_path):

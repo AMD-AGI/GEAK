@@ -49,9 +49,9 @@ from typing import Any
 
 try:
     # Package import under pytest / module use.
-    from interface.effective_config import _flag_map, resolve_effective_config
+    from interface.effective_config import _flag_map, _parse_env, resolve_effective_config
 except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
-    from effective_config import _flag_map, resolve_effective_config
+    from effective_config import _flag_map, _parse_env, resolve_effective_config
 
 try:
     from interface import claude_trace_mirror
@@ -582,10 +582,8 @@ def _resolve_ep(h: dict, effective: Any, tp: int) -> int:
     1. the handoff's own ``ep`` (beside ``tp``), when the orchestrator stated it;
     2. ``--ep-size N`` in the resolved server args, read through the resolver's own flag map so a
        spelling it canonicalises is seen the same way here;
-    3. the recipe's recorded ``EP_SIZE`` -- replayed verbatim onto the launch (it is not in
-       ``_RECIPE_ENV_GEAK_OWNED``), so it is a statement about what the server ran, not a guess;
-    4. ``--enable-expert-parallel`` with no degree: vLLM spreads EP over the whole TP x DP group,
-       so the degree is ``tp``, not 1;
+    3. ``--enable-expert-parallel``: vLLM spreads EP over the whole TP x DP group;
+    4. the effective environment's ``EP_SIZE``, then the recipe's recorded value;
     5. otherwise 1 -- no expert parallelism, which is also the right answer for a dense model.
     """
     def _positive(raw: Any) -> int:
@@ -606,13 +604,19 @@ def _resolve_ep(h: dict, effective: Any, tp: int) -> int:
     sized = flags.get("--ep-size")
     if sized is not None and _positive(getattr(sized, "value", None)):
         return _positive(sized.value)
+    if "--enable-expert-parallel" in flags:
+        dp_flag = flags.get("--data-parallel-size") or flags.get("-dp")
+        dp = _positive(getattr(dp_flag, "value", None)) or 1
+        return max(tp, 1) * dp
+    env = (getattr(effective, "final_env", {}) if effective is not None
+           else _parse_env(h.get("accepted_env", ""))) or {}
+    if _positive(env.get("EP_SIZE")):
+        return _positive(env["EP_SIZE"])
     recorded = _positive(
         _recipe_env_block(str(h.get("launch_recipe") or "")).get("EP_SIZE")
     )
     if recorded:
         return recorded
-    if "--enable-expert-parallel" in flags:
-        return max(tp, 1)
     return 1
 
 
@@ -3993,6 +3997,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # See run_e2e.md alignment table.
         "metric_basis": (
             final_summary.get("metric_basis")
+            or wf.get("metric_basis")
             or baseline_summary.get("metric_basis")
             or "aggregate_output_tok_s"
         ),
@@ -4043,6 +4048,11 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # e2e record ever written carried comparability={} -- a stored speedup with no statement of
         # what it is comparable to, which is the one thing a reader cannot reconstruct later.
         "comparability": workload_comparability,
+        # Preserve the declaration and the workflow's observed shape for KB backfill/recovery.
+        "workload": {
+            **(h.get("workload_spec") or {}), **workload,
+            **(wf.get("workload") or {}),
+        },
         # Never advertise a report that is not on disk: the old unconditional
         # fallback handed the caller a path to a file that was never written.
         # _emit fills this in with the synthesized report if the workflow died first.
@@ -6210,6 +6220,12 @@ def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
         pass
 
 
+def _enrich_kb_return(wf: dict, result: dict) -> dict:
+    """Put normalized metadata on the file the salvage writer actually reads."""
+    return {**wf, **{key: result[key] for key in ("comparability", "workload", "metric_basis")
+                     if result.get(key)}}
+
+
 # ---------------------------------------------------------------------------
 # kernel_journey contract (KERNEL_JOURNEY_SCHEMA.md producer side).
 #
@@ -7021,6 +7037,9 @@ def main(argv: list[str]) -> int:
     os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
     _publish_protected_pgids()
     bench_client = apply_bench_client(h)
+    # Module B writes workflow_return.json before normalize_result runs. Send the same
+    # comparability calculation into that return while the selected client is known.
+    ps_args["comparability"] = _workload_comparability(h)
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
@@ -7123,6 +7142,7 @@ def main(argv: list[str]) -> int:
             eval_dir = Path(eval_dir_str)
             if wf is not None:
                 try:
+                    wf = _enrich_kb_return(wf, out)
                     _persist_workflow_return(eval_dir, wf)
                 except Exception:
                     pass

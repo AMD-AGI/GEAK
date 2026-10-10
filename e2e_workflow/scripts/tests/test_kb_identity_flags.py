@@ -88,8 +88,8 @@ check("--workload-kind is fed by WORKLOAD_KIND, never WORKLOAD_SHAPE_PROVENANCE"
 # whole change exists to remove, because Config Tuner may move --ep-size mid-run.
 check("--ep is fed by the startup constant SERVING_EP",
       "--ep ${SERVING_EP}" in body)
-check("SERVING_EP is a startup constant parsed from args",
-      re.search(r"const SERVING_EP = parseInt\(A\.ep != null \? A\.ep : 1, 10\);", s) is not None)
+check("SERVING_EP is a startup constant resolved from the launch configuration",
+      "const SERVING_EP = resolveServingEp();" in s)
 
 # ── The graded axis is a LABEL, not an address ────────────────────────────────────────────────
 # bench_summarize.py grades on five bases and keeps adding them. In the address that would be five

@@ -161,7 +161,7 @@ _PREEP_TIERS = {3: ("legacy_preep", "legacy_preep_workload_any", "legacy_preep_t
                 1: ("legacy_preep",)}
 
 
-def legacy_preep_ladder(a):
+def legacy_preep_ladder(a, *, full_version=False):
     """The address this very run would have had before `ep` and the AgentX workload segment existed.
 
     Two changes landed together and both move the address: every run now states its `ep` (so a
@@ -175,22 +175,26 @@ def legacy_preep_ladder(a):
     would strand the entire existing e2e store the moment it lands -- the same invisible miss the
     change exists to prevent, just caused once and to everyone.
 
-    One variant is enough, and it is defined by construction rather than enumerated: drop the ep
-    segment and address as synthetic, which IS what this argv would have produced. Same two
-    restrictions as `legacy_version_ladder`: appended after the canonical ladder so a legacy page
-    can rescue but never shadow, and kept OUT of `ladder_of`, which write/attest/curate/retract all
-    iterate and would otherwise start filing new records at an address meant to be read backwards.
+    Drop ep and address as synthetic. Older records can ALSO predate version normalization, so
+    full_version selects that combined variant. Kept OUT of ladder_of: compatibility reads must
+    never cause new writes at old addresses.
 
     When a second AgentX corpus appears, the segment escalates to `wl_agentx.<corpus>` and the
     bare `wl_agentx` form becomes a second variant here, by the same rule.
     """
     identity = identity_of(a)
     cids = kbid.e2e_canonical_ids(identity)
+    if full_version:
+        raw = kbid.segment(getattr(a, "framework_version", ""), kbid.UNKNOWN_VERSION)
+        if raw == identity["framework_version"]:
+            return []
+        identity = dict(identity, framework_version=raw)
     legacy = kbid.e2e_canonical_ids(
         dict(identity, ep="", workload_kind=kbid.WORKLOAD_KIND_SYNTHETIC))
     if legacy == cids:
         return []
-    return [(cid, tier) + rung_metric(i, len(legacy))
+    return [(cid, tier.replace("legacy_preep", "legacy_preep_version") if full_version else tier)
+            + rung_metric(i, len(legacy))
             for i, (cid, tier) in enumerate(zip(legacy, _PREEP_TIERS[len(legacy)]))]
 
 
@@ -210,13 +214,18 @@ def read_ladder(a):
     canonical rung is always tried first, which is the "rescue but never shadow" rule this has to
     keep. Duplicate addresses are dropped so a page is never read twice.
     """
-    ladders = [ladder_of(a), legacy_version_ladder(a), legacy_preep_ladder(a)]
+    ladders = [ladder_of(a), legacy_version_ladder(a), legacy_preep_ladder(a),
+               legacy_preep_ladder(a, full_version=True)]
     out, seen = [], set()
-    for level in range(max(len(rungs) for rungs in ladders)):
+    depth = max(len(rungs) for rungs in ladders)
+    for level in range(depth):
         for rungs in ladders:
-            if level < len(rungs) and rungs[level][0] not in seen:
-                seen.add(rungs[level][0])
-                out.append(rungs[level])
+            # Missing dimensions remove rungs from the FRONT, not the end. Align bases before
+            # interleaving, otherwise a two-rung legacy ladder outranks a canonical middle rung.
+            index = level - (depth - len(rungs))
+            if index >= 0 and rungs[index][0] not in seen:
+                seen.add(rungs[index][0])
+                out.append(rungs[index])
     return out
 
 
@@ -448,7 +457,7 @@ def cmd_resolve(a) -> dict:
             # top_n=len(ordered): the offer is sliced to --top-n below, so collapse must not pre-slice.
             # It consumes only the per-idea best, not the alternates.
             views, alternates, collapsed = collapse_by_direction(
-                ordered, lambda v: v["direction"], lambda v: v["session_id"], len(ordered))
+                ordered, _direction_group, lambda v: v["session_id"], len(ordered))
             curation["same_direction_collapsed"] = collapsed
             if not views:
                 # A rung whose every candidate was curated away is NOT an empty page, yet the next
@@ -637,6 +646,9 @@ def _render_reference(refs_dir: str, cid: str, tier: str, views) -> str:
                 "- throughput: %s tok/s (baseline %s), speedup %s" % (
                     v["throughput_tok_s"], v["baseline_throughput_tok_s"], v["speedup"]),
                 "- workload: %s" % (json.dumps(v["workload"], sort_keys=True) or "{}"),
+                "- metric basis: %s" % (v.get("metric_basis") or "unrecorded"),
+                "- workload spec: %s" % json.dumps(v.get("workload_spec") or {}, sort_keys=True),
+                "- observed shape: %s" % json.dumps(v.get("observed_shape") or {}, sort_keys=True),
                 # Spelled out rather than reduced to a word: the Director's next decision is
                 # whether to spend a server launch on this, and "unverified, parity n/a" is a very
                 # different prompt from "validated, hot A/B, parity pass" even at the same speedup.
@@ -747,8 +759,8 @@ def _observed_shape(a, result: dict) -> dict:
     if not _is_agentx(a):
         return {}
     workload = result.get("workload") if isinstance(result.get("workload"), dict) else {}
-    shape = {k: v for k, v in (("isl", _int_or_none(getattr(a, "isl", None))),
-                               ("osl", _int_or_none(getattr(a, "osl", None))),
+    shape = {k: v for k, v in (("isl", _int_or_none(workload.get("isl", getattr(a, "isl", None)))),
+                               ("osl", _int_or_none(workload.get("osl", getattr(a, "osl", None)))),
                                ("provenance", str(workload.get("shape_provenance") or "")))
              if v not in (None, "")}
     return shape
@@ -831,8 +843,8 @@ def build_record(a, result: dict, workdir=None) -> dict:
     # when nobody stated one, for the same reason and because "" is a claim about the writer, not
     # about the measurement.
     #
-    # NOT part of _content_digest (it hashes config/kernels/workload/direction only), so recording
-    # it cannot split one configuration across two sessions.
+    # Observations never enter the digest. Declared measurement conditions do: a different corpus
+    # or metric must not overwrite the score and inherit attestations of an unrelated measurement.
     for key, block in (("observed_shape", _observed_shape(a, result)),
                        ("workload_spec", _workload_spec(a, result)),
                        ("metric_basis", str(getattr(a, "metric_basis", "")
@@ -840,6 +852,8 @@ def build_record(a, result: dict, workdir=None) -> dict:
         if block:
             value[key] = block
     value.update(state)
+    if _is_agentx(a):
+        value["workload_kind"] = kbid.WORKLOAD_KIND_AGENTX
     files = _artifact_files(a, result)
     files.update(kernel_files)
     _rebind_tuning_artifacts(kernels, files)
@@ -1426,8 +1440,14 @@ def _launch_text(a, result: dict, value: dict, kernels, overlay: str) -> str:
     # address them either — so a repro script that exported them would be stating a shape nothing
     # reads, for a run whose shape is not a knob.
     spec = value.get("workload_spec") or {}
-    agentx_env = [("BENCH_CLIENT", "agentx" if spec else None),
-                  ("GEAK_WORKLOAD_KIND", kbid.WORKLOAD_KIND_AGENTX if spec else None),
+    basis = str(value.get("metric_basis") or spec.get("metric_basis") or "")
+    axis = {"aggregate_output_tok_s": "output", "aggregate_total_token_tok_s": "total"}.get(
+        basis, basis)
+    agentx_env = [("BENCH_CLIENT", "agentx" if _is_agentx(a) else None),
+                  ("GEAK_WORKLOAD_KIND", kbid.WORKLOAD_KIND_AGENTX if _is_agentx(a) else None),
+                  ("MEASUREMENT_PURPOSE", "validation" if _is_agentx(a) else None),
+                  ("E2E_METRIC", axis),
+                  ("GEAK_METRIC_BASIS", basis),
                   ("GEAK_AGENTX_SCENARIO", spec.get("scenario")),
                   ("AGENTX_DATASET", spec.get("corpus")),
                   ("AGENTX_NUM_ENTRIES", spec.get("num_entries")),
@@ -1753,6 +1773,41 @@ def _as_number(value):
         return None
 
 
+def _session_ladder(a, session_id):
+    """Locate an existing session, then target ITS deployment for ledger/tombstone updates.
+
+    Compatibility never publishes a new candidate. Mutating an existing session is different:
+    the reader may have reached it through a coarse or legacy page, and updating the reader's
+    address would leave the original exact page's ledger and retirement state unchanged.
+    """
+    store, mirror, _why = open_plane(a, THROUGHPUT_METRIC, 0.0)
+    for plane in (store, mirror):
+        if plane is None:
+            continue
+        for cid, _tier, _metric, _floor in read_ladder(a):
+            try:
+                doc = plane.get_session(cid, session_id)
+            except Exception:
+                continue
+            value = doc.get("value") if isinstance(doc, dict) else None
+            if not isinstance(value, dict):
+                continue
+            workload = value.get("workload") if isinstance(value.get("workload"), dict) else {}
+            parts = cid.split(":")
+            kind = value.get("workload_kind") or (
+                kbid.WORKLOAD_KIND_AGENTX if "wl_agentx" in parts or
+                value.get("observed_shape") or value.get("workload_spec") else "")
+            ident = kbid.e2e_identity(*parts[2:7], workload_kind=kind,
+                                     **{k: workload.get(k) for k in ("tp", "ep", "isl", "osl", "conc")})
+            # The stored page may predate release-version normalization.
+            ident["framework_version"] = parts[5]
+            cids = kbid.e2e_canonical_ids(ident)
+            tiers = {3: ("exact", "workload_any", "tp_any"),
+                     2: ("exact", "tp_any"), 1: ("exact",)}[len(cids)]
+            return [(c, tiers[i]) + rung_metric(i, len(cids)) for i, c in enumerate(cids)]
+    return ladder_of(a)
+
+
 def cmd_attest(a) -> dict:
     """Count one attempt to actually RUN a stored record, at every rung it was written to.
 
@@ -1786,7 +1841,7 @@ def cmd_attest(a) -> dict:
         evidence["delta_pct"] = round(
             (evidence["measured_tok_s"] / evidence["baseline_tok_s"] - 1.0) * 100.0, 3)
     out = {"applied": bool(a.apply), "session_id": session_id, "outcome": a.outcome, "rungs": []}
-    for cid, tier, metric, floor in ladder_of(a):
+    for cid, tier, metric, floor in _session_ladder(a, session_id):
         store, mirror, why = open_plane(a, metric, floor)
         planes = [p for p in (store, mirror) if p is not None]
         if not planes:
@@ -1909,7 +1964,7 @@ def cmd_retract(a) -> dict:
         session_id = kbid.session_id(ladder_of(a)[0][0], identity_of(a)["model"],
                                      _content_digest(record["knowledge"]))
     out = {"applied": bool(a.apply), "session_id": session_id, "reason": a.reason, "rungs": []}
-    for cid, tier, metric, floor in ladder_of(a):
+    for cid, tier, metric, floor in _session_ladder(a, session_id):
         store, mirror, why = open_plane(a, metric, floor)
         planes = [p for p in (store, mirror) if p is not None]
         if not planes:
@@ -1930,7 +1985,7 @@ def cmd_retract(a) -> dict:
 
 
 def _content_digest(knowledge: dict) -> str:
-    """Dedup key: the CONFIG, not the measurement.
+    """Dedup key: configuration and declared measurement conditions, excluding observed values.
 
     Re-benchmarking one config must land on the same session id so `mode="replace"` updates that
     record instead of accumulating a page full of near-identical entries that all outrank each
@@ -1938,14 +1993,39 @@ def _content_digest(knowledge: dict) -> str:
     runs of the same config ARE the same candidate, and the later one wins.
     """
     value = knowledge.get("value") or {}
-    payload = json.dumps({"config": value.get("accepted_config") or {},
+    content = {"config": value.get("accepted_config") or {},
                           "kernels": sorted(str(k.get("name") or "") for k in
                                             (value.get("accepted_kernels") or [])
                                             if isinstance(k, dict)),
                           "workload": value.get("workload") or {},
-                          "direction": value.get("direction") or ""},
-                         sort_keys=True, ensure_ascii=False)
+                          "direction": value.get("direction") or ""}
+    # Preserve the existing synthetic digest, including --result retraction of older records.
+    agentx = value.get("workload_kind") == kbid.WORKLOAD_KIND_AGENTX or bool(
+        value.get("workload_spec") or value.get("observed_shape"))
+    conditions = _measurement_conditions(value) if agentx else {}
+    if conditions:
+        content["measurement_conditions"] = conditions
+    payload = json.dumps(content, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _measurement_conditions(value: dict) -> dict:
+    spec = value.get("workload_spec") or {}
+    conditions = {k: spec[k] for k in _WORKLOAD_SPEC_KEYS if k != "metric_basis"
+                  and spec.get(k) not in (None, "")}
+    basis = value.get("metric_basis") or spec.get("metric_basis")
+    if basis:
+        conditions["metric_basis"] = basis
+    return conditions
+
+
+def _direction_group(value: dict) -> str:
+    direction = str(value.get("direction") or "").strip()
+    conditions = _measurement_conditions(value)
+    if not direction or not conditions:
+        return direction
+    fingerprint = hashlib.sha256(json.dumps(conditions, sort_keys=True).encode()).hexdigest()
+    return direction + ":" + fingerprint
 
 
 # -- cli -----------------------------------------------------------------------------------------

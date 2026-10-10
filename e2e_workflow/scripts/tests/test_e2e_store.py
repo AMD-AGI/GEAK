@@ -11,6 +11,7 @@ land on the module under test.
 import json
 import os
 import sys
+import subprocess
 
 import pytest
 
@@ -1215,6 +1216,25 @@ def test_the_agentx_repro_script_names_the_corpus_not_isl_osl(tmp_path):
     assert "\n  ISL=" not in text and "\n  OSL=" not in text
 
 
+def test_agentx_repro_runs_the_recorded_metric_and_validation_window(tmp_path):
+    _write(tmp_path, "a", "config", identity=AGENTX_IDENTITY,
+           workload=AGENTX_WORKLOAD, metric_basis="p90_intvty_inferencex")
+    out = _run("resolve", "--store", str(tmp_path / "store"),
+               "--cache-dir", str(tmp_path / "mat"), identity=AGENTX_IDENTITY)
+    launch = next((tmp_path / "mat").rglob("launch.sh"))
+    scripts = tmp_path / "stub"
+    scripts.mkdir()
+    adapter = os.path.join(_SCRIPTS, "adapters", "clients", "agentx.sh")
+    (scripts / "bench_e2e.sh").write_text(
+        'source "$AGENTX_ADAPTER"\n'
+        'printf "%s %s %s\\n" "$BENCH_CLIENT" "${E2E_METRIC:-output}" "$(_agentx_duration)"\n')
+    env = dict(os.environ, MODEL="/models/m", GEAK_SCRIPTS=str(scripts),
+               AGENTX_ADAPTER=adapter, E2E_METRIC="output", MEASUREMENT_PURPOSE="search")
+    proc = subprocess.run(["bash", str(launch)], env=env, capture_output=True, text=True, check=True)
+    assert out["candidates"]
+    assert proc.stdout.strip() == "agentx p90_intvty_inferencex 3600"
+
+
 def test_ep_reaches_the_record_and_the_attest_evidence(tmp_path):
     written = _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
                      workload=AGENTX_WORKLOAD)
@@ -1265,6 +1285,49 @@ def test_a_synthetic_run_records_no_observed_shape_block(tmp_path):
     candidate = out["candidates"][0]
     assert candidate["observed_shape"] == {} and candidate["workload_spec"] == {}
     assert candidate["workload"] == {"tp": 8, "isl": 1024, "osl": 1024, "conc": 64}
+
+
+def test_preep_and_full_build_version_compatibility_compose(tmp_path, monkeypatch):
+    raw = "0.26.0.dev20260913+build1"
+    old = [x if x != "0.26.0" else raw for x in IDENTITY]
+    with monkeypatch.context() as patch:
+        patch.setattr(e2e_store.kbid, "_release_version",
+                      lambda value: e2e_store.kbid.segment(value, "unspecified"))
+        written = _write(tmp_path, "old-build", "config", identity=old)
+    new = old + ["--ep", "1", "--workload-kind", "agentx_trace_replay"]
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=new)
+    assert [c["session_id"] for c in out["candidates"]] == [written["session_id"]]
+    assert out["candidates"][0]["canonical_id"] == written["rungs"][0]["canonical_id"]
+
+
+def test_missing_observed_shape_does_not_prioritize_legacy_coarse_page(tmp_path):
+    _write(tmp_path, "old", "config", identity=IDENTITY)
+    other_conc = ["20" if x == "10" else x for x in AGENTX_IDENTITY]
+    current = _write(tmp_path, "current", "config", identity=other_conc,
+                     workload=AGENTX_WORKLOAD)
+    no_shape = AGENTX_IDENTITY[:AGENTX_IDENTITY.index("--isl")]
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=no_shape)
+    assert out["match_tier"] == "workload_any"
+    assert out["candidates"][0]["session_id"] == current["session_id"]
+
+
+def test_legacy_recall_updates_original_attestations_and_retraction(tmp_path):
+    written = _write(tmp_path, "old", "config", identity=IDENTITY)
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=AGENTX_IDENTITY)
+    assert out["candidates"][0]["session_id"] == written["session_id"]
+    _run("attest", "--store", str(tmp_path / "store"), "--session-id", written["session_id"],
+         "--outcome", "failed", "--apply", identity=AGENTX_IDENTITY)
+    original = _run("resolve", "--store", str(tmp_path / "store"), identity=IDENTITY)
+    assert original["candidates"][0]["failures"] == 1
+    retired = _run("retract", "--store", str(tmp_path / "store"),
+                   "--session-id", written["session_id"], "--reason", "bad measurement",
+                   "--apply", identity=AGENTX_IDENTITY)
+    assert retired["ok"]
+    assert _run("resolve", "--store", str(tmp_path / "store"), identity=IDENTITY)["candidates"] == []
+    from kb.store_local import LocalKBStore
+    plane = LocalKBStore(str(tmp_path / "store"), metric="throughput_tok_s", promote_floor=0)
+    for rung in _run("identity", identity=AGENTX_IDENTITY)["ladder"][:2]:
+        assert plane.get_session(rung["canonical_id"], written["session_id"]) is None
 
 
 # -- metric basis ---------------------------------------------------------------------------------
@@ -1324,22 +1387,54 @@ def test_a_record_that_states_no_basis_is_always_offered(tmp_path):
     assert out["curation"]["unstated_metric_basis"] == 1
 
 
-def test_the_basis_is_not_part_of_the_address_or_the_digest(tmp_path):
-    """Two runs of one configuration graded on different axes are still one candidate: the basis
-    labels the number, it does not identify the deployment. Putting it in the address would also
-    put it in session_id and reset the attestation ledger on every basis change."""
+def test_different_bases_share_a_page_without_overwriting_measurements(tmp_path):
     first = _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
                    workload=AGENTX_WORKLOAD, metric_basis="p90_intvty_inferencex")
     second = _write(tmp_path, "b", "config", identity=_agentx_identity(146713, 1109),
                     workload=AGENTX_WORKLOAD, metric_basis="aggregate_output_tok_s")
-    assert first["session_id"] == second["session_id"]
+    assert first["session_id"] != second["session_id"]
+    assert first["rungs"][0]["canonical_id"] == second["rungs"][0]["canonical_id"]
     assert all("intvty" not in r["canonical_id"] for r in second["rungs"])
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=AGENTX_IDENTITY)
+    assert len(out["candidates"]) == 2
+    for basis in ("p90_intvty_inferencex", "aggregate_output_tok_s"):
+        out = _run("resolve", "--store", str(tmp_path / "store"), "--metric-basis", basis,
+                   identity=AGENTX_IDENTITY)
+        assert [c["metric_basis"] for c in out["candidates"]] == [basis]
+
+
+@pytest.mark.parametrize("change", [{"corpus": "different_trace"}, {"duration_s": 900},
+                                    {"num_entries": 50}])
+def test_other_declared_workloads_do_not_inherit_attestations(tmp_path, change):
+    first = _write(tmp_path, "a", "config", identity=AGENTX_IDENTITY, workload=AGENTX_WORKLOAD)
+    _run("attest", "--store", str(tmp_path / "store"), "--session-id", first["session_id"],
+         "--outcome", "validated", "--apply", identity=AGENTX_IDENTITY)
+    second = _write(tmp_path, "b", "config", identity=AGENTX_IDENTITY,
+                    workload={**AGENTX_WORKLOAD, **change})
+    assert first["session_id"] != second["session_id"]
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=AGENTX_IDENTITY)
+    rows = {c["session_id"]: c for c in out["candidates"]}
+    assert rows[first["session_id"]]["validations"] == 1
+    assert rows[second["session_id"]]["validations"] == 0
+
+
+def test_observed_shape_prefers_the_result_over_preflight_identity(tmp_path):
+    _write(tmp_path, "a", "config", identity=AGENTX_IDENTITY,
+           workload={**AGENTX_WORKLOAD, "isl": 89000, "osl": 900})
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=AGENTX_IDENTITY)
+    assert out["candidates"][0]["observed_shape"]["isl"] == 89000
 
 
 def test_a_synthetic_record_with_no_basis_is_unchanged(tmp_path):
     _write(tmp_path, "a", "tuned")
     out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0")
     assert out["candidates"][0]["metric_basis"] == ""
+
+
+def test_synthetic_digest_remains_compatible_with_historical_result_files(tmp_path):
+    first = _write(tmp_path, "a", "config", metric_basis="aggregate_output_tok_s")
+    second = _write(tmp_path, "b", "config", metric_basis="aggregate_total_token_tok_s")
+    assert first["session_id"] == second["session_id"]
 
 
 def test_an_accepted_ep_that_differs_from_the_address_is_reported_not_refused(tmp_path):
