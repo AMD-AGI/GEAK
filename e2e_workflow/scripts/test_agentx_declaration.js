@@ -251,6 +251,7 @@ for (const [basis, axis] of [
   ['aggregate_total_token_tok_s', 'total'],
   ['aggregate_output_tok_s', 'output'],
   ['e2e_norm_intvty_p90', 'e2e_norm_intvty_p90'],
+  ['e2e_norm_intvty_p50', 'e2e_norm_intvty_p50'],
   ['p90_intvty_inferencex', 'p90_intvty_inferencex'],
 ]) {
   const m = axisOf(basis);
@@ -301,8 +302,12 @@ ok(/ISL=<isl> OSL=<osl> CONC=<conc>/.test(blk),
   'roles are told to keep their existing bench line unchanged (no role-file churn needed)');
 ok(/throughput_tok_s_median/.test(blk), 'the metric-neutral summary key is named');
 ok(/InferenceX P90 interactivity/.test(blk) && /tok\/s\/user/.test(blk)
-  && /guard_total_tok_s_median/.test(blk),
-  'on the default axis the prompt names its unit and the total-throughput guard beside it');
+  && /guard_aggregate_output_tok_s_median/.test(blk),
+  'on the default axis the prompt names its unit and the output-throughput guard beside it');
+const p50Blk = axisOf('e2e_norm_intvty_p50').workloadIdentityBlock();
+ok(/P50 interactivity/.test(p50Blk) && /guard_e2e_norm_intvty_p90_median/.test(p50Blk)
+  && /guard_aggregate_output_tok_s_median/.test(p50Blk) && !/guard_total/.test(p50Blk),
+  'the p50 objective names both KEEP guards and never requests the removed total guard');
 const totalBlk = axisOf('aggregate_total_token_tok_s').workloadIdentityBlock();
 ok(/TOTAL \(input\+output\) tok\/s/.test(totalBlk) && !/guard_total/.test(totalBlk),
   'a declared throughput axis keeps the throughput wording, with no guard to report');

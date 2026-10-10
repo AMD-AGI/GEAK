@@ -260,6 +260,7 @@ def _view(candidate, cid: str, tier: str, metric: str, champion_metric: str = ""
         # with a label, not scattered over five sparse pages. "" == written before this was
         # recorded, which is not the same claim as any particular basis.
         "metric_basis": str(value.get("metric_basis") or ""),
+        "acceptance": value.get("acceptance") or {},
         "direction": str(value.get("direction") or ""),
         "workload": workload,
         # The two things the ADDRESS deliberately stops saying on a trace replay, surfaced here so
@@ -852,6 +853,9 @@ def build_record(a, result: dict, workdir=None) -> dict:
         if block:
             value[key] = block
     value.update(state)
+    acceptance = (result.get("validation_evidence") or {}).get("acceptance")
+    if isinstance(acceptance, dict):
+        value["acceptance"] = acceptance
     if _is_agentx(a):
         value["workload_kind"] = kbid.WORKLOAD_KIND_AGENTX
     files = _artifact_files(a, result)
@@ -1582,6 +1586,9 @@ def win_gate(result: dict) -> str:
     if any(status.startswith(s) for s in NO_WIN_VERDICTS):
         return ("Director declared no win (%s) — the %sx same-session ratio is box-drift, "
                 "not a gain" % (status, speedup))
+    acceptance = (result.get("validation_evidence") or {}).get("acceptance")
+    if isinstance(acceptance, dict) and acceptance.get("keep") is not True:
+        return "handoff KEEP rule rejected the pair: " + "; ".join(acceptance.get("reasons") or [])
     return ""
 
 

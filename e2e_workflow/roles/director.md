@@ -124,7 +124,8 @@ Steps:
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/baseline_bench.log"
    ```
    Parse `EVAL_DIR/baseline/bench_summary.json` for `throughput_tok_s_median` + spread (the metric-neutral
-   key; `metric_basis` says whether it is output or total tok/s — falls back to
+   key; `metric_basis` names its axis — output or total tok/s, or an interactivity axis in
+   tok/s/user such as `e2e_norm_intvty_p50` — falls back to
    `output_throughput_tok_s_median` on older summaries). Baseline and candidate share the same basis, so
    the accept ratio is consistent.
    **Prove engagement**: grep `EVAL_DIR/logs/baseline_bench.log` / `server.log` to confirm the seed

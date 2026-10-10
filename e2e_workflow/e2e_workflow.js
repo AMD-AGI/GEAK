@@ -955,6 +955,7 @@ const METRIC_BASIS_OF_AXIS = {
   total_throughput: 'aggregate_total_token_tok_s',
   intvty: 'e2e_norm_intvty_p90',
   interactivity: 'e2e_norm_intvty_p90',
+  e2e_norm_intvty_p50: 'e2e_norm_intvty_p50',
   e2e_norm_intvty_p90: 'e2e_norm_intvty_p90',
   p90_intvty_inferencex: 'p90_intvty_inferencex',
 };
@@ -962,12 +963,14 @@ const METRIC_BASIS_OF_AXIS = {
 const AXIS_OF_METRIC_BASIS = {
   aggregate_output_tok_s: 'output',
   aggregate_total_token_tok_s: 'total',
+  e2e_norm_intvty_p50: 'e2e_norm_intvty_p50',
   e2e_norm_intvty_p90: 'e2e_norm_intvty_p90',
   p90_intvty_inferencex: 'p90_intvty_inferencex',
 };
 const AXIS_LABEL = {
   aggregate_output_tok_s: 'OUTPUT tok/s',
   aggregate_total_token_tok_s: 'TOTAL (input+output) tok/s',
+  e2e_norm_intvty_p50: 'TTFT-inclusive P50 interactivity: 1 / P50(E2EL/OSL) in tok/s/user',
   p90_intvty_inferencex: 'InferenceX P90 interactivity: 1000 / P90(ITL) in tok/s/user, decode only',
   e2e_norm_intvty_p90: 'TTFT-inclusive P90 interactivity: 1 / P90(E2EL/OSL) in tok/s/user',
 };
@@ -1696,7 +1699,8 @@ measurement duration. Consequences you must respect:
 * **The graded axis is ${AXIS_LABEL[AGENTX_METRIC_BASIS]}.**
   \`bench_summary.json\` reports it as \`throughput_tok_s_median\` with
   \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; ${/intvty/.test(AGENTX_METRIC_BASIS)
-    ? 'on this axis it is NOT\n  a tok/s figure but tok/s/user, higher is better. `guard_total_tok_s_median` carries total tok/s\n  beside it and nothing gates on it for you: state it next to every delta you report, because a\n  candidate that raises interactivity by serving less total work has not made the server faster.'
+    ? 'on this axis it is tok/s/user, higher is better. Report `guard_aggregate_output_tok_s_median`\n  beside it.' + (AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50'
+      ? ' Also report `guard_e2e_norm_intvty_p90_median`, the tail guard.' : '')
     : 'on a ~140:1\n  prefill:output trace the output-only axis barely moves for a large real change in work.'}
 * **A measured window is LONG**: ${AGENTX.geak_loop_duration_s}s per search leg,
   ${AGENTX.duration_s}s for parity/validation. Budget your phase around that and do not retry a
@@ -6182,6 +6186,7 @@ if (EVAL_DIR) {
 const kbNoWinVerdict = ['validated_no_win', 'recovered_no_gain']
   .some((s) => String(wfReturn.validation_status || '').startsWith(s));
 if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
+    !A.kb_defer_to_interface &&
     wfReturn.throughput_speedup > 1.0 && wfReturn.final_throughput_tok_s > 0 && !kbNoWinVerdict) {
   // Computed HERE, deterministically, from facts this script already holds — never asked of an
   // agent. `direction` is inside _content_digest, so a label that varies between two runs of the

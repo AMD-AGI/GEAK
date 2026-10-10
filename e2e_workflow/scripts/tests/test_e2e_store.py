@@ -1216,9 +1216,10 @@ def test_the_agentx_repro_script_names_the_corpus_not_isl_osl(tmp_path):
     assert "\n  ISL=" not in text and "\n  OSL=" not in text
 
 
-def test_agentx_repro_runs_the_recorded_metric_and_validation_window(tmp_path):
+@pytest.mark.parametrize("basis", ["p90_intvty_inferencex", "e2e_norm_intvty_p50"])
+def test_agentx_repro_runs_the_recorded_metric_and_validation_window(tmp_path, basis):
     _write(tmp_path, "a", "config", identity=AGENTX_IDENTITY,
-           workload=AGENTX_WORKLOAD, metric_basis="p90_intvty_inferencex")
+           workload=AGENTX_WORKLOAD, metric_basis=basis)
     out = _run("resolve", "--store", str(tmp_path / "store"),
                "--cache-dir", str(tmp_path / "mat"), identity=AGENTX_IDENTITY)
     launch = next((tmp_path / "mat").rglob("launch.sh"))
@@ -1232,7 +1233,7 @@ def test_agentx_repro_runs_the_recorded_metric_and_validation_window(tmp_path):
                AGENTX_ADAPTER=adapter, E2E_METRIC="output", MEASUREMENT_PURPOSE="search")
     proc = subprocess.run(["bash", str(launch)], env=env, capture_output=True, text=True, check=True)
     assert out["candidates"]
-    assert proc.stdout.strip() == "agentx p90_intvty_inferencex 3600"
+    assert proc.stdout.strip() == f"agentx {basis} 3600"
 
 
 def test_ep_reaches_the_record_and_the_attest_evidence(tmp_path):
@@ -1429,6 +1430,23 @@ def test_a_synthetic_record_with_no_basis_is_unchanged(tmp_path):
     _write(tmp_path, "a", "tuned")
     out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0")
     assert out["candidates"][0]["metric_basis"] == ""
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_kb_automated_write_follows_the_handoff_verdict(tmp_path, keep):
+    verdict = {"objective": "e2e_norm_intvty_p50", "keep": keep,
+               "reasons": [] if keep else ["p50 gained only 2%"]}
+    written = _write(tmp_path, "a", "config", "--require-win", identity=AGENTX_IDENTITY,
+                     workload=AGENTX_WORKLOAD, metric_basis="e2e_norm_intvty_p50",
+                     throughput_speedup=1.25,
+                     validation_evidence={"acceptance": verdict})
+    if keep:
+        out = _run("resolve", "--store", str(tmp_path / "store"),
+                   "--metric-basis", "e2e_norm_intvty_p50", identity=AGENTX_IDENTITY)
+        assert out["candidates"][0]["acceptance"] == verdict
+    else:
+        assert written["skipped"] and "KEEP rule rejected" in written["why"]
+        assert not (tmp_path / "store").exists()
 
 
 def test_synthetic_digest_remains_compatible_with_historical_result_files(tmp_path):

@@ -3435,6 +3435,96 @@ def _same_session_baseline(
     return 0.0, ""
 
 
+def handoff_acceptance(h: dict) -> dict | None:
+    """The caller's KEEP rule for the axis it handed GEAK; None leaves GEAK's own verdict.
+
+    Hyperloom publishes one in an AgentX ``workload_spec`` graded on interactivity: the
+    ``objective`` must gain at least ``min_gain_pct`` over the reference, while each guard in
+    ``guard_max_drop_pct`` -- named by basis, like the objective -- may fall no further below
+    the reference than its band. A block that does not parse is ignored with a warning rather
+    than half-applied: GEAK's own verdict stands, and the caller re-measures what it keeps.
+    """
+    spec = h.get("workload_spec")
+    block = spec.get("acceptance") if isinstance(spec, dict) else None
+    if block is None:
+        return None
+    try:
+        objective = str(block["objective"]).strip()
+        min_gain_pct = float(block["min_gain_pct"])
+        guards = {
+            str(basis).strip(): float(band)
+            for basis, band in (block.get("guard_max_drop_pct") or {}).items()
+        }
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        problem = repr(exc)
+    else:
+        if objective and all(math.isfinite(v) for v in (min_gain_pct, *guards.values())):
+            return {
+                "objective": objective,
+                "min_gain_pct": min_gain_pct,
+                "guard_max_drop_pct": guards,
+            }
+        problem = "no objective, or a band that is not a finite number"
+    sys.stderr.write(f"!!! workload_spec.acceptance ignored ({problem}): {block!r}\n")
+    return None
+
+
+def acceptance_verdict(
+    rule: dict,
+    *,
+    measured_basis: str,
+    baseline: float,
+    final: float,
+    reference: dict,
+    candidate: dict,
+) -> dict:
+    """Apply the caller's KEEP rule to the pair this run publishes.
+
+    Hyperloom's AgentX verdict, step for step: ``(final - baseline) / baseline * 100`` on the
+    objective must reach ``min_gain_pct``, and each guard must hold ``candidate >= reference *
+    (1 - max_drop_pct / 100)``. Guards are read from the ``guard_<basis>_median`` fields of the
+    two legs' bench summaries, and one missing from either leg fails: a guard nobody measured
+    is not one the candidate held. Hyperloom also refuses rounds of unequal length or with more
+    failed requests and applies its latency budget; the summaries carry neither, so Hyperloom's
+    re-measurement keeps the last word.
+    """
+    objective = rule["objective"]
+    gain_pct = (final - baseline) / baseline * 100.0 if baseline > 0.0 and final > 0.0 else None
+    reasons = []
+    if measured_basis != objective:
+        reasons.append(f"measured {measured_basis or 'an unnamed axis'}, not {objective}")
+    elif gain_pct is None:
+        reasons.append(f"no {objective} pair to compare")
+    elif gain_pct < rule["min_gain_pct"]:
+        reasons.append(f"{objective} gained {gain_pct:.3f}%, below {rule['min_gain_pct']}%")
+    guards = {}
+    for basis, max_drop_pct in rule["guard_max_drop_pct"].items():
+        ref = _positive_finite_float(reference.get(f"guard_{basis}_median"))
+        cand = _positive_finite_float(candidate.get(f"guard_{basis}_median"))
+        measured = ref > 0.0 and cand > 0.0
+        holds = measured and cand >= ref * (1.0 - max_drop_pct / 100.0)
+        guards[basis] = {
+            "reference": ref or None,
+            "candidate": cand or None,
+            "max_drop_pct": max_drop_pct,
+            "holds": holds,
+        }
+        if not measured:
+            reasons.append(f"guard {basis} was not measured on both legs")
+        elif not holds:
+            reasons.append(f"guard {basis} fell {(1.0 - cand / ref) * 100.0:.3f}%, "
+                           f"past {max_drop_pct}%")
+    return {
+        "objective": objective,
+        "measured_basis": measured_basis,
+        "gain_pct": round(gain_pct, 3) if gain_pct is not None else None,
+        "min_gain_pct": rule["min_gain_pct"],
+        "guards": guards,
+        "keep": not reasons,
+        "reasons": reasons,
+    }
+
+
 def normalize_result(h: dict, wf: dict) -> dict:
     eval_dir = Path(wf["eval_dir"])
     validation = _read_json(eval_dir / "director_e2e_validation.json")
@@ -3909,14 +3999,21 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # block carries what a reader needs to decide — the arbitration verdict, the
     # run-to-run spread of each leg, the Director's noise band, and whether the
     # delta clears them. Reported, never enforced: nothing here changes status.
+    # The one exception is ``acceptance``, added below only when the handoff states
+    # the caller's KEEP rule.
     delta_pct = round((speedup - 1.0) * 100.0, 3)
+    # The metric-neutral spread first: the output_*-named alias is only written on the output
+    # basis, so on any other axis it would leave both legs' scatter unknown.
     base_spread_pct = _positive_finite_float(
-        base_leg_summary.get("output_throughput_tok_s_spread_pct")
+        base_leg_summary.get("throughput_tok_s_spread_pct")
+        or base_leg_summary.get("output_throughput_tok_s_spread_pct")
         or (validation.get("base_block") or {}).get("spread_pct")
+        or baseline_summary.get("throughput_tok_s_spread_pct")
         or baseline_summary.get("output_throughput_tok_s_spread_pct")
     )
     final_spread_pct = _positive_finite_float(
-        final_summary.get("output_throughput_tok_s_spread_pct")
+        final_summary.get("throughput_tok_s_spread_pct")
+        or final_summary.get("output_throughput_tok_s_spread_pct")
         or (validation.get("final_block") or {}).get("spread_pct")
     )
     noise_band_pct = _positive_finite_float(validation.get("noise_band_pct"))
@@ -3964,6 +4061,39 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "recovery": wf.get("recovery_evidence") or None,
     }
 
+    # Measurement basis: read back from the bench_summary.json that actually produced these numbers
+    # (bench_summarize.py records the throughput or interactivity axis E2E_METRIC selected),
+    # so the label never lies about the basis. Falls back to output when neither summary carries it.
+    # See run_e2e.md alignment table.
+    metric_basis = (
+        final_summary.get("metric_basis")
+        or wf.get("metric_basis")
+        or baseline_summary.get("metric_basis")
+        or "aggregate_output_tok_s"
+    )
+
+    # ── the caller's KEEP rule ───────────────────────────────────────────────
+    # When the handoff states the rule its own verdict applies (Hyperloom's AgentX
+    # interactivity grading), "ok" means that rule keeps the published pair, not merely
+    # that the final beat the baseline. Guards come from the two legs the pair was read
+    # from; a pair with no such legs (a recovered win) cannot show its guards held.
+    acceptance = handoff_acceptance(h)
+    if acceptance is not None:
+        verdict = acceptance_verdict(
+            acceptance,
+            measured_basis=metric_basis,
+            baseline=geak_baseline,
+            final=promoted_final,
+            reference={
+                "validation_base_bench_summary": base_leg_summary,
+                "setup_baseline": baseline_summary,
+            }.get(baseline_basis_source, {}),
+            candidate={} if wf.get("recovered_intermediate") else final_summary,
+        )
+        validation_evidence["acceptance"] = verdict
+        if status == "ok" and not verdict["keep"]:
+            status = "no_gain"
+
     result = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
@@ -3991,16 +4121,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # _material_overlay_path / _material_patch_path).
         "final_patch": _material_patch_path(eval_dir, wf),
         "final_overlay": _material_overlay_path(eval_dir, wf),
-        # Measurement basis: read back from the bench_summary.json that actually produced these numbers
-        # (bench_e2e.sh records "aggregate_output_tok_s" or "aggregate_total_token_tok_s" per E2E_METRIC),
-        # so the label never lies about the basis. Falls back to output when neither summary carries it.
-        # See run_e2e.md alignment table.
-        "metric_basis": (
-            final_summary.get("metric_basis")
-            or wf.get("metric_basis")
-            or baseline_summary.get("metric_basis")
-            or "aggregate_output_tok_s"
-        ),
+        "metric_basis": metric_basis,
         # Which bench client measured these numbers. "inferencex" => identical
         # client to Hyperloom/Magpie (benchmark_serving.py); "native" => the
         # backend's own client (small cross-harness differences may remain).
@@ -6222,8 +6343,15 @@ def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
 
 def _enrich_kb_return(wf: dict, result: dict) -> dict:
     """Put normalized metadata on the file the salvage writer actually reads."""
-    return {**wf, **{key: result[key] for key in ("comparability", "workload", "metric_basis")
-                     if result.get(key)}}
+    enriched = {**wf, **{key: result[key] for key in ("comparability", "workload", "metric_basis")
+                         if result.get(key)}}
+    evidence = result.get("validation_evidence") or {}
+    if evidence.get("acceptance") is not None:
+        enriched["validation_evidence"] = evidence
+        # The acceptance verdict must travel with the same pair it evaluated.
+        for key in ("baseline_throughput_tok_s", "final_throughput_tok_s", "throughput_speedup"):
+            enriched[key] = result[key]
+    return enriched
 
 
 # ---------------------------------------------------------------------------
@@ -7040,6 +7168,9 @@ def main(argv: list[str]) -> int:
     # Module B writes workflow_return.json before normalize_result runs. Send the same
     # comparability calculation into that return while the selected client is known.
     ps_args["comparability"] = _workload_comparability(h)
+    # The handoff verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
+    # until then; _kb_write_back handles successful runs too when Module B left no receipt.
+    ps_args["kb_defer_to_interface"] = handoff_acceptance(h) is not None
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
