@@ -198,7 +198,8 @@ Backend-agnostic e2e serving-benchmark dispatcher: server lifecycle, health-wait
 (or `REUSE_SERVER=1`), warmup + N timed repeats + optional profiling trace, median throughput + spread.
 Env-driven; `MODEL` is **required** (no rig default).
 
-Key env vars: `MODEL`, `TP`, `GPU`, `ISL`/`OSL`/`CONC`, `REPEATS` (default 3), `MEM_FRACTION`,
+Key env vars: `MODEL`, `TP`, `GPU`, `ISL`/`OSL`/`CONC`, `REPEATS` (legacy-mode rounds: default 3, or 1
+with `BENCH_CLIENT=agentx`, where one call is one full replay window), `MEM_FRACTION`,
 `EXTRA_SERVER_ARGS`, `EXTRA_ENV`, `OVERLAY_PYTHONPATH`, `PROFILE`, `BENCH_CLIENT`, `PORT_BASE`/`PORT_SPAN`,
 `NUM_PROMPTS`, `NUM_WARMUPS`, `SEED`, `PROFILE_NUM_STEPS`, `REUSE_SERVER`.
 
@@ -300,11 +301,13 @@ Env knobs: `GEAK_CLAUDE_MODEL` (`claude-opus-4-8`), `GEAK_CLAUDE_EFFORT` (`ultra
 `GEAK_E2E_TIMEOUT_S` (`43200` = 12h), `GEAK_FINAL_RESERVE_S`, `GEAK_ROOT`,
 `GEAK_EVAL_DIR`, `INFERENCEX_PATH`.
 
-`BENCH_MAX_ATTEMPTS` (`2`) is read by `bench_e2e.sh` in `isolated_server` mode and bounds the
-attempts spent on one replica before it is given up. The default of 2 (one retry) assumes a failed
-leg means a bad config; raise it when the stack itself faults independently of the config — an
-intermittent GPU fault hitting ~20% of server launches will exhaust 2 attempts on ~1 replica in 25
-and lose the phase that needed it. A non-numeric or `<1` value falls back to `2`.
+`BENCH_MAX_ATTEMPTS` (`2`; `3` when `GEAK_WORKLOAD_KIND=agentx_trace_replay`) is read by
+`bench_e2e.sh` in `isolated_server` mode and bounds the attempts spent on one replica before it is
+given up. The default of 2 (one retry) assumes a failed leg means a bad config; raise it when the
+stack itself faults independently of the config — an intermittent GPU fault hitting ~20% of server
+launches will exhaust 2 attempts on ~1 replica in 25 and lose the phase that needed it. The trace
+replay starts at 3 for exactly that reason. A non-numeric or `<1` value falls back to the workload's
+default.
 
 `--timeout-s <seconds>` states the same wall-clock budget on the command line. When it and
 `GEAK_E2E_TIMEOUT_S` are both given the **smaller** wins (both name a real kill); `43200` applies only

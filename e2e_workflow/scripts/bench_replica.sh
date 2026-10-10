@@ -11,7 +11,7 @@ BENCH_E2E="${BENCH_E2E:-$HERE/bench_e2e.sh}"
 
 # The re-entered bench_e2e.sh sources this itself, but the client-specific
 # replica setup below runs BEFORE that exec, so read it here too. Same contract
-# (env wins, file only assigns with :=); absent => nothing happens.
+# (env wins, the file only assigns unset names); absent => nothing happens.
 BENCH_ENV_FILE="${BENCH_ENV_FILE:-$HERE/bench_env.sh}"
 if [ -f "$BENCH_ENV_FILE" ]; then
   # shellcheck source=/dev/null

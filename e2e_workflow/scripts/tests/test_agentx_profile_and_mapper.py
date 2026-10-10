@@ -24,6 +24,7 @@ InferenceX checkout, while an orchestrated run still prefers the copy its own
 runtime deployed.
 """
 
+import importlib.util
 import json
 import os
 import shutil
@@ -38,6 +39,19 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 CLIENTS = SCRIPTS / "adapters" / "clients"
 ADAPTER = CLIENTS / "agentx.sh"
 VENDORED_MAPPER = CLIENTS / "map_aiperf.py"
+
+# An export carrying every field the mapper reads an axis from.
+FULL_EXPORT = {
+    "metadata": {"submission_valid": True},
+    "metrics": {
+        "output_token_throughput": {"avg": 152.7},
+        "input_token_throughput": {"avg": 20647.3},
+        "request_count": 393,
+        "time_to_first_token": {"avg": 900.0, "p50": 880.0, "p90": 2400.0, "p99": 5000.0},
+        "inter_token_latency": {"avg": 21.0, "p50": 20.0, "p90": 34.0, "p99": 60.0},
+        "e2e_output_token_throughput": {"p10": 15.5, "p50": 31.0},
+    },
+}
 BENCH_E2E = SCRIPTS / "bench_e2e.sh"
 
 
@@ -272,8 +286,54 @@ class VendoredMapperTest(unittest.TestCase):
         which could match an unrelated file at the filesystem root."""
         self.assertNotIn('"${ix_root}/benchmarks/map_aiperf.py"', ADAPTER.read_text())
 
+    def _map(self, export: dict) -> dict:
+        tmp = Path(tempfile.mkdtemp(prefix="mapper_axes_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        src, dst = tmp / "export.json", tmp / "result.json"
+        src.write_text(json.dumps(export))
+        proc = subprocess.run(
+            ["python3", str(VENDORED_MAPPER), str(src), str(dst)],
+            capture_output=True, text=True, check=False,
+            env=dict(os.environ, PYTHONPATH=str(tmp)),
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        return json.loads(dst.read_text())
+
+    def test_the_mapper_carries_the_fields_the_interactivity_axes_grade_on(self):
+        """A standalone run grades on InferenceX P90 interactivity by default, and
+        upstream's inline mapping has no P90 ITL: every leg summarized to nothing."""
+        result = self._map(FULL_EXPORT)
+        self.assertEqual(result["p90_tpot_ms"], 34.0)
+        self.assertEqual(result["p90_ttft_ms"], 2400.0)
+        self.assertEqual(result["e2e_norm_intvty_p90"], 15.5)
+        self.assertEqual(result["e2e_norm_intvty_p50"], 31.0)
+        self.assertAlmostEqual(result["input_throughput"], 20647.3)
+
+    def test_a_missing_percentile_stays_missing_rather_than_becoming_the_mean(self):
+        """A graded P90 silently read off the mean would be graded as a P90."""
+        result = self._map({"metrics": {"output_token_throughput": {"avg": 1.0},
+                                        "inter_token_latency": {"avg": 21.0}}})
+        self.assertIsNone(result["p90_tpot_ms"])
+        self.assertIsNone(result["e2e_norm_intvty_p90"])
+        self.assertEqual(result["mean_tpot_ms"], 21.0)
+
+    def test_a_mapped_row_grades_on_every_axis_the_summary_knows(self):
+        """Read through bench_summarize.py's own axis selection, so an axis added
+        there without its field here fails this test rather than a run."""
+        spec = importlib.util.spec_from_file_location(
+            "bench_summarize_for_mapper", SCRIPTS / "bench_summarize.py"
+        )
+        summarize = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(summarize)
+        row = self._map(FULL_EXPORT)
+        for axis, (keys, basis, transform) in summarize._BASES.items():
+            with self.subTest(axis=axis):
+                self.assertIsNotNone(summarize._axis_num(row, keys, transform), basis)
+        p90 = summarize._BASES["p90_intvty_inferencex"]
+        self.assertAlmostEqual(summarize._axis_num(row, p90[0], p90[2]), 1000.0 / 34.0)
+
     def test_the_mapper_runs_without_hyperloom_importable(self):
-        """The inline fallback is what makes the vendored file self-sufficient."""
+        """The inline mapping is what makes the vendored file self-sufficient."""
         export = {
             "metadata": {"submission_valid": True},
             "metrics": {

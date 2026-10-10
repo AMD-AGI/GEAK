@@ -143,9 +143,11 @@ Workflow({
 
 `isl`/`osl`/`conc` describe a **synthetic sweep**: every request is the same shape, and the profile and
 the bench use it identically. An AgentX submission is not that. It replays a recorded corpus, so the
-client owns the request mix, the arrival pattern, its own warmup and the measurement duration — and
-because that corpus is ~140:1 prefill-to-output, it is graded on **total** (input+output) tok/s, not
-the output-only axis a sweep is graded on.
+client owns the request mix, the arrival pattern, its own warmup and the measurement duration.
+Standalone it is graded on **InferenceX P90 interactivity** — `p90_intvty_inferencex`, i.e.
+`1000 / P90(ITL)` in tok/s/user, decode only, the x-axis of the InferenceX pareto — with total
+(input+output) tok/s carried beside it as `guard_total_tok_s_median`. The output-only axis a sweep
+uses is a poor fit: on a ~140:1 prefill-to-output corpus it barely moves for a large change in work.
 
 Under Hyperloom this arrives as environment variables that `interface/run_e2e.py` exports. Standalone,
 declare it in the args instead — one line is enough, and it fills the canonical setup:
@@ -188,7 +190,7 @@ measured elsewhere — declare it, and the measurement will not override you:
 
 `workload_kind` expands to the graded setup: scenario `inferencex-agentx-mvp`, corpus
 `semianalysis_cc_traces_weka_062126`, 393 entries, a 3600s canonical window with 900s inner search
-legs, and `aggregate_total_token_tok_s` as the metric basis. Override any part with the long spelling,
+legs, and `p90_intvty_inferencex` as the metric basis. Override any part with the long spelling,
 which is the same object Hyperloom puts on its handoff:
 
 ```
@@ -197,8 +199,11 @@ which is the same object Hyperloom puts on its handoff:
       corpus: "semianalysis_cc_traces_weka_062126", num_entries: 393,
       duration_s: 3600,            // canonical/parity window
       geak_loop_duration_s: 900,   // inner search legs (the scenario's own floor)
-      concurrency: 8,
-      metric_basis: "aggregate_total_token_tok_s",
+      concurrency: 8,              // also what every bench line passes as CONC; wins over args.conc
+      metric_basis: "p90_intvty_inferencex",   // or aggregate_total_token_tok_s,
+                                               // aggregate_output_tok_s, e2e_norm_intvty_p90
+      canonical_corpus: "semianalysis_cc_traces_weka_062126",   // optional; what results are
+      canonical_duration_s: 3600,                               // stamped canonical against
       warmup_requests_per_lane: 10, warmup_grace_period_s: 1800,
       failed_request_threshold: 0.10,
       observed_isl: 0, observed_osl: 0,  // optional; omit to measure it off the baseline
@@ -207,6 +212,25 @@ which is the same object Hyperloom puts on its handoff:
       profile_warmup_s: 2700, profile_window_s: 20,   // optional window placement
     },
 ```
+
+Three parts of that object do more than they look:
+
+- **The axis.** A declared `metric_basis` wins. Without one, an `E2E_METRIC` already exported in the
+  environment decides, since an exported value outranks `bench_env.sh` and is what the bench would
+  measure anyway. A declared basis that disagrees with an exported `E2E_METRIC`, or an exported value
+  `bench_summarize.py` cannot measure, is refused at start rather than an hour into the baseline. The
+  acceptance noise band on a trace replay defaults to 4%, and the band the Director reports can only
+  widen it: two same-config baseline replicas differed by 3.86% on P90 interactivity (3.43% on total
+  tok/s). `noise_band_pct` sets that floor instead; the TTFT-inclusive `e2e_norm_intvty_p90` moved
+  17% on the same pair, so pass one if you grade on it.
+- **The reference.** Overriding `corpus` or `duration_s` does not move what a result is stamped
+  canonical against, so a replay of anything else comes back `submission_valid=false`. To change the
+  reference itself (a ~256k-context server's `_256k` corpus, say), set `canonical_corpus` /
+  `canonical_duration_s` too.
+- **The mapper.** An `inferencex_path` checkout's `map_aiperf.py` wins over GEAK's vendored copy, and
+  upstream's own fallback mapping carries no P90 ITL, so outside Hyperloom's runtime it cannot grade
+  the default axis. `agentx_smoke.sh` maps a sample export through whichever copy the run would use
+  and blocks when the graded field is missing.
 
 **Check the box first.** Every AgentX prerequisite is invisible until the client has already launched
 and warmed a server, so a missing one costs 20+ minutes to discover:
@@ -225,7 +249,7 @@ throughput — a "successful" run that measured a different workload.
 
 The workflow composes one `bench_env.sh` and the Director writes it beside the copied bench script;
 `bench_e2e.sh` and `bench_replica.sh` source it from next to themselves, so every bench in the run —
-including the ones role agents issue from their own prompts — selects the trace client and the total-token
+including the ones role agents issue from their own prompts — selects the trace client and the graded
 axis. Each line assigns only an unset-or-empty name, so anything already exported still wins and you can
 override one knob on the command line. Every role prompt also gains a workload-identity block stating
 what the run measures. **Without a declaration none of this exists**: no file is written, the source is a

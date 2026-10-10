@@ -741,10 +741,10 @@ const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : '
 // What the CALLER declared, kept apart from the shape roles finally optimize
 // against. On a trace replay those two are not the same thing, and telling them
 // apart needs the workload kind, which is parsed further down -- so the resolved
-// ISL/OSL/WORKLOAD are defined after it, by resolveTargetShape().
+// ISL/OSL/CONC/WORKLOAD are defined after it (CONC beside the declaration, the
+// shape by resolveTargetShape()).
 const ISL_DECLARED = A.isl != null ? parseInt(A.isl, 10) : null;
 const OSL_DECLARED = A.osl != null ? parseInt(A.osl, 10) : null;
-const CONC = parseInt(A.conc != null ? A.conc : 64, 10);
 
 // ---------------------------------------------------------------------------
 // Workload IDENTITY — the synthetic sweep, or a trace replay that owns its load
@@ -789,9 +789,18 @@ const AGENTX_DEFAULTS = {
   // (MEASUREMENT_PURPOSE). Declaring a value still overrides the client, for a run that needs a
   // specific tolerance end to end.
   failed_request_threshold: null,
-  metric_basis: 'aggregate_total_token_tok_s',
+  // InferenceX's P90 interactivity, 1000 / P90(ITL) in tok/s/user: the x-axis of the public
+  // InferenceX pareto, decode-only (TTFT and queue wait are outside it). bench_summarize.py
+  // reports total tok/s beside it as a guard. Hyperloom declares its own basis on the handoff
+  // and exports the matching E2E_METRIC, so this default only decides a run nobody configured.
+  metric_basis: 'p90_intvty_inferencex',
 };
 const AGENTX = IS_AGENTX ? Object.assign({}, AGENTX_DEFAULTS, WORKLOAD_SPEC) : null;
+// ONE concurrency for the run. Roles put WORKLOAD.conc on every bench line as CONC=<conc>, and a
+// command-line value outranks bench_env.sh, so a workload_spec.concurrency that reached only the
+// declaration would be replaced by args.conc (or the synthetic 64) on every bench.
+const CONC = parseInt(AGENTX && AGENTX.concurrency != null ? AGENTX.concurrency
+  : (A.conc != null ? A.conc : 64), 10);
 
 // ---------------------------------------------------------------------------
 // Kernel-targeting shape — the shape roles synthesize kernel inputs against
@@ -905,13 +914,64 @@ except Exception:
   }
   return SHAPE_IS_MEASURED;
 }
-// Which of the two throughput axes bench_e2e.sh medians. On a ~140:1
-// prefill:output trace, output-only tok/s moves almost not at all for a large
-// change in total work, so grading an AgentX run on the output axis reads real
-// wins as noise. bench_e2e.sh already implements both; it just defaults to
-// output, so the basis has to be SELECTED here.
-const AGENTX_METRIC_BASIS = AGENTX ? String(AGENTX.metric_basis || AGENTX_DEFAULTS.metric_basis) : '';
-const AGENTX_E2E_METRIC = /total/.test(AGENTX_METRIC_BASIS) ? 'total' : 'output';
+// Which axis bench_e2e.sh medians. It defaults E2E_METRIC to output, and on a ~140:1
+// prefill:output trace output-only tok/s moves almost not at all for a large change in total
+// work, so the axis has to be SELECTED here.
+//
+// bench_summarize.py's _BASES, flattened: each E2E_METRIC it accepts -> the metric_basis its
+// summary records. test_bench_env_channel.py holds this table to that one.
+const METRIC_BASIS_OF_AXIS = {
+  output: 'aggregate_output_tok_s',
+  total: 'aggregate_total_token_tok_s',
+  total_token: 'aggregate_total_token_tok_s',
+  total_throughput: 'aggregate_total_token_tok_s',
+  intvty: 'e2e_norm_intvty_p90',
+  interactivity: 'e2e_norm_intvty_p90',
+  e2e_norm_intvty_p90: 'e2e_norm_intvty_p90',
+  p90_intvty_inferencex: 'p90_intvty_inferencex',
+};
+// The E2E_METRIC the declaration sets for each basis: the basis itself wherever _BASES takes it.
+const AXIS_OF_METRIC_BASIS = {
+  aggregate_output_tok_s: 'output',
+  aggregate_total_token_tok_s: 'total',
+  e2e_norm_intvty_p90: 'e2e_norm_intvty_p90',
+  p90_intvty_inferencex: 'p90_intvty_inferencex',
+};
+const AXIS_LABEL = {
+  aggregate_output_tok_s: 'OUTPUT tok/s',
+  aggregate_total_token_tok_s: 'TOTAL (input+output) tok/s',
+  p90_intvty_inferencex: 'InferenceX P90 interactivity: 1000 / P90(ITL) in tok/s/user, decode only',
+  e2e_norm_intvty_p90: 'TTFT-inclusive P90 interactivity: 1 / P90(E2EL/OSL) in tok/s/user',
+};
+// Precedence: the basis the caller declared; else an E2E_METRIC already exported, because an
+// exported value outranks bench_env.sh and is what the bench will measure; else the standalone
+// default. Anything bench_summarize.py cannot measure fails HERE: it would refuse the axis too,
+// but only once the baseline replay had been paid for.
+function resolveAgentxMetric() {
+  if (!AGENTX) return { basis: '', source: '' };
+  const unknown = (what, v) => new Error(`AgentX: ${what} '${v}' is not an axis ` +
+    `bench_summarize.py measures (known: ${Object.keys(METRIC_BASIS_OF_AXIS).join(', ')}).`);
+  let inherited = '';
+  try { inherited = String(process.env.E2E_METRIC || '').trim().toLowerCase(); } catch (_) { /* no env */ }
+  // The bench reads an exported value as an axis token, so that is the only way it is looked up.
+  const inheritedBasis = inherited ? METRIC_BASIS_OF_AXIS[inherited] : '';
+  if (inherited && !inheritedBasis) throw unknown('the exported E2E_METRIC', inherited);
+  const declared = String(WORKLOAD_SPEC.metric_basis || '').trim().toLowerCase();
+  if (!declared) {
+    return inheritedBasis ? { basis: inheritedBasis, source: 'the exported E2E_METRIC' }
+      : { basis: AGENTX_DEFAULTS.metric_basis, source: 'the standalone default' };
+  }
+  const basis = AXIS_OF_METRIC_BASIS[declared] ? declared : METRIC_BASIS_OF_AXIS[declared];
+  if (!basis) throw unknown('workload_spec.metric_basis', declared);
+  if (inheritedBasis && inheritedBasis !== basis) {
+    throw new Error(`AgentX: workload_spec.metric_basis=${basis}, but E2E_METRIC=${inherited} is ` +
+      'exported in this environment and outranks bench_env.sh, so every bench would grade a ' +
+      'different axis than the one declared. Unset E2E_METRIC or declare the basis it names.');
+  }
+  return { basis, source: 'workload_spec.metric_basis' };
+}
+const { basis: AGENTX_METRIC_BASIS, source: AGENTX_METRIC_SOURCE } = resolveAgentxMetric();
+const AGENTX_E2E_METRIC = AGENTX ? AXIS_OF_METRIC_BASIS[AGENTX_METRIC_BASIS] : '';
 // Body of the per-run bench_env.sh the Director drops beside the copied bench
 // script (see roles/director.md PHASE=setup). Every line assigns ONLY when the
 // name is unset or empty, so a real exported value -- an orchestrator's, or an
@@ -932,17 +992,19 @@ const _agentxEnvPairs = () => {
     ['BENCH_CLIENT', 'agentx'],
     ['E2E_METRIC', AGENTX_E2E_METRIC],
     ['GEAK_METRIC_BASIS', AGENTX_METRIC_BASIS],
-    // A trace replay measures ONE duration-bounded window per replica; the
-    // synthetic default of 3 repeats would triple a 900s leg for no variance
-    // information the replica protocol does not already give us.
-    ['REPEATS', '1'],
-    ['CONC', String(AGENTX.concurrency != null ? AGENTX.concurrency : CONC)],
+    // No REPEATS: an explicit one outranks REPLICAS in bench_e2e.sh, so pinning it here turned
+    // isolated validation's three replicas into one. bench_e2e.sh defaults a trace-replay
+    // client's legacy rounds to one itself, after the replica count is resolved.
+    ['CONC', String(CONC)],
     ['GEAK_AGENTX_SCENARIO', AGENTX.scenario],
     ['AGENTX_DATASET', AGENTX.corpus],
-    ['AGENTX_CANONICAL_DATASET', AGENTX.canonical_corpus || AGENTX.corpus],
+    // What the run is compared AGAINST, so an override of the corpus or the window never
+    // carries it along: a replay of anything else is then stamped non-canonical, which is
+    // the point. Declare canonical_corpus / canonical_duration_s to move the reference itself.
+    ['AGENTX_CANONICAL_DATASET', AGENTX.canonical_corpus || AGENTX_DEFAULTS.corpus],
     ['AGENTX_NUM_ENTRIES', AGENTX.num_entries],
     ['GEAK_AGENTX_DURATION_S', AGENTX.duration_s],
-    ['AGENTX_CANONICAL_DURATION', AGENTX.canonical_duration_s || AGENTX.duration_s],
+    ['AGENTX_CANONICAL_DURATION', AGENTX.canonical_duration_s || AGENTX_DEFAULTS.duration_s],
     ['GEAK_AGENTX_LOOP_DURATION_S', AGENTX.geak_loop_duration_s],
     ['AGENTX_WARMUP_REQUESTS_PER_LANE', AGENTX.warmup_requests_per_lane],
     ['AGENTX_WARMUP_GRACE_PERIOD', AGENTX.warmup_grace_period_s],
@@ -1030,15 +1092,26 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
 // A trace replay is not that workload. It is client-paced over trajectories of wildly unequal size
 // (ISL p50 83k, p99 491k) against a prefix cache running 85-96% hits, so a replica completes a
 // whole number of trajectories and the throughput it reports quantises on which ones it got
-// through. The 20260912 validation measured that directly: three replicas of the BASELINE, same
-// config, same box, spread 3.43% (24054.0 / 23255.9). A 0.5% band against a 3.4% measurement is
-// 5-7x too permissive -- it would call a pure-noise difference a win -- so this workload carries
-// its own floor. Hardcoding it is a placeholder for deriving it from the replica spread Setup
-// already measures; until then the number is at least the measured one rather than an
-// inapplicable default.
-const NOISE_BAND_AGENTX = 3.5;
+// through. The 20260912 validation measured that directly: two surviving replicas of the
+// BASELINE, same config, same box, spread 3.43% on total tok/s (24054.0 / 23255.9) and 3.86% on
+// InferenceX P90 interactivity (29.52 / 28.40 tok/s/user), the default axis. A 0.5% band against
+// that is 7-8x too permissive -- it would call a pure-noise difference a win -- so this workload
+// carries its own floor. The TTFT-inclusive axis moved 17% on the same pair; a run graded on it
+// needs an explicit noise_band_pct. Hardcoding the floor is a placeholder for deriving it from
+// the replica spread Setup already measures; until then it is at least the measured one.
+const NOISE_BAND_AGENTX = 4.0;
 const NOISE_BAND_DEFAULT = parseFloat(
   A.noise_band_pct != null ? A.noise_band_pct : (IS_AGENTX ? NOISE_BAND_AGENTX : 0.5));
+// The band the run gates on, from the one the Director returned. Its role file starts every run
+// at 0.5 and only ever widens it, so on a trace replay that 0.5 would replace the workload floor
+// (and an explicit noise_band_pct) outright; there the Director may only raise the band. A
+// fixed-shape run keeps the Director's value, as it always has.
+function gateNoiseBand(reported) {
+  const r = parseFloat(reported);
+  const director = Number.isFinite(r) && r > 0 ? r : 0;
+  if (!IS_AGENTX) return director || NOISE_BAND_DEFAULT;
+  return Math.max(director, NOISE_BAND_DEFAULT);
+}
 // No timed-repeat knob on purpose: the round count belongs to the lifecycle (bench_e2e.sh derives
 // it from GEAK_REPEAT_MODE + MEASUREMENT_PURPOSE), so a second knob could only disagree with it.
 // Every integrate A/B MUST measure BOTH legs (reference + candidate). When the
@@ -1543,7 +1616,7 @@ function workloadIdentityBlock() {
   return `
 ## WORKLOAD IDENTITY — this run measures a TRACE REPLAY, not a fixed ISL/OSL sweep
 The served load is the AgentX corpus \`${AGENTX.corpus}\` replayed by aiperf under scenario
-\`${AGENTX.scenario}\` (${AGENTX.num_entries} entries, concurrency ${AGENTX.concurrency != null ? AGENTX.concurrency : CONC}).
+\`${AGENTX.scenario}\` (${AGENTX.num_entries} entries, concurrency ${CONC}).
 The CLIENT owns the load: it chooses the request mix, the arrival pattern, its own warmup, and the
 measurement duration. Consequences you must respect:
 
@@ -1562,10 +1635,11 @@ measurement duration. Consequences you must respect:
 * **Client selection and the metric axis are ALREADY configured** in \`$EVAL_DIR/bench_env.sh\`, which
   \`bench_e2e.sh\` sources beside itself on every invocation. Do NOT set \`BENCH_CLIENT\`,
   \`E2E_METRIC\` or any \`AGENTX_*\` variable yourself, and never delete or edit that file.
-* **The graded axis is ${AGENTX_E2E_METRIC === 'total' ? 'TOTAL (input+output) tok/s' : 'OUTPUT tok/s'}.**
+* **The graded axis is ${AXIS_LABEL[AGENTX_METRIC_BASIS]}.**
   \`bench_summary.json\` reports it as \`throughput_tok_s_median\` with
-  \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; on a ~140:1
-  prefill:output trace the output-only axis barely moves for a large real change in work.
+  \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; ${/intvty/.test(AGENTX_METRIC_BASIS)
+    ? 'on this axis it is NOT\n  a tok/s figure but tok/s/user, higher is better. `guard_total_tok_s_median` carries total tok/s\n  beside it and nothing gates on it for you: state it next to every delta you report, because a\n  candidate that raises interactivity by serving less total work has not made the server faster.'
+    : 'on a ~140:1\n  prefill:output trace the output-only axis barely moves for a large real change in work.'}
 * **A measured window is LONG**: ${AGENTX.geak_loop_duration_s}s per search leg,
   ${AGENTX.duration_s}s for parity/validation. Budget your phase around that and do not retry a
   timed-out leg blindly.
@@ -2892,13 +2966,19 @@ if (want('setup')) {
   EVAL_DIR = setup.eval_dir;
   MODEL_NAME = setup.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = setup.baseline_throughput_tok_s;
-  NOISE_BAND = setup.noise_band_pct || NOISE_BAND_DEFAULT;
+  NOISE_BAND = gateNoiseBand(setup.noise_band_pct);
   // Seed flags/env win when provided (baseline was measured on them); else fall
   // back to whatever the director resolved.
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
   curOverlay = INIT_BASE_OVERLAY;
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
+  if (IS_AGENTX) {
+    log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
+      `from ${AGENTX_METRIC_SOURCE}), concurrency ${CONC}, noise band ${NOISE_BAND}% ` +
+      `(Director reported ${setup.noise_band_pct != null ? setup.noise_band_pct : 'none'}%, ` +
+      `workload floor ${NOISE_BAND_DEFAULT}%).`);
+  }
 
   // ── The trace-replay declaration must have TAKEN EFFECT, not merely been sent ──
   // BASELINE_TPUT is the denominator of every gain this run will report, so a
@@ -2958,9 +3038,10 @@ print(json.dumps(res))
       } else if (verdict.basis !== AGENTX_METRIC_BASIS) {
         throw new Error(
           `Setup measured the baseline on metric_basis=${verdict.basis || '<absent>'} but this run ` +
-          `declared ${AGENTX_METRIC_BASIS}. On a prefill-dominated trace the two axes disagree by ` +
-          `more than any optimization this run can find, so the baseline is unusable. Check that ` +
-          `${EVAL_DIR}/bench_env.sh sets E2E_METRIC=${AGENTX_E2E_METRIC} and re-run Setup.`);
+          `declared ${AGENTX_METRIC_BASIS}. The two axes are not comparable, so the baseline is ` +
+          `unusable. Check that ${EVAL_DIR}/bench_env.sh sets E2E_METRIC=${AGENTX_E2E_METRIC} and ` +
+          `that the bench did not inherit another E2E_METRIC (an exported value outranks the ` +
+          `file), then re-run Setup.`);
       } else {
         log(`Setup: trace-replay declaration verified (bench_env.sh present, ` +
           `baseline metric_basis=${verdict.basis}).`);
@@ -3856,7 +3937,7 @@ print(json.dumps(res))
   if (!EVAL_DIR) throw new Error('Non-setup phase requires args.state.eval_dir (or args.eval_dir)');
   MODEL_NAME = ST.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = ST.baseline_throughput_tok_s || 0;
-  NOISE_BAND = ST.noise_band_pct || NOISE_BAND_DEFAULT;
+  NOISE_BAND = gateNoiseBand(ST.noise_band_pct);
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
   curOverlay = ST.overlay || INIT_BASE_OVERLAY;

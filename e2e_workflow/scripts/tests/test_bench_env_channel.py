@@ -23,6 +23,7 @@ so if it is edited or dropped these tests fail instead of passing against a copy
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -35,6 +36,7 @@ BASH = shutil.which("bash")
 SCRIPTS = Path(__file__).resolve().parents[1]
 BENCH_E2E = SCRIPTS / "bench_e2e.sh"
 BENCH_REPLICA = SCRIPTS / "bench_replica.sh"
+WORKFLOW_JS = SCRIPTS.parent / "e2e_workflow.js"
 
 # The names a declaration sets; used to prove the block is inert without a file.
 DECLARED = ("BENCH_CLIENT", "E2E_METRIC", "GEAK_METRIC_BASIS", "GEAK_WORKLOAD_KIND")
@@ -48,10 +50,9 @@ DECLARATION = """\
 #!/usr/bin/env bash
 [ -n "${GEAK_WORKLOAD_KIND:-}" ] || GEAK_WORKLOAD_KIND='agentx_trace_replay'
 [ -n "${BENCH_CLIENT:-}" ] || BENCH_CLIENT='agentx'
-[ -n "${E2E_METRIC:-}" ] || E2E_METRIC='total'
-[ -n "${GEAK_METRIC_BASIS:-}" ] || GEAK_METRIC_BASIS='aggregate_total_token_tok_s'
-[ -n "${REPEATS:-}" ] || REPEATS='1'
-export GEAK_WORKLOAD_KIND BENCH_CLIENT E2E_METRIC GEAK_METRIC_BASIS REPEATS
+[ -n "${E2E_METRIC:-}" ] || E2E_METRIC='p90_intvty_inferencex'
+[ -n "${GEAK_METRIC_BASIS:-}" ] || GEAK_METRIC_BASIS='p90_intvty_inferencex'
+export GEAK_WORKLOAD_KIND BENCH_CLIENT E2E_METRIC GEAK_METRIC_BASIS
 """
 
 
@@ -138,9 +139,9 @@ class BenchEnvChannelTest(unittest.TestCase):
             with self.subTest(script=label):
                 got = self._run(script, declaration=DECLARATION)
                 self.assertEqual(got["BENCH_CLIENT"], "agentx", msg=label)
-                self.assertEqual(got["E2E_METRIC"], "total", msg=label)
+                self.assertEqual(got["E2E_METRIC"], "p90_intvty_inferencex", msg=label)
                 self.assertEqual(
-                    got["GEAK_METRIC_BASIS"], "aggregate_total_token_tok_s", msg=label
+                    got["GEAK_METRIC_BASIS"], "p90_intvty_inferencex", msg=label
                 )
                 self.assertEqual(
                     got["GEAK_WORKLOAD_KIND"], "agentx_trace_replay", msg=label
@@ -207,6 +208,52 @@ class BothBenchScriptsCarryTheChannelTest(unittest.TestCase):
             (SCRIPTS / "bench_env.sh").exists(),
             "scripts/bench_env.sh must never be committed; it is written per run",
         )
+
+
+def _js_table(name: str) -> dict[str, str]:
+    """A flat ``const NAME = { key: 'value', ... };`` table from e2e_workflow.js."""
+    match = re.search(
+        rf"^const {name} = \{{\n(.*?)^\}};", WORKFLOW_JS.read_text(), re.DOTALL | re.MULTILINE
+    )
+    assert match, f"{name} is missing from e2e_workflow.js"
+    return dict(re.findall(r"^\s*(\w+): '([^']*)',", match.group(1), re.MULTILINE))
+
+
+class DeclaredAxisMatchesTheSummaryTest(unittest.TestCase):
+    """The workflow writes E2E_METRIC into bench_env.sh and later checks the baseline's
+    metric_basis against what it declared. Both only hold if its tables say what
+    bench_summarize.py does: a token it does not know is fatal there, and a token it maps
+    to another basis fails Setup after a full baseline replay."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "bench_summarize_for_axis_parity", SCRIPTS / "bench_summarize.py"
+        )
+        cls.summarize = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.summarize)
+        cls.bases = {axis: entry[1] for axis, entry in cls.summarize._BASES.items()}
+
+    def test_every_axis_the_summary_accepts_maps_to_the_same_basis(self):
+        self.assertEqual(_js_table("METRIC_BASIS_OF_AXIS"), self.bases)
+
+    def test_the_token_declared_for_each_basis_measures_that_basis(self):
+        declared = _js_table("AXIS_OF_METRIC_BASIS")
+        self.assertEqual(set(declared), set(self.bases.values()),
+                         "every basis the summary can record needs a token to select it")
+        for basis, axis in declared.items():
+            with self.subTest(basis=basis):
+                self.assertEqual(self.bases.get(axis), basis)
+
+    def test_every_basis_has_a_prompt_label(self):
+        self.assertEqual(set(_js_table("AXIS_LABEL")), set(self.bases.values()))
+
+    def test_the_standalone_default_is_an_interactivity_basis_with_a_guard(self):
+        default = re.search(
+            r"^  metric_basis: '([^']+)',", WORKFLOW_JS.read_text(), re.MULTILINE
+        ).group(1)
+        self.assertEqual(default, self.summarize.P90_INTVTY_BASIS)
+        self.assertIn(default, self.summarize._INTVTY_BASES)
 
 
 if __name__ == "__main__":

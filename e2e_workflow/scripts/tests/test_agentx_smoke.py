@@ -14,7 +14,9 @@ pin that it is.
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -69,7 +71,7 @@ class AgentXSmokeTest(unittest.TestCase):
     def _run(self, *, with_path: bool = True, **env) -> subprocess.CompletedProcess:
         run_env = {
             k: v for k, v in os.environ.items()
-            if k not in ("AIPERF_BIN", "BASE_URL", "MODEL", "INFERENCEX_PATH")
+            if k not in ("AIPERF_BIN", "BASE_URL", "MODEL", "INFERENCEX_PATH", "E2E_METRIC")
         }
         # A real PATH is needed for python3/mktemp; prepend the stub dir.
         run_env["PATH"] = (
@@ -157,6 +159,52 @@ class AgentXSmokeTest(unittest.TestCase):
         proc = self._run(INFERENCEX_PATH=str(self.tmp / "ix"))
         self.assertIn("InferenceX checkout wins", proc.stdout)
 
+    # ── the graded axis has to be IN the mapped row ──
+    # A mapper that omits it still "works", and every leg then summarizes to no number --
+    # discovered only after the baseline's full replay.
+    def _checkout_without_interactivity(self) -> Path:
+        """A checkout whose mapper predates the interactivity fields, as the
+        upstream copy's own fallback mapping does."""
+        bench = self.tmp / "ix_old" / "benchmarks"
+        bench.mkdir(parents=True)
+        (bench / "map_aiperf.py").write_text(
+            textwrap.dedent(
+                """\
+                import json, sys
+                m = json.load(open(sys.argv[1]))["metrics"]
+                out, inp = m["output_token_throughput"]["avg"], m["input_token_throughput"]["avg"]
+                json.dump({"output_throughput": out, "total_token_throughput": out + inp,
+                           "submission_valid": False}, open(sys.argv[2], "w"))
+                """
+            )
+        )
+        return self.tmp / "ix_old"
+
+    def test_the_vendored_mapper_carries_the_default_graded_axis(self):
+        self._stub_aiperf(AGENTX_AIPERF_HELP)
+        proc = self._run()
+        self.assertIn("carries the graded axis (E2E_METRIC=p90_intvty_inferencex", proc.stdout)
+
+    def test_a_checkout_mapper_without_p90_itl_blocks_the_default_axis(self):
+        self._stub_aiperf(AGENTX_AIPERF_HELP)
+        proc = self._run(INFERENCEX_PATH=str(self._checkout_without_interactivity()))
+        self.assertIn("emits nothing for the graded axis", proc.stdout)
+        self.assertIn("unset INFERENCEX_PATH", proc.stdout)
+        self.assertEqual(proc.returncode, 1)
+
+    def test_the_same_checkout_is_fine_for_a_throughput_axis(self):
+        self._stub_aiperf(AGENTX_AIPERF_HELP)
+        proc = self._run(INFERENCEX_PATH=str(self._checkout_without_interactivity()),
+                         E2E_METRIC="total")
+        self.assertIn("carries the graded axis (E2E_METRIC=total", proc.stdout)
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout)
+
+    def test_an_axis_the_summary_cannot_measure_is_a_blocker(self):
+        self._stub_aiperf(AGENTX_AIPERF_HELP)
+        proc = self._run(E2E_METRIC="bogus")
+        self.assertIn("E2E_METRIC=bogus cannot be graded", proc.stdout)
+        self.assertEqual(proc.returncode, 1)
+
     # ── the plumbing ──
     def test_the_profile_window_placement_is_reported_as_steady_state(self):
         self._stub_aiperf(AGENTX_AIPERF_HELP)
@@ -217,6 +265,22 @@ class SmokeScriptShapeTest(unittest.TestCase):
 
     def test_it_documents_its_own_invocation(self):
         self.assertIn("Usage:", SMOKE.read_text())
+
+    def test_it_checks_the_axis_a_standalone_run_is_graded_on(self):
+        """Otherwise the check passes a mapper the run itself cannot grade with."""
+        smoke_axis = re.search(r'GRADED_AXIS="\$\{E2E_METRIC:-([^}]+)\}"', SMOKE.read_text())
+        workflow_basis = re.search(
+            r"^  metric_basis: '([^']+)',",
+            (SCRIPTS.parent / "e2e_workflow.js").read_text(), re.MULTILINE,
+        )
+        self.assertIsNotNone(smoke_axis)
+        self.assertIsNotNone(workflow_basis)
+        spec = importlib.util.spec_from_file_location(
+            "bench_summarize_for_smoke", SCRIPTS / "bench_summarize.py"
+        )
+        summarize = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(summarize)
+        self.assertEqual(summarize._BASES[smoke_axis.group(1)][1], workflow_basis.group(1))
 
 
 if __name__ == "__main__":

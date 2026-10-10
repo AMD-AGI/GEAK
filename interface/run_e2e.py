@@ -1049,6 +1049,14 @@ def apply_bench_client(h: dict) -> str:
     return client
 
 
+# metric_basis -> the E2E_METRIC bench_summarize.py measures it under. The two
+# interactivity bases are absent on purpose: _BASES accepts each one as its own token.
+_E2E_METRIC_FOR_BASIS = {
+    "aggregate_output_tok_s": "output",
+    "aggregate_total_token_tok_s": "total",
+}
+
+
 def apply_workload_spec(h: dict) -> dict:
     """Export AgentX workload identity so bench_e2e.sh drives the trace replay.
 
@@ -1062,10 +1070,9 @@ def apply_workload_spec(h: dict) -> dict:
     exported: dict[str, str] = {}
     os.environ["GEAK_WORKLOAD_KIND"] = WORKLOAD_KIND_AGENTX
     os.environ["GEAK_ISL_OSL_INACTIVE"] = "1"
-    # Long agentic windows: one repeat unless the caller explicitly overrides.
-    if "REPEATS" not in os.environ:
-        os.environ["REPEATS"] = "1"
-        exported["REPEATS"] = "1"
+    # REPEATS is deliberately left alone. bench_e2e.sh already gives the trace-replay
+    # client one window per call, and an exported REPEATS outranks REPLICAS there, so
+    # pinning it here turned an isolated validation's replicas into one.
     mapping = (
         ("scenario", "GEAK_AGENTX_SCENARIO"),
         ("corpus", "AGENTX_DATASET"),
@@ -1099,9 +1106,11 @@ def apply_workload_spec(h: dict) -> dict:
         # driven from a handoff alone graded a 140:1 prefill-heavy trace on the
         # output axis, where a large change in total work barely moves the
         # number. Derive it here, and never overwrite an inherited value so the
-        # orchestrator stays authoritative over its own runs.
+        # orchestrator stays authoritative over its own runs. A basis this build
+        # cannot measure goes through verbatim: bench_summarize.py refuses it by
+        # name, where defaulting to output would grade a different axis silently.
         if "E2E_METRIC" not in os.environ:
-            axis = "total" if "total" in metric_basis else "output"
+            axis = _E2E_METRIC_FOR_BASIS.get(metric_basis, metric_basis)
             os.environ["E2E_METRIC"] = axis
             exported["E2E_METRIC"] = axis
     return exported

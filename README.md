@@ -136,13 +136,14 @@ use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8,
 ### Example — AgentX trace replay
 
 `ISL/OSL=…` above describes a synthetic sweep, where every request has the same shape. An AgentX
-submission instead replays a recorded corpus: the client owns the request mix and the duration, and
-because the corpus is ~140:1 prefill-to-output it is graded on **total** tok/s rather than output-only.
-Say so, and the workflow configures the whole run for it:
+submission instead replays a recorded corpus: the client owns the request mix and the duration. A
+standalone run is graded on **InferenceX P90 interactivity** (`1000 / P90(ITL)` in tok/s/user, the
+x-axis of the InferenceX pareto), with total tok/s reported beside it as a guard. Say so, and the
+workflow configures the whole run for it:
 
 ```
 use path_to_GEAK/e2e_workflow to optimize inference for /models/Kimi-K3 on vllm, gpus 0-7 tp=8,
-workload_kind=agentx_trace_replay (the canonical AgentX corpus; grade on total tok/s).
+workload_kind=agentx_trace_replay (the canonical AgentX corpus, graded on InferenceX P90 interactivity).
 isl/osl 114000/819 are the average shape to OPTIMIZE for, not a benchmark to reproduce.
 ```
 

@@ -12,6 +12,8 @@
 #   bash e2e_workflow/scripts/agentx_smoke.sh                  # environment only
 #   MODEL=/models/Kimi-K3 bash .../agentx_smoke.sh             # also check weights
 #   BASE_URL=http://127.0.0.1:8000 bash .../agentx_smoke.sh    # also replay for real
+#   E2E_METRIC=total bash .../agentx_smoke.sh                  # grade another axis (default
+#                                                              #   p90_intvty_inferencex)
 #
 # With BASE_URL pointing at a SERVER THAT IS ALREADY RUNNING, the last check
 # replays a handful of corpus entries for AGENTX_SMOKE_DURATION_S (default 60)
@@ -33,6 +35,27 @@ warn() { printf '  \033[33mwarn\033[0m    %s\n' "$1"; WARNINGS=$((WARNINGS + 1))
 fail() { printf '  \033[31mBLOCKER\033[0m %s\n' "$1"; BLOCKERS=$((BLOCKERS + 1)); }
 fix()  { printf '          -> %s\n' "$1"; }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+# The axis the run grades on; unset means the workflow's standalone default.
+GRADED_AXIS="${E2E_METRIC:-p90_intvty_inferencex}"
+# _graded FILE -> "<metric_basis> <value|none>" for a mapped result (JSON or JSONL, last row),
+# read through bench_summarize.py's own axis table so this check cannot disagree with the
+# summary about which field an axis needs.
+_graded() {
+  E2E_METRIC="$GRADED_AXIS" "$PY" - "$HERE" "$1" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import bench_summarize as bs
+keys, basis, transform = bs._basis()
+text = open(sys.argv[2]).read()
+try:
+    row = json.loads(text)
+except ValueError:
+    row = json.loads([line for line in text.splitlines() if line.strip()][-1])
+v = bs._axis_num(row, keys, transform)
+print(basis, "none" if v is None else round(v, 3))
+PY
+}
 
 echo "AgentX trace-replay readiness check"
 echo "workflow: $(cd "$HERE/.." && pwd)"
@@ -139,7 +162,7 @@ else
   # Run it, because "the file exists" is not the property that matters.
   _tmp="$(mktemp -d)"
   trap 'rm -rf "$_tmp"' EXIT
-  printf '%s' '{"metadata":{"submission_valid":true},"metrics":{"output_token_throughput":{"avg":1.5},"input_token_throughput":{"avg":210.0},"request_count":3}}' \
+  printf '%s' '{"metadata":{"submission_valid":true},"metrics":{"output_token_throughput":{"avg":1.5},"input_token_throughput":{"avg":210.0},"request_count":3,"inter_token_latency":{"avg":20.0,"p50":19.0,"p90":25.0,"p99":40.0},"time_to_first_token":{"avg":900.0,"p50":880.0,"p90":1500.0},"e2e_output_token_throughput":{"p10":12.0,"p50":30.0}}}' \
     > "$_tmp/export.json"
   if AGENTX_NONCANONICAL_REASONS="smoke" \
        "$PY" "$MAPPER" "$_tmp/export.json" "$_tmp/result.json" >/dev/null 2>"$_tmp/err"; then
@@ -153,6 +176,21 @@ print(r.get("output_throughput"), r.get("total_token_throughput"), r.get("submis
       *" False") pass "client-detected deviations force submission_valid=false" ;;
       *) warn "a stamped deviation did not invalidate the result" ;;
     esac
+    # A mapper that omits the graded field still "works": every leg then summarizes to no
+    # number, and only after its full replay.
+    if _g="$(_graded "$_tmp/result.json" 2>&1)"; then
+      case "$_g" in
+        *" none")
+          fail "the mapper emits nothing for the graded axis (E2E_METRIC=${GRADED_AXIS} -> ${_g% none})"
+          case "$MAPPER" in
+            "$CLIENTS/"*) fix "the vendored map_aiperf.py is out of step with bench_summarize.py" ;;
+            *) fix "unset INFERENCEX_PATH to use GEAK's vendored mapper, or update that checkout" ;;
+          esac ;;
+        *) pass "carries the graded axis (E2E_METRIC=${GRADED_AXIS}: ${_g})" ;;
+      esac
+    else
+      fail "E2E_METRIC=${GRADED_AXIS} cannot be graded: $(printf '%s' "$_g" | tail -c 200)"
+    fi
   else
     fail "the mapper failed on a synthetic export: $(tr -d '\n' < "$_tmp/err" | tail -c 200)"
   fi
@@ -254,9 +292,10 @@ else
 import json,sys
 r=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1])
 print("          output tok/s :", r.get("output_throughput"))
-print("          total  tok/s :", r.get("total_token_throughput"), "(the graded axis)")
+print("          total  tok/s :", r.get("total_token_throughput"))
 print("          valid        :", r.get("submission_valid"), r.get("submission_invalid_reasons"))
 ' "$_out/results.jsonl" 2>/dev/null || true
+      echo "          graded       : $(_graded "$_out/results.jsonl" 2>/dev/null || echo '?')"
       pass "the full chain works: client -> replay -> mapper -> result"
     else
       fail "the replay produced no result; last lines of its log:"

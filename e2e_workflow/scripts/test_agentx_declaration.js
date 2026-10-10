@@ -54,23 +54,35 @@ if (declStart < 0 || !blkMatch) { console.log('\nFAILED: cannot locate the code 
 ok(/function workloadIdentityBlock\(\) \{\s*\n\s*if \(!IS_AGENTX\) return '';/.test(src),
   "workloadIdentityBlock() opens with `if (!IS_AGENTX) return '';`");
 
-// The sliced region now also RESOLVES the kernel-targeting shape, so ISL/OSL and
-// the provenance are outputs of the code under test rather than inputs we inject.
-// Only the three raw arg derivations are mirrored here; the assertions below pin
-// that mirroring to the source so a change there fails this test.
+// The sliced region now also RESOLVES the kernel-targeting shape and the run's
+// concurrency, so ISL/OSL/CONC and the provenance are outputs of the code under
+// test rather than inputs we inject. Only the two raw arg derivations are mirrored
+// here; the assertions below pin that mirroring to the source so a change there
+// fails this test.
 ok(/const ISL_DECLARED = A\.isl != null \? parseInt\(A\.isl, 10\) : null;/.test(src),
   'ISL_DECLARED is derived straight from args.isl (mirrored by this harness)');
 ok(/const OSL_DECLARED = A\.osl != null \? parseInt\(A\.osl, 10\) : null;/.test(src),
   'OSL_DECLARED is derived straight from args.osl (mirrored by this harness)');
 
-function build(args) {
+// The declaration reads an exported E2E_METRIC, so every build runs against an
+// environment this harness controls rather than whatever the shell had.
+const INHERITED_E2E_METRIC = process.env.E2E_METRIC;
+delete process.env.E2E_METRIC;
+function build(args, env) {
   const islDeclared = args.isl != null ? parseInt(args.isl, 10) : null;
   const oslDeclared = args.osl != null ? parseInt(args.osl, 10) : null;
-  const conc = parseInt(args.conc != null ? args.conc : 64, 10);
-  return new Function('A', 'ISL_DECLARED', 'OSL_DECLARED', 'CONC',
-    `${decl}\n${blkMatch[0]}\nreturn { WORKLOAD_KIND, IS_AGENTX, AGENTX, AGENTX_ENV, AGENTX_METRIC_BASIS, AGENTX_E2E_METRIC, ISL, OSL, WORKLOAD, WORKLOAD_SHAPE_PROVENANCE, SHAPE_IS_MEASURED, workloadIdentityBlock };`
-  )(args, islDeclared, oslDeclared, conc);
+  if (env && env.E2E_METRIC != null) process.env.E2E_METRIC = env.E2E_METRIC;
+  try {
+    return new Function('A', 'ISL_DECLARED', 'OSL_DECLARED',
+      `${decl}\n${blkMatch[0]}\nreturn { WORKLOAD_KIND, IS_AGENTX, AGENTX, AGENTX_ENV, AGENTX_METRIC_BASIS, AGENTX_METRIC_SOURCE, AGENTX_E2E_METRIC, CONC, ISL, OSL, WORKLOAD, WORKLOAD_SHAPE_PROVENANCE, SHAPE_IS_MEASURED, workloadIdentityBlock };`
+    )(args, islDeclared, oslDeclared);
+  } finally {
+    delete process.env.E2E_METRIC;
+  }
 }
+const buildError = (args, env) => {
+  try { build(args, env); return ''; } catch (e) { return String(e && e.message); }
+};
 
 // ── 1. Synthetic (no declaration) is completely inert ───────────────────────────────────────────
 console.log('\n# no declaration => the fixed ISL/OSL path cannot notice this feature');
@@ -87,6 +99,10 @@ for (const [label, args] of [
   ok(m.IS_AGENTX === false, `${label}: IS_AGENTX false`);
   ok(m.workloadIdentityBlock() === '', `${label}: role prompts get '' (byte-identical)`);
 }
+ok(build({ conc: 8 }).WORKLOAD.conc === 8 && build({}).WORKLOAD.conc === 64,
+  'a synthetic run keeps args.conc and the 64 default exactly as before');
+ok(build({}, { E2E_METRIC: 'bogus' }).AGENTX_ENV === '',
+  'a synthetic run never reads E2E_METRIC, so even an unknown exported axis cannot touch it');
 
 // A malformed workload_spec must not switch the workload on, and must not throw either.
 for (const bad of [null, 'agentx_trace_replay', 42, []]) {
@@ -109,8 +125,12 @@ ok(sc.AGENTX.scenario === 'inferencex-agentx-mvp', 'canonical scenario');
 // ~256k-context servers; the campaign serves at 1048576, so replaying it would
 // measure a lighter workload and produce a baseline nothing can be compared to.
 ok(sc.AGENTX.corpus === 'semianalysis_cc_traces_weka_062126', 'canonical full-context weka corpus');
-ok(sc.AGENTX_METRIC_BASIS === 'aggregate_total_token_tok_s', 'graded on total tokens by default');
-ok(sc.AGENTX_E2E_METRIC === 'total', "metric basis maps to E2E_METRIC=total");
+ok(sc.AGENTX_METRIC_BASIS === 'p90_intvty_inferencex',
+  'graded on InferenceX P90 interactivity by default');
+ok(sc.AGENTX_E2E_METRIC === 'p90_intvty_inferencex',
+  'the default basis is selected by its own E2E_METRIC token');
+ok(sc.AGENTX_METRIC_SOURCE === 'the standalone default', 'and the run says where the axis came from');
+ok(sc.CONC === 8 && sc.WORKLOAD.conc === 8, 'args.conc still sets the concurrency when the spec has none');
 
 // nested spec spelling must be equivalent to the shorthand
 const nested = build({ workload_spec: { kind: 'agentx_trace_replay' }, conc: 8 });
@@ -135,12 +155,16 @@ ok(sc.AGENTX_ENV.startsWith('#!/usr/bin/env bash'), 'the body is a sourceable ba
 console.log('\n# the declaration sets what bench_e2e.sh and the client adapter read');
 const has = (name, val) => new RegExp(`\\[ -n "\\$\\{${name}:-\\}" \\] \\|\\| ${name}='${val}'$`, 'm').test(sc.AGENTX_ENV);
 ok(has('BENCH_CLIENT', 'agentx'), 'BENCH_CLIENT=agentx (the trace-replay client, not a synthetic sweep)');
-ok(has('E2E_METRIC', 'total'), 'E2E_METRIC=total (the axis bench_e2e.sh medians)');
-ok(has('GEAK_METRIC_BASIS', 'aggregate_total_token_tok_s'), 'GEAK_METRIC_BASIS records the declared basis');
+ok(has('E2E_METRIC', 'p90_intvty_inferencex'), 'E2E_METRIC=p90_intvty_inferencex (the axis bench_e2e.sh medians)');
+ok(has('GEAK_METRIC_BASIS', 'p90_intvty_inferencex'), 'GEAK_METRIC_BASIS records the declared basis');
 ok(has('GEAK_ISL_OSL_INACTIVE', '1'), 'GEAK_ISL_OSL_INACTIVE=1 (adapters refuse to treat isl/osl as the load)');
 ok(has('GEAK_WORKLOAD_KIND', 'agentx_trace_replay'), 'GEAK_WORKLOAD_KIND names the workload');
-ok(has('REPEATS', '1'), 'REPEATS=1 (a duration-bounded window is not repeated 3x)');
+// An explicit REPEATS outranks REPLICAS in bench_e2e.sh, so declaring one here collapsed isolated
+// validation's replicas to one; bench_e2e.sh gives the agentx client one round per call itself.
+ok(!/REPEATS/.test(sc.AGENTX_ENV), 'REPEATS is not declared, so REPLICAS keeps its meaning');
 ok(has('CONC', '8'), 'CONC comes from the declaration');
+ok(has('AGENTX_CANONICAL_DATASET', 'semianalysis_cc_traces_weka_062126')
+  && has('AGENTX_CANONICAL_DURATION', '3600'), 'the canonical reference is declared');
 ok(has('AGENTX_NUM_ENTRIES', '393') && has('GEAK_AGENTX_DURATION_S', '3600')
   && has('GEAK_AGENTX_LOOP_DURATION_S', '900'), 'corpus size and both durations are declared');
 ok(has('AGENTX_WARMUP_REQUESTS_PER_LANE', '10') && has('AGENTX_WARMUP_GRACE_PERIOD', '1800'),
@@ -179,13 +203,77 @@ ok(ov.AGENTX.num_entries === 50 && ov.AGENTX.geak_loop_duration_s === 300, 'name
 ok(ov.AGENTX.duration_s === 3600, 'unnamed fields keep the canonical value');
 ok(ov.AGENTX_E2E_METRIC === 'output', 'an output basis maps to E2E_METRIC=output');
 ok(/\|\| E2E_METRIC='output'$/m.test(ov.AGENTX_ENV), 'the output basis reaches the env body');
-ok(/\|\| CONC='16'$/m.test(ov.AGENTX_ENV), 'spec concurrency wins over args.conc');
-ok(/\|\| AGENTX_CANONICAL_DATASET='my_corpus'$/m.test(ov.AGENTX_ENV),
-  'canonical dataset defaults to the pinned corpus when not stated separately');
+ok(/\|\| CONC='16'$/m.test(ov.AGENTX_ENV), 'spec concurrency reaches the env body');
+
+// Roles pass WORKLOAD.conc on every bench line as CONC=<conc>, and a command-line value outranks
+// bench_env.sh. A spec concurrency that reached only the env body was overridden on every bench.
+const both = build({ conc: 64, workload_spec: { kind: 'agentx_trace_replay', concurrency: 16 } });
+ok(both.CONC === 16 && both.WORKLOAD.conc === 16,
+  'spec concurrency wins over args.conc for WORKLOAD.conc too, so bench lines carry it');
+ok(/\|\| CONC='16'$/m.test(both.AGENTX_ENV) && /concurrency 16\)/.test(both.workloadIdentityBlock()),
+  'and the env body and the prompt state that same concurrency');
+
+// The canonical reference must not follow an override: a replay of another corpus or window is
+// exactly what has to come back stamped non-canonical.
+ok(/\|\| AGENTX_CANONICAL_DATASET='semianalysis_cc_traces_weka_062126'$/m.test(ov.AGENTX_ENV),
+  'overriding the corpus leaves the canonical dataset on the standard corpus');
+const shortWindow = build({ workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800 } });
+ok(/\|\| GEAK_AGENTX_DURATION_S='1800'$/m.test(shortWindow.AGENTX_ENV)
+  && /\|\| AGENTX_CANONICAL_DURATION='3600'$/m.test(shortWindow.AGENTX_ENV),
+  'overriding the window leaves the canonical duration at 3600s');
+const moved = build({ workload_spec: { kind: 'agentx_trace_replay',
+  corpus: 'semianalysis_cc_traces_weka_062126_256k',
+  canonical_corpus: 'semianalysis_cc_traces_weka_062126_256k', canonical_duration_s: 1800 } });
+ok(/\|\| AGENTX_CANONICAL_DATASET='semianalysis_cc_traces_weka_062126_256k'$/m.test(moved.AGENTX_ENV)
+  && /\|\| AGENTX_CANONICAL_DURATION='1800'$/m.test(moved.AGENTX_ENV),
+  'declaring canonical_corpus / canonical_duration_s still moves the reference itself');
 
 // Values are shell-quoted, so a corpus name containing a quote cannot break the sourced file.
 const nasty = build({ workload_spec: { kind: 'agentx_trace_replay', corpus: "a'b" } });
 ok(/\|\| AGENTX_DATASET='a'\\''b'/.test(nasty.AGENTX_ENV), 'values are single-quote escaped for the shell');
+
+// ── 5b. The graded axis: declared, else exported, else the standalone default ─────────────────
+console.log('\n# the axis is resolved once, in the order the bench itself will honour');
+const axisOf = (basis) => build({ workload_spec: { kind: 'agentx_trace_replay', metric_basis: basis } });
+for (const [basis, axis] of [
+  ['aggregate_total_token_tok_s', 'total'],
+  ['aggregate_output_tok_s', 'output'],
+  ['e2e_norm_intvty_p90', 'e2e_norm_intvty_p90'],
+  ['p90_intvty_inferencex', 'p90_intvty_inferencex'],
+]) {
+  const m = axisOf(basis);
+  ok(m.AGENTX_METRIC_BASIS === basis && m.AGENTX_E2E_METRIC === axis
+    && m.AGENTX_METRIC_SOURCE === 'workload_spec.metric_basis',
+    `a declared ${basis} selects E2E_METRIC=${axis}`);
+}
+ok(axisOf('total').AGENTX_METRIC_BASIS === 'aggregate_total_token_tok_s'
+  && axisOf('intvty').AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p90',
+  "bench_summarize.py's own axis tokens are accepted as a basis and normalised");
+ok(/not an axis bench_summarize\.py measures/.test(buildError(
+  { workload_spec: { kind: 'agentx_trace_replay', metric_basis: 'e2e_norm_intvty_p75' } })),
+  'an unknown basis fails at load, before a server is launched, instead of grading output');
+
+// An exported E2E_METRIC outranks bench_env.sh, so it is what the bench will measure.
+const exported = build({ workload_kind: 'agentx_trace_replay' }, { E2E_METRIC: 'total' });
+ok(exported.AGENTX_METRIC_BASIS === 'aggregate_total_token_tok_s'
+  && exported.AGENTX_METRIC_SOURCE === 'the exported E2E_METRIC',
+  'with no declared basis, an exported E2E_METRIC decides (Setup then checks the right axis)');
+ok(/outranks bench_env\.sh/.test(buildError({ workload_spec: { kind: 'agentx_trace_replay',
+  metric_basis: 'p90_intvty_inferencex' } }, { E2E_METRIC: 'total' })),
+  'a declared basis that an exported E2E_METRIC contradicts is refused at load');
+ok(buildError({ workload_spec: { kind: 'agentx_trace_replay', metric_basis: 'e2e_norm_intvty_p90' } },
+  { E2E_METRIC: 'intvty' }) === '',
+  'an exported alias of the declared axis is the same axis, so it is accepted');
+ok(/not an axis/.test(buildError({ workload_kind: 'agentx_trace_replay' }, { E2E_METRIC: 'bogus' })),
+  'an exported axis bench_summarize.py cannot measure fails at load too');
+const exportedBasisName = buildError({ workload_kind: 'agentx_trace_replay' },
+  { E2E_METRIC: 'aggregate_total_token_tok_s' });
+ok(/the exported E2E_METRIC 'aggregate_total_token_tok_s' is not an axis/.test(exportedBasisName),
+  'an exported basis NAME is refused as the bench would refuse it, and the error names the export, ' +
+  'not a declaration nobody made');
+ok(/the exported E2E_METRIC 'bogus'/.test(buildError({ workload_spec: { kind: 'agentx_trace_replay',
+  metric_basis: 'total' } }, { E2E_METRIC: 'bogus' })),
+  'a valid declaration does not hide an exported axis the bench would fail on');
 
 // ── 6. The prompt block states the traps this workload sets ─────────────────────────────────────
 console.log('\n# every role is told what it is measuring');
@@ -200,6 +288,12 @@ ok(/Do NOT set/.test(blk) && /BENCH_CLIENT/.test(blk), 'roles are told not to se
 ok(/ISL=<isl> OSL=<osl> CONC=<conc>/.test(blk),
   'roles are told to keep their existing bench line unchanged (no role-file churn needed)');
 ok(/throughput_tok_s_median/.test(blk), 'the metric-neutral summary key is named');
+ok(/InferenceX P90 interactivity/.test(blk) && /tok\/s\/user/.test(blk)
+  && /guard_total_tok_s_median/.test(blk),
+  'on the default axis the prompt names its unit and the total-throughput guard beside it');
+const totalBlk = axisOf('aggregate_total_token_tok_s').workloadIdentityBlock();
+ok(/TOTAL \(input\+output\) tok\/s/.test(totalBlk) && !/guard_total/.test(totalBlk),
+  'a declared throughput axis keeps the throughput wording, with no guard to report');
 ok(blk.includes(String(sc.AGENTX.geak_loop_duration_s)) && blk.includes(String(sc.AGENTX.duration_s)),
   'both measurement windows are stated so phases can budget');
 ok(/non-canonical/.test(blk) && /submission_valid=false/.test(blk),
@@ -295,6 +389,7 @@ ok(/keep the two separate\.\n\$\{workloadIdentityBlock\(\)\}\n## Inputs/.test(sr
   'block is interpolated on its own line between the serving invariant and ## Inputs, ' +
   'so an empty block leaves the original blank line exactly as it was');
 
+if (INHERITED_E2E_METRIC !== undefined) process.env.E2E_METRIC = INHERITED_E2E_METRIC;
 console.log(failures === 0
   ? '\nPASS: no declaration => fixed ISL/OSL is byte-identical; a declaration is authority-ordered.'
   : `\nFAILED: ${failures} assertion(s).`);

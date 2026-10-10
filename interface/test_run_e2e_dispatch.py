@@ -688,7 +688,10 @@ class TestBenchClient(_RunE2ECase):
         self.assertEqual(os.environ["GEAK_WORKLOAD_KIND"], rx.WORKLOAD_KIND_AGENTX)
         self.assertEqual(os.environ["GEAK_ISL_OSL_INACTIVE"], "1")
         self.assertEqual(os.environ["AGENTX_DATASET"], "semianalysis_cc_traces_weka_062126")
-        self.assertEqual(exported["REPEATS"], "1")
+        # bench_e2e.sh gives the trace client one round per call itself; an exported
+        # REPEATS would outrank REPLICAS and collapse an isolated validation to one replica.
+        self.assertNotIn("REPEATS", exported)
+        self.assertNotIn("REPEATS", os.environ)
         self.assertEqual(os.environ["GEAK_METRIC_BASIS"], "aggregate_output_tok_s")
         self.assertEqual(exported["GEAK_METRIC_BASIS"], "aggregate_output_tok_s")
 
@@ -743,6 +746,36 @@ class TestBenchClient(_RunE2ECase):
         os.environ.pop("E2E_METRIC", None)
         rx.apply_workload_spec({"workload": {"isl": 1024}})
         self.assertNotIn("E2E_METRIC", os.environ)
+
+    def test_an_interactivity_basis_is_selected_by_its_own_token(self):
+        """The old derivation knew only total/output, so either interactivity
+        basis was silently graded on the output axis."""
+        for basis in ("p90_intvty_inferencex", "e2e_norm_intvty_p90"):
+            with self.subTest(basis=basis):
+                for var in ("E2E_METRIC", "GEAK_METRIC_BASIS"):
+                    os.environ.pop(var, None)
+                exported = rx.apply_workload_spec(self._agentx_spec(metric_basis=basis))
+                self.assertEqual(os.environ["E2E_METRIC"], basis)
+                self.assertEqual(exported["E2E_METRIC"], basis)
+
+    def test_a_basis_this_build_cannot_measure_is_passed_through_by_name(self):
+        """bench_summarize.py refuses an unknown E2E_METRIC by name; defaulting
+        to output here would grade a different axis without saying so."""
+        os.environ.pop("E2E_METRIC", None)
+        rx.apply_workload_spec(self._agentx_spec(metric_basis="e2e_norm_intvty_p75"))
+        self.assertEqual(os.environ["E2E_METRIC"], "e2e_norm_intvty_p75")
+
+    def test_every_basis_the_summary_records_round_trips_through_its_token(self):
+        spec = importlib.util.spec_from_file_location(
+            "bench_summarize_for_dispatch", rx.E2E_DIR / "scripts" / "bench_summarize.py"
+        )
+        summarize = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(summarize)
+        bases = {entry[1] for entry in summarize._BASES.values()}
+        for basis in bases:
+            with self.subTest(basis=basis):
+                axis = rx._E2E_METRIC_FOR_BASIS.get(basis, basis)
+                self.assertEqual(summarize._BASES[axis][1], basis)
 
     def test_explicit_inferencex_without_path_degrades_loudly(self):
         """Silently measuring with a different client than the orchestrator is

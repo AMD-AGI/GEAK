@@ -89,7 +89,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   1. the real environment (an orchestrator's export ALWAYS wins),
 #   2. this file (the standalone declaration),
 #   3. the defaults further down (synthetic ISL/OSL sweep).
-# The file must therefore only ever assign with `: "${VAR:=...}"`, never `VAR=`.
+# The file must therefore only ever assign an unset-or-empty name
+# (`[ -n "${VAR:-}" ] || VAR='...'`), never a bare `VAR=`.
 # When it does not exist NOTHING here runs, so a synthetic run is byte-identical
 # to one from before this channel existed.
 BENCH_ENV_FILE="${BENCH_ENV_FILE:-$HERE/bench_env.sh}"
@@ -148,7 +149,6 @@ fi
 # outranks the validation pin above: run_e2e.py pins GEAK_REPEAT_MODE into os.environ for the whole
 # process tree, so in an orchestrated run the mode is ALWAYS already set and a default-only
 # carve-out was a no-op exactly where it was needed.
-# Reads PROFILE/REPEATS, which standalone arrive from bench_env.sh -- hence its sourcing stays above.
 if [ "${PROFILE:-0}" = "1" ] && [ "${GEAK_REPEAT_MODE:-legacy}" != "legacy" ]; then
   echo ">>> PROFILE=1: using the single-server profiling lifecycle (not a timed measurement;" \
        "was ${GEAK_REPEAT_MODE})."
@@ -493,7 +493,12 @@ NUM_WARMUPS=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
 # (lengths sampled in [(1-ratio)*len, (1+ratio)*len]), and the caller may use
 # either. Standalone default = fixed-length (matches infer.sh --random-range-ratio 0).
 RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0}
-REPEATS=${REPEATS:-3}                 # repeat the bench this many times; report median + spread
+# A trace-replay client owns its duration, so one call is one full measured window and three of
+# them would triple a 900s leg. Defaulted HERE rather than exported by the caller: an explicit
+# REPEATS outranks REPLICAS above, and both multi-sample lifecycles have already set their own.
+_repeats_default=3
+[ "$BENCH_CLIENT" = "agentx" ] && _repeats_default=1
+REPEATS=${REPEATS:-$_repeats_default}  # repeat the bench this many times; report median + spread
 SEED=${SEED:-0}                       # fixed seed for reproducibility / parity
 
 # ---- client trust-remote-code (general, model-agnostic) ----
