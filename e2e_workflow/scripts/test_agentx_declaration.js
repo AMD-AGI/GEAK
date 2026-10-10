@@ -389,6 +389,91 @@ ok(/keep the two separate\.\n\$\{workloadIdentityBlock\(\)\}\n## Inputs/.test(sr
   'block is interpolated on its own line between the serving invariant and ## Inputs, ' +
   'so an empty block leaves the original blank line exactly as it was');
 
+// ── 9. The KB address does not move when the measured shape is installed ────────────────────────
+// This is the one assertion that defends the KB, not the prompt. adoptMeasuredShape() rewrites
+// ISL/OSL mid-run with what the baseline actually served, and kbIdentityFlags() reads ISL/OSL at
+// call time. While the agentx address carried isl_/osl_, that meant the writer and a later reader
+// addressed different pages for the same deployment: a 404 that is indistinguishable from "never
+// recorded", and -- worse -- a new session_id every run, so the replace-on-rebench digest never
+// fires and the attestation ledger silently resets. The address now names the WORKLOAD KIND and
+// the concurrency instead, both of which are fixed before the baseline starts.
+// --isl/--osl are still SENT on the agentx path and still move: e2e_store.py records them as
+// value["observed_shape"], outside value["workload"] and so outside _content_digest. What must not
+// move is the part of the argv the address is built from, which is what this section compares.
+// That kb/identity.py actually drops isl/osl from an agentx address is pinned on the Python side
+// (kb/tests/test_identity.py::test_an_agentx_address_survives_two_different_observed_shapes).
+console.log('\n# the measured shape moves the prompt, never the KB address');
+const addressing = (flags) => flags.replace(/ --isl \d+ --osl \d+/, '');
+function buildIdentity(args) {
+  const islDeclared = args.isl != null ? parseInt(args.isl, 10) : null;
+  const oslDeclared = args.osl != null ? parseInt(args.osl, 10) : null;
+  // Stubs for the names kbIdentityFlags() closes over that live outside the sliced region.
+  // SERVING_TP/SERVING_EP are parsed from args once at startup, before any bench runs, which is
+  // precisely why they cannot drift; the shape is the only live input to this function.
+  const preamble = `const log = () => {};\n${shqSrc}\n`
+    + `const BACKEND = 'sglang';\n const SERVING_TP = 8;\n const SERVING_EP = 1;\n`
+    + `const KB_DIMS = { model: 'M', gfx: 'gfx950', framework_version: '0.5.19',`
+    + ` precision: 'mxfp4', rocm_version: '7.2.0' };\n`;
+  return new Function('A', 'ISL_DECLARED', 'OSL_DECLARED',
+    `${preamble}${decl}\n${kbFlagsSrc}\n`
+    + `return { kbIdentityFlags, adoptMeasuredShape, get ISL() { return ISL; }, `
+    + `get OSL() { return OSL; }, get PROV() { return WORKLOAD_SHAPE_PROVENANCE; } };`
+  )(args, islDeclared, oslDeclared);
+}
+const kbFlagsMatch = src.match(/function kbIdentityFlags\(\) \{[\s\S]*?\n\}/);
+ok(!!kbFlagsMatch, 'kbIdentityFlags() defined');
+const kbFlagsSrc = kbFlagsMatch ? kbFlagsMatch[0] : 'function kbIdentityFlags() { return ""; }';
+const shqSrc = src.match(/^const shq = .*$/m)[0];
+const adoptAt = src.indexOf('function adoptMeasuredShape');
+ok(adoptAt > declStart && adoptAt < declEnd,
+  'adoptMeasuredShape() lives inside the sliced region, so the real one is under test');
+
+for (const [label, args] of [
+  ['agentx shorthand', { workload_kind: 'agentx_trace_replay', conc: 10 }],
+  ['agentx with a declared shape', { workload_kind: 'agentx_trace_replay', conc: 10, isl: 4096, osl: 512 }],
+]) {
+  const m = buildIdentity(args);
+  const before = m.kbIdentityFlags();
+  ok(m.adoptMeasuredShape(146713, 1109, 'baseline') === true, `${label}: the baseline shape is adopted`);
+  const mid = m.kbIdentityFlags();
+  ok(m.adoptMeasuredShape(89000, 900, 'a later leg') === true, `${label}: a second, different shape is adopted`);
+  const after = m.kbIdentityFlags();
+  ok(addressing(before) === addressing(mid) && addressing(mid) === addressing(after),
+    `${label}: the addressing flags are byte-identical across two shape adoptions`
+    + (addressing(before) === addressing(after) ? ''
+       : `\n        before: ${addressing(before)}\n        after:  ${addressing(after)}`));
+  ok(before !== after && / --isl 89000 --osl 900/.test(after),
+    `${label}: the measured shape still reaches the record as the observed shape`);
+  ok(m.ISL === 89000 && m.OSL === 900 && m.PROV === 'agentx_measured_this_run',
+    `${label}: the shape itself DID move (the roles still size kernels against it)`);
+  ok(/--workload-kind 'agentx_trace_replay'/.test(after) && /--conc 10/.test(after),
+    `${label}: the argv states the declared kind and the fixed concurrency`);
+}
+// conc is the one addressing dimension the agentx segment still carries, so the page is only
+// honest if it is the concurrency the replay ACTUALLY ran. The spec outranks args.conc for both
+// the env body and the prompt (section 4); it has to outrank it here too, or the address names a
+// concurrency nothing was measured at.
+{
+  const m = buildIdentity({ conc: 64, workload_spec: { kind: 'agentx_trace_replay', concurrency: 16 } });
+  const flags = m.kbIdentityFlags();
+  ok(/--conc 16/.test(flags) && !/--conc 64/.test(flags),
+    'the address names the concurrency the replay runs, not the ignored args.conc');
+}
+
+// The synthetic path has no adoption at all, so its flags are a constant by construction;
+// assert it anyway, because that is the byte-identity claim this whole file exists to make.
+{
+  const m = buildIdentity({ isl: 4096, osl: 512, conc: 64 });
+  const before = m.kbIdentityFlags();
+  ok(m.adoptMeasuredShape(146713, 1109, 'nowhere') === true,
+    'synthetic: adoptMeasuredShape() is not gated on IS_AGENTX, so it would fire if ever called');
+  ok(m.kbIdentityFlags() !== before,
+    'synthetic: the address DOES still carry isl/osl -- unchanged from the pre-agentx scheme, ' +
+    'and safe there because nothing on that path ever calls adoptMeasuredShape()');
+  ok(/--isl 4096 --osl 512 --conc 64/.test(before),
+    'synthetic: the declared shape reaches the argv exactly as it always did');
+}
+
 if (INHERITED_E2E_METRIC !== undefined) process.env.E2E_METRIC = INHERITED_E2E_METRIC;
 console.log(failures === 0
   ? '\nPASS: no declaration => fixed ISL/OSL is byte-identical; a declaration is authority-ordered.'

@@ -19,6 +19,11 @@ from kb.attest import should_retire                                          # n
 from kb.retract import is_retired, retracted_document, retraction_ok        # noqa: E402
 from kb.store_local import KBStoreError, LocalKBStore                       # noqa: E402
 
+# The only hand-written e2e canonical id in the repository, and so the byte-level evidence that
+# adding ep and the agentx workload segment moved NO existing address: this argv states neither,
+# `counted()` refuses to invent what it was not told, and the id below is unchanged. If a future
+# change makes ep implicit, this literal is where it will be caught -- every other reader and
+# writer computes the id from kb/identity.py and would drift together, silently.
 CID = "geak:e2e:m:gfx950:vllm:0.26.0:fp8:tp_8:isl_1024:osl_1024:conc_64"
 IDENTITY = ["--model", "M", "--gfx", "gfx950", "--framework", "vllm",
             "--framework-version", "0.26.0", "--precision", "fp8",

@@ -42,10 +42,10 @@ def _result(path, tput=1000.0, baseline=800.0, **extra):
     return str(path)
 
 
-def _write(tmp_path, name, direction, *args, tput=1000.0, **extra):
+def _write(tmp_path, name, direction, *args, tput=1000.0, identity=IDENTITY, **extra):
     result = _result(tmp_path / (name + ".json"), tput=tput, **extra)
     return _run("write", "--store", str(tmp_path / "store"), "--result", result,
-                "--direction", direction, "--apply", *args)
+                "--direction", direction, "--apply", *args, identity=identity)
 
 
 # -- identity -----------------------------------------------------------------------------------
@@ -1141,3 +1141,221 @@ def test_the_reference_prose_names_ran_and_lost_separately(tmp_path):
     _run("resolve", "--store", str(tmp_path / "store"), "--refs-dir", str(tmp_path / "refs"))
     prose = "\n".join(p.read_text() for p in (tmp_path / "refs").glob("e2e_reference_*.md"))
     assert "2 ran and did not win" in prose
+
+
+# -- agentx addressing: a trace replay is addressed by its corpus, not by what it observed --------
+
+AGENTX_IDENTITY = ["--model", "M", "--gfx", "gfx950", "--framework", "vllm",
+                   "--framework-version", "0.26.0", "--precision", "fp8",
+                   "--tp", "8", "--ep", "1", "--workload-kind", "agentx_trace_replay",
+                   "--conc", "10", "--isl", "146713", "--osl", "1109"]
+
+AGENTX_WORKLOAD = {"kind": "agentx_trace_replay", "shape_provenance": "agentx_measured_this_run",
+                   "scenario": "inferencex-agentx-mvp",
+                   "corpus": "semianalysis_cc_traces_weka_062126",
+                   "num_entries": 393, "duration_s": 3600}
+
+
+def _agentx_identity(isl, osl):
+    out = list(AGENTX_IDENTITY)
+    out[out.index("--isl") + 1] = str(isl)
+    out[out.index("--osl") + 1] = str(osl)
+    return out
+
+
+def test_two_agentx_runs_with_different_observed_shapes_replace_one_record(tmp_path):
+    """The headline invariant, and the one most easily undone by accident.
+
+    Two replays of the same corpus on the same configuration observe different mean sequence
+    lengths. They are the same measurement repeated, so the second must REPLACE the first: same
+    address, same session id, one candidate. Addressing (or hashing) the observed shape instead
+    gives a fresh page and a fresh session every run — the reader stops at a page holding exactly
+    one record and calls it a cold start, and the attestation ledger restarts from empty.
+    """
+    first = _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
+                   workload=AGENTX_WORKLOAD)
+    second = _write(tmp_path, "b", "config", identity=_agentx_identity(89000, 900),
+                    workload=AGENTX_WORKLOAD)
+    assert first["session_id"] == second["session_id"]
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0",
+               identity=_agentx_identity(89000, 900))
+    assert len(out["candidates"]) == 1
+    assert out["canonical_id"].endswith("tp_8:ep_1:wl_agentx:conc_10")
+
+
+def test_the_observed_shape_is_recorded_though_it_is_not_addressed(tmp_path):
+    """Dropping it from the address must not drop it from the record: nothing else says what regime
+    the accepted kernels were chosen for."""
+    _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
+           workload=AGENTX_WORKLOAD)
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0",
+               identity=_agentx_identity(146713, 1109))
+    candidate = out["candidates"][0]
+    assert candidate["observed_shape"] == {"isl": 146713, "osl": 1109,
+                                           "provenance": "agentx_measured_this_run"}
+    # The corpus, for the day a second one is graded and the pages have to be split.
+    assert candidate["workload_spec"]["corpus"] == "semianalysis_cc_traces_weka_062126"
+    # And the addressed dimensions carry no shape at all.
+    assert candidate["workload"] == {"tp": 8, "ep": 1, "conc": 10}
+
+
+def test_the_agentx_repro_script_names_the_corpus_not_isl_osl(tmp_path):
+    """adapters/clients/agentx.sh ignores ISL/OSL — the corpus owns the sequence lengths. A repro
+    script that exported them would state a shape nothing reads for a run that has no such knob."""
+    _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
+           workload=AGENTX_WORKLOAD)
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0",
+               "--cache-dir", str(tmp_path / "mat"), identity=_agentx_identity(146713, 1109))
+    scripts = list((tmp_path / "mat").rglob("*.sh"))
+    text = "\n".join(p.read_text() for p in scripts)
+    assert out["candidates"]
+    assert "AGENTX_DATASET='semianalysis_cc_traces_weka_062126'" in text
+    assert "GEAK_AGENTX_SCENARIO='inferencex-agentx-mvp'" in text
+    assert "BENCH_CLIENT='agentx'" in text
+    assert "\n  ISL=" not in text and "\n  OSL=" not in text
+
+
+def test_ep_reaches_the_record_and_the_attest_evidence(tmp_path):
+    written = _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
+                     workload=AGENTX_WORKLOAD)
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0",
+               identity=_agentx_identity(146713, 1109))
+    assert out["candidates"][0]["workload"]["ep"] == 1
+    attested = _run("attest", "--store", str(tmp_path / "store"), "--apply",
+                    "--session-id", written["session_id"], "--outcome", "validated",
+                    identity=_agentx_identity(146713, 1109))
+    assert attested["applied"]
+
+
+def test_the_preep_compat_rung_is_tried_after_the_canonical_ladder(tmp_path):
+    """Every record already in the store was filed before ep and the agentx segment existed. The
+    read has to reach them, and reach them at the rung that still says which deployment they are —
+    not only at the base page where every tp, ep and workload on this stack are piled together."""
+    pre_ep = ["--model", "M", "--gfx", "gfx950", "--framework", "vllm",
+              "--framework-version", "0.26.0", "--precision", "fp8",
+              "--tp", "8", "--isl", "146713", "--osl", "1109", "--conc", "10"]
+    _write(tmp_path, "old", "config", identity=pre_ep)
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0",
+               identity=_agentx_identity(146713, 1109))
+    assert out["candidates"] and out["candidates"][0]["match_tier"] == "legacy_preep"
+    # Tried in specificity order: the canonical exact rung first, the compat exact rung next, and
+    # only then anything coarser. Appending the compat ladder whole would put the canonical BASE
+    # page ahead of it, and the read would answer from there instead.
+    assert out["tried"][0].endswith("wl_agentx:conc_10")
+    assert out["tried"][1].endswith("isl_146713:osl_1109:conc_10")
+
+
+def test_the_compat_ladder_never_receives_a_write(tmp_path):
+    """A rescue rung that also accepts writes splits one deployment's history across two addresses
+    forever — the state the new address exists to end."""
+    written = _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
+                     workload=AGENTX_WORKLOAD)
+    assert all("isl_" not in r["canonical_id"] for r in written["rungs"])
+    identity = _run("identity", identity=_agentx_identity(146713, 1109))
+    assert [r["tier"] for r in identity["ladder"]] == ["exact", "workload_any", "tp_any"]
+    assert [r["tier"] for r in identity["legacy_read_only"]] == \
+        ["legacy_preep", "legacy_preep_workload_any"]
+
+
+def test_a_synthetic_run_records_no_observed_shape_block(tmp_path):
+    """A synthetic run's shape IS its address; the two new blocks stay absent so its record is
+    byte-identical to one written before they existed."""
+    _write(tmp_path, "a", "tuned")
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0")
+    candidate = out["candidates"][0]
+    assert candidate["observed_shape"] == {} and candidate["workload_spec"] == {}
+    assert candidate["workload"] == {"tp": 8, "isl": 1024, "osl": 1024, "conc": 64}
+
+
+# -- metric basis ---------------------------------------------------------------------------------
+# One page, several axes. bench_summarize.py grades on five bases and keeps adding them, and this
+# deployment's page has already carried ~64763 (total tokens/s), ~471 (output tokens/s) and ~81
+# (P90 interactivity) at the same time. The address deliberately does not name the basis -- five
+# sparse pages serve nobody -- so the record carries it as a label and the READER states which one
+# it is asking about.
+
+
+def test_the_basis_is_recorded_from_the_result(tmp_path):
+    _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
+           workload=AGENTX_WORKLOAD, metric_basis="p90_intvty_inferencex")
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0",
+               identity=_agentx_identity(146713, 1109))
+    assert out["candidates"][0]["metric_basis"] == "p90_intvty_inferencex"
+
+
+def test_the_flag_overrides_what_the_result_claims(tmp_path):
+    """A human backfilling a record knows what was measured; the JSON may predate the field."""
+    _write(tmp_path, "a", "config", "--metric-basis", "p90_intvty_inferencex",
+           identity=_agentx_identity(146713, 1109), workload=AGENTX_WORKLOAD,
+           metric_basis="aggregate_output_tok_s")
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0",
+               identity=_agentx_identity(146713, 1109))
+    assert out["candidates"][0]["metric_basis"] == "p90_intvty_inferencex"
+
+
+def test_a_reader_that_states_a_basis_is_not_offered_another_one(tmp_path):
+    store = str(tmp_path / "store")
+    _write(tmp_path, "intvty", "config", tput=81.4, identity=_agentx_identity(146713, 1109),
+           workload=AGENTX_WORKLOAD, metric_basis="p90_intvty_inferencex")
+    _write(tmp_path, "total", "kernels", tput=64763.0, identity=_agentx_identity(146713, 1109),
+           workload=AGENTX_WORKLOAD, metric_basis="aggregate_total_tok_s")
+    unfiltered = _run("resolve", "--store", store, "--min-speedup", "0",
+                      identity=_agentx_identity(146713, 1109))
+    # Unstated: today's behaviour, both offered, and the total-token record tops the list purely
+    # because its unit is larger. That is the failure this flag exists to let a caller avoid.
+    assert len(unfiltered["candidates"]) == 2
+    assert unfiltered["candidates"][0]["metric_basis"] == "aggregate_total_tok_s"
+    filtered = _run("resolve", "--store", store, "--min-speedup", "0",
+                    "--metric-basis", "p90_intvty_inferencex",
+                    identity=_agentx_identity(146713, 1109))
+    assert [c["metric_basis"] for c in filtered["candidates"]] == ["p90_intvty_inferencex"]
+    assert filtered["curation"]["other_metric_basis"] == 1
+
+
+def test_a_record_that_states_no_basis_is_always_offered(tmp_path):
+    """Every record written before this field existed states nothing. Dropping them the moment a
+    reader names its basis would strand the whole existing store -- the invisible miss again."""
+    _write(tmp_path, "old", "config", identity=_agentx_identity(146713, 1109),
+           workload=AGENTX_WORKLOAD)
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0",
+               "--metric-basis", "p90_intvty_inferencex",
+               identity=_agentx_identity(146713, 1109))
+    assert out["candidates"] and out["candidates"][0]["metric_basis"] == ""
+    assert out["curation"]["unstated_metric_basis"] == 1
+
+
+def test_the_basis_is_not_part_of_the_address_or_the_digest(tmp_path):
+    """Two runs of one configuration graded on different axes are still one candidate: the basis
+    labels the number, it does not identify the deployment. Putting it in the address would also
+    put it in session_id and reset the attestation ledger on every basis change."""
+    first = _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
+                   workload=AGENTX_WORKLOAD, metric_basis="p90_intvty_inferencex")
+    second = _write(tmp_path, "b", "config", identity=_agentx_identity(146713, 1109),
+                    workload=AGENTX_WORKLOAD, metric_basis="aggregate_output_tok_s")
+    assert first["session_id"] == second["session_id"]
+    assert all("intvty" not in r["canonical_id"] for r in second["rungs"])
+
+
+def test_a_synthetic_record_with_no_basis_is_unchanged(tmp_path):
+    _write(tmp_path, "a", "tuned")
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0")
+    assert out["candidates"][0]["metric_basis"] == ""
+
+
+def test_an_accepted_ep_that_differs_from_the_address_is_reported_not_refused(tmp_path):
+    """ep is tunable mid-run and tp is not, so a run can legitimately accept a different sharding
+    than the baseline it is addressed at. Refusing would throw away the measurement; staying quiet
+    would let a later reader divide two numbers taken at different ep."""
+    out = _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
+                 workload=AGENTX_WORKLOAD,
+                 accepted_config={"flags": "--ep-size 8 --enable-expert-parallel"})
+    assert out["ok"] and out["applied"]
+    assert "--ep-size 8" in out["ep_note"] and "ep_1" in out["ep_note"]
+
+
+def test_an_agreeing_ep_says_nothing(tmp_path):
+    out = _write(tmp_path, "a", "config", identity=_agentx_identity(146713, 1109),
+                 workload=AGENTX_WORKLOAD, accepted_config={"flags": "--ep-size 1"})
+    assert "ep_note" not in out
+    plain = _write(tmp_path, "b", "tuned")
+    assert "ep_note" not in plain, "a run that states no ep cannot disagree with itself"

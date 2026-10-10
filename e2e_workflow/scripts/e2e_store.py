@@ -108,7 +108,9 @@ def rung_metric(index: int, total: int):
 
 def identity_of(a) -> dict:
     return kbid.e2e_identity(a.model, a.gfx, a.framework, a.framework_version, a.precision,
-                             tp=a.tp, isl=a.isl, osl=a.osl, conc=a.conc)
+                             tp=a.tp, ep=getattr(a, "ep", None),
+                             isl=a.isl, osl=a.osl, conc=a.conc,
+                             workload_kind=getattr(a, "workload_kind", ""))
 
 
 def ladder_of(a):
@@ -154,6 +156,70 @@ def legacy_version_ladder(a):
             for i, (cid, tier) in enumerate(zip(cids, _LEGACY_TIERS[len(cids)]))]
 
 
+_PREEP_TIERS = {3: ("legacy_preep", "legacy_preep_workload_any", "legacy_preep_tp_any"),
+                2: ("legacy_preep", "legacy_preep_tp_any"),
+                1: ("legacy_preep",)}
+
+
+def legacy_preep_ladder(a):
+    """The address this very run would have had before `ep` and the AgentX workload segment existed.
+
+    Two changes landed together and both move the address: every run now states its `ep` (so a
+    page that mixed ep=1 and ep=8 with nothing in the address to tell them apart stopped being
+    possible), and an AgentX run addresses the corpus it replayed instead of the sequence lengths
+    it happened to OBSERVE while replaying it (those drift per run, so the exact rung drifted with
+    them -- a new page per run, a reader that stops at it and sees a cold start, and a session
+    fingerprint that reset the attestation ledger every time).
+
+    Every record already in the store was filed at the old address. Without this ladder the change
+    would strand the entire existing e2e store the moment it lands -- the same invisible miss the
+    change exists to prevent, just caused once and to everyone.
+
+    One variant is enough, and it is defined by construction rather than enumerated: drop the ep
+    segment and address as synthetic, which IS what this argv would have produced. Same two
+    restrictions as `legacy_version_ladder`: appended after the canonical ladder so a legacy page
+    can rescue but never shadow, and kept OUT of `ladder_of`, which write/attest/curate/retract all
+    iterate and would otherwise start filing new records at an address meant to be read backwards.
+
+    When a second AgentX corpus appears, the segment escalates to `wl_agentx.<corpus>` and the
+    bare `wl_agentx` form becomes a second variant here, by the same rule.
+    """
+    identity = identity_of(a)
+    cids = kbid.e2e_canonical_ids(identity)
+    legacy = kbid.e2e_canonical_ids(
+        dict(identity, ep="", workload_kind=kbid.WORKLOAD_KIND_SYNTHETIC))
+    if legacy == cids:
+        return []
+    return [(cid, tier) + rung_metric(i, len(legacy))
+            for i, (cid, tier) in enumerate(zip(legacy, _PREEP_TIERS[len(legacy)]))]
+
+
+def read_ladder(a):
+    """Every rung a READ tries, in order: canonical and compat ladders interleaved BY SPECIFICITY.
+
+    Appending a compat ladder after the canonical one whole, which is what this started as, has a
+    failure that only shows up once a compat ladder's exact rung names a page the canonical ladder
+    can still reach at its coarsest: writers publish every rung, so the canonical BASE rung ("any
+    parallelism, any workload") nearly always holds the very record the compat exact rung was added
+    to find. The read stops there and answers from the one page where every tp, ep and workload on
+    this stack are piled together, ranked by speedup against a floor -- a hit, but the coarsest and
+    least comparable form of one, for a record that could have been matched exactly.
+
+    So the ladders are walked level by level instead: every exact rung first (canonical, then each
+    compat one in order), then every workload_any rung, then the bases. Within a level the
+    canonical rung is always tried first, which is the "rescue but never shadow" rule this has to
+    keep. Duplicate addresses are dropped so a page is never read twice.
+    """
+    ladders = [ladder_of(a), legacy_version_ladder(a), legacy_preep_ladder(a)]
+    out, seen = [], set()
+    for level in range(max(len(rungs) for rungs in ladders)):
+        for rungs in ladders:
+            if level < len(rungs) and rungs[level][0] not in seen:
+                seen.add(rungs[level][0])
+                out.append(rungs[level])
+    return out
+
+
 # -- planes --------------------------------------------------------------------------------------
 
 
@@ -180,8 +246,23 @@ def _view(candidate, cid: str, tier: str, metric: str, champion_metric: str = ""
         "throughput_tok_s": finite_speedup(knowledge.get(THROUGHPUT_METRIC)),
         "speedup": finite_speedup(knowledge.get(SPEEDUP_METRIC)),
         "baseline_throughput_tok_s": finite_speedup(value.get("baseline_throughput_tok_s")),
+        # WHAT was measured, which the scalar above cannot say and the address deliberately does
+        # not: bench_summarize's bases are five and growing, and a reader wants them side by side
+        # with a label, not scattered over five sparse pages. "" == written before this was
+        # recorded, which is not the same claim as any particular basis.
+        "metric_basis": str(value.get("metric_basis") or ""),
         "direction": str(value.get("direction") or ""),
         "workload": workload,
+        # The two things the ADDRESS deliberately stops saying on a trace replay, surfaced here so
+        # a reader can still see them. `workload_spec.corpus` is the only early warning that two
+        # different corpora have been sharing a page (the day that happens the segment escalates to
+        # `wl_agentx.<corpus>`); `observed_shape` is the only statement of what regime the accepted
+        # kernels were actually chosen for. Both absent on a synthetic record, which says its shape
+        # in `workload` already.
+        "observed_shape": value.get("observed_shape") if isinstance(
+            value.get("observed_shape"), dict) else {},
+        "workload_spec": value.get("workload_spec") if isinstance(
+            value.get("workload_spec"), dict) else {},
         "accepted_config": value.get("accepted_config") if isinstance(
             value.get("accepted_config"), dict) else {},
         "accepted_kernels": [k for k in (value.get("accepted_kernels") or [])
@@ -248,7 +329,7 @@ def _sort_key(metric: str):
 def cmd_resolve(a) -> dict:
     # Appended, never merged: `ladder[0]` still has to be the address this run would WRITE, because
     # it is what lands in identity_out and names the page in the output.
-    ladder = ladder_of(a) + legacy_version_ladder(a)
+    ladder = read_ladder(a)
     metric = read_metric(a)
     # Echo both halves of the plane: `plane` is what the caller ASKED for, `read_plane` which one
     # answered. On `both` those differ, and "where did this candidate come from" is the first
@@ -278,7 +359,9 @@ def cmd_resolve(a) -> dict:
                                     "framework-version": str(a.framework_version or ""),
                                     "precision": str(a.precision or ""),
                                     "rocm-version": str(a.rocm_version or ""),
-                                    "tp": a.tp, "isl": a.isl, "osl": a.osl, "conc": a.conc},
+                                    "tp": a.tp, "ep": getattr(a, "ep", None),
+                                    "isl": a.isl, "osl": a.osl, "conc": a.conc,
+                                    "workload-kind": str(getattr(a, "workload_kind", "") or "")},
                            "store": str(getattr(a, "store", "") or ""),
                            # The plane the RUN writes on, which is not this read's plane: a `both`
                            # run reads remote-first (see kbResolveScript) and would otherwise leave
@@ -315,12 +398,33 @@ def cmd_resolve(a) -> dict:
                         # rather than paged around: widening the window costs a fetch per record.
                         "scan_limit": max(1, int(a.scan)),
                         "scan_saturated": len(found) >= max(1, int(a.scan))}
+            hydrated = [_view(c, cid, tier, metric, champion_metric) for c in kept]
+            # BASIS, then order. A page carries whatever bases have been measured on this
+            # deployment, and they are not one scale: the same campaign has written ~64763
+            # (total tokens/s), ~471 (output tokens/s) and ~81 (P90 interactivity) onto one page.
+            # Ranking across them is not a close call, it is a category error, and the top row
+            # wins by unit rather than by merit.
+            #
+            # Placed BEFORE demote_hinted and collapse_by_direction for the same reason
+            # --min-speedup is: the collapse keeps one entry per direction, so a record that
+            # cannot be offered must not be allowed to hold a direction's slot.
+            #
+            # A record with NO recorded basis is kept. Every record written before this field
+            # existed is in that state, and dropping them would strand the entire existing store
+            # the first time a reader states its basis -- the exact invisible miss this is for.
+            wanted_basis = str(getattr(a, "metric_basis", "") or "").strip()
+            curation["metric_basis"] = wanted_basis
+            if wanted_basis:
+                before = len(hydrated)
+                hydrated = [v for v in hydrated
+                            if not v["metric_basis"] or v["metric_basis"] == wanted_basis]
+                curation["other_metric_basis"] = before - len(hydrated)
+                curation["unstated_metric_basis"] = sum(1 for v in hydrated if not v["metric_basis"])
             # Re-sorted even though the store ordered by this metric, because the planes order by
             # slightly different things (document scalar vs the service's score). The hydrated views
             # are the one place both agree, and collapse_by_direction keeps the FIRST entry per
             # direction — a wrong order here silently offers the wrong member of every group.
-            ordered = demote_hinted(sorted([_view(c, cid, tier, metric, champion_metric) for c in kept],
-                                           key=_sort_key(metric)),
+            ordered = demote_hinted(sorted(hydrated, key=_sort_key(metric)),
                                     lambda v: v.get("retire_hint"))
             # Reported, because a demotion is otherwise invisible: the record is still listed with
             # its real numbers, just lower than the scalars alone would put it.
@@ -608,6 +712,66 @@ def _record_state(a, result: dict) -> dict:
             "lifecycle": "active" if decided else "candidate", "retained": True}
 
 
+def _int_or_none(raw):
+    text = str(raw if raw is not None else "").strip()
+    return int(text) if text.lstrip("-").isdigit() else None
+
+
+def _is_agentx(a) -> bool:
+    return (str(getattr(a, "workload_kind", "") or "").strip().lower()
+            == kbid.WORKLOAD_KIND_AGENTX)
+
+
+def _addressed_workload(a) -> dict:
+    """The dimensions that are IN this record's address, and nothing else.
+
+    A trace replay is addressed by the corpus it replays, not by the sequence lengths it happened
+    to observe while replaying it, so its isl/osl do not belong here. They are still recorded —
+    see `_observed_shape` — just outside the digest.
+    """
+    keys = ("tp", "ep", "conc") if _is_agentx(a) else ("tp", "ep", "isl", "osl", "conc")
+    return {k: _int_or_none(getattr(a, k, None)) for k in keys
+            if _int_or_none(getattr(a, k, None)) is not None}
+
+
+def _observed_shape(a, result: dict) -> dict:
+    """The request shape this run actually served — recorded, never addressed, never hashed.
+
+    On a trace replay the corpus owns the sequence lengths, so the only place they are knowable is
+    a measured run, and they move with the corpus, the tokenizer and the context window. That makes
+    them a genuinely useful thing to have on the record (nothing else says what regime the accepted
+    kernels were chosen for) and a disastrous thing to put in the address or the content digest:
+    either one turns a rebench into a new record rather than a replacement, and the attestation
+    ledger restarts from empty every run.
+    """
+    if not _is_agentx(a):
+        return {}
+    workload = result.get("workload") if isinstance(result.get("workload"), dict) else {}
+    shape = {k: v for k, v in (("isl", _int_or_none(getattr(a, "isl", None))),
+                               ("osl", _int_or_none(getattr(a, "osl", None))),
+                               ("provenance", str(workload.get("shape_provenance") or "")))
+             if v not in (None, "")}
+    return shape
+
+
+_WORKLOAD_SPEC_KEYS = ("scenario", "corpus", "num_entries", "duration_s", "metric_basis")
+
+
+def _workload_spec(a, result: dict) -> dict:
+    """WHICH trace corpus produced the number, since the address no longer spells it out.
+
+    `wl_agentx` is one segment for one corpus today. The day a second corpus is graded, the segment
+    escalates to `wl_agentx.<corpus>` (and e2e_store.legacy_preep_ladder gains the bare form as a
+    read-only variant) — and this field is what lets anyone SEE that two corpora have been sharing
+    a page before the numbers mislead someone.
+    """
+    if not _is_agentx(a):
+        return {}
+    workload = result.get("workload") if isinstance(result.get("workload"), dict) else {}
+    return {k: workload[k] for k in _WORKLOAD_SPEC_KEYS
+            if workload.get(k) not in (None, "")}
+
+
 def build_record(a, result: dict, workdir=None) -> dict:
     """One run's knowledge document, identical at every rung.
 
@@ -640,9 +804,12 @@ def build_record(a, result: dict, workdir=None) -> dict:
         # Ints, not the raw argv strings: this is the only copy of the shape once a record is read
         # back off a coarse rung, and "1024" sorts and compares differently from 1024 in every
         # consumer that touches it. A value that will not parse is dropped, matching counted().
-        "workload": {k: int(str(getattr(a, k)).strip())
-                     for k in ("tp", "isl", "osl", "conc")
-                     if str(getattr(a, k, "") or "").strip().lstrip("-").isdigit()},
+        #
+        # ADDRESSING dimensions only. _content_digest hashes this dict, so anything in here that
+        # moves between two runs of the same configuration mints a second session instead of
+        # replacing the first — which is why a trace replay's observed isl/osl live in
+        # `observed_shape` below and not here.
+        "workload": _addressed_workload(a),
         "baseline_throughput_tok_s": baseline,
         "final_throughput_tok_s": final,
         "direction": str(a.direction or result.get("direction") or ""),
@@ -659,6 +826,19 @@ def build_record(a, result: dict, workdir=None) -> dict:
         "measured_by": str(a.measured_by or ""),
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    # The first two are omitted entirely on a synthetic run (whose shape IS its address), so that
+    # record is byte-identical to one written before these fields existed. metric_basis is omitted
+    # when nobody stated one, for the same reason and because "" is a claim about the writer, not
+    # about the measurement.
+    #
+    # NOT part of _content_digest (it hashes config/kernels/workload/direction only), so recording
+    # it cannot split one configuration across two sessions.
+    for key, block in (("observed_shape", _observed_shape(a, result)),
+                       ("workload_spec", _workload_spec(a, result)),
+                       ("metric_basis", str(getattr(a, "metric_basis", "")
+                                            or result.get("metric_basis") or "").strip())):
+        if block:
+            value[key] = block
     value.update(state)
     files = _artifact_files(a, result)
     files.update(kernel_files)
@@ -1241,12 +1421,27 @@ def _launch_text(a, result: dict, value: dict, kernels, overlay: str) -> str:
         lines.append("# Server environment, as recorded.")
         lines += ["export %s=%s" % (k, _sh_quote(v)) for k, v in sorted(pairs.items())]
         lines.append("")
+    # A trace replay reproduces by naming its CORPUS. The agentx client ignores ISL/OSL entirely
+    # (adapters/clients/agentx.sh: the corpus owns the sequence lengths), and this record does not
+    # address them either — so a repro script that exported them would be stating a shape nothing
+    # reads, for a run whose shape is not a knob.
+    spec = value.get("workload_spec") or {}
+    agentx_env = [("BENCH_CLIENT", "agentx" if spec else None),
+                  ("GEAK_WORKLOAD_KIND", kbid.WORKLOAD_KIND_AGENTX if spec else None),
+                  ("GEAK_AGENTX_SCENARIO", spec.get("scenario")),
+                  ("AGENTX_DATASET", spec.get("corpus")),
+                  ("AGENTX_NUM_ENTRIES", spec.get("num_entries")),
+                  ("GEAK_AGENTX_DURATION_S", spec.get("duration_s"))]
     lines += ["exec env \\"]
-    for key, val in (("BACKEND", identity["framework"]),
-                     ("MODEL", "${MODEL}"),
-                     ("TP", workload.get("tp")), ("ISL", workload.get("isl")),
-                     ("OSL", workload.get("osl")), ("CONC", workload.get("conc")),
-                     ("GPU", "${GPU:-0}"), ("OUT_DIR", "${OUT_DIR:-$PWD/repro_out}")):
+    for key, val in tuple(agentx_env) + (
+            ("BACKEND", identity["framework"]),
+            ("MODEL", "${MODEL}"),
+            ("TP", workload.get("tp")),
+            # EP_SIZE, not EP: that is the name adapters/atom.sh reads.
+            ("EP_SIZE", workload.get("ep")),
+            ("ISL", workload.get("isl")),
+            ("OSL", workload.get("osl")), ("CONC", workload.get("conc")),
+            ("GPU", "${GPU:-0}"), ("OUT_DIR", "${OUT_DIR:-$PWD/repro_out}")):
         if val in (None, "", kbid.UNKNOWN):
             continue
         lines.append("  %s=%s \\" % (key, _sh_quote(str(val))))
@@ -1380,6 +1575,35 @@ def cmd_write(a) -> dict:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+_EP_SIZE_RE = re.compile(r"--ep-size[=\s]+(\d+)")
+
+
+def _ep_drift_note(a, value: dict) -> str:
+    """Say so when the accepted config runs a different ep than the address names. Never refuse.
+
+    ep is TUNABLE on this lane and tp is not: `--ep-size` reaches the server through
+    EXTRA_SERVER_ARGS (adapters/sglang.sh, vllm.sh, atom.sh), so the Config Tuner can legitimately
+    move it mid-run, while kbIdentityFlags() fixed the address at parse time. The convention,
+    identical to tp's: **the ep segment is the ep the BASELINE was launched with**, and the ep that
+    was accepted lives in value["accepted_config"].
+
+    Disagreement is therefore a legal outcome -- it is a run that found a better sharding -- so
+    this reports and does not gate. It is still worth saying out loud, because the alternative is
+    that the only record of the change sits in free text nobody reads, and a later reader divides
+    two numbers taken at different ep without noticing.
+    """
+    addressed = _int_or_none(getattr(a, "ep", None))
+    if addressed is None:
+        return ""
+    config = value.get("accepted_config") if isinstance(value.get("accepted_config"), dict) else {}
+    found = _EP_SIZE_RE.findall(" ".join(str(config.get(k) or "") for k in sorted(config)))
+    if not found or int(found[-1]) == addressed:
+        return ""
+    return ("accepted config runs --ep-size %s but this record is addressed at ep_%d (the ep the "
+            "baseline was launched with, by the same convention as tp). Recorded as-is; the "
+            "accepted degree is in value.accepted_config." % (found[-1], addressed))
+
+
 def _write(a, workdir: str) -> dict:
     try:
         with open(a.result, "r", errors="replace") as handle:
@@ -1406,6 +1630,9 @@ def _write(a, workdir: str) -> dict:
     out = {"applied": bool(a.apply), "session_id": sid, "speedup": record["speedup"],
            "throughput_tok_s": record["throughput"],
            "files": sorted(record["files"]), "rungs": []}
+    note = _ep_drift_note(a, record["knowledge"]["value"])
+    if note:
+        out["ep_note"] = note
     # A rung ranks on its own metric (throughput on the exact rung, speedup on the coarser ones), so
     # each opens its own per-metric store; `publish` writes that one rung, all-or-none. All-or-none
     # runs at THIS loop level too: a rung we cannot open or write stops the ladder before a partial
@@ -1551,7 +1778,8 @@ def cmd_attest(a) -> dict:
         ("baseline_tok_s", _as_number(getattr(a, "baseline_tok_s", None))),
         ("parity", str(getattr(a, "parity", "") or "").strip()),
         ("note", str(getattr(a, "note", "") or "").strip()),
-        ("workload", {k: str(getattr(a, k) or "") for k in ("tp", "isl", "osl", "conc")
+        ("workload", {k: str(getattr(a, k) or "")
+                      for k in ("tp", "ep", "isl", "osl", "conc")
                       if getattr(a, k, None)}),
     ) if v not in (None, "", {})}
     if evidence.get("measured_tok_s") and evidence.get("baseline_tok_s"):
@@ -1732,9 +1960,13 @@ def _identity_args(p):
     p.add_argument("--rocm-version", default="",
                    help="ROCm of the container, used to address the accepted kernels' own records")
     p.add_argument("--tp", default=None, help="tensor parallel degree")
+    p.add_argument("--ep", default=None, help="expert parallel degree, as the baseline was launched")
     p.add_argument("--isl", default=None, help="input sequence length")
     p.add_argument("--osl", default=None, help="output sequence length")
     p.add_argument("--conc", default=None, help="concurrency")
+    p.add_argument("--workload-kind", default="",
+                   help="synthetic_isl_osl (default) | agentx_trace_replay; decides whether the "
+                        "address names isl/osl or the trace corpus")
 
 
 def _state_args(p):
@@ -1771,6 +2003,11 @@ def main(argv=None) -> int:
     q.add_argument("--sort-by", choices=tuple(SORT_METRICS), default=DEFAULT_SORT_BY,
                    help="how to order the offer on EVERY rung (default: absolute throughput, "
                         "high to low). The champion metric per rung is unaffected.")
+    q.add_argument("--metric-basis", default="",
+                   help="only offer records measured on this basis (e.g. p90_intvty_inferencex, "
+                        "aggregate_output_tok_s). Records that state no basis are always kept — "
+                        "every record written before this field existed is one. Unset = today's "
+                        "behaviour: offer whatever is on the page, whatever it measures.")
     q.add_argument("--refs-dir", default="", help="write prose references here")
     q.add_argument("--cache-dir", default="", help="materialize artifact bundles here")
     q.add_argument("--identity-out", default="",
@@ -1785,6 +2022,10 @@ def main(argv=None) -> int:
     _plane_args(q)
     q.add_argument("--result", required=True, help="JSON from the workflow's report/validate step")
     q.add_argument("--direction", default="", help="what this run DID, for the shortlist collapse")
+    q.add_argument("--metric-basis", default="",
+                   help="which axis the pair was measured on; defaults to result.metric_basis, "
+                        "which bench_summarize.py records from the E2E_METRIC it actually used. "
+                        "Recorded, never addressed — a reader asks for it with the same flag.")
     q.add_argument("--measured-by", default="", help="who/what produced the number")
     q.add_argument("--file", action="append", default=[], help="extra artifact to attach")
     q.add_argument("--kernel-store", default="",
@@ -1858,7 +2099,8 @@ def main(argv=None) -> int:
                   # them in the same list as the addresses it will file at.
                   "legacy_read_only": [{"canonical_id": c, "tier": t, "ranked_by": m,
                                         "promote_floor": f}
-                                       for c, t, m, f in legacy_version_ladder(a)]}
+                                       for c, t, m, f in read_ladder(a)
+                                       if t.startswith("legacy_")]}
     elif a.command == "resolve":
         result = cmd_resolve(a)
     elif a.command == "retract":

@@ -264,6 +264,13 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
   : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
+// Expert-parallel degree AS THE BASELINE WAS LAUNCHED, resolved upstream (run_e2e._resolve_ep) and
+// passed down rather than re-derived from flags here. It is a KB addressing dimension beside TP:
+// the same model on the same stack with the experts sharded differently is a different deployment.
+// Unlike TP it is also a knob the Config Tuner may move mid-run (--ep-size rides EXTRA_SERVER_ARGS),
+// so this constant states the baseline's value and the accepted one lives in accepted_config.
+// Default 1 = no expert parallelism, which is also the right answer for a dense model.
+const SERVING_EP = parseInt(A.ep != null ? A.ep : 1, 10);
 // ---- WALL-CLOCK BUDGET (opt-in; default OFF when absent => byte-identical) ---------------------------
 // time_budget_s is the EXTERNAL orchestrator's HARD kill budget (run_e2e.py GEAK_E2E_TIMEOUT_S),
 // forwarded so GEAK can self-pace and FINISH (Finalize/Report/Validate + workflow_return flush) BEFORE
@@ -1551,7 +1558,12 @@ function kbIdentityFlags() {
   return [`--model ${shq(KB_DIMS.model)}`, `--gfx ${shq(KB_DIMS.gfx)}`,
     `--framework ${shq(BACKEND)}`, `--framework-version ${shq(KB_DIMS.framework_version)}`,
     `--precision ${shq(KB_DIMS.precision)}`, `--rocm-version ${shq(KB_DIMS.rocm_version)}`,
-    `--tp ${SERVING_TP}`, `--isl ${ISL}`, `--osl ${OSL}`, `--conc ${CONC}`].join(' ');
+    `--tp ${SERVING_TP}`, `--ep ${SERVING_EP}`,
+    // The DECLARATION (A.workload_kind / workload_spec.kind), never the shape PROVENANCE: the
+    // provenance values include agentx_pending_baseline and synthetic_fallback_on_agentx, which
+    // would mis-file precisely the degraded AgentX runs that most need a stable address.
+    `--workload-kind ${shq(WORKLOAD_KIND)}`,
+    `--isl ${ISL}`, `--osl ${OSL}`, `--conc ${CONC}`].join(' ');
 }
 
 // --store is what the local plane writes into and is meaningless to a remote-only run; open_plane()
@@ -1565,10 +1577,20 @@ function kbPlaneFlags(plane) {
 // first, local mirror only when the service has no answer) and reports which one spoke as
 // `read_plane`, so the bash branch that used to do it here is gone — one copy of the rule, and it
 // is the copy a human gets from the CLI too.
+// The graded axis is NOT part of the address (bench_summarize's bases are five and growing, and a
+// reader wants them side by side with a label rather than scattered over five sparse pages), so the
+// reader has to state it instead. One page has already carried ~64763 (total tok/s), ~471 (output
+// tok/s) and ~81 (P90 interactivity) at once; ranked together the top row wins by unit, not merit.
+// Only a declared basis is stated — a synthetic run asserts nothing and keeps today's behaviour,
+// and records that state no basis are offered either way (see cmd_resolve).
+function kbMetricBasisFlag() {
+  return AGENTX && AGENTX_METRIC_BASIS ? `--metric-basis ${shq(AGENTX_METRIC_BASIS)} ` : '';
+}
+
 function kbResolveScript(args) {
   return KB_ENV_PRELUDE + '\\\n' +
     `python3 ${shq(E2E_STORE_SCRIPT)} resolve ${kbIdentityFlags()} \\\n` +
-    `  ${kbPlaneFlags(E2E_KB_PLANE)} ${args}`;
+    `  ${kbMetricBasisFlag()}${kbPlaneFlags(E2E_KB_PLANE)} ${args}`;
 }
 
 // Warm-start prompt injection, mirroring expertSkillsBlock exactly: returns '' whenever the feature
@@ -6046,6 +6068,22 @@ const wfReturn = {
   // report nor the KB (e2e_store.py's _ARTIFACT_KEYS looks up exactly result["final_patch"]).
   // final_overlay cannot stand in for it: that is a DIRECTORY, and the store's os.path.isfile filter
   // drops it, so a run with no final_patch uploads no reproducible code at all.
+  // What this run SERVED, as opposed to what its address says. The KB writer splits this two ways
+  // (e2e_store.build_record): the addressing dimensions go in value.workload, and the OBSERVED
+  // shape goes in value.observed_shape, deliberately outside the content digest — on a trace
+  // replay isl/osl are a measurement of the corpus, they move every run, and hashing them would
+  // mint a new record per run instead of replacing the previous one.
+  workload: Object.assign({}, WORKLOAD, {
+    kind: WORKLOAD_KIND, tp: SERVING_TP, ep: SERVING_EP,
+  }, AGENTX ? {
+    scenario: AGENTX.scenario, corpus: AGENTX.corpus, num_entries: AGENTX.num_entries,
+    duration_s: AGENTX.duration_s, metric_basis: AGENTX.metric_basis,
+  } : {}),
+  // The axis these numbers are on, recorded beside them so a later reader never has to infer it
+  // from their magnitude. Stated only when the run declared one and Setup confirmed the baseline
+  // summary agreed (AgentX): a synthetic run asserts nothing, and "" means unstated, which is a
+  // different claim from any particular basis. Never addressed -- see kbMetricBasisFlag.
+  metric_basis: AGENTX ? AGENTX_METRIC_BASIS : '',
   final_patch: (finalize && finalize.final_patch) || '',
   final_launch_script: (validation && validation.final_launch_script) || (finalize && finalize.final_launch_script) || '',
   report_path: report ? report.report_path : `${EVAL_DIR}/architect_report.md`,

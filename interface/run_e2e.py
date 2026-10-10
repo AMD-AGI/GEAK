@@ -49,9 +49,9 @@ from typing import Any
 
 try:
     # Package import under pytest / module use.
-    from interface.effective_config import resolve_effective_config
+    from interface.effective_config import _flag_map, resolve_effective_config
 except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
-    from effective_config import resolve_effective_config
+    from effective_config import _flag_map, resolve_effective_config
 
 try:
     from interface import claude_trace_mirror
@@ -569,6 +569,53 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     }
 
 
+def _resolve_ep(h: dict, effective: Any, tp: int) -> int:
+    """How many ranks the experts are sharded over, as the BASELINE was launched.
+
+    ``ep`` is a KB addressing dimension beside ``tp``: two runs of the same model on the same
+    stack with the experts sharded differently are different deployments, and a store that cannot
+    name the difference files them on one page with nothing to tell them apart.
+
+    Sources, most authoritative first -- all of them things ``map_args`` already holds, because a
+    second flag parser living here is exactly how a reader and a writer end up on different pages:
+
+    1. the handoff's own ``ep`` (beside ``tp``), when the orchestrator stated it;
+    2. ``--ep-size N`` in the resolved server args, read through the resolver's own flag map so a
+       spelling it canonicalises is seen the same way here;
+    3. the recipe's recorded ``EP_SIZE`` -- replayed verbatim onto the launch (it is not in
+       ``_RECIPE_ENV_GEAK_OWNED``), so it is a statement about what the server ran, not a guess;
+    4. ``--enable-expert-parallel`` with no degree: vLLM spreads EP over the whole TP x DP group,
+       so the degree is ``tp``, not 1;
+    5. otherwise 1 -- no expert parallelism, which is also the right answer for a dense model.
+    """
+    def _positive(raw: Any) -> int:
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return 0
+        return value if value > 0 else 0
+
+    stated = _positive(h.get("ep"))
+    if stated:
+        return stated
+    flags = _flag_map(
+        effective.final_server_args
+        if effective is not None
+        else (h.get("accepted_flags", "") or "")
+    )
+    sized = flags.get("--ep-size")
+    if sized is not None and _positive(getattr(sized, "value", None)):
+        return _positive(sized.value)
+    recorded = _positive(
+        _recipe_env_block(str(h.get("launch_recipe") or "")).get("EP_SIZE")
+    )
+    if recorded:
+        return recorded
+    if "--enable-expert-parallel" in flags:
+        return max(tp, 1)
+    return 1
+
+
 def map_args(
     h: dict,
     timeout_s: int | None = None,
@@ -639,6 +686,8 @@ def map_args(
             "vllm" if gpu_identity and gpu_identity["target"] == "r9700" else "sglang"
         ),
         "tp": tp,
+        # Beside tp, and resolved the same way: see _resolve_ep.
+        "ep": _resolve_ep(h, effective, tp),
         "gpu_ids": str(gpu_ids),
         # On an AgentX handoff these describe the shape the agents OPTIMIZE for,
         # not the shape anything is measured at (see _targeting_shape).
@@ -3988,6 +4037,12 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Cold/hot speedup cross-checks (double-check only; see alignment_metrics above).
         # Does NOT change the promoted final_throughput_tok_s / throughput_speedup.
         "alignment_metrics": alignment_metrics,
+        # The SAME object as alignment_metrics.workload_comparability, lifted to the top level
+        # because that is where the KB writer looks for it (e2e_store.build_record reads
+        # result["comparability"], and both writers hand it this file). Until it was lifted, every
+        # e2e record ever written carried comparability={} -- a stored speedup with no statement of
+        # what it is comparable to, which is the one thing a reader cannot reconstruct later.
+        "comparability": workload_comparability,
         # Never advertise a report that is not on disk: the old unconditional
         # fallback handed the caller a path to a file that was never written.
         # _emit fills this in with the synthesized report if the workflow died first.

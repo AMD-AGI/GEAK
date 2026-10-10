@@ -1281,6 +1281,24 @@ def test_the_identity_dims_are_sent_as_the_address(tmp_path, monkeypatch):
     assert out["measured_by"] == "run_e2e:salvage" and out["ok"] is True
 
 
+def test_the_new_addressing_dims_survive_the_salvage_round_trip(tmp_path, monkeypatch):
+    """ep and the workload kind travel the same generic path as every other dim.
+
+    The salvage writer re-derives nothing: it replays the dims the workflow recorded in
+    kb_identity.json. So the only way a salvaged record lands on the SAME page as the run that
+    died is for these two to make the trip untouched — drop either and the address silently
+    reverts to the pre-ep synthetic scheme, which still parses and still writes.
+    """
+    seen = _kb_store(monkeypatch)
+    dims = {"model": "M", "gfx": "gfx950", "tp": 8, "ep": 1,
+            "workload-kind": "agentx_trace_replay", "conc": 10}
+    rx._kb_write_back(_kb_eval_dir(tmp_path, identity=_kb_identity(dims=dims)), {}, {})
+    cmd = seen["cmd"]
+    assert _flag(cmd, "--ep") == "1", "ep_1 is written, not inferred from its absence"
+    assert _flag(cmd, "--workload-kind") == "agentx_trace_replay"
+    assert _flag(cmd, "--conc") == "10"
+
+
 def test_an_empty_dim_is_dropped_rather_than_sent_blank(tmp_path, monkeypatch):
     """`--precision ''` is not the same request as omitting it: it addresses a page whose
     precision is literally the empty string."""

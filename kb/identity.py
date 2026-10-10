@@ -17,7 +17,10 @@ else.
 Two schemes, distinguished by the domain segment right after `geak`:
 
     kernel   geak:kernel:{gfx}:{kernel_name}:{backend}:rocm[:{version}]
-    e2e      geak:e2e:{model}:{gfx}:{framework}:{version}:{precision}[:tp_N[:isl_N:osl_N:conc_N]]
+    e2e      geak:e2e:{model}:{gfx}:{framework}:{version}:{precision}[:tp_N[:ep_M][:<workload>]]
+
+               workload, synthetic : isl_N:osl_N:conc_N
+               workload, agentx    : wl_agentx:conc_N
 
 Ordering is by how badly a mismatch hurts, most damaging first, because a canonical id can only be
 truncated from the RIGHT. That is what makes the tail droppable and the head mandatory:
@@ -68,6 +71,17 @@ E2E_DOMAIN = "e2e"
 KERNEL_FRAMEWORK = "rocm"
 UNKNOWN_VERSION = "unspecified"   # framework known, version not observed. Never guessed.
 UNKNOWN = "unknown"
+
+# The two workload kinds the e2e lane distinguishes, spelled exactly as interface/run_e2e.py does
+# (WORKLOAD_KIND_AGENTX / WORKLOAD_KIND_SYNTHETIC) and as e2e_workflow.js's WORKLOAD_KIND reports
+# them, so the string can travel from a handoff to an address without a translation table on the
+# way. Imported from here by e2e_store.py rather than re-spelled: a second copy of a literal that
+# selects an address shape is exactly the kind of one-segment disagreement this module exists to
+# make impossible.
+WORKLOAD_KIND_AGENTX = "agentx_trace_replay"
+WORKLOAD_KIND_SYNTHETIC = "synthetic_isl_osl"
+# What a trace replay puts where a synthetic run puts isl_N:osl_N. See _workload_segments.
+AGENTX_WORKLOAD_SEGMENT = "wl_agentx"
 
 _DISALLOWED = re.compile(r"[^a-z0-9._+-]+")
 _LEADING = re.compile(r"^[^a-z0-9_]+")
@@ -199,7 +213,7 @@ def kernel_canonical_ids(identity: dict):
 
 
 def e2e_identity(model: str, gfx: str, framework: str, framework_version: str, precision: str,
-                 tp=None, isl=None, osl=None, conc=None) -> dict:
+                 tp=None, isl=None, osl=None, conc=None, ep=None, workload_kind="") -> dict:
     """The e2e address: what is being served, on what, at what shape.
 
     `framework` here is the SERVING stack (vllm / sglang) — the opposite of the kernel scheme's
@@ -210,9 +224,29 @@ def e2e_identity(model: str, gfx: str, framework: str, framework_version: str, p
     scheme's `backend` dimension names the kernel language. Nothing shares a variable across the
     two, and this is why.
 
-    `tp` sits AFTER precision and before the workload shape so the ladder can drop the measured
-    point while keeping the deployment config. Anything unparseable folds to "" and simply removes
-    the rung that would have carried it.
+    `tp` and `ep` sit AFTER precision and before the workload shape so the ladder can drop the
+    measured point while keeping the deployment config. Anything unparseable folds to "" and
+    simply removes the rung that would have carried it.
+
+    `ep` rides the `tp` rung rather than owning one of its own, so the ladder stays three deep.
+    Two reasons, neither of them about this file being easier to write:
+
+      * A rung is not free. The ladder is WRITTEN (see the module docstring), so every rung costs
+        one store open, one publish and one full file-manifest upload per plane — doubled on
+        `--plane both`. A fourth level buys +33% write bytes and +33% failure surface on an
+        all-or-none ladder, for a dimension whose value is 1 on nearly every deployment.
+      * A standalone `...:tp_8` page would hold ep=1 and ep=8 records with nothing in the address
+        to tell them apart. That is precisely the `两个不同的 kernel` confusion quoted at the top
+        of this file, minted deliberately. Folding refuses to create that page.
+
+    What that costs: ep=1 and ep=8 at the same tp meet only on the coarsest rung, where tp varies
+    too. That is the right place for them — that rung's question is "how should I shard this", and
+    ep is sharding.
+
+    `workload_kind` selects the SHAPE of the workload segments, not their values — see
+    _workload_segments. It is carried in the identity dict (rather than being resolved to segments
+    immediately) so a caller can rebuild one variant of an address by replacing a single key; that
+    is what e2e_store.py's read-only compatibility ladders do.
 
     `framework_version` is cut to `<major>.<minor>.<patch>` — see _release_version. It is the one
     dimension here that a rebuild can change without anything about the deployment changing, and
@@ -225,29 +259,76 @@ def e2e_identity(model: str, gfx: str, framework: str, framework_version: str, p
         "framework_version": _release_version(framework_version),
         "precision": segment(precision, UNKNOWN),
         "tp": counted("tp", tp),
+        "ep": counted("ep", ep),
         "isl": counted("isl", isl),
         "osl": counted("osl", osl),
         "conc": counted("conc", conc),
+        # The declared kind, lowercased but NOT folded to a segment: it selects a shape here and
+        # only `wl_agentx` ever reaches an address. Keeping the raw string means a caller can
+        # compare it against run_e2e.py's constant without guessing how segment() mangled it.
+        "workload_kind": str(workload_kind or "").strip().lower(),
     }
 
 
-def e2e_canonical_ids(identity: dict):
-    """Up to three rungs, most specific first: exact workload, TP config, model.
+def _workload_segments(identity: dict):
+    """The workload tail of an address: what was served, at a granularity that holds still.
 
-    The last rung is TP-agnostic on purpose, and it is not just a fallback — it is the only page
-    that can answer "how many ways should I shard this", because that question needs TP4 and TP8
-    ranked against each other rather than filed apart. The middle rung answers "given TP=8, how do
-    I configure it". Rungs that would need a dimension the run did not record are omitted, never
-    filled with a placeholder.
+    Synthetic runs keep `isl_N:osl_N:conc_N` — those are a SPECIFICATION there, chosen by the
+    caller and identical on every repeat of the same benchmark point.
+
+    A trace replay is the opposite case and the distinction is the whole reason this function
+    exists. aiperf owns the sequence lengths; isl/osl are measured out of the run afterwards
+    (`bench_summarize.py` reports observed_isl/observed_osl, averaged per request and medianed
+    across replicas) and move with the corpus, the tokenizer, the context window and plain
+    sampling noise. Keyed verbatim they make every run its own address, and because the lookup is
+    exact and the ladder stops at the first rung that answers, that address SHADOWS the useful
+    `tp` rung with a page holding exactly one record. Recall becomes a coin flip decided by
+    sampling noise — and worse, session_id() fingerprints the most specific rung, so a drifting
+    exact rung also mints a fresh session id every run, which silently resets the attestation
+    ledger of a record that is being re-benched.
+
+    So a replay files under `wl_agentx:conc_N`: the kind, plus the one workload knob that really
+    is a launch parameter rather than a measurement. The observed shape is not lost, it is just
+    not an address — writers put it in the record's value.
+
+    The corpus is deliberately NOT a segment yet. It would be the honest discriminator (two
+    corpora at one concurrency are two workloads), but adding it today strands every agentx record
+    already written, and a segment that some runs carry and others do not splits the page in two —
+    which is the failure being fixed here. When a second corpus genuinely enters use, the
+    escalation is `wl_agentx.<corpus>` as a single segment, with the corpus-less form becoming one
+    more read-only compatibility variant. Until then writers record the corpus in the value and
+    readers surface it, so a human sees a mix before the ranking starts lying about it.
+    """
+    conc = identity.get("conc") or ""
+    if identity.get("workload_kind") == WORKLOAD_KIND_AGENTX:
+        return [AGENTX_WORKLOAD_SEGMENT, conc] if conc else []
+    isl, osl = identity.get("isl") or "", identity.get("osl") or ""
+    return [isl, osl, conc] if (isl and osl and conc) else []
+
+
+def e2e_canonical_ids(identity: dict):
+    """Up to three rungs, most specific first: exact workload, parallelism config, model.
+
+    The last rung is parallelism-agnostic on purpose, and it is not just a fallback — it is the
+    only page that can answer "how many ways should I shard this", because that question needs TP4
+    and TP8 ranked against each other rather than filed apart. The middle rung answers "given this
+    sharding, how do I configure it". Rungs that would need a dimension the run did not record are
+    omitted, never filled with a placeholder.
+
+    `ep` can never create a rung by itself: it is appended to `tp` or it is not there at all. An
+    expert-parallel degree without a tensor-parallel degree is not a deployment anybody described,
+    and a page addressed by one of the two would be a third way to spell the middle rung.
     """
     base = [SCHEME, E2E_DOMAIN, identity["model"], identity["gpu"], identity["framework"],
             identity["framework_version"], identity["precision"]]
+    tp, ep = identity["tp"], identity.get("ep") or ""
+    parallel = ([tp] + ([ep] if ep else [])) if tp else []
+    workload = _workload_segments(identity)
     rungs = []
-    tp, isl, osl, conc = identity["tp"], identity["isl"], identity["osl"], identity["conc"]
-    if tp and isl and osl and conc:
-        rungs.append(":".join(base + [tp, isl, osl, conc]))
-    if tp:
-        rungs.append(":".join(base + [tp]))
+    if parallel and workload:
+        rungs.append(":".join(base + parallel + workload))
+    if parallel:
+        rungs.append(":".join(base + parallel))
     rungs.append(":".join(base))
     return [check(r) for r in rungs]
 
@@ -273,6 +354,8 @@ def session_id(exact_canonical_id: str, name: str, digest: str, producer: str = 
     return ("%s-%s-%s-%s" % (segment(producer, SCHEME), legible, fp, port)).strip("-")
 
 
-__all__ = ["E2E_DOMAIN", "IdentityError", "KERNEL_DOMAIN", "KERNEL_FRAMEWORK", "SCHEME",
-           "SEGMENT_RE", "UNKNOWN", "UNKNOWN_VERSION", "check", "counted", "e2e_canonical_ids",
-           "e2e_identity", "kernel_canonical_ids", "kernel_identity", "segment", "session_id"]
+__all__ = ["AGENTX_WORKLOAD_SEGMENT", "E2E_DOMAIN", "IdentityError", "KERNEL_DOMAIN",
+           "KERNEL_FRAMEWORK", "SCHEME", "SEGMENT_RE", "UNKNOWN", "UNKNOWN_VERSION",
+           "WORKLOAD_KIND_AGENTX", "WORKLOAD_KIND_SYNTHETIC", "check", "counted",
+           "e2e_canonical_ids", "e2e_identity", "kernel_canonical_ids", "kernel_identity",
+           "segment", "session_id"]
