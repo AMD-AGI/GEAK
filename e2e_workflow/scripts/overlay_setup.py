@@ -42,7 +42,8 @@ Commands:
 Back-compat aliases: `monkeypatch` == add-rebind, `copy-subtree` == add-module (file granularity).
 Stdlib only.
 """
-import argparse, importlib, json, os, shutil, subprocess, sys, tempfile
+import argparse, hashlib, importlib, json, os, shutil, subprocess, sys, tempfile
+from pathlib import Path
 
 SITECUSTOMIZE = r'''# Auto-generated reversible overlay (e2e_workflow). Drop this dir from PYTHONPATH to revert.
 import json, os, sys, importlib, importlib.abc, importlib.util
@@ -164,6 +165,59 @@ LEGACY_SITECUSTOMIZE = (SITECUSTOMIZE.split(_INSTALLER_START)[0]
                        + _INSTALLER_END + SITECUSTOMIZE.split(_INSTALLER_END)[1])
 
 
+def installer_module_manifest(overlay, manifest):
+    """Expose real installer imports to consumers of the original modules/rebinds contract.
+
+    The runtime imports these modules to register hooks. A package-tree hash in the manifest
+    also lets older consumers fingerprint nested Python/HIP sources they do not know to scan.
+    Return a new manifest; never modify the source overlay while packaging or merging it.
+    """
+    if not manifest.get("installers"):
+        return manifest
+    root = Path(overlay)
+    result = dict(manifest)
+    modules = [dict(entry) for entry in manifest.get("modules", [])]
+    for installer in manifest["installers"]:
+        name = installer["module"]
+        if not isinstance(name, str) or not all(part.isidentifier() for part in name.split(".")):
+            raise ValueError("invalid installer module: " + str(name))
+        parts = name.split(".")
+        stem = root.joinpath(*parts)
+        source = stem / "__init__.py" if stem.is_dir() else stem.with_suffix(".py")
+        if not source.is_file():
+            raise ValueError("installer module source is missing: " + name)
+        tree = root / parts[0]
+        paths = []
+        if tree.is_dir():
+            if tree.is_symlink():
+                raise ValueError("installer source symlinks must be materialized: " + str(tree))
+            for directory, dirs, files in os.walk(tree):
+                dirs[:] = sorted(d for d in dirs if d not in ("__pycache__", ".torch_ext", ".git"))
+                if any((Path(directory) / d).is_symlink() for d in dirs):
+                    raise ValueError("installer directory symlinks must be materialized")
+                paths.extend(Path(directory) / f for f in sorted(files) if not f.endswith(".pyc"))
+        else:
+            paths = [source]
+        digest = hashlib.sha256()
+        for path in sorted(paths):
+            if path.is_symlink():
+                raise ValueError("installer file symlinks must be materialized: " + str(path))
+            digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+        rel = source.relative_to(root).as_posix()
+        matches = [entry for entry in modules if entry.get("module") == name]
+        if len(matches) > 1 or (matches and matches[0].get("file") != rel):
+            raise ValueError("conflicting installer module entry: " + name)
+        if matches:
+            entry = matches[0]
+        else:
+            entry = {"module": name, "file": rel}
+            modules.append(entry)
+        entry["installer_source_sha256"] = digest.hexdigest()
+    result["modules"] = modules
+    return result
+
+
 def cmd_add_installer(a):
     """Register a source package's deferred installer; its files already live in the overlay."""
     man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
@@ -179,7 +233,7 @@ def cmd_add_installer(a):
         raise SystemExit("installer id already has a different definition: " + a.id)
     if not old:
         m.setdefault("installers", []).append(entry)
-    _save_man(man, m)
+    _save_man(man, installer_module_manifest(a.overlay, m))
     with open(runtime, "w") as handle:
         handle.write(SITECUSTOMIZE)
     print("OVERLAY_DIR=" + a.overlay)
@@ -216,6 +270,7 @@ def merge_overlays(output, sources):
         with open(os.path.join(source, "sitecustomize.py")) as handle:
             if handle.read() not in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE):
                 raise ValueError("custom sitecustomize cannot be merged automatically: " + source)
+        manifest = installer_module_manifest(source, manifest)
         for kind, entries in manifest.items():
             if kind not in kinds:
                 if kind in merged and merged[kind] != entries:

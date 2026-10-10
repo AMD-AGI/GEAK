@@ -507,6 +507,51 @@ for (const [label, args] of [
     'synthetic: the declared shape reaches the argv exactly as it always did');
 }
 
+// Explicit KB recall policy is independent of the caller's measurement contract.
+{
+  const inherited = process.env.GEAK_E2E_KB_METRIC_BASIS;
+  const metricFlag = src.match(/function kbMetricBasisFlag\(\) \{[\s\S]*?\n\}/)[0];
+  const evaluate = (args) => new Function('A', 'ISL_DECLARED', 'OSL_DECLARED', 'shq',
+    `${decl}\n${metricFlag}\nreturn { E2E_KB_METRIC, AGENTX_METRIC_BASIS, AGENTX_ENV, ` +
+    `flags: kbMetricBasisFlag(), kbCanAttestMetric, kbMeasurementBasis };`)(args, null, null,
+      (value) => `'${value}'`);
+  try {
+    process.env.GEAK_E2E_KB_METRIC_BASIS = 'e2e_norm_intvty_p50';
+    for (const [axis, basis] of [['output', 'aggregate_output_tok_s'],
+                               ['total', 'aggregate_total_token_tok_s']]) {
+      process.env.E2E_METRIC = axis;
+      const m = evaluate({ workload_spec: { kind: 'agentx_trace_replay', metric_basis: basis } });
+      ok(m.flags === "--metric-basis 'e2e_norm_intvty_p50' --require-metric-basis ",
+        `legacy HL ${axis}: only explicitly labelled p50 records are recalled`);
+      ok(m.AGENTX_METRIC_BASIS === basis && m.kbMeasurementBasis() === basis,
+        `legacy HL ${axis}: actual measurement and write basis are unchanged`);
+      ok(!m.kbCanAttestMetric({ metric_basis: 'e2e_norm_intvty_p50' })
+        && !m.kbCanAttestMetric({}) && m.kbCanAttestMetric({ metric_basis: basis }),
+        `legacy HL ${axis}: local measurements cannot attest a different or unknown stored axis`);
+    }
+    const arg = evaluate({ e2e_kb_metric_basis: 'total' });
+    ok(arg.E2E_KB_METRIC.basis === 'aggregate_total_token_tok_s'
+      && arg.E2E_KB_METRIC.source === 'e2e_kb_metric_basis', 'argument overrides recall env and accepts axis aliases');
+    ok(evaluate({}).AGENTX_ENV === '', 'recall override does not create a synthetic bench declaration');
+    process.env.GEAK_E2E_KB_METRIC_BASIS = 'p50_typo';
+    let error = '';
+    try { evaluate({}); } catch (e) { error = e.message; }
+    ok(/Unknown e2e KB metric basis/.test(error), 'invalid recall policy fails before a bench');
+    delete process.env.GEAK_E2E_KB_METRIC_BASIS;
+    delete process.env.E2E_METRIC;
+    ok(evaluate({}).flags === '', 'unset override preserves unfiltered synthetic reads');
+    const normal = evaluate({ workload_spec: { kind: 'agentx_trace_replay', metric_basis: 'e2e_norm_intvty_p50' } });
+    ok(normal.flags === "--metric-basis 'e2e_norm_intvty_p50' " && normal.kbCanAttestMetric({}),
+      'unset override preserves the AgentX filter and unlabelled-record compatibility');
+    ok(/verdicts\.filter\(v => v\.session_id && kbCanAttestMetric\(v\)/.test(src),
+      'the attestation call site applies the metric guard');
+  } finally {
+    delete process.env.E2E_METRIC;
+    if (inherited === undefined) delete process.env.GEAK_E2E_KB_METRIC_BASIS;
+    else process.env.GEAK_E2E_KB_METRIC_BASIS = inherited;
+  }
+}
+
 if (INHERITED_E2E_METRIC !== undefined) process.env.E2E_METRIC = INHERITED_E2E_METRIC;
 console.log(failures === 0
   ? '\nPASS: no declaration => fixed ISL/OSL is byte-identical; a declaration is authority-ordered.'

@@ -23,6 +23,42 @@ Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
 
+### E2E KB recall policy
+
+GEAK reads the deployment KB after the Setup baseline and before Profile/Strategize.
+Normal runs default to `warm_start=on`; `reference` and fast mode offer references
+without applying candidates. Resuming phases without Setup skips this read.
+
+To select KB records independently of an orchestrator's metric, export this in the
+environment that launches GEAK (or its parent orchestrator):
+
+```bash
+export GEAK_E2E_KB_METRIC_BASIS=e2e_norm_intvty_p50
+```
+
+The handoff/workflow argument `e2e_kb_metric_basis` takes precedence over this
+environment variable. Both accept the metric bases and axis aliases supported by
+GEAK, and require an exact recorded basis: other metrics and unlabelled legacy
+records are excluded before ranking. Model, workload kind, hardware, TP/EP and
+concurrency still use the normal identity ladder. This setting does not change
+KB addresses, benchmark axes, acceptance rules, or the metric recorded by new writes.
+Without an override, AgentX retains the measurement-derived filter and permits
+unlabelled historical records; synthetic reads retain their existing behavior.
+
+For example, a caller can measure `output` while GEAK recalls only p50 candidates.
+Those candidates must still pass the current run's local A/B gate to be adopted.
+An A/B on another metric does not attest or reject the stored p50 claim. Logs and
+`workflow_return.json` → `kb_recall.e2e` report `recall_metric_basis`,
+`measurement_metric_basis`, the policy source, and whether matching was strict.
+Setting the recall filter alone does not make optimization or acceptance use p50.
+
+For Hyperloom, point `GEAK_ROOT` and `GEAK_E2E_RUNNER` at this GEAK build and
+provide `GEAK_KB_STORE_URL` / `GEAK_KB_STORE_TOKEN` to its parent environment.
+No Hyperloom change is needed for this recall override. The installer overlays
+created by GEAK also expose their real imports through `modules`, so consumers
+of the original overlay manifest can load them. A source-tree hash in the manifest
+includes nested installer/kernel files in those consumers' overlay fingerprints.
+
 ### Agent backend (swappable: Claude Code ↔ codex)
 
 By default `run_e2e.py` drives the JS workflow through **Claude Code's `Workflow`

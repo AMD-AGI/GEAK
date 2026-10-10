@@ -103,9 +103,9 @@ check("a declared basis is stated on the read",
 check("the resolve command carries it",
       "kbMetricBasisFlag()" in s and re.search(
           r"resolve \$\{kbIdentityFlags\(\)\}[\s\S]{0,120}kbMetricBasisFlag\(\)", s) is not None)
-check("only a declared basis is stated",
-      re.search(r"AGENTX && AGENTX_METRIC_BASIS \?", s) is not None,
-      "a synthetic run asserts no basis and must keep its present behaviour")
+check("the read uses the independent KB policy",
+      re.search(r"function kbMetricBasisFlag\(\) \{\s*return E2E_KB_METRIC.basis \?", s) is not None,
+      "test_agentx_declaration.js verifies explicit overrides and unchanged synthetic defaults")
 
 print()
 if FAILED:

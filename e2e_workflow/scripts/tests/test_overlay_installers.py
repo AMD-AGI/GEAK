@@ -1,5 +1,6 @@
 """Execute deferred installers after relocation and checked composition, without GPU dependencies."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -80,6 +81,8 @@ def test_installer_only_bundle_packs_all_package_sources(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "42"
     assert e2e_store._overlay_kernel_names({"final_overlay": str(materialized / "overlay")}) == {"sample_kernel"}
+    assert _legacy_loadable(materialized / "overlay")
+    assert not _legacy_loadable(overlay)  # packaging did not mutate the input
 
 
 def test_required_installer_failure_stops_python(tmp_path):
@@ -148,7 +151,64 @@ def test_overlay_coverage_does_not_fetch_another_kernel_champion(tmp_path, monke
 
 def test_adding_installer_upgrades_the_old_generic_runtime(tmp_path):
     base = _overlay(tmp_path / "base", legacy=True)
+    (base / "x.py").write_text("def install():\n    pass\n")
     ov.cmd_add_installer(type("Args", (), dict(overlay=str(base), base="", id="x", module="x",
                                              callable="install", target=["a:b"], kernel=["k"]))())
     assert (base / "sitecustomize.py").read_text() == ov.SITECUSTOMIZE
     assert json.loads((base / "_overlay_manifest.json").read_text())["installers"][0]["kernels"] == ["k"]
+
+
+def _legacy_loadable(root):
+    """The pre-installers Hyperloom loader contract, kept here without an HL dependency."""
+    manifest = json.loads((root / "_overlay_manifest.json").read_text())
+    return (root / "sitecustomize.py").is_file() and bool(
+        manifest.get("modules") or manifest.get("rebinds") or manifest.get("captures"))
+
+
+def _legacy_digest(root):
+    raw = (root / "_overlay_manifest.json").read_bytes()
+    digest = hashlib.sha256(raw)
+    spec = json.loads(raw)
+    bodies = {entry["file"] for entry in spec.get("modules", [])}
+    bodies.update(entry["impl_module"] + ".py" for entry in spec.get("rebinds", []))
+    for rel in sorted(bodies):
+        digest.update(rel.encode())
+        digest.update(hashlib.sha256((root / rel).read_bytes()).digest())
+    return digest.hexdigest()[:16]
+
+
+def test_stock_replay_is_loadable_and_nested_kernel_changes_affect_legacy_digest(tmp_path):
+    source = _overlay(tmp_path / "source", installer=True)
+    # A real package import, including a relative import, still registers the deferred hook once.
+    init = source / "sample_installer/__init__.py"
+    init.write_text("from .payload import VALUE\n" + init.read_text())
+    merged = Path(ov.merge_overlays(str(tmp_path / "first"), [str(source)]))
+    assert _legacy_loadable(merged)
+    proc = _child(merged, "import sys, sample_installer, incoming_target; "
+                  "assert sample_installer.VALUE == incoming_target.VALUE == 42; "
+                  "assert sys.fixture_installed")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr.count("[overlay] installed sample") == 1
+    assert "[overlay] injected module sample_installer" in proc.stderr
+    again = Path(ov.merge_overlays(str(tmp_path / "again"), [str(source), str(merged)]))
+    assert _legacy_digest(again) == _legacy_digest(merged)
+    (source / "sample_installer/kernel.hip").write_text("// changed kernel, same __init__\n")
+    changed = Path(ov.merge_overlays(str(tmp_path / "changed"), [str(source)]))
+    assert _legacy_digest(changed) != _legacy_digest(merged)
+
+
+@pytest.mark.parametrize("problem", ["missing", "conflicting_module", "symlink"])
+def test_installer_compatibility_rejects_broken_sources_atomically(tmp_path, problem):
+    source = _overlay(tmp_path / "source", installer=True)
+    if problem == "missing":
+        (source / "sample_installer/__init__.py").unlink()
+    elif problem == "conflicting_module":
+        path = source / "_overlay_manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["modules"] = [{"module": "sample_installer", "file": "unrelated.py"}]
+        path.write_text(json.dumps(manifest))
+    else:
+        (source / "sample_installer/link.py").symlink_to(source / "sample_installer/payload.py")
+    with pytest.raises(ValueError):
+        ov.merge_overlays(str(tmp_path / "output"), [str(source)])
+    assert not (tmp_path / "output").exists()

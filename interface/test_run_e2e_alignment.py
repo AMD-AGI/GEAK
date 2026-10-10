@@ -361,6 +361,25 @@ def test_map_args_omits_serving_fidelity_when_absent(tmp_path: Path) -> None:
     assert "mem_fraction" not in ps
 
 
+def test_kb_metric_override_only_controls_recall(tmp_path, monkeypatch):
+    import copy
+    h = {"model_path": "/models/M", "exp_root": str(tmp_path), "tp": 8,
+         "workload_spec": {"kind": "agentx_trace_replay", "metric_basis": "aggregate_output_tok_s"}}
+    original = copy.deepcopy(h)
+    monkeypatch.setenv("E2E_METRIC", "output")
+    monkeypatch.setenv("GEAK_E2E_KB_METRIC_BASIS", "e2e_norm_intvty_p50")
+    ps = rx.map_args(h)
+    assert ps["e2e_kb_metric_basis"] == "e2e_norm_intvty_p50"
+    assert ps["workload_spec"]["metric_basis"] == "aggregate_output_tok_s"
+    assert h == original
+    assert rx.os.environ["E2E_METRIC"] == "output"
+    h["e2e_kb_metric_basis"] = "e2e_norm_intvty_p90"
+    assert rx.map_args(h)["e2e_kb_metric_basis"] == "e2e_norm_intvty_p90"
+    del h["e2e_kb_metric_basis"]
+    monkeypatch.delenv("GEAK_E2E_KB_METRIC_BASIS")
+    assert "e2e_kb_metric_basis" not in rx.map_args(h)
+
+
 def test_map_args_consumes_schema_v2_effective_config(tmp_path: Path) -> None:
     """The complete current-best descriptor, not only accepted_flags, seeds GEAK."""
     recipe = tmp_path / "baseline_config.with_envs.yaml"

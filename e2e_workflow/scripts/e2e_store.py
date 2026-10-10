@@ -51,6 +51,7 @@ No delete exists on the service. Every `--apply` is permanent.
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
@@ -339,6 +340,10 @@ def _sort_key(metric: str):
 
 
 def cmd_resolve(a) -> dict:
+    wanted_basis = str(getattr(a, "metric_basis", "") or "").strip()
+    require_basis = bool(getattr(a, "require_metric_basis", False))
+    if require_basis and not wanted_basis:
+        raise ValueError("--require-metric-basis requires --metric-basis")
     # Appended, never merged: `ladder[0]` still has to be the address this run would WRITE, because
     # it is what lands in identity_out and names the page in the output.
     ladder = read_ladder(a)
@@ -421,17 +426,17 @@ def cmd_resolve(a) -> dict:
             # --min-speedup is: the collapse keeps one entry per direction, so a record that
             # cannot be offered must not be allowed to hold a direction's slot.
             #
-            # A record with NO recorded basis is kept. Every record written before this field
-            # existed is in that state, and dropping them would strand the entire existing store
-            # the first time a reader states its basis -- the exact invisible miss this is for.
-            wanted_basis = str(getattr(a, "metric_basis", "") or "").strip()
+            # Legacy reads keep unlabelled records; an explicit strict policy cannot treat an
+            # unknown measurement as evidence for the requested basis.
             curation["metric_basis"] = wanted_basis
+            curation["require_metric_basis"] = require_basis
             if wanted_basis:
                 before = len(hydrated)
-                hydrated = [v for v in hydrated
-                            if not v["metric_basis"] or v["metric_basis"] == wanted_basis]
-                curation["other_metric_basis"] = before - len(hydrated)
                 curation["unstated_metric_basis"] = sum(1 for v in hydrated if not v["metric_basis"])
+                hydrated = [v for v in hydrated
+                            if v["metric_basis"] == wanted_basis
+                            or (not require_basis and not v["metric_basis"])]
+                curation["other_metric_basis"] = before - len(hydrated)
             # Re-sorted even though the store ordered by this metric, because the planes order by
             # slightly different things (document scalar vs the service's score). The hydrated views
             # are the one place both agree, and collapse_by_direction keeps the FIRST entry per
@@ -1118,6 +1123,12 @@ def _pack_overlay(dirpath: str) -> str:
     holder = tempfile.TemporaryDirectory(prefix="e2e_overlay_")
     _PACKED.append(holder)
     out = os.path.join(holder.name, OVERLAY_TARBALL)
+    with open(manifest_path) as handle:
+        manifest = json.load(handle)
+    packed_manifest = None
+    if isinstance(manifest, dict) and manifest.get("installers"):
+        from overlay_setup import installer_module_manifest
+        packed_manifest = json.dumps(installer_module_manifest(dirpath, manifest), indent=2).encode()
 
     def _add_tree(tar, root_dir):
         for root, dirs, names in os.walk(root_dir):
@@ -1131,7 +1142,12 @@ def _pack_overlay(dirpath: str) -> str:
     with tarfile.open(out, "w:gz") as tar:
         for name in (OVERLAY_MANIFEST, "sitecustomize.py"):
             src = os.path.join(dirpath, name)
-            if os.path.isfile(src):
+            if name == OVERLAY_MANIFEST and packed_manifest is not None:
+                info = tarfile.TarInfo("overlay/" + name)
+                info.size = len(packed_manifest)
+                info.mode = 0o644
+                tar.addfile(info, io.BytesIO(packed_manifest))
+            elif os.path.isfile(src):
                 tar.add(src, arcname="overlay/" + name)
         _add_tree(tar, os.path.join(dirpath, "_patched"))
         for module in _overlay_modules(manifest_path):
@@ -2123,9 +2139,11 @@ def main(argv=None) -> int:
                         "high to low). The champion metric per rung is unaffected.")
     q.add_argument("--metric-basis", default="",
                    help="only offer records measured on this basis (e.g. p90_intvty_inferencex, "
-                        "aggregate_output_tok_s). Records that state no basis are always kept — "
-                        "every record written before this field existed is one. Unset = today's "
+                        "aggregate_output_tok_s). Unlabelled records are kept unless "
+                        "--require-metric-basis is set. Unset = today's "
                         "behaviour: offer whatever is on the page, whatever it measures.")
+    q.add_argument("--require-metric-basis", action="store_true",
+                   help="require an exact --metric-basis match; exclude unlabelled legacy records")
     q.add_argument("--refs-dir", default="", help="write prose references here")
     q.add_argument("--cache-dir", default="", help="materialize artifact bundles here")
     q.add_argument("--identity-out", default="",

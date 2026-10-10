@@ -1003,6 +1003,31 @@ function resolveAgentxMetric() {
 }
 const { basis: AGENTX_METRIC_BASIS, source: AGENTX_METRIC_SOURCE } = resolveAgentxMetric();
 const AGENTX_E2E_METRIC = AGENTX ? AXIS_OF_METRIC_BASIS[AGENTX_METRIC_BASIS] : '';
+// Recall has its own policy. In particular, older orchestrators may grade output/total while
+// the operator wants only p50 candidates. This never changes the bench axis or the writer's basis.
+function resolveKbMetric() {
+  let env = '';
+  try { env = String(process.env.GEAK_E2E_KB_METRIC_BASIS || '').trim(); } catch (_) { /* no env */ }
+  const arg = String(A.e2e_kb_metric_basis || '').trim();
+  const requested = (arg || env).toLowerCase();
+  if (!requested) return { basis: AGENTX_METRIC_BASIS, strict: false, source: 'measurement' };
+  const basis = AXIS_OF_METRIC_BASIS[requested] ? requested : METRIC_BASIS_OF_AXIS[requested];
+  if (!basis) throw new Error(`Unknown e2e KB metric basis '${requested}'. Known bases: ` +
+    Object.keys(AXIS_OF_METRIC_BASIS).join(', '));
+  return { basis, strict: true, source: arg ? 'e2e_kb_metric_basis' : 'GEAK_E2E_KB_METRIC_BASIS' };
+}
+const E2E_KB_METRIC = resolveKbMetric();
+function kbMeasurementBasis() {
+  if (AGENTX) return AGENTX_METRIC_BASIS;
+  let axis = '';
+  try { axis = String(process.env.E2E_METRIC || '').trim().toLowerCase(); } catch (_) { /* no env */ }
+  return METRIC_BASIS_OF_AXIS[axis] || 'aggregate_output_tok_s';
+}
+function kbCanAttestMetric(candidate) {
+  const measured = kbMeasurementBasis();
+  // A fresh output/total A/B is not evidence for or against the stored p50 claim.
+  return candidate.metric_basis ? candidate.metric_basis === measured : !E2E_KB_METRIC.strict;
+}
 // Body of the per-run bench_env.sh the Director drops beside the copied bench
 // script (see roles/director.md PHASE=setup). Every line assigns ONLY when the
 // name is unset or empty, so a real exported value -- an orchestrator's, or an
@@ -1620,10 +1645,11 @@ function kbPlaneFlags(plane) {
 // reader wants them side by side with a label rather than scattered over five sparse pages), so the
 // reader has to state it instead. One page has already carried ~64763 (total tok/s), ~471 (output
 // tok/s) and ~81 (P90 interactivity) at once; ranked together the top row wins by unit, not merit.
-// Only a declared basis is stated — a synthetic run asserts nothing and keeps today's behaviour,
-// and records that state no basis are offered either way (see cmd_resolve).
+// An explicit recall policy requires an exact basis, including on synthetic runs. Without one,
+// preserve the historical measurement-derived filter and its compatibility with unlabelled records.
 function kbMetricBasisFlag() {
-  return AGENTX && AGENTX_METRIC_BASIS ? `--metric-basis ${shq(AGENTX_METRIC_BASIS)} ` : '';
+  return E2E_KB_METRIC.basis ? `--metric-basis ${shq(E2E_KB_METRIC.basis)} ` +
+    (E2E_KB_METRIC.strict ? '--require-metric-basis ' : '') : '';
 }
 
 function kbResolveScript(args) {
@@ -3207,6 +3233,9 @@ print(json.dumps(res))
         `sorted_by=${resolved.sorted_by || resolved.ranked_by || '-'} ` +
         `champion_metric=${resolved.champion_metric || '-'} reason=${resolved.read_reason || '?'} ` +
         `candidates=${cands.length}`);
+      log(`[kb] recall_metric_basis=${E2E_KB_METRIC.basis || 'any'} ` +
+        `strict=${E2E_KB_METRIC.strict} source=${E2E_KB_METRIC.source} ` +
+        `measurement_metric_basis=${kbMeasurementBasis()}`);
       // The counts BEHIND a zero: nobody wrote this page, everything was retracted, everything was
       // under the floor — all `candidates=0` above. Logged separately so that line stays greppable.
       const curation = (resolved.curation && typeof resolved.curation === 'object') ? resolved.curation : {};
@@ -3228,6 +3257,9 @@ print(json.dumps(res))
         answered: String(resolved.canonical_id || ''),
         match_tier: String(resolved.match_tier || ''),
         plane: E2E_KB_PLANE, read_plane: KB_READ_PLANE, mode: E2E_WARM_START,
+        recall_metric_basis: E2E_KB_METRIC.basis,
+        recall_metric_strict: E2E_KB_METRIC.strict, recall_metric_source: E2E_KB_METRIC.source,
+        measurement_metric_basis: kbMeasurementBasis(),
         candidates: cands.length, configs: [], kernels: [],
         // Both floors, always: "what did this run decline to see, and at what threshold" is not
         // answerable after the fact from a candidate list.
@@ -3706,8 +3738,11 @@ print(json.dumps(res))
       // A record's headline number covers its WHOLE bundle. When that includes kernels this lane
       // benched only the config half, so every place printing both has to say which half ran.
       const configHalfOnly = v => Array.isArray(v.accepted_kernels) && v.accepted_kernels.length > 0;
-      const attestable = verdicts.filter(v => v.session_id &&
+      const attestable = verdicts.filter(v => v.session_id && kbCanAttestMetric(v) &&
         ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
+      const crossMetric = verdicts.filter(v => v.session_id && !kbCanAttestMetric(v));
+      if (crossMetric.length) log(`[kb] ${crossMetric.length} record(s) not attested: ` +
+        'the local measurement axis does not establish their stored metric claim.');
       if (attestable.length) {
         const cmds = attestable.map(v =>
           `python3 ${shq(E2E_STORE_SCRIPT)} attest ${kbIdentityFlags()} ${kbPlaneFlags()} ` +

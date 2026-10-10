@@ -817,6 +817,11 @@ def map_args(
     # subset of {setup,profile,config,tune,head,kernel,final} (default unset => "all").
     if h.get("phases"):
         ps_args["phases"] = str(h["phases"])
+    # Recall policy is independent of the workload's measurement/acceptance contract.
+    kb_basis = str(h.get("e2e_kb_metric_basis")
+                   or os.environ.get("GEAK_E2E_KB_METRIC_BASIS", "")).strip()
+    if kb_basis:
+        ps_args["e2e_kb_metric_basis"] = kb_basis
     # No timed-repeat pass-through: the round count belongs to the lifecycle, not the handoff, so
     # an `e2e_repeats` key from a stale caller is ignored rather than allowed to pull one leg off
     # the lifecycle the rest of the run used.

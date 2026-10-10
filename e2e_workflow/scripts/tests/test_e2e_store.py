@@ -1395,6 +1395,26 @@ def test_different_bases_share_a_page_without_overwriting_measurements(tmp_path)
         assert [c["metric_basis"] for c in out["candidates"]] == [basis]
 
 
+def test_strict_metric_recall_excludes_unknown_and_wrong_bases_before_ranking(tmp_path):
+    for name, basis, tput in [("p50", "e2e_norm_intvty_p50", 900),
+                              ("output", "aggregate_output_tok_s", 9000),
+                              ("legacy", "", 90000)]:
+        _write(tmp_path, name, "config", identity=AGENTX_IDENTITY,
+               workload=AGENTX_WORKLOAD, metric_basis=basis, tput=tput, baseline=800)
+    out = _run("resolve", "--store", str(tmp_path / "store"), "--metric-basis",
+               "e2e_norm_intvty_p50", "--require-metric-basis", identity=AGENTX_IDENTITY)
+    assert [c["metric_basis"] for c in out["candidates"]] == ["e2e_norm_intvty_p50"]
+    assert out["curation"]["require_metric_basis"] is True
+    assert out["curation"]["unstated_metric_basis"] == 1
+    assert out["curation"]["other_metric_basis"] == 2
+    assert "p50" not in out["canonical_id"]
+
+
+def test_strict_metric_requires_a_named_basis(tmp_path):
+    with pytest.raises(ValueError, match="requires --metric-basis"):
+        _run("resolve", "--store", str(tmp_path / "store"), "--require-metric-basis")
+
+
 @pytest.mark.parametrize("change", [{"corpus": "different_trace"}, {"duration_s": 900},
                                     {"num_entries": 50}])
 def test_other_declared_workloads_do_not_inherit_attestations(tmp_path, change):
