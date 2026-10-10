@@ -55,7 +55,7 @@ Steps:
    cp -r "$SKILL_DIR/scripts/adapters" "$EVAL_DIR/adapters"   # bench_e2e.sh sources adapters/<backend>.sh next to itself
    cp "$SKILL_DIR/scripts/parse_profile.py" "$EVAL_DIR/parse_profile.py"
    cp "$SKILL_DIR/scripts/trace_capability.py" "$EVAL_DIR/trace_capability.py"   # KernelFusion capture manifests
-   cp "$SKILL_DIR/scripts/overlay_setup.py" "$SKILL_DIR/scripts/triton_launch_probe.py" "$EVAL_DIR/"   # GEAK_TRITON_LAUNCH_SHAPES=1 captures
+   cp "$SKILL_DIR/scripts/overlay_setup.py" "$SKILL_DIR/scripts/triton_launch_probe.py" "$SKILL_DIR/scripts/vllm_phase_annotate.py" "$EVAL_DIR/"   # capture hooks (GEAK_TRITON_LAUNCH_SHAPES / GEAK_VLLM_DRAFT_ANNOTATE)
    cp "$SKILL_DIR/scripts/numa_pin.sh" "$EVAL_DIR/numa_pin.sh"   # bench_e2e.sh pins to the GPUs' NUMA node
    ```
    - If `LAUNCH_SCRIPT` is empty, the baseline is the stack's default config + `MODEL_PATH` +

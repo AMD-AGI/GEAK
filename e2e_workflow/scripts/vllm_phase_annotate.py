@@ -27,9 +27,22 @@ pairing, layer-boundary resolution, conservation checks — is reused verbatim.
 inside it, a correlated `gpu_user_annotation` device event.  That is the exact category
 pair `_collect_step_spans()` reads.
 
+SPECULATIVE DECODING (MTP / EAGLE)
+----------------------------------
+vLLM's own `execute_*` annotation wraps only `execute_model`, the target model's forward.
+The draft model's proposals and the rejection sampler run afterwards, in
+`GPUModelRunner.sample_tokens` (both the V1 runner, `drafter`, and the V2 runner,
+`speculator`, which vLLM picks for MiniMax-M3 + EAGLE3), outside every step span, so the semantics layer could only
+count them as out of scope (MiniMax-M3 TP8 + EAGLE3: 415 ms, 5% of the window). With
+`GEAK_VLLM_DRAFT_ANNOTATE=1`, and only when the runner has a drafter, `sample_tokens` is
+wrapped in `step[DRAFT_EXTEND bs=N]` -- sglang's draft dialect, which `sglang_step_modes`
+already maps to the draft phase: kept off the main-layer tables and reported on its own. The
+span also holds the sampler, which runs in the same call.
+
 CONTRACT
 --------
-- Inert unless `GEAK_VLLM_PHASE_ANNOTATE=1`. An unarmed overlay must not change a serving run.
+- Inert unless `GEAK_VLLM_PHASE_ANNOTATE=1` (target steps) or `GEAK_VLLM_DRAFT_ANNOTATE=1`
+  (draft steps). An unarmed overlay must not change a serving run.
 - Never raises into the serving path. If the phase cannot be determined the original method
   is called with NO annotation — a MISSING span degrades to "unresolved", a WRONG span
   silently corrupts every fusion candidate built on it.
@@ -45,6 +58,34 @@ _WARNED = set()
 
 def _armed():
     return os.environ.get("GEAK_VLLM_PHASE_ANNOTATE", "0") in ("1", "true", "True")
+
+
+def _draft_armed():
+    return os.environ.get("GEAK_VLLM_DRAFT_ANNOTATE", "0") in ("1", "true", "True")
+
+
+# Runner modules whose GPUModelRunner the hooks wrap: V1, and the V2 runner vLLM selects for
+# some configs (MiniMax-M3 + EAGLE3 logs "Using V2 Model Runner"). Each is wrapped only once
+# its module is already imported -- the overlay registers a post-import hook on both.
+RUNNER_MODULES = ("vllm.v1.worker.gpu_model_runner", "vllm.v1.worker.gpu.model_runner")
+
+
+def draft_step_name(runner):
+    """`step[DRAFT_EXTEND bs=N]` for a sample_tokens call that will run a drafter, else None.
+
+    V1 keeps its proposer in `drafter` and the batch in `input_batch`; V2 keeps it in
+    `speculator` and the step's batch in `execute_model_state.input_batch`.
+    """
+    if (getattr(runner, "drafter", None) is None
+            and getattr(runner, "speculator", None) is None):
+        return None
+    batch = getattr(getattr(runner, "execute_model_state", None), "input_batch", None)
+    if batch is None:
+        batch = getattr(runner, "input_batch", None)
+    num_reqs = getattr(batch, "num_reqs", None)
+    if not num_reqs:
+        return None
+    return "step[DRAFT_EXTEND bs=%d]" % int(num_reqs)
 
 
 def _warn_once(key, message):
@@ -104,24 +145,38 @@ def _step_name(runner, scheduler_output):
 
 
 def install():
-    """Wrap GPUModelRunner.execute_model. Called lazily AFTER the module is imported.
+    """Wrap GPUModelRunner methods. Called lazily AFTER the module is imported.
 
     Deliberately does NOT import vllm itself: an eager `import vllm...` from a
     sitecustomize runs before the engine has set up its distributed environment and
     hangs every TP rank. The overlay's post-import hook hands us the already-imported
     module instead.
     """
-    if not _armed():
+    phase, draft = _armed(), _draft_armed()
+    if not (phase or draft):
         return False
+    runners = [getattr(sys.modules[name], "GPUModelRunner", None)
+               for name in RUNNER_MODULES if name in sys.modules]
+    runners = [cls for cls in runners if cls is not None]
     try:
         import torch
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     except Exception as exc:
         _warn_once("import", "not installed (%r) -- traces will have NO step spans" % (exc,))
         return False
+    if not runners:
+        _warn_once("import", "no vLLM GPUModelRunner imported yet -- nothing wrapped")
+        return False
+    for cls in runners:
+        if phase:
+            _install_target(torch, cls)
+        if draft:
+            _install_draft(torch, cls)
+    return True
 
-    if GPUModelRunner in _INSTALLED:
-        return True
+
+def _install_target(torch, GPUModelRunner):
+    if (GPUModelRunner, "execute_model") in _INSTALLED:
+        return
     original = GPUModelRunner.execute_model
 
     def execute_model(self, scheduler_output, *args, **kwargs):
@@ -136,8 +191,33 @@ def install():
             return original(self, scheduler_output, *args, **kwargs)
 
     GPUModelRunner.execute_model = execute_model
-    _INSTALLED.add(GPUModelRunner)
+    _INSTALLED.add((GPUModelRunner, "execute_model"))
     sys.stderr.write(
-        "[GEAK_PHASE_ANNOTATE] ENGAGED: GPUModelRunner.execute_model emits "
-        "step[EXTEND bs=.. toks=..] / step[DECODE bs=..]\n")
-    return True
+        "[GEAK_PHASE_ANNOTATE] ENGAGED: %s.GPUModelRunner.execute_model emits "
+        "step[EXTEND bs=.. toks=..] / step[DECODE bs=..]\n" % GPUModelRunner.__module__)
+
+
+def _install_draft(torch, GPUModelRunner):
+    if (GPUModelRunner, "sample_tokens") in _INSTALLED:
+        return
+    original = getattr(GPUModelRunner, "sample_tokens", None)
+    if original is None:
+        _warn_once("draft", "GPUModelRunner has no sample_tokens; draft steps unannotated")
+        return
+
+    def sample_tokens(self, *args, **kwargs):
+        name = None
+        try:
+            name = draft_step_name(self)
+        except Exception as exc:
+            _warn_once("draft_name", "draft step naming failed (%r); unannotated" % (exc,))
+        if name is None:
+            return original(self, *args, **kwargs)
+        with torch.profiler.record_function(name):
+            return original(self, *args, **kwargs)
+
+    GPUModelRunner.sample_tokens = sample_tokens
+    _INSTALLED.add((GPUModelRunner, "sample_tokens"))
+    sys.stderr.write(
+        "[GEAK_PHASE_ANNOTATE] ENGAGED: %s.GPUModelRunner.sample_tokens emits "
+        "step[DRAFT_EXTEND bs=..] when a drafter is configured\n" % GPUModelRunner.__module__)

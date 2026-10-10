@@ -39,8 +39,9 @@ Commands:
                 Inert unless GEAK_SEMANTICS_CAPTURE=1.   --overlay O
   add-vllm-phase-annotation
                 shorthand: wire scripts/vllm_phase_annotate.py so a vLLM trace carries the
-                sglang-dialect step[EXTEND|DECODE ...] spans the fusion semantics layer needs.
-                Inert unless GEAK_VLLM_PHASE_ANNOTATE=1.   --overlay O
+                sglang-dialect step[EXTEND|DECODE ...] spans the fusion semantics layer needs,
+                and (GEAK_VLLM_DRAFT_ANNOTATE=1) step[DRAFT_EXTEND ...] around a speculative
+                drafter. Inert unless one of the two is set.   --overlay O [--from BASE]
   add-triton-launch-probe
                 wire scripts/triton_launch_probe.py so every Triton launch made while a
                 torch profiler records carries its tensor arguments in the trace (the only
@@ -339,10 +340,16 @@ def cmd_add_vllm_phase_annotation(a):
         os.path.dirname(os.path.abspath(__file__)), "vllm_phase_annotate.py")
     if not os.path.exists(impl):
         raise SystemExit(f"vllm_phase_annotate.py not found at {impl}")
+    _ensure_overlay(a.overlay, getattr(a, "base", ""))
     a.impl_file = impl
     a.impl_module = "vllm_phase_annotate"
     a.impl_attr = "install"
     cmd_add_hook(a)
+    # vLLM picks the V2 runner (vllm.v1.worker.gpu.model_runner) for some configs, e.g.
+    # MiniMax-M3 + EAGLE3; hook its import too, or its methods are never wrapped.
+    if a.module == "vllm.v1.worker.gpu_model_runner":
+        a.module, a.impl_file = "vllm.v1.worker.gpu.model_runner", ""
+        cmd_add_hook(a)
 
 
 def cmd_add_vllm_semantic_capture(a):
@@ -456,6 +463,7 @@ def main():
     p.add_argument("--overlay", required=True)
     p.add_argument("--module", default="vllm.v1.worker.gpu_model_runner")
     p.add_argument("--impl-file", default="", dest="impl_file")
+    p.add_argument("--from", dest="base", default="", help="seed the overlay from this existing overlay dir")
     p.set_defaults(func=cmd_add_vllm_phase_annotation)
 
     p = sub.add_parser("add-vllm-semantic-capture")

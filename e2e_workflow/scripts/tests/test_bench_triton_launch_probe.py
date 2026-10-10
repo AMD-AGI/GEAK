@@ -21,7 +21,7 @@ SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH = os.path.join(SCRIPTS_DIR, "bench_e2e.sh")
 BASH = shutil.which("bash")
 
-_START = "# ---- Triton launch probe"
+_START = "# ---- capture overlay"
 _END = "# export everything the adapter reads"
 
 
@@ -34,15 +34,15 @@ def _block():
 
 @unittest.skipIf(BASH is None, "bash is required")
 class BenchTritonLaunchProbeTest(unittest.TestCase):
-    def _run(self, tmp, extra_env, overlay_path, here=SCRIPTS_DIR):
+    def _run(self, tmp, extra_env, overlay_path, here=SCRIPTS_DIR, backend="vllm"):
         script = (
             "set -u\n"
-            'HERE="$1"; EXTRA_ENV="$2"; OVERLAY_PYTHONPATH="$3"; OUT_DIR="$4"\n'
+            'HERE="$1"; EXTRA_ENV="$2"; OVERLAY_PYTHONPATH="$3"; OUT_DIR="$4"; BACKEND="$5"\n'
             "_stage_lookup() { [ -f \"$HERE/$1\" ] && echo \"$HERE/$1\"; }\n"
             + _block()
             + '\nprintf %s "$OVERLAY_PYTHONPATH"\n')
         proc = subprocess.run(
-            [BASH, "-c", script, "_", here, extra_env, overlay_path, tmp],
+            [BASH, "-c", script, "_", here, extra_env, overlay_path, tmp, backend],
             capture_output=True, text=True, timeout=60,
             env=dict(os.environ, PATH=os.path.dirname(sys.executable) + ":" + os.environ["PATH"]))
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -87,6 +87,40 @@ class BenchTritonLaunchProbeTest(unittest.TestCase):
             out, err = self._run(tmp, "GEAK_TRITON_LAUNCH_SHAPES=1", raw)
             self.assertEqual(out, raw)
             self.assertIn("NOT armed", err)
+
+    def _hooks(self, tmp):
+        with open(os.path.join(tmp, "triton_launch_probe_overlay",
+                               "_overlay_manifest.json")) as fh:
+            return sorted((h["module"], h["impl_module"]) for h in json.load(fh)["hooks"])
+
+    def test_draft_annotation_rides_in_the_same_overlay_as_the_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, _ = self._run(
+                tmp, "GEAK_TRITON_LAUNCH_SHAPES=1 GEAK_VLLM_DRAFT_ANNOTATE=1", "")
+            self.assertEqual(out, os.path.join(tmp, "triton_launch_probe_overlay"))
+            self.assertEqual(self._hooks(tmp), [
+                ("triton.runtime.jit", "triton_launch_probe"),
+                ("vllm.v1.worker.gpu.model_runner", "vllm_phase_annotate"),
+                ("vllm.v1.worker.gpu_model_runner", "vllm_phase_annotate")])
+
+    def test_draft_annotation_alone_still_seeds_from_the_current_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = os.path.join(tmp, "accepted")
+            subprocess.run([sys.executable, os.path.join(SCRIPTS_DIR, "overlay_setup.py"),
+                            "add-hook", "--overlay", base, "--module", "vllm.x",
+                            "--impl-module", "accepted_kernel"],
+                           check=True, capture_output=True)
+            out, _ = self._run(tmp, "GEAK_VLLM_DRAFT_ANNOTATE=1", base)
+            self.assertEqual(out, os.path.join(tmp, "triton_launch_probe_overlay"))
+            self.assertEqual(self._hooks(tmp), [
+                ("vllm.v1.worker.gpu.model_runner", "vllm_phase_annotate"),
+                ("vllm.v1.worker.gpu_model_runner", "vllm_phase_annotate"),
+                ("vllm.x", "accepted_kernel")])
+
+    def test_draft_annotation_is_ignored_on_other_backends(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, _ = self._run(tmp, "GEAK_VLLM_DRAFT_ANNOTATE=1", "/o", backend="sglang")
+            self.assertEqual(out, "/o")
 
     def test_missing_helpers_degrade_loudly(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -81,6 +81,12 @@ adapter_bench() {
   if [ "${BENCH_TRUST_REMOTE_CODE:-0}" = "1" ]; then
     trust_args=(--trust-remote-code)
   fi
+  # Opt-in chat-template prompts (InferenceX MTP recipes pass --use-chat-template:
+  # spec-decode acceptance degrades on raw random tokens). Off by default.
+  local -a chat_args=()
+  if [ "${BENCH_USE_CHAT_TEMPLATE:-0}" = "1" ]; then
+    chat_args=(--use-chat-template)
+  fi
 
   # --backend vllm: OpenAI-compatible client regardless of the actual serving
   # stack (matches Hyperloom). --request-rate inf + --max-concurrency: the same
@@ -102,6 +108,7 @@ adapter_bench() {
     --percentile-metrics "ttft,tpot,itl,e2el" \
     --seed "$bench_seed" \
     ${trust_args[@]+"${trust_args[@]}"} \
+    ${chat_args[@]+"${chat_args[@]}"} \
     --save-result \
     --result-dir "$res_dir" \
     --result-filename "${res_name}.json" || return $?

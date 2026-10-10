@@ -233,10 +233,66 @@ def _phase_coverage(entries, analysis_rank, require_phases):
 _SERVER_ARGS_RE = re.compile(r"server_args=ServerArgs\((?P<body>.*)\)")
 _ACCEPT_RE = re.compile(
     r"#running-req:\s*(?P<running>\d+).*?accept len:\s*(?P<accept>[0-9.]+)")
+# vLLM: `non-default args: {..., 'speculative_config': {'method': 'eagle3', ...,
+# 'num_speculative_tokens': 3}}`, then every stats interval an `Engine 000: ...
+# Running: 32 reqs` line followed by `SpecDecoding metrics: ... Accepted: 8568
+# tokens, Drafted: 11109 tokens, ...`.
+_VLLM_SPEC_CONFIG_RE = re.compile(r"'speculative_config':\s*\{(?P<body>[^}]*)\}")
+_VLLM_RUNNING_RE = re.compile(r"Engine \d+:.*?Running:\s*(?P<running>\d+) reqs")
+_VLLM_SPEC_METRICS_RE = re.compile(
+    r"SpecDecoding metrics:.*?Accepted:\s*(?P<accepted>\d+) tokens,\s*"
+    r"Drafted:\s*(?P<drafted>\d+) tokens")
+
+
+def _vllm_log_facts(text, facts):
+    """vLLM speculative config and steady-state mean accept length.
+
+    vLLM names its verify steps `decode`, so the trace alone never reports
+    speculative decoding; the config in `non-default args` is the evidence.
+    Accept length = 1 + num_speculative_tokens * accepted / drafted over the
+    stats intervals whose running-request count is at least 90% of the largest
+    seen (same steady-state rule as the SGLang rows). Returns True when the log
+    is a vLLM speculative log.
+    """
+    config = _VLLM_SPEC_CONFIG_RE.search(text)
+    if not config:
+        return False
+    body = config.group("body")
+    method = re.search(r"'method':\s*'([^']*)'", body)
+    steps = re.search(r"'num_speculative_tokens':\s*(\d+)", body)
+    if method:
+        facts["algorithm_runtime"] = method.group(1)
+    if steps:
+        facts["num_steps"] = int(steps.group(1))
+        facts["verify_tokens_per_request"] = facts["num_steps"] + 1
+    facts["runtime"] = "vllm"
+    rows, running = [], None
+    for line in text.splitlines():
+        found = _VLLM_RUNNING_RE.search(line)
+        if found:
+            running = int(found.group("running"))
+            continue
+        found = _VLLM_SPEC_METRICS_RE.search(line)
+        if found and running is not None and int(found.group("drafted")) > 0:
+            rows.append((running, int(found.group("accepted")),
+                         int(found.group("drafted"))))
+    if rows and facts["num_steps"]:
+        peak = max(r for r, _, _ in rows)
+        steady = [(a, d) for r, a, d in rows if r >= 0.9 * peak]
+        accepted = sum(a for a, _ in steady)
+        drafted = sum(d for _, d in steady)
+        facts["accept_len_mean"] = round(
+            1.0 + facts["num_steps"] * accepted / drafted, 4)
+        facts["accept_len_rows"] = len(steady)
+    elif "SpecDecoding metrics" in text:
+        facts["warnings"].append(
+            "SpecDecoding metrics present but unparsable (no running-request "
+            "count or num_speculative_tokens)")
+    return True
 
 
 def _server_log_facts(path):
-    """Optional speculative facts from an SGLang server log (never a gate).
+    """Optional speculative facts from an SGLang or vLLM server log (never a gate).
 
     The log only enriches what the trace already decided: the runtime-resolved
     speculative config (e.g. NEXTN is reported as EAGLE) and the steady-state
@@ -245,7 +301,8 @@ def _server_log_facts(path):
     """
     facts = {"algorithm_runtime": None, "verify_tokens_per_request": None,
              "topk": None, "num_steps": None, "accept_len_mean": None,
-             "accept_len_rows": 0, "server_log": None, "warnings": []}
+             "accept_len_rows": 0, "server_log": None, "runtime": None,
+             "warnings": []}
     if not path:
         facts["warnings"].append("no server log supplied; speculative "
                                  "parameters left unset")
@@ -256,6 +313,8 @@ def _server_log_facts(path):
             text = fh.read()
     except OSError as exc:
         facts["warnings"].append("server log unreadable: %s" % exc)
+        return facts
+    if _vllm_log_facts(text, facts):
         return facts
     match = _SERVER_ARGS_RE.search(text)
     if match:
@@ -305,17 +364,27 @@ def _speculative_block(entries, server_log):
              else "trace:no_verify_steps"}
     facts = _server_log_facts(server_log) if (enabled or server_log) else {
         "warnings": []}
-    if enabled:
+    # vLLM keeps calling its verify steps `decode`, so the trace cannot see
+    # speculative decoding there. Carry the log's facts (accept length) for the
+    # Top-K workload weight without enabling the verify phase: the tables stay
+    # keyed by `decode`, exactly as the trace names them.
+    vllm_speculative = (not enabled and facts.get("runtime") == "vllm"
+                        and bool(facts.get("algorithm_runtime")))
+    if enabled or vllm_speculative:
         block.update({key: facts.get(key) for key in (
             "algorithm_runtime", "verify_tokens_per_request", "topk",
             "num_steps", "accept_len_mean", "accept_len_rows", "server_log")})
+    if vllm_speculative:
+        block["server_log_speculative"] = True
+        block["evidence"] += (",server_log:vllm speculative_config "
+                              "(verify steps named decode)")
     warnings = list(facts.get("warnings", []))
-    if not enabled and facts.get("algorithm_runtime"):
+    if not enabled and not vllm_speculative and facts.get("algorithm_runtime"):
         warnings.append(
             "server log reports speculative_algorithm=%s but the trace has no "
             "verify steps; the trace decides (generation phase = decode)"
             % facts["algorithm_runtime"])
-    if not enabled:
+    if not enabled and not vllm_speculative:
         warnings = [w for w in warnings if "trace" in w]
     block["warnings"] = warnings
     return block

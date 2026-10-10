@@ -171,6 +171,25 @@ class DonorShapeProjectionTest(unittest.TestCase):
             ["a", "x", "b"], ["a", "x", "x", "b"]), {0: 0, 2: 3})
         self.assertIsNone(projection._forced_subsequence_pairs(["a", "c"], ["a", "b"]))
 
+    def test_layer_pairing_survives_streams_that_swap_blocks(self):
+        # MiniMax-M3 + EAGLE3 TP8: the shared expert (sh_*) ran before the router
+        # in the donor and after it in graph replay, so neither layer is a
+        # subsequence of the other. Equal in-layer counts still pair one by one;
+        # the eager-only extra copies (3 vs 1) stay unpaired.
+        group = {"layer_ranges": [{"start_position": 0, "end_position": 8}]}
+        donor = {"layer_starts": [0], "sequence": [
+            "attn", "copy", "ar", "sh_up", "sh_down", "router", "moe", "copy",
+            "copy", "ar"]}
+        recipient = ["attn", "ar", "router", "moe", "sh_up", "sh_down", "copy", "ar"]
+        pairs = projection._layer_identical_pairs(group, donor, recipient)
+        self.assertEqual(pairs, {0: 0, 2: 1, 3: 4, 4: 5, 5: 2, 6: 3, 9: 7})
+        self.assertTrue(all(donor["sequence"][d] == recipient[r] for d, r in pairs.items()))
+
+    def test_occurrence_pairs_never_override_an_order_fixed_pair(self):
+        taken = {0: 1}   # donor X#0 already fixed to recipient offset 1
+        self.assertEqual(projection._equal_count_occurrence_pairs(
+            ["x", "x", "y"], ["x", "x", "y"], taken), {2: 2})
+
     def test_layer_pairing_works_when_graph_replay_adds_the_extra_kernel(self):
         group = {"layer_ranges": [{"start_position": 0, "end_position": 3}]}
         donor = {"layer_starts": [0], "sequence": ["a", "b"]}

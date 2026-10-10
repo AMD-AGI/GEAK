@@ -80,7 +80,8 @@ class InferencexClientWarmupParityTest(unittest.TestCase):
             RESULT_JSONL=os.path.join(out_dir, "results.jsonl"),
         )
         for key in ("NUM_WARMUPS", "SEED", "GEAK_ISOLATED_REPLICA",
-                    "WARM_SERVER_ROUNDS", "RANDOM_RANGE_RATIO"):
+                    "WARM_SERVER_ROUNDS", "RANDOM_RANGE_RATIO",
+                    "BENCH_USE_CHAT_TEMPLATE"):
             env.pop(key, None)
         env.update({key: str(value) for key, value in extra_env.items()})
         script = f'. "{CLIENT}"; adapter_bench 192 {conc} 0'
@@ -122,6 +123,15 @@ class InferencexClientWarmupParityTest(unittest.TestCase):
         flags = self.run_bench(conc=64, SEED=1234)
         self.assertEqual(flags["--num-warmups"], "8")
         self.assertEqual(flags["--seed"], "1234")
+
+    def test_chat_template_is_off_by_default(self):
+        self.assertNotIn("--use-chat-template", self.run_bench(conc=64))
+
+    def test_chat_template_switch_passes_the_flag(self):
+        """InferenceX MTP recipes pass --use-chat-template: spec-decode acceptance
+        degrades on raw random tokens, so an MTP A/B must be able to match them."""
+        flags = self.run_bench(conc=64, BENCH_USE_CHAT_TEMPLATE=1)
+        self.assertIn("--use-chat-template", flags)
 
 
 if __name__ == "__main__":

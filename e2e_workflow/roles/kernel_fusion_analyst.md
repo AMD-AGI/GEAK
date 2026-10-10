@@ -960,7 +960,10 @@ With speculative decoding the generation phase is `verify` and is weighted as
 `ceil((OSL-1)/accept_len)` TARGET_VERIFY forwards. The ranker reads `accept_len` from
 `phase_coverage.speculative.accept_len_mean` (the capture manifest); pass
 `--spec-accept-length` only to override it. Without either it keeps `OSL-1` and labels the
-generation weight an upper bound; say so in the Top-K narrative.
+generation weight an upper bound; say so in the Top-K narrative. vLLM keeps naming its verify
+steps `decode`: the manifest then carries `speculative.server_log_speculative=true` with the
+accept length parsed from the server log's `SpecDecoding metrics`, and the `decode` weight
+becomes `ceil((OSL-1)/accept_len)` the same way.
 
 板子写 `$EVAL_DIR/03_FUSION_TOPK.md`（根目录，和其他阶段报告并排），`fusion_topk.json`
 留在 `$FUSION_DIR` —— 它是 3.0/3.1 的输入，不是给人读的。写完刷新索引：

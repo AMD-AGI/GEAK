@@ -481,6 +481,57 @@ class ServerLogFactsTest(unittest.TestCase):
             self.assertEqual(doc["generation_phase"], "decode")
             self.assertTrue(any("trace" in w for w in doc["speculative"]["warnings"]))
 
+    VLLM_LOG = (
+        "(APIServer pid=1) INFO [api_utils.py:286] non-default args: {'model': 'm', "
+        "'speculative_config': {'method': 'eagle3', 'model': '/d', "
+        "'num_speculative_tokens': 3}, 'tensor_parallel_size': 8}\n"
+        # ramp interval: below 90% of the peak running count, excluded
+        "INFO [loggers.py:320] Engine 000: Avg prompt throughput: 1.0 tokens/s, "
+        "Running: 12 reqs, Waiting: 20 reqs\n"
+        "INFO [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 4.00, "
+        "Accepted: 30 tokens, Drafted: 30 tokens, Per-position acceptance rate: 1, 1, 1\n"
+        "INFO [loggers.py:320] Engine 000: Avg prompt throughput: 1.0 tokens/s, "
+        "Running: 32 reqs, Waiting: 0 reqs\n"
+        "INFO [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.50, "
+        "Accepted: 500 tokens, Drafted: 1000 tokens, Per-position acceptance rate: x\n"
+        "INFO [loggers.py:320] Engine 000: Avg prompt throughput: 1.0 tokens/s, "
+        "Running: 30 reqs, Waiting: 0 reqs\n"
+        "INFO [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 2.80, "
+        "Accepted: 600 tokens, Drafted: 1000 tokens, Per-position acceptance rate: x\n")
+
+    def test_vllm_log_supplies_accept_len_without_a_verify_phase(self):
+        """vLLM names verify steps `decode`; the log carries the accept length."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "server.log")
+            with open(log, "w") as fh:
+                fh.write(self.VLLM_LOG)
+            doc = trace_capability.build_manifest(
+                self._trace_dir(tmp, mode="DECODE"), auto_select_rank=True,
+                server_log=log)
+            spec = doc["speculative"]
+            self.assertEqual(doc["status"], "pass")
+            self.assertEqual(doc["generation_phase"], "decode")
+            self.assertFalse(spec["enabled"])
+            self.assertTrue(spec["server_log_speculative"])
+            self.assertEqual(spec["algorithm_runtime"], "eagle3")
+            self.assertEqual(spec["verify_tokens_per_request"], 4)
+            # steady intervals only (32 and 30 running): 1 + 3 * 1100 / 2000
+            self.assertAlmostEqual(spec["accept_len_mean"], 2.65)
+            self.assertEqual(spec["accept_len_rows"], 2)
+            self.assertEqual(spec["warnings"], [])
+
+    def test_vllm_log_without_speculative_config_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "server.log")
+            with open(log, "w") as fh:
+                fh.write("INFO non-default args: {'model': 'm'}\n")
+            spec = trace_capability.build_manifest(
+                self._trace_dir(tmp, mode="DECODE"), auto_select_rank=True,
+                server_log=log)["speculative"]
+            self.assertFalse(spec["enabled"])
+            self.assertNotIn("server_log_speculative", spec)
+            self.assertNotIn("accept_len_mean", spec)
+
 
 class AnalysisStepSelectionTest(unittest.TestCase):
     """Several captured steps: every table of a phase comes from ONE step."""
@@ -585,6 +636,20 @@ class TopKAutoAcceptLengthTest(unittest.TestCase):
         info, weights, _ = topk._workload_model(workload, {"prefill": 1.0, "verify": 1.0})
         self.assertEqual(weights["verify"], 1023)
         self.assertIn("upper bound", info["decode_forward_model"])
+
+    def test_vllm_decode_phase_is_weighted_by_logged_accept_length(self):
+        """vLLM: generation phase stays `decode`, weight still divides by accept len."""
+        table = {"phase_coverage": {"generation_phase": "decode",
+                                    "speculative": {"enabled": False,
+                                                    "server_log_speculative": True,
+                                                    "accept_len_mean": 2.486}}}
+        workload = topk._speculative_workload({"isl": 8192, "osl": 1024}, table)
+        self.assertTrue(workload["speculative_decoding"])
+        self.assertEqual(workload["spec_accept_length"], 2.486)
+        info, weights, _ = topk._workload_model(workload, {"prefill": 1.0, "decode": 1.0})
+        self.assertEqual(weights["decode"], 412)   # ceil(1023 / 2.486)
+        self.assertEqual(info["generation_phase"], "decode")
+        self.assertTrue(info["speculative_decoding"])
 
 
 class DraftModuleLeakTest(unittest.TestCase):

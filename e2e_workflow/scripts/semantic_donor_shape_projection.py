@@ -109,6 +109,14 @@ def _layer_identical_pairs(group, donor, recipient_sequence):
     donor adds work graph replay drops, e.g. the copy into a custom all-reduce's
     registered buffer), the positions every embedding agrees on are forced pairs.
     Otherwise only the agreeing prefix from the cut is paired.
+
+    On top of either, an identity that occurs the same number of times inside
+    the layer on both sides pairs occurrence by occurrence (the k-th X with the
+    k-th X). Concurrent streams can swap whole blocks of a layer between donor
+    and recipient -- MiniMax-M3 with EAGLE3: the shared expert ran before the
+    router in the donor and after it in the graph replay -- which defeats the
+    subsequence rule, but never reorders one kernel against itself. An
+    identity whose occurrences disagree with a pair already taken is skipped.
     """
     # layer_ranges already exclude any inter-layer residual; a layer whose width
     # then differs from the donor's simply is not paired.
@@ -124,25 +132,55 @@ def _layer_identical_pairs(group, donor, recipient_sequence):
                            for identity in recipient_sequence[r_start:r_stop]]
         donor_layer = [_layer_identity(identity)
                        for identity in donor["sequence"][d_start:d_stop]]
+        layer_pairs = {}   # donor offset -> recipient offset, within this layer
         forced = _forced_subsequence_pairs(recipient_layer, donor_layer)
         if forced is not None:
-            for r_offset, d_offset in forced.items():
-                pairs[d_start + d_offset] = r_start + r_offset
-            continue
-        forced = _forced_subsequence_pairs(donor_layer, recipient_layer)
-        if forced is not None:
-            for d_offset, r_offset in forced.items():
-                pairs[d_start + d_offset] = r_start + r_offset
-            continue
-        # Both sides start at the same validated cut, so while their identities
-        # agree position by position the pairing is forced; stop at the first
-        # divergence (e.g. the last layer's tail runs into different post-model work).
-        for offset in range(min(r_stop - r_start, d_stop - d_start)):
-            if (_layer_identity(recipient_sequence[r_start + offset])
-                    != _layer_identity(donor["sequence"][d_start + offset])):
-                break
-            pairs[d_start + offset] = r_start + offset
+            layer_pairs = {d: r for r, d in forced.items()}
+        else:
+            forced = _forced_subsequence_pairs(donor_layer, recipient_layer)
+            if forced is not None:
+                layer_pairs = dict(forced)
+            else:
+                # Both sides start at the same validated cut, so while their
+                # identities agree position by position the pairing is forced;
+                # stop at the first divergence (e.g. the last layer's tail runs
+                # into different post-model work).
+                for offset in range(min(len(recipient_layer), len(donor_layer))):
+                    if recipient_layer[offset] != donor_layer[offset]:
+                        break
+                    layer_pairs[offset] = offset
+        for d_offset, r_offset in _equal_count_occurrence_pairs(
+                donor_layer, recipient_layer, layer_pairs).items():
+            layer_pairs[d_offset] = r_offset
+        for d_offset, r_offset in layer_pairs.items():
+            pairs[d_start + d_offset] = r_start + r_offset
     return pairs
+
+
+def _equal_count_occurrence_pairs(donor_layer, recipient_layer, taken):
+    """{donor_offset: recipient_offset} for identities with equal in-layer counts.
+
+    Pairs the k-th occurrence with the k-th. An identity is dropped whole if any
+    of its pairs contradicts `taken` (a pair the order-based rules already fixed).
+    """
+    donor_at = collections.defaultdict(list)
+    recipient_at = collections.defaultdict(list)
+    for offset, identity in enumerate(donor_layer):
+        donor_at[identity].append(offset)
+    for offset, identity in enumerate(recipient_layer):
+        recipient_at[identity].append(offset)
+    taken_recipient = {r: d for d, r in taken.items()}
+    out = {}
+    for identity, donor_offsets in donor_at.items():
+        recipient_offsets = recipient_at.get(identity, [])
+        if len(donor_offsets) != len(recipient_offsets):
+            continue
+        candidate = dict(zip(donor_offsets, recipient_offsets))
+        if any(taken.get(d, r) != r or taken_recipient.get(r, d) != d
+               for d, r in candidate.items()):
+            continue
+        out.update(candidate)
+    return out
 
 
 def _pairs_for(group, donor, recipient_sequence):

@@ -708,8 +708,11 @@ class TestAddVllmPhaseAnnotation(_OverlayCase):
         out = self._run(ov.cmd_add_vllm_phase_annotation, argparse.Namespace(
             overlay=self.overlay, module="vllm.v1.worker.gpu_model_runner", impl_file=""))
 
+        # Both runner modules: vLLM selects the V2 runner for some configs (MiniMax-M3 + EAGLE3).
         self.assertEqual(self._manifest()["hooks"],
                          [{"module": "vllm.v1.worker.gpu_model_runner",
+                           "impl_module": "vllm_phase_annotate", "impl_attr": "install"},
+                          {"module": "vllm.v1.worker.gpu.model_runner",
                            "impl_module": "vllm_phase_annotate", "impl_attr": "install"}])
         copied = self._read(os.path.join(self.overlay, "vllm_phase_annotate.py"))
         self.assertEqual(copied, self._read(os.path.join(SCRIPTS_DIR, "vllm_phase_annotate.py")))

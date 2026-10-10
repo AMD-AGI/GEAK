@@ -202,6 +202,7 @@ def _speculative_workload(workload, table):
     coverage = (table or {}).get("phase_coverage") or {}
     speculative = coverage.get("speculative") or {}
     if (coverage.get("speculative_decoding") or speculative.get("enabled")
+            or speculative.get("server_log_speculative")
             or coverage.get("generation_phase") == "verify"):
         workload["speculative_decoding"] = True
     if workload.get("spec_accept_length"):
@@ -1175,7 +1176,8 @@ def main():
     parser.add_argument(
         "--spec-accept-length", type=float,
         help="speculative decoding: mean tokens accepted per TARGET_VERIFY "
-             "forward (SGLang server log `accept len`)")
+             "forward (SGLang server log `accept len`; vLLM `SpecDecoding "
+             "metrics` Mean acceptance length)")
     parser.add_argument(
         "--tiers", default="A,B",
         help="difficulty tiers to include in the ranked table (default A,B; "

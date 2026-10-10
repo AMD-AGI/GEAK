@@ -162,6 +162,46 @@ class TestArming(unittest.TestCase):
         else:
             os.environ["GEAK_VLLM_PHASE_ANNOTATE"] = self._saved
 
+    def test_draft_step_name_is_the_sglang_draft_dialect(self):
+        runner = types.SimpleNamespace(drafter=object(),
+                                       input_batch=types.SimpleNamespace(num_reqs=32))
+        name = vpa.draft_step_name(runner)
+        self.assertEqual(name, "step[DRAFT_EXTEND bs=32]")
+        step = parse_step(name)
+        self.assertEqual((step["phase"], step["batch_size"]), ("draft", 32))
+
+    def test_v2_runner_names_the_step_from_its_speculator_and_step_state(self):
+        # vLLM's V2 runner (MiniMax-M3 + EAGLE3) keeps the proposer in `speculator`
+        # and the step's batch in `execute_model_state.input_batch`.
+        runner = types.SimpleNamespace(
+            speculator=object(), execute_model_state=types.SimpleNamespace(
+                input_batch=types.SimpleNamespace(num_reqs=32)))
+        self.assertEqual(vpa.draft_step_name(runner), "step[DRAFT_EXTEND bs=32]")
+
+    def test_the_overlay_hooks_both_runner_modules(self):
+        import overlay_setup
+        import tempfile, json as _json, argparse
+        with tempfile.TemporaryDirectory() as tmp:
+            overlay_setup.cmd_add_vllm_phase_annotation(argparse.Namespace(
+                overlay=tmp, module="vllm.v1.worker.gpu_model_runner",
+                impl_file="", base=""))
+            with open(os.path.join(tmp, "_overlay_manifest.json")) as fh:
+                modules = sorted(h["module"] for h in _json.load(fh)["hooks"])
+        self.assertEqual(modules, sorted(vpa.RUNNER_MODULES))
+
+    def test_no_drafter_or_empty_batch_leaves_sample_tokens_unannotated(self):
+        self.assertIsNone(vpa.draft_step_name(types.SimpleNamespace(
+            drafter=None, input_batch=types.SimpleNamespace(num_reqs=32))))
+        self.assertIsNone(vpa.draft_step_name(types.SimpleNamespace(
+            drafter=object(), input_batch=types.SimpleNamespace(num_reqs=0))))
+
+    def test_draft_switch_alone_arms_install(self):
+        os.environ.pop("GEAK_VLLM_PHASE_ANNOTATE", None)
+        os.environ["GEAK_VLLM_DRAFT_ANNOTATE"] = "1"
+        self.addCleanup(os.environ.pop, "GEAK_VLLM_DRAFT_ANNOTATE", None)
+        self.assertTrue(vpa._draft_armed())
+        self.assertFalse(vpa.install())      # armed, but no vllm on this host -> False, no raise
+
     def test_install_is_a_no_op_when_unarmed(self):
         # The overlay ships on the capture PYTHONPATH; leaving it unarmed must cost nothing,
         # so an accidental carry-over into an A/B run cannot perturb the measurement.
