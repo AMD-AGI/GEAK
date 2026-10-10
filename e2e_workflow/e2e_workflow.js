@@ -738,17 +738,300 @@ const EXPERT_SKILL_ROLES = new Set(['system_architect', 'op_benchmarker', 'e2e_i
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
 const ENABLE_FP8 = String(A.enable_fp8 != null ? A.enable_fp8 : 'false');    // Tier-D quant (parity-breaking)
 const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : 'true') === 'true';
-const ISL = parseInt(A.isl != null ? A.isl : 1024, 10);
-const OSL = parseInt(A.osl != null ? A.osl : 1024, 10);
-const CONC = parseInt(A.conc != null ? A.conc : 64, 10);
-// On an AgentX trace replay there is no single ISL -- the corpus spans ~89k at
-// p50 past 500k at p99 -- so isl/osl describe the shape to OPTIMIZE FOR (the
-// average the orchestrator measured on its own baseline), not the shape anything
-// is measured at. The bench client replays the corpus and ignores them. Roles
-// must therefore use isl/osl for kernel/GEMM shape synthesis only, and never
-// treat them as a benchmark they can reproduce.
-const WORKLOAD_SHAPE_PROVENANCE = String(A.workload_shape_provenance || 'handoff_workload');
+// What the CALLER declared, kept apart from the shape roles finally optimize
+// against. On a trace replay those two are not the same thing, and telling them
+// apart needs the workload kind, which is parsed further down -- so the resolved
+// ISL/OSL/CONC/WORKLOAD are defined after it (CONC beside the declaration, the
+// shape by resolveTargetShape()).
+const ISL_DECLARED = A.isl != null ? parseInt(A.isl, 10) : null;
+const OSL_DECLARED = A.osl != null ? parseInt(A.osl, 10) : null;
+
+// ---------------------------------------------------------------------------
+// Workload IDENTITY — the synthetic sweep, or a trace replay that owns its load
+// ---------------------------------------------------------------------------
+// GEAK runs both under an orchestrator and standalone. Under Hyperloom,
+// interface/run_e2e.py reads handoff.workload_spec and EXPORTS the resulting
+// BENCH_CLIENT / E2E_METRIC / AGENTX_* into the environment GEAK inherits, so
+// this script never had to know what it was measuring. Standalone there is no
+// such parent: the args land here directly, and without the block below an
+// AgentX request would benchmark a synthetic ISL/OSL sweep on the output-token
+// axis and call it an AgentX number.
+//
+// So the workload is declared HERE, in either of two spellings:
+//   * args.workload_spec — the SAME object Hyperloom puts on its handoff, for
+//     callers that want every field explicit; or
+//   * args.workload_kind: "agentx_trace_replay" — the shorthand, which fills
+//     the canonical AgentX setup below and lets workload_spec override any part.
+// Neither present => 'synthetic', AGENTX_ENV is empty, no bench_env.sh is
+// written, and the fixed ISL/OSL path is byte-identical to a build without this.
+const WORKLOAD_SPEC = (A.workload_spec && typeof A.workload_spec === 'object') ? A.workload_spec : {};
+const WORKLOAD_KIND = String(A.workload_kind || WORKLOAD_SPEC.kind || 'synthetic');
+const IS_AGENTX = WORKLOAD_KIND === 'agentx_trace_replay';
+// The canonical AgentX submission setup. These are the leaderboard's numbers,
+// not tuning knobs: the 393-entry weka corpus at 3600s IS the graded workload,
+// and a run that deviates is stamped non-canonical by the client adapter and
+// can never be KEPT. The 900s loop duration is the scenario's own floor and is
+// what the inner search legs run, which is why they are always non-canonical.
+const AGENTX_DEFAULTS = {
+  scenario: 'inferencex-agentx-mvp',
+  // The full-context parent, not the _256k sibling: the latter drops every
+  // request over 256k tokens (98.8k -> 68.3k) for ~256k-context servers, and
+  // the campaign serves at --max-model-len 1048576.
+  corpus: 'semianalysis_cc_traces_weka_062126',
+  num_entries: 393,
+  duration_s: 3600,           // canonical/parity window
+  geak_loop_duration_s: 900,  // inner search legs (scenario floor)
+  warmup_requests_per_lane: 10,
+  warmup_grace_period_s: 1800,
+  // Failed-request tolerance is deliberately NOT defaulted here. Pinning one number for the whole
+  // run flattens the distinction between a leg that is exploring and a leg whose number will be
+  // compared, and the client is the only place that knows which one it is running
+  // (MEASUREMENT_PURPOSE). Declaring a value still overrides the client, for a run that needs a
+  // specific tolerance end to end.
+  failed_request_threshold: null,
+  // InferenceX's P90 interactivity, 1000 / P90(ITL) in tok/s/user: the x-axis of the public
+  // InferenceX pareto, decode-only (TTFT and queue wait are outside it). bench_summarize.py
+  // reports total tok/s beside it as a guard. Hyperloom declares its own basis on the handoff
+  // and exports the matching E2E_METRIC, so this default only decides a run nobody configured.
+  metric_basis: 'p90_intvty_inferencex',
+};
+const AGENTX = IS_AGENTX ? Object.assign({}, AGENTX_DEFAULTS, WORKLOAD_SPEC) : null;
+// ONE concurrency for the run. Roles put WORKLOAD.conc on every bench line as CONC=<conc>, and a
+// command-line value outranks bench_env.sh, so a workload_spec.concurrency that reached only the
+// declaration would be replaced by args.conc (or the synthetic 64) on every bench.
+const CONC = parseInt(AGENTX && AGENTX.concurrency != null ? AGENTX.concurrency
+  : (A.conc != null ? A.conc : 64), 10);
+
+// ---------------------------------------------------------------------------
+// Kernel-targeting shape — the shape roles synthesize kernel inputs against
+// ---------------------------------------------------------------------------
+// Nothing is MEASURED at isl/osl on a trace replay: aiperf owns the sequence
+// lengths and the bench client ignores these. But roles still read them as the
+// analytic serving call model when they pick tile sizes and synthesize GEMM
+// shapes, so leaving them at the synthetic 1024/1024 default would aim the whole
+// kernel search orders of magnitude below the real load. This mirrors
+// interface/run_e2e.py::_targeting_shape so the standalone and Hyperloom entries
+// resolve the shape identically, and so the provenance printed into every role
+// prompt is never a claim we cannot back -- the old default asserted
+// 'handoff_workload' even when no handoff existed.
+function resolveTargetShape() {
+  const haveDeclared = ISL_DECLARED > 0 && OSL_DECLARED > 0;
+  const declaredOr = (v) => (v != null ? v : 1024);
+  // Hyperloom resolves this upstream and passes it down; honour it verbatim.
+  if (A.workload_shape_provenance) {
+    return [declaredOr(ISL_DECLARED), declaredOr(OSL_DECLARED),
+            String(A.workload_shape_provenance)];
+  }
+  if (!IS_AGENTX) {
+    // Unchanged behaviour for the fixed ISL/OSL path, minus the borrowed label.
+    return [declaredOr(ISL_DECLARED), declaredOr(OSL_DECLARED),
+            haveDeclared ? 'declared_args' : 'synthetic_default'];
+  }
+  // An explicit shape is the caller stating what they measured on this stack.
+  // Absent that, we do NOT guess and we do not compile a corpus average into this
+  // file: the corpus is declarable, AgentX keeps publishing new ones, the numbers
+  // move with the tokenizer and the window, and a stale constant would be read as
+  // fact by every role. The run measures its own shape instead -- the baseline
+  // bench reports it and adoptMeasuredShape() below installs it, which is also
+  // why no kernel work is scheduled before the baseline lands.
+  const obsIsl = parseInt(AGENTX.observed_isl, 10);
+  const obsOsl = parseInt(AGENTX.observed_osl, 10);
+  if (obsIsl > 0 && obsOsl > 0) return [obsIsl, obsOsl, 'agentx_observed'];
+  if (haveDeclared) return [ISL_DECLARED, OSL_DECLARED, 'agentx_declared_args'];
+  return [1024, 1024, 'agentx_pending_baseline'];
+}
+// Mutable: on a trace replay the real shape is not knowable until something has
+// been measured, so the baseline installs it and every later phase reads it.
+let [ISL, OSL, WORKLOAD_SHAPE_PROVENANCE] = resolveTargetShape();
 const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC, shape_provenance: WORKLOAD_SHAPE_PROVENANCE };
+// Whether ISL/OSL describe the served load or are still a placeholder. A
+// placeholder never corrupts the MEASUREMENT, but it would misdirect every
+// kernel choice, so the prompt says which one a role is holding.
+let SHAPE_IS_MEASURED = !/^(agentx_pending_baseline|synthetic_fallback_on_agentx)$/
+  .test(WORKLOAD_SHAPE_PROVENANCE);
+
+// Install the shape the baseline actually served. bench_e2e.sh reports it as
+// observed_isl/observed_osl (averaged per request, medianed across replicas), so
+// this is measured on THIS corpus, tokenizer, model and window rather than
+// asserted. Called right after Setup, before any kernel work is scheduled.
+function adoptMeasuredShape(isl, osl, where) {
+  if (!(isl > 0 && osl > 0)) return false;
+  ISL = Math.round(isl);
+  OSL = Math.round(osl);
+  WORKLOAD_SHAPE_PROVENANCE = 'agentx_measured_this_run';
+  SHAPE_IS_MEASURED = true;
+  WORKLOAD.isl = ISL;
+  WORKLOAD.osl = OSL;
+  WORKLOAD.shape_provenance = WORKLOAD_SHAPE_PROVENANCE;
+  log(`Kernel-targeting shape measured from ${where}: isl=${ISL} osl=${OSL} `
+    + `(ratio ${(ISL / Math.max(1, OSL)).toFixed(1)}:1). Roles size kernels against this.`);
+  return true;
+}
+// The Setup probe reads the baseline summary ONCE, at the instant Setup returns,
+// and that instant is not guaranteed to contain one. An agent whose leg dies to a
+// hardware fault moves the wreckage aside and relaunches, so `baseline/` is
+// legitimately EMPTY while a replacement leg runs, and the summary lands minutes
+// after Setup reports done. A single read then loses the shape for the whole run
+// rather than for a moment: on the 20260909 standalone run Setup returned at
+// 10:40:49 with the directory just renamed away, the good summary was written at
+// 11:57, and every later phase kept the 1024/1024 placeholder. "Not written yet"
+// is a retryable state, not a verdict, so adoption is ALSO attempted lazily from
+// the prompt builder every role passes through: the first prompt built after the
+// summary appears installs the real shape. A no-op once measured, so a run that
+// adopted at Setup pays nothing and its prompts are unchanged.
+function ensureMeasuredShape() {
+  if (SHAPE_IS_MEASURED || !IS_AGENTX) return SHAPE_IS_MEASURED;
+  // EVAL_DIR is a `let` declared further down and only assigned by Setup, so it
+  // is read through typeof: a prompt built before that declaration is evaluated
+  // would otherwise die in the temporal dead zone, turning a missing shape into
+  // a crashed run. Nothing to read before Setup anyway — the baseline is what
+  // Setup produces.
+  const evalDir = typeof EVAL_DIR === 'undefined' ? '' : (EVAL_DIR || '');
+  if (!evalDir) return SHAPE_IS_MEASURED;
+  let shape = null;
+  try {
+    // Same execFileSync/python3 route the Setup probe uses: this JS has no fs.
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('python3', ['-c', `
+import json, os, sys
+p = os.path.join(sys.argv[1], 'baseline', 'bench_summary.json')
+def _num(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+try:
+    with open(p) as fh:
+        s = json.load(fh) or {}
+    print(json.dumps([_num(s.get('observed_isl')), _num(s.get('observed_osl'))]))
+except Exception:
+    print('[null, null]')
+`, evalDir], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 });
+    shape = JSON.parse(out);
+  } catch (err) {
+    return SHAPE_IS_MEASURED;   // unreadable right now; a later prompt retries
+  }
+  if (shape && shape[0] > 0 && shape[1] > 0) {
+    adoptMeasuredShape(shape[0], shape[1],
+      'the baseline bench (read after Setup returned, which had no summary yet)');
+  }
+  return SHAPE_IS_MEASURED;
+}
+// Which axis bench_e2e.sh medians. It defaults E2E_METRIC to output, and on a ~140:1
+// prefill:output trace output-only tok/s moves almost not at all for a large change in total
+// work, so the axis has to be SELECTED here.
+//
+// bench_summarize.py's _BASES, flattened: each E2E_METRIC it accepts -> the metric_basis its
+// summary records. test_bench_env_channel.py holds this table to that one.
+const METRIC_BASIS_OF_AXIS = {
+  output: 'aggregate_output_tok_s',
+  total: 'aggregate_total_token_tok_s',
+  total_token: 'aggregate_total_token_tok_s',
+  total_throughput: 'aggregate_total_token_tok_s',
+  intvty: 'e2e_norm_intvty_p90',
+  interactivity: 'e2e_norm_intvty_p90',
+  e2e_norm_intvty_p90: 'e2e_norm_intvty_p90',
+  p90_intvty_inferencex: 'p90_intvty_inferencex',
+};
+// The E2E_METRIC the declaration sets for each basis: the basis itself wherever _BASES takes it.
+const AXIS_OF_METRIC_BASIS = {
+  aggregate_output_tok_s: 'output',
+  aggregate_total_token_tok_s: 'total',
+  e2e_norm_intvty_p90: 'e2e_norm_intvty_p90',
+  p90_intvty_inferencex: 'p90_intvty_inferencex',
+};
+const AXIS_LABEL = {
+  aggregate_output_tok_s: 'OUTPUT tok/s',
+  aggregate_total_token_tok_s: 'TOTAL (input+output) tok/s',
+  p90_intvty_inferencex: 'InferenceX P90 interactivity: 1000 / P90(ITL) in tok/s/user, decode only',
+  e2e_norm_intvty_p90: 'TTFT-inclusive P90 interactivity: 1 / P90(E2EL/OSL) in tok/s/user',
+};
+// Precedence: the basis the caller declared; else an E2E_METRIC already exported, because an
+// exported value outranks bench_env.sh and is what the bench will measure; else the standalone
+// default. Anything bench_summarize.py cannot measure fails HERE: it would refuse the axis too,
+// but only once the baseline replay had been paid for.
+function resolveAgentxMetric() {
+  if (!AGENTX) return { basis: '', source: '' };
+  const unknown = (what, v) => new Error(`AgentX: ${what} '${v}' is not an axis ` +
+    `bench_summarize.py measures (known: ${Object.keys(METRIC_BASIS_OF_AXIS).join(', ')}).`);
+  let inherited = '';
+  try { inherited = String(process.env.E2E_METRIC || '').trim().toLowerCase(); } catch (_) { /* no env */ }
+  // The bench reads an exported value as an axis token, so that is the only way it is looked up.
+  const inheritedBasis = inherited ? METRIC_BASIS_OF_AXIS[inherited] : '';
+  if (inherited && !inheritedBasis) throw unknown('the exported E2E_METRIC', inherited);
+  const declared = String(WORKLOAD_SPEC.metric_basis || '').trim().toLowerCase();
+  if (!declared) {
+    return inheritedBasis ? { basis: inheritedBasis, source: 'the exported E2E_METRIC' }
+      : { basis: AGENTX_DEFAULTS.metric_basis, source: 'the standalone default' };
+  }
+  const basis = AXIS_OF_METRIC_BASIS[declared] ? declared : METRIC_BASIS_OF_AXIS[declared];
+  if (!basis) throw unknown('workload_spec.metric_basis', declared);
+  if (inheritedBasis && inheritedBasis !== basis) {
+    throw new Error(`AgentX: workload_spec.metric_basis=${basis}, but E2E_METRIC=${inherited} is ` +
+      'exported in this environment and outranks bench_env.sh, so every bench would grade a ' +
+      'different axis than the one declared. Unset E2E_METRIC or declare the basis it names.');
+  }
+  return { basis, source: 'workload_spec.metric_basis' };
+}
+const { basis: AGENTX_METRIC_BASIS, source: AGENTX_METRIC_SOURCE } = resolveAgentxMetric();
+const AGENTX_E2E_METRIC = AGENTX ? AXIS_OF_METRIC_BASIS[AGENTX_METRIC_BASIS] : '';
+// Body of the per-run bench_env.sh the Director drops beside the copied bench
+// script (see roles/director.md PHASE=setup). Every line assigns ONLY when the
+// name is unset or empty, so a real exported value -- an orchestrator's, or an
+// operator's one-off override on the command line -- always outranks the
+// declaration. Empty string when synthetic.
+//
+// The guard is spelled `[ -n "${K:-}" ] || K='v'` rather than the shorter
+// `: "${K:='v'}"` on purpose: inside a `${K:=word}` expansion the quotes are
+// NOT shell quoting, they are literal characters of `word`, so that spelling
+// assigns the value WITH its quotes attached. This form puts the value in real
+// single quotes, which is also what makes _shq's escaping mean anything.
+const _shq = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
+const _agentxEnvPairs = () => {
+  if (!AGENTX) return [];
+  const pairs = [
+    ['GEAK_WORKLOAD_KIND', WORKLOAD_KIND],
+    ['GEAK_ISL_OSL_INACTIVE', '1'],
+    ['BENCH_CLIENT', 'agentx'],
+    ['E2E_METRIC', AGENTX_E2E_METRIC],
+    ['GEAK_METRIC_BASIS', AGENTX_METRIC_BASIS],
+    // No REPEATS: an explicit one outranks REPLICAS in bench_e2e.sh, so pinning it here turned
+    // isolated validation's three replicas into one. bench_e2e.sh defaults a trace-replay
+    // client's legacy rounds to one itself, after the replica count is resolved.
+    ['CONC', String(CONC)],
+    ['GEAK_AGENTX_SCENARIO', AGENTX.scenario],
+    ['AGENTX_DATASET', AGENTX.corpus],
+    // What the run is compared AGAINST, so an override of the corpus or the window never
+    // carries it along: a replay of anything else is then stamped non-canonical, which is
+    // the point. Declare canonical_corpus / canonical_duration_s to move the reference itself.
+    ['AGENTX_CANONICAL_DATASET', AGENTX.canonical_corpus || AGENTX_DEFAULTS.corpus],
+    ['AGENTX_NUM_ENTRIES', AGENTX.num_entries],
+    ['GEAK_AGENTX_DURATION_S', AGENTX.duration_s],
+    ['AGENTX_CANONICAL_DURATION', AGENTX.canonical_duration_s || AGENTX_DEFAULTS.duration_s],
+    ['GEAK_AGENTX_LOOP_DURATION_S', AGENTX.geak_loop_duration_s],
+    ['AGENTX_WARMUP_REQUESTS_PER_LANE', AGENTX.warmup_requests_per_lane],
+    ['AGENTX_WARMUP_GRACE_PERIOD', AGENTX.warmup_grace_period_s],
+  ];
+  // Optional, only when the caller supplied them: the aiperf binary, the
+  // InferenceX checkout that may hold map_aiperf.py (GEAK vendors a fallback),
+  // and the profile-window placement.
+  const opt = [
+    ['AGENTX_FAILED_REQUEST_THRESHOLD', AGENTX.failed_request_threshold],
+    ['AIPERF_BIN', AGENTX.aiperf_bin],
+    ['INFERENCEX_PATH', AGENTX.inferencex_path],
+    ['AGENTX_PROFILE_WARMUP_S', AGENTX.profile_warmup_s],
+    ['AGENTX_PROFILE_WINDOW_S', AGENTX.profile_window_s],
+    ['AGENTX_MAX_CTX', AGENTX.max_context_length],
+  ];
+  for (const [k, v] of opt) if (v != null && String(v).trim() !== '') pairs.push([k, v]);
+  return pairs;
+};
+const AGENTX_ENV = !AGENTX ? '' : [
+  '#!/usr/bin/env bash',
+  '# Per-run workload declaration, written by e2e_workflow.js at Setup.',
+  '# Sourced by bench_e2e.sh / bench_replica.sh from beside themselves.',
+  '# Assign-if-unset throughout: an inherited/exported value always wins here.',
+  ...(_agentxEnvPairs().map(([k, v]) => `[ -n "\${${k}:-}" ] || ${k}=${_shq(v)}`)),
+  `export ${_agentxEnvPairs().map(([k]) => k).join(' ')}`,
+  '',
+].join('\n');
 // Seed config: when an external orchestrator (e.g. Hyperloom) already did
 // config/param search, it passes its accepted best flags/env so the GEAK
 // baseline is measured ON that config (fair engagement start), not the stack
@@ -803,8 +1086,32 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
 ) : '';
 // Acceptance noise band (%). Isolated-server ref/candidate measurements, non-overlap, and engagement
-// proof (see e2e_integrator) make a 0.5% default trustworthy. Prompt-tunable.
-const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
+// proof (see e2e_integrator) make a 0.5% default trustworthy for a fixed-shape workload, where a
+// replica is a fixed amount of identical work. Prompt-tunable.
+//
+// A trace replay is not that workload. It is client-paced over trajectories of wildly unequal size
+// (ISL p50 83k, p99 491k) against a prefix cache running 85-96% hits, so a replica completes a
+// whole number of trajectories and the throughput it reports quantises on which ones it got
+// through. The 20260912 validation measured that directly: two surviving replicas of the
+// BASELINE, same config, same box, spread 3.43% on total tok/s (24054.0 / 23255.9) and 3.86% on
+// InferenceX P90 interactivity (29.52 / 28.40 tok/s/user), the default axis. A 0.5% band against
+// that is 7-8x too permissive -- it would call a pure-noise difference a win -- so this workload
+// carries its own floor. The TTFT-inclusive axis moved 17% on the same pair; a run graded on it
+// needs an explicit noise_band_pct. Hardcoding the floor is a placeholder for deriving it from
+// the replica spread Setup already measures; until then it is at least the measured one.
+const NOISE_BAND_AGENTX = 4.0;
+const NOISE_BAND_DEFAULT = parseFloat(
+  A.noise_band_pct != null ? A.noise_band_pct : (IS_AGENTX ? NOISE_BAND_AGENTX : 0.5));
+// The band the run gates on, from the one the Director returned. Its role file starts every run
+// at 0.5 and only ever widens it, so on a trace replay that 0.5 would replace the workload floor
+// (and an explicit noise_band_pct) outright; there the Director may only raise the band. A
+// fixed-shape run keeps the Director's value, as it always has.
+function gateNoiseBand(reported) {
+  const r = parseFloat(reported);
+  const director = Number.isFinite(r) && r > 0 ? r : 0;
+  if (!IS_AGENTX) return director || NOISE_BAND_DEFAULT;
+  return Math.max(director, NOISE_BAND_DEFAULT);
+}
 // No timed-repeat knob on purpose: the round count belongs to the lifecycle (bench_e2e.sh derives
 // it from GEAK_REPEAT_MODE + MEASUREMENT_PURPOSE), so a second knob could only disagree with it.
 // Every integrate A/B MUST measure BOTH legs (reference + candidate). When the
@@ -1296,6 +1603,54 @@ function warmStartBlock(role) {
       : '');
 }
 
+// Run-wide workload-identity invariant, injected into EVERY role prompt exactly
+// like the serving-config invariant above it — a trace replay changes what a
+// benchmark MEANS, so no role may be left assuming the synthetic sweep.
+// Returns '' unless the caller declared a trace replay, so a fixed-ISL/OSL run
+// gets byte-identical prompts.
+function workloadIdentityBlock() {
+  if (!IS_AGENTX) return '';
+  // Late-adopt here rather than only at Setup: this block is the one path every
+  // role prompt takes, so the shape can never be stale by more than one agent.
+  ensureMeasuredShape();
+  return `
+## WORKLOAD IDENTITY — this run measures a TRACE REPLAY, not a fixed ISL/OSL sweep
+The served load is the AgentX corpus \`${AGENTX.corpus}\` replayed by aiperf under scenario
+\`${AGENTX.scenario}\` (${AGENTX.num_entries} entries, concurrency ${CONC}).
+The CLIENT owns the load: it chooses the request mix, the arrival pattern, its own warmup, and the
+measurement duration. Consequences you must respect:
+
+* **ISL=${ISL} / OSL=${OSL} is a KERNEL-TARGETING shape, not a benchmark** (provenance:
+  ${WORKLOAD_SHAPE_PROVENANCE}${SHAPE_IS_MEASURED ? '' : ' — A PLACEHOLDER, NOT THIS CORPUS'}).
+  ${SHAPE_IS_MEASURED
+    ? 'It is an average of what was actually served, so it is the right regime to size tiles and\n  synthesize GEMM/attention inputs against. Read it as a centre of mass, not as a shape every\n  request has.'
+    : 'It is the synthetic default and does NOT describe this load: the real shape is read off the\n  baseline once it has run, so nothing here has a corpus average compiled into it.\n  Do NOT size tiles or synthesize GEMM shapes from this number — if your phase needs the served\n  shape, take it from the baseline summary (observed_isl/observed_osl), not from this line.'}
+  A trace corpus spans orders of magnitude in request length, so there is no single ISL: read the
+  real distribution off the run's own export rather than assuming one. NEVER build a synthetic sweep
+  at these lengths and NEVER report one as an e2e number — measured on this stack, a synthetic sweep
+  came out ~2.76x the trace-replay throughput, so such a number is not a smaller-scale version of
+  the real one, it is a different workload.
+* **Keep passing \`ISL=<isl> OSL=<osl> CONC=<conc>\` on the bench line exactly as your role file
+  shows.** The trace client ignores them. Do not restructure your bench invocation for this workload.
+* **Client selection and the metric axis are ALREADY configured** in \`$EVAL_DIR/bench_env.sh\`, which
+  \`bench_e2e.sh\` sources beside itself on every invocation. Do NOT set \`BENCH_CLIENT\`,
+  \`E2E_METRIC\` or any \`AGENTX_*\` variable yourself, and never delete or edit that file.
+* **The graded axis is ${AXIS_LABEL[AGENTX_METRIC_BASIS]}.**
+  \`bench_summary.json\` reports it as \`throughput_tok_s_median\` with
+  \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; ${/intvty/.test(AGENTX_METRIC_BASIS)
+    ? 'on this axis it is NOT\n  a tok/s figure but tok/s/user, higher is better. `guard_total_tok_s_median` carries total tok/s\n  beside it and nothing gates on it for you: state it next to every delta you report, because a\n  candidate that raises interactivity by serving less total work has not made the server faster.'
+    : 'on a ~140:1\n  prefill:output trace the output-only axis barely moves for a large real change in work.'}
+* **A measured window is LONG**: ${AGENTX.geak_loop_duration_s}s per search leg,
+  ${AGENTX.duration_s}s for parity/validation. Budget your phase around that and do not retry a
+  timed-out leg blindly.
+* **Search legs are deliberately non-canonical.** They run the scenario's ${AGENTX.geak_loop_duration_s}s
+  floor rather than the canonical ${AGENTX.duration_s}s, so the client stamps them
+  \`submission_valid=false\` with the deviations attached. That is EXPECTED and does not invalidate an
+  A/B comparison — both legs deviate identically. It does mean a search-leg number may never be
+  reported as a submittable result.
+`;
+}
+
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
@@ -1304,6 +1659,8 @@ function roleAgent(role, phase, intro, inputs) {
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
     EFFECTIVE_CONFIG_DIGEST,
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
+    // Only surfaced on a trace replay; a synthetic run's Inputs block is unchanged.
+    ...(IS_AGENTX ? { WORKLOAD_KIND } : {}),
     ...inputs,
   };
   const base = `You are the ${role}. PHASE=${phase}.
@@ -1325,7 +1682,7 @@ GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY 
 work (op_bench bake-offs, shape-capture, the recursive kernel layer), where each task pins ONE id from
 the pool via GPU_ID. Do NOT use the serving TP/GPU set for that isolated work, and do NOT use a single
 optimization-pool id for a serving launch — keep the two separate.
-
+${workloadIdentityBlock()}
 ## Inputs
 ${cfg(inall)}
 
@@ -1356,6 +1713,10 @@ const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_m
 // inherits it automatically instead of having to remember it. Bash-capable agents own
 // server lifecycles, and a pattern-matched kill is indistinguishable from a correct one
 // until it TERMs the caller's orchestrator and fails the whole task.
+// The detachment rule rides along for the same reason: EVERY bash-capable role runs a long
+// serving leg (director's baseline, tuner's launch+bench cycles, the head e2e A/B), and each
+// one otherwise rediscovers at ~1h that a tool-managed background shell gets group-reaped
+// mid-measurement — an hour of budget and a booted server lost per role that learns it.
 const PROCESS_SAFETY = `## PROCESS SAFETY (a violation can kill the caller's orchestrator, failing the whole task)
 This container's PID 1 is the CALLER's orchestrator process, not yours, and it is NOT restartable.
 NEVER run global or pattern-matched process cleanup: no \`pkill -f\` / \`pgrep -f ... | xargs kill\` /
@@ -1369,6 +1730,19 @@ identity (pid, pgid, /proc start time) before signalling anything:
     \${SERVER_LAUNCH_PREFIX:-} <launch server> &   # own session => pgid == pid
     SERVER_PID=\$!; server_record_identity "\$SERVER_PID"
 
+## LONG MEASUREMENTS OUTLIVE YOUR TOOL CALL — DETACH THEM FROM THE SHELL MANAGER
+A serving measurement is longer than any bound your Bash tool can give it. One canonical trace-replay
+leg is a 3600s window PLUS warmup and finalization (~70min wall), and a cold server boot alone is ~9min.
+Your foreground bound is BASH_MAX_TIMEOUT_MS, and your tool's OWN background mode is worse: a shell the
+tool manages for you is reaped on the manager's schedule, and the reap is a GROUP kill that takes the
+server down with the client — you get a truncated log, an unloaded GPU, and no summary, from a leg that
+was measuring perfectly. Do NOT run a bench through your tool's background/\`run_in_background\` mode.
+Launch it so it is orphaned to init, OUTSIDE the manager's reach, then poll its log:
+    cd "\$EVAL_DIR" && setsid nohup bash run_bench.sh > run_bench.out 2>&1 < /dev/null &
+    # returns immediately; the leg's parent becomes PID 1 and no tool-call bound applies
+Then poll in SEPARATE short calls (\`sleep 300; tail -5 run_bench.out\`) until the summary lands. Before
+you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and whether
+the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
 `;
 function withProcessSafety(prompt) {
   return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
@@ -2551,6 +2925,11 @@ if (want('setup')) {
       MEASUREMENT_PURPOSE: 'parity', REPLICAS: PARITY_REPLICAS,
       SKILL_DIR: WORKFLOW_DIR, EXPECTED_GFX, EXPECTED_TARGET,
       EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
+      // Non-empty ONLY on a declared trace replay. The Director writes it to
+      // $EVAL_DIR/bench_env.sh in step 3, BEFORE the baseline bench in step 5,
+      // so the baseline is measured on the real client and the real metric axis
+      // rather than a synthetic sweep. Empty => the Director writes nothing.
+      ...(AGENTX_ENV ? { BENCH_ENV_CONTENT: AGENTX_ENV } : {}),
     }),
     { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
   if (!setup || !setup.eval_dir) throw new Error('Setup failed: no eval_dir');
@@ -2587,13 +2966,107 @@ if (want('setup')) {
   EVAL_DIR = setup.eval_dir;
   MODEL_NAME = setup.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = setup.baseline_throughput_tok_s;
-  NOISE_BAND = setup.noise_band_pct || NOISE_BAND_DEFAULT;
+  NOISE_BAND = gateNoiseBand(setup.noise_band_pct);
   // Seed flags/env win when provided (baseline was measured on them); else fall
   // back to whatever the director resolved.
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
   curOverlay = INIT_BASE_OVERLAY;
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
+  if (IS_AGENTX) {
+    log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
+      `from ${AGENTX_METRIC_SOURCE}), concurrency ${CONC}, noise band ${NOISE_BAND}% ` +
+      `(Director reported ${setup.noise_band_pct != null ? setup.noise_band_pct : 'none'}%, ` +
+      `workload floor ${NOISE_BAND_DEFAULT}%).`);
+  }
+
+  // ── The trace-replay declaration must have TAKEN EFFECT, not merely been sent ──
+  // BASELINE_TPUT is the denominator of every gain this run will report, so a
+  // baseline accidentally measured with the synthetic client on the output axis
+  // does not just mis-state one number -- it silently rebases the entire run,
+  // and the mismatch is invisible in the result afterwards. The declaration
+  // travels through an AGENT (the Director writes bench_env.sh), so confirm the
+  // effect rather than trusting the instruction: the file has to exist and the
+  // baseline summary has to carry the metric basis we asked for.
+  // Positive mismatch => abort now, while one bench has been spent instead of
+  // a full budget. Unreadable summary => say so loudly and continue, since the
+  // measurement itself may still be fine and a false abort is its own failure.
+  if (IS_AGENTX) {
+    let verdict = null;
+    try {
+      const { execFileSync } = require('child_process');
+      const out = execFileSync('python3', ['-c', `
+import json, os, sys
+eval_dir = sys.argv[1]
+want = sys.argv[2]
+env_file = os.path.join(eval_dir, 'bench_env.sh')
+summary = os.path.join(eval_dir, 'baseline', 'bench_summary.json')
+res = {'env_file': os.path.isfile(env_file) and os.path.getsize(env_file) > 0}
+def _num(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+try:
+    with open(summary) as fh:
+        _s = json.load(fh) or {}
+    res['basis'] = _s.get('metric_basis') or ''
+    # The request shape the baseline actually served. Reading it back is what
+    # lets kernel work target the served regime without this file, or the
+    # workflow, hardcoding a corpus average that would go stale.
+    res['observed_isl'] = _num(_s.get('observed_isl'))
+    res['observed_osl'] = _num(_s.get('observed_osl'))
+except Exception as exc:
+    res['basis'] = None
+    res['why'] = f'{type(exc).__name__}: {exc}'
+res['want'] = want
+print(json.dumps(res))
+`, EVAL_DIR, AGENTX_METRIC_BASIS], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
+      verdict = JSON.parse(out);
+    } catch (probeErr) {
+      log(`Setup: WARNING could not verify the trace-replay declaration ` +
+        `(${probeErr && probeErr.message ? probeErr.message : probeErr}). ` +
+        `Proceeding, but confirm ${EVAL_DIR}/bench_env.sh and the baseline metric_basis by hand.`);
+    }
+    if (verdict) {
+      if (!verdict.env_file) {
+        throw new Error(
+          `Setup declared workload_kind=${WORKLOAD_KIND} but ${EVAL_DIR}/bench_env.sh was never ` +
+          `written, so the baseline was measured with the synthetic client on the wrong metric axis. ` +
+          `Every later delta would be relative to the wrong number. Re-run Setup.`);
+      }
+      if (verdict.basis === null) {
+        log(`Setup: WARNING baseline/bench_summary.json unreadable (${verdict.why || 'unknown'}); ` +
+          `cannot confirm metric_basis=${AGENTX_METRIC_BASIS}.`);
+      } else if (verdict.basis !== AGENTX_METRIC_BASIS) {
+        throw new Error(
+          `Setup measured the baseline on metric_basis=${verdict.basis || '<absent>'} but this run ` +
+          `declared ${AGENTX_METRIC_BASIS}. The two axes are not comparable, so the baseline is ` +
+          `unusable. Check that ${EVAL_DIR}/bench_env.sh sets E2E_METRIC=${AGENTX_E2E_METRIC} and ` +
+          `that the bench did not inherit another E2E_METRIC (an exported value outranks the ` +
+          `file), then re-run Setup.`);
+      } else {
+        log(`Setup: trace-replay declaration verified (bench_env.sh present, ` +
+          `baseline metric_basis=${verdict.basis}).`);
+      }
+      // Now that something has actually been served, take the kernel-targeting
+      // shape from the measurement instead of from a declaration or a constant.
+      // A caller who declared a shape explicitly keeps it: they may be targeting
+      // a regime deliberately, and overriding that silently would be its own
+      // surprise.
+      if (SHAPE_IS_MEASURED) {
+        log(`Setup: keeping the declared kernel-targeting shape isl=${ISL} osl=${OSL} ` +
+          `(provenance ${WORKLOAD_SHAPE_PROVENANCE}); the baseline served ` +
+          `isl=${verdict.observed_isl || '?'} osl=${verdict.observed_osl || '?'}.`);
+      } else if (!adoptMeasuredShape(verdict.observed_isl, verdict.observed_osl,
+                                     'the baseline bench')) {
+        log(`Setup: the baseline summary carried no served request shape yet, so kernel ` +
+          `targeting is still the synthetic ${ISL}/${OSL} placeholder — far below a trace ` +
+          `replay's real lengths. This is expected when a relaunched leg has not written its ` +
+          `summary yet: every later role prompt retries the read and installs the shape as ` +
+          `soon as it appears (watch for "Kernel-targeting shape measured"). If that line ` +
+          `never comes, kernel choices are aimed at the wrong regime (the MEASUREMENT is ` +
+          `unaffected) — pass workload_spec.observed_isl/observed_osl to set it explicitly.`);
+      }
+    }
+  }
 
   // =========================================================================
   // MODULE A — read the deployment KB, then VALIDATE what it says on this box.
@@ -3464,7 +3937,7 @@ if (want('setup')) {
   if (!EVAL_DIR) throw new Error('Non-setup phase requires args.state.eval_dir (or args.eval_dir)');
   MODEL_NAME = ST.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = ST.baseline_throughput_tok_s || 0;
-  NOISE_BAND = ST.noise_band_pct || NOISE_BAND_DEFAULT;
+  NOISE_BAND = gateNoiseBand(ST.noise_band_pct);
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
   curOverlay = ST.overlay || INIT_BASE_OVERLAY;

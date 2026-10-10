@@ -106,6 +106,9 @@ jobs:
             interface/tests/test_geak_trace_events.py \
             interface/tests/test_geak_trace_report.py \
             interface/tests/test_tracker_wiring.py \
+            e2e_workflow/scripts/tests/test_agentx_profile_and_mapper.py \
+            e2e_workflow/scripts/tests/test_agentx_smoke.py \
+            e2e_workflow/scripts/tests/test_bench_env_channel.py \
             e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
             e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
@@ -116,7 +119,9 @@ jobs:
             e2e_workflow/scripts/tests/test_capture_shapes.py \
             e2e_workflow/scripts/tests/test_llm_ledger.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
+            e2e_workflow/scripts/tests/test_overlay_injection_runtime.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
+            e2e_workflow/scripts/tests/test_seam_trace_capture_guard.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
@@ -275,7 +280,7 @@ jobs:
           /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
 
   node-regression:
-    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget)
+    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget, workload declaration)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -315,6 +320,24 @@ jobs:
       # failed extraction and silently dropped heads whose unittest had passed.
       - name: extraction smoke status contract
         run: node e2e_workflow/scripts/test_smoke_status_contract.js
+      # Standalone GEAK has no orchestrator to export BENCH_CLIENT / E2E_METRIC / AGENTX_*, so the
+      # workflow declares the workload itself. Two things must hold and only node can check them:
+      # an absent declaration leaves the fixed ISL/OSL path byte-identical, and a present one only
+      # ever assigns an unset name so an orchestrated run's exported values still win.
+      - name: standalone workload declaration regression
+        run: node e2e_workflow/scripts/test_agentx_declaration.js
+      # The acceptance noise band decides what counts as a win, and the 0.5% default was measured
+      # on fixed-shape work. A trace replay's replica spread is ~7x that, so the band is scoped per
+      # workload and the Director's 0.5 cannot undercut it; this evaluates the real source and also
+      # checks a fixed-shape run is unchanged.
+      - name: acceptance noise band scoping
+        run: node e2e_workflow/scripts/test_noise_band_scope.js
+      # The joins between the pieces above: the real declaration, staged the way director.md says,
+      # through bench_e2e.sh, the agentx client, the vendored mapper, bench_summarize.py and the
+      # workflow's Setup check, with only the server and aiperf stubbed. Bash + python3 from the
+      # runner image; no GPU, no model, no network.
+      - name: standalone AgentX trace replay end to end
+        run: node e2e_workflow/scripts/test_agentx_standalone_e2e.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest
