@@ -4163,16 +4163,19 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Cold/hot speedup cross-checks (double-check only; see alignment_metrics above).
         # Does NOT change the promoted final_throughput_tok_s / throughput_speedup.
         "alignment_metrics": alignment_metrics,
-        # The SAME object as alignment_metrics.workload_comparability, lifted to the top level
-        # because that is where the KB writer looks for it (e2e_store.build_record reads
-        # result["comparability"], and both writers hand it this file). Until it was lifted, every
-        # e2e record ever written carried comparability={} -- a stored speedup with no statement of
-        # what it is comparable to, which is the one thing a reader cannot reconstruct later.
+        # Exposed for backfill; _enrich_kb_return also carries it to the salvage writer's input.
         "comparability": workload_comparability,
         # Preserve the declaration and the workflow's observed shape for KB backfill/recovery.
         "workload": {
             **(h.get("workload_spec") or {}), **workload,
             **(wf.get("workload") or {}),
+            **({
+                "isl": round(float(baseline_summary["observed_isl"])),
+                "osl": round(float(baseline_summary["observed_osl"])),
+                "shape_provenance": "agentx_measured_this_run",
+            } if (h.get("workload_spec") or {}).get("kind") == WORKLOAD_KIND_AGENTX
+            and _positive_finite_float(baseline_summary.get("observed_isl"))
+            and _positive_finite_float(baseline_summary.get("observed_osl")) else {}),
         },
         # Never advertise a report that is not on disk: the old unconditional
         # fallback handed the caller a path to a file that was never written.

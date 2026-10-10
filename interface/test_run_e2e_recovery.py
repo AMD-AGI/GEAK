@@ -99,6 +99,20 @@ def test_kb_recovery_persists_metadata_on_the_actual_writer_input(tmp_path, monk
     assert stored["metric_basis"] == "p90_intvty_inferencex"
 
 
+def test_kb_recovery_uses_measured_shape_when_the_return_has_no_workload(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path)
+    (eval_dir / "baseline").mkdir()
+    (eval_dir / "baseline" / "bench_summary.json").write_text(json.dumps(
+        {"observed_isl": 89000, "observed_osl": 900}))
+    h = _handoff(eval_dir)
+    h["workload_spec"] = {"kind": "agentx_trace_replay", "corpus": "trace_a"}
+    wf = {"eval_dir": str(eval_dir), "baseline_throughput_tok_s": 100,
+          "final_throughput_tok_s": 110}
+    stored = rx._enrich_kb_return(wf, rx.normalize_result(h, wf))
+    assert stored["workload"]["isl"] == 89000
+    assert stored["workload"]["shape_provenance"] == "agentx_measured_this_run"
+
+
 # ── intermediate-win recovery ───────────────────────────────────────────────
 
 def test_recover_best_intermediate_win_config(tmp_path):
