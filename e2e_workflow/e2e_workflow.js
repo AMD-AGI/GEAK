@@ -3612,23 +3612,18 @@ print(json.dumps(res))
               'directory as the candidate. Note the tarball is a STANDALONE overlay from another run: ' +
               'untarring it over CURRENT_OVERLAY would overwrite `_overlay_manifest.json` and drop every ' +
               'rebind already accepted here, which turns the A/B into a comparison against a candidate ' +
-              'that is missing part of its own reference. So graft its rebinds ON TOP of the current ' +
-              'overlay rather than replacing it:\n' +
+              'that is missing part of its own reference. Merge all manifest entries, including deferred ' +
+              'installers, with the checked merge command below. Use a fresh CAND directory; a conflict ' +
+              'must be reported as inapplicable, never resolved by dropping existing hooks:\n' +
               '```bash\n' +
               'CAND="$EVAL_DIR/overlay/cand_<short_name>"\n' +
-              'cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"   # empty CURRENT_OVERLAY is the normal case\n' +
               `KBO=$(mktemp -d) && tar xzf ${shq(k.overlay_tar)} -C "$KBO" --strip-components=1\n` +
-              'cp -r "$KBO"/. "$CAND"/                      # modules + _patched/; manifest handled next\n' +
-              'if [ -s "$CURRENT_OVERLAY/_overlay_manifest.json" ]; then\n' +
-              '  cp "$CURRENT_OVERLAY/_overlay_manifest.json" "$CAND/_overlay_manifest.json"   # restore, then re-add\n' +
-              '  # for each {target,impl_module,impl_attr} in "$KBO/_overlay_manifest.json":\n' +
-              '  python3 "$SKILL_DIR/scripts/overlay_setup.py" add-rebind --overlay "$CAND" \\\n' +
-              '    --target "<target>" --impl-module "<impl_module>" --impl-attr "<impl_attr>"\n' +
-              'fi\n' +
-              'PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module "<impl_module>"\n' +
+              'python3 "$SKILL_DIR/scripts/overlay_setup.py" merge --overlay "$CAND" \\\n' +
+              '  --from "$CURRENT_OVERLAY" --with "$KBO"\n' +
               '```\n' +
-              'The manifest names every rebind as `target -> impl_module:impl_attr`. VERIFY EACH REBIND ' +
-              'ACTUALLY TOOK on the candidate server (load banner, or the check above) before you believe ' +
+              'The manifest declares rebinds, injected modules and installers with their target sites. ' +
+              'VERIFY EVERY TARGET ACTUALLY TOOK on the candidate server (installer verification API, ' +
+              'load banner, and an executed seam call) before you believe ' +
               'a null result: this overlay was built against a different framework_version, and a rebind ' +
               'whose target module was renamed upstream binds nothing, silently, which is indistinguishable ' +
               'from "the kernel made no difference". If no rebind takes, report gate:"rejected" with ' +

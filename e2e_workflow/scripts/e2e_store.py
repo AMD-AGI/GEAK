@@ -1054,6 +1054,7 @@ def _overlay_modules(manifest_path: str) -> list:
         manifest = {}
     seen, out = set(), []
     queue = [str((entry or {}).get("impl_module") or "") for entry in (manifest.get("rebinds") or [])]
+    queue.extend(str((entry or {}).get("module") or "") for entry in (manifest.get("installers") or []))
     queue.extend(_sibling_imports(os.path.join(root, "sitecustomize.py")))
     while queue:
         # A submodule rebind (`geak_authored.gemm_flydsl`) is addressed by its top-level package,
@@ -1417,7 +1418,8 @@ def _launch_text(a, result: dict, value: dict, kernels, overlay: str) -> str:
                       '  echo "SRC unset: skipping %d kernel patch(es) — the recorded speedup will '
                       'NOT reproduce without them" >&2' % len(patched),
                       "fi"]
-        absent = [k for k in kernels if not k.get("patch")]
+        covered = _overlay_kernel_names(result)
+        absent = [k for k in kernels if not k.get("patch") and k.get("name") not in covered]
         if absent:
             lines += ["# NO PATCH IN THIS RECORD for: %s" % ", ".join(
                 str(k.get("name") or "?") for k in absent),
@@ -1492,6 +1494,24 @@ def _sh_quote(text: str) -> str:
     return "'%s'" % text.replace("'", "'\"'\"'")
 
 
+def _overlay_kernel_names(result):
+    """Explicit kernel coverage of installer packages actually present in the overlay."""
+    root = str(result.get("final_overlay") or "")
+    try:
+        with open(os.path.join(root, OVERLAY_MANIFEST)) as handle:
+            manifest = json.load(handle)
+        covered = set()
+        for installer in manifest.get("installers", []):
+            module = installer["module"].split(".")[0]
+            if (re.fullmatch(r"[A-Za-z_]\w*", module) and
+                    (os.path.isfile(os.path.join(root, module, "__init__.py")) or
+                     os.path.isfile(os.path.join(root, module + ".py")))):
+                covered.update(installer.get("kernels", []))
+        return covered
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return set()
+
+
 def _repro(a, result: dict, value: dict, kernels, files: dict, workdir) -> dict:
     """`value.repro`: everything needed to run this configuration again, said twice.
 
@@ -1509,8 +1529,14 @@ def _repro(a, result: dict, value: dict, kernels, files: dict, workdir) -> dict:
     overlay = str(artifacts.get("overlay") or "")
     config = value.get("accepted_config") or {}
     flags, env = str(config.get("flags") or ""), str(config.get("env") or "")
-    missing = _kernel_patches(a, kernels, files, workdir) if workdir else sum(
-        1 for k in kernels if not k.get("patch"))
+    covered = _overlay_kernel_names(result) if overlay else set()
+    # A covered kernel already ships its implementation. Fetching an unrelated kernel-KB
+    # champion's patch as well would change the recorded configuration on replay.
+    needs_patch = [k for k in kernels if k.get("name") not in covered]
+    if workdir:
+        _kernel_patches(a, needs_patch, files, workdir)
+    missing = sum(1 for k in kernels if not k.get("patch"))
+    unresolved = [k for k in kernels if not k.get("patch") and k.get("name") not in covered]
     if workdir:
         # `value.artifacts` is rebuilt by the caller from `files` after this returns, so adding to
         # `files` here is enough to make the synthesized script a first-class artifact of the
@@ -1549,8 +1575,9 @@ def _repro(a, result: dict, value: dict, kernels, files: dict, workdir) -> dict:
                      "kernel_canonical_id": k.get("kernel_canonical_id") or ""}
                     for k in kernels],
         "kernels_without_patch": missing,
+        "kernels_in_overlay": sorted(covered.intersection(k.get("name") for k in kernels)),
         # The one field a reader can branch on: is what follows enough to re-run, or is it a lead.
-        "complete": bool(captured) and not missing,
+        "complete": bool(captured) and not unresolved,
     }
 
 

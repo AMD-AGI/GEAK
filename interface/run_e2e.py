@@ -3275,7 +3275,7 @@ def _overlay_has_loadable_code(path: Path) -> bool:
         return False
     if not isinstance(spec, dict):
         return False
-    return bool(spec.get("modules") or spec.get("rebinds") or spec.get("captures"))
+    return bool(spec.get("modules") or spec.get("rebinds") or spec.get("captures") or spec.get("installers"))
 
 
 def _patch_has_hunks(path: Path) -> bool:
