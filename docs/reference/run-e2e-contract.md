@@ -32,6 +32,14 @@ Discovery: the installer should export `GEAK_E2E_RUNNER` pointing at this
 file (`$GEAK_ROOT/interface/run_e2e.py`) so the caller has a single
 hard-coded handle.
 
+E2E KB recall can use an independent GEAK policy: set
+`GEAK_E2E_KB_METRIC_BASIS=e2e_norm_intvty_p50` in the parent process environment,
+or `e2e_kb_metric_basis` in the handoff (higher precedence). Explicit policies
+exclude other and unlabelled metric bases without changing the benchmark axis,
+acceptance rule, or identity ladder. See the
+[recall policy contract](../../interface/run_e2e.md#e2e-kb-recall-policy) for
+defaults, diagnostics, and overlay compatibility.
+
 The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
 (`baseline/`, `validation/final/`, `final/` bundle, `director_e2e_validation.json`).
 

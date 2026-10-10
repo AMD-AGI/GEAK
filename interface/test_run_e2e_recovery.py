@@ -81,6 +81,38 @@ def _handoff(eval_dir: Path) -> dict:
     }
 
 
+def test_kb_recovery_persists_metadata_on_the_actual_writer_input(tmp_path, monkeypatch):
+    monkeypatch.setenv("BENCH_CLIENT", "agentx")
+    eval_dir = _make_eval_dir(tmp_path)
+    h = _handoff(eval_dir)
+    h["workload_spec"] = {"kind": "agentx_trace_replay", "corpus": "trace_a", "duration_s": 3600}
+    wf = {"eval_dir": str(eval_dir), "baseline_throughput_tok_s": 100,
+          "final_throughput_tok_s": 110, "metric_basis": "p90_intvty_inferencex",
+          "workload": {"isl": 89000, "osl": 900, "shape_provenance": "agentx_measured_this_run"}}
+    result = rx.normalize_result(h, wf)
+    enriched = rx._enrich_kb_return(wf, result)
+    rx._persist_workflow_return(eval_dir, enriched)
+    stored = json.loads((eval_dir / rx.WORKFLOW_RETURN_FILE).read_text())
+    assert stored["comparability"]["geak_workload_kind"] == "agentx_trace_replay"
+    assert stored["workload"]["corpus"] == "trace_a"
+    assert stored["workload"]["isl"] == 89000
+    assert stored["metric_basis"] == "p90_intvty_inferencex"
+
+
+def test_kb_recovery_uses_measured_shape_when_the_return_has_no_workload(tmp_path):
+    eval_dir = _make_eval_dir(tmp_path)
+    (eval_dir / "baseline").mkdir()
+    (eval_dir / "baseline" / "bench_summary.json").write_text(json.dumps(
+        {"observed_isl": 89000, "observed_osl": 900}))
+    h = _handoff(eval_dir)
+    h["workload_spec"] = {"kind": "agentx_trace_replay", "corpus": "trace_a"}
+    wf = {"eval_dir": str(eval_dir), "baseline_throughput_tok_s": 100,
+          "final_throughput_tok_s": 110}
+    stored = rx._enrich_kb_return(wf, rx.normalize_result(h, wf))
+    assert stored["workload"]["isl"] == 89000
+    assert stored["workload"]["shape_provenance"] == "agentx_measured_this_run"
+
+
 # ── intermediate-win recovery ───────────────────────────────────────────────
 
 def test_recover_best_intermediate_win_config(tmp_path):
@@ -1279,6 +1311,24 @@ def test_the_identity_dims_are_sent_as_the_address(tmp_path, monkeypatch):
     assert "--require-win" in cmd and "--apply" in cmd
     assert _flag(cmd, "--measured-by") == "run_e2e:salvage"
     assert out["measured_by"] == "run_e2e:salvage" and out["ok"] is True
+
+
+def test_the_new_addressing_dims_survive_the_salvage_round_trip(tmp_path, monkeypatch):
+    """ep and the workload kind travel the same generic path as every other dim.
+
+    The salvage writer re-derives nothing: it replays the dims the workflow recorded in
+    kb_identity.json. So the only way a salvaged record lands on the SAME page as the run that
+    died is for these two to make the trip untouched — drop either and the address silently
+    reverts to the pre-ep synthetic scheme, which still parses and still writes.
+    """
+    seen = _kb_store(monkeypatch)
+    dims = {"model": "M", "gfx": "gfx950", "tp": 8, "ep": 1,
+            "workload-kind": "agentx_trace_replay", "conc": 10}
+    rx._kb_write_back(_kb_eval_dir(tmp_path, identity=_kb_identity(dims=dims)), {}, {})
+    cmd = seen["cmd"]
+    assert _flag(cmd, "--ep") == "1", "ep_1 is written, not inferred from its absence"
+    assert _flag(cmd, "--workload-kind") == "agentx_trace_replay"
+    assert _flag(cmd, "--conc") == "10"
 
 
 def test_an_empty_dim_is_dropped_rather_than_sent_blank(tmp_path, monkeypatch):

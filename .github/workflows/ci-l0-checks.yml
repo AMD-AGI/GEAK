@@ -120,6 +120,7 @@ jobs:
             e2e_workflow/scripts/tests/test_llm_ledger.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
             e2e_workflow/scripts/tests/test_overlay_injection_runtime.py \
+            e2e_workflow/scripts/tests/test_overlay_installers.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_seam_trace_capture_guard.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \

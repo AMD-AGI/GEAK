@@ -7,11 +7,12 @@ entries, so every sibling submodule disappears and `import sglang` breaks. The c
 mechanism is a `sitecustomize.py` (auto-run by Python at interpreter startup, before anything imports
 the target) that either (a) injects a PATCHED submodule file into sys.modules under its dotted name,
 or (b) imports the real module and REBINDS one attribute (monkeypatch), or (c) installs a capture
-hook. All three are driven by a manifest so multiple overlays COMPOUND (each accepted kernel appends).
+hook, or (d) registers a deferred installer for a multi-seam package. All are driven by a manifest
+so multiple overlays COMPOUND (each accepted kernel appends).
 
 Layout produced:
     <overlay>/sitecustomize.py          # generic, manifest-driven (idempotent)
-    <overlay>/_overlay_manifest.json    # {"modules":[...], "rebinds":[...], "captures":[...]}
+    <overlay>/_overlay_manifest.json    # modules, rebinds, captures, markers, installers
     <overlay>/_patched/<dotted>.py      # patched submodule sources (for module-inject entries)
     <overlay>/<impl files>              # copied impl modules (for rebind/capture entries)
 Launch with:  PYTHONPATH=<overlay>:$PYTHONPATH
@@ -27,16 +28,22 @@ Commands:
                 --overlay O --target sglang...:fn --out <task_dir> [--max 5] [--capture-file capture_shapes.py]
   add-marker    install a marker-only hook on one candidate seam (uses seam_trace.py)
                 --overlay O --target sglang...:fn [--marker-file seam_trace.py]
+  add-installer register a package's deferred import hooks (package files must already be in O)
+                --overlay O --id NAME --module PACKAGE [--callable install]
+                [--target MODULE:ATTR ...] [--kernel NAME ...]
+  merge         compose complete overlays into a fresh directory, rejecting conflicting hooks/files
+                --overlay NEW --from BASE --with INCOMING
   check         print where a module resolves from (run with the overlay on PYTHONPATH)
                 --module sglang.srt.layers.activation [--path-only]
   Every add-* takes --from BASE to SEED a new overlay from an existing one, so a candidate overlay is
   "the live stack + ONE entry". Stacking by PYTHONPATH does NOT work: only the first sitecustomize on
-  sys.path is imported, so a second overlay dir is silently dead. Seeding by copy is the only way.
+  sys.path is imported, so a second overlay dir is silently dead. Use one composed directory.
 
 Back-compat aliases: `monkeypatch` == add-rebind, `copy-subtree` == add-module (file granularity).
 Stdlib only.
 """
-import argparse, importlib, json, os, shutil, subprocess, sys
+import argparse, hashlib, importlib, json, os, shutil, subprocess, sys, tempfile
+from pathlib import Path
 
 SITECUSTOMIZE = r'''# Auto-generated reversible overlay (e2e_workflow). Drop this dir from PYTHONPATH to revert.
 import json, os, sys, importlib, importlib.abc, importlib.util
@@ -105,6 +112,21 @@ for _dotted in _MODS:
     if _dotted in sys.modules:   # imported before sitecustomize ran -> the overlay would be a no-op
         sys.stderr.write("[overlay] WARNING %s was already imported before the overlay finder\n" % _dotted)
 
+# Manifest installers register deferred hooks without eagerly importing serving/GPU libraries.
+# They run before rebinds, since a rebind can itself import a module the installer must observe.
+for _e in _m.get("installers", []):
+    try:
+        _impl = importlib.import_module(_e["module"])
+        getattr(_impl, _e.get("callable", "install"))()
+        sys.stderr.write("[overlay] installed %s\n" % _e["id"])
+    except Exception as _ex:
+        sys.stderr.write("[overlay] installer FAILED %r: %r\n" % (_e, _ex))
+        if _e.get("required", True):
+            # CPython swallows sitecustomize exceptions and continues. A required installer
+            # failure must not quietly turn a candidate into a stock-server measurement.
+            sys.stderr.flush()
+            os._exit(70)
+
 # (b) rebind single attributes (monkeypatch).
 for _e in _m.get("rebinds", []):
     try:
@@ -134,6 +156,184 @@ for _e in _m.get("markers", []):
     except Exception as _ex:
         sys.stderr.write("[overlay] seam marker install FAILED %r: %r\n" % (_e, _ex))
 '''
+
+
+# Previous generic runtime, accepted when upgrading an existing manifest-based overlay.
+_INSTALLER_START = "# Manifest installers register deferred hooks"
+_INSTALLER_END = "# (b) rebind single attributes (monkeypatch)."
+LEGACY_SITECUSTOMIZE = (SITECUSTOMIZE.split(_INSTALLER_START)[0]
+                       + _INSTALLER_END + SITECUSTOMIZE.split(_INSTALLER_END)[1])
+
+
+def installer_module_manifest(overlay, manifest):
+    """Expose real installer imports to consumers of the original modules/rebinds contract.
+
+    The runtime imports these modules to register hooks. A package-tree hash in the manifest
+    also lets older consumers fingerprint nested Python/HIP sources they do not know to scan.
+    Return a new manifest; never modify the source overlay while packaging or merging it.
+    """
+    if not manifest.get("installers"):
+        return manifest
+    root = Path(overlay)
+    result = dict(manifest)
+    modules = [dict(entry) for entry in manifest.get("modules", [])]
+    for installer in manifest["installers"]:
+        name = installer["module"]
+        if not isinstance(name, str) or not all(part.isidentifier() for part in name.split(".")):
+            raise ValueError("invalid installer module: " + str(name))
+        parts = name.split(".")
+        stem = root.joinpath(*parts)
+        source = stem / "__init__.py" if stem.is_dir() else stem.with_suffix(".py")
+        if not source.is_file():
+            raise ValueError("installer module source is missing: " + name)
+        tree = root / parts[0]
+        paths = []
+        if tree.is_dir():
+            if tree.is_symlink():
+                raise ValueError("installer source symlinks must be materialized: " + str(tree))
+            for directory, dirs, files in os.walk(tree):
+                dirs[:] = sorted(d for d in dirs if d not in ("__pycache__", ".torch_ext", ".git"))
+                if any((Path(directory) / d).is_symlink() for d in dirs):
+                    raise ValueError("installer directory symlinks must be materialized")
+                paths.extend(Path(directory) / f for f in sorted(files) if not f.endswith(".pyc"))
+        else:
+            paths = [source]
+        digest = hashlib.sha256()
+        for path in sorted(paths):
+            if path.is_symlink():
+                raise ValueError("installer file symlinks must be materialized: " + str(path))
+            digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+        rel = source.relative_to(root).as_posix()
+        matches = [entry for entry in modules if entry.get("module") == name]
+        if len(matches) > 1 or (matches and matches[0].get("file") != rel):
+            raise ValueError("conflicting installer module entry: " + name)
+        if matches:
+            entry = matches[0]
+        else:
+            entry = {"module": name, "file": rel}
+            modules.append(entry)
+        entry["installer_source_sha256"] = digest.hexdigest()
+    result["modules"] = modules
+    return result
+
+
+def cmd_add_installer(a):
+    """Register a source package's deferred installer; its files already live in the overlay."""
+    man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
+    runtime = os.path.join(a.overlay, "sitecustomize.py")
+    with open(runtime) as handle:
+        if handle.read() not in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE):
+            raise SystemExit("cannot add an installer to a custom sitecustomize; preserve its hooks first")
+    m = _load_man(man)
+    entry = {"id": a.id, "module": a.module, "callable": a.callable,
+             "required": True, "targets": a.target, "kernels": a.kernel}
+    old = [e for e in m.get("installers", []) if e.get("id") == a.id]
+    if old and old != [entry]:
+        raise SystemExit("installer id already has a different definition: " + a.id)
+    if not old:
+        m.setdefault("installers", []).append(entry)
+    _save_man(man, installer_module_manifest(a.overlay, m))
+    with open(runtime, "w") as handle:
+        handle.write(SITECUSTOMIZE)
+    print("OVERLAY_DIR=" + a.overlay)
+
+
+def _targets_overlap(left, right):
+    left_module, _, left_attr = left.partition(":")
+    right_module, _, right_attr = right.partition(":")
+    if left_module == right_module:
+        return (not left_attr or not right_attr or left_attr == right_attr
+                or left_attr.startswith(right_attr + ".") or right_attr.startswith(left_attr + "."))
+    return ((not left_attr and right_module.startswith(left_module + "."))
+            or (not right_attr and left_module.startswith(right_module + ".")))
+
+
+def merge_overlays(output, sources):
+    """Build a fresh overlay without changing its inputs or silently replacing an existing hook."""
+    output = os.path.abspath(output)
+    if os.path.exists(output) and (not os.path.isdir(output) or os.listdir(output)):
+        raise ValueError("merge output must be absent or empty: " + output)
+    kinds = {"modules": "module", "rebinds": "target", "captures": "target",
+             "markers": "target", "installers": "id"}
+    merged, files, targets = {}, {}, {}
+    for source in sources:
+        if not source:
+            continue
+        source = os.path.abspath(source)
+        if source == output or os.path.commonpath((source, output)) in (source, output):
+            raise ValueError("merge inputs and output must not contain one another")
+        with open(os.path.join(source, "_overlay_manifest.json")) as handle:
+            manifest = json.load(handle)
+        if not isinstance(manifest, dict):
+            raise ValueError("overlay manifest must be an object: " + source)
+        with open(os.path.join(source, "sitecustomize.py")) as handle:
+            if handle.read() not in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE):
+                raise ValueError("custom sitecustomize cannot be merged automatically: " + source)
+        manifest = installer_module_manifest(source, manifest)
+        for kind, entries in manifest.items():
+            if kind not in kinds:
+                if kind in merged and merged[kind] != entries:
+                    raise ValueError("conflicting manifest metadata: " + kind)
+                merged[kind] = entries
+                continue
+            index = {e[kinds[kind]]: e for e in merged.get(kind, [])}
+            for entry in entries:
+                key = entry[kinds[kind]]
+                if key in index and index[key] != entry:
+                    raise ValueError("conflicting overlay entry: " + kind + ":" + key)
+                index[key] = entry
+                # Installers declare the serving sites they own so another overlay cannot
+                # overwrite them by introducing a rebind or whole-module replacement.
+                sites = entry.get("targets", []) if kind == "installers" else (
+                    [key] if kind in ("modules", "rebinds") else [])
+                owner = (kind, key)
+                for site in sites:
+                    for previous, prev_owner in targets.items():
+                        if _targets_overlap(site, previous) and prev_owner != owner:
+                            raise ValueError("conflicting overlay target: " + site)
+                    targets[site] = owner
+            merged[kind] = list(index.values())
+        for root, dirs, names in os.walk(source):
+            dirs[:] = sorted(d for d in dirs if d not in ("__pycache__", ".torch_ext", ".git"))
+            if any(os.path.islink(os.path.join(root, d)) for d in dirs):
+                raise ValueError("overlay directory symlinks must be materialized before merge")
+            for name in sorted(names):
+                path = os.path.join(root, name)
+                rel = os.path.relpath(path, source)
+                if rel in ("sitecustomize.py", "_overlay_manifest.json") or name.endswith(".pyc"):
+                    continue
+                if os.path.islink(path):
+                    raise ValueError("overlay file symlinks must be materialized before merge: " + rel)
+                if rel in files:
+                    with open(files[rel], "rb") as old, open(path, "rb") as new:
+                        if old.read() != new.read():
+                            raise ValueError("conflicting overlay source file: " + rel)
+                files[rel] = path
+    parent = os.path.dirname(output)
+    os.makedirs(parent, exist_ok=True)
+    staging = tempfile.mkdtemp(prefix=".overlay_merge_", dir=parent)
+    try:
+        for rel, source in files.items():
+            dest = os.path.join(staging, rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(source, dest)
+        with open(os.path.join(staging, "_overlay_manifest.json"), "w") as handle:
+            json.dump(merged, handle, indent=2)
+        with open(os.path.join(staging, "sitecustomize.py"), "w") as handle:
+            handle.write(SITECUSTOMIZE)
+        os.replace(staging, output)
+    finally:
+        if os.path.isdir(staging):
+            shutil.rmtree(staging)
+    return output
+
+
+def cmd_merge(a):
+    try:
+        print("OVERLAY_DIR=" + merge_overlays(a.overlay, [a.base, a.incoming]))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise SystemExit(str(error))
 
 
 def pkg_root(package):
@@ -318,6 +518,22 @@ def main():
     p.add_argument("--module", required=True)
     p.add_argument("--path-only", action="store_true", dest="path_only")
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("add-installer")
+    p.add_argument("--overlay", required=True)
+    p.add_argument("--id", required=True)
+    p.add_argument("--module", required=True)
+    p.add_argument("--callable", default="install")
+    p.add_argument("--target", action="append", default=[])
+    p.add_argument("--kernel", action="append", default=[])
+    p.add_argument("--from", dest="base", default="")
+    p.set_defaults(func=cmd_add_installer)
+
+    p = sub.add_parser("merge")
+    p.add_argument("--overlay", required=True)
+    p.add_argument("--from", dest="base", default="")
+    p.add_argument("--with", dest="incoming", required=True)
+    p.set_defaults(func=cmd_merge)
 
     a = ap.parse_args()
     a.func(a)

@@ -16,13 +16,15 @@ bench_summary.json shapes with nothing to catch it.
 
 Throughput basis: OUTPUT-only tok/s by default, matching the Hyperloom orchestrator's
 baseline/explore collectors (they read output_throughput).  E2E_METRIC=total switches to total
-(input+output).  TWO interactivity axes exist and are NOT interchangeable: E2E_METRIC=intvty is
-the TTFT-inclusive one Hyperloom grades on today, E2E_METRIC=p90_intvty_inferencex is the
-decode-only one the InferenceX pareto publishes.  See the _BASES block below before using
-either.  Baseline and candidate read the same key, so the accept RATIO is basis-consistent;
-metric_basis records which was used.  Values are aggregate, NOT divided by TP.
+(input+output).  THREE interactivity axes exist and are NOT interchangeable:
+E2E_METRIC=e2e_norm_intvty_p50 is the TTFT-inclusive median Hyperloom keeps AgentX candidates
+on, E2E_METRIC=e2e_norm_intvty_p90 is the same family's P90 tail, which Hyperloom holds as a
+guard, and E2E_METRIC=p90_intvty_inferencex is the decode-only axis the InferenceX pareto
+publishes.  See the _BASES block below before using any of them.  Baseline and candidate read
+the same key, so the accept RATIO is basis-consistent; metric_basis records which was used.
+Values are aggregate, NOT divided by TP.
 
-``throughput_tok_s_median`` carries whichever axis was selected, so on either interactivity axis
+``throughput_tok_s_median`` carries whichever axis was selected, so on any interactivity axis
 it is not a tok/s figure at all -- read it with metric_basis, never by its name alone.
 """
 import argparse
@@ -34,32 +36,41 @@ import sys
 
 TOTAL_KEYS = ("total_token_throughput", "total_throughput", "total_token_throughput_tok_s")
 OUTPUT_KEYS = ("output_throughput", "output_token_throughput", "output_throughput_tok_s")
-#: TWO DIFFERENT INTERACTIVITY AXES, and they are NOT interchangeable. Both are "tok/s/user",
-#: both higher-is-better, and on the GLM-5.2-MXFP4 AgentX trace they read 81.9 and 119.7 -- a
-#: factor of 1.46. Never compare a candidate read on one against a reference read on the other.
+#: THREE DIFFERENT INTERACTIVITY AXES, and they are NOT interchangeable. All are "tok/s/user",
+#: all higher-is-better, and on the GLM-5.2-MXFP4 AgentX trace the two P90 axes read 81.9 and
+#: 119.7 -- a factor of 1.46. Never compare a candidate read on one against a reference read on
+#: another.
 #:
-#:   intvty  ->  ``e2e_norm_intvty_p90``, i.e. 1 / P90(E2EL/OSL): aiperf's summary P10 of the
-#:       per-request rate OSL/E2EL_s, the slow-tail request's own token rate. TTFT and queue
-#:       wait are INSIDE the window. This is InferenceX's ``e2e_norm_intvty`` field, and it is
-#:       the axis Hyperloom grades AgentX on today (``GRADED_INTVTY``). Hyperloom computes the
-#:       value; this script only selects which already-computed field to read.
+#:   e2e_norm_intvty_p50: aiperf's summary P50 of the per-request rate OSL/E2EL_s, the
+#:       median request's own token rate, i.e. InferenceX's ``p50_e2e_norm_intvty``. TTFT and
+#:       queue wait are INSIDE the window. This is the axis Hyperloom keeps AgentX candidates
+#:       on (``GRADED_INTVTY_P50``), so it is the one its handoff selects.
+#:
+#:   e2e_norm_intvty_p90 (also ``intvty``, ``interactivity``)  ->  1 / P90(E2EL/OSL):
+#:       aiperf's summary P10 of the same per-request rate, the slow-tail request's. This is
+#:       InferenceX's ``p90_e2e_norm_intvty``. Hyperloom holds it as a guard
+#:       (``GRADED_INTVTY``) rather than keeping candidates on it. The two short tokens predate
+#:       the P50 axis and are kept only for callers that pinned them: in InferenceX's own
+#:       vocabulary a bare ``intvty`` is the decode-only axis below, so no new token is short.
 #:
 #:   p90_intvty_inferencex  ->  1000 / P90(ITL), decode only. TTFT and queue wait are OUTSIDE
-#:       the window. This is InferenceX's ``intvty`` field -- the axis its public pareto plots
+#:       the window. This is InferenceX's ``p90_intvty`` -- the axis its public pareto plots
 #:       as "P90 Interactivity (tok/s/user)" -- and it is derived here exactly as InferenceX's
 #:       own ingestion derives it (``infx/results/fixed_sequence.py``: p90_tpot_ms is mapped
 #:       through ``1000.0 / p90_tpot_ms``). Derived from a field the rows already carry, so it
 #:       costs no extra measurement.
 #:
-#: Hyperloom is expected to move its objective onto the InferenceX definition. Until that lands,
-#: ``intvty`` keeps naming the axis Hyperloom actually grades, so GEAK's accept gate and
-#: Hyperloom's KEEP gate cannot drift apart in the interim. When it lands, the handoff selects
-#: the new token and nothing in this file has to change.
+#: Hyperloom computes both e2e_norm values; this script only selects which already-computed
+#: field to read, so rows from a mapper that predates the P50 field have no P50 reading. The
+#: handoff names the axis Hyperloom keeps candidates on, so GEAK's accept gate and Hyperloom's
+#: KEEP gate read the same number.
+INTVTY_P50_KEYS = ("e2e_norm_intvty_p50",)
 INTVTY_KEYS = ("e2e_norm_intvty_p90",)
 P90_INTVTY_KEYS = ("p90_tpot_ms", "tpot_p90_ms")
 
 OUTPUT_BASIS = "aggregate_output_tok_s"
 TOTAL_BASIS = "aggregate_total_token_tok_s"
+INTVTY_P50_BASIS = "e2e_norm_intvty_p50"
 INTVTY_BASIS = "e2e_norm_intvty_p90"
 P90_INTVTY_BASIS = "p90_intvty_inferencex"
 
@@ -71,22 +82,32 @@ def _recip_ms_to_rate(ms):
 
 #: E2E_METRIC value -> (rows to read, metric_basis to record, per-row transform or None).
 #: Spelled in Hyperloom's axis vocabulary so the handoff and this summary can be compared as
-#: strings on both sides. The two interactivity axes carry DIFFERENT basis strings on purpose:
-#: a summary read on one can then never be mistaken for the other downstream.
+#: strings on both sides. Each interactivity axis carries its OWN basis string on purpose: a
+#: summary read on one can then never be mistaken for another downstream.
 _BASES = {
     "output": (OUTPUT_KEYS, OUTPUT_BASIS, None),
     "total": (TOTAL_KEYS, TOTAL_BASIS, None),
     "total_token": (TOTAL_KEYS, TOTAL_BASIS, None),
     "total_throughput": (TOTAL_KEYS, TOTAL_BASIS, None),
+    "e2e_norm_intvty_p50": (INTVTY_P50_KEYS, INTVTY_P50_BASIS, None),
     "intvty": (INTVTY_KEYS, INTVTY_BASIS, None),
     "interactivity": (INTVTY_KEYS, INTVTY_BASIS, None),
     "e2e_norm_intvty_p90": (INTVTY_KEYS, INTVTY_BASIS, None),
     "p90_intvty_inferencex": (P90_INTVTY_KEYS, P90_INTVTY_BASIS, _recip_ms_to_rate),
 }
 
-#: The axes that measure interactivity rather than throughput. They carry the total-throughput
-#: guard, and their ``throughput_tok_s_median`` is not a tok/s figure.
-_INTVTY_BASES = frozenset({INTVTY_BASIS, P90_INTVTY_BASIS})
+#: Interactivity basis -> the guards Hyperloom's KEEP verdict holds beside it, as guard basis ->
+#: rows to read. A median gain is kept only while the P90 tail and output throughput each stay
+#: inside the noise band, so a candidate that buys the median by shedding either is not a win;
+#: each guard is summarized from the same rows as the objective. Total token throughput is
+#: measured, not guarded. The throughput bases carry none: there the objective IS the guard.
+#: A guard lands as ``guard_<basis>_median``, so a handoff naming a guard by its basis (see
+#: ``workload_spec.acceptance``) finds the field without a table of its own.
+_GUARDS = {
+    INTVTY_P50_BASIS: {INTVTY_BASIS: INTVTY_KEYS, OUTPUT_BASIS: OUTPUT_KEYS},
+    INTVTY_BASIS: {OUTPUT_BASIS: OUTPUT_KEYS},
+    P90_INTVTY_BASIS: {OUTPUT_BASIS: OUTPUT_KEYS},
+}
 
 
 def _basis():
@@ -136,6 +157,15 @@ def _spread_pct(xs):
     return round(100.0 * (max(xs) - min(xs)) / m, 2) if m else 0.0
 
 
+def _guard_fields(guards):
+    """``guard_<basis>_median`` and ``guard_<basis>_spread_pct`` for each guard's samples."""
+    fields = {}
+    for basis, xs in guards.items():
+        fields["guard_" + basis + "_median"] = _med3(xs)
+        fields["guard_" + basis + "_spread_pct"] = _spread_pct(xs)
+    return fields
+
+
 def _contract(requested, successful, observed, usable):
     """The fields every caller gates on, spelled the same way in both modes."""
     return {
@@ -157,7 +187,7 @@ def _emit(summary, out_path, tail):
 
 def from_runs(args):
     keys, basis, transform = _basis()
-    is_output, is_intvty = basis == OUTPUT_BASIS, basis in _INTVTY_BASES
+    is_output, guard_keys = basis == OUTPUT_BASIS, _GUARDS.get(basis, {})
 
     def read(path):
         xs = []
@@ -178,7 +208,8 @@ def from_runs(args):
             pass
         return xs
 
-    tps, ttft, tpot, guard = [], [], [], []
+    tps, ttft, tpot = [], [], []
+    guards = {name: [] for name in guard_keys}
     # The request shape this run ACTUALLY served, averaged per request.  On a trace replay the
     # corpus owns the sequence lengths, so a measured run is the only place the real shape is
     # knowable, and it moves with the corpus, the tokenizer and the context window.
@@ -195,10 +226,10 @@ def from_runs(args):
             v = _axis_num(d, keys, transform)
             if v is not None:
                 tps.append(v)
-            if is_intvty:
-                g = _num(d, *TOTAL_KEYS)
+            for name, gkeys in guard_keys.items():
+                g = _num(d, *gkeys)
                 if g is not None:
-                    guard.append(g)
+                    guards[name].append(g)
             for src, dst in ((("median_ttft_ms", "mean_ttft_ms"), ttft),
                              (("median_tpot_ms", "mean_tpot_ms"), tpot)):
                 x = _num(d, *src)
@@ -221,12 +252,9 @@ def from_runs(args):
         "throughput_tok_s_spread_pct": spread,
         "output_throughput_tok_s_median": med if is_output else None,
         "output_throughput_tok_s_spread_pct": spread if is_output else None,
-        # AgentX grades interactivity against a total-throughput guard, so a candidate that buys
-        # tail latency by shedding throughput is not a win. Carried only on that axis: the two
-        # throughput bases keep their exact field set, and there the objective IS the guard.
-        **({"guard_total_tok_s_median": _med3(guard),
-            "guard_total_tok_s_spread_pct": _spread_pct(guard),
-            "guard_basis": TOTAL_BASIS} if is_intvty else {}),
+        # The guards Hyperloom holds beside an interactivity objective (see _GUARDS); none on the
+        # throughput bases, so those keep their exact field set.
+        **_guard_fields(guards),
         "ttft_ms_median": _med3(ttft),
         "tpot_ms_median": _med3(tpot),
         # None when the client did not report token totals, so a consumer can tell
@@ -293,8 +321,8 @@ def from_replicas(args):
     med, spread = _med3(tps), _spread_pct(tps)
     bases = {s.get("metric_basis") for s in summaries if s.get("metric_basis")}
     basis = next(iter(bases)) if len(bases) == 1 else None
-    is_output, is_intvty = basis == OUTPUT_BASIS, basis in _INTVTY_BASES
-    guard = col("guard_total_tok_s_median") if is_intvty else []
+    is_output = basis == OUTPUT_BASIS
+    guards = {name: col("guard_" + name + "_median") for name in _GUARDS.get(basis, {})}
     summary = {
         "requested": args.requested,
         "successful": args.successful,
@@ -307,9 +335,7 @@ def from_replicas(args):
         "throughput_tok_s_spread_pct": spread,
         "output_throughput_tok_s_median": med if is_output else None,
         "output_throughput_tok_s_spread_pct": spread if is_output else None,
-        **({"guard_total_tok_s_median": _med3(guard),
-            "guard_total_tok_s_spread_pct": _spread_pct(guard),
-            "guard_basis": TOTAL_BASIS} if is_intvty else {}),
+        **_guard_fields(guards),
         "ttft_ms_median": _med3(col("ttft_ms_median")),
         "tpot_ms_median": _med3(col("tpot_ms_median")),
         # Carried through the aggregate as well, so a caller reads the same key whichever

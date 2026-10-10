@@ -264,6 +264,34 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
   : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
+// Expert-parallel degree AS THE BASELINE WAS LAUNCHED, resolved upstream (run_e2e._resolve_ep) and
+// passed down rather than re-derived from flags here. It is a KB addressing dimension beside TP:
+// the same model on the same stack with the experts sharded differently is a different deployment.
+// Unlike TP it is also a knob the Config Tuner may move mid-run (--ep-size rides EXTRA_SERVER_ARGS),
+// so this constant states the baseline's value and the accepted one lives in accepted_config.
+// Standalone runs resolve through the same Python parser as interface dispatch.
+function resolveServingEp() {
+  if (A.ep != null) {
+    const ep = Number(A.ep);
+    if (!Number.isInteger(ep) || ep < 1) throw new Error('args.ep must be a positive integer');
+    return ep;
+  }
+  if (!A.initial_extra_server_args && !A.initial_extra_env && !A.launch_recipe) return 1;
+  const { execFileSync } = require('child_process');
+  const value = execFileSync('python3', ['-c', `
+import json, os, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+from interface.run_e2e import _resolve_ep
+a = json.loads(sys.argv[2])
+print(_resolve_ep(a, None, int(sys.argv[3])))
+`, WORKFLOW_DIR, JSON.stringify({ accepted_flags: A.initial_extra_server_args || '',
+    accepted_env: A.initial_extra_env || '', launch_recipe: A.launch_recipe || '' }),
+  String(SERVING_TP)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 });
+  const ep = Number(value.trim());
+  if (!Number.isInteger(ep) || ep < 1) throw new Error('could not resolve baseline expert parallelism');
+  return ep;
+}
+const SERVING_EP = resolveServingEp();
 // ---- WALL-CLOCK BUDGET (opt-in; default OFF when absent => byte-identical) ---------------------------
 // time_budget_s is the EXTERNAL orchestrator's HARD kill budget (run_e2e.py GEAK_E2E_TIMEOUT_S),
 // forwarded so GEAK can self-pace and FINISH (Finalize/Report/Validate + workflow_return flush) BEFORE
@@ -927,6 +955,7 @@ const METRIC_BASIS_OF_AXIS = {
   total_throughput: 'aggregate_total_token_tok_s',
   intvty: 'e2e_norm_intvty_p90',
   interactivity: 'e2e_norm_intvty_p90',
+  e2e_norm_intvty_p50: 'e2e_norm_intvty_p50',
   e2e_norm_intvty_p90: 'e2e_norm_intvty_p90',
   p90_intvty_inferencex: 'p90_intvty_inferencex',
 };
@@ -934,12 +963,14 @@ const METRIC_BASIS_OF_AXIS = {
 const AXIS_OF_METRIC_BASIS = {
   aggregate_output_tok_s: 'output',
   aggregate_total_token_tok_s: 'total',
+  e2e_norm_intvty_p50: 'e2e_norm_intvty_p50',
   e2e_norm_intvty_p90: 'e2e_norm_intvty_p90',
   p90_intvty_inferencex: 'p90_intvty_inferencex',
 };
 const AXIS_LABEL = {
   aggregate_output_tok_s: 'OUTPUT tok/s',
   aggregate_total_token_tok_s: 'TOTAL (input+output) tok/s',
+  e2e_norm_intvty_p50: 'TTFT-inclusive P50 interactivity: 1 / P50(E2EL/OSL) in tok/s/user',
   p90_intvty_inferencex: 'InferenceX P90 interactivity: 1000 / P90(ITL) in tok/s/user, decode only',
   e2e_norm_intvty_p90: 'TTFT-inclusive P90 interactivity: 1 / P90(E2EL/OSL) in tok/s/user',
 };
@@ -972,6 +1003,31 @@ function resolveAgentxMetric() {
 }
 const { basis: AGENTX_METRIC_BASIS, source: AGENTX_METRIC_SOURCE } = resolveAgentxMetric();
 const AGENTX_E2E_METRIC = AGENTX ? AXIS_OF_METRIC_BASIS[AGENTX_METRIC_BASIS] : '';
+// Recall has its own policy. In particular, older orchestrators may grade output/total while
+// the operator wants only p50 candidates. This never changes the bench axis or the writer's basis.
+function resolveKbMetric() {
+  let env = '';
+  try { env = String(process.env.GEAK_E2E_KB_METRIC_BASIS || '').trim(); } catch (_) { /* no env */ }
+  const arg = String(A.e2e_kb_metric_basis || '').trim();
+  const requested = (arg || env).toLowerCase();
+  if (!requested) return { basis: AGENTX_METRIC_BASIS, strict: false, source: 'measurement' };
+  const basis = AXIS_OF_METRIC_BASIS[requested] ? requested : METRIC_BASIS_OF_AXIS[requested];
+  if (!basis) throw new Error(`Unknown e2e KB metric basis '${requested}'. Known bases: ` +
+    Object.keys(AXIS_OF_METRIC_BASIS).join(', '));
+  return { basis, strict: true, source: arg ? 'e2e_kb_metric_basis' : 'GEAK_E2E_KB_METRIC_BASIS' };
+}
+const E2E_KB_METRIC = resolveKbMetric();
+function kbMeasurementBasis() {
+  if (AGENTX) return AGENTX_METRIC_BASIS;
+  let axis = '';
+  try { axis = String(process.env.E2E_METRIC || '').trim().toLowerCase(); } catch (_) { /* no env */ }
+  return METRIC_BASIS_OF_AXIS[axis] || 'aggregate_output_tok_s';
+}
+function kbCanAttestMetric(candidate) {
+  const measured = kbMeasurementBasis();
+  // A fresh output/total A/B is not evidence for or against the stored p50 claim.
+  return candidate.metric_basis ? candidate.metric_basis === measured : !E2E_KB_METRIC.strict;
+}
 // Body of the per-run bench_env.sh the Director drops beside the copied bench
 // script (see roles/director.md PHASE=setup). Every line assigns ONLY when the
 // name is unset or empty, so a real exported value -- an orchestrator's, or an
@@ -1551,7 +1607,27 @@ function kbIdentityFlags() {
   return [`--model ${shq(KB_DIMS.model)}`, `--gfx ${shq(KB_DIMS.gfx)}`,
     `--framework ${shq(BACKEND)}`, `--framework-version ${shq(KB_DIMS.framework_version)}`,
     `--precision ${shq(KB_DIMS.precision)}`, `--rocm-version ${shq(KB_DIMS.rocm_version)}`,
-    `--tp ${SERVING_TP}`, `--isl ${ISL}`, `--osl ${OSL}`, `--conc ${CONC}`].join(' ');
+    `--tp ${SERVING_TP}`, `--ep ${SERVING_EP}`,
+    // The DECLARATION (A.workload_kind / workload_spec.kind), never the shape PROVENANCE: the
+    // provenance values include agentx_pending_baseline and synthetic_fallback_on_agentx, which
+    // would mis-file precisely the degraded AgentX runs that most need a stable address.
+    `--workload-kind ${shq(WORKLOAD_KIND)}`,
+    `--isl ${ISL}`, `--osl ${OSL}`, `--conc ${CONC}`].join(' ');
+}
+
+// Metadata shared by the persisted return and the KB writer.
+function kbResultMetadata() {
+  return {
+    // Only tp/ep/conc address AgentX. Observed shape is retained outside the content digest.
+    workload: Object.assign({}, WORKLOAD, {
+      kind: WORKLOAD_KIND, tp: SERVING_TP, ep: SERVING_EP,
+    }, AGENTX ? {
+      scenario: AGENTX.scenario, corpus: AGENTX.corpus, num_entries: AGENTX.num_entries,
+      duration_s: AGENTX.duration_s, metric_basis: AGENTX_METRIC_BASIS,
+    } : {}),
+    metric_basis: AGENTX ? AGENTX_METRIC_BASIS : '',
+    comparability: A.comparability || {},
+  };
 }
 
 // --store is what the local plane writes into and is meaningless to a remote-only run; open_plane()
@@ -1565,10 +1641,21 @@ function kbPlaneFlags(plane) {
 // first, local mirror only when the service has no answer) and reports which one spoke as
 // `read_plane`, so the bash branch that used to do it here is gone — one copy of the rule, and it
 // is the copy a human gets from the CLI too.
+// The graded axis is NOT part of the address (bench_summarize's bases are five and growing, and a
+// reader wants them side by side with a label rather than scattered over five sparse pages), so the
+// reader has to state it instead. One page has already carried ~64763 (total tok/s), ~471 (output
+// tok/s) and ~81 (P90 interactivity) at once; ranked together the top row wins by unit, not merit.
+// An explicit recall policy requires an exact basis, including on synthetic runs. Without one,
+// preserve the historical measurement-derived filter and its compatibility with unlabelled records.
+function kbMetricBasisFlag() {
+  return E2E_KB_METRIC.basis ? `--metric-basis ${shq(E2E_KB_METRIC.basis)} ` +
+    (E2E_KB_METRIC.strict ? '--require-metric-basis ' : '') : '';
+}
+
 function kbResolveScript(args) {
   return KB_ENV_PRELUDE + '\\\n' +
     `python3 ${shq(E2E_STORE_SCRIPT)} resolve ${kbIdentityFlags()} \\\n` +
-    `  ${kbPlaneFlags(E2E_KB_PLANE)} ${args}`;
+    `  ${kbMetricBasisFlag()}${kbPlaneFlags(E2E_KB_PLANE)} ${args}`;
 }
 
 // Warm-start prompt injection, mirroring expertSkillsBlock exactly: returns '' whenever the feature
@@ -1638,7 +1725,8 @@ measurement duration. Consequences you must respect:
 * **The graded axis is ${AXIS_LABEL[AGENTX_METRIC_BASIS]}.**
   \`bench_summary.json\` reports it as \`throughput_tok_s_median\` with
   \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; ${/intvty/.test(AGENTX_METRIC_BASIS)
-    ? 'on this axis it is NOT\n  a tok/s figure but tok/s/user, higher is better. `guard_total_tok_s_median` carries total tok/s\n  beside it and nothing gates on it for you: state it next to every delta you report, because a\n  candidate that raises interactivity by serving less total work has not made the server faster.'
+    ? 'on this axis it is tok/s/user, higher is better. Report `guard_aggregate_output_tok_s_median`\n  beside it.' + (AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50'
+      ? ' Also report `guard_e2e_norm_intvty_p90_median`, the tail guard.' : '')
     : 'on a ~140:1\n  prefill:output trace the output-only axis barely moves for a large real change in work.'}
 * **A measured window is LONG**: ${AGENTX.geak_loop_duration_s}s per search leg,
   ${AGENTX.duration_s}s for parity/validation. Budget your phase around that and do not retry a
@@ -3145,6 +3233,9 @@ print(json.dumps(res))
         `sorted_by=${resolved.sorted_by || resolved.ranked_by || '-'} ` +
         `champion_metric=${resolved.champion_metric || '-'} reason=${resolved.read_reason || '?'} ` +
         `candidates=${cands.length}`);
+      log(`[kb] recall_metric_basis=${E2E_KB_METRIC.basis || 'any'} ` +
+        `strict=${E2E_KB_METRIC.strict} source=${E2E_KB_METRIC.source} ` +
+        `measurement_metric_basis=${kbMeasurementBasis()}`);
       // The counts BEHIND a zero: nobody wrote this page, everything was retracted, everything was
       // under the floor — all `candidates=0` above. Logged separately so that line stays greppable.
       const curation = (resolved.curation && typeof resolved.curation === 'object') ? resolved.curation : {};
@@ -3166,6 +3257,9 @@ print(json.dumps(res))
         answered: String(resolved.canonical_id || ''),
         match_tier: String(resolved.match_tier || ''),
         plane: E2E_KB_PLANE, read_plane: KB_READ_PLANE, mode: E2E_WARM_START,
+        recall_metric_basis: E2E_KB_METRIC.basis,
+        recall_metric_strict: E2E_KB_METRIC.strict, recall_metric_source: E2E_KB_METRIC.source,
+        measurement_metric_basis: kbMeasurementBasis(),
         candidates: cands.length, configs: [], kernels: [],
         // Both floors, always: "what did this run decline to see, and at what threshold" is not
         // answerable after the fact from a candidate list.
@@ -3550,23 +3644,18 @@ print(json.dumps(res))
               'directory as the candidate. Note the tarball is a STANDALONE overlay from another run: ' +
               'untarring it over CURRENT_OVERLAY would overwrite `_overlay_manifest.json` and drop every ' +
               'rebind already accepted here, which turns the A/B into a comparison against a candidate ' +
-              'that is missing part of its own reference. So graft its rebinds ON TOP of the current ' +
-              'overlay rather than replacing it:\n' +
+              'that is missing part of its own reference. Merge all manifest entries, including deferred ' +
+              'installers, with the checked merge command below. Use a fresh CAND directory; a conflict ' +
+              'must be reported as inapplicable, never resolved by dropping existing hooks:\n' +
               '```bash\n' +
               'CAND="$EVAL_DIR/overlay/cand_<short_name>"\n' +
-              'cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"   # empty CURRENT_OVERLAY is the normal case\n' +
               `KBO=$(mktemp -d) && tar xzf ${shq(k.overlay_tar)} -C "$KBO" --strip-components=1\n` +
-              'cp -r "$KBO"/. "$CAND"/                      # modules + _patched/; manifest handled next\n' +
-              'if [ -s "$CURRENT_OVERLAY/_overlay_manifest.json" ]; then\n' +
-              '  cp "$CURRENT_OVERLAY/_overlay_manifest.json" "$CAND/_overlay_manifest.json"   # restore, then re-add\n' +
-              '  # for each {target,impl_module,impl_attr} in "$KBO/_overlay_manifest.json":\n' +
-              '  python3 "$SKILL_DIR/scripts/overlay_setup.py" add-rebind --overlay "$CAND" \\\n' +
-              '    --target "<target>" --impl-module "<impl_module>" --impl-attr "<impl_attr>"\n' +
-              'fi\n' +
-              'PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module "<impl_module>"\n' +
+              'python3 "$SKILL_DIR/scripts/overlay_setup.py" merge --overlay "$CAND" \\\n' +
+              '  --from "$CURRENT_OVERLAY" --with "$KBO"\n' +
               '```\n' +
-              'The manifest names every rebind as `target -> impl_module:impl_attr`. VERIFY EACH REBIND ' +
-              'ACTUALLY TOOK on the candidate server (load banner, or the check above) before you believe ' +
+              'The manifest declares rebinds, injected modules and installers with their target sites. ' +
+              'VERIFY EVERY TARGET ACTUALLY TOOK on the candidate server (installer verification API, ' +
+              'load banner, and an executed seam call) before you believe ' +
               'a null result: this overlay was built against a different framework_version, and a rebind ' +
               'whose target module was renamed upstream binds nothing, silently, which is indistinguishable ' +
               'from "the kernel made no difference". If no rebind takes, report gate:"rejected" with ' +
@@ -3649,8 +3738,11 @@ print(json.dumps(res))
       // A record's headline number covers its WHOLE bundle. When that includes kernels this lane
       // benched only the config half, so every place printing both has to say which half ran.
       const configHalfOnly = v => Array.isArray(v.accepted_kernels) && v.accepted_kernels.length > 0;
-      const attestable = verdicts.filter(v => v.session_id &&
+      const attestable = verdicts.filter(v => v.session_id && kbCanAttestMetric(v) &&
         ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
+      const crossMetric = verdicts.filter(v => v.session_id && !kbCanAttestMetric(v));
+      if (crossMetric.length) log(`[kb] ${crossMetric.length} record(s) not attested: ` +
+        'the local measurement axis does not establish their stored metric claim.');
       if (attestable.length) {
         const cmds = attestable.map(v =>
           `python3 ${shq(E2E_STORE_SCRIPT)} attest ${kbIdentityFlags()} ${kbPlaneFlags()} ` +
@@ -6046,6 +6138,7 @@ const wfReturn = {
   // report nor the KB (e2e_store.py's _ARTIFACT_KEYS looks up exactly result["final_patch"]).
   // final_overlay cannot stand in for it: that is a DIRECTORY, and the store's os.path.isfile filter
   // drops it, so a run with no final_patch uploads no reproducible code at all.
+  ...kbResultMetadata(),
   final_patch: (finalize && finalize.final_patch) || '',
   final_launch_script: (validation && validation.final_launch_script) || (finalize && finalize.final_launch_script) || '',
   report_path: report ? report.report_path : `${EVAL_DIR}/architect_report.md`,
@@ -6123,6 +6216,7 @@ if (EVAL_DIR) {
 const kbNoWinVerdict = ['validated_no_win', 'recovered_no_gain']
   .some((s) => String(wfReturn.validation_status || '').startsWith(s));
 if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
+    !A.kb_defer_to_interface &&
     wfReturn.throughput_speedup > 1.0 && wfReturn.final_throughput_tok_s > 0 && !kbNoWinVerdict) {
   // Computed HERE, deterministically, from facts this script already holds — never asked of an
   // agent. `direction` is inside _content_digest, so a label that varies between two runs of the
