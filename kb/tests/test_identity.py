@@ -106,7 +106,8 @@ def test_the_agentx_session_fingerprint_is_stable_across_runs():
 
 def test_the_agentx_workload_segment_names_the_kind_and_the_concurrency():
     cids = kbid.e2e_canonical_ids(_agentx(146713, 1109))
-    assert cids[0].endswith("tp_8:ep_1:wl_agentx:conc_10")
+    assert cids[0] == "geak:e2e:agentx:m:gfx950:vllm:0.26.0:fp8:tp_8:ep_1:conc_10"
+    assert all(c.startswith("geak:e2e:agentx:") for c in cids)
     assert not any("isl_" in c or "osl_" in c for c in cids)
 
 
@@ -141,3 +142,14 @@ def test_an_agentx_run_with_no_conc_drops_only_the_workload_rung():
         "M", "gfx950", "vllm", "0.26.0", "fp8", tp=8, ep=1,
         workload_kind=kbid.WORKLOAD_KIND_AGENTX))
     assert len(cids) == 2 and cids[0].endswith("tp_8:ep_1")
+
+
+@pytest.mark.parametrize("dims", [{}, {"conc": None}, {"tp": None}, {"tp": None, "conc": None}])
+def test_agentx_namespace_is_never_dropped(dims):
+    agentx = kbid.e2e_identity(**dict(_AGENTX, **dims))
+    synthetic = kbid.e2e_identity(**dict(_AGENTX, workload_kind=kbid.WORKLOAD_KIND_SYNTHETIC, **dims))
+    a = kbid.e2e_canonical_ids(agentx)
+    b = kbid.e2e_canonical_ids(synthetic)
+    assert all(cid.startswith("geak:e2e:agentx:") for cid in a)
+    assert not set(a).intersection(b)
+    assert a[-1] == "geak:e2e:agentx:m:gfx950:vllm:0.26.0:fp8"

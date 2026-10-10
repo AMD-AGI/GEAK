@@ -1181,7 +1181,7 @@ def test_two_agentx_runs_with_different_observed_shapes_replace_one_record(tmp_p
     out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0",
                identity=_agentx_identity(89000, 900))
     assert len(out["candidates"]) == 1
-    assert out["canonical_id"].endswith("tp_8:ep_1:wl_agentx:conc_10")
+    assert out["canonical_id"] == "geak:e2e:agentx:m:gfx950:vllm:0.26.0:fp8:tp_8:ep_1:conc_10"
 
 
 def test_the_observed_shape_is_recorded_though_it_is_not_addressed(tmp_path):
@@ -1248,22 +1248,13 @@ def test_ep_reaches_the_record_and_the_attest_evidence(tmp_path):
     assert attested["applied"]
 
 
-def test_the_preep_compat_rung_is_tried_after_the_canonical_ladder(tmp_path):
-    """Every record already in the store was filed before ep and the agentx segment existed. The
-    read has to reach them, and reach them at the rung that still says which deployment they are —
-    not only at the base page where every tp, ep and workload on this stack are piled together."""
-    pre_ep = ["--model", "M", "--gfx", "gfx950", "--framework", "vllm",
-              "--framework-version", "0.26.0", "--precision", "fp8",
-              "--tp", "8", "--isl", "146713", "--osl", "1109", "--conc", "10"]
-    _write(tmp_path, "old", "config", identity=pre_ep)
-    out = _run("resolve", "--store", str(tmp_path / "store"), "--min-speedup", "0",
-               identity=_agentx_identity(146713, 1109))
-    assert out["candidates"] and out["candidates"][0]["match_tier"] == "legacy_preep"
-    # Tried in specificity order: the canonical exact rung first, the compat exact rung next, and
-    # only then anything coarser. Appending the compat ladder whole would put the canonical BASE
-    # page ahead of it, and the read would answer from there instead.
-    assert out["tried"][0].endswith("wl_agentx:conc_10")
-    assert out["tried"][1].endswith("isl_146713:osl_1109:conc_10")
+def test_synthetic_preep_compatibility_is_preserved(tmp_path):
+    _write(tmp_path, "old", "config", identity=IDENTITY)
+    out = _run("resolve", "--store", str(tmp_path / "store"),
+               identity=IDENTITY + ["--ep", "1"])
+    assert out["candidates"][0]["match_tier"] == "legacy_preep"
+    assert ":ep_1:" in out["tried"][0]
+    assert ":ep_1:" not in out["tried"][1]
 
 
 def test_the_compat_ladder_never_receives_a_write(tmp_path):
@@ -1275,7 +1266,7 @@ def test_the_compat_ladder_never_receives_a_write(tmp_path):
     identity = _run("identity", identity=_agentx_identity(146713, 1109))
     assert [r["tier"] for r in identity["ladder"]] == ["exact", "workload_any", "tp_any"]
     assert [r["tier"] for r in identity["legacy_read_only"]] == \
-        ["legacy_preep", "legacy_preep_workload_any"]
+        ["legacy_agentx"]
 
 
 def test_a_synthetic_run_records_no_observed_shape_block(tmp_path):
@@ -1295,7 +1286,7 @@ def test_preep_and_full_build_version_compatibility_compose(tmp_path, monkeypatc
         patch.setattr(e2e_store.kbid, "_release_version",
                       lambda value: e2e_store.kbid.segment(value, "unspecified"))
         written = _write(tmp_path, "old-build", "config", identity=old)
-    new = old + ["--ep", "1", "--workload-kind", "agentx_trace_replay"]
+    new = old + ["--ep", "1"]
     out = _run("resolve", "--store", str(tmp_path / "store"), identity=new)
     assert [c["session_id"] for c in out["candidates"]] == [written["session_id"]]
     assert out["candidates"][0]["canonical_id"] == written["rungs"][0]["canonical_id"]
@@ -1314,20 +1305,20 @@ def test_missing_observed_shape_does_not_prioritize_legacy_coarse_page(tmp_path)
 
 def test_legacy_recall_updates_original_attestations_and_retraction(tmp_path):
     written = _write(tmp_path, "old", "config", identity=IDENTITY)
-    out = _run("resolve", "--store", str(tmp_path / "store"), identity=AGENTX_IDENTITY)
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=IDENTITY + ["--ep", "1"])
     assert out["candidates"][0]["session_id"] == written["session_id"]
     _run("attest", "--store", str(tmp_path / "store"), "--session-id", written["session_id"],
-         "--outcome", "failed", "--apply", identity=AGENTX_IDENTITY)
+         "--outcome", "failed", "--apply", identity=IDENTITY + ["--ep", "1"])
     original = _run("resolve", "--store", str(tmp_path / "store"), identity=IDENTITY)
     assert original["candidates"][0]["failures"] == 1
     retired = _run("retract", "--store", str(tmp_path / "store"),
                    "--session-id", written["session_id"], "--reason", "bad measurement",
-                   "--apply", identity=AGENTX_IDENTITY)
+                   "--apply", identity=IDENTITY + ["--ep", "1"])
     assert retired["ok"]
     assert _run("resolve", "--store", str(tmp_path / "store"), identity=IDENTITY)["candidates"] == []
     from kb.store_local import LocalKBStore
     plane = LocalKBStore(str(tmp_path / "store"), metric="throughput_tok_s", promote_floor=0)
-    for rung in _run("identity", identity=AGENTX_IDENTITY)["ladder"][:2]:
+    for rung in _run("identity", identity=IDENTITY + ["--ep", "1"])["ladder"][:2]:
         assert plane.get_session(rung["canonical_id"], written["session_id"]) is None
 
 
@@ -1472,3 +1463,49 @@ def test_an_agreeing_ep_says_nothing(tmp_path):
     assert "ep_note" not in out
     plain = _write(tmp_path, "b", "tuned")
     assert "ep_note" not in plain, "a run that states no ep cannot disagree with itself"
+
+
+@pytest.mark.parametrize("query_dims", [AGENTX_IDENTITY, AGENTX_IDENTITY[:AGENTX_IDENTITY.index("--conc")]])
+def test_agentx_never_recalls_unmarked_synthetic_pages(tmp_path, query_dims):
+    _write(tmp_path, "synthetic", "config", identity=IDENTITY)
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=query_dims)
+    assert out["candidates"] == []
+    assert all(cid.startswith("geak:e2e:agentx:") or ":wl_agentx:" in cid
+               for cid in out["tried"])
+
+
+def test_agentx_rollups_do_not_publish_to_synthetic_pages(tmp_path):
+    written = _write(tmp_path, "agentx", "config", identity=AGENTX_IDENTITY,
+                     workload=AGENTX_WORKLOAD)
+    assert all(r["canonical_id"].startswith("geak:e2e:agentx:") for r in written["rungs"])
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=IDENTITY)
+    assert out["candidates"] == []
+
+
+@pytest.mark.parametrize("raw_version", ["0.26.0", "0.26.0.dev20260913+build1"])
+def test_marked_legacy_agentx_recall_and_lifecycle(tmp_path, monkeypatch, raw_version):
+    from kb.store_local import LocalKBStore
+    ident = e2e_store.kbid.e2e_identity("M", "gfx950", "vllm", raw_version, "fp8",
+                                     tp=8, ep=1, conc=10, workload_kind="agentx_trace_replay")
+    ident["framework_version"] = raw_version
+    old_cids = e2e_store.kbid.legacy_agentx_canonical_ids(ident)
+    argv = [raw_version if v == "0.26.0" else v for v in AGENTX_IDENTITY]
+    with monkeypatch.context() as patch:
+        patch.setattr(e2e_store.kbid, "e2e_canonical_ids", lambda _: old_cids)
+        written = _write(tmp_path, "old-agentx", "config", identity=argv, workload=AGENTX_WORKLOAD)
+    out = _run("resolve", "--store", str(tmp_path / "store"), identity=argv)
+    assert out["candidates"][0]["session_id"] == written["session_id"]
+    assert out["candidates"][0]["canonical_id"] == old_cids[0]
+    assert all(cid.startswith("geak:e2e:agentx:") or ":wl_agentx:" in cid for cid in out["tried"])
+    changed_conc = ["20" if v == "10" else v for v in argv]
+    assert not _run("resolve", "--store", str(tmp_path / "store"), identity=changed_conc)["candidates"]
+    _run("attest", "--store", str(tmp_path / "store"), "--session-id", written["session_id"],
+         "--outcome", "failed", "--apply", identity=argv)
+    plane = LocalKBStore(str(tmp_path / "store"), metric="throughput_tok_s", promote_floor=0)
+    for cid in old_cids:
+        assert plane.get_session(cid, written["session_id"])["value"]["attestations"]["failures"] == 1
+    retired = _run("retract", "--store", str(tmp_path / "store"),
+                   "--session-id", written["session_id"], "--reason", "bad measurement",
+                   "--apply", identity=argv)
+    assert retired["ok"]
+    assert not _run("resolve", "--store", str(tmp_path / "store"), identity=argv)["candidates"]

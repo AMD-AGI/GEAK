@@ -162,27 +162,15 @@ _PREEP_TIERS = {3: ("legacy_preep", "legacy_preep_workload_any", "legacy_preep_t
 
 
 def legacy_preep_ladder(a, *, full_version=False):
-    """The address this very run would have had before `ep` and the AgentX workload segment existed.
+    """Synthetic-only pre-EP compatibility, optionally using the full build version.
 
-    Two changes landed together and both move the address: every run now states its `ep` (so a
-    page that mixed ep=1 and ep=8 with nothing in the address to tell them apart stopped being
-    possible), and an AgentX run addresses the corpus it replayed instead of the sequence lengths
-    it happened to OBSERVE while replaying it (those drift per run, so the exact rung drifted with
-    them -- a new page per run, a reader that stops at it and sees a cold start, and a session
-    fingerprint that reset the attestation ledger every time).
-
-    Every record already in the store was filed at the old address. Without this ladder the change
-    would strand the entire existing e2e store the moment it lands -- the same invisible miss the
-    change exists to prevent, just caused once and to everyone.
-
-    Drop ep and address as synthetic. Older records can ALSO predate version normalization, so
-    full_version selects that combined variant. Kept OUT of ladder_of: compatibility reads must
-    never cause new writes at old addresses.
-
-    When a second AgentX corpus appears, the segment escalates to `wl_agentx.<corpus>` and the
-    bare `wl_agentx` form becomes a second variant here, by the same rule.
+    These old pages carry no workload marker. They cannot establish AgentX identity, even when
+    their measured ISL/OSL happen to match; AgentX reads only its namespace or explicit old tag.
     """
     identity = identity_of(a)
+    # An unmarked legacy page cannot establish that its measurements came from AgentX.
+    if identity["workload_kind"] == kbid.WORKLOAD_KIND_AGENTX:
+        return []
     cids = kbid.e2e_canonical_ids(identity)
     if full_version:
         raw = kbid.segment(getattr(a, "framework_version", ""), kbid.UNKNOWN_VERSION)
@@ -196,6 +184,19 @@ def legacy_preep_ladder(a, *, full_version=False):
     return [(cid, tier.replace("legacy_preep", "legacy_preep_version") if full_version else tier)
             + rung_metric(i, len(legacy))
             for i, (cid, tier) in enumerate(zip(legacy, _PREEP_TIERS[len(legacy)]))]
+
+
+def legacy_agentx_ladder(a, *, full_version=False):
+    """Only the old explicitly marked exact page is safe for AgentX recall."""
+    identity = identity_of(a)
+    if full_version:
+        raw = kbid.segment(getattr(a, "framework_version", ""), kbid.UNKNOWN_VERSION)
+        if raw == identity["framework_version"]:
+            return []
+        identity["framework_version"] = raw
+    return [(cid, "legacy_agentx_version" if full_version else "legacy_agentx") + _EXACT
+            for cid in kbid.legacy_agentx_canonical_ids(identity)
+            if kbid.AGENTX_WORKLOAD_SEGMENT in cid.split(":")]
 
 
 def read_ladder(a):
@@ -215,17 +216,19 @@ def read_ladder(a):
     keep. Duplicate addresses are dropped so a page is never read twice.
     """
     ladders = [ladder_of(a), legacy_version_ladder(a), legacy_preep_ladder(a),
-               legacy_preep_ladder(a, full_version=True)]
+               legacy_preep_ladder(a, full_version=True), legacy_agentx_ladder(a),
+               legacy_agentx_ladder(a, full_version=True)]
     out, seen = [], set()
-    depth = max(len(rungs) for rungs in ladders)
-    for level in range(depth):
+    for level in range(3):
         for rungs in ladders:
-            # Missing dimensions remove rungs from the FRONT, not the end. Align bases before
-            # interleaving, otherwise a two-rung legacy ladder outranks a canonical middle rung.
-            index = level - (depth - len(rungs))
-            if index >= 0 and rungs[index][0] not in seen:
-                seen.add(rungs[index][0])
-                out.append(rungs[index])
+            for index, rung in enumerate(rungs):
+                cid, _tier, metric, _floor = rung
+                # A compatibility variant may retain ONLY its exact page. Its list length says
+                # nothing about specificity; its throughput metric identifies the exact rung.
+                depth = 0 if metric == THROUGHPUT_METRIC else 3 - len(rungs) + index
+                if level == depth and cid not in seen:
+                    seen.add(cid)
+                    out.append(rung)
     return out
 
 
@@ -265,8 +268,7 @@ def _view(candidate, cid: str, tier: str, metric: str, champion_metric: str = ""
         "workload": workload,
         # The two things the ADDRESS deliberately stops saying on a trace replay, surfaced here so
         # a reader can still see them. `workload_spec.corpus` is the only early warning that two
-        # different corpora have been sharing a page (the day that happens the segment escalates to
-        # `wl_agentx.<corpus>`); `observed_shape` is the only statement of what regime the accepted
+        # different corpora have been sharing a page; `observed_shape` states what regime the accepted
         # kernels were actually chosen for. Both absent on a synthetic record, which says its shape
         # in `workload` already.
         "observed_shape": value.get("observed_shape") if isinstance(
@@ -771,12 +773,10 @@ _WORKLOAD_SPEC_KEYS = ("scenario", "corpus", "num_entries", "duration_s", "metri
 
 
 def _workload_spec(a, result: dict) -> dict:
-    """WHICH trace corpus produced the number, since the address no longer spells it out.
+    """Record the declared trace conditions outside the canonical namespace.
 
-    `wl_agentx` is one segment for one corpus today. The day a second corpus is graded, the segment
-    escalates to `wl_agentx.<corpus>` (and e2e_store.legacy_preep_ladder gains the bare form as a
-    read-only variant) — and this field is what lets anyone SEE that two corpora have been sharing
-    a page before the numbers mislead someone.
+    These conditions distinguish measurement sessions while all AgentX records remain on their
+    own pages. Observed shape never enters this specification or the content digest.
     """
     if not _is_agentx(a):
         return {}
@@ -1801,14 +1801,18 @@ def _session_ladder(a, session_id):
                 continue
             workload = value.get("workload") if isinstance(value.get("workload"), dict) else {}
             parts = cid.split(":")
+            offset = (3 if parts[2] == kbid.AGENTX_NAMESPACE and len(parts) >= 8
+                      and parts[4] == value.get("gpu") else 2)
             kind = value.get("workload_kind") or (
-                kbid.WORKLOAD_KIND_AGENTX if "wl_agentx" in parts or
+                kbid.WORKLOAD_KIND_AGENTX if offset == 3 or "wl_agentx" in parts or
                 value.get("observed_shape") or value.get("workload_spec") else "")
-            ident = kbid.e2e_identity(*parts[2:7], workload_kind=kind,
+            ident = kbid.e2e_identity(*parts[offset:offset+5], workload_kind=kind,
                                      **{k: workload.get(k) for k in ("tp", "ep", "isl", "osl", "conc")})
             # The stored page may predate release-version normalization.
-            ident["framework_version"] = parts[5]
-            cids = kbid.e2e_canonical_ids(ident)
+            ident["framework_version"] = parts[offset+3]
+            cids = (kbid.legacy_agentx_canonical_ids(ident)
+                    if offset == 2 and kind == kbid.WORKLOAD_KIND_AGENTX
+                    else kbid.e2e_canonical_ids(ident))
             tiers = {3: ("exact", "workload_any", "tp_any"),
                      2: ("exact", "tp_any"), 1: ("exact",)}[len(cids)]
             return [(c, tiers[i]) + rung_metric(i, len(cids)) for i, c in enumerate(cids)]
