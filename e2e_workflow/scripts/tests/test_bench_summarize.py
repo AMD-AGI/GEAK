@@ -78,6 +78,9 @@ class FromRunsTest(unittest.TestCase):
                 fh.write(json.dumps({"output_throughput": t,
                                      "total_token_throughput": t * 9,
                                      "e2e_norm_intvty_p90": t / 2,
+                                     # Distinct from the P90 tail, so the median axis and its
+                                     # tail guard cannot pass on each other's number.
+                                     "e2e_norm_intvty_p50": t * 0.8,
                                      "median_ttft_ms": 40.0 + i,
                                      "median_tpot_ms": 8.0 + i,
                                      # Deliberately unrelated to e2e_norm_intvty_p90 above, so a
@@ -123,8 +126,43 @@ class FromRunsTest(unittest.TestCase):
         self.assertIsNone(s["output_throughput_tok_s_spread_pct"])
         self.assertIn("aggregate_total_token_tok_s=945.0", line)
 
-    def test_intvty_metric_selects_the_interactivity_axis(self):
-        """AgentX is graded on interactivity, so GEAK must be able to measure it."""
+    def test_intvty_p50_metric_selects_the_axis_hyperloom_keeps_on(self):
+        """Hyperloom keeps AgentX candidates on the median, so GEAK must accept on that number."""
+        s, line = self.summarize([100.0, 110.0], env={"E2E_METRIC": "e2e_norm_intvty_p50"})
+        self.assertEqual(s["metric_basis"], "e2e_norm_intvty_p50")
+        self.assertEqual(s["throughput_tok_s_median"], 84.0)
+        self.assertIsNone(s["output_throughput_tok_s_median"])
+        self.assertIsNone(s["output_throughput_tok_s_spread_pct"])
+        self.assertIn("e2e_norm_intvty_p50=84.0", line)
+
+    def test_a_short_p50_token_is_not_an_axis(self):
+        """In InferenceX a bare ``intvty`` is the decode-only family; a short name is ambiguous."""
+        with self.assertRaises(SystemExit):
+            self.summarize([100.0], env={"E2E_METRIC": "intvty_p50"})
+
+    def test_intvty_p50_metric_carries_the_guards_hyperloom_keeps_on(self):
+        """KEEP holds the P90 tail and output throughput; both must be readable by the median."""
+        s, _ = self.summarize([100.0, 110.0], env={"E2E_METRIC": "e2e_norm_intvty_p50"})
+        self.assertEqual(s["guard_e2e_norm_intvty_p90_median"], 52.5)
+        self.assertEqual(s["guard_e2e_norm_intvty_p90_spread_pct"], 9.52)
+        self.assertEqual(s["guard_aggregate_output_tok_s_median"], 105.0)
+        self.assertEqual(s["guard_aggregate_output_tok_s_spread_pct"], 9.52)
+        self.assertNotIn("guard_total_tok_s_median", s)
+
+    def test_rows_without_a_p50_field_are_no_reading_not_the_tail(self):
+        """Rows from a mapper predating the P50 field must not fall back onto the P90 tail."""
+        with open(self.runs, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"e2e_norm_intvty_p90": 50.0, "output_throughput": 100.0}) + "\n")
+        line = _run(["from-runs", self.runs, self.out], {"E2E_METRIC": "e2e_norm_intvty_p50"})
+        with open(self.out, encoding="utf-8") as fh:
+            s = json.load(fh)
+        self.assertIsNone(s["throughput_tok_s_median"])
+        self.assertEqual(s["runs"], 0)
+        self.assertEqual(s["metric_basis"], "e2e_norm_intvty_p50")
+        self.assertIn("e2e_norm_intvty_p50=None", line)
+
+    def test_intvty_metric_still_selects_the_p90_tail(self):
+        """``intvty`` kept its meaning when Hyperloom moved its objective to the median."""
         s, line = self.summarize([100.0, 110.0], env={"E2E_METRIC": "intvty"})
         self.assertEqual(s["metric_basis"], "e2e_norm_intvty_p90")
         self.assertEqual(s["throughput_tok_s_median"], 52.5)
@@ -132,11 +170,12 @@ class FromRunsTest(unittest.TestCase):
         self.assertIsNone(s["output_throughput_tok_s_spread_pct"])
         self.assertIn("e2e_norm_intvty_p90=52.5", line)
 
-    def test_intvty_metric_carries_the_throughput_guard(self):
+    def test_intvty_metric_carries_the_output_guard(self):
         """Interactivity bought by shedding throughput is not a win; the guard must be readable."""
         s, _ = self.summarize([100.0, 110.0], env={"E2E_METRIC": "intvty"})
-        self.assertEqual(s["guard_total_tok_s_median"], 945.0)
-        self.assertEqual(s["guard_basis"], "aggregate_total_token_tok_s")
+        self.assertEqual(s["guard_aggregate_output_tok_s_median"], 105.0)
+        self.assertNotIn("guard_e2e_norm_intvty_p90_median", s)
+        self.assertNotIn("guard_total_tok_s_median", s)
 
     def test_inferencex_intvty_axis_is_the_reciprocal_of_p90_itl(self):
         """The axis InferenceX's pareto plots: 1000 / P90(ITL), derived as its ingestion does."""
@@ -148,21 +187,19 @@ class FromRunsTest(unittest.TestCase):
         self.assertIsNone(s["output_throughput_tok_s_median"])
         self.assertIn("p90_intvty_inferencex=95.455", line)
 
-    def test_the_two_interactivity_axes_are_not_the_same_number(self):
-        """Same rows, two tokens. They must not collapse onto one value or one basis string."""
-        norm, _ = self.summarize([100.0, 110.0], env={"E2E_METRIC": "intvty"})
-        infx, _ = self.summarize([100.0, 110.0],
-                                 env={"E2E_METRIC": "p90_intvty_inferencex"})
-        self.assertNotEqual(norm["metric_basis"], infx["metric_basis"])
-        self.assertNotEqual(norm["throughput_tok_s_median"],
-                            infx["throughput_tok_s_median"])
+    def test_the_interactivity_axes_are_not_the_same_number(self):
+        """Same rows, three tokens. They must not collapse onto one value or one basis string."""
+        read = [self.summarize([100.0, 110.0], env={"E2E_METRIC": m})[0]
+                for m in ("e2e_norm_intvty_p50", "e2e_norm_intvty_p90", "p90_intvty_inferencex")]
+        self.assertEqual(len({s["metric_basis"] for s in read}), 3)
+        self.assertEqual(len({s["throughput_tok_s_median"] for s in read}), 3)
 
-    def test_inferencex_intvty_carries_the_throughput_guard(self):
-        """Both interactivity axes need the guard; neither is a throughput measure."""
+    def test_inferencex_intvty_carries_the_output_guard(self):
+        """Every interactivity axis needs the guard; none is a throughput measure."""
         s, _ = self.summarize([100.0, 110.0],
                               env={"E2E_METRIC": "p90_intvty_inferencex"})
-        self.assertEqual(s["guard_total_tok_s_median"], 945.0)
-        self.assertEqual(s["guard_basis"], "aggregate_total_token_tok_s")
+        self.assertEqual(s["guard_aggregate_output_tok_s_median"], 105.0)
+        self.assertNotIn("guard_total_tok_s_median", s)
 
     def test_spread_is_expressed_in_the_graded_units(self):
         """Transforming per row, not after the median, keeps spread in the compared units."""
@@ -188,8 +225,7 @@ class FromRunsTest(unittest.TestCase):
         """On a throughput basis the objective IS the guard; a second copy would invite drift."""
         for metric in ("output", "total"):
             s, _ = self.summarize([100.0], env={"E2E_METRIC": metric})
-            self.assertNotIn("guard_total_tok_s_median", s, metric)
-            self.assertNotIn("guard_basis", s, metric)
+            self.assertEqual([k for k in s if k.startswith("guard_")], [], metric)
 
     def test_an_unknown_axis_is_fatal_rather_than_silently_output(self):
         """Falling back would label the summary with an axis the caller did not ask for."""
@@ -270,7 +306,8 @@ class FromReplicasTest(unittest.TestCase):
         with open(os.path.join(rdir, "selected_summary.json"), "w", encoding="utf-8") as fh:
             json.dump({"throughput_tok_s_median": tput, "ttft_ms_median": 40.0 + index,
                        "tpot_ms_median": 8.0 + index, "metric_basis": basis,
-                       "guard_total_tok_s_median": tput * 9}, fh)
+                       "guard_aggregate_output_tok_s_median": tput * 9,
+                       "guard_e2e_norm_intvty_p90_median": tput / 2}, fh)
         with open(os.path.join(rdir, "selected_attempt"), "w", encoding="utf-8") as fh:
             fh.write(str(attempt))
 
@@ -320,13 +357,27 @@ class FromReplicasTest(unittest.TestCase):
         self.assertIsNone(s["metric_basis"])
         self.assertIsNone(s["output_throughput_tok_s_median"])
 
+    def test_intvty_p50_leg_aggregates_both_guards_across_replicas(self):
+        """The replica path keys off the basis string, so the median axis must carry its guards."""
+        for i, t in enumerate([104.0, 108.0, 112.0], start=1):
+            self.add(i, t, basis="e2e_norm_intvty_p50")
+        s, line = self.summarize(3, 3)
+        self.assertEqual(s["metric_basis"], "e2e_norm_intvty_p50")
+        self.assertEqual(s["throughput_tok_s_median"], 108.0)
+        self.assertEqual(s["guard_e2e_norm_intvty_p90_median"], 54.0)
+        self.assertEqual(s["guard_e2e_norm_intvty_p90_spread_pct"], 7.41)
+        self.assertEqual(s["guard_aggregate_output_tok_s_median"], 972.0)
+        self.assertIsNone(s["output_throughput_tok_s_median"])
+        self.assertIn("e2e_norm_intvty_p50=108.0", line)
+
     def test_intvty_leg_aggregates_the_guard_across_replicas(self):
         for i, t in enumerate([104.0, 108.0, 112.0], start=1):
             self.add(i, t, basis="e2e_norm_intvty_p90")
         s, line = self.summarize(3, 3)
         self.assertEqual(s["metric_basis"], "e2e_norm_intvty_p90")
         self.assertEqual(s["throughput_tok_s_median"], 108.0)
-        self.assertEqual(s["guard_total_tok_s_median"], 972.0)
+        self.assertEqual(s["guard_aggregate_output_tok_s_median"], 972.0)
+        self.assertNotIn("guard_e2e_norm_intvty_p90_median", s)
         self.assertIsNone(s["output_throughput_tok_s_median"])
         self.assertIn("e2e_norm_intvty_p90=108.0", line)
 
@@ -336,7 +387,7 @@ class FromReplicasTest(unittest.TestCase):
             self.add(i, t, basis="p90_intvty_inferencex")
         s, line = self.summarize(3, 3)
         self.assertEqual(s["metric_basis"], "p90_intvty_inferencex")
-        self.assertEqual(s["guard_total_tok_s_median"], 972.0)
+        self.assertEqual(s["guard_aggregate_output_tok_s_median"], 972.0)
         self.assertIsNone(s["output_throughput_tok_s_median"])
         self.assertIn("p90_intvty_inferencex=108.0", line)
 

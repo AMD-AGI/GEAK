@@ -297,7 +297,7 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
     },
     "validation_base": { "aiter_mentions": 5471, "kernel_picks": ["..."] }
   },
-  "validation_evidence": {                 // audit only; never changes status
+  "validation_evidence": {                 // audit only, except acceptance (see below)
     "validation_status": "validated_win",
     "speedup_basis": "workflow_return | final_over_baseline",
     "delta_pct": 4.4,
@@ -309,7 +309,14 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
     "spreads_non_overlapping": true,       // null unless BOTH legs reported a spread
     "beats_orchestrator_same_config": true,
     "intermediate_win_not_confirmed": null, // true => Validate did not confirm an accepted A/B
-    "validate_final_missing": null          // true => the final number came from a disk A/B
+    "validate_final_missing": null,         // true => the final number came from a disk A/B
+    "acceptance": {                        // ONLY when the handoff states a KEEP rule; decides "ok"
+      "objective": "e2e_norm_intvty_p50", "measured_basis": "e2e_norm_intvty_p50",
+      "gain_pct": 4.4, "min_gain_pct": 3.0,
+      "guards": { "e2e_norm_intvty_p90": { "reference": 81.9, "candidate": 80.7,
+                                           "max_drop_pct": 5.0, "holds": true } },
+      "keep": true, "reasons": []
+    }
   },
   "report_path": ".../final_report.md",  // human report: per-kernel optimizations, changed params, TTFT/TPOT
   "kernel_journey_path": ".../kernel_journey.json",  // per-kernel journey contract (see below); absent if nothing accepted
@@ -350,6 +357,34 @@ all) falls back to the best accepted intermediate A/B on disk.
 `final_patch` and `final_overlay` are empty strings unless the run produced
 something loadable — a diff with at least one hunk, an overlay with importable
 code. Finalize writes both unconditionally, so their existence proves nothing.
+
+### The caller's KEEP rule decides "ok" when the handoff states one
+
+Without a rule, `status` is `ok` whenever the published final beats the published
+baseline. A caller that re-measures and keeps only bigger wins can hand its own
+rule in `workload_spec.acceptance`. Hyperloom does this on AgentX sessions graded
+on interactivity:
+
+```jsonc
+"acceptance": {
+  "objective": "e2e_norm_intvty_p50",      // must equal the metric_basis measured
+  "min_gain_pct": 3.0,                     // (final - baseline) / baseline * 100 >= this
+  "guard_max_drop_pct": {                  // each guard may fall at most this far below the reference
+    "e2e_norm_intvty_p90": 5.0,
+    "aggregate_output_tok_s": 5.0
+  }
+}
+```
+
+The rule is applied to the published pair. Guards are read from the
+`guard_<basis>_median` fields of the two legs' `bench_summary.json`
+(`validation/base` or the Setup baseline, and `validation/final`). A guard
+missing from either leg fails, so a recovered intermediate win, which has no such
+legs, cannot pass. When the rule does not keep the pair, `status` is `no_gain`
+and `validation_evidence.acceptance.reasons` says why. The throughput numbers and
+the speedup are reported unchanged. Per-kernel gates keep GEAK's own noise band,
+so small wins can still stack up to the caller's bar. A block that does not parse
+is ignored, with a warning on stderr.
 
 ### Choosing a headline out of a candidate pool
 
