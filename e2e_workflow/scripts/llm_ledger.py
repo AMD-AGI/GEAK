@@ -56,9 +56,13 @@ SCHEMA = "geak.llm_ledger/1"
 # message.model), so a run that mixes models — routing, a cheap helper, a model
 # switch mid-run — is priced call by call, not at one run-wide rate.
 # Source: the official table, platform.claude.com/docs/en/about-claude/pricing,
-# read 2026-09-28 (Sonnet 5.5 added 2026-10-01). Cache multipliers are 1.25x (5-minute write) and 2x (1-hour
-# write) everywhere; reads are 0.1x except Opus 5.5 (0.05x) and Fable/Mythos 5.1
-# (0.025x). `_default` (the Opus 4.8 / Opus 5 card) prices a call whose model is
+# read 2026-09-28 (Sonnet 5.5 added 2026-10-01, Haiku 5.5 2026-10-09). Cache multipliers are 1.25x (5-minute
+# write) and 2x (1-hour write) everywhere; reads are 0.1x except Opus 5.5 (0.05x) and Fable/Mythos 5.1
+# (0.025x). Sonnet 5.5 stays at 0.1x ($0.20): the pricing page read 2026-10-09 lists 0.05x, but Claude Code
+# 2.1.295 still charges 0.1x, and this table follows Claude Code so that sdk_check can hold it to its own cost.
+# Haiku 5.5 is priced per REQUEST by prompt length: a card's `long_prompt` tier replaces the whole card for a
+# request whose input + cache reads + cache writes exceed `above_prompt_tokens` (strictly, as Claude Code
+# 2.1.295 does for its own cost). `_default` (the Opus 4.8 / Opus 5 card) prices a call whose model is
 # unknown; a real model missing from this table is reported, never silently
 # priced (see unpriced_models). Override with --rates <file.json>: its keys are
 # merged over this table, so overriding one model leaves the others intact.
@@ -87,6 +91,8 @@ DEFAULT_RATES = {
     "claude-sonnet-4-6": _card(3.00, 15.00),
     "claude-sonnet-4-5": _card(3.00, 15.00),
     "claude-haiku-4-5": _card(1.00, 5.00),
+    "claude-haiku-5-5": dict(_card(0.10, 0.50),
+                             long_prompt=dict(_card(0.50, 2.50), above_prompt_tokens=100_000)),
 }
 
 # Not models: Claude Code writes "<synthetic>" for locally generated turns (for
@@ -109,9 +115,17 @@ def rate_key(model, rates):
     return base if base in rates else None
 
 
+def prompt_tokens(row):
+    """One request's prompt length as a prompt-length price counts it: input + cache reads + cache writes."""
+    return sum(int(row.get(k) or 0) for k in
+               ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+
 def rates_for(row, rates):
     key = rate_key(row.get("model"), rates)
-    return rates[key] if key else rates["_default"]
+    card = rates[key] if key else rates["_default"]
+    tier = card.get("long_prompt")
+    return tier if tier and prompt_tokens(row) > tier["above_prompt_tokens"] else card
 
 
 def unpriced_models(rows, rates):
@@ -135,6 +149,10 @@ def merge_rates(loaded, base=None):
             known = rate_key(k, rates)
             rates[k] = dict(rates[known] if known else rates["_default"], **v)
     return rates
+
+# The routing classifier opens every prompt with "You are the route_classifier." (kernel_lane.js), so
+# its calls form their own group. All of their cost is the price of CHOOSING a model, i.e. router cost.
+ROUTER_ROLE = "route_classifier"
 
 # Every role prompt in both workflows opens with this exact line (see roleAgent()
 # in e2e_workflow.js / kernel_lane.js / kernel_workflow.js), which is what lets a
@@ -713,7 +731,10 @@ def total_input(row):
 
 
 def cost_of(row, rates):
-    r = rates_for(row, rates)
+    return _price(row, rates_for(row, rates))
+
+
+def _price(row, r):
     return (row["input_tokens"] * r["input"]
             + row["cache_read_input_tokens"] * r["cache_read"]
             + row["cache_write_5m_tokens"] * r["cache_write_5m"]
@@ -731,12 +752,16 @@ def cost_breakdown(row, rates):
       - ``cache_read``      re-sent text served from cache (the tenth-price bucket).
       - ``cache_write``     text stored this call (5-minute + 1-hour writes summed).
       - ``output``          generated text (thinking + response bill the same).
-      - ``router``          routing-time LLM cost. 0.0 for the static deterministic
-                            router (no routing-time call); a labelled hook for a
-                            future dynamic router that would spend to choose a model.
+      - ``router``          routing-time LLM cost: the whole cost of a ``route_classifier``
+                            call (the cost ladder's Sonnet 5 decider), 0.0 for every other
+                            call. A static router makes no such call, so it stays 0.0.
     The five values sum to ``cost_of(row, rates)`` by construction; a test pins that.
     """
     r = rates_for(row, rates)
+    if row.get("role") == ROUTER_ROLE:
+        # A routing-time LLM call: every dollar of it is spent choosing a model, none doing the work.
+        return {"uncached_input": 0.0, "cache_read": 0.0, "cache_write": 0.0, "output": 0.0,
+                "router": cost_of(row, rates)}
     return {
         "uncached_input": row["input_tokens"] * r["input"] / 1e6,
         "cache_read": row["cache_read_input_tokens"] * r["cache_read"] / 1e6,
@@ -756,6 +781,111 @@ def list_cost_of(row, rates):
     """
     r = rates_for(row, rates)
     return (total_input(row) * r["input"] + row["output_tokens"] * r["output"]) / 1e6
+
+
+# --------------------------------------------------------------------------- #
+# Cross-check against Claude Code's own number
+# --------------------------------------------------------------------------- #
+# The API returns token counts, never dollars. Claude Code prices them itself and reports the session
+# total in each ResultMessage (``total_cost_usd``, per model in ``model_usage[m].costUSD``); run_e2e.py
+# saves those to reports/sdk_results.json. Two checks, kept apart because they fail for different
+# reasons:
+#   rate      our rates applied to the SDK's OWN tokens must reproduce the SDK's dollars. A miss means
+#             a wrong or missing rate card — the failure a routed, multi-model run is most exposed to.
+#             `rate_ok` is True (reproduced), False (a card is proven wrong) or None (cannot tell: a model
+#             priced per request whose request sizes this ledger does not hold; its totals only bound
+#             the cost, and a bound is not a match). A False anywhere wins over a None.
+#   coverage  our tokens vs the SDK's, over calls finished by the time that result arrived. A result
+#             can arrive before a background workflow finishes; calls after it are not in its total.
+SDK_RATE_TOLERANCE_USD = 0.01
+SDK_RATE_TOLERANCE_REL = 0.001
+
+
+def load_sdk_results(eval_dir):
+    path = os.path.join(eval_dir, "reports", "sdk_results.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return [d for d in data if isinstance(d, dict) and isinstance(d.get("total_cost_usd"), (int, float))]
+    except (OSError, ValueError):
+        return []
+
+
+def _ours_cell(v):
+    """The 'our rates' cell of the cross-check table; a per-request (prompt-length) card says how it was checked."""
+    if v.get("check") == "bounded":
+        return "$%.4f–$%.4f (request sizes unknown; bounds only)" % tuple(v["ours_range_usd"])
+    if v.get("check") == "exact":
+        return "$%.4f (summed per request)" % v["ours_on_sdk_tokens_usd"]
+    if v.get("check") == "below_threshold":
+        return "$%.4f (every request below the long-prompt threshold)" % v["ours_on_sdk_tokens_usd"]
+    return "$%.4f" % v["ours_on_sdk_tokens_usd"]
+
+
+_RATE_CELL = {True: "ok", False: "**MISMATCH**", None: "not confirmed"}
+_RATE_HEADLINE = {True: "match", False: "DO NOT MATCH — a rate card is wrong",
+                  None: "not confirmed — a model priced per request has calls missing from this ledger, "
+                        "so its totals only bound the cost"}
+
+
+def sdk_check(rows, sdk_results, rates):
+    """Compare this ledger with the LAST ResultMessage. None when there is none to compare with."""
+    if not sdk_results:
+        return None
+    last = max(sdk_results, key=lambda d: d.get("captured_at_unix") or 0)
+    at_ms = (last.get("captured_at_unix") or 0) * 1000 or None
+    models, rate_ok = {}, True
+    for m, u in (last.get("model_usage") or {}).items():
+        tok = {"input_tokens": int(u.get("inputTokens") or 0),
+               "cache_read_input_tokens": int(u.get("cacheReadInputTokens") or 0),
+               "cache_creation_input_tokens": int(u.get("cacheCreationInputTokens") or 0),
+               "output_tokens": int(u.get("outputTokens") or 0)}
+        # model_usage does not split 5-minute from 1-hour writes; GEAK writes 5-minute only.
+        row = dict(tok, model=m, cache_write_5m_tokens=tok["cache_creation_input_tokens"], cache_write_1h_tokens=0)
+        sdk_usd = float(u.get("costUSD") or 0.0)
+        tol = max(SDK_RATE_TOLERANCE_USD, SDK_RATE_TOLERANCE_REL * sdk_usd)
+        mine = [r for r in rows if r.get("model") == m and (at_ms is None or (r.get("ts_ms") or 0) <= at_ms)]
+        ledger_tok = {k: sum(int(r.get(k) or 0) for r in mine) for k in tok}
+        ledger_usd = sum(cost_of(r, rates) for r in mine)
+        key = rate_key(m, rates)
+        card = rates[key] if key else rates["_default"]
+        tier = card.get("long_prompt")
+        check = {}
+        if not tier:
+            ours = cost_of(row, rates)
+            ok = abs(ours - sdk_usd) <= tol
+        else:
+            # model_usage sums a model's requests, but this card prices each request by its own prompt length,
+            # so the sum cannot be priced as one request.
+            lo, hi = _price(row, card), _price(row, tier)
+            if ledger_tok == tok:
+                # This ledger holds exactly Claude Code's tokens: price them request by request.
+                kind, ours = "exact", ledger_usd
+                ok = abs(ledger_usd - sdk_usd) <= tol
+            elif prompt_tokens(row) <= tier["above_prompt_tokens"]:
+                # Every request's prompt is part of this total, so none can pass the threshold: all base price.
+                kind, ours = "below_threshold", lo
+                ok = abs(lo - sdk_usd) <= tol
+            else:
+                # Request sizes unknown. Every request at the base price is the floor, every one at the
+                # long-prompt price the ceiling. Outside them the card is proven wrong; inside them nothing is
+                # proven, because a value between the two need not be any real mix of requests.
+                kind, ours = "bounded", lo
+                ok = None if lo - tol <= sdk_usd <= hi + tol else False
+            check = {"check": kind, "ours_range_usd": [round(lo, 6), round(hi, 6)]}
+        if ok is False:
+            rate_ok = False
+        elif ok is None and rate_ok is not False:
+            rate_ok = None
+        models[m] = dict({"sdk_usd": round(sdk_usd, 6), "ours_on_sdk_tokens_usd": round(ours, 6),
+                          "rate_ok": ok, "sdk_tokens": tok, "ledger_tokens_until_result": ledger_tok,
+                          "ledger_usd_until_result": round(ledger_usd, 6)}, **check)
+    after = [r for r in rows if at_ms is not None and (r.get("ts_ms") or 0) > at_ms]
+    return {"results_seen": len(sdk_results), "session_id": last.get("session_id"),
+            "sdk_total_usd": round(float(last["total_cost_usd"]), 6), "rate_ok": rate_ok,
+            "models": models, "calls_after_result": len(after),
+            "usd_after_result": round(sum(cost_of(r, rates) for r in after), 6),
+            "partial": bool(after)}
 
 
 # --------------------------------------------------------------------------- #
@@ -1162,6 +1292,26 @@ def render_md(agg, meta):
              "something that should not be sent at all.")
     L.append("")
 
+    sdk = meta.get("sdk_check")
+    if sdk:
+        L.append("## Cross-check against Claude Code's own cost")
+        L.append("")
+        L.append("Claude Code reported **$%.2f** in its last ResultMessage (%d seen). Our rates on its own "
+                 "tokens: **%s**." % (sdk["sdk_total_usd"], sdk["results_seen"],
+                                    _RATE_HEADLINE[sdk["rate_ok"]]))
+        L.append("")
+        rows = [["`%s`" % m, "$%.4f" % v["sdk_usd"], _ours_cell(v),
+                 _RATE_CELL[v["rate_ok"]],
+                 _n(sum(v["sdk_tokens"].values())), _n(sum(v["ledger_tokens_until_result"].values()))]
+                for m, v in sorted(sdk["models"].items())]
+        L += _table(["model", "Claude Code $", "our rates, its tokens", "rate check",
+                     "its tokens", "our tokens (to result)"], ["l", "r", "r", "l", "r", "r"], rows)
+        L.append("")
+        if sdk["partial"]:
+            L.append("**Partial:** %d call(s) ($%.2f) finished after that result, so Claude Code's total "
+                     "leaves them out. Quote this ledger's total, not the SDK's." % (
+                         sdk["calls_after_result"], sdk["usd_after_result"]))
+            L.append("")
     L.append("## Tokens by phase")
     L.append("")
     rows = []
@@ -1388,6 +1538,14 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
     if unpriced:
         warnings.append("no rate card for %s; priced at the default card, so their dollars are "
                         "unreliable" % ", ".join(unpriced))
+    sdk = sdk_check(rows, load_sdk_results(eval_dir), rates)
+    if sdk and sdk["rate_ok"] is False:
+        warnings.append("our rates do not reproduce Claude Code's own cost for: %s" % ", ".join(
+            m for m, v in sdk["models"].items() if v["rate_ok"] is False))
+    unconfirmed = [m for m, v in (sdk or {}).get("models", {}).items() if v["rate_ok"] is None]
+    if unconfirmed:
+        warnings.append("Claude Code's own cost could not be confirmed for: %s (priced per request, and this "
+                        "ledger is missing some of those calls, so the totals only bound it)" % ", ".join(unconfirmed))
     meta = {
         "schema": SCHEMA, "eval_dir": eval_dir, "attribution_mode": mode,
         "transcripts": transcripts, "timeline_sources": timeline["sources"],
@@ -1396,6 +1554,7 @@ def build(eval_dir, explicit_globs=None, rates=None, roots=None,
         "transcript_scope": scope,
         "transcript_scope_anchor": scope_anchor,
         "warnings": warnings, "rates": rates, "complete": not warnings,
+        "sdk_check": sdk,
         "generated_at": _ms_to_iso(int(datetime.now(tz=timezone.utc).timestamp() * 1000)),
     }
     return rows, agent_rows, agg, meta
