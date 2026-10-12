@@ -131,9 +131,11 @@ plan review (2026-10-12). Eikos never picks a lane: it returns estimates, and th
   lane run. Its cost is booked as router cost (role `route_carrier`).
 - **Reducer (`__routeReduce`, pure, `lane_reduce.v1`).**
   - *Allowed* lanes come from the policy rank, which is the existing lane numbering (Haiku 5.5, Sonnet
-    5.5, Opus 4.6, Opus 5.5): at or above the class floor, any operator floor (`route_floors`) and the
-    scope's escalation floor. A lane is excluded once its work-product failures in the scope reach the
-    class allowance: 1 for a code change, 2 otherwise. Counts never reset.
+    5.5, Opus 4.6, Opus 5.5): at or above the class floor, any operator floor (`route_floors`), the
+    scope's escalation floor and the scope's current effective lane (the highest lane it has actually
+    dispatched; a lane proposed but not dispatched does not count). A new task gets new estimates but
+    never silently moves the scope down. A lane is excluded once its work-product failures in the scope
+    reach the class allowance: 1 for a code change, 2 otherwise. Counts never reset.
   - *Feasible* lanes are the allowed ones that are available and, for Opus 5.5, still have quota.
   - Among feasible lanes, the cheapest by list-price order (Haiku 5.5, Sonnet 5.5, Opus 5.5, Opus 4.6)
     whose estimate is at least τ wins. The price order is a list-price proxy, not a predicted task cost.

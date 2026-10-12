@@ -1120,6 +1120,7 @@ function __routeHostInput(scope, cls) {
            policy_rank: ROUTE_LANES.slice(), price_order: ROUTE_PRICE_ORDER.slice(),
            class_floor_rank: ROUTE_CLASS_FLOOR[cls], operator_floor_rank: __routeOpFloorRank(scope),
            scope_floor_rank: st ? st.floor_rank : ROUTE_CLASS_FLOOR[cls],
+           effective_rank: st ? st.effective_rank : -1,
            excluded: ROUTE_LANES.filter((m) => (fails[m] || 0) >= ROUTE_CLASS_MAX_FAILS[cls]),
            top_quota_left: Math.max(0, ROUTE_MAX_TOP_DISPATCHES - __routeTopUsed), available: ROUTE_LANES.slice() };
 }
@@ -1193,12 +1194,13 @@ It prints one JSON object. Return that object unchanged as StructuredOutput. Do 
   return Object.assign(res, { status: 'ok', estimates: est });
 }
 // Pure: every rule for one occurrence. x is __routeHostInput() plus { backend, estimates }. Floors and
-// escalation use the policy rank; availability and quota are removed before any choice; the list-price
-// proxy orders only what remains. A missing or unusable estimate is unknown -- never zero and never a
+// escalation use the policy rank. The scope's current effective lane (the highest lane it has actually
+// dispatched) is a floor too: a new task gets new estimates but never silently moves the scope down.
+// Availability and quota are removed before any choice; the list-price proxy orders only what remains. A missing or unusable estimate is unknown -- never zero and never a
 // threshold miss -- and still passes every hard constraint. No I/O, no clock, no shared state.
 function __routeReduce(x) {
   const top = x.policy_rank[x.policy_rank.length - 1];
-  const lo = Math.max(x.class_floor_rank, x.operator_floor_rank, x.scope_floor_rank);
+  const lo = Math.max(x.class_floor_rank, x.operator_floor_rank, x.scope_floor_rank, x.effective_rank);
   const allowed = x.policy_rank.filter((m, r) => r >= lo && x.excluded.indexOf(m) < 0);
   const filtered = [];
   const feasible = x.price_order.filter((m) => allowed.indexOf(m) >= 0).filter((m) => {
@@ -1252,7 +1254,7 @@ function __routeEikosPick(p, o, scope) {
     const cls = __routeScopeClass(scope);
     const key = __routeTaskKey(label, p, o);
     const st = __routeLadder[scope] || (__routeLadder[scope] = {
-      decider: 'eikos', scope_class: cls, occurrences: 0, floor_rank: ROUTE_CLASS_FLOOR[cls], fails_by_lane: {},
+      decider: 'eikos', scope_class: cls, occurrences: 0, floor_rank: ROUTE_CLASS_FLOOR[cls], effective_rank: -1, fails_by_lane: {},
       history: [], tasks: {}, model: null, lane: -1, why: '' });
     let tk = st.tasks[key];
     const fresh = !tk || tk.pending;
@@ -1316,6 +1318,7 @@ function __routeEikosPick(p, o, scope) {
     tk.reserved = false;                                     // the reservation is now this dispatch
     const id = `d${++__routeDispatchSeq}`;
     (__routeDispatches[label] = __routeDispatches[label] || []).push({ id, scope, task_key: key, seq: tk.seq, model: tk.model, outcome: null });
+    st.effective_rank = Math.max(st.effective_rank, __routeRank(tk.model));   // only a lane actually dispatched
     __routeAudit.push({ event: 'dispatch', scope, label, dispatch_id: id, seq: tk.seq, phase: (o && o.phase) || '',
                         model: tk.model, served_model: 'unverified', capped: false });
     return { model: tk.model, scope, dispatch_id: id };

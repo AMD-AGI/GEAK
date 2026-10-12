@@ -122,7 +122,7 @@ async function main() {
     ok('the host input of a fresh code-change scope: policy rank, list-price order, floors, quota, availability',
       JSON.stringify(BASE) === JSON.stringify({ reducer_version: 'lane_reduce.v1', scope_class: 'code_change', tau: 0.9,
         policy_rank: [H5, S5, O46, O55], price_order: [H5, S5, O55, O46], class_floor_rank: 1, operator_floor_rank: 0,
-        scope_floor_rank: 1, excluded: [], top_quota_left: 1, available: [H5, S5, O46, O55] }));
+        scope_floor_rank: 1, effective_rank: -1, excluded: [], top_quota_left: 1, available: [H5, S5, O46, O55] }));
     let r = R({ scope_class: 'paperwork', tau: 0.7, class_floor_rank: 0, scope_floor_rank: 0, estimates: P(0.95, 0.5, 0.99, 0.92) });
     ok('non-monotone estimates are taken as given: the cheapest qualifying lane wins', r.model === H5 && r.threshold_met === true);
     r = R({ estimates: P(0.99, 0.91, 0.99, 0.97) });
@@ -167,6 +167,11 @@ async function main() {
     ok('no available lane at or above the floor is a deferral', r.model === null);
     r = R({ operator_floor_rank: 3, estimates: P(1, 1, 1, 0.95) });
     ok('an operator floor raises the lower bound', r.model === O55);
+    r = R({ effective_rank: 2, estimates: P(1, 0.99, 0.95, 0.95) });
+    ok('the scope\'s effective lane is a floor by policy rank: a confident Sonnet is not taken, price picks among the rest',
+      r.model === O55 && r.allowed.join() === [O46, O55].join());
+    r = R({ effective_rank: 3, top_quota_left: 0, estimates: P(1, 1, 1, 1) });
+    ok('an effective Opus 5.5 lane with the quota used defers rather than dropping', r.model === null);
     const x = Object.assign({}, BASE, { backend: 'ok', estimates: P(0.2, 0.93, 0.9, 0.5) });
     const before = JSON.stringify(x);
     ok('the reducer is pure: same input, same output, input untouched',
@@ -276,8 +281,8 @@ async function main() {
       L.__routeOutcome('eng:memory', false, 'verify status=apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'));
       L.__routeOutcome('eng:memory', false, 'verify status=apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'));
       out.push((await L.__routePick('p0', W(ENG('r1_d0')))).model);          // escalated; the top lane is reserved
-      direction(L, 'r1_d1');
-      out.push((await L.__routePick('p1', W(ENG('r1_d1')))).model);          // quota used: filtered
+      direction(L, 'r1_d1', 'compute');
+      out.push((await L.__routePick('p1', W(ENG('r1_d1', 'compute')))).model); // another scope starts at its own floor
       return { out, top: L.topUsed(), fails: L.__routeLadder['eng:memory'].fails_by_lane,
                floor: L.__routeLadder['eng:memory'].floor_rank,
                decisions: all(L, 'decide').map((e) => [e.task_key, e.seq, e.decided, e.logical_key, e.estimates]),
@@ -295,8 +300,8 @@ async function main() {
     const replayed = await script(L2);
     const L3 = lane({}, { deadline: 1, evalDir: L1.evalDir });
     const relived = await script(L3);
-    ok('the run escalates past the failed Sonnet, counts the duplicate outcome once, and the quota filters the top lane',
-      JSON.stringify(recorded.out) === JSON.stringify([S5, O55, O46]) && recorded.top === 1 && recorded.fails[S5] === 1 &&
+    ok('the run escalates past the failed Sonnet, counts the duplicate outcome once, and another scope starts at its own floor',
+      JSON.stringify(recorded.out) === JSON.stringify([S5, O55, S5]) && recorded.top === 1 && recorded.fails[S5] === 1 &&
       recorded.floor === 2 && recorded.fail_events === 1 && recorded.unmatched === 1);
     ok('a resumed run with the Workflow cache asks nothing new: the same frozen cards and host inputs',
       misses === 0 && journal.size === 3 && server.seen.length === seenBefore);
@@ -403,6 +408,31 @@ async function main() {
       last(L, 'override').kind === 'decided_lane_no_longer_feasible' && last(L, 'override').to === null && L.topUsed() === 1);
   }
   {
+    // The scope's effective lane survives new occurrences (Astra, 2026-10-12): no silent drop to Sonnet.
+    server.probs = P(0.1, 0.5, 0.5, 0.97);
+    const L = lane();
+    direction(L, 'r1_d0');
+    const a = await L.__routePick('p', W(ENG('r1_d0')));
+    server.probs = P(0.1, 0.99, 0.5, 0.5);                                    // Sonnet would now qualify
+    direction(L, 'r1_d1');
+    const b = await L.__routePick('p1', W(ENG('r1_d1')));
+    ok('after Opus 5.5 is dispatched, a new task in the scope with the quota used is deferred, not sent to Sonnet',
+      a.model === O55 && L.__routeLadder['eng:memory'].effective_rank === 3 && b.skip === true && b.deferred === true &&
+      last(L, 'decide').backend === 'not_asked_no_feasible_lane' && L.carried.length === 1);
+    L.__routeOutcome('eng:memory', false, 'engineer reported 0.98x <= floor 1.05', 'non_improvement', 'engineer r1_d0', ENG('r1_d0'));
+    const c = await L.__routePick('p', W(ENG('r1_d0')));
+    ok('...and so is the next attempt after its non-improvement', c.skip === true && c.deferred === true &&
+      last(L, 'decide').trigger === 'non_improvement' && L.carried.length === 1);
+    const M = lane({ route_max_top_escalations: '5' });
+    server.probs = P(0.1, 0.5, 0.5, 0.97);
+    direction(M, 'r1_d0'); direction(M, 'r1_d1');
+    await M.__routePick('p', W(ENG('r1_d0')));
+    server.probs = P(0.1, 0.99, 0.5, 0.5);
+    const d = await M.__routePick('p1', W(ENG('r1_d1')));
+    ok('with quota left, the new task stays on the effective lane as a recorded override, not a drop to Sonnet',
+      d.model === O55 && last(M, 'decide').threshold_met === false && last(M, 'decide').reduce.allowed.join() === O55);
+  }
+  {
     const spent = { v: 0 };
     server.probs = P(0.1, 0.5, 0.5, 0.97);
     const L = lane({ route_max_output_tokens: '1000' }, { budget: { spent: () => spent.v },
@@ -412,7 +442,8 @@ async function main() {
     ok('a consultation that crosses the output cap stops the worker: no dispatch, quota released, killed reported',
       r === null && L.carried.length === 1 && L.coreCalls.length === 0 && L.topUsed() === 0 &&
       last(L, 'decide').decided === O55 && /kill switch/.test(last(L, 'skip').why) && L.__routeReport().killed === true &&
-      L.logs.some((m) => /output-token cap reached/.test(m)) && L.__routeSkipped[ENG('r1_d0')] === true);
+      L.logs.some((m) => /output-token cap reached/.test(m)) && L.__routeSkipped[ENG('r1_d0')] === true &&
+      L.__routeLadder['eng:memory'].effective_rank === -1);
     await L.agentT('p', W(ENG('r1_d1')));
     ok('once tripped, the switch is checked before the carrier: nothing more is asked', L.carried.length === 1 && L.coreCalls.length === 0);
   }
