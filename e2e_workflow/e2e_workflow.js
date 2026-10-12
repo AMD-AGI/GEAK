@@ -138,6 +138,11 @@ const laneArgs = (wfArgs) => {
     // routing is opt-in and forwarded ONLY when the parent set it explicitly, so a routing run reaches
     // the child lane's helper scopes instead of the experiment silently covering the parent alone.
     ...(A.routing != null ? { routing: String(A.routing) } : {}),
+    // ...and, like kernel_workflow.js, the cost-ladder knobs and the decider (Eikos included), each only when set.
+    ...Object.fromEntries(['route_conf_escalate', 'route_max_retries_per_lane', 'route_max_top_escalations',
+      'route_max_output_tokens', 'route_floors', 'route_decider', 'route_eikos_tau', 'route_eikos_max_consults',
+      'route_eikos_carrier_model', 'route_eikos_carrier_timeout_ms']
+      .filter((k) => A[k] != null).map((k) => [k, typeof A[k] === 'object' ? JSON.stringify(A[k]) : String(A[k])])),
     ...wfArgs,
   };
   if (RDNA4_ISOLATE) {

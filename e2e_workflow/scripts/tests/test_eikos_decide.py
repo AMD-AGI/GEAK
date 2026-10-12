@@ -400,3 +400,130 @@ def test_an_entry_copied_from_another_scope_is_not_adopted(tmp_path, fake):
     _Fake.bodies = [{"answers": answers("stop", p=0.95)}]
     again = decide(tmp_path, fake, scope="/target/lane")
     assert again["choice"] == "stop" and again["decision_attempt_id"] != src["attempt_id"]
+
+
+# ------------------------------------------------------------------ lane_sufficiency (estimates kind)
+LANE_SPEC, _ = ed.load_spec("lane_sufficiency")
+LANES = LANE_SPEC["lane_order"]
+
+
+def card(**kw):
+    c = {"card_version": 1, "scope": "eng:memory", "scope_class": "code_change", "role": "eng",
+         "phase": "Optimize", "round": 2,
+         "occurrence": {"seq": 1, "trigger": "first_sight", "prior": []},
+         "task": {"goal": "Optimize the kernel along this direction and leave best_patch.diff.", "goal_source": "direction",
+                  "acceptance": "verify: patch applies, correctness pass, speedup above the floor 1.0",
+                  "constraints": ["work only in the private workspace"],
+                  "direction": {"id": "r2_d1", "title": "tile the K loop", "specialty": "memory",
+                                "expected_speedup": 1.3, "focus_files": ["kernel.py"], "prompt": "Tile K by 64."},
+                  "prompt_sha256": "a" * 64, "prompt_chars": 5123},
+         "budget": {"directions_used": 3, "directions_budget": 6, "minutes_left": 95, "minutes_left_source": "round_clock"},
+         "config": {"lanes": list(LANES), "effort": None, "runtime": "claude-code workflow agent"}}
+    assert set(c) == set(LANE_SPEC["required_state"])
+    for k, v in kw.items():
+        c[k] = v
+    return json.dumps(c)
+
+
+def lane_answers(**p):
+    probs = dict({"claude-haiku-5-5": 0.31, "claude-sonnet-5-5": 0.82, "claude-opus-4-6": 0.77, "claude-opus-5-5": 0.93}, **p)
+    return {LANE_SPEC["estimate_questions"][lane]: {"type": "noul", "probability": v, "noul": v, "value": v >= 0.5,
+                                                    "confidence": max(v, 1 - v)}
+            for lane, v in probs.items()}
+
+
+def lane_decide(tmp_path, url, c=None, rnd=2):
+    return ed.decide("lane_sufficiency", "/eval/lane", rnd, c or card(), str(tmp_path), url, 5.0)
+
+
+def test_lane_estimates_travel_as_one_digested_string_and_decide_nothing(tmp_path, fake):
+    _Fake.bodies = [{"answers": lane_answers()}]
+    env = lane_decide(tmp_path, fake)
+    assert env["status"] == "ok" and env["persisted"] and not env["reused"]
+    assert env["choice"] is None and env["confidence"] is None and env["would_be_action"] is None
+    assert env["estimates"] == ("claude-haiku-5-5=0.31;claude-sonnet-5-5=0.82;"
+                                "claude-opus-4-6=0.77;claude-opus-5-5=0.93")   # non-monotone, kept as sent
+    out = ed.compact(env)
+    assert out["decision_sha256"] == ed.sha256(ed.canonical({k: out[k] for k in ed.DECISION_FIELDS + ("estimates",)}))
+    assert _Fake.seen[0]["questions"] == LANE_SPEC["questions"]
+
+
+def test_a_choice_decision_still_has_no_estimates_key(tmp_path, fake):
+    out = ed.compact(decide(tmp_path, fake))
+    assert "estimates" not in out
+    assert out["decision_sha256"] == ed.sha256(ed.canonical({k: out[k] for k in ed.DECISION_FIELDS}))
+
+
+def test_the_same_card_is_a_replay_and_a_changed_card_a_new_occurrence(tmp_path, fake):
+    _Fake.bodies = [{"answers": lane_answers()}]
+    first = lane_decide(tmp_path, fake)
+    _Fake.bodies = [{"answers": lane_answers(**{"claude-haiku-5-5": 0.99})}]   # would differ if asked
+    again = lane_decide(tmp_path, fake)
+    assert len(_Fake.seen) == 1 and again["reused"] and again["estimates"] == first["estimates"]
+    failed = json.loads(card())
+    failed["occurrence"] = {"seq": 2, "trigger": "work_product_failure", "prior": [
+        {"lane": "claude-haiku-5-5", "outcome": "work_product", "evidence": "verify status=apply_failed",
+         "source": "verify r2_d1"}]}
+    new = lane_decide(tmp_path, fake, json.dumps(failed))
+    assert len(_Fake.seen) == 2 and new["logical_key"] != first["logical_key"]
+    assert new["estimates"].startswith("claude-haiku-5-5=0.99;")
+
+
+@pytest.mark.parametrize("mutate, why", [
+    (lambda c: c.pop("budget"), "lacks required field"),
+    (lambda c: c["task"].update(goal="x" * 1501), "task must be"),                    # never truncated: refused
+    (lambda c: c["task"].update(answer="sonnet"), "task must be"),                    # no extra fields ride along
+    (lambda c: c["task"]["direction"].update(prompt="p" * 4001), "task must be"),
+    (lambda c: c["config"].update(lanes=list(reversed(LANES))), "config must be"),
+    (lambda c: c.update(scope_class="paperwork-ish"), "scope_class must be"),
+    (lambda c: c.update(round=3), "round must be"),
+    (lambda c: c["occurrence"].update(prior=[{"lane": "gpt", "outcome": "work_product", "evidence": "", "source": "x"}]),
+     "occurrence must be"),
+    (lambda c: c["occurrence"].update(trigger="hunch"), "occurrence must be"),
+    (lambda c: c["budget"].update(minutes_left=-1), "budget must be"),
+])
+def test_a_bad_card_is_refused_before_any_request(tmp_path, fake, mutate, why):
+    c = json.loads(card())
+    mutate(c)
+    env = lane_decide(tmp_path, fake, json.dumps(c))
+    assert env["status"] == "state_invalid" and why in env["error"] and not _Fake.seen
+    assert "estimates" in env and env["estimates"] is None
+
+
+@pytest.mark.parametrize("answers_, why", [
+    (lambda a: a.pop("passes_on_opus_4_6"), "answer missing"),
+    (lambda a: a["passes_on_haiku_5_5"].update(probability=1.4), "probability missing or not a number"),
+])
+def test_an_unusable_estimate_is_malformed_and_never_persisted(tmp_path, fake, answers_, why):
+    a = lane_answers()
+    answers_(a)
+    _Fake.bodies = [{"answers": a}]
+    env = lane_decide(tmp_path, fake)
+    assert env["status"] == "malformed" and why in env["error"] and env["estimates"] is None and not env["persisted"]
+
+
+def test_an_unreachable_server_still_returns_the_estimates_key(tmp_path):
+    env = ed.decide("lane_sufficiency", "/eval/lane", 2, card(), str(tmp_path), "http://127.0.0.1:9", 2.0)
+    assert env["status"] in ("unavailable", "timeout") and "estimates" in ed.compact(env)
+
+
+def test_the_cli_prints_the_estimates_envelope(tmp_path, fake):
+    _Fake.bodies = [{"answers": lane_answers()}]
+    out = subprocess.run([sys.executable, "-B", SCRIPT, "--decision", "lane_sufficiency", "--scope", "/eval/lane",
+                          "--round", "2", "--receipt-dir", str(tmp_path), "--state-json", card()],
+                         capture_output=True, text=True, env=dict(os.environ, GEAK_EIKOS_URL=fake), timeout=60)
+    env = json.loads(out.stdout)
+    assert env["status"] == "ok" and env["estimates"].count(";") == 3
+    assert env["decision_sha256"] == ed.decision_digest(env)
+
+
+def test_question_files_of_an_unknown_kind_or_with_a_lane_missing_are_refused(tmp_path, monkeypatch):
+    bad = dict(LANE_SPEC, estimate_questions={k: v for k, v in LANE_SPEC["estimate_questions"].items()
+                                               if k != "claude-opus-4-6"})
+    (tmp_path / "x.json").write_text(json.dumps(bad))
+    monkeypatch.setattr(ed, "QUESTIONS_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="exactly the lanes"):
+        ed.load_spec("x")
+    (tmp_path / "y.json").write_text(json.dumps(dict(LANE_SPEC, kind="vote")))
+    with pytest.raises(ValueError, match="unknown kind"):
+        ed.load_spec("y")

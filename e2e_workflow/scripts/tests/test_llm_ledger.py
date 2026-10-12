@@ -575,6 +575,13 @@ class TestCostBreakdown(unittest.TestCase):
         so a future dynamic router has a place to report its cost."""
         self.assertIn("router", L.cost_breakdown(self._row(), L.DEFAULT_RATES))
 
+    def test_the_eikos_carrier_is_router_cost_too(self):
+        """The route_decider=eikos carrier only relays Eikos's answer: every dollar of it chooses a model."""
+        row = dict(self._row(), role="route_carrier")
+        bd = L.cost_breakdown(row, L.DEFAULT_RATES)
+        self.assertAlmostEqual(bd["router"], L.cost_of(row, L.DEFAULT_RATES), places=9)
+        self.assertEqual(bd["uncached_input"] + bd["cache_read"] + bd["cache_write"] + bd["output"], 0.0)
+
     def test_uncached_input_is_the_fresh_bucket_only(self):
         """'uncached-context' is Anthropic's input_tokens — cache is already netted
         out of it, so it must not be re-derived from the total."""

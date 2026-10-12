@@ -105,6 +105,51 @@ the TechLead plus Director validation already decide when a run stops. The promp
 above 0.85 with all checks passing" is therefore **stricter in GEAK than asked**: completion needs the
 oracle, and no confidence score can substitute for it.
 
+## Eikos decider (`route_decider=eikos`) — experimental, off by default
+
+On `feat/geak-jev`, the ladder can ask Eikos instead of the Sonnet decider. The contract is
+`research/eikos_ladder_routing_proposal_20261009.md` (rev 2, §7). Eikos never picks a lane: it returns
+estimates, and the host picks.
+
+- **Question.** One versioned boolean per lane (`eikos_questions/lane_sufficiency.json`): will the next
+  attempt on this model pass the task's acceptance check within the budget? The four estimates are kept
+  apart, may be non-monotone, and are never normalised.
+- **Card.** The workflow builds a frozen task card. It holds the goal (a role prompt's own goal
+  sentence, or the engineer's direction object), the host's acceptance check and constraints, prior
+  attempts with their source, the budget, and the lane configuration. The prompt goes in only as a
+  digest and length. Required text is never truncated; a card that does not fit is ineligible, and the
+  host routes without Eikos.
+- **Carrier.** Haiku 5.5 runs `eikos_decide.py` with the card, verbatim, and relays its JSON. The host
+  checks the state and decision digests, the receipt and the estimates string. The carrier is never
+  routed itself, and `route_eikos_max_consults` (default 40) caps its calls per lane run. Its cost is
+  booked as router cost (role `route_carrier`).
+- **Reducer (`__routeReduce`, pure).** Lanes are compared in declared list-price order: Haiku 5.5,
+  Sonnet 5.5, Opus 5.5, Opus 4.6. Candidates must be at or above the current effective lane, the class
+  floor and any operator floor. After work-product failures, the failed lane is excluded: at once for a
+  code change, after two for other classes. Unavailable lanes, and the top lane once its quota is used,
+  are removed before any choice. The reducer picks the cheapest candidate whose estimate is at least τ.
+  - If no lane reaches τ, it picks the candidate with the highest estimate and records the override.
+  - If no lane is feasible, the worker is deferred and recorded.
+  - If the estimate is missing or unusable, it takes the cheapest feasible lane (the current lane or
+    the floor), and the backend status is recorded.
+- **Classes.**
+
+  | class | scopes | τ (unvalidated experimental) | floor |
+  |---|---|---|---|
+  | code change | `eng:*`, `deep:*`, `integrate`, `author:*`, anything unknown | 0.90 | Sonnet 5.5 |
+  | evidence | benchmark, profile, reprofile, verify, warm_start, researcher, `kb:*` except cite, update_experience | 0.80 | Sonnet 5.5 |
+  | paperwork | `commit`, `kb:cite` | 0.70 | Haiku 5.5 |
+
+  Set τ with `route_eikos_tau` (JSON). Nothing in the evidence so far calibrates these values; the
+  report labels them `unvalidated_experimental`.
+- **Failures.** Only a work-product failure (patch did not apply, correctness failed) counts against a
+  lane. A non-improving but valid result asks Eikos again with that evidence. A missing result or an
+  invalid measurement is recorded and changes nothing.
+- **Decision scope.** A code change is reassessed for every new direction. Evidence and paperwork scopes
+  keep one decision until a failure.
+- **Status.** Offline and tested with a fake transport (`kernel_workflow/scripts/test_eikos_route.js`).
+  No routed run has used it. Serving Eikos needs a GPU outside the run's pool.
+
 ## Budget layer — in code, never overridable by a model
 
 | cap | default | arg |

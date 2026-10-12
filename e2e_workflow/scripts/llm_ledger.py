@@ -152,7 +152,10 @@ def merge_rates(loaded, base=None):
 
 # The routing classifier opens every prompt with "You are the route_classifier." (kernel_lane.js), so
 # its calls form their own group. All of their cost is the price of CHOOSING a model, i.e. router cost.
+# The Eikos decider's carrier ("You are the route_carrier.") only relays Eikos's answer, so it is router
+# cost too.
 ROUTER_ROLE = "route_classifier"
+ROUTER_ROLES = (ROUTER_ROLE, "route_carrier")
 
 # Every role prompt in both workflows opens with this exact line (see roleAgent()
 # in e2e_workflow.js / kernel_lane.js / kernel_workflow.js), which is what lets a
@@ -758,7 +761,7 @@ def cost_breakdown(row, rates):
     The five values sum to ``cost_of(row, rates)`` by construction; a test pins that.
     """
     r = rates_for(row, rates)
-    if row.get("role") == ROUTER_ROLE:
+    if row.get("role") in ROUTER_ROLES:
         # A routing-time LLM call: every dollar of it is spent choosing a model, none doing the work.
         return {"uncached_input": 0.0, "cache_read": 0.0, "cache_write": 0.0, "output": 0.0,
                 "router": cost_of(row, rates)}

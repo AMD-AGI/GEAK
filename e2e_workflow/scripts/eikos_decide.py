@@ -29,6 +29,12 @@ caller acts on, so the carrier copies as little as possible. Everything else (di
 timings, the raw state, what this attempt itself observed) is in the attempt receipt, joined by
 attempt_id.
 
+ESTIMATES. A question file of kind "estimates" (lane_sufficiency) asks one boolean per model lane and
+decides nothing: choice, confidence and would_be_action stay null, and the validated probabilities
+travel in one more digested field, `estimates` ("<lane>=<repr p>;..." in the file's lane_order). The
+caller applies every threshold and picks the lane. Choice decisions (round_continue) carry no
+`estimates` key at all, so their envelope and digest are unchanged.
+
 WIRE CONTRACT. Every field covered by `decision_sha256` is a string, a boolean or null — never a
 number — so both sides hash the same bytes: Python writes 1.0 where JavaScript writes 1, and a hash
 over numbers would flag a valid answer as altered. `confidence` therefore travels as Python's repr
@@ -85,10 +91,25 @@ def load_spec(decision: str) -> tuple:
         raise ValueError("bad decision name %r" % (decision,))
     with open(os.path.join(QUESTIONS_DIR, decision + ".json"), encoding="utf-8") as fh:
         spec = json.load(fh)
-    for key in ("version", "required_state", "primary_question", "options", "questions", "policy"):
+    kind = spec.get("kind", "choice")
+    if kind not in ("choice", "estimates"):
+        raise ValueError("question file has unknown kind %r" % (kind,))
+    own = ("primary_question", "options") if kind == "choice" else ("lane_order", "estimate_questions")
+    for key in ("version", "required_state", "questions", "policy") + own:
         if key not in spec:
             raise ValueError("question file lacks %r" % key)
+    if kind == "estimates":
+        lanes, qs = spec["lane_order"], spec["estimate_questions"]
+        if not isinstance(lanes, list) or not lanes or sorted(lanes) != sorted(qs) or len(set(lanes)) != len(lanes):
+            raise ValueError("estimate_questions must name exactly the lanes in lane_order")
+        if sorted(qs.values()) != sorted(spec["questions"]) or any(
+                spec["questions"][q].get("type") not in ("noul", "boolean") for q in qs.values()):
+            raise ValueError("every question must be one lane's boolean estimate, and every lane must have one")
     return spec, sha256(canonical(spec))
+
+
+def is_estimates(spec: dict) -> bool:
+    return spec.get("kind") == "estimates"
 
 
 def _prob(x) -> bool:
@@ -133,14 +154,26 @@ def _wire(v):
     raise TypeError("decision field of type %s cannot be put on the wire" % type(v).__name__)
 
 
+def _decision_fields(env: dict) -> tuple:
+    """The digested fields: an estimates decision adds `estimates`; a choice decision has no such key."""
+    return DECISION_FIELDS + (("estimates",) if "estimates" in env else ())
+
+
 def decision_digest(env: dict) -> str:
-    return sha256(canonical({k: _wire(env.get(k)) for k in DECISION_FIELDS}))
+    return sha256(canonical({k: _wire(env.get(k)) for k in _decision_fields(env)}))
 
 
 def compact(env: dict) -> dict:
-    out = {k: (_wire(env.get(k)) if k in DECISION_FIELDS else env.get(k)) for k in ENVELOPE_FIELDS}
+    fields = _decision_fields(env)
+    out = {k: (_wire(env.get(k)) if k in fields else env.get(k)) for k in fields + ("state_sha256", "error")}
     out["decision_sha256"] = decision_digest(out)
     return out
+
+
+def estimates_wire(estimates: dict, spec: dict) -> str:
+    """The digested string form: '<lane>=<repr p>;...' in lane_order. repr of a float, so both sides
+    read back exactly the number that was validated."""
+    return ";".join("%s=%r" % (lane, float(estimates[lane])) for lane in spec["lane_order"])
 
 
 def _reject_constant(name):
@@ -223,11 +256,87 @@ def _round_continue_state(state: dict, round_no: int) -> str:
     return "; ".join(bad)
 
 
-STATE_VALIDATORS = {"round_continue": _round_continue_state}
+SCOPE_CLASSES = {"paperwork", "evidence", "code_change"}
+TRIGGERS = {"first_sight", "work_product_failure", "non_improvement", "changed_task"}
+OUTCOME_KINDS = {"work_product", "non_improvement", "invalid_measurement", "no_result"}
+EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _text(x, lo, hi) -> bool:
+    return isinstance(x, str) and lo <= len(x) <= hi
+
+
+def _keys(x, want) -> bool:
+    return isinstance(x, dict) and set(x) == set(want)
+
+
+def _prior_ok(p, lanes) -> bool:
+    return (_keys(p, ("lane", "outcome", "evidence", "source")) and p["lane"] in lanes
+            and p["outcome"] in OUTCOME_KINDS and _text(p["evidence"], 0, 300) and _text(p["source"], 1, 80))
+
+
+def _direction_ok(d) -> bool:
+    return d is None or (
+        _keys(d, ("id", "title", "specialty", "expected_speedup", "focus_files", "prompt"))
+        and _text(d["id"], 1, 40) and _text(d["title"], 0, 300) and d["specialty"] in SPECIALTIES
+        and (d["expected_speedup"] is None or _is_num(d["expected_speedup"], 0, strict=True))
+        and isinstance(d["focus_files"], list) and len(d["focus_files"]) <= 20
+        and all(_text(f, 1, 200) for f in d["focus_files"]) and _text(d["prompt"], 0, 4000))
+
+
+def _lane_card_state(state: dict, round_no: int, spec: dict) -> str:
+    """The routing card. Every nested object has an exact key set, so nothing else (least of all a
+    routing answer or an outcome) can ride along, and the task's required text is bounded, never cut:
+    a card whose text does not fit is refused here, and the host routes without Eikos."""
+    lanes = spec["lane_order"]
+    occ, task, budget, config = state["occurrence"], state["task"], state["budget"], state["config"]
+    checks = [
+        ("card_version", state["card_version"] == 1, "1"),
+        ("scope", _text(state["scope"], 1, 160), "a string of 1-160 characters"),
+        ("scope_class", state["scope_class"] in SCOPE_CLASSES, "one of " + ", ".join(sorted(SCOPE_CLASSES))),
+        ("role", _text(state["role"], 1, 80), "a string of 1-80 characters"),
+        ("phase", _text(state["phase"], 0, 40), "a string of at most 40 characters"),
+        ("round", _is_int(state["round"], 0) and state["round"] == round_no, "an integer >= 0 equal to --round"),
+        ("occurrence", _keys(occ, ("seq", "trigger", "prior")) and _is_int(occ["seq"], 1)
+         and occ["trigger"] in TRIGGERS and isinstance(occ["prior"], list) and len(occ["prior"]) <= 6
+         and all(_prior_ok(p, lanes) for p in occ["prior"]),
+         "{seq >= 1, trigger, prior: at most 6 {lane, outcome, evidence <= 300, source}}"),
+        ("task", _keys(task, ("goal", "goal_source", "acceptance", "constraints", "direction", "prompt_sha256",
+                              "prompt_chars"))
+         and _text(task["goal"], 1, 1500) and task["goal_source"] in ("direction", "role_intro", "host_template")
+         and _text(task["acceptance"], 1, 600)
+         and isinstance(task["constraints"], list) and len(task["constraints"]) <= 8
+         and all(_text(c, 1, 200) for c in task["constraints"]) and _direction_ok(task["direction"])
+         and isinstance(task["prompt_sha256"], str) and bool(HEX64.match(task["prompt_sha256"]))
+         and _is_int(task["prompt_chars"], 0),
+         "{goal 1-1500, goal_source, acceptance 1-600, constraints, direction or null, prompt_sha256, prompt_chars}"),
+        ("budget", _keys(budget, ("directions_used", "directions_budget", "minutes_left", "minutes_left_source"))
+         and _is_int(budget["directions_used"], 0) and _is_int(budget["directions_budget"], 1)
+         and (budget["minutes_left"] == "unknown" or _is_int(budget["minutes_left"], 0))
+         and budget["minutes_left_source"] in ("round_clock", "no_deadline", "not_recorded"),
+         "{directions_used, directions_budget, minutes_left, minutes_left_source}"),
+        ("config", _keys(config, ("lanes", "effort", "runtime")) and config["lanes"] == lanes
+         and (config["effort"] is None or config["effort"] in EFFORTS) and _text(config["runtime"], 1, 200),
+         "{lanes equal to the question file's lane_order, effort, runtime}"),
+    ]
+    bad = ["%s must be %s" % (k, why) for k, ok, why in checks if not ok]
+    return "; ".join(bad)
+
+
+STATE_VALIDATORS = {"round_continue": lambda state, round_no, spec: _round_continue_state(state, round_no),
+                    "lane_sufficiency": _lane_card_state}
+
+
+DERIVED = ("choice", "confidence", "distribution", "would_be_action")
 
 
 def derive(answers: dict, spec: dict) -> dict:
-    """The decision the policy derives from validated answers."""
+    """The decision the policy derives from validated answers. An estimates file derives no decision:
+    only each lane's probability, in lane_order."""
+    if is_estimates(spec):
+        est = {lane: answers[spec["estimate_questions"][lane]]["probability"] for lane in spec["lane_order"]}
+        return {"choice": None, "confidence": None, "distribution": None, "would_be_action": None, "estimates": est}
     primary = answers[spec["primary_question"]]
     choice = primary["choice"]
     conf = primary["probabilities"][choice]
@@ -257,7 +366,7 @@ def valid_persisted(entry, ctx: dict) -> bool:
     if not isinstance(answers, dict) or validate(answers, ctx["spec"]):
         return False
     again = derive(answers, ctx["spec"])
-    return all(entry.get(k) == again[k] for k in ("choice", "confidence", "distribution", "would_be_action"))
+    return all(entry.get(k) == again[k] for k in DERIVED + (("estimates",) if is_estimates(ctx["spec"]) else ()))
 
 
 def logical_key(decision, scope, round_no, canon, questions_sha, policy_version, model_id, endpoint) -> str:
@@ -329,6 +438,8 @@ def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir
         spec, spec_sha = load_spec(decision)
     except (OSError, ValueError) as exc:
         return finish("state_invalid", "question file: %s" % exc)
+    if is_estimates(spec):
+        env["estimates"] = None                     # digested from here on, even on a failure
     extra.update(questions_version=spec["version"], questions_sha256=spec_sha,
                  policy_version=spec["policy"].get("version"), model_id=er.model_identity(), endpoint=url)
     if len(state_raw) > MAX_STATE_CHARS:
@@ -346,7 +457,7 @@ def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir
         return finish("state_invalid", "state holds a non-finite or out-of-range number")
     checker = STATE_VALIDATORS.get(decision)
     try:
-        problem = checker(state, round_no) if checker else ""
+        problem = checker(state, round_no, spec) if checker else ""
     except (TypeError, ValueError, OverflowError) as exc:   # backstop: still a receipted refusal
         problem = "%s: %s" % (type(exc).__name__, exc)
     if problem:
@@ -364,6 +475,8 @@ def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir
         env.update({k: entry[k] for k in ("choice", "confidence", "would_be_action")})
         env.update(decision_attempt_id=entry["attempt_id"], reused=reused, persisted=persisted)
         extra["distribution"] = entry["distribution"]
+        if is_estimates(spec):
+            env["estimates"] = estimates_wire(entry["estimates"], spec)
 
     # Already decided for this key, and the record still checks out? Return it; never ask twice.
     if index_path:
@@ -398,6 +511,8 @@ def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir
         return finish("malformed", "invalid answers: " + problem)
     mine = derive(answers, spec)
     observed.update(choice=mine["choice"], confidence=mine["confidence"])
+    if is_estimates(spec):
+        observed["estimates"] = mine["estimates"]
     decided = dict(mine, status="ok", attempt_id=attempt_id,
                    answers={qid: answers[qid] for qid in spec["questions"]},
                    scope=scope, round=round_no, **{k: ctx[k] for k in
