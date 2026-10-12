@@ -205,7 +205,7 @@ async function runModelMap(F, src) {
     if (off.__routeModel({ phase: s.phase, label: s.label }) !== undefined) offRoutes++;
   ok_(`${F.name}: OFF -> __routeModel undefined on ALL scopes`, offRoutes === 0);
   ok_(`${F.name}: OFF -> agentT() short-circuits to agentTCore before any routing (byte-identical)`,
-      /async function agentT\(p, o\) \{\n  if \(!ROUTING_ON\) return agentTCore\(p, o\);/.test(src));
+      /async function agentT\(p, o(?:, route)?\) \{\n  if \(!ROUTING_ON\) return agentTCore\(p, o\);/.test(src));
 
   // (2) drift guards.
   ok_(`${F.name}: inline helper map == 3 Haiku helper scopes (no drift)`,

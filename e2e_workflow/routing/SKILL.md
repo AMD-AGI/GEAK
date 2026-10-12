@@ -147,8 +147,11 @@ plan review (2026-10-12). Eikos never picks a lane: it returns estimates, and th
 - **Hard constraints on every path.** The kill switch is checked before the carrier and again before the
   worker; a reserved Opus 5.5 unit is released if the worker does not run. A repeated dispatch whose lane
   is no longer feasible is re-reduced on its own estimates, never below its decided lane, and recorded.
-- **Outcomes.** Each outcome binds to the dispatch that produced it (its model and occurrence) and
-  counts once. Only a work-product failure counts against a lane. A non-improvement asks again on the
+- **Outcomes.** The router issues a dispatch id for every worker dispatch; the dispatch site keeps it
+  with its pipeline context (through verify) and reports it with the outcome. An outcome binds to that
+  exact dispatch (its model and occurrence) and counts once. An outcome with no id, an unknown id, an id
+  issued for another label, or a duplicate is recorded and changes nothing; nothing is inferred from
+  label or arrival order. Only a work-product failure counts against a lane. A non-improvement asks again on the
   next attempt without excluding the lane. A missing result or an invalid measurement changes nothing. A
   late outcome from a superseded occurrence counts against its own lane and schedules nothing.
 - **Resume.** A Workflow resume replays unchanged agent calls, so cards, host inputs and decisions come

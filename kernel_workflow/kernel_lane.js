@@ -926,10 +926,10 @@ async function __routePick(p, o) {
 // scope's next dispatch. `evidence` must be compact: status words and numbers, never a log.
 // `kind` names the failure: work_product, non_improvement, invalid_measurement or no_result. The Sonnet
 // decider counts every failure as before and only records the kind; the Eikos decider treats them apart.
-function __routeOutcome(scope, ok, evidence, kind, source, label) {
+function __routeOutcome(scope, ok, evidence, kind, source, label, dispatchId) {
   const st = __routeLadder[scope];
   if (!st) return;
-  if (st.decider === 'eikos') return __routeEikosOutcome(st, scope, ok, evidence, kind || 'work_product', source, label);
+  if (st.decider === 'eikos') return __routeEikosOutcome(st, scope, ok, evidence, kind || 'work_product', source, label, dispatchId);
   if (ok) { st.fails = 0; return; }
   st.fails++;
   st.pending = true;
@@ -1045,7 +1045,8 @@ const ROUTE_CLASS_MAX_FAILS = { paperwork: 2, evidence: 2, code_change: 1 };
 const ROUTE_EIKOS_RUNTIME = 'claude-code workflow agent (Bash, Read, Write, Edit)';
 const __routeTasks = {};       // engineer dispatch label -> its direction, registered at the dispatch site
 const __routeSkipped = {};     // dispatch labels the router skipped (kill switch, deferral)
-const __routeDispatches = {};  // dispatch label -> [{ id, scope, task_key, seq, model, outcome }], in dispatch order
+const __routeDispatches = {};  // dispatch label -> its dispatch records, for display
+const __routeDispatchById = {}; // host-issued dispatch id -> { id, label, scope, task_key, seq, model, outcome }
 const __routeLocks = {};       // scope -> tail of its decision chain (one decision at a time per scope)
 let __routeClock = null;       // { left_s } as the round loop last measured it
 let __routeConsults = 0;
@@ -1317,22 +1318,28 @@ function __routeEikosPick(p, o, scope) {
     }
     tk.reserved = false;                                     // the reservation is now this dispatch
     const id = `d${++__routeDispatchSeq}`;
-    (__routeDispatches[label] = __routeDispatches[label] || []).push({ id, scope, task_key: key, seq: tk.seq, model: tk.model, outcome: null });
+    const rec = { id, label, scope, task_key: key, seq: tk.seq, model: tk.model, outcome: null };
+    __routeDispatchById[id] = rec;
+    (__routeDispatches[label] = __routeDispatches[label] || []).push(rec);
     st.effective_rank = Math.max(st.effective_rank, __routeRank(tk.model));   // only a lane actually dispatched
     __routeAudit.push({ event: 'dispatch', scope, label, dispatch_id: id, seq: tk.seq, phase: (o && o.phase) || '',
                         model: tk.model, served_model: 'unverified', capped: false });
     return { model: tk.model, scope, dispatch_id: id };
   });
 }
-// One dispatch's outcome, bound to the dispatch that produced it (its own model and occurrence), not to
-// whatever the scope decided since. Each dispatch's outcome counts once; an outcome with no open dispatch
-// is recorded and ignored. A late outcome (its occurrence already superseded) still counts against its
-// own lane, but schedules nothing.
-function __routeEikosOutcome(st, scope, ok, evidence, kind, source, label) {
-  const list = __routeDispatches[String(label || '')] || [];
-  const d = list.filter((x) => x.outcome == null)[0];     // one label's outcomes arrive in dispatch order
-  if (!d) {
-    __routeAudit.push({ event: 'outcome_unmatched', scope, label: label || '', ok, kind });
+// One dispatch's outcome, bound by the host-issued dispatch id that the dispatch site carried through
+// engineer, verify and result (never by label order, never by a worker-supplied id). An outcome with no
+// id, an unknown id, an id issued for another label or scope, or an id whose outcome is already in, is
+// recorded and changes nothing. A late outcome (its occurrence already superseded) still counts against
+// its own lane, but schedules nothing.
+function __routeEikosOutcome(st, scope, ok, evidence, kind, source, label, dispatchId) {
+  const d = dispatchId != null ? __routeDispatchById[dispatchId] : null;
+  const why = dispatchId == null ? 'no dispatch id' : !d ? 'unknown dispatch id'
+    : (d.label !== String(label || '') || d.scope !== scope) ? 'dispatch id issued for another label or scope'
+    : d.outcome != null ? `duplicate: outcome already recorded (${d.outcome})` : '';
+  if (why) {
+    __routeAudit.push({ event: 'outcome_ignored', scope, label: label || '', dispatch_id: dispatchId == null ? null : dispatchId,
+                        ok, kind, why });
     return;
   }
   d.outcome = ok ? 'ok' : kind;
@@ -1352,9 +1359,13 @@ function __routeEikosOutcome(st, scope, ok, evidence, kind, source, label) {
 }
 // <<ROUTING-INLINE-END>>
 
-async function agentT(p, o) {
+// `route`, when given, is a host-owned object the caller keeps with its pipeline context: agentT writes
+// the dispatch id the router issued (null if nothing was dispatched), and the caller passes it back with
+// the outcome.
+async function agentT(p, o, route) {
   if (!ROUTING_ON) return agentTCore(p, o);
   const pick = await __routePick(p, o);
+  if (route) route.dispatch_id = pick.skip ? null : (pick.dispatch_id || null);
   if (pick.skip) {
     __routeSkipped[(o && o.label) || ''] = true;
     log(`  [route] ${(o && o.label) || 'agent'} skipped — ${pick.reason || 'output-token cap reached'}.`);
@@ -1369,7 +1380,7 @@ async function agentT(p, o) {
   // every other worker the one deterministic failure visible at this layer is no result at all.
   if (pick.scope && !/^(eng|deep):/.test(pick.scope) && r == null) {
     __routeOutcome(pick.scope, false, 'no result (timeout, API fault or lost StructuredOutput)', 'no_result',
-                   (o && o.label) || '', (o && o.label) || '');
+                   (o && o.label) || '', (o && o.label) || '', pick.dispatch_id);
   }
   return r;
 }
@@ -2381,6 +2392,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
           `loop and push to the TARGET; keep the best correct version.`
         : `Then Read ${WORKFLOW_DIR}/roles/engineer.md and ${WORKFLOW_DIR}/knowledge/self_monitoring.md and the ` +
           `knowledge files for your specialty, and follow them.`;
+      const route = ROUTING_ON ? {} : null;   // receives this dispatch's host-issued id (agentT)
       if (ROUTING_ON) {                       // the Eikos decider's card reads the direction, never the prompt
         const xs = Number(d.expected_speedup);
         __routeTasks[`${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`] = {
@@ -2428,12 +2440,12 @@ ${cfg({
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
       expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
-      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
-    ).then((eng) => ({ d, eng }));
+      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }, route
+    ).then((eng) => ({ d, eng, route }));
     },
 
     (prev) => {
-      const { d, eng } = prev;
+      const { d, eng, route } = prev;
       const patch = `${d.out_dir}/best_patch.diff`;
       // Harvest is MEASUREMENT-anchored, not return-value-anchored. An engineer only writes
       // best_patch.diff when it beat the floor (the Optimize prompt: "Save best_patch.diff ... when
@@ -2451,7 +2463,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR) &&
         eng.status !== 'invalid_measurement' && eng.measurement_valid === true;
       if (trustworthyBelowBaseline) {
-        return { d, eng, ver: null };
+        return { d, eng, ver: null, route };
       }
       const recovered = !eng || eng.status === 'failed';
       if (recovered) log(`Round ${round} dir ${d.id}: engineer return ${eng ? 'failed' : 'missing'} — ` +
@@ -2465,7 +2477,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then((ver) => ({ d, eng, ver, patch }));
+      ).then((ver) => ({ d, eng, ver, patch, route }));
     }
   );
 
@@ -2491,7 +2503,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
          says(r.ver.correctness, 'fail')) ? 'work_product'
       : 'non_improvement';
     __routeOutcome(sc, verified.indexOf(r) >= 0, ev, kind, `${r.ver ? 'verify' : 'engineer'} ${r.d.id}`,
-                   `${kindTag} ${r.d.id}:${r.d.specialty}`);
+                   `${kindTag} ${r.d.id}:${r.d.specialty}`, r.route ? r.route.dispatch_id : null);
   }
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------

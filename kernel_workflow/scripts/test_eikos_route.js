@@ -29,7 +29,7 @@ function region(a, b) {
 }
 const ROUTING = region('// <<ROUTING-INLINE-START>>', '// <<ROUTING-INLINE-END>>');
 const SHADOW = region('// <<EIKOS-SHADOW-START>>', '// <<EIKOS-SHADOW-END>>');
-const AGENT_T = SRC.slice(SRC.indexOf('async function agentT(p, o) {'), SRC.indexOf('async function agentTCore(p, o) {'));
+const AGENT_T = SRC.slice(SRC.indexOf('async function agentT(p, o, route) {'), SRC.indexOf('async function agentTCore(p, o) {'));
 
 // ---- fake Eikos server -------------------------------------------------------------------------
 const QID_LANE = {};
@@ -76,7 +76,7 @@ function lane(args, opts) {
   }
   const names = ['__routePick', '__routeOutcome', '__routeReduce', '__routeReport', '__routeCard', '__routeScopeClass',
     '__routeParseEstimates', '__routeHostInput', '__routeLadder', '__routeAudit', '__routeTasks', '__routeSkipped',
-    '__routeDispatches', '__routeConfigErrors', 'ROUTE_EIKOS_ON', 'ROUTE_EIKOS_TAU', 'ROUTE_EIKOS_MAX_CONSULTS',
+    '__routeDispatches', '__routeDispatchById', '__routeConfigErrors', 'ROUTE_EIKOS_ON', 'ROUTE_EIKOS_TAU', 'ROUTE_EIKOS_MAX_CONSULTS',
     'ROUTE_PRICE_ORDER', 'ROUTE_LANES', 'ROUTE_CLASS_FLOOR', 'agentT', 'eikosSha256', 'eikosCanonical',
     'EIKOS_DECISION_FIELDS', 'ROUTE_DECIDER'];
   const ret = 'return {' + names.map((s) => `${s}: (typeof ${s} !== 'undefined' ? ${s} : undefined)`).join(', ') +
@@ -232,18 +232,18 @@ async function main() {
       L.__routeDispatches[ENG('r2_d1')].length === 2 && L.__routeDispatches[ENG('r2_d1')].every((d) => d.seq === 1));
 
     // failure kinds, each bound to its own dispatch (the label's first open dispatch)
-    L.__routeOutcome('eng:memory', false, 'verify status=invalid_measurement', 'invalid_measurement', 'verify r2_d1', ENG('r2_d1'));
-    L.__routeOutcome('eng:memory', false, 'engineer returned nothing', 'no_result', 'engineer r2_d1', ENG('r2_d1'));
+    L.__routeOutcome('eng:memory', false, 'verify status=invalid_measurement', 'invalid_measurement', 'verify r2_d1', ENG('r2_d1'), pick.dispatch_id);
+    L.__routeOutcome('eng:memory', false, 'engineer returned nothing', 'no_result', 'engineer r2_d1', ENG('r2_d1'), again.dispatch_id);
     ok('an invalid measurement and a missing result each close one dispatch and change nothing',
       L.__routeDispatches[ENG('r2_d1')].map((d) => d.outcome).join() === 'invalid_measurement,no_result' &&
       JSON.stringify(L.__routeLadder['eng:memory'].fails_by_lane) === '{}' && all(L, 'fail').every((e) => !e.reconsult_next_attempt));
-    await L.__routePick('optimize prompt', W(ENG('r2_d1')));
+    const p3 = await L.__routePick('optimize prompt', W(ENG('r2_d1')));
     ok('...and ask nothing', L.carried.length === 1);
-    L.__routeOutcome('eng:memory', false, 'verify status=apply_failed', 'work_product', 'verify r2_d1', ENG('r2_d1'));
-    L.__routeOutcome('eng:memory', false, 'verify status=apply_failed', 'work_product', 'verify r2_d1', ENG('r2_d1'));
+    L.__routeOutcome('eng:memory', false, 'verify status=apply_failed', 'work_product', 'verify r2_d1', ENG('r2_d1'), p3.dispatch_id);
+    L.__routeOutcome('eng:memory', false, 'verify status=apply_failed', 'work_product', 'verify r2_d1', ENG('r2_d1'), p3.dispatch_id);
     ok('a work-product failure counts once against its own lane; a duplicate outcome is recorded and ignored',
       L.__routeLadder['eng:memory'].fails_by_lane[S5] === 1 && L.__routeLadder['eng:memory'].floor_rank === 2 &&
-      last(L, 'outcome_unmatched') && last(L, 'outcome_unmatched').kind === 'work_product');
+      /duplicate/.test(last(L, 'outcome_ignored').why) && last(L, 'outcome_ignored').dispatch_id === p3.dispatch_id);
     server.probs = P(0.1, 0.99, 0.95, 0.97);
     const p4 = await L.__routePick('optimize prompt', W(ENG('r2_d1')));
     const c4 = JSON.parse(server.seen[server.seen.length - 1].state);
@@ -252,7 +252,7 @@ async function main() {
       p4.model === O55 && L.carried.length === 2 && d4.seq === 2 && c4.occurrence.trigger === 'work_product_failure' &&
       c4.occurrence.prior.slice(-1)[0].outcome === 'work_product' && c4.occurrence.prior.slice(-1)[0].lane === S5 &&
       c4.occurrence.prior.slice(-1)[0].source === 'verify r2_d1' && d4.reduce.allowed.indexOf(S5) < 0 && L.topUsed() === 1);
-    L.__routeOutcome('eng:memory', false, 'verify status=correctness_failed', 'work_product', 'verify r2_d1', ENG('r2_d1'));
+    L.__routeOutcome('eng:memory', false, 'verify status=correctness_failed', 'work_product', 'verify r2_d1', ENG('r2_d1'), p4.dispatch_id);
     const p5 = await L.__routePick('optimize prompt', W(ENG('r2_d1')));
     ok('after the top lane fails a code change nothing is allowed: deferred without asking Eikos',
       p5.skip === true && p5.deferred === true && L.carried.length === 2 && last(L, 'decide').backend === 'not_asked_no_feasible_lane');
@@ -277,16 +277,17 @@ async function main() {
       L.setClock({ left_s: 3000 });
       direction(L, 'r1_d0');
       const out = [];
-      out.push((await L.__routePick('p0', W(ENG('r1_d0')))).model);
-      L.__routeOutcome('eng:memory', false, 'verify status=apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'));
-      L.__routeOutcome('eng:memory', false, 'verify status=apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'));
+      const a = await L.__routePick('p0', W(ENG('r1_d0')));
+      out.push(a.model);
+      L.__routeOutcome('eng:memory', false, 'verify status=apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'), a.dispatch_id);
+      L.__routeOutcome('eng:memory', false, 'verify status=apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'), a.dispatch_id);
       out.push((await L.__routePick('p0', W(ENG('r1_d0')))).model);          // escalated; the top lane is reserved
       direction(L, 'r1_d1', 'compute');
       out.push((await L.__routePick('p1', W(ENG('r1_d1', 'compute')))).model); // another scope starts at its own floor
       return { out, top: L.topUsed(), fails: L.__routeLadder['eng:memory'].fails_by_lane,
                floor: L.__routeLadder['eng:memory'].floor_rank,
                decisions: all(L, 'decide').map((e) => [e.task_key, e.seq, e.decided, e.logical_key, e.estimates]),
-               fail_events: all(L, 'fail').length, unmatched: all(L, 'outcome_unmatched').length };
+               fail_events: all(L, 'fail').length, ignored: all(L, 'outcome_ignored').length };
     }
     const journal = new Map();
     let misses = 0;
@@ -302,7 +303,7 @@ async function main() {
     const relived = await script(L3);
     ok('the run escalates past the failed Sonnet, counts the duplicate outcome once, and another scope starts at its own floor',
       JSON.stringify(recorded.out) === JSON.stringify([S5, O55, S5]) && recorded.top === 1 && recorded.fails[S5] === 1 &&
-      recorded.floor === 2 && recorded.fail_events === 1 && recorded.unmatched === 1);
+      recorded.floor === 2 && recorded.fail_events === 1 && recorded.ignored === 1);
     ok('a resumed run with the Workflow cache asks nothing new: the same frozen cards and host inputs',
       misses === 0 && journal.size === 3 && server.seen.length === seenBefore);
     ok('...and reaches the same decisions, quota use, failure counts, floor and attributions',
@@ -328,11 +329,12 @@ async function main() {
     const L = lane({ route_max_top_escalations: '5' });
     direction(L, 'r1_d0', 'compute');
     const lbl = ENG('r1_d0', 'compute');
-    const models = [(await L.__routePick('p', W(lbl))).model];
-    L.__routeOutcome('eng:compute', false, 'apply_failed', 'work_product', 'verify r1_d0', lbl);
-    models.push((await L.__routePick('p', W(lbl))).model);
-    L.__routeOutcome('eng:compute', false, 'correctness_failed', 'work_product', 'verify r1_d0', lbl);
-    models.push((await L.__routePick('p', W(lbl))).model);
+    const picks = [await L.__routePick('p', W(lbl))];
+    L.__routeOutcome('eng:compute', false, 'apply_failed', 'work_product', 'verify r1_d0', lbl, picks[0].dispatch_id);
+    picks.push(await L.__routePick('p', W(lbl)));
+    L.__routeOutcome('eng:compute', false, 'correctness_failed', 'work_product', 'verify r1_d0', lbl, picks[1].dispatch_id);
+    picks.push(await L.__routePick('p', W(lbl)));
+    const models = picks.map((x) => x.model);
     const d = last(L, 'decide');
     ok('Sonnet fails, then Opus 4.6 (the only qualifying lane) fails, then Opus 5.5 is still allowed',
       JSON.stringify(models) === JSON.stringify([S5, O46, O55]));
@@ -347,7 +349,7 @@ async function main() {
                          setTimeout: (fn, ms) => setTimeout(fn, hang ? 5 : ms) });
     direction(L, 'r1_d0');
     const a = await L.__routePick('p', W(ENG('r1_d0')));
-    L.__routeOutcome('eng:memory', false, 'apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'));
+    L.__routeOutcome('eng:memory', false, 'apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'), a.dispatch_id);
     hang = true;
     const b = await L.__routePick('p', W(ENG('r1_d0')));
     ok('Sonnet fails a code change, the next consultation times out: Opus 5.5, never Sonnet again',
@@ -370,7 +372,7 @@ async function main() {
     server.probs = P(0.1, 0.5, 0.5, 0.97);
     direction(L, 'r1_d2');
     const c = await L.__routePick('p2', W(ENG('r1_d2')));
-    L.__routeOutcome('eng:memory', false, 'first task patch did not apply', 'work_product', 'verify r1_d0', ENG('r1_d0'));
+    L.__routeOutcome('eng:memory', false, 'first task patch did not apply', 'work_product', 'verify r1_d0', ENG('r1_d0'), a.dispatch_id);
     const f0 = last(L, 'fail');
     ok('a delayed failure is charged to its own dispatch\'s lane, not the scope\'s latest decision',
       c.model === O55 && f0.model === S5 && f0.dispatch_id === a.dispatch_id && f0.seq === 1 &&
@@ -380,13 +382,13 @@ async function main() {
     ok('a repeated dispatch whose lane a failure has since excluded is re-reduced on its own estimates, recorded',
       b2.model === O55 && ov.kind === 'decided_lane_no_longer_feasible' && ov.from === S5 && ov.to === O55 &&
       L.carried.length === 3);
-    L.__routeOutcome('eng:memory', false, 'engineer reported 0.98x <= floor 1.05', 'non_improvement', 'engineer r1_d1', ENG('r1_d1'));
+    L.__routeOutcome('eng:memory', false, 'engineer reported 0.98x <= floor 1.05', 'non_improvement', 'engineer r1_d1', ENG('r1_d1'), b.dispatch_id);
     const b3 = await L.__routePick('p1', W(ENG('r1_d1')));
-    ok('the first open dispatch takes the outcome; a non-improvement asks again (a new occurrence) without exclusion',
+    ok('the outcome closes exactly its own dispatch; a non-improvement asks again (a new occurrence) without exclusion',
       L.__routeDispatches[ENG('r1_d1')][0].outcome === 'non_improvement' && L.carried.length === 4 &&
       last(L, 'decide').trigger === 'non_improvement' && last(L, 'decide').seq === 4 && b3.model === O55 &&
       last(L, 'decide').reduce.excluded.join() === S5);
-    L.__routeOutcome('eng:memory', false, 'late: patch did not apply', 'work_product', 'verify r1_d1', ENG('r1_d1'));
+    L.__routeOutcome('eng:memory', false, 'late: patch did not apply', 'work_product', 'verify r1_d1', ENG('r1_d1'), b2.dispatch_id);
     const late = last(L, 'fail');
     ok('a late failure from a superseded occurrence counts against its own lane and schedules nothing',
       late.late === true && late.seq === 2 && late.model === O55 && late.reconsult_next_attempt === false &&
@@ -394,6 +396,87 @@ async function main() {
     const b4 = await L.__routePick('p1', W(ENG('r1_d1')));
     ok('...but the next dispatch still obeys it: no new question, Opus 5.5 now excluded, deferred',
       L.carried.length === 4 && b4.skip === true && b4.deferred === true && last(L, 'override').to === null);
+  }
+
+  // ---- outcomes bind to the exact host-issued dispatch id (Astra, 2a1257f review) ------------------------
+  {
+    // 1. A duplicate of d1's failure after d2 has started under the same label must not close d2.
+    server.probs = P(0.1, 0.99, 0.5, 0.5);
+    const L = lane();
+    direction(L, 'r1_d0');
+    const d1 = await L.__routePick('p', W(ENG('r1_d0')));
+    L.__routeOutcome('eng:memory', false, 'apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'), d1.dispatch_id);
+    server.probs = P(0.1, 0.5, 0.5, 0.97);
+    const d2 = await L.__routePick('p', W(ENG('r1_d0')));
+    L.__routeOutcome('eng:memory', false, 'apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'), d1.dispatch_id);
+    const st = L.__routeLadder['eng:memory'];
+    ok('a duplicate of an earlier dispatch\'s failure, after a later dispatch started, changes nothing and leaves it open',
+      d1.model === S5 && d2.model === O55 && L.__routeDispatchById[d2.dispatch_id].outcome === null &&
+      st.fails_by_lane[S5] === 1 && !(O55 in st.fails_by_lane) && st.floor_rank === 2 &&
+      /duplicate/.test(last(L, 'outcome_ignored').why) && all(L, 'fail').length === 1);
+  }
+  {
+    // 2. Task A on Sonnet and a changed task B on Opus 5.5 under one label; B's success arrives first.
+    server.probs = P(0.1, 0.99, 0.5, 0.5);
+    const L = lane();
+    direction(L, 'r1_d0');
+    const a = await L.__routePick('task A', W(ENG('r1_d0')));
+    server.probs = P(0.1, 0.5, 0.5, 0.97);
+    direction(L, 'r1_d0', 'memory', { prompt: 'A different change to the same kernel.' });
+    const b = await L.__routePick('task B', W(ENG('r1_d0')));
+    L.__routeOutcome('eng:memory', true, 'verified', 'non_improvement', 'verify r1_d0', ENG('r1_d0'), b.dispatch_id);
+    L.__routeOutcome('eng:memory', false, 'apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'), a.dispatch_id);
+    const st = L.__routeLadder['eng:memory'];
+    ok('out-of-order outcomes keep their own dispatch: B\'s success closes B, A\'s failure is charged to Sonnet',
+      a.model === S5 && b.model === O55 && L.__routeDispatchById[b.dispatch_id].outcome === 'ok' &&
+      L.__routeDispatchById[a.dispatch_id].outcome === 'work_product' && st.fails_by_lane[S5] === 1 &&
+      !(O55 in st.fails_by_lane) && last(L, 'fail').dispatch_id === a.dispatch_id && last(L, 'fail').model === S5);
+  }
+  {
+    server.probs = P(0.1, 0.99, 0.5, 0.5);
+    const L = lane();
+    direction(L, 'r1_d0'); direction(L, 'r1_d1');
+    const a = await L.__routePick('p', W(ENG('r1_d0')));
+    await L.__routePick('p', W(ENG('r1_d1')));
+    L.__routeOutcome('eng:memory', false, 'x', 'work_product', 'verify r1_d0', ENG('r1_d0'));
+    L.__routeOutcome('eng:memory', false, 'x', 'work_product', 'verify r1_d0', ENG('r1_d0'), 'd999');
+    L.__routeOutcome('eng:memory', false, 'x', 'work_product', 'verify r1_d1', ENG('r1_d1'), a.dispatch_id);
+    L.__routeOutcome('eng:compute', false, 'x', 'work_product', 'verify r1_d0', ENG('r1_d0'), a.dispatch_id);
+    const why = all(L, 'outcome_ignored').map((e) => e.why);
+    ok('no id, an unknown id, or an id issued for another label is recorded and ignored: nothing inferred from order',
+      why.length === 3 && why[0] === 'no dispatch id' && why[1] === 'unknown dispatch id' && /another label/.test(why[2]) &&
+      Object.values(L.__routeDispatchById).every((d) => d.outcome === null) &&
+      JSON.stringify(L.__routeLadder['eng:memory'].fails_by_lane) === '{}');
+  }
+  {
+    // agentT hands the issued id to the caller's host-owned context and binds its own no-result outcome.
+    server.probs = P(0.1, 0.99, 0.5, 0.5);
+    const L = lane({}, { worker: (p, o) => (/^verify/.test(o.label) ? null : { ok: true }) });
+    direction(L, 'r1_d0');
+    const route = {};
+    await L.agentT('p', W(ENG('r1_d0')), route);
+    await L.agentT('verify d0', W('verify r1_d0', 'Verify'));
+    const v = last(L, 'fail');
+    ok('agentT writes the dispatch id it was issued into the caller\'s context',
+      typeof route.dispatch_id === 'string' && L.__routeDispatchById[route.dispatch_id].label === ENG('r1_d0'));
+    ok('a non-engineer with no result is charged to its own dispatch id, as no_result', v && v.kind === 'no_result' &&
+      L.__routeDispatchById[v.dispatch_id].label === 'verify r1_d0');
+    const spent = { v: 0 };
+    const K = lane({ route_max_output_tokens: '10' }, { budget: { spent: () => spent.v } });
+    direction(K, 'r1_d0');
+    spent.v = 50;
+    const r2 = { dispatch_id: 'stale' };
+    await K.agentT('p', W(ENG('r1_d0')), r2);
+    ok('a skipped dispatch leaves the context with no id', r2.dispatch_id === null);
+  }
+  {
+    // The engineer pipeline carries the context from dispatch through verify to the outcome call.
+    const eng = SRC.slice(SRC.indexOf('const results = await pipeline('), SRC.indexOf('// --- (d) Build candidate list'));
+    ok('the engineer site passes a host-owned context to agentT, keeps it through verify, and reports its id',
+      /const route = ROUTING_ON \? \{\} : null;/.test(eng) && /schema: ENG_SCHEMA \}, route\s*\)\.then\(\(eng\) => \(\{ d, eng, route \}\)\)/.test(eng) &&
+      /const \{ d, eng, route \} = prev;/.test(eng) && /return \{ d, eng, ver: null, route \};/.test(eng) &&
+      /\.then\(\(ver\) => \(\{ d, eng, ver, patch, route \}\)\)/.test(eng) &&
+      /r\.route \? r\.route\.dispatch_id : null\);/.test(eng));
   }
 
   // ---- quota and the kill switch ---------------------------------------------------------------------
@@ -419,7 +502,7 @@ async function main() {
     ok('after Opus 5.5 is dispatched, a new task in the scope with the quota used is deferred, not sent to Sonnet',
       a.model === O55 && L.__routeLadder['eng:memory'].effective_rank === 3 && b.skip === true && b.deferred === true &&
       last(L, 'decide').backend === 'not_asked_no_feasible_lane' && L.carried.length === 1);
-    L.__routeOutcome('eng:memory', false, 'engineer reported 0.98x <= floor 1.05', 'non_improvement', 'engineer r1_d0', ENG('r1_d0'));
+    L.__routeOutcome('eng:memory', false, 'engineer reported 0.98x <= floor 1.05', 'non_improvement', 'engineer r1_d0', ENG('r1_d0'), a.dispatch_id);
     const c = await L.__routePick('p', W(ENG('r1_d0')));
     ok('...and so is the next attempt after its non-improvement', c.skip === true && c.deferred === true &&
       last(L, 'decide').trigger === 'non_improvement' && L.carried.length === 1);
