@@ -173,6 +173,22 @@
    "notes": "vocabulary undeclared",
    "mode": "record_only",
    "capture": "not_implemented"
+  },
+  {
+   "id": "RT1",
+   "class": "judgment",
+   "question": "Routing decider: how complex is this worker task, how likely is the current lane to finish it, what next, has it drifted, is it risky",
+   "options": [
+    "complexity: small|medium|high|escalate",
+    "action: continue|retry|verify|escalate|complete",
+    "scope_drift: bool",
+    "confidence: 0..1",
+    "risk_flag: none|security|data_loss"
+   ],
+   "option_rule": "enums and range in ROUTE_DECISION_SCHEMA (kernel_lane.js); the host ladder (__routeStep) applies the code-owned gate, failure triggers, floors, quota and kill switch",
+   "notes": "expt/3-routing's Sonnet 5.5 decider (route:classify), live only when routing=1 with route_decider=sonnet; its confidence is an uncalibrated verbal estimate. Not an Eikos question; listed so the routing judgment is registered",
+   "mode": "record_only",
+   "capture": "not_implemented"
   }
  ],
  "files": {
@@ -1426,6 +1442,36 @@
      },
      "*": {
       "class": "open_object"
+     }
+    }
+   },
+   "ROUTE_DECISION_SCHEMA": {
+    "call_sites": [
+     [
+      "route:classify ${}",
+      ""
+     ]
+    ],
+    "fields": {
+     "complexity": {
+      "class": "judgment",
+      "decision": "RT1"
+     },
+     "action": {
+      "class": "judgment",
+      "decision": "RT1"
+     },
+     "scope_drift": {
+      "class": "judgment",
+      "decision": "RT1"
+     },
+     "confidence": {
+      "class": "judgment",
+      "decision": "RT1"
+     },
+     "risk_flag": {
+      "class": "judgment",
+      "decision": "RT1"
      }
     }
    }
