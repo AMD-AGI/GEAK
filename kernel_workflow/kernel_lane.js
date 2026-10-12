@@ -926,10 +926,10 @@ async function __routePick(p, o) {
 // scope's next dispatch. `evidence` must be compact: status words and numbers, never a log.
 // `kind` names the failure: work_product, non_improvement, invalid_measurement or no_result. The Sonnet
 // decider counts every failure as before and only records the kind; the Eikos decider treats them apart.
-function __routeOutcome(scope, ok, evidence, kind, source) {
+function __routeOutcome(scope, ok, evidence, kind, source, label) {
   const st = __routeLadder[scope];
   if (!st) return;
-  if (st.decider === 'eikos') return __routeEikosOutcome(st, scope, ok, evidence, kind || 'work_product', source);
+  if (st.decider === 'eikos') return __routeEikosOutcome(st, scope, ok, evidence, kind || 'work_product', source, label);
   if (ok) { st.fails = 0; return; }
   st.fails++;
   st.pending = true;
@@ -945,57 +945,111 @@ function __routeReport() {
            top_dispatches: __routeTopUsed, killed: __routeKilled, spent_output_tokens: __routeSpent(),
            session_output_tokens_at_start: ROUTE_SPENT_AT_START,
            ladder: __routeLadder, audit: __routeAudit,
+           config_errors: __routeConfigErrors,   // arguments the lane could not use, and what it used instead
            // route_decider=eikos only: its settings, all reported as unvalidated experimental values.
-           eikos: ROUTE_EIKOS_ON ? { question: ROUTE_EIKOS_QUESTION + '.v1', tau: ROUTE_EIKOS_TAU,
-             tau_status: 'unvalidated_experimental', price_order: ROUTE_PRICE_ORDER, class_floor: ROUTE_CLASS_FLOOR,
-             class_max_fails: ROUTE_CLASS_MAX_FAILS, carrier_model: ROUTE_EIKOS_CARRIER_MODEL,
-             carrier_timeout_ms: ROUTE_EIKOS_CARRIER_TIMEOUT_MS, consults: __routeConsults,
-             max_consults: ROUTE_EIKOS_MAX_CONSULTS,
-             decision_scope: 'code changes are reassessed per direction; evidence and paperwork scopes keep one decision until a failure' } : undefined };
+           eikos: ROUTE_EIKOS_ON ? { question: ROUTE_EIKOS_QUESTION_VERSION, policy: ROUTE_EIKOS_POLICY_VERSION,
+             reducer: ROUTE_REDUCER_VERSION, tau: ROUTE_EIKOS_TAU, tau_status: 'unvalidated_experimental',
+             policy_rank: ROUTE_LANES, price_order: ROUTE_PRICE_ORDER, price_order_is: 'list-price proxy, not predicted task cost',
+             class_floor_rank: ROUTE_CLASS_FLOOR, class_max_fails: ROUTE_CLASS_MAX_FAILS,
+             carrier_model: ROUTE_EIKOS_CARRIER_MODEL, carrier_timeout_ms: ROUTE_EIKOS_CARRIER_TIMEOUT_MS,
+             consults: __routeConsults, max_consults: ROUTE_EIKOS_MAX_CONSULTS, choices: __routeChoiceCounts(),
+             eligible_scopes: 'engineers with a registered direction; every other scope is routed by host policy',
+             units: 'consultation = one carrier call; dispatch = one agentT call (its transport retries included); occurrence = one frozen card' } : undefined };
 }
 // --- Eikos decider (route_decider=eikos; OFF unless chosen) --------------------------------------
-// Contract: research/eikos_ladder_routing_proposal_20261009.md rev 2, section 7 (Astra-reviewed). Eikos
-// never picks a lane. Through a transport-only carrier (it runs eikos_decide.py verbatim and relays the
-// JSON) Eikos returns one independent estimate per lane that the next attempt on that lane passes the
-// task's acceptance check; __routeReduce below, pure host code, applies every rule and picks the lane.
-// The per-class thresholds are UNVALIDATED EXPERIMENTAL settings and the report says so.
+// Contract: research/eikos_ladder_routing_proposal_20261009.md rev 2, section 7, plus Astra's S0 plan
+// review (2026-10-12). Eikos never picks a lane: through a transport-only carrier it returns one
+// independent estimate per lane that the next attempt on that lane meets the task's acceptance event
+// (for an engineer: verify finds the patch applies, is correct and beats the candidate floor).
+// __routeReduce, pure host code, applies every rule and picks the lane. Thresholds, classes and floors
+// are UNVALIDATED EXPERIMENTAL settings and the report says so.
+//
+// Units. A consultation is one carrier call (no carrier retries). A dispatch is one agentT() call; the
+// transport retries inside agentTCore are part of that dispatch, not new attempts. A decision
+// occurrence is one frozen card (`seq`); replaying it reuses it, and a new attempt after a completed one
+// is a new occurrence. Only a host-verified work-product failure counts against a lane.
 const ROUTE_EIKOS_ON = ROUTE_DECIDER === 'eikos';
 const ROUTE_EIKOS_QUESTION = 'lane_sufficiency';
-const ROUTE_EIKOS_TAU = (function () {
-  let t = A.route_eikos_tau;
-  if (typeof t === 'string') { try { t = JSON.parse(t); } catch (e) { t = null; } }
-  const out = { paperwork: 0.70, evidence: 0.80, code_change: 0.90 };
-  if (t && typeof t === 'object') {
-    Object.keys(out).forEach((k) => { const v = Number(t[k]); if (t[k] != null && Number.isFinite(v) && v > 0 && v <= 1) out[k] = v; });
+const ROUTE_EIKOS_QUESTION_VERSION = 'lane_sufficiency.v1';
+const ROUTE_EIKOS_POLICY_VERSION = 'lane_sufficiency.policy.v1';
+const ROUTE_REDUCER_VERSION = 'lane_reduce.v1';
+const __routeConfigErrors = [];
+if (['sonnet', 'eikos', 'jev'].indexOf(ROUTE_DECIDER) < 0) {
+  __routeConfigErrors.push(`route_decider=${JSON.stringify(ROUTE_DECIDER)} is unknown; the Sonnet decider is used`);
+}
+// The existing knobs keep their reviewed parsing; a value it would coerce is recorded, not hidden.
+['route_max_top_escalations', 'route_max_retries_per_lane', 'route_max_output_tokens'].forEach((k) => {
+  const v = A[k];
+  if (v != null && v !== '' && !(typeof v === 'number' ? Number.isInteger(v) && v >= 0 : /^\s*\d+\s*$/.test(String(v)))) {
+    __routeConfigErrors.push(`${k}=${JSON.stringify(v)} is not a nonnegative integer; it was coerced as before (see thresholds)`);
   }
+});
+if (A.route_conf_escalate != null && A.route_conf_escalate !== '' &&
+    !(Number.isFinite(Number(A.route_conf_escalate)) && Number(A.route_conf_escalate) >= 0 && Number(A.route_conf_escalate) <= 1)) {
+  __routeConfigErrors.push(`route_conf_escalate=${JSON.stringify(A.route_conf_escalate)} is not a number in [0, 1]`);
+}
+Object.keys(ROUTE_FLOORS).forEach((k) => {
+  const v = ROUTE_FLOORS[k];
+  if (!(Number.isInteger(Number(v)) && Number(v) >= 0 && Number(v) <= ROUTE_TOP)) {
+    __routeConfigErrors.push(`route_floors.${k}=${JSON.stringify(v)} is not a lane number 0..${ROUTE_TOP}; it was clamped`);
+  }
+});
+(function () {
+  let f = A.route_floors;
+  if (f == null || f === '') return;
+  if (typeof f === 'string') { try { f = JSON.parse(f); } catch (e) { f = null; } }
+  if (!f || typeof f !== 'object' || Array.isArray(f)) {
+    __routeConfigErrors.push('route_floors is not a JSON object of {scope: lane}; no floors are used');
+  }
+})();
+function __routeIntArg(name, dflt) {
+  const v = A[name];
+  if (v == null || v === '') return dflt;
+  const x = typeof v === 'number' ? v : (/^\s*\d+\s*$/.test(String(v)) ? Number(v) : NaN);
+  if (Number.isInteger(x) && x >= 0) return x;
+  __routeConfigErrors.push(`${name}=${JSON.stringify(v)} is not a nonnegative integer; ${dflt} is used`);
+  return dflt;
+}
+const ROUTE_EIKOS_TAU = (function () {
+  const out = { paperwork: 0.70, evidence: 0.80, code_change: 0.90 };
+  let t = A.route_eikos_tau;
+  if (t == null || t === '') return out;
+  if (typeof t === 'string') { try { t = JSON.parse(t); } catch (e) { t = null; } }
+  if (!t || typeof t !== 'object' || Array.isArray(t)) {
+    __routeConfigErrors.push('route_eikos_tau is not a JSON object; the built-in values are used');
+    return out;
+  }
+  Object.keys(t).forEach((k) => {
+    const v = t[k];
+    if (!(k in out)) __routeConfigErrors.push(`route_eikos_tau has an unknown class ${JSON.stringify(k)}; ignored`);
+    else if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 1) {
+      __routeConfigErrors.push(`route_eikos_tau.${k}=${JSON.stringify(v)} is not a number in [0, 1]; ${out[k]} is used`);
+    } else out[k] = v;
+  });
   return out;
 })();
-const ROUTE_EIKOS_MAX_CONSULTS = Math.max(0, __routeNum(A.route_eikos_max_consults, 40));
-const ROUTE_EIKOS_CARRIER_MODEL = String(A.route_eikos_carrier_model || 'claude-haiku-5-5');
-const ROUTE_EIKOS_CARRIER_TIMEOUT_MS = Math.max(10000, __routeNum(A.route_eikos_carrier_timeout_ms, 180000));
-// Declared list-price order (output $ per million: 0.50, 10, 20, 25). Neither the capability order nor
-// ROUTE_LANES: Opus 4.6 costs more than Opus 5.5. "Cheapest" and "at or above" are judged on this order.
+const ROUTE_EIKOS_MAX_CONSULTS = __routeIntArg('route_eikos_max_consults', 40);
+const ROUTE_EIKOS_CARRIER_MODEL = (typeof A.route_eikos_carrier_model === 'string' && A.route_eikos_carrier_model.trim())
+  ? A.route_eikos_carrier_model.trim() : 'claude-haiku-5-5';
+const ROUTE_EIKOS_CARRIER_TIMEOUT_MS = Math.max(10000, __routeIntArg('route_eikos_carrier_timeout_ms', 180000));
+// Host POLICY rank for floors and escalation: the existing lane numbering (ROUTE_LANES), so a numeric
+// operator floor keeps its meaning. A host policy, not a claim that capability rises with it.
+function __routeRank(m) { return ROUTE_LANES.indexOf(m); }
+// List-price proxy (output $ per million: 0.50, 10, 20, 25), used ONLY to choose among lanes already
+// allowed and feasible. Not predicted task cost: tokenizer, cache, retries and quota differ per lane.
 const ROUTE_PRICE_ORDER = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-opus-4-6'];
-const ROUTE_CLASS_FLOOR = { paperwork: 'claude-haiku-5-5', evidence: 'claude-sonnet-5-5', code_change: 'claude-sonnet-5-5' };
-// Work-product failures one lane may take before it is excluded: a code change climbs at once.
+const ROUTE_CLASS_FLOOR = { paperwork: 0, evidence: 1, code_change: 1 };        // policy rank
+// Work-product failures a lane may take in one scope before every lane at or below its rank is out:
+// a code change escalates at once; other classes get one retry. Counts never reset (finite policy).
 const ROUTE_CLASS_MAX_FAILS = { paperwork: 2, evidence: 2, code_change: 1 };
-const ROUTE_CLASS_TASK = {
-  code_change: { goal: 'Change the kernel source to make it faster along the stated direction, measure it, and leave a patch.',
-                 acceptance: 'An independent verify step finds the patch applies, the correctness check passes, and the measured speedup is above the candidate floor.',
-                 constraints: ['Work only in the private workspace the prompt names.', 'Use the GPU only through gpu_lock.sh.',
-                               'The engineer\'s own numbers are not accepted; verify re-measures.'] },
-  evidence: { goal: 'Run the stated measurement, profiling, verification or knowledge step and report it in the required structure.',
-              acceptance: 'A complete result in the required structure; a measuring step must report a valid measurement.',
-              constraints: ['Use the GPU only through gpu_lock.sh.', 'Report measurements, never estimates.'] },
-  paperwork: { goal: 'Carry out the stated bookkeeping step and report it in the required structure.',
-               acceptance: 'The step completes and returns a valid result in the required structure.',
-               constraints: ['Change only what the step names.'] },
-};
 const ROUTE_EIKOS_RUNTIME = 'claude-code workflow agent (Bash, Read, Write, Edit)';
-const __routeTasks = {};      // dispatch label -> structured task, registered at the dispatch site
-const __routeSkipped = {};    // dispatch labels the router skipped (kill switch or no feasible lane)
-let __routeClock = null;      // { left_s } as the round loop last measured it
+const __routeTasks = {};       // engineer dispatch label -> its direction, registered at the dispatch site
+const __routeSkipped = {};     // dispatch labels the router skipped (kill switch, deferral)
+const __routeDispatches = {};  // dispatch label -> [{ id, scope, task_key, seq, model, outcome }], in dispatch order
+const __routeLocks = {};       // scope -> tail of its decision chain (one decision at a time per scope)
+let __routeClock = null;       // { left_s } as the round loop last measured it
 let __routeConsults = 0;
+let __routeDispatchSeq = 0;
 
 function __routeScopeClass(scope) {
   const s = String(scope || '');
@@ -1004,65 +1058,73 @@ function __routeScopeClass(scope) {
   if (head === 'commit' || s === 'kb:cite') return 'paperwork';
   if (['benchmark_engineer', 'profile_engineer', 'reprofile', 'verify', 'warm_start', 'researcher', 'kb',
        'update_experience'].indexOf(head) >= 0) return 'evidence';
-  return 'code_change';       // unknown: the strictest class
+  return 'code_change';        // unknown: the strictest class
 }
-// Task identity inside one ladder: a code change is reassessed for every new direction (or, without
-// one, every new dispatch label); evidence and paperwork scopes keep a scope-level decision until a
-// failure, and the report says so.
-function __routeTaskKey(label, cls) {
-  if (cls !== 'code_change') return 'scope';
+// A task is what the next attempt is asked to do: its direction (or label), the whole dispatch prompt and
+// the requested effort. A change in any of them is a different attempt with its own occurrence, even
+// under the same direction ID.
+function __routeTaskKey(label, p, o) {
   const t = __routeTasks[label];
-  return t ? 'direction:' + t.id : 'label:' + String(label || '');
+  const who = t ? 'direction:' + t.id : 'label:' + String(label || '');
+  return who + ':' + eikosSha256(JSON.stringify([t || null, String(p == null ? '' : p), (o && o.effort) || null])).slice(0, 16);
 }
 function __routeRoundOf(label) {
   const m = /\br(\d+)(?:_d\d+)?\b/.exec(String(label || ''));
   return m ? parseInt(m[1], 10) : 0;
 }
-function __routeGoal(p, cls, task) {
-  if (task) return { text: ROUTE_CLASS_TASK[cls].goal, source: 'direction' };
-  const m = /^You are the [A-Za-z0-9_]+\. PHASE=[A-Za-z0-9_.-]+\.\n[\s\S]*?Do all filesystem\/shell work yourself \(Bash\/Read\/Write\)\. ([\s\S]*?)\n\n## Inputs/.exec(String(p == null ? '' : p));
-  if (m && m[1].trim()) return { text: m[1].trim(), source: 'role_intro' };
-  return { text: ROUTE_CLASS_TASK[cls].goal, source: 'host_template' };
+function __routeOpFloorRank(scope) {
+  const f = ROUTE_FLOORS[scope];
+  return f == null ? 0 : Math.max(0, Math.min(ROUTE_TOP, __routeNum(f, 0)));
 }
-// The card limits are eikos_decide.py's: a card that does not fit is never cut, it is ineligible.
-function __routeCardProblem(c) {
-  const t = c.task, d = t.direction;
-  if (t.goal.length > 1500) return 'goal over 1500 characters';
-  if (t.acceptance.length > 600) return 'acceptance over 600 characters';
-  if (d && (d.prompt.length > 4000 || d.title.length > 300 || String(d.id).length > 40 || d.focus_files.length > 20 ||
-            d.focus_files.some((f) => f.length > 200 || !f.length))) return 'direction does not fit the card';
-  if (c.scope.length > 160 || c.role.length > 80 || c.phase.length > 40) return 'scope, role or phase too long';
-  if (JSON.stringify(c).length > 8000) return 'card over 8000 characters';
-  return '';
-}
-// The frozen card for one decision occurrence. It carries the task, its acceptance check, prior
-// attempts (observed, with their source), the budget and the lane configuration -- never a routing
-// answer, its rationale, or an outcome of this occurrence.
-function __routeCard(p, o, scope, st, cls) {
+// The frozen card for one occurrence. S0 has an explicit task projection only for engineers with a
+// registered direction: the direction object goes in verbatim (bounded, never cut), the WHOLE dispatch
+// prompt only as its digest and length, which says nothing about its meaning. Every other scope is
+// ineligible and routed by host policy. The card never holds a routing answer or an outcome of itself.
+function __routeCard(p, o, scope, cls, occ) {
   const label = String((o && o.label) || '');
-  const task = __routeTasks[label] || null;
-  const goal = __routeGoal(p, cls, task);
-  const trigger = !st ? 'first_sight'
-    : st.lastKind === 'work_product' ? 'work_product_failure'
-    : st.lastKind === 'non_improvement' ? 'non_improvement' : 'changed_task';
+  const d = __routeTasks[label];
+  if (!d) return { card: null, ineligible: 'no task projection for this scope (S0 asks only for engineers with a registered direction)' };
+  const floor = typeof CANDIDATE_FLOOR !== 'undefined' ? CANDIDATE_FLOOR : 'configured';
+  const prompt = String(p == null ? '' : p);
   const hasDeadline = typeof DEADLINE_EPOCH !== 'undefined' && !!DEADLINE_EPOCH;
   const clk = __routeClock && Number.isFinite(__routeClock.left_s) ? __routeClock : null;
   const card = {
     card_version: 1, scope, scope_class: cls, role: label.split(/[ :]/)[0] || 'agent',
-    phase: String((o && o.phase) || ''), round: __routeRoundOf(label),
-    occurrence: { seq: (st ? st.consults : 0) + 1, trigger, prior: st ? st.history.slice(-6) : [] },
-    task: { goal: goal.text, goal_source: goal.source, acceptance: ROUTE_CLASS_TASK[cls].acceptance,
-            constraints: ROUTE_CLASS_TASK[cls].constraints.slice(), direction: task,
-            prompt_sha256: eikosSha256(String(p == null ? '' : p)), prompt_chars: String(p == null ? '' : p).length },
+    phase: String((o && o.phase) || ''), round: __routeRoundOf(label), occurrence: occ,
+    task: {
+      goal: 'Change the kernel source along this direction to make it faster, measure it, and leave best_patch.diff.',
+      goal_source: 'direction',
+      acceptance: `An independent verify step finds that the patch applies, the correctness check passes, and the measured speedup is above the candidate floor (${floor}). A correct patch that does not beat the floor does not meet this event.`,
+      constraints: ['Work only in the private workspace the dispatch names.', 'Use the GPU only through gpu_lock.sh.',
+                    'The engineer\'s own numbers are not accepted; verify re-measures.'],
+      direction: d, dispatch_prompt_sha256: eikosSha256(prompt), dispatch_prompt_chars: prompt.length },
     budget: { directions_used: typeof dispatched !== 'undefined' ? dispatched : 0,
               directions_budget: typeof BUDGET !== 'undefined' ? BUDGET : 1,
               minutes_left: hasDeadline && clk ? Math.max(0, Math.round(clk.left_s / 60)) : 'unknown',
               minutes_left_source: !hasDeadline ? 'no_deadline' : (clk ? 'round_clock' : 'not_recorded') },
-    config: { lanes: ROUTE_LANES.slice(), effort: (o && o.effort) || null, runtime: ROUTE_EIKOS_RUNTIME },
+    config: { lanes: ROUTE_LANES.slice(), effort: (o && o.effort) || null, runtime: ROUTE_EIKOS_RUNTIME,
+              attempt_timeout_s: (typeof AGENT_TIMEOUT_MS !== 'undefined' && AGENT_TIMEOUT_MS > 0) ? Math.round(AGENT_TIMEOUT_MS / 1000) : 'unknown',
+              transport_retries: typeof AGENT_RETRIES !== 'undefined' ? AGENT_RETRIES : 0 },
   };
-  return { card, trigger, ineligible: __routeCardProblem(card) };
+  const why = d.prompt.length > 4000 || d.title.length > 300 || String(d.id).length > 40 || d.focus_files.length > 20 ||
+    d.focus_files.some((f) => f.length > 200 || !f.length) ? 'the direction does not fit the card'
+    : (scope.length > 160 || card.phase.length > 40) ? 'scope or phase too long'
+    : JSON.stringify(card).length > 8000 ? 'card over 8000 characters' : '';
+  return { card, ineligible: why };
 }
-// '<lane>=<p>;...' in ROUTE_LANES order, every lane once, every p a finite number in [0, 1]; else null.
+// The reduction's inputs, frozen before the consultation and persisted with it (--host-json).
+function __routeHostInput(scope, cls) {
+  const st = __routeLadder[scope];
+  const fails = st ? st.fails_by_lane : {};
+  return { reducer_version: ROUTE_REDUCER_VERSION, scope_class: cls, tau: ROUTE_EIKOS_TAU[cls],
+           policy_rank: ROUTE_LANES.slice(), price_order: ROUTE_PRICE_ORDER.slice(),
+           class_floor_rank: ROUTE_CLASS_FLOOR[cls], operator_floor_rank: __routeOpFloorRank(scope),
+           scope_floor_rank: st ? st.floor_rank : ROUTE_CLASS_FLOOR[cls],
+           excluded: ROUTE_LANES.filter((m) => (fails[m] || 0) >= ROUTE_CLASS_MAX_FAILS[cls]),
+           top_quota_left: Math.max(0, ROUTE_MAX_TOP_DISPATCHES - __routeTopUsed), available: ROUTE_LANES.slice() };
+}
+// Python's repr of a probability: '0.31', '1.0', '5e-05', '1.5e-07'. No sign, no prefix parsing.
+const ROUTE_PROB_RE = /^(?:[01]\.[0-9]+|[0-9](?:\.[0-9]+)?e-[0-9]+)$/;
 function __routeParseEstimates(s) {
   if (typeof s !== 'string') return null;
   const parts = s.split(';');
@@ -1070,22 +1132,24 @@ function __routeParseEstimates(s) {
   const out = {};
   for (let i = 0; i < parts.length; i++) {
     const kv = parts[i].split('=');
-    const v = kv.length === 2 && /^[0-9.eE+-]+$/.test(kv[1]) ? Number(kv[1]) : NaN;
-    if (kv[0] !== ROUTE_LANES[i] || !Number.isFinite(v) || v < 0 || v > 1) return null;
+    if (kv.length !== 2 || kv[0] !== ROUTE_LANES[i] || !ROUTE_PROB_RE.test(kv[1])) return null;
+    const v = Number(kv[1]);
+    if (!Number.isFinite(v) || v < 0 || v > 1) return null;
     out[kv[0]] = v;
   }
   return out;
 }
-// One consultation: the carrier runs ONE fixed command (built here) and relays its JSON. It is called
-// with agent() directly, so it is never routed itself. One attempt, its own wait bound, no retries; the
-// run's consultations are capped. Everything the host acts on is checked here against digests.
-async function __routeEikosConsult(card) {
+// One consultation: the carrier runs ONE fixed command built here and relays its JSON. It is called with
+// agent() directly, so it is never routed. One attempt, its own wait bound, no retries; the lane caps
+// consultations. Everything the host acts on is checked against digests and the expected versions.
+async function __routeEikosConsult(card, host) {
   if (__routeConsults >= ROUTE_EIKOS_MAX_CONSULTS) return { status: 'consult_budget_exhausted' };
   __routeConsults++;
   const stateJson = JSON.stringify(card);
+  const hostJson = JSON.stringify(host);
   const cmd = `python3 -B ${eikosShellQuote(WORKFLOW_DIR + '/../e2e_workflow/scripts/eikos_decide.py')} ` +
     `--decision ${ROUTE_EIKOS_QUESTION} --scope ${eikosShellQuote(EVAL_DIR)} --round ${card.round} ` +
-    `--timeout-s ${EIKOS_CLI_TIMEOUT_S} --state-json ${eikosShellQuote(stateJson)}`;
+    `--timeout-s ${EIKOS_CLI_TIMEOUT_S} --state-json ${eikosShellQuote(stateJson)} --host-json ${eikosShellQuote(hostJson)}`;
   const ph = String(card.phase || 'Route').replace(/[^A-Za-z0-9_.-]/g, '') || 'Route';
   const prompt = `You are the route_carrier. PHASE=${ph}.
 Run EXACTLY this command and nothing else:
@@ -1107,109 +1171,181 @@ It prints one JSON object. Return that object unchanged as StructuredOutput. Do 
   if (env.__error) return { status: 'error', error: env.__error };
   if (ev) ev.ok = true;
   const dec = {};
-  EIKOS_DECISION_FIELDS.concat(['estimates']).forEach((k) => { dec[k] = env[k] === undefined ? null : env[k]; });
+  EIKOS_DECISION_FIELDS.concat(['estimates', 'questions_version', 'policy_version', 'decision_host_sha256'])
+    .forEach((k) => { dec[k] = env[k] === undefined ? null : env[k]; });
   const res = { envelope: env, relay_ok: env.state_sha256 === eikosSha256(stateJson),
+                host_relay_ok: env.host_sha256 === eikosSha256(hostJson),
                 decision_ok: env.decision_sha256 === eikosSha256(eikosCanonical(dec)), receipt_ok: env.receipt === 'written' };
-  if (!res.relay_ok) return Object.assign(res, { status: 'relay_mismatch' });
+  if (!res.relay_ok || !res.host_relay_ok) return Object.assign(res, { status: 'relay_mismatch' });
   if (!res.decision_ok) return Object.assign(res, { status: 'decision_altered' });
-  if (env.status !== 'ok') return Object.assign(res, { status: String(env.status || 'malformed') });
+  if (env.status !== 'ok') return Object.assign(res, { status: String(env.status || 'malformed').slice(0, 40) });
+  // Not replay-safe unless the decision is persisted AND its attempt receipted: otherwise a resume could
+  // draw new estimates for the same occurrence. Unusable, like any other missing answer.
+  if (env.persisted !== true || env.receipt !== 'written') return Object.assign(res, { status: 'not_persisted' });
+  if (env.questions_version !== ROUTE_EIKOS_QUESTION_VERSION || env.policy_version !== ROUTE_EIKOS_POLICY_VERSION) {
+    return Object.assign(res, { status: 'question_mismatch' });
+  }
   const est = __routeParseEstimates(env.estimates);
   if (!est) return Object.assign(res, { status: 'malformed' });
+  // Reused under a different host input (a resume after state moved on): the estimates stand, the
+  // reduction runs on the CURRENT constraints, and the change is recorded as a host intervention.
+  res.host_changed = env.decision_host_sha256 !== env.host_sha256;
   return Object.assign(res, { status: 'ok', estimates: est });
 }
-// Pure: every rule for one Eikos-decided dispatch, in the contract's order -- input eligibility and
-// backend status, the current effective lane, mandatory failure escalation, the class and operator
-// floors, availability, then quota (the kill switch is checked before any consultation). Unavailable or
-// capped lanes are removed BEFORE selection, so nothing is substituted after a choice. No I/O, no clock.
+// Pure: every rule for one occurrence. x is __routeHostInput() plus { backend, estimates }. Floors and
+// escalation use the policy rank; availability and quota are removed before any choice; the list-price
+// proxy orders only what remains. A missing or unusable estimate is unknown -- never zero and never a
+// threshold miss -- and still passes every hard constraint. No I/O, no clock, no shared state.
 function __routeReduce(x) {
-  const order = ROUTE_PRICE_ORDER;
-  const at = (m) => order.indexOf(m);
-  let lo = Math.max(at(x.floorModel), x.opFloorModel ? at(x.opFloorModel) : 0, x.current ? at(x.current) : 0);
-  const excluded = [];
-  if (x.failed && x.failsOnFailed >= x.maxFails) { excluded.push(x.failed); lo = Math.max(lo, at(x.failed) + 1); }
+  const top = x.policy_rank[x.policy_rank.length - 1];
+  const lo = Math.max(x.class_floor_rank, x.operator_floor_rank, x.scope_floor_rank);
+  const allowed = x.policy_rank.filter((m, r) => r >= lo && x.excluded.indexOf(m) < 0);
   const filtered = [];
-  const cands = order.filter((m, i) => i >= lo && excluded.indexOf(m) < 0).filter((m) => {
-    const why = (x.available && x.available.indexOf(m) < 0) ? 'unavailable'
-      : (m === ROUTE_MODEL_BRAIN && !(x.quotaLeft > 0)) ? 'top-lane quota used' : null;
+  const feasible = x.price_order.filter((m) => allowed.indexOf(m) >= 0).filter((m) => {
+    const why = x.available.indexOf(m) < 0 ? 'unavailable' : (m === top && !(x.top_quota_left > 0)) ? 'top-lane quota used' : null;
     if (why) filtered.push({ model: m, why });
     return !why;
   });
-  const base = { candidates: cands, filtered, excluded, lower_bound: order[lo] || null, qualifying: null, override: null };
-  if (!cands.length) return Object.assign(base, { model: null, reason: 'no feasible lane at or above the current lane and floors' });
+  const base = { reducer_version: x.reducer_version, lower_rank: lo, allowed, feasible, filtered, excluded: x.excluded,
+                 tau: x.tau, threshold_met: null, chosen_estimate: null, max_estimate: null, override: null };
+  if (!feasible.length) {
+    return Object.assign(base, { model: null, reason: `no feasible lane at policy rank >= ${lo}: the worker is deferred` });
+  }
   if (x.backend !== 'ok' || !x.estimates) {
-    return Object.assign(base, { model: cands[0], reason: `no usable estimate (${x.backend}): cheapest feasible lane at or above the current lane and floors` });
+    return Object.assign(base, { model: feasible[0], reason: `no usable estimate (${x.backend}): cheapest feasible allowed lane` });
   }
-  const qualifying = cands.filter((m) => x.estimates[m] >= x.tau);
-  if (qualifying.length) return Object.assign(base, { model: qualifying[0], qualifying, reason: `cheapest feasible lane with estimate >= ${x.tau}` });
-  let best = cands[0];
-  cands.forEach((m) => { if (x.estimates[m] > x.estimates[best]) best = m; });
-  return Object.assign(base, { model: best, qualifying: [],
-    reason: `no lane reached ${x.tau}: host override to the feasible lane with the highest estimate`,
-    override: { kind: 'no_lane_qualified', tau: x.tau, best_estimate: x.estimates[best] } });
+  const est = (m) => x.estimates[m];
+  const maxEst = Math.max.apply(null, feasible.map(est));
+  const qualifying = feasible.filter((m) => est(m) >= x.tau);
+  if (qualifying.length) {
+    return Object.assign(base, { model: qualifying[0], threshold_met: true, chosen_estimate: est(qualifying[0]),
+                                 max_estimate: maxEst, reason: `cheapest feasible lane with estimate >= ${x.tau}` });
+  }
+  let pick = feasible[0];
+  feasible.forEach((m) => { if (est(m) > est(pick)) pick = m; });   // ties keep the cheaper lane
+  return Object.assign(base, { model: pick, threshold_met: false, chosen_estimate: est(pick), max_estimate: maxEst,
+    reason: `no feasible lane reached ${x.tau}: host policy override to the highest estimate`,
+    override: { kind: 'no_lane_qualified', policy: 'highest_estimate', tau: x.tau, chosen_estimate: est(pick), max_estimate: maxEst } });
 }
-function __routeOpFloor(scope) {
-  const f = ROUTE_FLOORS[scope];
-  const i = f == null ? -1 : Math.max(0, Math.min(ROUTE_TOP, __routeNum(f, 0)));
-  return i >= 0 ? ROUTE_LANES[i] : null;
+// How each decision was reached: an Eikos estimate met tau, a recorded host override, a host fallback with
+// no usable estimate, or a deferral.
+function __routeChoiceCounts() {
+  const c = { eikos_qualified: 0, override_no_lane_qualified: 0, fallback_no_estimate: 0, deferred: 0 };
+  __routeAudit.forEach((e) => {
+    if (e.event !== 'decide' || e.decider !== 'eikos') return;
+    if (!e.decided) c.deferred++;
+    else if (e.threshold_met === true) c.eikos_qualified++;
+    else if (e.threshold_met === false) c.override_no_lane_qualified++;
+    else c.fallback_no_estimate++;
+  });
+  return c;
 }
-async function __routeEikosPick(p, o, scope) {
-  const label = String((o && o.label) || '');
-  const cls = __routeScopeClass(scope);
-  const key = __routeTaskKey(label, cls);
-  let st = __routeLadder[scope];
-  if (!st || st.pending || st.task_key !== key) {
-    const prev = st || null;
-    const c = __routeCard(p, o, scope, prev, cls);
-    const res = c.ineligible ? { status: 'ineligible', why: c.ineligible } : await __routeEikosConsult(c.card);
-    const input = { cls, tau: ROUTE_EIKOS_TAU[cls], current: prev ? prev.model : null, floorModel: ROUTE_CLASS_FLOOR[cls],
-                    opFloorModel: __routeOpFloor(scope), failed: prev && prev.lastKind === 'work_product' ? prev.model : null,
-                    failsOnFailed: prev && prev.model ? (prev.fails_by_lane[prev.model] || 0) : 0,
-                    maxFails: ROUTE_CLASS_MAX_FAILS[cls], backend: res.status, estimates: res.estimates || null,
-                    quotaLeft: ROUTE_MAX_TOP_DISPATCHES - __routeTopUsed, available: ROUTE_LANES };
-    const red = __routeReduce(input);
-    st = { decider: 'eikos', scope_class: cls, task_key: key, model: red.model,
-           lane: red.model ? ROUTE_LANES.indexOf(red.model) : -1, fails: 0,
-           fails_by_lane: prev ? prev.fails_by_lane : {}, pending: false, lastKind: null,
-           history: prev ? prev.history : [], consults: (prev ? prev.consults : 0) + (c.ineligible ? 0 : 1),
-           evidence: prev ? prev.evidence : '', input, why: red.reason, decision: null };
-    __routeLadder[scope] = st;
-    __routeAudit.push({ event: 'decide', decider: 'eikos', scope, scope_class: cls, trigger: c.trigger,
-      seq: c.card.occurrence.seq, card_sha256: eikosSha256(JSON.stringify(c.card)), ineligible: c.ineligible || null,
-      backend: res.status, logical_key: res.envelope ? res.envelope.logical_key || null : null,
-      relay_ok: res.relay_ok == null ? null : res.relay_ok, decision_ok: res.decision_ok == null ? null : res.decision_ok,
-      receipt_ok: res.receipt_ok == null ? null : res.receipt_ok, estimates: res.estimates || null,
-      tau: input.tau, proposed: red.model, candidates: red.candidates, filtered: red.filtered, excluded: red.excluded,
-      override: red.override, why: red.reason });
-  }
-  if (!st.model) {
-    __routeAudit.push({ event: 'skip', scope, label, why: 'deferred: ' + st.why });
-    return { skip: true, deferred: true, scope };
-  }
-  if (st.model === ROUTE_MODEL_BRAIN && __routeTopUsed >= ROUTE_MAX_TOP_DISPATCHES) {
-    // The quota ran out after this decision. Re-run the same rules on the same estimates with the top
-    // lane removed, and record it: the dispatched lane is the host's, not the one Eikos was asked about.
-    const red = __routeReduce(Object.assign({}, st.input, { quotaLeft: 0 }));
-    __routeAudit.push({ event: 'override', scope, label, kind: 'quota_used_before_dispatch', from: st.model, to: red.model, why: red.reason });
-    st.model = red.model; st.lane = red.model ? ROUTE_LANES.indexOf(red.model) : -1; st.why = red.reason;
-    if (!st.model) { __routeAudit.push({ event: 'skip', scope, label, why: 'deferred: ' + red.reason }); return { skip: true, deferred: true, scope }; }
-  }
-  if (st.model === ROUTE_MODEL_BRAIN) __routeTopUsed++;
-  __routeAudit.push({ event: 'dispatch', scope, label, phase: (o && o.phase) || '', model: st.model, capped: false });
-  return { model: st.model, scope };
+function __routeSerial(scope, fn) {
+  const prev = __routeLocks[scope] || Promise.resolve();
+  const next = prev.then(fn, fn);
+  __routeLocks[scope] = next.then(() => {}, () => {});
+  return next;
 }
-// One cycle's outcome under the Eikos decider. Only a host-defined work-product failure counts against
-// the lane; a non-improving result asks Eikos again with that evidence; a missing result or an invalid
-// measurement is recorded and changes nothing.
-function __routeEikosOutcome(st, scope, ok, evidence, kind, source) {
+function __routeEikosPick(p, o, scope) {
+  return __routeSerial(scope, async () => {
+    const label = String((o && o.label) || '');
+    const cls = __routeScopeClass(scope);
+    const key = __routeTaskKey(label, p, o);
+    const st = __routeLadder[scope] || (__routeLadder[scope] = {
+      decider: 'eikos', scope_class: cls, occurrences: 0, floor_rank: ROUTE_CLASS_FLOOR[cls], fails_by_lane: {},
+      history: [], tasks: {}, model: null, lane: -1, why: '' });
+    let tk = st.tasks[key];
+    const fresh = !tk || tk.pending;
+    if (fresh) {
+      st.occurrences++;
+      const occ = { seq: st.occurrences,
+                    trigger: tk ? (tk.last_kind === 'work_product' ? 'work_product_failure' : 'non_improvement')
+                      : (st.occurrences > 1 ? 'changed_task' : 'first_sight'),
+                    prior: st.history.slice(-6) };
+      const c = __routeCard(p, o, scope, cls, occ);
+      const host = __routeHostInput(scope, cls);
+      // Nothing to ask when no lane could be dispatched whatever the answer.
+      const none = !__routeReduce(Object.assign({}, host, { backend: 'not_asked', estimates: null })).model;
+      const res = c.ineligible ? { status: 'ineligible' } : none ? { status: 'not_asked_no_feasible_lane' }
+        : await __routeEikosConsult(c.card, host);
+      // Other scopes may have reserved the top lane while this one waited: reduce on the current inputs.
+      const now = __routeHostInput(scope, cls);
+      const red = __routeReduce(Object.assign({}, now, { backend: res.status, estimates: res.estimates || null }));
+      const interventions = [];
+      if (res.host_changed) interventions.push('decision reused from a different host input; reduced on the current one');
+      if (JSON.stringify(now) !== JSON.stringify(host)) interventions.push('host input changed during the consultation; reduced on the current one');
+      const reserved = red.model === ROUTE_MODEL_BRAIN;
+      if (reserved) __routeTopUsed++;                       // reserved at decision time, released if not dispatched
+      tk = st.tasks[key] = { key, seq: occ.seq, model: red.model, estimates: res.estimates || null,
+                             backend: res.status, pending: false, last_kind: null, reserved };
+      st.model = red.model; st.lane = red.model ? __routeRank(red.model) : -1; st.why = red.reason;
+      __routeAudit.push({ event: 'decide', decider: 'eikos', scope, label, scope_class: cls, task_key: key, seq: occ.seq,
+        trigger: occ.trigger, card_sha256: c.card ? eikosSha256(JSON.stringify(c.card)) : null, ineligible: c.ineligible || null,
+        backend: res.status, logical_key: res.envelope ? res.envelope.logical_key || null : null,
+        relay_ok: res.relay_ok == null ? null : res.relay_ok, decision_ok: res.decision_ok == null ? null : res.decision_ok,
+        receipt_ok: res.receipt_ok == null ? null : res.receipt_ok,
+        persisted: res.envelope ? res.envelope.persisted === true : null, estimates: res.estimates || null,
+        decided: red.model, threshold_met: red.threshold_met, chosen_estimate: red.chosen_estimate,
+        max_estimate: red.max_estimate, override: red.override, interventions, reduce: red, why: red.reason });
+    } else if (tk.model) {
+      // A repeated dispatch of a decided occurrence passes the CURRENT hard constraints too: a failure
+      // elsewhere in the scope may have excluded its lane, or the top-lane quota may be used. If its lane
+      // is no longer feasible, the rules run again on the occurrence's own estimates, never below its
+      // decided lane; with nothing feasible it is deferred. Recorded either way.
+      const now = __routeHostInput(scope, cls);
+      const feasible = __routeReduce(Object.assign({}, now, { backend: 'check', estimates: null })).feasible;
+      if (feasible.indexOf(tk.model) < 0) {
+        now.scope_floor_rank = Math.max(now.scope_floor_rank, __routeRank(tk.model));
+        const red = __routeReduce(Object.assign(now, { backend: tk.estimates ? 'ok' : tk.backend, estimates: tk.estimates }));
+        __routeAudit.push({ event: 'override', scope, label, seq: tk.seq, kind: 'decided_lane_no_longer_feasible',
+                            from: tk.model, to: red.model, threshold_met: red.threshold_met, why: red.reason });
+        tk.model = red.model;
+      }
+      if (tk.model === ROUTE_MODEL_BRAIN) { tk.reserved = true; __routeTopUsed++; }   // feasible: a unit is left
+    }
+    const release = () => { if (tk.reserved) { tk.reserved = false; __routeTopUsed = Math.max(0, __routeTopUsed - 1); } };
+    if (!tk.model) {
+      __routeAudit.push({ event: 'skip', scope, label, seq: tk.seq, why: 'deferred: no feasible lane' });
+      return { skip: true, deferred: true, scope, reason: 'no feasible lane (deferred)' };
+    }
+    if (__routeOverBudget()) {                               // the consultation itself may have spent the rest
+      release();
+      __routeAudit.push({ event: 'skip', scope, label, seq: tk.seq, why: 'kill switch tripped before the worker' });
+      return { skip: true, scope, reason: 'output-token cap reached' };
+    }
+    tk.reserved = false;                                     // the reservation is now this dispatch
+    const id = `d${++__routeDispatchSeq}`;
+    (__routeDispatches[label] = __routeDispatches[label] || []).push({ id, scope, task_key: key, seq: tk.seq, model: tk.model, outcome: null });
+    __routeAudit.push({ event: 'dispatch', scope, label, dispatch_id: id, seq: tk.seq, phase: (o && o.phase) || '',
+                        model: tk.model, served_model: 'unverified', capped: false });
+    return { model: tk.model, scope, dispatch_id: id };
+  });
+}
+// One dispatch's outcome, bound to the dispatch that produced it (its own model and occurrence), not to
+// whatever the scope decided since. Each dispatch's outcome counts once; an outcome with no open dispatch
+// is recorded and ignored. A late outcome (its occurrence already superseded) still counts against its
+// own lane, but schedules nothing.
+function __routeEikosOutcome(st, scope, ok, evidence, kind, source, label) {
+  const list = __routeDispatches[String(label || '')] || [];
+  const d = list.filter((x) => x.outcome == null)[0];     // one label's outcomes arrive in dispatch order
+  if (!d) {
+    __routeAudit.push({ event: 'outcome_unmatched', scope, label: label || '', ok, kind });
+    return;
+  }
+  d.outcome = ok ? 'ok' : kind;
+  if (ok) return;
   const ev = String(evidence == null ? '' : evidence).slice(0, 300);
-  if (ok) { if (st.model) st.fails_by_lane[st.model] = 0; return; }
-  if (st.model) st.history = st.history.concat([{ lane: st.model, outcome: kind, evidence: ev,
-                                                 source: String(source || 'host').slice(0, 80) }]).slice(-6);
-  if (kind === 'work_product') { st.fails_by_lane[st.model] = (st.fails_by_lane[st.model] || 0) + 1; st.lastKind = kind; st.pending = true; }
-  else if (kind === 'non_improvement') { st.lastKind = kind; st.pending = true; }
-  st.evidence = ev;
-  __routeAudit.push({ event: 'fail', decider: 'eikos', scope, model: st.model, kind, evidence: ev, source: source || 'host',
-                      fails_on_lane: st.model ? (st.fails_by_lane[st.model] || 0) : 0, reconsult: st.pending });
+  st.history = st.history.concat([{ lane: d.model, outcome: kind, evidence: ev, source: String(source || 'host').slice(0, 80) }]).slice(-6);
+  if (kind === 'work_product') {
+    st.fails_by_lane[d.model] = (st.fails_by_lane[d.model] || 0) + 1;
+    if (st.fails_by_lane[d.model] >= ROUTE_CLASS_MAX_FAILS[st.scope_class]) st.floor_rank = Math.max(st.floor_rank, __routeRank(d.model) + 1);
+  }
+  const tk = st.tasks[d.task_key];
+  const current = !!tk && tk.seq === d.seq;
+  if (current && (kind === 'work_product' || kind === 'non_improvement')) { tk.pending = true; tk.last_kind = kind; }
+  __routeAudit.push({ event: 'fail', decider: 'eikos', scope, label: label || '', dispatch_id: d.id, seq: d.seq, model: d.model,
+    kind, evidence: ev, source: source || 'host', late: !current, fails_on_lane: st.fails_by_lane[d.model] || 0,
+    scope_floor_rank: st.floor_rank, reconsult_next_attempt: current && (kind === 'work_product' || kind === 'non_improvement') });
 }
 // <<ROUTING-INLINE-END>>
 
@@ -1218,7 +1354,7 @@ async function agentT(p, o) {
   const pick = await __routePick(p, o);
   if (pick.skip) {
     __routeSkipped[(o && o.label) || ''] = true;
-    log(`  [route] ${(o && o.label) || 'agent'} skipped — ${pick.deferred ? 'no feasible lane (deferred)' : 'output-token cap reached'}.`);
+    log(`  [route] ${(o && o.label) || 'agent'} skipped — ${pick.reason || 'output-token cap reached'}.`);
     return null;
   }
   if (pick.model) {                         // clone opts, don't mutate
@@ -1229,7 +1365,8 @@ async function agentT(p, o) {
   // An engineer's cycle is judged by the oracle after verify (see the Optimize round), not here. For
   // every other worker the one deterministic failure visible at this layer is no result at all.
   if (pick.scope && !/^(eng|deep):/.test(pick.scope) && r == null) {
-    __routeOutcome(pick.scope, false, 'no result (timeout, API fault or lost StructuredOutput)', 'no_result', (o && o.label) || '');
+    __routeOutcome(pick.scope, false, 'no result (timeout, API fault or lost StructuredOutput)', 'no_result',
+                   (o && o.label) || '', (o && o.label) || '');
   }
   return r;
 }
@@ -2350,7 +2487,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       : (says(r.ver.status, 'apply_failed') || says(r.ver.status, 'correctness_failed') ||
          says(r.ver.correctness, 'fail')) ? 'work_product'
       : 'non_improvement';
-    __routeOutcome(sc, verified.indexOf(r) >= 0, ev, kind, `${r.ver ? 'verify' : 'engineer'} ${r.d.id}`);
+    __routeOutcome(sc, verified.indexOf(r) >= 0, ev, kind, `${r.ver ? 'verify' : 'engineer'} ${r.d.id}`,
+                   `${kindTag} ${r.d.id}:${r.d.specialty}`);
   }
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------

@@ -416,9 +416,10 @@ def card(**kw):
                   "constraints": ["work only in the private workspace"],
                   "direction": {"id": "r2_d1", "title": "tile the K loop", "specialty": "memory",
                                 "expected_speedup": 1.3, "focus_files": ["kernel.py"], "prompt": "Tile K by 64."},
-                  "prompt_sha256": "a" * 64, "prompt_chars": 5123},
+                  "dispatch_prompt_sha256": "a" * 64, "dispatch_prompt_chars": 5123},
          "budget": {"directions_used": 3, "directions_budget": 6, "minutes_left": 95, "minutes_left_source": "round_clock"},
-         "config": {"lanes": list(LANES), "effort": None, "runtime": "claude-code workflow agent"}}
+         "config": {"lanes": list(LANES), "effort": None, "runtime": "claude-code workflow agent",
+                    "attempt_timeout_s": 3600, "transport_retries": 3}}
     assert set(c) == set(LANE_SPEC["required_state"])
     for k, v in kw.items():
         c[k] = v
@@ -432,8 +433,11 @@ def lane_answers(**p):
             for lane, v in probs.items()}
 
 
-def lane_decide(tmp_path, url, c=None, rnd=2):
-    return ed.decide("lane_sufficiency", "/eval/lane", rnd, c or card(), str(tmp_path), url, 5.0)
+HOST = json.dumps({"reducer_version": "lane_reduce.v1", "scope_class": "code_change", "tau": 0.9, "top_quota_left": 1})
+
+
+def lane_decide(tmp_path, url, c=None, rnd=2, host=HOST):
+    return ed.decide("lane_sufficiency", "/eval/lane", rnd, c or card(), str(tmp_path), url, 5.0, host_raw=host)
 
 
 def test_lane_estimates_travel_as_one_digested_string_and_decide_nothing(tmp_path, fake):
@@ -443,15 +447,39 @@ def test_lane_estimates_travel_as_one_digested_string_and_decide_nothing(tmp_pat
     assert env["choice"] is None and env["confidence"] is None and env["would_be_action"] is None
     assert env["estimates"] == ("claude-haiku-5-5=0.31;claude-sonnet-5-5=0.82;"
                                 "claude-opus-4-6=0.77;claude-opus-5-5=0.93")   # non-monotone, kept as sent
+    assert env["questions_version"] == "lane_sufficiency.v1" and env["policy_version"] == "lane_sufficiency.policy.v1"
+    assert env["host_sha256"] == env["decision_host_sha256"] == ed.sha256(HOST)
     out = ed.compact(env)
-    assert out["decision_sha256"] == ed.sha256(ed.canonical({k: out[k] for k in ed.DECISION_FIELDS + ("estimates",)}))
+    assert out["decision_sha256"] == ed.sha256(ed.canonical({k: out[k] for k in ed.DECISION_FIELDS + ed.ESTIMATE_FIELDS}))
+    assert "host_sha256" in out and "host_sha256" not in ed.ESTIMATE_FIELDS        # an echo, like state_sha256
     assert _Fake.seen[0]["questions"] == LANE_SPEC["questions"]
+    assert attempts_of(tmp_path)[0]["host_raw"] == HOST                             # persisted with the attempt
+
+
+def attempts_of(tmp_path, name="lane_sufficiency"):
+    p = tmp_path / (name + ".attempts.jsonl")
+    return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
 
 def test_a_choice_decision_still_has_no_estimates_key(tmp_path, fake):
     out = ed.compact(decide(tmp_path, fake))
-    assert "estimates" not in out
+    assert not set(ed.ESTIMATE_FIELDS + ("host_sha256",)) & set(out)
     assert out["decision_sha256"] == ed.sha256(ed.canonical({k: out[k] for k in ed.DECISION_FIELDS}))
+
+
+def test_the_round_continue_envelope_is_byte_identical_to_the_baseline():
+    """A fixed envelope, compacted by the baseline eikos_decide.py (feat/geak-jev d650be38) and pinned here."""
+    env = {"status": "ok", "attempt_id": "a" * 32, "decision_attempt_id": "b" * 32, "logical_key": "c" * 64,
+           "choice": "continue", "confidence": 0.92, "would_be_action": "continue", "reused": True,
+           "persisted": True, "receipt": "written", "state_sha256": "d" * 64, "error": None}
+    assert ed.canonical(ed.compact(env)) == (
+        '{"attempt_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","choice":"continue","confidence":"0.92",'
+        '"decision_attempt_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",'
+        '"decision_sha256":"705da79b723d6d520408a457f4d826375fe83dd0a4293bdc957c57675590ac89","error":null,'
+        '"logical_key":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","persisted":true,'
+        '"receipt":"written","reused":true,'
+        '"state_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","status":"ok",'
+        '"would_be_action":"continue"}')
 
 
 def test_the_same_card_is_a_replay_and_a_changed_card_a_new_occurrence(tmp_path, fake):
@@ -471,6 +499,7 @@ def test_the_same_card_is_a_replay_and_a_changed_card_a_new_occurrence(tmp_path,
 
 @pytest.mark.parametrize("mutate, why", [
     (lambda c: c.pop("budget"), "lacks required field"),
+    (lambda c: c.update(current_outcome="ok"), "exactly the fields"),                 # nor at the root
     (lambda c: c["task"].update(goal="x" * 1501), "task must be"),                    # never truncated: refused
     (lambda c: c["task"].update(answer="sonnet"), "task must be"),                    # no extra fields ride along
     (lambda c: c["task"]["direction"].update(prompt="p" * 4001), "task must be"),
@@ -502,15 +531,63 @@ def test_an_unusable_estimate_is_malformed_and_never_persisted(tmp_path, fake, a
     assert env["status"] == "malformed" and why in env["error"] and env["estimates"] is None and not env["persisted"]
 
 
+def test_a_failed_receipt_append_is_reported_in_the_digested_envelope(tmp_path, fake):
+    """The decision persists but its attempt line cannot be written: the envelope says so, and the host
+    (kernel_lane.js) refuses to act on a decision whose receipt is not 'written'."""
+    (tmp_path / "lane_sufficiency.attempts.jsonl").mkdir()
+    _Fake.bodies = [{"answers": lane_answers()}]
+    out = ed.compact(lane_decide(tmp_path, fake))
+    assert out["status"] == "ok" and out["persisted"] is True and out["receipt"] == "failed"
+    assert out["decision_sha256"] == ed.decision_digest(out)
+
+
 def test_an_unreachable_server_still_returns_the_estimates_key(tmp_path):
-    env = ed.decide("lane_sufficiency", "/eval/lane", 2, card(), str(tmp_path), "http://127.0.0.1:9", 2.0)
+    env = ed.decide("lane_sufficiency", "/eval/lane", 2, card(), str(tmp_path), "http://127.0.0.1:9", 2.0, host_raw=HOST)
     assert env["status"] in ("unavailable", "timeout") and "estimates" in ed.compact(env)
+
+
+@pytest.mark.parametrize("host, why", [
+    (None, "missing"), ("x" * 4001, "over"), ("[1]", "reducer_version"), ('{"tau": NaN}', "not standard JSON"),
+    ('{"reducer_version": "v", "tau": 1e999}', "non-finite"),
+])
+def test_an_estimates_decision_needs_a_valid_host_input(tmp_path, fake, host, why):
+    _Fake.bodies = [{"answers": lane_answers()}]
+    env = lane_decide(tmp_path, fake, host=host)
+    assert env["status"] == "state_invalid" and "host input" in env["error"] and why in env["error"] and not _Fake.seen
+
+
+def test_reuse_under_different_host_state_is_visible_to_the_caller(tmp_path, fake):
+    _Fake.bodies = [{"answers": lane_answers()}]
+    first = lane_decide(tmp_path, fake)
+    later = json.dumps({"reducer_version": "lane_reduce.v1", "scope_class": "code_change", "tau": 0.9, "top_quota_left": 0})
+    again = lane_decide(tmp_path, fake, host=later)
+    assert again["reused"] and again["estimates"] == first["estimates"] and len(_Fake.seen) == 1
+    assert again["host_sha256"] == ed.sha256(later) and again["decision_host_sha256"] == ed.sha256(HOST)
+
+
+def test_a_tampered_persisted_estimate_is_not_reused(tmp_path, fake):
+    _Fake.bodies = [{"answers": lane_answers()}]
+    first = lane_decide(tmp_path, fake)
+    idx = tmp_path / "lane_sufficiency.index.json"
+    data = json.loads(idx.read_text())
+    data[first["logical_key"]]["estimates"]["claude-haiku-5-5"] = 0.99      # the answers still say 0.31
+    idx.write_text(json.dumps(data))
+    _Fake.bodies = [{"answers": lane_answers(**{"claude-sonnet-5-5": 0.11})}]
+    again = lane_decide(tmp_path, fake)
+    assert not again["reused"] and len(_Fake.seen) == 2 and "claude-sonnet-5-5=0.11" in again["estimates"]
+
+
+def test_the_estimates_keys_exist_even_when_the_question_file_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(ed, "QUESTIONS_DIR", str(tmp_path))
+    out = ed.compact(ed.decide("lane_sufficiency", "/eval/lane", 2, card(), str(tmp_path), "http://127.0.0.1:9", 1.0,
+                               host_raw=HOST))
+    assert out["status"] == "state_invalid" and set(ed.ESTIMATE_FIELDS) <= set(out) and out["estimates"] is None
 
 
 def test_the_cli_prints_the_estimates_envelope(tmp_path, fake):
     _Fake.bodies = [{"answers": lane_answers()}]
     out = subprocess.run([sys.executable, "-B", SCRIPT, "--decision", "lane_sufficiency", "--scope", "/eval/lane",
-                          "--round", "2", "--receipt-dir", str(tmp_path), "--state-json", card()],
+                          "--round", "2", "--receipt-dir", str(tmp_path), "--state-json", card(), "--host-json", HOST],
                          capture_output=True, text=True, env=dict(os.environ, GEAK_EIKOS_URL=fake), timeout=60)
     env = json.loads(out.stdout)
     assert env["status"] == "ok" and env["estimates"].count(";") == 3

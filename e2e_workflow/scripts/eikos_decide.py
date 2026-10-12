@@ -31,9 +31,14 @@ attempt_id.
 
 ESTIMATES. A question file of kind "estimates" (lane_sufficiency) asks one boolean per model lane and
 decides nothing: choice, confidence and would_be_action stay null, and the validated probabilities
-travel in one more digested field, `estimates` ("<lane>=<repr p>;..." in the file's lane_order). The
-caller applies every threshold and picks the lane. Choice decisions (round_continue) carry no
-`estimates` key at all, so their envelope and digest are unchanged.
+travel in one more digested field, `estimates` ("<lane>=<repr p>;..." in the file's lane_order),
+together with the question and policy versions that produced them. The caller applies every threshold
+and picks the lane. It also passes --host-json, the inputs of its own reduction (floors, exclusions,
+quota, thresholds): they are validated, persisted with the decision and the attempt, never part of the
+key, and echoed as digests -- `host_sha256` for this attempt's input, and the digested
+`decision_host_sha256` for the input the persisted decision was first made under. A caller that sees
+the two differ knows the decision is being reused under different host state. Choice decisions
+(round_continue) carry none of these keys, so their envelope and digest are unchanged.
 
 WIRE CONTRACT. Every field covered by `decision_sha256` is a string, a boolean or null — never a
 number — so both sides hash the same bytes: Python writes 1.0 where JavaScript writes 1, and a hash
@@ -72,6 +77,11 @@ QUESTIONS_DIR = os.path.join(HERE, "eikos_questions")
 DECISION_FIELDS = ("attempt_id", "decision_attempt_id", "logical_key", "status", "choice", "confidence",
                    "would_be_action", "reused", "persisted", "receipt")
 ENVELOPE_FIELDS = DECISION_FIELDS + ("state_sha256", "error")
+# Digested only for an estimates decision. Which decisions are estimates is fixed here too, so the
+# envelope has its keys even when the question file cannot be loaded.
+ESTIMATE_FIELDS = ("estimates", "questions_version", "policy_version", "decision_host_sha256")
+ESTIMATE_DECISIONS = {"lane_sufficiency"}
+MAX_HOST_CHARS = 4000
 DECISION_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_STATE_CHARS = 8000
 ATTEMPT_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -155,8 +165,8 @@ def _wire(v):
 
 
 def _decision_fields(env: dict) -> tuple:
-    """The digested fields: an estimates decision adds `estimates`; a choice decision has no such key."""
-    return DECISION_FIELDS + (("estimates",) if "estimates" in env else ())
+    """The digested fields: an estimates decision adds ESTIMATE_FIELDS; a choice decision has no such key."""
+    return DECISION_FIELDS + (ESTIMATE_FIELDS if "estimates" in env else ())
 
 
 def decision_digest(env: dict) -> str:
@@ -165,7 +175,8 @@ def decision_digest(env: dict) -> str:
 
 def compact(env: dict) -> dict:
     fields = _decision_fields(env)
-    out = {k: (_wire(env.get(k)) if k in fields else env.get(k)) for k in fields + ("state_sha256", "error")}
+    echo = ("state_sha256", "error") + (("host_sha256",) if "estimates" in env else ())
+    out = {k: (_wire(env.get(k)) if k in fields else env.get(k)) for k in fields + echo}
     out["decision_sha256"] = decision_digest(out)
     return out
 
@@ -289,6 +300,8 @@ def _lane_card_state(state: dict, round_no: int, spec: dict) -> str:
     """The routing card. Every nested object has an exact key set, so nothing else (least of all a
     routing answer or an outcome) can ride along, and the task's required text is bounded, never cut:
     a card whose text does not fit is refused here, and the host routes without Eikos."""
+    if set(state) != set(spec["required_state"]):
+        return "the card must have exactly the fields: " + ", ".join(spec["required_state"])
     lanes = spec["lane_order"]
     occ, task, budget, config = state["occurrence"], state["task"], state["budget"], state["config"]
     checks = [
@@ -302,23 +315,27 @@ def _lane_card_state(state: dict, round_no: int, spec: dict) -> str:
          and occ["trigger"] in TRIGGERS and isinstance(occ["prior"], list) and len(occ["prior"]) <= 6
          and all(_prior_ok(p, lanes) for p in occ["prior"]),
          "{seq >= 1, trigger, prior: at most 6 {lane, outcome, evidence <= 300, source}}"),
-        ("task", _keys(task, ("goal", "goal_source", "acceptance", "constraints", "direction", "prompt_sha256",
-                              "prompt_chars"))
+        ("task", _keys(task, ("goal", "goal_source", "acceptance", "constraints", "direction",
+                              "dispatch_prompt_sha256", "dispatch_prompt_chars"))
          and _text(task["goal"], 1, 1500) and task["goal_source"] in ("direction", "role_intro", "host_template")
          and _text(task["acceptance"], 1, 600)
          and isinstance(task["constraints"], list) and len(task["constraints"]) <= 8
          and all(_text(c, 1, 200) for c in task["constraints"]) and _direction_ok(task["direction"])
-         and isinstance(task["prompt_sha256"], str) and bool(HEX64.match(task["prompt_sha256"]))
-         and _is_int(task["prompt_chars"], 0),
-         "{goal 1-1500, goal_source, acceptance 1-600, constraints, direction or null, prompt_sha256, prompt_chars}"),
+         and isinstance(task["dispatch_prompt_sha256"], str) and bool(HEX64.match(task["dispatch_prompt_sha256"]))
+         and _is_int(task["dispatch_prompt_chars"], 0),
+         "{goal 1-1500, goal_source, acceptance 1-600, constraints, direction or null, dispatch_prompt_sha256, "
+         "dispatch_prompt_chars}"),
         ("budget", _keys(budget, ("directions_used", "directions_budget", "minutes_left", "minutes_left_source"))
          and _is_int(budget["directions_used"], 0) and _is_int(budget["directions_budget"], 1)
          and (budget["minutes_left"] == "unknown" or _is_int(budget["minutes_left"], 0))
          and budget["minutes_left_source"] in ("round_clock", "no_deadline", "not_recorded"),
          "{directions_used, directions_budget, minutes_left, minutes_left_source}"),
-        ("config", _keys(config, ("lanes", "effort", "runtime")) and config["lanes"] == lanes
-         and (config["effort"] is None or config["effort"] in EFFORTS) and _text(config["runtime"], 1, 200),
-         "{lanes equal to the question file's lane_order, effort, runtime}"),
+        ("config", _keys(config, ("lanes", "effort", "runtime", "attempt_timeout_s", "transport_retries"))
+         and config["lanes"] == lanes and (config["effort"] is None or config["effort"] in EFFORTS)
+         and _text(config["runtime"], 1, 200)
+         and (config["attempt_timeout_s"] == "unknown" or _is_int(config["attempt_timeout_s"], 0))
+         and _is_int(config["transport_retries"], 0),
+         "{lanes equal to the question file's lane_order, effort, runtime, attempt_timeout_s, transport_retries}"),
     ]
     bad = ["%s must be %s" % (k, why) for k, ok, why in checks if not ok]
     return "; ".join(bad)
@@ -362,6 +379,8 @@ def valid_persisted(entry, ctx: dict) -> bool:
                    entry["questions_sha256"], entry["policy_version"], entry["model_id"],
                    entry["endpoint"]) != ctx["logical_key"]:
         return False
+    if is_estimates(ctx["spec"]) and not isinstance(entry.get("host_raw"), str):
+        return False
     answers = entry.get("answers")
     if not isinstance(answers, dict) or validate(answers, ctx["spec"]):
         return False
@@ -373,6 +392,23 @@ def logical_key(decision, scope, round_no, canon, questions_sha, policy_version,
     return sha256(canonical({
         "decision": decision, "scope": scope, "round": round_no, "state": sha256(canon),
         "questions": questions_sha, "policy": policy_version, "model_id": model_id, "endpoint": endpoint}))
+
+
+def _host_problem(host_raw) -> str:
+    """Why the caller's reduction input is unusable, or "". Persisted as sent; never part of the key."""
+    if not isinstance(host_raw, str):
+        return "missing (--host-json is required for an estimates decision)"
+    if len(host_raw) > MAX_HOST_CHARS:
+        return "%d chars, over %d" % (len(host_raw), MAX_HOST_CHARS)
+    try:
+        host = json.loads(host_raw, parse_constant=_reject_constant)
+    except ValueError as exc:
+        return "not standard JSON: %s" % exc
+    if not isinstance(host, dict) or not _text(host.get("reducer_version"), 1, 40):
+        return "not an object with a reducer_version"
+    if _nonfinite(host):
+        return "holds a non-finite or out-of-range number"
+    return ""
 
 
 def receipt_paths(receipt_dir: str, decision: str) -> tuple:
@@ -412,7 +448,7 @@ def _first_persisted(index_path: str, key: str, value: dict, ctx: dict) -> tuple
 
 
 def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir: str,
-           url: str, timeout_s: float) -> dict:
+           url: str, timeout_s: float, host_raw=None) -> dict:
     t0 = time.monotonic()
     attempt_id = uuid.uuid4().hex
     env = {"status": None, "attempt_id": attempt_id, "decision_attempt_id": None, "logical_key": None,
@@ -434,12 +470,22 @@ def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir
 
     if not name_ok:
         return finish("state_invalid", "bad decision name %r" % (decision,))
+    if decision in ESTIMATE_DECISIONS:
+        env.update({k: None for k in ESTIMATE_FIELDS})
+        env["host_sha256"] = sha256(host_raw) if isinstance(host_raw, str) else None
     try:
         spec, spec_sha = load_spec(decision)
     except (OSError, ValueError) as exc:
         return finish("state_invalid", "question file: %s" % exc)
     if is_estimates(spec):
-        env["estimates"] = None                     # digested from here on, even on a failure
+        env.update({k: None for k in ESTIMATE_FIELDS})        # digested from here on, even on a failure
+        env["host_sha256"] = sha256(host_raw) if isinstance(host_raw, str) else None
+        env["questions_version"] = spec["version"]
+        env["policy_version"] = spec["policy"].get("version")
+        problem = _host_problem(host_raw)
+        if problem:
+            return finish("state_invalid", "host input: " + problem)
+        extra["host_raw"] = host_raw
     extra.update(questions_version=spec["version"], questions_sha256=spec_sha,
                  policy_version=spec["policy"].get("version"), model_id=er.model_identity(), endpoint=url)
     if len(state_raw) > MAX_STATE_CHARS:
@@ -477,6 +523,7 @@ def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir
         extra["distribution"] = entry["distribution"]
         if is_estimates(spec):
             env["estimates"] = estimates_wire(entry["estimates"], spec)
+            env["decision_host_sha256"] = sha256(entry["host_raw"])
 
     # Already decided for this key, and the record still checks out? Return it; never ask twice.
     if index_path:
@@ -513,6 +560,8 @@ def decide(decision: str, scope: str, round_no: int, state_raw: str, receipt_dir
     observed.update(choice=mine["choice"], confidence=mine["confidence"])
     if is_estimates(spec):
         observed["estimates"] = mine["estimates"]
+    if is_estimates(spec):
+        mine["host_raw"] = host_raw
     decided = dict(mine, status="ok", attempt_id=attempt_id,
                    answers={qid: answers[qid] for qid in spec["questions"]},
                    scope=scope, round=round_no, **{k: ctx[k] for k in
@@ -535,6 +584,7 @@ def main(argv=None) -> int:
     ap.add_argument("--state-json", required=True)
     ap.add_argument("--receipt-dir", default=None, help="default: <scope>/eikos")
     ap.add_argument("--timeout-s", type=float, default=30.0)
+    ap.add_argument("--host-json", default=None, help="estimates decisions: the caller's reduction input")
     try:
         a = ap.parse_args(argv)
     except SystemExit:
@@ -542,7 +592,8 @@ def main(argv=None) -> int:
         return 0
     receipt_dir = a.receipt_dir or os.path.join(a.scope, "eikos")
     try:
-        env = decide(a.decision, a.scope, a.round, a.state_json, receipt_dir, er.eikos_url(), a.timeout_s)
+        env = decide(a.decision, a.scope, a.round, a.state_json, receipt_dir, er.eikos_url(), a.timeout_s,
+                     host_raw=a.host_json)
     except Exception as exc:  # noqa: BLE001 - the carrier must always get one JSON object
         env = {"status": "malformed", "error": "%s: %s" % (type(exc).__name__, exc),
                "state_sha256": sha256(a.state_json)}

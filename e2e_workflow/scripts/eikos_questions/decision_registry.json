@@ -193,15 +193,15 @@
   {
    "id": "RT2",
    "class": "judgment",
-   "question": "Lane sufficiency: for one worker task, will the next attempt on each model lane pass the task's acceptance check within its budget?",
+   "question": "Lane sufficiency: for one engineer task, will the next attempt on each model lane meet the task's acceptance event (verified, correct, above the candidate floor) within its budget?",
    "options": [
     "claude-haiku-5-5: probability",
     "claude-sonnet-5-5: probability",
     "claude-opus-4-6: probability",
     "claude-opus-5-5: probability"
    ],
-   "option_rule": "four independent boolean estimates (eikos_questions/lane_sufficiency.json); the host reducer kernel_lane.js __routeReduce applies eligibility, per-class thresholds (unvalidated experimental), floors, availability, quota and the kill switch, and picks the lane",
-   "notes": "answered by Eikos through a transport-only carrier, only when routing=1 and route_decider=eikos (off by default); estimates travel in the envelope's digested `estimates` string, not in a typed schema field",
+   "option_rule": "four independent boolean estimates (eikos_questions/lane_sufficiency.json); the host reducer kernel_lane.js __routeReduce applies eligibility, policy-rank floors and failure exclusion, availability, quota and the kill switch, then takes the cheapest qualifying lane by list-price order (per-class thresholds are unvalidated experimental)",
+   "notes": "answered by Eikos through a transport-only carrier, only when routing=1 and route_decider=eikos (off by default), and in S0 only for engineers with a registered direction; estimates travel in the envelope's digested `estimates` string, bound to the question and policy versions and the host input digest, not in a typed schema field",
    "mode": "live_when_enabled",
    "capture": "not_implemented"
   }

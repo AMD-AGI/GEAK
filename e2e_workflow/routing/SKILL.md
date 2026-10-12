@@ -108,30 +108,51 @@ oracle, and no confidence score can substitute for it.
 ## Eikos decider (`route_decider=eikos`) — experimental, off by default
 
 On `feat/geak-jev`, the ladder can ask Eikos instead of the Sonnet decider. The contract is
-`research/eikos_ladder_routing_proposal_20261009.md` (rev 2, §7). Eikos never picks a lane: it returns
-estimates, and the host picks.
+`research/eikos_ladder_routing_proposal_20261009.md` (rev 2, §7) with the corrections of Astra's S0
+plan review (2026-10-12). Eikos never picks a lane: it returns estimates, and the host picks.
 
 - **Question.** One versioned boolean per lane (`eikos_questions/lane_sufficiency.json`): will the next
-  attempt on this model pass the task's acceptance check within the budget? The four estimates are kept
-  apart, may be non-monotone, and are never normalised.
-- **Card.** The workflow builds a frozen task card. It holds the goal (a role prompt's own goal
-  sentence, or the engineer's direction object), the host's acceptance check and constraints, prior
-  attempts with their source, the budget, and the lane configuration. The prompt goes in only as a
-  digest and length. Required text is never truncated; a card that does not fit is ineligible, and the
-  host routes without Eikos.
-- **Carrier.** Haiku 5.5 runs `eikos_decide.py` with the card, verbatim, and relays its JSON. The host
-  checks the state and decision digests, the receipt and the estimates string. The carrier is never
-  routed itself, and `route_eikos_max_consults` (default 40) caps its calls per lane run. Its cost is
-  booked as router cost (role `route_carrier`).
-- **Reducer (`__routeReduce`, pure).** Lanes are compared in declared list-price order: Haiku 5.5,
-  Sonnet 5.5, Opus 5.5, Opus 4.6. Candidates must be at or above the current effective lane, the class
-  floor and any operator floor. After work-product failures, the failed lane is excluded: at once for a
-  code change, after two for other classes. Unavailable lanes, and the top lane once its quota is used,
-  are removed before any choice. The reducer picks the cheapest candidate whose estimate is at least τ.
-  - If no lane reaches τ, it picks the candidate with the highest estimate and records the override.
-  - If no lane is feasible, the worker is deferred and recorded.
-  - If the estimate is missing or unusable, it takes the cheapest feasible lane (the current lane or
-    the floor), and the backend status is recorded.
+  attempt on this model meet the task's acceptance event within the budget? For an engineer that event
+  is "verify finds the patch applies, is correct and beats the candidate floor"; a correct patch that
+  does not beat the floor does not meet it. The four estimates are kept apart, may be non-monotone, and
+  are never normalised.
+- **Units.** A *consultation* is one carrier call (no retries). A *dispatch* is one `agentT` call; the
+  transport retries inside `agentTCore` belong to it. An *occurrence* is one frozen card (`seq`). A task
+  is its direction, the whole dispatch prompt and the effort: if any of them changes, or the host
+  schedules another attempt after a failure or a non-improvement, that is a new occurrence. A repeated
+  dispatch of the same occurrence asks nothing.
+- **Eligibility (S0).** Only engineers with a registered direction get a card. The direction goes in
+  verbatim (bounded, never cut); the whole dispatch prompt only as its digest and length. Every other
+  scope, and any card that does not fit, is ineligible: the host routes it by policy without asking.
+- **Carrier.** Haiku 5.5 runs `eikos_decide.py` with the card and the host input (`--host-json`),
+  verbatim, and relays its JSON. The host checks the card, host-input and decision digests, the question
+  and policy versions, that the decision was persisted and receipted, and parses the estimates string
+  strictly. The carrier is never routed, and `route_eikos_max_consults` (default 40) caps its calls per
+  lane run. Its cost is booked as router cost (role `route_carrier`).
+- **Reducer (`__routeReduce`, pure, `lane_reduce.v1`).**
+  - *Allowed* lanes come from the policy rank, which is the existing lane numbering (Haiku 5.5, Sonnet
+    5.5, Opus 4.6, Opus 5.5): at or above the class floor, any operator floor (`route_floors`) and the
+    scope's escalation floor. A lane is excluded once its work-product failures in the scope reach the
+    class allowance: 1 for a code change, 2 otherwise. Counts never reset.
+  - *Feasible* lanes are the allowed ones that are available and, for Opus 5.5, still have quota.
+  - Among feasible lanes, the cheapest by list-price order (Haiku 5.5, Sonnet 5.5, Opus 5.5, Opus 4.6)
+    whose estimate is at least τ wins. The price order is a list-price proxy, not a predicted task cost.
+  - If no feasible lane reaches τ, the host takes the one with the highest estimate and records a policy
+    override (`threshold_met=false`, τ, its own and the maximum estimate).
+  - If the estimate is missing or unusable for any reason, the host takes the cheapest feasible lane
+    under the same constraints and records the backend status.
+  - If no lane is feasible, the worker is deferred. Eikos is not asked when nothing could be dispatched.
+- **Hard constraints on every path.** The kill switch is checked before the carrier and again before the
+  worker; a reserved Opus 5.5 unit is released if the worker does not run. A repeated dispatch whose lane
+  is no longer feasible is re-reduced on its own estimates, never below its decided lane, and recorded.
+- **Outcomes.** Each outcome binds to the dispatch that produced it (its model and occurrence) and
+  counts once. Only a work-product failure counts against a lane. A non-improvement asks again on the
+  next attempt without excluding the lane. A missing result or an invalid measurement changes nothing. A
+  late outcome from a superseded occurrence counts against its own lane and schedules nothing.
+- **Resume.** A Workflow resume replays unchanged agent calls, so cards, host inputs and decisions come
+  back the same. Without that cache, `eikos_decide.py` returns the persisted estimates for an identical
+  card. If the host input changed meanwhile, the stored estimates stand, the host reduces on the
+  current constraints, and the report records the intervention.
 - **Classes.**
 
   | class | scopes | τ (unvalidated experimental) | floor |
@@ -140,13 +161,11 @@ estimates, and the host picks.
   | evidence | benchmark, profile, reprofile, verify, warm_start, researcher, `kb:*` except cite, update_experience | 0.80 | Sonnet 5.5 |
   | paperwork | `commit`, `kb:cite` | 0.70 | Haiku 5.5 |
 
-  Set τ with `route_eikos_tau` (JSON). Nothing in the evidence so far calibrates these values; the
-  report labels them `unvalidated_experimental`.
-- **Failures.** Only a work-product failure (patch did not apply, correctness failed) counts against a
-  lane. A non-improving but valid result asks Eikos again with that evidence. A missing result or an
-  invalid measurement is recorded and changes nothing.
-- **Decision scope.** A code change is reassessed for every new direction. Evidence and paperwork scopes
-  keep one decision until a failure.
+  Set τ with `route_eikos_tau` (JSON, each value in [0, 1]). Nothing in the evidence so far calibrates
+  these values; the report labels them `unvalidated_experimental`. Invalid settings are listed in the
+  report's `config_errors` with the value used instead.
+- **Report.** `routing.eikos.choices` counts Eikos-qualified choices apart from overrides, fallbacks and
+  deferrals; the audit has every decision, dispatch, outcome, override and skip.
 - **Status.** Offline and tested with a fake transport (`kernel_workflow/scripts/test_eikos_route.js`).
   No routed run has used it. Serving Eikos needs a GPU outside the run's pool.
 
