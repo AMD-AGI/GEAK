@@ -102,9 +102,14 @@ Look first for these semantic families, without assuming all are present:
 - MLA/GDN/linear-attention helper chains
 - MoE router/top-k/append/sort/quant helpers
 - Expert GEMM1 + activation/quant + GEMM2 boundary
+- Several GEMMs reading the same input (horizontal fusion, e.g. GDN
+  `in_proj_qkvz` + `in_proj_ba`, router + shared-expert gate): look first for an
+  existing multi-GEMM kernel (aiter `fused_gemm_a8w8_blockscale_a16w16`)
 
 These are search directions, not automatic matches. Adjacent positions and
-equal Shapes alone do not prove a producer/consumer dependency.
+equal Shapes alone do not prove a producer/consumer dependency. The donor rule
+below only bounds the regions you must cover; it does not limit the candidates
+you may propose, and a candidate may fuse or replace donors.
 
 Build a semantic stage inventory for **every** `(phase, pattern_id)` table.
 Every source row must belong to at least one inventory region, including
