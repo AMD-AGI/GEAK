@@ -91,6 +91,9 @@ CACHE_BASENAME = "eikos_router_cache.json"
 # which the server encodes once. The vLLM engine behind it is not addressed directly.
 EIKOS_DEFAULT_URL = "http://127.0.0.1:8000"
 EIKOS_PATH = "/v1/systemone"
+# d3 (vllm-sr/d3, served by `vllm-sr serve`, default port 8899) speaks the same API. Its endpoint needs
+# the model named in each request (GEAK_EIKOS_MODEL_ID), and two answer fields differ; see map_d3_answers.
+D3_MODEL_PREFIX = "vllm-sr/d3"
 STATE_TOKEN_BUDGET_CHARS = 8000  # ~2k tokens; Eikos serves 16,384 and was trained to 12k.
 
 
@@ -400,6 +403,28 @@ def build_state(req: dict) -> str:
     ])
 
 
+def is_d3(body) -> bool:
+    return isinstance(body, dict) and isinstance(body.get("model"), str) and body["model"].startswith(D3_MODEL_PREFIX)
+
+
+def map_d3_answers(answers: dict) -> dict:
+    """d3's answers in the field names GEAK checks, in place. A yes/no answer's `noul` (P(true)) becomes
+    `probability`. A choice's `confidence` becomes the chosen option's probability, which is what GEAK's
+    confidence means; d3's own value is kept as `d3_confidence`. Nothing else changes, and every check
+    still runs on the result."""
+    for a in answers.values():
+        if not isinstance(a, dict):
+            continue
+        if a.get("type") in ("noul", "boolean") and "probability" not in a and _prob(a.get("noul")):
+            a["probability"] = a["noul"]
+        probs, choice = a.get("probabilities"), a.get("choice")
+        if a.get("type") == "choice" and isinstance(probs, dict) and isinstance(choice, str) and _prob(probs.get(choice)):
+            if "confidence" in a:
+                a["d3_confidence"] = a["confidence"]
+            a["confidence"] = probs[choice]
+    return answers
+
+
 def post_systemone(url: str, state, questions: dict, timeout_s: float) -> dict:
     """One request to Eikos's serve.py API, with the transport protections every caller needs:
     loopback only (unless GEAK_EIKOS_ALLOW_REMOTE=1), no proxies, no redirects, bounded read.
@@ -414,7 +439,10 @@ def post_systemone(url: str, state, questions: dict, timeout_s: float) -> dict:
             "GEAK_EIKOS_URL %s is not a loopback address. The state carries GEAK task text, and "
             "the point of a local model is that it never leaves the host. Set "
             "GEAK_EIKOS_ALLOW_REMOTE=1 to send it there deliberately." % url)
-    payload = json.dumps({"state": state, "questions": questions}).encode("utf-8")
+    request_body = {"state": state, "questions": questions}
+    if os.environ.get("GEAK_EIKOS_MODEL_ID"):   # vllm-sr refuses a request that names no model
+        request_body["model"] = os.environ["GEAK_EIKOS_MODEL_ID"]
+    payload = json.dumps(request_body).encode("utf-8")
     request = urllib.request.Request(url + EIKOS_PATH, data=payload,
                                      headers={"Content-Type": "application/json"})
     # No proxies (an http_proxy variable would route the state through another host) and no
@@ -427,6 +455,8 @@ def post_systemone(url: str, state, questions: dict, timeout_s: float) -> dict:
     body = json.loads(raw.decode("utf-8"))
     if not isinstance(body, dict) or not isinstance(body.get("answers"), dict):
         raise RuntimeError("Eikos response has no `answers` object")
+    if is_d3(body):              # only a response that names a d3 model; Eikos answers are used as sent
+        map_d3_answers(body["answers"])
     return body
 
 

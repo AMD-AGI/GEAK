@@ -541,6 +541,43 @@ def test_a_failed_receipt_append_is_reported_in_the_digested_envelope(tmp_path, 
     assert out["decision_sha256"] == ed.decision_digest(out)
 
 
+# ------------------------------------------------------------------ d3 (vllm-sr/d3) served by vllm-sr
+def d3_lane_answers(**p):
+    probs = dict({"claude-haiku-5-5": 0.29, "claude-sonnet-5-5": 0.69, "claude-opus-4-6": 0.73, "claude-opus-5-5": 0.84}, **p)
+    return {LANE_SPEC["estimate_questions"][lane]: {"type": "noul", "noul": v} for lane, v in probs.items()}
+
+
+def test_d3_yes_no_answers_are_mapped_and_the_model_is_named(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("GEAK_EIKOS_MODEL_ID", "vllm-sr/d3")
+    _Fake.bodies = [{"answers": d3_lane_answers(), "model": "vllm-sr/d3", "usage": {"input_tokens": 1, "output_tokens": 0}}]
+    env = lane_decide(tmp_path, fake)
+    assert env["status"] == "ok" and _Fake.seen[0]["model"] == "vllm-sr/d3"
+    assert env["estimates"] == ("claude-haiku-5-5=0.29;claude-sonnet-5-5=0.69;"
+                                "claude-opus-4-6=0.73;claude-opus-5-5=0.84")
+
+
+def test_d3_choice_confidence_becomes_the_chosen_probability(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("GEAK_EIKOS_MODEL_ID", "vllm-sr/d3")
+    _Fake.bodies = [{"model": "vllm-sr/d3", "answers": {
+        "next_step": {"type": "choice", "choice": "stop", "probabilities": {"continue": 0.41, "stop": 0.59},
+                      "confidence": 0.023},
+        "stalled": {"type": "noul", "noul": 0.3}}}]
+    env = decide(tmp_path, fake)
+    assert env["status"] == "ok" and env["choice"] == "stop" and env["confidence"] == 0.59
+    mapped = ed.er.map_d3_answers({"q": {"type": "choice", "choice": "stop", "probabilities": {"continue": 0.41, "stop": 0.59},
+                                         "confidence": 0.023}})["q"]
+    assert mapped["confidence"] == 0.59 and mapped["d3_confidence"] == 0.023
+
+
+def test_an_eikos_response_is_not_mapped(tmp_path, fake):
+    _Fake.bodies = [{"answers": {   # no d3 model named: the same fields are checked as before
+        "next_step": {"type": "choice", "choice": "stop", "probabilities": {"continue": 0.41, "stop": 0.59},
+                      "confidence": 0.023},
+        "stalled": {"type": "noul", "noul": 0.3}}}]
+    env = decide(tmp_path, fake)
+    assert env["status"] == "malformed" and "model" not in _Fake.seen[0]
+
+
 def test_an_unreachable_server_still_returns_the_estimates_key(tmp_path):
     env = ed.decide("lane_sufficiency", "/eval/lane", 2, card(), str(tmp_path), "http://127.0.0.1:9", 2.0, host_raw=HOST)
     assert env["status"] in ("unavailable", "timeout") and "estimates" in ed.compact(env)
