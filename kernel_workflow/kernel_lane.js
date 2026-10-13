@@ -723,12 +723,13 @@ function tlAgent(prompt, o, attempt) {
 //   helper   the fixed-script scopes below    -> Haiku 4.5, fixed (their schema is the check)
 //   decider  route:* (the classifier itself)  -> Sonnet 5.5, fixed, never itself classified (no recursion)
 //   worker   every other scope                -> classified once by the decider, then moved UP the ladder
-//            only on a DETERMINISTIC failure: Haiku 4.5 -> Sonnet 5.5 -> Opus 4.6 -> Opus 5.5
+//            only on a DETERMINISTIC failure: Haiku 4.5 -> Sonnet 5.5 -> Opus 5.5. Opus 4.6 is not a lane: it
+//            costs more than Opus 5.5 on every price bucket (input, cache write, cache read, output).
 // Keys = `${phase}` + U+0000 + labelPrefix (everything before the first space), so dynamic round/tag
 // suffixes collapse to one stable scope identity.
 // <<ROUTING-INLINE-START>>
-const ROUTE_LANES = ['claude-haiku-4-5', 'claude-sonnet-5-5', 'claude-opus-4-6', 'claude-opus-5-5'];
-const ROUTE_LANE_OF = { small: 0, medium: 1, high: 2, escalate: 3 };
+const ROUTE_LANES = ['claude-haiku-4-5', 'claude-sonnet-5-5', 'claude-opus-5-5'];
+const ROUTE_LANE_OF = { small: 0, medium: 1, high: 2, escalate: 2 };
 const ROUTE_TOP = ROUTE_LANES.length - 1;
 const ROUTE_MODEL_BRAIN = ROUTE_LANES[ROUTE_TOP];
 const ROUTE_MODEL_DECIDER = ROUTE_LANES[1];
@@ -754,9 +755,14 @@ const ROUTING_ON = (function () {
 function __routeNum(v, d) { const x = Number(v); return v != null && v !== '' && Number.isFinite(x) ? x : d; }
 const ROUTE_CONF_ESCALATE = __routeNum(A.route_conf_escalate, 0.70);
 const ROUTE_MAX_FAILS_PER_LANE = Math.max(1, __routeNum(A.route_max_retries_per_lane, 3));
-const ROUTE_MAX_TOP_DISPATCHES = Math.max(0, __routeNum(A.route_max_top_escalations, 1));
+// Worker dispatches on the top lane (Opus 5.5) per run: no cap unless route_max_top_escalations is set
+// (null = none). With a cap, a capped dispatch runs one lane down. Never compare null numerically.
+const ROUTE_MAX_TOP_DISPATCHES = (function () {
+  const x = __routeNum(A.route_max_top_escalations, null);
+  return x == null ? null : Math.max(0, x);
+})();
 const ROUTE_MAX_OUTPUT_TOKENS = Math.max(0, __routeNum(A.route_max_output_tokens, 1000000));
-// Per-scope starting floors, {scope: lane 0..3} — the ONLY thing route_review.py proposes changing.
+// Per-scope starting floors, {scope: lane 0..2} — the ONLY thing route_review.py proposes changing.
 const ROUTE_FLOORS = (function () {
   let f = A.route_floors;
   if (typeof f === 'string') { try { f = JSON.parse(f); } catch (e) { f = null; } }
@@ -915,7 +921,7 @@ async function __routePick(p, o) {
   }
   let lane = st.lane, capped = false;
   if (lane === ROUTE_TOP) {
-    if (__routeTopUsed >= ROUTE_MAX_TOP_DISPATCHES) { lane = ROUTE_TOP - 1; capped = true; }
+    if (ROUTE_MAX_TOP_DISPATCHES != null && __routeTopUsed >= ROUTE_MAX_TOP_DISPATCHES) { lane = ROUTE_TOP - 1; capped = true; }
     else __routeTopUsed++;
   }
   __routeAudit.push({ event: 'dispatch', scope, label: (o && o.label) || '', phase: (o && o.phase) || '',
@@ -970,9 +976,9 @@ function __routeReport() {
 // is a new occurrence. Only a host-verified work-product failure counts against a lane.
 const ROUTE_EIKOS_ON = ROUTE_DECIDER === 'eikos';
 const ROUTE_EIKOS_QUESTION = 'lane_sufficiency';
-const ROUTE_EIKOS_QUESTION_VERSION = 'lane_sufficiency.v2';
+const ROUTE_EIKOS_QUESTION_VERSION = 'lane_sufficiency.v3';
 const ROUTE_EIKOS_POLICY_VERSION = 'lane_sufficiency.policy.v1';
-const ROUTE_REDUCER_VERSION = 'lane_reduce.v1';
+const ROUTE_REDUCER_VERSION = 'lane_reduce.v2';
 const __routeConfigErrors = [];
 if (['sonnet', 'eikos', 'jev'].indexOf(ROUTE_DECIDER) < 0) {
   __routeConfigErrors.push(`route_decider=${JSON.stringify(ROUTE_DECIDER)} is unknown; the Sonnet decider is used`);
@@ -1035,9 +1041,9 @@ const ROUTE_EIKOS_CARRIER_TIMEOUT_MS = Math.max(10000, __routeIntArg('route_eiko
 // Host POLICY rank for floors and escalation: the existing lane numbering (ROUTE_LANES), so a numeric
 // operator floor keeps its meaning. A host policy, not a claim that capability rises with it.
 function __routeRank(m) { return ROUTE_LANES.indexOf(m); }
-// List-price proxy (output $ per million: 5, 10, 20, 25), used ONLY to choose among lanes already
+// List-price proxy (output $ per million: 5, 10, 20), used ONLY to choose among lanes already
 // allowed and feasible. Not predicted task cost: tokenizer, cache, retries and quota differ per lane.
-const ROUTE_PRICE_ORDER = ['claude-haiku-4-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-opus-4-6'];
+const ROUTE_PRICE_ORDER = ['claude-haiku-4-5', 'claude-sonnet-5-5', 'claude-opus-5-5'];
 const ROUTE_CLASS_FLOOR = { paperwork: 0, evidence: 1, code_change: 1 };        // policy rank
 // Work-product failures a lane may take in one scope before every lane at or below its rank is out:
 // a code change escalates at once; other classes get one retry. Counts never reset (finite policy).
@@ -1132,7 +1138,8 @@ function __routeHostInput(scope, cls) {
            scope_floor_rank: st ? st.floor_rank : ROUTE_CLASS_FLOOR[cls],
            effective_rank: st ? st.effective_rank : -1,
            excluded: ROUTE_LANES.filter((m) => (fails[m] || 0) >= ROUTE_CLASS_MAX_FAILS[cls]),
-           top_quota_left: Math.max(0, ROUTE_MAX_TOP_DISPATCHES - __routeTopUsed), available: ROUTE_LANES.slice() };
+           top_quota_left: ROUTE_MAX_TOP_DISPATCHES == null ? null : Math.max(0, ROUTE_MAX_TOP_DISPATCHES - __routeTopUsed),
+           available: ROUTE_LANES.slice() };
 }
 // Python's repr of a probability: '0.31', '1.0', '5e-05', '1.5e-07'. No sign, no prefix parsing.
 const ROUTE_PROB_RE = /^(?:[01]\.[0-9]+|[0-9](?:\.[0-9]+)?e-[0-9]+)$/;
@@ -1240,7 +1247,8 @@ function __routeReduce(x) {
   const allowed = x.policy_rank.filter((m, r) => r >= lo && x.excluded.indexOf(m) < 0);
   const filtered = [];
   const feasible = x.price_order.filter((m) => allowed.indexOf(m) >= 0).filter((m) => {
-    const why = x.available.indexOf(m) < 0 ? 'unavailable' : (m === top && !(x.top_quota_left > 0)) ? 'top-lane quota used' : null;
+    const why = x.available.indexOf(m) < 0 ? 'unavailable'
+      : (m === top && x.top_quota_left != null && !(x.top_quota_left > 0)) ? 'top-lane quota used' : null;   // null quota: no cap
     if (why) filtered.push({ model: m, why });
     return !why;
   });

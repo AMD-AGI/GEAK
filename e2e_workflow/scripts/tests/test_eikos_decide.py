@@ -427,13 +427,13 @@ def card(**kw):
 
 
 def lane_answers(**p):
-    probs = dict({"claude-haiku-4-5": 0.31, "claude-sonnet-5-5": 0.82, "claude-opus-4-6": 0.77, "claude-opus-5-5": 0.93}, **p)
+    probs = dict({"claude-haiku-4-5": 0.31, "claude-sonnet-5-5": 0.82, "claude-opus-5-5": 0.77}, **p)
     return {LANE_SPEC["estimate_questions"][lane]: {"type": "noul", "probability": v, "noul": v, "value": v >= 0.5,
                                                     "confidence": max(v, 1 - v)}
             for lane, v in probs.items()}
 
 
-HOST = json.dumps({"reducer_version": "lane_reduce.v1", "scope_class": "code_change", "tau": 0.9, "top_quota_left": 1})
+HOST = json.dumps({"reducer_version": "lane_reduce.v2", "scope_class": "code_change", "tau": 0.9, "top_quota_left": None})
 
 
 def lane_decide(tmp_path, url, c=None, rnd=2, host=HOST):
@@ -446,8 +446,8 @@ def test_lane_estimates_travel_as_one_digested_string_and_decide_nothing(tmp_pat
     assert env["status"] == "ok" and env["persisted"] and not env["reused"]
     assert env["choice"] is None and env["confidence"] is None and env["would_be_action"] is None
     assert env["estimates"] == ("claude-haiku-4-5=0.31;claude-sonnet-5-5=0.82;"
-                                "claude-opus-4-6=0.77;claude-opus-5-5=0.93")   # non-monotone, kept as sent
-    assert env["questions_version"] == "lane_sufficiency.v2" and env["policy_version"] == "lane_sufficiency.policy.v1"
+                                "claude-opus-5-5=0.77")   # non-monotone, kept as sent
+    assert env["questions_version"] == "lane_sufficiency.v3" and env["policy_version"] == "lane_sufficiency.policy.v1"
     assert env["host_sha256"] == env["decision_host_sha256"] == ed.sha256(HOST)
     out = ed.compact(env)
     assert out["decision_sha256"] == ed.sha256(ed.canonical({k: out[k] for k in ed.DECISION_FIELDS + ed.ESTIMATE_FIELDS}))
@@ -520,7 +520,7 @@ def test_a_bad_card_is_refused_before_any_request(tmp_path, fake, mutate, why):
 
 
 @pytest.mark.parametrize("answers_, why", [
-    (lambda a: a.pop("passes_on_opus_4_6"), "answer missing"),
+    (lambda a: a.pop("passes_on_opus_5_5"), "answer missing"),
     (lambda a: a["passes_on_haiku_4_5"].update(probability=1.4), "probability missing or not a number"),
 ])
 def test_an_unusable_estimate_is_malformed_and_never_persisted(tmp_path, fake, answers_, why):
@@ -543,7 +543,7 @@ def test_a_failed_receipt_append_is_reported_in_the_digested_envelope(tmp_path, 
 
 # ------------------------------------------------------------------ d3 (vllm-sr/d3) served by vllm-sr
 def d3_lane_answers(**p):
-    probs = dict({"claude-haiku-4-5": 0.29, "claude-sonnet-5-5": 0.69, "claude-opus-4-6": 0.73, "claude-opus-5-5": 0.84}, **p)
+    probs = dict({"claude-haiku-4-5": 0.29, "claude-sonnet-5-5": 0.69, "claude-opus-5-5": 0.84}, **p)
     return {LANE_SPEC["estimate_questions"][lane]: {"type": "noul", "noul": v} for lane, v in probs.items()}
 
 
@@ -553,7 +553,7 @@ def test_d3_yes_no_answers_are_mapped_and_the_model_is_named(tmp_path, fake, mon
     env = lane_decide(tmp_path, fake)
     assert env["status"] == "ok" and _Fake.seen[0]["model"] == "vllm-sr/d3"
     assert env["estimates"] == ("claude-haiku-4-5=0.29;claude-sonnet-5-5=0.69;"
-                                "claude-opus-4-6=0.73;claude-opus-5-5=0.84")
+                                "claude-opus-5-5=0.84")
 
 
 def test_d3_choice_confidence_becomes_the_chosen_probability(tmp_path, fake, monkeypatch):
@@ -627,13 +627,13 @@ def test_the_cli_prints_the_estimates_envelope(tmp_path, fake):
                           "--round", "2", "--receipt-dir", str(tmp_path), "--state-json", card(), "--host-json", HOST],
                          capture_output=True, text=True, env=dict(os.environ, GEAK_EIKOS_URL=fake), timeout=60)
     env = json.loads(out.stdout)
-    assert env["status"] == "ok" and env["estimates"].count(";") == 3
+    assert env["status"] == "ok" and env["estimates"].count(";") == len(LANES) - 1
     assert env["decision_sha256"] == ed.decision_digest(env)
 
 
 def test_question_files_of_an_unknown_kind_or_with_a_lane_missing_are_refused(tmp_path, monkeypatch):
     bad = dict(LANE_SPEC, estimate_questions={k: v for k, v in LANE_SPEC["estimate_questions"].items()
-                                               if k != "claude-opus-4-6"})
+                                               if k != "claude-opus-5-5"})
     (tmp_path / "x.json").write_text(json.dumps(bad))
     monkeypatch.setattr(ed, "QUESTIONS_DIR", str(tmp_path))
     with pytest.raises(ValueError, match="exactly the lanes"):

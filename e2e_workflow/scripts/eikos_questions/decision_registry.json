@@ -197,10 +197,9 @@
    "options": [
     "claude-haiku-4-5: probability",
     "claude-sonnet-5-5: probability",
-    "claude-opus-4-6: probability",
     "claude-opus-5-5: probability"
    ],
-   "option_rule": "four independent boolean estimates (eikos_questions/lane_sufficiency.json); the host reducer kernel_lane.js __routeReduce applies eligibility, policy-rank floors and failure exclusion, availability, quota and the kill switch, then takes the cheapest qualifying lane by list-price order (per-class thresholds are unvalidated experimental)",
+   "option_rule": "three independent boolean estimates, one per lane (eikos_questions/lane_sufficiency.json); the host reducer kernel_lane.js __routeReduce applies eligibility, policy-rank floors and failure exclusion, availability, quota and the kill switch, then takes the cheapest qualifying lane by list-price order (per-class thresholds are unvalidated experimental)",
    "notes": "answered by Eikos through a transport-only carrier, only when routing=1 and route_decider=eikos (off by default), and in S0 only for engineers with a registered direction; estimates travel in the envelope's digested `estimates` string, bound to the question and policy versions and the host input digest, not in a typed schema field",
    "mode": "live_when_enabled",
    "capture": "not_implemented"

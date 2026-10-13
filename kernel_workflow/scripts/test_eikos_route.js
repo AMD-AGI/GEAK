@@ -17,7 +17,7 @@ const KDIR = path.resolve(__dirname, '..');
 const ROOT = path.resolve(KDIR, '..');
 const SRC = fs.readFileSync(path.join(KDIR, 'kernel_lane.js'), 'utf8');
 const SPEC = JSON.parse(fs.readFileSync(path.join(ROOT, 'e2e_workflow/scripts/eikos_questions/lane_sufficiency.json'), 'utf8'));
-const H45 = 'claude-haiku-4-5', S5 = 'claude-sonnet-5-5', O46 = 'claude-opus-4-6', O55 = 'claude-opus-5-5';
+const H45 = 'claude-haiku-4-5', S5 = 'claude-sonnet-5-5', O55 = 'claude-opus-5-5';
 
 let n = 0, fails = 0;
 function ok(name, cond) { n++; if (cond) console.log(`PASS  ${name}`); else { fails++; console.log(`FAIL  ${name}`); } }
@@ -49,7 +49,7 @@ const srv = http.createServer((req, res) => {
     res.end(server.raw != null ? server.raw : JSON.stringify({ answers }));
   });
 });
-const P = (h, s, o46, o55) => ({ [H45]: h, [S5]: s, [O46]: o46, [O55]: o55 });
+const P = (h, s, o55) => ({ [H45]: h, [S5]: s, [O55]: o55 });
 
 // ---- the lane's routing region, the shadow helpers and agentT, with stubs -------------------------
 function lane(args, opts) {
@@ -119,86 +119,87 @@ async function main() {
     const L = lane();
     const BASE = L.__routeHostInput('eng:memory', 'code_change');
     const R = (x) => L.__routeReduce(Object.assign({}, BASE, { backend: 'ok', estimates: null }, x));
-    ok('the host input of a fresh code-change scope: policy rank, list-price order, floors, quota, availability',
-      JSON.stringify(BASE) === JSON.stringify({ reducer_version: 'lane_reduce.v1', scope_class: 'code_change', tau: 0.9,
-        policy_rank: [H45, S5, O46, O55], price_order: [H45, S5, O55, O46], class_floor_rank: 1, operator_floor_rank: 0,
-        scope_floor_rank: 1, effective_rank: -1, excluded: [], top_quota_left: 1, available: [H45, S5, O46, O55] }));
-    let r = R({ scope_class: 'paperwork', tau: 0.7, class_floor_rank: 0, scope_floor_rank: 0, estimates: P(0.95, 0.5, 0.99, 0.92) });
+    ok('the host input of a fresh code-change scope: policy rank, list-price order, floors, no top-lane cap, availability',
+      JSON.stringify(BASE) === JSON.stringify({ reducer_version: 'lane_reduce.v2', scope_class: 'code_change', tau: 0.9,
+        policy_rank: [H45, S5, O55], price_order: [H45, S5, O55], class_floor_rank: 1, operator_floor_rank: 0,
+        scope_floor_rank: 1, effective_rank: -1, excluded: [], top_quota_left: null, available: [H45, S5, O55] }));
+    ok('a set cap reaches the host input as the quota left',
+      lane({ route_max_top_escalations: '2' }).__routeHostInput('eng:memory', 'code_change').top_quota_left === 2);
+    let r = R({ scope_class: 'paperwork', tau: 0.7, class_floor_rank: 0, scope_floor_rank: 0, estimates: P(0.95, 0.5, 0.92) });
     ok('non-monotone estimates are taken as given: the cheapest qualifying lane wins', r.model === H45 && r.threshold_met === true);
-    r = R({ estimates: P(0.99, 0.91, 0.99, 0.97) });
+    r = R({ estimates: P(0.99, 0.91, 0.97) });
     ok('a lane below the class floor is never allowed, however sure Eikos is', r.model === S5 && r.allowed.indexOf(H45) < 0);
-    r = R({ estimates: P(0.1, 0.93, 0.99, 0.97) });
+    r = R({ estimates: P(0.1, 0.93, 0.99) });
     ok('the chosen lane\'s own estimate and the maximum estimate are recorded apart',
       r.chosen_estimate === 0.93 && r.max_estimate === 0.99 && r.override === null);
-    // Astra's crossovers: the policy rank decides what is allowed, the price order only what is cheaper.
-    r = R({ scope_floor_rank: 2, excluded: [H45, S5], estimates: P(1, 1, 0.95, 0.95) });
-    ok('crossover 1: after an Opus 4.6-rank floor, the cheaper Opus 5.5 is still allowed and chosen by price',
-      r.model === O55 && JSON.stringify(r.allowed) === JSON.stringify([O46, O55]));
-    r = R({ scope_floor_rank: 3, excluded: [H45, S5, O46], estimates: P(1, 1, 1, 0.95) });
-    ok('crossover 2: after an Opus 4.6 code failure, Opus 5.5 remains feasible (not "no lane")', r.model === O55);
-    r = R({ operator_floor_rank: 3, top_quota_left: 0, estimates: P(1, 1, 0.99, 1) });
-    ok('crossover 3: an operator floor at lane 3 never admits the dearer Opus 4.6 when the quota is used: deferral',
+    r = R({ scope_floor_rank: 2, excluded: [H45, S5], estimates: P(1, 1, 0.95) });
+    ok('after a Sonnet code failure only Opus 5.5 is allowed, and it is taken',
+      r.model === O55 && JSON.stringify(r.allowed) === JSON.stringify([O55]));
+    r = R({ operator_floor_rank: 2, top_quota_left: 0, estimates: P(1, 1, 1) });
+    ok('an operator floor at the top lane with a set cap used up is a deferral, never a drop below the floor',
       r.model === null && r.allowed.length === 1 && /no feasible lane/.test(r.reason));
-    r = R({ scope_floor_rank: 4, excluded: [H45, S5, O46, O55], estimates: P(1, 1, 1, 1) });
-    ok('an Opus 5.5 code failure leaves nothing allowed: a deferral, not a fall back to Opus 4.6', r.model === null);
-    r = R({ estimates: P(0.25, 0.25, 0.25, 0.25) });
+    r = R({ scope_floor_rank: 3, excluded: [H45, S5, O55], estimates: P(1, 1, 1) });
+    ok('an Opus 5.5 code failure leaves nothing allowed: a deferral', r.model === null);
+    r = R({ estimates: P(0.25, 0.25, 0.25) });
     ok('uniform uncertainty qualifies no lane: a recorded policy override with tau, chosen and max estimate',
       r.threshold_met === false && r.override && r.override.kind === 'no_lane_qualified' &&
       r.override.policy === 'highest_estimate' && r.override.tau === 0.9 && r.chosen_estimate === 0.25 && r.max_estimate === 0.25);
-    r = R({ estimates: P(0.2, 0.4, 0.6, 0.85) });
-    ok('the override takes the highest estimate, not the dearest lane', r.model === O55 && r.override.chosen_estimate === 0.85);
-    r = R({ estimates: P(0.2, 0.5, 0.5, 0.5) });
+    r = R({ estimates: P(0.2, 0.6, 0.5) });
+    ok('the override takes the highest estimate, not the dearest lane', r.model === S5 && r.override.chosen_estimate === 0.6);
+    r = R({ estimates: P(0.2, 0.5, 0.5) });
     ok('override ties keep the cheaper lane', r.model === S5);
     r = R({ backend: 'timeout' });
     ok('a missing answer is unknown, not a miss: the cheapest feasible allowed lane, threshold_met null',
       r.model === S5 && r.threshold_met === null && r.override === null && /no usable estimate \(timeout\)/.test(r.reason));
     r = R({ backend: 'timeout', scope_floor_rank: 2, excluded: [H45, S5] });
     ok('a missing answer after a Sonnet code failure still excludes Sonnet', r.model === O55);
-    r = R({ backend: 'timeout', scope_floor_rank: 3, top_quota_left: 0 });
-    ok('a missing answer still obeys the quota: with nothing feasible it defers', r.model === null);
+    r = R({ backend: 'timeout', scope_floor_rank: 2, top_quota_left: 0 });
+    ok('a missing answer still obeys a set cap: with nothing feasible it defers', r.model === null);
     ok('every unusable backend status falls back the same way, under the same constraints',
       ['ineligible', 'malformed', 'unavailable', 'consult_budget_exhausted', 'write_failed', 'not_persisted',
        'relay_mismatch', 'decision_altered', 'question_mismatch', 'error', 'no_result']
-        .every((b) => R({ backend: b, estimates: P(1, 1, 1, 1) }).model === S5));
-    r = R({ top_quota_left: 0, estimates: P(0, 0.1, 0.95, 0.99) });
-    ok('a used-up top-lane quota is filtered before selection', r.model === O46 &&
+        .every((b) => R({ backend: b, estimates: P(1, 1, 1) }).model === S5));
+    r = R({ top_quota_left: 0, estimates: P(0, 0.1, 0.99) });
+    ok('a used-up top-lane cap is filtered before selection', r.model === S5 &&
       r.filtered.some((x) => x.model === O55 && /quota/.test(x.why)));
-    r = R({ available: [H45], estimates: P(1, 1, 1, 1) });
+    r = R({ estimates: P(0, 0.1, 0.99) });
+    ok('with no cap (a null quota) the top lane is never filtered for quota', r.model === O55 && r.filtered.length === 0);
+    r = R({ available: [H45], estimates: P(1, 1, 1) });
     ok('no available lane at or above the floor is a deferral', r.model === null);
-    r = R({ operator_floor_rank: 3, estimates: P(1, 1, 1, 0.95) });
+    r = R({ operator_floor_rank: 2, estimates: P(1, 1, 0.95) });
     ok('an operator floor raises the lower bound', r.model === O55);
-    r = R({ effective_rank: 2, estimates: P(1, 0.99, 0.95, 0.95) });
-    ok('the scope\'s effective lane is a floor by policy rank: a confident Sonnet is not taken, price picks among the rest',
-      r.model === O55 && r.allowed.join() === [O46, O55].join());
-    r = R({ effective_rank: 3, top_quota_left: 0, estimates: P(1, 1, 1, 1) });
-    ok('an effective Opus 5.5 lane with the quota used defers rather than dropping', r.model === null);
-    const x = Object.assign({}, BASE, { backend: 'ok', estimates: P(0.2, 0.93, 0.9, 0.5) });
+    r = R({ effective_rank: 2, estimates: P(1, 0.99, 0.95) });
+    ok('the scope\'s effective lane is a floor by policy rank: a confident Sonnet is not taken',
+      r.model === O55 && r.allowed.join() === [O55].join());
+    r = R({ effective_rank: 2, top_quota_left: 0, estimates: P(1, 1, 1) });
+    ok('an effective Opus 5.5 lane with a set cap used up defers rather than dropping', r.model === null);
+    const x = Object.assign({}, BASE, { backend: 'ok', estimates: P(0.2, 0.93, 0.5) });
     const before = JSON.stringify(x);
     ok('the reducer is pure: same input, same output, input untouched',
       JSON.stringify(L.__routeReduce(x)) === JSON.stringify(L.__routeReduce(x)) && JSON.stringify(x) === before);
-    ok('price order is the declared list-price proxy, over exactly the lanes',
-      JSON.stringify(L.ROUTE_PRICE_ORDER) === JSON.stringify([H45, S5, O55, O46]) &&
-      L.ROUTE_PRICE_ORDER.slice().sort().join() === L.ROUTE_LANES.slice().sort().join());
+    ok('price order is the declared list-price proxy over exactly the lanes, and now equals the policy rank',
+      JSON.stringify(L.ROUTE_PRICE_ORDER) === JSON.stringify([H45, S5, O55]) &&
+      JSON.stringify(L.ROUTE_PRICE_ORDER) === JSON.stringify(L.ROUTE_LANES));
   }
 
   // ---- strict wire parsing ------------------------------------------------------------------------
   {
     const L = lane();
-    const g = L.__routeParseEstimates(`${H45}=0.31;${S5}=1.0;${O46}=5e-05;${O55}=0.97`);
-    ok('the estimates string parses exactly as Python wrote it', g && g[H45] === 0.31 && g[S5] === 1 && g[O46] === 5e-05);
-    const bad = [`${H45}=0.9garbage;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${H45}=+0.3;${S5}=1.0;${O46}=0.5;${O55}=0.5`,
-      `${H45}=1.5;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${H45}=NaN;${S5}=1.0;${O46}=0.5;${O55}=0.5`,
-      `${H45}= 0.3;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${S5}=0.3;${H45}=1.0;${O46}=0.5;${O55}=0.5`,
-      `${H45}=0.3;${S5}=1.0;${O46}=0.5`, `${H45}=0.3;${S5}=1.0;${O46}=0.5;${O55}=0.5;${O55}=0.5`,
-      `${H45}=0.3;${H45}=1.0;${O46}=0.5;${O55}=0.5`, `${H45}=0x1;${S5}=1.0;${O46}=0.5;${O55}=0.5`,
-      `${H45}=0.3=1;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${H45}=-0.0;${S5}=1.0;${O46}=0.5;${O55}=0.5`, '', null];
+    const g = L.__routeParseEstimates(`${H45}=0.31;${S5}=1.0;${O55}=5e-05`);
+    ok('the estimates string parses exactly as Python wrote it', g && g[H45] === 0.31 && g[S5] === 1 && g[O55] === 5e-05);
+    const bad = [`${H45}=0.9garbage;${S5}=1.0;${O55}=0.5`, `${H45}=+0.3;${S5}=1.0;${O55}=0.5`,
+      `${H45}=1.5;${S5}=1.0;${O55}=0.5`, `${H45}=NaN;${S5}=1.0;${O55}=0.5`,
+      `${H45}= 0.3;${S5}=1.0;${O55}=0.5`, `${S5}=0.3;${H45}=1.0;${O55}=0.5`,
+      `${H45}=0.3;${S5}=1.0`, `${H45}=0.3;${S5}=1.0;${O55}=0.5;${O55}=0.5`,
+      `${H45}=0.3;${H45}=1.0;${O55}=0.5`, `${H45}=0x1;${S5}=1.0;${O55}=0.5`,
+      `${H45}=0.3=1;${S5}=1.0;${O55}=0.5`, `${H45}=-0.0;${S5}=1.0;${O55}=0.5`, '', null];
     ok('prefixes, signs, out-of-range, wrong order, missing, extra and duplicate lanes are all rejected',
       bad.every((b) => L.__routeParseEstimates(b) === null));
   }
 
   // ---- card, transport and the whole decision ------------------------------------------------------
   {
-    server.probs = P(0.31, 0.93, 0.95, 0.97);
+    server.probs = P(0.31, 0.93, 0.97);
     server.seen = [];
     const L = lane({}, { deadline: 1 });
     L.setClock({ left_s: 5400 });
@@ -223,7 +224,7 @@ async function main() {
     ok('the whole dispatch prompt goes in as digest and length only; no routing answer rides along',
       card.task.dispatch_prompt_sha256 === L.eikosSha256('optimize prompt') && card.task.dispatch_prompt_chars === 15 &&
       JSON.stringify(card).indexOf('optimize prompt') < 0 && !('answer' in card) && !('estimates' in card));
-    ok('Eikos is asked the four lane questions and never sees the host\'s thresholds or quota',
+    ok('Eikos is asked the lane questions and never sees the host\'s thresholds or quota',
       JSON.stringify(server.seen[0].questions) === JSON.stringify(SPEC.questions) &&
       JSON.stringify(server.seen[0]).indexOf('reducer_version') < 0 && JSON.stringify(server.seen[0]).indexOf('top_quota') < 0);
     const again = await L.__routePick('optimize prompt', W(ENG('r2_d1')));
@@ -244,7 +245,7 @@ async function main() {
     ok('a work-product failure counts once against its own lane; a duplicate outcome is recorded and ignored',
       L.__routeLadder['eng:memory'].fails_by_lane[S5] === 1 && L.__routeLadder['eng:memory'].floor_rank === 2 &&
       /duplicate/.test(last(L, 'outcome_ignored').why) && last(L, 'outcome_ignored').dispatch_id === p3.dispatch_id);
-    server.probs = P(0.1, 0.99, 0.95, 0.97);
+    server.probs = P(0.1, 0.99, 0.97);
     const p4 = await L.__routePick('optimize prompt', W(ENG('r2_d1')));
     const c4 = JSON.parse(server.seen[server.seen.length - 1].state);
     const d4 = last(L, 'decide');
@@ -291,10 +292,10 @@ async function main() {
     }
     const journal = new Map();
     let misses = 0;
-    server.probs = P(0.1, 0.95, 0.96, 0.97);
+    server.probs = P(0.1, 0.95, 0.97);
     const L1 = lane({}, { deadline: 1, carrier: async (p, o, run) => { const env = await run(p); journal.set(p, env); return env; } });
     const recorded = await script(L1);
-    server.probs = P(0.99, 0.99, 0.99, 0.99);                                 // any redraw would now differ
+    server.probs = P(0.99, 0.99, 0.99);                                 // any redraw would now differ
     const seenBefore = server.seen.length;
     const L2 = lane({}, { deadline: 1, evalDir: L1.evalDir,
       carrier: async (p, o, run) => { if (journal.has(p)) return journal.get(p); misses++; return run(p); } });
@@ -313,7 +314,7 @@ async function main() {
       all(L3, 'decide').every((e) => e.backend === 'ok' && e.persisted === true && e.interventions.length === 0));
     // The same EVAL_DIR resumed under a stricter operator floor: the stored estimates stand, the host
     // reduces on the current constraints and records the intervention.
-    const L4 = lane({ route_floors: '{"eng:memory": 3}' }, { deadline: 1, evalDir: L1.evalDir });
+    const L4 = lane({ route_floors: '{"eng:memory": 2}' }, { deadline: 1, evalDir: L1.evalDir });
     L4.setClock({ left_s: 3000 });
     direction(L4, 'r1_d0');
     const p4 = await L4.__routePick('p0', W(ENG('r1_d0')));
@@ -323,28 +324,27 @@ async function main() {
       d4.interventions.some((s) => /different host input/.test(s)) && server.seen.length === seenBefore);
   }
 
-  // ---- policy rank versus price, end to end --------------------------------------------------------
+  // ---- escalation end to end ----------------------------------------------------------------------
   {
-    server.probs = P(0.1, 0.95, 0.95, 0.5);
+    server.probs = P(0.1, 0.95, 0.5);
     const L = lane({ route_max_top_escalations: '5' });
     direction(L, 'r1_d0', 'compute');
     const lbl = ENG('r1_d0', 'compute');
     const picks = [await L.__routePick('p', W(lbl))];
     L.__routeOutcome('eng:compute', false, 'apply_failed', 'work_product', 'verify r1_d0', lbl, picks[0].dispatch_id);
     picks.push(await L.__routePick('p', W(lbl)));
+    const d = last(L, 'decide');
     L.__routeOutcome('eng:compute', false, 'correctness_failed', 'work_product', 'verify r1_d0', lbl, picks[1].dispatch_id);
     picks.push(await L.__routePick('p', W(lbl)));
-    const models = picks.map((x) => x.model);
-    const d = last(L, 'decide');
-    ok('Sonnet fails, then Opus 4.6 (the only qualifying lane) fails, then Opus 5.5 is still allowed',
-      JSON.stringify(models) === JSON.stringify([S5, O46, O55]));
-    ok('...taken as a recorded override because its estimate is under tau', d.threshold_met === false &&
+    ok('Sonnet (the qualifying lane) fails, then Opus 5.5 is still allowed, then after it fails the worker is deferred',
+      picks[0].model === S5 && picks[1].model === O55 && picks[2].skip === true && picks[2].deferred === true);
+    ok('...Opus 5.5 taken as a recorded override because its estimate is under tau', d.threshold_met === false &&
       d.override.kind === 'no_lane_qualified' && d.chosen_estimate === 0.5 && d.max_estimate === 0.5);
   }
   {
     // a carrier timeout after a code failure still excludes the failed lane
     let hang = false;
-    server.probs = P(0.1, 0.99, 0.95, 0.97);
+    server.probs = P(0.1, 0.99, 0.97);
     const L = lane({}, { carrier: (p, o, run) => (hang ? new Promise(() => {}) : run(p)),
                          setTimeout: (fn, ms) => setTimeout(fn, hang ? 5 : ms) });
     direction(L, 'r1_d0');
@@ -360,7 +360,7 @@ async function main() {
   // ---- parallel same-scope tasks and late results ---------------------------------------------------
   {
     let inflight = 0, maxInflight = 0;
-    server.probs = P(0.31, 0.93, 0.95, 0.97);
+    server.probs = P(0.31, 0.93, 0.97);
     const L = lane({ route_max_top_escalations: '5' }, { carrier: async (p, o, run) => {
       inflight++; maxInflight = Math.max(maxInflight, inflight);
       try { return await run(p); } finally { inflight--; } } });
@@ -369,7 +369,7 @@ async function main() {
     ok('two in-flight directions in one scope are decided one at a time, each its own occurrence',
       maxInflight === 1 && a.model === S5 && b.model === S5 &&
       JSON.stringify(all(L, 'decide').map((e) => e.seq)) === '[1,2]' && a.dispatch_id !== b.dispatch_id);
-    server.probs = P(0.1, 0.5, 0.5, 0.97);
+    server.probs = P(0.1, 0.5, 0.97);
     direction(L, 'r1_d2');
     const c = await L.__routePick('p2', W(ENG('r1_d2')));
     L.__routeOutcome('eng:memory', false, 'first task patch did not apply', 'work_product', 'verify r1_d0', ENG('r1_d0'), a.dispatch_id);
@@ -401,12 +401,12 @@ async function main() {
   // ---- outcomes bind to the exact host-issued dispatch id (Astra, 2a1257f review) ------------------------
   {
     // 1. A duplicate of d1's failure after d2 has started under the same label must not close d2.
-    server.probs = P(0.1, 0.99, 0.5, 0.5);
+    server.probs = P(0.1, 0.99, 0.5);
     const L = lane();
     direction(L, 'r1_d0');
     const d1 = await L.__routePick('p', W(ENG('r1_d0')));
     L.__routeOutcome('eng:memory', false, 'apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'), d1.dispatch_id);
-    server.probs = P(0.1, 0.5, 0.5, 0.97);
+    server.probs = P(0.1, 0.5, 0.97);
     const d2 = await L.__routePick('p', W(ENG('r1_d0')));
     L.__routeOutcome('eng:memory', false, 'apply_failed', 'work_product', 'verify r1_d0', ENG('r1_d0'), d1.dispatch_id);
     const st = L.__routeLadder['eng:memory'];
@@ -417,11 +417,11 @@ async function main() {
   }
   {
     // 2. Task A on Sonnet and a changed task B on Opus 5.5 under one label; B's success arrives first.
-    server.probs = P(0.1, 0.99, 0.5, 0.5);
+    server.probs = P(0.1, 0.99, 0.5);
     const L = lane();
     direction(L, 'r1_d0');
     const a = await L.__routePick('task A', W(ENG('r1_d0')));
-    server.probs = P(0.1, 0.5, 0.5, 0.97);
+    server.probs = P(0.1, 0.5, 0.97);
     direction(L, 'r1_d0', 'memory', { prompt: 'A different change to the same kernel.' });
     const b = await L.__routePick('task B', W(ENG('r1_d0')));
     L.__routeOutcome('eng:memory', true, 'verified', 'non_improvement', 'verify r1_d0', ENG('r1_d0'), b.dispatch_id);
@@ -433,7 +433,7 @@ async function main() {
       !(O55 in st.fails_by_lane) && last(L, 'fail').dispatch_id === a.dispatch_id && last(L, 'fail').model === S5);
   }
   {
-    server.probs = P(0.1, 0.99, 0.5, 0.5);
+    server.probs = P(0.1, 0.99, 0.5);
     const L = lane();
     direction(L, 'r1_d0'); direction(L, 'r1_d1');
     const a = await L.__routePick('p', W(ENG('r1_d0')));
@@ -450,7 +450,7 @@ async function main() {
   }
   {
     // agentT hands the issued id to the caller's host-owned context and binds its own no-result outcome.
-    server.probs = P(0.1, 0.99, 0.5, 0.5);
+    server.probs = P(0.1, 0.99, 0.5);
     const L = lane({}, { worker: (p, o) => (/^verify/.test(o.label) ? null : { ok: true }) });
     direction(L, 'r1_d0');
     const route = {};
@@ -481,43 +481,43 @@ async function main() {
 
   // ---- quota and the kill switch ---------------------------------------------------------------------
   {
-    server.probs = P(0.1, 0.5, 0.5, 0.97);
-    const L = lane();
+    server.probs = P(0.1, 0.5, 0.97);
+    const L = lane({ route_max_top_escalations: '1' });
     direction(L, 'r1_d0');
     const a = await L.__routePick('p', W(ENG('r1_d0')));
     const b = await L.__routePick('p', W(ENG('r1_d0')));
-    ok('a second dispatch of a top-lane occurrence with the quota used never drops below its decided lane: deferred',
+    ok('a second dispatch of a top-lane occurrence with a set cap used never drops below its decided lane: deferred',
       a.model === O55 && b.skip === true && b.deferred === true &&
       last(L, 'override').kind === 'decided_lane_no_longer_feasible' && last(L, 'override').to === null && L.topUsed() === 1);
   }
   {
     // The scope's effective lane survives new occurrences (Astra, 2026-10-12): no silent drop to Sonnet.
-    server.probs = P(0.1, 0.5, 0.5, 0.97);
-    const L = lane();
+    server.probs = P(0.1, 0.5, 0.97);
+    const L = lane({ route_max_top_escalations: '1' });
     direction(L, 'r1_d0');
     const a = await L.__routePick('p', W(ENG('r1_d0')));
-    server.probs = P(0.1, 0.99, 0.5, 0.5);                                    // Sonnet would now qualify
+    server.probs = P(0.1, 0.99, 0.5);                                    // Sonnet would now qualify
     direction(L, 'r1_d1');
     const b = await L.__routePick('p1', W(ENG('r1_d1')));
-    ok('after Opus 5.5 is dispatched, a new task in the scope with the quota used is deferred, not sent to Sonnet',
-      a.model === O55 && L.__routeLadder['eng:memory'].effective_rank === 3 && b.skip === true && b.deferred === true &&
+    ok('after Opus 5.5 is dispatched, a new task in the scope with a set cap used is deferred, not sent to Sonnet',
+      a.model === O55 && L.__routeLadder['eng:memory'].effective_rank === 2 && b.skip === true && b.deferred === true &&
       last(L, 'decide').backend === 'not_asked_no_feasible_lane' && L.carried.length === 1);
     L.__routeOutcome('eng:memory', false, 'engineer reported 0.98x <= floor 1.05', 'non_improvement', 'engineer r1_d0', ENG('r1_d0'), a.dispatch_id);
     const c = await L.__routePick('p', W(ENG('r1_d0')));
     ok('...and so is the next attempt after its non-improvement', c.skip === true && c.deferred === true &&
       last(L, 'decide').trigger === 'non_improvement' && L.carried.length === 1);
     const M = lane({ route_max_top_escalations: '5' });
-    server.probs = P(0.1, 0.5, 0.5, 0.97);
+    server.probs = P(0.1, 0.5, 0.97);
     direction(M, 'r1_d0'); direction(M, 'r1_d1');
     await M.__routePick('p', W(ENG('r1_d0')));
-    server.probs = P(0.1, 0.99, 0.5, 0.5);
+    server.probs = P(0.1, 0.99, 0.5);
     const d = await M.__routePick('p1', W(ENG('r1_d1')));
     ok('with quota left, the new task stays on the effective lane as a recorded override, not a drop to Sonnet',
       d.model === O55 && last(M, 'decide').threshold_met === false && last(M, 'decide').reduce.allowed.join() === O55);
   }
   {
     const spent = { v: 0 };
-    server.probs = P(0.1, 0.5, 0.5, 0.97);
+    server.probs = P(0.1, 0.5, 0.97);
     const L = lane({ route_max_output_tokens: '1000' }, { budget: { spent: () => spent.v },
       carrier: async (p, o, run) => { spent.v = 5000; return run(p); } });
     direction(L, 'r1_d0'); direction(L, 'r1_d1');
@@ -533,7 +533,7 @@ async function main() {
 
   // ---- what reaches the host when the relay or the record is bad -------------------------------------
   async function relayCase(name, carrier, expect, extra) {
-    server.probs = P(0.99, 0.99, 0.99, 0.99);
+    server.probs = P(0.99, 0.99, 0.99);
     let L = null;
     L = lane(extra && extra.args, Object.assign({ carrier: carrier && ((p, o, run) => carrier(p, o, run, L)) }, extra && extra.opts));
     if (extra && extra.prepare) extra.prepare(L);
@@ -543,7 +543,7 @@ async function main() {
     ok(name, d.backend === expect && pick.model === S5 && d.estimates === null && d.threshold_met === null);
   }
   await relayCase('altered estimates in the relay are caught (decision digest), host falls back',
-    async (p, o, run) => Object.assign(await run(p), { estimates: `${H45}=1.0;${S5}=1.0;${O46}=1.0;${O55}=1.0` }), 'decision_altered');
+    async (p, o, run) => Object.assign(await run(p), { estimates: `${H45}=1.0;${S5}=1.0;${O55}=1.0` }), 'decision_altered');
   await relayCase('a different card reached the script: relay mismatch',
     async (p, o, run) => Object.assign(await run(p), { state_sha256: '0'.repeat(64) }), 'relay_mismatch');
   await relayCase('a different host input reached the script: relay mismatch',
@@ -551,7 +551,7 @@ async function main() {
   await relayCase('an answer to another question version is refused even when consistently signed',
     async (p, o, run, L) => resign(L, Object.assign(await run(p), { questions_version: 'lane_sufficiency.v0' })), 'question_mismatch');
   await relayCase('a non-strict estimates token is malformed even when consistently signed',
-    async (p, o, run, L) => resign(L, Object.assign(await run(p), { estimates: `${H45}=0.99garbage;${S5}=0.99;${O46}=0.99;${O55}=0.99` })),
+    async (p, o, run, L) => resign(L, Object.assign(await run(p), { estimates: `${H45}=0.99garbage;${S5}=0.99;${O55}=0.99` })),
     'malformed');
   await relayCase('a carrier that throws is a backend error, not a worker failure', async () => { throw new Error('API 529'); }, 'error');
   await relayCase('a carrier that never returns times out on its own bound', () => new Promise(() => {}), 'timeout',
@@ -573,7 +573,7 @@ async function main() {
 
   // ---- task identity and eligibility -------------------------------------------------------------------
   {
-    server.probs = P(0.99, 0.99, 0.99, 0.99);
+    server.probs = P(0.99, 0.99, 0.99);
     const L = lane();
     direction(L, 'r1_d0');
     await L.__routePick('p', W(ENG('r1_d0')));
@@ -604,7 +604,7 @@ async function main() {
       L2.carried.length === 0 && /does not fit/.test(last(L2, 'decide').ineligible) && p.model === S5 &&
       L2.workers.length === 1 && L2.workers[0].o.label === 'eikos:condense eng:memory' && last(L2, 'decide').condensed === null);
     // Condensed: the carrier model shortens the direction for the card only; Eikos is then asked.
-    server.probs = P(0.31, 0.93, 0.95, 0.97);
+    server.probs = P(0.31, 0.93, 0.97);
     server.seen = [];
     const SHORT = 'Double-buffer the w2 k-tiles and issue all three loads before the first wait.';
     const L3 = lane({}, { worker: (pr, o) => (String(o.label).indexOf('eikos:condense') === 0 ? { prompt: SHORT } : { ok: true }) });
@@ -633,7 +633,7 @@ async function main() {
     ok('a direction that fits is never sent to the condenser', L5.workers.length === 0);
   }
   {
-    server.probs = P(0.99, 0.99, 0.99, 0.99);
+    server.probs = P(0.99, 0.99, 0.99);
     const L = lane({ route_eikos_max_consults: '1' });
     direction(L, 'r1_d0'); direction(L, 'r1_d1');
     await L.__routePick('p', W(ENG('r1_d0')));
@@ -642,7 +642,7 @@ async function main() {
       L.carried.length === 1 && last(L, 'decide').backend === 'consult_budget_exhausted' && b.model === S5);
   }
   {
-    server.probs = P(0.95, 0.95, 0.95, 0.95);
+    server.probs = P(0.95, 0.95, 0.95);
     const L = lane();
     await L.agentT('p', W('tech_lead:plan r1'));
     await L.agentT('p', W('clock r1'));

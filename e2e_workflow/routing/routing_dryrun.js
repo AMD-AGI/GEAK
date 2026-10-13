@@ -10,7 +10,7 @@
 //       (3) ON + verifier present (Path B) -> mapped -> Sonnet, gated.
 //       (4) ON + NO verifier (Path A) -> gated=false -> the seam SUPPRESSES (stays strong).
 //       (5) __routeEscalate: cheap-first, one strong fallback on a failed gate, both attempts recorded.
-//   * kernel_lane.js — the four-lane COST LADDER (policy: routing/SKILL.md; no verbatim cascade). Proves:
+//   * kernel_lane.js — the three-lane COST LADDER (policy: routing/SKILL.md; no verbatim cascade). Proves:
 //       (1) OFF -> __routeModel undefined on EVERY scope, and agentT() short-circuits (byte-identical run).
 //       (2) inline ROUTE_TIER_MAP is exactly the 3 Haiku helper scopes; ROUTE_LANES == canonical LANES.
 //       (3) ON static: helpers -> Haiku 4.5, brain -> Opus 5.5, decider -> Sonnet 5.5, workers -> classified.
@@ -193,7 +193,7 @@ async function runCascade(F, src) {
 }
 
 async function runModelMap(F, src) {
-  const OPUS55 = 'claude-opus-5-5', OPUS46 = 'claude-opus-4-6';
+  const OPUS55 = 'claude-opus-5-5';
   // (1) OFF: __routeModel undefined for EVERY scope, and agentT() hands straight to the unchanged core.
   const off = loadInline(src, {}, {}, [], fsRequire({}));
   ok_(`${F.name}: routing OFF by default`, off.ROUTING_ON === false);
@@ -212,7 +212,8 @@ async function runModelMap(F, src) {
       JSON.stringify(off.ROUTE_TIER_MAP) === JSON.stringify(F.expectMap));
   ok_(`${F.name}: inline ROUTE_LANES == canonical tier_map LANES`,
       JSON.stringify(off.ROUTE_LANES) === JSON.stringify(CANON.LANES));
-  ok_(`${F.name}: top lane is GEAK's default model (tier_map MODEL_STRONG)`, off.ROUTE_LANES[3] === CANON.MODEL_STRONG);
+  ok_(`${F.name}: top lane is GEAK's default model (tier_map MODEL_STRONG)`,
+      off.ROUTE_LANES[off.ROUTE_LANES.length - 1] === CANON.MODEL_STRONG);
   const someKey = Object.keys(off.ROUTE_TIER_MAP)[0];
   ok_(`${F.name}: scope keys use U+0000 separator (not a space)`, someKey.indexOf(NUL) >= 0 && someKey.indexOf(' ') < 0);
 
@@ -251,8 +252,8 @@ async function runModelMap(F, src) {
     const { L, asked } = harness({}, [dec('high', 0.40)]);
     const r1 = await L.__routePick('optimize the kernel', W('eng d1:memory'));
     const r2 = await L.__routePick('optimize again', W('eng d4:memory'));
-    ok_(`${F.name}: unsure small lane (conf 0.40 < 0.70) -> classified lane (high -> Opus 4.6)`, r1.model === OPUS46);
-    ok_(`${F.name}: decider asked ONCE per scope (same scope re-used, no re-classify on success)`, asked.length === 1 && r2.model === OPUS46);
+    ok_(`${F.name}: unsure small lane (conf 0.40 < 0.70) -> classified lane (high -> Opus 5.5)`, r1.model === OPUS55);
+    ok_(`${F.name}: decider asked ONCE per scope (same scope re-used, no re-classify on success)`, asked.length === 1 && r2.model === OPUS55);
     ok_(`${F.name}: decider call: route:classify label, low effort, typed schema (agentT pins route:* to Sonnet 5.5)`,
         asked[0].o.model === undefined && asked[0].o.label === 'route:classify eng:memory' &&
         asked[0].o.effort === 'low' && asked[0].o.schema === L.ROUTE_DECISION_SCHEMA);
@@ -314,8 +315,16 @@ async function runModelMap(F, src) {
     const { L } = harness({}, [dec('escalate', 0.10), dec('escalate', 0.10)]);
     const a = await L.__routePick('x', W('eng d1:algo'));
     const b = await L.__routePick('x', W('eng d2:layout'));
-    ok_(`${F.name}: first worker Opus 5.5 dispatch allowed, second capped to Opus 4.6 (max 1 per run)`,
-        a.model === OPUS55 && b.model === OPUS46 && L.__routeAudit.some((e) => e.event === 'dispatch' && e.capped));
+    ok_(`${F.name}: no top-lane cap by default: both worker dispatches run on Opus 5.5, none capped`,
+        a.model === OPUS55 && b.model === OPUS55 && !L.__routeAudit.some((e) => e.event === 'dispatch' && e.capped) &&
+        L.__routeReport().thresholds.max_top_escalations === null);
+  }
+  {
+    const { L } = harness({ route_max_top_escalations: '1' }, [dec('escalate', 0.10), dec('escalate', 0.10)]);
+    const a = await L.__routePick('x', W('eng d1:algo'));
+    const b = await L.__routePick('x', W('eng d2:layout'));
+    ok_(`${F.name}: route_max_top_escalations=1: first Opus 5.5 dispatch allowed, second capped one lane down to Sonnet 5.5`,
+        a.model === OPUS55 && b.model === CHEAP && L.__routeAudit.some((e) => e.event === 'dispatch' && e.capped));
   }
   {
     const { L } = harness({ route_floors: JSON.stringify({ verify: 1 }) }, [dec('small', 0.99)]);

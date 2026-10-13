@@ -1,6 +1,6 @@
 ---
 name: cost-ladder-routing
-description: GEAK's default routing policy on expt/3-routing — send every agent to the lowest sufficient Claude model (Haiku 4.5 → Sonnet 5.5 → Opus 4.6 → Opus 5.5), climb only on deterministic failure, cap spend in code, and report every dollar. Use when running, reviewing or tuning a routed GEAK run, or when asked where a routed run over- or under-spent.
+description: GEAK's default routing policy on expt/3-routing — send every agent to the lowest sufficient Claude model (Haiku 4.5 → Sonnet 5.5 → Opus 5.5), climb only on deterministic failure, cap spend in code, and report every dollar. Use when running, reviewing or tuning a routed GEAK run, or when asked where a routed run over- or under-spent.
 ---
 
 # Cost-ladder routing
@@ -32,7 +32,7 @@ Keep these apart. Never let one do another's job.
 | layer | who | does | never does |
 |---|---|---|---|
 | **Brain** | Opus 5.5 | Director and TechLead: plan, split work, adjudicate, validate | implementation work a worker can do |
-| **Workers** | Haiku 4.5 / Sonnet 5.5 / Opus 4.6 / Opus 5.5 | everything else: engineers, verify, integrate, commit, profile, research, KB | choose its own model |
+| **Workers** | Haiku 4.5 / Sonnet 5.5 / Opus 5.5 | everything else: engineers, verify, integrate, commit, profile, research, KB | choose its own model |
 | **Decider** | Sonnet 5.5 | answers one typed question per decision (below) | write code, patches or plans; answer anything a tool already answered |
 
 Fixed-script helpers (`clock`, `storage:reclaim`, `warm_start:resolve`) always run on Haiku 4.5. Their
@@ -49,15 +49,16 @@ falls back to Sonnet 5.5. When Jev serves, wire it behind that switch; keep the 
 |---:|---|---|---|
 | 0 | small | `claude-haiku-4-5` | 1 · 1.25 · 0.10 · 5 |
 | 1 | medium | `claude-sonnet-5-5` | 2 · 2.50 · 0.20† · 10 |
-| 2 | high | `claude-opus-4-6` | 5 · 6.25 · 0.50 · 25 |
-| 3 | escalate | `claude-opus-5-5` | 4 · 5 · 0.20 · 20 |
+| 2 | high, escalate | `claude-opus-5-5` | 4 · 5 · 0.20 · 20 |
 
 Official prices, read 2026-09-28 (lanes 0 and 1 moved to Haiku 5.5 and Sonnet 5.5 on 2026-10-09; lane 0 moved
 back to Haiku 4.5 on 2026-10-13, because Claude Code 2.1.296 sends `thinking.type.enabled` for Haiku 5.5 and the
 AMD gateway rejects it with a 400 (tested 2026-10-12) — switch back once Claude Code sends what Haiku 5.5 accepts). Opus 5.5
-is also GEAK's default model on this branch (`interface/run_e2e.py`, `GEAK_CLAUDE_MODEL`). Note Opus 5.5 is
-**cheaper** than Opus 4.6; lane 2 is there for capability spread, not price. Sonnet 5.5 and Opus 5.5 cache
-prompts from 512 tokens; Haiku 4.5 and Opus 4.6 need 4,096.
+is also GEAK's default model on this branch (`interface/run_e2e.py`, `GEAK_CLAUDE_MODEL`). Opus 4.6 was lane 2
+until 2026-10-13. It was dropped because it costs more than Opus 5.5 on every bucket (5 · 6.25 · 0.50 · 25), so a
+scope that climbed through it paid more for an older model; on two 2026-10-13 runs its engineers cost $0.84 per
+million input tokens (output included) against $0.69 on Opus 5.5. Sonnet 5.5 and Opus 5.5 cache prompts from
+512 tokens; Haiku 4.5 needs 4,096.
 
 † The pricing page now lists $0.10 for Sonnet 5.5 cache reads. Claude Code (2.1.295) still charges $0.20, and so
 does the ledger, so that its cross-check against Claude Code's own cost keeps working. Not yet decided.
@@ -95,7 +96,7 @@ One call, one schema (`ROUTE_DECISION_SCHEMA`):
 
 | field | type | used for |
 |---|---|---|
-| `complexity` | `small \| medium \| high \| escalate` | the starting lane |
+| `complexity` | `small \| medium \| high \| escalate` | the starting lane (`high` and `escalate` both start on Opus 5.5) |
 | `confidence` | 0–1: will the **current** lane finish this task? | both gates (0.70) |
 | `risk_flag` | `none \| security \| data_loss` | forces a climb after a failure |
 | `action` | `continue \| retry \| verify \| escalate \| complete` | recorded for review only |
@@ -115,7 +116,7 @@ plan review (2026-10-12). Eikos never picks a lane: it returns estimates, and th
 - **Question.** One versioned boolean per lane (`eikos_questions/lane_sufficiency.json`): will the next
   attempt on this model meet the task's acceptance event within the budget? For an engineer that event
   is "verify finds the patch applies, is correct and beats the candidate floor"; a correct patch that
-  does not beat the floor does not meet it. The four estimates are kept apart, may be non-monotone, and
+  does not beat the floor does not meet it. The estimates are kept apart, may be non-monotone, and
   are never normalised.
 - **Units.** A *consultation* is one carrier call (no retries). A *dispatch* is one `agentT` call; the
   transport retries inside `agentTCore` belong to it. An *occurrence* is one frozen card (`seq`). A task
@@ -131,16 +132,17 @@ plan review (2026-10-12). Eikos never picks a lane: it returns estimates, and th
   and policy versions, that the decision was persisted and receipted, and parses the estimates string
   strictly. The carrier is never routed, and `route_eikos_max_consults` (default 40) caps its calls per
   lane run. Its cost is booked as router cost (role `route_carrier`).
-- **Reducer (`__routeReduce`, pure, `lane_reduce.v1`).**
+- **Reducer (`__routeReduce`, pure, `lane_reduce.v2`).**
   - *Allowed* lanes come from the policy rank, which is the existing lane numbering (Haiku 4.5, Sonnet
-    5.5, Opus 4.6, Opus 5.5): at or above the class floor, any operator floor (`route_floors`), the
+    5.5, Opus 5.5): at or above the class floor, any operator floor (`route_floors`), the
     scope's escalation floor and the scope's current effective lane (the highest lane it has actually
     dispatched; a lane proposed but not dispatched does not count). A new task gets new estimates but
     never silently moves the scope down. A lane is excluded once its work-product failures in the scope
     reach the class allowance: 1 for a code change, 2 otherwise. Counts never reset.
-  - *Feasible* lanes are the allowed ones that are available and, for Opus 5.5, still have quota.
-  - Among feasible lanes, the cheapest by list-price order (Haiku 4.5, Sonnet 5.5, Opus 5.5, Opus 4.6)
-    whose estimate is at least τ wins. The price order is a list-price proxy, not a predicted task cost.
+  - *Feasible* lanes are the allowed ones that are available and, for Opus 5.5 when `route_max_top_escalations`
+    sets a cap, still have quota. There is no cap by default: the host input then carries `top_quota_left: null`.
+  - Among feasible lanes, the cheapest by list-price order (Haiku 4.5, Sonnet 5.5, Opus 5.5; the same order as
+    the policy rank since Opus 4.6 left the ladder) whose estimate is at least τ wins. The price order is a list-price proxy, not a predicted task cost.
   - If no feasible lane reaches τ, the host takes the one with the highest estimate and records a policy
     override (`threshold_met=false`, τ, its own and the maximum estimate).
   - If the estimate is missing or unusable for any reason, the host takes the cheapest feasible lane
@@ -181,7 +183,7 @@ plan review (2026-10-12). Eikos never picks a lane: it returns estimates, and th
 | cap | default | arg |
 |---|---|---|
 | failures per lane before a forced climb | 3 | `route_max_retries_per_lane` |
-| worker dispatches on Opus 5.5 per run | 1 (further requests run on Opus 4.6) | `route_max_top_escalations` |
+| worker dispatches on Opus 5.5 per run | no cap (when set, further requests run one lane down, on Sonnet 5.5) | `route_max_top_escalations` |
 | escalation gate | 0.70 | `route_conf_escalate` |
 | output-token kill switch | 1,000,000 | `route_max_output_tokens` (0 = off) |
 | per-scope starting floors | none | `route_floors` (JSON `{scope: lane}`) |
@@ -202,8 +204,7 @@ dollar cap (the workflow cannot see prices).
 GEAK already does most of this and routing does not change it: every dispatch is a fresh agent,
 history reaches the next round as the TechLead's compact `INSIGHTS`, files are read from the workspace
 rather than pasted, and repeated context is cached by the API. Routing adds one caution: a cheaper
-lane only pays if its prompt is long enough to cache (512 tokens on Sonnet 5.5 and Opus 5.5; 4,096 on Haiku 4.5
-and Opus 4.6).
+lane only pays if its prompt is long enough to cache (512 tokens on Sonnet 5.5 and Opus 5.5; 4,096 on Haiku 4.5).
 
 ## After each run — review, then you decide
 
@@ -235,8 +236,8 @@ A routed run is not finished until it has this report (`route_review.md` plus th
 - the final diff (`final_patch.diff`)
 - savings: **measured** against a matched routing-OFF run, or clearly labelled a counterfactual
   when there is none. Repricing the same tokens at Opus 5.5 rates is not a measurement: other models
-  write other outputs, and Opus 4.6 counts about 30% fewer tokens for the same text (so did Haiku 4.5, the
-  small lane before 2026-10-09).
+  write other outputs, and Haiku 4.5 (the small lane) counts about 30% fewer tokens for the same text, as did
+  Opus 4.6 (a lane until 2026-10-13).
 - every step where a cheap lane cost more than it saved
 - the ledger's **cross-check against Claude Code's own cost**. The API returns tokens, never dollars;
   Claude Code prices them and reports `total_cost_usd` and per-model `costUSD` in each
