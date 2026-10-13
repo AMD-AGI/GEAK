@@ -778,6 +778,43 @@ def map_args(
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
+    # ...and the cap on it, as a fraction of the budget (JS default 0.2). The reserve has to hold the
+    # Director's paired base/final validation, which on a trace replay is two ~70min legs plus their
+    # boots -- past 20% of most budgets. Optional in the same way as the reserve itself.
+    reserve_cap = _float_or_none(
+        os.environ.get("GEAK_FINAL_RESERVE_CAP_FRAC"), "GEAK_FINAL_RESERVE_CAP_FRAC")
+    if reserve_cap is not None:
+        ps_args["final_reserve_cap_frac"] = reserve_cap
+    # Hung-agent guard (JS default 120min, then up to two retries). A serving agent on a trace replay
+    # can legitimately outlive 120min, and the guard cannot stop the attempt it gives up on, so a
+    # retry runs beside a still-live original on the same GPUs. GEAK_AGENT_TIMEOUT_RETRY=0 degrades
+    # to "no result" instead of retrying.
+    agent_timeout_ms = _int_or_none(os.environ.get("GEAK_AGENT_TIMEOUT_MS"), "GEAK_AGENT_TIMEOUT_MS")
+    if agent_timeout_ms is not None:
+        ps_args["agent_timeout_ms"] = agent_timeout_ms
+    if os.environ.get("GEAK_AGENT_TIMEOUT_RETRY", "").strip():
+        ps_args["agent_timeout_retry"] = (
+            "true" if _as_bool(os.environ["GEAK_AGENT_TIMEOUT_RETRY"]) else "false")
+    # Correctness bar: task accuracy (gsm8k) instead of greedy byte-parity, for kernels that round
+    # differently by design. Unset keeps the workflow's own default.
+    accuracy_gate = os.environ.get("GEAK_E2E_ACCURACY_GATE", "").strip().lower()
+    if accuracy_gate in ("none", "gsm8k"):
+        ps_args["accuracy_gate"] = accuracy_gate
+    elif accuracy_gate:
+        sys.stderr.write(f"ignoring unknown GEAK_E2E_ACCURACY_GATE: {accuracy_gate!r}\n")
+    accuracy_limit = _int_or_none(
+        os.environ.get("GEAK_E2E_ACCURACY_LIMIT"), "GEAK_E2E_ACCURACY_LIMIT")
+    if accuracy_limit is not None:
+        ps_args["accuracy_limit"] = accuracy_limit
+    accuracy_tol = _float_or_none(os.environ.get("GEAK_E2E_ACCURACY_TOL"), "GEAK_E2E_ACCURACY_TOL")
+    if accuracy_tol is not None:
+        ps_args["accuracy_tol"] = accuracy_tol
+    # Simulated speculative acceptance makes a stack perf-comparable and nothing more: what it serves
+    # is neither deterministic nor the model's own output, so a parity or accuracy probe run under it
+    # measures the simulator. Name the switches so correctness probes can serve without them.
+    simulated = _simulated_acceptance_env(initial_env)
+    if simulated:
+        ps_args["correctness_unset_env"] = ",".join(simulated)
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
@@ -7093,6 +7130,33 @@ def _int_or_none(raw: str | None, what: str) -> int | None:
     except ValueError:
         sys.stderr.write(f"ignoring non-integer {what}: {raw!r}\n")
         return None
+
+
+def _float_or_none(raw: str | None, what: str) -> float | None:
+    """Positive float, or None (with a note) for junk — same contract as ``_int_or_none``."""
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        sys.stderr.write(f"ignoring non-numeric {what}: {raw!r}\n")
+        return None
+    return value if value > 0 else None
+
+
+SIMULATED_ACCEPTANCE_ENV_PREFIX = "SGLANG_SIMULATE_ACC"
+
+
+def _simulated_acceptance_env(extra_env: str) -> list[str]:
+    """Simulated-acceptance switches set in this process's env or in the seed ``K=V`` env string."""
+    names = {k for k in os.environ if k.startswith(SIMULATED_ACCEPTANCE_ENV_PREFIX)}
+    try:
+        tokens = shlex.split(extra_env or "")
+    except ValueError:
+        tokens = (extra_env or "").split()
+    names.update(t.split("=", 1)[0] for t in tokens
+                 if "=" in t and t.startswith(SIMULATED_ACCEPTANCE_ENV_PREFIX))
+    return sorted(names)
 
 
 def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:

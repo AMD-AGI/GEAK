@@ -3041,6 +3041,70 @@ class TestMain(_RunE2ECase):
                     json.loads(stdout)["mapped_args"].get("final_reserve_s"),
                     expected)
 
+    def _set_env_until_test_end(self, names, values):
+        for name in names:
+            saved = os.environ.pop(name, None)
+            if saved is not None:
+                self.addCleanup(os.environ.__setitem__, name, saved)
+            self.addCleanup(os.environ.pop, name, None)
+            if values.get(name) is not None:
+                os.environ[name] = values[name]
+
+    def test_run_knobs_are_forwarded_only_when_set(self):
+        """Reserve cap, hung-agent policy and the accuracy gate are operator knobs:
+        unset => each arg is absent and the JS default wins; junk is dropped with a
+        note instead of aborting the run."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        knobs = {
+            "GEAK_FINAL_RESERVE_CAP_FRAC": "final_reserve_cap_frac",
+            "GEAK_AGENT_TIMEOUT_MS": "agent_timeout_ms",
+            "GEAK_AGENT_TIMEOUT_RETRY": "agent_timeout_retry",
+            "GEAK_E2E_ACCURACY_GATE": "accuracy_gate",
+            "GEAK_E2E_ACCURACY_LIMIT": "accuracy_limit",
+            "GEAK_E2E_ACCURACY_TOL": "accuracy_tol",
+        }
+        cases = (
+            ({}, {}),
+            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "0.4", "GEAK_AGENT_TIMEOUT_MS": "18000000",
+              "GEAK_AGENT_TIMEOUT_RETRY": "0", "GEAK_E2E_ACCURACY_GATE": "GSM8K",
+              "GEAK_E2E_ACCURACY_LIMIT": "400", "GEAK_E2E_ACCURACY_TOL": "0.02"},
+             {"final_reserve_cap_frac": 0.4, "agent_timeout_ms": 18000000,
+              "agent_timeout_retry": "false", "accuracy_gate": "gsm8k",
+              "accuracy_limit": 400, "accuracy_tol": 0.02}),
+            ({"GEAK_AGENT_TIMEOUT_RETRY": "yes"}, {"agent_timeout_retry": "true"}),
+            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "lots", "GEAK_E2E_ACCURACY_GATE": "mmlu",
+              "GEAK_E2E_ACCURACY_TOL": "-1"}, {}),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env):
+                self._set_env_until_test_end(knobs, env)
+                _rc, stdout = self._run(self._handoff(), "--dry-run")
+                mapped = json.loads(stdout)["mapped_args"]
+                self.assertEqual(
+                    {arg: mapped[arg] for arg in knobs.values() if arg in mapped}, expected)
+
+    def test_simulated_acceptance_switches_are_named_for_correctness_probes(self):
+        """Simulated speculative acceptance makes greedy output irreproducible, so the
+        workflow is told which switches its correctness probes must drop — whether
+        they arrive in the process env or in the seed env. No switch => no arg."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        names = ("SGLANG_SIMULATE_ACC_LEN", "SGLANG_SIMULATE_ACC_METHOD")
+        cases = (
+            ({}, "", None),
+            ({"SGLANG_SIMULATE_ACC_LEN": "3.61"}, "",
+             "SGLANG_SIMULATE_ACC_LEN"),
+            ({}, "SGLANG_SIMULATE_ACC_METHOD=match-expected FOO=1",
+             "SGLANG_SIMULATE_ACC_METHOD"),
+            ({"SGLANG_SIMULATE_ACC_LEN": "3.61"}, "SGLANG_SIMULATE_ACC_METHOD=match-expected",
+             "SGLANG_SIMULATE_ACC_LEN,SGLANG_SIMULATE_ACC_METHOD"),
+        )
+        for env, accepted_env, expected in cases:
+            with self.subTest(env=env, accepted_env=accepted_env):
+                self._set_env_until_test_end(names, env)
+                _rc, stdout = self._run(self._handoff(accepted_env=accepted_env), "--dry-run")
+                self.assertEqual(
+                    json.loads(stdout)["mapped_args"].get("correctness_unset_env"), expected)
+
     def test_successful_run_emits_result_and_journey(self):
         report = self.eval_dir / "final_report.md"
         report.parent.mkdir(parents=True)

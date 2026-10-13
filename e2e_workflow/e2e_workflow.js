@@ -331,8 +331,10 @@ const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remai
 // / p90 77 / max 86min), and the tail is the case this exists for: big models spend the final phase
 // waiting on server boots. A longer tail still ships the reports (Report writes them before Validate; only
 // the re-measure is at risk and run_e2e falls back). The 20% cap binds below a 5h budget.
-// Env override: GEAK_FINAL_RESERVE_S.
-const FINAL_RESERVE_CAP_FRAC = 0.2;
+// Env override: GEAK_FINAL_RESERVE_S. The cap is GEAK_FINAL_RESERVE_CAP_FRAC (clamped to 5-50%): a trace
+// replay's paired validation is two ~70min legs plus their boots, which 20% of most budgets cannot hold.
+const FINAL_RESERVE_CAP_FRAC = Math.min(0.5, Math.max(0.05,
+  parseFloat(A.final_reserve_cap_frac != null ? A.final_reserve_cap_frac : 0.2) || 0.2));
 const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
   ? Math.min(parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
              Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC))
@@ -598,6 +600,13 @@ const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);
 const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
   ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
   : {};
+// Simulated speculative acceptance (run_e2e forwards the switch names it finds, e.g. SGLANG_SIMULATE_ACC_*)
+// keeps throughput comparable but serves neither deterministic nor model-faithful output, so a parity or
+// accuracy probe under it measures the simulator. The roles that run such probes are told to serve them
+// with these names unset; nothing else changes, and a run without the switches never sees the block.
+const CORRECTNESS_UNSET_ENV = String(A.correctness_unset_env || '').split(',')
+  .map((s) => s.trim()).filter((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s));
+const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_tuner', 'tuning_specialist']);
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
@@ -1739,6 +1748,21 @@ measurement duration. Consequences you must respect:
 `;
 }
 
+function correctnessEnvBlock(role) {
+  if (!CORRECTNESS_UNSET_ENV.length || !CORRECTNESS_PROBE_ROLES.has(role)) return '';
+  const unset = CORRECTNESS_UNSET_ENV.map((v) => `-u ${v}`).join(' ');
+  return `\n\n## CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE\n` +
+    `This stack serves with simulated speculative-decoding acceptance (${CORRECTNESS_UNSET_ENV.join(', ')}). ` +
+    `It keeps throughput comparable, but what it serves is neither deterministic nor the model's own ` +
+    `output: the unmodified reference does not reproduce itself, so a greedy-parity or task-accuracy probe ` +
+    `run under it measures the simulator, not the change. For EVERY correctness probe, launch BOTH servers ` +
+    `(the TRUE baseline and the candidate) with these variables removed, from the process env ` +
+    `(\`env ${unset} ...\`) and from EXTRA_ENV, and change nothing else: same flags, same overlay, same ` +
+    `TP/GPU. Throughput legs keep them, because those legs ARE the measurement, so a correctness server ` +
+    `is never one of the throughput servers. Say in your notes that the probe ran with simulated ` +
+    `acceptance off.`;
+}
+
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
@@ -1749,6 +1773,7 @@ function roleAgent(role, phase, intro, inputs) {
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
     // Only surfaced on a trace replay; a synthetic run's Inputs block is unchanged.
     ...(IS_AGENTX ? { WORKLOAD_KIND } : {}),
+    ...(correctnessEnvBlock(role) ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
     ...inputs,
   };
   const base = `You are the ${role}. PHASE=${phase}.
@@ -1775,7 +1800,7 @@ ${workloadIdentityBlock()}
 ${cfg(inall)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role) + warmStartBlock(role);
+  return base + expertSkillsBlock(role) + warmStartBlock(role) + correctnessEnvBlock(role);
 }
 
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
@@ -1795,6 +1820,9 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // it to 45min so a single hung/slow agent can't blow the wall-clock budget (still ample for the director
 // baseline + the head e2e A/B). Default mode keeps 120min → unchanged.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 2700000 : 7200000), 10);
+// The guard abandons the PROMISE, not the agent: a timed-out attempt keeps running its servers and legs,
+// so a retry runs beside it on the same GPUs and files. agent_timeout_retry=false degrades to null instead.
+const AGENT_TIMEOUT_RETRY = String(A.agent_timeout_retry != null ? A.agent_timeout_retry : 'true') !== 'false';
 // Process-safety rule prepended to EVERY agent prompt. It is injected at this funnel
 // (the one place `agent()` is ever called) rather than in roleAgent(), because several
 // prompts are built inline and would otherwise never see it — and any future call site
@@ -1851,9 +1879,18 @@ function withProcessSafety(prompt) {
 // with — work started before the final phase stays bounded.
 let FINAL_PHASE_STARTED = false;
 const FINALIZE_GATE_PHASE = 'Finalize-gate';   // display grouping only — not load-bearing for the cap
+const AGENT_TIMEOUT_FLOOR_MS = 120000;
 function agentTimeoutFor() {
   if (TIME_BUDGET_MS == null || FINAL_PHASE_STARTED) return AGENT_TIMEOUT_MS;
-  return Math.max(120000, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
+  return Math.max(AGENT_TIMEOUT_FLOOR_MS, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
+}
+// An agent started now would only get the floor above: the reserve has begun, or is under one floor
+// away, and the final phase has not started. Nothing measured fits in two minutes, and the guard that
+// fires then abandons the promise, not the agent -- so whatever starts here runs on, unwatched, on the
+// GPUs Finalize and Validate are about to need.
+function atReserveFloor() {
+  return TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED &&
+    remainingMs() - FINAL_RESERVE_MS <= AGENT_TIMEOUT_FLOOR_MS;
 }
 
 // ===========================================================================
@@ -1964,7 +2001,7 @@ function ablEffortFor(opts, attempt) {
   return ABL_CHEAP_LABELS.test(label) ? 'low' : null;
 }
 
-function agentBounded(rawPrompt, opts, ablAttempt) {
+function agentBounded(rawPrompt, opts, ablAttempt, onHung) {
   const prompt = withProcessSafety(rawPrompt);
   const ablEffort = ablEffortFor(opts, ablAttempt || 0);
   if (ablEffort) {
@@ -1974,17 +2011,24 @@ function agentBounded(rawPrompt, opts, ablAttempt) {
   const timeoutMs = agentTimeoutFor();
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
+  const run = agent(prompt, opts);
   const guard = new Promise((resolve) => {
     to = setTimeout(() => {
       log(`  [hung-agent guard] ${(opts && opts.label) || 'agent'} exceeded ${Math.round(timeoutMs / 60000)}min with no return — treating as a failed attempt.`);
+      if (onHung) onHung(run);
       resolve(null);
     }, timeoutMs);
   });
   return Promise.race([
-    agent(prompt, opts).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+    run.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
     guard,
   ]);
 }
+
+// Attempts the hung-agent guard gave up on inside the reserve, by label. Each is still running, and
+// for an integrator its eventual return is the verdict of the A/B it was measuring
+// (adoptAbandonedVerdict).
+const ABANDONED_RUNS = new Map();
 
 async function safeAgent(prompt, opts, tries = 3) {
   let lastErr = 'unknown';
@@ -1998,11 +2042,19 @@ async function safeAgent(prompt, opts, tries = 3) {
         ? prompt + `\n\n## PREVIOUS ATTEMPT FAILED — do not repeat it\nA cheaper-effort attempt at this exact task failed with:\n\`\`\`\n${String(lastErr).slice(0, 2000)}\n\`\`\`\nDiagnose that failure before acting.\n`
         : prompt;
       const ev = tlAgent(prompt, opts, i + 1);   // record AT DISPATCH; ok=false until it resolves
-      const r = await agentBounded(p2, opts, i);
+      let hung = null;
+      const r = await agentBounded(p2, opts, i, (run) => { hung = run; });
       if (r) {
         if (r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
         if (ev) ev.ok = true;
         return r;
+      }
+      const inReserve = !!hung && atReserveFloor();
+      if (hung && (!AGENT_TIMEOUT_RETRY || inReserve)) {
+        if (inReserve) ABANDONED_RUNS.set((opts && opts.label) || '', hung);
+        log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null without a retry: the timed-out attempt ` +
+          `may still be running (${inReserve ? 'the final reserve has begun' : 'agent_timeout_retry=false'}).`);
+        return null;
       }
       lastErr = 'null/empty result';
     } catch (e) { lastErr = String(e); }
@@ -2443,6 +2495,34 @@ const bankAccepted = (list, e, kr) => {
   });
 };
 
+// An integrator abandoned at the reserve boundary is still measuring, and is usually minutes from its
+// verdict. No FINISH retry may start inside the reserve, so that return is the only verdict this A/B
+// can still get: wait for it, but only through the first LATE_VERDICT_RESERVE_FRAC of the reserve, so
+// Finalize/Report/Validate keep the rest.
+const LATE_VERDICT_RESERVE_FRAC = 0.25;
+async function adoptAbandonedVerdict(integ, label) {
+  const run = ABANDONED_RUNS.get(label);
+  ABANDONED_RUNS.delete(label);
+  if (integ || !run || !atReserveFloor() || typeof setTimeout !== 'function') return integ;
+  const waitMs = remainingMs() - Math.ceil(FINAL_RESERVE_MS * (1 - LATE_VERDICT_RESERVE_FRAC));
+  if (!(waitMs > 0)) return integ;
+  log(`  ${label}: abandoned at the reserve boundary — waiting up to ${Math.round(waitMs / 60000)}min ` +
+    'for its own verdict instead of starting a FINISH retry.');
+  let to;
+  const late = await Promise.race([
+    run.then((r) => r || null, () => null),
+    new Promise((resolve) => { to = setTimeout(() => resolve(null), waitMs); }),
+  ]);
+  clearTimeout(to);
+  if (!late) {
+    log(`  ${label}: no late verdict within ${Math.round(waitMs / 60000)}min; the A/B stays incomplete.`);
+    return integ;
+  }
+  if (late.llm_timeline) LLM_TL.nested.push(late.llm_timeline);
+  log(`  ${label}: ADOPTED the late verdict (${late.gate || '?'}${late.e2e_delta_pct != null ? `, ${late.e2e_delta_pct}%` : ''}).`);
+  return late;
+}
+
 // Run ONE integrate A/B and GUARANTEE both legs complete. The first call does a
 // normal apply+gate; if the integrator returns incomplete (ran only ref, hung,
 // or degraded mid-A/B) we RE-INVOKE it in resume mode to run the MISSING leg,
@@ -2450,20 +2530,23 @@ const bankAccepted = (list, e, kr) => {
 // (head, milestone, finalize-gate, disk-recovered): an A/B never ends after the
 // reference leg alone — it is driven to a complete ref+cand measurement.
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
-  // Caller inputs win; the tuning carve-out only ever ADDS keys (and is {} when no tuning was banked).
+  // Caller inputs win; the accuracy gate and the tuning carve-out only ever ADD keys (each is {} when
+  // off / when no tuning was banked).
   const withTuning = {
     MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
-    ...tuningIntegrateInputs(), ...inputs,
+    ...ACCURACY_INPUTS, ...tuningIntegrateInputs(), ...inputs,
   };
-  let integ = await safeAgent(
+  let integ = await adoptAbandonedVerdict(await safeAgent(
     roleAgent('e2e_integrator', 'integrate', intro, withTuning),
-    { phase: phaseName, label, schema: INTEGRATE_SCHEMA });
+    { phase: phaseName, label, schema: INTEGRATE_SCHEMA }), label);
   let tries = 0;
   while (!abDone(integ) && tries < AB_FINISH_RETRIES) {
+    if (searchClosed(`${label}: FINISH retry`)) break;
     tries++;
     log(`  ${label}: A/B incomplete (${integ ? (integ.reason || integ.gate) : 'null/timeout'}); ` +
       `re-invoking integrator to FINISH the missing leg (retry ${tries}/${AB_FINISH_RETRIES}).`);
-    integ = await safeAgent(
+    const finishLabel = `${label} (finish ${tries})`;
+    integ = await adoptAbandonedVerdict(await safeAgent(
       roleAgent('e2e_integrator', 'integrate',
         'FINISH this e2e A/B. A reference leg may already exist on disk under $CB/ref — reuse it and ' +
         'run ONLY the missing candidate leg (or re-run both if no usable ref exists), then return ' +
@@ -2471,7 +2554,7 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
         'hardware/harness fault persists after this retry. If short on time, keep one isolated search ' +
         'replica per leg so BOTH legs still run.',
         { ...withTuning, RESUME_AB: true }),
-      { phase: phaseName, label: `${label} (finish ${tries})`, schema: INTEGRATE_SCHEMA });
+      { phase: phaseName, label: finishLabel, schema: INTEGRATE_SCHEMA }), finishLabel);
   }
   if (integ && integ.short_name) {
     const candidateId = String(integ.short_name).replace(/[^A-Za-z0-9_.-]+/g, '_');
@@ -2745,6 +2828,13 @@ if (TIME_BUDGET_EFFECTIVE_MS != null && typeof setTimeout === 'function' && TIME
     TIME_FINAL_DEADLINE_HIT = true;
     log(`[time-budget] RESERVE BOUNDARY reached (${Math.round(TIME_BUDGET_EFFECTIVE_MS / 60000)}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget spent) — the remaining ~${Math.round(FINAL_RESERVE_MS / 60000)}min belongs to Finalize/Report/Validate. No NEW A/B or measured work starts from here.`);
   }, TIME_BUDGET_EFFECTIVE_MS);
+}
+// The same rule for everything ahead of the Finalize-gate: the search phases, their re-profiles, the
+// KB replays and FINISH retries. Each checks before it dispatches; see atReserveFloor() for why.
+function searchClosed(what) {
+  if (FINAL_PHASE_STARTED || (!TIME_FINAL_DEADLINE_HIT && !atReserveFloor())) return false;
+  log(`[time-budget] ${what} SKIPPED — the final reserve has begun.`);
+  return true;
 }
 function deepBoundedWorkflow(ref, wfArgs, label) {
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
@@ -3324,6 +3414,11 @@ print(json.dumps(res))
           `${E2E_WARM_START_BENCH_MIN_SPEEDUP}x — offered as a reference, not measured`,
       }));
       for (const c of benchable.slice(0, benchN)) {
+        if (searchClosed(`[kb] replay of config ${c.session_id || '?'}`)) {
+          verdicts.push({ ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a',
+            outcome: 'skipped', why: 'the final reserve began before its turn' });
+          continue;
+        }
         // VALIDATE THROUGH THE ORIGINAL GATE. This is config_tuner:sweep — the same role, the same
         // schema, the same bench_e2e.sh at the same TP/GPU, the same delta-vs-median arithmetic, the
         // same parity check and the same swap-took-effect log grep the flow already trusts for a
@@ -3423,7 +3518,8 @@ print(json.dumps(res))
         // the minimum needed, and bench once more. Exactly once — a repair loop against a config
         // that cannot run here learns nothing new — and through the SAME accept gate.
         let repair = null;
-        if (!measuredTrialOf(sweep, BASELINE_TPUT).measured) {
+        if (!measuredTrialOf(sweep, BASELINE_TPUT).measured &&
+            !searchClosed(`[kb] repair of config ${c.session_id || '?'}`)) {
           const repaired = await runValidation(
             'A recovered configuration was applied to this box and the server produced NO ' +
             'measurement — it failed to launch, failed to become healthy, or died before the bench. ' +
@@ -3603,6 +3699,7 @@ print(json.dumps(res))
           : (!viaOverlay && kind === 'patch' && !patchPath) ? 'the record names a patch but its bundle holds no file'
           : (!viaOverlay && kind !== 'patch' && !hasRouting) ? `recorded as a '${kind}' win but carries no apply_env/apply_flags, so there is nothing to re-apply`
           : replayed >= E2E_WARM_START_KERNELS_N ? `replay budget of ${E2E_WARM_START_KERNELS_N} already spent`
+          : searchClosed(`[kb] replay of kernel ${k.name}`) ? 'the final reserve began before its turn'
           : '';
         if (unreplayable) {
           kernelVerdicts.push({ ...k, kind, outcome: 'reference', measured_delta_pct: null,
@@ -3665,9 +3762,10 @@ print(json.dumps(res))
             : '') +
           '(1) There is NO task_dir and therefore NO immutable oracle for this kernel. Your step-1 ' +
           'provenance re-check cannot run, because the workspace that produced this patch does not ' +
-          'exist on this box. Do NOT claim provenance was verified. The FRESH parity probe against the ' +
-          'reference leg is the only correctness evidence available here, so run it and report its ' +
-          'result plainly — if parity fails or cannot be established, REJECT.\n' +
+          'exist on this box. Do NOT claim provenance was verified. The FRESH correctness probe against ' +
+          'the TRUE baseline (greedy parity, or the task-accuracy gate when ACCURACY_GATE is in your ' +
+          'inputs) is the only correctness evidence available here, so run it and report its result ' +
+          'plainly — if it fails or cannot be established, REJECT.\n' +
           '(2) verified_isolated_speedup is a FOREIGN number, measured on another box against another ' +
           'baseline. It is context for what to expect, never evidence. Gate on what YOU measure.\n' +
           'As always: never mutate the installed package. The overlay on PYTHONPATH is the only ' +
@@ -3999,30 +4097,35 @@ print(json.dumps(res))
   // Fold before Profile and ConfigSweep so every downstream measurement sees the active source stack.
   curOverlay = ST.overlay || kbSeedOverlay || curOverlay || '';
 
-  phase('Profile');
-  profile = await safeAgent(
-    roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
-      EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
-      OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
-    }),
-    { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
-  log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
+  if (searchClosed('Profile and Strategize')) {
+    kernelQueue = [];
+    headQueue = [];
+  } else {
+    phase('Profile');
+    profile = await safeAgent(
+      roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
+        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
+        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
+      }),
+      { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
+    log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
 
-  phase('Strategize');
-  strategy = await safeAgent(
-    roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
-      EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
-      WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
-    }),
-    { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
-  kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
-  headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
-  headQueue = applyOpIdentityGuard(headQueue, 'strategize');
-  log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
-  // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
-  await ensureFlydslGate();
+    phase('Strategize');
+    strategy = await safeAgent(
+      roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
+        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
+        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+        ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
+      }),
+      { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
+    kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
+    headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
+    headQueue = applyOpIdentityGuard(headQueue, 'strategize');
+    log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
+    // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
+    await ensureFlydslGate();
+  }
 } else {
   // Load carried state from a prior phase invocation (args.state).
   EVAL_DIR = ST.eval_dir || EVAL_DIR_OVERRIDE;
@@ -4046,7 +4149,8 @@ print(json.dumps(res))
 // A carried phase-partial state still wins: it is a measurement this run already made. kbSeedTput is
 // 0 when Module A did not run or adopted nothing, so `0 || BASELINE_TPUT === BASELINE_TPUT`.
 let curTput = ST.throughput || kbSeedTput || BASELINE_TPUT;
-if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_directions || []).length) {
+if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_directions || []).length &&
+    !searchClosed('ConfigSweep')) {
   phase('ConfigSweep');
   const sweep = await safeAgent(
     roleAgent('config_tuner', 'sweep', 'Sweep the ranked config axes one at a time; keep wins.', {
@@ -4079,27 +4183,29 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       integrity: { checkpoint_assets: [] },
     });
     log(`Config sweep accepted. throughput ${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x). Re-profiling.`);
-    // Re-profile: config changed which kernels dominate.
-    profile = await safeAgent(
-      roleAgent('profiler', 'reprofile', 'Re-profile after the config sweep.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'config',
-        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Profile', label: 'profiler:post-config', schema: PROFILE_SCHEMA });
-    // Re-strategize the kernel queue against the new profile.
-    const restrat = await safeAgent(
-      roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
-        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
-        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
-    if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
-    if (restrat && restrat.head_candidates)
-      headQueue = applyOpIdentityGuard(restrat.head_candidates.slice(), 're-strategize');
-    // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
-    await ensureFlydslGate();
+    if (!searchClosed('post-config re-profile and re-strategize')) {
+      // Re-profile: config changed which kernels dominate.
+      profile = await safeAgent(
+        roleAgent('profiler', 'reprofile', 'Re-profile after the config sweep.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'config',
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Profile', label: 'profiler:post-config', schema: PROFILE_SCHEMA });
+      // Re-strategize the kernel queue against the new profile.
+      const restrat = await safeAgent(
+        roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
+          WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
+      if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
+      if (restrat && restrat.head_candidates)
+        headQueue = applyOpIdentityGuard(restrat.head_candidates.slice(), 're-strategize');
+      // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
+      await ensureFlydslGate();
+    }
   } else {
     log(`Config sweep found no win above the noise band.`);
   }
@@ -4148,7 +4254,7 @@ function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SY
 // An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
 // the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
 // ===========================================================================
-if (want('tune') && TUNING_SKILLSET_ENABLED) {
+if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) {
   phase('TuningSkillset');
   log(`Tuning skillset: ${TUNING_SKILLSET_DIR} (whole, standalone, pre-HeadKernel); ` +
     `no op cap, tuning-kb ${TUNING_KB_ENABLED ? 'ENABLED' : 'DISABLED (blind eval)'}.`);
@@ -4160,7 +4266,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: curTput,
       CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
       MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
-      NOISE_BAND_PCT: NOISE_BAND, ACCURACY_GATE,
+      NOISE_BAND_PCT: NOISE_BAND, ACCURACY_GATE, ...ACCURACY_INPUTS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '',
       TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
       TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
@@ -4473,27 +4579,29 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
 
     // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the
     // POST-tuning landscape, not the pre-tuning one. Same contract as the post-ConfigSweep re-profile.
-    profile = await safeAgent(
-      roleAgent('profiler', 'reprofile', 'Re-profile after the tuning skillset deployed its artifacts.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'tuning',
-        // curOverlay, not '': tuning may have banked a routing overlay, and profiling without it would
-        // measure a stack where the tuned artifact binds to nothing, then hand the head track a Top-N
-        // for the wrong landscape.
-        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Profile', label: 'profiler:post-tuning', schema: PROFILE_SCHEMA });
-    const retune = await safeAgent(
-      roleAgent('system_architect', 'strategize', 'Re-route after tuning changed the landscape.', {
-        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
-        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Strategize', label: 'architect:post-tuning-strategize', schema: STRATEGY_SCHEMA });
-    if (retune && retune.kernel_candidates) kernelQueue = retune.kernel_candidates.slice();
-    if (retune && retune.head_candidates)
-      headQueue = applyOpIdentityGuard(retune.head_candidates.slice(), 'post-tuning re-strategize');
-    if (retune) await ensureFlydslGate();
+    if (!searchClosed('post-tuning re-profile and re-strategize')) {
+      profile = await safeAgent(
+        roleAgent('profiler', 'reprofile', 'Re-profile after the tuning skillset deployed its artifacts.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'tuning',
+          // curOverlay, not '': tuning may have banked a routing overlay, and profiling without it would
+          // measure a stack where the tuned artifact binds to nothing, then hand the head track a Top-N
+          // for the wrong landscape.
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Profile', label: 'profiler:post-tuning', schema: PROFILE_SCHEMA });
+      const retune = await safeAgent(
+        roleAgent('system_architect', 'strategize', 'Re-route after tuning changed the landscape.', {
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
+          WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Strategize', label: 'architect:post-tuning-strategize', schema: STRATEGY_SCHEMA });
+      if (retune && retune.kernel_candidates) kernelQueue = retune.kernel_candidates.slice();
+      if (retune && retune.head_candidates)
+        headQueue = applyOpIdentityGuard(retune.head_candidates.slice(), 'post-tuning re-strategize');
+      if (retune) await ensureFlydslGate();
+    }
   } else if (tuned) {
     // Claimed accepted but failed a hard bar. Do NOT bank it — an unproven artifact silently poisons
     // every downstream A/B, which is the exact failure the skillset exists to prevent.
@@ -5481,7 +5589,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   }
   } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
   // Head wins reshape the profile massively (GEMM mass shrinks) — re-profile before the kernel loop.
-  if (acceptedHeads.length) {
+  if (acceptedHeads.length && !searchClosed('post-head re-profile')) {
     profile = await safeAgent(
       roleAgent('profiler', 'reprofile', 'Re-profile after head-kernel wins.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'head',
@@ -5939,7 +6047,7 @@ if (want('final')) {
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL,
       MEASUREMENT_MODE: VALIDATION_MEASUREMENT_MODE,
       MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_SAMPLES,
-      SKILL_DIR: WORKFLOW_DIR,
+      SKILL_DIR: WORKFLOW_DIR, ...ACCURACY_INPUTS,
       // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
       // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup
       // / TTFT / TPOT (and status/parity) to its authoritative same-session numbers, so report-vs-director

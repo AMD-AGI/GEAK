@@ -115,6 +115,14 @@ console.log('\n# the default reserve is one hour');
     'below a 5h budget the 20% cap binds instead of the default (3h -> 36min)');
   ok(reserveFor(12 * 3600 * 1000, { final_reserve_s: 5400 }) === 90 * 60000,
     'GEAK_FINAL_RESERVE_S still widens it, up to the same 20% cap');
+  ok(reserveFor(12 * 3600 * 1000, { final_reserve_s: 19800 }) === Math.floor(0.2 * 12 * 3600 * 1000),
+    'a reserve wider than 20% of the budget is still capped by default');
+  ok(reserveFor(16 * 3600 * 1000, { final_reserve_s: 19800, final_reserve_cap_frac: 0.4 }) === 19800 * 1000,
+    'GEAK_FINAL_RESERVE_CAP_FRAC raises the cap for a final phase that needs longer legs');
+  ok(reserveFor(12 * 3600 * 1000, { final_reserve_s: 40000, final_reserve_cap_frac: 0.9 }) === 0.5 * 12 * 3600 * 1000,
+    'the cap itself is clamped to half the budget, so the search keeps the other half');
+  ok(reserveFor(3 * 3600 * 1000, { final_reserve_cap_frac: 'junk' }) === Math.floor(0.2 * 3 * 3600 * 1000),
+    'a junk cap falls back to the 20% default');
 }
 
 console.log('\n# the reserve boundary is armed and gates the Finalize-gate');
@@ -181,5 +189,119 @@ ok(/function agentTimeoutFor\(\)/.test(src) && !/FINAL_PHASE_LABELS/.test(src),
 ok(src.slice(gate, grant).indexOf('FINAL_PHASE_STARTED = true') === -1,
   'the Finalize-gate runs entirely before the exemption is granted');
 
-console.log(failures ? `\nFAILED (${failures})` : '\nPASS');
-process.exit(failures ? 1 : 0);
+console.log('\n# nothing measured starts once a new agent would only get the 2min floor');
+// The 20261011 GLM run: WarmStart's KB integrator was cut off at the boundary, three FINISH retries
+// each got 2min and were abandoned too, then Profile dispatched — and that abandoned profiler held the
+// GPUs for an hour while Finalize waited. Every one of those agents ran on after its promise was dropped.
+const fStart = aStart;
+const fEnd = src.indexOf('\n}', src.indexOf('function atReserveFloor')) + 2;
+ok(fEnd > src.indexOf('function atReserveFloor') && src.indexOf('function atReserveFloor') > aEnd,
+  'atReserveFloor located right after agentTimeoutFor');
+const floorAt = (TIME_BUDGET_MS, leftMs) => new Function(
+  'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
+  `${src.slice(fStart, fEnd)}
+   return { atReserveFloor, agentTimeoutFor, enterFinalPhase: () => { FINAL_PHASE_STARTED = true; } };`)(
+  TIME_BUDGET_MS, AGENT_MAX, RESERVE, () => leftMs);
+ok(!floorAt(H, RESERVE + 3 * 60000).atReserveFloor(), '3min before the boundary an agent still gets real time');
+const edge = floorAt(H, RESERVE + 60000);
+ok(edge.atReserveFloor() && edge.agentTimeoutFor() === 120000,
+  'one rung of clock lag before the boundary already counts — that agent would get the floor');
+const inside = floorAt(H, 40 * 60000);
+ok(inside.atReserveFloor(), 'inside the reserve: true');
+inside.enterFinalPhase();
+ok(!inside.atReserveFloor(), 'never once the final phase has started — it owns the reserve');
+ok(!new Function('TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
+  `${src.slice(fStart, fEnd)}\nreturn atReserveFloor;`)(null, AGENT_MAX, null, () => Infinity)(),
+'no time_budget_s => never');
+
+const scSrc = (src.match(/function searchClosed\(what\) \{[\s\S]*?\n\}/) || [])[0];
+ok(!!scSrc, 'searchClosed(what) located');
+const closedFor = (flags) => {
+  const logs = [];
+  const fn = new Function('FINAL_PHASE_STARTED', 'TIME_FINAL_DEADLINE_HIT', 'atReserveFloor', 'log',
+    `${scSrc}\nreturn searchClosed;`)(flags.final, flags.hit, () => flags.floor, (m) => logs.push(m));
+  return { closed: fn('Profile'), logs };
+};
+ok(!closedFor({ final: false, hit: false, floor: false }).closed, 'mid-search: open, and silent');
+const byTimer = closedFor({ final: false, hit: true, floor: false });
+ok(byTimer.closed && /Profile SKIPPED/.test(byTimer.logs.join('\n')),
+  'closed by the drift-free boundary timer, and the skip is logged by name');
+ok(closedFor({ final: false, hit: false, floor: true }).closed, 'closed by the floor rule just before it');
+ok(!closedFor({ final: true, hit: true, floor: false }).closed, 'never closes anything in the final phase');
+
+// Every dispatch ahead of the Finalize-gate that could straddle the boundary checks first.
+for (const [gateArg, dispatch] of [
+  ["'Profile and Strategize'", "phase('Profile');"],
+  ["'ConfigSweep'", "phase('ConfigSweep');"],
+  ["'post-config re-profile and re-strategize'", "label: 'profiler:post-config'"],
+  ["'TuningSkillset'", "phase('TuningSkillset');"],
+  ["'post-tuning re-profile and re-strategize'", "label: 'profiler:post-tuning'"],
+  ["'post-head re-profile'", "label: 'profiler:post-head'"],
+  ['`[kb] replay of config', 'const runValidation'],
+  ['`[kb] repair of config', 'warm_start:repair:'],
+  ['`[kb] replay of kernel', 'runIntegrateBothLegs('],
+]) {
+  const g = src.indexOf(`searchClosed(${gateArg}`);
+  const d = g === -1 ? -1 : src.indexOf(dispatch, g);
+  // Only the gated call itself may sit between the gate and its marker.
+  const between = d > g ? src.slice(g, d) : '';
+  const dispatches = (between.match(/\b(?:safeAgent|runIntegrateBothLegs|runValidation)\(/g) || []).length;
+  ok(g !== -1 && d > g && dispatches <= 1 && d - g < 4000, `${dispatch} is gated by searchClosed(${gateArg}...)`);
+}
+ok(/if \(searchClosed\('Profile and Strategize'\)\) \{\s*kernelQueue = \[\];\s*headQueue = \[\];/.test(src),
+  'skipping Strategize still leaves both queues arrays (they are declared without a value)');
+
+console.log("\n# an integrator abandoned at the reserve boundary keeps its verdict");
+const rib = src.slice(src.indexOf('async function runIntegrateBothLegs('),
+  src.indexOf('if (integ && integ.short_name)', src.indexOf('async function runIntegrateBothLegs(')));
+ok(/let integ = await adoptAbandonedVerdict\(await safeAgent\(/.test(rib),
+  'the first integrate attempt goes through adoptAbandonedVerdict');
+ok(/searchClosed\(`\$\{label\}: FINISH retry`\)\) break;/.test(rib) &&
+  rib.indexOf('searchClosed(') < rib.indexOf('tries++'),
+  'no FINISH retry starts inside the reserve (checked before each one)');
+ok(/integ = await adoptAbandonedVerdict\(await safeAgent\([\s\S]*?label: finishLabel, [^}]*\}\), finishLabel\);/.test(rib),
+  'a FINISH attempt abandoned at the boundary is adoptable too');
+
+const adSrc = src.slice(src.indexOf('const LATE_VERDICT_RESERVE_FRAC'),
+  src.indexOf('// Run ONE integrate A/B and GUARANTEE'));
+ok(adSrc.includes('async function adoptAbandonedVerdict('), 'adoptAbandonedVerdict located');
+const adoptHarness = ({ floor = true, leftMs = RESERVE, run, integ = null }) => {
+  const waits = [];
+  const runs = new Map(run ? [['warm_start integrate k', run]] : []);
+  const fn = new Function('ABANDONED_RUNS', 'atReserveFloor', 'remainingMs', 'FINAL_RESERVE_MS', 'log',
+    'LLM_TL', 'setTimeout', `${adSrc}\nreturn adoptAbandonedVerdict;`)(
+    runs, () => floor, () => leftMs, RESERVE, () => {}, { nested: [] },
+    (cb, ms) => { waits.push(ms); if (run === NEVER) cb(); return 0; });
+  return { adopt: () => fn(integ, 'warm_start integrate k'), waits, runs };
+};
+const NEVER = new Promise(() => {});
+const verdict = { gate: 'accepted', ab_complete: true, e2e_delta_pct: 23.99 };
+
+(async () => {
+  const late = adoptHarness({ run: Promise.resolve(verdict) });
+  ok(await late.adopt() === verdict, 'the late return of the abandoned attempt is the adopted verdict');
+  ok(late.waits.length === 1 && late.waits[0] === RESERVE / 4,
+    `the wait is bounded at the first quarter of the reserve (${late.waits[0] / 60000}min of ${RESERVE / 60000}min)`);
+  ok(late.runs.size === 0, 'the entry is consumed, so a later A/B with the same label starts clean');
+
+  const silent = adoptHarness({ run: NEVER });
+  ok(await silent.adopt() === null, 'an attempt that never returns leaves the A/B incomplete, not stuck');
+
+  const failed = adoptHarness({ run: Promise.reject(new Error('agent crashed')) });
+  ok(await failed.adopt() === null, 'an attempt that throws is incomplete too');
+
+  const early = adoptHarness({ floor: false, run: Promise.resolve(verdict) });
+  ok(await early.adopt() === null && early.waits.length === 0,
+    'mid-search nothing is awaited: FINISH retries proceed exactly as before');
+
+  const spent = adoptHarness({ leftMs: RESERVE * 0.7, run: Promise.resolve(verdict) });
+  ok(await spent.adopt() === null && spent.waits.length === 0,
+    'past the first quarter of the reserve nothing is awaited — the rest belongs to Finalize/Validate');
+
+  const got = { gate: 'rejected', ab_complete: true };
+  const returned = adoptHarness({ integ: got, run: Promise.resolve(verdict) });
+  ok(await returned.adopt() === got && returned.waits.length === 0, 'a verdict already in hand is never replaced');
+
+  console.log(failures ? `\nFAILED (${failures})` : '\nPASS');
+  process.exit(failures ? 1 : 0);
+})();

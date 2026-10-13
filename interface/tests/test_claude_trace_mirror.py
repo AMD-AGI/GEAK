@@ -980,3 +980,85 @@ class UnreadableAndAmbiguousTest(unittest.TestCase):
         rec = home / "projects" / "-home-aditysin-PROJECTS-GEAK" / "s1" / "workflows" / "wf_run_a.json"
         pairs = M._sources(rec, "run_a")
         self.assertTrue(pairs and all(isinstance(rel, Path) for _, rel in pairs))
+
+
+class TestCredentialsStayInTheLiveHome(unittest.TestCase):
+    """The KB store token reached ``llm_trace`` on 2026-10-11 (GLM-5.2 e2e run).
+
+    Agents inherit it to talk to the store; one printed it, and the mirror copied
+    that transcript verbatim onto the run's durable output volume.
+    """
+
+    SECRET = "kbtok_" + "Q7" * 24   # synthetic
+    ENC = "-home-aditysin-PROJECTS-GEAK"
+
+    def _env(self, tmp, **extra):
+        # HOME moves too, so a developer's own ~/.geak_kb_token never enters the test.
+        env = {k: v for k, v in os.environ.items() if not M._SECRET_NAME_RE.search(k)}
+        env.update(HOME=os.path.join(tmp, "user"), **extra)
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def _run(self, tmp, printed):
+        ev = os.path.join(tmp, "eval")
+        os.makedirs(ev, exist_ok=True)
+        home = _home(os.path.join(tmp, "home"), "sess", "wf_tok", ev, agents=1)
+        src = (home / "projects" / self.ENC / "sess" / "subagents" / "workflows"
+               / "wf_tok" / "agent-0.jsonl")
+        src.write_text(json.dumps({"type": "user", "content": printed}) + "\n", encoding="utf-8")
+        return ev, home, src, Path(ev) / M.MIRROR_DIRNAME / src.relative_to(home)
+
+    def _manifest(self, ev):
+        return json.loads((Path(ev) / M.MIRROR_DIRNAME / M.MANIFEST_NAME).read_text(encoding="utf-8"))
+
+    def test_a_printed_store_token_is_masked_at_its_own_length(self):
+        with tempfile.TemporaryDirectory() as tmp, self._env(tmp, GEAK_KB_STORE_TOKEN=self.SECRET):
+            ev, home, src, dest = self._run(tmp, "GEAK_KB_STORE_TOKEN=%s\n" % self.SECRET)
+            self.assertEqual(M.mirror_run_trace(ev, homes=[home])["status"], "ok")
+            text = dest.read_text(encoding="utf-8")
+            self.assertNotIn(self.SECRET, text)
+            self.assertEqual(json.loads(text)["content"],
+                             "GEAK_KB_STORE_TOKEN=%s\n" % ("*" * len(self.SECRET)))
+            self.assertEqual(dest.stat().st_size, src.stat().st_size)
+            man = self._manifest(ev)
+            self.assertEqual(man["secrets_masked"], 1)
+            self.assertNotIn(self.SECRET, json.dumps(man))
+
+    def test_a_masked_copy_is_still_current_on_the_next_pass(self):
+        with tempfile.TemporaryDirectory() as tmp, self._env(tmp, KB_STORE_TOKEN=self.SECRET):
+            ev, home, _, _ = self._run(tmp, self.SECRET)
+            M.mirror_run_trace(ev, homes=[home])
+            M.mirror_run_trace(ev, homes=[home])
+            rec = [f for f in self._manifest(ev)["files"]
+                   if f["path"].endswith("wf_tok/agent-0.jsonl")][0]
+            self.assertFalse(rec["copied"])
+
+    def test_the_token_file_kb_env_sh_falls_back_to_is_masked_too(self):
+        with tempfile.TemporaryDirectory() as tmp, self._env(tmp):
+            user = Path(tmp) / "user"
+            user.mkdir()
+            (user / ".geak_kb_token").write_text(self.SECRET + "\n", encoding="utf-8")
+            ev, home, _, dest = self._run(tmp, "$ cat ~/.geak_kb_token\n" + self.SECRET)
+            M.mirror_run_trace(ev, homes=[home])
+            self.assertNotIn(self.SECRET, dest.read_text(encoding="utf-8"))
+
+    def test_paths_urls_and_short_values_are_copied_untouched(self):
+        long_path = "/shared/models/" + "x" * 40
+        url = "https://kb.example.internal/" + "y" * 20
+        with tempfile.TemporaryDirectory() as tmp, self._env(
+                tmp, HF_TOKEN_PATH=long_path, KB_TOKEN_URL=url,
+                SGLANG_SIMULATE_ACC_TOKEN_MODE="multinomial"):
+            ev, home, src, dest = self._run(tmp, " ".join([long_path, url, "multinomial"]))
+            M.mirror_run_trace(ev, homes=[home])
+            self.assertEqual(dest.read_bytes(), src.read_bytes())
+            mirror = Path(ev) / M.MIRROR_DIRNAME
+            record = Path("projects") / self.ENC / "sess" / "workflows" / "wf_wf_tok.json"
+            self.assertEqual((mirror / record).read_bytes(), (home / record).read_bytes())
+            self.assertEqual(
+                [i["run_id"] for i in M.resolve_run_scope([mirror], eval_dir=ev)["invocations"]],
+                ["wf_tok"])
+
+    def test_a_value_containing_another_is_masked_whole(self):
+        short, longer = "a" * 20, "a" * 20 + "b" * 20
+        with tempfile.TemporaryDirectory() as tmp, self._env(
+                tmp, KB_STORE_TOKEN=short, GEAK_KB_STORE_TOKEN=longer, MODEL_NAME="z" * 30):
+            self.assertEqual(M.secret_values(), [longer.encode(), short.encode()])
