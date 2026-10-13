@@ -1,5 +1,5 @@
-"""KernelFusion apply-back speed-ups: gsm8k gate harness/cache, pair-by-pair A/B, and
-parallel unit-side waves.
+"""KernelFusion apply-back speed-ups: gsm8k gate harness/cache, single-server A/B, no
+per-entry fallback after a rejected combined A/B, and parallel unit-side waves.
 
 The scheduling code is executed for real under node (skipped when node is absent), so
 the budget order, ladder release and GPU pinning are checked as behaviour, not as text.
@@ -49,8 +49,11 @@ class AccuracyGateContractTest(unittest.TestCase):
                     "GSM8K_THINKING: FUSION_GSM8K_THINKING",
                     "ACCURACY_STACK_KEY: accuracyKey",
                     "fusionAccuracyRef.stack_key === accuracyKey",
-                    "AB_DECIDE_SCRIPT:", "AB_MAX_PAIRS: FUSION_AB_MAX_PAIRS"):
+                    "COMBINED_AB_SCRIPT:", "AB_REPEATS: FUSION_COMBINED_AB_REPEATS"):
             self.assertIn(key, block)
+        # One base server and one candidate server, like the combined A/B: no pair-by-pair gate.
+        self.assertNotIn("AB_DECIDE_SCRIPT", block)
+        self.assertNotIn("AB_MAX_PAIRS", block)
 
     def test_thinking_is_off_by_default(self):
         self.assertIn("A.fusion_gsm8k_thinking != null ? A.fusion_gsm8k_thinking : 'false'", _source())
@@ -76,7 +79,10 @@ class AccuracyGateContractTest(unittest.TestCase):
         role = _role("fusion_integrator.md")
         self.assertLess(role.index("throughput A/B FIRST"), role.index("Accuracy verification"))
         self.assertIn('--concurrency "$GSM8K_CONCURRENCY"', role)
-        self.assertIn("AB_DECISION=continue", role)
+        self.assertNotIn("AB_DECISION=continue", role)
+        self.assertNotIn("R1 C1", role)
+        apply_one = role[role.index("## PHASE=apply_one"):]
+        self.assertIn("ONE `COMBINED_AB_SCRIPT` run", apply_one)
         self.assertIn("ACCURACY_REFERENCE", role)
         self.assertNotIn("≥4 reps/leg", role)
 
@@ -234,7 +240,7 @@ class CombinedApplyBackBehaviourTest(unittest.TestCase):
     ENTRIES = [{"exec_id": "e%02d" % i, "candidate_ids": ["c%02d" % i]} for i in range(1, 6)]
     ELIGIBLE = ["c02", "c03", "c05"]
 
-    def _run(self, mode="combined", decision="accept", gpus="0,1"):
+    def _run(self, mode="combined", decision="accept", gpus="0,1", reason="", authored=True):
         src = _source()
         start = src.index("    let applyState = {")
         end = src.index("        commitStep(step, accuracyKey, applyEntry.exec_id);\n      }\n    }\n")
@@ -255,7 +261,7 @@ const fusionUnitEligibleIds = {json.dumps(self.ELIGIBLE)};
 const fusionGsm8kConcurrency = () => 4;
 let curOverlay = '', curFlags = '', curEnv = '', curTput = 190;
 let fapply = null, fusionApplyFailedExec = '', fusionApplyUnprocessed = [];
-let fusionFailureStage = '', fusionAccuracyRef = null;
+let fusionFailureStage = '', fusionAccuracyRef = null, combinedFailure = '';
 const acceptedFusions = [], fusionRecoveryState = {{}};
 const fusionStackKey = () => JSON.stringify(acceptedFusions.map((r) => r.exec_id));
 const roleAgent = (role, phase, intro, inputs) => ({{ phase, inputs }});
@@ -264,11 +270,14 @@ const safeAgent = async (call) => {{
                 authored: call.inputs.AUTHORED_OVERLAY ? call.inputs.AUTHORED_OVERLAY.overlay_dir : '' }});
   if (call.phase === 'author_one') {{
     const id = call.inputs.TARGET_EXEC_ID;
-    return id === 'e03' ? {{ exec_id: id, status: 'blocked', reason: 'no seam' }}
-                        : {{ exec_id: id, status: 'authored', overlay_dir: '/o/' + id, banner_tag: id }};
+    return (id === 'e03' || !{json.dumps(authored)})
+      ? {{ exec_id: id, status: 'blocked', reason: 'no seam' }}
+      : {{ exec_id: id, status: 'authored', overlay_dir: '/o/' + id, banner_tag: id }};
   }}
   if (call.phase === 'combined_ab') {{
-    if ({json.dumps(decision)} !== 'accept') return {{ combined_decision: 'reject', accepted_fusions: [] }};
+    if ({json.dumps(decision)} === 'none') return null;
+    if ({json.dumps(decision)} !== 'accept') return {{ combined_decision: 'reject', accepted_fusions: [],
+             combined_ab: {{ decision: 'reject', reason: {json.dumps(reason)} }} }};
     return {{ combined_decision: 'accept', final_overlay: '/o/combined', e2e_throughput_tok_s: 247,
              accepted_fusions: [{{ exec_id: 'e02' }}, {{ exec_id: 'e05' }}],
              rejected: [{{ exec_id: 'e03', reason: 'no seam' }}] }};
@@ -278,7 +287,7 @@ const safeAgent = async (call) => {{
 }};
 (async () => {{
 {block}
-  console.log(JSON.stringify({{ calls, curTput, curOverlay,
+  console.log(JSON.stringify({{ calls, curTput, curOverlay, combinedFailure, fapply,
     accepted: acceptedFusions.map((r) => r.exec_id) }}));
 }})();
 """
@@ -299,19 +308,59 @@ const safeAgent = async (call) => {{
         authored = [c for c in out["calls"] if c["phase"] == "author_one"]
         self.assertEqual([c["gpu"] for c in authored], ["0", "1", "0"])   # waves of 2
 
-    def test_rejected_stack_falls_back_to_serial_and_reuses_overlays(self):
-        out = self._run(decision="reject")
-        serial = [c for c in out["calls"] if c["phase"] == "apply_one"]
-        self.assertEqual([c["exec"] for c in serial], [e["exec_id"] for e in self.ENTRIES])
-        reuse = {c["exec"]: c["authored"] for c in serial}
-        self.assertEqual(reuse["e02"], "/o/e02")
-        self.assertEqual(reuse["e03"], "")                     # blocked at authoring
+    def test_rejected_throughput_fails_fusion_without_serial_fallback(self):
+        reason = "throughput: nonoverlap=False, delta -0.510% vs noise band 0.5%"
+        out = self._run(decision="reject", reason=reason)
+        phases = [c["phase"] for c in out["calls"]]
+        self.assertEqual(phases.count("combined_ab"), 1)
+        self.assertNotIn("apply_one", phases)
+        self.assertEqual(out["combinedFailure"], "combined A/B rejected: " + reason)
+        self.assertEqual(out["accepted"], [])
+        self.assertIsNone(out["fapply"])
+        self.assertEqual(out["curTput"], 190)                   # pre-Fusion state kept
+        self.assertEqual(out["curOverlay"], "")
+
+    def test_rejected_accuracy_fails_fusion_without_serial_fallback(self):
+        reason = "accuracy: gsm8k 0.940 -> 0.165 (z=21.3 >= 2.0)"
+        out = self._run(decision="reject", reason=reason)
+        self.assertNotIn("apply_one", [c["phase"] for c in out["calls"]])
+        self.assertIn("accuracy: gsm8k", out["combinedFailure"])
+
+    def test_missing_combined_result_fails_fusion_without_serial_fallback(self):
+        out = self._run(decision="none")
+        self.assertNotIn("apply_one", [c["phase"] for c in out["calls"]])
+        self.assertEqual(out["combinedFailure"], "combined A/B returned no result")
+
+    def test_nothing_authored_fails_fusion_without_any_ab(self):
+        out = self._run(authored=False)
+        phases = [c["phase"] for c in out["calls"]]
+        self.assertNotIn("combined_ab", phases)
+        self.assertNotIn("apply_one", phases)
+        self.assertIn("no unit-side pass could be authored", out["combinedFailure"])
 
     def test_serial_mode_never_authors_separately(self):
-        phases = [c["phase"] for c in self._run(mode="serial")["calls"]]
+        out = self._run(mode="serial")
+        phases = [c["phase"] for c in out["calls"]]
         self.assertNotIn("author_one", phases)
         self.assertNotIn("combined_ab", phases)
         self.assertEqual(phases.count("apply_one"), len(self.ENTRIES))
+        self.assertEqual(out["combinedFailure"], "")
+
+
+class CombinedFailureDispositionTest(unittest.TestCase):
+    def test_combined_failure_is_a_kernelfusion_failure_with_its_reason(self):
+        src = _source()
+        # Declared where the disposition code can see it, not inside the apply-back block.
+        self.assertLess(src.index("let combinedFailure = ''"),
+                        src.index("if (FUSION_INPUTS.FUSION_TOPK_JSON && FUSION_INPUTS.FUSION_UNITSIDE_JSON) {"))
+        block = src[src.index("  if (!fapply) {\n    log('KernelFusion apply-back failed"):]
+        block = block[:block.index("\n  }\n")]
+        self.assertIn("failed_stage: combinedFailure ? 'apply_back:combined_ab'", block)
+        self.assertIn("`KernelFusion failed: ${combinedFailure}.", block)
+        self.assertIn("else if (combinedFailure) fusionStatus = 'combined_ab_failed';", src)
+        # Serial apply only runs when it was asked for.
+        self.assertIn("if (!combinedAccepted && FUSION_APPLYBACK_MODE === 'serial') {", src)
+        self.assertNotIn("falling back to one A/B per entry", src)
 
 
 class CombinedModeDefaultsTest(unittest.TestCase):

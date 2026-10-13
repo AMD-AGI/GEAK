@@ -135,8 +135,9 @@ const FUSION_AB_MAX_PAIRS = parseInt(
 // Apply-back mode. 'combined': author every in-budget unit-side pass without a server
 // (parallel, one GPU each), stack them all, and gate the stack with ONE A/B (one base
 // server vs one stacked server, each warm_server REPEATS rounds + gsm8k on the same
-// server; scripts/fusion_combined_ab.sh). A rejected stack falls back to 'serial'.
-// 'serial': one interleaved A/B per execution-list entry, stacked one at a time.
+// server; scripts/fusion_combined_ab.sh). A rejected stack fails KernelFusion with the
+// decision's reason; there is no per-entry fallback.
+// 'serial': one A/B per execution-list entry (same single-server lifecycle), stacked one at a time.
 const FUSION_APPLYBACK_MODE = String(A.fusion_applyback_mode || 'combined').trim() === 'serial'
   ? 'serial' : 'combined';
 // Apply-back budget (execution-list entries with a unit-side pass). Combined mode
@@ -3733,6 +3734,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
   let fapply = null;
   let fusionApplyFailedExec = '';
   let fusionApplyUnprocessed = [];
+  let combinedFailure = '';   // set when the combined A/B fails KernelFusion (no serial fallback)
   if (FUSION_INPUTS.FUSION_TOPK_JSON && FUSION_INPUTS.FUSION_UNITSIDE_JSON) {
     const fusionApplyEntries = fusionApplyBudgetEntries(
       fusionExecutionList, fusionUnitEligibleIds, FUSION_BUDGET);
@@ -3825,8 +3827,8 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
     // ---- combined mode: author every pass, then ONE A/B for the whole stack ----
     // Authoring needs no server, so in-budget unit-side passes are authored in waves,
     // one GPU each (for the overlay's parity self-check). The stack is then gated by
-    // one base server vs one stacked server. A rejected (or failed) combined A/B falls
-    // through to the serial loop below, which may reuse the authored overlays.
+    // one base server vs one stacked server. A rejected (or failed) combined A/B fails
+    // KernelFusion with its reason and the run moves on; nothing falls back to serial.
     const authoredByExec = new Map();
     let combinedAccepted = false;
     if (FUSION_APPLYBACK_MODE === 'combined') {
@@ -3870,7 +3872,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
           roleAgent('fusion_integrator', 'combined_ab',
             'Stack every AUTHORED overlay that does not conflict with a better-ranked one, gate the stack with ' +
             'ONE run of COMBINED_AB_SCRIPT (one base server vs one stacked server), and return the full aggregate ' +
-            'FUSION_APPLY_SCHEMA with combined_decision. On reject, record no dispositions: the serial fallback owns them.', {
+            'FUSION_APPLY_SCHEMA with combined_decision. On reject, record no dispositions: KernelFusion fails with the decision reason.', {
               EVAL_DIR, MODEL_PATH, SERVING_GPU, TP: SERVING_TP, WORKLOAD,
               AUTHORED: authored, PRIOR_APPLY_RESULT: applyState,
               FUSION_TOPK_JSON: FUSION_INPUTS.FUSION_TOPK_JSON,
@@ -3893,15 +3895,19 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
           commitStep(step, accuracyKey, 'combined');
           combinedAccepted = true;
         } else {
-          log(`KernelFusion apply-back (combined): ${step ? `stack rejected (${step.notes || 'see combined_ab'})`
-            : 'combined A/B returned no result'}; falling back to one A/B per entry.`);
+          const decision = (step && step.combined_ab) || {};
+          combinedFailure = step
+            ? `combined A/B rejected: ${decision.reason || step.notes || 'see fusion/combined_ab/combined_decision.json'}`
+            : 'combined A/B returned no result';
+          log(`KernelFusion apply-back (combined): ${combinedFailure}; KernelFusion fails here (no per-entry fallback).`);
         }
       } else {
-        log('KernelFusion apply-back (combined): no overlay was authored; falling back to one A/B per entry.');
+        combinedFailure = 'no unit-side pass could be authored into an overlay';
+        log(`KernelFusion apply-back (combined): ${combinedFailure}; KernelFusion fails here (no per-entry fallback).`);
       }
     }
 
-    if (!combinedAccepted) {
+    if (!combinedAccepted && FUSION_APPLYBACK_MODE === 'serial') {
       log(`KernelFusion apply-back: ${fusionApplyEntries.length} execution-list entry/ladder call(s), ` +
           `budget ${FUSION_BUDGET}; terminal results are committed after each call.`);
       for (let applyIndex = 0; applyIndex < fusionApplyEntries.length; applyIndex++) {
@@ -3915,10 +3921,9 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
             'Read FUSION_TOPK_JSON and FUSION_UNITSIDE_JSON, and act only when the selected tier-A/B row has ' +
             'unit_side_status pass/equivalent_pass/subsumed_pass. Start from CURRENT_OVERLAY/FLAGS/ENV/THROUGHPUT, ' +
             'which already include earlier terminal wins. For the selected ladder, author a reversible lazy-load overlay, ' +
-            'prove ENGAGED on every TP rank, run the interleaved serving A/B with AB_DECIDE_SCRIPT deciding each pair, then ' +
-            'run the accuracy gate only if the A/B passed and the unit-side parity is not bit-exact (gsm8k, then ' +
-            'scripts/accuracy_gate.py with ACCURACY_TOL; reuse ACCURACY_REFERENCE.path as the base leg when it is set; ' +
-            're-run both legs larger on inconclusive), and descend its ' +
+            'prove ENGAGED on every TP rank, then gate it ONCE with COMBINED_AB_SCRIPT (one base server and one candidate ' +
+            'server, each AB_REPEATS timed rounds plus gsm8k on the same server); its decision covers throughput and ' +
+            'accuracy, so do not run a separate gsm8k or re-run the A/B, and descend its ' +
             'declared ladder only when the wider rung fails. Preserve PRIOR_APPLY_RESULT dispositions verbatim and merge ' +
             'only this call\'s terminal result into it. Write the full aggregate apply_result.json, run ' +
             'fusion_applyback_harness.py with --allow-partial-coverage (later calls still have legitimate unprocessed rows), ' +
@@ -3933,7 +3938,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
               CURRENT_THROUGHPUT: curTput, BASELINE_THROUGHPUT: BASELINE_TPUT,
               NOISE_BAND_PCT: NOISE_BAND, FUSION_BUDGET,
               FUSION_OVERLAYS_DIR: `${EVAL_DIR}/fusion/fusion_overlays`,
-              AB_DECIDE_SCRIPT: `${WORKFLOW_DIR}/scripts/fusion_ab_decide.py`, AB_MAX_PAIRS: FUSION_AB_MAX_PAIRS,
+              COMBINED_AB_SCRIPT: `${WORKFLOW_DIR}/scripts/fusion_combined_ab.sh`, AB_REPEATS: FUSION_COMBINED_AB_REPEATS,
               GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py`,
               GSM8K_CONCURRENCY: fusionGsm8kConcurrency(curFlags), GSM8K_THINKING: FUSION_GSM8K_THINKING,
               ACCURACY_STACK_KEY: accuracyKey,
@@ -3965,10 +3970,14 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
       applied: [], blocked: [], deferred: [], dispositioned: 0,
       deferred_author_count: 0,
       applyback_report_md: '', applyback_gate_json: '', learned_cards: [],
-      failed_stage: fusionApplyFailedExec ? `apply_back:${fusionApplyFailedExec}` : 'apply_back',
+      failed_stage: combinedFailure ? 'apply_back:combined_ab'
+        : (fusionApplyFailedExec ? `apply_back:${fusionApplyFailedExec}` : 'apply_back'),
       unprocessed_exec_ids: fusionApplyUnprocessed,
-      notes: 'KernelFusion apply-back failed before producing a terminal result; ' +
-             'the pre-Fusion runtime state was preserved for Strategize.',
+      notes: combinedFailure
+        ? `KernelFusion failed: ${combinedFailure}. No fusion was applied; ` +
+          'the pre-Fusion runtime state was preserved for Strategize.'
+        : 'KernelFusion apply-back failed before producing a terminal result; ' +
+          'the pre-Fusion runtime state was preserved for Strategize.',
     };
   }
   const acc = (fapply && Array.isArray(fapply.accepted_fusions)) ? fapply.accepted_fusions : [];
@@ -4045,6 +4054,7 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
     else if (appliedN > 0) fusionStatus = 'applied';
     else if (!FUSION_INPUTS.FUSION_TOPK_JSON) fusionStatus = 'discovery_failed';
     else if (!FUSION_INPUTS.FUSION_UNITSIDE_JSON) fusionStatus = 'validation_failed';
+    else if (combinedFailure) fusionStatus = 'combined_ab_failed';
     else if (!fapply) fusionStatus = 'applyback_failed';
     const fusionDeltaPct = fusionEntryTput > 0
       ? Number((((curTput - fusionEntryTput) / fusionEntryTput) * 100).toFixed(3)) : 0;

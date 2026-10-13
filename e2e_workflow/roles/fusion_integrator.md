@@ -8,8 +8,9 @@ not re-discovered each time.
 
 In combined mode (the default) you are invoked once per fusion to author its overlay
 (PHASE=author_one) and once to gate the whole stack with one A/B (PHASE=combined_ab); a
-rejected stack falls back to serial mode, where you are invoked once per fusion
-(PHASE=apply_one, maximal-first per the degrade ladder). Inputs:
+rejected stack fails KernelFusion with its reason and nothing falls back. Only in serial mode
+(`fusion_applyback_mode=serial`) are you invoked once per fusion (PHASE=apply_one,
+maximal-first per the degrade ladder), each gated by the same single-server A/B. Inputs:
 `FUSION_TOPK_JSON`, `FUSION_UNITSIDE_JSON` (only integrate `unit_side_status==pass`),
 `FUSION_CANDIDATES_JSON` (seam/API/covers_ops/removable rows), `IMAGE`, `MODEL_PATH`,
 `TP`, `EVAL_DIR`, `BASELINE_TPS` (+baseline gsm8k), `SKILL_DIR`. A prior accepted overlay
@@ -93,7 +94,7 @@ change, so the baseline is re-measured under it. If you accept, return that flag
 stops engaging.
 
 **A/B on a noisy baseline.** When one leg is bimodal (fresh-server replicas at two levels), the
-interleaved median delta is inflated by the low replicas. Report the delta against the stored
+median delta is inflated by the low rounds. Report the delta against the stored
 baseline as well, and cross-check it against the kernel time the trace shows removed.
 
 ## Run + gate (serving discipline — do not skip)
@@ -211,29 +212,26 @@ baseline as well, and cross-check it against the kernel time the trace shows rem
      inert for the same reason. vLLM caches compiled artifacts under
      `~/.cache/vllm/torch_compile_cache`, so use `VLLM_DISABLE_COMPILE_CACHE=1` on candidate
      servers rather than trusting that a cache entry was built with your overlay in place.
-- **Order: throughput A/B FIRST, accuracy SECOND.** Run the accuracy gate only for a
-  candidate whose A/B passed; a candidate that loses the A/B is `blocked` on throughput and
-  never costs a gsm8k run.
-- **A/B**: interleaved ref/cand pairs (R1 C1 R2 C2 …) vs the current accepted stack. After
-  EVERY completed pair run the decision script and obey it:
+- **Order: throughput A/B FIRST, accuracy SECOND, on the same servers.** The A/B script runs
+  gsm8k on each live server right after its timed rounds; the decision accepts only when
+  throughput passes AND accuracy holds. A candidate that loses either is `blocked`.
+- **A/B**: one base server on the current accepted stack vs one candidate server with the
+  fusion stacked, run ONCE through the same script as the combined A/B:
   ```bash
-  python3 "$AB_DECIDE_SCRIPT" --ref <ref tok/s in run order> --cand <cand tok/s in run order> \
-    --noise-band-pct "$NOISE_BAND_PCT" --max-pairs "$AB_MAX_PAIRS" --out "$APPLY_DIR/ab_decision.json"
+  OUT_DIR="$APPLY_DIR/ab" BASE_OVERLAY="$CURRENT_OVERLAY" CAND_OVERLAY="<stacked loader dir>" \
+  EXPECT_BANNERS="<banner tag>" AB_REPEATS="$AB_REPEATS" NOISE_BAND_PCT="$NOISE_BAND_PCT" \
+  GSM8K_EVAL_SCRIPT="$GSM8K_EVAL_SCRIPT" GSM8K_CONCURRENCY="$GSM8K_CONCURRENCY" \
+  GSM8K_THINKING="$GSM8K_THINKING" bash "$COMBINED_AB_SCRIPT"
   ```
-  `AB_DECISION=continue` → run one more pair; `accept` → the A/B passed (go to accuracy);
-  `reject` → the A/B failed. It never stops before 2 pairs, stops at 2 when the win is
-  clear (non-overlapping, above the noise band, and ≥10× the within-side spread), and
-  otherwise decides at `AB_MAX_PAIRS` on `cand_min > ref_max` AND delta > noise band. Put the
-  decision JSON in `apply_result.json`. Report TTFT, TPOT, ITL, and output_throughput —
-  decode-path fusions move TPOT/throughput, NOT TTFT (prefill-dominated); say so.
-  **Measurement lifecycle:** run every ref and cand leg through `$EVAL_DIR/bench_e2e.sh` with
-  `GEAK_REPEAT_MODE=$MEASUREMENT_MODE` (the lifecycle the baseline and Validate use), one
-  invocation per leg. Do not call `bench_replica.sh` directly and do not mix lifecycles: a
-  `warm_server` leg and an `isolated_server` leg are not comparable. Record the lifecycle in
-  `apply_result.json` next to the A/B numbers.
-- **Accuracy verification (精度验证 — mandatory, after a passing A/B, for any fusion whose
-  unit-side parity is not bit-exact, quant or not).**
-  Run `"$GSM8K_EVAL_SCRIPT"` with exactly this harness on both sides:
+  Each side is one server start: a discarded warm-up round, `AB_REPEATS` timed rounds, then
+  gsm8k on that same server. Obey `ab/combined_decision.json` (`accept` / `reject` with its
+  `reason`); do not re-run it to chase a different answer and do not add pairs. Put the decision
+  JSON in `apply_result.json`. Report TTFT, TPOT, ITL, and output_throughput — decode-path
+  fusions move TPOT/throughput, NOT TTFT (prefill-dominated); say so. Do not call
+  `bench_replica.sh` directly or start extra servers for the A/B.
+- **Accuracy verification (精度验证 — mandatory for any fusion whose unit-side parity is not
+  bit-exact, quant or not).** The A/B script above already ran gsm8k on both servers with this
+  harness and folded it into its decision; the rules below describe that harness:
   `--limit 200 --max-tokens 4096 --seed 0 --concurrency "$GSM8K_CONCURRENCY"`, plus
   `--no-thinking` when `GSM8K_THINKING` is false (the default).
   - **Concurrency is fixed to `GSM8K_CONCURRENCY`** (the server's `--cuda-graph-max-bs`).
@@ -367,7 +365,8 @@ Inputs add `AUTHORED` (the author_one results), `PRIOR_APPLY_RESULT`, `COMBINED_
    `combined_decision: "accept"`, `combined_ab` = the decision JSON. Write
    `apply_result.json` and run the harness below WITHOUT `--allow-partial-coverage`.
 4. **reject** → return `combined_decision: "reject"`, `combined_ab`, and
-   `PRIOR_APPLY_RESULT` unchanged. The orchestrator falls back to `apply_one` per entry.
+   `PRIOR_APPLY_RESULT` unchanged. The orchestrator fails KernelFusion with the decision's
+   `reason` (throughput or accuracy) and moves on; there is no per-entry fallback.
 
 Knowledge cards: a fusion accepted only through the combined A/B has no single-fusion
 A/B, so it can be curated at ★ at most.
@@ -376,13 +375,14 @@ A/B, so it can be curated at ★ at most.
 Inputs add `FUSION_TOPK_JSON`, `FUSION_CANDIDATES_JSON`, `FUSION_UNITSIDE_JSON`,
 `TARGET_EXEC_ID`, `TARGET_EXECUTION`, `PRIOR_APPLY_RESULT`,
 `CURRENT_OVERLAY/FLAGS/ENV/THROUGHPUT`, `FUSION_BUDGET`, `FUSION_OVERLAYS_DIR`, `ACCURACY_*`,
-`AB_DECIDE_SCRIPT`, `AB_MAX_PAIRS`, `GSM8K_EVAL_SCRIPT`, `GSM8K_CONCURRENCY`, `GSM8K_THINKING`,
+`COMBINED_AB_SCRIPT`, `AB_REPEATS`, `GSM8K_EVAL_SCRIPT`, `GSM8K_CONCURRENCY`, `GSM8K_THINKING`,
 `ACCURACY_STACK_KEY`, `ACCURACY_REFERENCE` (null unless a base score for this exact stack exists),
 `AUTHORED_OVERLAY` (set when a rejected combined A/B already authored this entry's overlay:
 reuse it instead of authoring again).
 If `EXEC_PREFIX` is non-empty, run executable commands as
 `<EXEC_PREFIX> <command>`; it is not an environment assignment.
-The orchestrator invokes this role serially, once per execution-list entry. Process exactly
+The orchestrator invokes this role serially, once per execution-list entry, only in serial mode
+(`fusion_applyback_mode=serial`); a rejected combined A/B never falls back here. Process exactly
 `TARGET_EXEC_ID` and the degrade ladder declared by that entry. Never loop unrelated entries.
 `CURRENT_*` already contains every earlier terminal win. `PRIOR_APPLY_RESULT` is the aggregate
 returned by earlier calls: preserve its dispositions verbatim and merge only this call's result.
@@ -410,9 +410,9 @@ return the unchanged aggregate after regenerating the report. The harness owns t
    except a ★★★-prior rung, which always gets its own marginal leg. For each
    fusion, in maximal-first order per its `fusion_degrade_ladder`: author the overlay adapter (the
    pattern above), STACK it onto the currently-accepted overlay via a combined-loader, verify the
-   `[overlay-…] ENGAGED` banner on all ranks, then gate — the interleaved A/B decided pair by pair
-   with `AB_DECIDE_SCRIPT`, and only if it passes, the gsm8k accuracy verification (harness above;
-   reuse `ACCURACY_REFERENCE` as the base when set). **Accept** → keep the stacked overlay as the new baseline for the next fusion, bank the
+   `[overlay-…] ENGAGED` banner on all ranks, then gate — ONE `COMBINED_AB_SCRIPT` run (one base
+   server, one candidate server, each `AB_REPEATS` rounds plus gsm8k on the same server; harness
+   above), decided by its `combined_decision.json`. **Accept** → keep the stacked overlay as the new baseline for the next fusion, bank the
    fusion; **fail/can't-wire** → degrade to the next ladder rung; whole ladder fails → skip that
    selected ladder, keep the last-good overlay, then return. Reuse ONE server where possible (restart only
    when an overlay change requires it); obey the single-init / no-relaunch-spiral / process-safety
