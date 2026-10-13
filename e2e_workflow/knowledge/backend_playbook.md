@@ -42,6 +42,24 @@ experience; treat the seed as priors, not gospel — the unittest is the judge.
   low → not ranked on, head not dropped). Lesson: for a fused MoE dispatcher at decode, do NOT trust a
   `saturated`/`attainable=1.0` roofline verdict to size the opportunity; the launch-overhead win is invisible
   to it. This is the exact "measured EXCEEDS predicted attainable" failure mode — flag loudly.
+- 2026-10-01 · gfx942 sglang fp8 Qwen3-14B dense MLP (`_e04_kernel`, silu+group-quant fusion, decode,
+  10.76% head): roofline predicted `attainable_speedup=7.264×`, `expected_e2e_gain_pct=9.28%` (bound
+  **latency**, `roofline_pct` 0.121 → "far from ceiling", headroom `underperforming`, confidence **low**).
+  MEASURED via a 2D-tiled shape-adaptive tile micro-tune: isolated **1.656×**, e2e **+2.32%**. Here the
+  model was OPTIMISTIC the other way — a latency-bound `attainable` of 7.26× over-predicted what a tile
+  tune recovers by ~4.4×. Correct behavior held (confidence low → not ranked on). Lesson: a latency-bound
+  `attainable_speedup` at low confidence is a weak upper bound on BOTH sides; size a micro-tune from the
+  `pct_gpu_time` Amdahl ceiling (here 4.45% max → realized ~half), not from the roofline attainable.
+- 2026-10-01 · gfx942 sglang fp8 Qwen3-14B PREFILL fp8 a8w8 block-scale dense GEMM
+  (`_gemm_a8w8_blockscale_seed_kernel`, c0 authored-Triton seam, ~84% head): roofline predicted
+  `attainable_speedup=4.978×`, `expected_e2e_gain_pct=67.2%` (bound **latency**, confidence **low**).
+  MEASURED: a deepest-seam RE-capture + RE-author of the already-authored Triton kernel produced a
+  BYTE-COPY candidate (`weighted_speedup=0.9926`, iso ~1.0×) → e2e **dead-end**, i.e. NO further win beyond
+  the already-banked +6.55% authored-Triton swap. Third confirm that a latency-bound, low-confidence
+  roofline `attainable` grossly over-predicts (4.978× vs ~1.0× realized). Correct behavior held (conf low →
+  not ranked on; the head is NOT dropped — at 84% it STAYS the top target, but the only remaining lever is
+  a genuinely NEW kernel idea (flydsl SOTA fp8 GEMM / a real split-K rewrite), NOT another re-capture of the
+  same seam, which is exhausted at this budget).
 
 ## How to use this in a run
 1. Architect reads the Profiler Top-N classification + shapes.

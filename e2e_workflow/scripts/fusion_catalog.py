@@ -13,15 +13,29 @@ exactly the way the analyst did. We union:
   1. python importable callables (dir over aiter.ops.*)   -> source="py_import"
   2. python `def NAME(` across each provider tree          -> source=<provider>
   3. C++/HIP kernel symbols in csrc                        -> source="csrc"
-  4. (optional) kernels observed in a clean trace          -> source="trace"
+
+Only real kernel entry points are kept: predicates (is_/should_/can_/has_/
+check_), *_fake / *_cpu / *_npu fallbacks and config/tuner helpers are dropped
+(is_kernel_name). Op tags come from whole name TOKENS (plus signature params),
+never from bare substrings -- "gemma" is not "gemm", "gating" is not "topk".
+
+observed_in_trace is set by matching every catalog kernel against the kernel
+names of a clean trace (--trace) or of the semantic table (--semantic-table):
+by token stem (add_rmsnorm_quant in add_rmsnorm_quant_kernel<...>) or, for a
+multi-op trace kernel, by its op set (allreduce_fusion_kernel_1stage = AR + add
++ RMSNorm marks fused_allreduce_rmsnorm). A catalog entry seen there is
+"already fused in the baseline".
 
 Output: available_fusion_kernels.json — a list of
   {name, op_tags[], dtype_tags[], modules[], sources[], observed_in_trace}
-plus the tag vocab and the providers scanned (so the catalog declares its scope).
+plus the tag vocab, the tagger version and the providers scanned (so the
+catalog declares its scope). Readers re-tag catalogs from an older tagger
+(sanitize_kernels / load_index).
 
 Run INSIDE the runtime container (needs the providers importable):
   python3 fusion_catalog.py --out <dir>/available_fusion_kernels.json \
-      [--trace <rank0.trace.json.gz>] [--extra-provider name=/path]
+      [--trace <rank0.trace.json.gz>] [--semantic-table <table.json>]
+      [--extra-provider name=/path]
 """
 import argparse
 import gzip
@@ -29,44 +43,84 @@ import json
 import os
 import re
 
-# --- semantic tag vocabulary (name-substring -> op tag) ----------------------
-# One shared vocabulary with the candidate harness's region op-tags, so
-# "region op-set subset of kernel op_tags" is a real containment test.
+# --- semantic tag vocabulary (name TOKENS -> op tag) --------------------------
+# One shared vocabulary with the candidate harness's region op-tags and the
+# fusion screen's chain tags, so "region op-set subset of kernel op_tags" is a
+# real containment test.
+#
+# Matching is on whole name TOKENS, never on bare substrings. Substrings were
+# the root of the Qwen3.5-397B (2026-10-11) mis-screen: "gemma" contained
+# "gemm" (qk_norm became a GEMM barrier), "gating" tagged fused_gdn_gating /
+# fused_sigmoid_gating_delta_rule_update / ff_a16w16_fused_gated as topk, and
+# "wvsplit" never matched wv_splitk. A phrase is a "_"-joined token sequence
+# that must appear at token boundaries; a trailing "*" lets the LAST token be a
+# prefix ("rmsnorm*" also matches rmsnorm2d). Names are tokenized after
+# demangling Itanium symbols and splitting camelCase (topkGatingSoftmax ->
+# topk, gating, softmax).
+TAGGER_VERSION = "token-v1"
 _OP_RULES = [
-    ("norm", ("rmsnorm", "rms_norm", "layernorm", "layer_norm", "groupnorm",
-              "group_norm", "l2norm", "qk_norm", "_norm_", "_norm", "norm_")),
-    ("add_residual", ("with_add", "add_rmsnorm", "add_rms", "_residual",
-                      "fused_add")),
-    ("quant", ("quant", "_fp8", "fp8_", "_fp4", "fp4_", "a8w8", "a4w4",
-               "blockscale", "block_quant", "dynamicquant", "e4m3", "e5m2",
-               "mxfp")),
-    ("rope", ("rope", "rotary", "pos_encoding", "mrope", "_rope_")),
-    ("kv_cache", ("kv_cache", "kvcache", "_cache_", "cache_quant",
-                  "cache_block", "reshape_and_cache", "concat_and_cast",
-                  "kv_buffer", "set_mla_kv", "store_kv")),
-    ("cast", ("_cast", "cast_", "concat_and_cast", "convert")),
-    ("layout", ("shuffle", "layout", "trans_ragged", "permute", "transpose")),
-    ("allreduce", ("all_reduce", "allreduce", "fused_ar", "custom_fused_ar")),
-    ("moe", ("moe", "fmoe", "expert", "ck_moe", "g1u1")),
-    ("topk", ("topk", "grouped_topk", "fused_gate", "moe_sort", "gating")),
-    ("activation", ("silu", "gelu", "act_mul", "activation", "swiglu",
-                    "geglu")),
-    ("gemm", ("gemm", "_bmm", "bmm_", "batched_gemm", "matmul")),
-    ("gemm_prologue", ("prequant", "prologue", "_a_per_token", "a_per_group")),
-    ("gemm_epilogue", ("epilogue", "_bias", "gemm_a8w8")),
+    ("norm", ("rmsnorm*", "rms_norm", "layernorm*", "layer_norm", "groupnorm",
+              "group_norm", "l2norm", "norm", "gemma_norm", "ar_rms", "rms")),
+    ("add_residual", ("with_add", "add_rmsnorm*", "add_rms", "add_layernorm*",
+                      "fused_add*", "residual*", "res_in")),
+    ("quant", ("~quant", "~lowprec", "quantize*", "fp8*", "fp4*", "a8w8", "a4w4",
+               "afp4wfp4", "blockscale", "e4m3*", "e5m2*", "mxfp*")),
+    ("rope", ("rope*", "rotary*", "mrope*", "pos_encoding")),
+    ("kv_cache", ("kv_cache", "kvcache", "store_kvcache", "store_kv",
+                  "store_cache", "cache_quant", "reshape_and_cache*",
+                  "concat_and_cache*", "kv_buffer", "set_mla_kv*", "kv_write",
+                  "~cache")),
+    ("cast", ("cast", "convert", "concat_and_cast")),
+    ("layout", ("shuffle", "layout", "trans_ragged", "permute", "transpose",
+                "split", "reshape", "cat", "concat")),
+    ("allreduce", ("allreduce*", "all_reduce*", "fused_ar", "custom_fused_ar*",
+                   "cross_device_reduce*", "quick_reduce", "quickreduce",
+                   "collective")),
+    ("moe", ("moe*", "fmoe*", "expert", "experts", "g1u1", "ck_moe*")),
+    ("topk", ("topk*", "top_k", "grouped_topk", "moe_fused_gate",
+              "moe_sorting*", "moe_sort", "append_shared_experts*")),
+    ("activation", ("silu*", "gelu*", "act_mul*", "act_and_mul*", "activation",
+                    "swiglu", "geglu")),
+    ("gemm", ("~gemm", "bmm", "matmul", "batched_gemm", "cijk", "wv_splitk*",
+              "wvsplitk*", "hipblaslt*", "skinny_gemm")),
+    ("gemm_prologue", ("prequant", "prologue", "a_per_token", "a_per_group")),
+    ("gemm_epilogue", ("epilogue", "bias")),
 ]
 _DTYPE_RULES = [
     ("fp8_blockscale", ("blockscale", "block_quant", "per_group", "per_1x128",
                         "group_quant", "a8w8")),
-    ("fp8", ("fp8", "_f8", "f8_", "e4m3", "e5m2")),
-    ("fp4", ("fp4", "_f4", "f4_", "mxfp4", "a4w4", "e2m1")),
-    ("bf16", ("bf16", "bfloat16")),
-    ("fp16", ("fp16", "float16", "_half")),
+    ("fp8", ("fp8*", "f8", "e4m3*", "e5m2*", "float8*")),
+    ("fp4", ("fp4", "f4", "mxfp4", "a4w4", "afp4wfp4", "e2m1")),
+    ("bf16", ("bf16", "bfloat16", "a16w16")),
+    ("fp16", ("fp16", "float16", "half")),
 ]
+# Quant granularity is part of a kernel's contract: a per-token kernel is not a
+# drop-in for a per-group-128 seam even though both carry the "quant" tag.
+_GRANULARITY_RULES = [
+    ("group", ("per_group", "group_quant", "blockscale", "block_quant",
+               "per_1x128", "1x128", "group")),
+    ("token", ("per_token", "pertoken", "token", "dynamicquant",
+               "smoothquant")),
+    ("tensor", ("per_tensor", "tensorwise", "static_quant", "static")),
+]
+# GEMM operand-precision tokens; a name with two of them runs two GEMMs
+# (fused_gemm_a8w8_blockscale_a16w16 = one fp8 + one bf16 GEMM, shared input).
+_GEMM_PRECISION = re.compile(r"^a(?:\d+|fp\d+)w(?:\d+|fp\d+)$")
 # names that are NOT kernels: decorators, generators, config/tuner helpers
 _NOISE_EXACT = {"compile_ops", "torch_compile_guard", "per_block_quant_wrapper"}
 _NOISE_PREFIX = ("gen_", "get_", "compute_", "cmdgenfunc", "_", "test_")
 _NOISE_SUBSTR = ("_fake_tensor", "_tune_", "_config", "_torch", "fake_tensors")
+# Predicates, dispatch switches and per-device fallbacks. They mention a fused
+# op in their name but never launch it here, so as catalog entries they are
+# false "existing kernel" answers (is_activation_quantization_format "covered"
+# SiLU+quant on Qwen3; can_use_custom_all_reduce_with_nvlink "covered" AR).
+_NOT_KERNEL_PREFIX = ("is_", "should_", "can_", "has_", "check_", "use_",
+                      "enable_", "disable_", "init_", "maybe_", "need_",
+                      "supports_", "set_custom_", "set_mscclpp_")
+_NOT_KERNEL_SUFFIX = ("_fake", "_cpu", "_npu", "_meta", "_ref", "_reference",
+                      "_tune", "_config", "_configs")
+_NOT_KERNEL_TOKENS = {"fake", "cpu", "npu", "xpu", "mps", "musa", "config",
+                      "configs", "tuner", "ref", "reference", "benchmark"}
 # a name must look like a fusion kernel: carry >=1 of these tokens
 _FUSED_HINT = re.compile(
     r"(fused|_quant|rmsnorm|rms_norm|layernorm|rope|allreduce|all_reduce|"
@@ -79,12 +133,128 @@ _DEF_RE = re.compile(r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.M)
 _CPP_RE = re.compile(
     r'(?:m\.def\("|def\("|TORCH_LIBRARY[^{]*\{[^}]*?"|__global__[^;{]*?\b)'
     r"([A-Za-z_][A-Za-z0-9_]*)")
+_CAMEL_LOWER_UPPER = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_CAMEL_ACRONYM = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
+# A "cache" token is a KV-cache write only next to attention operands; alone it
+# is too generic (rope_cache, lru caches).
+_KV_CONTEXT = {"kv", "qk", "k", "v", "mla", "paged", "attn", "kvcache"}
+
+
+def _demangle_identifiers(name):
+    """Identifiers of an Itanium-mangled symbol (_ZN5aiter24add_rmsnorm...).
+
+    Not a demangler: it only reads the <length><identifier> runs, which is
+    all the tagger needs (aiter, add_rmsnorm_quant_kernel, silu_kernel ...).
+    """
+    out = []
+    index = 0
+    while index < len(name):
+        if name[index].isdigit():
+            end = index
+            while end < len(name) and name[end].isdigit():
+                end += 1
+            length = int(name[index:end])
+            ident = name[end:end + length]
+            if length and len(ident) == length and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", ident):
+                out.append(ident)
+                index = end + length
+                continue
+            index = end
+            continue
+        index += 1
+    return out
+
+
+def name_tokens(name):
+    """Lower-case word tokens of a kernel / function name.
+
+    Function arguments are dropped (they are types, not semantics); template
+    arguments are kept because they often carry the op
+    (elementwise_kernel<direct_copy_kernel_cuda>, act_and_mul_kernel<silu>).
+    """
+    text = str(name or "")
+    if text.startswith("_Z"):
+        parts = _demangle_identifiers(text) or [text]
+    else:
+        text = text.replace("(anonymous namespace)::", "")
+        if text.startswith("void "):
+            text = text[5:]
+        text = text.split("(", 1)[0]
+        parts = [text]
+    tokens = []
+    raw = []
+    for part in parts:
+        split = _CAMEL_ACRONYM.sub("_", _CAMEL_LOWER_UPPER.sub("_", part))
+        tokens.extend(tok for tok in re.split(r"[^a-z0-9]+", split.lower()) if tok)
+        raw.extend(tok for tok in re.split(r"[^a-z0-9]+", part.lower()) if tok)
+    # camelCase splitting breaks acronyms (RoPE -> ro, pe), so the unsplit
+    # tokens ride along after an empty separator that no phrase can span.
+    extra = [tok for tok in raw if tok not in tokens]
+    return tokens + ([""] + extra if extra else [])
+
+
+def _phrase_hit(tokens, phrase):
+    """`phrase` ("a_b", "a_b*", "~sub") at token boundaries in `tokens`."""
+    if phrase.startswith("~"):
+        word = phrase[1:]
+        if word == "quant":
+            return any(tok.endswith("quant") or tok.startswith("quant")
+                       for tok in tokens)
+        if word == "gemm":
+            return any(re.match(r"^gemm\d*$", tok) for tok in tokens)
+        if word == "lowprec":
+            return any(_GEMM_PRECISION.match(tok) and not re.match(r"^a16w16$", tok)
+                       for tok in tokens)
+        if word == "cache":
+            return "cache" in tokens and bool(_KV_CONTEXT & set(tokens))
+        return word in tokens
+    prefix = phrase.endswith("*")
+    words = (phrase[:-1] if prefix else phrase).split("_")
+    span = len(words)
+    for start in range(len(tokens) - span + 1):
+        window = tokens[start:start + span]
+        if window[:-1] != words[:-1]:
+            continue
+        last = window[-1]
+        if last == words[-1] or (prefix and last.startswith(words[-1])):
+            return True
+    return False
+
+
+def has_phrase(name_or_tokens, *phrases):
+    tokens = (name_or_tokens if isinstance(name_or_tokens, list)
+              else name_tokens(name_or_tokens))
+    return any(_phrase_hit(tokens, phrase) for phrase in phrases)
 
 
 def _op_tags(name):
-    low = name.lower()
-    return sorted({tag for tag, toks in _OP_RULES
-                  if any(t in low for t in toks)})
+    tokens = name_tokens(name)
+    return sorted({tag for tag, phrases in _OP_RULES
+                   if any(_phrase_hit(tokens, p) for p in phrases)})
+
+
+def quant_granularity(name):
+    """per-group / per-token / per-tensor from the name, or None if it does not say."""
+    tokens = name_tokens(name)
+    for granularity, phrases in _GRANULARITY_RULES:
+        if any(_phrase_hit(tokens, p) for p in phrases):
+            return granularity
+    return None
+
+
+def gemm_precisions(name):
+    """GEMM operand-precision tokens (a8w8, a16w16, afp4wfp4) in name order."""
+    return [tok for tok in name_tokens(name) if _GEMM_PRECISION.match(tok)]
+
+
+def is_kernel_name(name):
+    """False for predicates, fakes, per-device fallbacks and config helpers."""
+    low = str(name or "").lower()
+    if not low:
+        return False
+    if low.startswith(_NOT_KERNEL_PREFIX) or low.endswith(_NOT_KERNEL_SUFFIX):
+        return False
+    return not (_NOT_KERNEL_TOKENS & set(name_tokens(name)))
 
 
 # A kernel's NAME is a lossy projection of what it does: fused_allreduce_rmsnorm
@@ -126,9 +296,9 @@ def _expand_implied(tags):
 
 
 def _dtype_tags(name):
-    low = name.lower()
-    tags = {tag for tag, toks in _DTYPE_RULES
-            if any(t in low for t in toks)}
+    tokens = name_tokens(name)
+    tags = {tag for tag, phrases in _DTYPE_RULES
+            if any(_phrase_hit(tokens, p) for p in phrases)}
     # blockscale/fp4-variant are SUBTYPES of the base precision: a region that
     # only knows it is "fp8" must still match an "fp8_blockscale" kernel (and
     # must NOT match an fp4 one). Make the subtype imply its base.
@@ -141,11 +311,154 @@ def _is_noise(name):
     low = name.lower()
     if name in _NOISE_EXACT or low.startswith(_NOISE_PREFIX):
         return True
-    return any(s in low for s in _NOISE_SUBSTR)
+    if any(s in low for s in _NOISE_SUBSTR):
+        return True
+    return not is_kernel_name(name)
 
 
 def _keep(name):
     return (not _is_noise(name)) and bool(_FUSED_HINT.search(name))
+
+
+def sanitize_kernels(kernels, tagger=None, require_tags=True):
+    """Catalog entries the screen may match against, plus what was dropped.
+
+    Drops non-kernel entries (predicates, fakes, per-device fallbacks, config
+    helpers). A catalog written by an older tagger (no `tagger` field, or a
+    different version) carries substring-derived op_tags, so those are
+    re-derived from the name tokens plus the stored signatures -- the only
+    other evidence an old catalog kept. Entries from the current tagger are
+    trusted as written.
+    """
+    kept, dropped = [], []
+    for kernel in kernels or []:
+        entry = {"name": kernel} if isinstance(kernel, str) else dict(kernel)
+        name = str(entry.get("name") or "")
+        if not name:
+            continue
+        if not is_kernel_name(name):
+            dropped.append({"name": name, "reason": "not a kernel entry point"})
+            continue
+        if tagger != TAGGER_VERSION or not entry.get("op_tags"):
+            tags = set(_op_tags(name))
+            for sig in entry.get("signatures") or []:
+                tags |= _sig_tags(sig)
+            stale = sorted(set(entry.get("op_tags") or []) - tags)
+            if stale:
+                entry["retag_dropped"] = stale
+            entry["op_tags"] = sorted(tags)
+            entry["dtype_tags"] = _dtype_tags(name)
+        if entry.get("dtype_tags") is None:
+            entry["dtype_tags"] = _dtype_tags(name)
+        entry.setdefault("sources", [])
+        entry.setdefault("observed_in_trace", False)
+        if require_tags and not entry["op_tags"]:
+            dropped.append({"name": name, "reason": "no op tag after token re-tagging"})
+            continue
+        kept.append(entry)
+    return kept, dropped
+
+
+def _stem(tokens):
+    """Name tokens without the generic kernel / launcher / provider words."""
+    generic = {"kernel", "kernels", "fwd", "impl", "void", "aiter", "sglang",
+               "vllm", "triton", "hip", "ck", "cuda", "launch", "op", "ops",
+               "native", "at", "sgl", "torch", "run", "forward"}
+    return [tok for tok in tokens if tok and tok not in generic and not tok.isdigit()]
+
+
+_NAMESPACES = {"aiter", "ck_tile", "ck", "vllm", "moe", "at", "native", "sglang",
+               "sgl_kernel", "quickreduce", "std", "void", "detail", "internal"}
+
+
+def primary_identifier(trace_name):
+    """The kernel's own identifier, without namespaces and template/function args.
+
+    Matching a catalog name against the WHOLE mangled symbol let template
+    arguments answer for the kernel (an FMHA prefill kernel "matched"
+    reshape_and_cache_* through its KV-cache layout enums).
+    """
+    text = str(trace_name or "")
+    if text.startswith("_Z"):
+        for ident in _demangle_identifiers(text):
+            if ident.lower() not in _NAMESPACES:
+                return ident
+        return text
+    text = text.replace("(anonymous namespace)::", "")
+    if text.startswith("void "):
+        text = text[5:]
+    text = text.split("(", 1)[0].split("<", 1)[0]
+    return text.split("::")[-1]
+
+
+def trace_kernel_matches(kernel, trace_name):
+    """Length of the catalog kernel's token stem inside the trace kernel's
+    primary identifier (0 = no match).
+
+    add_rmsnorm_quant matches _ZN5aiter24add_rmsnorm_quant_kernel... with 3;
+    add_rmsnorm also matches with 2 and loses to the longer stem in
+    mark_observed. Multi-op trace kernels whose name does not spell their ops
+    are matched by op set instead (fused_trace_tags).
+    """
+    want = _stem(name_tokens(kernel["name"]))
+    have = _stem(name_tokens(primary_identifier(trace_name)))
+    if len(want) < 2 or len(want) > len(have):
+        return 0
+    for i in range(len(have) - len(want) + 1):
+        if have[i:i + len(want)] == want:
+            return len(want)
+    return 0
+
+
+# Fused trace kernels whose name does not spell every op they run. The aiter
+# allreduce_fusion kernel is the custom all-reduce with the residual add and
+# RMSNorm folded in (--enable-aiter-allreduce-fusion); naming it AR alone made
+# the baseline look unfused.
+_FUSED_TRACE_SEMANTICS = (
+    (("allreduce_fusion*",), ("allreduce", "add_residual", "norm")),
+    (("all_reduce_fusion*",), ("allreduce", "add_residual", "norm")),
+    (("fused_allreduce_rmsnorm*",), ("allreduce", "add_residual", "norm")),
+)
+
+
+def fused_trace_tags(name):
+    """Op tags a trace kernel actually runs (name tags + known fused semantics)."""
+    tags = set(_op_tags(name))
+    tokens = name_tokens(name)
+    for phrases, extra in _FUSED_TRACE_SEMANTICS:
+        if any(_phrase_hit(tokens, p) for p in phrases):
+            tags |= set(extra)
+    return tags
+
+
+def mark_observed(kernels, trace_names):
+    """Set observed_in_trace / observed_as on catalog entries seen in the trace.
+
+    Returns {trace_name: [catalog names]} for the report. A multi-op trace
+    kernel with no name match is matched semantically to the catalog kernels
+    that run exactly its op set (so allreduce_fusion_kernel_1stage marks
+    fused_allreduce_rmsnorm as already in the baseline).
+    """
+    found = {}
+    names = sorted({str(n) for n in trace_names or [] if n})
+    for trace_name in names:
+        scored = [(trace_kernel_matches(k, trace_name), k) for k in kernels]
+        best = max([score for score, _ in scored] or [0])
+        hits = [k for score, k in scored if score and score == best]
+        tags = fused_trace_tags(trace_name) - {"gemm_prologue", "gemm_epilogue"}
+        if not hits and tags != set(_op_tags(trace_name)) - {"gemm_prologue", "gemm_epilogue"}:
+            # Known fused semantics the name does not spell: match by op set.
+            hits = [k for k in kernels
+                    if _expand_implied(k.get("op_tags") or []) >= tags
+                    and set(k.get("op_tags") or []) <= _expand_implied(tags)]
+        for kernel in hits:
+            kernel["observed_in_trace"] = True
+            seen = kernel.setdefault("observed_as", [])
+            if trace_name not in seen:
+                seen.append(trace_name)
+        if hits:
+            found[trace_name] = sorted(k["name"] for k in hits)
+    return found
 
 
 def enumerate_py_import(catalog):
@@ -208,24 +521,59 @@ def enumerate_source(catalog, root, py_source="py_def"):
             _scan_file(catalog, path, os.path.relpath(path, anchor), py_source)
 
 
-def enumerate_trace(catalog, trace_path):
-    """Kernel names actually seen in a clean trace = ground-truth present."""
+def trace_kernel_names(trace_path):
+    """GPU kernel names in a clean trace (ground truth for observed_in_trace)."""
     opener = gzip.open if trace_path.endswith(".gz") else open
     try:
         with opener(trace_path, "rt") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
-        return
+        return set()
     events = data.get("traceEvents", data) if isinstance(data, dict) else data
+    names = set()
     for ev in events or []:
-        raw = ev.get("name", "")
-        # demangle the leading identifier out of a C++ symbol
-        m = re.search(r"([A-Za-z_][A-Za-z0-9_]{3,})", raw)
-        if not m:
+        if not isinstance(ev, dict):
             continue
-        name = m.group(1)
-        if _keep(name):
-            _add(catalog, name, "trace", "", "", observed=True)
+        cat = str(ev.get("cat") or "").lower()
+        if cat and cat not in ("kernel", "gpu_op", "cuda_runtime_kernel"):
+            continue
+        if ev.get("name"):
+            names.add(str(ev["name"]))
+    return names
+
+
+def table_kernel_names(table_path):
+    """Kernel names in a semantic pattern-layer table (raw_name per row)."""
+    try:
+        with open(table_path) as fh:
+            table = json.load(fh)
+    except (OSError, ValueError):
+        return set()
+    names = set()
+    for spec in table.get("tables") or []:
+        for row in spec.get("rows") or []:
+            name = row.get("raw_name") or row.get("short_name")
+            if name:
+                names.add(str(name))
+    return names
+
+
+def enumerate_trace(catalog, trace_path):
+    """Back-compat shim: mark existing entries seen in the trace.
+
+    Trace names used to be ADDED as catalog entries; their mangled leading
+    identifier (_ZN5aiter24add_rmsnorm...) was never a usable kernel name and
+    nothing else was marked observed. Now the catalog entries are matched
+    against the trace names instead (see mark_observed).
+    """
+    names = trace_kernel_names(trace_path)
+    entries = [dict(entry, op_tags=sorted(entry["op_tags"])) for entry in catalog.values()]
+    mark_observed(entries, names)
+    for entry in entries:
+        if entry.get("observed_in_trace"):
+            catalog[entry["name"]]["observed_in_trace"] = True
+            catalog[entry["name"]]["observed_as"] = entry.get("observed_as", [])
+    return names
 
 
 def _add(catalog, name, source, module, sig, observed=False):
@@ -293,7 +641,7 @@ def _provider_root(provider):
     return None
 
 
-def build(out_path, trace_path="", extra_providers=None):
+def build(out_path, trace_path="", extra_providers=None, semantic_table=""):
     catalog = {}
     scanned = []
     providers = list(PROVIDERS) + list(extra_providers or [])
@@ -313,13 +661,16 @@ def build(out_path, trace_path="", extra_providers=None):
                 enumerate_source(catalog, target, py_source=provider["name"])
         scanned.append(provider["name"])
     print("[fusion_catalog] scanned providers: %s" % ", ".join(scanned or ["<none>"]))
+    trace_names = set()
     if trace_path:
-        enumerate_trace(catalog, trace_path)
+        trace_names |= trace_kernel_names(trace_path)
+    if semantic_table:
+        trace_names |= table_kernel_names(semantic_table)
 
     entries = []
     for entry in catalog.values():
         # keep only entries that carry at least one op tag (a fusion needs one)
-        if not entry["op_tags"]:
+        if not entry["op_tags"] or not is_kernel_name(entry["name"]):
             continue
         entries.append({
             "name": entry["name"],
@@ -331,9 +682,14 @@ def build(out_path, trace_path="", extra_providers=None):
             "observed_in_trace": entry["observed_in_trace"],
         })
     entries.sort(key=lambda e: e["name"])
+    observed = mark_observed(entries, trace_names) if trace_names else {}
     result = {
-        "schema_version": 2,
+        "schema_version": 3,
         "artifact": "available_fusion_kernels",
+        # Tags were derived by this token tagger; older catalogs (no field)
+        # are re-tagged on load by sanitize_kernels().
+        "tagger": TAGGER_VERSION,
+        "observed_trace_kernels": observed,
         # The catalog DECLARES its own scope: whoever reads it knows which
         # backends were scanned and — by omission — which are blind spots
         # (a provider not listed here was not installed / not scanned).
@@ -351,9 +707,16 @@ def build(out_path, trace_path="", extra_providers=None):
 
 # --- query helper the harnesses import ---------------------------------------
 def load_index(catalog_path):
-    """Return (kernels_by_name, list). Query with covers()."""
+    """Return (kernels_by_name, list). Query with covers().
+
+    Non-kernel entries are dropped and a catalog from an older tagger is
+    re-tagged (sanitize_kernels), so a stale catalog file cannot answer
+    "existing kernel" with a predicate or a substring-derived tag.
+    """
     data = json.load(open(catalog_path))
-    kernels = data.get("kernels", [])
+    kernels, _dropped = sanitize_kernels(
+        data.get("kernels", []) if isinstance(data, dict) else data,
+        data.get("tagger") if isinstance(data, dict) else None, require_tags=False)
     return {k["name"]: k for k in kernels}, kernels
 
 
@@ -411,6 +774,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--trace", default="")
     ap.add_argument(
+        "--semantic-table", default="",
+        help="pattern_layer_kernel_table.json; its kernel names mark catalog "
+             "entries observed_in_trace (baseline already runs them)")
+    ap.add_argument(
         "--extra-provider", action="append", default=[], metavar="NAME=PATH",
         help="scan an additional backend not in the built-in registry, e.g. "
              "--extra-provider mylib=/path/to/mylib. Repeatable.")
@@ -421,7 +788,8 @@ def main():
             name, path = spec.split("=", 1)
             extra.append({"name": name.strip(), "import": name.strip(),
                           "roots": [path.strip()], "subdirs": [""]})
-    res = build(args.out, args.trace, extra_providers=extra)
+    res = build(args.out, args.trace, extra_providers=extra,
+                semantic_table=args.semantic_table)
     print(json.dumps({"kernel_count": res["kernel_count"],
                       "providers": res["providers_scanned"], "out": args.out}))
     return 0

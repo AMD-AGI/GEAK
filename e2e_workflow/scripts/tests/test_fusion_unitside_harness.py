@@ -670,5 +670,183 @@ class BudgetVsSubsumptionTest(unittest.TestCase):
         self.assertEqual(cov["not_validated"], 1)
 
 
+class ScreenFormatUnitsideTest(unittest.TestCase):
+    """fusion_screen.py candidates (row_ids / matched_existing_kernels / self_author).
+
+    Qwen3.5-397B 20261010: Phase 3.0 never ran; fed to the legacy checks these
+    candidates were all "out of scope" because they carry no existing_apis."""
+
+    def _fixture(self, tmp, verdicts, with_table=True, topk_over=None):
+        table = {"tables": [{"phase": "decode", "rows": [
+            {"row_id": "r1", "raw_name": "_fused_qk_gemma_rmsnorm_kernel",
+             "parent_operator": "sglang::qk_norm", "phase": "decode",
+             "step_batch_size": 4, "step_input_tokens": 4,
+             "shape": {"source": "kernel_exact", "input_dims": [[4, 4096]]}},
+            {"row_id": "r2", "raw_name": "mrope_kernel", "parent_operator": "aten::rope",
+             "phase": "decode", "step_batch_size": 4, "step_input_tokens": 4,
+             "shape": {"source": "unresolved", "input_dims": []}},
+            {"row_id": "r3", "raw_name": "cross_device_reduce_1stage",
+             "parent_operator": "sglang::all_reduce", "phase": "decode",
+             "step_batch_size": 4, "step_input_tokens": 4,
+             "shape": {"source": "unresolved", "input_dims": []}},
+            {"row_id": "r4", "raw_name": "dynamic_per_group_scaled_quant",
+             "parent_operator": "aiter::quant", "phase": "decode",
+             "step_batch_size": 4, "step_input_tokens": 4,
+             "shape": {"source": "unresolved", "input_dims": []}}]}]}
+        cands = {"candidates": [
+            {"candidate_id": "c07", "phase": "decode", "kind": "serial",
+             "row_ids": ["r1", "r2"], "op_tags": ["norm", "rope"],
+             "kernel_names": ["_fused_qk_gemma_rmsnorm_kernel", "mrope_kernel"],
+             "matched_existing_kernels": [{"name": "fused_qk_norm_rope_cache_quant_shuffle"}],
+             "self_author": True},
+            {"candidate_id": "c40", "phase": "decode", "kind": "serial",
+             "row_ids": ["r3", "r4"], "op_tags": ["allreduce", "quant"],
+             "kernel_names": ["cross_device_reduce_1stage", "dynamic_per_group_scaled_quant"],
+             "matched_existing_kernels": [], "self_author": True}]}
+        topk = {"execution_list": [{"exec_id": "e01", "candidate_ids": ["c07"]},
+                                   {"exec_id": "e02", "candidate_ids": ["c40"]}]}
+        if topk_over:
+            topk = topk_over(topk)
+        paths = {}
+        for name, doc in (("c.json", cands), ("t.json", table), ("k.json", topk)):
+            paths[name] = os.path.join(tmp, name)
+            with open(paths[name], "w") as fh:
+                json.dump(doc, fh)
+        vdir = os.path.join(tmp, "verdict")
+        os.makedirs(vdir)
+        for i, v in enumerate(verdicts):
+            with open(os.path.join(vdir, "v%d.json" % i), "w") as fh:
+                json.dump(v, fh)
+        return uh.validate(paths["c.json"], vdir, topk_path=paths["k.json"],
+                           semantic_table_path=paths["t.json"] if with_table else None,
+                           require_coverage=True)
+
+    def _v(self, **over):
+        v = {"candidate_id": "c07", "fused_fn": "fused_qk_norm_rope_cache_quant_shuffle",
+             "tested_shape": [4, 4096], "parity": "pass", "ref_ms": 0.03, "cand_ms": 0.02,
+             "isolated_speedup": 1.5, "engaged": True,
+             "ref_ops": ["_fused_qk_gemma_rmsnorm_kernel", "mrope_kernel"],
+             "outside_work_removed": []}
+        v.update(over)
+        return v
+
+    def test_screen_candidates_are_in_scope_and_unbenched_ones_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self._fixture(tmp, [self._v()])
+            self.assertEqual(res["coverage"]["in_scope"], 2)
+            self.assertEqual(res["coverage"]["not_validated_ids"], ["c40"])
+            self.assertEqual(res["status"], "fail")
+
+    def test_members_are_grafted_from_the_semantic_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self._fixture(tmp, [self._v(tested_shape=[8, 4096])])
+            self.assertTrue(any("not among the candidate's captured member shapes" in e
+                                for e in res["errors"]), res["errors"])
+
+    def test_self_authored_side_needs_its_source_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self._fixture(tmp, [self._v(implementation="self_authored",
+                                              fused_fn="geak_qknorm_rope",
+                                              kernel_source="/nope/k.py")])
+            self.assertTrue(any("does not exist" in e for e in res["errors"]))
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "k.py")
+            open(src, "w").write("# kernel\n")
+            res = self._fixture(tmp, [self._v(implementation="self_authored",
+                                              fused_fn="geak_qknorm_rope",
+                                              kernel_source=src)])
+            row = next(r for r in res["results"] if r["candidate_id"] == "c07")
+            self.assertEqual(row["unit_side_status"], "pass")
+            self.assertEqual(row["side"], "self_authored")
+
+    def test_best_side_wins_and_both_are_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "k.py")
+            open(src, "w").write("# kernel\n")
+            res = self._fixture(tmp, [
+                self._v(isolated_speedup=0.9),
+                self._v(implementation="self_authored", fused_fn="geak_qknorm_rope",
+                        kernel_source=src, isolated_speedup=1.4)])
+            rows = [r for r in res["results"] if r["candidate_id"] == "c07"]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["unit_side_status"], "pass")
+            self.assertEqual(sorted(s["side"] for s in rows[0]["sides"]),
+                             ["existing", "self_authored"])
+            self.assertIn("双侧对比", uh.render_markdown(res))
+
+    def test_unresolved_shapes_fall_back_to_the_step_token_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "k.py")
+            open(src, "w").write("# kernel\n")
+            ok = dict(candidate_id="c40", implementation="self_authored",
+                      fused_fn="geak_ar_quant", kernel_source=src, tested_shape=[4, 4096],
+                      ref_ops=["cross_device_reduce_1stage", "dynamic_per_group_scaled_quant"])
+            res = self._fixture(tmp, [self._v(), self._v(**ok)])
+            self.assertEqual(res["status"], "pass", res["errors"])
+            self.assertTrue(res["warnings"])
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "k.py")
+            open(src, "w").write("# kernel\n")
+            bad = dict(ok, kernel_source=src, tested_shape=[16, 4096])
+            res = self._fixture(tmp, [self._v(), self._v(**bad)])
+            self.assertTrue(any("token count" in e for e in res["errors"]))
+
+    def test_collective_entries_are_flagged_for_the_serving_lease(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self._fixture(tmp, [self._v()])
+            self.assertEqual(res["collective_candidate_ids"], ["c40"])
+
+    def test_alt_rungs_and_pool_items_validate_outside_the_denominator(self):
+        def over(topk):
+            topk["execution_list"][0]["alt_ladder"] = [
+                {"rung": 0, "row_ids": ["r1", "r2"]},
+                {"rung": 1, "kind": "serial", "row_ids": ["r1"],
+                 "kernel_names": ["_fused_qk_gemma_rmsnorm_kernel"],
+                 "matched_existing_kernels": [{"name": "fused_qk_rmsnorm"}]}]
+            topk["candidate_pool"] = [
+                {"exec_id": "p01", "candidate_ids": ["cp1"], "phase": "decode",
+                 "row_ids": ["r4"], "kernel_names": ["dynamic_per_group_scaled_quant"],
+                 "matched_existing_kernels": []}]
+            return topk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "k.py")
+            open(src, "w").write("# kernel\n")
+            rung = self._v(candidate_id="e01.r1", fused_fn="fused_qk_rmsnorm",
+                           ref_ops=["_fused_qk_gemma_rmsnorm_kernel"], isolated_speedup=0.8)
+            pool = self._v(candidate_id="cp1", implementation="self_authored",
+                           fused_fn="geak_quant", kernel_source=src,
+                           ref_ops=["dynamic_per_group_scaled_quant"])
+            res = self._fixture(tmp, [self._v(), rung, pool], topk_over=over)
+            self.assertFalse(any("unknown candidate" in e for e in res["errors"]), res["errors"])
+            status = {r["candidate_id"]: r["unit_side_status"] for r in res["results"]}
+            self.assertEqual(status["e01.r1"], "fail")
+            self.assertEqual(status["cp1"], "pass")
+            # still only the Top-K candidates count toward coverage
+            self.assertEqual(res["coverage"]["in_scope"], 2)
+
+    def test_an_untested_alt_rung_is_on_demand_not_a_coverage_gap(self):
+        def over(topk):
+            topk["execution_list"][0]["alt_ladder"] = [
+                {"rung": 0, "row_ids": ["r1", "r2"]},
+                {"rung": 1, "kind": "serial", "row_ids": ["r1"],
+                 "kernel_names": ["_fused_qk_gemma_rmsnorm_kernel"]}]
+            return topk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Only the Top-K candidate has a verdict: the deeper rung is tested on demand
+            # during apply-back, so its missing verdict is neither an error nor a gap.
+            res = self._fixture(tmp, [self._v()], topk_over=over)
+            self.assertFalse(any("e01.r1" in e for e in res["errors"]), res["errors"])
+            row = next(r for r in res["results"] if r["candidate_id"] == "e01.r1")
+            self.assertEqual(row["unit_side_status"], "deferred_rank_budget")
+            self.assertIn("on demand during apply-back", row["reason"])
+            self.assertNotIn("e01.r1", res["coverage"]["not_validated_ids"])
+
+    def test_legacy_candidates_pass_through_unchanged(self):
+        legacy = {"candidate_id": "x", "members": [], "existing_apis": []}
+        self.assertIs(uh.normalize_screen_candidate(legacy, {}), legacy)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,10 +3,37 @@ key: fp8_a8w8_blockscale dense GEMM · gfx942 · sglang Triton live path
 type: lever
 confidence: ★★★
 effect: iso ~1.06–1.16× prefill (Triton-overlay, DEPRECATED); CK-tuned KERNEL ~1.78× vs untuned Triton on the M=13645 head (kernel-level)
-confirms: 17
-last_seen: 2026-07-06
+confirms: 19
+last_seen: 2026-10-01
 status: DEPRECATED-FOR-THIS-EVAL
 ---
+> 🏁 **FINAL-GATE reconcile (2026-10-01, Qwen3-14B-FP8 TP=1, gfx942, run 0930).** The M-routed CK decode
+> swap (M≤256→CK, prefill→stock Triton; env threshold `GEAK_CK_GEMM_M_THRESHOLD=256`) is a member of the
+> Director-validated FINAL stack: run **770.3 → 1256.7 tok/s, Director same-session 1.644× — validated_win,
+> output parity PASS**. The standalone **+32.6%** below is THIS lever's own interleaved tuning-phase A/B
+> (correct per-lever attribution — do NOT add it to the head-kernel deltas, which were measured ON TOP of
+> it); the e2e gate on the complete stack now confirms the decode CK win transfers.
+> ✅ **18th confirm + e2e-transfer BANKED (2026-09-30, Qwen3-14B-FP8 TP=1, gfx942/MI300X, sglang 0.5.11 /
+> aiter a6bb499375, blind run 0930).** M-routed Triton→plain-CK swap (decode M≤256→CK, prefill→Triton,
+> threshold 256) shipped as a reversible fp8_utils overlay: **isolated-server e2e A/B 930.9 → 1234.1 tok/s
+> = +32.6%, TPOT −25.8%, TTFT flat**, greedy M≥2 parity PASS — the decode CK lever TRANSFERS to e2e, banked.
+> Fresh op-level reconfirm of the regime split (device-event median, cold): prefill M∈{2973,4955} plain-CK
+> (default config — tuned CSV misses these live shapes) is **1.41–1.88× SLOWER than stock Triton on ALL 4
+> families** (qkv 1.58/1.88×, o 1.41/1.68×, gate_up 1.80/1.83×, down 1.65/1.87× slower), correct
+> (`transpose_scale=False`, relerr ~7e-5). So on the RESIDUAL prefill-large-M head (82.6% of the prefill
+> trace) CK is a measured dead-end and the only remaining lever is **Tier-C author** (flydsl SOTA fp8 GEMM
+> DSL — `aiter.ops.flydsl.flydsl_hgemm/flydsl_preshuffle_gemm_a8` verified importable — then Triton
+> split-K/tile). NOTE: the tuned-CSV DATA half is non-deployable on this pre-#3075 aiter (wrapper drops the
+> tuned instance) → the deployable CK win is the CODE backend swap, not `AITER_CONFIG_...`.
+> ⚠️ **CONDITIONED caution (2026-09-29, Qwen3-14B-FP8 TP=8, gfx942/MI300X cu_num=304, sglang 0.5.12 / aiter 0.1.12, blind run 0929).**
+> The "CK beats Triton" verdict above is measured against the UNTUNED Triton default. **Also verify what the live
+> Triton seam is actually running:** here an accepted Triton **split-K** decode config (M<=32, small BN + NUM_KSPLIT
+> 8..20, routed via an fp8_utils overlay) was already live. Against THAT, CK (tuned DB 18 shapes errRatio 0, and
+> CK default — identical) LOST at every served shape: decode M<=4 per-call, HIP-graph + rotating weights —
+> qkv 896x5120 Triton-splitK 5.8us vs CK 23.2us, gate_up 4352x5120 12.3 vs 24.3us, down 5120x2176 8.2 vs 16.9us;
+> prefill M=16384 CK 1.5–3.2x slower on every family. Only o_proj 5120x640 decode favoured CK (7.8 vs 13.5us) and
+> that shape did not reach the seam on the live stack. So: CK-tuned is the lever vs untuned Triton; vs a split-K-tuned
+> Triton seam it is a measured no-win at TP8 small-N/K shards — go to the Tier-C Triton rewrite for further headroom.
 > ✅ **17th confirm (2026-07-06, Qwen3-14B-FP8 TP=1, gfx942/MI300X cu_num=304, e2e_cycle0).**
 > CK skill end to end on the 12 live (M,N,K) (4 NK families × {1,64,16384}), `--libtype both --mp 1`:
 > ALL 12 winners `libtype=ck`, errRatio 0.0. §9.1 scale-layout check (M=64, all 4 families): CK wants

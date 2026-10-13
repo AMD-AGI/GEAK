@@ -1535,3 +1535,75 @@ class MemberShapeGraftTest(FusionCandidateHarnessTest):
                 [[8, 16]])
             with open(os.path.join(root, "res.json")) as fh:
                 self.assertEqual(json.load(fh)["member_shape_graft"]["grafted"], 2)
+
+
+class ScreenRegionCoverageTest(unittest.TestCase):
+    """check_screen_region_coverage: every fusible region of the screen board
+    needs a covering candidate or a per-region rejection reason."""
+
+    TABLE = {"tables": [{"phase": "decode", "pattern_id": "P1", "rows": [
+        {"row_id": "g", "pos": 0, "device_seq_index": 0, "stream": 8, "duration_us": 20.0,
+         "stage": "gemm"},
+        {"row_id": "n", "pos": 1, "device_seq_index": 1, "stream": 8, "duration_us": 5.4,
+         "stage": "norm"},
+        {"row_id": "r", "pos": 2, "device_seq_index": 2, "stream": 8, "duration_us": 4.8,
+         "stage": "rope"},
+        {"row_id": "a", "pos": 3, "device_seq_index": 3, "stream": 8, "duration_us": 21.6,
+         "stage": "attn"},
+    ]}]}
+
+    def test_candidate_or_reason_satisfies_a_region(self):
+        covered = {"candidates": [{"phase": "decode", "pattern_id": "P1", "row_ids": ["n", "r"]}]}
+        self.assertEqual(harness.check_screen_region_coverage(self.TABLE, covered), [])
+        rejected = {"region_coverage": [{
+            "phase": "decode", "pattern_id": "P1", "row_ids": ["n", "r"],
+            "status": "rejected", "reason": "below_time_gate (request share 0.4% < 3%)"}]}
+        self.assertEqual(harness.check_screen_region_coverage(self.TABLE, rejected), [])
+
+    def test_missing_or_empty_reason_is_an_error(self):
+        errors = harness.check_screen_region_coverage(self.TABLE, {"candidates": []})
+        self.assertEqual(len(errors), 1)
+        self.assertIn("neither a covering candidate", errors[0])
+        empty = {"region_coverage": [{
+            "phase": "decode", "pattern_id": "P1", "row_ids": ["n", "r"],
+            "status": "rejected", "reason": "n/a"}]}
+        self.assertIn("without a reason",
+                      harness.check_screen_region_coverage(self.TABLE, empty)[0])
+
+
+class ScreenItemCoverageTest(unittest.TestCase):
+    """check_screen_item_coverage: code seams with >= 3 kernels and inefficient
+    kernels on the screen board each need a candidate, a reason or a hand-off."""
+
+    def test_pool_counts_as_covered_for_a_region(self):
+        pooled = {"region_coverage": [{
+            "phase": "decode", "pattern_id": "P1", "row_ids": ["n", "r"],
+            "status": "covered_by_pool", "covered_by": ["q01"]}]}
+        self.assertEqual(harness.check_screen_region_coverage(
+            ScreenRegionCoverageTest.TABLE, pooled), [])
+
+    def test_items_need_a_candidate_reason_or_handoff(self):
+        good = {
+            "seam_coverage": [
+                {"phase": "decode", "pattern_id": "P0", "code_seam": "mlp", "status": "covered",
+                 "covered_by": ["c01"]},
+                {"phase": "decode", "pattern_id": "P1", "code_seam": "(layer)", "status": "rejected",
+                 "reason": "barriers split the seam into runs of fewer than 3"}],
+            "inefficient_coverage": [
+                {"phase": "decode", "pattern_id": "P0", "kernel": "gemm", "status": "handoff",
+                 "reason": "handoff:HeadKernel/TuningSkillset"},
+                {"phase": "decode", "pattern_id": "P0", "kernel": "gemm2", "status": "covered_by_pool",
+                 "covered_by": ["q02"]}]}
+        self.assertEqual(harness.check_screen_item_coverage(good), [])
+        bad = {
+            "seam_coverage": [
+                {"phase": "decode", "pattern_id": "P0", "code_seam": "mlp", "status": "covered"},
+                {"phase": "decode", "pattern_id": "P0", "code_seam": "attn", "status": "handoff",
+                 "reason": "handoff:HeadKernel/TuningSkillset"}],
+            "inefficient_coverage": [
+                {"phase": "decode", "pattern_id": "P0", "kernel": "gemm", "status": "handoff",
+                 "reason": "later"},
+                {"phase": "decode", "pattern_id": "P0", "kernel": "gemm2", "status": "rejected",
+                 "reason": "n/a"}]}
+        errors = harness.check_screen_item_coverage(bad)
+        self.assertEqual(len(errors), 4, errors)

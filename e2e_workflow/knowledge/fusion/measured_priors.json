@@ -1,0 +1,353 @@
+{
+  "schema_version": 2,
+  "artifact": "fusion_measured_priors",
+  "note": "Fusion seams with MEASURED end-to-end results, positive (a win) or negative (a regression alone or when stacked). Read by scripts/fusion_screen.py: a positive prior whose effective gain clears the noise band and whose seam is present in the trace is forced into the final list (without taking a Top-K slot) and ranks first in pass 2; a negative prior multiplies a matching window's difficulty by 3, is never forced and sorts last. The store is append-only: scripts/fusion_prior_writeback.py appends measurements through fusion_priors.append_measurement; the effective gain is the median of the last 3 measurements by date. The seam descriptor is the screen's matching aid (ordered member patterns over the semantic table rows), not part of the measurement.",
+  "seam_member_fields": {
+    "cls": "fusion_screen row class (gemm, topk, quant, norm, rope, kv_cache, activation, elementwise, allreduce, ...)",
+    "module": "dotted module suffix that must appear in the row's contained_by (skipped when the row has no module evidence)",
+    "module_any": "any of these module suffixes",
+    "name": "name phrases (token match, fusion_catalog phrase syntax); any one must hit",
+    "op": "parent canonical operator (e.g. aten::sigmoid)",
+    "role": "fused (removed/merged by the fusion, default) or context (locates the seam, stays)"
+  },
+  "seam_fields": {
+    "kinds": "window kinds the seam may be found as (serial, sibling, parallel, epilogue_forward, fan_out, seam_rewrite)",
+    "max_span": "rows between the first and last member",
+    "members": "ordered member patterns (see seam_member_fields)",
+    "phases": "optional: phases the measurement covered; on a table blind to a required phase a prior without phases is not forced",
+    "tags": "tag-only seam (op tags) when no member patterns exist"
+  },
+  "measurement_fields": {
+    "gain_pct": "measured e2e gain in percent (negative = regression)",
+    "date": "YYYY-MM-DD",
+    "protocol": "workload / serving protocol of the measurement",
+    "source": "who / what measured it",
+    "evidence": "path to the evidence, or null"
+  },
+  "priors": [
+    {
+      "prior_id": "xb-qwen35-router-topk",
+      "title": "router topk fusion (router GEMM + topk_softmax + shared-expert gate GEMM + sigmoid + append_shared)",
+      "model_family": "Qwen3.5",
+      "model": "Qwen3.5-397B-A17B-FP8",
+      "gfx": "gfx942",
+      "framework": "sglang",
+      "polarity": "positive",
+      "seam": {
+        "kinds": [
+          "serial",
+          "sibling",
+          "seam_rewrite"
+        ],
+        "max_span": 10,
+        "members": [
+          {
+            "cls": "gemm",
+            "module": "mlp.gate"
+          },
+          {
+            "cls": "topk",
+            "name": [
+              "topk*"
+            ]
+          },
+          {
+            "cls": "gemm",
+            "module": "mlp.shared_expert_gate"
+          },
+          {
+            "cls": "elementwise",
+            "op": "aten::sigmoid"
+          },
+          {
+            "cls": "topk",
+            "name": [
+              "append_shared_experts*"
+            ]
+          }
+        ]
+      },
+      "measurements": [
+        {
+          "gain_pct": 6.08,
+          "date": "2026-10-11",
+          "protocol": {
+            "isl": 8192,
+            "osl": 1024,
+            "conc": 4,
+            "gpu": "MI300X",
+            "tp": 8
+          },
+          "source": "user-reported, other GEAK branch, reported 2026-10-11",
+          "evidence": null
+        },
+        {
+          "gain_pct": 7.598,
+          "date": "2026-10-12",
+          "protocol": {
+            "name": "ab_interleaved",
+            "isl": 8192,
+            "osl": 1024,
+            "conc": 4,
+            "tp": 8,
+            "max_pairs": 3
+          },
+          "source": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ",
+          "evidence": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ/fusion/fusion_overlays/Qwen3.5-397B-A17B-FP8/e02_router_shared_topk"
+        }
+      ]
+    },
+    {
+      "prior_id": "xb-qwen35-ar-norm-quant",
+      "title": "AR+Norm+Quant (all-reduce + residual add + RMSNorm + fp8 group quant, layer input)",
+      "model_family": "Qwen3.5",
+      "model": "Qwen3.5-397B-A17B-FP8",
+      "gfx": "gfx942",
+      "framework": "sglang",
+      "polarity": "positive",
+      "seam": {
+        "kinds": [
+          "serial",
+          "epilogue_forward"
+        ],
+        "max_span": 3,
+        "members": [
+          {
+            "cls": "allreduce"
+          },
+          {
+            "cls": "quant",
+            "module_any": [
+              "in_proj_qkvz",
+              "qkv_proj"
+            ]
+          }
+        ]
+      },
+      "measurements": [
+        {
+          "gain_pct": 0.66,
+          "date": "2026-10-11",
+          "protocol": {
+            "isl": 8192,
+            "osl": 1024,
+            "conc": 4,
+            "gpu": "MI300X",
+            "tp": 8
+          },
+          "source": "user-reported, other GEAK branch, reported 2026-10-11",
+          "evidence": null
+        },
+        {
+          "gain_pct": 1.271,
+          "date": "2026-10-12",
+          "protocol": {
+            "name": "ab_interleaved",
+            "isl": 8192,
+            "osl": 1024,
+            "conc": 4,
+            "tp": 8,
+            "max_pairs": 3
+          },
+          "source": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ",
+          "evidence": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ/fusion/fusion_overlays/Qwen3.5-397B-A17B-FP8/e06_ar_rms_group_quant"
+        }
+      ]
+    },
+    {
+      "prior_id": "xb-qwen35-qk-norm-rope-cache",
+      "title": "qk norm+rope+cache (q/k RMSNorm + mRoPE + KV-cache store)",
+      "model_family": "Qwen3.5",
+      "model": "Qwen3.5-397B-A17B-FP8",
+      "gfx": "gfx942",
+      "framework": "sglang",
+      "polarity": "positive",
+      "seam": {
+        "kinds": [
+          "serial"
+        ],
+        "max_span": 5,
+        "members": [
+          {
+            "cls": "norm"
+          },
+          {
+            "cls": "rope"
+          },
+          {
+            "cls": "kv_cache"
+          }
+        ]
+      },
+      "measurements": [
+        {
+          "gain_pct": 0.96,
+          "date": "2026-10-11",
+          "protocol": {
+            "isl": 8192,
+            "osl": 1024,
+            "conc": 4,
+            "gpu": "MI300X",
+            "tp": 8
+          },
+          "source": "user-reported, other GEAK branch, reported 2026-10-11",
+          "evidence": null
+        }
+      ]
+    },
+    {
+      "prior_id": "xb-qwen35-post-attn-ar-norm-dual-quant",
+      "title": "post-attn AR+Norm+dual Quant (all-reduce + add + RMSNorm emitting the bf16 router input and the fp8 expert input)",
+      "model_family": "Qwen3.5",
+      "model": "Qwen3.5-397B-A17B-FP8",
+      "gfx": "gfx942",
+      "framework": "sglang",
+      "polarity": "positive",
+      "seam": {
+        "kinds": [
+          "serial",
+          "epilogue_forward",
+          "fan_out"
+        ],
+        "max_span": 12,
+        "members": [
+          {
+            "cls": "allreduce"
+          },
+          {
+            "cls": "gemm",
+            "module": "mlp.gate",
+            "role": "context"
+          },
+          {
+            "cls": "quant",
+            "module": "mlp.experts"
+          }
+        ]
+      },
+      "measurements": [
+        {
+          "gain_pct": 1.08,
+          "date": "2026-10-11",
+          "protocol": {
+            "isl": 8192,
+            "osl": 1024,
+            "conc": 4,
+            "gpu": "MI300X",
+            "tp": 8
+          },
+          "source": "user-reported, other GEAK branch, reported 2026-10-11",
+          "evidence": null
+        }
+      ]
+    },
+    {
+      "prior_id": "xb-qwen35-silu-quant",
+      "title": "SiLU+Quant (MoE act_and_mul + fp8 group quant)",
+      "model_family": "Qwen3.5",
+      "model": "Qwen3.5-397B-A17B-FP8",
+      "gfx": "gfx942",
+      "framework": "sglang",
+      "polarity": "positive",
+      "seam": {
+        "kinds": [
+          "serial",
+          "epilogue_forward"
+        ],
+        "max_span": 2,
+        "members": [
+          {
+            "cls": "activation"
+          },
+          {
+            "cls": "quant"
+          }
+        ]
+      },
+      "measurements": [
+        {
+          "gain_pct": 1.26,
+          "date": "2026-10-11",
+          "protocol": {
+            "isl": 8192,
+            "osl": 1024,
+            "conc": 4,
+            "gpu": "MI300X",
+            "tp": 8
+          },
+          "source": "user-reported, other GEAK branch, reported 2026-10-11",
+          "evidence": null
+        },
+        {
+          "gain_pct": 1.03,
+          "date": "2026-10-12",
+          "protocol": {
+            "name": "ab_interleaved",
+            "isl": 8192,
+            "osl": 1024,
+            "conc": 4,
+            "tp": 8,
+            "max_pairs": 3
+          },
+          "source": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ",
+          "evidence": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ/fusion/apply_e04/ab_decision.json"
+        }
+      ]
+    },
+    {
+      "prior_id": "xb-qwen35-qkvz-ba-dual-gemm",
+      "title": "qkvz+ba dual GEMM (GDN in_proj_qkvz fp8 + in_proj_ba bf16 sharing the activation)",
+      "model_family": "Qwen3.5",
+      "model": "Qwen3.5-397B-A17B-FP8",
+      "gfx": "gfx942",
+      "framework": "sglang",
+      "polarity": "positive",
+      "seam": {
+        "kinds": [
+          "sibling",
+          "seam_rewrite"
+        ],
+        "max_span": 3,
+        "members": [
+          {
+            "cls": "gemm",
+            "module": "in_proj_qkvz"
+          },
+          {
+            "cls": "gemm",
+            "module": "in_proj_ba"
+          }
+        ]
+      },
+      "measurements": [
+        {
+          "gain_pct": 17.72,
+          "date": "2026-10-11",
+          "protocol": {
+            "isl": 8192,
+            "osl": 1024,
+            "conc": 4,
+            "gpu": "MI300X",
+            "tp": 8
+          },
+          "source": "user-reported, other GEAK branch, reported 2026-10-11",
+          "evidence": null
+        },
+        {
+          "gain_pct": 10.718,
+          "date": "2026-10-12",
+          "protocol": {
+            "name": "ab_interleaved",
+            "isl": 8192,
+            "osl": 1024,
+            "conc": 4,
+            "tp": 8,
+            "max_pairs": 3
+          },
+          "source": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ",
+          "evidence": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ/fusion/fusion_overlays/Qwen3.5-397B-A17B-FP8/e01_qkvz_ba_dual_gemm"
+        }
+      ]
+    }
+  ]
+}

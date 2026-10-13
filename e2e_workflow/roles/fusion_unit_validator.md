@@ -16,6 +16,73 @@ This is the fusion analogue of `kernel_extractor` (extract_op) + `op_bench.py`: 
 isolated, oracle-checked bake-off. Reuse `SKILL_DIR/scripts/harness_lib.py` for timing
 and parity (`time_op`, `correct`, `sync`, `detect_arch`) — do not hand-roll timing.
 
+## Phase 3.0 is mandatory and runs BEFORE apply-back
+
+The workflow calls this role for every candidate of every Top-K entry right after the screen,
+then once more for PHASE=aggregate, and only then starts apply-back. Qwen3.5-397B (20261010)
+skipped this phase entirely (`04_FUSION_UNITSIDE.md` "未生成"), so every apply-back integrator
+re-did its own unit test and booted its own server. Your verdicts, measured speedups and
+authored kernels are what apply-back now reuses — write them so they can be reused.
+
+Scheduling (the workflow decides, not you): single-GPU candidates run in parallel, each on ONE
+exclusive idle card given in `GPU_IDS`; collective candidates (AllReduce fusions) get the full
+serving set under the serving-GPU lease and run alone.
+
+### Screen-format entries (`fusion_screen.py`, the current board)
+
+`TARGET_EXECUTION` is the execution-list row. Its candidates carry `row_ids` (+ `partner_row_ids`
+for the other phase), `kernel_names`, `op_tags`, `matched_existing_kernels` and `self_author`,
+not `members` / `existing_apis`. Read the member rows (kernel, parent operator, captured
+`shape.input_dims`, `step_batch_size` / `step_input_tokens`) from `SEMANTIC_TABLE_JSON` by
+`row_id`; the harness grafts the same rows, so your `tested_shape` must be one of those captured
+shapes (or, for rows whose shape is unresolved, carry the captured step's token count as its
+leading dim).
+
+Bench **both sides** when they exist, each against the same unfused LIVE reference chain:
+
+| side | `implementation` | `fused_fn` | file |
+|---|---|---|---|
+| existing kernel | `existing` | a `matched_existing_kernels[].name` that fits the shapes/dtypes (try them in order; record why each one that does not fit was skipped) | `VERDICT_DIR/<CANDIDATE_ID>__existing.json` |
+| self-authored kernel | `self_authored` | the authored kernel's entry point | `VERDICT_DIR/<CANDIDATE_ID>__self.json`, with `kernel_source` = the absolute path of the kernel under `KERNEL_DIR` |
+
+The harness takes the best measured side as the candidate's status and keeps both in the
+report. A `kernel_source` that does not exist is an error (an authored kernel nobody can find
+is not evidence). Keep the authored kernel, its unit test and a README (seam, call signature,
+shapes, numbers) under `KERNEL_DIR`: apply-back wires that kernel instead of re-authoring it.
+
+### Alternative-group rungs and candidate-pool items (`UNIT_JOB_KIND`)
+
+`UNIT_JOB_KIND` is `topk` (a Top-K entry), `alt` or `pool`:
+
+- `alt` — one rung ≥ 1 of an alternative group (`alt_group`, `alt_ladder`: alternative windows
+  that eliminate the same kernel instance; rung 0 is the entry itself). `TARGET_EXECUTION` is
+  that rung's window (its own `row_ids`, `kernel_names`, `matched_existing_kernels`) and
+  `CANDIDATE_ID` is `<exec_id>.r<rung>`. Every rung is unit-tested, in parallel, so apply-back can
+  step down the ladder without a second unit wave; record each rung's result on its own. A rung
+  that fails on every side is skipped by apply-back; when every rung fails, the group is blocked.
+  Rungs > 0 are normally tested ON DEMAND during apply-back: Phase 3.0 tests rung 0 only, and
+  the workflow calls you for rung N (UNIT_JOB_KIND=alt, one single call for that rung) only
+  after rung N−1 failed its unit test or was rejected by measurement in apply-back. Such a
+  call is the whole unit test of that rung — write its verdict files under `VERDICT_DIR` and
+  its kernel under `KERNEL_DIR` exactly as above and return FUSION_UNIT_SCHEMA; no aggregate
+  call follows it. (When the run sets `fusion_unit_all_rungs=true`, every rung is still tested
+  up front in Phase 3.0.)
+- `pool` — a `candidate_pool` item (below the Top-K bar). Greedy stacking may add it only when
+  this unit test passes. Keep its authored kernel under `KERNEL_DIR` exactly as for a Top-K entry:
+  the stacking step wires it from there.
+
+Verdict files, sides and `tested_shape` rules are the same as for a Top-K candidate.
+`fusion_unitside_harness.py --topk` synthesizes these candidates from the board's `alt_ladder` /
+`candidate_pool` (outside the Top-K coverage denominator), so their verdicts validate like any
+other; the aggregate's `unit_status_by_candidate` includes their ids (`EXTRA_UNIT_CANDIDATES`).
+
+### Processes and the lease
+
+Everything you start is registered under `GPU_LEASE_ID` (`GPU_LEASE_SCRIPT launch|register`,
+see the lease block in your prompt) and finished in the foreground before you return — no
+`nohup`, `setsid`, trailing `&` or `disown`. The workflow waits for and reaps registered
+processes after you return; it never touches anything else, and neither do you.
+
 ## PHASE=validate_one — one concrete Top-K candidate
 One invocation of this role validates ONE candidate. **The loop over concrete
 candidate ids in `FUSION_TOPK_JSON.execution_list` is the CALLER's job.** It must
@@ -56,7 +123,11 @@ Inputs: `FUSION_TOPK_JSON`, `FUSION_CANDIDATES_JSON`, `FUSION_DIR`, `EVAL_DIR`,
 `BUDGET_SKIPPED`, and any explicit
 waivers from the caller.
 
-Run the harness with `--topk "$FUSION_TOPK_JSON"`. Its coverage denominator is the
+Run the harness with `--topk "$FUSION_TOPK_JSON"` and, for a screen-format board,
+`--semantic-table "$SEMANTIC_TABLE_JSON"` (it grafts the member rows the verdicts are checked
+against). Every `BUDGET_SKIPPED` item the workflow passes is a candidate whose validator call
+returned no verdict or could not get the serving lease: pass it as `--budget-skipped` — it was
+never measured and must stay red. Its coverage denominator is the
 union of concrete `candidate_ids` in `fusion_topk.execution_list`, not every discovery
 candidate. Candidates outside that union are `deferred_rank_budget` and cannot fail
 Top-K coverage.
@@ -88,6 +159,7 @@ python3 "$SKILL_DIR/scripts/fusion_unitside_harness.py" \
   --candidates "$FUSION_CANDIDATES_JSON" \
   --topk       "$FUSION_TOPK_JSON" \
   --verdicts   "$EVAL_DIR/verdict" \
+  --semantic-table "$SEMANTIC_TABLE_JSON" \
   --out-md     "$EVAL_DIR/04_FUSION_UNITSIDE.md" \
   --out-json   "$FUSION_DIR/fusion_unitside.json" \
   --equivalent "<id>=<representative_candidate_id>" \
@@ -109,6 +181,7 @@ Return:
  "fusion_unitside_md":"<absolute path>",
  "validated_count":0,
  "applyback_eligible_ids":["<candidate_id>", "..."],
+ "unit_status_by_candidate":{"<candidate_id>":"pass|fail|blocked|needs_diagnosis|budget_skipped|..."},
  "waived":[],"deferred":[],"notes":"..."}
 ```
 
@@ -117,6 +190,11 @@ Return:
 copied from that file, not from your own reading of the verdicts. The apply-back budget
 counts only execution-list entries that carry one of these ids, so a unit-side failure
 does not use up a slot.
+
+`unit_status_by_candidate` maps EVERY Top-K candidate_id to its `unit_side_status` in the
+`fusion_unitside.json` you just wrote (one row per candidate: the best measured side). The
+workflow closes an entry as `blocked`/`unit_fail` without a serving A/B only when every one of
+its candidates is a measured `fail`; everything else goes to apply-back with its verdicts.
 
 ## Inputs
 - `FUSION_CANDIDATES_JSON` — the Phase 2.1 candidates.
@@ -130,7 +208,8 @@ does not use up a slot.
   `GPU_IDS` — the cards to use, and ONLY these. Single-GPU candidates run in parallel on
   different cards, so for a single-GPU family `GPU_IDS` is the one card pinned to you; a
   collective family gets the full serving set and runs alone.
-- `EVAL_DIR` — where to write `verdict/<CANDIDATE_ID>.json` and scratch.
+- `EVAL_DIR` — where to write `verdict/<CANDIDATE_ID>.json` (screen format:
+  `VERDICT_DIR/<CANDIDATE_ID>__existing.json` / `__self.json`) and scratch.
 - `SKILL_DIR` — this workflow dir (harness_lib, server_teardown).
 
 ## What the candidate already gives you (do NOT re-capture)
@@ -272,6 +351,7 @@ Read the candidate object for `CANDIDATE_ID` from `FUSION_CANDIDATES_JSON`:
 6. **Write `EVAL_DIR/verdict/<CANDIDATE_ID>.json`** (rank0 only) with EXACTLY:
    ```json
    {"candidate_id": "...", "family": "...", "fused_fn": "<existing_apis[].name>",
+    "implementation": "existing|self_authored", "kernel_source": "<abs path, self_authored only>",
     "tested_shape": [tokens, hidden], "dtypes": ["bf16", ...], "tol": 0.02,
     "parity": "pass|fail", "ref_ms": 0.0, "cand_ms": 0.0, "isolated_speedup": 0.0,
     "ref_ops": ["<every op the ref leg ran>"], "outside_work_removed": [],

@@ -37,3 +37,21 @@ Two layers decide "what can be fused", in this order:
   `fusion_candidate_harness.py --fusion-priors`).
 - Add a strategy when a new fusible op-combination is learned; cite the kernel
   and, if measured, the `learned/` card.
+- `measured_priors.json` — fusion seams with a MEASURED end-to-end result,
+  schema 2: `{schema_version: 2, priors: [{prior_id, title, model_family,
+  model, gfx, framework, polarity, seam, measurements: [{gain_pct, date,
+  protocol, source, evidence}]}]}`. `polarity` is `positive` (a win) or
+  `negative` (a regression alone or when stacked). The effective gain is the
+  median of the last 3 measurements by date. Read by
+  `scripts/fusion_screen.py` (with the `learned/` fusion cards): a positive
+  prior over the noise band whose seam is present is forced into the final
+  list and ranks first in pass 2; a negative prior triples the matching
+  window's difficulty, is never forced and sorts last. The `seam` descriptor
+  (`kinds`, `max_span`, ordered `members`, optional `phases`) locates the seam
+  in the semantic table; a screen entry's `seam_descriptor` has the same shape.
+- The store is **append-only**. Write it through
+  `fusion_priors.append_measurement(path, prior_id_or_seam_record,
+  measurement, polarity)` (used by `scripts/fusion_prior_writeback.py`): it
+  appends under a lock, rewrites the file atomically, never edits or removes a
+  measurement and ignores an identical repeat. Record only measured numbers and
+  their source.

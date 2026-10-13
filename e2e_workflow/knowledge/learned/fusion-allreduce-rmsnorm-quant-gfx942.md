@@ -3,8 +3,8 @@ key: kernel fusion (collective+norm+quant) · gfx942 · sglang fp8 decode TP8
 type: lever
 confidence: ★★★
 effect: reproduced on 2 independent runs. Decode kernel time -20.0% over the fusion set (51.96 -> 41.55 us/layer); launches 245 -> 121/iter (-50.6%). e2e transfer, ISOLATED at last: **+1.583% output tok/s, non-overlapping** (167.330 -> 169.979 tok/s) — i.e. this rung ALONE is worth ~1.6%, not the +11.80% of the stack it previously shipped inside. 3rd confirm 2026-08-30: **+2.014% output tok/s marginal, non-overlapping (220.853 < 224.145)**, TPOT -2.23%, gsm8k 0.935 -> 0.945.
-confirms: 3
-last_seen: 2026-08-30
+confirms: 4
+last_seen: 2026-10-12
 ---
 # aiter fused AllReduce+add+RMSNorm+per-group-quant — and the flag that lies about being on
 - lever: on TP decode, the AllReduce → add → RMSNorm → per-group-quant chain after each
@@ -46,3 +46,38 @@ last_seen: 2026-08-30
     `should_custom_ar` declines above 64 MiB, so a correct decode-only landing looks like
     `decode 3600/0, prefill 180/4740`. Untagged it reads as a 19% fallback rate and gets misjudged.
 - source: 2026-08-30 (05_FUSION_APPLYBACK.md e04; overlay fusion/fusion_overlays/dsr1/e04_ar_norm_quant)
+- caution (2026-10-10, Qwen3.5-397B-A17B-FP8, gfx942 TP8): the +1.6–2.0% above is the WHOLE
+  AR+add+RMSNorm+per-group-quant collapse measured on a baseline where the flag was OFF. **Also
+  verify the marginal gain separately when `--enable-aiter-allreduce-fusion` is ALREADY on in the
+  baseline** — there, sglang already runs `custom_fused_ar_rms` (AR+add+RMSNorm → bf16) and only a
+  SEPARATE per-group quant remains (`dynamic_per_group_scaled_quant`). Folding just that residual quant
+  into the AR launch by rerouting `GroupCoordinator.fused_allreduce_rmsnorm` →
+  `custom_fused_ar_rms_per_group_quant` (emit_bf16, consume the (fp8,scale) at `aiter.fused_moe.get_quant`)
+  ENGAGED x8 under the cuda graph and the quant kernel was genuinely removed (consume counter > 0, not
+  inert), yet the interleaved A/B was **in-noise: −0.197% median (ref 295.65, cand 295.06),
+  nonoverlap=false, TPOT +0.04%, TTFT +0.08%**. Under the decode cuda graph the residual fold saves only
+  a launch the graph already removes — the same place the sibling MoE-prologue quant-fold (e06) landed
+  (+0.335%). So the collective+norm fold is where the e2e lives; the trailing quant alone is not a second
+  rung once the flag is on.
+- source: 2026-10-10 (e08; overlay fusion/fusion_overlays/Qwen3.5-397B-A17B-FP8/e08_ar_quant, ab_summary.json)
+- caution → REFINED (2026-10-12, Qwen3.5-397B-A17B-FP8, gfx942 TP8, flag already on): WHERE the residual
+  quant is folded decides whether it is a second rung. The in-noise results above are all **post-attention /
+  MLP-side** folds (e08 −0.197%, e05 −0.164%): the saved `dynamic_per_group_scaled_quant` feeds the MoE
+  experts, and that launch sits inside the decode cuda graph that already amortizes it. **Also verify the
+  PRE-ATTENTION / layer-input fold separately — it is NOT in-noise.** Folding the layer-input per-group quant
+  into `prepare_attn`'s input-layernorm AR+RMS (reroute `GroupCoordinator.fused_allreduce_rmsnorm` scoped to
+  prepare_attn → `custom_fused_ar_rms_per_group_quant(emit_bf16)`, consume at `fp8_utils.aiter_per1x128_quant`)
+  landed **+1.271% e2e, non-overlapping (3 pairs, ref med 316.069 vs cand med 320.087, cand_min 319.265 >
+  ref_max 316.637, spread 0.86%), TPOT −1.17%, TTFT flat** (Qwen3.5-397B e06, seam `fan_out|allreduce+quant|#0`,
+  stacked on e01 GDN in_proj dual-GEMM + e02 router fold). The saved quant here feeds the attention/GDN INPUT
+  projections (c16 GDN `in_proj_qkvz` shared quant via the e01 fused dual GEMM; c18 attention `qkv_proj` quant)
+  which are on the pre-attention critical path OUTSIDE the MoE graph replay. Wiring is simpler than the MoE-side
+  fold: the consumer is a standalone quant feeding a dense GEMM (`aiter_w8a8_block_fp8_linear`), so wrapping the
+  module-global `fp8_utils.aiter_per1x128_quant` reaches BOTH the stock qkv_proj (L786 global lookup) and e01's
+  fused GDN path (imports the name after the wrap) — NO MoeRunner scoped-arm, NO data_ptr boundary. On gfx942
+  `use_triton=True` → `transpose_scale=False` → the native `s_p` scale the fused collective emits, so NO
+  `partial_transpose`/`s_s`/pre-capture num_rows hook. Shape-match consume is correctness-safe: `_communicate_
+  simple_fn` is identity on this path, and an all-gather would change the shape → fall back to the real quant.
+  Accuracy gated by unit-equivalence only (base-vs-base gsm8k flipped 44%; c16/c18 parity pass tol 0.06).
+- source: 2026-10-12 (e06 ACCEPTED; overlay fusion/fusion_overlays/Qwen3.5-397B-A17B-FP8/e06_ar_rms_group_quant,
+  apply_e06/ab_decision.json)

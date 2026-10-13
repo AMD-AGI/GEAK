@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "artifact": "fusion_measured_priors_sidecar",
+  "note": "Implementation-level failures (a unit_fail is about one implementation, never a negative seam prior) and candidates the budget left untested (next-round candidate input). Append-only.",
+  "implementation_failures": [],
+  "untested_candidates": [
+    {
+      "seam_key": "fan_out|allreduce+quant|#1",
+      "prior_id": "xb-qwen35-post-attn-ar-norm-dual-quant",
+      "exec_id": "e05",
+      "why": "stack_pending, never re-gated in the stack",
+      "priority": "normal",
+      "expected_gain_pct": 1.8539,
+      "overlay_path": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ/fusion/fusion_overlays/Qwen3.5-397B-A17B-FP8/e05_ar_rms_group_quant",
+      "unit_side": "reused FUSION_UNITSIDE_JSON: c17 custom_fused_ar_rms_per_group_quant 1.388x parity pass; c19 fused_allreduce_rmsnorm_quant_per_group 1.445x parity pass (fp8 noise, dequant err 0.0571<=0.0625)",
+      "model_family": "qwen35",
+      "model": "Qwen3.5-397B-A17B-FP8",
+      "gfx": "gfx942",
+      "framework": "sglang",
+      "date": "2026-10-12",
+      "source": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ"
+    },
+    {
+      "seam_key": "serial|norm+quant|#0|linear_attn",
+      "prior_id": "learned:fusion-gdn-outnorm-moe-quant-stack-qwen35-gfx942",
+      "exec_id": "e03",
+      "why": "apply-back stopped at the stacking reserve",
+      "priority": "normal",
+      "expected_gain_pct": 1.3913,
+      "overlay_path": "",
+      "unit_side": {
+        "candidate_ids": [
+          "c23",
+          "c24"
+        ],
+        "statuses": [
+          "pass",
+          "error"
+        ],
+        "eligible": true,
+        "measured_loss": false,
+        "rung": 0,
+        "unitside_json": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ/fusion/fusion_unitside.json"
+      },
+      "model_family": "qwen35",
+      "model": "Qwen3.5-397B-A17B-FP8",
+      "gfx": "gfx942",
+      "framework": "sglang",
+      "date": "2026-10-12",
+      "source": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ"
+    },
+    {
+      "seam_key": "serial|norm+rope+kv_cache|#0",
+      "prior_id": "xb-qwen35-qk-norm-rope-cache",
+      "exec_id": "e07",
+      "why": "apply-back stopped at the stacking reserve",
+      "priority": "normal",
+      "expected_gain_pct": 0.9275,
+      "overlay_path": "",
+      "unit_side": {
+        "candidate_ids": [
+          "c27",
+          "c28"
+        ],
+        "statuses": [
+          "error",
+          "pass"
+        ],
+        "eligible": true,
+        "measured_loss": false,
+        "rung": 0,
+        "unitside_json": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ/fusion/fusion_unitside.json"
+      },
+      "model_family": "qwen35",
+      "model": "Qwen3.5-397B-A17B-FP8",
+      "gfx": "gfx942",
+      "framework": "sglang",
+      "date": "2026-10-12",
+      "source": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ"
+    },
+    {
+      "seam_key": "serial|elementwise+elementwise+quant+gemm|#0",
+      "prior_id": "auto-qwen35-gfx942-serial-elementwise-elementwise-quant-gemm-0",
+      "exec_id": "e08",
+      "why": "apply-back stopped at the stacking reserve",
+      "priority": "normal",
+      "expected_gain_pct": 1.7368,
+      "overlay_path": "",
+      "unit_side": {
+        "candidate_ids": [
+          "c22"
+        ],
+        "statuses": [
+          "pass"
+        ],
+        "eligible": true,
+        "measured_loss": false,
+        "rung": 0,
+        "unitside_json": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ/fusion/fusion_unitside.json"
+      },
+      "model_family": "qwen35",
+      "model": "Qwen3.5-397B-A17B-FP8",
+      "gfx": "gfx942",
+      "framework": "sglang",
+      "date": "2026-10-12",
+      "source": "/home/amd/yixiongh/geak/exp/Qwen35/20261010_test_e2e_qwen35/geak/e2e_Qwen3.5-397B-A17B-FP8_20261011T164752267404_4c70519dZ"
+    }
+  ]
+}
