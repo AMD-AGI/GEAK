@@ -34,6 +34,33 @@ input-shape signatures records `(args, kwargs) -> output` to `reference_io.pt`. 
 - **Determinism**: capture with temp=0 so re-running the reference is reproducible.
 - Bound the window (`--num-steps`) so capture is fast and the file stays small.
 
+## Step 1b — When the server does not boot: REPLAY the oracle, do not drop the task
+Capture needs a live server, and a live server is the least reliable part of the pipeline. When
+`meta.oracle_complete` is false or empty, the task is still recoverable: rebuild the operands from
+`regime.json` and produce the golden outputs by RUNNING the frozen real baseline in `baseline_src/`.
+Only the inputs are reconstructed; the values still come from the production kernel, so this is a
+replay, not a fabrication.
+
+```
+<task_dir>/
+  case_spec.py       # operands built through harness_lib from regime.json (dtype/KV layout/scales/pack_x)
+  _build_oracle.py   # imports baseline_src/, runs it on those operands, writes reference_io.pt
+  _oracle_info.json  # sha256 + determinism fingerprint + the case list
+```
+
+Four guards make it admissible — all four, or drop:
+1. every operand from `regime.json` via `harness_lib`, never from offline defaults;
+2. the golden output computed by calling `baseline_src/`, never hand-written and never a re-run of the
+   code under optimization;
+3. seeded operands rebuilt twice and asserted bit-identical, with the fingerprint in `meta.json` and
+   re-checked by `unittest.py` before it trusts the oracle (fail loud);
+4. `meta.json` carries `oracle_source: "capture" | "replay"` so the Validator and the dashboard can
+   tell the two apart.
+
+Prefer live capture whenever the server is up. Drop (`editable:false`) only when the regime itself
+cannot be rebuilt offline — an op that exists only fused in the compile graph, or routing-dependent
+MoE token counts. A server that fails to boot is not by itself a reason to drop the task.
+
 ## Step 2 — Emit an immutable, general unittest
 The unittest must be backend-agnostic: it loads `reference_io.pt`, calls whatever the CURRENT kernel
 entry point is on the recorded inputs, compares to the golden output (tolerance per dtype:
