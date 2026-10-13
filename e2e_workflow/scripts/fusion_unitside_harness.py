@@ -78,9 +78,34 @@ to bench) are reported as `deferred_author` and are legitimately out of scope --
 are counted and shown, never silently dropped. Pass `--allow-partial-coverage` to
 report the gap without failing (the gap is still printed loudly either way).
 
+SCREEN-FORMAT CANDIDATES (fusion_screen.py, 2026-10)
+---------------------------------------------------
+The board is now `fusion_screen.py`, whose candidates carry `row_ids`,
+`matched_existing_kernels` and `self_author` instead of `members` / `existing_apis`.
+Fed to the old checks unchanged, every one of them was "out of scope" (no
+existing_apis) and Phase 3.0 reported complete over a board it never benched -- which
+is one reason the workflow stopped running it at all, and why every apply-back call
+of the Qwen3.5-397B run (20261010) re-did its own unit test and booted its own server.
+Such candidates are normalized here instead:
+
+  * `existing_apis` <- `matched_existing_kernels[].name`;
+  * `members` are grafted from the semantic table (`--semantic-table`, the
+    pattern_layer_kernel_table.json the screen read) by `row_ids` + `partner_row_ids`,
+    with each row's kernel name, parent operator and captured shape;
+  * every screen candidate is IN scope: the screen always asks for a self-authored
+    kernel, so there is always something to bench;
+  * a verdict may be for the EXISTING side (fused_fn must be one of the matched
+    kernels, as before) or the SELF-AUTHORED side (`implementation: self_authored`,
+    `kernel_source` must exist on disk -- an authored kernel nobody can find is not
+    evidence). One candidate may submit both sides; its status is the best measured
+    side and every side stays in the row's `sides`;
+  * a screen candidate whose rows carry no input_dims falls back to the token-count
+    check against the step bucket the rows were captured in, with a warning (the
+    rows are real trace rows; only their shapes are unresolved).
+
 Usage:
   python3 fusion_unitside_harness.py --candidates fusion_candidates.json \
-      --topk fusion_topk.json \
+      --topk fusion_topk.json [--semantic-table pattern_layer_kernel_table.json] \
       --verdicts <dir-of-*.json | combined.json> \
       --out-md FUSION_UNITSIDE.md --out-json fusion_unitside.json \
       [--min-speedup 1.0] [--allow-partial-coverage] \
@@ -213,10 +238,129 @@ def _in_scope(candidate):
     """True iff this candidate is 单侧-testable: it cites an existing fused API.
 
     tier-C (author a new kernel) has nothing to bench -> out of scope (deferred),
-    not missing. Everything else MUST produce a verdict or an explicit waiver."""
+    not missing. Everything else MUST produce a verdict or an explicit waiver.
+    A fusion_screen.py candidate is always in scope: the screen requires a
+    self-authored kernel for every chain, so there is always a kernel to bench."""
+    if candidate.get("screen_format"):
+        return True
     if str(candidate.get("implementation_class") or "") in DEFERRED_CLASSES:
         return False
     return bool(candidate.get("existing_apis"))
+
+
+_COLLECTIVE_TAGS = {"allreduce", "all_reduce", "communication", "collective"}
+_COLLECTIVE_NAMES = ("all_reduce", "allreduce", "cross_device_reduce", "reduce_scatter",
+                     "all_gather", "allgather", "custom_ar", "qr_all_reduce")
+
+
+def is_collective_candidate(candidate):
+    """Needs the whole TP group (and therefore the serving-GPU lease) to bench."""
+    if str(candidate.get("family") or "").startswith("collective"):
+        return True
+    tags = {str(t).lower() for t in candidate.get("op_tags") or []}
+    if tags & _COLLECTIVE_TAGS:
+        return True
+    names = " ".join(str(n).lower() for n in candidate.get("kernel_names") or [])
+    return any(n in names for n in _COLLECTIVE_NAMES)
+
+
+def load_semantic_rows(path):
+    """row_id -> row of a pattern_layer_kernel_table.json (or a bare {rows:[...]})."""
+    if not path:
+        return {}
+    data = _load(path)
+    rows = []
+    for table in (data.get("tables") or []) if isinstance(data, dict) else []:
+        rows.extend(table.get("rows") or [])
+    if isinstance(data, dict) and data.get("rows"):
+        rows.extend(data["rows"])
+    return {r.get("row_id"): r for r in rows if isinstance(r, dict) and r.get("row_id")}
+
+
+def normalize_screen_candidate(candidate, rows_by_id):
+    """Map a fusion_screen.py candidate onto the members / existing_apis view.
+
+    Legacy (fusion_candidate_harness) candidates pass through unchanged."""
+    if candidate.get("members") is not None or "row_ids" not in candidate:
+        return candidate
+    c = dict(candidate)
+    c["screen_format"] = True
+    if not c.get("existing_apis"):
+        c["existing_apis"] = [{"name": k.get("name")}
+                              for k in c.get("matched_existing_kernels") or []
+                              if isinstance(k, dict) and k.get("name")]
+    row_ids = list(c.get("row_ids") or []) + list(c.get("partner_row_ids") or [])
+    members, bucket = [], {}
+    for rid in row_ids:
+        row = rows_by_id.get(rid)
+        if row is None:
+            members.append({"row_id": rid, "shape": {}})
+            continue
+        members.append({"row_id": rid,
+                        "kernel": row.get("raw_name") or row.get("short_name"),
+                        "parent_operator": row.get("parent_operator"),
+                        "phase": row.get("phase"),
+                        "shape": row.get("shape") or {}})
+        if not bucket and (row.get("step_batch_size") or row.get("step_input_tokens")):
+            bucket = {"batch_size": row.get("step_batch_size"),
+                      "input_tokens": row.get("step_input_tokens")}
+    c["members"] = members
+    c.setdefault("removable_row_ids", row_ids)
+    if bucket and not c.get("selected_bucket"):
+        c["selected_bucket"] = bucket
+    if not c.get("family"):
+        tags = "_".join(sorted(str(t) for t in c.get("op_tags") or [])) or str(
+            c.get("kind") or "chain")
+        c["family"] = ("collective_" + tags) if is_collective_candidate(c) else tags
+    return c
+
+
+def alt_rung_candidate_id(exec_id, rung_item):
+    """Candidate id of one alternative-group rung (rung 0 is the entry itself).
+
+    Mirrors fusionAltRungCandidateId in e2e_workflow.js."""
+    explicit = rung_item.get("candidate_id")
+    if explicit:
+        return str(explicit)
+    return "%s.r%s" % (exec_id, rung_item.get("rung"))
+
+
+def synthesize_extra_candidates(topk, rows_by_id):
+    """Screen-format candidates for alt-ladder rungs >= 1 and candidate_pool items.
+
+    The board describes them inline (row_ids, kernel_names, matched_existing_kernels);
+    fusion_candidates.json may not carry them, and a verdict for an unknown candidate is
+    an error. Synthesized candidates are flagged (`alt_of` / `pool_item`) and sit outside
+    the coverage denominator."""
+    out = []
+    for entry in (topk or {}).get("execution_list") or []:
+        exec_id = entry.get("exec_id")
+        for item in entry.get("alt_ladder") or []:
+            if not isinstance(item, dict) or item.get("rung") in (None, 0, "0"):
+                continue
+            c = {"candidate_id": alt_rung_candidate_id(exec_id, item),
+                 "phase": item.get("phase") or entry.get("phase"),
+                 "op_tags": item.get("op_tags") or entry.get("op_tags") or [],
+                 "self_author": True, "alt_of": exec_id, "alt_rung": item.get("rung")}
+            for key in ("row_ids", "partner_row_ids", "kernel_names",
+                        "matched_existing_kernels", "kind", "seam_key"):
+                if item.get(key) is not None:
+                    c[key] = item[key]
+            c.setdefault("row_ids", [])
+            out.append(normalize_screen_candidate(c, rows_by_id))
+    for entry in (topk or {}).get("candidate_pool") or []:
+        if not isinstance(entry, dict):
+            continue
+        cids = entry.get("candidate_ids") or [entry.get("candidate_id") or entry.get("exec_id")]
+        for cid in cids:
+            if not cid:
+                continue
+            c = {k: v for k, v in entry.items() if k not in ("candidate_ids", "alt_ladder")}
+            c.update({"candidate_id": cid, "pool_item": True})
+            c.setdefault("self_author", True)
+            c.setdefault("row_ids", [])
+            out.append(normalize_screen_candidate(c, rows_by_id))
+    return out
 
 
 def _member_names(member):
@@ -339,9 +483,13 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
              require_coverage=True, waivers=None, legacy_schema_ok=False,
              phase_waivers=None, require_phase_generalization=True,
              allow_shapeless_candidate="", topk_path=None,
-             subsumed=None, equivalent=None, budget_skipped=None):
+             subsumed=None, equivalent=None, budget_skipped=None,
+             semantic_table_path=None):
     payload = _load(candidates_path)
-    candidate_list = payload.get("candidates", [])
+    rows_by_id = load_semantic_rows(semantic_table_path)
+    candidate_list = [normalize_screen_candidate(c, rows_by_id)
+                      for c in payload.get("candidates", [])]
+    warnings = []
     candidates = {c["candidate_id"]: c for c in candidate_list}
     topk_ids = None
     candidate_exec = {}
@@ -357,6 +505,15 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
             for entry in (topk.get("execution_list") or [])
             for cid in (entry.get("candidate_ids") or [])
         }
+        # Alternative-group rungs and candidate-pool items are unit-tested too (the
+        # apply-back walks an alt ladder rung by rung, and greedy stacking may add pool
+        # items whose unit test passed). They are outside the Top-K coverage denominator,
+        # but their verdicts must validate like any other.
+        for extra in synthesize_extra_candidates(topk, rows_by_id):
+            cid = extra["candidate_id"]
+            if cid not in candidates:
+                candidates[cid] = extra
+                candidate_list.append(extra)
     verdicts = _load_verdicts(verdicts_path)
     waivers = dict(waivers or {})
     phase_waivers = dict(phase_waivers or {})
@@ -397,9 +554,23 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
             errors.append("%s references unknown candidate_id" % vp)
             continue
         family = str(candidate.get("family") or "")
-        # 3. fused_fn is one of the candidate's declared APIs (anti-cheat)
-        if not _fn_matches_api(verdict.get("fused_fn"),
-                               candidate.get("existing_apis")):
+        side = str(verdict.get("implementation") or "existing")
+        # 3. fused_fn is one of the candidate's declared APIs (anti-cheat). The
+        #    self-authored side of a screen candidate has no catalog name to match;
+        #    its anti-cheat is the source file it claims to have benched.
+        if side == "self_authored":
+            src = verdict.get("kernel_source")
+            if not candidate.get("screen_format") or candidate.get("self_author") is False:
+                errors.append("%s is a self_authored verdict for a candidate that does "
+                              "not ask for a self-authored kernel" % vp)
+                continue
+            if not src or not os.path.isfile(str(src)):
+                errors.append("%s self_authored verdict names kernel_source %r, which "
+                              "does not exist — an authored kernel nobody can find is "
+                              "not evidence" % (vp, src))
+                continue
+        elif not _fn_matches_api(verdict.get("fused_fn"),
+                                 candidate.get("existing_apis")):
             errors.append(
                 "%s fused_fn '%s' is not one of the candidate's existing_apis %s"
                 % (vp, verdict.get("fused_fn"),
@@ -426,6 +597,21 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
                     "shapes %s (cannot trust a 单侧 pass on a different shape)"
                     % (vp, verdict.get("tested_shape"), sorted(cand_shapes)))
                 continue
+        elif candidate.get("screen_format") and (
+                (candidate.get("selected_bucket") or {}).get("batch_size")
+                or (candidate.get("selected_bucket") or {}).get("input_tokens")):
+            bucket = candidate.get("selected_bucket") or {}
+            expect_tok = (bucket.get("batch_size") if candidate.get("phase") == "decode"
+                          else bucket.get("input_tokens"))
+            if expect_tok and int(tested[0]) != int(expect_tok):
+                errors.append(
+                    "%s tested_shape leading dim %d != the captured step's token count "
+                    "%d (cannot trust a 单侧 pass on a different token count)"
+                    % (vp, tested[0], int(expect_tok)))
+                continue
+            warnings.append(
+                "%s: the semantic rows carry no input_dims; tested_shape checked "
+                "against the captured step's token count only" % vp)
         elif not allow_shapeless_candidate:
             # 2026-09-01. This branch used to fall through to the loose token-count
             # check below, which means: when the members carried NO shape, the shape
@@ -567,6 +753,8 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
                       % (speedup, ", engaged" if is_collective else ""))
         results.append({
             "candidate_id": cid,
+            "side": side,
+            "kernel_source": verdict.get("kernel_source"),
             "family": family,
             "phase": candidate.get("phase"),
             "tier_hint": candidate.get("implementation_class"),
@@ -594,6 +782,9 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
             "tol": verdict.get("tol"),
         })
 
+    # ---- one row per candidate: the best measured side leads, the rest ride along
+    results = _collapse_sides(results)
+
     # ---- COVERAGE (recall): close the loop over CANDIDATES, not verdicts ------
     # Up to here the loop was verdict-driven, so a candidate nobody benched was
     # invisible. Walk the candidate list and give every in-scope candidate an
@@ -608,6 +799,11 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
         if topk_ids is not None and cid not in topk_ids:
             coverage_rows.append(_row(
                 cid, candidate, "deferred_rank_budget",
+                ("alternative-group rung %s of %s: unit-tested on demand during "
+                 "apply-back, only after an earlier rung fails its unit test or is "
+                 "rejected by measurement; not in the unitside coverage denominator"
+                 % (candidate.get("alt_rung"), candidate.get("alt_of")))
+                if candidate.get("alt_of") else
                 "candidate is outside fusion_topk.execution_list; not in the "
                 "unitside coverage denominator"))
             continue
@@ -763,9 +959,14 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
         counts[r["unit_side_status"]] = counts.get(r["unit_side_status"], 0) + 1
 
     coverage_fail = bool(require_coverage and unvalidated)
+    # Screen candidates are excluded from the cross-phase gap: the screen merges a
+    # seam's prefill and decode chains into ONE execution entry (partner_row_ids), so
+    # the cross-phase question is answered by construction, and its tag-based
+    # matched-kernel lists are far too wide to generate gaps from.
     phase_candidates = [
         c for c in candidate_list
-        if topk_ids is None or c.get("candidate_id") in topk_ids
+        if (topk_ids is None or c.get("candidate_id") in topk_ids)
+        and not c.get("screen_format")
     ]
     phase_gen = _phase_generalization(results, phase_candidates, phase_waivers)
     phase_fail = bool(require_phase_generalization and phase_gen["open_gaps"])
@@ -796,7 +997,15 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
         "status": "fail" if (errors or coverage_fail or phase_fail) else "pass",
         "min_speedup": min_speedup,
         "candidates_json": os.path.abspath(candidates_path),
+        "semantic_table_json": (os.path.abspath(semantic_table_path)
+                                if semantic_table_path else ""),
         "errors": errors,
+        "warnings": warnings,
+        # Which execution entries need the whole serving TP group to bench (and so
+        # the serving-GPU lease) -- the workflow schedules those serially.
+        "collective_candidate_ids": sorted(
+            c.get("candidate_id") for c in candidate_list
+            if c.get("candidate_id") and is_collective_candidate(c)),
         "coverage": coverage,
         "coverage_ok": not coverage_fail,
         "phase_generalization": phase_gen,
@@ -806,6 +1015,43 @@ def validate(candidates_path, verdicts_path, min_speedup=1.0,
         "results": results,
     }
     return result
+
+
+_SIDE_RANK = {"pass": 0, "fail": 1, "blocked": 2, "needs_diagnosis": 3}
+
+
+def _collapse_sides(results):
+    """Several verdicts for one candidate (existing + self-authored) -> one row.
+
+    The best measured side is the candidate's status: apply-back takes whichever
+    implementation won, so a losing existing kernel must not veto a winning authored
+    one (or vice versa). Every side is kept under `sides` for the report."""
+    by_cid, order = {}, []
+    for row in results:
+        cid = row.get("candidate_id")
+        if cid not in by_cid:
+            by_cid[cid] = []
+            order.append(cid)
+        by_cid[cid].append(row)
+    out = []
+    for cid in order:
+        rows = by_cid[cid]
+        if len(rows) == 1:
+            out.append(rows[0])
+            continue
+        def key(r):
+            sp = r.get("isolated_speedup")
+            return (_SIDE_RANK.get(r.get("unit_side_status"), 9),
+                    -(sp if isinstance(sp, (int, float)) else 0.0))
+        best = dict(sorted(rows, key=key)[0])
+        best["sides"] = [{k: r.get(k) for k in (
+            "side", "fused_fn", "unit_side_status", "isolated_speedup", "parity",
+            "kernel_source", "reason")} for r in rows]
+        best["reason"] = "best of %d sides (%s): %s" % (
+            len(rows), ", ".join("%s=%s" % (r.get("side"), r.get("unit_side_status"))
+                                 for r in rows), best.get("reason"))
+        out.append(best)
+    return out
 
 
 def _esc(value):
@@ -937,6 +1183,25 @@ def render_markdown(result):
                 _esc(r["candidate_id"]), _esc(r["phase"]), _esc(r["family"]),
                 _esc(r["tier_hint"]), _esc(r["reason"])))
         lines.append("")
+    multi = [r for r in result["results"] if r.get("sides")]
+    if multi:
+        lines.append("## 双侧对比（现成 kernel vs 自写，取实测更好的一侧）")
+        lines.append("")
+        lines.append("| 候选 | 侧 | fused_fn | 结论 | speedup | kernel_source |")
+        lines.append("|---|---|---|:--:|---:|---|")
+        for r in multi:
+            for sd in r["sides"]:
+                lines.append("| `%s` | %s | %s | %s | %s | %s |" % (
+                    _esc(r["candidate_id"]), _esc(sd.get("side")), _esc(sd.get("fused_fn")),
+                    _esc(sd.get("unit_side_status")), _esc(sd.get("isolated_speedup")),
+                    _esc(sd.get("kernel_source"))))
+        lines.append("")
+    if result.get("warnings"):
+        lines.append("## 提示")
+        lines.append("")
+        for w in result["warnings"]:
+            lines.append("- %s" % w)
+        lines.append("")
     if result["errors"]:
         lines.append("## 不可信 verdict（harness 错误，需按报错重跑，不得当作 pass）")
         lines.append("")
@@ -973,7 +1238,8 @@ def run(candidates_path, verdicts_path, out_md, out_json, min_speedup=1.0,
         require_coverage=True, waivers=None, legacy_schema_ok=False,
         phase_waivers=None, require_phase_generalization=True,
         allow_shapeless_candidate="", topk_path=None,
-        subsumed=None, equivalent=None, budget_skipped=None):
+        subsumed=None, equivalent=None, budget_skipped=None,
+        semantic_table_path=None):
     result = validate(candidates_path, verdicts_path, min_speedup,
                       require_coverage=require_coverage, waivers=waivers,
                       legacy_schema_ok=legacy_schema_ok,
@@ -982,7 +1248,8 @@ def run(candidates_path, verdicts_path, out_md, out_json, min_speedup=1.0,
                       allow_shapeless_candidate=allow_shapeless_candidate,
                       topk_path=topk_path, subsumed=subsumed,
                       equivalent=equivalent,
-                      budget_skipped=budget_skipped)
+                      budget_skipped=budget_skipped,
+                      semantic_table_path=semantic_table_path)
     os.makedirs(os.path.dirname(os.path.abspath(out_json)), exist_ok=True)
     with open(out_json, "w") as fh:
         json.dump(result, fh, indent=2, ensure_ascii=False)
@@ -998,6 +1265,11 @@ def main():
         "--topk", default=None,
         help="fusion_topk.json; when set, coverage is limited to concrete "
              "candidate_ids in execution_list")
+    parser.add_argument(
+        "--semantic-table", default=None,
+        help="pattern_layer_kernel_table.json the screen read; grafts members "
+             "(kernel, parent operator, captured shape) onto fusion_screen.py "
+             "candidates by row_id")
     parser.add_argument("--verdicts", required=True,
                         help="dir of per-candidate *.json verdicts OR a combined json")
     parser.add_argument("--out-md", required=True)
@@ -1057,7 +1329,8 @@ def main():
                  subsumed=_parse_waivers(args.subsumed, "--subsumed"),
                  equivalent=_parse_waivers(args.equivalent, "--equivalent"),
                  budget_skipped=_parse_waivers(
-                     args.budget_skipped, "--budget-skipped"))
+                     args.budget_skipped, "--budget-skipped"),
+                 semantic_table_path=args.semantic_table)
     cov = result.get("coverage") or {}
     pg = result.get("phase_generalization") or {}
     print(json.dumps({"status": result["status"], "counts": result["counts"],

@@ -336,6 +336,13 @@ class TestMapArgs(_RunE2ECase):
         self.assertIs(ps["semantics_shape_capture"], False)
         self.assertNotIn("semantics_shape_capture_setup", ps)
 
+    def test_fusion_screen_budget_is_forwarded(self):
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"), framework="sglang",
+            fusion_budget_s=64800, fusion_item_minutes=40))
+        self.assertEqual(ps["fusion_budget_s"], 64800)
+        self.assertEqual(ps["fusion_item_minutes"], 40)
+
     def test_budget_omitted_when_unknown(self):
         """No timeout => the workflow stays budget-unaware (byte-identical to a
         direct, non-interface invocation)."""

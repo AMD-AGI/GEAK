@@ -5,7 +5,7 @@ export const meta = {
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the isolated eval dir + records baseline throughput' },
     { title: 'Profile', detail: 'Profiler captures a warm trace -> standardized Top-N' },
-    { title: 'KernelFusion', detail: 'reuse the Profile trace -> semantics -> discover/rank/validate Top-K -> integrate tier-A/B with reversible A/B gates -> re-profile if a fusion landed' },
+    { title: 'KernelFusion', detail: 'reuse the Profile trace -> semantics -> screen chains -> initial benefit rank -> two Score passes merged into an adaptive Top-K -> unit-test every entry, alternative rung and pool item -> integrate the unit-side passes with reversible A/B gates -> re-profile if a fusion landed' },
     { title: 'Strategize', detail: 'System Architect routes kernels by Amdahl (config vs kernel vs host)' },
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
     { title: 'TuningSkillset', detail: 'Tuning Specialist runs the VENDORED tuning skillset whole + standalone (its own pre/post A/B) BEFORE HeadKernel, so its share of the gain is attributable' },
@@ -115,9 +115,8 @@ const FUSION_DISCOVERY_ON =
 const FUSION_REQUIRED = String(A.fusion_required != null
   ? A.fusion_required
   : (A.fusion_discovery != null ? A.fusion_discovery : 'false')) === 'true';
-const FUSION_TOP_K = parseInt(A.fusion_top_k != null ? A.fusion_top_k : 10, 10);
-const FUSION_UNITSIDE_BUDGET = parseInt(
-  A.fusion_unitside_budget != null ? A.fusion_unitside_budget : FUSION_TOP_K, 10);
+const FUSION_TOP_K = parseInt(A.fusion_top_k != null ? A.fusion_top_k : 8, 10);
+const FUSION_SCREEN_PASSES = 2;
 // Unit-side microbenches that may run at once (single-GPU candidates only;
 // collective candidates always run alone on the full GPU set). 1 = serial.
 const FUSION_UNIT_PARALLEL = parseInt(
@@ -147,6 +146,39 @@ const FUSION_BUDGET = parseInt(A.fusion_budget != null ? A.fusion_budget
 // Timed rounds per side of the combined A/B.
 const FUSION_COMBINED_AB_REPEATS = parseInt(
   A.fusion_combined_ab_repeats != null ? A.fusion_combined_ab_repeats : 3, 10);
+// Phase 3.0 (单侧 gate) is MANDATORY: every Top-K entry is unit-tested (accuracy + isolated
+// microbench, existing kernel and self-authored side) and 04_FUSION_UNITSIDE.md is published
+// BEFORE apply-back. On Qwen3.5-397B (20261010) it never ran -- 00_INDEX.md listed
+// 04_FUSION_UNITSIDE.md as 未生成 -- so each of the eight apply-back integrators re-did its own
+// unit test and booted its own server, spending the GPU time on duplicated work. Only an
+// EXPLICIT args.fusion_unitside=false skips it (logged loudly); there is no implicit skip.
+const FUSION_UNITSIDE_ON = String(
+  A.fusion_unitside != null ? A.fusion_unitside : 'true') === 'true';
+// Serving-GPU lease (scripts/fusion_gpu_lease.py). After every apply-back call the workflow
+// waits for the processes the call registered, in rounds of FUSION_LEASE_WAIT_S (one round
+// fits an agent's 10-minute Bash limit), then reaps ONLY those registered pgids.
+const FUSION_LEASE_WAIT_S = 540;
+const FUSION_LEASE_WAIT_ROUNDS = Math.max(1, parseInt(
+  A.fusion_lease_wait_rounds != null ? A.fusion_lease_wait_rounds : 2, 10));
+// Phase 3.0 unit-tests rung 0 of every alternative group up front; deeper rungs are tested on
+// demand during apply-back, only after the rung before them failed its unit test or was
+// rejected by measurement. args.fusion_unit_all_rungs=true unit-tests every rung up front.
+const FUSION_UNIT_ALL_RUNGS = String(
+  A.fusion_unit_all_rungs != null ? A.fusion_unit_all_rungs : 'false') === 'true';
+// KernelFusion time budget (GEAK_structure 二.8.4). It sizes the screen's adaptive K
+// (K = clamp(floor(budget x 0.7 / t_item), 8, 16)). args.fusion_budget_s sets it; otherwise it is
+// FUSION_BUDGET_FRAC of the time left before the dispatch deadline when the run has a wall-clock
+// budget, else a fixed default.
+const FUSION_BUDGET_S_ARG = A.fusion_budget_s != null ? parseInt(A.fusion_budget_s, 10) : null;
+const FUSION_BUDGET_FRAC = parseFloat(A.fusion_budget_frac != null ? A.fusion_budget_frac : 0.4);
+const FUSION_BUDGET_DEFAULT_S = 28800;
+const FUSION_BUDGET_MIN_S = 1800;
+// Per-item apply-back cost (unit test + A/B) when nothing has been measured yet.
+const FUSION_ITEM_MINUTES_DEFAULT = 45;
+// candidate_pool items unit-tested in Phase 3.0 so greedy stacking may add them (by expected
+// gain, highest first). They are below the Top-K bar, so the number is capped.
+const FUSION_POOL_MAX = Math.max(0, parseInt(A.fusion_pool_max != null ? A.fusion_pool_max : 8, 10));
+const FUSION_GFX = String(A.gfx || 'gfx942');
 let FUSION_INPUTS = {
   FUSION_TOPK_JSON: '',
   FUSION_CANDIDATES_JSON: '',
@@ -850,6 +882,9 @@ const FUSION_RANK_SCHEMA = obj({
   status: { type: 'string' }, round: { type: ['number', 'string'] },
   fusion_topk_json: { type: 'string' }, fusion_topk_md: { type: 'string' },
   execution_list: arrObj, config_levers: arrObj, notes: { type: 'string' },
+  // Optional (older boards omit them): below-threshold candidates, the adaptive K, the noise band.
+  candidate_pool: arrObj, k_effective: { type: 'number' }, noise_band_pct: { type: 'number' },
+  phase_blind: arrStr,
 }, ['fusion_topk_json', 'execution_list']);
 
 const FUSION_UNIT_SCHEMA = obj({
@@ -862,8 +897,18 @@ const FUSION_UNIT_AGG_SCHEMA = obj({
   status: { type: 'string' }, fusion_unitside_json: { type: 'string' },
   fusion_unitside_md: { type: 'string' }, validated_count: { type: 'number' },
   applyback_eligible_ids: arrStr,
+  // candidate_id -> unit_side_status, copied from fusion_unitside.json (best measured side).
+  unit_status_by_candidate: { type: 'object', additionalProperties: true },
   waived: arrObj, deferred: arrObj, notes: { type: 'string' },
 }, ['status', 'fusion_unitside_json']);
+
+// scripts/fusion_gpu_lease.py output, passed through verbatim by the lease runner agent.
+const FUSION_LEASE_SCHEMA = obj({
+  ok: { type: 'boolean' }, action: { type: 'string' }, lease_id: { type: 'string' },
+  alive_count: { type: 'number' }, busy_holders: arrObj, serving_lock_held: { type: 'boolean' },
+  leases: arrObj, signalled: arrObj, refused: arrObj, released: arrStr,
+  lease_path: { type: 'string' }, reason: { type: 'string' },
+}, ['ok']);
 
 const STRATEGY_SCHEMA = obj({
   regime_summary: { type: 'string' }, config_directions: arrObj,
@@ -1318,6 +1363,220 @@ function fusionGsm8kConcurrency(flags) {
 function fusionStackKey() {
   const ids = acceptedFusions.map((r) => String((r && (r.exec_id || r.fusion)) || '')).sort();
   return JSON.stringify({ fusions: ids, overlay: curOverlay || '', flags: curFlags || '', env: curEnv || '' });
+}
+
+// ---- KernelFusion: serving-GPU lease + process registry (root cause B.9) --------------------
+// Qwen3.5-397B (20261010): e03's integrator started its A/B driver with nohup/setsid and returned
+// "not finished"; the driver was reparented to PID 1 and held all eight serving GPUs. e04..e08
+// each saw the GPUs occupied, correctly refused (PROCESS SAFETY) to kill a process they had not
+// started, and returned "blocked" with no measurement. The agent was asked to judge GPU
+// ownership it could not prove. Ownership now belongs to the WORKFLOW:
+//   * before each apply_one / stacking step / accuracy calibration / collective unit test the
+//     workflow ACQUIRES the serving lease (scripts/fusion_gpu_lease.py acquire);
+//   * the agent REGISTERS every process it starts (pid, pgid, /proc start time) in
+//     $EVAL_DIR/fusion/gpu_lease/<lease_id>.json -- or launches it through the helper;
+//   * after the agent returns the workflow WAITS (bounded) for registered processes and then
+//     REAPS only those, by recorded identity. They are processes this workflow's own call
+//     started, so this is exactly what PROCESS SAFETY allows: never a pattern kill, never PID 1,
+//     never a group containing PID 1 or one of our ancestors, never a recycled pid;
+//   * an acquire that finds an earlier lease still alive reaps THAT lease (also ours) first.
+// Workflow scripts have no shell, so each lease operation is ONE command run by a narrowly
+// scoped agent that returns the script's JSON verbatim -- the script, not the agent, decides.
+const FUSION_LEASE_SCRIPT = `${WORKFLOW_DIR}/scripts/fusion_gpu_lease.py`;
+function fusionLeaseDir() { return `${EVAL_DIR}/fusion/gpu_lease`; }
+function fusionLeaseInputs(leaseId) {
+  return {
+    GPU_LEASE_ID: leaseId, GPU_LEASE_DIR: fusionLeaseDir(), GPU_LEASE_SCRIPT: FUSION_LEASE_SCRIPT,
+    GPU_LEASE_FILE: `${fusionLeaseDir()}/${leaseId}.json`,
+  };
+}
+// Shared prompt text for every agent that runs serving work under a lease. It restates the
+// lease contract in the call itself (the role files carry the detail) because the failure it
+// prevents -- backgrounding an A/B and returning -- is invisible until the NEXT call.
+function fusionLeaseRules(leaseId, serving = true) {
+  const ex = EXEC_PREFIX ? `${EXEC_PREFIX} ` : '';
+  const helper = `${ex}python3 ${FUSION_LEASE_SCRIPT}`;
+  const sel = `--lease-dir ${fusionLeaseDir()} --lease-id ${leaseId}`;
+  const head = serving
+    ? `## SERVING-GPU LEASE ${leaseId} (owned by the workflow, not by you)
+The workflow already holds the serving-GPU lease for this call. You do not judge whether the GPUs
+are "occupied": if bench_e2e.sh waits on its serving lock, let it wait.`
+    : `## PROCESS REGISTRY ${leaseId} (owned by the workflow, not by you)
+This is isolated single-card work: use only the GPU_IDS card(s) you were given; never start a server.`;
+  return `
+
+${head}
+- Register EVERY process you start (A/B driver, bench_e2e.sh leg, server, gsm8k/probe client).
+  Launch long work through the helper, which starts it in its own session and registers it:
+      ${helper} launch ${sel} --log <log file> --role ab_driver -- bash <driver.sh>
+  or register a pid you started yourself, immediately after starting it:
+      ${helper} register ${sel} --pid <pid> --role server
+- NEVER background an A/B, bench or server and return: no nohup, no setsid, no trailing &, no
+  disown outside the helper's launch subcommand. A long A/B runs in the FOREGROUND of this call:
+  after launching, poll with
+      ${helper} wait ${sel} --max-s 540
+  (one call fits the Bash tool's 10-minute limit) and repeat it until it reports alive_count 0.
+  Never return while it reports anything alive -- a returned call with live processes is reaped.
+- GPU busy / measurement not finished / not reached is NOT a disposition. If you could not
+  measure, return the entry in \`retry\` with reason_code gpu_busy|not_finished|not_reached and
+  measured:false -- never in \`rejected\`. The workflow re-runs it after the lease is free.
+- \`rejected\` (blocked) requires measured evidence: measured:true and blocked_evidence one of
+  unit_fail, unit_parity_fail, e2e_regression, e2e_no_gain, ab_reject, accuracy_fail,
+  not_engaged, wire_failure, kernel_unavailable, stack_reject.
+- Never kill, signal or wait on a process you did not start; the workflow reaps registered
+  processes after you return.`;
+}
+// Run ONE deterministic script command through a narrowly scoped agent and return its JSON.
+// The workflow has no shell; the script, not the agent, decides.
+function fusionScriptOp(cmd, label, schema) {
+  return safeAgent(
+    'You are the KernelFusion script runner. Run EXACTLY this one shell command with the Bash ' +
+    'tool (timeout 600000 ms), once, and do nothing else:\n\n' +
+    `    ${cmd}\n\n` +
+    'It prints ONE JSON object on its last stdout line. Its exit code (0 = clear, 2 = busy / still ' +
+    'alive) is part of the answer, not a failure. Return that JSON object verbatim as the structured ' +
+    'output. Do NOT run any other command, do NOT signal, kill, inspect or clean up any process ' +
+    'yourself, and do NOT retry with different arguments: the script owns process identity and ' +
+    'safety. If the command cannot run at all, return {"ok": false, "reason": "<the error text>"}.',
+    { phase: 'KernelFusion', label, schema }, 2);
+}
+async function fusionLeaseOp(op, args, label) {
+  const ex = EXEC_PREFIX ? `${EXEC_PREFIX} ` : '';
+  const cmd = `${ex}python3 ${FUSION_LEASE_SCRIPT} ${op} --lease-dir ${fusionLeaseDir()} ${args}`;
+  return fusionScriptOp(cmd, `fusion-lease:${op}:${label}`, FUSION_LEASE_SCHEMA);
+}
+// Bounded wait for a lease's registered processes, then reap exactly those. `leaseId` '*'
+// settles every held lease (the barrier after the parallel unit-side wave).
+async function fusionLeaseSettle(leaseId, why) {
+  const scope = leaseId === '*' ? '--all' : `--lease-id ${leaseId}`;
+  for (let round = 0; round < FUSION_LEASE_WAIT_ROUNDS; round++) {
+    const st = await fusionLeaseOp('wait', `${scope} --max-s ${FUSION_LEASE_WAIT_S} --release`, leaseId);
+    if (!st) break;
+    if (Number(st.alive_count) === 0) return { clean: true, reaped: false };
+    log(`KernelFusion lease ${leaseId} (${why}): ${st.alive_count} registered process(es) still ` +
+        `alive after wait round ${round + 1}/${FUSION_LEASE_WAIT_ROUNDS}.`);
+  }
+  const reaped = await fusionLeaseOp('reap', `${scope} --grace-s 15`, leaseId);
+  const left = reaped ? Number(reaped.alive_count) || 0 : null;
+  log(`KernelFusion lease ${leaseId} (${why}): reaped the registered process groups the call ` +
+      `left behind (signalled ${reaped && Array.isArray(reaped.signalled) ? reaped.signalled.length : '?'}, ` +
+      `still alive ${left == null ? '?' : left}). Unregistered processes were not touched.`);
+  return { clean: false, reaped: true, alive_after: left };
+}
+// Acquire the serving lease. Holders reported busy are workflow-owned leases (an earlier call
+// that left work behind): settle them -- wait, then reap by registered identity -- and retry
+// once. A serving lock held by something OUTSIDE the registry is never touched: the caller gets
+// {ok:false} and defers the entry to its retry queue (gpu_busy).
+async function fusionLeaseAcquire(leaseId) {
+  const acq = () => fusionLeaseOp('acquire',
+    `--lease-id ${leaseId} --serving-gpu ${SERVING_GPU} --wait-s ${FUSION_LEASE_WAIT_S}`, leaseId);
+  let res = await acq();
+  if (res && res.ok) return { ok: true };
+  const holders = (res && Array.isArray(res.busy_holders))
+    ? res.busy_holders.map((h) => h && h.lease_id).filter(Boolean) : [];
+  for (const holder of holders) {
+    log(`KernelFusion lease ${leaseId}: earlier workflow lease ${holder} still has live registered ` +
+        'processes; settling it before this call.');
+    await fusionLeaseSettle(holder, `stale holder before ${leaseId}`);
+  }
+  if (holders.length) {
+    res = await acq();
+    if (res && res.ok) return { ok: true };
+  }
+  return { ok: false, reason: (res && res.reason) || 'lease runner returned no result' };
+}
+// Run fn(leaseInputs) under the serving lease; always settle the lease afterwards.
+async function withFusionServingLease(leaseId, fn) {
+  const got = await fusionLeaseAcquire(leaseId);
+  if (!got.ok) {
+    log(`KernelFusion lease ${leaseId}: not acquired (${got.reason}); deferring, not blocking.`);
+    return { leaseBusy: true, reason: got.reason };
+  }
+  try {
+    return { value: await fn(fusionLeaseInputs(leaseId)) };
+  } finally {
+    await fusionLeaseSettle(leaseId, 'post-call');
+  }
+}
+
+// Expected e2e gain of one execution entry, in percent of request time, or null when the board
+// does not carry enough to say. Used for the small-gain route: a fusion whose expected gain is
+// below the measured noise band cannot win a solo A/B (Qwen3.5-397B, CONC=4/NUM_PROMPTS=40:
+// one config spans 263-268 tok/s, +-1%; AR+Norm+Quant is worth ~+0.66%), so after unit pass +
+// engagement + no regression it goes straight to stack_pending instead of a solo accept/reject.
+function fusionExpectedGainPct(entry) {
+  if (!entry) return null;
+  for (const k of ['expected_e2e_gain_pct', 'expected_gain_pct']) {
+    // Number(null) is 0: a board that carries the key without a value must fall through to
+    // the share x speedup estimate, not read as "0% expected" and route every entry to stack.
+    if (entry[k] == null || entry[k] === '') continue;
+    const v = Number(entry[k]);
+    if (Number.isFinite(v)) return v;
+  }
+  const share = Number.isFinite(Number(entry.e2e_share)) ? Number(entry.e2e_share)
+    : (Number.isFinite(Number(entry.workload_forward_pct)) ? Number(entry.workload_forward_pct) / 100 : NaN);
+  const sp = Number(entry.estimated_speedup || entry.speedup);
+  if (!(share > 0) || !(sp > 1)) return null;
+  return Number((share * (1 - 1 / sp) * 100).toFixed(4));
+}
+
+// ---- KernelFusion execution helpers (GEAK_structure 二.10) ---------------------------------
+// Candidate id of one alternative-group rung. Rung 0 is the execution entry itself; a deeper
+// rung is unit-tested and applied under this id. Mirrors
+// fusion_unitside_harness.alt_rung_candidate_id.
+function fusionAltRungCandidateId(execId, item) {
+  return item && item.candidate_id ? String(item.candidate_id) : `${execId}.r${item ? item.rung : '?'}`;
+}
+// The ladder of one execution slot, best first. An alternative group (alternative windows that
+// eliminate the same kernel instance) holds ONE Top-K slot; apply-back walks its rungs in order
+// and the first rung that lands (accepted or stack_pending) ends the slot. Every rung entry keeps
+// the slot's exec_id so the apply-back gate credits the slot; `alt_rung` names the rung. An older
+// board without alt_ladder is a one-rung ladder.
+function fusionAltLadder(entry) {
+  if (!entry) return [];
+  const ladder = Array.isArray(entry.alt_ladder) ? entry.alt_ladder.filter((r) => r && typeof r === 'object') : [];
+  const base = { ...entry, alt_rung: 0 };
+  if (ladder.length <= 1) return [base];
+  const rungs = ladder.slice().sort((a, b) => (Number(a.rung) || 0) - (Number(b.rung) || 0));
+  const out = [base];
+  for (const item of rungs) {
+    if (Number(item.rung) === 0) continue;
+    const cid = fusionAltRungCandidateId(entry.exec_id, item);
+    const rung = { ...entry, ...item, exec_id: entry.exec_id, alt_group: entry.alt_group,
+      alt_rung: item.rung, candidate_id: cid, candidate_ids: [cid] };
+    delete rung.alt_ladder;
+    delete rung.rung;
+    out.push(rung);
+  }
+  return out;
+}
+// Apply-back order: expected e2e gain, highest first (unknown last); board order breaks ties.
+function fusionOrderByExpectedGain(entries) {
+  return (entries || []).map((e, i) => ({ e, i, g: fusionExpectedGainPct(e) }))
+    .sort((a, b) => {
+      if ((a.g == null) !== (b.g == null)) return a.g == null ? 1 : -1;
+      if (a.g != null && b.g !== a.g) return b.g - a.g;
+      return a.i - b.i;
+    }).map((x) => x.e);
+}
+// 单侧 status derived from a validator's own return, used only for alt-ladder rungs and pool items
+// the aggregate harness did not report (they sit outside its Top-K denominator).
+function fusionUnitStatusFromResult(res) {
+  if (!res) return '';
+  const parity = String(res.parity || '').toLowerCase();
+  const sp = Number(res.isolated_speedup);
+  if (parity === 'pass') return Number.isFinite(sp) ? (sp > 1 ? 'pass' : 'fail') : '';
+  if (parity === 'fail') return 'needs_diagnosis';
+  return '';
+}
+// Needs the whole serving TP group to unit-test (an AllReduce fusion): such entries go through
+// the serving lease one at a time; everything else runs in parallel on idle single cards.
+// Mirrors fusion_unitside_harness.is_collective_candidate.
+function fusionEntryIsCollective(entry) {
+  const tags = ((entry && entry.op_tags) || []).map((t) => String(t).toLowerCase());
+  if (tags.some((t) => ['allreduce', 'all_reduce', 'communication', 'collective'].includes(t))) return true;
+  const names = `${((entry && entry.kernel_names) || []).join(' ')} ${(entry && entry.family) || ''}`;
+  return /all_?reduce|cross_device_reduce|reduce_scatter|all_?gather|custom_ar|^collective/i.test(names);
 }
 
 // Execution-list entries the apply-back loop calls. The budget counts only entries with a
@@ -2463,6 +2722,15 @@ let fusionExecutionList = [];
 // candidate_ids whose 单侧 status is apply-back eligible, as the unit-side aggregate
 // read them from fusion_unitside.json; null when it did not report them.
 let fusionUnitEligibleIds = null;
+// Screen board extras (fusion_topk.json top level): below-threshold candidates greedy stacking
+// may add after a unit pass, the adaptive K, and the noise band the screen ranked against.
+let fusionCandidatePool = [];
+let fusionBoardK = null;
+let fusionBoardNoiseBand = null;
+let fusionBoardPhaseBlind = [];
+// candidate_id -> 单侧 unit_side_status, as the unit-side aggregate read it from
+// fusion_unitside.json; null when Phase 3.0 did not run or did not report it.
+let fusionUnitStatus = null;
 // Base gsm8k score of the current fusion stack, reused across apply-back calls
 // until a fusion is accepted. {stack_key, exact_match, n, path, harness}.
 let fusionAccuracyRef = null;
@@ -3393,6 +3661,18 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && !FUSION_BACKENDS.has(BACKEND)) {
 if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
   phase('KernelFusion');
   fusionSemanticsAttempted = SEMANTICS_MAPPING_ON;
+  // KernelFusion budget: explicit args.fusion_budget_s, else a share of the time left before the
+  // run's dispatch deadline, else the default. Never below FUSION_BUDGET_MIN_S.
+  const FUSION_BUDGET_MS = 1000 * Math.max(FUSION_BUDGET_MIN_S, FUSION_BUDGET_S_ARG != null
+    ? FUSION_BUDGET_S_ARG
+    : (TIME_HEAD_DEADLINE_MS != null
+      ? Math.floor(Math.max(0, TIME_HEAD_DEADLINE_MS - ELAPSED_MS) * FUSION_BUDGET_FRAC / 1000)
+      : FUSION_BUDGET_DEFAULT_S));
+  // Minutes per apply-back item (the screen's t_item): args.fusion_item_minutes, else the default.
+  const FUSION_ITEM_MINUTES = A.fusion_item_minutes != null ? Number(A.fusion_item_minutes)
+    : FUSION_ITEM_MINUTES_DEFAULT;
+  log(`KernelFusion budget ${Math.round(FUSION_BUDGET_MS / 60000)}min, ` +
+      `t_item ${FUSION_ITEM_MINUTES}min (sizes the screen's adaptive K).`);
   const fusionEntryTput = curTput;
   const fusionRecoveryState = {
     overlay: curOverlay,
@@ -3510,220 +3790,203 @@ if (!FAST_MODE && FUSION_DISCOVERY_ON && FUSION_BACKENDS.has(BACKEND)) {
       semantics = { status: 'failed', notes: 'fusion capture produced no usable trace manifest' };
     }
 
-    if (semantics && semantics.status === 'pass' && semantics.semantic_table_json) {
-      fusionFailureStage = 'discovery';
-      const discover = await safeAgent(
-        roleAgent('kernel_fusion_analyst', 'generate_plans',
-          'Generate and deterministically validate the complete run-local fusion inventory. If EXEC_PREFIX is set, use it as the literal command prefix.', {
+    // A partial table still carries every phase it resolved (e.g. prefill complete,
+    // decode boundaries missing). Screen what exists and say which phases are blind,
+    // instead of dropping the whole fusion track.
+    const semanticsUsable = semantics && semantics.semantic_table_json &&
+      (semantics.status === 'pass' || semantics.status === 'partial');
+    if (semanticsUsable && semantics.status === 'partial') {
+      log('KernelFusion: semantic table is partial; screening the phases it resolved. ' +
+          'Chains in unresolved phases cannot be discovered this round (see 01_SEMANTIC.md).');
+    }
+    if (semanticsUsable) {
+      // Policy after the captured trace has been turned into a kernel table:
+      // screen chains, rank by estimated time saved, then two Score passes
+      // merged into the final Top-K.
+      fusionFailureStage = 'screen';
+      const screened = await safeAgent(
+        roleAgent('kernel_fusion_analyst', 'screen',
+          'Run scripts/fusion_screen.py and return its JSON unchanged. Do not invent or rerank candidates. ' +
+          'Pass --fusion-budget-s FUSION_BUDGET_S and --item-minutes ITEM_MINUTES (they size the adaptive K). ' +
+          'If EXEC_PREFIX is set, use it as the literal command prefix.', {
             EVAL_DIR, MODEL_NAME, MODEL_PATH, ROUND: fusionRound,
             SEMANTIC_TABLE_JSON: semantics.semantic_table_json,
-            STRUCTURAL_PATTERNS_JSON: semantics.structural_patterns_json || '',
-            SEMANTIC_QUALITY_JSON: semantics.quality_json || '',
-            SEMANTICS_RUN_JSON: semantics.semantic_report_json || '',
-            PROFILE_ROOFLINE_JSON: `${EVAL_DIR}/profile/round_0/profile_roofline.json`,
-            RUNTIME_IMAGE, TP: SERVING_TP,
-            PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR, SKILL_DIR: WORKFLOW_DIR,
+            WORKLOAD_ISL: ISL, WORKLOAD_OSL: OSL, WORKLOAD_CONC: CONC,
+            TOP_K: FUSION_TOP_K,
+            FUSION_BUDGET_S: Math.round(FUSION_BUDGET_MS / 1000),
+            ITEM_MINUTES: FUSION_ITEM_MINUTES,
+            PASSES: FUSION_SCREEN_PASSES,
+            GFX: FUSION_GFX,
+            SKILL_DIR: WORKFLOW_DIR,
             ...FUSION_RUNTIME_INPUTS,
           }),
-        { phase: 'KernelFusion', label: 'fusion-analyst:generate', schema: FUSION_DISCOVER_SCHEMA }, 1);
-      if (discover && discover.status !== 'failed' &&
-          discover.fusion_candidates_json && discover.validation_json) {
-        FUSION_INPUTS.FUSION_CANDIDATES_JSON = discover.fusion_candidates_json;
-        FUSION_INPUTS.FUSION_VALIDATION_JSON = discover.validation_json;
-        fusionFailureStage = 'rank';
-        const ranked = await safeAgent(
-          roleAgent('kernel_fusion_analyst', 'rank_topk',
-            'Run the deterministic Top-K ranker and return both the board path and concrete execution_list. If EXEC_PREFIX is set, use it as the literal command prefix.', {
-              EVAL_DIR, ROUND: fusionRound,
-              FUSION_DIR: discover.fusion_candidates_json.replace(/\/[^/]+$/, ''),
-              FUSION_CANDIDATES_JSON: discover.fusion_candidates_json,
-              FUSION_VALIDATION_JSON: discover.validation_json,
-              SEMANTIC_TABLE_JSON: semantics.semantic_table_json,
-              TOP_K: FUSION_TOP_K,
-              WORKLOAD_ISL: ISL, WORKLOAD_OSL: OSL, WORKLOAD_CONC: CONC,
-              SKILL_DIR: WORKFLOW_DIR,
-              ...FUSION_RUNTIME_INPUTS,
-            }),
-          { phase: 'KernelFusion', label: 'fusion-analyst:rank', schema: FUSION_RANK_SCHEMA }, 1);
-        if (ranked && ranked.status !== 'failed' && ranked.fusion_topk_json) {
-          FUSION_INPUTS.FUSION_TOPK_JSON = ranked.fusion_topk_json;
-          fusionExecutionList = Array.isArray(ranked.execution_list)
-            ? ranked.execution_list.slice() : [];
-          if (Array.isArray(ranked.config_levers)) fusionConfigLevers = ranked.config_levers;
-          fusionFailureStage = 'unit_validation';
-          // ---- unit-side scheduling: spend the budget on LADDER TOPS ------
-          // The budget is a microbench-run count, and it used to be spent in
-          // flat board order. On DSR1 2026-09-03 that meant e01 (AR+norm, 4
-          // candidates) and e02 (AR+norm+quant, 4 candidates) consumed 8 of
-          // the 10 slots proving overlapping halves of ONE ladder, and e04 --
-          // the oproj flatten-quant fusion carrying a ★★★ prior with two
-          // previously MEASURED e2e confirms -- never got a slot. The ranker
-          // now marks each row's ladder position, so a row whose removable
-          // rows are a strict subset of another surviving row waits: the top's
-          // microbench already exercises every row the subset would remove.
-          // A subsumed rung is released back into the queue if its top FAILS
-          // unit-side -- the top's PASS is what covers it, not its existence.
-          const execById = new Map();
-          for (const entry of (ranked.execution_list || [])) execById.set(entry.exec_id, entry);
-          const heldByTop = new Map();   // ladder_top exec_id -> [subsumed entries]
-          const tops = [];
-          for (const entry of (ranked.execution_list || [])) {
-            const top = entry.ladder_top || entry.subsumed_by || null;
-            if (top && execById.has(top)) {
-              if (!heldByTop.has(top)) heldByTop.set(top, []);
-              heldByTop.get(top).push(entry);
-            } else {
-              tops.push(entry);
-            }
-          }
-          const seenUnitCandidates = new Set();
-          // One recipe/cohort is one unit-side combination.  Measure its
-          // deterministic representative once; sibling occurrences are kept in
-          // the denominator and inherit that representative's auditable result.
-          const expand = (entry) => {
-            const cid = entry.unit_representative_candidate_id ||
-              (entry.candidate_ids || [])[0];
-            return cid && !seenUnitCandidates.has(cid)
-              ? [{ exec_id: entry.exec_id, candidate_id: cid }]
-              : [];
-          };
-          const queue = [];
-          for (const entry of tops) queue.push(entry);
-          const subsumedCovered = [];
-          const equivalentCovered = [];
-          const budgetSkipped = [];
-          let spent = 0;
-          // Advisory pass test, for ROUTING only: the authoritative pass/fail
-          // is the harness gate below. A missing or failed agent result counts
-          // as not-passed, which releases the held rungs -- the safe direction.
-          const unitPassed = (r) => !!(r && r.status !== 'failed' &&
-            String(r.parity || '').toLowerCase() === 'pass' &&
-            Number(r.isolated_speedup) > 1);
-          // Unit-side microbenches run in WAVES. The budget is assigned in the same
-          // deterministic queue order as before, so which candidates are measured
-          // (and which are budget-skipped) does not depend on parallelism. Within a
-          // wave, single-GPU candidates run concurrently, one pinned card each;
-          // collective candidates need every serving GPU, so they run afterwards,
-          // one at a time. Rungs released by a failed ladder top form the next wave.
-          const isCollectiveEntry = (entry) => /allreduce|all_reduce|custom_ar|collective/i.test(
-            `${entry.handle || ''} ${(entry.candidate_ids || []).join(' ')}`);
-          const runUnit = (item, gpus) => safeAgent(
-            roleAgent('fusion_unit_validator', 'validate_one',
-              'Validate exactly this one concrete Top-K candidate; never substitute another candidate. ' +
-              'Use only the GPU(s) in GPU_IDS: other candidates may be running on the other cards.', {
-                EVAL_DIR, MODEL_PATH, GPU_IDS: gpus, TP: SERVING_TP,
-                FUSION_CANDIDATES_JSON: discover.fusion_candidates_json,
-                FUSION_TOPK_JSON: ranked.fusion_topk_json,
-                EXEC_ID: item.exec_id, CANDIDATE_ID: item.candidate_id,
-                IMAGE: RUNTIME_IMAGE, SKILL_DIR: WORKFLOW_DIR,
-                ...FUSION_RUNTIME_INPUTS,
-              }),
-            { phase: 'KernelFusion', label: `fusion-unit:${item.candidate_id}`, schema: FUSION_UNIT_SCHEMA }, 1);
-          const unitWidth = Math.max(1, Math.min(FUSION_UNIT_PARALLEL, GPU_LIST.length || 1));
-          while (queue.length) {
-            const wave = queue.splice(0, queue.length);
-            const plans = wave.map((entry) => {
-              const plan = { entry, items: [], representativeBudgetSkipped: false };
-              for (const item of expand(entry)) {
-                seenUnitCandidates.add(item.candidate_id);
-                if (spent >= FUSION_UNITSIDE_BUDGET) {
-                  plan.representativeBudgetSkipped = true;
-                  budgetSkipped.push({ ...item,
-                    reason: `unit-side budget ${FUSION_UNITSIDE_BUDGET} exhausted; NEVER MEASURED (not a waiver)` });
-                  continue;
-                }
-                spent += 1;
-                plan.items.push({ ...item, collective: isCollectiveEntry(entry) });
-              }
-              return plan;
-            });
-            const unitResults = new Map();
-            const single = [];
-            const collective = [];
-            for (const plan of plans) {
-              for (const item of plan.items) (item.collective ? collective : single).push(item);
-            }
-            for (let i = 0; i < single.length; i += unitWidth) {
-              const chunk = single.slice(i, i + unitWidth);
-              const rs = await Promise.all(chunk.map((item, slot) =>
-                runUnit(item, String(GPU_LIST[slot % GPU_LIST.length] || GPU_LIST[0] || '0'))));
-              chunk.forEach((item, k) => unitResults.set(item.candidate_id, rs[k]));
-            }
-            for (const item of collective) {
-              unitResults.set(item.candidate_id, await runUnit(item, GPU_IDS));
-            }
-            for (const plan of plans) {
-              const entry = plan.entry;
-              const representativeBudgetSkipped = plan.representativeBudgetSkipped;
-              const anyPass = plan.items.some((item) => unitPassed(unitResults.get(item.candidate_id)));
-              if (representativeBudgetSkipped) {
-                for (const cid of (entry.unit_equivalent_candidate_ids || [])) {
-                  if (seenUnitCandidates.has(cid)) continue;
-                  seenUnitCandidates.add(cid);
-                  budgetSkipped.push({ exec_id: entry.exec_id, candidate_id: cid,
-                    reason: `representative unit-side test was skipped after budget ${FUSION_UNITSIDE_BUDGET} was exhausted` });
-                }
-              }
-              const held = heldByTop.get(entry.exec_id) || [];
-              if (!representativeBudgetSkipped) {
-                const representative = entry.unit_representative_candidate_id ||
-                  (entry.candidate_ids || [])[0];
-                for (const cid of (entry.unit_equivalent_candidate_ids || [])) {
-                  if (seenUnitCandidates.has(cid)) continue;
-                  seenUnitCandidates.add(cid);
-                  equivalentCovered.push({ exec_id: entry.exec_id,
-                    candidate_id: cid, representative_candidate_id: representative });
-                }
-              }
-              if (anyPass) {
-                for (const child of held) {
-                  for (const cid of (child.candidate_ids || [])) {
-                    if (seenUnitCandidates.has(cid)) continue;
-                    seenUnitCandidates.add(cid);
-                    subsumedCovered.push({ exec_id: child.exec_id, candidate_id: cid,
-                      ladder_top: entry.exec_id });
-                  }
-                }
-                if (held.length) {
-                  log(`KernelFusion unit-side: ${entry.exec_id} passed; ${held.length} subsumed rung(s) covered without their own slot.`);
-                }
-              } else if (held.length) {
-                log(`KernelFusion unit-side: ${entry.exec_id} did NOT pass; releasing ${held.length} subsumed rung(s) to the next wave.`);
-                for (const child of held) queue.push(child);
-              }
-            }
-          }
-          const deferred = budgetSkipped.map(item => ({ ...item, disposition: 'budget_skipped' }));
-          fusionFailureStage = 'unit_aggregate';
-          const aggregate = await safeAgent(
-            roleAgent('fusion_unit_validator', 'aggregate',
-              'Aggregate only the Top-K execution_list candidate ids. Pass EQUIVALENT_COVERED rows as ' +
-              '--equivalent <id>=<representative_candidate_id> and SUBSUMED_COVERED rows as ' +
-              '--subsumed <id>=<ladder_top> (covered: their ladder top was benched and passed) and BUDGET_SKIPPED rows as ' +
-              '--budget-skipped <id>=<reason> (NOT covered — never measured). Do NOT launder a budget skip through --waive. ' +
-              'Return applyback_eligible_ids: every candidate_id whose unit_side_status in the written ' +
-              'fusion_unitside.json is pass, equivalent_pass or subsumed_pass.', {
-                EVAL_DIR, FUSION_CANDIDATES_JSON: discover.fusion_candidates_json,
-                FUSION_TOPK_JSON: ranked.fusion_topk_json,
-                FUSION_DIR: discover.fusion_candidates_json.replace(/\/[^/]+$/, ''),
-                FUSION_UNITSIDE_BUDGET, DEFERRED_EXECUTIONS: deferred,
-                EQUIVALENT_COVERED: equivalentCovered,
-                SUBSUMED_COVERED: subsumedCovered, BUDGET_SKIPPED: budgetSkipped,
-                SKILL_DIR: WORKFLOW_DIR, ...FUSION_RUNTIME_INPUTS,
-              }),
-            { phase: 'KernelFusion', label: 'fusion-unit:aggregate', schema: FUSION_UNIT_AGG_SCHEMA }, 1);
-          // Preserve partial/failed aggregate artifacts too. Individual verdicts
-          // retain their own pass/fail status; apply-back applies only proven
-          // passes and explicitly disposes the rest. Dropping this path discarded
-          // valid wins and silently skipped the entire apply-back phase.
-          if (aggregate && aggregate.fusion_unitside_json) {
-            FUSION_INPUTS.FUSION_UNITSIDE_JSON = aggregate.fusion_unitside_json;
-          }
-          if (aggregate && Array.isArray(aggregate.applyback_eligible_ids)) {
-            fusionUnitEligibleIds = aggregate.applyback_eligible_ids;
-          }
+        { phase: 'KernelFusion', label: 'fusion-screen', schema: FUSION_RANK_SCHEMA }, 1);
+      if (screened && screened.status !== 'failed' && screened.fusion_topk_json) {
+        FUSION_INPUTS.FUSION_CANDIDATES_JSON = screened.fusion_candidates_json || '';
+        FUSION_INPUTS.FUSION_TOPK_JSON = screened.fusion_topk_json;
+        fusionExecutionList = Array.isArray(screened.execution_list)
+          ? screened.execution_list.slice() : [];
+        // Older boards carry none of these; every consumer treats them as optional.
+        fusionCandidatePool = Array.isArray(screened.candidate_pool) ? screened.candidate_pool.slice() : [];
+        fusionBoardK = Number.isFinite(Number(screened.k_effective)) ? Number(screened.k_effective) : null;
+        fusionBoardNoiseBand = Number(screened.noise_band_pct) > 0 ? Number(screened.noise_band_pct) : null;
+        fusionBoardPhaseBlind = Array.isArray(screened.phase_blind) ? screened.phase_blind.map(String) : [];
+        log(`KernelFusion screen: ${fusionExecutionList.length} final candidate(s)` +
+            (fusionBoardK != null ? ` (K=${fusionBoardK})` : '') +
+            `, ${fusionCandidatePool.length} in the candidate pool; applying every final candidate.`);
+      }
+    }
+  }
+
+  // ---- Phase 3.0: 单侧 gate (unit-side), MANDATORY before apply-back (GEAK_structure 二.10.1) ----
+  // Every Top-K entry is unit-tested on its captured shapes -- accuracy against the unfused live
+  // chain plus an isolated microbench, for the existing kernel (when the board matched one) AND
+  // the self-authored kernel -- and 04_FUSION_UNITSIDE.md / fusion_unitside.json are published
+  // before any serving A/B, so apply-back reuses verdicts and kernels instead of redoing them.
+  // An alternative group (one Top-K slot, several windows that eliminate the same kernel
+  // instance) has only rung 0 unit-tested here (FUSION_UNIT_ALL_RUNGS tests every rung up front).
+  // candidate_pool items (below the Top-K bar) are unit-tested here too and reported in
+  // 04_FUSION_UNITSIDE.md; apply-back takes only execution-list entries.
+  // Scheduling: single-GPU work (elementwise / norm / quant / small GEMM) runs in parallel, one
+  // exclusive idle card each (makeSem over GPU_LIST); a hard barrier settles their leases;
+  // collective work (AR fusions need the whole TP group) then runs one at a time under the
+  // serving-GPU lease. A failed or missing Top-K verdict is passed to the harness as
+  // never-measured (--budget-skipped), so the report shows it red instead of silently passing.
+  // Pool items stay out of the serving lease (a collective pool item is not unit-tested).
+  const fusionPoolEntries = fusionOrderByExpectedGain((fusionCandidatePool || [])
+    .filter((e) => e && (e.exec_id || e.candidate_id))
+    .map((e) => (e.exec_id ? e : { ...e, exec_id: String(e.candidate_id) })))
+    .filter((e) => !fusionEntryIsCollective(e))
+    .slice(0, FUSION_POOL_MAX);
+  // Validator returns for rungs / pool items, keyed by candidate id (fallback status source).
+  const fusionExtraUnitResults = {};
+  if (FUSION_INPUTS.FUSION_TOPK_JSON && fusionExecutionList.length) {
+    if (!FUSION_UNITSIDE_ON) {
+      log('KernelFusion Phase 3.0 (单侧 gate) SKIPPED by explicit args.fusion_unitside=false: ' +
+          '04_FUSION_UNITSIDE.md will not exist, so apply-back has no unit-side result to act on.');
+    } else {
+      fusionFailureStage = 'unitside';
+      const semanticTableJson = (semantics && semantics.semantic_table_json) || '';
+      const unitJobs = [];
+      const seenCids = new Set();
+      const addJob = (entry, cid, kind) => {
+        if (!cid || seenCids.has(String(cid))) return;
+        seenCids.add(String(cid));
+        unitJobs.push({ entry, cid: String(cid), kind, collective: fusionEntryIsCollective(entry),
+          result: null, why: '' });
+      };
+      let onDemandRungs = 0;
+      for (const entry of fusionExecutionList) {
+        if (!entry || !entry.exec_id) continue;
+        for (const rungEntry of fusionAltLadder(entry)) {
+          if (Number(rungEntry.alt_rung) > 0 && !FUSION_UNIT_ALL_RUNGS) { onDemandRungs += 1; continue; }
+          const cids = (Array.isArray(rungEntry.candidate_ids) && rungEntry.candidate_ids.length)
+            ? rungEntry.candidate_ids : [rungEntry.candidate_id || rungEntry.exec_id];
+          for (const cid of cids) addJob(rungEntry, cid, Number(rungEntry.alt_rung) > 0 ? 'alt' : 'topk');
         }
       }
+      for (const entry of fusionPoolEntries) {
+        const cids = (Array.isArray(entry.candidate_ids) && entry.candidate_ids.length)
+          ? entry.candidate_ids : [entry.candidate_id || entry.exec_id];
+        for (const cid of cids) addJob(entry, cid, 'pool');
+      }
+      const validateUnit = (job, gpuIds, extraInputs) => safeAgent(
+        roleAgent('fusion_unit_validator', 'validate_one',
+          'Unit-test exactly CANDIDATE_ID of TARGET_EXECUTION on its captured shapes: the existing kernel side ' +
+          '(each TARGET_EXECUTION.matched_existing_kernels entry that fits, first) and the self-authored ' +
+          'fused kernel side, each against the unfused LIVE reference chain (accuracy + isolated speedup). ' +
+          'Write one verdict per side under VERDICT_DIR and keep the authored kernel under KERNEL_DIR so ' +
+          'apply-back reuses it. Use ONLY the card(s) in the GPU_IDS input. Never touch the serving stack. ' +
+          (job.kind === 'alt' ? `This is rung ${job.entry.alt_rung} of alternative group ` +
+            `${job.entry.alt_group || job.entry.exec_id} (UNIT_JOB_KIND=alt): unit-test this rung's window. ` : '') +
+          (job.kind === 'pool' ? 'This is a candidate_pool item (UNIT_JOB_KIND=pool). ' : '') +
+          'Return FUSION_UNIT_SCHEMA.' + (extraInputs && extraInputs.GPU_LEASE_ID
+            ? fusionLeaseRules(extraInputs.GPU_LEASE_ID, job.collective) : ''), {
+            EVAL_DIR, MODEL_PATH, MODEL_NAME, EXEC_ID: job.entry.exec_id, CANDIDATE_ID: job.cid,
+            TARGET_EXECUTION: job.entry, UNIT_JOB_KIND: job.kind,
+            FUSION_TOPK_JSON: FUSION_INPUTS.FUSION_TOPK_JSON,
+            FUSION_CANDIDATES_JSON: FUSION_INPUTS.FUSION_CANDIDATES_JSON,
+            SEMANTIC_TABLE_JSON: semanticTableJson,
+            GPU_IDS: gpuIds, TP: job.collective ? SERVING_TP : 1,
+            VERDICT_DIR: `${EVAL_DIR}/verdict`, KERNEL_DIR: `${EVAL_DIR}/fusion/unitside/${job.cid}`,
+            FUSION_DIR: `${EVAL_DIR}/fusion`,
+            ...(extraInputs || {}), ...FUSION_RUNTIME_INPUTS, SKILL_DIR: WORKFLOW_DIR,
+          }),
+        { phase: 'KernelFusion', label: `fusion_unit_validator:${job.entry.exec_id}:${job.cid}`,
+          schema: FUSION_UNIT_SCHEMA }, 1);
+      const singleJobs = unitJobs.filter((j) => !j.collective);
+      const collectiveJobs = unitJobs.filter((j) => j.collective);
+      const kinds = (k) => unitJobs.filter((j) => j.kind === k).length;
+      log(`KernelFusion Phase 3.0: ${unitJobs.length} unit test(s) over ${fusionExecutionList.length} ` +
+          `Top-K entr(ies) (${kinds('topk')} Top-K, ${kinds('alt')} alternative rung(s), ${kinds('pool')} pool` +
+          (onDemandRungs ? `; ${onDemandRungs} deeper alternative rung(s) not unit-tested (args.fusion_unit_all_rungs=true tests them)` : '') +
+          '): ' +
+          `${singleJobs.length} single-GPU in parallel on {${GPU_LIST.join(',')}}, ` +
+          `${collectiveJobs.length} collective serially under the serving-GPU lease.`);
+      if (singleJobs.length) {
+        const UNIT_ISO = makeSem(GPU_LIST);
+        await parallel(singleJobs.map((job) => async () => UNIT_ISO.with(1, async (cards) => {
+          // A per-job registry (no serving acquire: one isolated card) so the barrier below can
+          // reap anything a microbench left behind before the serving work starts.
+          job.result = await validateUnit(job, cards.join(','), fusionLeaseInputs(`unit_${job.cid}`));
+          if (!job.result) job.why = 'unit validator returned no verdict';
+        })));
+        await fusionLeaseSettle('*', 'Phase 3.0 single-GPU barrier');
+      }
+      for (const job of collectiveJobs) {
+        const leased = await withFusionServingLease(`unit_${job.cid}`,
+          (leaseIn) => validateUnit(job, SERVING_GPU, leaseIn));
+        job.result = leased.value || null;
+        if (!job.result) {
+          job.why = leased.leaseBusy ? `serving-GPU lease busy: ${leased.reason}`
+            : 'unit validator returned no verdict';
+        }
+      }
+      for (const job of unitJobs) {
+        if (job.kind !== 'topk' && job.result) fusionExtraUnitResults[job.cid] = job.result;
+      }
+      // Only Top-K candidates are the harness's coverage denominator; a rung or pool item that
+      // returned nothing is simply untested (it cannot land without a unit pass).
+      const neverMeasured = unitJobs.filter((j) => !j.result && j.kind === 'topk').map((j) => `${j.cid}=${j.why}`);
+      const unitAgg = await safeAgent(
+        roleAgent('fusion_unit_validator', 'aggregate',
+          'Run scripts/fusion_unitside_harness.py over VERDICT_DIR for the Top-K denominator (pass ' +
+          '--semantic-table SEMANTIC_TABLE_JSON when set, and every BUDGET_SKIPPED item as --budget-skipped), ' +
+          'publish EVAL_DIR/04_FUSION_UNITSIDE.md even when the gate fails, run report_index.py, and return ' +
+          'FUSION_UNIT_AGG_SCHEMA with unit_status_by_candidate copied from fusion_unitside.json ' +
+          '(alternative-rung and candidate-pool ids included).', {
+            EVAL_DIR, FUSION_DIR: `${EVAL_DIR}/fusion`, VERDICT_DIR: `${EVAL_DIR}/verdict`,
+            FUSION_TOPK_JSON: FUSION_INPUTS.FUSION_TOPK_JSON,
+            FUSION_CANDIDATES_JSON: FUSION_INPUTS.FUSION_CANDIDATES_JSON,
+            SEMANTIC_TABLE_JSON: semanticTableJson,
+            FUSION_UNITSIDE_BUDGET: kinds('topk'),
+            EXTRA_UNIT_CANDIDATES: unitJobs.filter((j) => j.kind !== 'topk').map((j) => j.cid),
+            EQUIVALENT_COVERED: [], SUBSUMED_COVERED: [], BUDGET_SKIPPED: neverMeasured,
+            ...FUSION_RUNTIME_INPUTS, SKILL_DIR: WORKFLOW_DIR,
+          }),
+        { phase: 'KernelFusion', label: 'fusion_unit_validator:aggregate', schema: FUSION_UNIT_AGG_SCHEMA }, 2);
+      // Only a path the aggregate reported: the final apply-back gate passes it to the harness,
+      // which must not be pointed at a file that was never written.
+      FUSION_INPUTS.FUSION_UNITSIDE_JSON = (unitAgg && unitAgg.fusion_unitside_json) || '';
+      fusionUnitStatus = (unitAgg && unitAgg.unit_status_by_candidate
+        && typeof unitAgg.unit_status_by_candidate === 'object') ? { ...unitAgg.unit_status_by_candidate } : null;
+      // A rung / pool status the harness did not report falls back to the validator's own numbers.
+      for (const [cid, res] of Object.entries(fusionExtraUnitResults)) {
+        const st = fusionUnitStatusFromResult(res);
+        if (!st) continue;
+        if (!fusionUnitStatus) fusionUnitStatus = {};
+        if (!fusionUnitStatus[cid]) fusionUnitStatus[cid] = st;
+      }
+      // Apply-back reads the eligible ids; the harness writes them, else derive them from the
+      // per-candidate statuses (same pass set the harness uses).
+      fusionUnitEligibleIds = (unitAgg && Array.isArray(unitAgg.applyback_eligible_ids))
+        ? unitAgg.applyback_eligible_ids
+        : (fusionUnitStatus ? Object.keys(fusionUnitStatus).filter((cid) =>
+          ['pass', 'equivalent_pass', 'subsumed_pass'].includes(String(fusionUnitStatus[cid]))) : null);
+      log(`KernelFusion Phase 3.0: ${unitAgg ? (unitAgg.status || '?') : 'aggregate agent failed'}; ` +
+          `${unitJobs.length - unitJobs.filter((j) => !j.result).length}/${unitJobs.length} unit test(s) returned a verdict` +
+          (neverMeasured.length ? `; never measured: ${neverMeasured.join('; ')}` : '') +
+          `. Report: ${(unitAgg && unitAgg.fusion_unitside_md) || `${EVAL_DIR}/04_FUSION_UNITSIDE.md`}`);
     }
   }
 

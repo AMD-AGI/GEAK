@@ -582,6 +582,95 @@ def _fusible_regions(table, floor_us):
     return regions
 
 
+def check_screen_region_coverage(table, screen_payload, floor_us=DEFAULT_HELPER_FLOOR_US):
+    """Errors for fusible regions the deterministic screen left unaccounted.
+
+    The screen (fusion_screen.py) writes `region_coverage` into
+    fusion_candidates.json: one record per fusible region, either covered by a
+    candidate whose rows contain the whole region or rejected with a reason.
+    This re-derives the regions from the same table and fails any region with
+    neither -- a bare category count is not an answer, because a region that
+    silently vanishes is indistinguishable from one that was never looked at.
+    A region covered by a candidate-pool entry (`covered_by_pool`) counts as
+    covered: the pool is the stacking stage's fill-in list.
+    """
+    errors = []
+    records = {}
+    for record in (screen_payload or {}).get("region_coverage") or []:
+        key = (record.get("phase"), record.get("pattern_id"),
+               tuple(record.get("row_ids") or ()))
+        records[key] = record
+    candidates = {}
+    for candidate in (screen_payload or {}).get("candidates") or []:
+        candidates.setdefault(
+            (candidate.get("phase"), candidate.get("pattern_id")), []).append(
+                set(candidate.get("row_ids") or ()))
+    for key, row_ids, stages, total_us in _fusible_regions(table, floor_us):
+        record = records.get((key[0], key[1], tuple(row_ids)))
+        wanted = set(row_ids)
+        covered = any(wanted <= rows for rows in candidates.get(key, []))
+        if record is None and not covered:
+            errors.append(
+                "%s fusible region %s (%s, %.1f us/layer) has neither a covering "
+                "candidate nor a region_coverage record" % (
+                    key, list(row_ids), stages, total_us))
+            continue
+        if record is None:
+            continue
+        status = record.get("status")
+        if status in SCREEN_COVERED_STATUSES:
+            if not record.get("covered_by"):
+                errors.append("%s fusible region %s is %s but names no candidate"
+                              % (key, list(row_ids), status))
+        elif status == "rejected":
+            if _bad_reason(record.get("reason")):
+                errors.append("%s fusible region %s rejected without a reason"
+                              % (key, list(row_ids)))
+        else:
+            errors.append("%s fusible region %s has status %r (want %s | rejected)"
+                          % (key, list(row_ids), status, " | ".join(SCREEN_COVERED_STATUSES)))
+    return errors
+
+
+# A candidate in the Top-K board, in the candidate pool (stacking fill-in) or
+# in the deduped appendix all account for an item; anything else needs a reason.
+SCREEN_COVERED_STATUSES = ("covered", "covered_by_pool", "covered_by_appendix")
+SCREEN_HANDOFF_PREFIX = "handoff:"
+
+
+def check_screen_item_coverage(screen_payload):
+    """Errors for screen coverage records (code seams with >= 3 kernels and
+    inefficient kernels) that neither name a candidate nor give a reason.
+
+    The screen must account for every such item: a candidate, a per-item
+    rejection reason, or (inefficient kernels only) an explicit hand-off to
+    kernel tuning. A bare count is not an answer.
+    """
+    errors = []
+    for field, label, handoff_ok in (("seam_coverage", "code seam", False),
+                                     ("inefficient_coverage", "inefficient kernel", True)):
+        for record in (screen_payload or {}).get(field) or []:
+            name = record.get("code_seam") or record.get("kernel") or record.get("row_id")
+            where = "%s/%s %s %s" % (record.get("phase"), record.get("pattern_id"), label, name)
+            status = record.get("status")
+            if status in SCREEN_COVERED_STATUSES:
+                if not record.get("covered_by"):
+                    errors.append("%s is %s but names no candidate" % (where, status))
+            elif status == "rejected":
+                if _bad_reason(record.get("reason")):
+                    errors.append("%s rejected without a reason" % where)
+            elif status == "handoff" and handoff_ok:
+                if not str(record.get("reason") or "").startswith(SCREEN_HANDOFF_PREFIX):
+                    errors.append("%s handed off without a handoff:<target> reason" % where)
+            else:
+                errors.append("%s has status %r" % (where, status))
+    return errors
+
+
+def _bad_reason(reason):
+    return fusion_priors._bad_reason(reason)
+
+
 def _semantic_index(table):
     tables = {}
     rows = {}

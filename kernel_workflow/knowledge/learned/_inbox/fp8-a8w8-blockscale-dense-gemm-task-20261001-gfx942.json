@@ -1,0 +1,65 @@
+{
+  "run_id": "fp8_a8w8_blockscale_dense_gemm_task_20261001_gfx942",
+  "date": "2026-10-01",
+  "kernel_names": [
+    "gemm_a8w8_blockscale",
+    "_gemm_a8w8_blockscale_seed_kernel"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "name": "route-prefill-to-a-scalar-scale-fold-and-decode-to-a-cache-global-load-quantized-gemm-gfx942-both",
+      "description": "fp8 a8w8 block-128 GEMM on gfx942: size-gate prefill to a scalar weight-scale fold (BLOCK_N==GROUP_N) and decode to a .cg weight load - ~1.5x weighted",
+      "keywords": [
+        "fp8",
+        "fnuz",
+        "block-scale",
+        "quantized-gemm",
+        "dense-gemm",
+        "mfma",
+        "cache-modifier",
+        "size-gating",
+        "stacking",
+        "prefill",
+        "decode",
+        "memory-bound",
+        "compute-bound",
+        "triton",
+        "gfx942"
+      ],
+      "kernels": [
+        "gemm_a8w8_blockscale",
+        "_gemm_a8w8_blockscale_seed_kernel"
+      ],
+      "platforms": [
+        "gfx942"
+      ],
+      "kernel_class": "quantized_gemm",
+      "regime": "both",
+      "key": "fp8 (e4m3fnuz) a8w8 block-128 scaled dense GEMM, prefill+decode serving mix on gfx942/MI300X, aiter drop-in (Triton)",
+      "type": "lever",
+      "layer": "learned",
+      "lifecycle": "active",
+      "confidence": "★★",
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "losses": 0,
+      "attempts": 1,
+      "verified_on": "2026-10-01",
+      "last_seen": "2026-10-01",
+      "roofline": "prefill compute-bound 16.3%->27.7% of fp8 MFMA peak; decode HBM-streaming-bound ~25%->32% of achievable HBM BW - both left near their practical Triton fp8 ceilings",
+      "effect": "~1.5x isolated time-weighted vs frozen live-aiter (rebind-driver A/B, 3 measurements 1.48-1.53, non-overlapping); unweighted geomean ~1.39x; per-bucket prefill 1.26-1.68x and decode 1.21-1.38x, every case up, none regress",
+      "title": "fp8 a8w8 block-scaled dense GEMM on gfx942: route prefill to a scalar-fold epilogue and decode to a cache-global weight load",
+      "lever": "Split the op by serving regime behind an M-size constexpr gate: (prefill, M>=512) when BLOCK_N==GROUP_N the per-tile weight scale is one scalar, so fold it into the per-row activation scale (SCALAR_BS epilogue) and tune mfma_16x16/kpack=2/num_stages=2/GROUP_SIZE_M=32; (decode, M<512) add a .cg cache-global hint on the fp8 weight load.",
+      "apply": "Drop-in Triton replacement for the aiter block-scale GEMM call; two off-by-default constexprs pick the SCALAR_BS epilogue (M>=512) vs the .cg weight load (M<512) by M; num_stages=2 overlaps the scale load in the scaled prefill kernel.",
+      "stack": "total ~1.5x isolated time-weighted (rebind-driver A/B, round-2 integrate) = two regime-disjoint directions compounded\n  - 1. prefill SCALAR_BS folded-scale epilogue (M>=512, 63.8% wt) - ~1.33x standalone weighted (round 2, verified); +13-17% per prefill bucket, gate_up ~1.68x, MFMA eff 16.3%->27.7% of fp8 peak\n  - 2. decode .cg cache-global on the fp8 weight load (M<512, 34% wt) - ~1.08x standalone weighted (round 2, verified); 1.28-1.40x per decode bucket\n  - note: legs are size-gated to disjoint M (off-by-default constexprs) so they are additive, not incremental; neither clears the weighted metric alone, each leaving the other dominant bucket at seed",
+      "verify": "Rebind-driver isolated A/B (frozen live-aiter baseline, warmup/repeats + cold-flush, time-weighted ratio-of-sums) clears 1.0 on every bucket with oracle parity; confirm the M-gate routes prefill->SCALAR_BS and decode->.cg and that BLOCK_N==GROUP_N==128 holds.",
+      "pitfall": "naked in-process unittest read ~1.0x (0.99xx) every round regardless of kernel edits -> no candidate overlay binds baseline and target to the SAME installed library symbol -> measure with a split-process rebind driver (edited source vs original live library)\n- pitfall: the scalar-fold epilogue is only bit-exact when BLOCK_N==GROUP_N==128 (per-tile weight scale is one scalar) -> at other BLOCK_N the weight scale is a [BLOCK_N] vector and folding it into the row scale is wrong -> gate the fold behind an off-by-default constexpr and recheck oracle parity\n- pitfall: a standalone prefill or standalone decode leg each read ~1.0x on the weighted metric -> it leaves the other dominant bucket (prefill 63.8% / decode 34%) at the seed -> merge both behind an M-size gate so the two dominant buckets compound\n- pitfall: every latency knob on the primary decode bucket (num_stages 3/4, waves_per_eu, num_warps, finer BLOCK_N) regressed it -> it sits at the HBM-streaming ceiling (grid ~full 272/304, wide non-temporal loads + .cg) -> hold it byte-identical and move it only via the .cg hint; .cs is unsupported here and .cv / activation-side .cg lose",
+      "caution": "also verify the scalar fold stays bit-parity under the oracle at BLOCK_N==GROUP_N, and re-check the primary decode bucket is still grid-full before treating .cg as its sole lever.",
+      "source": "run fp8_a8w8_blockscale_dense_gemm_task 2026-10-01, gfx942/MI300X kernel lane (3-round rebind-driver frozen-baseline A/B)"
+    }
+  ]
+}

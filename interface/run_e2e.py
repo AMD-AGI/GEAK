@@ -542,7 +542,8 @@ def map_args(
         ps_args["runtime_image"] = str(h.get("runtime_image") or h.get("image"))
     for key in ("fusion_discovery", "fusion_top_k", "fusion_budget",
                 "fusion_unitside_budget", "fusion_applyback_mode",
-                "fusion_combined_ab_repeats"):
+                "fusion_combined_ab_repeats", "fusion_budget_s",
+                "fusion_item_minutes"):
         if h.get(key) is not None:
             ps_args[key] = h[key]
     if h.get("semantics_shape_capture") is not None:
