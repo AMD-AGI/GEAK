@@ -124,8 +124,12 @@ plan review (2026-10-12). Eikos never picks a lane: it returns estimates, and th
   schedules another attempt after a failure or a non-improvement, that is a new occurrence. A repeated
   dispatch of the same occurrence asks nothing.
 - **Eligibility (S0).** Only engineers with a registered direction get a card. The direction goes in
-  verbatim (bounded, never cut); the whole dispatch prompt only as its digest and length. Every other
-  scope, and any card that does not fit, is ineligible: the host routes it by policy without asking.
+  verbatim (bounded, never cut); the whole dispatch prompt only as its digest and length. Caps: 8,000
+  characters for the direction prompt, 12,000 for the card (both enforced again by `eikos_decide.py`).
+  A direction over its cap is first shortened by the carrier model (`eikos:condense <scope>`, target
+  6,000 characters) for the card only; the card then says it was condensed, the engineer still gets the
+  full text, and the decide audit records `condensed`. Every other scope, and any card that still does
+  not fit, is ineligible: the host routes it by policy without asking.
 - **Carrier.** Sonnet 5.5 (default; `route_eikos_carrier_model` changes it) runs `eikos_decide.py` with the
   card and the host input (`--host-json`),
   verbatim, and relays its JSON. The host checks the card, host-input and decision digests, the question
@@ -175,8 +179,12 @@ plan review (2026-10-12). Eikos never picks a lane: it returns estimates, and th
   report's `config_errors` with the value used instead.
 - **Report.** `routing.eikos.choices` counts Eikos-qualified choices apart from overrides, fallbacks and
   deferrals; the audit has every decision, dispatch, outcome, override and skip.
-- **Status.** Offline and tested with a fake transport (`kernel_workflow/scripts/test_eikos_route.js`).
-  No routed run has used it. Serving Eikos needs a GPU outside the run's pool.
+- **Status.** Tested offline with a fake transport (`kernel_workflow/scripts/test_eikos_route.js`) and
+  live on 2026-10-13 with vllm-sr/d3 standing in for Eikos (`GEAK_EIKOS_URL`, `GEAK_EIKOS_MODEL_ID`):
+  four consultations, three answers used, one refused as `decision_altered` because the carrier
+  relayed nulls as empty strings. d3 ranked the lanes by model size on every task and never reached a
+  code-change τ of 0.90, so each used answer became a highest-estimate override. Serving Eikos or d3
+  needs a GPU outside the run's pool.
 
 ## Budget layer — in code, never overridable by a model
 
