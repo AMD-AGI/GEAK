@@ -427,7 +427,7 @@ def card(**kw):
 
 
 def lane_answers(**p):
-    probs = dict({"claude-haiku-5-5": 0.31, "claude-sonnet-5-5": 0.82, "claude-opus-4-6": 0.77, "claude-opus-5-5": 0.93}, **p)
+    probs = dict({"claude-haiku-4-5": 0.31, "claude-sonnet-5-5": 0.82, "claude-opus-4-6": 0.77, "claude-opus-5-5": 0.93}, **p)
     return {LANE_SPEC["estimate_questions"][lane]: {"type": "noul", "probability": v, "noul": v, "value": v >= 0.5,
                                                     "confidence": max(v, 1 - v)}
             for lane, v in probs.items()}
@@ -445,9 +445,9 @@ def test_lane_estimates_travel_as_one_digested_string_and_decide_nothing(tmp_pat
     env = lane_decide(tmp_path, fake)
     assert env["status"] == "ok" and env["persisted"] and not env["reused"]
     assert env["choice"] is None and env["confidence"] is None and env["would_be_action"] is None
-    assert env["estimates"] == ("claude-haiku-5-5=0.31;claude-sonnet-5-5=0.82;"
+    assert env["estimates"] == ("claude-haiku-4-5=0.31;claude-sonnet-5-5=0.82;"
                                 "claude-opus-4-6=0.77;claude-opus-5-5=0.93")   # non-monotone, kept as sent
-    assert env["questions_version"] == "lane_sufficiency.v1" and env["policy_version"] == "lane_sufficiency.policy.v1"
+    assert env["questions_version"] == "lane_sufficiency.v2" and env["policy_version"] == "lane_sufficiency.policy.v1"
     assert env["host_sha256"] == env["decision_host_sha256"] == ed.sha256(HOST)
     out = ed.compact(env)
     assert out["decision_sha256"] == ed.sha256(ed.canonical({k: out[k] for k in ed.DECISION_FIELDS + ed.ESTIMATE_FIELDS}))
@@ -485,16 +485,16 @@ def test_the_round_continue_envelope_is_byte_identical_to_the_baseline():
 def test_the_same_card_is_a_replay_and_a_changed_card_a_new_occurrence(tmp_path, fake):
     _Fake.bodies = [{"answers": lane_answers()}]
     first = lane_decide(tmp_path, fake)
-    _Fake.bodies = [{"answers": lane_answers(**{"claude-haiku-5-5": 0.99})}]   # would differ if asked
+    _Fake.bodies = [{"answers": lane_answers(**{"claude-haiku-4-5": 0.99})}]   # would differ if asked
     again = lane_decide(tmp_path, fake)
     assert len(_Fake.seen) == 1 and again["reused"] and again["estimates"] == first["estimates"]
     failed = json.loads(card())
     failed["occurrence"] = {"seq": 2, "trigger": "work_product_failure", "prior": [
-        {"lane": "claude-haiku-5-5", "outcome": "work_product", "evidence": "verify status=apply_failed",
+        {"lane": "claude-haiku-4-5", "outcome": "work_product", "evidence": "verify status=apply_failed",
          "source": "verify r2_d1"}]}
     new = lane_decide(tmp_path, fake, json.dumps(failed))
     assert len(_Fake.seen) == 2 and new["logical_key"] != first["logical_key"]
-    assert new["estimates"].startswith("claude-haiku-5-5=0.99;")
+    assert new["estimates"].startswith("claude-haiku-4-5=0.99;")
 
 
 @pytest.mark.parametrize("mutate, why", [
@@ -521,7 +521,7 @@ def test_a_bad_card_is_refused_before_any_request(tmp_path, fake, mutate, why):
 
 @pytest.mark.parametrize("answers_, why", [
     (lambda a: a.pop("passes_on_opus_4_6"), "answer missing"),
-    (lambda a: a["passes_on_haiku_5_5"].update(probability=1.4), "probability missing or not a number"),
+    (lambda a: a["passes_on_haiku_4_5"].update(probability=1.4), "probability missing or not a number"),
 ])
 def test_an_unusable_estimate_is_malformed_and_never_persisted(tmp_path, fake, answers_, why):
     a = lane_answers()
@@ -543,7 +543,7 @@ def test_a_failed_receipt_append_is_reported_in_the_digested_envelope(tmp_path, 
 
 # ------------------------------------------------------------------ d3 (vllm-sr/d3) served by vllm-sr
 def d3_lane_answers(**p):
-    probs = dict({"claude-haiku-5-5": 0.29, "claude-sonnet-5-5": 0.69, "claude-opus-4-6": 0.73, "claude-opus-5-5": 0.84}, **p)
+    probs = dict({"claude-haiku-4-5": 0.29, "claude-sonnet-5-5": 0.69, "claude-opus-4-6": 0.73, "claude-opus-5-5": 0.84}, **p)
     return {LANE_SPEC["estimate_questions"][lane]: {"type": "noul", "noul": v} for lane, v in probs.items()}
 
 
@@ -552,7 +552,7 @@ def test_d3_yes_no_answers_are_mapped_and_the_model_is_named(tmp_path, fake, mon
     _Fake.bodies = [{"answers": d3_lane_answers(), "model": "vllm-sr/d3", "usage": {"input_tokens": 1, "output_tokens": 0}}]
     env = lane_decide(tmp_path, fake)
     assert env["status"] == "ok" and _Fake.seen[0]["model"] == "vllm-sr/d3"
-    assert env["estimates"] == ("claude-haiku-5-5=0.29;claude-sonnet-5-5=0.69;"
+    assert env["estimates"] == ("claude-haiku-4-5=0.29;claude-sonnet-5-5=0.69;"
                                 "claude-opus-4-6=0.73;claude-opus-5-5=0.84")
 
 
@@ -607,7 +607,7 @@ def test_a_tampered_persisted_estimate_is_not_reused(tmp_path, fake):
     first = lane_decide(tmp_path, fake)
     idx = tmp_path / "lane_sufficiency.index.json"
     data = json.loads(idx.read_text())
-    data[first["logical_key"]]["estimates"]["claude-haiku-5-5"] = 0.99      # the answers still say 0.31
+    data[first["logical_key"]]["estimates"]["claude-haiku-4-5"] = 0.99      # the answers still say 0.31
     idx.write_text(json.dumps(data))
     _Fake.bodies = [{"answers": lane_answers(**{"claude-sonnet-5-5": 0.11})}]
     again = lane_decide(tmp_path, fake)

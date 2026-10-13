@@ -195,7 +195,7 @@
    "class": "judgment",
    "question": "Lane sufficiency: for one engineer task, will the next attempt on each model lane meet the task's acceptance event (verified, correct, above the candidate floor) within its budget?",
    "options": [
-    "claude-haiku-5-5: probability",
+    "claude-haiku-4-5: probability",
     "claude-sonnet-5-5: probability",
     "claude-opus-4-6: probability",
     "claude-opus-5-5: probability"

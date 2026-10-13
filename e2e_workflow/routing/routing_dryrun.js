@@ -13,7 +13,7 @@
 //   * kernel_lane.js — the four-lane COST LADDER (policy: routing/SKILL.md; no verbatim cascade). Proves:
 //       (1) OFF -> __routeModel undefined on EVERY scope, and agentT() short-circuits (byte-identical run).
 //       (2) inline ROUTE_TIER_MAP is exactly the 3 Haiku helper scopes; ROUTE_LANES == canonical LANES.
-//       (3) ON static: helpers -> Haiku 5.5, brain -> Opus 5.5, decider -> Sonnet 5.5, workers -> classified.
+//       (3) ON static: helpers -> Haiku 4.5, brain -> Opus 5.5, decider -> Sonnet 5.5, workers -> classified.
 //       (4) the ladder: first-sight gate, retry vs escalate after a failure, top-lane cap, floors,
 //           kill switch — each driven through the SHIPPED __routePick / __routeOutcome.
 //   Both: (6) PILOT REACHABILITY — at least one mapped scope is an ACTUAL call site in the entry point.
@@ -30,7 +30,7 @@ const ROOT = path.resolve(__dirname, '..', '..');   // /home/aditysin/PROJECTS/G
 const CANON = require('./tier_map.js');
 const NUL = String.fromCharCode(0);
 const CHEAP = 'claude-sonnet-5-5';             // the e2e cascade's routed model
-const HAIKU = 'claude-haiku-5-5';              // the kernel ladder's SMALL lane / helper model
+const HAIKU = 'claude-haiku-4-5';              // the kernel ladder's SMALL lane / helper model
 
 // Per-entry-point config. `kind` selects which routing SURFACE to exercise. `mapped` lists the scopes
 // that SHOULD route, each with a `reach` token: the distinctive source substring that proves the scope

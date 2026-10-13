@@ -17,7 +17,7 @@ const KDIR = path.resolve(__dirname, '..');
 const ROOT = path.resolve(KDIR, '..');
 const SRC = fs.readFileSync(path.join(KDIR, 'kernel_lane.js'), 'utf8');
 const SPEC = JSON.parse(fs.readFileSync(path.join(ROOT, 'e2e_workflow/scripts/eikos_questions/lane_sufficiency.json'), 'utf8'));
-const H5 = 'claude-haiku-5-5', S5 = 'claude-sonnet-5-5', O46 = 'claude-opus-4-6', O55 = 'claude-opus-5-5';
+const H45 = 'claude-haiku-4-5', S5 = 'claude-sonnet-5-5', O46 = 'claude-opus-4-6', O55 = 'claude-opus-5-5';
 
 let n = 0, fails = 0;
 function ok(name, cond) { n++; if (cond) console.log(`PASS  ${name}`); else { fails++; console.log(`FAIL  ${name}`); } }
@@ -49,7 +49,7 @@ const srv = http.createServer((req, res) => {
     res.end(server.raw != null ? server.raw : JSON.stringify({ answers }));
   });
 });
-const P = (h, s, o46, o55) => ({ [H5]: h, [S5]: s, [O46]: o46, [O55]: o55 });
+const P = (h, s, o46, o55) => ({ [H45]: h, [S5]: s, [O46]: o46, [O55]: o55 });
 
 // ---- the lane's routing region, the shadow helpers and agentT, with stubs -------------------------
 function lane(args, opts) {
@@ -121,25 +121,25 @@ async function main() {
     const R = (x) => L.__routeReduce(Object.assign({}, BASE, { backend: 'ok', estimates: null }, x));
     ok('the host input of a fresh code-change scope: policy rank, list-price order, floors, quota, availability',
       JSON.stringify(BASE) === JSON.stringify({ reducer_version: 'lane_reduce.v1', scope_class: 'code_change', tau: 0.9,
-        policy_rank: [H5, S5, O46, O55], price_order: [H5, S5, O55, O46], class_floor_rank: 1, operator_floor_rank: 0,
-        scope_floor_rank: 1, effective_rank: -1, excluded: [], top_quota_left: 1, available: [H5, S5, O46, O55] }));
+        policy_rank: [H45, S5, O46, O55], price_order: [H45, S5, O55, O46], class_floor_rank: 1, operator_floor_rank: 0,
+        scope_floor_rank: 1, effective_rank: -1, excluded: [], top_quota_left: 1, available: [H45, S5, O46, O55] }));
     let r = R({ scope_class: 'paperwork', tau: 0.7, class_floor_rank: 0, scope_floor_rank: 0, estimates: P(0.95, 0.5, 0.99, 0.92) });
-    ok('non-monotone estimates are taken as given: the cheapest qualifying lane wins', r.model === H5 && r.threshold_met === true);
+    ok('non-monotone estimates are taken as given: the cheapest qualifying lane wins', r.model === H45 && r.threshold_met === true);
     r = R({ estimates: P(0.99, 0.91, 0.99, 0.97) });
-    ok('a lane below the class floor is never allowed, however sure Eikos is', r.model === S5 && r.allowed.indexOf(H5) < 0);
+    ok('a lane below the class floor is never allowed, however sure Eikos is', r.model === S5 && r.allowed.indexOf(H45) < 0);
     r = R({ estimates: P(0.1, 0.93, 0.99, 0.97) });
     ok('the chosen lane\'s own estimate and the maximum estimate are recorded apart',
       r.chosen_estimate === 0.93 && r.max_estimate === 0.99 && r.override === null);
     // Astra's crossovers: the policy rank decides what is allowed, the price order only what is cheaper.
-    r = R({ scope_floor_rank: 2, excluded: [H5, S5], estimates: P(1, 1, 0.95, 0.95) });
+    r = R({ scope_floor_rank: 2, excluded: [H45, S5], estimates: P(1, 1, 0.95, 0.95) });
     ok('crossover 1: after an Opus 4.6-rank floor, the cheaper Opus 5.5 is still allowed and chosen by price',
       r.model === O55 && JSON.stringify(r.allowed) === JSON.stringify([O46, O55]));
-    r = R({ scope_floor_rank: 3, excluded: [H5, S5, O46], estimates: P(1, 1, 1, 0.95) });
+    r = R({ scope_floor_rank: 3, excluded: [H45, S5, O46], estimates: P(1, 1, 1, 0.95) });
     ok('crossover 2: after an Opus 4.6 code failure, Opus 5.5 remains feasible (not "no lane")', r.model === O55);
     r = R({ operator_floor_rank: 3, top_quota_left: 0, estimates: P(1, 1, 0.99, 1) });
     ok('crossover 3: an operator floor at lane 3 never admits the dearer Opus 4.6 when the quota is used: deferral',
       r.model === null && r.allowed.length === 1 && /no feasible lane/.test(r.reason));
-    r = R({ scope_floor_rank: 4, excluded: [H5, S5, O46, O55], estimates: P(1, 1, 1, 1) });
+    r = R({ scope_floor_rank: 4, excluded: [H45, S5, O46, O55], estimates: P(1, 1, 1, 1) });
     ok('an Opus 5.5 code failure leaves nothing allowed: a deferral, not a fall back to Opus 4.6', r.model === null);
     r = R({ estimates: P(0.25, 0.25, 0.25, 0.25) });
     ok('uniform uncertainty qualifies no lane: a recorded policy override with tau, chosen and max estimate',
@@ -152,7 +152,7 @@ async function main() {
     r = R({ backend: 'timeout' });
     ok('a missing answer is unknown, not a miss: the cheapest feasible allowed lane, threshold_met null',
       r.model === S5 && r.threshold_met === null && r.override === null && /no usable estimate \(timeout\)/.test(r.reason));
-    r = R({ backend: 'timeout', scope_floor_rank: 2, excluded: [H5, S5] });
+    r = R({ backend: 'timeout', scope_floor_rank: 2, excluded: [H45, S5] });
     ok('a missing answer after a Sonnet code failure still excludes Sonnet', r.model === O55);
     r = R({ backend: 'timeout', scope_floor_rank: 3, top_quota_left: 0 });
     ok('a missing answer still obeys the quota: with nothing feasible it defers', r.model === null);
@@ -163,7 +163,7 @@ async function main() {
     r = R({ top_quota_left: 0, estimates: P(0, 0.1, 0.95, 0.99) });
     ok('a used-up top-lane quota is filtered before selection', r.model === O46 &&
       r.filtered.some((x) => x.model === O55 && /quota/.test(x.why)));
-    r = R({ available: [H5], estimates: P(1, 1, 1, 1) });
+    r = R({ available: [H45], estimates: P(1, 1, 1, 1) });
     ok('no available lane at or above the floor is a deferral', r.model === null);
     r = R({ operator_floor_rank: 3, estimates: P(1, 1, 1, 0.95) });
     ok('an operator floor raises the lower bound', r.model === O55);
@@ -177,21 +177,21 @@ async function main() {
     ok('the reducer is pure: same input, same output, input untouched',
       JSON.stringify(L.__routeReduce(x)) === JSON.stringify(L.__routeReduce(x)) && JSON.stringify(x) === before);
     ok('price order is the declared list-price proxy, over exactly the lanes',
-      JSON.stringify(L.ROUTE_PRICE_ORDER) === JSON.stringify([H5, S5, O55, O46]) &&
+      JSON.stringify(L.ROUTE_PRICE_ORDER) === JSON.stringify([H45, S5, O55, O46]) &&
       L.ROUTE_PRICE_ORDER.slice().sort().join() === L.ROUTE_LANES.slice().sort().join());
   }
 
   // ---- strict wire parsing ------------------------------------------------------------------------
   {
     const L = lane();
-    const g = L.__routeParseEstimates(`${H5}=0.31;${S5}=1.0;${O46}=5e-05;${O55}=0.97`);
-    ok('the estimates string parses exactly as Python wrote it', g && g[H5] === 0.31 && g[S5] === 1 && g[O46] === 5e-05);
-    const bad = [`${H5}=0.9garbage;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${H5}=+0.3;${S5}=1.0;${O46}=0.5;${O55}=0.5`,
-      `${H5}=1.5;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${H5}=NaN;${S5}=1.0;${O46}=0.5;${O55}=0.5`,
-      `${H5}= 0.3;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${S5}=0.3;${H5}=1.0;${O46}=0.5;${O55}=0.5`,
-      `${H5}=0.3;${S5}=1.0;${O46}=0.5`, `${H5}=0.3;${S5}=1.0;${O46}=0.5;${O55}=0.5;${O55}=0.5`,
-      `${H5}=0.3;${H5}=1.0;${O46}=0.5;${O55}=0.5`, `${H5}=0x1;${S5}=1.0;${O46}=0.5;${O55}=0.5`,
-      `${H5}=0.3=1;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${H5}=-0.0;${S5}=1.0;${O46}=0.5;${O55}=0.5`, '', null];
+    const g = L.__routeParseEstimates(`${H45}=0.31;${S5}=1.0;${O46}=5e-05;${O55}=0.97`);
+    ok('the estimates string parses exactly as Python wrote it', g && g[H45] === 0.31 && g[S5] === 1 && g[O46] === 5e-05);
+    const bad = [`${H45}=0.9garbage;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${H45}=+0.3;${S5}=1.0;${O46}=0.5;${O55}=0.5`,
+      `${H45}=1.5;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${H45}=NaN;${S5}=1.0;${O46}=0.5;${O55}=0.5`,
+      `${H45}= 0.3;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${S5}=0.3;${H45}=1.0;${O46}=0.5;${O55}=0.5`,
+      `${H45}=0.3;${S5}=1.0;${O46}=0.5`, `${H45}=0.3;${S5}=1.0;${O46}=0.5;${O55}=0.5;${O55}=0.5`,
+      `${H45}=0.3;${H45}=1.0;${O46}=0.5;${O55}=0.5`, `${H45}=0x1;${S5}=1.0;${O46}=0.5;${O55}=0.5`,
+      `${H45}=0.3=1;${S5}=1.0;${O46}=0.5;${O55}=0.5`, `${H45}=-0.0;${S5}=1.0;${O46}=0.5;${O55}=0.5`, '', null];
     ok('prefixes, signs, out-of-range, wrong order, missing, extra and duplicate lanes are all rejected',
       bad.every((b) => L.__routeParseEstimates(b) === null));
   }
@@ -209,8 +209,8 @@ async function main() {
     ok('first sight: one carrier call, verified and persisted, cheapest lane at or above tau', pick.model === S5 &&
       L.carried.length === 1 && dec.backend === 'ok' && dec.relay_ok && dec.decision_ok && dec.receipt_ok &&
       dec.persisted === true && dec.trigger === 'first_sight' && dec.threshold_met === true && dec.chosen_estimate === 0.93);
-    ok('the carrier is Haiku 5.5, unrouted, labelled as router cost, and sends the host input',
-      L.carried[0].o.model === H5 && /^You are the route_carrier\. PHASE=Optimize\./.test(L.carried[0].prompt) &&
+    ok('the carrier is Sonnet 5.5, unrouted, labelled as router cost, and sends the host input',
+      L.carried[0].o.model === S5 && /^You are the route_carrier\. PHASE=Optimize\./.test(L.carried[0].prompt) &&
       /--host-json /.test(L.carried[0].prompt) && L.workers.length === 0);
     const card = JSON.parse(server.seen[0].state);
     ok('the card carries the direction verbatim, the acceptance event, budget and attempt configuration',
@@ -319,7 +319,7 @@ async function main() {
     const p4 = await L4.__routePick('p0', W(ENG('r1_d0')));
     const d4 = last(L4, 'decide');
     ok('resumed under a changed host input: same key, persisted estimates, current constraints, recorded intervention',
-      p4.model === O55 && d4.logical_key === recorded.decisions[0][3] && d4.estimates[H5] === 0.1 &&
+      p4.model === O55 && d4.logical_key === recorded.decisions[0][3] && d4.estimates[H45] === 0.1 &&
       d4.interventions.some((s) => /different host input/.test(s)) && server.seen.length === seenBefore);
   }
 
@@ -543,7 +543,7 @@ async function main() {
     ok(name, d.backend === expect && pick.model === S5 && d.estimates === null && d.threshold_met === null);
   }
   await relayCase('altered estimates in the relay are caught (decision digest), host falls back',
-    async (p, o, run) => Object.assign(await run(p), { estimates: `${H5}=1.0;${S5}=1.0;${O46}=1.0;${O55}=1.0` }), 'decision_altered');
+    async (p, o, run) => Object.assign(await run(p), { estimates: `${H45}=1.0;${S5}=1.0;${O46}=1.0;${O55}=1.0` }), 'decision_altered');
   await relayCase('a different card reached the script: relay mismatch',
     async (p, o, run) => Object.assign(await run(p), { state_sha256: '0'.repeat(64) }), 'relay_mismatch');
   await relayCase('a different host input reached the script: relay mismatch',
@@ -551,7 +551,7 @@ async function main() {
   await relayCase('an answer to another question version is refused even when consistently signed',
     async (p, o, run, L) => resign(L, Object.assign(await run(p), { questions_version: 'lane_sufficiency.v0' })), 'question_mismatch');
   await relayCase('a non-strict estimates token is malformed even when consistently signed',
-    async (p, o, run, L) => resign(L, Object.assign(await run(p), { estimates: `${H5}=0.99garbage;${S5}=0.99;${O46}=0.99;${O55}=0.99` })),
+    async (p, o, run, L) => resign(L, Object.assign(await run(p), { estimates: `${H45}=0.99garbage;${S5}=0.99;${O46}=0.99;${O55}=0.99` })),
     'malformed');
   await relayCase('a carrier that throws is a backend error, not a worker failure', async () => { throw new Error('API 529'); }, 'error');
   await relayCase('a carrier that never returns times out on its own bound', () => new Promise(() => {}), 'timeout',
@@ -562,7 +562,7 @@ async function main() {
   await relayCase('a real index write failure is write_failed, so not used', null, 'write_failed',
     { prepare: (L) => fs.mkdirSync(path.join(L.evalDir, 'eikos', 'lane_sufficiency.index.json'), { recursive: true }) });
   {
-    server.raw = JSON.stringify({ answers: { passes_on_haiku_5_5: answer(1.7) } });
+    server.raw = JSON.stringify({ answers: { passes_on_haiku_4_5: answer(1.7) } });
     const L = lane();
     direction(L, 'r1_d0');
     const pick = await L.__routePick('p', W(ENG('r1_d0')));
@@ -647,7 +647,7 @@ async function main() {
     await L.agentT('p', W('tech_lead:plan r1'));
     await L.agentT('p', W('clock r1'));
     ok('brain and fixed helpers are never sent to Eikos', L.carried.length === 0 &&
-      L.coreCalls[0].o.model === O55 && L.coreCalls[1].o.model === H5);
+      L.coreCalls[0].o.model === O55 && L.coreCalls[1].o.model === H45);
     direction(L, 'r1_d0');
     const o = Object.assign(W(ENG('r1_d0')), { effort: 'high' });
     await L.agentT('p', o);

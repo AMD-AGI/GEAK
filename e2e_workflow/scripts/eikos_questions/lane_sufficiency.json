@@ -1,6 +1,6 @@
 {
   "decision": "lane_sufficiency",
-  "version": "lane_sufficiency.v1",
+  "version": "lane_sufficiency.v2",
   "kind": "estimates",
   "purpose": "Cost-ladder routing (route_decider=eikos, off by default): for one worker task, an independent estimate per model lane that the next attempt on that lane passes the task's acceptance check within its budget. Estimates only: the host reducer in kernel_lane.js applies eligibility, thresholds, floors, quota and the kill switch, and picks the lane. Design: research/eikos_ladder_routing_proposal_20261009.md rev 2, section 7.",
   "required_state": [
@@ -16,24 +16,24 @@
     "config"
   ],
   "lane_order": [
-    "claude-haiku-5-5",
+    "claude-haiku-4-5",
     "claude-sonnet-5-5",
     "claude-opus-4-6",
     "claude-opus-5-5"
   ],
   "estimate_questions": {
-    "claude-haiku-5-5": "passes_on_haiku_5_5",
+    "claude-haiku-4-5": "passes_on_haiku_4_5",
     "claude-sonnet-5-5": "passes_on_sonnet_5_5",
     "claude-opus-4-6": "passes_on_opus_4_6",
     "claude-opus-5-5": "passes_on_opus_5_5"
   },
   "questions": {
-    "passes_on_haiku_5_5": {
+    "passes_on_haiku_4_5": {
       "type": "noul",
-      "instructions": "The card describes one task that a GPU kernel-optimization run is about to give to an AI coding agent, with the task's acceptance check, its prior attempts and the run's remaining budget. Suppose this attempt runs on Claude Haiku 5.5 (claude-haiku-5-5). Will that attempt produce a work product that passes the acceptance check stated in the card, within the stated budget? Judge each model on its own; do not compare it with other models. Fields marked unknown were not measured; do not assume a value for them.",
+      "instructions": "The card describes one task that a GPU kernel-optimization run is about to give to an AI coding agent, with the task's acceptance check, its prior attempts and the run's remaining budget. Suppose this attempt runs on Claude Haiku 4.5 (claude-haiku-4-5). Will that attempt produce a work product that passes the acceptance check stated in the card, within the stated budget? Judge each model on its own; do not compare it with other models. Fields marked unknown were not measured; do not assume a value for them.",
       "criteria": {
-        "true": "An attempt on Claude Haiku 5.5 would pass the card's acceptance check within the budget.",
-        "false": "An attempt on Claude Haiku 5.5 would fail the acceptance check, run out of budget, or produce no usable work product."
+        "true": "An attempt on Claude Haiku 4.5 would pass the card's acceptance check within the budget.",
+        "false": "An attempt on Claude Haiku 4.5 would fail the acceptance check, run out of budget, or produce no usable work product."
       }
     },
     "passes_on_sonnet_5_5": {

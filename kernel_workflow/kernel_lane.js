@@ -720,14 +720,14 @@ function tlAgent(prompt, o, attempt) {
 // truthy (or GEAK_ROUTING=1 for a harness) -> agentT() never consults it -> the run is BYTE-IDENTICAL to
 // a non-routing build. Reversible via git on expt/3-routing.
 //   brain    director:* / tech_lead:*         -> Opus 5.5, fixed (planning, decomposition, adjudication)
-//   helper   the fixed-script scopes below    -> Haiku 5.5, fixed (their schema is the check)
+//   helper   the fixed-script scopes below    -> Haiku 4.5, fixed (their schema is the check)
 //   decider  route:* (the classifier itself)  -> Sonnet 5.5, fixed, never itself classified (no recursion)
 //   worker   every other scope                -> classified once by the decider, then moved UP the ladder
-//            only on a DETERMINISTIC failure: Haiku 5.5 -> Sonnet 5.5 -> Opus 4.6 -> Opus 5.5
+//            only on a DETERMINISTIC failure: Haiku 4.5 -> Sonnet 5.5 -> Opus 4.6 -> Opus 5.5
 // Keys = `${phase}` + U+0000 + labelPrefix (everything before the first space), so dynamic round/tag
 // suffixes collapse to one stable scope identity.
 // <<ROUTING-INLINE-START>>
-const ROUTE_LANES = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-4-6', 'claude-opus-5-5'];
+const ROUTE_LANES = ['claude-haiku-4-5', 'claude-sonnet-5-5', 'claude-opus-4-6', 'claude-opus-5-5'];
 const ROUTE_LANE_OF = { small: 0, medium: 1, high: 2, escalate: 3 };
 const ROUTE_TOP = ROUTE_LANES.length - 1;
 const ROUTE_MODEL_BRAIN = ROUTE_LANES[ROUTE_TOP];
@@ -970,7 +970,7 @@ function __routeReport() {
 // is a new occurrence. Only a host-verified work-product failure counts against a lane.
 const ROUTE_EIKOS_ON = ROUTE_DECIDER === 'eikos';
 const ROUTE_EIKOS_QUESTION = 'lane_sufficiency';
-const ROUTE_EIKOS_QUESTION_VERSION = 'lane_sufficiency.v1';
+const ROUTE_EIKOS_QUESTION_VERSION = 'lane_sufficiency.v2';
 const ROUTE_EIKOS_POLICY_VERSION = 'lane_sufficiency.policy.v1';
 const ROUTE_REDUCER_VERSION = 'lane_reduce.v1';
 const __routeConfigErrors = [];
@@ -1030,14 +1030,14 @@ const ROUTE_EIKOS_TAU = (function () {
 })();
 const ROUTE_EIKOS_MAX_CONSULTS = __routeIntArg('route_eikos_max_consults', 40);
 const ROUTE_EIKOS_CARRIER_MODEL = (typeof A.route_eikos_carrier_model === 'string' && A.route_eikos_carrier_model.trim())
-  ? A.route_eikos_carrier_model.trim() : 'claude-haiku-5-5';
+  ? A.route_eikos_carrier_model.trim() : 'claude-sonnet-5-5';
 const ROUTE_EIKOS_CARRIER_TIMEOUT_MS = Math.max(10000, __routeIntArg('route_eikos_carrier_timeout_ms', 180000));
 // Host POLICY rank for floors and escalation: the existing lane numbering (ROUTE_LANES), so a numeric
 // operator floor keeps its meaning. A host policy, not a claim that capability rises with it.
 function __routeRank(m) { return ROUTE_LANES.indexOf(m); }
-// List-price proxy (output $ per million: 0.50, 10, 20, 25), used ONLY to choose among lanes already
+// List-price proxy (output $ per million: 5, 10, 20, 25), used ONLY to choose among lanes already
 // allowed and feasible. Not predicted task cost: tokenizer, cache, retries and quota differ per lane.
-const ROUTE_PRICE_ORDER = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-opus-4-6'];
+const ROUTE_PRICE_ORDER = ['claude-haiku-4-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-opus-4-6'];
 const ROUTE_CLASS_FLOOR = { paperwork: 0, evidence: 1, code_change: 1 };        // policy rank
 // Work-product failures a lane may take in one scope before every lane at or below its rank is out:
 // a code change escalates at once; other classes get one retry. Counts never reset (finite policy).

@@ -28,7 +28,7 @@ const MODEL_STRONG = 'claude-opus-5-5';   // pinned default (GEAK's default mode
 const MODEL_CHEAP = 'claude-sonnet-5-5';  // the routed model
 // The kernel lane's four-lane cost ladder, cheapest first (kernel_lane.js inlines it as ROUTE_LANES;
 // routing_dryrun.js asserts the two have not drifted). Policy: e2e_workflow/routing/SKILL.md.
-const LANES = Object.freeze(['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-4-6', MODEL_STRONG]);
+const LANES = Object.freeze(['claude-haiku-4-5', 'claude-sonnet-5-5', 'claude-opus-4-6', MODEL_STRONG]);
 
 // Scope-key separator. Built textually via fromCharCode so the SOURCE FILE contains no literal
 // NUL byte (ordinary rg/git review sees text); at runtime it is U+0000, which cannot occur in a
