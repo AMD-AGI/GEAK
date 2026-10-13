@@ -1077,13 +1077,20 @@ function __routeOpFloorRank(scope) {
   const f = ROUTE_FLOORS[scope];
   return f == null ? 0 : Math.max(0, Math.min(ROUTE_TOP, __routeNum(f, 0)));
 }
+// Card size caps, mirrored by eikos_decide.py (MAX_DIRECTION_PROMPT_CHARS, MAX_STATE_CHARS). A direction
+// prompt over the cap is condensed by the carrier model (__routeCondense) rather than refused; the
+// engineer itself always receives the full text.
+const ROUTE_CARD_PROMPT_CHARS = 8000;
+const ROUTE_CARD_STATE_CHARS = 12000;
+const ROUTE_CONDENSE_TARGET_CHARS = 6000;
 // The frozen card for one occurrence. S0 has an explicit task projection only for engineers with a
-// registered direction: the direction object goes in verbatim (bounded, never cut), the WHOLE dispatch
-// prompt only as its digest and length, which says nothing about its meaning. Every other scope is
-// ineligible and routed by host policy. The card never holds a routing answer or an outcome of itself.
-function __routeCard(p, o, scope, cls, occ) {
+// registered direction: the direction object goes in verbatim (bounded, never cut) unless it had to be
+// condensed (`fit`, which the card then says), the WHOLE dispatch prompt only as its digest and length,
+// which says nothing about its meaning. Every other scope is ineligible and routed by host policy. The
+// card never holds a routing answer or an outcome of itself.
+function __routeCard(p, o, scope, cls, occ, fit) {
   const label = String((o && o.label) || '');
-  const d = __routeTasks[label];
+  const d = (fit && fit.direction) || __routeTasks[label];
   if (!d) return { card: null, ineligible: 'no task projection for this scope (S0 asks only for engineers with a registered direction)' };
   const floor = typeof CANDIDATE_FLOOR !== 'undefined' ? CANDIDATE_FLOOR : 'configured';
   const prompt = String(p == null ? '' : p);
@@ -1097,7 +1104,9 @@ function __routeCard(p, o, scope, cls, occ) {
       goal_source: 'direction',
       acceptance: `An independent verify step finds that the patch applies, the correctness check passes, and the measured speedup is above the candidate floor (${floor}). A correct patch that does not beat the floor does not meet this event.`,
       constraints: ['Work only in the private workspace the dispatch names.', 'Use the GPU only through gpu_lock.sh.',
-                    'The engineer\'s own numbers are not accepted; verify re-measures.'],
+                    'The engineer\'s own numbers are not accepted; verify re-measures.'].concat(fit
+        ? [`The direction prompt here was condensed from ${fit.from_chars} to ${d.prompt.length} characters; the engineer gets the full text.`]
+        : []),
       direction: d, dispatch_prompt_sha256: eikosSha256(prompt), dispatch_prompt_chars: prompt.length },
     budget: { directions_used: typeof dispatched !== 'undefined' ? dispatched : 0,
               directions_budget: typeof BUDGET !== 'undefined' ? BUDGET : 1,
@@ -1107,10 +1116,10 @@ function __routeCard(p, o, scope, cls, occ) {
               attempt_timeout_s: (typeof AGENT_TIMEOUT_MS !== 'undefined' && AGENT_TIMEOUT_MS > 0) ? Math.round(AGENT_TIMEOUT_MS / 1000) : 'unknown',
               transport_retries: typeof AGENT_RETRIES !== 'undefined' ? AGENT_RETRIES : 0 },
   };
-  const why = d.prompt.length > 4000 || d.title.length > 300 || String(d.id).length > 40 || d.focus_files.length > 20 ||
-    d.focus_files.some((f) => f.length > 200 || !f.length) ? 'the direction does not fit the card'
+  const why = d.prompt.length > ROUTE_CARD_PROMPT_CHARS || d.title.length > 300 || String(d.id).length > 40 ||
+    d.focus_files.length > 20 || d.focus_files.some((f) => f.length > 200 || !f.length) ? 'the direction does not fit the card'
     : (scope.length > 160 || card.phase.length > 40) ? 'scope or phase too long'
-    : JSON.stringify(card).length > 8000 ? 'card over 8000 characters' : '';
+    : JSON.stringify(card).length > ROUTE_CARD_STATE_CHARS ? `card over ${ROUTE_CARD_STATE_CHARS} characters` : '';
   return { card, ineligible: why };
 }
 // The reduction's inputs, frozen before the consultation and persisted with it (--host-json).
@@ -1140,6 +1149,32 @@ function __routeParseEstimates(s) {
     out[kv[0]] = v;
   }
   return out;
+}
+// One condensation: the carrier model rewrites a direction prompt that is over the card cap, so Eikos can
+// still be asked about it. Called with agent() directly (journaled, so a replay reuses it), never routed,
+// one attempt under the carrier's wait bound. Returns the shortened direction, or null -- the card then
+// stays ineligible, as before.
+const ROUTE_CONDENSE_SCHEMA = { type: 'object', properties: { prompt: { type: 'string' } },
+                                required: ['prompt'], additionalProperties: false };
+async function __routeCondense(d, scope, phase) {
+  const prompt = `You are the route_condenser. PHASE=${String(phase || 'Route').replace(/[^A-Za-z0-9_.-]/g, '') || 'Route'}.
+Below is the direction an engineer will receive (${d.prompt.length} characters). Rewrite it in at most ${ROUTE_CONDENSE_TARGET_CHARS} characters for a model that only estimates how hard the task is. Keep every concrete element: the bottleneck it targets, the code changes it asks for, the files and functions, the numbers, the expected gain and the risks. Drop repetition, background and step-by-step procedure. Add nothing that is not in the text. Do not run any tool and do not modify any file.
+Return {"prompt": "<the condensed direction>"} as StructuredOutput.
+
+DIRECTION TITLE: ${d.title}
+DIRECTION:
+${d.prompt}`;
+  const opts = { phase, label: `eikos:condense ${scope}`, model: ROUTE_EIKOS_CARRIER_MODEL, schema: ROUTE_CONDENSE_SCHEMA };
+  const ev = (typeof tlAgent === 'function') ? tlAgent(prompt, opts, 1) : null;
+  let to;
+  const guard = new Promise((resolve) => { to = setTimeout(() => resolve(null), ROUTE_EIKOS_CARRIER_TIMEOUT_MS); });
+  const call = Promise.resolve().then(() => agent(prompt, opts)).then(
+    (r) => { clearTimeout(to); return r; }, () => { clearTimeout(to); return null; });
+  const r = await Promise.race([call, guard]);
+  const s = r && typeof r.prompt === 'string' ? r.prompt.trim() : '';
+  if (!s || s.length > ROUTE_CARD_PROMPT_CHARS) return null;
+  if (ev) ev.ok = true;
+  return Object.assign({}, d, { prompt: s });
 }
 // One consultation: the carrier runs ONE fixed command built here and relays its JSON. It is called with
 // agent() directly, so it is never routed. One attempt, its own wait bound, no retries; the lane caps
@@ -1265,10 +1300,17 @@ function __routeEikosPick(p, o, scope) {
                     trigger: tk ? (tk.last_kind === 'work_product' ? 'work_product_failure' : 'non_improvement')
                       : (st.occurrences > 1 ? 'changed_task' : 'first_sight'),
                     prior: st.history.slice(-6) };
-      const c = __routeCard(p, o, scope, cls, occ);
       const host = __routeHostInput(scope, cls);
       // Nothing to ask when no lane could be dispatched whatever the answer.
       const none = !__routeReduce(Object.assign({}, host, { backend: 'not_asked', estimates: null })).model;
+      // A registered direction too long for the card is condensed first, and only when Eikos will be asked.
+      const reg = __routeTasks[label];
+      let fit = null;
+      if (!none && reg && reg.prompt.length > ROUTE_CARD_PROMPT_CHARS) {
+        const short = await __routeCondense(reg, scope, (o && o.phase) || '');
+        if (short) fit = { direction: short, from_chars: reg.prompt.length };
+      }
+      const c = __routeCard(p, o, scope, cls, occ, fit);
       const res = c.ineligible ? { status: 'ineligible' } : none ? { status: 'not_asked_no_feasible_lane' }
         : await __routeEikosConsult(c.card, host);
       // Other scopes may have reserved the top lane while this one waited: reduce on the current inputs.
@@ -1284,6 +1326,7 @@ function __routeEikosPick(p, o, scope) {
       st.model = red.model; st.lane = red.model ? __routeRank(red.model) : -1; st.why = red.reason;
       __routeAudit.push({ event: 'decide', decider: 'eikos', scope, label, scope_class: cls, task_key: key, seq: occ.seq,
         trigger: occ.trigger, card_sha256: c.card ? eikosSha256(JSON.stringify(c.card)) : null, ineligible: c.ineligible || null,
+        condensed: fit ? { from_chars: fit.from_chars, to_chars: fit.direction.prompt.length, model: ROUTE_EIKOS_CARRIER_MODEL } : null,
         backend: res.status, logical_key: res.envelope ? res.envelope.logical_key || null : null,
         relay_ok: res.relay_ok == null ? null : res.relay_ok, decision_ok: res.decision_ok == null ? null : res.decision_ok,
         receipt_ok: res.receipt_ok == null ? null : res.receipt_ok,

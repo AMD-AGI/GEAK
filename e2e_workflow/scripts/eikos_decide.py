@@ -83,7 +83,8 @@ ESTIMATE_FIELDS = ("estimates", "questions_version", "policy_version", "decision
 ESTIMATE_DECISIONS = {"lane_sufficiency"}
 MAX_HOST_CHARS = 4000
 DECISION_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-MAX_STATE_CHARS = 8000
+MAX_STATE_CHARS = 12000
+MAX_DIRECTION_PROMPT_CHARS = 8000  # kernel_lane.js ROUTE_CARD_PROMPT_CHARS; longer ones are condensed first
 ATTEMPT_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -293,7 +294,7 @@ def _direction_ok(d) -> bool:
         and _text(d["id"], 1, 40) and _text(d["title"], 0, 300) and d["specialty"] in SPECIALTIES
         and (d["expected_speedup"] is None or _is_num(d["expected_speedup"], 0, strict=True))
         and isinstance(d["focus_files"], list) and len(d["focus_files"]) <= 20
-        and all(_text(f, 1, 200) for f in d["focus_files"]) and _text(d["prompt"], 0, 4000))
+        and all(_text(f, 1, 200) for f in d["focus_files"]) and _text(d["prompt"], 0, MAX_DIRECTION_PROMPT_CHARS))
 
 
 def _lane_card_state(state: dict, round_no: int, spec: dict) -> str:

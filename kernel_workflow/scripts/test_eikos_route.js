@@ -598,10 +598,39 @@ async function main() {
     ok('two different verification tasks are two occurrences, not one scope-wide decision',
       d.length === 3 && d[1].task_key !== d[2].task_key && d[2].seq === 2);
     const L2 = lane();
-    direction(L2, 'r1_d0', 'memory', { prompt: 'x'.repeat(4001) });
+    direction(L2, 'r1_d0', 'memory', { prompt: 'x'.repeat(8001) });
     const p = await L2.__routePick('p', W(ENG('r1_d0')));
-    ok('a direction too long for the card is ineligible: Eikos is not asked, nothing is truncated',
-      L2.carried.length === 0 && /does not fit/.test(last(L2, 'decide').ineligible) && p.model === S5);
+    ok('a direction too long for the card that the condenser cannot shorten is ineligible: Eikos is not asked, nothing is truncated',
+      L2.carried.length === 0 && /does not fit/.test(last(L2, 'decide').ineligible) && p.model === S5 &&
+      L2.workers.length === 1 && L2.workers[0].o.label === 'eikos:condense eng:memory' && last(L2, 'decide').condensed === null);
+    // Condensed: the carrier model shortens the direction for the card only; Eikos is then asked.
+    server.probs = P(0.31, 0.93, 0.95, 0.97);
+    server.seen = [];
+    const SHORT = 'Double-buffer the w2 k-tiles and issue all three loads before the first wait.';
+    const L3 = lane({}, { worker: (pr, o) => (String(o.label).indexOf('eikos:condense') === 0 ? { prompt: SHORT } : { ok: true }) });
+    direction(L3, 'r1_d0', 'memory', { prompt: 'y'.repeat(9000) });
+    const p3 = await L3.__routePick('p', W(ENG('r1_d0')));
+    const d3c = last(L3, 'decide');
+    const card3 = server.seen.length ? JSON.parse(server.seen[0].state) : null;
+    ok('a long direction is condensed by the carrier model, then Eikos is asked about the condensed card',
+      L3.workers.length === 1 && L3.workers[0].o.model === L3.carried[0].o.model && L3.workers[0].o.schema &&
+      /^You are the route_condenser\./.test(L3.workers[0].prompt) && L3.carried.length === 1 && d3c.backend === 'ok' &&
+      d3c.ineligible === null && d3c.condensed && d3c.condensed.from_chars === 9000 && d3c.condensed.to_chars === SHORT.length &&
+      p3.model === S5);
+    ok('the condensed card says so, and the registered direction (what the engineer gets) is untouched',
+      card3 && card3.task.direction.prompt === SHORT && card3.task.constraints.length === 4 &&
+      /condensed from 9000 to \d+ characters/.test(card3.task.constraints[3]) &&
+      L3.__routeTasks[ENG('r1_d0')].prompt.length === 9000);
+    const L4 = lane({}, { worker: (pr, o) => (String(o.label).indexOf('eikos:condense') === 0 ? { prompt: 'z'.repeat(8001) } : { ok: true }) });
+    direction(L4, 'r1_d0', 'memory', { prompt: 'y'.repeat(9000) });
+    const p4 = await L4.__routePick('p', W(ENG('r1_d0')));
+    ok('a condensation that is still over the cap is refused: ineligible, Eikos not asked',
+      L4.carried.length === 0 && /does not fit/.test(last(L4, 'decide').ineligible) && last(L4, 'decide').condensed === null &&
+      p4.model === S5);
+    const L5 = lane();
+    direction(L5, 'r1_d0', 'memory', { prompt: 'Tile K by 64.' });
+    await L5.__routePick('p', W(ENG('r1_d0')));
+    ok('a direction that fits is never sent to the condenser', L5.workers.length === 0);
   }
   {
     server.probs = P(0.99, 0.99, 0.99, 0.99);

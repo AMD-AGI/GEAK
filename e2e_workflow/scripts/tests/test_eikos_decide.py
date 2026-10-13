@@ -502,7 +502,7 @@ def test_the_same_card_is_a_replay_and_a_changed_card_a_new_occurrence(tmp_path,
     (lambda c: c.update(current_outcome="ok"), "exactly the fields"),                 # nor at the root
     (lambda c: c["task"].update(goal="x" * 1501), "task must be"),                    # never truncated: refused
     (lambda c: c["task"].update(answer="sonnet"), "task must be"),                    # no extra fields ride along
-    (lambda c: c["task"]["direction"].update(prompt="p" * 4001), "task must be"),
+    (lambda c: c["task"]["direction"].update(prompt="p" * (ed.MAX_DIRECTION_PROMPT_CHARS + 1)), "task must be"),
     (lambda c: c["config"].update(lanes=list(reversed(LANES))), "config must be"),
     (lambda c: c.update(scope_class="paperwork-ish"), "scope_class must be"),
     (lambda c: c.update(round=3), "round must be"),

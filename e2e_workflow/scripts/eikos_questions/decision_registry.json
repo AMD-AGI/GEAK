@@ -245,6 +245,20 @@
      }
     }
    },
+   "ROUTE_CONDENSE_SCHEMA": {
+    "call_sites": [
+     [
+      "eikos:condense ${}",
+      ""
+     ]
+    ],
+    "fields": {
+     "prompt": {
+      "class": "free_text",
+      "note": "a direction prompt over the routing card's cap, shortened by the carrier model for the Eikos card only; the engineer still receives the full direction"
+     }
+    }
+   },
    "SETUP_SCHEMA": {
     "call_sites": [
      [
