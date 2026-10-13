@@ -1384,7 +1384,7 @@ def mirror_invocations(
         "bytes_copied": 0,
         "max_bytes": int(max_bytes),
         "deadline_hit": False,
-        "secrets_masked": 0,
+        "secrets_redacted": 0,
         "invocations": [],
     }
 
@@ -1479,8 +1479,8 @@ def mirror_invocations(
             manifest["bytes_copied"] += size
             rec = {"path": key, "bytes": size, "copied": True}
             if masked:
-                rec["secrets_masked"] = masked
-                manifest["secrets_masked"] += masked
+                rec["secrets_redacted"] = masked
+                manifest["secrets_redacted"] += masked
             entry["files"].append(rec)
             manifest["files"].append(rec)
         if entry["status"] == "ok":

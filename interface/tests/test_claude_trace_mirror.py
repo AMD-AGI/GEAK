@@ -989,7 +989,7 @@ class TestCredentialsStayInTheLiveHome(unittest.TestCase):
     that transcript verbatim onto the run's durable output volume.
     """
 
-    SECRET = "kbtok_" + "Q7" * 24   # synthetic
+    TOKEN = "kbtok_" + "Q7" * 24   # synthetic
     ENC = "-home-aditysin-PROJECTS-GEAK"
 
     def _env(self, tmp, **extra):
@@ -1011,21 +1011,21 @@ class TestCredentialsStayInTheLiveHome(unittest.TestCase):
         return json.loads((Path(ev) / M.MIRROR_DIRNAME / M.MANIFEST_NAME).read_text(encoding="utf-8"))
 
     def test_a_printed_store_token_is_masked_at_its_own_length(self):
-        with tempfile.TemporaryDirectory() as tmp, self._env(tmp, GEAK_KB_STORE_TOKEN=self.SECRET):
-            ev, home, src, dest = self._run(tmp, "GEAK_KB_STORE_TOKEN=%s\n" % self.SECRET)
+        with tempfile.TemporaryDirectory() as tmp, self._env(tmp, GEAK_KB_STORE_TOKEN=self.TOKEN):
+            ev, home, src, dest = self._run(tmp, "GEAK_KB_STORE_TOKEN=%s\n" % self.TOKEN)
             self.assertEqual(M.mirror_run_trace(ev, homes=[home])["status"], "ok")
             text = dest.read_text(encoding="utf-8")
-            self.assertNotIn(self.SECRET, text)
+            self.assertNotIn(self.TOKEN, text)
             self.assertEqual(json.loads(text)["content"],
-                             "GEAK_KB_STORE_TOKEN=%s\n" % ("*" * len(self.SECRET)))
+                             "GEAK_KB_STORE_TOKEN=%s\n" % ("*" * len(self.TOKEN)))
             self.assertEqual(dest.stat().st_size, src.stat().st_size)
             man = self._manifest(ev)
-            self.assertEqual(man["secrets_masked"], 1)
-            self.assertNotIn(self.SECRET, json.dumps(man))
+            self.assertEqual(man["secrets_redacted"], 1)
+            self.assertNotIn(self.TOKEN, json.dumps(man))
 
     def test_a_masked_copy_is_still_current_on_the_next_pass(self):
-        with tempfile.TemporaryDirectory() as tmp, self._env(tmp, KB_STORE_TOKEN=self.SECRET):
-            ev, home, _, _ = self._run(tmp, self.SECRET)
+        with tempfile.TemporaryDirectory() as tmp, self._env(tmp, KB_STORE_TOKEN=self.TOKEN):
+            ev, home, _, _ = self._run(tmp, self.TOKEN)
             M.mirror_run_trace(ev, homes=[home])
             M.mirror_run_trace(ev, homes=[home])
             rec = [f for f in self._manifest(ev)["files"]
@@ -1036,10 +1036,10 @@ class TestCredentialsStayInTheLiveHome(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, self._env(tmp):
             user = Path(tmp) / "user"
             user.mkdir()
-            (user / ".geak_kb_token").write_text(self.SECRET + "\n", encoding="utf-8")
-            ev, home, _, dest = self._run(tmp, "$ cat ~/.geak_kb_token\n" + self.SECRET)
+            (user / ".geak_kb_token").write_text(self.TOKEN + "\n", encoding="utf-8")
+            ev, home, _, dest = self._run(tmp, "$ cat ~/.geak_kb_token\n" + self.TOKEN)
             M.mirror_run_trace(ev, homes=[home])
-            self.assertNotIn(self.SECRET, dest.read_text(encoding="utf-8"))
+            self.assertNotIn(self.TOKEN, dest.read_text(encoding="utf-8"))
 
     def test_paths_urls_and_short_values_are_copied_untouched(self):
         long_path = "/shared/models/" + "x" * 40
