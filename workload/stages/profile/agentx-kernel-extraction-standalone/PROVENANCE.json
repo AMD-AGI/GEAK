@@ -1,0 +1,163 @@
+{
+  "created_utc": "2026-10-12T09:20:38.384382+00:00",
+  "origin": "GEAK working-tree snapshot based on b383dbe24a6ec505d31dc1b2ba4b751b278e717a",
+  "runtime_dependency_on_origin_repository": false,
+  "adaptation": "Pure delivery gates vendored; workflow loading removed; GPU set helper resolves sibling; standalone agent instructions; package-local test imports. Configurable explicit shared lock directory; unrelated-process reaping removed; weighting tests converted from pytest to unittest.",
+  "sources": [
+    {
+      "file": "scripts/capture_shapes.py",
+      "source": "e2e_workflow/scripts/capture_shapes.py",
+      "source_sha256": "68e133c5a5329a90c9e8b7f71b9997bf5fb45a8e1724120987a7f7406dcf9d91"
+    },
+    {
+      "file": "scripts/harness_lib.py",
+      "source": "e2e_workflow/scripts/harness_lib.py",
+      "source_sha256": "b18e0f2364007025d48b80b47d220fc4dc82f575ab9ed630cfa9fe143d54113b"
+    },
+    {
+      "file": "scripts/leg_runner.py",
+      "source": "e2e_workflow/scripts/leg_runner.py",
+      "source_sha256": "7666e8ec6cba04eb65436e5b277ed2b67312dfc2c1328f6d61ab2b9383c29e28"
+    },
+    {
+      "file": "scripts/overlay_setup.py",
+      "source": "e2e_workflow/scripts/overlay_setup.py",
+      "source_sha256": "dff32ddda76980263fad33a2d37021747d8f5a08e15c042f5858642c84b2b3fc"
+    },
+    {
+      "file": "scripts/seam_trace.py",
+      "source": "e2e_workflow/scripts/seam_trace.py",
+      "source_sha256": "52c5f953cb1b65c9c223fdf029d6aa8dc48ed2219283116929c615f06b2625e9"
+    },
+    {
+      "file": "scripts/kernel_selection.py",
+      "source": "e2e_workflow/scripts/kernel_selection.py",
+      "source_sha256": "e636e0896a6bf375afcc62c5bc5d88c0dc077575d951a9188f3425497bffd581"
+    },
+    {
+      "file": "scripts/parse_profile.py",
+      "source": "e2e_workflow/scripts/parse_profile.py",
+      "source_sha256": "5365ccf9f2f5188ffba3e3ca5c8b38230dec4a605b5a447056488f88106ce61f"
+    },
+    {
+      "file": "scripts/kernel_source_delivery.mjs",
+      "source": "e2e_workflow/scripts/kernel_source_delivery.mjs",
+      "source_sha256": "dec54adc26932291472c8a64d9c4b4a911de6a498bb369fa5a04b3ae0646b34d"
+    },
+    {
+      "file": "scripts/gpu_lock_set.py",
+      "source": "e2e_workflow/scripts/gpu_lock_set.py",
+      "source_sha256": "9aafca7a2610df73323f91cfaf55ef4785e9258f0a2259089c64910fe35aa3d9"
+    },
+    {
+      "file": "scripts/gpu_lock.sh",
+      "source": "kernel_workflow/scripts/gpu_lock.sh",
+      "source_sha256": "4377cd9a8b0de9bed5669b7ced0e108d8b65719fd3b97922aa361c06b141edf8"
+    },
+    {
+      "file": "scripts/workspace_sources.py",
+      "source": "kernel_workflow/scripts/workspace_sources.py",
+      "source_sha256": "15a97e8db9471e77275428affbcbdfde7a9c4ba948690f043a9c544ee14d360b"
+    },
+    {
+      "file": "scripts/schema.mjs",
+      "source": "interface/runtime/engine/schema.mjs",
+      "source_sha256": "19ba9273c7a443138eaf0ae0d072e278ec6f10e4477f2ee5e70b85f5b00454e3"
+    },
+    {
+      "file": "scripts/select_targets.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/select_targets.py",
+      "source_sha256": "edb449b6fc2cfd0ef3b3f2d95cde0a991141ab9c835654c85eae470263eca141"
+    },
+    {
+      "file": "scripts/kernel_extraction_delivery.mjs",
+      "source": "e2e_workflow/scripts/kernel_extraction_delivery.mjs",
+      "source_sha256": "61e2c11d0cfee864b4d5c94194e319bd42a4434316d531f2d3e56e36439ee5ab"
+    },
+    {
+      "file": "references/dynamic-workloads.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/dynamic-workloads.md",
+      "source_sha256": "710a42730455f20336c88e28cfad827ae8fe1e73209eaa037a950526f906125d"
+    },
+    {
+      "file": "references/selection-coverage.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/selection-coverage.md",
+      "source_sha256": "734b19580ec65d3defcb309673cf84b68b83964858b225f1c6761405aba8c685"
+    },
+    {
+      "file": "references/joint-indexer-ut.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/joint-indexer-ut.md",
+      "source_sha256": "fd3aa4ca19468776cb4bb74bf99359c18f6b16fe94171a3971089c3b7b73d5dd"
+    },
+    {
+      "file": "references/source-extraction.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/source-extraction.md",
+      "source_sha256": "c9686f3993e896803b2a0f909868472479b31a0309a1a7d50ba109c1603786fd"
+    },
+    {
+      "file": "references/collective-ut.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/collective-ut.md",
+      "source_sha256": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165"
+    },
+    {
+      "file": "references/source-delivery-records.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/source-delivery-records.md",
+      "source_sha256": "ea8d22df49d226c5c5f70104092bd875f3fb3a453d1bd1f5a2d4860c22dae9cb"
+    },
+    {
+      "file": "references/glm-agentx-example.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract-glm-agentx-example/SKILL.md",
+      "source_sha256": "ba741d2987b754a8a6a73f99eb62d50f1b5e455fcd322230bbf1f87ec47db5ea"
+    },
+    {
+      "file": "tests/test_kernel_selection.py",
+      "source": "e2e_workflow/scripts/tests/test_kernel_selection.py",
+      "source_sha256": "e09c4e6878134376cb01b78354d791dfc19c5f125ae6d5f93c74f3ae1d931633"
+    },
+    {
+      "file": "tests/test_capture_shapes.py",
+      "source": "e2e_workflow/scripts/tests/test_capture_shapes.py",
+      "source_sha256": "8cab68271bedb5b06fa2ad99f0677b41693d88b8881609fc6f5ecfe0c279db59"
+    },
+    {
+      "file": "tests/test_harness_lib.py",
+      "source": "e2e_workflow/scripts/tests/test_harness_lib.py",
+      "source_sha256": "19686590a618b47f458a6b20fa8cb6e21115088cba175c936c411e6330a9115d"
+    },
+    {
+      "file": "tests/test_leg_runner.py",
+      "source": "e2e_workflow/scripts/tests/test_leg_runner.py",
+      "source_sha256": "7fe49d490259f47907a6d53c625a07bbe0897f8b86e5caa17d3696ac65935f30"
+    },
+    {
+      "file": "tests/test_overlay_setup.py",
+      "source": "e2e_workflow/scripts/tests/test_overlay_setup.py",
+      "source_sha256": "620bc2879319d3797abc9c3b2e34b11f35a09ac31c51cfb460595228211feeec"
+    },
+    {
+      "file": "tests/test_kernel_extract_gpu_isolation.py",
+      "source": "e2e_workflow/scripts/tests/test_kernel_extract_gpu_isolation.py",
+      "source_sha256": "95df9afa0e7e5cb413681be07f145077fb70cacac7a9bf5917ae005578e6f79f"
+    },
+    {
+      "file": "tests/test_kernel_extract_targets.py",
+      "source": "e2e_workflow/scripts/tests/test_kernel_extract_targets.py",
+      "source_sha256": "cc74f63ef687cce9a938f1d77d9872862fc43e82961ae253b8d63dcaf3aff69f"
+    },
+    {
+      "file": "tests/test_observed_workload_weights.py",
+      "source": "e2e_workflow/scripts/tests/test_observed_workload_weights.py",
+      "source_sha256": "951f7fa6b1e36d703f9f3567cbc13b21f8f7bcfa31f74fe6751cc14bf0e5df38"
+    },
+    {
+      "file": "tests/test_kernel_source_delivery.mjs",
+      "source": "e2e_workflow/scripts/test_kernel_source_delivery.mjs",
+      "source_sha256": "ebd628d83190f874ef76b8755c7bc26991c8699f6bb36fa4c9db143e8e65378f"
+    },
+    {
+      "file": "LICENSE.md",
+      "source": "LICENSE.md",
+      "source_sha256": "cc09a983d7b46105587a34d759bbc9ed4e37d9857e5367766710d3f55e603315"
+    }
+  ]
+}

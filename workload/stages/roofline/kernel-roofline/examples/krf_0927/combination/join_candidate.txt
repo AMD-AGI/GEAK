@@ -1,0 +1,33 @@
+kernel/regime                         ax |     TL%   TLsp |    RPemp%    sp |    RPds%    sp |   n   cov covds
+add_rmsnorm_quant/decode                 |   1.5% 64.90x |     5.0%20.18x |      --       |   1  100%    0%
+dsa_indexer_decode/decode                |  61.6%  1.62x |    57.0% 1.75x |   48.8% 2.05x |   1  100%  100%
+dsa_indexer_prefill/prefill              |  84.0%  1.19x |    48.7% 2.05x |   48.2% 2.07x |   1  100%  100%
+dsa_indexer_prefill_score_topk/prefill         |  70.6%  1.42x |    49.7% 2.01x |   46.6% 2.15x |   1  100%   89%
+dsa_indexer_score_topk/decode            |  35.5%  2.82x |    38.2% 2.62x |   47.3% 2.12x |   1   80%   54%
+dsa_indexer_topk/decode                  |  15.7%  6.37x |    20.1% 4.98x |      --       |   1  100%    0%
+mxfp4_fused_moe/prefill                  |  26.0%  3.85x |    71.7% 1.40x |   51.0% 1.96x |   1   98%   64%
+sparse_mla_prefill/prefill               | 346.1%  0.29x |    37.0% 2.70x |   31.7% 3.15x |   1  100%  100%
+
+[48 of 56 TL rows had no rocprof file -- this table covers 8 case(s), NOT the whole leg]
+  missing add_rmsnorm_quant_dec_bs2_m12_res_candidate_roofline.txt
+  missing add_rmsnorm_quant_dec_bs3_m18_nores_candidate_roofline.txt
+  missing add_rmsnorm_quant_dec_bs2_m12_nores_candidate_roofline.txt
+  missing add_rmsnorm_quant_pre_m10129_res_candidate_roofline.txt
+  missing add_rmsnorm_quant_pre_m10129_nores_candidate_roofline.txt
+  missing add_rmsnorm_quant_pre_m1137_res_candidate_roofline.txt
+  missing add_rmsnorm_quant_pre_m1137_nores_candidate_roofline.txt
+  missing dsa_indexer_decode_dec_bs3_ctx173k_candidate_roofline.txt
+  missing dsa_indexer_decode_dec_bs3_ctx217k_candidate_roofline.txt
+  missing dsa_indexer_decode_dec_bs3_ctx261k_candidate_roofline.txt
+  missing dsa_indexer_decode_dec_bs2_ctx318k_candidate_roofline.txt
+  missing dsa_indexer_decode_dec_bs2_ctx418k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_ch_r684_ctx784k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_ch_r2934_ctx182k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_ch_r14082_ctx38k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_ch_r5406_ctx99k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_un_r2639_ctx97k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_un_r1784_ctx185k_candidate_roofline.txt
+  missing dsa_indexer_prefill_pre_m3480_kv113k_candidate_roofline.txt
+  missing dsa_indexer_prefill_pre_m2457_kv201k_candidate_roofline.txt
+
+per-case -> /shared_nfs/yueliu14/krf_0927/results/combination/per_case_candidate.json  (8 cases)

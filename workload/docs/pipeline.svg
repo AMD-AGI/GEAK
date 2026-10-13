@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1220"/>
+      <stop offset="100%" stop-color="#111a2e"/>
+    </linearGradient>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="376" rx="14" fill="url(#bg)"/>
+
+  <!-- input band -->
+  <rect x="26" y="20" width="948" height="46" rx="10" fill="#131d33" stroke="#2a3a5e"/>
+  <text x="500" y="41" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">real agentic workload</text>
+  <text x="500" y="58" text-anchor="middle" fill="#8aa0c0" font-size="11">e.g. GLM-5.2 / DeepSeek-V4 on AgentX &#183; fixed parallelism, concurrency and request trace</text>
+  <path d="M500 66 L500 86" stroke="#64748b" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- stage 1 -->
+  <rect x="26" y="92" width="172" height="170" rx="10" fill="#16213a" stroke="#2a3a5e"/>
+  <text x="40" y="114" fill="#38bdf8" font-size="9" letter-spacing="1.4">EVIDENCE</text>
+  <text x="40" y="136" fill="#f1f5f9" font-size="14" font-weight="600">1 &#183; baseline</text>
+  <text x="40" y="160" fill="#9fb3cd" font-size="11">The number to beat —</text>
+  <text x="40" y="177" fill="#9fb3cd" font-size="11">and exactly how it</text>
+  <text x="40" y="194" fill="#9fb3cd" font-size="11">was measured.</text>
+  <rect x="40" y="222" width="144" height="24" rx="6" fill="#0d1526" stroke="#2a3a5e"/>
+  <text x="52" y="238" fill="#7dd3fc" font-size="10.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">baseline.json</text>
+
+  <!-- stage 2 -->
+  <rect x="220" y="92" width="172" height="170" rx="10" fill="#16213a" stroke="#2a3a5e"/>
+  <text x="234" y="114" fill="#38bdf8" font-size="9" letter-spacing="1.4">EVIDENCE</text>
+  <text x="234" y="136" fill="#f1f5f9" font-size="14" font-weight="600">2 &#183; profile</text>
+  <text x="234" y="160" fill="#9fb3cd" font-size="11">Where GPU time goes</text>
+  <text x="234" y="177" fill="#9fb3cd" font-size="11">under real traffic. One</text>
+  <text x="234" y="194" fill="#9fb3cd" font-size="11">frozen standalone unit</text>
+  <text x="234" y="211" fill="#9fb3cd" font-size="11">test per hot kernel.</text>
+  <rect x="234" y="222" width="144" height="24" rx="6" fill="#0d1526" stroke="#2a3a5e"/>
+  <text x="246" y="238" fill="#7dd3fc" font-size="10.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">tasks/&lt;kernel&gt;/</text>
+
+  <!-- stage 3 -->
+  <rect x="414" y="92" width="172" height="170" rx="10" fill="#16213a" stroke="#2a3a5e"/>
+  <text x="428" y="114" fill="#38bdf8" font-size="9" letter-spacing="1.4">EVIDENCE</text>
+  <text x="428" y="136" fill="#f1f5f9" font-size="14" font-weight="600">3 &#183; roofline</text>
+  <text x="428" y="160" fill="#9fb3cd" font-size="11">How much headroom a</text>
+  <text x="428" y="177" fill="#9fb3cd" font-size="11">kernel truly has, ranked</text>
+  <text x="428" y="194" fill="#9fb3cd" font-size="11">by expected e2e gain.</text>
+  <rect x="428" y="222" width="144" height="24" rx="6" fill="#0d1526" stroke="#2a3a5e"/>
+  <text x="440" y="238" fill="#7dd3fc" font-size="10.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">roofline.json</text>
+
+  <!-- stage 4 -->
+  <rect x="608" y="92" width="172" height="170" rx="10" fill="#1b2135" stroke="#4a3f1f"/>
+  <text x="622" y="114" fill="#fbbf24" font-size="9" letter-spacing="1.4">COMPUTE BUDGET</text>
+  <text x="622" y="136" fill="#f1f5f9" font-size="14" font-weight="600">4 &#183; optimize</text>
+  <text x="622" y="160" fill="#9fb3cd" font-size="11">One kernel per GPU, in</text>
+  <text x="622" y="177" fill="#9fb3cd" font-size="11">parallel, fixed budget.</text>
+  <text x="622" y="194" fill="#9fb3cd" font-size="11">Every keep survives a</text>
+  <text x="622" y="211" fill="#9fb3cd" font-size="11">cold rerun.</text>
+  <rect x="622" y="222" width="144" height="24" rx="6" fill="#0d1526" stroke="#4a3f1f"/>
+  <text x="634" y="238" fill="#fcd34d" font-size="10.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">verified.json</text>
+
+  <!-- stage 5 -->
+  <rect x="802" y="92" width="172" height="170" rx="10" fill="#15241f" stroke="#1f4d3c"/>
+  <text x="816" y="114" fill="#34d399" font-size="9" letter-spacing="1.4">PROOF</text>
+  <text x="816" y="136" fill="#f1f5f9" font-size="14" font-weight="600">5 &#183; applyback</text>
+  <text x="816" y="160" fill="#9fb3cd" font-size="11">Reversible overlay into</text>
+  <text x="816" y="177" fill="#9fb3cd" font-size="11">the serving stack, then</text>
+  <text x="816" y="194" fill="#9fb3cd" font-size="11">re-measure and A/B.</text>
+  <rect x="816" y="222" width="144" height="24" rx="6" fill="#0d1526" stroke="#1f4d3c"/>
+  <text x="828" y="238" fill="#6ee7b7" font-size="10.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">ab.json</text>
+
+  <!-- connectors -->
+  <path d="M200 177 L216 177" stroke="#64748b" stroke-width="1.5" marker-end="url(#ar)"/>
+  <path d="M394 177 L410 177" stroke="#64748b" stroke-width="1.5" marker-end="url(#ar)"/>
+  <path d="M588 177 L604 177" stroke="#64748b" stroke-width="1.5" marker-end="url(#ar)"/>
+  <path d="M782 177 L798 177" stroke="#64748b" stroke-width="1.5" marker-end="url(#ar)"/>
+  <path d="M888 262 L888 292" stroke="#64748b" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- output band -->
+  <rect x="26" y="298" width="948" height="54" rx="10" fill="#101d19" stroke="#1f4d3c"/>
+  <text x="46" y="321" fill="#e2e8f0" font-size="12.5" font-weight="600">An end-to-end A/B against the original deployment — the only number allowed to be called a win.</text>
+  <text x="46" y="340" fill="#7f9c92" font-size="11">Operator speedup is reported beside it, never in place of it: a kernel that wins in isolation often moves the system by nothing.</text>
+</svg>

@@ -1,0 +1,8 @@
+{
+  "name": "Synthetic device for arithmetic demonstration only",
+  "source": "Synthetic values, not a calibrated or advertised GPU",
+  "mem_bw_gbps": 1000,
+  "max_achievable_tflops": {
+    "matrix_bf16": 100
+  }
+}

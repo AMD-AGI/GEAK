@@ -1,0 +1,189 @@
+{
+ "add_rmsnorm_quant_dec_bs3_m18_res": {
+  "kernel": "add_rmsnorm_quant",
+  "regime": "decode",
+  "case": "dec_bs3_m18_res",
+  "w": 0.6221,
+  "measured_us": 8.490133333333414,
+  "tl_roof_us": 0.1308187253901123,
+  "rp_roof_us_emp": 0.42078282666667083,
+  "rp_roof_us_ds": null,
+  "coverage": 1.0,
+  "coverage_ds": 0.0,
+  "no_eff": [],
+  "no_eff_ds": [
+   [
+    "void at::native::(anonymous namespace)::CatArrayBa",
+    0.00459373333333339
+   ],
+   [
+    "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi25",
+    0.0038964000000000242
+   ]
+  ]
+ },
+ "dsa_indexer_decode_dec_bs3_ctx104k": {
+  "kernel": "dsa_indexer_decode",
+  "regime": "decode",
+  "case": "dec_bs3_ctx104k",
+  "w": 0.1669,
+  "measured_us": 11.57116666666666,
+  "tl_roof_us": 7.125212191920665,
+  "rp_roof_us_emp": 6.59440788333333,
+  "rp_roof_us_ds": 5.652514916666663,
+  "coverage": 1.0,
+  "coverage_ds": 1.0,
+  "no_eff": [],
+  "no_eff_ds": []
+ },
+ "dsa_indexer_prefill_score_topk_pre_ch_r1383_ctx387k": {
+  "kernel": "dsa_indexer_prefill_score_topk",
+  "regime": "prefill",
+  "case": "pre_ch_r1383_ctx387k",
+  "w": 0.3222,
+  "measured_us": 1979.9776666666662,
+  "tl_roof_us": 1398.536235657652,
+  "rp_roof_us_emp": 984.6712131399997,
+  "rp_roof_us_ds": 923.0655881999998,
+  "coverage": 1.0,
+  "coverage_ds": 0.8895285350861702,
+  "no_eff": [],
+  "no_eff_ds": [
+   [
+    "void sglang::topk_ragged_kernel<true>(sglang::TopK",
+    0.2187310333333331
+   ]
+  ]
+ },
+ "dsa_indexer_prefill_pre_m10129_kv40k": {
+  "kernel": "dsa_indexer_prefill",
+  "regime": "prefill",
+  "case": "pre_m10129_kv40k",
+  "w": 0.167,
+  "measured_us": 884.2061333333335,
+  "tl_roof_us": 743.0420411581292,
+  "rp_roof_us_emp": 430.51996632000004,
+  "rp_roof_us_ds": 426.18735626666677,
+  "coverage": 1.0,
+  "coverage_ds": 1.0,
+  "no_eff": [],
+  "no_eff_ds": []
+ },
+ "dsa_indexer_score_topk_dec_bs3_ctx104k": {
+  "kernel": "dsa_indexer_score_topk",
+  "regime": "decode",
+  "case": "dec_bs3_ctx104k",
+  "w": 0.1669,
+  "measured_us": 23.21190000000001,
+  "tl_roof_us": 8.241248942686306,
+  "rp_roof_us_emp": 8.858916942172305,
+  "rp_roof_us_ds": 10.972265130000006,
+  "coverage": 0.7972117749947223,
+  "coverage_ds": 0.5368711738375572,
+  "no_eff": [
+   [
+    "void sglang::topk_tiled_histcand_w_kernel<1u, 16u>",
+    0.004707100000000008
+   ]
+  ],
+  "no_eff_ds": [
+   [
+    "sglang::topk_tiled_candsel_kernel(sglang::TopKTile",
+    0.006043000000000002
+   ],
+   [
+    "void sglang::topk_tiled_histcand_w_kernel<1u, 16u>",
+    0.004707100000000008
+   ]
+  ]
+ },
+ "dsa_indexer_topk_dec_bs3_ctx104k": {
+  "kernel": "dsa_indexer_topk",
+  "regime": "decode",
+  "case": "dec_bs3_ctx104k",
+  "w": 0.1669,
+  "measured_us": 7.105733333333335,
+  "tl_roof_us": 1.116036750765641,
+  "rp_roof_us_emp": 1.4268312533333336,
+  "rp_roof_us_ds": null,
+  "coverage": 1.0,
+  "coverage_ds": 0.0,
+  "no_eff": [],
+  "no_eff_ds": [
+   [
+    "void sglang::thresh::topk_thresh_fused_kernel<2u, ",
+    0.007105733333333335
+   ]
+  ]
+ },
+ "mxfp4_fused_moe_pre_M32768": {
+  "kernel": "mxfp4_fused_moe",
+  "regime": "prefill",
+  "case": "pre_M32768",
+  "w": 0.3276,
+  "measured_us": 2096.7277333333336,
+  "tl_roof_us": 544.6455592579256,
+  "rp_roof_us_emp": 1502.7475258745321,
+  "rp_roof_us_ds": 1069.204638329889,
+  "coverage": 0.9786865508146089,
+  "coverage_ds": 0.6419032437719779,
+  "no_eff": [
+   [
+    "_pf_scale_sort",
+    0.01886719999999997
+   ],
+   [
+    "_pf_sort_mark",
+    0.009419133333333694
+   ],
+   [
+    "_pf_sort_emit",
+    0.009104466666666268
+   ],
+   [
+    "_pf_sort_count",
+    0.007297700000000334
+   ]
+  ],
+  "no_eff_ds": [
+   [
+    "_gl_pf_topk_reduce_kernel",
+    0.6234908666666664
+   ],
+   [
+    "_ZN5aiter37dynamic_per_group_scaled_quant_kernelID",
+    0.0826520333333334
+   ],
+   [
+    "_pf_scale_sort",
+    0.01886719999999997
+   ],
+   [
+    "_pf_sort_mark",
+    0.009419133333333694
+   ],
+   [
+    "_pf_sort_emit",
+    0.009104466666666268
+   ],
+   [
+    "_pf_sort_count",
+    0.007297700000000334
+   ]
+  ]
+ },
+ "sparse_mla_prefill_pre_seq32768": {
+  "kernel": "sparse_mla_prefill",
+  "regime": "prefill",
+  "case": "pre_seq32768",
+  "w": 0.3546,
+  "measured_us": 3106.0395000000003,
+  "tl_roof_us": 10748.477451946916,
+  "rp_roof_us_emp": 1149.5452189500002,
+  "rp_roof_us_ds": 985.2357294000001,
+  "coverage": 1.0,
+  "coverage_ds": 1.0,
+  "no_eff": [],
+  "no_eff_ds": []
+ }
+}

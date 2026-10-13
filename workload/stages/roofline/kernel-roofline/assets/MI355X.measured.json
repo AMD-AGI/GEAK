@@ -1,0 +1,22 @@
+{
+    "name": "MI355X",
+    "mem_bw_gbps": 6851,
+    "memory_gb": 288,
+    "max_achievable_tflops": {
+        "matrix_fp16": 1310,
+        "matrix_bf16": 1452,
+        "matrix_fp32": 154,
+        "matrix_fp64": 76,
+        "matrix_fp8": 3168,
+        "matrix_fp4": 5146,
+        "matrix_fp6": 2721,
+        "matrix_int8": 2238,
+        "vector_fp16": 140,
+        "vector_bf16": 112,
+        "vector_fp32": 104,
+        "vector_fp64": 54,
+        "matrix_fp4_ck": 5146,
+        "matrix_fp4_triton": 2722
+    },
+    "source": "These are benchmark derived peak flops and bw; matrix_fp4_{ck,triton} added by hand from the same run's SUMMARY block (microbench writes only the max into matrix_fp4)"
+}

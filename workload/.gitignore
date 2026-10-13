@@ -1,0 +1,9 @@
+# Run artifacts stay out of the repo: per-run STATE, logs and candidate sources live
+# here and have nothing to do with the code.
+runs/
+__pycache__/
+*.pyc
+# Filled-in credential files. The template runners/claude.env.example is committed; a
+# filled-in copy never is.
+*.env
+!runners/*.env.example

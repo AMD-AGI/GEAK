@@ -1,0 +1,20 @@
+{
+  "_comment": "Smoke config: **real agent**, fake tasks. Proves the worker -> runner -> claude -> measure -> KEEP/revert -> verify -> finalize chain holds under real sessions. The fake tasks are CPU-only frozen harnesses (tests/make_fake_tasks.py), so no GPU is occupied; it does spend a small number of tokens. Point TASKS_DIR at them from the command line.",
+  "run_root": "/tmp/wl_smoke_real",
+  "runner": "claude",
+  "order": ["optimize"],
+  "runner_env": {
+    "env_file": "/shared_nfs/zihao/kernel_agent/ax/.secrets/claude.env"
+  },
+  "stages": {
+    "optimize": {
+      "skill": "subagent-raw",
+      "mode": "script",
+      "params": {
+        "time_budget_sec": 420, "attempt_cap_sec": 180, "attempt_min_sec": 0,
+        "budget": 1, "keep_threshold": 1.045, "verify_repeats": 2, "gpus": "0,1",
+        "heartbeat_stale_sec": 300, "bad_node_limit": 2
+      }
+    }
+  }
+}

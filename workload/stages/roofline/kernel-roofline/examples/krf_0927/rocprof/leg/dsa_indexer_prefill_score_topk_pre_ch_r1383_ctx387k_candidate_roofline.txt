@@ -1,0 +1,523 @@
+
+Below is the roofline information of the kernel:
+
+kernel function name:
+- _gluon_fp8_mqa_logits_kernel
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 1148.48 peak: 6857.0 utilization_pct: 16.74901560449176
+COMPUTE UTILIZATION:
+- VALU FLOPs (F16): actual: 560.7 peak: 153727.48428186326 utilization_pct: 0.3647363401666954
+- VALU FLOPs (F32): actual: 26895.58 peak: 153392.17676432632 utilization_pct: 17.533866829025257
+- MFMA FLOPs (F8): actual: 2306615.89 peak: 4949468.1 utilization_pct: 46.603308545417235
+ARITHMETIC INTENSITY:
+- AI HBM: value: 2032.31 Flops/byte
+- AI L2: value: 785.52 Flops/byte
+- AI L1: value: 112.96 Flops/byte
+- Performance (TFLOPs): value: 2331.21866 TFLOPS
+
+kernel function name:
+- void sglang::topk_ragged_kernel<true>(sglang::TopKRaggedParams)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 4887.99 peak: 6857.0 utilization_pct: 71.28467259734578
+COMPUTE UTILIZATION:
+- VALU FLOPs (F16): actual: 1263.47 peak: 153727.48428186326 utilization_pct: 0.8218894662215349
+- VALU FLOPs (F32): actual: 50.48 peak: 153392.17676432632 utilization_pct: 0.03290910988085012
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.27 Flops/byte
+- AI L2: value: 0.41 Flops/byte
+- AI L1: value: 0.23 Flops/byte
+- Performance (TFLOPs): value: 1.31299 TFLOPS
+
+kernel function name:
+- void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::MaxNanFunctor<float> >, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::MaxNanFunctor<float> >, unsigned int, float, 4, 4>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 2116.14 peak: 6857.0 utilization_pct: 30.861017937873704
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<float, 4, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<float, float, HIP_vector_type<float, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(int, float)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<float, float, HIP_vector_type<float, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(int, float)#1})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 1497.65 peak: 6857.0 utilization_pct: 21.84118419133732
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 5987.37 peak: 153392.17676432632 utilization_pct: 3.9033085821574014
+ARITHMETIC INTENSITY:
+- AI HBM: value: 3.83 Flops/byte
+- AI L2: value: 3.83 Flops/byte
+- AI L1: value: 3.83 Flops/byte
+- Performance (TFLOPs): value: 9.69003 TFLOPS
+
+kernel function name:
+- void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 4925.07 peak: 6857.0 utilization_pct: 71.82543386320548
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 8452.42 peak: 153392.17676432632 utilization_pct: 5.5103331723275595
+ARITHMETIC INTENSITY:
+- AI HBM: value: 1.7 Flops/byte
+- AI L2: value: 2.29 Flops/byte
+- AI L1: value: 1.17 Flops/byte
+- Performance (TFLOPs): value: 9.80582 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::AbsFunctor<float>, std::array<char*, 2ul> >(int, at::native::AbsFunctor<float>, std::array<char*, 2ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 4186.4 peak: 6857.0 utilization_pct: 61.05293860288755
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 5069.28 peak: 6857.0 utilization_pct: 73.92854017792037
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 1013.17 peak: 153392.17676432632 utilization_pct: 0.6605095653324271
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.2 Flops/byte
+- AI L2: value: 0.33 Flops/byte
+- AI L1: value: 0.2 Flops/byte
+- Performance (TFLOPs): value: 1.14874 TFLOPS
+
+kernel function name:
+- void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 10.27 peak: 6857.0 utilization_pct: 0.14977395362403384
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 242.42 peak: 6857.0 utilization_pct: 3.5353653201108357
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- __amd_rocclr_copyBuffer
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 323.45 peak: 6857.0 utilization_pct: 4.717077439113314
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 395.62 peak: 6857.0 utilization_pct: 5.7695785328861025
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 712.13 peak: 6857.0 utilization_pct: 10.38544553011521
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<float, 4, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<float, float, HIP_vector_type<float, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(int, float)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<float, float, HIP_vector_type<float, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(int, float)#1})
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 1.56 peak: 6857.0 utilization_pct: 0.02275047396820767
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 0.23 peak: 153392.17676432632 utilization_pct: 0.0001499424578564883
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.15 Flops/byte
+- AI L2: value: 10.0 Flops/byte
+- AI L1: value: 10.0 Flops/byte
+- Performance (TFLOPs): value: 0.00023 TFLOPS
+
+kernel function name:
+- void at::native::reduce_kernel<512, 1, at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::MaxNanFunctor<int> >, unsigned int, int, 4, 4> >(at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::MaxNanFunctor<int> >, unsigned int, int, 4, 4>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 2.58 peak: 6857.0 utilization_pct: 0.0376257838704973
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 558.79 peak: 6857.0 utilization_pct: 8.149190608137669
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 12.46 peak: 6857.0 utilization_pct: 0.18171211900247922
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, function_traits<at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>::result_type*)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 672.61 peak: 6857.0 utilization_pct: 9.809100189587284
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::BUnaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul> >(int, at::native::BUnaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 615.63 peak: 6857.0 utilization_pct: 8.97812454426134
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 38.68 peak: 153392.17676432632 utilization_pct: 0.025216409869082464
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.06 Flops/byte
+- AI L2: value: 0.08 Flops/byte
+- AI L1: value: 0.06 Flops/byte
+- Performance (TFLOPs): value: 0.04569 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 17.68 peak: 6857.0 utilization_pct: 0.25783870497302025
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::BUnaryFunctor<long, long, long, at::native::remainder_kernel_cuda(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long, long)#1}>, std::array<char*, 2ul> >(int, at::native::BUnaryFunctor<long, long, long, at::native::remainder_kernel_cuda(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long, long)#1}>, std::array<char*, 2ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 1705.97 peak: 6857.0 utilization_pct: 24.87924748432259
+COMPUTE UTILIZATION:
+- VALU FLOPs (F32): actual: 211.75 peak: 153392.17676432632 utilization_pct: 0.13804484978744083
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.12 Flops/byte
+- AI L2: value: 0.1 Flops/byte
+- AI L1: value: 0.12 Flops/byte
+- Performance (TFLOPs): value: 0.21175 TFLOPS
+
+kernel function name:
+- __amd_rocclr_initHeap
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 40.69 peak: 6857.0 utilization_pct: 0.5934081960040835
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<long, long, long, at::native::binary_internal::MulFunctor<long> >, std::array<char*, 2ul> >(int, at::native::AUnaryFunctor<long, long, long, at::native::binary_internal::MulFunctor<long> >, std::array<char*, 2ul>)
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 2056.07 peak: 6857.0 utilization_pct: 29.984978853726123
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+kernel function name:
+- __amd_rocclr_fillBufferAligned
+HBM BANDWIDTH UTILIZATION:
+- HBM Bandwidth: actual: 2.16 peak: 6857.0 utilization_pct: 0.03150065626367216
+ARITHMETIC INTENSITY:
+- AI HBM: value: 0.0 Flops/byte
+- AI L2: value: 0.0 Flops/byte
+- AI L1: value: 0.0 Flops/byte
+- Performance (TFLOPs): value: 0.0 TFLOPS
+
+=== Roofline efficiency (empirical + datasheet cross-check) ===
+
+kernel: _gluon_fp8_mqa_logits_kernel
+  AI (HBM)            : 2032.31 FLOP/byte
+  Perf (achieved)     : 2331218.66 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [mfma_f8]: 4949468.10 GFLOP/s
+  ridge(emp)          : 721.81 FLOP/byte  (compute-bound)
+  attainable          : 4949468.10 GFLOP/s  (min of compute 4949468.10 , BW*AI 13935549.67)
+  >> Roofline Eff.    : 0.47  (47.10 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [mfma_f8]: 5000000.00 GFLOP/s
+  ridge(ds)           : 625.00 FLOP/byte  (compute-bound)
+  >> Roofline Eff.(ds): 0.47  (46.62 %)
+  HBM util (real)     : 16.75 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void sglang::topk_ragged_kernel<true>(sglang::TopKRaggedParams)
+  AI (HBM)            : 0.27 FLOP/byte
+  Perf (achieved)     : 1312.99 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f16]: 153727.48 GFLOP/s
+  ridge(emp)          : 22.42 FLOP/byte  (memory-bound)
+  attainable          : 1851.39 GFLOP/s  (min of compute 153727.48 , BW*AI 1851.39)
+  >> Roofline Eff.    : 0.71  (70.92 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f16:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 71.28 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::MaxNanFunctor<float> >, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::MaxNanFunctor<float> >, unsigned int, float, 4, 4>)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 30.86 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<float, 4, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<float, float, HIP_vector_type<float, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(int, float)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<float, float, HIP_vector_type<float, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(int, float)#1})
+  AI (HBM)            : 3.83 FLOP/byte
+  Perf (achieved)     : 9690.03 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 26262.31 GFLOP/s  (min of compute 153392.18 , BW*AI 26262.31)
+  >> Roofline Eff.    : 0.37  (36.90 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 21.84 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1})
+  AI (HBM)            : 1.70 FLOP/byte
+  Perf (achieved)     : 9805.82 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 11656.90 GFLOP/s  (min of compute 153392.18 , BW*AI 11656.90)
+  >> Roofline Eff.    : 0.84  (84.12 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 71.83 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::AbsFunctor<float>, std::array<char*, 2ul> >(int, at::native::AbsFunctor<float>, std::array<char*, 2ul>)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 61.05 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::float8_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)
+  AI (HBM)            : 0.20 FLOP/byte
+  Perf (achieved)     : 1148.74 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 1371.40 GFLOP/s  (min of compute 153392.18 , BW*AI 1371.40)
+  >> Roofline Eff.    : 0.84  (83.76 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 73.93 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1})
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.15 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::DivFunctor<float> > const&)::{lambda(int, bool)#1})
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 3.54 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: __amd_rocclr_copyBuffer
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 4.72 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 5.77 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul> >(int, at::native::CUDAFunctorOnSelf_add<long>, std::array<char*, 2ul>)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 10.39 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::(anonymous namespace)::distribution_elementwise_grid_stride_kernel<float, 4, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<float, float, HIP_vector_type<float, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(int, float)#1}>(long, at::PhiloxCudaState, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::(anonymous namespace)::distribution_nullary_kernel<float, float, HIP_vector_type<float, 4u>, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2}, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_and_transform<float, float, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::CUDAGeneratorImpl*, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(hiprandStatePhilox4_32_10*)#2} const&, at::native::templates::cuda::normal_kernel<at::CUDAGeneratorImpl*>(at::TensorBase const&, double, double, at::CUDAGeneratorImpl*)::{lambda()#1}::operator()() const::{lambda()#2}::operator()() const::{lambda(float)#1})::{lambda(int, float)#1})
+  AI (HBM)            : 0.15 FLOP/byte
+  Perf (achieved)     : 0.23 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 1028.55 GFLOP/s  (min of compute 153392.18 , BW*AI 1028.55)
+  >> Roofline Eff.    : 0.00  (0.02 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.02 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::reduce_kernel<512, 1, at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::MaxNanFunctor<int> >, unsigned int, int, 4, 4> >(at::native::ReduceOp<int, at::native::func_wrapper_t<int, at::native::MaxNanFunctor<int> >, unsigned int, int, 4, 4>)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.04 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 8.15 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.18 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(int, at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}, function_traits<at::native::arange_cuda_out(c10::Scalar const&, c10::Scalar const&, c10::Scalar const&, at::Tensor&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>::result_type*)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 9.81 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::BUnaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul> >(int, at::native::BUnaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> >, std::array<char*, 2ul>)
+  AI (HBM)            : 0.06 FLOP/byte
+  Perf (achieved)     : 45.69 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 411.42 GFLOP/s  (min of compute 153392.18 , BW*AI 411.42)
+  >> Roofline Eff.    : 0.11  (11.11 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 8.98 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<long>, std::array<char*, 3ul>)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.26 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::BUnaryFunctor<long, long, long, at::native::remainder_kernel_cuda(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long, long)#1}>, std::array<char*, 2ul> >(int, at::native::BUnaryFunctor<long, long, long, at::native::remainder_kernel_cuda(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(long, long)#1}>, std::array<char*, 2ul>)
+  AI (HBM)            : 0.12 FLOP/byte
+  Perf (achieved)     : 211.75 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [valu_f32]: 153392.18 GFLOP/s
+  ridge(emp)          : 22.37 FLOP/byte  (memory-bound)
+  attainable          : 822.84 GFLOP/s  (min of compute 153392.18 , BW*AI 822.84)
+  >> Roofline Eff.    : 0.26  (25.73 %)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [valu_f32:no-datasheet]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 24.88 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: __amd_rocclr_initHeap
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.59 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<long, long, long, at::native::binary_internal::MulFunctor<long> >, std::array<char*, 2ul> >(int, at::native::AUnaryFunctor<long, long, long, at::native::binary_internal::MulFunctor<long> >, std::array<char*, 2ul>)
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 29.98 %  [vs fixed 6857.0 GB/s, cross-run only]
+
+kernel: __amd_rocclr_fillBufferAligned
+  AI (HBM)            : 0.00 FLOP/byte
+  Perf (achieved)     : 0.00 GFLOP/s
+  Peak_BW_emp (HBM)   : 6857.00 GB/s
+  Peak_Compute [auto:none]: N/A GFLOP/s
+  -> insufficient data for efficiency (missing peak/AI/perf)
+  Peak_BW_ds (HBM)    : 8000.00 GB/s
+  Peak_Compute_ds [datasheet:none]: N/A GFLOP/s
+  -> datasheet Eff. N/A (no datasheet peak for arch 'gfx950')
+  HBM util (real)     : 0.03 %  [vs fixed 6857.0 GB/s, cross-run only]

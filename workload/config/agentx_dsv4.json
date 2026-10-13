@@ -1,0 +1,82 @@
+{
+  "_comment": "Scenario config: AgentX / DeepSeek-V4 / TP8 / global conc=10, aligned with CI run 34783501425. Layered on top of default.json. Every site-local absolute path appears here and nowhere in the code.",
+
+  "run_root": "workload/runs/agentx_dsv4",
+  "runner": "claude",
+
+  "runner_env": {
+    "_comment": "env_file points at a credential file **outside the repo** (mode 600); only the path appears here, never the key. This cluster authenticates through the AMD gateway rather than ~/.claude credentials. If the file is missing the runner returns 78 and the worker stops immediately instead of burning budget on retries that cannot succeed. See runners/claude.env.example for the template.",
+    "env_file": "/shared_nfs/zihao/kernel_agent/ax/.secrets/claude.env"
+  },
+
+  "stages": {
+    "baseline": {
+      "skill": "adopt-measured-receipt",
+      "params": {
+        "receipt": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/baseline/tp8_conc10/measured_baseline.json",
+        "metric": "output_token_throughput",
+        "unit": "tok/s",
+        "noise_band": 1.045,
+        "max_reference_drift": 0.05,
+        "_note_receipt": "A full reproduction of CI run 34783501425: 446.87889 tok/s against a CI reference of 446.56324 (0.07% apart), 1455 successes / 0 errors, TP8/EP1, 8 GPUs, global conc=10, MTP 5-6-1.",
+        "_note_node": "The receipt does not record a node name. Fill in `node` if you know which machine it was, otherwise applyback will warn about cross-node risk.",
+        "node": null
+      }
+    },
+
+    "profile": {
+      "skill": "agentx-kernel-extraction-standalone",
+      "params": {
+        "selection": "per-phase Top 5 AND overall GPU-time share > 3%",
+        "max_targets": null,
+        "trace_dir": null,
+        "serving_env": null,
+        "_note_window": "The capture window must land in steady state, not in the ramp. This scenario once captured a window with prefill:decode = 32:7 while the true ratio was 1:1119 — ranking on raw window percentages would have routed the entire kernel budget at prefill."
+      }
+    },
+
+    "roofline": {
+      "skill": "kernel-roofline",
+      "params": {
+        "roofline_mode": "tl-only",
+        "roof_key": "roofline_us",
+        "arch_json": null,
+        "rank_key": "expected_e2e_gain_pct",
+        "_note_arch": "The arch JSON is not a constant. This cluster carries four MI355X variants whose bf16 peaks spread by 18.6%. Which arch JSON, its md5, and the peak key it parsed must appear in every row's provenance.",
+        "_note_derate": "tl-only bandwidth is already derated; do not stack target_eff=0.90 on top. That is a double derate and inflates attainable_speedup by roughly 17%."
+      }
+    },
+
+    "optimize": {
+      "skill": "geak-kernel-workflow",
+      "params": {
+        "time_budget_sec": 172800,
+        "attempt_cap_sec": 1500,
+        "budget": 4,
+        "min_improve": 0.05,
+        "keep_threshold": 1.045,
+        "apply_to_original": true,
+        "gpus_per_task": 1,
+        "nodes": [],
+        "image": null,
+        "_note_cap": "Short attempts chained through apply_to_original. Measured: a 2 h cap gave 69 attempts / 11 keeps (16%); a 1500 s cap gave 85 attempts / 22 keeps (26%), in under half the wall-clock.",
+        "_note_keep": "1.045 comes from measurement, not from the 1.02 in the documentation: in the previous campaign four kernels whose source was md5-identical to the original re-measured at 1.0246-1.0453 from cold."
+      }
+    },
+
+    "applyback": {
+      "skill": "overlay-e2e-ab",
+      "params": {
+        "exclusive_node": true,
+        "repeats": 3,
+        "smoke_required": true,
+        "base_url": null,
+        "inferencex_path": null,
+        "duration_s": 3600,
+        "metric": "p90_intvty_inferencex",
+        "_note_exclusive": "End-to-end re-measurement needs the full 8-GPU serving stack (TP8/conc10). Once it starts it owns the whole machine and cannot run alongside optimize.",
+        "_note_gap": "An operator win with no end-to-end movement has already happened twice in this scenario: FlyDSL MoE sorting measured 1.80x on the microbenchmark and +0.2356% whole-machine; MoE split4 measured 1.342x on local replay and -0.0872% whole-machine. Operator speedup and end-to-end delta must be reported as two separate numbers."
+      }
+    }
+  }
+}

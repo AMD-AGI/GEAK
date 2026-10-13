@@ -1,0 +1,33 @@
+[leg] AI and bound type, folded as sum(w*FLOPs)/sum(w*bytes); 'cmp%' = share of weighted device time on the compute axis
+
+kernel/regime                          peak_spec |    TL AI  ridge  cmp% |    RP AI  ridge  cmp% |  AI ratio   n
+add_rmsnorm_quant/decode             vector_bf16 |      0.6   16.5    0% |      0.2     22    0% |     3.89x   1
+dsa_indexer_decode/decode             matrix_fp8 |    314.6  458.4    0% |    345.7    722    0% |     0.91x   1
+dsa_indexer_prefill/prefill           matrix_fp8 |   1965.1  458.4  100% |   1522.4    722  100% |     1.29x   1
+dsa_indexer_prefill_score_topk/prefill          matrix_fp8 |   1007.9  458.4  100% |   1331.4    645   89% |     0.76x   1
+dsa_indexer_score_topk/decode          matrix_fp8 |    272.0  458.4    0% |    335.0    493    0% |     0.81x   1
+dsa_indexer_topk/decode              vector_fp32 |      0.0     15    0% |      0.2     22    0% |     0.00x   1
+mxfp4_fused_moe/prefill               matrix_fp4 |   1825.0  745.2  100% |    277.0    955    0% |     6.59x   1
+sparse_mla_prefill/prefill            matrix_fp8 |     15.9  458.4    0% |    316.1    722    0% |     0.05x   1
+
+[48 of 56 TL rows had no rocprof file -- this table covers 8 case(s), NOT the whole leg]
+  missing add_rmsnorm_quant_dec_bs2_m12_res_candidate_roofline.txt
+  missing add_rmsnorm_quant_dec_bs3_m18_nores_candidate_roofline.txt
+  missing add_rmsnorm_quant_dec_bs2_m12_nores_candidate_roofline.txt
+  missing add_rmsnorm_quant_pre_m10129_res_candidate_roofline.txt
+  missing add_rmsnorm_quant_pre_m10129_nores_candidate_roofline.txt
+  missing add_rmsnorm_quant_pre_m1137_res_candidate_roofline.txt
+  missing add_rmsnorm_quant_pre_m1137_nores_candidate_roofline.txt
+  missing dsa_indexer_decode_dec_bs3_ctx173k_candidate_roofline.txt
+  missing dsa_indexer_decode_dec_bs3_ctx217k_candidate_roofline.txt
+  missing dsa_indexer_decode_dec_bs3_ctx261k_candidate_roofline.txt
+  missing dsa_indexer_decode_dec_bs2_ctx318k_candidate_roofline.txt
+  missing dsa_indexer_decode_dec_bs2_ctx418k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_ch_r684_ctx784k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_ch_r2934_ctx182k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_ch_r14082_ctx38k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_ch_r5406_ctx99k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_un_r2639_ctx97k_candidate_roofline.txt
+  missing dsa_indexer_prefill_score_topk_pre_un_r1784_ctx185k_candidate_roofline.txt
+  missing dsa_indexer_prefill_pre_m3480_kv113k_candidate_roofline.txt
+  missing dsa_indexer_prefill_pre_m2457_kv201k_candidate_roofline.txt

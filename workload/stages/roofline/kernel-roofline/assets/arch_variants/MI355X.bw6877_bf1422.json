@@ -1,0 +1,20 @@
+{
+    "name": "MI355X",
+    "mem_bw_gbps": 6877,
+    "memory_gb": 288,
+    "max_achievable_tflops": {
+        "matrix_fp16": 1276,
+        "matrix_bf16": 1422,
+        "matrix_fp32": 153,
+        "matrix_fp64": 75,
+        "matrix_fp8": 3098,
+        "matrix_fp4": 4964,
+        "matrix_fp6": 2337,
+        "matrix_int8": 2182,
+        "vector_fp16": 133,
+        "vector_bf16": 110,
+        "vector_fp32": 102,
+        "vector_fp64": 53
+    },
+    "source": "These are benchmark derived peak flops and bw"
+}

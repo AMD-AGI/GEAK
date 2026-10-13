@@ -1,0 +1,80 @@
+{
+  "_comment": "Default knobs for workload/. A scenario config (e.g. agentx_dsv4.json) layers on top of this, and command-line --set layers on top of that. Every path is either absolute or resolved relative to the GEAK repository root.",
+
+  "run_root": "workload/runs/default",
+  "runner": "claude",
+  "order": ["baseline", "profile", "roofline", "optimize", "applyback"],
+
+  "stages": {
+    "baseline": {
+      "skill": "adopt-measured-receipt",
+      "mode": "script",
+      "params": {
+        "receipt": null,
+        "metric": "output_token_throughput",
+        "unit": "tok/s",
+        "noise_band": 1.045
+      }
+    },
+
+    "profile": {
+      "skill": "agentx-kernel-extraction-standalone",
+      "mode": "agent",
+      "params": {
+        "selection": "per-phase Top 5 AND overall GPU-time share > 3%",
+        "max_targets": null,
+        "trace_dir": null,
+        "serving_env": null
+      }
+    },
+
+    "roofline": {
+      "skill": "kernel-roofline",
+      "mode": "agent",
+      "params": {
+        "roofline_mode": "tl-only",
+        "arch_json": null,
+        "rank_key": "expected_e2e_gain_pct"
+      }
+    },
+
+    "optimize": {
+      "skill": "geak-kernel-workflow",
+      "mode": "script",
+      "params": {
+        "time_budget_sec": 172800,
+        "attempt_cap_sec": 1500,
+        "attempt_min_sec": 600,
+        "budget": 4,
+        "min_improve": 0.05,
+        "deep_cost": "medium",
+        "gpus_per_task": 1,
+        "nodes": [],
+        "image": null,
+        "heartbeat_stale_sec": 900,
+        "bad_node_limit": 2,
+        "keep_threshold": 1.045,
+        "apply_to_original": true,
+        "max_tasks": null
+      }
+    },
+
+    "applyback": {
+      "skill": "overlay-e2e-ab",
+      "mode": "script",
+      "params": {
+        "exclusive_node": true,
+        "repeats": 3,
+        "serving_env": null,
+        "smoke_required": true
+      }
+    }
+  },
+
+  "runner_env": {
+    "_comment": "state_dir_base must sit on local disk, never on NFS (the agent's sqlite gets poisoned there). env_file points at a credential/gateway file kept **outside the repo**; see runners/claude.env.example for the template — keys are never committed. Leaving model null uses the CLI's own default rather than inheriting an ANTHROPIC_MODEL that may already be exported in the environment.",
+    "state_dir_base": "/dev/shm/workload_agent_state",
+    "env_file": null,
+    "model": null
+  }
+}

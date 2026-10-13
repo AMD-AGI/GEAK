@@ -1,0 +1,209 @@
+{
+ "add_rmsnorm_quant_dec_bs3_m18_res": {
+  "kernel": "add_rmsnorm_quant",
+  "regime": "decode",
+  "case": "dec_bs3_m18_res",
+  "w": 0.6221,
+  "measured_us": 9.002166666666659,
+  "tl_roof_us": 0.1308187253901123,
+  "rp_roof_us_emp": 0.44587226666666624,
+  "rp_roof_us_ds": null,
+  "coverage": 1.0,
+  "coverage_ds": 0.0,
+  "no_eff": [],
+  "no_eff_ds": [
+   [
+    "void at::native::(anonymous namespace)::CatArrayBa",
+    0.004596433333333312
+   ],
+   [
+    "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi25",
+    0.004405733333333347
+   ]
+  ]
+ },
+ "dsa_indexer_decode_dec_bs3_ctx104k": {
+  "kernel": "dsa_indexer_decode",
+  "regime": "decode",
+  "case": "dec_bs3_ctx104k",
+  "w": 0.1669,
+  "measured_us": 46.743566666666666,
+  "tl_roof_us": 7.125212191920665,
+  "rp_roof_us_emp": 37.29201748666667,
+  "rp_roof_us_ds": 31.96325088666666,
+  "coverage": 1.0,
+  "coverage_ds": 1.0,
+  "no_eff": [],
+  "no_eff_ds": []
+ },
+ "dsa_indexer_prefill_score_topk_pre_ch_r1383_ctx387k": {
+  "kernel": "dsa_indexer_prefill_score_topk",
+  "regime": "prefill",
+  "case": "pre_ch_r1383_ctx387k",
+  "w": 0.3222,
+  "measured_us": 5293.977533333329,
+  "tl_roof_us": 1398.536235657652,
+  "rp_roof_us_emp": 1066.7364729666658,
+  "rp_roof_us_ds": 1056.148517899999,
+  "coverage": 0.7303319937272623,
+  "coverage_ds": 0.7303319937272623,
+  "no_eff": [
+   [
+    "void sgl::dsa_topk::coop_topk_kernel<2048u, 12u, 4",
+    1.419150233333331
+   ],
+   [
+    "void rocprim::ROCPRIM_400200_NS::detail::trampolin",
+    0.004256400000000591
+   ],
+   [
+    "Memcpy DtoD (Device -> Device)",
+    0.004209733333332664
+   ]
+  ],
+  "no_eff_ds": [
+   [
+    "void sgl::dsa_topk::coop_topk_kernel<2048u, 12u, 4",
+    1.419150233333331
+   ],
+   [
+    "void rocprim::ROCPRIM_400200_NS::detail::trampolin",
+    0.004256400000000591
+   ],
+   [
+    "Memcpy DtoD (Device -> Device)",
+    0.004209733333332664
+   ]
+  ]
+ },
+ "dsa_indexer_prefill_pre_m10129_kv40k": {
+  "kernel": "dsa_indexer_prefill",
+  "regime": "prefill",
+  "case": "pre_m10129_kv40k",
+  "w": 0.167,
+  "measured_us": 1575.4175666666665,
+  "tl_roof_us": 743.0420411581292,
+  "rp_roof_us_emp": 422.21190786666665,
+  "rp_roof_us_ds": 417.95828043666666,
+  "coverage": 1.0,
+  "coverage_ds": 1.0,
+  "no_eff": [],
+  "no_eff_ds": []
+ },
+ "dsa_indexer_score_topk_dec_bs3_ctx104k": {
+  "kernel": "dsa_indexer_score_topk",
+  "regime": "decode",
+  "case": "dec_bs3_ctx104k",
+  "w": 0.1669,
+  "measured_us": 80.08699999999996,
+  "tl_roof_us": 8.241248942686306,
+  "rp_roof_us_emp": 37.87895691333329,
+  "rp_roof_us_ds": 53.90655969999997,
+  "coverage": 1.0,
+  "coverage_ds": 0.5859923166889337,
+  "no_eff": [],
+  "no_eff_ds": [
+   [
+    "void sglang::topk_main_kernel<true, 2, (sglang::To",
+    0.03315663333333335
+   ]
+  ]
+ },
+ "dsa_indexer_topk_dec_bs3_ctx104k": {
+  "kernel": "dsa_indexer_topk",
+  "regime": "decode",
+  "case": "dec_bs3_ctx104k",
+  "w": 0.1669,
+  "measured_us": 30.29536666666667,
+  "tl_roof_us": 1.116036750765641,
+  "rp_roof_us_emp": 0.9633926600000001,
+  "rp_roof_us_ds": null,
+  "coverage": 1.0,
+  "coverage_ds": 0.0,
+  "no_eff": [],
+  "no_eff_ds": [
+   [
+    "void sglang::topk_main_kernel<true, 2, (sglang::To",
+    0.03029536666666667
+   ]
+  ]
+ },
+ "mxfp4_fused_moe_pre_M32768": {
+  "kernel": "mxfp4_fused_moe",
+  "regime": "prefill",
+  "case": "pre_M32768",
+  "w": 0.3276,
+  "measured_us": 2584.3903333333346,
+  "tl_roof_us": 544.6455592579256,
+  "rp_roof_us_emp": 1887.3280959257029,
+  "rp_roof_us_ds": 1515.6958896026601,
+  "coverage": 0.9441236753323249,
+  "coverage_ds": 0.6263216689016656,
+  "no_eff": [
+   [
+    "void aiter::opus_moe_sorting_entry<aiter::MoeSorti",
+    0.0669811000000009
+   ],
+   [
+    "void aiter::mxfp4_moe_sort_kernel<256, 32, 24, 32>",
+    0.06021319999999952
+   ],
+   [
+    "void aiter::opus_moe_sorting_entry<aiter::MoeSorti",
+    0.006547100000000473
+   ],
+   [
+    "void aiter::opus_moe_sorting_entry<aiter::MoeSorti",
+    0.005681799999999704
+   ],
+   [
+    "void aiter::opus_moe_sorting_entry<aiter::MoeSorti",
+    0.004983033333333939
+   ]
+  ],
+  "no_eff_ds": [
+   [
+    "moe_reduction_kernel_0",
+    0.7388950666666674
+   ],
+   [
+    "_ZN5aiter37dynamic_per_group_scaled_quant_kernelID",
+    0.08242936666666661
+   ],
+   [
+    "void aiter::opus_moe_sorting_entry<aiter::MoeSorti",
+    0.0669811000000009
+   ],
+   [
+    "void aiter::mxfp4_moe_sort_kernel<256, 32, 24, 32>",
+    0.06021319999999952
+   ],
+   [
+    "void aiter::opus_moe_sorting_entry<aiter::MoeSorti",
+    0.006547100000000473
+   ],
+   [
+    "void aiter::opus_moe_sorting_entry<aiter::MoeSorti",
+    0.005681799999999704
+   ],
+   [
+    "void aiter::opus_moe_sorting_entry<aiter::MoeSorti",
+    0.004983033333333939
+   ]
+  ]
+ },
+ "sparse_mla_prefill_pre_seq32768": {
+  "kernel": "sparse_mla_prefill",
+  "regime": "prefill",
+  "case": "pre_seq32768",
+  "w": 0.3546,
+  "measured_us": 4568.750100000001,
+  "tl_roof_us": 10748.477451946916,
+  "rp_roof_us_emp": 1492.1537826600002,
+  "rp_roof_us_ds": 1278.7931529900002,
+  "coverage": 1.0,
+  "coverage_ds": 1.0,
+  "no_eff": [],
+  "no_eff_ds": []
+ }
+}
