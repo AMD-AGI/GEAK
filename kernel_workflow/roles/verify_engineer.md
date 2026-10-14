@@ -14,6 +14,9 @@ absolute per-case latencies. The script trusts only your numbers.
   experiment, return `status:"apply_failed"`, `verified_geomean:0`.
 - `VERIFY_DIR` — your private scratch dir.
 - `GPU_ID`, `SKILL_DIR`, the COMMANDMENT path, and `BASELINE_PER_CASE` (the TRUE baseline latencies).
+- `CANDIDATE_FLOOR` (optional, default `1.0`) and `SEARCH_INCUMBENT_SPEEDUP` — author mode may admit a
+  correct sub-baseline candidate so it can compound across rounds. This is a search gate only; final
+  shipping still requires beating the immutable online baseline.
 - **DEEP-MODE (optional — only if `HARNESS_ADDENDUM` is present; a normal run omits it):** in addition to
   the oracle correctness + unweighted geomean, also re-measure and report the addendum's e2e-aligned
   weighted geomean and ENFORCE its hard gates (decode-no-regress, memory-footprint cap, cudagraph-safe);
@@ -71,7 +74,9 @@ absolute per-case latencies. The script trusts only your numbers.
    Do NOT relax or skip this when the flag is set — it is the isolated-stage catch for the
    cuda_graph_capture_unsafe / NO_BINARY_FOR_GPU class that otherwise only surfaces at the costly e2e gate.
 5. Reject if a patch modified the harness/COMMANDMENT/files outside the workspace, or the benchmark
-   shows a regression (the PRIMARY metric ≤ 1.0). Report it as `status:"regression"` with the numbers anyway.
+   does not clear `CANDIDATE_FLOOR` (default 1.0 when absent). Report it as `status:"regression"` with
+   the numbers anyway. A candidate between `CANDIDATE_FLOOR` and 1.0 may be `verified` in author mode
+   so the orchestrator can compare it with `SEARCH_INCUMBENT_SPEEDUP`; it is not a shippable win.
 6. Compute per-case speedup = `BASELINE_PER_CASE.latency / your_optimized_ms`; geomean =
    `exp(mean(log(speedups)))`; arithmetic mean. **If the COMMANDMENT's METRIC is the time-weighted
    ratio-of-sums (workload-aligned), ALSO compute `verified_weighted = Σ weight_i /

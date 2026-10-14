@@ -75,9 +75,11 @@ import time
 # Moved to the FRONT even when already present: this script's own directory is sys.path[0], it
 # holds an unrelated `kb.py` (the learned-card CLI), and that shadows the `kb` PACKAGE for anyone
 # who has the repo root on PYTHONPATH — every import below then fails with "kb is not a package".
+# An empty PYTHONPATH entry run from the repo root puts the root at the END of sys.path, which is
+# how the lanes invoke this, so the existing entry is matched by resolved path rather than by
+# string equality. Empty entries are left alone: they are cwd, not this repo.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-while _REPO_ROOT in sys.path:
-    sys.path.remove(_REPO_ROOT)
+sys.path[:] = [p for p in sys.path if not p or os.path.abspath(p) != _REPO_ROOT]
 sys.path.insert(0, _REPO_ROOT)
 
 from kb.attest import OUTCOMES as _OUTCOMES

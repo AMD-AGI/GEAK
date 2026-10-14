@@ -231,6 +231,9 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
   "workload_aligned": false,
   "baseline_weighted_total_ms": 0.0,
   "weights_provenance": "trace|caller|regime_prior|mixed",
+  "measurement_method": "CUDA events, same-session frozen-baseline A/B",
+  "warmup_iterations": 10,
+  "benchmark_iterations": 100,
   "num_test_cases": 0,
   "reliable": true,
   "notes": "anything downstream agents must know (incl. any naive-baseline / regime_prior caveats)"
