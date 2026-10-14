@@ -258,8 +258,12 @@ const R9700 = {
   }
   {
     ok(!/one fp8 MFMA/.test(BODY), 'R9700-reachable graph/head prompts have no hard-coded fp8 MFMA');
-    ok(/MATRIX_CORE_NAME = RDNA4_ISOLATE \? 'WMMA' : 'MFMA'/.test(BODY),
+    ok(/MATRIX_CORE_NAME = CLIENT_RDNA_ISOLATE \? 'WMMA' : 'MFMA'/.test(BODY),
       'matrix-core guidance is architecture-aware');
+    // CLIENT_RDNA_ISOLATE is a union, not a rename: RDNA4_ISOLATE must keep
+    // meaning exactly gfx1201 so this file's R9700 assertions stay load-bearing.
+    ok(/const CLIENT_RDNA_ISOLATE = RDNA4_ISOLATE \|\| RDNA35_ISA/.test(BODY),
+      'client-RDNA isolation still contains RDNA4 isolation');
     for (const role of ['op_benchmarker.md', 'system_architect.md', 'config_tuner.md']) {
       const text = fs.readFileSync(path.join(E2E_DIR, 'roles', role), 'utf8');
       ok(/E2E_LEARNED_KB=off/.test(text), `${role} honors the learned-KB off switch`);
