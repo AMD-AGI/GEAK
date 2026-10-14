@@ -97,7 +97,8 @@ differently → flips borderline argmaxes → over-rejects valid kernels). Inste
   `rejected` with reason `accuracy_regression` (record both scores). This REPLACES byte-parity for the
   quant gate — a byte-divergent kernel that holds gsm8k accuracy is a LEGITIMATE win. Still apply the
   throughput + engagement + memory gates as usual. (You can reuse the same two servers for the throughput
-  A/B to avoid extra launches.)
+  A/B to avoid extra launches — except when `CORRECTNESS_UNSET_ENV` is in your inputs: then the accuracy
+  servers run without those variables and the throughput servers keep them, so they are separate launches.)
 
 **DEEP-MODE feedback (only if `DEEP_FEEDBACK` is in your inputs; a normal/fast run omits it).** Besides
 the gate decision, the deep-mode scheduler needs the WHY so the next co-opt waves can fix the

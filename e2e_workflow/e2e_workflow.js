@@ -264,6 +264,34 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
   : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
+// Expert-parallel degree AS THE BASELINE WAS LAUNCHED, resolved upstream (run_e2e._resolve_ep) and
+// passed down rather than re-derived from flags here. It is a KB addressing dimension beside TP:
+// the same model on the same stack with the experts sharded differently is a different deployment.
+// Unlike TP it is also a knob the Config Tuner may move mid-run (--ep-size rides EXTRA_SERVER_ARGS),
+// so this constant states the baseline's value and the accepted one lives in accepted_config.
+// Standalone runs resolve through the same Python parser as interface dispatch.
+function resolveServingEp() {
+  if (A.ep != null) {
+    const ep = Number(A.ep);
+    if (!Number.isInteger(ep) || ep < 1) throw new Error('args.ep must be a positive integer');
+    return ep;
+  }
+  if (!A.initial_extra_server_args && !A.initial_extra_env && !A.launch_recipe) return 1;
+  const { execFileSync } = require('child_process');
+  const value = execFileSync('python3', ['-c', `
+import json, os, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+from interface.run_e2e import _resolve_ep
+a = json.loads(sys.argv[2])
+print(_resolve_ep(a, None, int(sys.argv[3])))
+`, WORKFLOW_DIR, JSON.stringify({ accepted_flags: A.initial_extra_server_args || '',
+    accepted_env: A.initial_extra_env || '', launch_recipe: A.launch_recipe || '' }),
+  String(SERVING_TP)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 });
+  const ep = Number(value.trim());
+  if (!Number.isInteger(ep) || ep < 1) throw new Error('could not resolve baseline expert parallelism');
+  return ep;
+}
+const SERVING_EP = resolveServingEp();
 // ---- WALL-CLOCK BUDGET (opt-in; default OFF when absent => byte-identical) ---------------------------
 // time_budget_s is the EXTERNAL orchestrator's HARD kill budget (run_e2e.py GEAK_E2E_TIMEOUT_S),
 // forwarded so GEAK can self-pace and FINISH (Finalize/Report/Validate + workflow_return flush) BEFORE
@@ -303,8 +331,10 @@ const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remai
 // / p90 77 / max 86min), and the tail is the case this exists for: big models spend the final phase
 // waiting on server boots. A longer tail still ships the reports (Report writes them before Validate; only
 // the re-measure is at risk and run_e2e falls back). The 20% cap binds below a 5h budget.
-// Env override: GEAK_FINAL_RESERVE_S.
-const FINAL_RESERVE_CAP_FRAC = 0.2;
+// Env override: GEAK_FINAL_RESERVE_S. The cap is GEAK_FINAL_RESERVE_CAP_FRAC (clamped to 5-50%): a trace
+// replay's paired validation is two ~70min legs plus their boots, which 20% of most budgets cannot hold.
+const FINAL_RESERVE_CAP_FRAC = Math.min(0.5, Math.max(0.05,
+  parseFloat(A.final_reserve_cap_frac != null ? A.final_reserve_cap_frac : 0.2) || 0.2));
 const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
   ? Math.min(parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
              Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC))
@@ -570,6 +600,13 @@ const ACCURACY_TOL = parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01);
 const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
   ? { ACCURACY_GATE, ACCURACY_LIMIT, ACCURACY_TOL, GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
   : {};
+// Simulated speculative acceptance (run_e2e forwards the switch names it finds, e.g. SGLANG_SIMULATE_ACC_*)
+// keeps throughput comparable but serves neither deterministic nor model-faithful output, so a parity or
+// accuracy probe under it measures the simulator. The roles that run such probes are told to serve them
+// with these names unset; nothing else changes, and a run without the switches never sees the block.
+const CORRECTNESS_UNSET_ENV = String(A.correctness_unset_env || '').split(',')
+  .map((s) => s.trim()).filter((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s));
+const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_tuner', 'tuning_specialist']);
 // The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
 // measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
@@ -738,17 +775,328 @@ const EXPERT_SKILL_ROLES = new Set(['system_architect', 'op_benchmarker', 'e2e_i
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
 const ENABLE_FP8 = String(A.enable_fp8 != null ? A.enable_fp8 : 'false');    // Tier-D quant (parity-breaking)
 const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : 'true') === 'true';
-const ISL = parseInt(A.isl != null ? A.isl : 1024, 10);
-const OSL = parseInt(A.osl != null ? A.osl : 1024, 10);
-const CONC = parseInt(A.conc != null ? A.conc : 64, 10);
-// On an AgentX trace replay there is no single ISL -- the corpus spans ~89k at
-// p50 past 500k at p99 -- so isl/osl describe the shape to OPTIMIZE FOR (the
-// average the orchestrator measured on its own baseline), not the shape anything
-// is measured at. The bench client replays the corpus and ignores them. Roles
-// must therefore use isl/osl for kernel/GEMM shape synthesis only, and never
-// treat them as a benchmark they can reproduce.
-const WORKLOAD_SHAPE_PROVENANCE = String(A.workload_shape_provenance || 'handoff_workload');
+// What the CALLER declared, kept apart from the shape roles finally optimize
+// against. On a trace replay those two are not the same thing, and telling them
+// apart needs the workload kind, which is parsed further down -- so the resolved
+// ISL/OSL/CONC/WORKLOAD are defined after it (CONC beside the declaration, the
+// shape by resolveTargetShape()).
+const ISL_DECLARED = A.isl != null ? parseInt(A.isl, 10) : null;
+const OSL_DECLARED = A.osl != null ? parseInt(A.osl, 10) : null;
+
+// ---------------------------------------------------------------------------
+// Workload IDENTITY — the synthetic sweep, or a trace replay that owns its load
+// ---------------------------------------------------------------------------
+// GEAK runs both under an orchestrator and standalone. Under Hyperloom,
+// interface/run_e2e.py reads handoff.workload_spec and EXPORTS the resulting
+// BENCH_CLIENT / E2E_METRIC / AGENTX_* into the environment GEAK inherits, so
+// this script never had to know what it was measuring. Standalone there is no
+// such parent: the args land here directly, and without the block below an
+// AgentX request would benchmark a synthetic ISL/OSL sweep on the output-token
+// axis and call it an AgentX number.
+//
+// So the workload is declared HERE, in either of two spellings:
+//   * args.workload_spec — the SAME object Hyperloom puts on its handoff, for
+//     callers that want every field explicit; or
+//   * args.workload_kind: "agentx_trace_replay" — the shorthand, which fills
+//     the canonical AgentX setup below and lets workload_spec override any part.
+// Neither present => 'synthetic', AGENTX_ENV is empty, no bench_env.sh is
+// written, and the fixed ISL/OSL path is byte-identical to a build without this.
+const WORKLOAD_SPEC = (A.workload_spec && typeof A.workload_spec === 'object') ? A.workload_spec : {};
+const WORKLOAD_KIND = String(A.workload_kind || WORKLOAD_SPEC.kind || 'synthetic');
+const IS_AGENTX = WORKLOAD_KIND === 'agentx_trace_replay';
+// The canonical AgentX submission setup. These are the leaderboard's numbers,
+// not tuning knobs: the 393-entry weka corpus at 3600s IS the graded workload,
+// and a run that deviates is stamped non-canonical by the client adapter and
+// can never be KEPT. The 900s loop duration is the scenario's own floor and is
+// what the inner search legs run, which is why they are always non-canonical.
+const AGENTX_DEFAULTS = {
+  scenario: 'inferencex-agentx-mvp',
+  // The full-context parent, not the _256k sibling: the latter drops every
+  // request over 256k tokens (98.8k -> 68.3k) for ~256k-context servers, and
+  // the campaign serves at --max-model-len 1048576.
+  corpus: 'semianalysis_cc_traces_weka_062126',
+  num_entries: 393,
+  duration_s: 3600,           // canonical/parity window
+  geak_loop_duration_s: 900,  // inner search legs (scenario floor)
+  warmup_requests_per_lane: 10,
+  warmup_grace_period_s: 1800,
+  // Failed-request tolerance is deliberately NOT defaulted here. Pinning one number for the whole
+  // run flattens the distinction between a leg that is exploring and a leg whose number will be
+  // compared, and the client is the only place that knows which one it is running
+  // (MEASUREMENT_PURPOSE). Declaring a value still overrides the client, for a run that needs a
+  // specific tolerance end to end.
+  failed_request_threshold: null,
+  // InferenceX's P90 interactivity, 1000 / P90(ITL) in tok/s/user: the x-axis of the public
+  // InferenceX pareto, decode-only (TTFT and queue wait are outside it). bench_summarize.py
+  // reports total tok/s beside it as a guard. Hyperloom declares its own basis on the handoff
+  // and exports the matching E2E_METRIC, so this default only decides a run nobody configured.
+  metric_basis: 'p90_intvty_inferencex',
+};
+const AGENTX = IS_AGENTX ? Object.assign({}, AGENTX_DEFAULTS, WORKLOAD_SPEC) : null;
+// ONE concurrency for the run. Roles put WORKLOAD.conc on every bench line as CONC=<conc>, and a
+// command-line value outranks bench_env.sh, so a workload_spec.concurrency that reached only the
+// declaration would be replaced by args.conc (or the synthetic 64) on every bench.
+const CONC = parseInt(AGENTX && AGENTX.concurrency != null ? AGENTX.concurrency
+  : (A.conc != null ? A.conc : 64), 10);
+
+// ---------------------------------------------------------------------------
+// Kernel-targeting shape — the shape roles synthesize kernel inputs against
+// ---------------------------------------------------------------------------
+// Nothing is MEASURED at isl/osl on a trace replay: aiperf owns the sequence
+// lengths and the bench client ignores these. But roles still read them as the
+// analytic serving call model when they pick tile sizes and synthesize GEMM
+// shapes, so leaving them at the synthetic 1024/1024 default would aim the whole
+// kernel search orders of magnitude below the real load. This mirrors
+// interface/run_e2e.py::_targeting_shape so the standalone and Hyperloom entries
+// resolve the shape identically, and so the provenance printed into every role
+// prompt is never a claim we cannot back -- the old default asserted
+// 'handoff_workload' even when no handoff existed.
+function resolveTargetShape() {
+  const haveDeclared = ISL_DECLARED > 0 && OSL_DECLARED > 0;
+  const declaredOr = (v) => (v != null ? v : 1024);
+  // Hyperloom resolves this upstream and passes it down; honour it verbatim.
+  if (A.workload_shape_provenance) {
+    return [declaredOr(ISL_DECLARED), declaredOr(OSL_DECLARED),
+            String(A.workload_shape_provenance)];
+  }
+  if (!IS_AGENTX) {
+    // Unchanged behaviour for the fixed ISL/OSL path, minus the borrowed label.
+    return [declaredOr(ISL_DECLARED), declaredOr(OSL_DECLARED),
+            haveDeclared ? 'declared_args' : 'synthetic_default'];
+  }
+  // An explicit shape is the caller stating what they measured on this stack.
+  // Absent that, we do NOT guess and we do not compile a corpus average into this
+  // file: the corpus is declarable, AgentX keeps publishing new ones, the numbers
+  // move with the tokenizer and the window, and a stale constant would be read as
+  // fact by every role. The run measures its own shape instead -- the baseline
+  // bench reports it and adoptMeasuredShape() below installs it, which is also
+  // why no kernel work is scheduled before the baseline lands.
+  const obsIsl = parseInt(AGENTX.observed_isl, 10);
+  const obsOsl = parseInt(AGENTX.observed_osl, 10);
+  if (obsIsl > 0 && obsOsl > 0) return [obsIsl, obsOsl, 'agentx_observed'];
+  if (haveDeclared) return [ISL_DECLARED, OSL_DECLARED, 'agentx_declared_args'];
+  return [1024, 1024, 'agentx_pending_baseline'];
+}
+// Mutable: on a trace replay the real shape is not knowable until something has
+// been measured, so the baseline installs it and every later phase reads it.
+let [ISL, OSL, WORKLOAD_SHAPE_PROVENANCE] = resolveTargetShape();
 const WORKLOAD = { isl: ISL, osl: OSL, conc: CONC, shape_provenance: WORKLOAD_SHAPE_PROVENANCE };
+// Whether ISL/OSL describe the served load or are still a placeholder. A
+// placeholder never corrupts the MEASUREMENT, but it would misdirect every
+// kernel choice, so the prompt says which one a role is holding.
+let SHAPE_IS_MEASURED = !/^(agentx_pending_baseline|synthetic_fallback_on_agentx)$/
+  .test(WORKLOAD_SHAPE_PROVENANCE);
+
+// Install the shape the baseline actually served. bench_e2e.sh reports it as
+// observed_isl/observed_osl (averaged per request, medianed across replicas), so
+// this is measured on THIS corpus, tokenizer, model and window rather than
+// asserted. Called right after Setup, before any kernel work is scheduled.
+function adoptMeasuredShape(isl, osl, where) {
+  if (!(isl > 0 && osl > 0)) return false;
+  ISL = Math.round(isl);
+  OSL = Math.round(osl);
+  WORKLOAD_SHAPE_PROVENANCE = 'agentx_measured_this_run';
+  SHAPE_IS_MEASURED = true;
+  WORKLOAD.isl = ISL;
+  WORKLOAD.osl = OSL;
+  WORKLOAD.shape_provenance = WORKLOAD_SHAPE_PROVENANCE;
+  log(`Kernel-targeting shape measured from ${where}: isl=${ISL} osl=${OSL} `
+    + `(ratio ${(ISL / Math.max(1, OSL)).toFixed(1)}:1). Roles size kernels against this.`);
+  return true;
+}
+// The Setup probe reads the baseline summary ONCE, at the instant Setup returns,
+// and that instant is not guaranteed to contain one. An agent whose leg dies to a
+// hardware fault moves the wreckage aside and relaunches, so `baseline/` is
+// legitimately EMPTY while a replacement leg runs, and the summary lands minutes
+// after Setup reports done. A single read then loses the shape for the whole run
+// rather than for a moment: on the 20260909 standalone run Setup returned at
+// 10:40:49 with the directory just renamed away, the good summary was written at
+// 11:57, and every later phase kept the 1024/1024 placeholder. "Not written yet"
+// is a retryable state, not a verdict, so adoption is ALSO attempted lazily from
+// the prompt builder every role passes through: the first prompt built after the
+// summary appears installs the real shape. A no-op once measured, so a run that
+// adopted at Setup pays nothing and its prompts are unchanged.
+function ensureMeasuredShape() {
+  if (SHAPE_IS_MEASURED || !IS_AGENTX) return SHAPE_IS_MEASURED;
+  // EVAL_DIR is a `let` declared further down and only assigned by Setup, so it
+  // is read through typeof: a prompt built before that declaration is evaluated
+  // would otherwise die in the temporal dead zone, turning a missing shape into
+  // a crashed run. Nothing to read before Setup anyway — the baseline is what
+  // Setup produces.
+  const evalDir = typeof EVAL_DIR === 'undefined' ? '' : (EVAL_DIR || '');
+  if (!evalDir) return SHAPE_IS_MEASURED;
+  let shape = null;
+  try {
+    // Same execFileSync/python3 route the Setup probe uses: this JS has no fs.
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('python3', ['-c', `
+import json, os, sys
+p = os.path.join(sys.argv[1], 'baseline', 'bench_summary.json')
+def _num(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+try:
+    with open(p) as fh:
+        s = json.load(fh) or {}
+    print(json.dumps([_num(s.get('observed_isl')), _num(s.get('observed_osl'))]))
+except Exception:
+    print('[null, null]')
+`, evalDir], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 });
+    shape = JSON.parse(out);
+  } catch (err) {
+    return SHAPE_IS_MEASURED;   // unreadable right now; a later prompt retries
+  }
+  if (shape && shape[0] > 0 && shape[1] > 0) {
+    adoptMeasuredShape(shape[0], shape[1],
+      'the baseline bench (read after Setup returned, which had no summary yet)');
+  }
+  return SHAPE_IS_MEASURED;
+}
+// Which axis bench_e2e.sh medians. It defaults E2E_METRIC to output, and on a ~140:1
+// prefill:output trace output-only tok/s moves almost not at all for a large change in total
+// work, so the axis has to be SELECTED here.
+//
+// bench_summarize.py's _BASES, flattened: each E2E_METRIC it accepts -> the metric_basis its
+// summary records. test_bench_env_channel.py holds this table to that one.
+const METRIC_BASIS_OF_AXIS = {
+  output: 'aggregate_output_tok_s',
+  total: 'aggregate_total_token_tok_s',
+  total_token: 'aggregate_total_token_tok_s',
+  total_throughput: 'aggregate_total_token_tok_s',
+  intvty: 'e2e_norm_intvty_p90',
+  interactivity: 'e2e_norm_intvty_p90',
+  e2e_norm_intvty_p50: 'e2e_norm_intvty_p50',
+  e2e_norm_intvty_p90: 'e2e_norm_intvty_p90',
+  p90_intvty_inferencex: 'p90_intvty_inferencex',
+};
+// The E2E_METRIC the declaration sets for each basis: the basis itself wherever _BASES takes it.
+const AXIS_OF_METRIC_BASIS = {
+  aggregate_output_tok_s: 'output',
+  aggregate_total_token_tok_s: 'total',
+  e2e_norm_intvty_p50: 'e2e_norm_intvty_p50',
+  e2e_norm_intvty_p90: 'e2e_norm_intvty_p90',
+  p90_intvty_inferencex: 'p90_intvty_inferencex',
+};
+const AXIS_LABEL = {
+  aggregate_output_tok_s: 'OUTPUT tok/s',
+  aggregate_total_token_tok_s: 'TOTAL (input+output) tok/s',
+  e2e_norm_intvty_p50: 'TTFT-inclusive P50 interactivity: 1 / P50(E2EL/OSL) in tok/s/user',
+  p90_intvty_inferencex: 'InferenceX P90 interactivity: 1000 / P90(ITL) in tok/s/user, decode only',
+  e2e_norm_intvty_p90: 'TTFT-inclusive P90 interactivity: 1 / P90(E2EL/OSL) in tok/s/user',
+};
+// Precedence: the basis the caller declared; else an E2E_METRIC already exported, because an
+// exported value outranks bench_env.sh and is what the bench will measure; else the standalone
+// default. Anything bench_summarize.py cannot measure fails HERE: it would refuse the axis too,
+// but only once the baseline replay had been paid for.
+function resolveAgentxMetric() {
+  if (!AGENTX) return { basis: '', source: '' };
+  const unknown = (what, v) => new Error(`AgentX: ${what} '${v}' is not an axis ` +
+    `bench_summarize.py measures (known: ${Object.keys(METRIC_BASIS_OF_AXIS).join(', ')}).`);
+  let inherited = '';
+  try { inherited = String(process.env.E2E_METRIC || '').trim().toLowerCase(); } catch (_) { /* no env */ }
+  // The bench reads an exported value as an axis token, so that is the only way it is looked up.
+  const inheritedBasis = inherited ? METRIC_BASIS_OF_AXIS[inherited] : '';
+  if (inherited && !inheritedBasis) throw unknown('the exported E2E_METRIC', inherited);
+  const declared = String(WORKLOAD_SPEC.metric_basis || '').trim().toLowerCase();
+  if (!declared) {
+    return inheritedBasis ? { basis: inheritedBasis, source: 'the exported E2E_METRIC' }
+      : { basis: AGENTX_DEFAULTS.metric_basis, source: 'the standalone default' };
+  }
+  const basis = AXIS_OF_METRIC_BASIS[declared] ? declared : METRIC_BASIS_OF_AXIS[declared];
+  if (!basis) throw unknown('workload_spec.metric_basis', declared);
+  if (inheritedBasis && inheritedBasis !== basis) {
+    throw new Error(`AgentX: workload_spec.metric_basis=${basis}, but E2E_METRIC=${inherited} is ` +
+      'exported in this environment and outranks bench_env.sh, so every bench would grade a ' +
+      'different axis than the one declared. Unset E2E_METRIC or declare the basis it names.');
+  }
+  return { basis, source: 'workload_spec.metric_basis' };
+}
+const { basis: AGENTX_METRIC_BASIS, source: AGENTX_METRIC_SOURCE } = resolveAgentxMetric();
+const AGENTX_E2E_METRIC = AGENTX ? AXIS_OF_METRIC_BASIS[AGENTX_METRIC_BASIS] : '';
+// Recall has its own policy. In particular, older orchestrators may grade output/total while
+// the operator wants only p50 candidates. This never changes the bench axis or the writer's basis.
+function resolveKbMetric() {
+  let env = '';
+  try { env = String(process.env.GEAK_E2E_KB_METRIC_BASIS || '').trim(); } catch (_) { /* no env */ }
+  const arg = String(A.e2e_kb_metric_basis || '').trim();
+  const requested = (arg || env).toLowerCase();
+  if (!requested) return { basis: AGENTX_METRIC_BASIS, strict: false, source: 'measurement' };
+  const basis = AXIS_OF_METRIC_BASIS[requested] ? requested : METRIC_BASIS_OF_AXIS[requested];
+  if (!basis) throw new Error(`Unknown e2e KB metric basis '${requested}'. Known bases: ` +
+    Object.keys(AXIS_OF_METRIC_BASIS).join(', '));
+  return { basis, strict: true, source: arg ? 'e2e_kb_metric_basis' : 'GEAK_E2E_KB_METRIC_BASIS' };
+}
+const E2E_KB_METRIC = resolveKbMetric();
+function kbMeasurementBasis() {
+  if (AGENTX) return AGENTX_METRIC_BASIS;
+  let axis = '';
+  try { axis = String(process.env.E2E_METRIC || '').trim().toLowerCase(); } catch (_) { /* no env */ }
+  return METRIC_BASIS_OF_AXIS[axis] || 'aggregate_output_tok_s';
+}
+function kbCanAttestMetric(candidate) {
+  const measured = kbMeasurementBasis();
+  // A fresh output/total A/B is not evidence for or against the stored p50 claim.
+  return candidate.metric_basis ? candidate.metric_basis === measured : !E2E_KB_METRIC.strict;
+}
+// Body of the per-run bench_env.sh the Director drops beside the copied bench
+// script (see roles/director.md PHASE=setup). Every line assigns ONLY when the
+// name is unset or empty, so a real exported value -- an orchestrator's, or an
+// operator's one-off override on the command line -- always outranks the
+// declaration. Empty string when synthetic.
+//
+// The guard is spelled `[ -n "${K:-}" ] || K='v'` rather than the shorter
+// `: "${K:='v'}"` on purpose: inside a `${K:=word}` expansion the quotes are
+// NOT shell quoting, they are literal characters of `word`, so that spelling
+// assigns the value WITH its quotes attached. This form puts the value in real
+// single quotes, which is also what makes _shq's escaping mean anything.
+const _shq = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
+const _agentxEnvPairs = () => {
+  if (!AGENTX) return [];
+  const pairs = [
+    ['GEAK_WORKLOAD_KIND', WORKLOAD_KIND],
+    ['GEAK_ISL_OSL_INACTIVE', '1'],
+    ['BENCH_CLIENT', 'agentx'],
+    ['E2E_METRIC', AGENTX_E2E_METRIC],
+    ['GEAK_METRIC_BASIS', AGENTX_METRIC_BASIS],
+    // No REPEATS: an explicit one outranks REPLICAS in bench_e2e.sh, so pinning it here turned
+    // isolated validation's three replicas into one. bench_e2e.sh defaults a trace-replay
+    // client's legacy rounds to one itself, after the replica count is resolved.
+    ['CONC', String(CONC)],
+    ['GEAK_AGENTX_SCENARIO', AGENTX.scenario],
+    ['AGENTX_DATASET', AGENTX.corpus],
+    // What the run is compared AGAINST, so an override of the corpus or the window never
+    // carries it along: a replay of anything else is then stamped non-canonical, which is
+    // the point. Declare canonical_corpus / canonical_duration_s to move the reference itself.
+    ['AGENTX_CANONICAL_DATASET', AGENTX.canonical_corpus || AGENTX_DEFAULTS.corpus],
+    ['AGENTX_NUM_ENTRIES', AGENTX.num_entries],
+    ['GEAK_AGENTX_DURATION_S', AGENTX.duration_s],
+    ['AGENTX_CANONICAL_DURATION', AGENTX.canonical_duration_s || AGENTX_DEFAULTS.duration_s],
+    ['GEAK_AGENTX_LOOP_DURATION_S', AGENTX.geak_loop_duration_s],
+    ['AGENTX_WARMUP_REQUESTS_PER_LANE', AGENTX.warmup_requests_per_lane],
+    ['AGENTX_WARMUP_GRACE_PERIOD', AGENTX.warmup_grace_period_s],
+  ];
+  // Optional, only when the caller supplied them: the aiperf binary, the
+  // InferenceX checkout that may hold map_aiperf.py (GEAK vendors a fallback),
+  // and the profile-window placement.
+  const opt = [
+    ['AGENTX_FAILED_REQUEST_THRESHOLD', AGENTX.failed_request_threshold],
+    ['AIPERF_BIN', AGENTX.aiperf_bin],
+    ['INFERENCEX_PATH', AGENTX.inferencex_path],
+    ['AGENTX_PROFILE_WARMUP_S', AGENTX.profile_warmup_s],
+    ['AGENTX_PROFILE_WINDOW_S', AGENTX.profile_window_s],
+    ['AGENTX_MAX_CTX', AGENTX.max_context_length],
+  ];
+  for (const [k, v] of opt) if (v != null && String(v).trim() !== '') pairs.push([k, v]);
+  return pairs;
+};
+const AGENTX_ENV = !AGENTX ? '' : [
+  '#!/usr/bin/env bash',
+  '# Per-run workload declaration, written by e2e_workflow.js at Setup.',
+  '# Sourced by bench_e2e.sh / bench_replica.sh from beside themselves.',
+  '# Assign-if-unset throughout: an inherited/exported value always wins here.',
+  ...(_agentxEnvPairs().map(([k, v]) => `[ -n "\${${k}:-}" ] || ${k}=${_shq(v)}`)),
+  `export ${_agentxEnvPairs().map(([k]) => k).join(' ')}`,
+  '',
+].join('\n');
 // Seed config: when an external orchestrator (e.g. Hyperloom) already did
 // config/param search, it passes its accepted best flags/env so the GEAK
 // baseline is measured ON that config (fair engagement start), not the stack
@@ -803,8 +1151,32 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
 ) : '';
 // Acceptance noise band (%). Isolated-server ref/candidate measurements, non-overlap, and engagement
-// proof (see e2e_integrator) make a 0.5% default trustworthy. Prompt-tunable.
-const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
+// proof (see e2e_integrator) make a 0.5% default trustworthy for a fixed-shape workload, where a
+// replica is a fixed amount of identical work. Prompt-tunable.
+//
+// A trace replay is not that workload. It is client-paced over trajectories of wildly unequal size
+// (ISL p50 83k, p99 491k) against a prefix cache running 85-96% hits, so a replica completes a
+// whole number of trajectories and the throughput it reports quantises on which ones it got
+// through. The 20260912 validation measured that directly: two surviving replicas of the
+// BASELINE, same config, same box, spread 3.43% on total tok/s (24054.0 / 23255.9) and 3.86% on
+// InferenceX P90 interactivity (29.52 / 28.40 tok/s/user), the default axis. A 0.5% band against
+// that is 7-8x too permissive -- it would call a pure-noise difference a win -- so this workload
+// carries its own floor. The TTFT-inclusive axis moved 17% on the same pair; a run graded on it
+// needs an explicit noise_band_pct. Hardcoding the floor is a placeholder for deriving it from
+// the replica spread Setup already measures; until then it is at least the measured one.
+const NOISE_BAND_AGENTX = 4.0;
+const NOISE_BAND_DEFAULT = parseFloat(
+  A.noise_band_pct != null ? A.noise_band_pct : (IS_AGENTX ? NOISE_BAND_AGENTX : 0.5));
+// The band the run gates on, from the one the Director returned. Its role file starts every run
+// at 0.5 and only ever widens it, so on a trace replay that 0.5 would replace the workload floor
+// (and an explicit noise_band_pct) outright; there the Director may only raise the band. A
+// fixed-shape run keeps the Director's value, as it always has.
+function gateNoiseBand(reported) {
+  const r = parseFloat(reported);
+  const director = Number.isFinite(r) && r > 0 ? r : 0;
+  if (!IS_AGENTX) return director || NOISE_BAND_DEFAULT;
+  return Math.max(director, NOISE_BAND_DEFAULT);
+}
 // No timed-repeat knob on purpose: the round count belongs to the lifecycle (bench_e2e.sh derives
 // it from GEAK_REPEAT_MODE + MEASUREMENT_PURPOSE), so a second knob could only disagree with it.
 // Every integrate A/B MUST measure BOTH legs (reference + candidate). When the
@@ -831,6 +1203,13 @@ const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${CAPTURE_BYTE_BUDGET} CAPTURE_
 const TASK = A.task || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
+// The caller reads workflow_return.json and recovers results only from a pinned eval_dir, so a Director
+// that builds a sibling directory leaves the whole run where the caller never looks.
+function evalDirDivergence(override, returned) {
+  const norm = (p) => String(p || '').trim().replace(/(.)\/+$/, '$1');
+  if (!norm(override) || norm(returned) === norm(override)) return '';
+  return `Director returned eval_dir ${norm(returned) || '(none)'}, but the caller pinned ${norm(override)}`;
+}
 const MODEL_NAME_HINT = (MODEL_PATH || KERNEL_PATH).replace(/\/+$/, '').split('/').pop();
 
 // ---------------------------------------------------------------------------
@@ -997,6 +1376,12 @@ const PLAN_SCHEMA = obj({
   config_directions: arrObj, head_candidates: arrObj, kernel_candidates: arrObj,
 }, ['stop']);
 
+// Extraction smoke gate: EXACTLY lowercase "pass" or "fail". Every gate below tests `=== 'pass'`, and a
+// free string let agents answer "PASS (exit 0) on GPU 1 ..." — a passing unittest then read as a failed
+// extraction and the head was silently dropped. The enum makes StructuredOutput reject anything else so
+// the agent must re-answer; the prose belongs in smoke_detail / notes.
+const SMOKE_STATUS = { type: 'string', enum: ['pass', 'fail'] };
+
 const EXTRACT_OP_SCHEMA = obj({
   short_name: { type: 'string' }, op_kind: { type: 'string' }, editable: { type: 'boolean' },
   task_dir: { type: 'string' }, shapes: { type: 'object', additionalProperties: true },
@@ -1009,7 +1394,7 @@ const EXTRACT_OP_SCHEMA = obj({
   device_kernel: { type: 'string' },
   seam_candidates: arrObj,
   selection_validation: { type: 'object', additionalProperties: true },
-  smoke: { type: 'string' }, notes: { type: 'string' },
+  smoke: SMOKE_STATUS, smoke_detail: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
 const OPBENCH_SCHEMA = obj({
@@ -1031,7 +1416,7 @@ const EXTRACT_SCHEMA = obj({
   short_name: { type: 'string' }, editable: { type: 'boolean' }, task_dir: { type: 'string' },
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
-  build: { type: 'boolean' }, unittest_smoke: { type: 'string' },
+  build: { type: 'boolean' }, unittest_smoke: SMOKE_STATUS, smoke_detail: { type: 'string' },
   // the baseline leg is an ENVIRONMENT (baseline_overlay/ = a frozen CURRENT_OVERLAY snapshot), and
   // candidate_bind is the ONE entry layered on top of it to make the candidate leg.
   candidate_bind: { type: 'object', additionalProperties: true },
@@ -1242,7 +1627,27 @@ function kbIdentityFlags() {
   return [`--model ${shq(KB_DIMS.model)}`, `--gfx ${shq(KB_DIMS.gfx)}`,
     `--framework ${shq(BACKEND)}`, `--framework-version ${shq(KB_DIMS.framework_version)}`,
     `--precision ${shq(KB_DIMS.precision)}`, `--rocm-version ${shq(KB_DIMS.rocm_version)}`,
-    `--tp ${SERVING_TP}`, `--isl ${ISL}`, `--osl ${OSL}`, `--conc ${CONC}`].join(' ');
+    `--tp ${SERVING_TP}`, `--ep ${SERVING_EP}`,
+    // The DECLARATION (A.workload_kind / workload_spec.kind), never the shape PROVENANCE: the
+    // provenance values include agentx_pending_baseline and synthetic_fallback_on_agentx, which
+    // would mis-file precisely the degraded AgentX runs that most need a stable address.
+    `--workload-kind ${shq(WORKLOAD_KIND)}`,
+    `--isl ${ISL}`, `--osl ${OSL}`, `--conc ${CONC}`].join(' ');
+}
+
+// Metadata shared by the persisted return and the KB writer.
+function kbResultMetadata() {
+  return {
+    // Only tp/ep/conc address AgentX. Observed shape is retained outside the content digest.
+    workload: Object.assign({}, WORKLOAD, {
+      kind: WORKLOAD_KIND, tp: SERVING_TP, ep: SERVING_EP,
+    }, AGENTX ? {
+      scenario: AGENTX.scenario, corpus: AGENTX.corpus, num_entries: AGENTX.num_entries,
+      duration_s: AGENTX.duration_s, metric_basis: AGENTX_METRIC_BASIS,
+    } : {}),
+    metric_basis: AGENTX ? AGENTX_METRIC_BASIS : '',
+    comparability: A.comparability || {},
+  };
 }
 
 // --store is what the local plane writes into and is meaningless to a remote-only run; open_plane()
@@ -1256,10 +1661,21 @@ function kbPlaneFlags(plane) {
 // first, local mirror only when the service has no answer) and reports which one spoke as
 // `read_plane`, so the bash branch that used to do it here is gone — one copy of the rule, and it
 // is the copy a human gets from the CLI too.
+// The graded axis is NOT part of the address (bench_summarize's bases are five and growing, and a
+// reader wants them side by side with a label rather than scattered over five sparse pages), so the
+// reader has to state it instead. One page has already carried ~64763 (total tok/s), ~471 (output
+// tok/s) and ~81 (P90 interactivity) at once; ranked together the top row wins by unit, not merit.
+// An explicit recall policy requires an exact basis, including on synthetic runs. Without one,
+// preserve the historical measurement-derived filter and its compatibility with unlabelled records.
+function kbMetricBasisFlag() {
+  return E2E_KB_METRIC.basis ? `--metric-basis ${shq(E2E_KB_METRIC.basis)} ` +
+    (E2E_KB_METRIC.strict ? '--require-metric-basis ' : '') : '';
+}
+
 function kbResolveScript(args) {
   return KB_ENV_PRELUDE + '\\\n' +
     `python3 ${shq(E2E_STORE_SCRIPT)} resolve ${kbIdentityFlags()} \\\n` +
-    `  ${kbPlaneFlags(E2E_KB_PLANE)} ${args}`;
+    `  ${kbMetricBasisFlag()}${kbPlaneFlags(E2E_KB_PLANE)} ${args}`;
 }
 
 // Warm-start prompt injection, mirroring expertSkillsBlock exactly: returns '' whenever the feature
@@ -1294,6 +1710,70 @@ function warmStartBlock(role) {
       : '');
 }
 
+// Run-wide workload-identity invariant, injected into EVERY role prompt exactly
+// like the serving-config invariant above it — a trace replay changes what a
+// benchmark MEANS, so no role may be left assuming the synthetic sweep.
+// Returns '' unless the caller declared a trace replay, so a fixed-ISL/OSL run
+// gets byte-identical prompts.
+function workloadIdentityBlock() {
+  if (!IS_AGENTX) return '';
+  // Late-adopt here rather than only at Setup: this block is the one path every
+  // role prompt takes, so the shape can never be stale by more than one agent.
+  ensureMeasuredShape();
+  return `
+## WORKLOAD IDENTITY — this run measures a TRACE REPLAY, not a fixed ISL/OSL sweep
+The served load is the AgentX corpus \`${AGENTX.corpus}\` replayed by aiperf under scenario
+\`${AGENTX.scenario}\` (${AGENTX.num_entries} entries, concurrency ${CONC}).
+The CLIENT owns the load: it chooses the request mix, the arrival pattern, its own warmup, and the
+measurement duration. Consequences you must respect:
+
+* **ISL=${ISL} / OSL=${OSL} is a KERNEL-TARGETING shape, not a benchmark** (provenance:
+  ${WORKLOAD_SHAPE_PROVENANCE}${SHAPE_IS_MEASURED ? '' : ' — A PLACEHOLDER, NOT THIS CORPUS'}).
+  ${SHAPE_IS_MEASURED
+    ? 'It is an average of what was actually served, so it is the right regime to size tiles and\n  synthesize GEMM/attention inputs against. Read it as a centre of mass, not as a shape every\n  request has.'
+    : 'It is the synthetic default and does NOT describe this load: the real shape is read off the\n  baseline once it has run, so nothing here has a corpus average compiled into it.\n  Do NOT size tiles or synthesize GEMM shapes from this number — if your phase needs the served\n  shape, take it from the baseline summary (observed_isl/observed_osl), not from this line.'}
+  A trace corpus spans orders of magnitude in request length, so there is no single ISL: read the
+  real distribution off the run's own export rather than assuming one. NEVER build a synthetic sweep
+  at these lengths and NEVER report one as an e2e number — measured on this stack, a synthetic sweep
+  came out ~2.76x the trace-replay throughput, so such a number is not a smaller-scale version of
+  the real one, it is a different workload.
+* **Keep passing \`ISL=<isl> OSL=<osl> CONC=<conc>\` on the bench line exactly as your role file
+  shows.** The trace client ignores them. Do not restructure your bench invocation for this workload.
+* **Client selection and the metric axis are ALREADY configured** in \`$EVAL_DIR/bench_env.sh\`, which
+  \`bench_e2e.sh\` sources beside itself on every invocation. Do NOT set \`BENCH_CLIENT\`,
+  \`E2E_METRIC\` or any \`AGENTX_*\` variable yourself, and never delete or edit that file.
+* **The graded axis is ${AXIS_LABEL[AGENTX_METRIC_BASIS]}.**
+  \`bench_summary.json\` reports it as \`throughput_tok_s_median\` with
+  \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; ${/intvty/.test(AGENTX_METRIC_BASIS)
+    ? 'on this axis it is tok/s/user, higher is better. Report `guard_aggregate_output_tok_s_median`\n  beside it.' + (AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50'
+      ? ' Also report `guard_e2e_norm_intvty_p90_median`, the tail guard.' : '')
+    : 'on a ~140:1\n  prefill:output trace the output-only axis barely moves for a large real change in work.'}
+* **A measured window is LONG**: ${AGENTX.geak_loop_duration_s}s per search leg,
+  ${AGENTX.duration_s}s for parity/validation. Budget your phase around that and do not retry a
+  timed-out leg blindly.
+* **Search legs are deliberately non-canonical.** They run the scenario's ${AGENTX.geak_loop_duration_s}s
+  floor rather than the canonical ${AGENTX.duration_s}s, so the client stamps them
+  \`submission_valid=false\` with the deviations attached. That is EXPECTED and does not invalidate an
+  A/B comparison — both legs deviate identically. It does mean a search-leg number may never be
+  reported as a submittable result.
+`;
+}
+
+function correctnessEnvBlock(role) {
+  if (!CORRECTNESS_UNSET_ENV.length || !CORRECTNESS_PROBE_ROLES.has(role)) return '';
+  const unset = CORRECTNESS_UNSET_ENV.map((v) => `-u ${v}`).join(' ');
+  return `\n\n## CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE\n` +
+    `This stack serves with simulated speculative-decoding acceptance (${CORRECTNESS_UNSET_ENV.join(', ')}). ` +
+    `It keeps throughput comparable, but what it serves is neither deterministic nor the model's own ` +
+    `output: the unmodified reference does not reproduce itself, so a greedy-parity or task-accuracy probe ` +
+    `run under it measures the simulator, not the change. For EVERY correctness probe, launch BOTH servers ` +
+    `(the TRUE baseline and the candidate) with these variables removed, from the process env ` +
+    `(\`env ${unset} ...\`) and from EXTRA_ENV, and change nothing else: same flags, same overlay, same ` +
+    `TP/GPU. Throughput legs keep them, because those legs ARE the measurement, so a correctness server ` +
+    `is never one of the throughput servers. Say in your notes that the probe ran with simulated ` +
+    `acceptance off.`;
+}
+
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
@@ -1302,6 +1782,9 @@ function roleAgent(role, phase, intro, inputs) {
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
     EFFECTIVE_CONFIG_DIGEST,
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
+    // Only surfaced on a trace replay; a synthetic run's Inputs block is unchanged.
+    ...(IS_AGENTX ? { WORKLOAD_KIND } : {}),
+    ...(correctnessEnvBlock(role) ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
     ...inputs,
   };
   const base = `You are the ${role}. PHASE=${phase}.
@@ -1323,12 +1806,12 @@ GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY 
 work (op_bench bake-offs, shape-capture, the recursive kernel layer), where each task pins ONE id from
 the pool via GPU_ID. Do NOT use the serving TP/GPU set for that isolated work, and do NOT use a single
 optimization-pool id for a serving launch — keep the two separate.
-
+${workloadIdentityBlock()}
 ## Inputs
 ${cfg(inall)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role) + warmStartBlock(role);
+  return base + expertSkillsBlock(role) + warmStartBlock(role) + correctnessEnvBlock(role);
 }
 
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
@@ -1348,12 +1831,19 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // it to 45min so a single hung/slow agent can't blow the wall-clock budget (still ample for the director
 // baseline + the head e2e A/B). Default mode keeps 120min → unchanged.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 2700000 : 7200000), 10);
+// The guard abandons the PROMISE, not the agent: a timed-out attempt keeps running its servers and legs,
+// so a retry runs beside it on the same GPUs and files. agent_timeout_retry=false degrades to null instead.
+const AGENT_TIMEOUT_RETRY = String(A.agent_timeout_retry != null ? A.agent_timeout_retry : 'true') !== 'false';
 // Process-safety rule prepended to EVERY agent prompt. It is injected at this funnel
 // (the one place `agent()` is ever called) rather than in roleAgent(), because several
 // prompts are built inline and would otherwise never see it — and any future call site
 // inherits it automatically instead of having to remember it. Bash-capable agents own
 // server lifecycles, and a pattern-matched kill is indistinguishable from a correct one
 // until it TERMs the caller's orchestrator and fails the whole task.
+// The detachment rule rides along for the same reason: EVERY bash-capable role runs a long
+// serving leg (director's baseline, tuner's launch+bench cycles, the head e2e A/B), and each
+// one otherwise rediscovers at ~1h that a tool-managed background shell gets group-reaped
+// mid-measurement — an hour of budget and a booted server lost per role that learns it.
 const PROCESS_SAFETY = `## PROCESS SAFETY (a violation can kill the caller's orchestrator, failing the whole task)
 This container's PID 1 is the CALLER's orchestrator process, not yours, and it is NOT restartable.
 NEVER run global or pattern-matched process cleanup: no \`pkill -f\` / \`pgrep -f ... | xargs kill\` /
@@ -1367,6 +1857,19 @@ identity (pid, pgid, /proc start time) before signalling anything:
     \${SERVER_LAUNCH_PREFIX:-} <launch server> &   # own session => pgid == pid
     SERVER_PID=\$!; server_record_identity "\$SERVER_PID"
 
+## LONG MEASUREMENTS OUTLIVE YOUR TOOL CALL — DETACH THEM FROM THE SHELL MANAGER
+A serving measurement is longer than any bound your Bash tool can give it. One canonical trace-replay
+leg is a 3600s window PLUS warmup and finalization (~70min wall), and a cold server boot alone is ~9min.
+Your foreground bound is BASH_MAX_TIMEOUT_MS, and your tool's OWN background mode is worse: a shell the
+tool manages for you is reaped on the manager's schedule, and the reap is a GROUP kill that takes the
+server down with the client — you get a truncated log, an unloaded GPU, and no summary, from a leg that
+was measuring perfectly. Do NOT run a bench through your tool's background/\`run_in_background\` mode.
+Launch it so it is orphaned to init, OUTSIDE the manager's reach, then poll its log:
+    cd "\$EVAL_DIR" && setsid nohup bash run_bench.sh > run_bench.out 2>&1 < /dev/null &
+    # returns immediately; the leg's parent becomes PID 1 and no tool-call bound applies
+Then poll in SEPARATE short calls (\`sleep 300; tail -5 run_bench.out\`) until the summary lands. Before
+you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and whether
+the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
 `;
 function withProcessSafety(prompt) {
   return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
@@ -1387,9 +1890,18 @@ function withProcessSafety(prompt) {
 // with — work started before the final phase stays bounded.
 let FINAL_PHASE_STARTED = false;
 const FINALIZE_GATE_PHASE = 'Finalize-gate';   // display grouping only — not load-bearing for the cap
+const AGENT_TIMEOUT_FLOOR_MS = 120000;
 function agentTimeoutFor() {
   if (TIME_BUDGET_MS == null || FINAL_PHASE_STARTED) return AGENT_TIMEOUT_MS;
-  return Math.max(120000, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
+  return Math.max(AGENT_TIMEOUT_FLOOR_MS, Math.min(AGENT_TIMEOUT_MS, remainingMs() - FINAL_RESERVE_MS));
+}
+// An agent started now would only get the floor above: the reserve has begun, or is under one floor
+// away, and the final phase has not started. Nothing measured fits in two minutes, and the guard that
+// fires then abandons the promise, not the agent -- so whatever starts here runs on, unwatched, on the
+// GPUs Finalize and Validate are about to need.
+function atReserveFloor() {
+  return TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED &&
+    remainingMs() - FINAL_RESERVE_MS <= AGENT_TIMEOUT_FLOOR_MS;
 }
 
 // ===========================================================================
@@ -1500,7 +2012,7 @@ function ablEffortFor(opts, attempt) {
   return ABL_CHEAP_LABELS.test(label) ? 'low' : null;
 }
 
-function agentBounded(rawPrompt, opts, ablAttempt) {
+function agentBounded(rawPrompt, opts, ablAttempt, onHung) {
   const prompt = withProcessSafety(rawPrompt);
   const ablEffort = ablEffortFor(opts, ablAttempt || 0);
   if (ablEffort) {
@@ -1510,17 +2022,24 @@ function agentBounded(rawPrompt, opts, ablAttempt) {
   const timeoutMs = agentTimeoutFor();
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
+  const run = agent(prompt, opts);
   const guard = new Promise((resolve) => {
     to = setTimeout(() => {
       log(`  [hung-agent guard] ${(opts && opts.label) || 'agent'} exceeded ${Math.round(timeoutMs / 60000)}min with no return — treating as a failed attempt.`);
+      if (onHung) onHung(run);
       resolve(null);
     }, timeoutMs);
   });
   return Promise.race([
-    agent(prompt, opts).then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
+    run.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }),
     guard,
   ]);
 }
+
+// Attempts the hung-agent guard gave up on inside the reserve, by label. Each is still running, and
+// for an integrator its eventual return is the verdict of the A/B it was measuring
+// (adoptAbandonedVerdict).
+const ABANDONED_RUNS = new Map();
 
 async function safeAgent(prompt, opts, tries = 3) {
   let lastErr = 'unknown';
@@ -1534,11 +2053,19 @@ async function safeAgent(prompt, opts, tries = 3) {
         ? prompt + `\n\n## PREVIOUS ATTEMPT FAILED — do not repeat it\nA cheaper-effort attempt at this exact task failed with:\n\`\`\`\n${String(lastErr).slice(0, 2000)}\n\`\`\`\nDiagnose that failure before acting.\n`
         : prompt;
       const ev = tlAgent(prompt, opts, i + 1);   // record AT DISPATCH; ok=false until it resolves
-      const r = await agentBounded(p2, opts, i);
+      let hung = null;
+      const r = await agentBounded(p2, opts, i, (run) => { hung = run; });
       if (r) {
         if (r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
         if (ev) ev.ok = true;
         return r;
+      }
+      const inReserve = !!hung && atReserveFloor();
+      if (hung && (!AGENT_TIMEOUT_RETRY || inReserve)) {
+        if (inReserve) ABANDONED_RUNS.set((opts && opts.label) || '', hung);
+        log(`agent[${(opts && opts.label) || '?'}] DEGRADED to null without a retry: the timed-out attempt ` +
+          `may still be running (${inReserve ? 'the final reserve has begun' : 'agent_timeout_retry=false'}).`);
+        return null;
       }
       lastErr = 'null/empty result';
     } catch (e) { lastErr = String(e); }
@@ -1861,6 +2388,11 @@ const hasFrozenBaseline = (ext) =>
              (ext.candidate_bind && typeof ext.candidate_bind === 'object') ||
              (typeof ext.baseline_callable === 'string' && ext.baseline_callable.trim() !== '')));
 
+// Why an extraction failed, for logs / ledger / flagged heads. The status field is an enum
+// ("pass"/"fail"), so the prose lives in smoke_detail; notes may be unrelated, so read both.
+const extractFailWhy = (e) => !e ? 'none'
+  : [e.smoke_detail, e.notes].filter(Boolean).join(' | ') || e.smoke || e.unittest_smoke || 'none';
+
 // Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
 // transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
 // task dir present) but produced NO frozen baseline — re-invoking with a corrective instruction up
@@ -1945,12 +2477,14 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
     log(`  ${(opts && opts.label) || role}: kernel selection still unverified after ` +
       `${BASELINE_EXTRACT_RETRIES} re-extractions — ABORTING (${finalSelection.why}).`);
     return { ...ext, smoke: 'fail', unittest_smoke: 'fail', selection_failed: true,
+      smoke_detail: `workflow forced fail: kernel selection failed: ${finalSelection.why}`,
       notes: `kernel selection failed: ${finalSelection.why} — ${ext.notes || ''}` };
   }
   if (smokeOk(ext) && !hasFrozenBaseline(ext)) {
     log(`  ${(opts && opts.label) || role}: STILL no frozen baseline after ${BASELINE_EXTRACT_RETRIES} ` +
       `re-extractions — ABORTING this extraction (refusing a fake speedup vs the candidate's own scaffold).`);
     return { ...ext, smoke: 'fail', unittest_smoke: 'fail',
+      smoke_detail: `workflow forced fail: no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions`,
       notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
         `(baseline_overlay/ + meta.candidate_bind required as the speedup denominator) — ${ext.notes || ''}` };
   }
@@ -2003,6 +2537,34 @@ const bankAccepted = (list, e, kr) => {
   });
 };
 
+// An integrator abandoned at the reserve boundary is still measuring, and is usually minutes from its
+// verdict. No FINISH retry may start inside the reserve, so that return is the only verdict this A/B
+// can still get: wait for it, but only through the first LATE_VERDICT_RESERVE_FRAC of the reserve, so
+// Finalize/Report/Validate keep the rest.
+const LATE_VERDICT_RESERVE_FRAC = 0.25;
+async function adoptAbandonedVerdict(integ, label) {
+  const run = ABANDONED_RUNS.get(label);
+  ABANDONED_RUNS.delete(label);
+  if (integ || !run || !atReserveFloor() || typeof setTimeout !== 'function') return integ;
+  const waitMs = remainingMs() - Math.ceil(FINAL_RESERVE_MS * (1 - LATE_VERDICT_RESERVE_FRAC));
+  if (!(waitMs > 0)) return integ;
+  log(`  ${label}: abandoned at the reserve boundary — waiting up to ${Math.round(waitMs / 60000)}min ` +
+    'for its own verdict instead of starting a FINISH retry.');
+  let to;
+  const late = await Promise.race([
+    run.then((r) => r || null, () => null),
+    new Promise((resolve) => { to = setTimeout(() => resolve(null), waitMs); }),
+  ]);
+  clearTimeout(to);
+  if (!late) {
+    log(`  ${label}: no late verdict within ${Math.round(waitMs / 60000)}min; the A/B stays incomplete.`);
+    return integ;
+  }
+  if (late.llm_timeline) LLM_TL.nested.push(late.llm_timeline);
+  log(`  ${label}: ADOPTED the late verdict (${late.gate || '?'}${late.e2e_delta_pct != null ? `, ${late.e2e_delta_pct}%` : ''}).`);
+  return late;
+}
+
 // Run ONE integrate A/B and GUARANTEE both legs complete. The first call does a
 // normal apply+gate; if the integrator returns incomplete (ran only ref, hung,
 // or degraded mid-A/B) we RE-INVOKE it in resume mode to run the MISSING leg,
@@ -2010,20 +2572,23 @@ const bankAccepted = (list, e, kr) => {
 // (head, milestone, finalize-gate, disk-recovered): an A/B never ends after the
 // reference leg alone — it is driven to a complete ref+cand measurement.
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
-  // Caller inputs win; the tuning carve-out only ever ADDS keys (and is {} when no tuning was banked).
+  // Caller inputs win; the accuracy gate and the tuning carve-out only ever ADD keys (each is {} when
+  // off / when no tuning was banked).
   const withTuning = {
     MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
-    ...tuningIntegrateInputs(), ...inputs,
+    ...ACCURACY_INPUTS, ...tuningIntegrateInputs(), ...inputs,
   };
-  let integ = await safeAgent(
+  let integ = await adoptAbandonedVerdict(await safeAgent(
     roleAgent('e2e_integrator', 'integrate', intro, withTuning),
-    { phase: phaseName, label, schema: INTEGRATE_SCHEMA });
+    { phase: phaseName, label, schema: INTEGRATE_SCHEMA }), label);
   let tries = 0;
   while (!abDone(integ) && tries < AB_FINISH_RETRIES) {
+    if (searchClosed(`${label}: FINISH retry`)) break;
     tries++;
     log(`  ${label}: A/B incomplete (${integ ? (integ.reason || integ.gate) : 'null/timeout'}); ` +
       `re-invoking integrator to FINISH the missing leg (retry ${tries}/${AB_FINISH_RETRIES}).`);
-    integ = await safeAgent(
+    const finishLabel = `${label} (finish ${tries})`;
+    integ = await adoptAbandonedVerdict(await safeAgent(
       roleAgent('e2e_integrator', 'integrate',
         'FINISH this e2e A/B. A reference leg may already exist on disk under $CB/ref — reuse it and ' +
         'run ONLY the missing candidate leg (or re-run both if no usable ref exists), then return ' +
@@ -2031,7 +2596,7 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
         'hardware/harness fault persists after this retry. If short on time, keep one isolated search ' +
         'replica per leg so BOTH legs still run.',
         { ...withTuning, RESUME_AB: true }),
-      { phase: phaseName, label: `${label} (finish ${tries})`, schema: INTEGRATE_SCHEMA });
+      { phase: phaseName, label: finishLabel, schema: INTEGRATE_SCHEMA }), finishLabel);
   }
   if (integ && integ.short_name) {
     const candidateId = String(integ.short_name).replace(/[^A-Za-z0-9_.-]+/g, '_');
@@ -2306,6 +2871,13 @@ if (TIME_BUDGET_EFFECTIVE_MS != null && typeof setTimeout === 'function' && TIME
     log(`[time-budget] RESERVE BOUNDARY reached (${Math.round(TIME_BUDGET_EFFECTIVE_MS / 60000)}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget spent) — the remaining ~${Math.round(FINAL_RESERVE_MS / 60000)}min belongs to Finalize/Report/Validate. No NEW A/B or measured work starts from here.`);
   }, TIME_BUDGET_EFFECTIVE_MS);
 }
+// The same rule for everything ahead of the Finalize-gate: the search phases, their re-profiles, the
+// KB replays and FINISH retries. Each checks before it dispatches; see atReserveFloor() for why.
+function searchClosed(what) {
+  if (FINAL_PHASE_STARTED || (!TIME_FINAL_DEADLINE_HIT && !atReserveFloor())) return false;
+  log(`[time-budget] ${what} SKIPPED — the final reserve has begun.`);
+  return true;
+}
 function deepBoundedWorkflow(ref, wfArgs, label) {
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   if (!DEEP_MODE || typeof setTimeout !== 'function' || !(DEEP_HEAD_WF_MS > 0)) return p;
@@ -2573,6 +3145,11 @@ if (want('setup')) {
       MEASUREMENT_PURPOSE: 'parity', REPLICAS: PARITY_REPLICAS,
       SKILL_DIR: WORKFLOW_DIR, EXPECTED_GFX, EXPECTED_TARGET,
       EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
+      // Non-empty ONLY on a declared trace replay. The Director writes it to
+      // $EVAL_DIR/bench_env.sh in step 3, BEFORE the baseline bench in step 5,
+      // so the baseline is measured on the real client and the real metric axis
+      // rather than a synthetic sweep. Empty => the Director writes nothing.
+      ...(AGENTX_ENV ? { BENCH_ENV_CONTENT: AGENTX_ENV } : {}),
     }),
     { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
   if (!setup || !setup.eval_dir) throw new Error('Setup failed: no eval_dir');
@@ -2604,16 +3181,112 @@ if (want('setup')) {
     log(`Setup identity telemetry differs from the deterministic probe: physical_cu_count expected ` +
         `${EXPECTED_PHYSICAL_CU_COUNT}, Director returned ${detectedPhysicalCuCount}; using expected value.`);
   }
+  const divergence = evalDirDivergence(EVAL_DIR_OVERRIDE, setup.eval_dir);
+  if (divergence) throw new Error(`Setup failed: ${divergence}`);
   EVAL_DIR = setup.eval_dir;
   MODEL_NAME = setup.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = setup.baseline_throughput_tok_s;
-  NOISE_BAND = setup.noise_band_pct || NOISE_BAND_DEFAULT;
+  NOISE_BAND = gateNoiseBand(setup.noise_band_pct);
   // Seed flags/env win when provided (baseline was measured on them); else fall
   // back to whatever the director resolved.
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
   curOverlay = INIT_BASE_OVERLAY;
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
+  if (IS_AGENTX) {
+    log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
+      `from ${AGENTX_METRIC_SOURCE}), concurrency ${CONC}, noise band ${NOISE_BAND}% ` +
+      `(Director reported ${setup.noise_band_pct != null ? setup.noise_band_pct : 'none'}%, ` +
+      `workload floor ${NOISE_BAND_DEFAULT}%).`);
+  }
+
+  // ── The trace-replay declaration must have TAKEN EFFECT, not merely been sent ──
+  // BASELINE_TPUT is the denominator of every gain this run will report, so a
+  // baseline accidentally measured with the synthetic client on the output axis
+  // does not just mis-state one number -- it silently rebases the entire run,
+  // and the mismatch is invisible in the result afterwards. The declaration
+  // travels through an AGENT (the Director writes bench_env.sh), so confirm the
+  // effect rather than trusting the instruction: the file has to exist and the
+  // baseline summary has to carry the metric basis we asked for.
+  // Positive mismatch => abort now, while one bench has been spent instead of
+  // a full budget. Unreadable summary => say so loudly and continue, since the
+  // measurement itself may still be fine and a false abort is its own failure.
+  if (IS_AGENTX) {
+    let verdict = null;
+    try {
+      const { execFileSync } = require('child_process');
+      const out = execFileSync('python3', ['-c', `
+import json, os, sys
+eval_dir = sys.argv[1]
+want = sys.argv[2]
+env_file = os.path.join(eval_dir, 'bench_env.sh')
+summary = os.path.join(eval_dir, 'baseline', 'bench_summary.json')
+res = {'env_file': os.path.isfile(env_file) and os.path.getsize(env_file) > 0}
+def _num(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+try:
+    with open(summary) as fh:
+        _s = json.load(fh) or {}
+    res['basis'] = _s.get('metric_basis') or ''
+    # The request shape the baseline actually served. Reading it back is what
+    # lets kernel work target the served regime without this file, or the
+    # workflow, hardcoding a corpus average that would go stale.
+    res['observed_isl'] = _num(_s.get('observed_isl'))
+    res['observed_osl'] = _num(_s.get('observed_osl'))
+except Exception as exc:
+    res['basis'] = None
+    res['why'] = f'{type(exc).__name__}: {exc}'
+res['want'] = want
+print(json.dumps(res))
+`, EVAL_DIR, AGENTX_METRIC_BASIS], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
+      verdict = JSON.parse(out);
+    } catch (probeErr) {
+      log(`Setup: WARNING could not verify the trace-replay declaration ` +
+        `(${probeErr && probeErr.message ? probeErr.message : probeErr}). ` +
+        `Proceeding, but confirm ${EVAL_DIR}/bench_env.sh and the baseline metric_basis by hand.`);
+    }
+    if (verdict) {
+      if (!verdict.env_file) {
+        throw new Error(
+          `Setup declared workload_kind=${WORKLOAD_KIND} but ${EVAL_DIR}/bench_env.sh was never ` +
+          `written, so the baseline was measured with the synthetic client on the wrong metric axis. ` +
+          `Every later delta would be relative to the wrong number. Re-run Setup.`);
+      }
+      if (verdict.basis === null) {
+        log(`Setup: WARNING baseline/bench_summary.json unreadable (${verdict.why || 'unknown'}); ` +
+          `cannot confirm metric_basis=${AGENTX_METRIC_BASIS}.`);
+      } else if (verdict.basis !== AGENTX_METRIC_BASIS) {
+        throw new Error(
+          `Setup measured the baseline on metric_basis=${verdict.basis || '<absent>'} but this run ` +
+          `declared ${AGENTX_METRIC_BASIS}. The two axes are not comparable, so the baseline is ` +
+          `unusable. Check that ${EVAL_DIR}/bench_env.sh sets E2E_METRIC=${AGENTX_E2E_METRIC} and ` +
+          `that the bench did not inherit another E2E_METRIC (an exported value outranks the ` +
+          `file), then re-run Setup.`);
+      } else {
+        log(`Setup: trace-replay declaration verified (bench_env.sh present, ` +
+          `baseline metric_basis=${verdict.basis}).`);
+      }
+      // Now that something has actually been served, take the kernel-targeting
+      // shape from the measurement instead of from a declaration or a constant.
+      // A caller who declared a shape explicitly keeps it: they may be targeting
+      // a regime deliberately, and overriding that silently would be its own
+      // surprise.
+      if (SHAPE_IS_MEASURED) {
+        log(`Setup: keeping the declared kernel-targeting shape isl=${ISL} osl=${OSL} ` +
+          `(provenance ${WORKLOAD_SHAPE_PROVENANCE}); the baseline served ` +
+          `isl=${verdict.observed_isl || '?'} osl=${verdict.observed_osl || '?'}.`);
+      } else if (!adoptMeasuredShape(verdict.observed_isl, verdict.observed_osl,
+                                     'the baseline bench')) {
+        log(`Setup: the baseline summary carried no served request shape yet, so kernel ` +
+          `targeting is still the synthetic ${ISL}/${OSL} placeholder — far below a trace ` +
+          `replay's real lengths. This is expected when a relaunched leg has not written its ` +
+          `summary yet: every later role prompt retries the read and installs the shape as ` +
+          `soon as it appears (watch for "Kernel-targeting shape measured"). If that line ` +
+          `never comes, kernel choices are aimed at the wrong regime (the MEASUREMENT is ` +
+          `unaffected) — pass workload_spec.observed_isl/observed_osl to set it explicitly.`);
+      }
+    }
+  }
 
   // =========================================================================
   // MODULE A — read the deployment KB, then VALIDATE what it says on this box.
@@ -2692,6 +3365,9 @@ if (want('setup')) {
         `sorted_by=${resolved.sorted_by || resolved.ranked_by || '-'} ` +
         `champion_metric=${resolved.champion_metric || '-'} reason=${resolved.read_reason || '?'} ` +
         `candidates=${cands.length}`);
+      log(`[kb] recall_metric_basis=${E2E_KB_METRIC.basis || 'any'} ` +
+        `strict=${E2E_KB_METRIC.strict} source=${E2E_KB_METRIC.source} ` +
+        `measurement_metric_basis=${kbMeasurementBasis()}`);
       // The counts BEHIND a zero: nobody wrote this page, everything was retracted, everything was
       // under the floor — all `candidates=0` above. Logged separately so that line stays greppable.
       const curation = (resolved.curation && typeof resolved.curation === 'object') ? resolved.curation : {};
@@ -2713,6 +3389,9 @@ if (want('setup')) {
         answered: String(resolved.canonical_id || ''),
         match_tier: String(resolved.match_tier || ''),
         plane: E2E_KB_PLANE, read_plane: KB_READ_PLANE, mode: E2E_WARM_START,
+        recall_metric_basis: E2E_KB_METRIC.basis,
+        recall_metric_strict: E2E_KB_METRIC.strict, recall_metric_source: E2E_KB_METRIC.source,
+        measurement_metric_basis: kbMeasurementBasis(),
         candidates: cands.length, configs: [], kernels: [],
         // Both floors, always: "what did this run decline to see, and at what threshold" is not
         // answerable after the fact from a candidate list.
@@ -2777,6 +3456,11 @@ if (want('setup')) {
           `${E2E_WARM_START_BENCH_MIN_SPEEDUP}x — offered as a reference, not measured`,
       }));
       for (const c of benchable.slice(0, benchN)) {
+        if (searchClosed(`[kb] replay of config ${c.session_id || '?'}`)) {
+          verdicts.push({ ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a',
+            outcome: 'skipped', why: 'the final reserve began before its turn' });
+          continue;
+        }
         // VALIDATE THROUGH THE ORIGINAL GATE. This is config_tuner:sweep — the same role, the same
         // schema, the same bench_e2e.sh at the same TP/GPU, the same delta-vs-median arithmetic, the
         // same parity check and the same swap-took-effect log grep the flow already trusts for a
@@ -2876,7 +3560,8 @@ if (want('setup')) {
         // the minimum needed, and bench once more. Exactly once — a repair loop against a config
         // that cannot run here learns nothing new — and through the SAME accept gate.
         let repair = null;
-        if (!measuredTrialOf(sweep, BASELINE_TPUT).measured) {
+        if (!measuredTrialOf(sweep, BASELINE_TPUT).measured &&
+            !searchClosed(`[kb] repair of config ${c.session_id || '?'}`)) {
           const repaired = await runValidation(
             'A recovered configuration was applied to this box and the server produced NO ' +
             'measurement — it failed to launch, failed to become healthy, or died before the bench. ' +
@@ -3056,6 +3741,7 @@ if (want('setup')) {
           : (!viaOverlay && kind === 'patch' && !patchPath) ? 'the record names a patch but its bundle holds no file'
           : (!viaOverlay && kind !== 'patch' && !hasRouting) ? `recorded as a '${kind}' win but carries no apply_env/apply_flags, so there is nothing to re-apply`
           : replayed >= E2E_WARM_START_KERNELS_N ? `replay budget of ${E2E_WARM_START_KERNELS_N} already spent`
+          : searchClosed(`[kb] replay of kernel ${k.name}`) ? 'the final reserve began before its turn'
           : '';
         if (unreplayable) {
           kernelVerdicts.push({ ...k, kind, outcome: 'reference', measured_delta_pct: null,
@@ -3097,23 +3783,18 @@ if (want('setup')) {
               'directory as the candidate. Note the tarball is a STANDALONE overlay from another run: ' +
               'untarring it over CURRENT_OVERLAY would overwrite `_overlay_manifest.json` and drop every ' +
               'rebind already accepted here, which turns the A/B into a comparison against a candidate ' +
-              'that is missing part of its own reference. So graft its rebinds ON TOP of the current ' +
-              'overlay rather than replacing it:\n' +
+              'that is missing part of its own reference. Merge all manifest entries, including deferred ' +
+              'installers, with the checked merge command below. Use a fresh CAND directory; a conflict ' +
+              'must be reported as inapplicable, never resolved by dropping existing hooks:\n' +
               '```bash\n' +
               'CAND="$EVAL_DIR/overlay/cand_<short_name>"\n' +
-              'cp -r "$CURRENT_OVERLAY"/. "$CAND"/ 2>/dev/null || mkdir -p "$CAND"   # empty CURRENT_OVERLAY is the normal case\n' +
               `KBO=$(mktemp -d) && tar xzf ${shq(k.overlay_tar)} -C "$KBO" --strip-components=1\n` +
-              'cp -r "$KBO"/. "$CAND"/                      # modules + _patched/; manifest handled next\n' +
-              'if [ -s "$CURRENT_OVERLAY/_overlay_manifest.json" ]; then\n' +
-              '  cp "$CURRENT_OVERLAY/_overlay_manifest.json" "$CAND/_overlay_manifest.json"   # restore, then re-add\n' +
-              '  # for each {target,impl_module,impl_attr} in "$KBO/_overlay_manifest.json":\n' +
-              '  python3 "$SKILL_DIR/scripts/overlay_setup.py" add-rebind --overlay "$CAND" \\\n' +
-              '    --target "<target>" --impl-module "<impl_module>" --impl-attr "<impl_attr>"\n' +
-              'fi\n' +
-              'PYTHONPATH="$CAND" python3 "$SKILL_DIR/scripts/overlay_setup.py" check --module "<impl_module>"\n' +
+              'python3 "$SKILL_DIR/scripts/overlay_setup.py" merge --overlay "$CAND" \\\n' +
+              '  --from "$CURRENT_OVERLAY" --with "$KBO"\n' +
               '```\n' +
-              'The manifest names every rebind as `target -> impl_module:impl_attr`. VERIFY EACH REBIND ' +
-              'ACTUALLY TOOK on the candidate server (load banner, or the check above) before you believe ' +
+              'The manifest declares rebinds, injected modules and installers with their target sites. ' +
+              'VERIFY EVERY TARGET ACTUALLY TOOK on the candidate server (installer verification API, ' +
+              'load banner, and an executed seam call) before you believe ' +
               'a null result: this overlay was built against a different framework_version, and a rebind ' +
               'whose target module was renamed upstream binds nothing, silently, which is indistinguishable ' +
               'from "the kernel made no difference". If no rebind takes, report gate:"rejected" with ' +
@@ -3123,9 +3804,10 @@ if (want('setup')) {
             : '') +
           '(1) There is NO task_dir and therefore NO immutable oracle for this kernel. Your step-1 ' +
           'provenance re-check cannot run, because the workspace that produced this patch does not ' +
-          'exist on this box. Do NOT claim provenance was verified. The FRESH parity probe against the ' +
-          'reference leg is the only correctness evidence available here, so run it and report its ' +
-          'result plainly — if parity fails or cannot be established, REJECT.\n' +
+          'exist on this box. Do NOT claim provenance was verified. The FRESH correctness probe against ' +
+          'the TRUE baseline (greedy parity, or the task-accuracy gate when ACCURACY_GATE is in your ' +
+          'inputs) is the only correctness evidence available here, so run it and report its result ' +
+          'plainly — if it fails or cannot be established, REJECT.\n' +
           '(2) verified_isolated_speedup is a FOREIGN number, measured on another box against another ' +
           'baseline. It is context for what to expect, never evidence. Gate on what YOU measure.\n' +
           'As always: never mutate the installed package. The overlay on PYTHONPATH is the only ' +
@@ -3196,8 +3878,11 @@ if (want('setup')) {
       // A record's headline number covers its WHOLE bundle. When that includes kernels this lane
       // benched only the config half, so every place printing both has to say which half ran.
       const configHalfOnly = v => Array.isArray(v.accepted_kernels) && v.accepted_kernels.length > 0;
-      const attestable = verdicts.filter(v => v.session_id &&
+      const attestable = verdicts.filter(v => v.session_id && kbCanAttestMetric(v) &&
         ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
+      const crossMetric = verdicts.filter(v => v.session_id && !kbCanAttestMetric(v));
+      if (crossMetric.length) log(`[kb] ${crossMetric.length} record(s) not attested: ` +
+        'the local measurement axis does not establish their stored metric claim.');
       if (attestable.length) {
         const cmds = attestable.map(v =>
           `python3 ${shq(E2E_STORE_SCRIPT)} attest ${kbIdentityFlags()} ${kbPlaneFlags()} ` +
@@ -3454,37 +4139,42 @@ if (want('setup')) {
   // Fold before Profile and ConfigSweep so every downstream measurement sees the active source stack.
   curOverlay = ST.overlay || kbSeedOverlay || curOverlay || '';
 
-  phase('Profile');
-  profile = await safeAgent(
-    roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
-      EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
-      OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
-    }),
-    { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
-  log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
+  if (searchClosed('Profile and Strategize')) {
+    kernelQueue = [];
+    headQueue = [];
+  } else {
+    phase('Profile');
+    profile = await safeAgent(
+      roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
+        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
+        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+        ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
+      }),
+      { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
+    log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
 
-  phase('Strategize');
-  strategy = await safeAgent(
-    roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
-      EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
-      WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-      ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
-    }),
-    { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
-  kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
-  headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
-  headQueue = applyOpIdentityGuard(headQueue, 'strategize');
-  log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
-  // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
-  await ensureFlydslGate();
+    phase('Strategize');
+    strategy = await safeAgent(
+      roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
+        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
+        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+        ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
+      }),
+      { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
+    kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
+    headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
+    headQueue = applyOpIdentityGuard(headQueue, 'strategize');
+    log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
+    // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
+    await ensureFlydslGate();
+  }
 } else {
   // Load carried state from a prior phase invocation (args.state).
   EVAL_DIR = ST.eval_dir || EVAL_DIR_OVERRIDE;
   if (!EVAL_DIR) throw new Error('Non-setup phase requires args.state.eval_dir (or args.eval_dir)');
   MODEL_NAME = ST.model_name || MODEL_NAME_HINT;
   BASELINE_TPUT = ST.baseline_throughput_tok_s || 0;
-  NOISE_BAND = ST.noise_band_pct || NOISE_BAND_DEFAULT;
+  NOISE_BAND = gateNoiseBand(ST.noise_band_pct);
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
   curOverlay = ST.overlay || INIT_BASE_OVERLAY;
@@ -3501,7 +4191,8 @@ if (want('setup')) {
 // A carried phase-partial state still wins: it is a measurement this run already made. kbSeedTput is
 // 0 when Module A did not run or adopted nothing, so `0 || BASELINE_TPUT === BASELINE_TPUT`.
 let curTput = ST.throughput || kbSeedTput || BASELINE_TPUT;
-if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_directions || []).length) {
+if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_directions || []).length &&
+    !searchClosed('ConfigSweep')) {
   phase('ConfigSweep');
   const sweep = await safeAgent(
     roleAgent('config_tuner', 'sweep', 'Sweep the ranked config axes one at a time; keep wins.', {
@@ -3534,27 +4225,29 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       integrity: { checkpoint_assets: [] },
     });
     log(`Config sweep accepted. throughput ${curTput} tok/s (${(curTput / BASELINE_TPUT).toFixed(3)}x). Re-profiling.`);
-    // Re-profile: config changed which kernels dominate.
-    profile = await safeAgent(
-      roleAgent('profiler', 'reprofile', 'Re-profile after the config sweep.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'config',
-        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Profile', label: 'profiler:post-config', schema: PROFILE_SCHEMA });
-    // Re-strategize the kernel queue against the new profile.
-    const restrat = await safeAgent(
-      roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
-        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
-        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
-    if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
-    if (restrat && restrat.head_candidates)
-      headQueue = applyOpIdentityGuard(restrat.head_candidates.slice(), 're-strategize');
-    // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
-    await ensureFlydslGate();
+    if (!searchClosed('post-config re-profile and re-strategize')) {
+      // Re-profile: config changed which kernels dominate.
+      profile = await safeAgent(
+        roleAgent('profiler', 'reprofile', 'Re-profile after the config sweep.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'config',
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Profile', label: 'profiler:post-config', schema: PROFILE_SCHEMA });
+      // Re-strategize the kernel queue against the new profile.
+      const restrat = await safeAgent(
+        roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
+          WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Strategize', label: 'architect:re-strategize', schema: STRATEGY_SCHEMA });
+      if (restrat && restrat.kernel_candidates) kernelQueue = restrat.kernel_candidates.slice();
+      if (restrat && restrat.head_candidates)
+        headQueue = applyOpIdentityGuard(restrat.head_candidates.slice(), 're-strategize');
+      // re-strategize may have (re)routed flydsl -> provision it (idempotent; no-op if already done).
+      await ensureFlydslGate();
+    }
   } else {
     log(`Config sweep found no win above the noise band.`);
   }
@@ -3603,7 +4296,7 @@ function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SY
 // An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
 // the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
 // ===========================================================================
-if (want('tune') && TUNING_SKILLSET_ENABLED) {
+if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) {
   phase('TuningSkillset');
   log(`Tuning skillset: ${TUNING_SKILLSET_DIR} (whole, standalone, pre-HeadKernel); ` +
     `no op cap, tuning-kb ${TUNING_KB_ENABLED ? 'ENABLED' : 'DISABLED (blind eval)'}.`);
@@ -3615,7 +4308,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
       BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: curTput,
       CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
       MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
-      NOISE_BAND_PCT: NOISE_BAND, ACCURACY_GATE,
+      NOISE_BAND_PCT: NOISE_BAND, ACCURACY_GATE, ...ACCURACY_INPUTS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '',
       TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
       TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
@@ -3928,27 +4621,29 @@ if (want('tune') && TUNING_SKILLSET_ENABLED) {
 
     // Tuning changed which kernels dominate — re-profile + re-strategize so the head track works the
     // POST-tuning landscape, not the pre-tuning one. Same contract as the post-ConfigSweep re-profile.
-    profile = await safeAgent(
-      roleAgent('profiler', 'reprofile', 'Re-profile after the tuning skillset deployed its artifacts.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'tuning',
-        // curOverlay, not '': tuning may have banked a routing overlay, and profiling without it would
-        // measure a stack where the tuned artifact binds to nothing, then hand the head track a Top-N
-        // for the wrong landscape.
-        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Profile', label: 'profiler:post-tuning', schema: PROFILE_SCHEMA });
-    const retune = await safeAgent(
-      roleAgent('system_architect', 'strategize', 'Re-route after tuning changed the landscape.', {
-        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
-        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Strategize', label: 'architect:post-tuning-strategize', schema: STRATEGY_SCHEMA });
-    if (retune && retune.kernel_candidates) kernelQueue = retune.kernel_candidates.slice();
-    if (retune && retune.head_candidates)
-      headQueue = applyOpIdentityGuard(retune.head_candidates.slice(), 'post-tuning re-strategize');
-    if (retune) await ensureFlydslGate();
+    if (!searchClosed('post-tuning re-profile and re-strategize')) {
+      profile = await safeAgent(
+        roleAgent('profiler', 'reprofile', 'Re-profile after the tuning skillset deployed its artifacts.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'tuning',
+          // curOverlay, not '': tuning may have banked a routing overlay, and profiling without it would
+          // measure a stack where the tuned artifact binds to nothing, then hand the head track a Top-N
+          // for the wrong landscape.
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Profile', label: 'profiler:post-tuning', schema: PROFILE_SCHEMA });
+      const retune = await safeAgent(
+        roleAgent('system_architect', 'strategize', 'Re-route after tuning changed the landscape.', {
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
+          WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Strategize', label: 'architect:post-tuning-strategize', schema: STRATEGY_SCHEMA });
+      if (retune && retune.kernel_candidates) kernelQueue = retune.kernel_candidates.slice();
+      if (retune && retune.head_candidates)
+        headQueue = applyOpIdentityGuard(retune.head_candidates.slice(), 'post-tuning re-strategize');
+      if (retune) await ensureFlydslGate();
+    }
   } else if (tuned) {
     // Claimed accepted but failed a hard bar. Do NOT bank it — an unproven artifact silently poisons
     // every downstream A/B, which is the exact failure the skillset exists to prevent.
@@ -4061,7 +4756,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
       if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
-        const why = ext ? ext.notes || ext.smoke : 'none';
+        const why = extractFailWhy(ext);
         log(`  [deep] ${h.short_name}: op extraction failed (${why})${isDominant ? ' [DOMINANT — flagged]' : ''}; skipping.`);
         if (isDominant) flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why });
         history.ledger.push({ direction: h.short_name, verdict: isDominant ? 'flagged' : 'dead_end', lesson: `op extraction failed (${why})` });
@@ -4452,7 +5147,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (p.dead === 'deadline') { log(`  [fast-mode] ${h.short_name}: skipped (dispatch deadline).`); continue;
       }
       if (p.dead === 'extract' || !p.ext || !p.ext.task_dir) {
-        const why = p.ext ? p.ext.notes || p.ext.smoke : 'none';
+        const why = extractFailWhy(p.ext);
         if (isDominant) { log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head op extraction FAILED (${why}) — flagged, NOT skipped.`);
           flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why }); }
         else log(`  ${h.short_name}: op extraction failed (${why}); skipping.`);
@@ -4641,7 +5336,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
     if (!ext || ext.smoke !== 'pass' || !ext.task_dir) {
-      const why = ext ? ext.notes || ext.smoke : 'none';
+      const why = extractFailWhy(ext);
       if (isDominant) {
         log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) op extraction FAILED (${why}) — flagged, NOT silently skipped.`);
         flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'extract', gate: 'extract_failed', reason: why });
@@ -4936,7 +5631,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   }
   } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
   // Head wins reshape the profile massively (GEMM mass shrinks) — re-profile before the kernel loop.
-  if (acceptedHeads.length) {
+  if (acceptedHeads.length && !searchClosed('post-head re-profile')) {
     profile = await safeAgent(
       roleAgent('profiler', 'reprofile', 'Re-profile after head-kernel wins.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'head',
@@ -5015,7 +5710,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
-      return { c, skip: true, reason: `extraction failed/non-editable (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };
+      return { c, skip: true, reason: `extraction failed/non-editable (${extractFailWhy(ext)})` };
     }
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
     let kl;
@@ -5394,7 +6089,7 @@ if (want('final')) {
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL,
       MEASUREMENT_MODE: VALIDATION_MEASUREMENT_MODE,
       MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_SAMPLES,
-      SKILL_DIR: WORKFLOW_DIR,
+      SKILL_DIR: WORKFLOW_DIR, ...ACCURACY_INPUTS,
       // The Report phase already wrote these files with the Finalize-bundle bench (the Director had not
       // run yet). After validation the Director MUST review + rewrite their headline throughput / speedup
       // / TTFT / TPOT (and status/parity) to its authoritative same-session numbers, so report-vs-director
@@ -5593,6 +6288,7 @@ const wfReturn = {
   // report nor the KB (e2e_store.py's _ARTIFACT_KEYS looks up exactly result["final_patch"]).
   // final_overlay cannot stand in for it: that is a DIRECTORY, and the store's os.path.isfile filter
   // drops it, so a run with no final_patch uploads no reproducible code at all.
+  ...kbResultMetadata(),
   final_patch: (finalize && finalize.final_patch) || '',
   final_launch_script: (validation && validation.final_launch_script) || (finalize && finalize.final_launch_script) || '',
   report_path: report ? report.report_path : `${EVAL_DIR}/architect_report.md`,
@@ -5670,6 +6366,7 @@ if (EVAL_DIR) {
 const kbNoWinVerdict = ['validated_no_win', 'recovered_no_gain']
   .some((s) => String(wfReturn.validation_status || '').startsWith(s));
 if (E2E_WARM_START_ON && KB_DIMS && KB_DIMS.gfx && want('final') && EVAL_DIR &&
+    !A.kb_defer_to_interface &&
     wfReturn.throughput_speedup > 1.0 && wfReturn.final_throughput_tok_s > 0 && !kbNoWinVerdict) {
   // Computed HERE, deterministically, from facts this script already holds — never asked of an
   // agent. `direction` is inside _content_digest, so a label that varies between two runs of the

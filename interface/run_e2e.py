@@ -49,9 +49,9 @@ from typing import Any
 
 try:
     # Package import under pytest / module use.
-    from interface.effective_config import resolve_effective_config
+    from interface.effective_config import _flag_map, _parse_env, resolve_effective_config
 except ModuleNotFoundError:  # Direct: python interface/run_e2e.py ...
-    from effective_config import resolve_effective_config
+    from effective_config import _flag_map, _parse_env, resolve_effective_config
 
 try:
     from interface import claude_trace_mirror
@@ -461,8 +461,10 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     aiperf's trace replay, which owns the sequence lengths. But the agents still
     read isl/osl as the analytic serving call model when they synthesize
     GEMM/attention shapes, so on a trace replay the synthetic 1024/1024
-    defaults would aim the whole search two orders of magnitude below the real
-    load (the corpus averages ~112k input tokens per request).
+    defaults would aim the whole search orders of magnitude below the real load
+    (a trace corpus's average input length dwarfs a synthetic prompt). The real
+    figure is deliberately not quoted here: it moves with the corpus, the
+    tokenizer and the window, so it is measured, never asserted.
 
     ``workload_spec.observed_isl/observed_osl`` carry the shape the orchestrator
     MEASURED on its own baseline. Prefer them; fall back to the synthetic
@@ -482,13 +484,18 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     except (TypeError, ValueError):
         obs_isl = obs_osl = 0
     if obs_isl <= 0 or obs_osl <= 0:
+        # Not an error, and no longer a dead end: the workflow measures the shape
+        # it actually served off its own baseline and adopts it before any kernel
+        # work is scheduled (adoptMeasuredShape). So the honest label here is
+        # "pending", which the workflow reads as "you may replace me", not
+        # "synthetic_fallback", which reads as a decision already made.
         sys.stderr.write(
-            "!!! AgentX workload carries no observed_isl/observed_osl; kernel "
-            f"targeting falls back to the synthetic {syn_isl}/{syn_osl}, which "
-            "is far below the real replay shape. Kernel choices may be aimed at "
-            "the wrong regime (the MEASUREMENT is unaffected).\n"
+            "note: AgentX workload carries no observed_isl/observed_osl, so the "
+            f"kernel-targeting shape starts at the synthetic {syn_isl}/{syn_osl} "
+            "and is replaced by what the baseline actually serves. Pass "
+            "observed_isl/observed_osl only to target a regime deliberately.\n"
         )
-        return syn_isl, syn_osl, "synthetic_fallback_on_agentx"
+        return syn_isl, syn_osl, "agentx_pending_baseline"
     return obs_isl, obs_osl, "agentx_observed"
 
 
@@ -562,6 +569,57 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     }
 
 
+def _resolve_ep(h: dict, effective: Any, tp: int) -> int:
+    """How many ranks the experts are sharded over, as the BASELINE was launched.
+
+    ``ep`` is a KB addressing dimension beside ``tp``: two runs of the same model on the same
+    stack with the experts sharded differently are different deployments, and a store that cannot
+    name the difference files them on one page with nothing to tell them apart.
+
+    Sources, most authoritative first -- all of them things ``map_args`` already holds, because a
+    second flag parser living here is exactly how a reader and a writer end up on different pages:
+
+    1. the handoff's own ``ep`` (beside ``tp``), when the orchestrator stated it;
+    2. ``--ep-size N`` in the resolved server args, read through the resolver's own flag map so a
+       spelling it canonicalises is seen the same way here;
+    3. ``--enable-expert-parallel``: vLLM spreads EP over the whole TP x DP group;
+    4. the effective environment's ``EP_SIZE``, then the recipe's recorded value;
+    5. otherwise 1 -- no expert parallelism, which is also the right answer for a dense model.
+    """
+    def _positive(raw: Any) -> int:
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return 0
+        return value if value > 0 else 0
+
+    stated = _positive(h.get("ep"))
+    if stated:
+        return stated
+    flags = _flag_map(
+        effective.final_server_args
+        if effective is not None
+        else (h.get("accepted_flags", "") or "")
+    )
+    sized = flags.get("--ep-size")
+    if sized is not None and _positive(getattr(sized, "value", None)):
+        return _positive(sized.value)
+    if "--enable-expert-parallel" in flags:
+        dp_flag = flags.get("--data-parallel-size") or flags.get("-dp")
+        dp = _positive(getattr(dp_flag, "value", None)) or 1
+        return max(tp, 1) * dp
+    env = (getattr(effective, "final_env", {}) if effective is not None
+           else _parse_env(h.get("accepted_env", ""))) or {}
+    if _positive(env.get("EP_SIZE")):
+        return _positive(env["EP_SIZE"])
+    recorded = _positive(
+        _recipe_env_block(str(h.get("launch_recipe") or "")).get("EP_SIZE")
+    )
+    if recorded:
+        return recorded
+    return 1
+
+
 def map_args(
     h: dict,
     timeout_s: int | None = None,
@@ -632,6 +690,8 @@ def map_args(
             "vllm" if gpu_identity and gpu_identity["target"] == "r9700" else "sglang"
         ),
         "tp": tp,
+        # Beside tp, and resolved the same way: see _resolve_ep.
+        "ep": _resolve_ep(h, effective, tp),
         "gpu_ids": str(gpu_ids),
         # On an AgentX handoff these describe the shape the agents OPTIMIZE for,
         # not the shape anything is measured at (see _targeting_shape).
@@ -639,6 +699,20 @@ def map_args(
         "osl": target_osl,
         "workload_shape_provenance": shape_provenance,
         "conc": int(workload.get("conc", 64)),
+        # Forward the workload declaration into the workflow rather than relying
+        # only on the environment exported below. It is the SAME mechanism the
+        # standalone entry point uses, which is the point: one declaration, one
+        # set of defaults, one place where roles are told what they are
+        # measuring. The workflow's own channel assigns nothing that is already
+        # exported, so everything set here still wins -- this only closes the gap
+        # where a bench runs in a context that did not inherit the environment.
+        # Absent/synthetic workload_spec => omitted, and the args are unchanged.
+        **(
+            {"workload_spec": h["workload_spec"]}
+            if isinstance(h.get("workload_spec"), dict)
+            and str(h["workload_spec"].get("kind") or "") == WORKLOAD_KIND_AGENTX
+            else {}
+        ),
         # Seed the baseline with Hyperloom's accepted best config so the
         # baseline == Hyperloom best config (fair engagement start).
         "initial_extra_server_args": initial_server_args,
@@ -704,6 +778,43 @@ def map_args(
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
+    # ...and the cap on it, as a fraction of the budget (JS default 0.2). The reserve has to hold the
+    # Director's paired base/final validation, which on a trace replay is two ~70min legs plus their
+    # boots -- past 20% of most budgets. Optional in the same way as the reserve itself.
+    reserve_cap = _float_or_none(
+        os.environ.get("GEAK_FINAL_RESERVE_CAP_FRAC"), "GEAK_FINAL_RESERVE_CAP_FRAC")
+    if reserve_cap is not None:
+        ps_args["final_reserve_cap_frac"] = reserve_cap
+    # Hung-agent guard (JS default 120min, then up to two retries). A serving agent on a trace replay
+    # can legitimately outlive 120min, and the guard cannot stop the attempt it gives up on, so a
+    # retry runs beside a still-live original on the same GPUs. GEAK_AGENT_TIMEOUT_RETRY=0 degrades
+    # to "no result" instead of retrying.
+    agent_timeout_ms = _int_or_none(os.environ.get("GEAK_AGENT_TIMEOUT_MS"), "GEAK_AGENT_TIMEOUT_MS")
+    if agent_timeout_ms is not None:
+        ps_args["agent_timeout_ms"] = agent_timeout_ms
+    if os.environ.get("GEAK_AGENT_TIMEOUT_RETRY", "").strip():
+        ps_args["agent_timeout_retry"] = (
+            "true" if _as_bool(os.environ["GEAK_AGENT_TIMEOUT_RETRY"]) else "false")
+    # Correctness bar: task accuracy (gsm8k) instead of greedy byte-parity, for kernels that round
+    # differently by design. Unset keeps the workflow's own default.
+    accuracy_gate = os.environ.get("GEAK_E2E_ACCURACY_GATE", "").strip().lower()
+    if accuracy_gate in ("none", "gsm8k"):
+        ps_args["accuracy_gate"] = accuracy_gate
+    elif accuracy_gate:
+        sys.stderr.write(f"ignoring unknown GEAK_E2E_ACCURACY_GATE: {accuracy_gate!r}\n")
+    accuracy_limit = _int_or_none(
+        os.environ.get("GEAK_E2E_ACCURACY_LIMIT"), "GEAK_E2E_ACCURACY_LIMIT")
+    if accuracy_limit is not None:
+        ps_args["accuracy_limit"] = accuracy_limit
+    accuracy_tol = _float_or_none(os.environ.get("GEAK_E2E_ACCURACY_TOL"), "GEAK_E2E_ACCURACY_TOL")
+    if accuracy_tol is not None:
+        ps_args["accuracy_tol"] = accuracy_tol
+    # Simulated speculative acceptance makes a stack perf-comparable and nothing more: what it serves
+    # is neither deterministic nor the model's own output, so a parity or accuracy probe run under it
+    # measures the simulator. Name the switches so correctness probes can serve without them.
+    simulated = _simulated_acceptance_env(initial_env)
+    if simulated:
+        ps_args["correctness_unset_env"] = ",".join(simulated)
     if h.get("launch_recipe"):
         ps_args["launch_script"] = h["launch_recipe"]
     # Serving-launch fidelity (see Hyperloom handoff builder / #805): forward the
@@ -743,6 +854,11 @@ def map_args(
     # subset of {setup,profile,config,tune,head,kernel,final} (default unset => "all").
     if h.get("phases"):
         ps_args["phases"] = str(h["phases"])
+    # Recall policy is independent of the workload's measurement/acceptance contract.
+    kb_basis = str(h.get("e2e_kb_metric_basis")
+                   or os.environ.get("GEAK_E2E_KB_METRIC_BASIS", "")).strip()
+    if kb_basis:
+        ps_args["e2e_kb_metric_basis"] = kb_basis
     # No timed-repeat pass-through: the round count belongs to the lifecycle, not the handoff, so
     # an `e2e_repeats` key from a stale caller is ignored rather than allowed to pull one leg off
     # the lifecycle the rest of the run used.
@@ -1028,6 +1144,14 @@ def apply_bench_client(h: dict) -> str:
     return client
 
 
+# metric_basis -> the E2E_METRIC bench_summarize.py measures it under. The two
+# interactivity bases are absent on purpose: _BASES accepts each one as its own token.
+_E2E_METRIC_FOR_BASIS = {
+    "aggregate_output_tok_s": "output",
+    "aggregate_total_token_tok_s": "total",
+}
+
+
 def apply_workload_spec(h: dict) -> dict:
     """Export AgentX workload identity so bench_e2e.sh drives the trace replay.
 
@@ -1041,10 +1165,9 @@ def apply_workload_spec(h: dict) -> dict:
     exported: dict[str, str] = {}
     os.environ["GEAK_WORKLOAD_KIND"] = WORKLOAD_KIND_AGENTX
     os.environ["GEAK_ISL_OSL_INACTIVE"] = "1"
-    # Long agentic windows: one repeat unless the caller explicitly overrides.
-    if "REPEATS" not in os.environ:
-        os.environ["REPEATS"] = "1"
-        exported["REPEATS"] = "1"
+    # REPEATS is deliberately left alone. bench_e2e.sh already gives the trace-replay
+    # client one window per call, and an exported REPEATS outranks REPLICAS there, so
+    # pinning it here turned an isolated validation's replicas into one.
     mapping = (
         ("scenario", "GEAK_AGENTX_SCENARIO"),
         ("corpus", "AGENTX_DATASET"),
@@ -1070,6 +1193,21 @@ def apply_workload_spec(h: dict) -> dict:
     if metric_basis:
         os.environ["GEAK_METRIC_BASIS"] = metric_basis
         exported["GEAK_METRIC_BASIS"] = metric_basis
+        # GEAK_METRIC_BASIS records the DECLARED basis; it is not what selects
+        # the axis. bench_e2e.sh medians whichever throughput E2E_METRIC names
+        # and defaults it to "output". Under Hyperloom that variable arrives in
+        # our own environment (the orchestrator injects it), which is why this
+        # was never noticed -- but nothing inside GEAK was setting it, so a run
+        # driven from a handoff alone graded a 140:1 prefill-heavy trace on the
+        # output axis, where a large change in total work barely moves the
+        # number. Derive it here, and never overwrite an inherited value so the
+        # orchestrator stays authoritative over its own runs. A basis this build
+        # cannot measure goes through verbatim: bench_summarize.py refuses it by
+        # name, where defaulting to output would grade a different axis silently.
+        if "E2E_METRIC" not in os.environ:
+            axis = _E2E_METRIC_FOR_BASIS.get(metric_basis, metric_basis)
+            os.environ["E2E_METRIC"] = axis
+            exported["E2E_METRIC"] = axis
     return exported
 
 
@@ -1101,19 +1239,22 @@ def agentx_preflight(h: dict) -> list[str]:
             "client cannot replay traces. Install the AgentX-capable aiperf "
             "into this environment, or set AIPERF_BIN to its path."
         )
+    # The mapper is only a real gap when the vendored fallback is missing too.
+    # GEAK ships a copy beside the client adapter precisely so a run without an
+    # InferenceX checkout is not a failure; reporting its absence as a problem
+    # would send an operator hunting for a checkout they do not need.
+    vendored_mapper = E2E_DIR / "scripts" / "adapters" / "clients" / "map_aiperf.py"
     ix_root = os.environ.get("INFERENCEX_PATH", "").strip()
-    if not ix_root:
-        problems.append(
-            "INFERENCEX_PATH is unset, so map_aiperf.py cannot be located to "
-            "convert the aiperf export into a canonical result."
-        )
-    elif not any(
+    ix_mapper = ix_root and any(
         os.path.isfile(os.path.join(ix_root, rel))
         for rel in ("benchmarks/map_aiperf.py", "assets/agentx/map_aiperf.py")
-    ):
+    )
+    if not ix_mapper and not vendored_mapper.is_file():
         problems.append(
-            f"map_aiperf.py not found under INFERENCEX_PATH={ix_root!r} "
-            "(expected benchmarks/ or assets/agentx/)."
+            "no map_aiperf.py to convert the aiperf export into a canonical "
+            f"result: INFERENCEX_PATH={ix_root or '<unset>'} has none (expected "
+            f"benchmarks/ or assets/agentx/) and the vendored copy at "
+            f"{vendored_mapper} is missing."
         )
     for problem in problems:
         sys.stderr.write(f"!!! AgentX preflight: {problem}\n")
@@ -2030,6 +2171,37 @@ def apply_bench_protocol(h: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Invocation: SDK preferred, CLI fallback.
 # ---------------------------------------------------------------------------
+# Everything the agent says is CAPTURED for the life of the run: the SDK path
+# accumulates fragments and joins them at the end, and the CLI path asks for
+# --output-format json, which emits one blob on exit. Either way a multi-hour run
+# prints nothing to its container log, so the workflow's own log() lines -- the
+# phase transitions, and the "Kernel-targeting shape measured" line that says
+# whether kernel work is aimed at the right regime -- are unreadable until it is
+# over. Both consumption paths funnel through _iter_message_text(), so teeing
+# there makes a run watchable with one write and no change to what is returned.
+# Unset GEAK_LIVE_LOG => byte-identical behaviour.
+_LIVE_LOG_PATH = os.environ.get("GEAK_LIVE_LOG", "")
+_LIVE_LOG_BROKEN = False
+
+
+def _live_log(texts: list[str]) -> None:
+    """Append streamed agent text to a watchable file. Never raises.
+
+    Observability must not be able to fail a run, so the first write error
+    disables the tee for good rather than retrying on every message.
+    """
+    global _LIVE_LOG_BROKEN
+    if not _LIVE_LOG_PATH or _LIVE_LOG_BROKEN or not texts:
+        return
+    try:
+        with open(_LIVE_LOG_PATH, "a", encoding="utf-8", errors="replace") as fh:
+            for text in texts:
+                fh.write(text if text.endswith("\n") else text + "\n")
+            fh.flush()
+    except Exception:
+        _LIVE_LOG_BROKEN = True
+
+
 def _iter_message_text(msg: Any) -> list[str]:
     """Best-effort extraction of every text fragment from one SDK message.
 
@@ -2072,6 +2244,7 @@ def _iter_message_text(msg: Any) -> list[str]:
     if isinstance(msg, dict):
         _take(msg.get("text"))
         _take(msg.get("result"))
+    _live_log(out)
     return out
 
 
@@ -3144,7 +3317,7 @@ def _overlay_has_loadable_code(path: Path) -> bool:
         return False
     if not isinstance(spec, dict):
         return False
-    return bool(spec.get("modules") or spec.get("rebinds") or spec.get("captures"))
+    return bool(spec.get("modules") or spec.get("rebinds") or spec.get("captures") or spec.get("installers"))
 
 
 def _patch_has_hunks(path: Path) -> bool:
@@ -3302,6 +3475,96 @@ def _same_session_baseline(
     if value > 0.0:
         return value, "director_drift_corrected"
     return 0.0, ""
+
+
+def handoff_acceptance(h: dict) -> dict | None:
+    """The caller's KEEP rule for the axis it handed GEAK; None leaves GEAK's own verdict.
+
+    Hyperloom publishes one in an AgentX ``workload_spec`` graded on interactivity: the
+    ``objective`` must gain at least ``min_gain_pct`` over the reference, while each guard in
+    ``guard_max_drop_pct`` -- named by basis, like the objective -- may fall no further below
+    the reference than its band. A block that does not parse is ignored with a warning rather
+    than half-applied: GEAK's own verdict stands, and the caller re-measures what it keeps.
+    """
+    spec = h.get("workload_spec")
+    block = spec.get("acceptance") if isinstance(spec, dict) else None
+    if block is None:
+        return None
+    try:
+        objective = str(block["objective"]).strip()
+        min_gain_pct = float(block["min_gain_pct"])
+        guards = {
+            str(basis).strip(): float(band)
+            for basis, band in (block.get("guard_max_drop_pct") or {}).items()
+        }
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        problem = repr(exc)
+    else:
+        if objective and all(math.isfinite(v) for v in (min_gain_pct, *guards.values())):
+            return {
+                "objective": objective,
+                "min_gain_pct": min_gain_pct,
+                "guard_max_drop_pct": guards,
+            }
+        problem = "no objective, or a band that is not a finite number"
+    sys.stderr.write(f"!!! workload_spec.acceptance ignored ({problem}): {block!r}\n")
+    return None
+
+
+def acceptance_verdict(
+    rule: dict,
+    *,
+    measured_basis: str,
+    baseline: float,
+    final: float,
+    reference: dict,
+    candidate: dict,
+) -> dict:
+    """Apply the caller's KEEP rule to the pair this run publishes.
+
+    Hyperloom's AgentX verdict, step for step: ``(final - baseline) / baseline * 100`` on the
+    objective must reach ``min_gain_pct``, and each guard must hold ``candidate >= reference *
+    (1 - max_drop_pct / 100)``. Guards are read from the ``guard_<basis>_median`` fields of the
+    two legs' bench summaries, and one missing from either leg fails: a guard nobody measured
+    is not one the candidate held. Hyperloom also refuses rounds of unequal length or with more
+    failed requests and applies its latency budget; the summaries carry neither, so Hyperloom's
+    re-measurement keeps the last word.
+    """
+    objective = rule["objective"]
+    gain_pct = (final - baseline) / baseline * 100.0 if baseline > 0.0 and final > 0.0 else None
+    reasons = []
+    if measured_basis != objective:
+        reasons.append(f"measured {measured_basis or 'an unnamed axis'}, not {objective}")
+    elif gain_pct is None:
+        reasons.append(f"no {objective} pair to compare")
+    elif gain_pct < rule["min_gain_pct"]:
+        reasons.append(f"{objective} gained {gain_pct:.3f}%, below {rule['min_gain_pct']}%")
+    guards = {}
+    for basis, max_drop_pct in rule["guard_max_drop_pct"].items():
+        ref = _positive_finite_float(reference.get(f"guard_{basis}_median"))
+        cand = _positive_finite_float(candidate.get(f"guard_{basis}_median"))
+        measured = ref > 0.0 and cand > 0.0
+        holds = measured and cand >= ref * (1.0 - max_drop_pct / 100.0)
+        guards[basis] = {
+            "reference": ref or None,
+            "candidate": cand or None,
+            "max_drop_pct": max_drop_pct,
+            "holds": holds,
+        }
+        if not measured:
+            reasons.append(f"guard {basis} was not measured on both legs")
+        elif not holds:
+            reasons.append(f"guard {basis} fell {(1.0 - cand / ref) * 100.0:.3f}%, "
+                           f"past {max_drop_pct}%")
+    return {
+        "objective": objective,
+        "measured_basis": measured_basis,
+        "gain_pct": round(gain_pct, 3) if gain_pct is not None else None,
+        "min_gain_pct": rule["min_gain_pct"],
+        "guards": guards,
+        "keep": not reasons,
+        "reasons": reasons,
+    }
 
 
 def normalize_result(h: dict, wf: dict) -> dict:
@@ -3778,14 +4041,21 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # block carries what a reader needs to decide — the arbitration verdict, the
     # run-to-run spread of each leg, the Director's noise band, and whether the
     # delta clears them. Reported, never enforced: nothing here changes status.
+    # The one exception is ``acceptance``, added below only when the handoff states
+    # the caller's KEEP rule.
     delta_pct = round((speedup - 1.0) * 100.0, 3)
+    # The metric-neutral spread first: the output_*-named alias is only written on the output
+    # basis, so on any other axis it would leave both legs' scatter unknown.
     base_spread_pct = _positive_finite_float(
-        base_leg_summary.get("output_throughput_tok_s_spread_pct")
+        base_leg_summary.get("throughput_tok_s_spread_pct")
+        or base_leg_summary.get("output_throughput_tok_s_spread_pct")
         or (validation.get("base_block") or {}).get("spread_pct")
+        or baseline_summary.get("throughput_tok_s_spread_pct")
         or baseline_summary.get("output_throughput_tok_s_spread_pct")
     )
     final_spread_pct = _positive_finite_float(
-        final_summary.get("output_throughput_tok_s_spread_pct")
+        final_summary.get("throughput_tok_s_spread_pct")
+        or final_summary.get("output_throughput_tok_s_spread_pct")
         or (validation.get("final_block") or {}).get("spread_pct")
     )
     noise_band_pct = _positive_finite_float(validation.get("noise_band_pct"))
@@ -3833,6 +4103,39 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "recovery": wf.get("recovery_evidence") or None,
     }
 
+    # Measurement basis: read back from the bench_summary.json that actually produced these numbers
+    # (bench_summarize.py records the throughput or interactivity axis E2E_METRIC selected),
+    # so the label never lies about the basis. Falls back to output when neither summary carries it.
+    # See run_e2e.md alignment table.
+    metric_basis = (
+        final_summary.get("metric_basis")
+        or wf.get("metric_basis")
+        or baseline_summary.get("metric_basis")
+        or "aggregate_output_tok_s"
+    )
+
+    # ── the caller's KEEP rule ───────────────────────────────────────────────
+    # When the handoff states the rule its own verdict applies (Hyperloom's AgentX
+    # interactivity grading), "ok" means that rule keeps the published pair, not merely
+    # that the final beat the baseline. Guards come from the two legs the pair was read
+    # from; a pair with no such legs (a recovered win) cannot show its guards held.
+    acceptance = handoff_acceptance(h)
+    if acceptance is not None:
+        verdict = acceptance_verdict(
+            acceptance,
+            measured_basis=metric_basis,
+            baseline=geak_baseline,
+            final=promoted_final,
+            reference={
+                "validation_base_bench_summary": base_leg_summary,
+                "setup_baseline": baseline_summary,
+            }.get(baseline_basis_source, {}),
+            candidate={} if wf.get("recovered_intermediate") else final_summary,
+        )
+        validation_evidence["acceptance"] = verdict
+        if status == "ok" and not verdict["keep"]:
+            status = "no_gain"
+
     result = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
@@ -3860,15 +4163,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # _material_overlay_path / _material_patch_path).
         "final_patch": _material_patch_path(eval_dir, wf),
         "final_overlay": _material_overlay_path(eval_dir, wf),
-        # Measurement basis: read back from the bench_summary.json that actually produced these numbers
-        # (bench_e2e.sh records "aggregate_output_tok_s" or "aggregate_total_token_tok_s" per E2E_METRIC),
-        # so the label never lies about the basis. Falls back to output when neither summary carries it.
-        # See run_e2e.md alignment table.
-        "metric_basis": (
-            final_summary.get("metric_basis")
-            or baseline_summary.get("metric_basis")
-            or "aggregate_output_tok_s"
-        ),
+        "metric_basis": metric_basis,
         # Which bench client measured these numbers. "inferencex" => identical
         # client to Hyperloom/Magpie (benchmark_serving.py); "native" => the
         # backend's own client (small cross-harness differences may remain).
@@ -3910,6 +4205,20 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # Cold/hot speedup cross-checks (double-check only; see alignment_metrics above).
         # Does NOT change the promoted final_throughput_tok_s / throughput_speedup.
         "alignment_metrics": alignment_metrics,
+        # Exposed for backfill; _enrich_kb_return also carries it to the salvage writer's input.
+        "comparability": workload_comparability,
+        # Preserve the declaration and the workflow's observed shape for KB backfill/recovery.
+        "workload": {
+            **(h.get("workload_spec") or {}), **workload,
+            **(wf.get("workload") or {}),
+            **({
+                "isl": round(float(baseline_summary["observed_isl"])),
+                "osl": round(float(baseline_summary["observed_osl"])),
+                "shape_provenance": "agentx_measured_this_run",
+            } if (h.get("workload_spec") or {}).get("kind") == WORKLOAD_KIND_AGENTX
+            and _positive_finite_float(baseline_summary.get("observed_isl"))
+            and _positive_finite_float(baseline_summary.get("observed_osl")) else {}),
+        },
         # Never advertise a report that is not on disk: the old unconditional
         # fallback handed the caller a path to a file that was never written.
         # _emit fills this in with the synthesized report if the workflow died first.
@@ -6021,8 +6330,11 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
 
     With NO accepted change the served path is unchanged, so final == baseline by
     construction (do-no-harm); speedup 1.0 -> :func:`normalize_result` => no_gain.
-    Returns ``None`` only when no baseline throughput was ever measured (the run
-    genuinely produced nothing to keep).
+    Returns ``None`` when no baseline throughput was ever measured (the run
+    genuinely produced nothing to keep), or when the Finalize bundle
+    (``final/final_launch.sh``) is missing: a run cut off mid-optimization also has
+    a measured baseline, and reporting it as no_gain tells the caller GEAK finished
+    and found nothing. ``None`` surfaces the run's classified error instead.
 
     This is the LAST recovery tier: :func:`_recover_workflow_return` reaches it only
     after ruling out an accepted kernel win AND an adopted serving config
@@ -6041,6 +6353,8 @@ def _recover_completed_no_gain(eval_dir: Path) -> dict | None:
     try:
         baseline_tput = float(baseline_tput)
     except (TypeError, ValueError):
+        return None
+    if not (eval_dir / "final" / "final_launch.sh").is_file():
         return None
     return {
         "eval_dir": str(eval_dir),
@@ -6070,6 +6384,19 @@ def _persist_workflow_return(eval_dir: Path, wf: dict) -> None:
             json.dumps(wf, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+def _enrich_kb_return(wf: dict, result: dict) -> dict:
+    """Put normalized metadata on the file the salvage writer actually reads."""
+    enriched = {**wf, **{key: result[key] for key in ("comparability", "workload", "metric_basis")
+                         if result.get(key)}}
+    evidence = result.get("validation_evidence") or {}
+    if evidence.get("acceptance") is not None:
+        enriched["validation_evidence"] = evidence
+        # The acceptance verdict must travel with the same pair it evaluated.
+        for key in ("baseline_throughput_tok_s", "final_throughput_tok_s", "throughput_speedup"):
+            enriched[key] = result[key]
+    return enriched
 
 
 # ---------------------------------------------------------------------------
@@ -6805,6 +7132,33 @@ def _int_or_none(raw: str | None, what: str) -> int | None:
         return None
 
 
+def _float_or_none(raw: str | None, what: str) -> float | None:
+    """Positive float, or None (with a note) for junk — same contract as ``_int_or_none``."""
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        sys.stderr.write(f"ignoring non-numeric {what}: {raw!r}\n")
+        return None
+    return value if value > 0 else None
+
+
+SIMULATED_ACCEPTANCE_ENV_PREFIX = "SGLANG_SIMULATE_ACC"
+
+
+def _simulated_acceptance_env(extra_env: str) -> list[str]:
+    """Simulated-acceptance switches set in this process's env or in the seed ``K=V`` env string."""
+    names = {k for k in os.environ if k.startswith(SIMULATED_ACCEPTANCE_ENV_PREFIX)}
+    try:
+        tokens = shlex.split(extra_env or "")
+    except ValueError:
+        tokens = (extra_env or "").split()
+    names.update(t.split("=", 1)[0] for t in tokens
+                 if "=" in t and t.startswith(SIMULATED_ACCEPTANCE_ENV_PREFIX))
+    return sorted(names)
+
+
 def _resolve_timeout_s(argv: list[str]) -> tuple[list[str], set[str], int]:
     """Split argv into positionals + flags, and resolve the wall-clock budget.
 
@@ -6883,6 +7237,12 @@ def main(argv: list[str]) -> int:
     os.environ["GEAK_EVAL_DIR"] = ps_args["eval_dir"]
     _publish_protected_pgids()
     bench_client = apply_bench_client(h)
+    # Module B writes workflow_return.json before normalize_result runs. Send the same
+    # comparability calculation into that return while the selected client is known.
+    ps_args["comparability"] = _workload_comparability(h)
+    # The handoff verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
+    # until then; _kb_write_back handles successful runs too when Module B left no receipt.
+    ps_args["kb_defer_to_interface"] = handoff_acceptance(h) is not None
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
@@ -6985,6 +7345,7 @@ def main(argv: list[str]) -> int:
             eval_dir = Path(eval_dir_str)
             if wf is not None:
                 try:
+                    wf = _enrich_kb_return(wf, out)
                     _persist_workflow_return(eval_dir, wf)
                 except Exception:
                     pass

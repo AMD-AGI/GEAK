@@ -23,7 +23,8 @@ reads back as a home:
 ``python3 interface/geak_report.py --eval-dir <eval_dir> --claude-home <eval_dir>/llm_trace``.
 ``--claude-home`` appends a search root, it does not select a run; the eval dir
 does that. The record is copied byte for byte precisely so the eval dir it names
-still selects it from the mirror.
+still selects it from the mirror. The one exception is a credential value an
+agent printed, which is masked in place at its own length (:func:`secret_values`).
 
 Everything here is best effort. An 18-hour optimization run must never die over
 telemetry, so no function in this module raises to its caller: failures are
@@ -1203,6 +1204,81 @@ def _is_current(src: Path, dest: Path) -> bool:
     return a.st_size == b.st_size and int(a.st_mtime) == int(b.st_mtime)
 
 
+#: Environment names whose values are credentials. Agents inherit them (the KB
+#: store token among them), and one that prints its environment or the token file
+#: writes the value into its transcript -- which the mirror would then carry onto
+#: the run's durable output volume.
+_SECRET_NAME_RE = re.compile(
+    r"TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL", re.I)
+
+#: Shorter values under such names are modes and flags, not credentials, and
+#: masking them would overwrite ordinary text.
+_SECRET_MIN_LEN = 16
+
+#: What ``e2e_workflow/scripts/kb_env.sh`` reads when no token is in the environment.
+_KB_TOKEN_FILE = "~/.geak_kb_token"
+
+
+def _secret_shaped(value: str) -> bool:
+    return (len(value) >= _SECRET_MIN_LEN and "://" not in value
+            and not value.startswith(("/", "~", ".")))
+
+
+def secret_values(environ: dict[str, str] | None = None) -> list[bytes]:
+    """The credential values an agent of this run could have printed.
+
+    Paths and URLs are excluded even under a secret-looking name: they are
+    pointers, not credentials, and the record names its eval dir by path.
+
+    Args:
+        environ: Environment to read; ``os.environ`` when omitted.
+
+    Returns:
+        Distinct values, longest first, so a value containing another is masked
+        whole rather than leaving its remainder readable.
+    """
+    env = os.environ if environ is None else environ
+    found = {str(v).strip() for k, v in env.items() if _SECRET_NAME_RE.search(k)}
+    try:
+        found.add(Path(_KB_TOKEN_FILE).expanduser().read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeDecodeError):
+        pass
+    return sorted((v.encode("utf-8") for v in found if _secret_shaped(v)),
+                  key=len, reverse=True)
+
+
+def _copy_masked(src: Path, dest: Path, secrets: list[bytes]) -> int:
+    """Copy *src* to *dest* with every secret overwritten by ``*``.
+
+    Each mask is as long as its secret, so the size :func:`_is_current` compares
+    is unchanged; with the source's mtime copied too, a repeated pass still skips
+    the file.
+
+    Args:
+        src: Source file.
+        dest: Mirrored file.
+        secrets: From :func:`secret_values`.
+
+    Returns:
+        How many occurrences were masked.
+    """
+    if not secrets:
+        shutil.copy2(src, dest)
+        return 0
+    masked = 0
+    part = dest.with_name(dest.name + ".part")
+    with open(src, "rb") as fin, open(part, "wb") as fout:
+        for line in fin:
+            for secret in secrets:
+                if secret in line:
+                    masked += line.count(secret)
+                    line = line.replace(secret, b"*" * len(secret))
+            fout.write(line)
+    shutil.copystat(src, part)
+    os.replace(part, dest)
+    return masked
+
+
 def mirror(
     record_path: Path,
     record: dict[str, Any],
@@ -1308,11 +1384,13 @@ def mirror_invocations(
         "bytes_copied": 0,
         "max_bytes": int(max_bytes),
         "deadline_hit": False,
+        "secrets_redacted": 0,
         "invocations": [],
     }
 
     budget = int(max_bytes)
     started = time.monotonic()
+    secrets = secret_values()
     seen: set[str] = set()
     for site in sites:
         run_id = str(site.get("run_id") or "")
@@ -1390,7 +1468,7 @@ def mirror_invocations(
                 continue
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dest)
+                masked = _copy_masked(src, dest, secrets)
             except OSError as exc:
                 rec = {"path": str(src), "error": f"{type(exc).__name__}: {exc}"}
                 entry["errors"].append(rec)
@@ -1400,6 +1478,9 @@ def mirror_invocations(
             entry["bytes_copied"] += size
             manifest["bytes_copied"] += size
             rec = {"path": key, "bytes": size, "copied": True}
+            if masked:
+                rec["secrets_redacted"] = masked
+                manifest["secrets_redacted"] += masked
             entry["files"].append(rec)
             manifest["files"].append(rec)
         if entry["status"] == "ok":
