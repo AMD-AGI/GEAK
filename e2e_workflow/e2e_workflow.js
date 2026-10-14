@@ -800,10 +800,11 @@ const OSL_DECLARED = A.osl != null ? parseInt(A.osl, 10) : null;
 //     callers that want every field explicit; or
 //   * args.workload_kind: "agentx_trace_replay" — the shorthand, which fills
 //     the canonical AgentX setup below and lets workload_spec override any part.
-// Resume the saved declaration; new runs use main's explicit workload identity.
-const WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object' && !Array.isArray(A.workload_spec)
+// AgentX extraction resumes its saved declaration when no new workload is supplied.
+const WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object'
   ? A.workload_spec
-  : (A.state && A.state.workload_spec && typeof A.state.workload_spec === 'object' && !Array.isArray(A.state.workload_spec)
+  : ((!A.workload_kind || A.workload_kind === 'agentx_trace_replay') &&
+      A.state?.workload_spec?.kind === 'agentx_trace_replay'
     ? A.state.workload_spec : {});
 const WORKLOAD_KIND = String(A.workload_kind || WORKLOAD_SPEC.kind || 'synthetic');
 const IS_AGENTX = WORKLOAD_KIND === 'agentx_trace_replay';
@@ -1778,10 +1779,10 @@ The served load is the AgentX corpus \`${AGENTX.corpus}\` replayed by aiperf und
 The CLIENT owns the load: it chooses the request mix, the arrival pattern, its own warmup, and the
 measurement duration. Consequences you must respect:
 
-* **ISL=${ISL} / OSL=${OSL} summarizes request lengths, not kernel input shapes** (provenance:
+* **ISL=${ISL} / OSL=${OSL} is a KERNEL-TARGETING shape, not a benchmark** (provenance:
   ${WORKLOAD_SHAPE_PROVENANCE}${SHAPE_IS_MEASURED ? '' : ' — A PLACEHOLDER, NOT THIS CORPUS'}).
   ${SHAPE_IS_MEASURED
-    ? 'It is an average of served request lengths. Derive kernel shapes and call weights from\n  current server logs, dispatch evidence and captured operands; prefix reuse, batching and\n  speculative decoding make request lengths insufficient for kernel input synthesis.'
+    ? 'It is an average of what was actually served, so it is the right regime to size tiles and\n  synthesize GEMM/attention inputs against. Read it as a centre of mass, not as a shape every\n  request has.'
     : 'It is the synthetic default and does NOT describe this load: the real shape is read off the\n  baseline once it has run, so nothing here has a corpus average compiled into it.\n  Do NOT size tiles or synthesize GEMM shapes from this number — if your phase needs the served\n  shape, take it from the baseline summary (observed_isl/observed_osl), not from this line.'}
   A trace corpus spans orders of magnitude in request length, so there is no single ISL: read the
   real distribution off the run's own export rather than assuming one. NEVER build a synthetic sweep
@@ -1834,7 +1835,9 @@ function kernelExtractBlock(role) {
     `analysis_skill=none or use_expert_skills=false. Discover workload/model/backend features from ` +
     `the current configuration and execution evidence; apply replay, KV-cache, MoE and speculative ` +
     `decoding branches only when those features exist. This skill governs top-kernel selection, ` +
-    `shape coverage and UT weights for AgentX. Missing evidence never authorizes substituting ` +
+    `shape coverage and UT weights for AgentX. ISL/OSL summarize request lengths; derive actual ` +
+    `kernel shapes and call weights from dispatch evidence and captured operands. ` +
+    `Missing evidence never authorizes substituting ` +
     `fixed-ISL/OSL shapes or weights. Keep existing ` +
     `kernel identity, frozen baseline, correctness, and serving TP/GPU contracts.\n` +
     `Declared workload kind: ${WORKLOAD_KIND}; specification: ${JSON.stringify(WORKLOAD_SPEC)}`;

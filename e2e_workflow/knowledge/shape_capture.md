@@ -73,18 +73,3 @@ workflow so the kernel layer's Director/verify_engineer math is unchanged.
   the oracle won't reproduce. Record everything the callable reads.
 - **In-place outputs**: if the kernel writes into a passed-in buffer, snapshot the buffer BEFORE the
   call as input and AFTER as the oracle output.
-
-### Shared parent IDs in fused-op traces (observed in MoE extraction)
-
-A nested GEMM1 launcher appeared to execute both GEMM1 and GEMM2, falsely
-qualifying it as the complete MoE boundary. Both GPU launches inherited the
-outer CPU op's `External id`; that ID identified their common parent, not which
-inner launcher issued each launch.
-
-When this symptom appears, inspect host launch correlations on the marker's
-own thread. A device event with a correlation must match that exact launch;
-only events without correlations may fall back to a fully contained CPU op's
-External ID. Keep different dispatch branches separate when checking members.
-This is a trace-attribution issue, not a model-specific extraction recipe.
-The shared fix and regression live in [kernel_selection.py](../scripts/kernel_selection.py)
-and [its tests](../scripts/tests/test_kernel_selection.py).

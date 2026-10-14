@@ -107,8 +107,13 @@ class TestJointChainSelection(unittest.TestCase):
         result = self.verify(events)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["deeper_live_candidates"], [])
-        self.assertEqual(ks._marker_kernel_evidence(events, self.score, "topk_kernel")["matched"], [])
-        self.assertEqual(ks._marker_kernel_evidence(events, self.topk, "score_kernel")["matched"], [])
+        self.assertFalse(self.verify(events, target=self.score)["ok"])
+        self.assertFalse(self.verify(events, target=self.topk)["ok"])
+        # The stricter attribution belongs to the new joint UT path only.
+        legacy = ks.verify(self.score, "topk_kernel",
+                           {"module": "pkg.indexer", "attr": "score", "total_calls_observed": 1},
+                           events, [self.score])
+        self.assertTrue(legacy["ok"], legacy)
 
     def test_known_launch_outside_marker_cannot_fall_back_to_parent_external_id(self):
         events = self.chain_trace()
@@ -120,7 +125,7 @@ class TestJointChainSelection(unittest.TestCase):
         for event in events:
             if event.get("cat") == "kernel":
                 event["args"]["External id"] = 6
-        self.assertEqual(ks._marker_kernel_evidence(events, self.score, "topk_kernel")["matched"], [])
+        self.assertFalse(self.verify(events, target=self.score)["ok"])
 
     def test_external_only_fallback_requires_contained_cpu_op_not_a_runtime_id(self):
         events = self.chain_trace()
@@ -130,8 +135,8 @@ class TestJointChainSelection(unittest.TestCase):
         for event in events:
             if event.get("cat") in ("hip_runtime", "kernel"):
                 event["args"] = {"External id": 6}
-        self.assertEqual(ks._marker_kernel_evidence(events, self.score, "topk_kernel")["matched"], [])
-        self.assertEqual(ks._marker_kernel_evidence(events, self.joint, "topk_kernel")["matched"], ["topk_kernel"])
+        self.assertFalse(self.verify(events, target=self.score)["ok"])
+        self.assertTrue(self.verify(events)["ok"])
 
     def test_a_deeper_complete_joint_still_rejects_outer_wrapper(self):
         deeper = "pkg.indexer:inner_joint"

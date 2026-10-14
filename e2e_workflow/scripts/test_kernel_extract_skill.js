@@ -39,7 +39,8 @@ const make = new Function('A', 'process', `
   ${hook}
   ${role}
   ${legacyRole}
-  return { active: KERNEL_EXTRACT_ON, workload: WORKLOAD, roleAgent, legacyRoleAgent, logs,
+  return { active: KERNEL_EXTRACT_ON, workload: WORKLOAD, spec: WORKLOAD_SPEC,
+    roleAgent, legacyRoleAgent, logs,
     block: kernelExtractBlock, measurement: MEASUREMENT_MODE,
     validationMeasurement: VALIDATION_MEASUREMENT_MODE, validationSamples: VALIDATION_SAMPLES };
 `);
@@ -65,6 +66,7 @@ for (const args of [
     assert(prompt.includes(`PHASE=${phase}`));
     const skill = prompt.match(/Read (\S+kernel-extract\/SKILL.md)/)[1];
     assert(fs.existsSync(skill), 'injected skill must ship at the referenced path');
+    assert(prompt.includes('derive actual kernel shapes and call weights from dispatch evidence and captured operands'));
   }
   assert.equal(run.block('director'), '');
   assert.equal(run.block('config_tuner'), '');
@@ -101,11 +103,13 @@ for (const args of [
   {workload_spec: {kind: 'dynamic_serving'}},
   {workload_spec: {kind: 'custom_workload', shape_axes: [1, 17]}},
   {state: {workload_spec: {kind: 'synthetic_isl_osl'}}},
+  {state: {workload_spec: {kind: 'custom_workload', concurrency: 7}}},
 ]) {
   const run = make(args, undefined);
   assert(!run.active);
   assert.deepEqual(run.workload, {isl: 1024, osl: 1024, conc: 64, shape_provenance: 'synthetic_default'});
   assert.deepEqual(run.logs, []);
+  if (!args.workload_spec) assert.deepEqual(run.spec, {}, 'only AgentX declarations resume from state');
   for (const [name, phase] of consumers) {
     const inputs = {WORKLOAD: run.workload, PROFILE_TOPN: '/eval/profile_topN.json'};
     assert.equal(run.block(name), '');
@@ -121,6 +125,10 @@ const fixed = make({workload_spec: {kind: 'synthetic_isl_osl'},
   {env: {GEAK_WORKLOAD_KIND: 'agentx_trace_replay', BENCH_CLIENT: 'agentx'}});
 assert(!fixed.active);
 assert(!Object.hasOwn(fixed.workload, 'kind'));
+const fixedKind = make({workload_kind: 'synthetic',
+  state: {workload_spec: {kind: 'agentx_trace_replay', concurrency: 10}}}, undefined);
+assert(!fixedKind.active);
+assert.deepEqual(fixedKind.spec, {}, 'explicit non-AgentX kind does not inherit replay configuration');
 // This integration must not expand main's workload identity from incidental metadata.
 for (const args of [{}, {bench_client: 'agentx'}, {workload_shape_provenance: 'agentx_observed'}]) {
   const run = make(args, {env: {GEAK_WORKLOAD_KIND: 'agentx_trace_replay', BENCH_CLIENT: 'agentx',
