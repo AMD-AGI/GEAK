@@ -47,7 +47,13 @@ def _chain_following_sitecustomize() -> None:
         if spec is None or spec.loader is None:
             continue
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Import-time code such as @dataclass looks its module up in sys.modules.
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(spec.name, None)
+            raise
         return
 
 
