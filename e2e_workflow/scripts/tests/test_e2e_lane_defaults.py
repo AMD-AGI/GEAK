@@ -41,8 +41,17 @@ check("e2e defaults the lane's learned KB to off",
 check("the default is overridable per run",
       "A.use_learned_kb" in s, "the caller must be able to turn it back on")
 
+check("e2e defaults perf authoring knowledge on",
+      re.search(r"LANE_USE_PERF_KNOWLEDGE\s*=\s*\n?\s*String\(A\.use_perf_knowledge\s*!=\s*null\s*\?\s*"
+                r"A\.use_perf_knowledge\s*:\s*'true'\)", s) is not None,
+      "historical behavior stays on; formal validation can pass false")
+check("the perf knowledge default is overridable per run",
+      "A.use_perf_knowledge" in s, "the caller must be able to create the clean control arm")
+
 check("one injection point, not one per call site",
-      s.count("const laneArgs = (wfArgs) =>") == 1 and "use_learned_kb: LANE_USE_LEARNED_KB" in s,
+      s.count("const laneArgs = (wfArgs) =>") == 1
+      and "use_learned_kb: LANE_USE_LEARNED_KB" in s
+      and "use_perf_knowledge: LANE_USE_PERF_KNOWLEDGE" in s,
       "laneArgs is where the default is applied")
 
 check("gfx1201 disables the E2E learned-card corpus",
@@ -82,6 +91,10 @@ lane = open(os.path.join(os.path.dirname(E2E), "kernel_workflow", "kernel_lane.j
 check("the kernel lane itself still defaults the KB ON",
       re.search(r"A\.use_learned_kb\s*!=\s*null\s*\?\s*A\.use_learned_kb\s*:\s*'true'", lane) is not None,
       "kernel_workflow's own default must stay on")
+check("the kernel lane defaults perf knowledge ON",
+      re.search(r"A\.use_perf_knowledge\s*!=\s*null\s*\?\s*A\.use_perf_knowledge\s*:\s*'true'",
+                lane) is not None,
+      "the new switch must preserve historical behavior when omitted")
 
 print()
 if FAILED:

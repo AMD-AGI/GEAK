@@ -120,6 +120,10 @@ const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA';
 // Off is also the conservative default for the layer that has never been measured with it on.
 // Override per run with args.use_learned_kb=true.
 const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb : 'false');
+// Perf authoring knowledge is ON by default (the historical behavior) but must have a real off arm
+// for causal validation. Kept beside the learned-KB default because every nested lane needs both.
+const LANE_USE_PERF_KNOWLEDGE =
+  String(A.use_perf_knowledge != null ? A.use_perf_knowledge : 'true');
 
 // EVERY nested lane invocation goes through here. Setting the flag at each call site instead would
 // be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
@@ -133,6 +137,7 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
+    use_perf_knowledge: LANE_USE_PERF_KNOWLEDGE,
     ...ablLaneArgs(),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
@@ -140,6 +145,7 @@ const laneArgs = (wfArgs) => {
   if (RDNA4_ISOLATE) {
     out.use_learned_kb = 'false';
     out.use_expert_skills = 'false';
+    out.use_perf_knowledge = 'false';
     out.perf_knowledge_dir = '';
     out.warm_start = 'off';
   }
@@ -607,12 +613,19 @@ const ACCURACY_INPUTS = (ACCURACY_GATE !== 'none')
 const CORRECTNESS_UNSET_ENV = String(A.correctness_unset_env || '').split(',')
   .map((s) => s.trim()).filter((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s));
 const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_tuner', 'tuning_specialist']);
-// The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to, never decisions; agents always
-// measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
+// The AMD authoring knowledge base (REFERENCE ONLY — facts/how-to/conditioned candidate cards, never
+// final verdicts; agents always measure). Default: sibling perf_knowledge/. Workflows enumerate candidates from
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
-let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
-if (RDNA4_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
+// Two independent ways to reach the empty (no-authoring-KB) arm: the caller's explicit
+// `use_perf_knowledge=false` control arm, and RDNA4_ISOLATE, which has to hold on gfx1201
+// whatever the caller asked for.
+const USE_PERF_KNOWLEDGE = LANE_USE_PERF_KNOWLEDGE === 'true';
+const DEFAULT_PERF_KNOWLEDGE_DIR =
+  WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge';
+const REQUESTED_PERF_KNOWLEDGE_DIR =
+  A.perf_knowledge_dir != null ? String(A.perf_knowledge_dir) : DEFAULT_PERF_KNOWLEDGE_DIR;
+const KERNEL_KNOWLEDGE_DIR =
+  (USE_PERF_KNOWLEDGE && !RDNA4_ISOLATE ? REQUESTED_PERF_KNOWLEDGE_DIR : '').replace(/\/+$/, '');
 // Warm start = the kernel layer's LOCAL experience reuse: before round 1 a lane resolves this kernel's
 // own history in kb_artifacts/ and re-validates the top stored patches through the same verify gate as
 // a fresh candidate. The knobs live in the kernel layer; e2e only forwards them, so that (a) one store
@@ -768,8 +781,11 @@ const KB_ENV_PRELUDE = `. "${WORKFLOW_DIR}/scripts/kb_env.sh"; `;
 // When OFF (the default) NOTHING is injected into any role prompt -> the prompt (and thus the whole run)
 // is byte-identical to a build without this feature. The flag + dir are passed DOWN to the kernel layer.
 const USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
-const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
-  (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
+// Not `||`: with the KB arm off KERNEL_KNOWLEDGE_DIR is '', and `'' + '/expert_skills'`
+// would hand the lane a bogus absolute-looking path instead of the empty one it expects.
+const EXPERT_SKILLS_DIR = String(A.expert_skills_dir != null
+  ? A.expert_skills_dir
+  : (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only routing/bake-off/integration roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['system_architect', 'op_benchmarker', 'e2e_integrator']);
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
