@@ -61,7 +61,7 @@ for (const role of ['profiler', 'system_architect', 'kernel_author']) {
 const off = blockFor({});
 ok(['e2e_integrator', 'director', 'config_tuner', 'tuning_specialist', 'profiler'].every((r) => off(r) === ''),
   'no switches => every role prompt is byte-identical');
-ok(/return base \+ expertSkillsBlock\(role\)[^;]*\+ correctnessEnvBlock\(role\);/.test(src),
+ok(/return base \+ expertSkillsBlock\(role\)[^;]*\+ correctnessEnvBlock\(role\)[^;]*;/.test(src),
   'roleAgent appends the block after base (additive, never rewrites it)');
 ok(/\.\.\.\(correctnessEnvBlock\(role\) \? \{ CORRECTNESS_UNSET_ENV: /.test(src),
   'the Inputs block names the switches only where the prompt explains them');
