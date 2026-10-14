@@ -27,7 +27,7 @@
         "max_targets": null,
         "trace_dir": null,
         "serving_env": null,
-        "_note_window": "The capture window must land in steady state, not in the ramp. This scenario once captured a window with prefill:decode = 32:7 while the true ratio was 1:1119 \u2014 ranking on raw window percentages would have routed the entire kernel budget at prefill."
+        "_note_window": "The capture window must land in steady state, not in the ramp. This scenario once captured a window with prefill:decode = 32:7 while the true ratio was 1:1119 — ranking on raw window percentages would have routed the entire kernel budget at prefill."
       }
     },
     "roofline": {
@@ -45,7 +45,7 @@
     "optimize": {
       "skill": "geak-kernel-workflow",
       "params": {
-        "time_budget_sec": 172800,
+        "time_budget_sec": 14400,
         "attempt_cap_sec": 1500,
         "budget": 4,
         "min_improve": 0.05,
@@ -53,9 +53,12 @@
         "apply_to_original": true,
         "gpus_per_task": 1,
         "nodes": [],
-        "image": null,
+        "image": "lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260913",
         "_note_cap": "Short attempts chained through apply_to_original. Measured: a 2 h cap gave 69 attempts / 11 keeps (16%); a 1500 s cap gave 85 attempts / 22 keeps (26%), in under half the wall-clock.",
-        "_note_keep": "1.045 comes from measurement, not from the 1.02 in the documentation: in the previous campaign four kernels whose source was md5-identical to the original re-measured at 1.0246-1.0453 from cold."
+        "_note_keep": "1.045 comes from measurement, not from the 1.02 in the documentation: in the previous campaign four kernels whose source was md5-identical to the original re-measured at 1.0246-1.0453 from cold.",
+        "gpus": "0,1,2,3,4,5,6,7",
+        "_note_budget": "4 h per unit test for this campaign (the skill default is 48 h). With a 1500 s attempt cap that is ~9-10 chained attempts per kernel.",
+        "_note_image": "Same image as the pristine CI stack the profile stage extracted against, so the kernel being optimized is the kernel that ships."
       }
     },
     "applyback": {

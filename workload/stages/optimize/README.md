@@ -68,8 +68,17 @@ The worker passes context through environment variables and expects the prompt w
 | `PROMPT_OUT` | where to write the prompt |
 
 `measure.sh` is optional and must print a line containing `STATUS=<0|1> SPEEDUP=<x>`.
-Without it the default applies: run `python3 unittest.py` in `$TASK_DIR` and read
-`CORRECTNESS: PASS` and `GEAK_GEOMEAN_SPEEDUP`.
+Without it the default applies: run the task's entry through
+`scripts/run_task_entry.py $TASK_DIR` and read whichever contract it prints —
+`CORRECTNESS: PASS` plus `GEAK_GEOMEAN_SPEEDUP <x>`, or a JSON line
+`{"exit": 0, "weighted": <x>}` (the form the extraction skill emits, where a zero exit
+means every gate passed and `weighted` is the serving-weighted speedup over the sweep).
+
+The entry is **not** run as `cd $TASK_DIR && python3 unittest.py`: the task directory
+contains its own `unittest.py`, which lands on `sys.path[0]` and shadows the standard
+library package. Nothing fails at import; it fails later inside torch with
+`No module named 'unittest.mock'`, the measurement comes back empty, and the attempt is
+reverted for a reason that has nothing to do with the kernel.
 
 ## Artifacts → `result.json`
 

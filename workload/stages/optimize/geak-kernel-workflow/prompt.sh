@@ -24,6 +24,9 @@ KEEP_THRESHOLD="${KEEP_THRESHOLD:-1.045}"
 BEST_SPEEDUP="${BEST_SPEEDUP:-1.0}"
 ATTEMPT="${ATTEMPT:-1}"
 GPU_IDS="${GPU_IDS:-0}"
+# The slot script the prompt tells the agent to call, resolved here so no path is
+# guessed inside the prompt text.
+WORKLOAD_SCRIPTS="${WORKLOAD_SCRIPTS:-$GEAK_ROOT/workload/scripts}"
 EXTRA_STEER="${EXTRA_STEER:-}"
 
 # Hints from the task directory save the agent a detour, but their absence must not be
@@ -69,8 +72,17 @@ next attempt starts from your result and builds on it.
 ## Task
 
 Make $TASK_DIR/kernel_src/$KERNEL_SRC faster with correctness fully preserved.
-Check yourself with \`cd $TASK_DIR && python3 unittest.py\`; it prints CORRECTNESS and
-GEAK_GEOMEAN_SPEEDUP.
+Check yourself with:
+
+  python3 $WORKLOAD_SCRIPTS/run_task_entry.py $TASK_DIR
+
+Run it that way, not as \`cd $TASK_DIR && python3 unittest.py\`: the task directory holds
+its own unittest.py, which shadows the standard library package and makes the run die
+inside torch with "No module named 'unittest.mock'". The entry prints either
+\`CORRECTNESS: PASS\` plus \`GEAK_GEOMEAN_SPEEDUP <x>\`, or a JSON line
+{"exit": 0, "weighted": <x>} where exit 0 means every gate passed (correctness, negative
+controls, tail contracts) and \`weighted\` is the serving-weighted speedup across the whole
+sweep. That is the same measurement the scheduler uses to decide KEEP or revert.
 
 $( [ -n "$HINT" ] && printf 'What is known about this kernel:\n%s\n' "$HINT" )
 

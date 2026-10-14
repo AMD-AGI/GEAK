@@ -51,8 +51,12 @@ mkdir -p "$RUN/snapshots" "$LOG" "$STATE"
 note() { echo "[$(date '+%F %T')] $*" >> "$LOG/worker.log"; }
 
 [ -d "$TASK_DIR/kernel_src" ] || { note "FATAL no kernel_src/ under $TASK_DIR"; exit 2; }
-KSRC="$(ls "$TASK_DIR/kernel_src" | head -1)"
-[ -n "$KSRC" ] || { note "FATAL kernel_src/ is empty"; exit 2; }
+# Regular files only, .py first: a __pycache__/ created by a previous attempt sorts ahead
+# of the kernel and would otherwise be treated as the editable source.
+KSRC="$(cd "$TASK_DIR/kernel_src" && ls -p | grep -v '/$' | grep -v '^__' | grep '\.py$' \
+        | head -1)"
+[ -n "$KSRC" ] || KSRC="$(cd "$TASK_DIR/kernel_src" && ls -p | grep -v '/$' | grep -v '^__' | head -1)"
+[ -n "$KSRC" ] || { note "FATAL kernel_src/ holds no editable file"; exit 2; }
 
 [ -f "$CREDIT" ] || echo 0 > "$CREDIT"
 BASE="$(cat "$CREDIT" 2>/dev/null || echo 0)"
@@ -82,17 +86,50 @@ PARENT=$$
 TICKER=$!
 trap 'kill "$TICKER" 2>/dev/null' EXIT INT TERM
 
-# Default measurement: run the task's own frozen unittest.py and parse the two lines it
-# contracts to print. The baseline leg is always the **originally installed module**, not
-# your previous change, so this speedup is always the cumulative figure against the real
-# baseline.
+# Default measurement: run the task's own frozen entry and read what it contracts to print.
+# The baseline leg is always the **originally installed module**, not your previous change,
+# so this speedup is always the cumulative figure against the real baseline.
+#
+# The entry is launched through scripts/run_task_entry.py rather than with `cd $TASK_DIR &&
+# python3 unittest.py`: a task directory contains its own `unittest.py`, which lands on
+# sys.path[0] and shadows the standard library package, and the failure surfaces far away
+# ("No module named 'unittest.mock'") as an empty measurement rather than as an error.
+#
+# Two output contracts are accepted, because both kinds of harness exist in the wild:
+#   * `CORRECTNESS: PASS` plus `GEAK_GEOMEAN_SPEEDUP <x>`
+#   * a JSON line {"exit": 0, "weighted": <x>} -- the form this pipeline's extraction skill
+#     emits, where exit 0 means every gate passed (correctness, negative controls, tail
+#     contracts) and `weighted` is the serving-weighted speedup over the whole shape sweep.
 default_measure() {
-  ( cd "$TASK_DIR" && timeout "$MEASURE_TIMEOUT" python3 unittest.py ) \
+  local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  ( timeout "$MEASURE_TIMEOUT" python3 "$here/run_task_entry.py" "$TASK_DIR" unittest.py ) \
       > "$RUN/.measure.log" 2>&1
   local sp ok
   sp="$(grep -oE 'GEAK_GEOMEAN_SPEEDUP [0-9.]+' "$RUN/.measure.log" | tail -1 | awk '{print $2}')"
   ok=0; grep -q '^CORRECTNESS: PASS' "$RUN/.measure.log" && ok=1
-  echo "STATUS=$ok SPEEDUP=${sp:-}"
+  if [ -z "$sp" ]; then
+    read -r ok sp <<<"$(python3 - "$RUN/.measure.log" <<'PY'
+import json, sys
+ok, sp = 0, ""
+for line in open(sys.argv[1], errors="replace"):
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    if "exit" not in d:
+        continue
+    # A gate failure is not a measurement: report STATUS=0 and let the worker revert.
+    ok = 1 if d.get("exit") == 0 else 0
+    w = d.get("weighted")
+    sp = "" if w in (None, "") else repr(float(w))
+print(ok, sp)
+PY
+)"
+  fi
+  echo "STATUS=${ok:-0} SPEEDUP=${sp:-}"
 }
 
 measure() {
