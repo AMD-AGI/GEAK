@@ -39,6 +39,12 @@ UTs enter optimization queues after the skill finishes. Record requested work
 that the caller cannot schedule; do not silently raise budgets or redefine
 completion. A low optimization ceiling does not invalidate a UT.
 
+Use `deferred_budget` only against the caller's actual task/time limit, recording
+the limit and consumption. A complex bound method, missing replay adapter, or
+multi-rank harness is authoring work to attempt within that budget. Preserve
+partial work and concrete failed commands when it cannot be completed; do not
+declare the budget exhausted simply because easier tasks have passed.
+
 Queue one owner per `ut_task`, in exactly one queue. A grouped owner retains
 `selected_device_kernels` and `extraction_members[]` containing each member's
 `device_kernel`, `short_name`, `served_regimes` and original `kernel_extraction`.
