@@ -4,11 +4,29 @@
 Single source of truth = operators/<op>/backends/<backend>.md frontmatter
 (kind: sota_card, operator, backend, status, gens, dtypes, regimes, sources).
 Run from perf_knowledge/: python index/_gen_registry.py
+With --check, write nothing and exit 1 if any output is stale -- the cards are hand-edited and the
+indexes are not, so an edit that skips this script leaves the matrix claiming the old status.
 """
 import os, re, glob, sys
 
 KK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CARDS = sorted(glob.glob(os.path.join(KK, "operators", "*", "backends", "*.md")))
+CHECK = "--check" in sys.argv
+STALE = []
+
+
+def emit(name, lines):
+    path = os.path.join(KK, "index", name)
+    text = "\n".join(lines) + "\n"
+    if not CHECK:
+        open(path, "w", encoding="utf-8").write(text)
+        return
+    try:
+        current = open(path, encoding="utf-8").read()
+    except FileNotFoundError:
+        current = None
+    if current != text:
+        STALE.append(name)
 
 BADGE = {"sota":"🟢","competitive":"🟡","experimental":"🧪","legacy":"🟤","na":"⚪"}
 
@@ -96,7 +114,7 @@ for op in [o for _,ops in FAMILY for o in ops] + [o for o in recs if o not in {o
             out.append("    sources:")
             for s in r["sources"][:4]:
                 out.append(f"      - {s}")
-open(os.path.join(KK,"index","sota_registry.yaml"),"w",encoding="utf-8").write("\n".join(out)+"\n")
+emit("sota_registry.yaml", out)
 
 # ---------- capability_index.yaml (what the WORKFLOWS consume) ----------
 # Reference-only CAPABILITY index: which backends have a documented impl for an op and what they
@@ -129,7 +147,7 @@ for op in [o for _,ops in FAMILY for o in ops] + [o for o in recs if o not in {o
             cap.append("    sources:")
             for s in r["sources"][:4]:
                 cap.append(f"      - {s}")
-open(os.path.join(KK,"index","capability_index.yaml"),"w",encoding="utf-8").write("\n".join(cap)+"\n")
+emit("capability_index.yaml", cap)
 
 # ---------- sota_matrix.md ----------
 m = []
@@ -166,6 +184,12 @@ for fam, ops in FAMILY:
                 cells.append("·")
         m.append("| " + " | ".join(cells) + " |")
     m.append("")
-open(os.path.join(KK,"index","sota_matrix.md"),"w",encoding="utf-8").write("\n".join(m)+"\n")
+emit("sota_matrix.md", m)
 
-print(f"OK: {len(recs)} operators, {nentry} cards -> sota_registry.yaml + sota_matrix.md")
+if CHECK:
+    if STALE:
+        print("STALE (re-run `python3 index/_gen_registry.py`): " + ", ".join(STALE), file=sys.stderr)
+        sys.exit(1)
+    print(f"OK: index/ is in sync with {nentry} cards across {len(recs)} operators")
+else:
+    print(f"OK: {len(recs)} operators, {nentry} cards -> sota_registry.yaml + sota_matrix.md")
