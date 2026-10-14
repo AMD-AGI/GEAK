@@ -279,6 +279,35 @@ fi
 [[ "$err" == *"mixed identities"* ]] \
   || fail "mixed-discrete stderr missing explicit identity failure (got: $err)"
 
+# A Strix Halo APU wears the same generic nameplate as a 2-CU desktop iGPU, but
+# it is the compute device. Preferring the discrete card would silently hand an
+# APU run gfx1201 policy, peaks and images, so this host must fail closed with
+# both agents named. ROCR_VISIBLE_DEVICES is the escape hatch.
+cat > "$tmp/rocminfo" <<'EOF'
+#!/bin/sh
+cat <<'ROCMINFO'
+*******
+Agent 1
+*******
+  Name:                    gfx1201
+  Marketing Name:          AMD Radeon AI PRO R9700
+  Compute Unit:            64
+*******
+Agent 2
+*******
+  Name:                    gfx1151
+  Marketing Name:          AMD Radeon Graphics
+  Compute Unit:            40
+ROCMINFO
+EOF
+chmod +x "$tmp/rocminfo"
+err=""
+if err="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH= detect_gpu_arch 2>&1)"; then
+  fail "an APU alongside a discrete card must fail identity, not be swallowed"
+fi
+[[ "$err" == *"mixed identities"* && "$err" == *"gfx1151"* && "$err" == *"gfx1201"* ]] \
+  || fail "APU/discrete failure must name both agents (got: $err)"
+
 # A generic gfx1201 product must not receive the R9700 vLLM image.
 install_rocminfo_stub gfx1201 'Another gfx1201 Product'
 err=""
