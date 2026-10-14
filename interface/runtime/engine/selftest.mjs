@@ -115,6 +115,27 @@ async function testSchemaAgent() {
   try { await rt.agent('FAKE_BADJSON', { schema: sch }); } catch { threw = true; }
   ok(threw, 'agent schema throws after retries exhausted');
   eq(b.calls - before, 3, 'schema retried schemaRetries+1 = 3 times');
+
+  for (const prior of ['not JSON: completed GPU log /task/run/pass.log',
+    JSON.stringify({ ok: 'yes', log: '/task/run/pass.log', detail: 'x'.repeat(20000) })]) {
+    const requests = [];
+    const repair = createRuntime({ backend: { name: 'fake', runAgent: async request => {
+      requests.push(request);
+      if (requests.length === 1) return { text: prior };
+      const informed = request.prompt.includes('Structured output repair') &&
+        request.prompt.includes('/task/run/pass.log') &&
+        request.prompt.includes('failed validation:');
+      return { text: informed ? '{"ok":true}' : prior };
+    } }, schemaRetries: 1, log: silent });
+    eq(await repair.agent('Validate this task.', { schema: sch, label: 'extract task' }),
+      { ok: true }, 'schema retry repairs a result using prior response and validator feedback');
+    eq(requests.length, 2, 'repair succeeds on the next bounded attempt');
+    ok(!requests[0].prompt.includes('Structured output repair'), 'first dispatch stays unchanged');
+    ok(requests[1].prompt.includes('do not repeat successful benchmarks'),
+      'format repair preserves completed GPU validation');
+    ok(requests[1].prompt.length < requests[0].prompt.length + 19000,
+      'prior response excerpt has a bounded prompt size');
+  }
 }
 
 async function testRunScriptAndNesting() {

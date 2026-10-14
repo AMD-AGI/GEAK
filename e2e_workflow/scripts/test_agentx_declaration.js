@@ -293,8 +293,8 @@ console.log('\n# every role is told what it is measuring');
 const blk = sc.workloadIdentityBlock();
 ok(blk !== '', 'declared run => non-empty block');
 ok(/WORKLOAD IDENTITY/.test(blk), 'block is headed as the workload identity');
-ok(/KERNEL-TARGETING shape, not a benchmark/.test(blk),
-  'isl/osl are labelled a kernel-targeting shape, not a benchmark');
+ok(/summarizes request lengths, not kernel input shapes/.test(blk),
+  'isl/osl describe request lengths without claiming actual kernel input shapes');
 ok(/NEVER build a synthetic sweep/.test(blk), 'synthetic sweeps are forbidden explicitly');
 ok(/bench_env\.sh/.test(blk), 'the block points at the file that owns client/metric selection');
 ok(/Do NOT set/.test(blk) && /BENCH_CLIENT/.test(blk), 'roles are told not to set the client themselves');
@@ -378,10 +378,11 @@ ok(/A PLACEHOLDER, NOT THIS CORPUS/.test(fbBlk), 'the prompt labels a placeholde
 ok(/Do NOT size tiles/.test(fbBlk), 'and tells roles not to size kernels from it');
 ok(/observed_isl\/observed_osl/.test(fbBlk),
   'and points a role at the baseline summary for the real served shape');
-// A shape that IS known (declared here; measured-this-run at runtime) reads as usable.
+// Measured request lengths remain context; extraction needs actual dispatch evidence.
 const usableBlk = declShape.workloadIdentityBlock();
-ok(/right regime to size tiles/.test(usableBlk) && !/A PLACEHOLDER/.test(usableBlk),
-  'a known shape is instead presented as usable for kernel sizing');
+ok(/Derive kernel shapes and call weights from/.test(usableBlk)
+  && /dispatch evidence and captured operands/.test(usableBlk) && !/A PLACEHOLDER/.test(usableBlk),
+  'known request lengths still require dispatch evidence to establish kernel shapes');
 // The prompt must not hardcode one corpus's distribution: the corpus is
 // declarable and AgentX keeps changing it, so a baked-in average goes stale
 // silently and would be read as fact by every role.

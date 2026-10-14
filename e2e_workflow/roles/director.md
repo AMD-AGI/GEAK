@@ -101,8 +101,12 @@ Steps:
 5. **Record the TRUE baseline throughput** in the lifecycle `MEASUREMENT_MODE` selects — pass it
    through verbatim, never substitute your own. This is the number every later gain is measured
    against, so it MUST be taken exactly the way the sweep, integrate and validate legs will be.
-   The default `warm_server` boots ONE server, runs a full untimed round that populates the prefix
-   cache and is discarded, then runs `REPLICAS` timed round(s) on that hot server — Hyperloom's own
+   AgentX defaults to `isolated_server` with one replica: fresh server, AgentX's
+   own per-lane warmup, then one measured replay. Do not add a separate full
+   replay or clear the cache between the client's warmup and measurement.
+   For fixed loads, the default `warm_server` boots ONE server, runs a full untimed
+   round that populates the prefix cache and is discarded, then runs `REPLICAS`
+   timed round(s) on that hot server — Hyperloom's own
    `warmup_round`/`measure_round`. Under `isolated_server` each replica is a fresh server and
    InferenceX's internal kernel/graph warmups run but no outer full-round replay does.
    **Serving is TP=`SERVING_TP`
@@ -195,7 +199,7 @@ TRUE baseline and decide if the COMBINED result clears the band.
 `MEASUREMENT_MODE` decides the lifecycle, and you MUST pass it through verbatim — do not substitute
 your own. It is one of:
 
-- **`warm_server`** (the DEFAULT, and what every other leg in this run used): ONE server per leg.
+- **`warm_server`** (the fixed-load default): ONE server per leg.
   One full untimed round warms the prefix cache and is discarded, then `REPLICAS` timed rounds run on
   that same hot server and their median is reported. `REPLICAS` defaults to 1, which makes it exactly
   two client passes per leg with the second one reported — precisely how Hyperloom measures its own
@@ -203,9 +207,11 @@ your own. It is one of:
   your number and the orchestrator's rebench are the same measurement. It costs 2 server boots total.
   The spread across those rounds bounds CLIENT noise, not boot-to-boot noise — see step 1's caveat,
   and at `REPLICAS=1` there is no spread at all.
-- **`isolated_server`** (opt-in): `REPLICAS` FRESH servers per leg. Every replica retains the client's
-  internal kernel/graph warmups but skips the outer full-round replay, then records one cache-cold
-  measured request set; never replace a failed replica with another repeat on the same server. The
+- **`isolated_server`** (AgentX default, one replica unless explicitly changed):
+  `REPLICAS` FRESH servers per leg. Every replica retains the client's internal
+  warmup and skips the outer full-round replay. AgentX preserves the cache built
+  by its per-lane warmup into measurement. Never replace a failed replica with
+  another repeat on the same server. The
   spread bounds boot-to-boot variance. Most faithful, but `REPLICAS` cold boots per leg.
 
 1. Measure baseline AND final: a reference block (the TRUE baseline current-best stack) and a final

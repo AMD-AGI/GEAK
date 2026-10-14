@@ -352,6 +352,66 @@ meaning, and a run without the phase produces a byte-identical `result.json`.
 Fast mode skips the phase; deep mode keeps it. Full contract:
 `knowledge/tuning_skillset_integration.md`.
 
+## AgentX kernel selection and UT extraction
+
+AgentX replay uses the model-independent
+[kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md)
+for candidate selection, extraction (`extract` and `extract_op`) and
+op benchmarking, including evidence refreshes and resumes. Activation is independent of
+`analysis_skill` and `use_expert_skills`. Fixed ISL/OSL, other non-AgentX runs
+and single-kernel pass-through retain their existing behavior.
+
+The skill activates on `workload_spec.kind="agentx_trace_replay"` or legacy
+AgentX client/environment/provenance signals. An explicit non-AgentX workload
+kind takes precedence. AgentX workload specifications persist across resumes;
+new serving backends still require a compatible adapter.
+
+After baseline, AgentX enters `KernelExtract` directly. The extractor's `select`
+phase reads baseline server logs, measured-leg exports and effective configuration,
+identifies top kernels and their live dispatch paths, and returns the candidate
+queues. It replaces the separate Profile and Strategize passes. The skill reuses
+existing evidence and performs targeted cost/dispatch/shape captures only where
+needed; it does not run another full AgentX replay for profiling. Logs establish
+the workload distribution, while GPU captures establish costs and kernel identity.
+After accepted changes or a resume, the same skill refreshes affected evidence.
+
+Selection receives the user's `TASK`, including supplied UT references, and
+records a full inventory with phase identities, prior-task overlaps and each
+candidate's disposition in `kernel_ranking.json`. The default extraction set is
+**PREFILL Top 5 or DECODE Top 5, with overall workload share strictly >3%**.
+Rank each phase first, filter by overall share, then deduplicate; do not backfill
+excluded rows from rank 6. The skill's selector records the target set separately
+from optimization scheduling and individual UT results. Task budgets limit execution,
+not discovery; optimization thresholds do not define extraction coverage.
+Eligible queues survive small execution budgets and resumes. A passing GPU
+batch certifies only its tested tasks/cases; inventory reconciliation, requested
+task-set completion and full-workload/e2e validation are reported separately.
+See [selection scope and coverage](knowledge/kernel_extraction_skills/kernel-extract/references/selection-coverage.md).
+
+AgentX defaults to `measurement_mode="isolated_server"` for baseline, search
+and final validation, with one replica per arm. Each fresh server receives one
+AgentX invocation: the client's per-lane warmup followed by the measured replay.
+GEAK adds no full untimed replay. The client retains its configured warmup
+(default 10 requests per lane, 1800-second grace limit) and replay duration;
+the grace limit is not a fixed sleep. Additional replicas require an explicit
+count. Fixed ISL/OSL keeps the `warm_server` default. Explicit `warm_server`
+AgentX runs remain supported for existing experiments, but their cache history
+differs and their numbers must not be mixed with the client-only warmup protocol.
+Resuming an existing baseline preserves its recorded measurement lifecycle.
+
+Each candidate links `kernel_workload.json` and `kernel_ranking.json` through
+`kernel_extraction`. Routing uses the measured share a candidate can affect
+while retaining original trace percentages. UTs preserve observed cases,
+verify device dispatch and editable-code execution, and score
+`sum(baseline_ms * effective_calls) / sum(optimized_ms * effective_calls)`.
+Every positive-mass served case must be measured; missing evidence is explicit.
+
+The skill includes focused references for workload measurement and source/UT
+validation, plus an optional
+[GLM example](knowledge/kernel_extraction_skills/kernel-extract-glm-agentx-example/SKILL.md).
+All model-specific assumptions require current runtime evidence. Probes and
+artifacts belong under `EVAL_DIR`.
+
 ## Roofline-guided routing (`analysis_skill`, default `roofline`)
 
 `pct_gpu_time` tells you where the time goes; it does **not** tell you whether that time is

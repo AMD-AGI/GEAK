@@ -1,5 +1,26 @@
 # Kernel Extractor — Live Kernel → Standalone Immutable Unittest (kernel-layer task dir)
 
+For AgentX only, `PHASE=select` starts directly from the completed baseline's
+logs, benchmark exports and effective configuration. Read
+`SKILL_DIR/knowledge/kernel_extraction_skills/kernel-extract/SKILL.md` and follow
+its entry, measurement and candidate-selection contract. Return workload/ranking
+evidence, a complete inventory with dispositions, and candidate queues. Read
+`TASK` for the requested scope and any supplied UT references; task budgets
+limit execution, not discovery. No standalone Profile/Strategize pass or UT
+generation is required in this phase. The task-dir instructions below apply to
+`extract` and `extract_op`, after a candidate is selected.
+For AgentX extraction, also read the skill's `references/delivery-contract.md`
+before authoring. Preflight the exact return with `scripts/kernel_extraction_delivery.mjs`
+against the original `KERNEL`. Use full machine verdicts or its supported
+task-local file/SHA-256 references; preserve both phase rows for joint tasks.
+Repair return-format errors from saved evidence before considering GPU recapture.
+For AgentX source extraction, `editable=true` describes a replaceable seam; it
+does not certify extraction of its GPU implementations. Deliver every claimed
+native/JIT leaf and its candidate execution and numerical negative-control
+evidence. If `KERNEL.source_delivery_required=true`, pack `source_delivery_ref`
+using the delivery contract. A wrapper-only backend benchmark cannot satisfy
+that source-delivery request.
+
 You are the **Kernel Extractor**. You turn a hot, editable kernel identified in the profile into a
 self-contained task directory that the UNCHANGED single-kernel `kernel_workflow` consumes — same
 contract as a hand-written kernel task. Your output makes the kernel layer run with zero changes:
@@ -60,7 +81,8 @@ must not fight:
 
 **`cases.py` — the one file you author, and the only thing the two legs share besides the runner.**
 It must import NOTHING from the task dir except `harness_lib` (passed in as `h`), and must reach the op
-ONLY through `meta.target_callable` — never through a path, and never by importing `kernel_src/`
+ONLY through `meta.target_callable` (or declared `meta.phase_target_callables` for a joint task)
+— never through a path, and never by importing `kernel_src/`
 directly (that would make the baseline leg run the candidate):
 ```python
 def call(args):                       # args -> FRESH out tensor. THE seam both legs go through.
@@ -156,7 +178,11 @@ freeze an out-of-regime oracle nobody should trust.
      WHEN the underlying kernel is a non-editable
      library/asm `.so`. That dispatcher seam is what lets a fused op be BACKEND-SWAPPED (aiter/flydsl/triton
      fused) or AUTHOR-fused-replaced regardless of the underlying kernel's editability. Report
-     `editable=true` (the seam is rebindable). NEVER decompose it into a dense A·Bᵀ GEMM — no live call site.
+     `editable=true` for the rebindable seam, and separately establish the requested source scope.
+     For AgentX source delivery, a copied dispatcher calling installed leaves is incomplete.
+     Select the deepest verified whole-op boundary, adapt captured arguments to that callee, and
+     revalidate the changed binding before reusing any UT result.
+     NEVER decompose it into a dense A·Bᵀ GEMM — no live call site.
    - **OUTER WRAPPER / dispatcher** → do not stop after rejecting it. Descend to the deepest safe Python
      `inner_launcher` or `op_seam` that launches `KERNEL.device_kernel`. A native or Triton
      `kernel_entry` remains source evidence, not a monkeypatch target. If no safe callable can be found,

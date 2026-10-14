@@ -252,11 +252,14 @@ def _within_any_span(event, spans, same_thread=False):
     )
 
 
-def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
+def _marker_kernel_evidence(trace_events, target_callable, device_kernel, spans_override=None):
     marker = MARKER_PREFIX + target_callable
-    spans = _complete_spans(trace_events or [], marker)
-    # Only CPU events on the marker's own thread can establish launch causality. Global timestamp
-    # overlap is unsafe under concurrent serving. The resulting External ids bridge to async GPU events.
+    spans = (_complete_spans(trace_events or [], marker)
+             if spans_override is None else spans_override)
+    # Only host events on the marker's own thread establish launch causality.
+    # External ids belong to CPU ops, not individual launches: sibling AITER
+    # GEMMs can inherit the SAME enclosing custom-op id. A runtime event carrying
+    # that id inside one leaf must not attribute every sibling kernel to the leaf.
     related_external_ids = set()
     # Triton (and any raw hipModuleLaunchKernel) device rows carry only `correlation`, never an
     # `External id`, so the External-id bridge alone silently misses them. The host-side launch
@@ -266,14 +269,22 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
     for event in trace_events or []:
         if not isinstance(event, dict) or not _within_any_span(event, spans, same_thread=True):
             continue
-        if event.get("cat") == "kernel":
+        if event.get("cat") == "kernel" or _device_projection(event):
             continue
         args = event.get("args") or {}
         ext = args.get("External id")
-        if ext is not None:
+        # Legacy traces without device correlations can still use a CPU op that
+        # is wholly contained by this marker. Runtime External ids alone are not
+        # ownership proof; their enclosing op may start before this leaf marker.
+        event_end = float(event["ts"]) + float(event.get("dur") or 0)
+        contained_op = event.get("cat") == "cpu_op" and any(
+            start <= float(event["ts"]) and event_end <= end
+            and event.get("pid") == owner.get("pid") and event.get("tid") == owner.get("tid")
+            for start, end, owner in spans)
+        if ext is not None and contained_op:
             related_external_ids.add(ext)
         corr = args.get("correlation")
-        if corr is not None:
+        if corr is not None and event.get("cat") in ("cuda_runtime", "hip_runtime"):
             related_correlations.add(corr)
     matched = []
     for event in trace_events or []:
@@ -282,8 +293,10 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel):
         args = event.get("args") or {}
         ext = args.get("External id")
         corr = args.get("correlation")
-        linked = (ext is not None and ext in related_external_ids) or (
-            corr is not None and corr in related_correlations)
+        # A present launch identity takes precedence; do not rescue an unmatched
+        # launch with a broader parent id. Missing host launches remain unproven.
+        linked = (corr in related_correlations if corr is not None else
+                  ext is not None and ext in related_external_ids)
         if linked and kernel_matches(device_kernel, event.get("name")):
             matched.append(str(event.get("name") or ""))
     return {
@@ -411,6 +424,55 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
     }
 
 
+def verify_chain(target_callable, device_kernel, required_device_kernels, capture_meta,
+                 trace_events, candidate_targets=None):
+    """Verify the deepest callable containing every member of a joint chain.
+
+    A score-only child may be deeper than the joint entry but cannot replace it.
+    Each observed invocation must contain every required member, including when
+    GPU execution is asynchronous and only host launch correlations establish it.
+    """
+    members = list(dict.fromkeys([device_kernel] + list(required_device_kernels)))
+    if len(members) < 2 or any(not str(name or '').strip() for name in members):
+        raise ValueError("joint selection requires at least two nonempty device kernel identities")
+    verdicts = [verify(target_callable, name, capture_meta, trace_events, candidate_targets)
+                for name in members]
+    result = dict(verdicts[0])
+    candidates = list(dict.fromkeys(list(candidate_targets or []) + [target_callable]))
+    coverage = {}
+    for candidate in candidates:
+        spans = _outermost_spans(_complete_spans(trace_events, MARKER_PREFIX + candidate))
+        coverage[candidate] = [
+            {"call": index, "missing_members": [name for name in members
+              if not _marker_kernel_evidence(trace_events, candidate, name, [span])["matched"]]}
+            for index, span in enumerate(spans)
+        ]
+    complete = {candidate for candidate, calls in coverage.items()
+                if calls and all(not call["missing_members"] for call in calls)}
+    outer = _complete_spans(trace_events, MARKER_PREFIX + target_callable)
+    deeper = sorted(candidate for candidate in complete if candidate != target_callable
+                    and _is_nested(_complete_spans(trace_events, MARKER_PREFIX + candidate), outer))
+    failed = {item for verdict in verdicts for item in verdict["failed"]
+              if item != "deeper_live_candidate_exists"}
+    if target_callable not in complete:
+        failed.add("joint_member_missing_in_call")
+    if deeper:
+        failed.add("deeper_live_candidate_exists")
+    result.update(
+        ok=not failed, failed=sorted(failed), deepest_verified=not failed,
+        selection_scope="joint_chain", required_device_kernels=members,
+        live_candidate_targets=sorted(complete), deeper_live_candidates=deeper,
+        partial_candidate_targets=sorted(candidate for candidate, calls in coverage.items()
+                                         if calls and candidate not in complete),
+        joint_call_coverage=coverage.get(target_callable, []),
+        chain_members=[{"device_kernel": name,
+                        "matched_kernel_calls": verdict["matched_kernel_calls"],
+                        "matched_kernel_names": verdict["matched_kernel_names"]}
+                       for name, verdict in zip(members, verdicts)],
+    )
+    return result
+
+
 def infer_task_dir(meta_paths):
     """If all metas live in capture.pid-* dirs under one parent, that parent is the task dir."""
     parents = []
@@ -427,6 +489,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True, help="exact module:attr selected seam")
     parser.add_argument("--device-kernel", required=True, help="GPU kernel selected from profile")
+    parser.add_argument("--required-device-kernel", action="append", default=[],
+                        help="additional mandatory joint-chain member; repeat for this phase")
     parser.add_argument("--capture-meta", required=True, nargs="+",
                         help="one or more process-local capture_shapes meta.json files")
     parser.add_argument("--torch-trace", required=True, nargs="+",
@@ -454,8 +518,10 @@ def main(argv=None):
                              os.path.basename(path))
             ]
         if not matching_traces:
-            verdict = verify(
-                args.target, args.device_kernel, meta, [], args.candidate_target)
+            verdict = (verify_chain(args.target, args.device_kernel, args.required_device_kernel,
+                                    meta, [], args.candidate_target)
+                       if args.required_device_kernel else
+                       verify(args.target, args.device_kernel, meta, [], args.candidate_target))
             verdict["failed"].append("capture_process_trace_missing")
             verdict["ok"] = False
             verdict["deepest_verified"] = False
@@ -464,8 +530,11 @@ def main(argv=None):
         attempts.append((
             meta_path,
             matching_traces,
-            verify(args.target, args.device_kernel, meta,
-                   merge_process_traces(matching_traces), args.candidate_target),
+            (verify_chain(args.target, args.device_kernel, args.required_device_kernel, meta,
+                          merge_process_traces(matching_traces), args.candidate_target)
+             if args.required_device_kernel else
+             verify(args.target, args.device_kernel, meta,
+                    merge_process_traces(matching_traces), args.candidate_target)),
         ))
     # The strongest single process seeds the verdict shape, but every field that survives below is
     # recomputed across ALL attempts. Only the meta path stays process-specific, so it is named for
@@ -517,6 +586,19 @@ def main(argv=None):
     verdict["matched_kernel_names"] = sorted({
         name for item in all_verdicts for name in item["matched_kernel_names"]
     })
+    if args.required_device_kernel:
+        verdict["joint_call_coverage"] = [
+            {"capture_meta_file": meta_path, **call}
+            for meta_path, _, item in attempts for call in item["joint_call_coverage"]]
+        verdict["chain_members"] = [
+            {"device_kernel": name,
+             "matched_kernel_calls": sum(member["matched_kernel_calls"]
+                 for item in all_verdicts for member in item["chain_members"]
+                 if member["device_kernel"] == name),
+             "matched_kernel_names": sorted({kernel
+                 for item in all_verdicts for member in item["chain_members"]
+                 if member["device_kernel"] == name for kernel in member["matched_kernel_names"]})}
+            for name in verdict["required_device_kernels"]]
     verdict["process_verdicts"] = [
         {
             "capture_meta_file": meta_path,

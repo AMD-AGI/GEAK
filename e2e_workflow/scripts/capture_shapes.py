@@ -484,8 +484,36 @@ def _should_share_kwarg(key, value, policy, share_min_bytes):
     return False
 
 
+def _snapshots_equal(a, b):
+    """Exact captured-value equality; names, shapes or live tensor identity are insufficient.
+
+    Inference tensors can be overwritten by native code without a version bump.
+    Compare detached CPU bytes, including NaN payloads and packed/float8 dtypes.
+    An unsupported comparison means no reuse, never an assumed match.
+    """
+    torch = _torch()
+    if torch.is_tensor(a) or torch.is_tensor(b):
+        if not (torch.is_tensor(a) and torch.is_tensor(b)):
+            return False
+        try:
+            return (a.dtype == b.dtype and tuple(a.shape) == tuple(b.shape)
+                    and bool(torch.equal(a.contiguous().view(torch.uint8),
+                                         b.contiguous().view(torch.uint8))))
+        except Exception:
+            return False
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        if "__repr__" in a or "__repr__" in b:
+            return False
+        return a.keys() == b.keys() and all(_snapshots_equal(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(_snapshots_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
 def _snapshot_kwargs(kwargs, shared_store, policy, share_min_bytes):
-    """Snapshot kwargs; large/static weight tensors are stored once in ``shared_store``."""
+    """Store equal captured values once, preserving different values of the same kwarg."""
     if policy == "full" or not isinstance(kwargs, dict):
         return _snapshot(kwargs), 0, []
     snap = {}
@@ -493,11 +521,20 @@ def _snapshot_kwargs(kwargs, shared_store, policy, share_min_bytes):
     shared_keys = []
     for key, value in kwargs.items():
         if _should_share_kwarg(key, value, policy, share_min_bytes):
-            if key not in shared_store:
-                shared_store[key] = _snapshot(value)
+            captured = _snapshot(value)
+            prefix = str(key) + "#"
+            slot = next((name for name, previous in shared_store.items()
+                         if (name == key or str(name).startswith(prefix))
+                         and _snapshots_equal(previous, captured)), None)
+            if slot is None:
+                slot, suffix = key, 1
+                while slot in shared_store:
+                    slot = f"{key}#{suffix}"
+                    suffix += 1
+                shared_store[slot] = captured
                 shared_added += _estimate_object_bytes(value)
-            snap[key] = {"__shared__": key}
-            shared_keys.append(key)
+            snap[key] = {"__shared__": slot}
+            shared_keys.append(slot)
         else:
             snap[key] = _snapshot(value)
     return snap, shared_added, shared_keys
@@ -581,7 +618,9 @@ def _wrapper(*args, **kwargs):
                 used = int(s.get("oracle_bytes_est") or 0) + int(s.get("shared_bytes_est") or 0)
                 policy = s.get("persist_policy") or "share_large"
                 share_min = int(s.get("share_min_bytes") or (16 << 20))
-                # Estimate after sharing: weight kwargs counted once into shared pool.
+                # Bound all new snapshots BEFORE cloning. Content equality can
+                # only be established after snapshotting; a repeated kwarg name
+                # must not make a different layer/activation appear free.
                 shared_store = s.setdefault("shared_tensors", {})
                 est_shared_add = 0
                 est_case = call_bytes
@@ -590,8 +629,7 @@ def _wrapper(*args, **kwargs):
                         if _should_share_kwarg(key, value, policy, share_min):
                             nbytes = _estimate_object_bytes(value)
                             est_case -= nbytes
-                            if key not in shared_store:
-                                est_shared_add += nbytes
+                            est_shared_add += nbytes
                 effective_need = max(0, est_case) + est_shared_add
                 if case_limit > 0 and effective_need > case_limit:
                     s["seen"].add(sig)

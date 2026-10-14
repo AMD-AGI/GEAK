@@ -29,8 +29,8 @@ Two current-behavior bugs are pinned here rather than fixed, and flagged by name
 test_module_file_requires_the_caller_to_have_imported_importlib_util and
 test_plain_top_level_install_is_misreported_as_injected.
 
-Every test runs inside its own tempfile.TemporaryDirectory; subprocess is replaced by a recorder,
-so nothing is executed and nothing outside the temp dir is written.
+Every test runs inside its own tempfile.TemporaryDirectory. Installer subprocesses are replaced
+by a recorder; the startup regression runs lightweight Python processes without a GPU.
 """
 import argparse
 import contextlib
@@ -40,6 +40,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import types
@@ -178,6 +179,92 @@ class _OverlayCase(unittest.TestCase):
 # _ensure_overlay -- the shim + empty manifest, and its idempotence
 # --------------------------------------------------------------------------- #
 class TestEnsureOverlay(_OverlayCase):
+    def test_parent_bootstrap_imports_complete_patched_child(self):
+        self._write("importable/ov_cycle/__init__.py", "from .backend import cached_call\n")
+        self._write("importable/ov_cycle/backend.py", "from .child import call\ndef cached_call(): return call()\n")
+        self._write("importable/ov_cycle/child.py", "def call(): return 'baseline'\n")
+        self._write("importable/ov_cycle/utility.py", "VALUE = 'candidate'\n")
+        patched = self._write("patch.py", "from ov_cycle.utility import VALUE\ndef call(): return VALUE\n")
+        self._run(ov.cmd_add_module, self._ns(module="ov_cycle.child", patched_file=patched))
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join([self.overlay, os.path.join(self.tmp, "importable")]))
+        run = subprocess.run([sys.executable, "-c",
+                              "import ov_cycle, ov_cycle.child; print(ov_cycle.cached_call(), ov_cycle.child.call())"],
+                             cwd=self.tmp, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), "candidate candidate")
+        self.assertNotIn("inject FAILED", run.stderr)
+
+    def test_parent_created_alias_cannot_bypass_module_patch(self):
+        self._write("importable/ov_alias/__init__.py",
+                    "import sys\nfrom . import impl\nsys.modules[__name__ + '.compat'] = impl\n")
+        self._write("importable/ov_alias/impl.py", "VALUE = 'baseline'\n")
+        patched = self._write("patch.py", "VALUE = 'candidate'\n")
+        self._run(ov.cmd_add_module, self._ns(module="ov_alias.compat", patched_file=patched))
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join([self.overlay, os.path.join(self.tmp, "importable")]))
+        run = subprocess.run([sys.executable, "-c",
+                              "import ov_alias.compat, ov_alias.impl; print(ov_alias.compat.VALUE, ov_alias.impl.VALUE)"],
+                             cwd=self.tmp, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), "candidate baseline")
+
+    def test_lazy_patch_preserves_and_reports_previously_loaded_module(self):
+        self._write("importable/ov_existing/__init__.py", "")
+        self._write("importable/ov_existing/child.py", "VALUE = 'baseline'\n")
+        patched = self._write("patch.py", "raise ImportError('broken candidate')\n")
+        self._run(ov.cmd_add_module, self._ns(module="ov_existing.child", patched_file=patched))
+        shim = os.path.join(self.overlay, "sitecustomize.py")
+        env = dict(os.environ, PYTHONPATH=os.path.join(self.tmp, "importable"))
+        code = ("import runpy, importlib\nold = importlib.import_module('ov_existing.child')\n"
+                f"runpy.run_path({shim!r})\n"
+                "now = importlib.import_module('ov_existing.child')\nprint(now is old, now.VALUE)\n")
+        run = subprocess.run([sys.executable, "-c", code], cwd=self.tmp, env=env,
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), "True baseline")
+        self.assertIn("already imported before the overlay finder", run.stderr)
+
+    def test_patch_rebasing_file_for_resources_is_executed_once(self):
+        patched = self._write("patch.py", "import builtins\n"
+                              "builtins._ov_resource_count = getattr(builtins, '_ov_resource_count', 0) + 1\n"
+                              "__file__ = '/installed/package/resource_anchor.py'\nVALUE = 'candidate'\n")
+        self._run(ov.cmd_add_module, self._ns(module="ov_resource_anchor", patched_file=patched))
+        env = dict(os.environ, PYTHONPATH=self.overlay)
+        run = subprocess.run([sys.executable, "-c",
+                              "import builtins, ov_resource_anchor; print(builtins._ov_resource_count, ov_resource_anchor.VALUE)"],
+                             cwd=self.tmp, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), "1 candidate")
+
+    def test_python_rocm_enumerator_does_not_recursively_apply_overlay(self):
+        utility = self._write("rocm_agent_enumerator", '''import json, sys
+print(json.dumps({"overlay_loaded": "ov_startup_probe" in sys.modules}))
+''')
+        calls = os.path.join(self.tmp, "overlay_calls.txt")
+        child_result = os.path.join(self.tmp, "child_result.json")
+        patched = self._write("patched.py", '''import os, subprocess, sys
+with open(os.environ["OVERLAY_TEST_CALLS"], "a") as f:
+    f.write(sys.argv[0] + "\\n")
+# Bound the old, recursive behavior so a failed regression never runs away.
+depth = int(os.environ.get("OVERLAY_TEST_DEPTH", "0"))
+if depth < 2:
+    env = dict(os.environ, OVERLAY_TEST_DEPTH=str(depth + 1))
+    child = subprocess.run([sys.executable, os.environ["OVERLAY_TEST_UTILITY"], "-name"],
+                           env=env, capture_output=True, text=True, check=True, timeout=10)
+    with open(os.environ["OVERLAY_TEST_CHILD_RESULT"], "w") as f:
+        f.write(child.stdout)
+VALUE = "patched"
+''')
+        self._run(ov.cmd_add_module, self._ns(module="ov_startup_probe", patched_file=patched))
+        env = dict(os.environ, PYTHONPATH=self.overlay, PYTHONNOUSERSITE="1",
+                   OVERLAY_TEST_DEPTH="0", OVERLAY_TEST_UTILITY=utility,
+                   OVERLAY_TEST_CALLS=calls, OVERLAY_TEST_CHILD_RESULT=child_result)
+        run = subprocess.run([sys.executable, "-c", "import ov_startup_probe; print(ov_startup_probe.VALUE)"],
+                             cwd=self.tmp, env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), "patched", "normal process still receives the overlay")
+        self.assertEqual(json.loads(self._read(child_result)), {"overlay_loaded": False})
+        self.assertEqual(self._read(calls).splitlines(), ["-c"], "utility never imports the overlay")
+
     def test_creates_missing_dir_with_shim_and_empty_manifest(self):
         self.assertFalse(os.path.exists(self.overlay))
         man = ov._ensure_overlay(self.overlay)
@@ -186,6 +273,31 @@ class TestEnsureOverlay(_OverlayCase):
         self.assertEqual(self._overlay_entries(), ["_overlay_manifest.json", "sitecustomize.py"])
         self.assertEqual(self._read(os.path.join(self.overlay, "sitecustomize.py")), ov.SITECUSTOMIZE)
         self.assertEqual(self._manifest(), EMPTY_MANIFEST)
+
+    def test_capture_build_helpers_stand_down_but_later_workers_apply_overlay(self):
+        calls = os.path.join(self.tmp, "capture_calls.txt")
+        capture = self._write("capture_shapes.py", '''import os, subprocess, sys
+def install(*args):
+    depth = int(os.environ.get("OVERLAY_TEST_DEPTH", "0"))
+    with open(os.environ["OVERLAY_TEST_CALLS"], "a") as f:
+        f.write(str(depth) + "\\n")
+    # Keep the old recursion bounded if the bootstrap guard regresses.
+    if depth < 2:
+        subprocess.run([sys.executable, "-c", "pass"],
+                       env=dict(os.environ, OVERLAY_TEST_DEPTH=str(depth + 1)),
+                       check=True, timeout=10)
+''')
+        self._run(ov.cmd_add_capture, self._ns(
+            target="unused:call", out=self.tmp, max=1, capture_file=capture))
+        env = dict(os.environ, PYTHONPATH=self.overlay, OVERLAY_TEST_CALLS=calls,
+                   OVERLAY_TEST_DEPTH="0")
+        code = ("import os, subprocess, sys\n"
+                "assert '_GEAK_OVERLAY_BOOTSTRAPPING' not in os.environ\n"
+                "subprocess.run([sys.executable, '-c', 'pass'], check=True, timeout=10)\n")
+        run = subprocess.run([sys.executable, "-c", code], cwd=self.tmp, env=env,
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self._read(calls).splitlines(), ["0", "0"])
 
     def test_missing_intermediate_dirs_are_created(self):
         nested = os.path.join(self.tmp, "runs", "task-7", "overlay")
