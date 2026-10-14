@@ -165,3 +165,34 @@ test('delivery requires UT files within eval and complete declared selected boun
   assert.equal(ready.kernel_candidates.length, 0);
   assert.match(ready.failed_tasks[1].reason, /inside EVAL_DIR/);
 });
+
+test('full extract-only workflow resumes from baseline and returns UT state without optimization', async t => {
+  const f = await preparationFixture(t);
+  await f.save();
+  const { createRuntime } = await import('../../interface/runtime/engine/run_workflow.mjs');
+  const calls = [], logs = [];
+  const runtime = createRuntime({ backend: { name: 'fixture', runAgent: async input => {
+    calls.push(input.prompt);
+    if (!input.prompt.includes('PHASE=prepare')) {
+      assert.match(input.prompt, /workflow_return.json|PHASE=persist_llm_stats/);
+      return { text: JSON.stringify({ written: true, path: f.root, ok: true }) };
+    }
+    return { text: JSON.stringify({ delivery_path: path.join(f.task, 'run/delivery.json') }) };
+  } }, log: line => logs.push(line) });
+  const workload = { kind: 'agentx_trace_replay', concurrency: 10 };
+  const result = await runtime.runScript(path.resolve(import.meta.dirname, '../e2e_workflow.js'), {
+    model_path: '/model', workflow_dir: path.resolve(import.meta.dirname, '..'),
+    expected_gfx: 'gfx950', expected_target: 'mi355x', expected_physical_cu_count: 256,
+    phases: 'extract', workload_spec: workload, config_tune: 'false', tuning_skillset: 'false',
+    analysis_skill: 'none', use_expert_skills: 'false', use_learned_kb: 'false', warm_start: 'false',
+    gpu_ids: '0', final_reserve_s: 0,
+    state: { eval_dir: f.root, model_name: 'fixture', baseline_throughput_tok_s: 1,
+      throughput: 1, flags: '--tp 1', env: '', overlay: '', workload_spec: workload },
+  }, 0);
+  assert.equal(calls.filter(p => p.includes('PHASE=prepare')).length, 1, logs.join('\n'));
+  assert.deepEqual(result.phases_run, ['extract']);
+  assert.equal(result.state.kernelQueue.length, 1);
+  assert.equal(result.kernel_extraction.failed_tasks.length, 1);
+  assert.equal(result.kernel_extraction.deferred_tasks.length, 1);
+  assert.equal(result.validation_status, 'phase_partial');
+});
