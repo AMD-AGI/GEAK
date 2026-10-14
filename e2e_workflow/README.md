@@ -354,7 +354,9 @@ Fast mode skips the phase; deep mode keeps it. Full contract:
 
 ## AgentX kernel selection and UT extraction
 
-AgentX enters `KernelExtract` after baseline. The
+Runs declared with `workload_kind: "agentx_trace_replay"` or the corresponding
+`workload_spec.kind` enter `KernelExtract` after baseline; resumes retain the
+saved declaration. The
 [kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md)
 selects from baseline logs/configuration and compatible runtime evidence,
 using bounded dispatch/shape captures where needed. It replaces separate

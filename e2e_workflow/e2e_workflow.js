@@ -800,22 +800,12 @@ const OSL_DECLARED = A.osl != null ? parseInt(A.osl, 10) : null;
 //     callers that want every field explicit; or
 //   * args.workload_kind: "agentx_trace_replay" — the shorthand, which fills
 //     the canonical AgentX setup below and lets workload_spec override any part.
-// Resumes and legacy client/environment signals also preserve AgentX identity.
-// With no replay declaration, AGENTX_ENV stays empty and fixed-load behavior is unchanged.
+// Resume the saved declaration; new runs use main's explicit workload identity.
 const WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object' && !Array.isArray(A.workload_spec)
   ? A.workload_spec
   : (A.state && A.state.workload_spec && typeof A.state.workload_spec === 'object' && !Array.isArray(A.state.workload_spec)
     ? A.state.workload_spec : {});
-const WORKLOAD_ENV = typeof process !== 'undefined' && process.env ? process.env : {};
-const WORKLOAD_CLIENT = String(A.bench_client || WORKLOAD_ENV.BENCH_CLIENT || '').trim().toLowerCase();
-// run_e2e sets BENCH_CLIENT for each run; it outranks a leftover workload-kind
-// environment variable when no structured specification was supplied.
-const WORKLOAD_KIND = String(A.workload_kind || WORKLOAD_SPEC.kind
-  || (WORKLOAD_CLIENT === 'agentx' ? 'agentx_trace_replay'
-    : ['native', 'inferencex'].includes(WORKLOAD_CLIENT) ? 'synthetic_isl_osl' : '')
-  || WORKLOAD_ENV.GEAK_WORKLOAD_KIND
-  || (['agentx_observed', 'synthetic_fallback_on_agentx'].includes(A.workload_shape_provenance)
-    ? 'agentx_trace_replay' : 'synthetic'));
+const WORKLOAD_KIND = String(A.workload_kind || WORKLOAD_SPEC.kind || 'synthetic');
 const IS_AGENTX = WORKLOAD_KIND === 'agentx_trace_replay';
 // The canonical AgentX submission setup. These are the leaderboard's numbers,
 // not tuning knobs: the 393-entry weka corpus at 3600s IS the graded workload,
@@ -853,7 +843,7 @@ const CONC = parseInt(AGENTX && AGENTX.concurrency != null ? AGENTX.concurrency
   : (A.conc != null ? A.conc : 64), 10);
 
 // ---------------------------------------------------------------------------
-// Observed request lengths — workload context for kernel extraction
+// Kernel-targeting shape — the shape roles synthesize kernel inputs against
 // ---------------------------------------------------------------------------
 // Nothing is MEASURED at isl/osl on a trace replay: aiperf owns the sequence
 // lengths and the bench client ignores these. But roles still read them as the
@@ -914,7 +904,7 @@ function adoptMeasuredShape(isl, osl, where) {
   WORKLOAD.osl = OSL;
   WORKLOAD.shape_provenance = WORKLOAD_SHAPE_PROVENANCE;
   log(`Kernel-targeting shape measured from ${where}: isl=${ISL} osl=${OSL} `
-    + `(ratio ${(ISL / Math.max(1, OSL)).toFixed(1)}:1). Extraction derives kernel shapes from dispatch evidence.`);
+    + `(ratio ${(ISL / Math.max(1, OSL)).toFixed(1)}:1). Roles size kernels against this.`);
   return true;
 }
 // The Setup probe reads the baseline summary ONCE, at the instant Setup returns,
@@ -1887,7 +1877,7 @@ ${workloadIdentityBlock()}
 ${cfg(inall)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role) + warmStartBlock(role) + correctnessEnvBlock(role) + kernelExtractBlock(role);
+  return base + expertSkillsBlock(role) + warmStartBlock(role) + kernelExtractBlock(role) + correctnessEnvBlock(role);
 }
 
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
@@ -2365,8 +2355,6 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
       return { ok: false, why: 'dispatch branches omit a selected device kernel' };
     return { ok: true, why: 'verified whole-op dispatch branches independently' };
   }
-  if (ext && ext.selection_evidence_error)
-    return { ok: false, why: ext.selection_evidence_error };
   if (h && h.joint_ut) {
     const phases = h.joint_ut.phases;
     const results = ext && ext.phase_selection_validations;
@@ -2655,7 +2643,9 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
     const priorTarget = String((ext && ext.target_callable) || '').trim();
     if (priorTarget && !attemptedTargets.includes(priorTarget)) attemptedTargets.push(priorTarget);
     const selectionCorrective = selection.ok ? '' :
-      ` PRIOR EXTRACTION DELIVERY FAILED VALIDATION: ${selection.why}. ` +
+      (agentxDelivery || head.joint_ut ?
+        ` PRIOR EXTRACTION DELIVERY FAILED VALIDATION: ${selection.why}. ` :
+        ` PRIOR ATTEMPT DID NOT SELECT THE PROFILED GPU KERNEL: ${selection.why}. `) +
       (agentxDelivery ?
       'Read the kernel-extract delivery contract and preflight the exact return against the original KERNEL. ' +
       'Repair missing return fields or verdict file/hash references from existing evidence before GPU work. ' +
@@ -2670,16 +2660,20 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
         '(issue #429 — never accumulate capture.pid-* oracles across retries). ') +
       'Install safe markers for every relevant candidate, never native/JIT kernel_entry objects. Run ' +
       'kernel_selection.py over every process-local capture and all root-call traces with --task-dir "$TASK". ' +
-      'Return its JSON verbatim as selection_validation, or use a task-local selection_validation_ref with path and SHA-256. ' +
+      (agentxDelivery || head.joint_ut ?
+        'Return its JSON verbatim as selection_validation, or use a task-local selection_validation_ref with path and SHA-256. ' :
+        'Return its JSON verbatim as selection_validation. ') +
       (head.joint_ut ?
         'For KERNEL.joint_ut, verify each declared phase with all --required-device-kernel members, return ' +
         'phase_selection_validations and choose the deepest boundary containing the WHOLE chain. ' :
         'Select the deepest live inner_launcher/op_seam across all calls/ranks; a fused head must select the whole-op op_seam. ') +
-      'Rejecting the previous outer wrapper ' +
-      'is not success. ATTEMPTED_TARGET_CALLABLES records prior probes, not a target blacklist. ' +
-      'You may retain a prior target after new runtime evidence resolves every failed selection check; ' +
-      'missing probe coverage alone does not invalidate the callable. A target with a deeper live ' +
-      'deployable seam or the wrong kernel identity still fails the unchanged selection gate.';
+      'Rejecting the previous outer wrapper is not success. ' +
+      (agentxDelivery || head.joint_ut ?
+        'ATTEMPTED_TARGET_CALLABLES records prior probes, not a target blacklist. ' +
+        'You may retain a prior target after new runtime evidence resolves every failed selection check; ' +
+        'missing probe coverage alone does not invalidate the callable. A target with a deeper live ' +
+        'deployable seam or the wrong kernel identity still fails the unchanged selection gate.' :
+        'Do not return any ATTEMPTED_TARGET_CALLABLES value again.');
     const baselineCorrective = needBaseline ?
       ' PRIOR ATTEMPT DID NOT FREEZE A BASELINE. You MUST seed baseline_overlay/ from ' +
       'CURRENT_OVERLAY (the live serving stack = the speedup denominator), declare meta.candidate_bind ' +

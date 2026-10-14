@@ -310,14 +310,13 @@ async function run(body, overrides = {}, reply = selection()) {
   // A live resume omitted a dispatcher marker, although its selected op seam was
   // correct. Repairing probe coverage must not force selection of a wrong seam.
   const identity = between('const CALLABLE_SPEC_RX =', 'const PRE_FLAGGED_HEADS =');
-  const retryPrompts = [];
   const target = 'pkg.live:op', dispatcher = 'pkg.live:compile';
   const selectedHead = { entity_kind: 'gpu_kernel', device_kernel: 'device_kernel',
     seam_candidates: [
       { target_callable: target, role: 'op_seam', depth: 1, device_kernels: ['device_kernel'] },
       { target_callable: dispatcher, role: 'dispatcher', depth: 2, device_kernels: ['device_kernel'] },
     ] };
-  const retryDispatch = new Function('safeAgent', `
+  const makeRetryDispatch = new Function('safeAgent', 'KERNEL_EXTRACT_ON', `
     const CAPTURE_STORAGE_ENV = '', CAPTURE_BYTE_BUDGET = 1, CAPTURE_CASE_BYTE_LIMIT = 1;
     const CAPTURE_PERSIST_POLICY = '', BASELINE_EXTRACT_RETRIES = 1;
     const roleAgent = (role, phase, intro, inputs) => ({ role, phase, intro, inputs });
@@ -327,23 +326,32 @@ async function run(body, overrides = {}, reply = selection()) {
     ${identity}
     ${extraction}
     return extractWithBaseline;
-  `)(async prompt => {
-    retryPrompts.push(prompt);
-    return { smoke: 'pass', task_dir: '/fixture', baseline_frozen: true,
-      target_callable: target, selection_validation: {
-        contract: 'kernel_selection', ok: true, target_callable: target,
-        device_kernel: 'device_kernel', total_calls_observed: 1,
-        target_marker_calls: 1, matched_kernel_calls: 1, deepest_verified: true,
-        live_candidate_targets: [target], deeper_live_candidates: [],
-        candidate_targets_tested: retryPrompts.length === 1 ? [target] : [target, dispatcher],
-      } };
-  });
-  const repaired = await retryDispatch('kernel_extractor', 'extract_op', '', { KERNEL: selectedHead });
-  assert.equal(retryPrompts.length, 2, 'real selection gate requires the omitted dispatcher probe');
-  assert.equal(repaired.smoke, 'pass', 'complete new evidence can certify the same target');
-  assert.deepEqual(retryPrompts[1].inputs.ATTEMPTED_TARGET_CALLABLES, [target]);
-  assert(retryPrompts[1].intro.includes('not a target blacklist'));
-  assert(retryPrompts[1].intro.includes('new runtime evidence resolves every failed selection check'));
+  `);
+  for (const enabled of [true, false]) {
+    const retryPrompts = [];
+    const retryDispatch = makeRetryDispatch(async prompt => {
+      retryPrompts.push(prompt);
+      return { smoke: 'pass', task_dir: '/fixture', baseline_frozen: true,
+        target_callable: target, selection_validation: {
+          contract: 'kernel_selection', ok: true, target_callable: target,
+          device_kernel: 'device_kernel', total_calls_observed: 1,
+          target_marker_calls: 1, matched_kernel_calls: 1, deepest_verified: true,
+          live_candidate_targets: [target], deeper_live_candidates: [],
+          candidate_targets_tested: retryPrompts.length === 1 ? [target] : [target, dispatcher],
+        } };
+    }, enabled);
+    const repaired = await retryDispatch('kernel_extractor', 'extract_op', '', { KERNEL: selectedHead });
+    assert.equal(retryPrompts.length, 2, 'real selection gate requires the omitted dispatcher probe');
+    assert.equal(repaired.smoke, 'pass', 'complete new evidence can certify the same target');
+    assert.deepEqual(retryPrompts[1].inputs.ATTEMPTED_TARGET_CALLABLES, [target]);
+    const retry = retryPrompts[1].intro;
+    assert.equal(retry.includes('not a target blacklist'), enabled);
+    assert.equal(retry.includes('new runtime evidence resolves every failed selection check'), enabled);
+    assert.equal(retry.includes('selection_validation_ref'), enabled);
+    assert.equal(retry.includes('PRIOR ATTEMPT DID NOT SELECT THE PROFILED GPU KERNEL'), !enabled);
+    assert.equal(retry.includes('Do not return any ATTEMPTED_TARGET_CALLABLES value again.'), !enabled);
+    assert.equal(retry.includes('--cleanup-task-dir "$TASK" --no-promote'), !enabled);
+  }
   const checkSelection = new Function(`${identity}\nreturn kernelSelectionVerified;`)();
   function jointPhase(regime) {
     const prefix = regime.toLowerCase(), target = `pkg.indexer:${prefix}_joint`;

@@ -99,54 +99,10 @@ for _e in _m.get("modules", []):
         sys.stderr.write("[overlay] bad module entry %r: %r\n" % (_e, _ex))
 
 
-class _OverlayParentLoader:
-    """Repair compatibility aliases only after the parent initializes normally."""
-    def __init__(self, loader):
-        self.loader = loader
-
-    def create_module(self, spec):
-        create = getattr(self.loader, "create_module", None)
-        return create(spec) if create else None
-
-    def exec_module(self, module):
-        self.loader.exec_module(module)
-        for dotted, file in _MODS.items():
-            parent, _, child = dotted.rpartition(".")
-            previous = sys.modules.get(dotted)
-            if parent != module.__name__ or previous is None:
-                continue
-            origin = getattr(getattr(previous, "__spec__", None), "origin", None)
-            if os.path.realpath(origin or "") == os.path.realpath(file):
-                continue
-            spec = importlib.util.spec_from_file_location(dotted, file)
-            patched = importlib.util.module_from_spec(spec)
-            sys.modules[dotted] = patched
-            try:
-                spec.loader.exec_module(patched)
-            except BaseException:
-                sys.modules[dotted] = previous
-                raise
-            setattr(module, child, patched)
-            sys.stderr.write("[overlay] injected alias %s <- %s\n" % (dotted, file))
-
-    def __getattr__(self, name):
-        return getattr(self.loader, name)
-
-
 class _OverlayFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, _name, _path=None, _target=None):
         _file = _MODS.get(_name)
         if _file is None:
-            if any(name.rpartition(".")[0] == _name for name in _MODS):
-                for finder in sys.meta_path:
-                    if finder is self:
-                        continue
-                    find = getattr(finder, "find_spec", None)
-                    spec = find(_name, _path, _target) if find else None
-                    if spec is not None:
-                        if spec.loader is not None:
-                            spec.loader = _OverlayParentLoader(spec.loader)
-                        return spec
             return None
         sys.stderr.write("[overlay] injected module %s <- %s\n" % (_name, _file))
         return importlib.util.spec_from_file_location(_name, _file)
