@@ -19,9 +19,9 @@ a function is absent. Reuse compatible standalone traces but regenerate machine
 verdicts from raw events; prose cannot populate `candidate_targets_tested`.
 Keep supplemental replay and original serving evidence separately scoped.
 
-Use the shared selector's launch attribution without rewriting failed verdicts.
-For suspicious sibling-launch attribution, consult the
-[MoE trace pitfall](../../../shape_capture.md#shared-parent-ids-in-fused-op-traces-observed-in-moe-extraction).
+Joint UT verification correlates each member with its own host launch; a shared
+parent External ID cannot prove that a leaf contains the complete chain. Use
+`--required-device-kernel` for every companion and retain failed verdicts.
 
 Preserve supported module boundaries and import order. If bundling is needed,
 use scope-aware transformations, preserve external imports/resources and run

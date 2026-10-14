@@ -60,11 +60,10 @@ _EMPTY = {"modules": [], "rebinds": [], "markers": [], "captures": []}
 # recursive process spawn that wedges the whole node (observed: 13.7k processes, load 590, every
 # subsequent vLLM launch failing torch.distributed rendezvous with "2/8 clients joined").
 # The overlay has no business running inside an arch probe, so no-op there.
-_BOOTSTRAP_ENV = "_GEAK_OVERLAY_BOOTSTRAPPING"
 _ARGV0 = (sys.argv[0] if sys.argv else "") or ""
 _PROBES = {"rocm_agent_enumerator", "rocminfo", "offload-arch", "amdgpu-arch", "hipconfig", "hipcc",
            "hipinfo", "rocm-smi", "rocm_smi.py"}
-if _BOOTSTRAP_ENV in os.environ or os.path.basename(_ARGV0) in _PROBES or os.path.abspath(_ARGV0 or ".").startswith(
+if os.path.basename(_ARGV0) in _PROBES or os.path.abspath(_ARGV0 or ".").startswith(
         ("/opt/rocm", "/usr/local/rocm")):
     _m = dict(_EMPTY)
 else:
@@ -113,12 +112,6 @@ for _dotted in _MODS:
     if _dotted in sys.modules:   # imported before sitecustomize ran -> the overlay would be a no-op
         sys.stderr.write("[overlay] WARNING %s was already imported before the overlay finder\n" % _dotted)
 
-# Python build helpers spawned by rebind/capture imports inherit PYTHONPATH.
-# Stand down in those helpers; later serving workers must still apply the overlay.
-_bootstrap_owned = _BOOTSTRAP_ENV not in os.environ
-if _bootstrap_owned:
-    os.environ[_BOOTSTRAP_ENV] = "1"
-
 # Manifest installers register deferred hooks without eagerly importing serving/GPU libraries.
 # They run before rebinds, since a rebind can itself import a module the installer must observe.
 for _e in _m.get("installers", []):
@@ -162,8 +155,6 @@ for _e in _m.get("markers", []):
         seam_trace.install(_e["target"])
     except Exception as _ex:
         sys.stderr.write("[overlay] seam marker install FAILED %r: %r\n" % (_e, _ex))
-if _bootstrap_owned:
-    os.environ.pop(_BOOTSTRAP_ENV, None)
 '''
 
 
@@ -172,17 +163,6 @@ _INSTALLER_START = "# Manifest installers register deferred hooks"
 _INSTALLER_END = "# (b) rebind single attributes (monkeypatch)."
 LEGACY_SITECUSTOMIZE = (SITECUSTOMIZE.split(_INSTALLER_START)[0]
                        + _INSTALLER_END + SITECUSTOMIZE.split(_INSTALLER_END)[1])
-
-# Accept the unmodified main runtimes when composing overlays saved before this update.
-_PREVIOUS_RUNTIME_HASHES = {
-    'efb5d81c8a2b111f90d295f08ad801082ade58e67a5d3a43e695b562c65bb3a4',
-    '1fcb7a9835b7369cff8f60f57aa337bcbe7214122279454ec93a17cdc32f9db9',
-}
-
-
-def _known_runtime(source):
-    return (source in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE)
-            or hashlib.sha256(source.encode()).hexdigest() in _PREVIOUS_RUNTIME_HASHES)
 
 
 def installer_module_manifest(overlay, manifest):
@@ -243,7 +223,7 @@ def cmd_add_installer(a):
     man = _ensure_overlay(a.overlay, getattr(a, "base", ""))
     runtime = os.path.join(a.overlay, "sitecustomize.py")
     with open(runtime) as handle:
-        if not _known_runtime(handle.read()):
+        if handle.read() not in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE):
             raise SystemExit("cannot add an installer to a custom sitecustomize; preserve its hooks first")
     m = _load_man(man)
     entry = {"id": a.id, "module": a.module, "callable": a.callable,
@@ -288,7 +268,7 @@ def merge_overlays(output, sources):
         if not isinstance(manifest, dict):
             raise ValueError("overlay manifest must be an object: " + source)
         with open(os.path.join(source, "sitecustomize.py")) as handle:
-            if not _known_runtime(handle.read()):
+            if handle.read() not in (SITECUSTOMIZE, LEGACY_SITECUSTOMIZE):
                 raise ValueError("custom sitecustomize cannot be merged automatically: " + source)
         manifest = installer_module_manifest(source, manifest)
         for kind, entries in manifest.items():

@@ -252,14 +252,13 @@ def _within_any_span(event, spans, same_thread=False):
     )
 
 
-def _marker_kernel_evidence(trace_events, target_callable, device_kernel, spans_override=None):
+def _marker_kernel_evidence(trace_events, target_callable, device_kernel, spans_override=None,
+                            *, strict_launch=False):
     marker = MARKER_PREFIX + target_callable
     spans = (_complete_spans(trace_events or [], marker)
              if spans_override is None else spans_override)
-    # Only host events on the marker's own thread establish launch causality.
-    # External ids belong to CPU ops, not individual launches: sibling kernels
-    # can inherit the same enclosing custom-op id. A runtime event carrying
-    # that id inside one leaf must not attribute every sibling kernel to the leaf.
+    # Only CPU events on the marker's own thread can establish launch causality. Global timestamp
+    # overlap is unsafe under concurrent serving. The resulting External ids bridge to async GPU events.
     related_external_ids = set()
     # Triton (and any raw hipModuleLaunchKernel) device rows carry only `correlation`, never an
     # `External id`, so the External-id bridge alone silently misses them. The host-side launch
@@ -269,22 +268,23 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel, spans_
     for event in trace_events or []:
         if not isinstance(event, dict) or not _within_any_span(event, spans, same_thread=True):
             continue
-        if event.get("cat") == "kernel" or _device_projection(event):
+        if event.get("cat") == "kernel" or (strict_launch and _device_projection(event)):
             continue
         args = event.get("args") or {}
         ext = args.get("External id")
-        # Legacy traces without device correlations can still use a CPU op that
-        # is wholly contained by this marker. Runtime External ids alone are not
-        # ownership proof; their enclosing op may start before this leaf marker.
-        event_end = float(event["ts"]) + float(event.get("dur") or 0)
-        contained_op = event.get("cat") == "cpu_op" and any(
-            start <= float(event["ts"]) and event_end <= end
-            and event.get("pid") == owner.get("pid") and event.get("tid") == owner.get("tid")
-            for start, end, owner in spans)
-        if ext is not None and contained_op:
+        # Joint UTs must distinguish sibling launches sharing a parent External id.
+        # Only a fully contained CPU op may provide their correlation-free fallback.
+        owns_external_id = True
+        if strict_launch:
+            event_end = float(event["ts"]) + float(event.get("dur") or 0)
+            owns_external_id = event.get("cat") == "cpu_op" and any(
+                start <= float(event["ts"]) and event_end <= end
+                and event.get("pid") == owner.get("pid") and event.get("tid") == owner.get("tid")
+                for start, end, owner in spans)
+        if ext is not None and owns_external_id:
             related_external_ids.add(ext)
         corr = args.get("correlation")
-        if corr is not None and event.get("cat") in ("cuda_runtime", "hip_runtime"):
+        if corr is not None and (not strict_launch or event.get("cat") in ("cuda_runtime", "hip_runtime")):
             related_correlations.add(corr)
     matched = []
     for event in trace_events or []:
@@ -293,10 +293,10 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel, spans_
         args = event.get("args") or {}
         ext = args.get("External id")
         corr = args.get("correlation")
-        # A present launch identity takes precedence; do not rescue an unmatched
-        # launch with a broader parent id. Missing host launches remain unproven.
-        linked = (corr in related_correlations if corr is not None else
-                  ext is not None and ext in related_external_ids)
+        linked = (ext is not None and ext in related_external_ids) or (
+            corr is not None and corr in related_correlations)
+        if strict_launch and corr is not None:
+            linked = corr in related_correlations
         if linked and kernel_matches(device_kernel, event.get("name")):
             matched.append(str(event.get("name") or ""))
     return {
@@ -323,7 +323,8 @@ def _is_nested(inner_spans, outer_spans):
     return False
 
 
-def verify(target_callable, device_kernel, capture_meta, trace_events, candidate_targets=None):
+def verify(target_callable, device_kernel, capture_meta, trace_events, candidate_targets=None,
+           *, strict_launch=False):
     target_callable = str(target_callable or "").strip()
     device_kernel = str(device_kernel or "").strip()
     failed = []
@@ -354,7 +355,8 @@ def verify(target_callable, device_kernel, capture_meta, trace_events, candidate
     if invalid_candidates:
         failed.append("invalid_candidate_target")
     evidence = {
-        candidate: _marker_kernel_evidence(trace_events, candidate, device_kernel)
+        candidate: _marker_kernel_evidence(trace_events, candidate, device_kernel,
+                                           strict_launch=strict_launch)
         for candidate in candidates if valid_callable_spec(candidate)
     }
     installed_candidates = [
@@ -435,7 +437,8 @@ def verify_chain(target_callable, device_kernel, required_device_kernels, captur
     members = list(dict.fromkeys([device_kernel] + list(required_device_kernels)))
     if len(members) < 2 or any(not str(name or '').strip() for name in members):
         raise ValueError("joint selection requires at least two nonempty device kernel identities")
-    verdicts = [verify(target_callable, name, capture_meta, trace_events, candidate_targets)
+    verdicts = [verify(target_callable, name, capture_meta, trace_events, candidate_targets,
+                       strict_launch=True)
                 for name in members]
     result = dict(verdicts[0])
     candidates = list(dict.fromkeys(list(candidate_targets or []) + [target_callable]))
@@ -444,7 +447,8 @@ def verify_chain(target_callable, device_kernel, required_device_kernels, captur
         spans = _outermost_spans(_complete_spans(trace_events, MARKER_PREFIX + candidate))
         coverage[candidate] = [
             {"call": index, "missing_members": [name for name in members
-              if not _marker_kernel_evidence(trace_events, candidate, name, [span])["matched"]]}
+              if not _marker_kernel_evidence(trace_events, candidate, name, [span],
+                                              strict_launch=True)["matched"]]}
             for index, span in enumerate(spans)
         ]
     complete = {candidate for candidate, calls in coverage.items()
