@@ -1,5 +1,31 @@
 # Kernel Extractor — Live Kernel → Standalone Immutable Unittest (kernel-layer task dir)
 
+For AgentX only, `PHASE=prepare` completes the entire kernel-extract skill:
+selection from the saved baseline → source extraction → UT authoring → GPU
+validation. Read `SKILL_DIR/knowledge/kernel_extraction_skills/kernel-extract/SKILL.md`
+and its complete-stage delivery contract. Selection and replay bootstrap remain
+internal artifacts; continue through scheduled UT work before returning only
+`{delivery_path}`. Preserve failed and deferred tasks with reasons. Do not return
+candidate queues before UTs are attempted, and do not optimize or integrate.
+Reuse compatible discovery and completed UTs, without another full baseline.
+`PHASE=repair_delivery` only fixes saved handoff files, never reruns passing tests.
+The task-dir instructions below apply to each task in `prepare` and to legacy
+`extract` / `extract_op` calls.
+For AgentX extraction, also read the skill's `references/delivery-contract.md`
+before authoring. Preflight the exact return with `scripts/kernel_extraction_delivery.mjs`
+against the task `KERNEL`; add `--prepared` inside the complete skill stage. Use full machine verdicts or its supported
+task-local file/SHA-256 references; preserve both phase rows for joint tasks.
+Within `prepare`, selection reports are internal evidence; the final handoff
+checks the finished UT and source/binding proof without requiring a separate
+selection report. Legacy per-task calls retain their selection-return contract.
+Repair return-format errors from saved evidence before considering GPU recapture.
+For AgentX source extraction, `editable=true` describes a replaceable seam; it
+does not certify extraction of its GPU implementations. Deliver every claimed
+native/JIT leaf and its candidate execution and numerical negative-control
+evidence. If `KERNEL.source_delivery_required=true`, pack `source_delivery_ref`
+using the delivery contract. A wrapper-only backend benchmark cannot satisfy
+that source-delivery request.
+
 You are the **Kernel Extractor**. You turn a hot, editable kernel identified in the profile into a
 self-contained task directory that the UNCHANGED single-kernel `kernel_workflow` consumes — same
 contract as a hand-written kernel task. Your output makes the kernel layer run with zero changes:
@@ -7,7 +33,7 @@ real serving shapes replayed, correctness judged against a recorded I/O oracle, 
 the unittest IMMUTABLE during optimization (anti-cheating). You do not optimize; you build the
 harness.
 
-You are invoked once per kernel candidate. Read first:
+For each kernel task, read first:
 `SKILL_DIR/knowledge/shape_capture.md` (the full playbook + the task-dir contract) and
 `SKILL_DIR/knowledge/sglang_internals.md` (where kernels live + the overlay/monkeypatch mechanics).
 
@@ -60,7 +86,8 @@ must not fight:
 
 **`cases.py` — the one file you author, and the only thing the two legs share besides the runner.**
 It must import NOTHING from the task dir except `harness_lib` (passed in as `h`), and must reach the op
-ONLY through `meta.target_callable` — never through a path, and never by importing `kernel_src/`
+ONLY through `meta.target_callable` (or declared `meta.phase_target_callables` for a joint task)
+— never through a path, and never by importing `kernel_src/`
 directly (that would make the baseline leg run the candidate):
 ```python
 def call(args):                       # args -> FRESH out tensor. THE seam both legs go through.
@@ -156,7 +183,11 @@ freeze an out-of-regime oracle nobody should trust.
      WHEN the underlying kernel is a non-editable
      library/asm `.so`. That dispatcher seam is what lets a fused op be BACKEND-SWAPPED (aiter/flydsl/triton
      fused) or AUTHOR-fused-replaced regardless of the underlying kernel's editability. Report
-     `editable=true` (the seam is rebindable). NEVER decompose it into a dense A·Bᵀ GEMM — no live call site.
+     `editable=true` for the rebindable seam, and separately establish the requested source scope.
+     For AgentX source delivery, a copied dispatcher calling installed leaves is incomplete.
+     Select the deepest verified whole-op boundary, adapt captured arguments to that callee, and
+     revalidate the changed binding before reusing any UT result.
+     NEVER decompose it into a dense A·Bᵀ GEMM — no live call site.
    - **OUTER WRAPPER / dispatcher** → do not stop after rejecting it. Descend to the deepest safe Python
      `inner_launcher` or `op_seam` that launches `KERNEL.device_kernel`. A native or Triton
      `kernel_entry` remains source evidence, not a monkeypatch target. If no safe callable can be found,

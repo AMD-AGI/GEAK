@@ -124,9 +124,12 @@ jobs:
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_seam_trace_capture_guard.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
+            e2e_workflow/scripts/tests/test_kernel_extract_targets.py \
+            e2e_workflow/scripts/tests/test_kernel_extract_gpu_isolation.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
             e2e_workflow/scripts/tests/test_harness_lib.py \
+            e2e_workflow/scripts/tests/test_observed_workload_weights.py \
             e2e_workflow/scripts/tests/test_leg_runner.py \
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
@@ -293,6 +296,12 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      - name: AgentX-only kernel extraction and fixed-load compatibility
+        run: |
+          node e2e_workflow/scripts/test_kernel_extract_skill.js
+          node e2e_workflow/scripts/test_agentx_baseline_selection.js
+          node --test e2e_workflow/scripts/test_kernel_extraction_delivery.mjs
+          node --test e2e_workflow/scripts/test_kernel_source_delivery.mjs
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
       # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this

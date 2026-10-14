@@ -352,6 +352,35 @@ meaning, and a run without the phase produces a byte-identical `result.json`.
 Fast mode skips the phase; deep mode keeps it. Full contract:
 `knowledge/tuning_skillset_integration.md`.
 
+## AgentX kernel extraction and UT delivery
+
+Runs declared with `workload_kind: "agentx_trace_replay"` or the corresponding
+`workload_spec.kind` enter `KernelExtract` after baseline; resumes retain the
+saved declaration. The
+[kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md)
+selects from baseline logs/configuration and compatible runtime evidence,
+using bounded dispatch/shape captures where needed. Its `prepare` stage finishes
+source extraction, UT authoring and GPU validation before handing the workflow a
+`delivery_path`. Selection is internal; descriptive JSON fields do not cause an
+intermediate rejection. The final handoff checks UT/source/binding evidence
+without a second selection admission gate. The workflow consumes passing UTs
+without extracting them again. The skill replaces separate Profile/Strategize passes and refreshes
+affected evidence after accepted changes. `phases: "extract"` with saved baseline
+state runs this full stage without optimization.
+Fixed-load and single-kernel runs retain their existing flow.
+
+The default target set is **PREFILL Top 5 or DECODE Top 5, with overall share
+strictly >3%**: rank each phase, filter, then deduplicate without backfilling.
+Task budgets limit execution; the full inventory, failures and deferred tasks survive
+resumes. See [selection and coverage](knowledge/kernel_extraction_skills/kernel-extract/references/selection-coverage.md).
+
+UT delivery preserves complete joint/dispatch boundaries, actual editable
+native/JIT source, isolated baseline/candidate execution, GPU correctness and
+observed-call-weighted timing. The [delivery contract](knowledge/kernel_extraction_skills/kernel-extract/references/delivery-contract.md)
+and shared preflight reject incomplete or stale evidence. Per-task PASS,
+workload coverage and e2e validation remain separate results. Benchmark lifecycle,
+warmup and replica defaults are unchanged by this integration.
+
 ## Roofline-guided routing (`analysis_skill`, default `roofline`)
 
 `pct_gpu_time` tells you where the time goes; it does **not** tell you whether that time is
