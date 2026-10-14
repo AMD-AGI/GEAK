@@ -2214,6 +2214,10 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
         extra: dict = {}
         if CLAUDE_EFFORT in VALID_EFFORTS:
             extra["effort"] = CLAUDE_EFFORT
+        # Claude Code >=2.1.295 rejects Workflow scriptPath unless the directory
+        # is explicitly added (cwd alone is no longer enough). Nested kernel
+        # workflows need the same grant for kernel_workflow/.
+        add_dirs = [str(E2E_DIR), str(GEAK_ROOT / "kernel_workflow")]
         return ClaudeAgentOptions(
             model=CLAUDE_MODEL,
             allowed_tools=ALLOWED_TOOLS,
@@ -2221,6 +2225,7 @@ def _invoke_via_sdk(prompt: str, timeout_s: int, eval_dir: str | None = None) ->
             settings=WORKFLOW_SETTINGS,
             extra_args=extra,
             cwd=str(E2E_DIR),
+            add_dirs=add_dirs,
             env=_sdk_child_env(),
             **({"cli_path": CLAUDE_BIN} if CLAUDE_BIN else {}),
         )
@@ -2351,6 +2356,9 @@ def _invoke_via_cli(prompt: str, timeout_s: int) -> str:
     ]
     if CLAUDE_EFFORT in VALID_EFFORTS:
         cmd += ["--effort", CLAUDE_EFFORT]
+    # Mirror SDK add_dirs: Workflow scriptPath gate on Claude Code >=2.1.295.
+    for _d in (E2E_DIR, GEAK_ROOT / "kernel_workflow"):
+        cmd += ["--add-dir", str(_d)]
     # IS_SANDBOX stays unconditional on this path (pre-existing behaviour);
     # _sdk_child_env only adds the opt-in config-dir redirect on top.
     env = dict(os.environ, IS_SANDBOX="1")
