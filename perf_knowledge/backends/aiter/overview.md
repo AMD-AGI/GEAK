@@ -111,6 +111,15 @@ to confirm hot shapes hit asm/CK rather than Triton fallback.
 - On-box source: `/sgl-workspace/aiter` = `ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0`
   (`v0.1.12.post1-150`): `aiter/tuned_gemm.py`, `aiter/jit/core.py`, `aiter/jit/utils/torch_guard.py`,
   `aiter/configs/`.
+- **This box carries five aiter checkouts at five commits, and the cited commit — not the path —
+  is the identity.** The two this tree cites are `a6bb4993` at `/sgl-workspace/aiter` (585 citations,
+  the path written into most cards' prose) and `4faf8713` at `/sgl-workspace/geak_flydsl/aiter_main/aiter`
+  (the newer MoE/FlyDSL work). Taking a `@4faf8713` citation to `/sgl-workspace/aiter` finds a file
+  that is absent or differently numbered, and reads as "the citation is broken" when it is not.
+  Resolve through git objects instead of by path:
+  `python3 perf_knowledge/index/resolve_citation.py 'ROCm/aiter@4faf8713:aiter/fused_moe.py:4530'`
+  (`--list` for the checkouts, `--audit` for every citation in this tree; the audit also runs inside
+  `test_docs_contract.py`).
 - aiter as the central engine / default backend: https://github.com/ROCm/aiter (README) ·
   https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
 - Vendor 2×/3×/17× figures: https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html

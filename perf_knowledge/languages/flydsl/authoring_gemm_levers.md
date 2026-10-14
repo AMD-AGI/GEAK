@@ -12,6 +12,13 @@ sources:
 > follow-on to [`authoring_optimization.md`](authoring_optimization.md). For the SOTA backend decision
 > for dense GEMM (which path to pick, library vs author) see the operator card
 > [`../../operators/dense_gemm/backends/flydsl.md`](../../operators/dense_gemm/backends/flydsl.md).
+>
+> **These levers are written for a dense GEMM, where the caller's shape fixes the tile.** They do
+> not carry over unchanged to the grouped/MoE arm: per-expert M is ragged and padded to the sort
+> block size, so `tile_m` is set by the sorting stage rather than by the caller, and the parity gate
+> is a magnitude-weighted `logits_diff < 0.01` rather than an elementwise `allclose`. For that arm
+> start from the operator card
+> [`../../operators/fused_moe_grouped_gemm/backends/flydsl.md`](../../operators/fused_moe_grouped_gemm/backends/flydsl.md).
 
 # FlyDSL GEMM optimization
 

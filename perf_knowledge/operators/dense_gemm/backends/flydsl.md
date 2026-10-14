@@ -51,18 +51,19 @@ From the on-box `flydsl_hgemm` signature (`aiter/ops/flydsl/gemm_kernels.py`). A
 
 | param | range / typical | effect | default |
 |---|---|---|---|
-| `tile_m` / `tile_n` / `tile_k` | 64–256 / 64–256 / 32–128 | per-workgroup output + K tile | 128 / 128 / 64 |
-| `split_k` | 1–16 | K-dim split across CUs (skinny/deep-K) | 1 |
-| `block_m_warps` / `block_n_warps` | 1–4 / 1–8 | warp grid inside a block | 1 / 4 |
-| `n_tile_repeat` | 1–4 | N tiles per workgroup iteration | 1 |
-| `persistent_n_tiles` | 1–N | persistent-kernel N tiling | 1 |
-| `waves_per_eu` | 0–4 | occupancy hint (0 = compiler-chosen) | 0 |
-| `b_to_lds` / `b_to_lds_unroll` | bool / 0–8 | stage B through LDS + unroll | False / 0 |
-| `b_preshuffle` | bool | consume pre-shuffled weights (set by `B.is_shuffled`) | True |
-| `c_to_lds` | bool | stage C through LDS before store | False |
-| `stages` | 1–4 | software-pipeline depth | FIXED_STAGE (2) |
-| `async_copy` | bool | use async global→LDS copies | False |
+| `tile_m` / `tile_n` / `tile_k` | (16,32,48,64,80,96,112,128,160,256) / (64,128,160,192,256) / (64,96,128,160,256); tile_m capped at max(96, align_up(2M,16)) | per-workgroup output + K tile | 128 / 128 / 64 |
+| `split_k` | 1–32, only divisors of K leaving a tile_k-divisible split (base set 1,2,4,8,16) | K-dim split across CUs (skinny/deep-K) | 1 |
+| `block_m_warps` / `block_n_warps` + `b_to_lds` | exactly five registry variants: (1,2,F) (1,4,F) (2,2,F) (1,4,T) (2,2,T) | warp grid inside a block, and whether B goes through LDS | 1 / 4 / False |
+| `n_tile_repeat` / `persistent_n_tiles` / `waves_per_eu` / `b_to_lds_unroll` | small-M family only | occupancy / persistence levers for M < 17 | 1 / 1 / 0 / 0 |
+| `b_preshuffle` | bool; rejected together with `b_to_lds=True` and in the small-M family | consume pre-shuffled weights (set by `B.is_shuffled`) | True |
+| `c_to_lds` | fixed False (other values raise) | stage C through LDS before store | False |
+| `stages` | fixed 2 (other values raise) | software-pipeline depth | FIXED_STAGE (2) |
+| `async_copy` | fixed by architecture: off on gfx942, on elsewhere (a mismatch raises) | async global→LDS copies | arch-derived |
 | `kernel_family` | HGEMM / SMALL_M | choose the small-M kernel for decode | HGEMM |
+
+The corpus states this space with citations and the rules that narrow it per shape —
+[`flydsl-hgemm-config-space`](../../../corpus/gemm_decisions.md) and
+`flydsl-hgemm-tiling-validity` — plus the FlyDSL configurations AITER actually shipped per M bucket.
 
 ## Numerics / parity
 hgemm with **fp32 accumulate**; bias fused when dtype matches (else cast-then-add). The hgemm path
@@ -86,8 +87,11 @@ the dense aiter card (`AITER_CONFIG_GEMM_BF16=<csv>`). No standalone env-overlay
   verify `is_flydsl_available()` before trusting flydsl CSV rows.
 - A flydsl row whose `kernelName` isn't decodable returns `None` → the dispatcher falls through to the next
   `padded_M` granularity / default, so a typo in the CSV silently disables the row.
-- Instruction-level control = many more knobs than Triton; do **not** hand-tune — rely on aiter's per-shape
-  DB / gradlib autotune to fill `kernelName`.
+- Instruction-level control = many more knobs than Triton. When *deploying* the library kernel, fill
+  `kernelName` from aiter's per-shape DB / gradlib race rather than by hand. When *authoring* a FlyDSL GEMM,
+  generate candidates from the declared space and its legality rules
+  ([`../../../corpus/gemm_decisions.md`](../../../corpus/gemm_decisions.md)) and let the benchmark pick —
+  hand-picked values outside the space are what fail to build.
 - hgemm path can't take scales — passing `scale_a/scale_b` raises an assert; use the quant FlyDSL/MoE path.
 - **fp8 block-scale ≠ native scaled-MFMA.** Porting CK `gemm_a8w8_blockscale` onto the E8M0 block-scaled
   MFMA fails parity (power-of-two rounding of an arbitrary fp32 scale). Pick a software-fp32-post-MFMA core;

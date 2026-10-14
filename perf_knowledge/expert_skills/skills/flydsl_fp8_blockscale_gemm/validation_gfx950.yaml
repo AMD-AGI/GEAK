@@ -1,5 +1,12 @@
 skill_id: flydsl_fp8_blockscale_gemm
 date: '2026-07-17'
+# `notes` below already records that this YAML was written after the run and that the exact
+# FlyDSL/AITER commits were never captured. Said in fields too, so the gap is machine-visible rather
+# than buried in prose. The build was a standalone FlyDSL checkout with software blockscale support
+# (see `provider`), which was never version-pinned — so this is a permanent answer, not a TODO.
+flydsl_version: not_captured
+rocm_version: not_captured
+aiter_commit: not_captured
 provider: standalone_flydsl
 gpu: gfx950 / MI355X
 scope: down_proj M=16384 N=7168 K=768, CK versus FlyDSL isolated kernel

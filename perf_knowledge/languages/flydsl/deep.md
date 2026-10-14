@@ -98,14 +98,20 @@ def swizzle_xor16(row, col_in_bytes, k_blocks16):
 ```
 Applied at both the LDS write (staging from global) and the LDS read (feeding MFMA). LDS budget is
 arch-aware: `addressable_lds_bytes_for_gfx` → 65536 (gfx942) / 163840 (gfx950); aiter's
-`_estimate_hgemm_lds_bytes` checks `(stages·tile_m·tile_k + stages·tile_n·tile_k)·2B` against
-`get_shared_memory_per_block()` before compiling.
+`_estimate_hgemm_lds_bytes` checks `max(stages·tile_m·tile_k, tile_m·tile_n)·2B` — the C tile
+reuses the A staging space — plus `stages·tile_n·tile_k·2B` only when `b_to_lds`, against the arch
+limit before compiling.
 
-## 5. Split-K accumulation (global semaphore)
-Split-K HGEMM uses a **global semaphore** + signal-state ring (not just atomics): aiter maintains
-`SPLIT_K_GLOBAL_SEMAPHORE` (`int32[3·128]`) per stream and an `OnlineScheduler`
-(release/consume signals) so the split-K partials are reduced deterministically. `SPLIT_K_COUNTER_MAX_LEN
-= 128` caps `ceil(M/tile_m)·(N/tile_n)` output tiles for split-K>1.
+## 5. Split-K accumulation (init flag, then atomics)
+Split-K HGEMM combines its partials inside the kernel. aiter keeps `SPLIT_K_GLOBAL_SEMAPHORE`
+(`int32[3·128]`) per stream and passes the current signal state into each launch. The split with
+k index 0 initialises the output tile (zero, or the bias so it is added once), writes back L2 and
+sets the tile's counter; every other split spins on that counter, then adds its partial — rounded to
+the output dtype — with a packed atomic `fadd` at agent scope. Split 0 also clears the previous
+state's counters while the current ones are in use. The sum is atomic, so the result is not
+bit-reproducible. `SPLIT_K_COUNTER_MAX_LEN = 128` caps `ceil(M/tile_m)·(N/tile_n)` output tiles for
+split-K>1. (`OnlineScheduler` in the same file is the hot-loop instruction-scheduling helper that
+spreads loads over MFMAs; it plays no part in the reduction.)
 
 ## 6. Compile / JIT flow
 `compile_flydsl_hgemm_kernel(...)` (aiter `kernels/hgemm_dispatch.py`) → `compile_hgemm_kernel(...)`

@@ -21,9 +21,11 @@ sources:
 ## TL;DR
 The **scaled** (dequant-fused) GEMM path is where FlyDSL is SOTA: a separate `preshuffle_gemm` kernel family
 consumes quantized A/W (**fp8 / int8 / int4 / fp4**) plus dequant scales and produces bf16/fp16. The dense
-hgemm path explicitly **rejects scales** — scaling lives here. On **CDNA4 (gfx950)** the fp4 path uses the
+hgemm path takes **no scales** — scaling lives here. On **CDNA4 (gfx950)** the fp4 path uses the
 block-scaled `mfma_scale_f32_16x16x128_f8f6f4` MXFP MFMA; on gfx942 it runs the fp8/int8 preshuffle kernel.
-This is the family Kimi-K2.5 used for MoE GEMM (vendor: up to +162% throughput).
+Its scales are per-token × per-channel (applied at the last tile), not 128×128 blocks. The Kimi-K2.5
+fused-MoE result (vendor: up to +162% throughput) came from the 2-stage MoE kernels, which reuse this
+family's preshuffle MFMA pipeline (`mfma_preshuffle_pipeline.py`) and epilogues.
 
 ## SOTA implementation
 A8W8 (fp8/int8) and W4 (MXFP4) share one compiler, `compile_preshuffle_gemm_a8`; `compile_preshuffle_gemm_w4`
@@ -53,7 +55,7 @@ and emits `rocdl.mfma_scale_f32_16x16x128_f8f6f4` with `cbsz/blgp = 4` and `pack
 | impl | source | gens/dtypes | measured perf | when best |
 |---|---|---|---|---|
 | A8W8 preshuffle GEMM | `preshuffle_gemm.py::compile_preshuffle_gemm_a8` | gfx942/950; fp8/int8 → bf16/fp16 | no isolated flydsl number; folded into aiter a8w8 bpreshuffle GEMM tune | per-tensor/row fp8/int8 GEMM with preshuffled W |
-| W4 / MXFP4 block-scaled GEMM | `preshuffle_gemm.py::compile_preshuffle_gemm_w4` (→ a8 with fp4) | **gfx950 only**; fp4 (per_1x32) → bf16/fp16 | Kimi-K2.5 fused-MoE (FlyDSL, vendor): up to **+162% throughput, −69% TPOT, −65% TTFT** (SGLang+AITER, 2025) | MXFP4 MoE / dense low-bit GEMM |
+| W4 / MXFP4 block-scaled GEMM | `preshuffle_gemm.py::compile_preshuffle_gemm_w4` (→ a8 with fp4) | **gfx950 only**; fp4 (per_1x32) → bf16/fp16 | no isolated number (the Kimi-K2.5 vendor result is for the 2-stage MoE kernels that share this pipeline) | MXFP4 dense low-bit GEMM |
 
 ## Config space / knobs
 From `compile_preshuffle_gemm_a8` signature + the tune catalog
@@ -87,13 +89,17 @@ Two seams: (1) the a8w8 bpreshuffle GEMM tune (`gemm_tune/flydsl_gemm_a8w8_bpres
 `kernelInstance.name` = `flydsl_bpreshuflle_<m>x<n>x<k>_<qa>_<qw>_<dt>_<lds>x<csh>x<async>x<wpe>_default`)
 selecting a `solidx`; (2) `flydsl_preshuffle_gemm_a8(XQ,WQ,x_scale,w_scale,Out,...)` exported from
 `aiter.ops.flydsl` and lazily compiled via `_get_compile_fn()` (logs `"[FlyDSL] loaded preshuffle GEMM
-compiler"`; on absence falls back to CK/CKTile). `is_flydsl_available()` gates all of it.
+compiler"`). `is_flydsl_available()` gates all of it: in `gemm_a8w8_bpreshuffle` a tuned `flydsl` row is
+served only when it is true, and at this AITER commit that branch has no fallback — check availability
+before relying on such a row (with no tuned row at all the dispatcher goes to CK).
 
 ## Pitfalls & anti-patterns
 - **fp4/MXFP4 is gfx950-only** — `compile_preshuffle_gemm_w4` raises on gfx942; fp8-A + MXFP4 is
   `NotImplementedError` (op_sel_a overflow).
 - `tile_k_bytes % 64 != 0` raises; fp4 with `tile_k != 128` and `k_unroll < 2` raises.
-- Don't route scaled GEMM through `flydsl_hgemm` — it asserts no scale; use the preshuffle family.
+- Don't route scaled GEMM through `flydsl_hgemm` — it takes no scale arguments; use the preshuffle family.
+- It is not a 128×128 block-scale kernel: its scales are per-token × per-channel, applied once at the
+  last tile. A block-scale contract needs the per-K-block multiply inside the loop.
 - LDS over the arch limit silently drops a tune candidate (the tune prunes by `preshuffle_gemm_estimated_lds_bytes`).
 
 ## How to verify

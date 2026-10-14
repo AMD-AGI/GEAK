@@ -19,9 +19,13 @@ sources:
 ## TL;DR
 FlyDSL has a dedicated **small-M kernel family** (`KERNEL_FAMILY_SMALL_M`) for decode-shaped GEMM where
 `1 ≤ M < 17` (`SMALL_M_KERNEL_MAX = 17`). It is a FLIR/ROCDL MLIR-Python DSL kernel with a fixed `tile_m=16`,
-a wide N-tile catalog, and persistent/repeat-N variants to keep all CUs busy at tiny M. **It is gated to
-gfx950 only** — `iter_small_m_registry_configs` returns nothing on gfx942. Reached through the same
-`aiter.tuned_gemm` flydsl seam as the dense/split-K hgemm.
+a wide N-tile catalog, and persistent/repeat-N variants to keep all CUs busy at tiny M. **It is excluded
+on gfx942** — `iter_small_m_registry_configs` returns nothing there and the compile entry raises; the
+source gate names gfx942 only, gfx950 is where the registry is exercised, and other architectures are
+unverified. Reached through the same `aiter.tuned_gemm` flydsl seam as the dense/split-K hgemm. Note that
+AITER's shipped gfx950 bf16 tuned databases select the *generic* HGEMM (tile_m=32 + split_k) for every
+M≤16 FlyDSL row — see `flydsl-small-m-hgemm-family` in
+[`../../../corpus/gemm_decisions.md`](../../../corpus/gemm_decisions.md).
 
 ## SOTA implementation
 The registry only emits small-M configs for bf16→bf16 on non-gfx942, within the small-M range. From
