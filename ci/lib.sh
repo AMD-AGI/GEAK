@@ -223,8 +223,10 @@ pick_account() {
 
 # Detect the identity bucket used to pick a docker_default.json entry.
 # Returns MI355 (gfx950 / MI35x), MI300 (gfx942/gfx90a / MI30x), R9700 only
-# for the exact validated Radeon AI PRO R9700 product, or gfx1201 when only the
-# ISA is known. A bare gfx1201/RDNA4 override never proves the product.
+# for the exact validated Radeon AI PRO R9700 product, or a bare ISA (gfx1201,
+# gfx1151) when only the ISA is known. A bare gfx1201/RDNA4 override never
+# proves the product, and gfx1151 (RDNA 3.5 / Strix Halo) is ISA-only by
+# construction: the 8060S, 8050S and 8040S all report it.
 # Missing identity keeps the historical MI355 SPUR default unless R9700 was
 # explicitly requested, in which case detection fails closed.
 # resolve_image runs on the compute-node host, before the container starts.
@@ -236,12 +238,13 @@ normalize_gpu_arch() {
     mi300|gfx942|gfx90a) echo MI300 ;;
     r9700) echo R9700 ;;
     rdna4|gfx1201) echo gfx1201 ;;
+    rdna35|strix-halo|strixhalo|gfx1151) echo gfx1151 ;;
     gfx1200)
       echo "E_ARCH_UNVALIDATED: gfx1200 is not validated; refusing R9700 runtime policy" >&2
       return 1
       ;;
     *)
-      echo "E_ARCH_UNSUPPORTED: unsupported GPU arch override '$1' (want MI355|MI300|R9700|RDNA4|gfx950|gfx942|gfx90a|gfx1201)" >&2
+      echo "E_ARCH_UNSUPPORTED: unsupported GPU arch override '$1' (want MI355|MI300|R9700|RDNA4|RDNA35|gfx950|gfx942|gfx90a|gfx1201|gfx1151)" >&2
       return 1
       ;;
   esac
@@ -310,6 +313,11 @@ detect_gpu_arch() {
     gfx1201)
       if [ "${target:-unknown}" = "r9700" ]; then echo R9700; else echo gfx1201; fi
       ;;
+    # RDNA 3.5 APU (Strix Halo). ISA-only on purpose: gfx1151 is shared by the
+    # 8060S/8050S/8040S, so no marketing name proves a product bucket. Without
+    # this arm an APU fell through to GEAK_GPU_ARCH_DEFAULT and silently claimed
+    # to be an MI355, which then selected CDNA runtime policy and an MI image.
+    gfx1151)           echo gfx1151 ;;
     gfx1200)
       echo "E_ARCH_UNVALIDATED: gfx1200 is not validated; refusing R9700 runtime policy" >&2
       return 1
@@ -342,9 +350,10 @@ except Exception:
 
 def pick(node):
     # node may be a plain image string or an {arch: image, "default": image} dict.
-    # A bare gfx1201 ISA has no validated product image. Exact R9700 may select
-    # only an explicit R9700 mapping; neither may inherit a plain MI image.
-    if arch == "gfx1201":
+    # A bare gfx1201 ISA has no validated product image, and no gfx1151 serving
+    # image is published at all. Exact R9700 may select only an explicit R9700
+    # mapping; none of them may inherit a plain MI image.
+    if arch in ("gfx1201", "gfx1151"):
         return ""
     if arch == "R9700" and isinstance(node, str):
         return ""
