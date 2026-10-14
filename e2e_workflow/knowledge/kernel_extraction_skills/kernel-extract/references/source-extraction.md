@@ -69,14 +69,34 @@ Use the existing `kernel_src/`, frozen `baseline_overlay`/`baseline_ref/*.orig`,
 callables through the ambient overlay, never by importing candidate files.
 Only `kernel_src/` remains editable during optimization.
 
-Keep `assert_legs_differ`, then prove actual editable-leaf execution. Local
-wrapper paths, correct outputs and matching grids cannot exclude fallback to
-installed code via cached aliases, registries or function-local imports. Use
-untimed leaf invocation evidence or reversible diagnostic markers, linked to
-current candidate source through `_cand_overlay`. Test every claimed editable
-branch; explicitly out-of-scope dependencies/fallbacks remain allowed. Restore
-instrumentation and rerun normal checks before freezing delivery. Recheck after
-binding or source changes, including native/JIT paths.
+**Common broken UT: opt imports the original kernel.** An `opt.py`/`opt/` entry
+can resolve to a local file yet call an installed implementation via a top-level
+import, function-local import, cached alias, registry or native/JIT loader. The
+UT then compares the original kernel with itself; editing opt's copied kernel
+has no effect. `assert_legs_differ`, a different wrapper path, matching launch
+grids and correct outputs do not rule this out.
+
+Before accepting a generated UT:
+
+1. Follow the opt entry through every claimed editable GPU leaf. Make its
+   imports, rebinds and build inputs resolve to the delivered candidate source
+   under `kernel_src/`, including each joint/dispatch branch. Installed helpers
+   outside the requested source scope may remain dependencies; the claimed
+   candidate kernel must not silently fall back to the original implementation.
+2. Run the real candidate leg through `_cand_overlay` in a fresh process and
+   record untimed leaf invocation evidence tied to the current source/build.
+   Keep `cases.py` shared and baseline imports independent of opt.
+3. Temporarily change the actual candidate GPU leaf to produce a numerically
+   wrong result on a covered case. Rebuild/re-JIT as needed and use a fresh
+   process so cached modules, binaries or graphs cannot hide the edit. The
+   launch must succeed, candidate correctness must fail, and the unchanged
+   baseline must still pass. An import/build error or a marker only in the
+   Python wrapper is insufficient. If the UT still passes, fix the opt binding
+   before claiming extraction success; do not relax the correctness check.
+4. Restore the exact clean source, refresh the candidate build and rerun the
+   normal UT. Keep the mutation, source hashes, commands and both failure/pass
+   logs. Test each claimed editable leaf and repeat after source or binding
+   changes; final delivery contains clean code only.
 
 Each observed signature retains phase, operands/state, baseline kernels, full
 grids, calls per phase instance, dispatch and evidence source. Preserve scales,
