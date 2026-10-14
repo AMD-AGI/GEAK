@@ -312,6 +312,8 @@ jobs:
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
       - name: gfx1201 fail-closed knowledge regression
         run: node kernel_workflow/scripts/test_rdna4_policy.js
+      - name: gfx1151 isolation and SKU-gated roofline peaks
+        run: node kernel_workflow/scripts/test_rdna3_policy.js
       - name: R9700 E2E identity and knowledge policy
         run: node e2e_workflow/scripts/test_rdna4_e2e_policy.js
       - name: caller-pinned eval_dir regression
