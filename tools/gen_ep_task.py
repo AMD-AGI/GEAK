@@ -51,6 +51,13 @@ SHAPE_PRESETS = {
         {"M": 8192, "N": 4096, "iters": 50},   # larger batch
         {"M": 2048, "N": 8192, "iters": 50},   # wide rows
     ],
+    # Qwen3-Next shapes (hidden=5120, head_size=256, eps=1e-6). Block RMSNorm
+    # normalizes over hidden; the narrow N=256 row is the per-head QK-norm regime.
+    "rmsnorm_default": [
+        {"M": 4096, "N": 5120, "iters": 50},   # block RMSNorm, prefill-ish batch
+        {"M": 8192, "N": 5120, "iters": 50},   # block RMSNorm, larger batch
+        {"M": 8192, "N": 256,  "iters": 50},   # QK-norm regime (per-head, narrow rows)
+    ],
 }
 
 TEMPLATES_DIR = os.path.join(TOOLS_DIR, "selfcheck_templates")
