@@ -215,19 +215,31 @@ def is_client_rdna4(gfx):
     return bool(re.fullmatch(r"gfx120\d+", str(gfx or "").lower()))
 
 
+def is_client_rdna3x(gfx):
+    """True for the RDNA 3.5 APUs (gfx1151 and siblings).
+
+    Discrete RDNA3 (gfx1100/gfx1101/gfx1102) and the gfx1103 iGPU are different
+    parts and must not match, so the family is gfx115x rather than gfx11xx.
+    """
+    return bool(re.fullmatch(r"gfx115\d+", str(gfx or "").lower()))
+
+
 def resolve_peaks(peaks_md_path, gfx, device=0, product=None):
-    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA4.
+    """Resolve tabulated peaks; never derive one for a client RDNA part.
 
     Navi 48 reports properties that are insufficient to derive WMMA throughput,
-    and its GDDR clock interpretation is toolchain-dependent. An absent table
-    entry on gfx120x is therefore a hard unknown rather than a low-confidence
-    numeric denominator. R9700 peaks require product='r9700'. CDNA5 gfx1250
-    is not in that family and may derive.
+    and its GDDR clock interpretation is toolchain-dependent. The RDNA 3.5 APUs
+    are worse: their "memory clock" is system DRAM shared with the CPU, so a
+    derived bandwidth is not a conservative estimate of anything. An absent table
+    entry on gfx120x or gfx115x is therefore a hard unknown rather than a
+    low-confidence numeric denominator — every utilisation percentage downstream
+    is divided by this number. R9700 peaks require product='r9700'. CDNA5 gfx1250
+    is in neither family and may derive.
     """
     peaks = load_peaks(peaks_md_path, gfx, product=product)
     if peaks:
         return peaks
-    if is_client_rdna4(gfx):
+    if is_client_rdna4(gfx) or is_client_rdna3x(gfx):
         return None
     return derive_peaks_from_props(device)
 
