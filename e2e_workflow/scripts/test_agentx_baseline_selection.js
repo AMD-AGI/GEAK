@@ -15,9 +15,9 @@ function between(start, end, from = 0) {
   return src.slice(a, b);
 }
 const schemas = between('const obj =', '// Result of the ensure_flydsl');
-const selectionSchema = new Function(`${schemas}\nreturn AGENTX_SELECTION_SCHEMA;`)();
+const selectionSchema = new Function(`${schemas}\nreturn AGENTX_PREPARATION_SCHEMA;`)();
 const profileSchema = new Function(`${schemas}\nreturn PROFILE_SCHEMA;`)();
-const helper = between('function groupAgentXExtractionTasks(', "\nif (want('setup'))");
+const helper = between('async function prepareAgentXKernels(', "\nif (want('setup'))");
 const initial = between("  if (searchClosed('Profile and Strategize')) {",
   '} else {\n  // Load carried state');
 const resume = between('  // Load carried state', '\n}\n\n// ===');
@@ -26,7 +26,7 @@ const tuning = between("    if (!searchClosed('post-tuning re-profile and re-str
 const deep = between('        let rp;', '        if (rp && Array.isArray(rp.heads))');
 const head = between("  if (acceptedHeads.length && !searchClosed('post-head re-profile')) {\n    if (KERNEL_EXTRACT_ON)",
   '  log(`Head-kernel track done.');
-const milestoneRefresh = between('    if (KERNEL_EXTRACT_ON) {\n      profile = await selectAgentXKernels(milestone',
+const milestoneRefresh = between('    if (KERNEL_EXTRACT_ON) {\n      profile = await prepareAgentXKernels(milestone',
   '  } else {\n    noImprove++');
 const milestonePlan = between('  let plan;\n  if (KERNEL_EXTRACT_ON)', '\n  const planCandsRaw');
 const milestoneSchedule = between('  const cands = planCands.slice(0, remaining)',
@@ -34,14 +34,16 @@ const milestoneSchedule = between('  const cands = planCands.slice(0, remaining)
 const carry = between('const carryState = {', '\n// What this run got from the KB');
 
 function candidate(name) {
-  return { short_name: name, pct_gpu_time: 99, entity_kind: 'gpu_kernel', device_kernel: name, op_kind: 'attn',
+  return { short_name: name, pct_gpu_time: 7.25, prepared_ut: { result_path: '/task/run/RETURN.json', sha256: 'hash' }, entity_kind: 'gpu_kernel', device_kernel: name, op_kind: 'attn',
     kernel_extraction: { workload_json: '/eval/kernel_extraction/workload.json',
       ranking_json: '/eval/kernel_extraction/ranking.json', selection_pct_gpu_time: 7.25 } };
 }
 function selection() {
   return { head_candidates: [candidate('head')], kernel_candidates: [candidate('kernel')],
     profile_workload_json: '/eval/kernel_extraction/workload.json',
-    kernel_ranking_json: '/eval/kernel_extraction/ranking.json', config_directions: [] };
+    kernel_ranking_json: '/eval/kernel_extraction/ranking.json', config_directions: [], kernel_extraction_delivery_json: '/eval/delivery.json',
+    failed_tasks: [{ short_name: 'failed', reason: 'GPU mismatch' }],
+    deferred_tasks: [{ short_name: 'later', reason: 'budget' }], coverage_summary: { tested: 2 } };
 }
 async function run(body, overrides = {}, reply = selection()) {
   const calls = [], phases = [];
@@ -63,9 +65,10 @@ async function run(body, overrides = {}, reply = selection()) {
     flaggedHeads: [], pendingIntegrations: [], tuning: null, BACKEND: 'sglang',
     MEASUREMENT_MODE: 'isolated_server', VALIDATION_MEASUREMENT_MODE: 'isolated_server',
     VALIDATION_REPLICAS: 1, PLAN_SCHEMA: {},
-    searchClosed: () => false, gateNoiseBand: x => x, remainingMin: () => 120, log: () => {}, phase: p => phases.push(p), want: () => true,
+    searchClosed: () => false, gateNoiseBand: x => x, remainingMin: () => 120, log: () => {}, phase: p => phases.push(p), want: phase => phase !== 'extract',
     roleAgent: (role, phase, intro, inputs) => ({ role, phase, intro, inputs }),
-    safeAgent: async (prompt, opts) => { calls.push({ ...prompt, opts }); return structuredClone(reply); },
+    safeAgent: async (prompt, opts) => { calls.push({ ...prompt, opts }); return prompt.role === 'kernel_extractor' ? { delivery_path: '/eval/delivery.json' } : structuredClone(reply); },
+    readAgentXPreparation: async () => structuredClone(reply),
     applyOpIdentityGuard: q => q, admitHeads: q => q, ensureFlydslGate: async () => {},
     ...overrides,
   };
@@ -80,38 +83,16 @@ async function run(body, overrides = {}, reply = selection()) {
 
 (async () => {
   const { validate } = await import('../../interface/runtime/engine/schema.mjs');
-  for (const round of ['baseline', 'resume', 'config', 'tuning', 'head', 'deep-1', 0, 2]) {
-    const verdict = validate({ ...selection(), round }, selectionSchema);
-    assert(verdict.ok, `AgentX selection accepts round ${JSON.stringify(round)}: ${verdict.errors}`);
-  }
-  for (const round of [null, {}, [], true]) {
-    assert(!validate({ ...selection(), round }, selectionSchema).ok,
-      'round must still be a named phase or numeric milestone');
-  }
+  assert(validate({ delivery_path: '/eval/delivery.json' }, selectionSchema).ok);
+  assert(!validate({ head_candidates: [], kernel_candidates: [] }, selectionSchema).ok,
+    'selection alone is no longer a workflow handoff');
   assert(!validate({ round: 'resume', profile_topN_json: '/p', top_kernels: [] }, profileSchema).ok,
     'fixed-load profile schema remains unchanged');
-  for (const key of ['head_candidates', 'kernel_candidates']) {
-    for (const field of ['short_name', 'device_kernel', 'entity_kind', 'kernel_extraction']) {
-      const bad = selection();
-      delete bad[key][0][field];
-      assert(!validate(bad, selectionSchema).ok, `${key} requires ${field} before routing`);
-    }
-    const bad = selection(); bad[key][0].entity_kind = 'op';
-    assert(!validate(bad, selectionSchema).ok, 'logical ops cannot masquerade as GPU candidates');
-    const missingPath = selection(); delete missingPath[key][0].kernel_extraction.workload_json;
-    assert(!validate(missingPath, selectionSchema).ok, 'attributed cost must link its workload evidence');
-    const badSeam = selection(); badSeam[key][0].seam_candidates = [{
-      target_callable: 'pkg:call', depth: 1, role: 'dispatch_entry', device_kernels: ['kernel'],
-    }];
-    assert(!validate(badSeam, selectionSchema).ok, 'seams must use the existing machine-readable roles');
-  }
-  const noKind = selection(); delete noKind.head_candidates[0].op_kind;
-  assert(!validate(noKind, selectionSchema).ok, 'head extraction needs op_kind');
   const first = await run(initial);
   assert.deepEqual(first.phases, ['KernelExtract']);
   assert.deepEqual(first.calls.map(c => c.role), ['kernel_extractor']);
   const input = first.calls[0].inputs;
-  assert.equal(first.calls[0].phase, 'select');
+  assert.equal(first.calls[0].phase, 'prepare');
   assert.equal(input.BASELINE_LOG, '/eval/baseline/server.log');
   assert.equal(input.BASELINE_BENCH_DIR, '/eval/baseline');
   assert.equal(input.CURRENT_FLAGS, '--tp 8');
@@ -130,65 +111,16 @@ async function run(body, overrides = {}, reply = selection()) {
   assert.deepEqual(closed.calls, [], 'a closed search must not start extraction or profiling');
   assert.deepEqual(closed.kernelQueue, []);
   assert.deepEqual(closed.headQueue, []);
-  const groupTasks = new Function(`${helper}\nreturn groupAgentXExtractionTasks;`)();
-  const decode = { ...candidate('decode_score'), ut_task: 'indexer', served_regimes: ['DECODE'] };
-  const prefill = { ...candidate('prefill_score'), ut_task: 'indexer', served_regimes: ['PREFILL'] };
-  const duplicateLeafPlan = { ...selection(), head_candidates: [decode], kernel_candidates: [decode, prefill] };
-  assert.throws(() => groupTasks(duplicateLeafPlan), /one owner/, 'task name alone cannot certify a joint');
-  const owner = { ...decode, selected_device_kernels: ['decode_score', 'prefill_score'],
-    extraction_members: [decode, prefill], joint_ut: { phases: [
-      { regime: 'DECODE', device_kernel: 'decode_score', required_device_kernels: ['decode_score', 'decode_topk'],
-        seam_candidates: [{ target_callable: 'pkg:decode', depth: 0, role: 'op_seam', device_kernels: ['decode_score', 'decode_topk'] }] },
-      { regime: 'PREFILL', device_kernel: 'prefill_score', required_device_kernels: ['prefill_score', 'prefill_topk'],
-        seam_candidates: [{ target_callable: 'pkg:prefill', depth: 0, role: 'op_seam', device_kernels: ['prefill_score', 'prefill_topk'] }] },
-    ] } };
-  const groupedPlan = { ...selection(), head_candidates: [owner], kernel_candidates: [decode, prefill] };
-  const grouped = groupTasks(groupedPlan);
-  assert.equal(grouped.head_candidates.length, 1);
-  assert.equal(grouped.kernel_candidates.length, 0, 'joint leaves cannot be dispatched again');
-  assert.equal(grouped.head_candidates[0].kernel_extraction.selection_pct_gpu_time, 7.25,
-    'grouping must not sum overlapping cost scopes');
-  assert.equal(grouped.head_candidates[0].extraction_members.length, 2);
-  assert.deepEqual(groupTasks(grouped), grouped, 'saved grouped queues remain stable');
-  const dispatchOwner = { ...owner, joint_ut: undefined, op_kind: 'moe', dispatch_ut: {
-    phases: owner.joint_ut.phases.map(p => ({ ...p, required_device_kernels: undefined })) } };
-  const dispatchedGroup = groupTasks({ ...selection(), head_candidates: [dispatchOwner], kernel_candidates: [] });
-  assert.equal(dispatchedGroup.head_candidates.length, 1);
-  assert.equal(dispatchedGroup.head_candidates[0].joint_ut, undefined,
-    'mutually exclusive selected kernels do not become a mandatory joint chain');
-  dispatchOwner.dispatch_ut.phases.pop();
-  assert.throws(() => groupTasks({ head_candidates: [dispatchOwner] }), /dispatch phases/);
-  const companionPlan = structuredClone(grouped);
-  const companion = { ...candidate('prefill_topk'), kernel_extraction: {
-    ...candidate('prefill_topk').kernel_extraction, selected: false, selection_pct_gpu_time: 1.7 } };
-  companionPlan.head_candidates[0].extraction_members.push(companion);
-  const withCompanion = groupTasks(companionPlan);
-  assert.equal(withCompanion.head_candidates[0].extraction_members.length, 3);
-  assert.equal(withCompanion.head_candidates[0].selected_device_kernels.length, 2,
-    'required companions are delivered without inflating the selected target count');
-  companionPlan.head_candidates[0].selected_device_kernels.push('prefill_topk');
-  assert.throws(() => groupTasks(companionPlan), /non-selected companion/);
-  const missingPhase = structuredClone(groupedPlan);
-  missingPhase.head_candidates[0].joint_ut.phases.pop();
-  assert.throws(() => groupTasks(missingPhase), /every selected member/);
-  const missingMember = structuredClone(groupedPlan);
-  missingMember.head_candidates[0].selected_device_kernels.push('lost_kernel');
-  assert.throws(() => groupTasks(missingMember), /original evidence/);
-  let groupAttempts = 0;
-  const repairedGroup = await run(initial, { safeAgent: async () => structuredClone(
-    ++groupAttempts === 1 ? duplicateLeafPlan : groupedPlan) });
-  assert.equal(groupAttempts, 2);
-  assert.equal(repairedGroup.headQueue.length, 1);
-  assert.equal(repairedGroup.kernelQueue.length, 0);
-  let companionAttempts = 0;
-  const repairedCompanion = await run(initial, { safeAgent: async () => structuredClone(
-    ++companionAttempts === 1 ? companionPlan : withCompanion) });
-  assert.equal(companionAttempts, 2);
-  assert.equal(repairedCompanion.headQueue[0].selected_device_kernels.length, 2);
-  assert.equal(repairedCompanion.headQueue[0].extraction_members.length, 3,
-    'repairing target classification retains the companion delivery obligation');
-  assert(!first.calls[0].opts.schema.required.includes('profile_topN_json'),
-    'no pre-existing full profile is required');
+  assert.deepEqual(first.calls[0].opts.schema.required, ['delivery_path']);
+  assert.equal(input.SOURCE_DELIVERY_REQUIRED, true);
+  let release;
+  const finishing = run(initial, { safeAgent: () => new Promise(resolve => { release = resolve; }) });
+  let done = false;
+  finishing.then(() => { done = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(done, false, 'downstream queues wait for the complete skill stage');
+  release({ delivery_path: '/eval/delivery.json' });
+  await finishing;
 
   // Discovery may be larger than the executable batch. The production selector
   // and carried state must retain eligible work when both task budgets are one.
@@ -261,15 +193,23 @@ async function run(body, overrides = {}, reply = selection()) {
   assert.equal(fixedResume.calls.length, 0, 'fixed-load resume adds no calls');
   assert.deepEqual(fixedResume.profile, { profile_topN_json: '' });
 
-  for (const bad of [null, {}, { ...selection(), kernel_ranking_json: '' },
-    { ...selection(), kernel_candidates: [{ short_name: 'unmeasured', pct_gpu_time: 80 }] },
-    ...[NaN, -1, 101, '7.25'].map(share => {
-      const result = selection(); result.head_candidates[0].kernel_extraction.selection_pct_gpu_time = share;
-      return result;
-    }),
-  ]) {
-    await assert.rejects(run(initial, {}, bad), /AgentX kernel selection failed/);
-  }
+  const extractOnly = await run(resume, { ST: baselineOnly, want: p => p === 'extract' });
+  assert.equal(extractOnly.calls[0].phase, 'prepare', 'baseline-only extract phase completes UTs');
+  const oldSelection = await run(resume, { ST: { ...baselineOnly,
+    headQueue: [{ ...candidate('old'), prepared_ut: undefined }], kernelQueue: [] } });
+  assert.equal(oldSelection.calls[0].phase, 'prepare', 'old selection queues are not completed UTs');
+  assert.deepEqual(restored.profile.failed_tasks, selection().failed_tasks);
+  assert.deepEqual(restored.profile.deferred_tasks, selection().deferred_tasks);
+  assert.deepEqual(restored.profile.coverage_summary, selection().coverage_summary);
+  let reads = 0;
+  const repaired = await run(initial, { readAgentXPreparation: async () => {
+    if (++reads === 1) throw new Error('saved manifest not found');
+    return selection();
+  } });
+  assert.deepEqual(repaired.calls.map(c => c.phase), ['prepare', 'repair_delivery']);
+  await assert.rejects(run(initial, { readAgentXPreparation: async () => {
+    throw new Error('saved manifest not found');
+  } }), /AgentX UT delivery unreadable/);
   // Exercise the real extraction function: authoring can overlap even for a shared
   // GPU (execution locks live at the command boundary), and failed UTs stay local.
   const extraction = between('async function extractWithBaseline(', '\n// abDone ==');

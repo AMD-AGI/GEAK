@@ -1,8 +1,59 @@
 # Delivery and workflow acceptance
 
-Read in `select`, `extract` and `extract_op`. The maintained gates and schemas
-live in `SKILL_DIR/e2e_workflow.js`; `scripts/kernel_extraction_delivery.mjs`
-uses those definitions for CPU preflight. It does not run GPU tests.
+Read in `prepare`, `extract` and `extract_op`. The workflow consumes finished
+UTs, not an intermediate selection return. The shared delivery helper reads
+recorded evidence; it does not run GPU tests.
+
+## Complete-stage handoff
+
+Finish selection → source extraction → UT authoring → GPU validation inside
+`PHASE=prepare`. Write one delivery file under `EVAL_DIR` and return only
+`{"delivery_path":"/absolute/eval/path/ut_delivery.json"}`. Example file:
+
+```json
+{
+  "workload_json": "kernel_extraction/round_resume/kernel_workload.json",
+  "ranking_json": "kernel_extraction/round_resume/kernel_ranking.json",
+  "tasks": [{
+    "kernel": {
+      "short_name": "example",
+      "device_kernel": "exact_selected_device_symbol",
+      "entity_kind": "gpu_kernel",
+      "op_kind": "attn",
+      "kernel_extraction": {"selection_pct_gpu_time": 7.2},
+      "seam_candidates": []
+    },
+    "phase": "extract_op",
+    "result_path": "kernels/example_task/run/RETURN.json"
+  }],
+  "failed_tasks": [],
+  "deferred_tasks": [],
+  "coverage_summary": {},
+  "notes": "Coverage and limitations."
+}
+```
+
+Paths are absolute or relative to `EVAL_DIR` and stay inside it; per-task
+`task_dir` is absolute. `kernel` records the task boundary described below,
+including real seam evidence and any joint/dispatch members (the empty example
+above must be populated). One task owns each selected identity; retain original
+per-member cost evidence. `phase` chooses the per-task return convention:
+`extract_op` for op UTs, `extract` for other kernel UTs. Only validated tasks enter
+optimization queues; no second extractor is called. The reader derives missing
+anchor cost from the saved ranking, rather than requesting a new selection.
+
+Record every selected task as completed, failed, or deferred with its reason
+and artifact paths. Selection-only plans and bootstrap PASS do not count as
+completed UTs. Report the tested scope and unresolved coverage explicitly.
+Descriptions such as `source`, `notes` and `regime_summary` can be strings or
+structured notes; their types do not reject a completed UT. Executable identity,
+actual UT status, frozen baseline and binding/source evidence still matter.
+
+For complete-stage per-task preflight, add `--prepared` to the command below;
+it checks execution evidence without applying legacy descriptive-field schemas.
+Fix packaging from saved evidence. Rerun GPU work only when execution evidence
+is missing, failed, stale, or the source/inputs changed. Do not restart selection
+because a descriptive field has a different JSON type.
 
 ## Declare the queued boundary
 
@@ -19,10 +70,10 @@ together in every verified invocation; mutually exclusive variants belong in
 separate dispatch branches. Do not combine `joint_ut` and `dispatch_ut`.
 Branch labels may subdivide PREFILL/DECODE; retain the workload phase in cases.
 
-Declare these fields on the original queued `KERNEL`, not only in UT metadata
-or the returned JSON. A returned undeclared chain produces
-`needs_selection_repair=true`: repair selection from saved evidence before
-retrying, rather than repeatedly capturing the unchanged task.
+Declare these fields on the delivery task's `kernel`, not only in UT metadata.
+Within `prepare`, repair incomplete boundary declarations using saved evidence
+before final handoff. Legacy per-task calls report `needs_selection_repair=true`
+for an undeclared chain; neither path requires recapturing unchanged evidence.
 
 Depth is relative to the whole boundary. A score-only child cannot replace a
 joint chain; fused-op selection compares complete `op_seam` entries, while leaves
@@ -57,9 +108,10 @@ correctness, deployment mode and timing; the old entry's PASS cannot transfer.
   set, positive per-member evidence and complete `joint_call_coverage`. The
   primary callable must be a verified phase entry. Dispatch rows all verify
   the same whole-op callable.
-- **Return:** obey the supplied schema, including lowercase `smoke="pass"`
+- **Per-task result:** preserve lowercase `smoke="pass"`
   (`extract_op`) or `unittest_smoke="pass"` (`extract`), `task_dir` and
-  `editable` not false. Keep string fields as strings and phase data structured.
+  `editable` not false. Keep phase evidence structured. Legacy per-task agent
+  calls still obey their supplied return schema.
 
 The workflow checks declarations and recorded evidence consistency. It does not
 independently rerun the GPU assertions; preserve raw results and coverage limits.
@@ -92,7 +144,8 @@ node "$SKILL_DIR/scripts/kernel_extraction_delivery.mjs" \
 Use actual phase labels; omit phase options for ordinary tasks. The helper
 attaches hashes and writes `--out` only on acceptance. It changes neither the
 queued declaration nor verdicts. Omit attachment options to check packed JSON.
-Return the accepted JSON unchanged. Repair serialization errors from saved
+Keep the accepted JSON in `result_path`; `prepare` returns the delivery path.
+Legacy per-task calls return the accepted JSON unchanged. Repair serialization errors from saved
 raw evidence; rerun GPU work only for missing/invalid evidence or changed
 code/inputs. Preserve real failures rather than retrying unchanged UTs.
 
