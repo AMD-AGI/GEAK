@@ -275,6 +275,7 @@ Return JSON:
   "total_gpu_time_ms": 0.0,
   "top_kernels": [
     {"rank": 1, "short_name": "...", "classification": "...", "pct_gpu_time": 0.0,
+     "entity_kind": "<copied from the profile_topN.json row>", "device_kernel": "<copied from the profile_topN.json row>",
      "calls": 0, "avg_us": 0.0, "shapes": [[...]], "editable": true, "regime_note": "prefill|decode|both"}
   ],
   "shift_note": "for reprofile: how the bottleneck moved vs previous round",
