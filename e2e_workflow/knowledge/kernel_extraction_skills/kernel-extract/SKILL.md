@@ -53,7 +53,12 @@ Read [source extraction](references/source-extraction.md) and the
 [delivery contract](references/delivery-contract.md) before authoring or returning
 an `extract`/`extract_op` result. They define the executable task, source and
 binding proof, numerical checks, evidence transport and CPU delivery preflight.
-A copied wrapper calling installed leaves does not establish source extraction.
+**Write the opt path correctly:** `opt.py`, `opt/` or `kernel_src/` must execute
+the editable candidate kernel, not import and call the original installed kernel.
+A local wrapper or a passing UT does not prove this. Trace the candidate's imports
+through the actual GPU leaf, then make a reversible numerical change to that leaf:
+the candidate UT must fail while the frozen baseline still passes. Restore the
+source and rerun the clean UT; see [candidate proof](references/source-extraction.md#baseline-cases-and-candidate-proof).
 A CPU gate cannot substitute for real GPU execution and correctness evidence.
 
 Conditional task guidance:
