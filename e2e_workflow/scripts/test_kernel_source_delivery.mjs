@@ -110,8 +110,11 @@ async function preparationFixture(t) {
   return { ...f, result, delivery, save };
 }
 
-test('complete-stage handoff accepts structured descriptions and reuses the validated task', async t => {
-  const f = await preparationFixture(t), ready = await f.save();
+test('complete-stage handoff accepts validated UTs without a separate selection report', async t => {
+  const f = await preparationFixture(t);
+  delete f.result.selection_validation;
+  await f.write('run/RETURN.json', f.result);
+  const ready = await f.save();
   assert.equal(ready.kernel_candidates.length, 1, JSON.stringify(ready.failed_tasks));
   assert.equal(ready.kernel_candidates[0].pct_gpu_time, 7.2);
   assert.equal(ready.failed_tasks.length, 1);

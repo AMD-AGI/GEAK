@@ -49,18 +49,27 @@ export async function checkDelivery(kernel, result, phase, contract = null) {
     scope: 'delivery contract only; reads recorded evidence, does not run or independently certify GPU UTs' };
 }
 
-// The complete AgentX skill owns its intermediate metadata. At the final UT
-// handoff, prose field types cannot invalidate real execution evidence.
+// The complete AgentX skill owns selection and its intermediate metadata.
+// Handoff verifies the completed UT against its source/binding evidence; it
+// does not reapply the legacy selection-only contract to a passing task.
 export async function checkPreparedUT(kernel, result, phase, contract = null) {
-  const report = await checkDelivery(kernel, result, phase, contract);
-  delete report.checks.schema;
+  if (!['extract', 'extract_op'].includes(phase)) throw new Error('phase must be extract or extract_op');
+  contract ||= await loadContract();
+  const smoke = phase === 'extract' ? result?.unittest_smoke : result?.smoke;
   const selected = kernel.selected_device_kernels || [kernel.device_kernel];
   const phases = kernel.joint_ut?.phases || kernel.dispatch_ut?.phases || [];
   const declared = new Set(phases.flatMap(p => p.required_device_kernels || [p.device_kernel]));
-  report.checks.boundary = { ok: Array.isArray(selected) &&
-    (phases.length ? selected.every(k => declared.has(k)) : selected.length === 1) };
-  report.ok = Object.values(report.checks).every(check => check.ok);
-  return report;
+  const checks = {
+    baseline_declaration: { ok: contract.hasFrozenBaseline(result) },
+    task: { ok: typeof result?.task_dir === 'string' && !!result.task_dir && result.editable !== false },
+    ut_status: { ok: smoke === 'pass', reported: smoke ?? null },
+    source_delivery: await verifySourceDelivery({ ...kernel, source_delivery_required: true }, result),
+    boundary: { ok: Array.isArray(selected) && selected.length > 0 &&
+      selected.every(k => typeof k === 'string' && k.trim()) &&
+      (phases.length ? selected.every(k => declared.has(k)) : selected.length === 1) },
+  };
+  return { ok: Object.values(checks).every(check => check.ok), phase, checks,
+    scope: 'completed UT/source evidence consistency; selection stays within the skill; does not rerun GPU tests' };
 }
 
 export async function attachVerdict(result, file, regime = null) {

@@ -362,8 +362,9 @@ selects from baseline logs/configuration and compatible runtime evidence,
 using bounded dispatch/shape captures where needed. Its `prepare` stage finishes
 source extraction, UT authoring and GPU validation before handing the workflow a
 `delivery_path`. Selection is internal; descriptive JSON fields do not cause an
-intermediate rejection. The workflow consumes passing UTs without extracting
-them again. The skill replaces separate Profile/Strategize passes and refreshes
+intermediate rejection. The final handoff checks UT/source/binding evidence
+without a second selection admission gate. The workflow consumes passing UTs
+without extracting them again. The skill replaces separate Profile/Strategize passes and refreshes
 affected evidence after accepted changes. `phases: "extract"` with saved baseline
 state runs this full stage without optimization.
 Fixed-load and single-kernel runs retain their existing flow.

@@ -48,9 +48,15 @@ completed UTs. Report the tested scope and unresolved coverage explicitly.
 Descriptions such as `source`, `notes` and `regime_summary` can be strings or
 structured notes; their types do not reject a completed UT. Executable identity,
 actual UT status, frozen baseline and binding/source evidence still matter.
+The complete-stage reader does not require a separate `kernel_selection.py`
+verdict as an additional handoff gate. Establish the selected kernel, callable
+and complete boundary inside the skill; raw selection probes remain useful
+internal evidence. Source execution and numerical negative controls must cover
+every selected/explicitly requested implementation before the task is ready.
 
 For complete-stage per-task preflight, add `--prepared` to the command below;
-it checks execution evidence without applying legacy descriptive-field schemas.
+it checks completed UT/source evidence without applying legacy selection or
+descriptive-field schemas.
 Fix packaging from saved evidence. Rerun GPU work only when execution evidence
 is missing, failed, stale, or the source/inputs changed. Do not restart selection
 because a descriptive field has a different JSON type.
@@ -101,7 +107,7 @@ correctness, deployment mode and timing; the old entry's PASS cannot transfer.
   The JS compatibility check accepts `baseline_frozen=true`, a `candidate_bind`
   object or nonempty `baseline_callable`; that declaration is not independent
   proof of isolation.
-- **Selection:** original verdict has `contract="kernel_selection"`, `ok=true`,
+- **Selection probes (internal to `prepare`; required for legacy per-task calls):** original verdict has `contract="kernel_selection"`, `ok=true`,
   matching callable/kernel, positive observed/marker/matched counts, all relevant
   candidates tested and verified boundary depth. Joint returns contain exactly
   one `phase_selection_validations` row per declared phase, the matching member
