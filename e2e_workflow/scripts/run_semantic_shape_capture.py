@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Launch the real GEAK Semantics 1.2 metadata+marker replay."""
+"""Launch the real GEAK Semantics 1.2 metadata+marker replay (sglang only).
+
+vLLM does not use this replay: see roles/semantics_mapper.md, PHASE=complete_table,
+"On vLLM, a CUDA-graph-off capture replaces the graph-construction replay".
+"""
 import argparse
 import base64
 import json
@@ -384,10 +388,31 @@ def layer_entry_env(layer_entry_callables):
     return ",".join(methods), ",".join(functions)
 
 
+def _require_sglang(setup):
+    """Refuse a non-sglang target before anything is deployed.
+
+    The replay instruments sglang's ModelRunner and turns on sglang's
+    --enable-profile-cuda-graph. vLLM gets its decode layer boundaries from a
+    CUDA-graph-off donor capture instead (roles/semantics_mapper.md, switch
+    `semantics_layer_donor`); running this replay there cannot work, and
+    reading this script as the only implementation is how that path was once
+    switched off by mistake.
+    """
+    backend = str(setup.get("backend") or os.environ.get("BACKEND")
+                  or "sglang").strip().lower()
+    if backend != "sglang":
+        raise ValueError(
+            "run_semantic_shape_capture.py is sglang-only (BACKEND=%s). On vLLM, "
+            "decode layer boundaries come from the CUDA-graph-off donor capture "
+            "in roles/semantics_mapper.md PHASE=complete_table "
+            "(workflow switch: semantics_layer_donor)." % backend)
+
+
 def capture(setup_path, capture_plan_path, out_dir, phases=None,
             forwards_per_bucket=1, layer_entry_callables=None):
     with open(setup_path) as fh:
         setup = json.load(fh)
+    _require_sglang(setup)
     phases = list(phases or setup.get("capture_phases", []))
     if forwards_per_bucket == 1 and setup.get("forwards_per_bucket") is not None:
         forwards_per_bucket = int(setup["forwards_per_bucket"])

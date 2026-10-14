@@ -31,6 +31,54 @@ class RunSemanticShapeCaptureTest(unittest.TestCase):
         self.assertEqual(
             capture._required_phases(plan), ["decode", "prefill"])
 
+class SglangOnlyGuardTest(unittest.TestCase):
+    """The replay is sglang-only; vLLM's decode boundaries come from the donor."""
+
+    def _write(self, tmp, setup_extra):
+        setup = os.path.join(tmp, "setup.json")
+        plan = os.path.join(tmp, "plan.json")
+        with open(setup, "w") as fh:
+            json.dump(dict({
+                "container": "c", "model": "/model",
+                "benchmark": "/repo/bench.sh", "port": 30001,
+                "tensor_parallel_size": 1,
+                "workload": {"concurrency": 1, "input_length": 1,
+                             "output_length": 1},
+            }, **setup_extra), fh)
+        with open(plan, "w") as fh:
+            json.dump({
+                "target_buckets": [{"phase": "decode"}],
+                "capture_targets": [{"representative_layer_id": 0}],
+            }, fh)
+        return setup, plan
+
+    def test_vllm_setup_is_refused_before_anything_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            setup, plan = self._write(tmp, {"backend": "vllm"})
+            with mock.patch.object(capture, "_docker") as docker, \
+                    mock.patch.object(capture.subprocess, "run") as run:
+                with self.assertRaisesRegex(ValueError, "semantics_layer_donor"):
+                    capture.capture(setup, plan, os.path.join(tmp, "out"))
+            docker.assert_not_called()
+            run.assert_not_called()
+
+    def test_backend_env_is_honoured_when_setup_names_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            setup, plan = self._write(tmp, {})
+            with mock.patch.dict(os.environ, {"BACKEND": "vllm"}), \
+                    mock.patch.object(capture, "_docker") as docker:
+                with self.assertRaisesRegex(ValueError, "sglang-only"):
+                    capture.capture(setup, plan, os.path.join(tmp, "out"))
+            docker.assert_not_called()
+
+    def test_sglang_and_unnamed_backends_pass_the_guard(self):
+        env = {k: v for k, v in os.environ.items() if k != "BACKEND"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            capture._require_sglang({})
+            capture._require_sglang({"backend": "sglang"})
+            capture._require_sglang({"backend": " SGLang "})
+
+
 class OwnProcessGroupTeardownTest(unittest.TestCase):
     """Regression tests for B6."""
 

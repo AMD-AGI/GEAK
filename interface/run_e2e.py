@@ -548,6 +548,11 @@ def map_args(
             ps_args[key] = h[key]
     if h.get("semantics_shape_capture") is not None:
         ps_args["semantics_shape_capture"] = h["semantics_shape_capture"]
+    # vLLM's decode layer-boundary donor has its own switch; semantics_shape_capture
+    # configures the sglang replay only (see e2e_workflow.js FUSION_COMPLETE_TABLE_ON).
+    if h.get("semantics_layer_donor") is not None:
+        ps_args["semantics_layer_donor"] = (
+            "true" if _as_bool(h["semantics_layer_donor"]) else "false")
     if isinstance(h.get("semantics_shape_capture_setup"), dict):
         ps_args["semantics_shape_capture_setup"] = dict(
             h["semantics_shape_capture_setup"])
