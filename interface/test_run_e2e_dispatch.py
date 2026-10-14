@@ -336,6 +336,23 @@ class TestMapArgs(_RunE2ECase):
         self.assertIs(ps["semantics_shape_capture"], False)
         self.assertNotIn("semantics_shape_capture_setup", ps)
 
+    def test_vllm_layer_donor_switch_is_forwarded_separately(self):
+        # semantics_shape_capture configures the sglang replay only; turning it
+        # off on vLLM must not imply anything about the decode donor.
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"), framework="vllm",
+            semantics_shape_capture=False))
+        self.assertNotIn("semantics_layer_donor", ps)
+        self.assertNotIn("semantics_shape_capture_setup", ps)
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"), framework="vllm",
+            semantics_layer_donor=False))
+        self.assertEqual(ps["semantics_layer_donor"], "false")
+        ps = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_x"), framework="vllm",
+            semantics_layer_donor="true"))
+        self.assertEqual(ps["semantics_layer_donor"], "true")
+
     def test_fusion_screen_budget_is_forwarded(self):
         ps = rx.map_args(self._handoff(
             eval_dir=str(self.tmp / "e2e_x"), framework="sglang",
