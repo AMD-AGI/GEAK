@@ -15,6 +15,9 @@ For AgentX extraction, also read the skill's `references/delivery-contract.md`
 before authoring. Preflight the exact return with `scripts/kernel_extraction_delivery.mjs`
 against the task `KERNEL`; add `--prepared` inside the complete skill stage. Use full machine verdicts or its supported
 task-local file/SHA-256 references; preserve both phase rows for joint tasks.
+Within `prepare`, selection reports are internal evidence; the final handoff
+checks the finished UT and source/binding proof without requiring a separate
+selection report. Legacy per-task calls retain their selection-return contract.
 Repair return-format errors from saved evidence before considering GPU recapture.
 For AgentX source extraction, `editable=true` describes a replaceable seam; it
 does not certify extraction of its GPU implementations. Deliver every claimed

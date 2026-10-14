@@ -18,7 +18,9 @@ in one invocation. Selection and replay bootstrap are internal steps: save their
 artifacts and continue working. Do not return a selection-only candidate list.
 The workflow receives `{delivery_path}` only after scheduled UT work finishes;
 failed and budget-deferred tasks remain explicit in that delivery. It then
-consumes passing UTs without invoking extraction again. See the
+consumes passing UTs without invoking extraction again. Final handoff checks
+UT/source/binding evidence; it does not rerun a selection-only admission gate.
+Keep selection reasoning and probes as internal evidence. See the
 [complete-stage handoff](references/delivery-contract.md#complete-stage-handoff).
 
 Start from the completed baseline:
