@@ -257,8 +257,8 @@ def _marker_kernel_evidence(trace_events, target_callable, device_kernel, spans_
     spans = (_complete_spans(trace_events or [], marker)
              if spans_override is None else spans_override)
     # Only host events on the marker's own thread establish launch causality.
-    # External ids belong to CPU ops, not individual launches: sibling AITER
-    # GEMMs can inherit the SAME enclosing custom-op id. A runtime event carrying
+    # External ids belong to CPU ops, not individual launches: sibling kernels
+    # can inherit the same enclosing custom-op id. A runtime event carrying
     # that id inside one leaf must not attribute every sibling kernel to the leaf.
     related_external_ids = set()
     # Triton (and any raw hipModuleLaunchKernel) device rows carry only `correlation`, never an

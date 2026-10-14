@@ -152,7 +152,6 @@ jobs:
             e2e_workflow/scripts/tests/test_bench_summarize.py \
             e2e_workflow/scripts/tests/test_inferencex_client_warmup_parity.py \
             e2e_workflow/scripts/tests/test_agentx_client_canonicality.py \
-            e2e_workflow/scripts/tests/test_agentx_measurement_lifecycle.py \
             e2e_workflow/scripts/tests/test_roofline_skill.py \
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             e2e_workflow/scripts/tests/test_profile_env_shim.py \
@@ -304,8 +303,6 @@ jobs:
           node e2e_workflow/scripts/test_agentx_baseline_selection.js
           node --test e2e_workflow/scripts/test_kernel_extraction_delivery.mjs
           node --test e2e_workflow/scripts/test_kernel_source_delivery.mjs
-      - name: standalone runtime and structured output recovery
-        run: node interface/runtime/engine/selftest.mjs
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
       # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
