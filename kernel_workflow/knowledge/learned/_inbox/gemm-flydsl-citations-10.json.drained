@@ -1,0 +1,21 @@
+{
+  "run_id": "gemm_flydsl-citations",
+  "date": "2026-09-26",
+  "kernel_names": [
+    "gemm_flydsl"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "one-dispatch-for-split-kv-decode-and-the-protocol-that-pays--attention-decode-gfx950-decode.md",
+      "round": 2,
+      "direction": "r2_d1",
+      "specialty": "algorithm",
+      "cited_then_verified": 0,
+      "became_winner": false
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "run_id": "gemm_flydsl-citations",
+  "date": "2026-09-26",
+  "kernel_names": [
+    "gemm_flydsl"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "invert-the-xcd-round-robin-with-a-chunk-interleaved-workgrou-moe-grouped-gemm-gfx950-mixed.md",
+      "round": 1,
+      "direction": "r1_d1",
+      "specialty": "memory",
+      "cited_then_verified": 0.7385,
+      "became_winner": false
+    },
+    {
+      "card": "cache-policy-is-a-per-buffer-per-bucket-decision-on-a-bf16-f-moe-grouped-gemm-gfx950-both.md",
+      "round": 2,
+      "direction": "r2_d1",
+      "specialty": "memory",
+      "cited_then_verified": 1.0162,
+      "became_winner": true
+    }
+  ]
+}

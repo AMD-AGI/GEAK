@@ -1,0 +1,198 @@
+{
+  "run_id": "volck_A-cards",
+  "date": "2026-10-12",
+  "kernel_names": [
+    "glm52_mxfp4_fused_moe"
+  ],
+  "kernel_class": "moe_grouped_gemm",
+  "operator": "fused_moe_grouped_gemm",
+  "gfx": "gfx950",
+  "device": "MI355X",
+  "regime": "decode",
+  "toolchain": "flydsl 0.3.4.1 / aiter@4faf8713 / ROCm 7.2",
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "citations": [],
+  "cards": [
+    {
+      "title": "Narrow BN to multiply the decode grid on an mxfp4 two-stage MoE stage-1",
+      "key": "filling the CUs on a decode-regime mxfp4 a4w4 two-stage MoE stage-1 GEMM by narrowing the N tile, where split-K overshoots into a second wave",
+      "description": "Decode mxfp4 MoE stage-1: halve BN to double num_n_blocks and land the grid on a wave boundary; a fill lever with no cross-CTA handoff.",
+      "keywords": [
+        "moe-grouped-gemm",
+        "mxfp4",
+        "a4w4",
+        "tile-geometry",
+        "grid-occupancy",
+        "cu-underfill",
+        "wave-quantisation",
+        "split-k",
+        "decode",
+        "flydsl",
+        "gfx950"
+      ],
+      "kernels": [
+        "gemm1_a4w4_port",
+        "gemm1_a4w4_bnflex"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "decode",
+      "language": "flydsl",
+      "lifecycle": "active",
+      "confidence": "★★",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "cost": "L1",
+      "verified_on": "2026-10-12",
+      "levers": [
+        "geom.tile-shape",
+        "geom.grid-fill"
+      ],
+      "effect": "BN 256->128 (num_n_blocks 2->4) took weighted 1.1294 -> 1.1502 as a standalone round-1 edit and anchored a 1.3205 stack; per-case the gain lands only where the grid was quantisation-starved -- at 1.69 waves the grid costs 17% more time per CTA than at 1.27 or 2.02 waves -- so decode buckets sitting mid-wave move and already-saturated ones do not.",
+      "lever": "When a grouped-GEMM decode grid lands mid-wave, halve the N tile instead of splitting K: num_n_blocks = n_out/BN multiplies the CTA count directly, with no partial buffer, no arrival counters and no XCD co-residency requirement.",
+      "apply": "Gate the narrow tile on the COMPUTED GRID, not on the token/expert tier -- the same tier produces different grids as expert count varies -- and make narrow-BN and split-K mutually exclusive so two fill levers never compound into a third wave.",
+      "stack": "Pairs with a per-tier dispatch that keeps the wide-BN variant in the same file, so each comparison stays an A/B on identical inputs; it does not compose with split-K.",
+      "verify": "Plot us/CTA against grid size across the tiers before and after: a real fill win flattens that curve. A bucket whose grid was already >= 2 full waves must stay on the null floor -- that is the in-run negative control.",
+      "pitfall": "The first run of a fresh workspace reads ~6% low because the new tile variant pays JIT compilation -> it looks like a failed reproduction -> clear __pycache__ and discard run 1.\nThe fill ceiling priced from a cost model fitted to the WIDE-tile implementation said ~7% weighted and was wrong by ~17pp -> a model fitted to one tile shape has no authority over another.",
+      "caution": "Upstream may accept tile widths the vendored copy hard-asserts away; confirm the assert is a simplification and not a layout contract (the scale-layout contract genuinely does bind both stages) before widening the whitelist.",
+      "source": "run wwd7t6625 / team_volck_A_20261012_082749, 2026-10-12, gfx950/MI355X, 3 rounds, director weighted 1.3205 correctness pass; re-verified 1.3212 and 1.3139 in a kernel-only interleaved A/B",
+      "name": "narrow-bn-to-multiply-the-decode-grid-on-an-mxfp4-two-stage--moe-grouped-gemm-gfx950-decode"
+    },
+    {
+      "title": "Put the non-temporal bit on the block-scale stream, not just the weight data",
+      "key": "cache policy on the per-block scale metadata stream of an mxfp4 a4w4 grouped GEMM, which the kernel's own _nt flag does not cover",
+      "description": "mxfp4 MoE: the scale stream is 1/16 of the bytes but evicts the other 15/16 from a 256 MiB LLC; one NT bit on it is worth +12.5pp weighted.",
+      "keywords": [
+        "moe-grouped-gemm",
+        "mxfp4",
+        "block-scale",
+        "cache-modifier",
+        "non-temporal-loads",
+        "l2-residency",
+        "llc-capacity",
+        "infinity-cache",
+        "decode",
+        "flydsl",
+        "gfx950"
+      ],
+      "kernels": [
+        "gemm1_a4w4_port"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "decode",
+      "language": "flydsl",
+      "lifecycle": "active",
+      "confidence": "★★",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "cost": "L1",
+      "verified_on": "2026-10-12",
+      "levers": [
+        "mem.load-cache-policy"
+      ],
+      "effect": "One non-temporal bit on stage-1's w1 SCALE stream, 8 functional lines, moved weighted 1.1432 -> 1.2858; per-case it is what finally unstuck the decode bucket holding 22.45% of the metric (0.9902 -> 1.1728) after three rounds of fill levers had left it inside its own MDE.",
+      "lever": "Treat every stream the kernel loads as its own cache-policy decision -- weight data, block scales, activations, output -- and A/B the scale stream separately; it is small enough to look irrelevant and large enough to evict everything else.",
+      "apply": "One cache_modifier argument on the scale-tile load. Scales are loads only, so parity is free and the output stays bit-identical.",
+      "stack": "Independent of tile geometry and of split-K; compose it with a fill lever rather than choosing between them.",
+      "verify": "Prove the LLC-capacity premise with a working-set sweep rather than a profiler: here 129 MiB read -7.5%, 258 MiB -12.6%, and past overflow it plateaued at -13%. A warm profiler cannot see this win at all and will report it as a regression.",
+      "pitfall": "A kernel-name tag like _nt names ONE operand, not the kernel -> the flag drove only the B data stream while the scale stream stayed allocating -> an axis written off as 'cache policy is closed' cost a full campaign.\nA non-temporal hint on a small stream pays only where a large ALLOCATING neighbour is being evicted -> on a stream with no such neighbour it measures as a plausible null.",
+      "caution": "Verify the hint actually reached the ISA; a policy edit that flips one bit with no ISA delta is the silent no-op failure mode, and it reads exactly like a real null.",
+      "source": "run wwd7t6625 / team_volck_A_20261012_082749 round 2, 2026-10-12, gfx950/MI355X; director weighted 1.3205 correctness pass, re-verified 1.3212 and 1.3139 in a kernel-only interleaved A/B",
+      "name": "put-the-non-temporal-bit-on-the-block-scale-stream-not-just--moe-grouped-gemm-gfx950-decode"
+    },
+    {
+      "title": "The CUDA-graph launch floor is per-replay, not per-node",
+      "key": "whether collapsing graph nodes is worth funding on a decode MoE already captured as one CUDA graph",
+      "description": "Anti-pattern: deleting a 4.49us graph node recovered zero wall time; the surviving kernel absorbed +2.50us. Fold nodes for locality, never for node count.",
+      "keywords": [
+        "anti-pattern",
+        "closed-axis",
+        "moe-grouped-gemm",
+        "cuda-graph",
+        "graph-replay",
+        "launch-overhead",
+        "dispatch-collapse",
+        "kernel-fusion",
+        "decode",
+        "flydsl",
+        "gfx950"
+      ],
+      "kernels": [
+        "gemm1_a4w4_port"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "moe_grouped_gemm",
+      "regime": "decode",
+      "language": "flydsl",
+      "lifecycle": "active",
+      "confidence": "★★",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "cost": "L2",
+      "verified_on": "2026-10-12",
+      "levers": [
+        "host.dispatch-collapse"
+      ],
+      "effect": "Folding the sort prologue into stage-1's grid cut the captured graph from 3 nodes to 1 and bought +1.8% marginal weighted (1.2913 -> 1.3279) for 656 lines; the deletion control is the real result -- removing a prologue node recovered ZERO measurable wall time on every decode case, while the surviving stage-1 kernel grew by over half the deleted node's own device time.",
+      "lever": "Before funding a node-count reduction on an already-captured graph, delete one node and measure: under graph replay the launch floor is paid once per replay, so node count is not a cost term.",
+      "apply": "Keep the deletion control as a separate arm from the fusion arm, so 'the node is free' and 'the fusion helps' are measured apart rather than inferred from one number.",
+      "stack": "What does pay is locality and the work the fusion lets you skip; budget the round against that, not against the node count.",
+      "verify": "A node-count change with no measured host residue is a null by construction -- price the exposed host fraction first, and if a replay-floor measurement shows no floor, the axis is closed before any code is written.",
+      "pitfall": "The same reasoning is correct and valuable WITHOUT graph capture, where each launch is a real dispatch -> carrying it into a captured-graph decode path funded a 656-line rewrite for +1.8% -> check which regime the benchmark actually times.",
+      "caution": "A fused prologue silently widens the kernel's correctness surface; the win here was marginal enough that the added parity risk is the dominant cost, not the lines.",
+      "source": "run wwd7t6625 / team_volck_A_20261012_082749 round 3, 2026-10-12, gfx950/MI355X, decode-only CUDA-graph capture/replay harness; director weighted 1.3205 correctness pass",
+      "name": "the-cuda-graph-launch-floor-is-per-replay-not-per-node-moe-grouped-gemm-gfx950-decode"
+    },
+    {
+      "title": "A vendored kernel may be a strict subset of the upstream it was flattened from",
+      "key": "recovering tuning axes that a task's vendored or flattened kernel copy deleted from its upstream original, before declaring any axis closed",
+      "description": "Before calling an axis closed, diff the vendored kernel's signature against upstream: an assert that deletes a knob reads exactly like the knob being inert.",
+      "keywords": [
+        "method",
+        "vendored-source",
+        "upstream-diff",
+        "api-surface",
+        "closed-axis",
+        "anti-pattern",
+        "tuning-knobs",
+        "campaign-brief",
+        "flydsl",
+        "gfx950"
+      ],
+      "platforms": [
+        "gfx950"
+      ],
+      "kernel_class": "method",
+      "regime": "both",
+      "language": "flydsl",
+      "lifecycle": "active",
+      "confidence": "★★",
+      "attempts": 1,
+      "confirms_cited": 0,
+      "confirms_blind": 0,
+      "cost": "L0",
+      "verified_on": "2026-10-12",
+      "effect": "The task's vendored stage-1 had dropped num_waves, k_wave, prefetch_hidden and the 64/128 tile widths and hard-asserted a single tile size; recovering ONE of those axes was worth weighted 1.1294 -> 1.1502 across the decode buckets on its own, and the campaign that started from the diff reached 1.3205 against a prior ceiling priced at ~7% over 1.1294.",
+      "lever": "Diff the vendored/flattened kernel's function signature against the same function in the upstream library and enumerate the parameters the candidate never passes; those are axes nobody has measured, not axes that were measured and closed.",
+      "apply": "Put the signature diff in the campaign brief as the FIRST section, naming each recovered knob. A compat checker that validates the symbols a candidate already uses cannot surface a knob the candidate does not use.",
+      "stack": "Pairs with authorising a new kernel rather than editing the given one; an edit-this-file loop will not reach for a parameter the file does not mention.",
+      "verify": "Resolve a handful of upstream citations by line before trusting the diff, and confirm which tree you are in -- a box carrying two checkouts of the same library makes every citation fail silently in the wrong one.",
+      "pitfall": "Some deletions are real contracts, not simplifications -> a scale-layout parameter documented as a GEMM1/GEMM2 contract must stay consistent across both stages -> read the upstream docstring before widening a whitelist.\nLine numbers do NOT survive flattening -> a citation that will not resolve means the wrong tree or the wrong copy, not a typo.",
+      "caution": "Closed-axis lists and cost ceilings are scoped to the skeleton they were measured in; carried into the next brief as properties of the problem they delete the structural search space, which is how the ~7% ceiling above came to be off by 17pp.",
+      "source": "run wwd7t6625 / team_volck_A_20261012_082749, 2026-10-12, gfx950/MI355X; diff of the task's fused_moe_seam.py against aiter@4faf8713 ops/flydsl/kernels/mxfp4_gemm1.py",
+      "name": "a-vendored-kernel-may-be-a-strict-subset-of-the-upstream-it--method-gfx950-both"
+    }
+  ]
+}
