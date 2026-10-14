@@ -36,9 +36,12 @@ Regime = Literal["square", "tall_skinny", "short_fat", "k_heavy", "decode", "bat
 # tensor raises "fill_cuda not implemented" even where the matrix core is
 # present, so a probe written with zeros reports the dtype missing on the only
 # part that has it. Use torch.empty.
+#
+# gfx1151 has no fp8 matrix core, though torch still allocates fp8 tensors.
 DTYPES_BY_ARCH = {
     "gfx942": ["bf16", "fp16", "fp8_e4m3_fnuz", "int8"],
     "gfx950": ["bf16", "fp16", "fp8_e4m3", "int8", "mxfp8", "mxfp4"],
+    "gfx1151": ["bf16", "fp16", "int8"],
     # RDNA4 client: OCP fp8, no FNUZ, no MX block-scale.
     "gfx1201": ["bf16", "fp16", "fp8_e4m3", "int8"],
 }
