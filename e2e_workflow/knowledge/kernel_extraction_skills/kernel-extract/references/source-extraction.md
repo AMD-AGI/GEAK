@@ -13,6 +13,13 @@ and unexercised lazy dependencies. Separate editable implementations, installed
 dependencies, unchanged fallbacks and architecture-gated paths; a copied
 dispatcher does not make native children editable. Preserve whole fused semantics.
 
+Before declaring source unavailable, check the exact paths already supplied in
+the ranking/task plan and locate the current installed package's source/build
+tree. A missing historical checkout directory does not establish missing source;
+packaged stacks may have moved native code under their Python package. Record
+the paths and build metadata actually checked, then distinguish missing source
+from a build or runtime failure.
+
 Markers must cover the reference the caller holds, including `from` imports,
 compatibility aliases and registered dispatchers. Zero marker calls do not prove
 a function is absent. Reuse compatible standalone traces but regenerate machine
