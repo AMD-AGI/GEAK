@@ -20,12 +20,12 @@
 # It is config-driven by env so an agent can vary ONE axis at a time. Nothing is model-specific.
 #
 # GEAK_REPEAT_MODE picks the measurement lifecycle:
-#   warm_server (fixed-load default) one server per leg; one full untimed round warms the prefix cache, then
+#   warm_server (default)  one server per leg; one full untimed round warms the prefix cache, then
 #                     $REPEATS timed rounds on that hot server (median).  $REPEATS defaults to 1
 #                     for every purpose, i.e. Hyperloom's warmup_round/measure_round protocol:
 #                     two client passes, the second is the number.  Spread, if any, is WITHIN-server
 #                     (client noise), not boot-to-boot.  1 boot per leg.
-#   isolated_server (AgentX default) one FRESH server per timed replica (bench_replica.sh), median across
+#   isolated_server   one FRESH server per timed replica (bench_replica.sh), median across
 #                     replicas; spread bounds boot-to-boot variance.  N replicas = N cold boots,
 #                     serialized behind the serving-GPU lock.
 #   legacy            one server, short warmup, $REPEATS timed rounds, median.
@@ -122,14 +122,10 @@ if [ -z "$SUMMARIZE" ]; then
 fi
 
 # ---- default lifecycle ----
-# AgentX owns its per-lane warmup inside aiperf. Pre-replaying the entire corpus
-# changes the measured prefix-cache history. Fixed loads retain warm_server;
-# explicit modes (including bench_replica.sh's legacy re-entry) still win.
-if [ "${BENCH_CLIENT:-native}" = "agentx" ]; then
-  GEAK_REPEAT_MODE="${GEAK_REPEAT_MODE:-isolated_server}"
-else
-  GEAK_REPEAT_MODE="${GEAK_REPEAT_MODE:-warm_server}"
-fi
+# No mode named => the Hyperloom one, since "the caller forgot to forward MEASUREMENT_MODE" is the
+# likeliest way a number ends up measured under a different lifecycle than the rest of the run.
+# bench_replica.sh pins legacy explicitly, so this cannot recurse into it.
+GEAK_REPEAT_MODE="${GEAK_REPEAT_MODE:-warm_server}"
 
 # ---- validation lifecycle pin ----
 # Validation's lifecycle is CALLER policy: a pinned GEAK_VALIDATION_REPEAT_MODE outranks
@@ -137,7 +133,6 @@ fi
 # (The no-throughput carve-out below still outranks THIS, since a trace or a shape capture
 # is not a validation measurement no matter what MEASUREMENT_PURPOSE says.)
 if [ -n "${GEAK_VALIDATION_REPEAT_MODE:-}" ] \
-   && [ "${GEAK_ISOLATED_REPLICA:-0}" != "1" ] \
    && [ "${MEASUREMENT_PURPOSE:-}" = "validation" ] \
    && [ "${GEAK_REPEAT_MODE:-legacy}" != "${GEAK_VALIDATION_REPEAT_MODE}" ]; then
   echo ">>> MEASUREMENT_PURPOSE=validation: pinning GEAK_REPEAT_MODE=${GEAK_VALIDATION_REPEAT_MODE}" \
@@ -248,9 +243,7 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "isolated_server" ]; then
     *) [ "$_max_attempts" -ge 1 ] || _max_attempts="$_attempts_default" ;;
   esac
   _purpose="${MEASUREMENT_PURPOSE:-search}"
-  _validation_default=3
-  [ "${BENCH_CLIENT:-native}" = "agentx" ] && _validation_default=1
-  _resolve_samples "$_validation_default" "isolated replica" isolated-server
+  _resolve_samples 3 "isolated replica" isolated-server
   _requested="$_samples"
 
   _aggregate_out="${OUT_DIR:-$(pwd)/e2e_bench_out}"
@@ -353,9 +346,6 @@ if [ "$BENCH_CLIENT" != "native" ]; then
   if ! declare -F adapter_bench >/dev/null; then
     echo "!!! Client adapter $CLIENT_ADAPTER must define adapter_bench()" >&2; exit 3
   fi
-  echo ">>> Bench client: $BENCH_CLIENT (effective adapter: $CLIENT_ADAPTER)"
-else
-  echo ">>> Bench client: native (backend adapter: $ADAPTER)"
 fi
 
 # ---- optional server-LAUNCHER override (align the SERVER launch RECIPE with an

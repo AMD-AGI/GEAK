@@ -1131,22 +1131,22 @@ const INIT_ENV = String(A.initial_extra_env || '');
 // every later candidate overlay instead of being dropped at Setup.
 const INIT_BASE_OVERLAY = String(A.initial_overlay_pythonpath || '');
 const EFFECTIVE_CONFIG_DIGEST = String(A.effective_config_digest || '');
-// AgentX's client owns per-lane warmup; an outer full replay changes cache history.
-// Fixed loads retain warm_server. Preserve a resumed AgentX baseline's lifecycle;
-// older states without this field were produced under the warm_server default.
-const AGENTX_MEASUREMENT = WORKLOAD_KIND === 'agentx_trace_replay';
-const SAVED_MEASUREMENT_MODE = AGENTX_MEASUREMENT && A.state
-  ? (A.state.measurement_mode || (A.state.baseline_throughput_tok_s ? 'warm_server' : '')) : '';
-const DEFAULT_MEASUREMENT_MODE = AGENTX_MEASUREMENT ? 'isolated_server' : 'warm_server';
-const MEASUREMENT_MODE = String(A.measurement_mode || SAVED_MEASUREMENT_MODE || DEFAULT_MEASUREMENT_MODE);
+// One lifecycle for EVERY throughput number (baseline, search A/B, parity, validation), because
+// a cache-cold search number and a cache-warm validation number are not comparable and the gains
+// carried between phases used to mix the two. warm_server = Hyperloom's protocol: one server per
+// leg, round 1 a full warmup that is discarded, round 2 IS the number.
+// isolated_server (REPLICAS fresh servers per leg) stays available when boot-to-boot variance is
+// what must be gated on. The bench dispatcher owns retry/degraded aggregation in both modes.
+const MEASUREMENT_MODE = String(A.measurement_mode || 'warm_server');
 const PARITY_REPLICAS = parseInt(A.parity_replicas != null ? A.parity_replicas : 1, 10);
 const SEARCH_REPLICAS = parseInt(A.search_replicas != null ? A.search_replicas : 1, 10);
-const VALIDATION_REPLICAS = parseInt(A.validation_replicas != null ? A.validation_replicas
-  : (AGENTX_MEASUREMENT ? ((A.state && A.state.validation_replicas) || 1) : 3), 10);
-// AgentX defaults to one replay per arm, including validation. Explicit replica
-// counts remain available for measuring boot-to-boot variance.
-const VALIDATION_MEASUREMENT_MODE = String(A.validation_measurement_mode
-  || (AGENTX_MEASUREMENT ? ((A.state && A.state.validation_measurement_mode) || MEASUREMENT_MODE) : 'warm_server'));
+const VALIDATION_REPLICAS = parseInt(A.validation_replicas != null ? A.validation_replicas : 3, 10);
+// Validation keeps its OWN knob so an operator can make the final re-measure stricter than the
+// search that fed it (isolated_server + validation_replicas=3 buys the boot-to-boot dispersion
+// test). Default is warm_server like everything else, which is what the orchestrator rebenches
+// against — and the cheap one: isolated validation is 6-12 cold boots serialized behind the
+// serving-GPU flock, enough to overrun FINAL_RESERVE_MS and ship no validated number at all.
+const VALIDATION_MEASUREMENT_MODE = String(A.validation_measurement_mode || 'warm_server');
 // Sample count follows the mode rather than a knob of its own: warm_server IS one timed round per
 // leg, and a second knob could only disagree with the lifecycle it belongs to. Going isolated is
 // what buys extra samples, and it already has `validation_replicas` to size them.
@@ -3478,8 +3478,8 @@ async function selectAgentXKernels(round, throughput, configTuneEnabled = false,
       'Default extraction targets: per-phase PREFILL/DECODE Top 5 AND overall GPU-time share strictly >3%, ' +
       'unioned by live kernel identity. Use the skill selector; do not backfill filtered ranks or apply ' +
       'optimization thresholds to extraction targets. Explicit user scope in TASK takes precedence. ' +
-      'Group selected indexer score/top-k kernels into one unified UT task with prefill/decode branches ' +
-      'and required glue; preserve member kernel identities and follow the joint-indexer skill reference. ' +
+      'For a complete indexer operation, group score/top-k and required glue into one UT across its ' +
+      'served phases. Honor an explicit leaf-only or single-phase TASK scope; follow the joint-indexer reference. ' +
       'Return one candidate per ut_task in exactly one queue, carrying selected_device_kernels, ' +
       'extraction_members with original per-kernel evidence. Mandatory chains, including a selected ' +
       'split-K with its reduction companion, require joint_ut.phases with required kernels and seam_candidates. ' +
@@ -6637,8 +6637,6 @@ const carryState = {
   backend: BACKEND,
   ...(KERNEL_EXTRACT_ON
     ? { workload_spec: { ...WORKLOAD_SPEC, kind: WORKLOAD_KIND },
-        measurement_mode: MEASUREMENT_MODE, validation_measurement_mode: VALIDATION_MEASUREMENT_MODE,
-        validation_replicas: VALIDATION_REPLICAS,
         profile_workload_json: profile ? profile.profile_workload_json || '' : '',
         kernel_ranking_json: profile ? profile.kernel_ranking_json || '' : '' } : {}),
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,

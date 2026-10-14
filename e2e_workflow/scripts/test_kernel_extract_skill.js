@@ -7,7 +7,7 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const src = fs.readFileSync(path.join(root, 'e2e_workflow.js'), 'utf8');
 const settings = src.slice(src.indexOf('const ISL_DECLARED ='), src.indexOf('// Seed config:'));
-const measurementSettings = src.slice(src.indexOf('const AGENTX_MEASUREMENT ='),
+const measurementSettings = src.slice(src.indexOf('// One lifecycle for EVERY throughput number'),
   src.indexOf('// CUDA/HIP-graph deployment requirement'));
 const hook = src.match(/function kernelExtractBlock\(role\) \{[\s\S]*?\n\}/)[0];
 const role = src.match(/function roleAgent\(role, phase, intro, inputs\) \{[\s\S]*?\n\}/)[0];
@@ -61,8 +61,8 @@ for (const [args, env] of [
   const run = make({...args, analysis_skill: 'none', use_expert_skills: 'false'}, {env});
   assert(run.active);
   assert.equal(run.workload.kind, 'agentx_trace_replay');
-  assert.equal(run.measurement, 'isolated_server');
-  assert.equal(run.validationMeasurement, 'isolated_server');
+  assert.equal(run.measurement, 'warm_server');
+  assert.equal(run.validationMeasurement, 'warm_server');
   assert.equal(run.validationSamples, 1);
   for (const [name, phase] of consumers) {
     const prompt = run.roleAgent(name, phase, 'Run the phase.', {WORKLOAD: run.workload});
@@ -134,19 +134,11 @@ assert(!standalone.active);
 for (const [name] of consumers) assert.equal(standalone.block(name), '');
 assert.equal(fixed.measurement, 'warm_server');
 assert.equal(fixed.validationMeasurement, 'warm_server');
+// Extraction does not change the caller's benchmark lifecycle or replica defaults.
 const replaySpec = {kind: 'agentx_trace_replay'};
-for (const mode of ['warm_server', 'isolated_server']) {
-  const explicit = make({workload_spec: replaySpec, measurement_mode: mode}, undefined);
-  assert.equal(explicit.measurement, mode);
-  assert.equal(explicit.validationMeasurement, mode);
-  const resumed = make({state: {workload_spec: replaySpec, baseline_throughput_tok_s: 100,
-    measurement_mode: mode, validation_measurement_mode: mode}}, undefined);
-  assert.equal(resumed.measurement, mode);
-  assert.equal(resumed.validationMeasurement, mode);
-}
-const oldBaseline = make({state: {workload_spec: replaySpec, baseline_throughput_tok_s: 100}}, undefined);
-assert.equal(oldBaseline.measurement, 'warm_server', 'an old measured baseline must not silently change lifecycle');
-assert.equal(oldBaseline.validationMeasurement, 'warm_server');
-const repeated = make({workload_spec: replaySpec, validation_replicas: 2}, undefined);
-assert.equal(repeated.validationSamples, 2);
+const explicit = make({workload_spec: replaySpec, measurement_mode: 'isolated_server',
+  validation_measurement_mode: 'isolated_server', validation_replicas: 2}, undefined);
+assert.equal(explicit.measurement, 'isolated_server');
+assert.equal(explicit.validationMeasurement, 'isolated_server');
+assert.equal(explicit.validationSamples, 2);
 console.log('PASS: AgentX-only activation across models and resumes; fixed-load prompts, workload and state stay unchanged.');

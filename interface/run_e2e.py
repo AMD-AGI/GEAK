@@ -455,12 +455,16 @@ def _as_bool(v) -> bool:
 
 
 def _targeting_shape(h: dict) -> tuple[int, int, str]:
-    """Resolve workload ISL/OSL context and mark its provenance.
+    """Resolve the ISL/OSL the KERNEL agents should optimize against.
 
-    An AgentX handoff drives aiperf's trace replay, which owns sequence lengths.
-    These summaries remain useful context; the workload-aware extraction skill derives
-    actual kernel shapes and call weights from server logs and dispatch evidence,
-    since prefix hits and MTP make corpus ISL and concurrency insufficient.
+    The bench client no longer measures with these -- an AgentX handoff drives
+    aiperf's trace replay, which owns the sequence lengths. But the agents still
+    read isl/osl as the analytic serving call model when they synthesize
+    GEMM/attention shapes, so on a trace replay the synthetic 1024/1024
+    defaults would aim the whole search orders of magnitude below the real load
+    (a trace corpus's average input length dwarfs a synthetic prompt). The real
+    figure is deliberately not quoted here: it moves with the corpus, the
+    tokenizer and the window, so it is measured, never asserted.
 
     ``workload_spec.observed_isl/observed_osl`` carry the shape the orchestrator
     MEASURED on its own baseline. Prefer them; fall back to the synthetic
@@ -486,10 +490,10 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
         # "pending", which the workflow reads as "you may replace me", not
         # "synthetic_fallback", which reads as a decision already made.
         sys.stderr.write(
-            "!!! AgentX workload carries no observed_isl/observed_osl; "
-            f"{syn_isl}/{syn_osl} are synthetic placeholders only. The kernel "
-            "extraction skill must derive shapes and weights from current "
-            "server logs (the MEASUREMENT is unaffected).\n"
+            "note: AgentX workload carries no observed_isl/observed_osl, so the "
+            f"kernel-targeting shape starts at the synthetic {syn_isl}/{syn_osl} "
+            "and is replaced by what the baseline actually serves. Pass "
+            "observed_isl/observed_osl only to target a regime deliberately.\n"
         )
         return syn_isl, syn_osl, "agentx_pending_baseline"
     return obs_isl, obs_osl, "agentx_observed"
@@ -616,18 +620,6 @@ def _resolve_ep(h: dict, effective: Any, tp: int) -> int:
     return 1
 
 
-def _default_measurement_mode(h: dict) -> str:
-    """AgentX warms within the client; fixed loads keep the full outer replay."""
-    spec = h.get("workload_spec")
-    if isinstance(spec, dict) and spec.get("kind"):
-        agentx = spec["kind"] == WORKLOAD_KIND_AGENTX
-    elif str(h.get("bench_client") or "").strip().lower() in ("agentx", "native", "inferencex"):
-        agentx = str(h["bench_client"]).strip().lower() == AGENTX_BENCH_CLIENT
-    else:
-        agentx = _baseline_workload_kind(h)[0] == WORKLOAD_KIND_AGENTX
-    return "isolated_server" if agentx else "warm_server"
-
-
 def map_args(
     h: dict,
     timeout_s: int | None = None,
@@ -691,7 +683,6 @@ def map_args(
     # Default to 0..tp-1 so serving honours the requested tensor-parallel size.
     gpu_ids = h.get("gpu_ids") or ",".join(str(i) for i in range(max(tp, 1)))
     target_isl, target_osl, shape_provenance = _targeting_shape(h)
-    measurement_mode = _default_measurement_mode(h)
     ps_args = {
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
@@ -702,8 +693,8 @@ def map_args(
         # Beside tp, and resolved the same way: see _resolve_ep.
         "ep": _resolve_ep(h, effective, tp),
         "gpu_ids": str(gpu_ids),
-        # On AgentX these are corpus summaries; the extraction skill establishes
-        # the actual working point from logs (see _targeting_shape).
+        # On an AgentX handoff these describe the shape the agents OPTIMIZE for,
+        # not the shape anything is measured at (see _targeting_shape).
         "isl": target_isl,
         "osl": target_osl,
         "workload_shape_provenance": shape_provenance,
@@ -717,7 +708,7 @@ def map_args(
         # where a bench runs in a context that did not inherit the environment.
         # Absent/synthetic workload_spec => omitted, and the args are unchanged.
         **(
-            {"workload_spec": dict(h["workload_spec"])}
+            {"workload_spec": h["workload_spec"]}
             if isinstance(h.get("workload_spec"), dict)
             and str(h["workload_spec"].get("kind") or "") == WORKLOAD_KIND_AGENTX
             else {}
@@ -727,14 +718,24 @@ def map_args(
         "initial_extra_server_args": initial_server_args,
         "initial_extra_env": initial_env,
         "initial_overlay_pythonpath": initial_overlay,
-        # Use one lifecycle across baseline, search and final validation.
-        # AgentX: fresh server -> aiperf per-lane warmup -> one measured replay.
-        # Fixed loads retain Hyperloom's full warmup_round/measure_round protocol.
-        "measurement_mode": measurement_mode,
+        # ONE protocol for the whole run, and it is Hyperloom's (warmup_round discarded,
+        # measure_round on the re-attached hot server), so the headline GEAK reports and the
+        # number Hyperloom rebenches are the same measurement.  Mixing lifecycles across phases
+        # was worse than either alone: a cache-cold search A/B is not comparable to a cache-warm
+        # validation, yet gains were carried between them.  It is also 2 boots instead of the
+        # 6-12 cold boots isolated validation serializes behind the serving-GPU lock, which on a
+        # large model overruns the final reserve and kills the run mid-bench.
+        # Trade: within-server samples bound CLIENT noise, not boot-to-boot variance.  Anything
+        # that must gate on the latter pins measurement_mode=isolated_server, which brings the
+        # *_replicas knobs below back into play.
+        "measurement_mode": "warm_server",
         "parity_replicas": 1,
         "search_replicas": 1,
-        "validation_replicas": 1 if measurement_mode == "isolated_server" else 3,
-        "validation_measurement_mode": measurement_mode,
+        "validation_replicas": 3,
+        # warm_server IS Hyperloom's protocol, not a truncation of a longer one: two client passes
+        # on one server, report the second.  A 3-round median would be a different statistic from
+        # the one it rebenches against, so the round count is not a knob here.
+        "validation_measurement_mode": "warm_server",
         # Hyperloom already did config/param search in EXPLORE; do not double-run.
         "config_tune": "false",
         # Produce the final/ bundle (final_launch.sh + overlay) so the caller can
@@ -761,12 +762,6 @@ def map_args(
         _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%S%f"), _uuid.uuid4().hex[:12])
     if effective is not None:
         ps_args["effective_config_digest"] = effective.digest
-    # Only AgentX adds extraction inputs. Preserve arbitrary model/runtime
-    # features within its spec; fixed ISL/OSL retains the original argument shape.
-    workload_spec = h.get("workload_spec")
-    if ((not isinstance(workload_spec, dict) or not workload_spec.get("kind"))
-            and str(h.get("bench_client") or "").strip().lower() == AGENTX_BENCH_CLIENT):
-        ps_args["bench_client"] = AGENTX_BENCH_CLIENT
     # Forward the orchestrator's HARD wall-clock budget (the same timeout_s this
     # runner enforces via anyio.fail_after / subprocess timeout) so the JS
     # workflow can self-pace and FINISH (Finalize/Report/Validate + workflow_return
@@ -2092,12 +2087,15 @@ def apply_bench_protocol(h: dict) -> dict:
     ``handoff.bench_protocol`` carries the recorded bench knobs — chiefly
     ``random_range_ratio`` (fixed vs variable sequence lengths),
     ``num_prompts``, ``num_warmups`` and ``seed``. We export each provided key.
-    Fixed-load schema-v2 handoffs retain the full discarded warmup replay.
-    AgentX uses a fresh server and the client's own per-lane warmup before one
-    measured replay, without an extra full replay to populate the prefix cache.
+    For schema-v2 Hyperloom handoffs, the actual wrapper lifecycle is
+    authoritative over stale metadata: fixed seed/range and 2*CONC client
+    warmups, run on one server per leg whose first full round is a discarded
+    warmup (Hyperloom's warmup_round/measure_round).
 
-    Only supplied prompt knobs are exported. With neither an AgentX identity
-    nor a schema-v2 baseline, an absent protocol leaves shell defaults alone.
+    IMPORTANT: only keys actually present in the handoff are exported. When
+    ``bench_protocol`` is absent (e.g. GEAK run standalone, no external
+    orchestrator), nothing is exported and ``bench_e2e.sh`` keeps its own
+    defaults — so the standalone path is unchanged.
 
     Returns the dict of {env_var: value} it exported (for --dry-run / logging).
     """
@@ -2113,22 +2111,25 @@ def apply_bench_protocol(h: dict) -> dict:
             continue
         os.environ[env_var] = str(val)
         exported[env_var] = str(val)
-    agentx = _default_measurement_mode(h) == "isolated_server"
-    if agentx or (int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
+    if int(h.get("schema_version", 1) or 1) >= 2 and isinstance(
         h.get("baseline_env_spec"), dict
-    )):
-        mode = "isolated_server" if agentx else "warm_server"
+    ):
+        # Warm-server parity -- one server per leg, a discarded full warmup round, then the
+        # timed round(s) on that hot server (Hyperloom's warmup_round/measure_round
+        # lifecycle) -- is about the SERVER lifecycle, so it holds for either workload kind.
         aligned = {
-            "GEAK_REPEAT_MODE": mode,
-            # Keep the same lifecycle for final remeasurement.
-            "GEAK_VALIDATION_REPEAT_MODE": mode,
+            "GEAK_REPEAT_MODE": "warm_server",
+            # Pinned as env too (bench_e2e.sh honours it for MEASUREMENT_PURPOSE=validation only)
+            # so pinning measurement_mode=isolated_server for search cannot drag validation off
+            # Hyperloom's protocol, and so a role forwarding the global mode cannot drop it.
+            "GEAK_VALIDATION_REPEAT_MODE": "warm_server",
             "REPLICA_RETRIES": "1",
         }
         # The remaining knobs shape a SYNTHETIC prompt sweep and only mean
         # something when both sides measured one. AgentX replays a fixed trace
         # corpus with its own seed and warmup contract, so fabricating prompt
         # counts or a range ratio for it would describe a workload nobody ran.
-        if not agentx:
+        if _baseline_workload_kind(h)[0] != WORKLOAD_KIND_AGENTX:
             # NUM_PROMPTS was the one protocol knob this block did not align, and
             # the two sides disagree by default: bench_e2e.sh falls back to Magpie's
             # fixed CONC*10, while the caller's own materializer scales the count

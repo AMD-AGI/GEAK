@@ -56,7 +56,6 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest import mock
 
 _HERE = Path(__file__).resolve().parent
 
@@ -1471,8 +1470,15 @@ class TestBenchProtocol(_RunE2ECase):
         self.assertEqual(exported["NUM_PROMPTS_ADAPTIVE"], "1")
         self.assertNotIn("NUM_PROMPTS", exported)
 
-    def test_agentx_uses_client_warmup_without_a_full_outer_replay(self):
-        """AgentX owns warmup; fixed-load sweep and full replay knobs do not apply."""
+    def test_agentx_keeps_the_server_lifecycle_but_drops_sweep_knobs(self):
+        """Server hygiene is workload-independent; prompt-sweep knobs are not.
+
+        Warm-server parity -- one server per leg, a discarded full warmup round,
+        then the timed round(s) on that hot server -- is about the server
+        lifecycle, so AgentX needs it just as much.
+        NUM_WARMUPS/SEED/RANDOM_RANGE_RATIO describe a synthetic prompt sweep
+        that the trace replay never performs.
+        """
         exported = rx.apply_bench_protocol({
             "schema_version": 2,
             "workload": {"conc": 64},
@@ -1480,31 +1486,12 @@ class TestBenchProtocol(_RunE2ECase):
             "workload_spec": {"kind": "agentx_trace_replay"},
             "bench_protocol": {},
         })
-        self.assertEqual(exported["GEAK_REPEAT_MODE"], "isolated_server")
-        self.assertEqual(exported["GEAK_VALIDATION_REPEAT_MODE"], "isolated_server")
+        self.assertEqual(exported["GEAK_REPEAT_MODE"], "warm_server")
+        self.assertEqual(exported["GEAK_VALIDATION_REPEAT_MODE"], "warm_server")
         self.assertEqual(exported["REPLICA_RETRIES"], "1")
         for synthetic in ("NUM_WARMUPS", "SEED", "RANDOM_RANGE_RATIO"):
             self.assertNotIn(synthetic, exported)
             self.assertNotIn(synthetic, os.environ)
-
-    def test_agentx_legacy_handoffs_get_the_same_lifecycle(self):
-        for identity in ({"workload_spec": {"kind": "agentx_trace_replay"}},
-                         {"bench_client": "agentx"}):
-            with self.subTest(identity=identity):
-                exported = rx.apply_bench_protocol(identity)
-                self.assertEqual(exported["GEAK_REPEAT_MODE"], "isolated_server")
-                self.assertEqual(exported["GEAK_VALIDATION_REPEAT_MODE"], "isolated_server")
-
-    def test_explicit_workload_kind_outranks_a_stale_agentx_client(self):
-        exported = rx.apply_bench_protocol({
-            "schema_version": 2, "baseline_env_spec": {"config": {}},
-            "workload_spec": {"kind": "synthetic_isl_osl"}, "bench_client": "agentx",
-        })
-        self.assertEqual(exported["GEAK_REPEAT_MODE"], "warm_server")
-
-    def test_current_client_outranks_a_legacy_recipe(self):
-        with mock.patch.object(rx, "_baseline_workload_kind", return_value=("synthetic_isl_osl", "recipe")):
-            self.assertEqual(rx._default_measurement_mode({"bench_client": "agentx"}), "isolated_server")
 
 
 class TestTargetingShape(_RunE2ECase):
@@ -1584,16 +1571,11 @@ class TestTargetingShape(_RunE2ECase):
         self.assertEqual(ps["isl"], 112020)
         self.assertEqual(ps["osl"], 796)
         self.assertEqual(ps["workload_shape_provenance"], "agentx_observed")
-        self.assertEqual(ps["workload_spec"]["kind"], "agentx_trace_replay")
-        self.assertEqual(ps["workload_spec"]["observed_isl"], 112020)
         # Concurrency reaches the workflow from the workload block, but on an AgentX run it no
         # longer decides anything downstream: e2e_workflow.js derives CONC from
         # AGENTX.concurrency when the spec carries one, and kbIdentityFlags() addresses the KB
         # with THAT. This assertion pins the forwarding, not the authority.
         self.assertEqual(ps["conc"], 8)
-        self.assertEqual(ps["measurement_mode"], "isolated_server")
-        self.assertEqual(ps["validation_measurement_mode"], "isolated_server")
-        self.assertEqual(ps["validation_replicas"], 1)
 
     def test_map_args_is_byte_identical_for_synthetic_runs(self):
         base = {
@@ -1606,44 +1588,6 @@ class TestTargetingShape(_RunE2ECase):
         self.assertEqual(ps["isl"], 4096)
         self.assertEqual(ps["osl"], 256)
         self.assertEqual(ps["workload_shape_provenance"], "handoff_workload")
-        self.assertNotIn("workload_spec", ps)
-        self.assertNotIn("bench_client", ps)
-        self.assertEqual(ps["measurement_mode"], "warm_server")
-        self.assertEqual(ps["validation_measurement_mode"], "warm_server")
-
-    def test_explicit_agentx_client_reaches_workflow_without_spec(self):
-        ps = rx.map_args({
-            "model_path": "/models/m", "bench_client": "agentx",
-            "exp_root": str(self.tmp), "eval_dir": str(self.tmp / "eval"),
-        })
-        self.assertEqual(ps["bench_client"], "agentx")
-        self.assertEqual(ps["measurement_mode"], "isolated_server")
-
-    def test_map_args_preserves_arbitrary_agentx_features(self):
-        for kind, features in [
-            ("synthetic_isl_osl", {"cache": "cold", "speculative": False}),
-            ("dynamic_serving", {"architecture": "moe", "arrival_rate": 3.5}),
-            ("embedding", {"phases": ["encode", "pool"]}),
-            ("custom_workload", {"shape_axes": {"height": [128, 257]}}),
-        ]:
-            with self.subTest(kind=kind):
-                workload_spec = {"kind": "agentx_trace_replay", "scenario": kind, **features}
-                ps = rx.map_args({
-                    "model_path": "/models/any", "workload_spec": workload_spec,
-                    "exp_root": str(self.tmp), "eval_dir": str(self.tmp / "eval"),
-                })
-                self.assertEqual(ps["workload_spec"], workload_spec)
-
-    def test_non_agentx_spec_does_not_add_extraction_inputs(self):
-        for kind in ("synthetic_isl_osl", "dynamic_serving", "custom_workload"):
-            with self.subTest(kind=kind):
-                ps = rx.map_args({
-                    "model_path": "/models/any", "workload_spec": {"kind": kind},
-                    "exp_root": str(self.tmp), "eval_dir": str(self.tmp / "eval"),
-                })
-                self.assertNotIn("workload_spec", ps)
-                self.assertNotIn("bench_client", ps)
-                self.assertEqual(ps["measurement_mode"], "warm_server")
 
 
 class TestResolveEp(_RunE2ECase):

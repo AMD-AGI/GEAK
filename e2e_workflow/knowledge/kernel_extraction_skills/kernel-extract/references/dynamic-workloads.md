@@ -25,7 +25,9 @@ shapes or dispatch differ, including conditional layers and reused results.
 
 Use the original joint distribution to select common cases and material tails,
 including non-power-of-two values, chunk tails and served dispatch boundaries.
-Record both call mass and baseline-time mass. Configured caps and graph capture
+Record both call mass and baseline-time mass. Target at least 90% of measured
+device-time mass in each material phase, disclosing achieved and uncovered mass.
+This reporting target does not authorize unbounded captures. Configured caps and graph capture
 lists constrain possible shapes; runtime evidence establishes their mass and
 served eager fallbacks. Keep unobserved envelope probes at zero observed weight.
 
