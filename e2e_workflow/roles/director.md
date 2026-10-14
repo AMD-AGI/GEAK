@@ -124,7 +124,8 @@ Steps:
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/baseline_bench.log"
    ```
    Parse `EVAL_DIR/baseline/bench_summary.json` for `throughput_tok_s_median` + spread (the metric-neutral
-   key; `metric_basis` says whether it is output or total tok/s — falls back to
+   key; `metric_basis` names its axis — output or total tok/s, or an interactivity axis in
+   tok/s/user such as `e2e_norm_intvty_p50` — falls back to
    `output_throughput_tok_s_median` on older summaries). Baseline and candidate share the same basis, so
    the accept ratio is consistent.
    **Prove engagement**: grep `EVAL_DIR/logs/baseline_bench.log` / `server.log` to confirm the seed
@@ -246,7 +247,10 @@ your own. It is one of:
 2. **Output parity** (a faster wrong server is a regression): run a short greedy/temp=0 fixed-seed
    request set against both baseline and final; diff the decoded outputs. Record pass/fail. If
    parity fails (and the change was not an intentional, accuracy-approved quantization), status =
-   `flagged`.
+   `flagged`. When `ACCURACY_GATE=gsm8k` is in your inputs, the run's correctness bar is task accuracy,
+   not bytes: score both servers with `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1
+   --model <MODEL_PATH> --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` (same fixed subset), and
+   parity fails only if `final_score < base_score - ACCURACY_TOL`. Record both scores.
 3. Compute `throughput_speedup = final_med / base_med` (drift-corrected, same-session). Also report
    vs the provided baseline for reference. The COMBINED stack counts as a real win only if
    `delta% > NOISE_BAND_PCT` AND non-overlapping; otherwise report it honestly as within-noise (the

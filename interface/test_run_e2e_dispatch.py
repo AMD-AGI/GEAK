@@ -1571,7 +1571,10 @@ class TestTargetingShape(_RunE2ECase):
         self.assertEqual(ps["isl"], 112020)
         self.assertEqual(ps["osl"], 796)
         self.assertEqual(ps["workload_shape_provenance"], "agentx_observed")
-        # Concurrency still comes from the workload block (the replay honours it).
+        # Concurrency reaches the workflow from the workload block, but on an AgentX run it no
+        # longer decides anything downstream: e2e_workflow.js derives CONC from
+        # AGENTX.concurrency when the spec carries one, and kbIdentityFlags() addresses the KB
+        # with THAT. This assertion pins the forwarding, not the authority.
         self.assertEqual(ps["conc"], 8)
 
     def test_map_args_is_byte_identical_for_synthetic_runs(self):
@@ -1585,6 +1588,119 @@ class TestTargetingShape(_RunE2ECase):
         self.assertEqual(ps["isl"], 4096)
         self.assertEqual(ps["osl"], 256)
         self.assertEqual(ps["workload_shape_provenance"], "handoff_workload")
+
+
+class TestResolveEp(_RunE2ECase):
+    """ep is a KB addressing dimension, so guessing it wrong strands a page.
+
+    Two runs of the same model on the same stack with the experts sharded differently are
+    different deployments. The address can now say so -- but only if something resolves the degree,
+    and nothing in this repo set EP_SIZE before (adapters/atom.sh read a variable no caller wrote).
+    Each source below is a different thing an orchestrator does; the order is authority order, so
+    each test fixes one source while leaving a LOWER-ranked one contradicting it.
+    """
+
+    def _effective(self, server_args):
+        return types.SimpleNamespace(final_server_args=server_args)
+
+    def _recipe(self, body):
+        path = self.tmp / "recipe.yaml"
+        path.write_text(body)
+        return str(path)
+
+    def test_the_handoff_outranks_everything_else(self):
+        ep = rx._resolve_ep(
+            {"ep": 4, "launch_recipe": self._recipe("envs:\n  EP_SIZE: 2\n")},
+            self._effective("--ep-size 8 --enable-expert-parallel"),
+            tp=8,
+        )
+        self.assertEqual(ep, 4)
+
+    def test_an_ep_size_flag_is_read_through_the_resolver_flag_map(self):
+        ep = rx._resolve_ep(
+            {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 2\n")},
+            self._effective("--tp-size 8 --ep-size 8"),
+            tp=8,
+        )
+        self.assertEqual(ep, 8)
+
+    def test_the_equals_spelling_is_the_same_flag(self):
+        """--ep-size=8 and --ep-size 8 launch the same server; _flag_map is what makes them the
+        same flag here, which is the whole reason this does not parse argv itself."""
+        self.assertEqual(
+            rx._resolve_ep({}, self._effective("--ep-size=8"), tp=8), 8
+        )
+
+    def test_the_recipe_env_block_is_used_when_no_flag_states_it(self):
+        ep = rx._resolve_ep(
+            {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 2\n  OTHER: x\n")},
+            self._effective("--tp-size 8"),
+            tp=8,
+        )
+        self.assertEqual(ep, 2)
+
+    def test_a_bare_expert_parallel_flag_means_the_whole_group(self):
+        """vLLM spreads EP over the entire TP x DP group, so the degree is tp. Reading it as 1
+        would file an 8-way-EP deployment on the same page as a dense one."""
+        self.assertEqual(
+            rx._resolve_ep({}, self._effective("--enable-expert-parallel"), tp=8), 8
+        )
+
+    def test_vllm_ep_includes_dp_and_outranks_recipe_env(self):
+        h = {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 1\n")}
+        for dp_flag in ("--data-parallel-size", "-dp"):
+            effective = self._effective(f"--enable-expert-parallel {dp_flag} 2")
+            self.assertEqual(rx._resolve_ep(h, effective, tp=8), 16)
+
+    def test_effective_env_outranks_recipe_ep(self):
+        h = {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 1\n")}
+        effective = types.SimpleNamespace(final_server_args="", final_env={"EP_SIZE": "4"})
+        self.assertEqual(rx._resolve_ep(h, effective, tp=8), 4)
+
+    def test_nothing_stated_is_one(self):
+        self.assertEqual(rx._resolve_ep({}, self._effective(""), tp=8), 1)
+        self.assertEqual(rx._resolve_ep({}, None, tp=8), 1)
+
+    def test_a_malformed_degree_falls_through_rather_than_addressing_on_junk(self):
+        for bad in ("", "abc", 0, -2, None, {}):
+            with self.subTest(ep=bad):
+                self.assertEqual(
+                    rx._resolve_ep({"ep": bad}, self._effective(""), tp=8), 1
+                )
+
+    def test_a_malformed_flag_value_still_falls_back_to_the_recipe(self):
+        ep = rx._resolve_ep(
+            {"launch_recipe": self._recipe("envs:\n  EP_SIZE: 2\n")},
+            self._effective("--ep-size notanumber"),
+            tp=8,
+        )
+        self.assertEqual(ep, 2)
+
+    def test_without_a_resolver_the_handoff_accepted_flags_are_read(self):
+        """A salvage path can reach map_args with no resolved config. The accepted flags are the
+        same statement about the same server, so the address must not silently become ep_1."""
+        self.assertEqual(
+            rx._resolve_ep({"accepted_flags": "--ep-size 8"}, None, tp=8), 8
+        )
+
+    def test_map_args_puts_the_resolved_degree_beside_tp(self):
+        ps = rx.map_args({
+            "model_path": "/models/m",
+            "workload": {"isl": 1024, "osl": 1024, "conc": 8},
+            "exp_root": str(self.tmp),
+            "eval_dir": str(self.tmp / "eval"),
+            "ep": 4,
+        })
+        self.assertEqual(ps["ep"], 4)
+
+    def test_map_args_defaults_the_degree_to_one(self):
+        ps = rx.map_args({
+            "model_path": "/models/m",
+            "workload": {"isl": 1024, "osl": 1024, "conc": 8},
+            "exp_root": str(self.tmp),
+            "eval_dir": str(self.tmp / "eval"),
+        })
+        self.assertEqual(ps["ep"], 1)
 
 
 class TestAgentXPreflight(_RunE2ECase):
@@ -2924,6 +3040,70 @@ class TestMain(_RunE2ECase):
                 self.assertEqual(
                     json.loads(stdout)["mapped_args"].get("final_reserve_s"),
                     expected)
+
+    def _set_env_until_test_end(self, names, values):
+        for name in names:
+            saved = os.environ.pop(name, None)
+            if saved is not None:
+                self.addCleanup(os.environ.__setitem__, name, saved)
+            self.addCleanup(os.environ.pop, name, None)
+            if values.get(name) is not None:
+                os.environ[name] = values[name]
+
+    def test_run_knobs_are_forwarded_only_when_set(self):
+        """Reserve cap, hung-agent policy and the accuracy gate are operator knobs:
+        unset => each arg is absent and the JS default wins; junk is dropped with a
+        note instead of aborting the run."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        knobs = {
+            "GEAK_FINAL_RESERVE_CAP_FRAC": "final_reserve_cap_frac",
+            "GEAK_AGENT_TIMEOUT_MS": "agent_timeout_ms",
+            "GEAK_AGENT_TIMEOUT_RETRY": "agent_timeout_retry",
+            "GEAK_E2E_ACCURACY_GATE": "accuracy_gate",
+            "GEAK_E2E_ACCURACY_LIMIT": "accuracy_limit",
+            "GEAK_E2E_ACCURACY_TOL": "accuracy_tol",
+        }
+        cases = (
+            ({}, {}),
+            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "0.4", "GEAK_AGENT_TIMEOUT_MS": "18000000",
+              "GEAK_AGENT_TIMEOUT_RETRY": "0", "GEAK_E2E_ACCURACY_GATE": "GSM8K",
+              "GEAK_E2E_ACCURACY_LIMIT": "400", "GEAK_E2E_ACCURACY_TOL": "0.02"},
+             {"final_reserve_cap_frac": 0.4, "agent_timeout_ms": 18000000,
+              "agent_timeout_retry": "false", "accuracy_gate": "gsm8k",
+              "accuracy_limit": 400, "accuracy_tol": 0.02}),
+            ({"GEAK_AGENT_TIMEOUT_RETRY": "yes"}, {"agent_timeout_retry": "true"}),
+            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "lots", "GEAK_E2E_ACCURACY_GATE": "mmlu",
+              "GEAK_E2E_ACCURACY_TOL": "-1"}, {}),
+        )
+        for env, expected in cases:
+            with self.subTest(env=env):
+                self._set_env_until_test_end(knobs, env)
+                _rc, stdout = self._run(self._handoff(), "--dry-run")
+                mapped = json.loads(stdout)["mapped_args"]
+                self.assertEqual(
+                    {arg: mapped[arg] for arg in knobs.values() if arg in mapped}, expected)
+
+    def test_simulated_acceptance_switches_are_named_for_correctness_probes(self):
+        """Simulated speculative acceptance makes greedy output irreproducible, so the
+        workflow is told which switches its correctness probes must drop — whether
+        they arrive in the process env or in the seed env. No switch => no arg."""
+        self.patch_rx("invoke_workflow", lambda *a, **k: {})
+        names = ("SGLANG_SIMULATE_ACC_LEN", "SGLANG_SIMULATE_ACC_METHOD")
+        cases = (
+            ({}, "", None),
+            ({"SGLANG_SIMULATE_ACC_LEN": "3.61"}, "",
+             "SGLANG_SIMULATE_ACC_LEN"),
+            ({}, "SGLANG_SIMULATE_ACC_METHOD=match-expected FOO=1",
+             "SGLANG_SIMULATE_ACC_METHOD"),
+            ({"SGLANG_SIMULATE_ACC_LEN": "3.61"}, "SGLANG_SIMULATE_ACC_METHOD=match-expected",
+             "SGLANG_SIMULATE_ACC_LEN,SGLANG_SIMULATE_ACC_METHOD"),
+        )
+        for env, accepted_env, expected in cases:
+            with self.subTest(env=env, accepted_env=accepted_env):
+                self._set_env_until_test_end(names, env)
+                _rc, stdout = self._run(self._handoff(accepted_env=accepted_env), "--dry-run")
+                self.assertEqual(
+                    json.loads(stdout)["mapped_args"].get("correctness_unset_env"), expected)
 
     def test_successful_run_emits_result_and_journey(self):
         report = self.eval_dir / "final_report.md"

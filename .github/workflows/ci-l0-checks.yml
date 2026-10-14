@@ -120,6 +120,7 @@ jobs:
             e2e_workflow/scripts/tests/test_llm_ledger.py \
             e2e_workflow/scripts/tests/test_overlay_setup.py \
             e2e_workflow/scripts/tests/test_overlay_injection_runtime.py \
+            e2e_workflow/scripts/tests/test_overlay_installers.py \
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_seam_trace_capture_guard.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
@@ -141,6 +142,7 @@ jobs:
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
             kb/tests/test_identity.py \
+            kb/tests/test_store_read_only.py \
             kernel_workflow/scripts/tests/test_kb_loop_offline.py \
             interface/test_effective_config.py \
             e2e_workflow/scripts/tests/test_bench_replica_lifecycle.py \
@@ -332,6 +334,11 @@ jobs:
       # checks a fixed-shape run is unchanged.
       - name: acceptance noise band scoping
         run: node e2e_workflow/scripts/test_noise_band_scope.js
+      # Simulated speculative acceptance makes the reference irreproducible, and the hung-agent guard
+      # cannot stop the agent it gives up on. Both policies are opt-in; this also checks a run that
+      # sets neither sees byte-identical prompts and the old retry.
+      - name: correctness probes off simulated acceptance / hung-agent retry policy
+        run: node e2e_workflow/scripts/test_correctness_probe_env.js
       # The joins between the pieces above: the real declaration, staged the way director.md says,
       # through bench_e2e.sh, the agentx client, the vendored mapper, bench_summarize.py and the
       # workflow's Setup check, with only the server and aiperf stubbed. Bash + python3 from the

@@ -215,8 +215,9 @@ try {
   ok(s.metric_basis === wf.AGENTX_METRIC_BASIS, `the summary is on the declared axis (${s.metric_basis})`);
   ok(near(s.throughput_tok_s_median, p90For(2)),
     `the graded number is 1000 / P90 ITL of the TIMED replay (${s.throughput_tok_s_median}), not the warmup's`);
-  ok(near(s.guard_total_tok_s_median, OUT_TPUT + IN_TPUT), 'total tok/s rides beside it as the guard');
-  ok(s.guard_basis === 'aggregate_total_token_tok_s', 'and says which axis the guard is');
+  ok(near(s.guard_aggregate_output_tok_s_median, OUT_TPUT), 'output tok/s rides beside it as the guard');
+  ok(!('guard_total_tok_s_median' in s) && !('guard_basis' in s),
+    'the removed total-throughput guard fields stay absent');
   ok(near(s.observed_isl, ISL_AVG) && near(s.observed_osl, OSL_AVG), 'the served request shape is reported');
   for (const c of calls) {
     ok(flag(c.argv, '--concurrency') === '4', `replay ${c.call} runs at the declared concurrency, not args.conc`);
@@ -280,7 +281,7 @@ try {
   ok(v.requested_replicas === 3 && v.successful_replicas === 3 && v.status === 'complete',
     'and the aggregate reports all three');
   ok(near(v.throughput_tok_s_median, p90For(2)), 'its number is the median replica, on the declared axis');
-  ok(v.metric_basis === wf.AGENTX_METRIC_BASIS && near(v.guard_total_tok_s_median, OUT_TPUT + IN_TPUT),
+  ok(v.metric_basis === wf.AGENTX_METRIC_BASIS && near(v.guard_aggregate_output_tok_s_median, OUT_TPUT),
     'with the guard carried through the aggregate');
 
   // ── 7. Legacy gives a trace replay one timed round unless asked for more ──────────────────────

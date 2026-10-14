@@ -253,7 +253,8 @@ class DeclaredAxisMatchesTheSummaryTest(unittest.TestCase):
             r"^  metric_basis: '([^']+)',", WORKFLOW_JS.read_text(), re.MULTILINE
         ).group(1)
         self.assertEqual(default, self.summarize.P90_INTVTY_BASIS)
-        self.assertIn(default, self.summarize._INTVTY_BASES)
+        self.assertEqual(set(self.summarize._GUARDS[default]),
+                         {self.summarize.OUTPUT_BASIS})
 
 
 if __name__ == "__main__":
