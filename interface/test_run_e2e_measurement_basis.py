@@ -92,6 +92,26 @@ def _wf(eval_dir: Path, *, base: float, final: float, speedup: float, **extra) -
     return wf
 
 
+def test_kb_return_retains_the_normalized_keep_verdict_and_pair(tmp_path):
+    eval_dir = _eval_dir(tmp_path, setup_base=90, base_leg=100, final_leg=102)
+    for leg in ("base", "final"):
+        path = eval_dir / "validation" / leg / "bench_summary.json"
+        summary = json.loads(path.read_text())
+        summary.update(metric_basis="e2e_norm_intvty_p50",
+                       guard_e2e_norm_intvty_p90_median=80,
+                       guard_aggregate_output_tok_s_median=440)
+        _write(path, summary)
+    h = {"workload_spec": {"kind": "agentx_trace_replay", "acceptance": {
+        "objective": "e2e_norm_intvty_p50", "min_gain_pct": 3,
+        "guard_max_drop_pct": {"e2e_norm_intvty_p90": 5, "aggregate_output_tok_s": 5}}}}
+    wf = _wf(eval_dir, base=90, final=102, speedup=102/90, validation_status="validated_win")
+    normalized = rx.normalize_result(h, wf)
+    stored = rx._enrich_kb_return(wf, normalized)
+    assert stored["validation_evidence"]["acceptance"]["keep"] is False
+    assert stored["baseline_throughput_tok_s"] == 100
+    assert stored["throughput_speedup"] == 1.02
+
+
 def _accepted_candidate(
     eval_dir: Path,
     name: str = "cand_fast_norm",
@@ -681,3 +701,122 @@ def test_the_report_flags_an_unaligned_recipe_for_a_human(tmp_path: Path, monkey
     assert "Server launch recipe: `magpie`" in aligned_section
     assert "did not serve the same stack" not in aligned_section
     assert unaligned_section.count(rx.BASELINE_ALIGNMENT_BEGIN) == 1
+
+
+# --------------------------------------------------------------------------- #
+# the caller's KEEP rule decides "ok" when the handoff states one
+# --------------------------------------------------------------------------- #
+P50, P90, OUTPUT = "e2e_norm_intvty_p50", "e2e_norm_intvty_p90", "aggregate_output_tok_s"
+# The rule as Hyperloom's AgentX workload_spec publishes it.
+HL_AGENTX = {"workload_spec": {
+    "kind": "agentx_trace_replay", "metric_basis": P50,
+    "acceptance": {"objective": P50, "min_gain_pct": 3.0,
+                   "guard_max_drop_pct": {P90: 5.0, OUTPUT: 5.0}},
+}}
+
+
+def _intvty_legs(
+    tmp_path: Path, *, base: float, final: float, final_guards: dict, basis: str = P50,
+) -> Path:
+    """A Validate pair read on *basis*, each leg carrying its guards' medians."""
+    eval_dir = tmp_path / "e2e_cycle0"
+    base_guards = {P90: 80.0, OUTPUT: 2000.0}
+    for leg, value, guards in (("base", base, base_guards), ("final", final, final_guards)):
+        _write(eval_dir / "validation" / leg / "bench_summary.json", {
+            "throughput_tok_s_median": value,
+            "throughput_tok_s_spread_pct": 1.5,
+            "metric_basis": basis,
+            **{f"guard_{name}_median": v for name, v in guards.items()},
+        })
+    _write(eval_dir / "baseline" / "bench_summary.json",
+           {"throughput_tok_s_median": base, "metric_basis": basis})
+    return eval_dir
+
+
+def _graded(tmp_path: Path, handoff: dict, *, final: float, final_guards: dict, **legs) -> dict:
+    eval_dir = _intvty_legs(tmp_path, base=100.0, final=final, final_guards=final_guards, **legs)
+    return rx.normalize_result(handoff, _wf(eval_dir, base=100.0, final=final, speedup=final / 100))
+
+
+def test_a_gain_that_clears_the_bar_with_its_guards_held_is_ok(tmp_path: Path) -> None:
+    out = _graded(tmp_path, HL_AGENTX, final=103.0, final_guards={P90: 76.5, OUTPUT: 1950.0})
+
+    verdict = out["validation_evidence"]["acceptance"]
+    assert out["status"] == "ok"
+    assert verdict["keep"] is True and verdict["reasons"] == []
+    assert verdict["gain_pct"] == 3.0
+    assert verdict["guards"][P90] == {"reference": 80.0, "candidate": 76.5,
+                                      "max_drop_pct": 5.0, "holds": True}
+
+
+def test_a_gain_below_the_callers_bar_is_not_ok(tmp_path: Path) -> None:
+    """GEAK alone would call +2% a win; the rule Hyperloom keeps on does not."""
+    out = _graded(tmp_path, HL_AGENTX, final=102.0, final_guards={P90: 80.0, OUTPUT: 2000.0})
+
+    assert out["status"] == "no_gain"
+    assert out["throughput_speedup"] == 1.02
+    assert out["validation_evidence"]["acceptance"]["reasons"] == [
+        "e2e_norm_intvty_p50 gained 2.000%, below 3.0%"]
+
+
+def test_a_guard_that_falls_past_its_band_vetoes_the_gain(tmp_path: Path) -> None:
+    out = _graded(tmp_path, HL_AGENTX, final=110.0, final_guards={P90: 75.0, OUTPUT: 2000.0})
+
+    verdict = out["validation_evidence"]["acceptance"]
+    assert out["status"] == "no_gain"
+    assert verdict["guards"][P90]["holds"] is False
+    assert verdict["guards"][OUTPUT]["holds"] is True
+    assert verdict["reasons"] == ["guard e2e_norm_intvty_p90 fell 6.250%, past 5.0%"]
+
+
+def test_a_guard_measured_on_one_leg_only_fails_closed(tmp_path: Path) -> None:
+    out = _graded(tmp_path, HL_AGENTX, final=110.0, final_guards={P90: 80.0})
+
+    assert out["status"] == "no_gain"
+    assert out["validation_evidence"]["acceptance"]["reasons"] == [
+        "guard aggregate_output_tok_s was not measured on both legs"]
+
+
+def test_a_pair_measured_on_another_axis_is_not_kept(tmp_path: Path) -> None:
+    out = _graded(tmp_path, HL_AGENTX, final=110.0,
+                  final_guards={P90: 80.0, OUTPUT: 2000.0}, basis=OUTPUT)
+
+    assert out["status"] == "no_gain"
+    assert out["validation_evidence"]["acceptance"]["reasons"][0] == (
+        "measured aggregate_output_tok_s, not e2e_norm_intvty_p50")
+
+
+def test_a_recovered_win_cannot_show_its_guards_held(tmp_path: Path) -> None:
+    eval_dir = _intvty_legs(tmp_path, base=100.0, final=110.0,
+                            final_guards={P90: 80.0, OUTPUT: 2000.0})
+    out = rx.normalize_result(HL_AGENTX, _wf(
+        eval_dir, base=100.0, final=110.0, speedup=1.1,
+        recovered_intermediate=True, recovered_from_disk=True,
+    ))
+
+    assert out["status"] == "no_gain"
+    assert out["validation_evidence"]["acceptance"]["keep"] is False
+
+
+def test_without_a_rule_the_verdict_is_geaks_own(tmp_path: Path) -> None:
+    out = _graded(tmp_path, {}, final=102.0, final_guards={P90: 70.0, OUTPUT: 2000.0})
+
+    assert out["status"] == "ok"
+    assert "acceptance" not in out["validation_evidence"]
+
+
+def test_a_malformed_rule_is_ignored_not_half_applied(tmp_path: Path, capsys) -> None:
+    handoff = {"workload_spec": {"kind": "agentx_trace_replay",
+                                 "acceptance": {"objective": P50, "min_gain_pct": "three"}}}
+    out = _graded(tmp_path, handoff, final=102.0, final_guards={P90: 70.0, OUTPUT: 2000.0})
+
+    assert out["status"] == "ok"
+    assert "acceptance" not in out["validation_evidence"]
+    assert "workload_spec.acceptance ignored" in capsys.readouterr().err
+
+
+def test_the_spread_is_read_on_an_interactivity_axis_too(tmp_path: Path) -> None:
+    ev = _graded(tmp_path, {}, final=110.0, final_guards={})["validation_evidence"]
+
+    assert ev["baseline_spread_pct"] == 1.5
+    assert ev["final_spread_pct"] == 1.5

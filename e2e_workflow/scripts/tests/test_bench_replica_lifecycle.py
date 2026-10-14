@@ -132,6 +132,42 @@ class BenchReplicaLifecycleTest(unittest.TestCase):
         self.assertEqual(summary["replicas"][0]["attempt"], 2)
         self.assertEqual(sum(e["event"] == "launch" for e in events), 2)
 
+    # ---- attempt budget is scoped to the workload -------------------------------------------
+    # Two attempts suits a workload whose launches do not fault on their own. The agentx trace
+    # replay does fault on its own (HSA queue abort at ~113k context, reproduced on three nodes),
+    # independently of the config under measurement, so exhausting the budget throws away the leg
+    # for a reason that has nothing to do with the candidate. These two tests are a pair: the
+    # second is only meaningful because the first pins that nothing else moved.
+
+    def test_a_fixed_shape_workload_still_gets_two_attempts(self):
+        _proc, _summary, events = self.run_bench(FAIL_ATTEMPTS="1:1,1:2")
+        self.assertEqual(sum(e["event"] == "launch" for e in events), 2,
+                         "the default budget for non-agentx workloads must not have moved")
+
+    def test_agentx_trace_replay_gets_a_third_attempt(self):
+        proc, summary, events = self.run_bench(FAIL_ATTEMPTS="1:1,1:2",
+                                               GEAK_WORKLOAD_KIND="agentx_trace_replay")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(summary["successful"], 1,
+                         "the third attempt should have rescued the replica")
+        self.assertEqual(summary["replicas"][0]["attempt"], 3)
+        self.assertEqual(sum(e["event"] == "launch" for e in events), 3)
+
+    def test_an_explicit_budget_still_overrides_the_workload_default(self):
+        _proc, _summary, events = self.run_bench(FAIL_ATTEMPTS="1:1,1:2",
+                                                 GEAK_WORKLOAD_KIND="agentx_trace_replay",
+                                                 BENCH_MAX_ATTEMPTS=2)
+        self.assertEqual(sum(e["event"] == "launch" for e in events), 2)
+
+    def test_a_rejected_budget_falls_back_to_the_workload_default(self):
+        """A malformed value must not silently drop agentx back to the fixed-shape budget."""
+        proc, summary, events = self.run_bench(FAIL_ATTEMPTS="1:1,1:2",
+                                               GEAK_WORKLOAD_KIND="agentx_trace_replay",
+                                               BENCH_MAX_ATTEMPTS="not-a-number")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(summary["successful"], 1)
+        self.assertEqual(sum(e["event"] == "launch" for e in events), 3)
+
     def test_exhausted_retry_is_incomplete_but_keeps_successful_median(self):
         proc, summary, events = self.run_bench(
             purpose="validation", repeats=2, FAIL_ATTEMPTS="2:1,2:2"

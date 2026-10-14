@@ -36,15 +36,18 @@ Inputs: `LAUNCH_SCRIPT` (path to a bench/launch script; may be empty), `MODEL_PA
 (ISL/OSL/conc), `INIT_FLAGS` (seed `--server` flags from the caller's best config; may be empty),
 `INIT_ENV` (seed `KEY=VAL` env from the caller's best config; may be empty),
 `INIT_BASE_OVERLAY` (the caller's current-best Python overlay/source stack),
-`MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`, and
-`EFFECTIVE_CONFIG_DIGEST`, plus the caller-established structured identity
+`MEASUREMENT_MODE`, `MEASUREMENT_PURPOSE`, `REPLICAS`,
+`EFFECTIVE_CONFIG_DIGEST`, the caller-established structured identity
 `EXPECTED_GFX`, `EXPECTED_TARGET`, `EXPECTED_DEVICE_NAME`, and
-`EXPECTED_PHYSICAL_CU_COUNT`.
+`EXPECTED_PHYSICAL_CU_COUNT`, and `BENCH_ENV_CONTENT` (present ONLY when the run measures a
+workload that owns its own load — an AgentX trace replay; absent on a fixed ISL/OSL run).
 
 Steps:
 1. Collision-proof run id: `TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}`.
-2. Decide `EVAL_DIR`: if `EVAL_DIR_OVERRIDE` set use it; else
-   `EXP_ROOT/e2e_${MODEL_NAME}_${TS}`. If it exists & non-empty, append `_${RANDOM}` until fresh.
+2. Decide `EVAL_DIR`: if `EVAL_DIR_OVERRIDE` is set, `EVAL_DIR` is exactly that path, even when it
+   already exists and holds files (the caller writes there first and reads results only from there).
+   Otherwise use `EXP_ROOT/e2e_${MODEL_NAME}_${TS}`, and if that generated path exists & is non-empty,
+   append `_${RANDOM}` until fresh.
 3. Build the layout and copy the launch script in (never edit the original):
    ```bash
    mkdir -p "$EVAL_DIR"/{baseline,profile,overlay,kernels,config,logs}
@@ -57,6 +60,16 @@ Steps:
    cp -r "$SKILL_DIR/scripts/adapters" "$EVAL_DIR/adapters"   # bench_e2e.sh sources adapters/<backend>.sh next to itself
    cp "$SKILL_DIR/scripts/parse_profile.py" "$EVAL_DIR/parse_profile.py"
    ```
+   - **If `BENCH_ENV_CONTENT` is non-empty**, write it VERBATIM to `$EVAL_DIR/bench_env.sh` in this
+     same step — before you bench anything. `bench_e2e.sh` and `bench_replica.sh` source that file
+     from beside themselves on every invocation; it is what selects the trace-replay client and the
+     graded metric axis for the whole run, **including your own baseline in step 5**. Skip it and the
+     baseline silently becomes a synthetic ISL/OSL sweep on the wrong axis, which makes every later
+     delta in the run meaningless. Do not edit, reorder, or add to its contents, and do not set
+     `BENCH_CLIENT` / `E2E_METRIC` / `AGENTX_*` on any bench command line yourself — the file owns
+     them. Verify it landed (`test -s "$EVAL_DIR/bench_env.sh"`) and report the path.
+     When `BENCH_ENV_CONTENT` is absent, write NOTHING: the absence of that file is what keeps a
+     fixed ISL/OSL run on its normal synthetic path.
    - If `LAUNCH_SCRIPT` is empty, the baseline is the stack's default config + `MODEL_PATH` +
      `WORKLOAD` (bench_e2e.sh needs no model default — `MODEL` is passed). Record the resolved server
      flags in `EVAL_DIR/config/baseline_flags.json`.
@@ -111,7 +124,8 @@ Steps:
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/baseline_bench.log"
    ```
    Parse `EVAL_DIR/baseline/bench_summary.json` for `throughput_tok_s_median` + spread (the metric-neutral
-   key; `metric_basis` says whether it is output or total tok/s — falls back to
+   key; `metric_basis` names its axis — output or total tok/s, or an interactivity axis in
+   tok/s/user such as `e2e_norm_intvty_p50` — falls back to
    `output_throughput_tok_s_median` on older summaries). Baseline and candidate share the same basis, so
    the accept ratio is consistent.
    **Prove engagement**: grep `EVAL_DIR/logs/baseline_bench.log` / `server.log` to confirm the seed
@@ -233,7 +247,10 @@ your own. It is one of:
 2. **Output parity** (a faster wrong server is a regression): run a short greedy/temp=0 fixed-seed
    request set against both baseline and final; diff the decoded outputs. Record pass/fail. If
    parity fails (and the change was not an intentional, accuracy-approved quantization), status =
-   `flagged`.
+   `flagged`. When `ACCURACY_GATE=gsm8k` is in your inputs, the run's correctness bar is task accuracy,
+   not bytes: score both servers with `python3 $GSM8K_EVAL_SCRIPT --base-url http://127.0.0.1:<port>/v1
+   --model <MODEL_PATH> --limit $ACCURACY_LIMIT --out <dir>/gsm8k_<tag>.json` (same fixed subset), and
+   parity fails only if `final_score < base_score - ACCURACY_TOL`. Record both scores.
 3. Compute `throughput_speedup = final_med / base_med` (drift-corrected, same-session). Also report
    vs the provided baseline for reference. The COMBINED stack counts as a real win only if
    `delta% > NOISE_BAND_PCT` AND non-overlapping; otherwise report it honestly as within-noise (the
