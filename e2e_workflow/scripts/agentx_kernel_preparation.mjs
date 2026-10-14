@@ -56,9 +56,7 @@ export async function readPreparedKernels(evalDir, filename) {
       const candidate = { ...kernel, short_name: label, entity_kind: 'gpu_kernel',
         target_callable: result.target_callable,
         op_kind: kernel.op_kind || result.op_kind, kernel_extraction: evidence,
-        pct_gpu_time: share, source_delivery_required: true,
-        source_device_kernels: [...new Set([...(kernel.source_device_kernels || []),
-          ...(kernel.joint_ut?.phases || []).flatMap(p => p.required_device_kernels || [])])] };
+        pct_gpu_time: share, source_delivery_required: true };
       const checked = await checkPreparedUT(candidate, result, task.phase);
       if (!checked.ok) {
         output.failed_tasks.push({ short_name: label, task_dir: result.task_dir,

@@ -196,3 +196,25 @@ test('full extract-only workflow resumes from baseline and returns UT state with
   assert.equal(result.kernel_extraction.deferred_tasks.length, 1);
   assert.equal(result.validation_status, 'phase_partial');
 });
+
+test('joint execution preserves explicitly requested source scope for unchanged dependencies', async t => {
+  const f = await preparationFixture(t);
+  const phase = { regime: 'DECODE', device_kernel: 'score', required_device_kernels: ['score', 'topk'],
+    seam_candidates: [{ ...f.kernel.seam_candidates[0], device_kernels: ['score', 'topk'] }] };
+  f.kernel.joint_ut = { phases: [phase] };
+  f.result.selection_validation = { ...f.result.selection_validation, selection_scope: 'joint_chain',
+    required_device_kernels: ['score', 'topk'],
+    chain_members: ['score', 'topk'].map(device_kernel => ({ device_kernel, matched_kernel_calls: 1 })),
+    joint_call_coverage: [{ call: 0, missing_members: [] }] };
+  f.result.phase_selection_validations = [{ regime: 'DECODE', target_callable: f.result.target_callable,
+    selection_validation: f.result.selection_validation }];
+  f.m.kernels = f.m.kernels.filter(k => k.device_kernel === 'score');
+  f.result.source_delivery_ref = (await f.pack()).source_delivery_ref;
+  await f.write('run/RETURN.json', f.result);
+  const ready = await f.save();
+  assert.equal(ready.kernel_candidates.length, 1, JSON.stringify(ready.failed_tasks));
+  f.kernel.source_device_kernels = ['topk'];
+  const missingRequested = await f.save();
+  assert.equal(missingRequested.kernel_candidates.length, 0);
+  assert.match(missingRequested.failed_tasks[1].checks.source_delivery.why, /source record for topk/);
+});
