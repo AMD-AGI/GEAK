@@ -1,14 +1,11 @@
 {
   "_comment": "Scenario config: AgentX / DeepSeek-V4 / TP8 / global conc=10, aligned with CI run 34783501425. Layered on top of default.json. Every site-local absolute path appears here and nowhere in the code.",
-
   "run_root": "workload/runs/agentx_dsv4",
   "runner": "claude",
-
   "runner_env": {
     "_comment": "env_file points at a credential file **outside the repo** (mode 600); only the path appears here, never the key. This cluster authenticates through the AMD gateway rather than ~/.claude credentials. If the file is missing the runner returns 78 and the worker stops immediately instead of burning budget on retries that cannot succeed. See runners/claude.env.example for the template.",
     "env_file": "/shared_nfs/zihao/kernel_agent/ax/.secrets/claude.env"
   },
-
   "stages": {
     "baseline": {
       "skill": "adopt-measured-receipt",
@@ -23,7 +20,6 @@
         "node": null
       }
     },
-
     "profile": {
       "skill": "agentx-kernel-extraction-standalone",
       "params": {
@@ -31,22 +27,21 @@
         "max_targets": null,
         "trace_dir": null,
         "serving_env": null,
-        "_note_window": "The capture window must land in steady state, not in the ramp. This scenario once captured a window with prefill:decode = 32:7 while the true ratio was 1:1119 — ranking on raw window percentages would have routed the entire kernel budget at prefill."
+        "_note_window": "The capture window must land in steady state, not in the ramp. This scenario once captured a window with prefill:decode = 32:7 while the true ratio was 1:1119 \u2014 ranking on raw window percentages would have routed the entire kernel budget at prefill."
       }
     },
-
     "roofline": {
       "skill": "kernel-roofline",
       "params": {
-        "roofline_mode": "tl-only",
+        "roofline_mode": "rocprof",
         "roof_key": "roofline_us",
         "arch_json": null,
         "rank_key": "expected_e2e_gain_pct",
         "_note_arch": "The arch JSON is not a constant. This cluster carries four MI355X variants whose bf16 peaks spread by 18.6%. Which arch JSON, its md5, and the peak key it parsed must appear in every row's provenance.",
-        "_note_derate": "tl-only bandwidth is already derated; do not stack target_eff=0.90 on top. That is a double derate and inflates attainable_speedup by roughly 17%."
+        "_note_mode": "rocprof, not tl-only: TraceLens carries no native perf model for any of the three selected operators (has_perf_model=false on every captured case), so tl-only can emit no roofline_us for them. rocprof measures instead of predicting and does not need one.",
+        "_note_ceilings": "The installed rocprof-compute is 3.4.0, below the 3.6.0 gate: its gfx950 MFMA microbench emits CDNA3 instructions and reads 2-4x low. Its COUNTERS are fine, so the ceilings are supplied instead from a frozen roofline.csv measured by the 3.6.0 microbench run standalone (scripts/new_mibench.py), via ROOFLINE_MIBENCH_CACHE. HBM read bytes are corrected by scripts/rocprof_hbm_patch.py (gfx950 FETCH_SIZE bills 128B reads at 64B through a TCC_BUBBLE that is identically 0)."
       }
     },
-
     "optimize": {
       "skill": "geak-kernel-workflow",
       "params": {
@@ -63,7 +58,6 @@
         "_note_keep": "1.045 comes from measurement, not from the 1.02 in the documentation: in the previous campaign four kernels whose source was md5-identical to the original re-measured at 1.0246-1.0453 from cold."
       }
     },
-
     "applyback": {
       "skill": "overlay-e2e-ab",
       "params": {

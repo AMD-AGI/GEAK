@@ -15,6 +15,24 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from emit_result import emit, read_json  # noqa: E402
 
 REQUIRED = ["kernel_workload.json", "kernel_ranking.json", "selection_targets.json"]
+
+
+def coverage(out, targets):
+    """(uncovered, covered_by_task, blocked) by identity, per task_plan.json.
+
+    Returns `None` when the skill declared no plan, so the caller can fall back."""
+    plan = read_json(os.path.join(out, "task_plan.json"), default={})
+    if not plan.get("tasks") and not plan.get("blocked_identities"):
+        return None
+    owned, blocked = set(), set()
+    for t in plan.get("tasks") or []:
+        owned.update(t.get("selected_identities") or [])
+    for b in plan.get("blocked_identities") or []:
+        if b.get("kernel") and (b.get("blocker") or "").strip():
+            blocked.add(b["kernel"])
+    ids = [t.get("id") or t.get("name") for t in targets]
+    return ([i for i in ids if i not in owned and i not in blocked],
+            [i for i in ids if i in owned], [i for i in ids if i in blocked])
 TASK_FILES = ["unittest.py", "meta.json", "cases.py"]
 
 
@@ -71,11 +89,21 @@ def main():
         notes.append("these task directories are incomplete and the optimize stage cannot "
                      "run on them: " +
                      "; ".join("%s is missing %s" % (n, l) for n, l in broken))
-    if len(built) < len(targets):
+    cov = coverage(out, targets)
+    if cov is not None:
+        uncovered, owned, blocked_ids = cov
+        metrics["identities_owned_by_tasks"] = len(owned)
+        metrics["identities_blocked"] = len(blocked_ids)
+        if uncovered:
+            status = "blocked"
+            notes.append("these selected identities have neither a task nor a stated "
+                         "blocker in task_plan.json: %s" % uncovered)
+    elif len(built) < len(targets):
         status = "blocked"
-        notes.append("%d identities were selected but only %d tasks were built. Every "
-                     "selected identity needs either a task or a stated blocker; complete "
-                     "it and rerun finalize." % (len(targets), len(built)))
+        notes.append("%d identities were selected but only %d tasks were built, and no "
+                     "task_plan.json declares how they map. Every selected identity needs "
+                     "either a task or a stated blocker; complete it and rerun finalize."
+                     % (len(targets), len(built)))
     if not targets:
         status = "fail"
         notes.append("targets in selection_targets.json is empty. Missing evidence is not "

@@ -56,6 +56,21 @@ def bound_by_time(rows):
     return {k: max(v.items(), key=lambda kv: kv[1])[0] for k, v in acc.items()}
 
 
+def task_dir_index(plan):
+    """task_plan.json -> {selected identity: task directory name}.
+
+    Empty when the upstream skill declared no plan, which leaves the caller on its
+    name-matching fallback."""
+    idx = {}
+    for t in (plan or {}).get("tasks") or []:
+        name = t.get("name") or t.get("id")
+        if not name:
+            continue
+        for k in t.get("selected_identities") or []:
+            idx.setdefault(k, name)
+    return idx
+
+
 def target_index(sel):
     """selection_targets.json -> {possible name: target}. Both id and name are registered
     so the rows have something to match on."""
@@ -115,6 +130,7 @@ def main(argv=None):
     bounds = bound_by_time(rows)
 
     sel = read_json(os.path.join(inp or "", "selection_targets.json"))
+    plan_idx = task_dir_index(read_json(os.path.join(inp or "", "task_plan.json"), {}))
     idx = target_index(sel)
     if not idx:
         return emit(status="fail", artifacts={},
@@ -136,8 +152,14 @@ def main(argv=None):
             "expected_e2e_gain_pct": 0.0,
             "_any_scored": False,
         })
-        if rec["task_dir"] is None and t:
-            for cand in (t.get("id"), t.get("name"), kernel):
+        if rec["task_dir"] is None:
+            # The declared owner first: a task directory is named after the math boundary it
+            # covers, which is only incidentally a kernel name.
+            cands = [plan_idx.get(kernel)]
+            if t:
+                cands += [t.get("id"), t.get("name")]
+            cands.append(kernel)
+            for cand in cands:
                 if cand and os.path.isdir(os.path.join(tasks_root, cand)):
                     rec["task_dir"] = os.path.join("tasks", cand)
                     break
