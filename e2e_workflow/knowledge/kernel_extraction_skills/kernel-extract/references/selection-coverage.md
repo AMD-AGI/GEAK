@@ -1,6 +1,6 @@
 # Selection scope and coverage
 
-Read for `select`, prior-delivery reconciliation and completion reporting.
+Read for the internal selection step of `prepare`, prior-delivery reconciliation and completion reporting.
 Record whether the request is optimization, UT delivery or skill review, and
 its phases/families/count/coverage. Skill review alone does not start a campaign.
 
@@ -33,8 +33,9 @@ output is a target plan, not dispatch, source or GPU-validation evidence.
 
 `HEAD_BUDGET`, `BUDGET` and `KERNEL_BUDGET` govern execution, not discovery.
 `HEAD_THRESHOLD_PCT` and `MILESTONE_MIN_PCT` govern optimization; they must not
-replace the extraction rule. Return all evidenced extraction targets in the
-queues, retaining budget-deferred entries for resume. Record requested work
+replace the extraction rule. Preserve all evidenced extraction targets in the
+delivery, including failed and budget-deferred entries for resume. Only passing
+UTs enter optimization queues after the skill finishes. Record requested work
 that the caller cannot schedule; do not silently raise budgets or redefine
 completion. A low optimization ceiling does not invalidate a UT.
 

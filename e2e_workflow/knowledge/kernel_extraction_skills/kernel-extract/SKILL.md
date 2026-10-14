@@ -5,15 +5,23 @@ description: Select top GPU kernels, extract editable source and build workload-
 
 # AgentX kernel extraction
 
-Applies to AgentX `kernel_extractor` phases `select`, `extract`, `extract_op`,
+Applies to AgentX `kernel_extractor` phases `prepare`, `extract`, `extract_op`,
 and their routing/bakeoff consumers, refreshes and resumes. Activation is
 independent of roofline and expert-skill toggles. Preserve the configured
 benchmark metric, measurement lifecycle, serving TP/GPU set and frozen baseline.
 Keep probes, task packages and evidence under `EVAL_DIR`.
 
-## Select from the completed baseline
+## Complete the skill before workflow handoff
 
-`PHASE=select` replaces separate Profile and Strategize passes:
+`PHASE=prepare` owns selection, source extraction, UT authoring and GPU validation
+in one invocation. Selection and replay bootstrap are internal steps: save their
+artifacts and continue working. Do not return a selection-only candidate list.
+The workflow receives `{delivery_path}` only after scheduled UT work finishes;
+failed and budget-deferred tasks remain explicit in that delivery. It then
+consumes passing UTs without invoking extraction again. See the
+[complete-stage handoff](references/delivery-contract.md#complete-stage-handoff).
+
+Start from the completed baseline:
 
 1. Read `TASK`, supplied UT references, `BASELINE_LOG`, `BASELINE_BENCH_DIR`,
    `BASELINE_SUMMARY` and effective model/serving configuration. Identify the
@@ -35,23 +43,19 @@ Keep probes, task packages and evidence under `EVAL_DIR`.
    companions and each selected identity without double-counting joint/leaf work.
 
 Write `kernel_workload.json` and `kernel_ranking.json` under `EVIDENCE_DIR`.
-Return their paths as `profile_workload_json` and `kernel_ranking_json`, plus
-`head_candidates`, `kernel_candidates`, `config_directions`, `drop_list` and
-`strategy_path`. Candidates retain the existing architect schema, exact
-`device_kernel`, `entity_kind`, seam evidence and `kernel_extraction` cost links.
-Return every evidenced selected target without truncating to the task budget;
-unevidenced targets stay in the inventory with a blocker. Do not author UTs
-in `select` or fabricate trace-window profile files from logs.
+Use selection metadata as working notes; it is not a PROFILE/STRATEGY-schema
+handoff. Preserve all selected targets and their dispositions, then continue
+through extraction and validation below. Never fabricate trace-window profiles.
 
 For refreshes, compare current accepted-stack logs with saved evidence and
-invalidate only affected costs, identities and weights. On resume, reuse
-compatible evidence and queues without repeating the baseline.
+invalidate only affected costs, identities, weights and task results. On resume,
+reuse compatible discovery and passing UTs without repeating the baseline.
 
 ## Extract and validate the selected tasks
 
 Read [source extraction](references/source-extraction.md) and the
 [delivery contract](references/delivery-contract.md) before authoring or returning
-an `extract`/`extract_op` result. They define the executable task, source and
+a per-task `extract`/`extract_op` result within `prepare` (or a legacy task call). They define the executable task, source and
 binding proof, numerical checks, evidence transport and CPU delivery preflight.
 **Write the opt path correctly:** `opt.py`, `opt/` or `kernel_src/` must execute
 the editable candidate kernel, not import and call the original installed kernel.

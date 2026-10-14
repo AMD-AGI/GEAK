@@ -5,9 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { sourceSnapshot, fileRef, verifySourceDelivery } from './kernel_source_delivery.mjs';
 
-async function fixture(t) {
-  const task = await fs.mkdtemp(path.join(os.tmpdir(), 'source-delivery-'));
-  t.after(() => fs.rm(task, { recursive: true, force: true }));
+async function fixture(t, nested = false) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'source-delivery-'));
+  const task = nested ? path.join(root, 'task') : root;
+  if (nested) await fs.mkdir(task);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(task, 'kernel_src'));
   await fs.mkdir(path.join(task, 'run'));
   const write = async (name, value) => {
@@ -37,7 +39,7 @@ async function fixture(t) {
   const kernel = { source_delivery_required: true, selected_device_kernels: ['score', 'topk'] };
   const result = { task_dir: task, target_callable: 'pkg:op' };
   const pack = async () => ({ ...result, source_delivery_ref: await write('run/source.json', m) });
-  return { task, kernel, result, m, write, pack };
+  return { root, task, kernel, result, m, write, pack };
 }
 test('source delivery covers all selected implementations and remains opt-in for legacy calls', async t => {
   const f = await fixture(t);
@@ -80,4 +82,86 @@ test('tampered logs and source symlinks outside the task cannot certify executio
   assert.match((await verifySourceDelivery(f.kernel, await f.pack())).why, /changed.*log/);
   await fs.symlink(import.meta.filename, path.join(f.task, 'kernel_src/external.py'));
   await assert.rejects(sourceSnapshot(f.task), /outside task/);
+});
+
+// Recorded evidence fixtures exercise admission/reuse; they are not GPU tests.
+import { readPreparedKernels, reusePreparedUT } from './agentx_kernel_preparation.mjs';
+import { checkPreparedUT } from './kernel_extraction_delivery.mjs';
+
+async function preparationFixture(t) {
+  const f = await fixture(t, true);
+  const seams = [{ target_callable: 'pkg:op', depth: 1, role: 'op_seam', device_kernels: ['score'] }];
+  f.kernel = { device_kernel: 'score', short_name: 'score', entity_kind: 'gpu_kernel',
+    selected_device_kernels: ['score'], seam_candidates: seams, source_delivery_required: true };
+  const result = { ...await f.pack(), unittest_smoke: 'pass', baseline_frozen: true,
+    source: { path: 'kernel_src/score.py' }, notes: ['structured notes'], regime_summary: { DECODE: 3 },
+    selection_validation: { contract: 'kernel_selection', ok: true, target_callable: 'pkg:op',
+      device_kernel: 'score', total_calls_observed: 1, target_marker_calls: 1, matched_kernel_calls: 1,
+      deepest_verified: true, live_candidate_targets: ['pkg:op'], deeper_live_candidates: [],
+      candidate_targets_tested: ['pkg:op'] } };
+  await f.write('run/RETURN.json', result);
+  await f.write('run/workload.json', {});
+  await f.write('run/ranking.json', { ranking: [{ device_kernel: 'score', selection_pct_gpu_time: 7.2 }] });
+  const delivery = { workload_json: 'task/run/workload.json', ranking_json: 'task/run/ranking.json',
+    tasks: [{ kernel: f.kernel, phase: 'extract', result_path: 'task/run/RETURN.json' }],
+    failed_tasks: [{ short_name: 'previous', reason: 'missing operands' }],
+    deferred_tasks: [{ short_name: 'later', reason: 'budget' }], notes: { coverage: 'limited' } };
+  const save = async () => { await f.write('run/delivery.json', delivery); return readPreparedKernels(f.root, 'task/run/delivery.json'); };
+  return { ...f, result, delivery, save };
+}
+
+test('complete-stage handoff accepts structured descriptions and reuses the validated task', async t => {
+  const f = await preparationFixture(t), ready = await f.save();
+  assert.equal(ready.kernel_candidates.length, 1, JSON.stringify(ready.failed_tasks));
+  assert.equal(ready.kernel_candidates[0].pct_gpu_time, 7.2);
+  assert.equal(ready.failed_tasks.length, 1);
+  assert.equal(ready.deferred_tasks.length, 1);
+  const reused = await reusePreparedUT(ready.kernel_candidates[0]);
+  assert.equal(reused.unittest_smoke, 'pass');
+  assert.deepEqual(reused.notes, ['structured notes']);
+  const source = await fs.readFile(new URL('../e2e_workflow.js', import.meta.url), 'utf8');
+  const block = source.slice(source.indexOf('async function extractWithBaseline('), source.indexOf('// abDone =='));
+  const dispatch = new Function('WORKFLOW_DIR', `
+    const KERNEL_EXTRACT_ON = true;
+    const safeAgent = () => { throw new Error('must not invoke a second extractor'); };
+    ${block}\nreturn extractWithBaseline;
+  `)(path.resolve(import.meta.dirname, '..'));
+  assert.equal((await dispatch('kernel_extractor', 'extract', '', { KERNEL: ready.kernel_candidates[0] })).smoke, 'pass');
+});
+
+test('failed UT remains visible and never enters an optimization queue', async t => {
+  const f = await preparationFixture(t);
+  f.result.unittest_smoke = 'fail';
+  await f.write('run/RETURN.json', f.result);
+  const ready = await f.save();
+  assert.equal(ready.kernel_candidates.length, 0);
+  assert.equal(ready.failed_tasks.length, 2);
+  assert.equal(ready.failed_tasks[1].checks.ut_status.ok, false);
+});
+
+test('prepared reuse detects changed result files and changed candidate source', async t => {
+  const f = await preparationFixture(t), ready = await f.save(), kernel = ready.kernel_candidates[0];
+  const file = path.join(f.task, 'run/RETURN.json'), before = await fs.readFile(file);
+  await fs.appendFile(file, '\n');
+  assert.match((await reusePreparedUT(kernel)).smoke_detail, /result changed/);
+  await fs.writeFile(file, before);
+  await fs.appendFile(path.join(f.task, 'kernel_src/score.py'), '# edited after UT\n');
+  assert.equal((await reusePreparedUT(kernel)).smoke, 'fail');
+});
+
+test('duplicate UT ownership does not schedule the same selected implementation twice', async t => {
+  const f = await preparationFixture(t);
+  f.delivery.tasks.push({ ...f.delivery.tasks[0], kernel: { ...f.kernel, short_name: 'duplicate' } });
+  const ready = await f.save();
+  assert.equal(ready.kernel_candidates.length, 1);
+  assert.match(ready.failed_tasks[1].reason, /already owned/);
+});
+
+test('delivery requires UT files within eval and complete declared selected boundaries', async t => {
+  const f = await preparationFixture(t);
+  assert.equal((await checkPreparedUT({ ...f.kernel, selected_device_kernels: ['score', 'topk'] }, f.result, 'extract')).ok, false);
+  f.delivery.tasks[0].result_path = '/etc/hosts';
+  const ready = await f.save();
+  assert.equal(ready.kernel_candidates.length, 0);
+  assert.match(ready.failed_tasks[1].reason, /inside EVAL_DIR/);
 });

@@ -1,17 +1,19 @@
 # Kernel Extractor — Live Kernel → Standalone Immutable Unittest (kernel-layer task dir)
 
-For AgentX only, `PHASE=select` starts directly from the completed baseline's
-logs, benchmark exports and effective configuration. Read
-`SKILL_DIR/knowledge/kernel_extraction_skills/kernel-extract/SKILL.md` and follow
-its entry, measurement and candidate-selection contract. Return workload/ranking
-evidence, a complete inventory with dispositions, and candidate queues. Read
-`TASK` for the requested scope and any supplied UT references; task budgets
-limit execution, not discovery. No standalone Profile/Strategize pass or UT
-generation is required in this phase. The task-dir instructions below apply to
-`extract` and `extract_op`, after a candidate is selected.
+For AgentX only, `PHASE=prepare` completes the entire kernel-extract skill:
+selection from the saved baseline → source extraction → UT authoring → GPU
+validation. Read `SKILL_DIR/knowledge/kernel_extraction_skills/kernel-extract/SKILL.md`
+and its complete-stage delivery contract. Selection and replay bootstrap remain
+internal artifacts; continue through scheduled UT work before returning only
+`{delivery_path}`. Preserve failed and deferred tasks with reasons. Do not return
+candidate queues before UTs are attempted, and do not optimize or integrate.
+Reuse compatible discovery and completed UTs, without another full baseline.
+`PHASE=repair_delivery` only fixes saved handoff files, never reruns passing tests.
+The task-dir instructions below apply to each task in `prepare` and to legacy
+`extract` / `extract_op` calls.
 For AgentX extraction, also read the skill's `references/delivery-contract.md`
 before authoring. Preflight the exact return with `scripts/kernel_extraction_delivery.mjs`
-against the original `KERNEL`. Use full machine verdicts or its supported
+against the task `KERNEL`; add `--prepared` inside the complete skill stage. Use full machine verdicts or its supported
 task-local file/SHA-256 references; preserve both phase rows for joint tasks.
 Repair return-format errors from saved evidence before considering GPU recapture.
 For AgentX source extraction, `editable=true` describes a replaceable seam; it
@@ -28,7 +30,7 @@ real serving shapes replayed, correctness judged against a recorded I/O oracle, 
 the unittest IMMUTABLE during optimization (anti-cheating). You do not optimize; you build the
 harness.
 
-You are invoked once per kernel candidate. Read first:
+For each kernel task, read first:
 `SKILL_DIR/knowledge/shape_capture.md` (the full playbook + the task-dir contract) and
 `SKILL_DIR/knowledge/sglang_internals.md` (where kernels live + the overlay/monkeypatch mechanics).
 

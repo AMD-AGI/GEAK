@@ -352,20 +352,25 @@ meaning, and a run without the phase produces a byte-identical `result.json`.
 Fast mode skips the phase; deep mode keeps it. Full contract:
 `knowledge/tuning_skillset_integration.md`.
 
-## AgentX kernel selection and UT extraction
+## AgentX kernel extraction and UT delivery
 
 Runs declared with `workload_kind: "agentx_trace_replay"` or the corresponding
 `workload_spec.kind` enter `KernelExtract` after baseline; resumes retain the
 saved declaration. The
 [kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md)
 selects from baseline logs/configuration and compatible runtime evidence,
-using bounded dispatch/shape captures where needed. It replaces separate
-Profile/Strategize passes and refreshes affected evidence after accepted changes.
+using bounded dispatch/shape captures where needed. Its `prepare` stage finishes
+source extraction, UT authoring and GPU validation before handing the workflow a
+`delivery_path`. Selection is internal; descriptive JSON fields do not cause an
+intermediate rejection. The workflow consumes passing UTs without extracting
+them again. The skill replaces separate Profile/Strategize passes and refreshes
+affected evidence after accepted changes. `phases: "extract"` with saved baseline
+state runs this full stage without optimization.
 Fixed-load and single-kernel runs retain their existing flow.
 
 The default target set is **PREFILL Top 5 or DECODE Top 5, with overall share
 strictly >3%**: rank each phase, filter, then deduplicate without backfilling.
-Task budgets limit execution; the full inventory and deferred queues survive
+Task budgets limit execution; the full inventory, failures and deferred tasks survive
 resumes. See [selection and coverage](knowledge/kernel_extraction_skills/kernel-extract/references/selection-coverage.md).
 
 UT delivery preserves complete joint/dispatch boundaries, actual editable
