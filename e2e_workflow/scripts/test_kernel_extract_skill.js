@@ -49,16 +49,12 @@ const consumers = [
   ['kernel_extractor', 'extract_op'], ['kernel_extractor', 'extract'],
   ['op_benchmarker', 'bakeoff'],
 ];
-for (const [args, env] of [
-  [{workload_spec: {kind: 'agentx_trace_replay', concurrency: 10}}, {}],
-  [{state: {workload_spec: {kind: 'agentx_trace_replay', concurrency: 10}}}, {}],
-  [{bench_client: 'agentx'}, {}],
-  [{}, {BENCH_CLIENT: 'agentx'}],
-  [{}, {GEAK_WORKLOAD_KIND: 'agentx_trace_replay'}],
-  [{workload_shape_provenance: 'agentx_observed'}, {}],
-  [{workload_shape_provenance: 'synthetic_fallback_on_agentx'}, {}],
+for (const args of [
+  {workload_kind: 'agentx_trace_replay'},
+  {workload_spec: {kind: 'agentx_trace_replay', concurrency: 10}},
+  {state: {workload_spec: {kind: 'agentx_trace_replay', concurrency: 10}}},
 ]) {
-  const run = make({...args, analysis_skill: 'none', use_expert_skills: 'false'}, {env});
+  const run = make({...args, analysis_skill: 'none', use_expert_skills: 'false'}, undefined);
   assert(run.active);
   assert.equal(run.workload.kind, 'agentx_trace_replay');
   assert.equal(run.measurement, 'warm_server');
@@ -125,9 +121,11 @@ const fixed = make({workload_spec: {kind: 'synthetic_isl_osl'},
   {env: {GEAK_WORKLOAD_KIND: 'agentx_trace_replay', BENCH_CLIENT: 'agentx'}});
 assert(!fixed.active);
 assert(!Object.hasOwn(fixed.workload, 'kind'));
-for (const client of ['native', 'inferencex']) {
-  const run = make({}, {env: {GEAK_WORKLOAD_KIND: 'agentx_trace_replay', BENCH_CLIENT: client}});
-  assert(!run.active, 'current fixed-load client outranks a leftover AgentX environment signal');
+// This integration must not expand main's workload identity from incidental metadata.
+for (const args of [{}, {bench_client: 'agentx'}, {workload_shape_provenance: 'agentx_observed'}]) {
+  const run = make(args, {env: {GEAK_WORKLOAD_KIND: 'agentx_trace_replay', BENCH_CLIENT: 'agentx',
+    WORKLOAD_ENV: 'agentx', WORKLOAD_CLIENT: 'agentx'}});
+  assert(!run.active, 'AgentX extraction requires an explicit workload declaration');
 }
 const standalone = make({kernel_path: '/task/kernel.py', workload_spec: {kind: 'agentx_trace_replay'}}, undefined);
 assert(!standalone.active);
