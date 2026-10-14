@@ -302,8 +302,16 @@ ok(/ISL=<isl> OSL=<osl> CONC=<conc>/.test(blk),
   'roles are told to keep their existing bench line unchanged (no role-file churn needed)');
 ok(/throughput_tok_s_median/.test(blk), 'the metric-neutral summary key is named');
 ok(/InferenceX P90 interactivity/.test(blk) && /tok\/s\/user/.test(blk)
-  && /guard_aggregate_output_tok_s_median/.test(blk),
-  'on the default axis the prompt names its unit and the output-throughput guard beside it');
+  && /guard_aggregate_total_token_tok_s_median/.test(blk) && /less total\s+work/.test(blk)
+  && !/guard_aggregate_output_tok_s_median/.test(blk),
+  'on the default axis the prompt names its unit and the total-throughput guard beside it, and why');
+ok(/At Validate the guard is part of the\s+verdict/.test(blk) && /more than 5% below the base leg/.test(blk)
+  && /validated_no_win/.test(blk),
+  'with no rule from the caller, Validate holds the guard to the 5% band an orchestrated run gets');
+const ruledBlk = build({ workload_spec: { kind: 'agentx_trace_replay', acceptance: {
+  objective: 'p90_intvty_inferencex', min_gain_pct: 1, guard_max_drop_pct: {} } } }).workloadIdentityBlock();
+ok(/guard_aggregate_total_token_tok_s_median/.test(ruledBlk) && !/At Validate the guard/.test(ruledBlk),
+  "a caller's own KEEP rule keeps the guard reported but leaves the verdict to that rule");
 const p50Blk = axisOf('e2e_norm_intvty_p50').workloadIdentityBlock();
 ok(/P50 interactivity/.test(p50Blk) && /guard_e2e_norm_intvty_p90_median/.test(p50Blk)
   && /guard_aggregate_output_tok_s_median/.test(p50Blk) && !/guard_total/.test(p50Blk),

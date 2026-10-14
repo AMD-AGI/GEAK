@@ -346,7 +346,7 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
     "beats_orchestrator_same_config": true,
     "intermediate_win_not_confirmed": null, // true => Validate did not confirm an accepted A/B
     "validate_final_missing": null,         // true => the final number came from a disk A/B
-    "acceptance": {                        // ONLY when the handoff states a KEEP rule; decides "ok"
+    "acceptance": {                        // ONLY when a KEEP rule applies (see below); decides "ok"
       "objective": "e2e_norm_intvty_p50", "measured_basis": "e2e_norm_intvty_p50",
       "gain_pct": 4.4, "min_gain_pct": 3.0,
       "guards": { "e2e_norm_intvty_p90": { "reference": 81.9, "candidate": 80.7,
@@ -421,6 +421,34 @@ and `validation_evidence.acceptance.reasons` says why. The throughput numbers an
 the speedup are reported unchanged. Per-kernel gates keep GEAK's own noise band,
 so small wins can still stack up to the caller's bar. A block that does not parse
 is ignored, with a warning on stderr.
+
+### A standalone AgentX run is held to GEAK's own rule
+
+An AgentX handoff with no `acceptance` block, graded on the standalone default
+`p90_intvty_inferencex` (nothing declared, that basis declared, or that basis
+exported as `E2E_METRIC`), is held to this rule instead:
+
+```jsonc
+"acceptance": {
+  "objective": "p90_intvty_inferencex",
+  "min_gain_pct": 3.0,
+  "guard_max_drop_pct": { "aggregate_total_token_tok_s": 5.0 }
+}
+```
+
+These are the bars Hyperloom's AgentX rule holds an orchestrated run to, so a
+standalone result and an orchestrated one are judged alike; they do not move with
+the run's noise band. The objective is decode-only, so a candidate can raise it by
+serving less total work, and on a prefill-heavy trace output tok/s barely shows
+that; total tok/s does. The rule is applied exactly as a caller's rule is, and the
+KB write waits for it, so a pair it does not keep is never recorded. A handoff with
+its own `acceptance` block, even one that does not parse, keeps this rule out, and
+an AgentX run on any other declared axis keeps GEAK's own verdict.
+
+The workflow's own Validate verdict is separate. It still needs a gain past the
+AgentX noise band (4.0% or wider) for `validated_win`, the status a KB record
+requires, and it holds total tok/s to the same 5%. A gain between 3% and the band
+is therefore `ok` here but leaves no KB record, as it does under Hyperloom.
 
 ### Choosing a headline out of a candidate pool
 

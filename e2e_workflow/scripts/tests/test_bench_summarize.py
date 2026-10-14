@@ -190,6 +190,7 @@ class FromRunsTest(unittest.TestCase):
         self.assertEqual(s["guard_e2e_norm_intvty_p90_spread_pct"], 9.52)
         self.assertEqual(s["guard_aggregate_output_tok_s_median"], 105.0)
         self.assertEqual(s["guard_aggregate_output_tok_s_spread_pct"], 9.52)
+        self.assertNotIn("guard_aggregate_total_token_tok_s_median", s)
         self.assertNotIn("guard_total_tok_s_median", s)
 
     def test_rows_without_a_p50_field_are_no_reading_not_the_tail(self):
@@ -218,6 +219,7 @@ class FromRunsTest(unittest.TestCase):
         s, _ = self.summarize([100.0, 110.0], env={"E2E_METRIC": "intvty"})
         self.assertEqual(s["guard_aggregate_output_tok_s_median"], 105.0)
         self.assertNotIn("guard_e2e_norm_intvty_p90_median", s)
+        self.assertNotIn("guard_aggregate_total_token_tok_s_median", s)
         self.assertNotIn("guard_total_tok_s_median", s)
 
     def test_inferencex_intvty_axis_is_the_reciprocal_of_p90_itl(self):
@@ -237,11 +239,14 @@ class FromRunsTest(unittest.TestCase):
         self.assertEqual(len({s["metric_basis"] for s in read}), 3)
         self.assertEqual(len({s["throughput_tok_s_median"] for s in read}), 3)
 
-    def test_inferencex_intvty_carries_the_output_guard(self):
-        """Every interactivity axis needs the guard; none is a throughput measure."""
+    def test_inferencex_intvty_carries_the_total_guard(self):
+        """The decode-only axis can rise while the server serves less work, and on a prefill-heavy
+        trace output tok/s barely shows it, so this axis is guarded on total tok/s instead."""
         s, _ = self.summarize([100.0, 110.0],
                               env={"E2E_METRIC": "p90_intvty_inferencex"})
-        self.assertEqual(s["guard_aggregate_output_tok_s_median"], 105.0)
+        self.assertEqual(s["guard_aggregate_total_token_tok_s_median"], 945.0)
+        self.assertEqual(s["guard_aggregate_total_token_tok_s_spread_pct"], 9.52)
+        self.assertNotIn("guard_aggregate_output_tok_s_median", s)
         self.assertNotIn("guard_total_tok_s_median", s)
 
     def test_spread_is_expressed_in_the_graded_units(self):
@@ -350,6 +355,7 @@ class FromReplicasTest(unittest.TestCase):
             json.dump({"throughput_tok_s_median": tput, "ttft_ms_median": 40.0 + index,
                        "tpot_ms_median": 8.0 + index, "metric_basis": basis,
                        "guard_aggregate_output_tok_s_median": tput * 9,
+                       "guard_aggregate_total_token_tok_s_median": tput * 10,
                        "guard_e2e_norm_intvty_p90_median": tput / 2}, fh)
         with open(os.path.join(rdir, "selected_attempt"), "w", encoding="utf-8") as fh:
             fh.write(str(attempt))
@@ -410,6 +416,7 @@ class FromReplicasTest(unittest.TestCase):
         self.assertEqual(s["guard_e2e_norm_intvty_p90_median"], 54.0)
         self.assertEqual(s["guard_e2e_norm_intvty_p90_spread_pct"], 7.41)
         self.assertEqual(s["guard_aggregate_output_tok_s_median"], 972.0)
+        self.assertNotIn("guard_aggregate_total_token_tok_s_median", s)
         self.assertIsNone(s["output_throughput_tok_s_median"])
         self.assertIn("e2e_norm_intvty_p50=108.0", line)
 
@@ -421,6 +428,7 @@ class FromReplicasTest(unittest.TestCase):
         self.assertEqual(s["throughput_tok_s_median"], 108.0)
         self.assertEqual(s["guard_aggregate_output_tok_s_median"], 972.0)
         self.assertNotIn("guard_e2e_norm_intvty_p90_median", s)
+        self.assertNotIn("guard_aggregate_total_token_tok_s_median", s)
         self.assertIsNone(s["output_throughput_tok_s_median"])
         self.assertIn("e2e_norm_intvty_p90=108.0", line)
 
@@ -430,7 +438,8 @@ class FromReplicasTest(unittest.TestCase):
             self.add(i, t, basis="p90_intvty_inferencex")
         s, line = self.summarize(3, 3)
         self.assertEqual(s["metric_basis"], "p90_intvty_inferencex")
-        self.assertEqual(s["guard_aggregate_output_tok_s_median"], 972.0)
+        self.assertEqual(s["guard_aggregate_total_token_tok_s_median"], 1080.0)
+        self.assertNotIn("guard_aggregate_output_tok_s_median", s)
         self.assertIsNone(s["output_throughput_tok_s_median"])
         self.assertIn("p90_intvty_inferencex=108.0", line)
 

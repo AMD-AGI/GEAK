@@ -138,8 +138,8 @@ use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8,
 `ISL/OSL=…` above describes a synthetic sweep, where every request has the same shape. An AgentX
 submission instead replays a recorded corpus: the client owns the request mix and the duration. A
 standalone run is graded on **InferenceX P90 interactivity** (`1000 / P90(ITL)` in tok/s/user, the
-x-axis of the InferenceX pareto), with total tok/s reported beside it as a guard. Say so, and the
-workflow configures the whole run for it:
+x-axis of the InferenceX pareto), with total tok/s held beside it as a guard: a gain does not count
+if total tok/s falls more than 5%. Say so, and the workflow configures the whole run for it:
 
 ```
 use path_to_GEAK/e2e_workflow to optimize inference for /models/Kimi-K3 on vllm, gpus 0-7 tp=8,

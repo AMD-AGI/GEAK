@@ -96,17 +96,20 @@ _BASES = {
     "p90_intvty_inferencex": (P90_INTVTY_KEYS, P90_INTVTY_BASIS, _recip_ms_to_rate),
 }
 
-#: Interactivity basis -> the guards Hyperloom's KEEP verdict holds beside it, as guard basis ->
-#: rows to read. A median gain is kept only while the P90 tail and output throughput each stay
-#: inside the noise band, so a candidate that buys the median by shedding either is not a win;
-#: each guard is summarized from the same rows as the objective. Total token throughput is
-#: measured, not guarded. The throughput bases carry none: there the objective IS the guard.
-#: A guard lands as ``guard_<basis>_median``, so a handoff naming a guard by its basis (see
-#: ``workload_spec.acceptance``) finds the field without a table of its own.
+#: Interactivity basis -> the guards its KEEP verdict holds beside it, as guard basis -> rows to
+#: read; each guard is summarized from the same rows as the objective. The two e2e_norm axes are
+#: Hyperloom's: a median gain is kept only while the P90 tail and output throughput each stay
+#: inside the noise band, so a candidate that buys the median by shedding either is not a win,
+#: and total token throughput is measured, not guarded. The InferenceX P90 axis is the standalone
+#: default and is guarded on TOTAL token throughput instead: it is decode-only, so a candidate
+#: can raise it by serving less total work, and on a ~140:1 prefill:output trace the output-only
+#: figure barely moves when it does. The throughput bases carry none: there the objective IS the
+#: guard. A guard lands as ``guard_<basis>_median``, so a KEEP rule naming a guard by its basis
+#: (see ``workload_spec.acceptance``) finds the field without a table of its own.
 _GUARDS = {
     INTVTY_P50_BASIS: {INTVTY_BASIS: INTVTY_KEYS, OUTPUT_BASIS: OUTPUT_KEYS},
     INTVTY_BASIS: {OUTPUT_BASIS: OUTPUT_KEYS},
-    P90_INTVTY_BASIS: {OUTPUT_BASIS: OUTPUT_KEYS},
+    P90_INTVTY_BASIS: {TOTAL_BASIS: TOTAL_KEYS},
 }
 
 
@@ -252,7 +255,7 @@ def from_runs(args):
         "throughput_tok_s_spread_pct": spread,
         "output_throughput_tok_s_median": med if is_output else None,
         "output_throughput_tok_s_spread_pct": spread if is_output else None,
-        # The guards Hyperloom holds beside an interactivity objective (see _GUARDS); none on the
+        # The guards held beside an interactivity objective (see _GUARDS); none on the
         # throughput bases, so those keep their exact field set.
         **_guard_fields(guards),
         "ttft_ms_median": _med3(ttft),

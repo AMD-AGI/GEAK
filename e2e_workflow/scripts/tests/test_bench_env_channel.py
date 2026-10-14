@@ -248,13 +248,13 @@ class DeclaredAxisMatchesTheSummaryTest(unittest.TestCase):
     def test_every_basis_has_a_prompt_label(self):
         self.assertEqual(set(_js_table("AXIS_LABEL")), set(self.bases.values()))
 
-    def test_the_standalone_default_is_an_interactivity_basis_with_a_guard(self):
+    def test_the_standalone_default_is_an_interactivity_basis_guarded_on_total(self):
         default = re.search(
             r"^  metric_basis: '([^']+)',", WORKFLOW_JS.read_text(), re.MULTILINE
         ).group(1)
         self.assertEqual(default, self.summarize.P90_INTVTY_BASIS)
         self.assertEqual(set(self.summarize._GUARDS[default]),
-                         {self.summarize.OUTPUT_BASIS})
+                         {self.summarize.TOTAL_BASIS})
 
 
 if __name__ == "__main__":

@@ -1012,6 +1012,10 @@ function resolveAgentxMetric() {
 }
 const { basis: AGENTX_METRIC_BASIS, source: AGENTX_METRIC_SOURCE } = resolveAgentxMetric();
 const AGENTX_E2E_METRIC = AGENTX ? AXIS_OF_METRIC_BASIS[AGENTX_METRIC_BASIS] : '';
+// How far total tok/s may fall before a gain on the standalone default axis stops counting: the
+// band Hyperloom holds an orchestrated AgentX run's guards to. run_e2e.py
+// STANDALONE_AGENTX_GUARD_DROP_PCT is the same number.
+const STANDALONE_TOTAL_GUARD_PCT = 5.0;
 // Recall has its own policy. In particular, older orchestrators may grade output/total while
 // the operator wants only p50 candidates. This never changes the bench axis or the writer's basis.
 function resolveKbMetric() {
@@ -1734,8 +1738,12 @@ measurement duration. Consequences you must respect:
 * **The graded axis is ${AXIS_LABEL[AGENTX_METRIC_BASIS]}.**
   \`bench_summary.json\` reports it as \`throughput_tok_s_median\` with
   \`metric_basis=${AGENTX_METRIC_BASIS}\`. Always read the metric-neutral key; ${/intvty/.test(AGENTX_METRIC_BASIS)
-    ? 'on this axis it is tok/s/user, higher is better. Report `guard_aggregate_output_tok_s_median`\n  beside it.' + (AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50'
-      ? ' Also report `guard_e2e_norm_intvty_p90_median`, the tail guard.' : '')
+    ? 'on this axis it is tok/s/user, higher is better. ' + (AGENTX_METRIC_BASIS === 'p90_intvty_inferencex'
+      ? 'Report `guard_aggregate_total_token_tok_s_median`\n  beside every delta: this axis is decode-only, so a candidate can raise it by serving less total\n  work, and one that does has not made the server faster.' + (WORKLOAD_SPEC.acceptance == null
+        ? ' At Validate the guard is part of the\n  verdict: a gain whose final leg reads it more than ' + STANDALONE_TOTAL_GUARD_PCT +
+          '% below the base leg is not a\n  win, so report `validated_no_win` and name the guard in `arbitration_note`.' : '')
+      : 'Report `guard_aggregate_output_tok_s_median`\n  beside it.' + (AGENTX_METRIC_BASIS === 'e2e_norm_intvty_p50'
+        ? ' Also report `guard_e2e_norm_intvty_p90_median`, the tail guard.' : ''))
     : 'on a ~140:1\n  prefill:output trace the output-only axis barely moves for a large real change in work.'}
 * **A measured window is LONG**: ${AGENTX.geak_loop_duration_s}s per search leg,
   ${AGENTX.duration_s}s for parity/validation. Budget your phase around that and do not retry a

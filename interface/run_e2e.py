@@ -3511,6 +3511,43 @@ def handoff_acceptance(h: dict) -> dict | None:
     return None
 
 
+#: The axis a standalone AgentX run is graded on when nothing else is declared, and the guard
+#: held beside it: e2e_workflow.js AGENTX_DEFAULTS.metric_basis and bench_summarize.py _GUARDS.
+STANDALONE_AGENTX_OBJECTIVE = "p90_intvty_inferencex"
+STANDALONE_AGENTX_GUARD = "aggregate_total_token_tok_s"
+#: The bars Hyperloom's AgentX KEEP rule holds an orchestrated run to, so a standalone result is
+#: judged alike. The guard band is also e2e_workflow.js STANDALONE_TOTAL_GUARD_PCT.
+STANDALONE_AGENTX_MIN_GAIN_PCT = 3.0
+STANDALONE_AGENTX_GUARD_DROP_PCT = 5.0
+
+
+def standalone_acceptance(h: dict) -> dict | None:
+    """GEAK's own KEEP rule for an AgentX run on the default axis; None leaves GEAK's verdict.
+
+    A trace replay graded on InferenceX P90 interactivity, with no rule from the caller, is kept
+    only when that axis gains at least 3% and total token throughput falls no more than 5% below
+    the reference: the axis is decode-only, so a candidate can raise it by serving less total work.
+    A declared ``acceptance`` block, even one handoff_acceptance ignores, is the caller's own rule
+    and keeps this one out.
+    """
+    spec = h.get("workload_spec")
+    if not isinstance(spec, dict) or str(spec.get("kind") or "") != WORKLOAD_KIND_AGENTX:
+        return None
+    if spec.get("acceptance") is not None:
+        return None
+    # The axis e2e_workflow.js resolveAgentxMetric grades: the declared basis, else an exported
+    # E2E_METRIC, else the default. Only its own token resolves to the default basis.
+    declared = str(spec.get("metric_basis") or "").strip().lower()
+    inherited = str(os.environ.get("E2E_METRIC") or "").strip().lower()
+    if (declared or inherited or STANDALONE_AGENTX_OBJECTIVE) != STANDALONE_AGENTX_OBJECTIVE:
+        return None
+    return {
+        "objective": STANDALONE_AGENTX_OBJECTIVE,
+        "min_gain_pct": STANDALONE_AGENTX_MIN_GAIN_PCT,
+        "guard_max_drop_pct": {STANDALONE_AGENTX_GUARD: STANDALONE_AGENTX_GUARD_DROP_PCT},
+    }
+
+
 def acceptance_verdict(
     rule: dict,
     *,
@@ -3520,7 +3557,7 @@ def acceptance_verdict(
     reference: dict,
     candidate: dict,
 ) -> dict:
-    """Apply the caller's KEEP rule to the pair this run publishes.
+    """Apply a KEEP rule to the pair this run publishes.
 
     Hyperloom's AgentX verdict, step for step: ``(final - baseline) / baseline * 100`` on the
     objective must reach ``min_gain_pct``, and each guard must hold ``candidate >= reference *
@@ -4041,8 +4078,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
     # block carries what a reader needs to decide — the arbitration verdict, the
     # run-to-run spread of each leg, the Director's noise band, and whether the
     # delta clears them. Reported, never enforced: nothing here changes status.
-    # The one exception is ``acceptance``, added below only when the handoff states
-    # the caller's KEEP rule.
+    # The one exception is ``acceptance``, added below only when a KEEP rule applies:
+    # the one the handoff states, or a standalone AgentX run's own.
     delta_pct = round((speedup - 1.0) * 100.0, 3)
     # The metric-neutral spread first: the output_*-named alias is only written on the output
     # basis, so on any other axis it would leave both legs' scatter unknown.
@@ -4114,12 +4151,14 @@ def normalize_result(h: dict, wf: dict) -> dict:
         or "aggregate_output_tok_s"
     )
 
-    # ── the caller's KEEP rule ───────────────────────────────────────────────
+    # ── the KEEP rule ────────────────────────────────────────────────────────
     # When the handoff states the rule its own verdict applies (Hyperloom's AgentX
     # interactivity grading), "ok" means that rule keeps the published pair, not merely
-    # that the final beat the baseline. Guards come from the two legs the pair was read
-    # from; a pair with no such legs (a recovered win) cannot show its guards held.
-    acceptance = handoff_acceptance(h)
+    # that the final beat the baseline. A standalone AgentX run on the default axis is
+    # held to GEAK's own rule, on Hyperloom's bars. Guards come from the two legs the
+    # pair was read from; a pair with no such legs (a recovered win) cannot show its
+    # guards held.
+    acceptance = handoff_acceptance(h) or standalone_acceptance(h)
     if acceptance is not None:
         verdict = acceptance_verdict(
             acceptance,
@@ -7240,9 +7279,11 @@ def main(argv: list[str]) -> int:
     # Module B writes workflow_return.json before normalize_result runs. Send the same
     # comparability calculation into that return while the selected client is known.
     ps_args["comparability"] = _workload_comparability(h)
-    # The handoff verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
+    # A KEEP rule's verdict needs Normalize's chosen pair and its guard summaries. Defer Module B
     # until then; _kb_write_back handles successful runs too when Module B left no receipt.
-    ps_args["kb_defer_to_interface"] = handoff_acceptance(h) is not None
+    ps_args["kb_defer_to_interface"] = (
+        handoff_acceptance(h) or standalone_acceptance(h)
+    ) is not None
     bench_launcher = apply_bench_launcher(h)
     workload_exports = apply_workload_spec(h)
     workload_preflight = agentx_preflight(h)
