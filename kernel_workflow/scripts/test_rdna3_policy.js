@@ -216,6 +216,49 @@ function mustExclude(hay, needle, msg) {
     throw new Error(`kernel_workflow.js no longer parses: ${error.message}`);
   }
 
+  // --- I. Doc contract. -----------------------------------------------------
+  // Section A asserts gfx11* reaches policy as itself; the roles then route it to
+  // knowledge/amd_ryzen.md. That routing is only worth anything if the file still
+  // states the facts the policy above encodes, so pin them here rather than leaving
+  // the two to drift apart silently.
+  const repoRoot = path.resolve(wfDir, '..');
+  const ryzen = fs.readFileSync(path.join(wfDir, 'knowledge', 'amd_ryzen.md'), 'utf8');
+  for (const fact of ['gfx1151', 'fp8 matrix path', 'none', 'WMMA', '8060S (40 CU)']) {
+    mustInclude(ryzen, fact, `amd_ryzen.md no longer states: ${fact}`);
+  }
+  // The MFMA-only Triton knobs do not raise and do not change codegen here, so the
+  // only safe way to name them is as a trap. Naming them without that qualifier
+  // would send an agent tuning a knob that cannot move the number.
+  if (/matrix_instr_nonkdim/.test(ryzen)) {
+    mustInclude(ryzen, 'accepted and silently ignored',
+      'amd_ryzen.md names matrix_instr_nonkdim without saying it is silently ignored');
+  }
+
+  // The long form is a separate directory so amd_ryzen.md can stay a summary. A
+  // pointer to a directory that does not exist is worse than no pointer.
+  const longFormRel = 'perf_knowledge/hardware/rdna35_gfx1151';
+  mustInclude(ryzen, longFormRel, 'amd_ryzen.md lost the pointer to the long form');
+  const longFormDir = path.join(repoRoot, longFormRel);
+  const longForm = fs.readdirSync(longFormDir).filter((f) => f.endsWith('.md'));
+  if (!longForm.includes('arch.md')) {
+    throw new Error(`${longFormRel} has no arch.md entry point`);
+  }
+  // Relative links inside the directory are the one reference class nothing else
+  // checks; a renamed file leaves them dangling with no error anywhere.
+  for (const file of longForm) {
+    const text = fs.readFileSync(path.join(longFormDir, file), 'utf8');
+    for (const match of text.matchAll(/\]\((?!\w+:)([^)#\s]+\.md)(?:#[^)]*)?\)/g)) {
+      const resolved = path.resolve(longFormDir, match[1]);
+      if (!fs.existsSync(resolved)) {
+        throw new Error(`${longFormRel}/${file} links to a missing file: ${match[1]}`);
+      }
+    }
+  }
+
+  mustInclude(
+    fs.readFileSync(path.join(repoRoot, 'perf_knowledge', 'index', 'taxonomy.md'), 'utf8'),
+    '| `gfx1151` |', 'taxonomy.md does not list gfx1151 as a hardware generation');
+
   console.log('PASS: gfx1151 is isolated, SKU-gated on peaks, and the gfx115x predicate is pinned.');
 })().catch((error) => {
   console.error(error);
