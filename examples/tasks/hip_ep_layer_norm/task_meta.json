@@ -1,0 +1,22 @@
+{
+  "op": "layer_norm",
+  "oracle": "numeric",
+  "arch": "gfx1151",
+  "kernel_file": "layer_norm_kernel.hip",
+  "target_functions": [
+    "hip_layer_norm_kernel"
+  ],
+  "frozen_symbols": [
+    "hip_layer_norm"
+  ],
+  "numeric_test": "test_layer_norm.py",
+  "numeric": {
+    "ep_repo": "/home/thpereir/projects/remote/ge/hip-ep-2bit-fpzp",
+    "backend": "ort_ep",
+    "ep_name": "AMDGPUExecutionProvider",
+    "ep_dll": "/path/to/amdgpu-ep.so",
+    "ep_options": [],
+    "build_cmd": ""
+  },
+  "shapes": []
+}
