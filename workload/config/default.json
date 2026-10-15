@@ -1,8 +1,18 @@
 {
-  "_comment": "Default knobs for workload/. A scenario config (e.g. agentx_dsv4.json) layers on top of this, and command-line --set layers on top of that. Every path is either absolute or resolved relative to the GEAK repository root.",
+  "_comment": "Default knobs for workload/. A scenario config (e.g. agentx_glm52.json) layers on top of this, and command-line --set layers on top of that. Every path is either absolute or resolved relative to the GEAK repository root.",
 
   "run_root": "workload/runs/default",
   "runner": "claude",
+
+  "target": {
+    "_comment": "What this run optimizes. A scenario config MUST fill in `model`: scripts/target.py refuses to start a run whose config filename or run_root does not carry a recognisable token of it, and cross-checks `image`/`commits` against what the stages observed and recorded. This exists because a run once carried a planning-phase label (`agentx_dsv4`) for a GLM-5.2 stack from end to end -- every number was right and every label was wrong. `name_tokens` whitelists a deliberate abbreviation the tokeniser cannot derive (e.g. \"dsv4\" for DeepSeek-V4). Set `enforce` to false only with a written reason.",
+    "model": null,
+    "image": null,
+    "commits": {},
+    "name_tokens": [],
+    "enforce": true
+  },
+
   "order": ["baseline", "profile", "roofline", "optimize", "applyback"],
 
   "stages": {

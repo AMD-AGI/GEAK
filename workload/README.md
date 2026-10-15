@@ -82,6 +82,18 @@ every correctness check while hot and fail from cold.
 did not demonstrably shadow its targets, or if the two sides used different metric bases:
 "no gain" is otherwise indistinguishable from "the patch never loaded".
 
+**A run must be able to say what it optimizes.** Every scenario config declares a `target`
+block — model, image, component commits — and `scripts/target.py` enforces two things with
+it. The config filename and `run_root` must carry a recognisable token of the declared
+model, checked at `plan`/`prepare` time, before a GPU hour is spent; and the declaration is
+cross-checked at every `validate` against the image and commits the stages actually
+observed and wrote down, with a contradiction failing the stage. The first campaign ran
+end to end under the name `agentx_dsv4` against a GLM-5.2-MXFP4 stack: every number was
+right and every label was wrong, which is the harder error to catch, because a wrong
+number invites doubt and a wrong name invites confidence. An abbreviation the tokeniser
+cannot derive (`dsv4` for DeepSeek-V4) is still allowed, but only by writing it into
+`target.name_tokens` — a deliberate declaration instead of an accident.
+
 **Nothing is bound to a developer's machine.** All paths come from config and resolve
 against the repository root. Credentials stay outside the tree —
 `runners/claude.env.example` is a template; the scenario config points at the filled-in
@@ -91,7 +103,7 @@ copy via `runner_env.env_file`.
 
 ```bash
 cd <GEAK repo root>
-CFG=workload/config/agentx_dsv4.json
+CFG=workload/config/agentx_glm52.json
 
 python3 workload/scripts/stage.py --config $CFG --dry-run    # resolve everything, run nothing
 python3 workload/scripts/stage.py --config $CFG run baseline # … profile, roofline,

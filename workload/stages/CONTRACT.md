@@ -103,6 +103,25 @@ python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok \
     --artifact baseline=baseline.json --metric throughput=446.87889
 ```
 
+### 3.0 Saying which stack you ran against
+
+A stage that can observe the stack it ran against should say so, either as an optional
+`stack` object inside `result.json`:
+
+```json
+"stack": {"model": "amd/GLM-5.2-MXFP4",
+          "image": "lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260913",
+          "sglang_commit": "7f1f8c706a", "aiter_commit": "4ad998328"}
+```
+
+or by writing `$OUT/stack_identity.json` (a document that names the stack in force under
+an `active_stack` key is read only there). `stage.py validate` compares whatever it finds
+against the `target` block of the config and **fails the stage on a contradiction**: if
+the config says one model and the stage observed another, one of them is wrong and every
+label downstream is wrong with it. A stage that observes nothing is reported as
+`unverified`, which is a statement rather than a pass. See `scripts/target.py` for the
+whole gate, and `README.md` for the naming half of it.
+
 ### 3.1 Slot-level adapters
 
 A third-party skill vendored as-is (such as `agentx-kernel-extraction-standalone`) knows

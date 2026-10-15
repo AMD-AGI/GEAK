@@ -45,6 +45,25 @@ def main():
     stages = state.get("stages") or state
     L = ["# Workload run — %s\n" % os.path.basename(root)]
 
+    # --- What was optimized, stated next to the run's name. A report that names only the
+    # run invites the reader to infer the stack from the directory, which is exactly how
+    # a stale label becomes a false claim.
+    tgt = state.get("target") or {}
+    if tgt.get("model"):
+        L.append("**Target stack** — model `%s`%s%s. Declared in the config and "
+                 "cross-checked against what the stages observed: **%s**.\n"
+                 % (tgt["model"],
+                    (", image `%s`" % tgt["image"]) if tgt.get("image") else "",
+                    (", " + ", ".join("%s `%s`" % (k, v)
+                                      for k, v in sorted((tgt.get("commits") or {}).items())))
+                    if tgt.get("commits") else "",
+                    tgt.get("verdict", "unchecked")))
+    else:
+        L.append("**Target stack** — not declared by this run's config, so the run name is "
+                 "the only thing naming the stack and nothing checked it.\n")
+    if os.path.exists(os.path.join(root, "RENAME.md")):
+        L.append("This run was renamed after it finished; see `RENAME.md`.\n")
+
     # --- The contract view: every stage, whatever its skill.
     L.append("## Stages\n")
     L.append("| Stage | Skill | Status | Key metrics |\n| --- | --- | --- | --- |")

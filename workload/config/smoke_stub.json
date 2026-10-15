@@ -1,16 +1,28 @@
 {
   "_comment": "Smoke config: no GPU, no tokens. A stub runner plus fake tasks, used to exercise the optimize slot's orchestration, fault tolerance, re-verification and summarization. Point TASKS_DIR at the fake tasks via the environment.",
+  "target": {
+    "model": null,
+    "enforce": false,
+    "_note_enforce": "Smoke config: stub skills returning fixed values, no serving stack and no real kernels. Any config that does target a real stack must fill in target.model instead."
+  },
   "run_root": "/tmp/wl_smoke_run",
   "runner": "stub",
-  "order": ["optimize"],
+  "order": [
+    "optimize"
+  ],
   "stages": {
     "optimize": {
       "skill": "subagent-raw",
       "mode": "script",
       "params": {
-        "time_budget_sec": 20, "attempt_cap_sec": 10, "budget": 1,
-        "keep_threshold": 1.045, "verify_repeats": 2, "gpus": "0",
-        "heartbeat_stale_sec": 60, "bad_node_limit": 2
+        "time_budget_sec": 20,
+        "attempt_cap_sec": 10,
+        "budget": 1,
+        "keep_threshold": 1.045,
+        "verify_repeats": 2,
+        "gpus": "0",
+        "heartbeat_stale_sec": 60,
+        "bad_node_limit": 2
       }
     }
   }

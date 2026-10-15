@@ -33,7 +33,7 @@ def test_dry_run_resolves_every_stage():
     """--dry-run must resolve all five stages with nothing missing. It is the only static
     gate before a real run."""
     r = run([sys.executable, "workload/scripts/stage.py", "--config",
-             "workload/config/agentx_dsv4.json", "--dry-run"])
+             "workload/config/agentx_glm52.json", "--dry-run"])
     assert r.returncode == 0, r.stdout + r.stderr
     for stage in ("baseline", "profile", "roofline", "optimize", "applyback"):
         assert stage in r.stdout
@@ -42,11 +42,103 @@ def test_dry_run_resolves_every_stage():
 def test_set_override_wins(tmp_path):
     """--set must beat the config file — smoke runs rely on it to shrink the scale."""
     r = run([sys.executable, "workload/scripts/stage.py", "--config",
-             "workload/config/agentx_dsv4.json",
+             "workload/config/agentx_glm52.json",
              "--set", "stages.optimize.skill=subagent-raw",
              "--set", "stages.optimize.params.time_budget_sec=60", "--dry-run"])
     assert r.returncode == 0, r.stdout + r.stderr
     assert "subagent-raw" in r.stdout
+
+
+# ----------------------------------------------------------------- target gate
+#
+# The failure these cover is not hypothetical: the first full campaign ran end to end as
+# `agentx_dsv4` against a GLM-5.2-MXFP4 stack. Every number was right, every label was
+# wrong, and nothing in the pipeline was in a position to notice.
+
+def test_scenario_config_declares_what_it_optimizes():
+    """Every scenario config must name the stack it targets — the gate has nothing to
+    check against otherwise."""
+    for name in os.listdir(os.path.join(WORKLOAD, "config")):
+        if not name.endswith(".json") or name == "default.json":
+            continue
+        cfg = json.load(open(os.path.join(WORKLOAD, "config", name)))
+        t = cfg.get("target") or {}
+        # A config that targets no real stack (the smoke configs run fake CPU tasks) opts
+        # out explicitly and in writing. Silence is not an option.
+        assert t.get("model") or (t.get("enforce") is False and t.get("_note_enforce")), \
+            "%s neither declares target.model nor states why it is exempt" % name
+
+
+def test_run_name_must_carry_a_token_of_the_declared_model(tmp_path):
+    """A run whose directory disagrees with its model is refused before it starts."""
+    r = run([sys.executable, "workload/scripts/stage.py", "--config",
+             "workload/config/agentx_glm52.json",
+             "--run-root", str(tmp_path / "agentx_dsv4"), "--dry-run"])
+    assert r.returncode != 0
+    assert "target.model" in (r.stdout + r.stderr)
+
+    ok = run([sys.executable, "workload/scripts/stage.py", "--config",
+              "workload/config/agentx_glm52.json",
+              "--run-root", str(tmp_path / "agentx_glm52_smoke"), "--dry-run"])
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_name_tokens_let_an_abbreviation_through_only_when_declared():
+    import target
+    hits, toks = target.check_name("agentx_dsv4", "deepseek-ai/DeepSeek-V4")
+    assert not hits, "an abbreviation must not pass by accident (tokens were %s)" % toks
+    hits, _ = target.check_name("agentx_dsv4", "deepseek-ai/DeepSeek-V4",
+                                extra=["dsv4"])
+    assert hits == ["dsv4"]
+
+
+def test_version_digits_fold_onto_the_model_name():
+    """`GLM-5.2` is written glm52 and glm5 as often as glm-5.2."""
+    import target
+    toks = target.name_tokens("amd/GLM-5.2-MXFP4")
+    assert {"glm", "glm5", "glm52", "mxfp4"} <= set(toks)
+    # The organisation prefix says who published the weights, not which stack is under
+    # test; blessing it would bless `agentx_amd` for everything AMD ever uploaded.
+    assert "amd" not in toks
+
+
+def test_observed_stack_contradicting_the_config_is_a_mismatch(tmp_path):
+    import target
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "stack_identity.json").write_text(json.dumps({
+        "superseded_stack": {"image": "someone/else:tag"},
+        "active_stack": {"image": "lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260913",
+                         "sglang_commit": "7f1f8c706a"}}))
+    cfg = {"target": {"model": "amd/GLM-5.2-MXFP4",
+                      "image": "lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260913",
+                      "commits": {"sglang": "7f1f8c706a"}}}
+    obs = target.observed_identity(str(out))
+    rep = target.identity_report(cfg, obs)
+    assert rep["verdict"] == "ok", rep
+    assert not target.identity_problems(rep)
+
+    cfg["target"]["commits"]["sglang"] = "deadbeef12"
+    bad = target.identity_report(cfg, obs)
+    assert bad["verdict"] == "mismatch"
+    assert target.identity_problems(bad)
+
+
+def test_a_stage_pinned_to_another_image_is_refused(tmp_path):
+    """Optimizing kernels inside an image the run does not claim to target produces work
+    for a system nobody is measuring."""
+    r = run([sys.executable, "workload/scripts/stage.py", "--config",
+             "workload/config/agentx_glm52.json",
+             "--set", "stages.optimize.params.image=someone/else:tag", "--dry-run"])
+    assert r.returncode != 0
+    assert "target.image" in (r.stdout + r.stderr)
+
+
+def test_a_stage_that_observed_nothing_is_unverified_not_ok(tmp_path):
+    import target
+    rep = target.identity_report({"target": {"model": "amd/GLM-5.2-MXFP4"}}, {})
+    assert rep["verdict"] == "unverified"
+    assert not target.identity_problems(rep)
 
 
 def test_every_configured_skill_exists():

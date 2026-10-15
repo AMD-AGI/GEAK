@@ -28,6 +28,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import target  # noqa: E402  -- the naming/identity gate; see target.py for why it exists
+
 WORKLOAD_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GEAK_ROOT = os.path.dirname(WORKLOAD_ROOT)
 DEFAULT_CONFIG = os.path.join(WORKLOAD_ROOT, "config", "default.json")
@@ -77,7 +80,16 @@ def load_config(args):
         cfg = apply_set(cfg, expr)
     if args.run_root:
         cfg["run_root"] = args.run_root
+    # Which files produced this configuration. Recorded as provenance, and read by the
+    # naming gate: the config's own filename is part of what a reader sees.
+    cfg["_config_files"] = [DEFAULT_CONFIG] + [resolve_path(p) for p in args.config or []]
     return cfg
+
+
+def target_problems(cfg):
+    """The naming half of the target gate (target.py). Runs before any GPU time."""
+    return target.naming_problems(cfg, resolve_path(cfg["run_root"]),
+                                  cfg.get("_config_files") or [])
 
 
 def resolve_path(path):
@@ -244,10 +256,14 @@ def validate_result(lay):
 # ---------------------------------------------------------------- commands
 
 def cmd_plan(cfg, args):
-    problems = []
+    problems = list(target_problems(cfg))
+    tgt = target.declared(cfg)
     print("GEAK_ROOT      %s" % GEAK_ROOT)
     print("run_root       %s" % resolve_path(cfg["run_root"]))
     print("runner         %s" % cfg.get("runner"))
+    print("target         %s" % (tgt.get("model") or "(undeclared)"))
+    if tgt.get("image"):
+        print("               image %s" % tgt["image"])
     state = load_state(cfg)
     print()
     for stage in cfg["order"]:
@@ -275,7 +291,7 @@ def cmd_plan(cfg, args):
 
 def cmd_prepare(cfg, args):
     lay = stage_layout(cfg, args.stage)
-    problems = []
+    problems = list(target_problems(cfg))
     check_skill(lay, problems)
     if problems:
         for p in problems:
@@ -356,6 +372,24 @@ def cmd_validate(cfg, args, exec_rc=None):
     if exec_rc is not None:
         entry["exec_rc"] = exec_rc
 
+    # The target gate. A stage that ran against a different stack than the config names
+    # invalidates the labels on everything downstream, so it fails here rather than
+    # surfacing as a confusing report later.
+    errs = list(errs) + target_problems(cfg)
+    observed = target.observed_identity(lay["out"], res)
+    rep = target.identity_report(cfg, observed)
+    entry["target_identity"] = rep
+    errs += target.identity_problems(rep)
+    # The run-level verdict aggregates the stages: most stages observe nothing about the
+    # stack and report `unverified`, which must not erase the corroboration from the one
+    # stage that did look.
+    per_stage = dict((state.get("target") or {}).get("stages") or {})
+    per_stage[lay["stage"]] = rep["verdict"]
+    vs = set(per_stage.values())
+    state["target"] = dict(target.declared(cfg), stages=per_stage,
+                           verdict=("mismatch" if "mismatch" in vs
+                                    else "ok" if "ok" in vs else "unverified"))
+
     if errs:
         entry["status"] = "fail"
         entry["errors"] = errs
@@ -376,6 +410,8 @@ def cmd_validate(cfg, args, exec_rc=None):
     save_state(cfg, state)
 
     print("stage %s: %s (%s)" % (lay["stage"], res["status"], lay["skill"]))
+    print("  stack identity: %s%s" % (rep["verdict"],
+                                      (" — " + "; ".join(rep["matched"])) if rep["matched"] else ""))
     for k, v in (res.get("metrics") or {}).items():
         print("  %s = %s" % (k, v))
     if res.get("notes"):

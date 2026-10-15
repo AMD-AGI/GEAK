@@ -1,7 +1,19 @@
 {
-  "_comment": "Scenario config: AgentX / DeepSeek-V4 / TP8 / global conc=10, aligned with CI run 34783501425. Layered on top of default.json. Every site-local absolute path appears here and nowhere in the code.",
-  "run_root": "workload/runs/agentx_dsv4",
+  "_comment": "Scenario config: AgentX / GLM-5.2-MXFP4 / TP8 / global conc=10, aligned with CI run 34783501425. Layered on top of default.json. Every site-local absolute path appears here and nowhere in the code. The file was called agentx_dsv4.json until 2026-10-15: `dsv4` was a planning-phase label, and `dsa` in the kernel names is DeepSeek Sparse Attention -- the attention mechanism GLM-5.2 uses -- not DeepSeek-V4. The target block below is what now keeps the name and the stack in agreement.",
+  "run_root": "workload/runs/agentx_glm52",
   "runner": "claude",
+
+  "target": {
+    "model": "amd/GLM-5.2-MXFP4",
+    "image": "lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260913",
+    "commits": {
+      "sglang": "7f1f8c706a",
+      "aiter": "4ad998328"
+    },
+    "name_tokens": [],
+    "enforce": true,
+    "_note_source": "Read off CI run 34783501425 and re-verified on the node by the profile stage, which records what it actually saw in stack_identity.json:active_stack."
+  },
   "runner_env": {
     "_comment": "env_file points at a credential file **outside the repo** (mode 600); only the path appears here, never the key. This cluster authenticates through the AMD gateway rather than ~/.claude credentials. If the file is missing the runner returns 78 and the worker stops immediately instead of burning budget on retries that cannot succeed. See runners/claude.env.example for the template.",
     "env_file": "/shared_nfs/zihao/kernel_agent/ax/.secrets/claude.env"
@@ -71,7 +83,7 @@
         "case_name": "geakx_applyback",
         "base_case": "baseline",
         "overlay_subdir": "overlays/geakx_applyback",
-        "reference_run": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/runs/agentx_dsv4/profile/out/pristine_baseline.json",
+        "reference_run": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/runs/agentx_glm52/profile/out/pristine_baseline.json",
         "reference_key": "output_tok_per_s",
         "run_tag_prefix": "wl_geakx_ab",
         "repeats": 2,

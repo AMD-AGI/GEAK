@@ -13,11 +13,17 @@ measure        extract UTs    rank by        one kernel     wire back,
 the target                    headroom       per GPU        measure e2e
 ```
 
+Before anything else, a config must declare what it optimizes, in a `target` block (model,
+image, component commits). The config filename and `run_root` have to carry a recognisable
+token of that model, and every `validate` cross-checks the declaration against the stack
+the stages actually observed. Writing a new scenario config starts there; `scripts/target.py`
+says why, and refuses the run otherwise.
+
 Run the whole thing:
 
 ```bash
 cd <GEAK repo root>
-CFG=workload/config/agentx_dsv4.json
+CFG=workload/config/agentx_glm52.json
 
 python3 workload/scripts/stage.py --config $CFG --dry-run   # check resolution first
 python3 workload/scripts/stage.py --config $CFG run baseline
