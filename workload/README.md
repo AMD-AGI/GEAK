@@ -106,14 +106,22 @@ cd <GEAK repo root>
 CFG=workload/config/agentx_glm52.json
 
 python3 workload/scripts/stage.py --config $CFG --dry-run    # resolve everything, run nothing
-python3 workload/scripts/stage.py --config $CFG run baseline # … profile, roofline,
-python3 workload/scripts/stage.py --config $CFG run optimize # 48 h per kernel by default
-python3 workload/scripts/stage.py --config $CFG run applyback
+python3 workload/scripts/stage.py --config $CFG all          # the whole campaign, unattended
+python3 workload/scripts/stage.py --config $CFG run optimize # or one stage at a time
 ```
 
 `next` reports the stage that is due, `status` shows progress, and an interrupted run
-resumes by re-issuing the same command. While `optimize` runs:
+resumes by re-issuing the same command — `all` skips the stages already recorded `ok`.
+While `optimize` runs:
 `scheduler.py status --work-root $RUN_ROOT/optimize/out/work`.
+
+`all` also starts `scripts/watch.py`, which appends a progress report to
+`$RUN_ROOT/PROGRESS.md` every 30 minutes and kills an attempt that is provably stalled —
+nothing written under `$OUT` for 90 minutes *and* no CPU burned — so the dispatcher
+resumes it from the artifacts on disk. Both signals are required: the long stages spend
+long stretches building images and loading weights without touching `$OUT`. Anything else
+it finds is reported rather than acted on. `--no-watch` opts out; the knobs live under
+`watch` in `config/default.json`.
 
 Swapping a module, at the command line or in the config:
 

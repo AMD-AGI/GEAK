@@ -665,3 +665,117 @@ def test_no_runner_overrides_gpu_visibility():
                                      "ROCR_VISIBLE_DEVICES=",
                                      "HIP_VISIBLE_DEVICES=")), \
                 "%s.sh touches GPU visibility: %s" % (name, s)
+
+
+# ----------------------------------------------------------------- the watcher
+#
+# A campaign is a day and a half of GPU time nobody is watching. The watcher exists for
+# the failure that costs the most: a session that stopped working without exiting. These
+# cover the line between "wedged" and "working on something that does not touch $OUT",
+# because getting that line wrong means either never intervening or killing live work.
+
+def _snap(**over):
+    s = {"at": 10_000.0, "driver_alive": True, "driver_pid": 42,
+         "gpu_vram_used": None, "order": ["profile"],
+         "stages": {"profile": {"stage": "profile", "status": "running", "notes": "",
+                                "pids": [111, 222], "cpu": 900.0, "cpu_delta": 0.2,
+                                "quiet_since": 10_000.0 - 7200, "files": 3,
+                                "bytes": 10, "newest": 10_000.0 - 7200, "recent": [],
+                                "new_files": 0}}}
+    for k, v in over.items():
+        if k in s["stages"]["profile"]:
+            s["stages"]["profile"][k] = v
+        else:
+            s[k] = v
+    return s
+
+
+def test_both_signals_are_required_to_call_a_stage_stalled():
+    import watch
+    quiet_and_idle = watch.findings(_snap(), None, stall_sec=5400, min_cpu_sec=5.0)
+    assert any(kind == "stall" for kind, _, _ in quiet_and_idle)
+
+
+def test_a_quiet_stage_that_is_burning_cpu_is_left_alone():
+    """Building the image and loading 892 GB of weights both look like silence under
+    $OUT. Killing those is how a monitor turns a slow run into no run."""
+    import watch
+    out = watch.findings(_snap(cpu_delta=900.0), None, stall_sec=5400, min_cpu_sec=5.0)
+    assert not any(kind == "stall" for kind, _, _ in out)
+    assert any("burning CPU" in msg for _, _, msg in out)
+
+
+def test_a_stage_that_is_writing_is_never_stalled():
+    import watch
+    out = watch.findings(_snap(quiet_since=9_900.0), None, stall_sec=5400, min_cpu_sec=5.0)
+    assert not any(kind == "stall" for kind, _, _ in out)
+
+
+def test_a_dead_driver_is_reported_and_not_silently_restarted():
+    """Restarting a campaign is a decision with consequences; the watcher states the
+    situation and the command, and stops there."""
+    import watch
+    out = watch.findings(_snap(driver_alive=False), None, stall_sec=5400, min_cpu_sec=5.0)
+    kinds = [k for k, _, _ in out]
+    assert "report" in kinds and "stall" not in kinds[:1]
+    assert any("resume" in msg for _, _, msg in out)
+
+
+def test_a_finished_campaign_with_a_gone_driver_is_not_a_problem():
+    import watch
+    s = _snap(driver_alive=False)
+    s["stages"]["profile"]["status"] = "ok"
+    s["stages"]["profile"]["pids"] = []
+    assert watch.findings(s, None, stall_sec=5400, min_cpu_sec=5.0) == []
+
+
+def test_a_tick_writes_a_report_and_acts_within_its_cap(tmp_path, monkeypatch):
+    """Two ticks against a stage stalled from the start: the first kills the attempt, and
+    once the cap is reached it says so instead of killing again."""
+    import watch
+    cfg_path = _stub_cfg(tmp_path)
+    r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg_path),
+             "prepare", "profile"])
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    killed = []
+    monkeypatch.setattr(watch, "kill_tree", lambda pids, log: killed.append(list(pids)))
+    monkeypatch.setattr(watch, "tree_for", lambda out: [111])
+    monkeypatch.setattr(watch, "tree_cpu", lambda pids: 1.0)
+    monkeypatch.setattr(watch, "gpu_usage", lambda: None)
+
+    args = type("A", (), {"driver_pid": 0, "stall_sec": 0, "min_cpu_sec": 5.0,
+                          "on_stall": "restart-attempt", "max_interventions": 1})()
+    cfg = json.load(open(cfg_path))
+    cfg.setdefault("order", ["profile"])
+    cfg = __import__("stage").deep_merge(
+        json.load(open(os.path.join(WORKLOAD, "config", "default.json"))), cfg)
+    counts = {}
+    prev = watch.tick_once(cfg, None, args, 1, counts, lambda m: None)
+    assert killed == [[111]], "a stalled attempt must be killed so dispatch resumes it"
+    watch.tick_once(cfg, prev, args, 2, counts, lambda m: None)
+    assert killed == [[111]], "past the cap the watcher reports instead of killing again"
+
+    report = (tmp_path / "run" / "PROGRESS.md").read_text()
+    assert "| stage | state |" in report and "profile" in report
+    assert "interventions have already been spent" in report
+    assert json.load(open(str(tmp_path / "run" / "progress.json")))["stages"]["profile"]
+
+
+def test_the_watcher_starts_with_the_run_and_can_be_turned_off(tmp_path):
+    """One command still means one command: `all` brings its own reporting."""
+    script = tmp_path / "work.sh"
+    script.write_text('echo "{}" > "$OUT/kernel_ranking.json"\n'
+                      'python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok '
+                      '--artifact ranking=kernel_ranking.json\n')
+    cfg = _stub_cfg(tmp_path, agent_budget_sec=120)
+    r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg), "all"],
+            env_extra={"STUB_SCRIPT": str(script)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "watching:" in r.stdout
+    assert (tmp_path / "run" / "watch.log").exists()
+
+    r2 = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg), "all",
+              "--force", "--no-watch"], env_extra={"STUB_SCRIPT": str(script)})
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    assert "watching:" not in r2.stdout

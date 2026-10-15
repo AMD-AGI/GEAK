@@ -81,6 +81,16 @@
     }
   },
 
+  "watch": {
+    "_comment": "scripts/watch.py, started automatically by `stage.py all`. It reports every interval_sec into <run_root>/PROGRESS.md and acts on exactly one condition: a live stage that has written nothing under $OUT for stall_sec AND whose process tree used less than min_cpu_sec of CPU over that window. One signal alone lies -- the long stages legitimately spend forty minutes building an image or loading weights without touching $OUT -- so both are required. The action is to kill that attempt, which is how it resumes: the dispatcher's next attempt opens with a continuation prompt listing the artifacts already on disk. Nothing is deleted. After max_interventions on one stage it stops acting and says so, because a stage that wedges that often needs a person. Set on_stall to \"report\" to watch without ever acting.",
+    "enabled": true,
+    "interval_sec": 1800,
+    "stall_sec": 5400,
+    "min_cpu_sec": 5,
+    "on_stall": "restart-attempt",
+    "max_interventions": 3
+  },
+
   "runner_env": {
     "_comment": "state_dir_base must sit on local disk, never on NFS (the agent's sqlite gets poisoned there). env_file points at a credential/gateway file kept **outside the repo**; see runners/claude.env.example for the template — keys are never committed. Leaving model null uses the CLI's own default rather than inheriting an ANTHROPIC_MODEL that may already be exported in the environment.",
     "state_dir_base": "/dev/shm/workload_agent_state",

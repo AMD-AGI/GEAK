@@ -26,16 +26,42 @@ cd <GEAK repo root>
 CFG=workload/config/agentx_glm52.json
 
 python3 workload/scripts/stage.py --config $CFG --dry-run   # check resolution first
-python3 workload/scripts/stage.py --config $CFG run baseline
-python3 workload/scripts/stage.py --config $CFG run profile
-python3 workload/scripts/stage.py --config $CFG run roofline
-python3 workload/scripts/stage.py --config $CFG run optimize    # 48 h per kernel by default
-python3 workload/scripts/stage.py --config $CFG run applyback
+python3 workload/scripts/stage.py --config $CFG all         # the whole campaign, unattended
 ```
+
+That is the whole command. Every stage runs in order, including the ones that are
+procedures rather than scripts — those are dispatched through the runner, so no stage
+waits for a person. A single stage still runs on its own with `run <stage>` when you want
+one.
 
 `next` tells you which stage is due; `status` shows progress. Each stage's result is
 recorded in `$RUN_ROOT/STATE.json`; after an interruption, re-issue the same command and
-the run resumes where it stopped.
+the run resumes where it stopped — `all` skips what is already `ok`, and a resumed agent
+stage is handed a list of the artifacts already on disk so it continues rather than
+recomputes.
+
+`all` stops at the first stage that is not `ok`. That is deliberate: `blocked` means a
+precondition was missing, and carrying on would optimize kernels nobody profiled.
+
+### While it runs
+
+`all` starts `scripts/watch.py` alongside the run. It appends a report to
+`$RUN_ROOT/PROGRESS.md` every 30 minutes — per-stage state, how much was written, what
+changed in the window, which GPUs are held — and keeps the latest snapshot in
+`progress.json`.
+
+It intervenes in exactly one case: a live stage that has written nothing under `$OUT` for
+90 minutes **and** whose process tree used almost no CPU over that window. Both signals
+are required, because the long stages legitimately spend forty minutes building an image
+or loading weights without touching `$OUT`, and killing those turns a slow run into no
+run. The action is to kill that attempt — which is how it resumes, since the next attempt
+opens with a continuation prompt listing what is already there. Nothing on disk is
+touched. After three interventions on one stage it stops acting and says so.
+
+Everything else — a dead driver, a GPU held by another job, a stage that reported
+`blocked` — is reported, not acted on. Those need a decision, and a monitor inventing one
+is worse than a monitor that says plainly what it saw. Knobs, with reasons, under `watch`
+in `config/default.json`; `--no-watch` turns it off.
 
 ## Stages
 
