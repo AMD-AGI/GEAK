@@ -65,20 +65,61 @@ container_running() { [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2
 # ---- activity samplers (stall mode) ----------------------------------------
 # Max GPU utilisation across devices, as an integer percent. Echoes "" (unknown)
 # when no GPU tool is available — the caller treats unknown as "cannot prove idle".
+# No rocm-smi fallback: every ROCm in the support matrix ships amd-smi, and rocm-smi is no longer
+# built as of ROCm 7.0 / the standard ROCm 10.1 build, so a `command -v rocm-smi` gate here would
+# just never fire on a current stack. The amd-smi call is decoupled from the parse (`raw=... || true`)
+# so an absent/failed amd-smi can never poison the parse stage, which runs against a fixed string and
+# degrades to "" (unknown) on its own — preserving the "cannot prove idle -> warn-only" bias below.
+#
+# Deliberately NOT given the resident-process fallback that ci/dispatch/held_nodes.sh's busy probe
+# has (for the same "usage" block going absent on some amd-smi builds): the two call sites have
+# opposite cost asymmetries. For the dispatcher, treating unknown as busy just costs a missed
+# dispatch — cheap, so trading it for a coarser-but-always-available signal is worth it. Here, this
+# feeds a stall/watchdog detector: a residency fallback would let a single stray or hung-but-resident
+# process read as "busy" and mask the very hang this detector exists to catch — the more expensive
+# failure of the two. So this stays unknown-is-fine; do not port that fallback here.
 gpu_util_max() {
-  local out max=""
-  if command -v rocm-smi >/dev/null 2>&1; then
-    # "GPU use (%)" rows; grab all integers in the use column.
-    out="$(rocm-smi --showuse 2>/dev/null | grep -oiE 'GPU use \(%\)[^0-9]*[0-9]+' | grep -oE '[0-9]+$')"
-  elif command -v amd-smi >/dev/null 2>&1; then
-    out="$(amd-smi monitor -u 2>/dev/null | grep -oE '[0-9]+' )"
+  local raw max=""
+  if command -v amd-smi >/dev/null 2>&1; then
+    raw="$(amd-smi metric --usage --json 2>/dev/null)" || true
+    max="$(printf '%s' "$raw" | python3 -c '
+import json, sys
+
+def scalar(x):
+    if isinstance(x, dict):
+        x = x.get("value")
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    return float(x)
+
+def lookup(mapping, *names):
+    if not isinstance(mapping, dict):
+        return None
+    for name in names:
+        if name not in mapping:
+            continue
+        value = mapping[name]
+        if value is None or (isinstance(value, str) and value.strip().upper() in ("", "N/A")):
+            continue
+        return value
+    return None
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+best = None
+for row in data.get("gpu_data", []) or []:
+    v = scalar(lookup(row.get("usage"), "gfx_activity", "graphics_activity", "gfx_usage", "apu_average_gfx_activity"))
+    if v is not None and (best is None or v > best):
+        best = v
+print(int(round(best)) if best is not None else "")
+' 2>/dev/null)"
   elif command -v nvidia-smi >/dev/null 2>&1; then
-    out="$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | grep -oE '[0-9]+')"
+    max="$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | grep -oE '[0-9]+' | sort -n | tail -1)"
   else
     echo ""; return 0
   fi
-  [ -n "$out" ] || { echo ""; return 0; }
-  max="$(printf '%s\n' "$out" | sort -n | tail -1)"
   echo "${max:-}"
 }
 

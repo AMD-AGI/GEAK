@@ -107,7 +107,75 @@ held_activity() {
   local jid="$1" out busy ncont fs
   out="$(held_exec "$jid" "$HELD_PROBE_TIMEOUT_S" \
     "HELD_RW_DIR=$(printf '%q' "$HELD_RW_PROBE_DIR") HELD_IGN=$(printf '%q' "$HELD_IGNORE_CONTAINERS")"'
-    b=$(rocm-smi --showuse --csv 2>/dev/null | awk -F, "NR>1 && \$2 ~ /^[0-9]+$/ {print \$2}" | sort -rn | head -1)
+    b=$(amd-smi metric --usage --json 2>/dev/null | python3 -c "
+import json, sys
+def scalar(x):
+    if isinstance(x, dict):
+        x = x.get(\"value\")
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    return float(x)
+def lookup(mapping, *names):
+    if not isinstance(mapping, dict):
+        return None
+    for name in names:
+        if name not in mapping:
+            continue
+        value = mapping[name]
+        if value is None or (isinstance(value, str) and value.strip().upper() in (\"\", \"N/A\")):
+            continue
+        return value
+    return None
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+best = None
+for row in data.get(\"gpu_data\", []) or []:
+    v = scalar(lookup(row.get(\"usage\"), \"gfx_activity\", \"graphics_activity\", \"gfx_usage\", \"apu_average_gfx_activity\"))
+    if v is not None and (best is None or v > best):
+        best = v
+print(int(round(best)) if best is not None else \"\")
+" 2>/dev/null)
+    if [ -z "$b" ]; then
+      # No GFX-percentage telemetry on this amd-smi build (observed live on ROCm 7.2.3 /
+      # tool 26.2.2, where the whole "usage" block is the bare string "N/A"). Falling
+      # back to rocm-smi here would reintroduce the tool we are removing, and leaving
+      # this empty makes the node permanently unreachable ("?" -> never idle -> never
+      # dispatched) on an officially supported stack, which is the exact failure this
+      # port exists to fix. `amd-smi process` is on every stack in the matrix and still
+      # answers the question held_is_idle actually needs: is anything resident on the
+      # GPU. 0 = no compute process attached to any GPU (idle); 100 = at least one is.
+      # 100 (not a literal process count) keeps the field a percentage and guarantees
+      # it is never mistaken for idle by the "$busy" -le "$HELD_IDLE_PCT" check below,
+      # regardless of how HELD_IDLE_PCT is configured. This is coarser than a real GFX
+      # percentage, but matches what held_activity already does elsewhere: it treats
+      # occupancy (containers, here resident processes) as binary, and held_is_idle
+      # already requires ncont == 0 on top of the percentage check. Only prints "" (and
+      # so "?") when process-level telemetry ALSO cannot be read at all.
+      b=$(amd-smi process --json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = None
+rows = data if isinstance(data, list) else (data.get(\"gpu_data\") if isinstance(data, dict) else None)
+if rows is None:
+    print(\"\")
+else:
+    saw_gpu = False
+    busy = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        saw_gpu = True
+        for proc in row.get(\"process_list\", []) or []:
+            info = proc.get(\"process_info\") if isinstance(proc, dict) else None
+            if isinstance(info, dict):
+                busy = True
+    print((\"100\" if busy else \"0\") if saw_gpu else \"\")
+" 2>/dev/null)
+    fi
     c=$(docker ps --format "{{.Names}}" 2>/dev/null | grep -Ev "$HELD_IGN" | wc -l)
     w=ro
     t="$HELD_RW_DIR/.held_rw_probe_$$_${RANDOM}"
