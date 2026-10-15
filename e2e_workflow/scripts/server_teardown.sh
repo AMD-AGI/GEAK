@@ -167,7 +167,7 @@ _server_descendants() {
     }'
 }
 
-server_teardown() {
+_server_teardown_launched() {
   [ -n "${SERVER_PID:-}" ] || return 0
   # A server we launched can never BE init, and a non-numeric pid means a pid file /
   # launcher handed us garbage. Refuse before any signal, so the pid-only fallback
@@ -242,4 +242,44 @@ server_teardown() {
     done
   fi
   wait "$SERVER_PID" 2>/dev/null || true
+}
+
+# A Magpie-launched ATOM server leads its OWN process group (the recipe setsid's it),
+# while SERVER_PID above is GEAK's supervisor in a different group. Reaping that group
+# was the supervisor's TERM trap alone -- a trap that never installs when TERM arrives
+# ignored, and never runs when the supervisor is SIGKILLed -- leaving rank workers
+# holding every GPU. So teardown reaps it directly, on every exit path of the above.
+#
+# Identity: the kernel never hands out a pid number while a process group of that id
+# still has members, so a non-empty group named MAGPIE_INNER_SERVER_PID is the one this
+# launch created, even after its leader exited. An empty group needs nothing.
+_reap_magpie_inner_group() {
+  local _g="${MAGPIE_INNER_SERVER_PID:-}" _p _members _i _grace="${SERVER_STOP_GRACE_S:-10}"
+  unset MAGPIE_INNER_SERVER_PID
+  case "$_g" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$_g" -gt 1 ] || return 0
+  case "$_grace" in ''|*[!0-9]*) _grace=10 ;; esac
+  for _p in $SERVER_PROTECTED_PGIDS; do
+    [ "$_g" = "$_p" ] && { echo "!!! magpie inner group $_g is protected; not signalled." >&2; return 0; }
+  done
+  _members="$(ps -eo pid=,pgid= 2>/dev/null | awk -v g="$_g" '$2==g{print $1}')"
+  [ -n "$_members" ] || return 0
+  for _p in $_members; do
+    if [ "$_p" = "1" ] || [ "$_p" = "$BENCH_PID" ]; then
+      echo "!!! magpie inner group $_g contains pid $_p; not signalled." >&2
+      return 0
+    fi
+  done
+  echo ">>> Reaping Magpie inner server group pgid=$_g ($(echo $_members | wc -w) live member(s)) ..."
+  kill -TERM "-$_g" 2>/dev/null || true
+  for _i in $(seq 1 "$_grace"); do
+    kill -0 "-$_g" 2>/dev/null || return 0
+    sleep 1
+  done
+  kill -KILL "-$_g" 2>/dev/null || true
+}
+
+server_teardown() {
+  _server_teardown_launched
+  _reap_magpie_inner_group
 }
