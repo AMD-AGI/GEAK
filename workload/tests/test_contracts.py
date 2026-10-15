@@ -282,6 +282,83 @@ def test_a_check_that_could_not_run_is_unproven_not_ok(tmp_path):
     assert all(c["status"] != "ok" for c in doc["checks"])
 
 
+# ----------------------------------------------------------------- adopting a receipt
+#
+# A receipt is somebody else's format. The temptation when it does not fit is to retype
+# the number into a flat file -- after which receipt_sha256 attests to the copy, and the
+# one thing this step exists to catch (the original changed underneath us) is gone.
+
+ADOPT = os.path.join(WORKLOAD, "stages", "baseline", "adopt-measured-receipt")
+
+
+def _adopt(tmp_path, params):
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    (tmp_path / "params.json").write_text(json.dumps(params))
+    r = run([sys.executable, os.path.join(ADOPT, "adopt.py")],
+            env_extra={"OUT": str(out), "PARAMS": str(tmp_path / "params.json"),
+                       "WORKLOAD_ROOT": WORKLOAD, "GEAK_ROOT": GEAK,
+                       "STAGE": "baseline", "STAGE_SKILL": "adopt-measured-receipt"})
+    return r, json.load(open(out / "result.json"))
+
+
+def test_a_nested_receipt_is_read_where_it_lives(tmp_path):
+    """The AgentX result document records throughput four levels down and nothing at the
+    top level. A dotted key reaches it; the alternative is a hand-copied number."""
+    (tmp_path / "r.json").write_text(json.dumps(
+        {"model": "deepseek-ai/DeepSeek-V4-Pro-0813", "tp": 8, "ep": 8, "num_gpus": 8,
+         "conc": 128,
+         "request_metrics": {"throughput": {"output": {"tokens_per_second": 2935.11997}}}}))
+    r, res = _adopt(tmp_path, {"receipt": str(tmp_path / "r.json"),
+                               "throughput_key":
+                                   "request_metrics.throughput.output.tokens_per_second"})
+    assert res["status"] == "ok", r.stdout + r.stderr
+    doc = json.load(open(tmp_path / "out" / "baseline.json"))
+    assert doc["throughput"] == 2935.11997
+    # the deployment shape travels with it, under its canonical names
+    assert doc["config"]["gpus"] == 8 and doc["config"]["concurrency"] == 128
+    # and what it served, so the target gate has something to cross-check
+    assert doc["provenance"]["model"] == "deepseek-ai/DeepSeek-V4-Pro-0813"
+
+
+def test_a_reference_in_a_sibling_document_is_hashed_too(tmp_path):
+    """Throughput here, the CI figure next door. Both are evidence, so both are copied
+    and hashed -- a reference read from an unrecorded file is a number from nowhere."""
+    (tmp_path / "r.json").write_text(json.dumps({"output_tokens_per_second": 2935.11997}))
+    (tmp_path / "c.json").write_text(json.dumps(
+        {"submission_valid": True, "comparison": [{"ci": 2982.36554, "local": 2935.11997}]}))
+    r, res = _adopt(tmp_path, {"receipt": str(tmp_path / "r.json"),
+                               "reference_receipt": str(tmp_path / "c.json"),
+                               "reference_key": "comparison.0.ci"})
+    assert res["status"] == "ok", r.stdout + r.stderr
+    doc = json.load(open(tmp_path / "out" / "baseline.json"))
+    assert doc["reference"]["value"] == 2982.36554
+    assert round(doc["reference"]["ratio"], 5) == 0.98416
+    assert doc["provenance"]["reference_receipt_sha256"]
+    assert (tmp_path / "out" / "reference.copy.json").exists()
+
+
+def test_an_invalid_submission_blocks_even_from_the_sibling(tmp_path):
+    """submission_valid lives in the comparison document on this harness. A validity gate
+    that only reads one of the two files passes a run the harness itself failed."""
+    (tmp_path / "r.json").write_text(json.dumps({"output_tokens_per_second": 2935.0}))
+    (tmp_path / "c.json").write_text(json.dumps({"submission_valid": False}))
+    _, res = _adopt(tmp_path, {"receipt": str(tmp_path / "r.json"),
+                               "reference_receipt": str(tmp_path / "c.json")})
+    assert res["status"] == "blocked"
+    assert "submission_valid" in res["notes"]
+
+
+def test_a_named_key_that_is_absent_is_not_silently_replaced(tmp_path):
+    """Naming throughput_key and getting an alias instead would report a different metric
+    under the name that was asked for."""
+    (tmp_path / "r.json").write_text(json.dumps({"output_tokens_per_second": 2935.0}))
+    _, res = _adopt(tmp_path, {"receipt": str(tmp_path / "r.json"),
+                               "throughput_key": "metrics.output.not_here"})
+    assert res["status"] == "blocked"
+    assert "throughput_key" in res["notes"]
+
+
 def test_physical_core_plan_drops_smt_siblings():
     """One logical CPU per physical core, from the machine's own topology. Guessing that
     siblings are cpu and cpu+n/2 is right on one node and wrong on the next."""

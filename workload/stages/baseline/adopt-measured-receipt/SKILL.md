@@ -23,8 +23,11 @@ comparisons to the wrong reference — without ever raising an error.
 | `metric` | no | metric name recorded in the output; default `output_token_throughput` |
 | `unit` | no | default `tok/s` |
 | `noise_band` | no | keep threshold; default `1.045` (calibrated by measurement, not the documented 1.02) |
-| `throughput_key` | no | which field to read; by default each known alias is tried in turn |
-| `reference_key` | no | reference-value field; default `ci_output_tokens_per_second` |
+| `throughput_key` | no | which field to read; by default each known alias is tried in turn. A **dotted path** (`request_metrics.throughput.output.tokens_per_second`, list indices allowed) reaches into a nested receipt |
+| `reference_receipt` | no | a sibling document holding the reference figure, when the harness writes the throughput and the comparison into two files. Copied and hashed exactly like the receipt |
+| `reference_key` | no | reference-value field, read from `reference_receipt` if set, otherwise from the receipt; default `ci_output_tokens_per_second` |
+| `model_key`, `image_key` | no | where the receipt records what it served; default `model` / `image`. Recorded in provenance, where `scripts/target.py` cross-checks it against the declared target |
+| `config` | no | deployment shape to record when the receipt does not carry flat `tp`/`ep`/`gpus`/`concurrency` keys |
 | `max_reference_drift` | no | maximum relative deviation from the reference; default `0.05`, beyond which the stage reports `blocked` |
 | `require_valid` | no | default `true`: `submission_valid`/`power_valid` being false yields `blocked` |
 | `node` | no | which node the receipt was measured on; `null` if omitted, and applyback will warn about cross-node risk |
@@ -41,7 +44,13 @@ Or manually: `source $OUT/env.sh && bash $SKILL_ROOT/run.sh`.
 
 `$OUT/baseline.json` (schema in `../README.md`), `$OUT/receipt.copy.json` (a snapshot of
 the original receipt with its sha256, so a later edit to the original cannot go
-unnoticed), and `$OUT/result.json`.
+unnoticed), `$OUT/reference.copy.json` when `reference_receipt` is set, and
+`$OUT/result.json`.
+
+**Nothing is retyped.** A receipt that nests its numbers, or splits them across two
+documents, is read where it is — `throughput_key` takes a path and `reference_receipt`
+names the sibling. Hand-copying a figure into a flat file would produce a receipt whose
+sha256 attests only to the copy, which is the one thing this step exists to prevent.
 
 ## When this reports `blocked` rather than `ok`
 
