@@ -5,10 +5,10 @@ confidence: ★★
 effect: ~1.00x each across six directions on all three cases (graph capture/replay, XCD + GROUP_M swizzle, cache modifiers, epilogue bias-fold, split-K and M-adaptive dual-tile, LLIR/AMDGCN scheduling flags); the negatives are unambiguous — split-K measures 0.53x on the small-M case and dropping the LDS round-trip measures 2.5x slower
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 6
+losses: 1
+attempts: 8
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-26
 name: the-in-source-ceiling-of-an-mfma-bound-dense-gemm-dense-gemm-gfx950-compute-bound
 description: Once an fp16 dense GEMM sits at ~2/3 of its MFMA roof, six host/layout/algorithm directions each returned ~1.00x; the residual gap is a backend lowering gap
 keywords: ['dense-gemm', 'roofline', 'mfma', 'split-k', 'launch-overhead', 'hip-graph', 'xcd-swizzle', 'convert-layout', 'gfx950', 'compute-bound', 'anti-pattern']

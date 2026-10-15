@@ -1,0 +1,29 @@
+{
+  "run_id": "glm52_qkv_a_proj_decode_flydsl-citations",
+  "date": "2026-09-24",
+  "kernel_names": [
+    "glm52_qkv_a_proj_decode_flydsl"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "one-dispatch-for-split-kv-decode-and-the-protocol-that-pays--attention-decode-gfx950-decode.md",
+      "round": 1,
+      "direction": "r1_d1",
+      "specialty": "memory",
+      "cited_then_verified": 1.283,
+      "became_winner": false
+    },
+    {
+      "card": "split-only-up-to-one-workgroup-per-cu-and-make-pipeline-dept-attention-decode-gfx950-decode.md",
+      "round": 2,
+      "direction": "r2_d0",
+      "specialty": "compute",
+      "cited_then_verified": 1.3962,
+      "became_winner": true
+    }
+  ]
+}

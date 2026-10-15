@@ -10,7 +10,8 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 - `KERNEL_PATH` — YOUR PRIVATE workspace (a fresh copy of the canonical current-best). Operate ONLY here.
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
-  `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds).
+  `baseline_per_case`, `CANDIDATE_FLOOR` (the search-admission floor; normally 1.0, lower during an
+  author migration climb), and the cross-round `INSIGHTS` (durable findings from earlier rounds).
 - **DEEP-MODE (optional — act only if present in your inputs; a normal run omits all three):**
   `SHARED_KB` (cross-backend blackboard — Read it and BORROW any technique that plausibly transfers to
   your kernel; skip its disproved dead-ends), `E2E_FEEDBACK` (latest end-to-end result+problems — if a
@@ -55,6 +56,11 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
   `languages/<dir>/` (map: triton→`triton_amd`, hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`,
   flydsl→`flydsl`, tilelang→`tilelang`; read `overview.md`/`patterns.md`/`knobs.md`, plus flydsl's
   `authoring_*.md`) — the source card does not teach the target backend.
+- **To open a card's `repo@commit:path:line` citation**, run
+  `python3 KERNEL_KNOWLEDGE_DIR/index/resolve_citation.py 'ROCm/aiter@<commit>:<path>:<line>'`. Do not
+  `grep` for the path: this box carries five `aiter` checkouts at five commits, the commit is the
+  identity and the path is not, and the nearest tree will hand you a different file (or none) while
+  looking like the card is broken.
 
 **Contract (do not violate — this guarantees the base can only help, never hurt):**
 - *Facts/how-to, not decisions.* The base may be stale/incomplete/wrong. It only *adds candidates and
@@ -104,8 +110,10 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    METRIC is the time-weighted ratio-of-sums (workload-aligned), ALSO compute and report
    `speedup_weighted = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's `weight` from
    `baseline_per_case` — that is the PRIMARY number you optimize toward; the geomean is secondary.
-5. **Save patch** when geomean > 1.0: `cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`.
-   Do this the MOMENT you have a >1.0x result — not at the end. `best_patch.diff` is the RECOVERY
+5. **Save patch** when the PRIMARY metric clears `CANDIDATE_FLOOR`: `cd $KERNEL_PATH && git diff >
+   $OUTPUT_DIR/best_patch.diff`. In author mode this may still be below the online baseline; it is a
+   search step that must beat the current seed before the orchestrator banks it, not a ship claim.
+   Do this the MOMENT you clear the floor — not at the end. `best_patch.diff` is the RECOVERY
    artifact: if your final return is lost (you time out, crash, or mis-format the StructuredOutput),
    the lane falls back to re-measuring whatever >1.0x patch it finds on disk. A patch left on disk
    still counts; work that only exists in a lost return is gone. Re-save it whenever `best` improves.
@@ -149,5 +157,5 @@ didn't. (This is your required mini-report.)
 checks and measurement commands succeeded. An unresolved invalid measurement uses the status and
 recovery rules above, even if no patch remains; never label it a measured no-op.
 
-If you achieved no speedup (or correctness could not be fixed), still submit with `status` =
+If you did not clear `CANDIDATE_FLOOR` (or correctness could not be fixed), still submit with `status` =
 `failed`/`partial`, NO patch_file, and notes explaining why — that is valuable signal for the ledger.

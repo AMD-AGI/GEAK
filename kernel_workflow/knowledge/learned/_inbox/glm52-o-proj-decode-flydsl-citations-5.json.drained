@@ -1,0 +1,21 @@
+{
+  "run_id": "glm52_o_proj_decode_flydsl-citations",
+  "date": "2026-09-26",
+  "kernel_names": [
+    "glm52_o_proj_decode_flydsl"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "one-dispatch-for-split-kv-decode-and-the-protocol-that-pays--attention-decode-gfx950-decode.md",
+      "round": 1,
+      "direction": "r1_d0",
+      "specialty": "algorithm",
+      "cited_then_verified": 1.0016,
+      "became_winner": false
+    }
+  ]
+}

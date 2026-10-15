@@ -1,0 +1,21 @@
+{
+  "run_id": "gemm_flydsl-citations",
+  "date": "2026-09-26",
+  "kernel_names": [
+    "gemm_flydsl"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "size-the-exposed-host-residue-before-buying-a-launch-overhea-dense-gemm-gfx950-compute-bound.md",
+      "round": 1,
+      "direction": "r1_d0",
+      "specialty": "host_runtime",
+      "cited_then_verified": 1.0909,
+      "became_winner": false
+    }
+  ]
+}

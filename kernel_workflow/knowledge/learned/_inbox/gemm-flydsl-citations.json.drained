@@ -1,0 +1,21 @@
+{
+  "run_id": "gemm_flydsl-citations",
+  "date": "2026-09-24",
+  "kernel_names": [
+    "gemm_flydsl"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "per-region-isa-census-before-hot-loop-tuning-locate-on-cpu-p-method-gfx950-n-a.md",
+      "round": 2,
+      "direction": "r2_d1",
+      "specialty": "algorithm",
+      "cited_then_verified": 1.0051,
+      "became_winner": true
+    }
+  ]
+}

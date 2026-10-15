@@ -28,7 +28,8 @@ coherent implementation, and iterate hard.
 - `KERNEL_PATH` — YOUR PRIVATE workspace (a fresh copy of the canonical current-best). Operate ONLY here.
 - `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
-  `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds — read
+  `baseline_per_case`, `CANDIDATE_FLOOR` (search admission; may be below 1.0 in author mode), and the
+  cross-round `INSIGHTS` (durable findings from earlier rounds — read
   them; do not re-walk confirmed dead-ends).
 - **DEEP-MODE (optional — act only if present; a normal run omits all three):** `SHARED_KB` (cross-backend
   blackboard — borrow transferable techniques, skip its dead-ends), `E2E_FEEDBACK` (end-to-end ground
@@ -60,9 +61,14 @@ When `KERNEL_KNOWLEDGE_DIR` is non-empty AND `KK_OPERATOR` is set, mine the card
 cannot write from memory — `flydsl`/`tilelang`/`gluon` map to the same dir name, triton→`triton_amd`,
 hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`) to *widen* your candidate techniques (knobs,
 skeletons, split-K/preshuffle, fusion, MFMA/numerics pitfalls, alternative backends worth mimicking).
-**Contract:** facts/how-to, not decisions; it may be stale/wrong; your measured benchmark is the floor;
-ignore stored `status`/TFLOPS as decisions. It can only add candidates, never narrow them. Skip entirely
+**Contract:** facts/how-to/conditioned candidate cards, never final verdicts; it may be stale/wrong;
+your measured benchmark is the floor. Ignore stored `status`/TFLOPS as verdicts. It can only add
+candidates, never narrow them. Skip entirely
 if empty / `KK_OPERATOR` null.
+**To open a card's `repo@commit:path:line` citation**, run
+`python3 KERNEL_KNOWLEDGE_DIR/index/resolve_citation.py 'ROCm/aiter@<commit>:<path>:<line>'` — this box
+carries five `aiter` checkouts at five commits, so the commit is the identity and the path is not;
+`grep`-ing the nearest tree hands you a different file (or none) and reads as a broken card.
 **Cross-backend rewrite/port** (your rewrite targets a language ≠ the current source — ANY source→target,
 e.g. ck→flydsl, triton→tilelang, hip→ck): ALSO mine the TARGET backend card
 `operators/<KK_OPERATOR>/backends/<target>.md` and the target language's authoring how-to under
@@ -123,9 +129,11 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    from other categories (e.g. warp-cooperative rewrite + native output layout + dispatch fusion).
 3. **Implement → correctness → benchmark** the change. Keep it only if correct AND faster than your
    current best. Save `best_patch.diff` (`cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`)
-   the MOMENT you set a new best with geomean > 1.0 — not at the end. It is the RECOVERY artifact: if
+   the MOMENT you set a new best whose PRIMARY metric clears `CANDIDATE_FLOOR` — not at the end. In
+   author mode a sub-1.0 result is only a composable search step, never a shipping claim. It is the
+   RECOVERY artifact: if
    your final return is lost (timeout/crash/mis-formatted StructuredOutput), the lane falls back to
-   re-measuring whatever >1.0x patch it finds on disk. A patch on disk still counts; a result that only
+   re-measuring whatever above-floor patch it finds on disk. A patch on disk still counts; a result that only
    exists in a lost return is gone.
 4. **Self-profile to re-steer**: every few accepted changes, re-run
    `bash $SKILL_DIR/scripts/profile_kernel.sh $GPU_ID "<benchmark cmd that cd's into $KERNEL_PATH>" $OUTPUT_DIR/profile_rN`
@@ -139,7 +147,7 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    try ONE more radically different approach, then stop); OR
    (c) a hard cap of ~40 measured iterations.
    On a 3-identical-error crash loop, reset to your best saved patch and change approach (don't grind).
-6. If your best correct version regresses vs baseline (it shouldn't), submit `status:"failed"` with no
+6. If your best correct version does not clear `CANDIDATE_FLOOR`, submit `status:"failed"` with no
    patch and explain — that is signal for the ledger.
 
 ## Outputs

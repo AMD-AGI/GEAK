@@ -16,8 +16,10 @@ sources:
 ## TL;DR
 The Local Data Share (LDS) is the on-CU scratchpad that stages GEMM/attention operands for the matrix
 cores. Capacity: **64 KB/CU on CDNA3 (MI300X)**, **160 KB/CU on CDNA4 (MI350X/MI355X)** with ~2× LDS
-bandwidth. LDS is split into **32 banks of 4 bytes** (a 128-byte row); two lanes in a wave hitting the
-same bank on different addresses serialize (**bank conflict**). The two fixes are **padding** (add a
+bandwidth. LDS is split into 4-byte banks — **32 on CDNA3 (a 128-byte row), 64 on CDNA4 (a 256-byte
+row)**; two lanes in a wave hitting the same bank on different addresses serialize (**bank conflict**).
+A swizzle or pad derived for one bank count is not guaranteed conflict-free on the other, so re-derive
+it when moving a kernel between gfx942 and gfx950. The two fixes are **padding** (add a
 stride so consecutive rows land in different banks) and **XOR swizzle** (permute the column index so
 `ds_read`/`ds_write` are conflict-free). LDS capacity directly bounds tile/head-dim size, so the
 CDNA3→CDNA4 jump materially relaxes flash-attention head-dim limits. See
@@ -27,8 +29,9 @@ CDNA3→CDNA4 jump materially relaxes flash-attention head-dim limits. See
 - **Capacity**: CDNA3 = 64 KB/CU; CDNA4 = 160 KB/CU (≈2.5×) plus a direct **L1→LDS load path** that
   removes the intermediate-register hop (see `[[optimization/memory_pipelining.md]]`,
   `[[hardware/cdna4_mi350/memory.md]]`).
-- **Banks**: 32 banks × 4 B = a 128-B-wide structure. Model LDS as a 2-D array `[rows][32]`; address
-  `a` maps to bank `(a/4) % 32`.
+- **Banks**: CDNA3 has 32 banks × 4 B = a 128-B-wide structure; model LDS as `[rows][32]`, address
+  `a` maps to bank `(a/4) % 32`. CDNA4 has 64 banks (256 B wide), bank `(a/4) % 64` — see
+  `[[hardware/cdna4_mi350/memory.md]]`. The examples below use the CDNA3 numbers; substitute 64 on gfx950.
 - **Conflict**: when multiple lanes of a wave access *different* 4-B words in the *same* bank in one
   instruction, accesses serialize (N-way conflict ⇒ N× the `ds_*` cost). Broadcast (same address) is free.
 - **Why it bites GEMM**: storing a tile column-major / reading row-major (or vice-versa for the MFMA

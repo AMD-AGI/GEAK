@@ -1,0 +1,21 @@
+{
+  "run_id": "glm52_o_proj_decode_flydsl-citations",
+  "date": "2026-09-25",
+  "kernel_names": [
+    "glm52_o_proj_decode_flydsl"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "a-single-partition-control-separates-a-rejected-kv-split-fro-attention-decode-gfx950-decode.md",
+      "round": 2,
+      "direction": "r2_d0",
+      "specialty": "algorithm",
+      "cited_then_verified": 0,
+      "became_winner": false
+    }
+  ]
+}

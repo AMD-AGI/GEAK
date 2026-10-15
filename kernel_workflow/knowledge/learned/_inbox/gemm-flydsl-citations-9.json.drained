@@ -1,0 +1,29 @@
+{
+  "run_id": "gemm_flydsl-citations",
+  "date": "2026-09-26",
+  "kernel_names": [
+    "gemm_flydsl"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "cache-policy-is-a-per-buffer-per-bucket-decision-on-a-bf16-f-moe-grouped-gemm-gfx950-both.md",
+      "round": 1,
+      "direction": "r1_d1",
+      "specialty": "memory",
+      "cited_then_verified": 1.1936,
+      "became_winner": true
+    },
+    {
+      "card": "collapse-the-co-resident-sequence-set-to-break-the-kv-addres-attention-decode-gfx950-decode.md",
+      "round": 2,
+      "direction": "r2_d1",
+      "specialty": "memory",
+      "cited_then_verified": 1.2847,
+      "became_winner": false
+    }
+  ]
+}

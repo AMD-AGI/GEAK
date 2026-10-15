@@ -2,9 +2,10 @@
 
 
 > **Consumption contract (read this).** This base is **reference material** — it may be stale,
-> incomplete, or wrong. It provides *facts and how-to* (APIs, code skeletons, knobs, pitfalls, which
-> backends exist), **not decisions**. Consumers (kernel_workflow / e2e_workflow agents) must form their own
-> judgment and **decide by on-box measurement** — never treat anything here (including `status`/TFLOPS,
+> incomplete, or wrong. It provides facts, how-to and **conditioned candidate cards** (what to try,
+> alternatives, evidence strength and limits), **not final verdicts**. Consumers
+> (kernel_workflow / e2e_workflow agents) must form their own judgment and **decide by on-box
+> measurement** — never treat anything here (including `status`/TFLOPS,
 > which are dated evidence) as a verdict. Machine consumers enumerate candidates from
 > `index/capability_index.yaml` (no ranking) and then measure. Adding this base can only *seed/locate*
 > candidates faster; it must never reduce an agent's result below its measured baseline.
@@ -17,9 +18,10 @@ It has two jobs:
 2. **Be a SOTA registry** — for **every `operator × backend` cell**, point at the *best known
    implementation(s)* with source, measured performance, applicability, knobs, and pitfalls.
 
-> **~586 docs · ~43,900 lines · 0 broken links · every content file ends with `## Sources`.**
-> 14× the file count of the original `perf_knowledge`. Built P0→P4 + hot-path enrichment, 2026-06-08
-> (see [`index/changelog.md`](index/changelog.md)).
+> **Links all resolve and every content file cites its sources** — both checked by
+> [`test_docs_contract.py`](test_docs_contract.py), not asserted here. Exemptions (indexes,
+> templates, vendored skills) are listed in that file with a reason each.
+> Built P0→P4 + hot-path enrichment from 2026-06-08 (see [`index/changelog.md`](index/changelog.md)).
 
 ---
 
@@ -29,6 +31,8 @@ It has two jobs:
 |---|---|
 | **Pick the best backend for an operator** | [`index/sota_matrix.md`](index/sota_matrix.md) (human) · [`index/sota_registry.yaml`](index/sota_registry.yaml) (machine) → the operator's [`operators/<op>/backends/<backend>.md`](operators/) card |
 | **Decide what to even try** | [`index/decision_trees.md`](index/decision_trees.md) |
+| **See which axes keep paying and which keep closing** | [`index/run_recurrence.md`](index/run_recurrence.md) — base rates rolled up from the workflows' own learned cards (generated) |
+| **Get a concrete GEMM development decision** | [`corpus/gemm_decisions.md`](corpus/gemm_decisions.md) — cards in the order a kernel is written (steps 1-10: math contract, architecture and path, grid/tile/split-K, layout, data movement, MFMA, pipeline, epilogue, host/launch, validation): condition → action → alternatives → other backends' solutions → evidence strength → limits, plus the FlyDSL configs and per-bucket backend choices from AITER's tuned databases. Trace a card to the six-language source index in [`gemm_source_evidence.md`](corpus/gemm_source_evidence.md) |
 | **Understand an operator** | [`operators/<op>/overview.md`](operators/) (+ `tuning` / `numerics` / `fusion`) |
 | **Learn the hardware / a language / a library** | [`hardware/`](hardware/) · [`languages/`](languages/) · [`backends/`](backends/) |
 | **Apply a cross-cutting technique** | [`optimization/`](optimization/) · [`quantization/`](quantization/) |
@@ -45,7 +49,11 @@ It has two jobs:
 
 ```
 perf_knowledge/
-├── index/         (10)  navigation + SOTA registry + taxonomy + sourcing rules + templates + generator
+├── index/         (11)  navigation + SOTA registry + taxonomy + sourcing rules + templates + generators
+│                        + run_recurrence (base rates fed back from workflow runs)
+├── corpus/              actionable development cards (first read) + six-language source evidence
+│                        (traceability) + shipped tuning starting points. Source-observed, shipped-
+│                        sweep and measured evidence are labelled rather than collapsed.
 ├── hardware/      (27)  CDNA1–4 deep dives + shared (matrix core, memory, numerics)
 ├── languages/     (42)  triton · flydsl · hip · ck · asm · tilelang · rocwmma · hipkittens · mojo · cutlass
 ├── backends/      (35)  aiter · hipblaslt · ck_lib · rocblas/tunableop · fa_rocm · mori/rccl · miopen
@@ -97,6 +105,11 @@ matrix badge links correctly.
 
 - **Every content file ends with `## Sources`** citing primary sources — ROCm docs/blogs, CDNA ISA §,
   GitHub `repo@commit:path`, arXiv, vendor benchmarks.
+- **Every `repo@commit:path` citation resolves on this box**, checked by `test_docs_contract.py`.
+  The commit is the identity and the path is not: five aiter checkouts live here at five different
+  commits, so resolve with
+  [`index/resolve_citation.py`](index/resolve_citation.py) (git-object based) rather than by
+  `grep`-ing whichever tree is nearest. See [`backends/aiter/overview.md`](backends/aiter/overview.md).
 - **Every performance number is measured** and tagged `value @ hardware, ROCm/lib version, date`, or
   explicitly labeled **vendor-reported**. No theoretical peak presented as achievable (MI300X commonly
   sustains ~45% of peak).

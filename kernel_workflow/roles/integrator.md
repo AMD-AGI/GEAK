@@ -8,7 +8,7 @@ do not invent new optimizations; you compose and reconcile existing ones.
 ## Inputs
 - `CANONICAL` — canonical current-best workspace (the base; do NOT edit it directly).
 - `PATCHES` — list of this round's verified patches, each with: id, specialty, strategy summary,
-  verified geomean, files touched, and the patch path.
+  verified geomean, files touched, patch path, and `decision_refs` attribution.
 - `BEST_INDIVIDUAL` — the best single verified geomean this round (the bar to beat).
 - `INTEGRATE_DIR` — your private scratch dir. `GPU_ID`, `SKILL_DIR`, COMMANDMENT path, `BASELINE_PER_CASE`.
 - `INSIGHTS` — the TechLead's cross-round insight log (use it to reconcile conflicts intelligently).

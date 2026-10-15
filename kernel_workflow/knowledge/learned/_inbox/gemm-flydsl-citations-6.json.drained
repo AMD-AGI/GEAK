@@ -1,0 +1,29 @@
+{
+  "run_id": "gemm_flydsl-citations",
+  "date": "2026-09-26",
+  "kernel_names": [
+    "gemm_flydsl"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "the-in-source-ceiling-of-an-mfma-bound-dense-gemm-dense-gemm-gfx950-compute-bound.md",
+      "round": 1,
+      "direction": "r1_d1",
+      "specialty": "memory",
+      "cited_then_verified": 0.7704,
+      "became_winner": false
+    },
+    {
+      "card": "split-only-up-to-one-workgroup-per-cu-and-make-pipeline-dept-attention-decode-gfx950-decode.md",
+      "round": 2,
+      "direction": "r2_d1",
+      "specialty": "compute",
+      "cited_then_verified": 0.9791,
+      "became_winner": false
+    }
+  ]
+}

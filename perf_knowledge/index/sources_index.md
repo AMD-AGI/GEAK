@@ -4,7 +4,7 @@ kind: reference
 updated: 2026-06-09
 ---
 
-# Sources index — 503 unique URLs across 656 docs
+# Sources index — 507 unique URLs across 694 docs
 
 Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources.py`). Each doc keeps its own inline `## Sources`.
 
@@ -209,6 +209,8 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://github.com/ROCm/ROCm/issues/341
 - https://github.com/ROCm/TheRock/issues/2591
 - https://github.com/ROCm/aiter
+- https://github.com/ROCm/aiter.git
+- https://github.com/ROCm/aiter.git`
 - https://github.com/ROCm/aiter/blob/main/LICENSE
 - https://github.com/ROCm/aiter/issues/1455
 - https://github.com/ROCm/aiter/issues/1542
@@ -375,6 +377,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
 - https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-register-pressure-readme/
 - https://gpuopen.com/learn/optimizing-gpu-occupancy-resource-usage-large-thread-groups/
+- https://gpuopen.com/learn/wmma-guide-amd-rdna-4-gpus-part-2/
 - https://gpuopen.com/learn/wmma_on_rdna3/
 
 ## guru3d.com
@@ -522,6 +525,7 @@ Auto-generated union of every `## Sources` / inline URL (run `index/_gen_sources
 - https://rocm.blogs.amd.com/software-tools-optimization/mi300x-rccl-xgmi/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/mxfp4-mxfp6-quantization/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/mxfp4-online-rotation/README.html
+- https://rocm.blogs.amd.com/software-tools-optimization/occupancy-math-mi355x/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/optimizing-triton-kernel.html
 - https://rocm.blogs.amd.com/software-tools-optimization/optimizing-with-composable-kernel.html
 - https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html

@@ -40,6 +40,7 @@ import glob as globmod
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import date, datetime
 
@@ -156,6 +157,10 @@ def slugify(s):
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", str(s).lower())).strip("-")[:60]
 
 
+def _as_list(value):
+    return value if isinstance(value, list) else ([str(value)] if value else [])
+
+
 # ---------------------------------------------------------------------------
 # The lint. ONE implementation, called from `propose` (fail fast, at the source, while the run that
 # can explain itself is still alive), from `drain` (defence against hand-written or older proposals),
@@ -206,6 +211,21 @@ REQUIRED_HEADER_FIELDS = ("name", "description", "keywords", "platforms",
 # forbidden from naming a kernel, so the symbol genuinely was not recoverable) produced 11 invented
 # symbols across the corpus, one of them, `fused_moe_grouped_gemm`, in 17 cards. A grep aid that
 # sends the reader to the wrong card is worse than an absent one. Optional, and checked when given.
+# The language the card's finding was measured in. Required on a NEW card and absent from the 135
+# cards that predate it -- deliberately not backfilled, for the same reason `kernels` is optional:
+# nobody can recover it from a card body that is forbidden from naming a kernel, so a backfill would
+# be a guess, and this field only earns its place if a reader can trust it.
+#
+# Why it is required going forward: the read path is "open INDEX.md, judge by meaning", and until now
+# the index carried no language at all. A FlyDSL run therefore could not tell a FlyDSL card from a
+# Triton one, and `toolchain` could not stand in -- it is a whole-stack fingerprint, and `drain`
+# defaults it to "unknown", which is what all 133 cards carrying it say.
+#
+# Ids are taken verbatim from perf_knowledge/index/taxonomy.md ("Backends -- the Cartesian columns",
+# authoring-language rows). Library/auto backends (`aiter`, `hipblaslt`, ...) are NOT languages: a
+# card whose finding is "call this library" is not a card about how a kernel was written.
+AUTHORING_LANGUAGES = ("triton", "flydsl", "hip", "ck", "asm", "tilelang",
+                       "gluon", "rocwmma", "hipkittens", "mojo", "cutlass_port")
 MAX_DESCRIPTION_CHARS = 160          # README: the description IS the index line
 CARD_BODY_FIELDS = ("title", "lever", "apply", "stack", "verify", "pitfall", "caution", "effect",
                     "source")
@@ -329,6 +349,26 @@ def lint_card(card, kernel_names=(), strict_source=True, is_new=True):
             errs.append(f"{fld} must be 0 on a NEW card — confirmations are earned by citations, "
                         f"applied by `drain`, never asserted by the author")
 
+    # `language` is required on a new card and merely validated on an old one, so the cards that
+    # predate the field stay lintable without anyone inventing a value for them.
+    lang = str(card.get("language", "")).strip()
+    if is_new and not lang:
+        errs.append(f"language is required on a NEW card: the index line is filtered on it, and "
+                    f"without it a run in one language reads cards measured in another. One of "
+                    f"{'|'.join(AUTHORING_LANGUAGES)}")
+    if lang and lang not in AUTHORING_LANGUAGES:
+        errs.append(f"language {lang!r} is not an authoring-language id from "
+                    f"perf_knowledge/index/taxonomy.md; expected one of "
+                    f"{'|'.join(AUTHORING_LANGUAGES)}")
+
+    decision_refs = card.get("decision_refs", [])
+    if decision_refs and not isinstance(decision_refs, list):
+        errs.append("decision_refs must be a YAML list of exact decision-card/config IDs")
+    elif isinstance(decision_refs, list):
+        for ref in decision_refs:
+            if not re.fullmatch(r"(?:[a-z0-9][a-z0-9-]*|cfg_[0-9a-f]{16})", str(ref)):
+                errs.append(f"invalid decision_ref {ref!r}: expected a card slug or cfg_<16 hex>")
+
     body_lines = sum(len(str(card.get(f, "")).splitlines()) or 1 for f in CARD_BODY_FIELDS)
     if body_lines > MAX_CARD_LINES:
         errs.append(f"body is {body_lines} lines (>{MAX_CARD_LINES}): that is narrative, distil it")
@@ -353,13 +393,42 @@ def lint_proposal(prop):
 # ---------------------------------------------------------------------------
 # Card files: a tiny front-matter format (no PyYAML dependency on these boxes).
 # ---------------------------------------------------------------------------
+def _fold_flow_sequences(lines):
+    """Rejoin a `[a, b, c]` that a long `kernels:` wrapped onto a second line.
+
+    YAML allows it and hand-written cards use it, but the line-at-a-time parse below does not: it
+    sees `kernels: [a, b,` — no closing bracket — and stores the TRUNCATED STRING. Nothing errors.
+    Every consumer that iterates the field then iterates CHARACTERS, and the run-recurrence digest
+    duly reported ' ', ',' and '1' as kernels behind a verdict. Folding here keeps that one card
+    shape from having to be understood at four call sites.
+    """
+    out, pending = [], None
+    for line in lines:
+        if pending is not None:
+            pending += " " + line.strip()
+            if pending.rstrip().endswith("]"):
+                out.append(pending)
+                pending = None
+            continue
+        _, sep, v = line.partition(":")
+        if sep and v.strip().startswith("[") and not v.strip().endswith("]"):
+            pending = line.rstrip()
+            continue
+        out.append(line)
+    # An unterminated `[` to the end of the header is malformed YAML, not a fold. Keep the raw line
+    # so the header lint sees the same text a reader does rather than silently dropping the field.
+    if pending is not None:
+        out.append(pending)
+    return out
+
+
 def read_card(path):
     raw = open(path).read()
     m = re.match(r"^---\n(.*?)\n---\n(.*)$", raw, re.S)
     if not m:
         return None
     meta = {}
-    for line in m.group(1).splitlines():
+    for line in _fold_flow_sequences(m.group(1).splitlines()):
         if line.strip().startswith("#") or ":" not in line:
             continue
         k, v = line.split(":", 1)
@@ -736,7 +805,39 @@ def _kw_fold(x):
     return re.sub(r"s$", "", _kw_normalize(x).replace("-", ""))
 
 
-def _index_header(d):
+def _platform_coverage(cards):
+    """One generated line stating which generations the active cards were actually measured on.
+
+    Derived, never asserted. A reader deciding whether to trust a card's `effect:` as a number needs
+    to know the arch spread of the folder, and that fact already lives in every card's `platforms:`
+    field -- writing it into prose would be a second copy to maintain, and the copy that goes stale
+    is the one that says "nothing here for your machine" while a card for it sits right there.
+
+    Deliberately says nothing about WHICH other generation to go look at: that is advice, it is not
+    derivable from the cards, and it belongs in README.md where advice is allowed to be hand-written.
+    """
+    if not cards:
+        return ""
+    n = Counter(p for c in cards for p in c["platforms"])
+    if not n:
+        # A sink whose cards carry no `platforms:` at all -- the e2e sink's frontmatter is lighter and
+        # encodes the arch in the filename and `key:` line. Say nothing rather than render a coverage
+        # claim out of an absence: "(unstated): 24, nothing on any other generation" would be a
+        # fabrication, and a generated fabrication is worse than the hand-written one this replaced.
+        return ""
+    stated = sum(1 for c in cards if c["platforms"])
+    spread = ", ".join(f"**{p}**: {k}" for p, k in sorted(n.items(), key=lambda kv: (-kv[1], kv[0])))
+    only = " Nothing here was measured on any other generation." if len(n) == 1 else ""
+    if stated < len(cards):
+        only += (f" ({len(cards) - stated} card(s) state no `platforms:` and are not counted — "
+                 f"their arch cannot be read off the frontmatter.)")
+    return (f"\n**Platform coverage (generated):** {stated} active card(s) — {spread}.{only} "
+            f"A card's `effect:` is a number from the generation it was measured on; on a different "
+            f"one it is a *hypothesis worth testing first*, not a number — the A/B still decides. See "
+            f"`README.md` -> \"Architecture coverage\" for where other generations are covered.\n")
+
+
+def _index_header(d, cards=()):
     o = _owner(d)
     return (f"""# Learned — index of distilled {o} experience cards
 
@@ -759,7 +860,7 @@ card's own description, the kernel symbols it was measured on, and its keywords 
 relevance without opening anything. Match on *meaning*, not on an exact string: a card written for
 `split-k on skinny-M GEMM` is worth opening for a tall-K GEMM too. If nothing matches, that is a real
 answer — plan cold, exactly as this workflow does without any KB.
-""")
+{_platform_coverage(cards)}""")
 
 
 def build_index(kb_dir):
@@ -782,6 +883,7 @@ def build_index(kb_dir):
             "keywords": list(dict.fromkeys(filter(None, (_kw_normalize(k) for k in arr(m.get("keywords")))))),
             "kernels": arr(m.get("kernels")), "platforms": arr(m.get("platforms")),
             "kernel_class": class_of(m), "regime": m.get("regime") or "",
+            "language": str(m.get("language") or ""),
             "confidence": st.group(0) if st else "★",
         })
 
@@ -796,7 +898,11 @@ def build_index(kb_dir):
         rows = sorted(groups[g], key=lambda c: (-len(c["confidence"]), c["name"]))
         body += f"\n## {g}\n"
         for c in rows:
-            scope = " · ".join([x for x in ["/".join(c["platforms"]), c["regime"]] if x])
+            # Language joins the scope prefix rather than the tag line below it: the prefix is what
+            # a reader scans to decide whether a card is even about their situation, and "measured in
+            # a different language" disqualifies a card as hard as "measured on a different gfx".
+            scope = " · ".join([x for x in ["/".join(c["platforms"]), c["regime"],
+                                            c["language"]] if x])
             body += f"- {'[' + scope + '] ' if scope else ''}{c['description']} {c['confidence']} — ({c['file']})\n"
             tags = " · ".join([x for x in [
                 f"kernels: {', '.join(c['kernels'])}" if c["kernels"] else "",
@@ -830,7 +936,7 @@ def build_index(kb_dir):
                   ", ".join(f"{g} ({n})" for g, n in sorted(over.items())) +
                   ". Archive the lowest `confidence × freshness × standing` card in that class\n"
                   "> (★★★ is never auto-evicted), then regenerate.\n")
-    return _index_header(kb_dir) + body + footer
+    return _index_header(kb_dir, cards) + body + footer
 
 
 def cmd_index(kb, a):
@@ -921,6 +1027,8 @@ def cmd_drain(kb, a):
                 if want == 3 and int(m.get("confirms_blind", 0)) < 1:
                     want = 2      # a merge must not raise a star no single card could claim
                 m["confidence"] = STAR_OF[max(want, STARS.get(m.get("confidence", "★"), 1))]
+                m["decision_refs"] = list(dict.fromkeys(
+                    _as_list(m.get("decision_refs")) + _as_list(card.get("decision_refs"))))
                 cards[fn]["body"] += f"\n- source: {card.get('source')}\n"
                 merged.append({"card": fn, "run": prop.get("run_id")})
             else:
@@ -945,6 +1053,10 @@ def cmd_drain(kb, a):
                     "platforms": card.get("platforms", []),
                     "kernel_class": card.get("kernel_class", "other"),
                     "regime": card.get("regime", ""),
+                    # No "unknown" default: the lint above already rejected a proposal without it,
+                    # and defaulting is how `toolchain` ended up reading "unknown" on every card.
+                    "language": card.get("language", ""),
+                    "decision_refs": card.get("decision_refs", []),
                     "key": key, "layer": "learned",
                     "lifecycle": card.get("lifecycle", "active"),
                     "type": card.get("type", "lever"),
@@ -1121,7 +1233,36 @@ def cmd_drain(kb, a):
     # drift" and "the index can never drift as long as everyone remembers"; a stale index after a
     # bulk import is indistinguishable from a KB that learned nothing.
     open(os.path.join(kb.root, "INDEX.md"), "w").write(build_index(kb.root))
+    refresh_recurrence()
     return 0
+
+
+# The perf_knowledge roll-up of these cards. Regenerated from HERE, for the reason stated above
+# INDEX.md: the digest is a projection of the cards, and a projection an operator has to remember to
+# refresh is a projection that will be stale. It is the last step of the ingest rather than a
+# separate chore, so "cards changed" and "the curated base reflects them" are one action.
+RECURRENCE_GEN = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "perf_knowledge", "index", "_gen_run_recurrence.py")
+
+
+def refresh_recurrence():
+    """Best-effort, reported either way. Never fatal.
+
+    Soft on purpose, in both directions. A checkout without `perf_knowledge/` (this tool serves
+    several trees) must still be able to drain, so a missing generator is a note and not an error.
+    And by the time this runs the cards are already on disk: raising here would abort a half-applied
+    ingest, which is strictly worse than a stale digest that CI's `--check` will catch on the way in.
+    """
+    if not os.path.exists(RECURRENCE_GEN):
+        print("note: no perf_knowledge/index/_gen_run_recurrence.py in this checkout; "
+              "the run-recurrence digest was not refreshed")
+        return
+    r = subprocess.run([sys.executable, RECURRENCE_GEN], capture_output=True, text=True,
+                       check=False)
+    print((r.stdout or r.stderr).strip() or "run-recurrence digest: no output")
+    if r.returncode != 0:
+        print(f"note: the digest generator exited {r.returncode}; the cards ARE written. "
+              f"Re-run `python3 {os.path.relpath(RECURRENCE_GEN)}` once it is fixed.")
 
 
 def cmd_doctor(kb, a):

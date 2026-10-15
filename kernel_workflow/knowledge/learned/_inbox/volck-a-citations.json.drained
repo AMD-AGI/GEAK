@@ -1,0 +1,53 @@
+{
+  "run_id": "volck_A-citations",
+  "date": "2026-10-12",
+  "kernel_names": [
+    "volck_A"
+  ],
+  "validation_status": "accepted",
+  "box_quiet": true,
+  "held_out": false,
+  "cards": [],
+  "citations": [
+    {
+      "card": "derive-the-split-kv-decode-launch-shape-from-a-constant-byte-attention-decode-gfx950-decode.md",
+      "round": 1,
+      "direction": "r1_d1",
+      "specialty": "algorithm",
+      "cited_then_verified": 0,
+      "became_winner": false
+    },
+    {
+      "card": "split-only-up-to-one-workgroup-per-cu-and-make-pipeline-dept-attention-decode-gfx950-decode.md",
+      "round": 1,
+      "direction": "r1_d1",
+      "specialty": "algorithm",
+      "cited_then_verified": 0,
+      "became_winner": false
+    },
+    {
+      "card": "delete-the-satellite-dispatches-once-both-moe-gemms-sit-at-t-moe-grouped-gemm-gfx950-both.md",
+      "round": 2,
+      "direction": "r2_d0",
+      "specialty": "algorithm",
+      "cited_then_verified": 0,
+      "became_winner": false
+    },
+    {
+      "card": "delete-the-satellite-dispatches-once-both-moe-gemms-sit-at-t-moe-grouped-gemm-gfx950-both.md",
+      "round": 3,
+      "direction": "r3_d1",
+      "specialty": "algorithm",
+      "cited_then_verified": 1.3626,
+      "became_winner": true
+    },
+    {
+      "card": "split-kv-decode-the-two-dispatch-shape-is-welded-budget-the--attention-decode-gfx950-decode.md",
+      "round": 3,
+      "direction": "r3_d1",
+      "specialty": "algorithm",
+      "cited_then_verified": 1.3626,
+      "became_winner": true
+    }
+  ]
+}
