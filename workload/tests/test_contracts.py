@@ -282,6 +282,98 @@ def test_a_check_that_could_not_run_is_unproven_not_ok(tmp_path):
     assert all(c["status"] != "ok" for c in doc["checks"])
 
 
+# --------------------------------------------------- unattended end-to-end dispatch
+#
+# The pipeline is meant to be started once and left alone. These cover the two ways that
+# goes wrong silently: an agent session that produces nothing being recorded as a pass,
+# and a missing precondition being retried until the budget is gone.
+
+def _stub_cfg(tmp_path, stage="profile", **params):
+    cfg = {"run_root": str(tmp_path / "run"), "runner": "stub",
+           "order": ["profile"], "target": {"model": None, "enforce": False,
+                                            "_note_enforce": "stub"},
+           "stages": {"profile": {"skill": "agentx-kernel-extraction-standalone",
+                                  "params": params}}}
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps(cfg))
+    return p
+
+
+def test_an_agent_stage_runs_itself_through_the_runner(tmp_path):
+    """Agent mode used to stop and ask for a human. The judgement is still the agent's;
+    dispatching it is not judgement, and the runner contract already abstracts it."""
+    script = tmp_path / "work.sh"
+    script.write_text('echo "{}" > "$OUT/kernel_ranking.json"\n'
+                      'python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok '
+                      '--artifact ranking=kernel_ranking.json '
+                      '--metric kernels_censused=3\n')
+    cfg = _stub_cfg(tmp_path, agent_budget_sec=120)
+    r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
+             "run", "profile"],
+            env_extra={"STUB_SCRIPT": str(script)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "agent mode via stub.sh" in r.stdout
+    # and the prompt it was handed carried the contract, not a vague instruction
+    prompt = (tmp_path / "run" / "profile" / "out" / "agent_prompt.1.txt").read_text()
+    assert "result.json" in prompt and "$OUT" in prompt
+    assert "Never report `ok` for work that was not done" in prompt
+
+
+def test_a_session_that_wrote_nothing_is_a_failed_stage(tmp_path):
+    """An agent that talked and produced no artifacts has not done the stage. The only
+    thing that decides the verdict is result.json."""
+    cfg = _stub_cfg(tmp_path, agent_budget_sec=120, agent_attempts=2)
+    r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
+             "run", "profile"], env_extra={"STUB_RC": "0"})
+    assert r.returncode != 0
+    doc = json.load(open(tmp_path / "run" / "profile" / "out" / "result.json"))
+    assert doc["status"] == "fail"
+    assert "attempts" in doc["notes"]
+
+
+def test_a_continuation_names_what_is_already_on_disk(tmp_path):
+    """Restarting from zero throws away hours of profiling already written to $OUT."""
+    script = tmp_path / "work.sh"
+    script.write_text('echo partial > "$OUT/kernel_ranking.json"\n')
+    cfg = _stub_cfg(tmp_path, agent_budget_sec=120, agent_attempts=2)
+    run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
+         "run", "profile"], env_extra={"STUB_SCRIPT": str(script)})
+    second = (tmp_path / "run" / "profile" / "out" / "agent_prompt.2.txt").read_text()
+    assert "CONTINUATION" in second and "Do not start over" in second
+    assert "kernel_ranking.json" in second
+
+
+def test_an_unmet_precondition_is_not_retried(tmp_path):
+    """78 means the binary or the credentials are missing. Retrying produces the same
+    result; the contract says stop, and `blocked` is the honest verdict."""
+    cfg = _stub_cfg(tmp_path, agent_budget_sec=120, agent_attempts=5)
+    r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
+             "run", "profile"], env_extra={"STUB_RC": "78"})
+    assert r.returncode != 0
+    out = tmp_path / "run" / "profile" / "out"
+    doc = json.load(open(out / "result.json"))
+    assert doc["status"] == "blocked"
+    assert not (out / "agent_prompt.2.txt").exists(), "78 must not be retried"
+
+
+def test_all_skips_what_is_already_done(tmp_path):
+    """Resume is the default, not a mode: re-issuing the same command after any
+    interruption continues instead of re-running finished stages."""
+    script = tmp_path / "work.sh"
+    script.write_text('echo "{}" > "$OUT/kernel_ranking.json"\n'
+                      'python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok '
+                      '--artifact ranking=kernel_ranking.json\n')
+    cfg = _stub_cfg(tmp_path, agent_budget_sec=120)
+    for _ in range(1):
+        r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg), "all"],
+                env_extra={"STUB_SCRIPT": str(script)})
+        assert r.returncode == 0, r.stdout + r.stderr
+    again = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg), "all"],
+                env_extra={"STUB_RC": "1"})     # would fail if it re-ran the stage
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "already ok, skipping" in again.stdout
+
+
 # ----------------------------------------------------------------- adopting a receipt
 #
 # A receipt is somebody else's format. The temptation when it does not fit is to retype

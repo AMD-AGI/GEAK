@@ -8,7 +8,8 @@ file knows no individual skill. Contract in ../stages/CONTRACT.md.
 
     stage.py plan                      # resolve and print where all five stages land (= --dry-run)
     stage.py prepare <stage>           # create OUT, write params.json/env.sh, print the SKILL.md path
-    stage.py run <stage>               # prepare + execute run.sh (script mode only) + validate
+    stage.py run <stage>               # prepare + execute + validate, script or agent mode
+    stage.py all [stage ...]           # every stage in order, unattended; resumes by default
     stage.py validate <stage>          # validate $OUT/result.json on its own
     stage.py status                    # print STATE.json
     stage.py next                      # print the next pending stage (for resume); empty when done
@@ -331,18 +332,33 @@ def cmd_prepare(cfg, args):
 
 def cmd_run(cfg, args):
     lay = stage_layout(cfg, args.stage)
-    if lay["mode"] != "script":
-        print("stages.%s is an agent-mode stage; stage.py does not execute it."
-              % args.stage, file=sys.stderr)
-        print("Use `stage.py prepare %s` for the environment, then have the agent read "
-              "%s and follow it." % (args.stage, lay["skill_md"]), file=sys.stderr)
-        return 2
-
     rc = cmd_prepare(cfg, argparse.Namespace(stage=args.stage, quiet=True))
     if rc:
         return rc
-
     env = stage_env(cfg, lay)
+
+    # An agent-mode stage is dispatched through the runner rather than refused. The
+    # judgement stays the agent's; only the dispatching is mechanical, and the runner
+    # contract already isolates that from any particular CLI. See agent_stage.py.
+    if lay["mode"] != "script":
+        import agent_stage
+        started = time.time()
+        print("[stage] %s / %s (agent mode via %s)"
+              % (lay["stage"], lay["skill"], os.path.basename(env["RUNNER"])))
+        rc, note = agent_stage.dispatch(cfg, lay, env)
+        print("[stage] agent stage finished rc=%d after %.0fs" % (rc, time.time() - started))
+        if rc != 0:
+            # No result.json, or an unusable one: say so here rather than letting
+            # validate report a bare "missing file" with no history.
+            status = "blocked" if rc == 78 else "fail"
+            if not os.path.exists(os.path.join(lay["out"], "result.json")):
+                with open(os.path.join(lay["out"], "result.json"), "w") as f:
+                    json.dump({"stage": lay["stage"], "skill": lay["skill"],
+                               "status": status, "artifacts": {}, "metrics": {},
+                               "notes": note or "the agent session produced no result.json"},
+                              f, indent=2, ensure_ascii=False)
+        return cmd_validate(cfg, args, exec_rc=rc)
+
     log = os.path.join(lay["out"], "stage.log")
     started = time.time()
     print("[stage] %s / %s -> %s" % (lay["stage"], lay["skill"], log))
@@ -420,6 +436,54 @@ def cmd_validate(cfg, args, exec_rc=None):
     return 0 if res["status"] == "ok" else 1
 
 
+def cmd_all(cfg, args):
+    """Every stage, in order, unattended -- the whole campaign from one command.
+
+    Resume is the default and is not a special mode: a stage already recorded `ok` in
+    STATE.json is skipped, so re-issuing this command after any interruption continues
+    where it stopped. That is the same property `next` has always had, with the loop
+    closed around it.
+
+    It stops at the first stage that is not `ok`, and that is deliberate. `blocked` means
+    a precondition was missing; carrying on would optimize kernels nobody profiled, or
+    A/B a stack nothing was applied to. The run stops with the reason on screen and in
+    STATE.json, and resumes with the same command once the precondition is met.
+    """
+    order = list(cfg["order"])
+    only = [s for s in (args.stages or []) if s]
+    if only:
+        bad = [s for s in only if s not in order]
+        if bad:
+            print("no such stage(s): %s (order is %s)" % (", ".join(bad), ", ".join(order)),
+                  file=sys.stderr)
+            return 2
+        order = [s for s in order if s in only]
+
+    state = load_state(cfg)
+    print("run_root %s" % cfg["run_root"])
+    print("stages   %s" % " -> ".join(order))
+    for stage in order:
+        done = state["stages"].get(stage, {}).get("status") == "ok"
+        if done and not args.force:
+            print("\n=== %s: already ok, skipping (--force to re-run)" % stage)
+            continue
+        print("\n=== %s" % stage)
+        sys.stdout.flush()
+        rc = cmd_run(cfg, argparse.Namespace(stage=stage))
+        state = load_state(cfg)
+        if rc != 0:
+            entry = state["stages"].get(stage) or {}
+            print("\nstopped at %s (%s). %s"
+                  % (stage, entry.get("status", "fail"),
+                     entry.get("notes") or "; ".join(entry.get("errors") or []) or ""),
+                  file=sys.stderr)
+            print("Fix the cause and re-issue the same command; completed stages are "
+                  "skipped.", file=sys.stderr)
+            return rc
+    print("\nall requested stages are ok.")
+    return 0
+
+
 def cmd_status(cfg, args):
     state = load_state(cfg)
     print("run_root %s" % state.get("run_root"))
@@ -459,6 +523,9 @@ def main(argv=None):
     sub.add_parser("plan")
     p = sub.add_parser("prepare"); p.add_argument("stage"); p.add_argument("--quiet", action="store_true")
     p = sub.add_parser("run"); p.add_argument("stage")
+    p = sub.add_parser("all")
+    p.add_argument("stages", nargs="*", help="limit to these stages (default: all)")
+    p.add_argument("--force", action="store_true", help="re-run stages already recorded ok")
     p = sub.add_parser("validate"); p.add_argument("stage")
     sub.add_parser("status")
     sub.add_parser("next")
@@ -472,6 +539,7 @@ def main(argv=None):
         "plan": cmd_plan,
         "prepare": cmd_prepare,
         "run": cmd_run,
+        "all": cmd_all,
         "validate": cmd_validate,
         "status": cmd_status,
         "next": cmd_next,
