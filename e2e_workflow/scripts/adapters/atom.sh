@@ -40,6 +40,30 @@
 
 adapter_default_port() { echo 8888; }
 
+# Resolved at source time: inside a function BASH_SOURCE is still this file, but resolving once keeps
+# the lookup independent of the caller's cwd.
+_ATOM_ADAPTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# _atom_server_argv ARGS -> fills the global array _ATOM_EXTRA_ARGV with ARGS split by shell quoting
+# rules. An unquoted $EXTRA_SERVER_ARGS keeps quotes as literal characters and glob-expands `*`/`[..]`,
+# so a recipe's `--online_quant_config '{"exclude_layer":["*.mlp.gate"]}'` reached the server quoted
+# (json parse error) or rewritten by any file the glob matched. Falls back to word splitting, loudly,
+# only when the helper is missing or cannot split the string.
+_atom_server_argv() {
+  _ATOM_EXTRA_ARGV=()
+  [ -n "${1:-}" ] || return 0
+  local _helper="$_ATOM_ADAPTER_DIR/split_args.py"
+  if [ -f "$_helper" ]; then
+    mapfile -d '' -t _ATOM_EXTRA_ARGV < <(python3 "$_helper" "$1")
+    [ "${#_ATOM_EXTRA_ARGV[@]}" -gt 0 ] && return 0
+  fi
+  echo "!!! atom adapter: could not split EXTRA_SERVER_ARGS with $_helper; falling back to word splitting" \
+       "(quoted or JSON values will reach the server mangled)." >&2
+  local -; set -f
+  # shellcheck disable=SC2206
+  _ATOM_EXTRA_ARGV=($1)
+}
+
 # ---- ATOM worker-reaping supervisor -------------------------------------------------------------
 # WHY: ATOM starts its per-rank ModelRunners with multiprocessing.spawn. Those workers do NOT die on
 # the SIGTERM that server_teardown.sh sends to the process group -- the leader exits promptly, the
@@ -104,6 +128,8 @@ adapter_launch() {
     _prof_env=(ATOM_PROFILER_MORE="${ATOM_PROFILER_MORE:-1}")
   fi
 
+  _atom_server_argv "${EXTRA_SERVER_ARGS:-}"
+
   # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
   # own session so teardown can prove the process group is ours. Empty when unset.
   # shellcheck disable=SC2086
@@ -120,7 +146,7 @@ adapter_launch() {
         -tp "$TP" \
         "${_opt[@]}" \
         "${_prof[@]}" \
-        $EXTRA_SERVER_ARGS \
+        "${_ATOM_EXTRA_ARGV[@]}" \
       > "$LOG" 2>&1 &
   SERVER_PID=$!
 }

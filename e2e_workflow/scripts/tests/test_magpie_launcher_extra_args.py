@@ -173,6 +173,20 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
             "--kv_cache_dtype fp8 --block-size 16 --max-num-seqs 8",
         )
 
+    def test_quoted_json_reaches_the_recipe_as_bare_words(self):
+        """Recipes expand $EXTRA_<BE>_ARGS unquoted, so the effective config's shell quoting
+        (`--q '{"a":1}'`) must be undone here or the server parses a quoted string."""
+        cap, _ = self._launch(
+            backend="atom",
+            extra_server_args="""--online_quant_config '{"exclude_layer":["*.mlp.gate"],"q":"ptpc_fp8"}'"""
+                              " --cudagraph-capture-sizes '[1,2,4,8]' --block-size 64",
+        )
+        self.assertEqual(
+            cap["EXTRA_ATOM_ARGS"],
+            '--online_quant_config {"exclude_layer":["*.mlp.gate"],"q":"ptpc_fp8"}'
+            " --cudagraph-capture-sizes [1,2,4,8] --block-size 64",
+        )
+
     def test_atom_wrap_survives_a_late_session_leader(self):
         """The pgid probe must SETTLE, not judge on one sample.
 

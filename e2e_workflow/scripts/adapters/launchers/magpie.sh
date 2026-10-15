@@ -246,6 +246,28 @@ PY
     fi
   fi
 
+  # Recipe scripts expand ${_args_var} UNQUOTED (atom_mi355x.sh: `$EXTRA_ATOM_ARGS`), so a shell-quoted
+  # value from the effective config (`--online_quant_config '{"a":1}'`) would reach the server with its
+  # quotes still on. Re-render as bare words: a whitespace-free JSON value survives word splitting
+  # intact. A token that itself holds whitespace cannot be carried that way -- say so rather than ship
+  # a split value.
+  local _split_helper
+  _split_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/split_args.py"
+  if [ -n "$_extra_args" ] && [ -f "$_split_helper" ]; then
+    local -a _argv=()
+    mapfile -d '' -t _argv < <(python3 "$_split_helper" "$_extra_args")
+    if [ "${#_argv[@]}" -gt 0 ]; then
+      local _t
+      for _t in "${_argv[@]}"; do
+        case "$_t" in *[[:space:]]*)
+          echo "!!! magpie launcher: server arg '$_t' contains whitespace; the recipe's unquoted" \
+               "\$${_args_var} will split it." >&2 ;;
+        esac
+      done
+      _extra_args="${_argv[*]}"
+    fi
+  fi
+
   # Map GEAK's env onto Magpie's server-phase env. Ordering IS the precedence
   # policy: recipe replay first, then the accepted env under test, then the
   # run-scoped names GEAK owns -- so a later layer knowingly overrides an
