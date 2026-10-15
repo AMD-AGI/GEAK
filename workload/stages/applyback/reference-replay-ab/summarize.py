@@ -17,6 +17,40 @@ import argparse, hashlib, json, os, statistics, sys
 BASIS = "output_token_throughput"
 
 
+# Where the harness keeps the graded throughput. The result file nests it
+# (request_metrics.throughput.output.tokens_per_second); a flat key is accepted too so a
+# harness that normalizes its own output still works. Tried in order, first hit wins.
+CANDIDATE_PATHS = [
+    "request_metrics.throughput.output.tokens_per_second",
+    "output_tok_per_s",
+    "output_tokens_per_second",
+]
+CONTEXT = {
+    "duration_seconds": "request_metrics.throughput.duration_seconds",
+    "requests_successful": "num_requests_successful",
+    "requests_total": "num_requests_total",
+    "ttft_p50": "request_metrics.latency.ttft.p50",
+    "ttft_p90": "request_metrics.latency.ttft.p90",
+    "itl_p50": "request_metrics.latency.itl.p50",
+    "itl_p90": "request_metrics.latency.itl.p90",
+    "prefix_cache_hit_rate": "request_metrics.cache.theoretical_cache_hit_rate",
+    "conc": "conc",
+    "tp": "tp",
+}
+
+
+def dig(d, paths):
+    for path in paths:
+        v = d
+        for k in path.split("."):
+            v = v.get(k) if isinstance(v, dict) else None
+            if v is None:
+                break
+        if isinstance(v, (int, float)):
+            return v
+    return None
+
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -45,11 +79,11 @@ def leg(run_dir, want):
         rec["error"] = "the leg produced no result file (%s)" % res
         return rec
     d = json.load(open(res))
-    rec["throughput"] = d.get("output_tok_per_s") or d.get("output_tokens_per_second")
-    for k in ("duration_seconds", "requests_profiled", "requests_error_dropped",
-              "ttft_p50", "itl_p50", "prefix_cache_hit_rate", "conc", "tp"):
-        if k in d:
-            rec[k] = d[k]
+    rec["throughput"] = dig(d, CANDIDATE_PATHS)
+    for name, path in CONTEXT.items():
+        v = dig(d, [path])
+        if v is not None:
+            rec[name] = v
 
     sc = os.path.join(run_dir, "server_case.json")
     if not os.path.exists(sc):
@@ -95,7 +129,7 @@ def main():
         json.dump(summary, f, indent=1, ensure_ascii=False)
 
     ref = json.load(open(a.reference_run))
-    rv = ref.get(a.reference_key)
+    rv = dig(ref, [a.reference_key] + CANDIDATE_PATHS)
     reference = {
         BASIS: rv, "metric_basis": BASIS, "noise_band": a.noise_band,
         "provenance": {

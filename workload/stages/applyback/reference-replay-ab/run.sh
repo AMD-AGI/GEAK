@@ -74,14 +74,31 @@ python3 "$SKILL_ROOT/register_case.py" --harness "$HARNESS" --case-file "$CASE_F
 
 # --- 3. Re-run the reference harness, once per repeat, unchanged.
 mkdir -p "$OUT/e2e"
+STOP="$(p stop_cmd '')"
 RUN_DIRS=()
 for i in $(seq 1 "$REPEATS"); do
   TAG="${TAG_PREFIX}_$(printf '%02d' "$i")"
+  DIR="$HARNESS/runs/$TAG"
+  RUN_DIRS+=("$DIR")
+  # Resumable by result, not by directory: a leg that already produced its result file is
+  # a finished measurement and is reused. The harness refuses to overwrite an existing run
+  # directory, so without this a stage that lost one leg could never be re-run.
+  if [ -f "$DIR/$TAG.json" ]; then
+    echo "[applyback] leg $i/$REPEATS: $TAG already has a result; reusing it"
+    continue
+  fi
   echo "[applyback] leg $i/$REPEATS: $HCMD $CASE_NAME $TAG $DURATION"
   ( cd "$HARNESS" && bash "$HCMD" "$CASE_NAME" "$TAG" "$DURATION" ) \
       > "$OUT/e2e/${TAG}.log" 2>&1
-  echo "[applyback] leg $i exited ${PIPESTATUS[0]}"
-  RUN_DIRS+=("$HARNESS/runs/$TAG")
+  echo "[applyback] leg $i exited $?"
+  # Stop the server this leg owns. The harness launches one and leaves it running, and it
+  # refuses to start another while one is up -- so without a teardown every leg after the
+  # first dies in a second with "Stop the owned previous server". Leaving it up would be
+  # worse than that: the next leg would measure a server that had already served an hour.
+  if [ -n "$STOP" ] && [ -f "$DIR/server_pid.json" ]; then
+    ( cd "$HARNESS" && python3 "$STOP" "$DIR" ) >> "$OUT/e2e/${TAG}.log" 2>&1 \
+      || echo "[applyback] teardown of leg $i reported a problem; see ${TAG}.log"
+  fi
 done
 
 # --- 4. Summarize + verify the server really loaded the overlay, then the slot adapter.

@@ -79,7 +79,8 @@
         "port": 8899,
         "_note_reference": "The A/B reference is the node-local pristine leg (446.33214 tok/s), not the adopted CI receipt (446.87889). The receipt was measured on the CI runner; the pristine leg was measured on this node by the same harness, the same client flags and the same corpus as the candidate legs. The receipt stays in the record as a cross-check.",
         "_note_exclusive": "End-to-end re-measurement needs the full 8-GPU serving stack (TP8/conc10). Once it starts it owns the whole machine and cannot run alongside optimize.",
-        "_note_gap": "An operator win with no end-to-end movement has already happened twice in this scenario: FlyDSL MoE sorting measured 1.80x on the microbenchmark and +0.2356% whole-machine; MoE split4 measured 1.342x on local replay and -0.0872% whole-machine. Operator speedup and end-to-end delta must be reported as two separate numbers."
+        "_note_gap": "An operator win with no end-to-end movement has already happened twice in this scenario: FlyDSL MoE sorting measured 1.80x on the microbenchmark and +0.2356% whole-machine; MoE split4 measured 1.342x on local replay and -0.0872% whole-machine. Operator speedup and end-to-end delta must be reported as two separate numbers.",
+        "stop_cmd": "tools/stop_owned_server.py"
       }
     }
   }
