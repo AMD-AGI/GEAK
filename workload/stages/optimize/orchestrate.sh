@@ -85,9 +85,24 @@ echo "[optimize] scheduler exited $SRC"
 
 # The cold re-verification gate. It runs even when the scheduler exited abnormally —
 # results already kept should not be lost because scheduling died.
-python3 "$SCRIPTS/verify.py" --work-root "$WORK_ROOT" --tasks-dir "$TASKS_DIR" \
-    --repeats "$REPEATS" --threshold "$KEEP" --out "$OUT/verified.json" \
-    2>&1 | tee -a "$OUT/verify.out"
+#
+# It needs a GPU, and with --backend docker this process has none: the scheduler only
+# starts containers, so the machine it runs on is not required to expose /dev/kfd. The
+# gate therefore runs inside one container of the same image, with a single renderD node,
+# the way a worker does. Kernels are verified serially in that one container — this is the
+# last step of the stage and nothing else wants the card.
+VERIFY=(python3 "$SCRIPTS/verify.py" --work-root "$WORK_ROOT" --tasks-dir "$TASKS_DIR"
+        --repeats "$REPEATS" --threshold "$KEEP" --out "$OUT/verified.json")
+if [ "$BACKEND" = docker ]; then
+  VGPU="${GPUS%%,*}"
+  VRENDER="/dev/dri/renderD$(( 128 + 8 * VGPU ))"   # same numbering as scheduler.py
+  docker run --rm --name "wl_verify_$$" \
+      --device /dev/kfd --device "$VRENDER" --group-add video --ipc host \
+      --security-opt seccomp=unconfined --shm-size 16g -v /shared_nfs:/shared_nfs \
+      "$IMAGE" "${VERIFY[@]}" 2>&1 | tee -a "$OUT/verify.out"
+else
+  "${VERIFY[@]}" 2>&1 | tee -a "$OUT/verify.out"
+fi
 
 # Slot adapter: artifacts -> result.json.
 python3 "$(dirname "${BASH_SOURCE[0]}")/finalize.py" --scheduler-rc "$SRC"
