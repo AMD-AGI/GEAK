@@ -187,6 +187,26 @@ def human_size(n):
 
 # ----------------------------------------------------------------- gpus
 
+def gpu_usage_sysfs():
+    """VRAM in use per card, straight from the driver.
+
+    The monitor usually runs inside a container that has the render nodes but not
+    `rocm-smi`, which is the one place a GPU report is actually wanted. sysfs is there
+    either way.
+    """
+    used = []
+    import glob
+    for p in sorted(glob.glob("/sys/class/drm/card*/device/mem_info_vram_used")):
+        if "-" in os.path.basename(os.path.dirname(os.path.dirname(p))):
+            continue                                  # a partition, not a card
+        try:
+            with open(p) as f:
+                used.append(int(f.read().strip()))
+        except (OSError, ValueError):
+            pass
+    return used or None
+
+
 def gpu_usage():
     """Best effort. A monitor that cannot read the GPUs says so rather than guessing."""
     try:
@@ -194,7 +214,7 @@ def gpu_usage():
                            capture_output=True, text=True, timeout=60)
         doc = json.loads(r.stdout)
     except Exception:
-        return None
+        return gpu_usage_sysfs()
     used = []
     for card in sorted(doc):
         for k, v in (doc[card] or {}).items():
@@ -276,10 +296,10 @@ def render(snap, prev, acts, tick):
          "| --- | --- | ---: | ---: | --- | --- |"]
     for name in snap["order"]:
         s = snap["stages"][name]
-        age = human_age(snap["at"] - s["newest"]) if s["newest"] else "-"
+        age = ("%s ago" % human_age(snap["at"] - s["newest"])) if s["newest"] else "never"
         win = ("+%d files, %.0fs CPU" % (s["new_files"], s["cpu_delta"])) if s["pids"] \
             else ("+%d files" % s["new_files"] if s["new_files"] else "-")
-        L.append("| %s | %s | %d | %s | %s ago | %s |"
+        L.append("| %s | %s | %d | %s | %s | %s |"
                  % (name, s["status"], s["files"], human_size(s["bytes"]), age, win))
     live = [n for n in snap["order"] if snap["stages"][n]["pids"]]
     if live:
