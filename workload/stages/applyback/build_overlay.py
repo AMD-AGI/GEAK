@@ -33,6 +33,33 @@ def find_overlay_setup(geak_root, tasks_dir):
     return None
 
 
+def read_check(out):
+    """(file, verdict) from `overlay_setup.py check`, which prints a "<module> -> <file>"
+    line followed by one of OVERLAY_ACTIVE / INJECTED / INSTALL."""
+    where, verdict = "", ""
+    for line in out.splitlines():
+        line = line.strip()
+        if " -> " in line:
+            where = line.split(" -> ", 1)[1]
+        elif line in ("OVERLAY_ACTIVE", "INJECTED") or line.startswith("INSTALL"):
+            verdict = line.split()[0]
+    return where, verdict
+
+
+def editable_src(ksrc_dir):
+    """The one editable file in kernel_src/, chosen by what it is.
+
+    Sorting the directory and taking the first entry picks `__pycache__` as soon as one
+    attempt has run -- a directory, which the overlay then installs as the kernel."""
+    if not os.path.isdir(ksrc_dir):
+        return None
+    names = [n for n in sorted(os.listdir(ksrc_dir))
+             if os.path.isfile(os.path.join(ksrc_dir, n)) and not n.startswith("__")]
+    py = [n for n in names if n.endswith(".py")]
+    pick = (py or names or [None])[0]
+    return os.path.join(ksrc_dir, pick) if pick else None
+
+
 def add_entry(tool, overlay, base, bind, src):
     if bind.get("kind") == "rebind":
         args = ["add-rebind", "--target", bind["target"],
@@ -91,11 +118,10 @@ def main():
         # The optimized source: prefer best_kernel_src (re-verification has already
         # restored it into kernel_src), otherwise whatever kernel_src currently holds.
         ksrc = os.path.join(task, "kernel_src")
-        files = sorted(os.listdir(ksrc)) if os.path.isdir(ksrc) else []
-        if not files:
-            out["skipped"].append({"kernel": k, "reason": "kernel_src/ is empty"})
+        src = editable_src(ksrc)
+        if not src:
+            out["skipped"].append({"kernel": k, "reason": "kernel_src/ holds no editable file"})
             continue
-        src = os.path.join(ksrc, files[0])
         rc, log = add_entry(tool, args.overlay, base, bind, src)
         if rc != 0:
             out["skipped"].append({"kernel": k,
@@ -118,13 +144,18 @@ def main():
             continue
         r = subprocess.run([sys.executable, tool, "check", "--module", mod],
                            capture_output=True, text=True, env=env)
-        where = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
-        inside = args.overlay in where
-        checked.append({"module": mod, "resolves_to": where, "shadowed": inside})
+        where, verdict = read_check(r.stdout or "")
+        # Trust the tool's own verdict rather than looking for the overlay path in its
+        # output. `check` prints "<module> -> <file>" and then a separate verdict line, so
+        # taking the last line as the path judged a correctly installed overlay to be
+        # missing -- it fails closed, which aborts a run that was in fact fine.
+        inside = verdict in ("OVERLAY_ACTIVE", "INJECTED")
+        checked.append({"module": mod, "resolves_to": where, "verdict": verdict,
+                        "shadowed": inside})
         if not inside:
-            a["warning"] = ("the overlay does not shadow %s — it still resolves to %s. "
+            a["warning"] = ("the overlay does not shadow %s — it resolves to %s (%s). "
                             "Any e2e measured in this state is meaningless."
-                            % (mod, where or "<unknown>"))
+                            % (mod, where or "<unknown>", verdict or "no verdict"))
     out["checks"] = checked
     out["all_shadowed"] = bool(checked) and all(c["shadowed"] for c in checked)
 

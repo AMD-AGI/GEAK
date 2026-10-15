@@ -16,9 +16,14 @@ end-to-end gain.
 
 | Skill | Notes |
 | --- | --- |
-| `overlay-e2e-ab/` | **default**. Reversible sitecustomize overlay + fresh server + A/B. |
+| `overlay-e2e-ab/` | Reversible sitecustomize overlay, fresh server, A/B — measured with GEAK's own `bench_e2e.sh` and the `agentx` client. |
+| `reference-replay-ab/` | For a baseline that was **not** measured by `bench_e2e.sh`: re-runs the reference harness itself, with the overlay handed to it through its own `python_overlay` hook. Both legs then come from the same command. |
 
-To replace it — patching a fork directly, or targeting a different serving stack — create
+Building the overlay is slot-level machinery, not a skill's: `build_overlay.py` sits
+beside `finalize.py` and both implementations call it, so the chain-seeding rule and the
+shadow check cannot drift apart between them.
+
+To replace them — patching a fork directly, or targeting a different serving stack — create
 a directory with a `SKILL.md` and a `run.sh`, and rename `stages.applyback.skill`. The
 slot's `finalize.py` (the A/B conventions and the rule that the two numbers stay
 separate) does not need rewriting.

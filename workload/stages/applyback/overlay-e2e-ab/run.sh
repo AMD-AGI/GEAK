@@ -33,7 +33,7 @@ done
 
 # --- 1. Layer the overlay.
 OVERLAY="$OUT/overlay"
-python3 "$SKILL_ROOT/build_overlay.py" --optimized "$OPTIMIZED" --tasks-dir "$TASKS_DIR" \
+python3 "$SLOT/build_overlay.py" --optimized "$OPTIMIZED" --tasks-dir "$TASKS_DIR" \
     --overlay "$OVERLAY" --manifest "$OUT/applied.json" 2>&1 | tee "$OUT/overlay.log"
 BRC=${PIPESTATUS[0]}
 if [ "$BRC" = 3 ]; then
