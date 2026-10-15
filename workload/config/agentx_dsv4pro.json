@@ -5,7 +5,7 @@
 
   "target": {
     "model": "deepseek-ai/DeepSeek-V4-Pro-0813",
-    "image": "lmsysorg/sglang-rocm:v0.5.21-rocm720-mi35x-20261007",
+    "image": "zihao-inferencex112750:world-init-20261013",
     "commits": {
       "inferencex": "92966d7943b7670a2ceba1d3333afd464b3476db",
       "aiperf": "89b21867872a5bbc4b0676bf5005c404da5e9f94",
@@ -13,7 +13,7 @@
     },
     "name_tokens": ["dsv4pro", "dsv4"],
     "enforce": true,
-    "_note_image": "The declared image is the recipe tag the CI run named. It was overwritten upstream at 14:49 UTC on 2026-10-07, after the CI job finished at 12:57 UTC, so the tag now resolves to sha256:65c5a944... carrying SGLang 1e86143bf0 rather than the CI source. Every run against this config therefore executes a locally derived image rebuilt from the CI pip record; byte identity with the historical image is unprovable and is never claimed. See stages.baseline.params.runtime_image."
+    "_note_image": "The declared image is NOT the recipe tag the CI run named. That tag -- lmsysorg/sglang-rocm:v0.5.21-rocm720-mi35x-20261007 -- was overwritten upstream at 14:49 UTC on 2026-10-07, after the CI job finished at 12:57 UTC, and now resolves to sha256:65c5a944... carrying SGLang 1e86143bf0 rather than the CI source. Pulling it would run a different stack under the CI's name. What this campaign actually targets is the image rebuilt from the CI pip record and source commit, which produced the adopted baseline: zihao-inferencex112750:world-init-20261013, sha256:9692a15cb5257aa524bc0ccc26e2bab2cc361a51f80c95ae33e7b25c44cbb44d as built on crsuse2-m2m-053. It is declared here so that every stage is checked against the thing that will really run. Byte identity with the historical CI image is unprovable and is never claimed. Build files: <harness>/control/Dockerfile.ci_source, Dockerfile.ci_packages, Dockerfile.world_init."
   },
   "runner_env": {
     "env_file": "/shared_nfs/zihao/kernel_agent/ax/.secrets/claude.env"
@@ -47,6 +47,9 @@
         "trace_dir": "/shared_nfs/zihao/ax_ut_37608671586_20261013/trace_full2",
         "serving_env": null,
         "prior_extraction": "/shared_nfs/zihao/ax_ut_37608671586_20261013",
+        "agent_budget_sec": 36000,
+        "agent_attempts": 5,
+        "agent_brief": "MACHINE. Everything in this campaign runs on crsuse2-m2m-318 (dev318), the machine you are already on. All 8 MI355X are idle and are yours. Do not reach for another node; nothing here needs one.\n\nWHAT IS ALREADY DONE. $PARAMS.prior_extraction holds a partial run of this very skill against this very CI job, by a copy of SKILL.md whose md5 matches the vendored one byte for byte. Sections 1-3 are finished and are to be IMPORTED WITH THEIR PROVENANCE, not recomputed: evidence/kernel_ranking*.json (326 kernels, 4,326,042 launches, deployment scope over all 8 ranks), evidence/selection_targets.json (8 targets), extraction/SELECTION.md and extraction/task_plan.json (6 declared task boundaries), roofline/REPORT.md. Copy them into $OUT and say in your notes where each came from. Re-deriving them from the same traces would burn hours and could only agree or introduce an error.\n\nWHAT IS NOT DONE. Section 4. The task directories under prior_extraction/extraction/tasks hold kernel_src/ and nothing else: no cases.py, no meta.json, no unittest.py, no captured shapes, no oracles, no run/ evidence. That is the work of this stage. Section 5 follows it.\n\nTHE SIX BOUNDARIES: ep_combine_intranode, megamoe_prepare_compact_dispatch, megamoe_stage1_fp8xfp4_grouped_gemm1, megamoe_stage2_gemm2_p2p_scatter, mla_v4_decode_asm_a8w8, opus_mla_v4_sparse_prefill.\n\nCAPTURE NEEDS A LIVE STACK, AND THE STACK HAS TO BE BUILT HERE FIRST. The image this campaign targets does not yet exist on dev318. Build it from the harness at stages.applyback.params.harness_dir: control/Dockerfile.ci_source, Dockerfile.ci_packages, Dockerfile.world_init, tagged zihao-inferencex112750:world-init-20261013 to match target.image, and record the resulting digest in your artifacts next to the 053 digest sha256:9692a15c... Do not pull the CI recipe tag: it was overwritten and now carries different SGLang source. Weights are already staged on shared storage at /shared_nfs/models/deepseek-ai/DeepSeek-V4-Pro-0813 at CI revision 72e1d3230f6c080a530b0a1d46f8eb4602340597 -- 892 GB, verified, do not re-download. The harness splits host side (tools/run_host.py, creates its own container) from container side (tools/in_container.py); read HANDOFF.md before driving either.\n\nTHE STACK IS EXCLUSIVE. A TP8/EP8 server owns all 8 GPUs. Tear it down when capture is finished; the optimize stage that follows needs one GPU per task and will otherwise contend with a server nobody is measuring.\n\nTRAPS CARRIED IN, all paid for already. Write traces to /dev/shm, never to NFS -- on NFS they truncate. Truncation is a flush race: wait for file sizes to stop growing, never a fixed sleep. Pin GPUs with ROCR_VISIBLE_DEVICES; HIP_VISIBLE_DEVICES alone does not reach benchmark subprocesses. The capture window must be steady state -- the prior run's first window was 32:7 prefill:decode against a true 1:1119 and mis-ranked the entire budget. A detached process started through spur exec does not survive the session; long work runs as a docker container on the node.\n\nONE KNOWN DEFECT IN THE VENDORED CAPTURE CODE: capture_shapes.py hooks only the first seam (its _STATE is a module global), so a multi-seam overlay silently installs one. If you need several seams, say so in your notes rather than trusting a single installed hook.",
         "_note_prior": "A partial run of this same skill (SKILL.md md5-identical to the vendored copy) already produced the census, the ranking, the selection and the boundary declarations for this exact CI run: 326 kernels, 4,326,042 launches, 8 targets, 6 declared task boundaries. Its tasks/ hold kernel_src/ and nothing else -- no cases.py, no meta.json, no unittest.py, no captures, no oracles -- so section 4 is substantively unstarted. Sections 1-3 are imported with their provenance rather than recomputed from the same traces.",
         "_note_scope": "Ranking is deployment-scope (all 8 ranks), not rank 0. Rank 0 and rank 3 agree on only 3 of their 10 top targets, so a single-rank ranking would select a different kernel set from the same run."
       }
@@ -58,7 +61,10 @@
         "roofline_mode": "rocprof",
         "roof_key": "roofline_us",
         "arch_json": null,
-        "rank_key": "expected_e2e_gain_pct"
+        "rank_key": "expected_e2e_gain_pct",
+        "agent_budget_sec": 10800,
+        "agent_attempts": 3,
+        "agent_brief": "MACHINE: crsuse2-m2m-318, 8 idle MI355X, the machine you are on.\n\nA roofline for these six boundaries already exists and is imported through the profile stage ($RUN_ROOT/profile/out): the selected set folds to 33.4% of roof (DECODE 39.1%, PREFILL 24.5%), MegaMoE GEMM1/GEMM2 are healthy at 48-76%, and 19.2% of all device time sits in megamoe_prepare_* plus ep_combine at 0.6-3.1% of any roof -- residency on a small block set waiting on peer barriers, not a bandwidth or FLOP limit. Treat that as the prior, and say explicitly where your numbers confirm or contradict it.\n\nTWO THINGS THE EARLIER PASS COULD NOT SETTLE, which is why this stage runs again now that section 4 has produced runnable harnesses. (1) The rocprof leg never ran: rocprof-compute on that node was 3.4.0, below the skill's 3.6.0 gate for gfx95x, and --roof-only needs a runnable --cmd, which only a built UT provides. Check the version on this machine; if it is still below the gate, say so and fall back to the corrections workflow (build_cases -> roofline_report -> fold) rather than reporting a roofline nobody measured. (2) The MLA-decode model was inferred rather than observed -- no recorded shapes, direct module launch. The captures from section 4 are what settle it.\n\nRANKING IS BY EXPECTED END-TO-END GAIN, not by operator speedup, and the reason is specific to this deployment: GPU busy fraction is 98.31%, but TP8/EP8 synchronises every rank each step, so a step shortens only by the MINIMUM per-rank saving. EPLB plus DP attention give each rank a different expert load -- rank 0 is an outlier for the MoE kernels -- so report the bound both ways, aggregate share for the upper bound and the weakest rank for the lower. prior_extraction/evidence/uplift_bounds.json has the earlier computation.\n\nFold multi-shape kernels with the skill's own fold.py. Do not sum by hand."
       }
     },
 
@@ -72,9 +78,10 @@
         "keep_threshold": 1.045,
         "apply_to_original": true,
         "gpus_per_task": 1,
-        "nodes": [],
-        "image": "lmsysorg/sglang-rocm:v0.5.21-rocm720-mi35x-20261007",
+        "nodes": ["crsuse2-m2m-318"],
+        "image": "zihao-inferencex112750:world-init-20261013",
         "gpus": "0,1,2,3,4,5,6,7",
+        "_note_backend": "image is set, so the scheduler uses the docker backend: one container per GPU, each mounting a single /dev/dri/renderD<128+i>. An env-only ROCR pin is not enough -- an optimizing agent resets its own environment, and a pin that lives only in the environment then lands on physical GPU 0 no matter what the scheduler intended. Physical isolation is what holds. The image must exist on this machine before this stage starts; the profile stage builds it.",
         "_note_budget": "12 h per unit test. With 6 task boundaries on 8 GPUs every task owns a GPU for the whole window, so 12 h per test is also 12 h wall-clock.",
         "_note_amdahl": "GPU busy fraction is 98.31%, so device time bounds the step -- but TP8/EP8 synchronises every rank each step, so a step shortens only by the *minimum* per-rank saving. A kernel sped up on one rank and not another buys nothing end to end."
       }
@@ -95,6 +102,7 @@
         "run_tag_prefix": "wl_geakx_dsv4pro_ab",
         "repeats": 2,
         "duration_s": 3600,
+        "_note_node": "This stage runs wherever the pipeline runs, which for this campaign is crsuse2-m2m-318. It takes the whole node: a TP8/EP8 server owns all 8 GPUs, and run.sh refuses rather than measure against someone else's load.",
         "_note_harness": "harness_cmd/case_file are null because this harness has no case table and no python_overlay hook: run_host.py launches the container and in_container.py launches the frozen server CLI. Wiring applyback means giving it that hook, and that is a stage-skill change, not a config value. Until it exists this stage reports blocked rather than measuring the candidate through a different client than the reference.",
         "_note_reference": "reference_run is null so both arms are measured here, on one node, by one harness. The adopted baseline was measured on node053 under a job that has since ended; differencing a candidate on another node against it would attribute the node difference to the kernels."
       }
