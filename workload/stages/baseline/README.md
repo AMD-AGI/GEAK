@@ -9,6 +9,15 @@
 | --- | --- | --- |
 | `adopt-measured-receipt/` | script | **default**. Reuse an already-measured serving receipt. No GPUs, no tokens, replayable |
 | `agentx-trace-replay/` | script | re-measure with a fresh AgentX trace replay. Occupies the whole machine; gate on `agentx_smoke.sh` first |
+| `ci-run-replay/` | script | reproduce a *named CI run* from a fresh digest-pinned container and accept the number only if it aligns. Pins image digest / data+seed / `benchmark_id` / cache-bust prefix, binds one rank per physical core, and proves each pin afterwards from the run's own records |
+
+Choose by what the baseline has to withstand. `adopt-measured-receipt` is right when the
+number is already trusted and the question is only "what was it". `ci-run-replay` is right
+when **this machine's ability to hit the CI point is itself in question** — before a long
+campaign, after a node or image change, or whenever a previous baseline and the CI figure
+disagree and nobody can say which pin drifted. It is the only one that reports `blocked`
+on a run that completed successfully but landed outside the band, which is the failure
+mode that otherwise quietly re-labels every downstream delta.
 
 The default reuses rather than re-measures because the CI run named in `instruct.md`
 (`34783501425`) has already been reproduced in full: `output_tokens_per_second =
@@ -42,11 +51,16 @@ applyback's A/B) reads only this file.
   cited 1.02. Anything below that is noise, not speedup.
 - A baseline with `measured=false` must not enter applyback's A/B.
 
+`ci-run-replay` fills the same schema and additionally records every pin plus the
+check-by-check alignment verdict under `provenance` (`alignment_verdict`,
+`alignment_checks`, `image_digest`, `benchmark_id`, `cpu_binding`, `cold_cache_dirs`), and
+sets `reference` to the CI run with the measured `drift_pct`.
+
 ## Artifacts → `result.json`
 
-Both implementations are script-shaped; `run.sh` writes `result.json` itself, so
+All three implementations are script-shaped; `run.sh` writes `result.json` itself, so
 `stage.py run baseline` completes in one step. `metrics` carries `throughput` and
-`reference_ratio`.
+`reference_ratio` (`ci_drift_pct` and `alignment` for `ci-run-replay`).
 
 ## Two measurement rules
 

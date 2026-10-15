@@ -41,7 +41,7 @@ the run resumes where it stopped.
 
 | Stage | Default skill | What it does | Key artifact |
 | --- | --- | --- | --- |
-| `baseline` | `adopt-measured-receipt` | reuse an already-measured receipt (no GPUs); `agentx-trace-replay` re-measures instead | `baseline.json` |
+| `baseline` | `adopt-measured-receipt` | reuse an already-measured receipt (no GPUs); `agentx-trace-replay` re-measures instead; `ci-run-replay` reproduces a named CI run under pinned digest/data/seed/`benchmark_id`/cache-bust and physical-core binding, and refuses a number that does not align | `baseline.json` |
 | `profile` | `agentx-kernel-extraction-standalone` | profile, then extract frozen-harness unit tests | `tasks/<k>/`, `kernel_ranking.json` |
 | `roofline` | `kernel-roofline` | per-kernel roofline; rank by **expected e2e gain** | `roofline.json` |
 | `optimize` | `geak-kernel-workflow` | one kernel per GPU in parallel, 48 h by default; `subagent-raw` optimizes without the GEAK workflow | `optimized.json`, `verified.json` |

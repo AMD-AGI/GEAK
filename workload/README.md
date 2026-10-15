@@ -36,7 +36,7 @@ files on disk.
 
 | Step | Artifact | Default skill | Swap it for |
 | --- | --- | --- | --- |
-| `baseline` | `baseline.json` | `adopt-measured-receipt` | `agentx-trace-replay` (re-measure from scratch) |
+| `baseline` | `baseline.json` | `adopt-measured-receipt` | `agentx-trace-replay` (re-measure from scratch), `ci-run-replay` (reproduce a named CI run and prove every pin) |
 | `profile` | `tasks/<kernel>/` | `agentx-kernel-extraction-standalone` | any skill that emits `tasks/` + a ranking |
 | `roofline` | `roofline.json` | `kernel-roofline` | any skill that emits per-case `rows.json` + `fold.py` |
 | `optimize` | `verified.json` | `geak-kernel-workflow` | `subagent-raw` (an agent, no GEAK workflow) |

@@ -1,0 +1,145 @@
+{
+  "_comment": "agentx_glm52, but with the baseline reproduced from scratch instead of adopted from a receipt. Identical to config/agentx_glm52.json except for stages.baseline. Use this when the question is whether *this machine* can still hit CI run 34783501425 -- before a long campaign, after a node or image change, or when a previous baseline and the CI figure disagree. It costs an hour on eight GPUs; agentx_glm52.json costs nothing and reuses a number that was already reproduced to within 0.07%.",
+  "run_root": "workload/runs/agentx_glm52_ci_replay",
+  "runner": "claude",
+
+  "target": {
+    "model": "amd/GLM-5.2-MXFP4",
+    "image": "lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260913",
+    "commits": {
+      "sglang": "7f1f8c706a",
+      "aiter": "4ad998328"
+    },
+    "name_tokens": [],
+    "enforce": true
+  },
+  "runner_env": {
+    "env_file": "/shared_nfs/zihao/kernel_agent/ax/.secrets/claude.env"
+  },
+  "stages": {
+    "baseline": {
+      "skill": "ci-run-replay",
+      "params": {
+        "ci": {
+          "run_id": "34783501425",
+          "run_url": "https://github.com/SemiAnalysisAI/InferenceX/actions/runs/34783501425/job/103795172714",
+          "output_throughput": 446.56324,
+          "metric": "output_token_throughput",
+          "unit": "tok/s",
+          "max_drift_pct": 0.5,
+          "_note_band": "0.5% is wide enough to absorb run-to-run noise on this workload and narrow enough to catch a dropped pin. For scale: the local reproduction landed 0.07% from CI, while the node-local pristine leg sits 0.12% below the receipt."
+        },
+        "pins": {
+          "image": "lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260913",
+          "image_digest": "sha256:d1a7c4cae3870711a5548cfe38e0b33db4c61c8977b04f66b7ab9b3bc1769a64",
+          "model": "amd/GLM-5.2-MXFP4",
+          "model_revision": "386bd0e4ec821f7b07975701cec3c3b953a5576a",
+          "seed": 42,
+          "benchmark_id": null,
+          "cache_bust": "first_turn_prefix",
+          "duration_s": 3600,
+          "warmup_requests_per_lane": 10,
+          "trace_corpus": {
+            "loader": "semianalysis_cc_traces_weka_062126",
+            "dataset": "semianalysisai/cc-traces-weka-062126",
+            "entries": 393,
+            "_note": "A named public-dataset loader, not a file. The harness picks it from MODEL_PREFIX=glm5.2; it is pinned here so a change in that default shows up as a mismatch rather than as unexplained drift. The loader name selects the corpus generation, and 062126 and 061526 have different prompt-length mixes."
+          },
+          "_note_benchmark_id": "Deliberately null: there is no safe default. The AgentX cache-bust marker embeds the AIPerf benchmark id, so the id IS the KV keyspace -- reusing one starts the run on warmed prefixes and measures high with nothing in the output saying so. Set a fresh id per run; preflight refuses any id already in runs/.benchmark_id_ledger.json.",
+          "_note_revision": "The weights are pinned by revision rather than by wiping the weights cache: emptying HF_HOME re-downloads tens of gigabytes and can change what is served underneath the run."
+        },
+        "cpu": {
+          "bind": "physical-cores",
+          "sglang_set_cpu_affinity": 0,
+          "_note_affinity": "0, not 1. sglang derives per-rank masks from the full topology, so under a restricted cpuset it binds to CPUs the cgroup then denies. This node has 118 physical cores over 2 sockets (236 logical); if the run is granted the whole node, 1 is correct -- but it must then be 1 in every arm compared against it."
+        },
+        "isolation": {
+          "fresh_container": true,
+          "container_name": "wl_ci_replay",
+          "cache_dirs": {
+            "TRITON_CACHE_DIR": {"container": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/cache/triton"},
+            "XDG_CACHE_HOME": {"container": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/cache/user"},
+            "TORCH_EXTENSIONS_DIR": {"container": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916/cache/torch_extensions"}
+          },
+          "cache_root": null,
+          "ledger": null,
+          "_note_mounts": "Bind mounts rather than plain -e, because tools/environment.sh exports these three variables itself and an -e pin would lose to it. A fresh empty directory under this run's out/ is mounted onto each path the harness names, so the harness's own export lands cold. The shared cache tree is shadowed, never emptied -- other runs out of that directory are untouched.",
+          "_note_hf": "HF_HUB_CACHE and the dataset mmap cache are intentionally absent: they hold weights and corpus, which must be warm and pinned, not cold."
+        },
+        "env_map": {},
+        "_note_env_map": "Empty on purpose. The harness sets seed, benchmark id and cache-bust itself through build_replay_cmd; passing a second set of variables would mean two sources of truth for the same pin. The proof pass reads back what the client actually recorded, so an unset pin surfaces as a mismatch rather than as silence.",
+        "docker": {
+          "volumes": [
+            "/shared_nfs:/shared_nfs",
+            "/mnt/m2m_nobackup:/mnt/m2m_nobackup"
+          ],
+          "extra_args": []
+        },
+        "harness": {
+          "dir": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916",
+          "cmd": "tools/run_tp8_c10.sh",
+          "args": ["CASE", "RUN_TAG", "DURATION"],
+          "case": "baseline",
+          "run_tag": null,
+          "result_dir": null,
+          "_note": "The site's own CI harness is driven rather than reimplemented, so what is reproduced stays what was measured. It refuses to overwrite an existing RESULT_DIR, so run_tag must be new -- it defaults to the benchmark_id, which preflight has already proven unused."
+        },
+        "noise_band": 1.045,
+        "config": {"tp": 8, "ep": 1, "gpus": 8, "concurrency": 10}
+      }
+    },
+    "profile": {
+      "skill": "agentx-kernel-extraction-standalone",
+      "params": {
+        "selection": "per-phase Top 5 AND overall GPU-time share > 3%",
+        "max_targets": null,
+        "trace_dir": null,
+        "serving_env": null
+      }
+    },
+    "roofline": {
+      "skill": "kernel-roofline",
+      "params": {
+        "roofline_mode": "rocprof",
+        "roof_key": "roofline_us",
+        "arch_json": null,
+        "rank_key": "expected_e2e_gain_pct"
+      }
+    },
+    "optimize": {
+      "skill": "geak-kernel-workflow",
+      "params": {
+        "time_budget_sec": 14400,
+        "attempt_cap_sec": 1500,
+        "budget": 4,
+        "min_improve": 0.05,
+        "keep_threshold": 1.045,
+        "apply_to_original": true,
+        "gpus_per_task": 1,
+        "nodes": [],
+        "image": "lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260913",
+        "gpus": "0,1,2,3,4,5,6,7"
+      }
+    },
+    "applyback": {
+      "skill": "reference-replay-ab",
+      "params": {
+        "exclusive_node": true,
+        "harness_dir": "/shared_nfs/zihao/inferencex_agentx_34783501425_268_20260916",
+        "harness_cmd": "tools/run_tp8_c10.sh",
+        "case_file": "tools/cases_tp8_c10.json",
+        "case_name": "geakx_applyback",
+        "base_case": "baseline",
+        "overlay_subdir": "overlays/geakx_applyback",
+        "reference_run": null,
+        "reference_key": "output_tok_per_s",
+        "run_tag_prefix": "wl_geakx_ci_ab",
+        "repeats": 2,
+        "duration_s": 3600,
+        "port": 8899,
+        "stop_cmd": "tools/stop_owned_server.py",
+        "_note_reference": "null, so the A/B reference is this config's own freshly reproduced baseline rather than a receipt from another node. That is the point of running ci-run-replay: both arms are measured on this machine, by this harness, against the same corpus."
+      }
+    }
+  }
+}

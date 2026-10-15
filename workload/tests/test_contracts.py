@@ -141,6 +141,159 @@ def test_a_stage_that_observed_nothing_is_unverified_not_ok(tmp_path):
     assert not target.identity_problems(rep)
 
 
+# ----------------------------------------------------------------- CI replay alignment
+#
+# These guard the baseline itself. A baseline that measured something adjacent to the CI
+# point is worse than no baseline: every downstream delta inherits the error with a
+# plausible-looking sign, and nothing in the output says so.
+
+REPLAY = os.path.join(WORKLOAD, "stages", "baseline", "ci-run-replay")
+sys.path.insert(0, REPLAY)
+
+
+def _params(**over):
+    p = {"pins": {"image": "", "image_digest": "sha256:" + "a" * 64,
+                  "model": "m", "model_revision": "r", "seed": 42,
+                  "benchmark_id": "bid_1", "cache_bust": "first_turn_prefix",
+                  "duration_s": 3600,
+                  "trace_corpus": {"loader": "semianalysis_cc_traces_weka_062126"}},
+         "ci": {"output_throughput": 100.0}}
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(p.get(k), dict):
+            p[k] = dict(p[k], **v)
+        else:
+            p[k] = v
+    return p
+
+
+def _blockers(p):
+    import preflight
+    problems = []
+    preflight.check_pins(p, problems)
+    return problems
+
+
+def test_a_tag_is_not_an_identity():
+    """A tag is a moving pointer; only the digest says what was measured."""
+    assert any("moving pointer" in x for x in
+               _blockers(_params(pins={"image_digest": "v0.5.19-rocm720"})))
+    assert not any("moving pointer" in x for x in _blockers(_params()))
+
+
+def test_a_reissued_benchmark_id_is_refused(tmp_path):
+    """The AgentX cache-bust marker embeds the id, so the id is the KV keyspace. A second
+    run under the same id starts on warmed prefixes and measures high, silently."""
+    import preflight
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"used": [{"benchmark_id": "bid_1"}]}))
+    problems = []
+    preflight.check_benchmark_id(_params()["pins"], str(ledger), problems)
+    assert any("already been used" in x for x in problems)
+    problems = []
+    preflight.check_benchmark_id({"benchmark_id": "bid_2"}, str(ledger), problems)
+    assert problems == []
+
+
+def test_a_different_cache_bust_target_is_refused():
+    assert any("first_turn_prefix" in x for x in
+               _blockers(_params(pins={"cache_bust": "whole_prompt"})))
+
+
+def test_the_corpus_may_be_a_loader_but_may_not_be_unnamed():
+    """The AgentX harness takes a public-dataset loader name, not a file. Demanding a path
+    would make an honest config impossible; demanding nothing would let the corpus
+    generation drift, and 062126 and 061526 are different prompt-length mixes."""
+    assert not any("trace_corpus" in x for x in _blockers(_params()))
+    assert any("trace_corpus" in x for x in _blockers(_params(pins={"trace_corpus": {}})))
+
+
+def test_a_weights_cache_is_never_cold_wiped(tmp_path):
+    """Emptying HF_HOME re-downloads tens of gigabytes and can change which revision is
+    served underneath the run. Compile caches are cold; weights caches are pinned."""
+    import preflight
+    problems = []
+    preflight.check_isolation({"isolation": {"cache_vars": ["TRITON_CACHE_DIR", "HF_HOME"]}},
+                              str(tmp_path), problems)
+    assert any("HF_HOME" in x and "weights cache" in x for x in problems)
+
+
+def test_a_warm_compile_cache_is_refused(tmp_path):
+    """A warm Triton cache can carry kernels compiled from another campaign's overlay —
+    which has happened on this stack."""
+    import preflight
+    warm = tmp_path / "caches" / "triton_cache_dir"
+    warm.mkdir(parents=True)
+    (warm / "leftover.hsaco").write_text("x")
+    problems = []
+    preflight.check_isolation({"isolation": {"cache_vars": ["TRITON_CACHE_DIR"]}},
+                              str(tmp_path), problems)
+    assert any("already holds" in x for x in problems)
+
+
+def test_cache_dirs_shadow_the_path_the_harness_names(tmp_path):
+    """`-e TRITON_CACHE_DIR=...` loses to a harness that exports it itself, so the fresh
+    directory must be mounted onto the path the harness names — and the harness's own
+    cache tree must be shadowed, not emptied."""
+    import preflight
+    iso = {"cache_dirs": {"TRITON_CACHE_DIR": {"container": "/ix/cache/triton"}}}
+    root, dirs, mounts = preflight.cache_plan(iso, str(tmp_path))
+    host = dirs["TRITON_CACHE_DIR"]
+    assert mounts[host] == "/ix/cache/triton"
+    assert host.startswith(root) and "/ix/cache" not in host
+
+
+def test_an_empty_cache_after_the_run_is_a_failure_not_a_pass(tmp_path):
+    """The only proof the variable reached the server. A cache that is still empty after an
+    hour of serving means the server compiled somewhere else entirely."""
+    out = tmp_path / "out"
+    out.mkdir()
+    rundir = tmp_path / "rundir"
+    rundir.mkdir()
+    cold = tmp_path / "triton"
+    cold.mkdir()
+    (tmp_path / "align.json").write_text(json.dumps(
+        {"cache_vars": {"TRITON_CACHE_DIR": str(cold)}, "cpu_plan": {"cpus": []}}))
+    (tmp_path / "params.json").write_text(json.dumps(_params()))
+    r = run([sys.executable, os.path.join(REPLAY, "verify_alignment.py"),
+             "--params", str(tmp_path / "params.json"),
+             "--alignment", str(tmp_path / "align.json"),
+             "--out", str(out), "--run-dir", str(rundir)])
+    assert r.returncode == 1, r.stdout + r.stderr
+    doc = json.load(open(out / "alignment_verified.json"))
+    assert doc["verdict"] == "FAILED"
+    assert any("still empty" in f for f in doc["failures"])
+
+
+def test_a_check_that_could_not_run_is_unproven_not_ok(tmp_path):
+    """'We could not check' must never render as a tick."""
+    out = tmp_path / "out"
+    out.mkdir()
+    rundir = tmp_path / "rundir"      # the harness's own output, and nothing else
+    rundir.mkdir()
+    (tmp_path / "align.json").write_text(json.dumps({"cache_vars": {}, "cpu_plan": {}}))
+    (tmp_path / "params.json").write_text(json.dumps(_params()))
+    r = run([sys.executable, os.path.join(REPLAY, "verify_alignment.py"),
+             "--params", str(tmp_path / "params.json"),
+             "--alignment", str(tmp_path / "align.json"),
+             "--out", str(out), "--run-dir", str(rundir)])
+    assert r.returncode == 2, r.stdout + r.stderr
+    doc = json.load(open(out / "alignment_verified.json"))
+    assert doc["verdict"] == "unproven"
+    assert all(c["status"] != "ok" for c in doc["checks"])
+
+
+def test_physical_core_plan_drops_smt_siblings():
+    """One logical CPU per physical core, from the machine's own topology. Guessing that
+    siblings are cpu and cpu+n/2 is right on one node and wrong on the next."""
+    import preflight
+    plan, err = preflight.physical_cores()
+    if err:
+        pytest.skip(err)
+    assert plan["physical_cores"] == len(plan["cpus"]) == len(set(plan["cpus"]))
+    assert plan["physical_cores"] + plan["smt_siblings_dropped"] == \
+        plan["granted_logical_cpus"]
+
+
 def test_every_configured_skill_exists():
     """Every skill directory named in the config must actually exist and carry a SKILL.md."""
     cfg = json.load(open(os.path.join(WORKLOAD, "config", "default.json")))
