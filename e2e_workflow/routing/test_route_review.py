@@ -14,7 +14,7 @@ sys.path.insert(0, HERE)
 import route_review as RR  # noqa: E402
 
 HAIKU, SONNET, OPUS55 = "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"
-LANES = [HAIKU, SONNET, "claude-opus-4-6", OPUS55]
+LANES = [HAIKU, SONNET, OPUS55]
 
 
 def call(label, model, inp=0, read=0, w5=0, out=0, role="engineer"):
@@ -36,7 +36,7 @@ CALLS = [
     call("verify d4", HAIKU, read=200_000, w5=50_000, out=5_000),
 ]
 ROUTING = {"lanes": LANES, "decider": SONNET, "thresholds": {"conf_escalate": 0.7, "max_retries_per_lane": 3,
-           "max_top_escalations": 1, "max_output_tokens": 1_000_000, "floors": {}},
+           "max_top_escalations": None, "max_output_tokens": 1_000_000, "floors": {}},
            "killed": False, "spent_output_tokens": 106_000, "audit": [
     {"event": "decide", "scope": "eng:memory", "lane": 0, "why": "classified high; small-lane confidence 0.9 >= 0.7 -> SMALL"},
     {"event": "dispatch", "scope": "eng:memory", "label": "eng d1:memory", "model": HAIKU, "capped": False},
@@ -98,6 +98,18 @@ class TestRouteReview(unittest.TestCase):
         md_old = RR.render(RR.review(old_calls, old_routing, None, RR.L.DEFAULT_RATES), old_routing)
         self.assertIn("(`claude-sonnet-5` decider)", md_old)
         self.assertIn("`claude-haiku-4-5-20251001` uses an older tokenizer", md_old)
+
+    def test_top_lane_cap_reads_as_no_cap_by_default_and_as_its_value_when_set(self):
+        md = RR.render(self.R, ROUTING)
+        self.assertIn("no cap on worker dispatches on the top lane", md)
+        self.assertNotIn("None", md.split("## Ladder", 1)[1].split("\n\n", 2)[1])
+        capped = json.loads(json.dumps(ROUTING))
+        capped["thresholds"]["max_top_escalations"] = 1
+        capped["audit"].append({"event": "dispatch", "scope": "eng:algo", "label": "eng d2:algo", "model": SONNET,
+                                "capped": True})
+        md_cap = RR.render(RR.review(CALLS, capped, None, RR.L.DEFAULT_RATES), capped)
+        self.assertIn("max 1 worker dispatch(es) on the top lane", md_cap)
+        self.assertIn("1 dispatch(es) wanted the top lane but were capped one lane down", md_cap)
 
     def test_cli_end_to_end(self):
         with tempfile.TemporaryDirectory() as d:

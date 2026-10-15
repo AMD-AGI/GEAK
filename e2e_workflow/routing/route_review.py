@@ -190,9 +190,11 @@ def render(R, routing):
     if routing:
         th = routing.get("thresholds", {})
         L_ += ["## Ladder", "",
-               "Thresholds: escalate below confidence %s; max %s failures per lane; max %s worker dispatch(es) on "
+               "Thresholds: escalate below confidence %s; max %s failures per lane; %s on "
                "the top lane; output-token cap %s; floors %s."
-               % (th.get("conf_escalate"), th.get("max_retries_per_lane"), th.get("max_top_escalations"),
+               % (th.get("conf_escalate"), th.get("max_retries_per_lane"),
+                  "no cap on worker dispatches" if th.get("max_top_escalations") is None
+                  else "max %s worker dispatch(es)" % th.get("max_top_escalations"),
                   th.get("max_output_tokens"), json.dumps(th.get("floors") or {})), ""]
         if routing.get("killed"):
             L_ += ["**The output-token kill switch tripped** at %s output tokens. Work after that point was skipped."
@@ -221,7 +223,8 @@ def render(R, routing):
         items.append("**Top-lane worker dispatches: %d**, %d failed anyway." % (len(top), sum(d["result"] == "fail" for _, d in top)))
     capped = sum(d["capped"] for s in R["per"].values() for d in s["dispatches"])
     if capped:
-        items.append("**%d dispatch(es) wanted Opus 5.5 but were capped to Opus 4.6.** If they then failed, the cap cost quality." % capped)
+        items.append("**%d dispatch(es) wanted the top lane but were capped one lane down.** If they then failed, the cap "
+                     "cost quality." % capped)
     if R["control"] is not None and R["total"] > R["control"]:
         items.append("**Routing cost more than it saved:** routed %s vs control %s." % (_usd(R["total"]), _usd(R["control"])))
     L_ += (["- " + i if not i.startswith("  ") else i for i in items] or ["- Nothing found in this run's evidence."]) + [""]

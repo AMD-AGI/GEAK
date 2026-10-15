@@ -723,12 +723,13 @@ function tlAgent(prompt, o, attempt) {
 //   helper   the fixed-script scopes below    -> Haiku 5.5, fixed (their schema is the check)
 //   decider  route:* (the classifier itself)  -> Sonnet 5.5, fixed, never itself classified (no recursion)
 //   worker   every other scope                -> classified once by the decider, then moved UP the ladder
-//            only on a DETERMINISTIC failure: Haiku 5.5 -> Sonnet 5.5 -> Opus 4.6 -> Opus 5.5
+//            only on a DETERMINISTIC failure: Haiku 5.5 -> Sonnet 5.5 -> Opus 5.5. Opus 4.6 is not a lane: it
+//            costs more than Opus 5.5 on every price bucket (input, cache write, cache read, output).
 // Keys = `${phase}` + U+0000 + labelPrefix (everything before the first space), so dynamic round/tag
 // suffixes collapse to one stable scope identity.
 // <<ROUTING-INLINE-START>>
-const ROUTE_LANES = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-4-6', 'claude-opus-5-5'];
-const ROUTE_LANE_OF = { small: 0, medium: 1, high: 2, escalate: 3 };
+const ROUTE_LANES = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'];
+const ROUTE_LANE_OF = { small: 0, medium: 1, high: 2, escalate: 2 };
 const ROUTE_TOP = ROUTE_LANES.length - 1;
 const ROUTE_MODEL_BRAIN = ROUTE_LANES[ROUTE_TOP];
 const ROUTE_MODEL_DECIDER = ROUTE_LANES[1];
@@ -754,9 +755,14 @@ const ROUTING_ON = (function () {
 function __routeNum(v, d) { const x = Number(v); return v != null && v !== '' && Number.isFinite(x) ? x : d; }
 const ROUTE_CONF_ESCALATE = __routeNum(A.route_conf_escalate, 0.70);
 const ROUTE_MAX_FAILS_PER_LANE = Math.max(1, __routeNum(A.route_max_retries_per_lane, 3));
-const ROUTE_MAX_TOP_DISPATCHES = Math.max(0, __routeNum(A.route_max_top_escalations, 1));
+// Worker dispatches on the top lane (Opus 5.5) per run: no cap unless route_max_top_escalations is set
+// (null = none). With a cap, a capped dispatch runs one lane down. Never compare null numerically.
+const ROUTE_MAX_TOP_DISPATCHES = (function () {
+  const x = __routeNum(A.route_max_top_escalations, null);
+  return x == null ? null : Math.max(0, x);
+})();
 const ROUTE_MAX_OUTPUT_TOKENS = Math.max(0, __routeNum(A.route_max_output_tokens, 1000000));
-// Per-scope starting floors, {scope: lane 0..3} — the ONLY thing route_review.py proposes changing.
+// Per-scope starting floors, {scope: lane 0..2} — the ONLY thing route_review.py proposes changing.
 const ROUTE_FLOORS = (function () {
   let f = A.route_floors;
   if (typeof f === 'string') { try { f = JSON.parse(f); } catch (e) { f = null; } }
@@ -914,7 +920,7 @@ async function __routePick(p, o) {
   }
   let lane = st.lane, capped = false;
   if (lane === ROUTE_TOP) {
-    if (__routeTopUsed >= ROUTE_MAX_TOP_DISPATCHES) { lane = ROUTE_TOP - 1; capped = true; }
+    if (ROUTE_MAX_TOP_DISPATCHES != null && __routeTopUsed >= ROUTE_MAX_TOP_DISPATCHES) { lane = ROUTE_TOP - 1; capped = true; }
     else __routeTopUsed++;
   }
   __routeAudit.push({ event: 'dispatch', scope, label: (o && o.label) || '', phase: (o && o.phase) || '',
