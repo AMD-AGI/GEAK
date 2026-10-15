@@ -764,16 +764,55 @@ fi
 # baseline, so a "win" measured with less memory headroom is unfair (and usually OOMs under load anyway).
 # Reject such a candidate BEFORE the timed legs instead of after a full A/B. The integrator records the
 # free-VRAM floor the baseline leg cleared into MEM_HEADROOM_MIN_MB; a candidate below it fails parity.
-# Fail-OPEN on any parse error (missing rocm-smi / unexpected schema) so non-AMD or partial rigs are
+# Fail-OPEN on any parse error (amd-smi absent / unexpected schema) so non-AMD or partial rigs are
 # unaffected — this only ever rejects when it can POSITIVELY prove the headroom regressed.
+# amd-smi has no "VRAM Total Free Memory (B)" key (that was rocm-smi's own derived field); free is
+# computed from total_vram - used_vram instead, read by EXACT key name only. The neighbouring *_gtt
+# fields are deliberately not matched: on an APU, GTT is ~24x VRAM, so a loose "*vram*" match would
+# report a number wildly too large rather than fail. amd-smi's call is decoupled from the parse
+# (`_vram_raw=... || true`) so a stage-1 failure (no driver, tool absent) can never poison the
+# stage-2 parse, which always runs against a fixed string and degrades to "" on its own.
 if [ -n "$OVERLAY_PYTHONPATH" ] && [ -n "${MEM_HEADROOM_MIN_MB:-}" ]; then
-  _free_mb=$(rocm-smi --showmeminfo vram --json 2>/dev/null | python3 -c '
+  _vram_raw=$(amd-smi metric --mem-usage --json 2>/dev/null) || true
+  _free_mb=$(printf '%s' "$_vram_raw" | python3 -c '
 import sys, json
+
+def _scalar(x):
+    if isinstance(x, dict):
+        x = x.get("value")
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    return float(x)
+
+def _lookup(mapping, name):
+    if not isinstance(mapping, dict) or name not in mapping:
+        return None
+    value = mapping[name]
+    if value is None or (isinstance(value, str) and value.strip().upper() in ("", "N/A")):
+        return None
+    return value
+
+_MIB_PER_UNIT = {"B": 1.0 / 1024**2, "KB": 1.0 / 1024, "KIB": 1.0 / 1024, "MB": 1.0, "MIB": 1.0,
+                 "GB": 1024.0, "GIB": 1024.0, "TB": 1024.0**2, "TIB": 1024.0**2}
+
+def _mib(block):
+    value = _scalar(block)
+    if value is None:
+        return None
+    unit = str(block.get("unit") or "").strip().upper() if isinstance(block, dict) else "MB"
+    scale = _MIB_PER_UNIT.get(unit)
+    return value * scale if scale is not None else None
+
 try:
     d = json.load(sys.stdin)
-    vals = [int(v["VRAM Total Free Memory (B)"]) // (1024*1024)
-            for v in d.values()
-            if isinstance(v, dict) and "VRAM Total Free Memory (B)" in v]
+    vals = []
+    for row in d.get("gpu_data", []) or []:
+        mem = row.get("mem_usage")
+        used = _mib(_lookup(mem, "used_vram"))
+        total = _mib(_lookup(mem, "total_vram"))
+        if used is None or total is None or total <= 0:
+            continue
+        vals.append(int(total - used))
     print(min(vals) if vals else "")
 except Exception:
     print("")

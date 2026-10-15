@@ -235,7 +235,7 @@ class TestEmptyManifestParity(_Scenario):
 
 class TestForkBombGuard(_Scenario):
     PROBES = ["rocm_agent_enumerator", "rocminfo", "offload-arch", "amdgpu-arch",
-              "hipconfig", "hipcc", "hipinfo", "rocm-smi", "rocm_smi.py"]
+              "hipconfig", "hipcc", "hipinfo", "rocm-smi", "rocm_smi.py", "amd-smi"]
 
     def test_every_known_probe_gets_an_empty_manifest(self):
         for probe in self.PROBES:

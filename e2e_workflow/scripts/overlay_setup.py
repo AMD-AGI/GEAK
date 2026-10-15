@@ -61,8 +61,11 @@ _EMPTY = {"modules": [], "rebinds": [], "markers": [], "captures": []}
 # subsequent vLLM launch failing torch.distributed rendezvous with "2/8 clients joined").
 # The overlay has no business running inside an arch probe, so no-op there.
 _ARGV0 = (sys.argv[0] if sys.argv else "") or ""
+# amd-smi belongs here too: it is itself a Python entry-point script (ROCm's pip/TheRock wheels
+# ship it as `#!.../python` + `from rocm_sdk_core._cli import amd_smi`), so it inherits PYTHONPATH
+# exactly like the other arch probes and is just as capable of re-entering this shim.
 _PROBES = {"rocm_agent_enumerator", "rocminfo", "offload-arch", "amdgpu-arch", "hipconfig", "hipcc",
-           "hipinfo", "rocm-smi", "rocm_smi.py"}
+           "hipinfo", "rocm-smi", "rocm_smi.py", "amd-smi"}
 if os.path.basename(_ARGV0) in _PROBES or os.path.abspath(_ARGV0 or ".").startswith(
         ("/opt/rocm", "/usr/local/rocm")):
     _m = dict(_EMPTY)
