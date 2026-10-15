@@ -164,3 +164,57 @@ def test_missing_physical_cu_count_fails_closed() -> None:
     )
     with pytest.raises(gpu_identity.IdentityError, match="physical Compute Unit"):
         gpu_identity.parse_rocminfo(text)
+
+
+def test_strix_halo_apu_alone_is_visible() -> None:
+    identity = gpu_identity.parse_rocminfo(
+        _rocminfo("gfx1151", "AMD Radeon Graphics", cu=40)
+    )
+    assert identity["gfx"] == "gfx1151"
+    assert identity["target"] == "unknown"
+    assert identity["physical_cu_count"] == 40
+
+
+def test_strix_halo_apu_is_not_hidden_by_a_discrete_card() -> None:
+    # The integrated-nameplate filter exists to drop a 2-CU desktop iGPU that
+    # nobody asked to run on. A Strix Halo APU wears the same nameplate but is
+    # the compute device; silently preferring the discrete card would hand an
+    # APU run RDNA4 policy, peaks and images. Fail closed and name both agents.
+    text = _rocminfo("gfx1201", gpu_identity.R9700_MARKETING_NAME)
+    text += """
+*******
+Agent 3
+*******
+  Name:                    gfx1151
+  Marketing Name:          AMD Radeon Graphics
+  Compute Unit:            40
+"""
+    with pytest.raises(gpu_identity.IdentityError, match="mixed identities") as excinfo:
+        gpu_identity.parse_rocminfo(text)
+    message = str(excinfo.value)
+    assert "gfx1151" in message and "gfx1201" in message
+
+
+def test_apu_exception_is_keyed_on_isa_not_nameplate() -> None:
+    # A desktop Ryzen iGPU wears the identical marketing string. It is still
+    # filtered, because the exception is an ISA allowlist, not a name test.
+    text = _rocminfo("gfx1201", gpu_identity.R9700_MARKETING_NAME)
+    text += """
+*******
+Agent 3
+*******
+  Name:                    gfx1036
+  Marketing Name:          AMD Radeon Graphics
+  Compute Unit:            2
+"""
+    identity = gpu_identity.parse_rocminfo(text)
+    assert identity["gfx"] == "gfx1201"
+    assert identity["visible_gpu_agents"] == 1
+
+
+def test_strix_halo_apu_keeps_an_explicit_nameplate() -> None:
+    identity = gpu_identity.parse_rocminfo(
+        _rocminfo("gfx1151", "AMD Radeon 8060S Graphics", cu=40)
+    )
+    assert identity["gfx"] == "gfx1151"
+    assert identity["target"] == "unknown"
