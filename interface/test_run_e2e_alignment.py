@@ -775,3 +775,102 @@ def test_verified_reference_report_has_no_unverified_caveat(
     section = rx._render_baseline_alignment_section(out)
 
     assert "upstream handoff gap" not in section
+
+
+_ATOM_ENGINE_LINE = (
+    "[atom 23:43:23] Engine kwargs: {{'trust_remote_code': True, 'tensor_parallel_size': 8, "
+    "'port': {port}, 'kv_cache_dtype': 'fp8', 'max_num_seqs': {seqs}, 'gpu_memory_utilization': 0.85, "
+    "'torch_profiler_dir': {prof}, "
+    "'online_quant_config': {quant}, 'kv_cache_block_size': {block}, "
+    "'compilation_config': CompilationConfig(level=3, use_cudagraph=True, cudagraph_capture_sizes=[1, 2, 4, 8], "
+    "traced_files=set(), cudagraph_mode=<CUDAGraphMode.FULL: 2>, inductor_compile_config={{}}), "
+    "'speculative_config': {spec}, 'enable_tbo': False}}\n"
+)
+
+
+def _atom_log(path: Path, *, seqs: int = 8, block: int = 64, mtp: bool = True,
+              port: int = 8006, prof: str = "None") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "[atom] starting\n"
+        + _ATOM_ENGINE_LINE.format(
+            port=port, seqs=seqs, block=block, prof=prof,
+            quant="{'global_quant_config': 'ptpc_fp8', 'exclude_layer': ['*.mlp.gate']}" if mtp else "None",
+            spec="SpeculativeConfig(method='mtp', num_spec_tokens=5)" if mtp else "None",
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_atom_engine_kwargs_are_read_as_launch_identity(tmp_path: Path) -> None:
+    observed, _ = rx._read_server_identity_evidence(_atom_log(tmp_path / "server.log"))
+
+    assert observed["backend"] == "atom"
+    args = observed["server_args"]
+    assert args["speculative_method"] == "mtp" and args["num_spec_tokens"] == 5
+    assert args["kv_cache_block_size"] == 64 and args["max_num_seqs"] == 8
+    assert args["online_quant_config"]["global_quant_config"] == "ptpc_fp8"
+    assert args["cudagraph_capture_sizes"] == [1, 2, 4, 8] and args["cudagraph_mode"] == "FULL"
+    # Run-scoped values are not identity: two launches of one config differ there.
+    assert "port" not in args and "torch_profiler_dir" not in args
+
+
+def test_atom_without_speculation_records_it_as_absent(tmp_path: Path) -> None:
+    observed, _ = rx._read_server_identity_evidence(_atom_log(tmp_path / "server.log", mtp=False))
+
+    assert observed["server_args"]["speculative_method"] is None
+    assert observed["server_args"]["online_quant_config"] is None
+
+
+def _atom_handoff(orchestrator_log: Path) -> dict:
+    # The upstream identity is an opaque digest no GEAK log can reproduce.
+    return {
+        "same_config_reference_identity": "sha256:" + "0" * 64,
+        "baseline_env_spec": {
+            "measurement_evidence": {"actual_server_log_path": str(orchestrator_log)},
+        },
+    }
+
+
+def test_opaque_upstream_identity_falls_back_to_the_orchestrator_server_log(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log", port=9000)
+    _atom_log(eval_dir / "profile" / "round_0" / "server.log", prof="'/tmp/prof'")
+    handoff = _atom_handoff(_atom_log(tmp_path / "hl" / "server.log"))
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert identity["status"] == "matched"
+    assert identity["expected_source"] == "orchestrator_server_log"
+    assert [leg["status"] for leg in identity["geak_launched"]] == ["matched"]
+
+
+def test_a_geak_launch_that_dropped_the_recipe_flags_is_a_mismatch(tmp_path: Path) -> None:
+    """The 2026-10-04 GLM case: Setup imported the orchestrator's server, but every server
+    GEAK launched itself ran adapter defaults -- no MTP, block 16, 512 seqs."""
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    _atom_log(eval_dir / "validation" / "base" / "server.log", seqs=512, block=16, mtp=False)
+    handoff = _atom_handoff(_atom_log(tmp_path / "hl" / "server.log"))
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert identity["status"] == "mismatched"
+    leg = identity["geak_launched"][0]
+    assert leg["leg"] == "validation_base" and leg["status"] == "mismatched"
+    differing = {m["key"]: (m["expected"], m["observed"]) for m in leg["mismatches"]}
+    assert differing["speculative_method"] == ("mtp", None)
+    assert differing["kv_cache_block_size"] == (64, 16)
+    assert differing["max_num_seqs"] == (8, 512)
+
+
+def test_no_orchestrator_log_keeps_an_opaque_identity_unverified(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    handoff = _atom_handoff(tmp_path / "missing" / "server.log")
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert identity["status"] == "unverified"
+    assert "geak_launched" not in identity
