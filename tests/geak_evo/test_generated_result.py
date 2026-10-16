@@ -111,6 +111,13 @@ class GeneratedResultTests(unittest.TestCase):
         context = output["timing_context"]["candidate"]
         self.assertEqual(context["paired_cases"]["case-a"]["reps"], 2)
         self.assertIn("observer/paired-score.json", context["evidence"])
+        reference = output["original_paired_reference"]
+        self.assertEqual(reference["evaluation_id"], "baseline")
+        self.assertEqual(reference["admitted_source_id"], self.original_source)
+        self.assertEqual(reference["baseline_closure_sha256"], output["baseline_closure_sha256"])
+        self.assertEqual(reference["per_case"], output["timing_context"]["baseline"]["paired_cases"])
+        self.assertEqual(reference["measurement"], output["measurements"]["baseline"])
+        self.assertAlmostEqual(reference["geomean_speedup"], ((1.7 / 1.05) * 2) ** 0.5)
 
     def test_weighted_metric_uses_same_internal_pair(self):
         self.measure()
@@ -193,6 +200,21 @@ class GeneratedResultTests(unittest.TestCase):
         output = self.export()
         self.assertEqual(output["outcome"], "error")
         self.assertIn("generated retained artifact differs", output["error"])
+
+    def test_only_original_cache_difference_rejects_cross_evaluation_comparison(self):
+        def change(role, fixture):
+            if role == "baseline":
+                for record in fixture.records:
+                    if record["kind"] == "leg" and record["payload"]["mode"] == "time":
+                        row = record["payload"]["result"]["cases"][0]
+                        row["cache_condition"]["mode"] = "write_evict"
+        self.change_raw = change
+        self.measure()
+        output = self.export()
+        self.assertEqual(output["outcome"], "error")
+        self.assertIn("baseline and selected actual timer/cache conditions differ", output["error"])
+        self.assertIsNone(output["final_speedup"])
+        self.assertEqual(output["final_patch"], "")
 
     def test_mixed_cache_is_retained_but_not_exported_as_comparable(self):
         def change(role, fixture):

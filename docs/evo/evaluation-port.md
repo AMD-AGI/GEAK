@@ -191,13 +191,17 @@ the ratio. The separate ORIGINAL evaluation remains a checked reference; its
 candidate-side timing is not used as the paired baseline. The external baseline
 is identified by its protected closure and resolved-file observations. The
 admitted editable source ID is retained separately and does not name that
-external implementation.
+external implementation. `original_paired_reference` exposes ORIGINAL's own
+internal pair, full-case geomean and measurement reference; it need not equal 1.0.
 
 Raw timer, graph fallback, cache, compile and dispatch details remain in the
 paired score. Export additionally requires matching actual timer/cache settings
 across both legs and replicates, and the ORIGINAL reference. This prospective
 comparability check is stricter than merely parsing a valid harness report.
 A matching wall fallback remains labeled `wall`; it is never graph evidence.
+If candidate graph capture falls back to event or wall timing while its baseline
+leg retains graph timing, export refuses the comparison rather than combining
+those different timers.
 Cases and replications are not pooled with native-v2 graph means. All exported
 measurement/custody/reward/framework-acceptance flags remain false.
 

@@ -380,6 +380,14 @@ def export_final_result(store, snapshot, *, evaluator, selection_options, baseli
                 after = {case: paired[case]["optimized_ms"] for case in cases}
                 result["comparison_basis"] = "selected_evaluation_internal_baseline_candidate_pair"
                 result["baseline_closure_sha256"] = records["candidate"]["timing_context"]["baseline_closure_sha256"]
+                original_pair = records["baseline"]["timing_context"]["paired_cases"]
+                result["original_paired_reference"] = {
+                    "evaluation_id": baseline_evaluation_id, "admitted_source_id": baseline["source_id"],
+                    "measurement": records["baseline"]["receipt_ref"],
+                    "baseline_closure_sha256": result["baseline_closure_sha256"],
+                    "per_case": copy.deepcopy(original_pair),
+                    "geomean_speedup": math.exp(math.fsum(math.log(original_pair[case]["speedup"])
+                                                          for case in cases) / len(cases))}
                 result["scope"] = ("Provisional generated-harness comparison against the external baseline closure. "
                                    "baseline_source_id names the admitted editable source, not that external callable. "
                                    "Final Director and workload validation remain required.")
