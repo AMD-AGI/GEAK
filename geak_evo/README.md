@@ -52,8 +52,9 @@ establish the gain against the correct baseline. Missing evidence stays missing.
 
 The [shared host](../docs/evo/shared-host.md) constructs the search using the
 existing Arena native-v2 callbacks. It reuses the host's GPU ownership, evaluation
-and process cleanup. The host also checks the loaded runtime code and permission
-to settle a call; see the [planner notes](../docs/evo/planner-port.md).
+and process cleanup. The host must also verify the loaded runtime code and
+permission to settle a call; these checks still need live qualification. See
+the [planner notes](../docs/evo/planner-port.md).
 
 `EvolutionLoop(store, campaign_id, ...)` reads an existing campaign. Its
 constructor starts no work. Recovery uses the saved operation identity and
@@ -74,6 +75,8 @@ their source code separately.
 
 Saved record formats remain readable. In-flight operations pin their evaluator,
 backend and instructions and require the original runtime or a checked migration.
+Older runtime references require their exact original bytes and a compatible
+host; copying this package alone does not qualify a historical run.
 Never rewrite those pins to force resume.
 
 ## Check a change

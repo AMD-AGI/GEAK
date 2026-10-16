@@ -161,7 +161,8 @@ a separately specified endpoint measurement; this port does not establish them.
 
 Source and build artifacts are hashed by streaming. The metadata needed for
 semantic checks stays bounded; oracle bodies have a separate streaming check.
-This reader and its fixture mount plan do not launch or resume a task.
+This reader and its fixture mount plan do not launch or resume a task and grant
+no execution or measurement authority.
 Generated-task execution and final paired measurements still need their runtime
 adapter; see [current support](../../geak_evo/README.md#current-support).
 

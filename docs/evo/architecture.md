@@ -86,7 +86,8 @@ blocks further subprocess work. This path needs the standalone runtime's
 `runProcess`; the Claude Code Workflow tool does not provide it.
 
 The [native EVO adapter](dispatch-adapter.md) connects that dispatcher to the
-admitted command through the existing owner entrypoint. See
+admitted command through a small patch to the existing owner entrypoint. The
+patch still needs installation. See
 [current support](../../geak_evo/README.md#current-support) for supported task
 formats and remaining live qualification. Each deployment must pin and qualify
 its actual search, engineer, evaluator and instruction versions.

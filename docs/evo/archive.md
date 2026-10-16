@@ -58,7 +58,7 @@ view/
 ```
 
 Start with `index.csv`, then open a program's `program.json`. Its `research_files`
-links lead to the investigation, current direction review and source-specific
+links lead to the investigation, current direction review and program-specific
 claims. Use `measurements.csv` and `observations/` for the measured results.
 Check the program/source IDs: a direction review describes its current tip, and
 an investigation's strategy need not describe every intermediate trial.
@@ -66,8 +66,9 @@ an investigation's strategy need not describe every intermediate trial.
 Missing explanations stay null. Long strategies have a marked 4,096-character
 preview plus the full exact UTF-8 text in `attempts/<hash>.strategy.txt`, its
 SHA-256, and the original artifact/field reference. Claims and corrections come
-from the saved campaign head. These are attributed statements, not new validation;
-blinded reviewers must exclude them as required by their study's review policy.
+from the saved campaign head. Strategies, direction reviews, claims and
+corrections are attributed statements, not validation; blinded reviewers must
+exclude all of them as required by their study's review policy.
 Conversations and bulk reports are not copied.
 
 Export one campaign at a time to a new directory for each journal snapshot.
