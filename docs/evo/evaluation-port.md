@@ -193,6 +193,10 @@ is identified by its protected closure and resolved-file observations. The
 admitted editable source ID is retained separately and does not name that
 external implementation. `original_paired_reference` exposes ORIGINAL's own
 internal pair, full-case geomean and measurement reference; it need not equal 1.0.
+When comparing search methods or claiming a gain over the starting program,
+report that reference alongside the selected ratio. Similar ratios do not
+establish a gain over the starting program, even when both beat the external
+baseline. Do not divide two adaptive scores to invent a matched comparison.
 
 Raw timer, graph fallback, cache, compile and dispatch details remain in the
 paired score. Export additionally requires matching actual timer/cache settings
