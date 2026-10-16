@@ -96,6 +96,10 @@ Production callers should use `interface/run_e2e.py`, which performs structured
 on-box identity detection before backend and knowledge policy are selected. A
 direct model-mode `Workflow` call must supply both `expected_gfx` and
 `expected_target`; this entry fails closed when either is missing.
+At Setup/Freeze, `expected_target=unknown` leaves the product unconstrained,
+including an exact R9700 detected on gfx1201. Pin `r9700`, `mi350x` or `mi355x`
+to require that product. The E2E gfx1201 serving entry still requires an explicit
+R9700 identity before setup; a shared ISA alone does not establish a product or its peaks.
 `workflow_dir` must be this folder (a JS workflow can't read its own path); the
 kernel layer defaults to the sibling `kernel_workflow/`.
 ```
@@ -105,7 +109,7 @@ Workflow({
     model_path: "/path/to/model",                    // REQUIRED for e2e mode (no default)
     workflow_dir: "<E2E_DIR>",                       // REQUIRED: this folder
     expected_gfx: "gfx950",                          // REQUIRED direct E2E identity
-    expected_target: "unknown",                      // REQUIRED: r9700|unknown; gfx1201 never implies r9700
+    expected_target: "unknown",                      // REQUIRED: r9700|mi350x|mi355x|unknown
     backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 is vllm-only (default vllm)
     launch_script: "<...>/launch.sh",                // optional; else the stack's default config
     kernel_workflow_dir: "<...>/workflows",          // optional; default = sibling kernel_workflow/
@@ -123,9 +127,9 @@ Workflow({
                           //   value is cumulative). See "Tuning skillset" below +
                           //   knowledge/tuning_skillset_integration.md.
     analysis_skill: "roofline", // profile-analysis skill (default "roofline"; "none" disables).
-                          //   Enriches the Top-N with % of the hardware roofline -> attainable speedup ->
-                          //   expected e2e gain, so budget goes to the kernel with HEADROOM, not merely
-                          //   the biggest one. ADVISORY: annotates + reorders, never prunes a candidate
+                          //   Adds conditional roofline/scenario estimates to the Top-N. Modeled
+                          //   GPU-time reduction supports secondary prioritization; workload gains
+                          //   need measurement. ADVISORY: annotates + reorders, never prunes a candidate
                           //   and never overrides the measured pct_gpu_time. See "Roofline" below.
     use_expert_skills: "false", // consult perf_knowledge/expert_skills (advisory priors) on/off (default OFF, opt-in);
                           //   set "true" to enable. When OFF (default) nothing is injected -> behavior is
@@ -354,36 +358,35 @@ Fast mode skips the phase; deep mode keeps it. Full contract:
 
 ## Roofline-guided routing (`analysis_skill`, default `roofline`)
 
-`pct_gpu_time` tells you where the time goes; it does **not** tell you whether that time is
-*recoverable*. A kernel already running at the memory or compute ceiling has nothing left to give no
-matter how much of the profile it owns. So after the Profiler emits the Top-N it runs one pluggable
-**analysis skill** (`knowledge/analysis_skills/<name>/SKILL.md`) which estimates, per kernel:
-`roofline_pct` → `attainable_speedup` → `expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable)`.
-The Architect then reports **both** orderings — by `%GPU` and by expected gain — and says which it
-followed; a disagreement between them is the useful signal, so it is never blended into one number.
+`pct_gpu_time` locates cost. The pluggable [roofline skill](knowledge/analysis_skills/roofline/SKILL.md)
+adds conditional work/traffic models and a second ordering for choosing experiments. Its historical
+`attainable_speedup` field is a scenario based on an efficiency prior, not a measured limit.
+`expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable_speedup)` estimates a reduction in summed
+profiled GPU time. It predicts workload latency only if that fraction matches the critical elapsed
+interval and other costs and overlap remain unchanged. Measure the workload result separately.
+The Architect reports both orderings and states which it followed.
 
-**Roofline is advisory and can never prune a candidate.** Same doctrine as the TraceLens prior: the
-measured `pct_gpu_time` is the judge. Confidence is staged — profile-time shape estimates are `low`
-(display only, not ranked on), real extracted shapes are `medium`, rocprofv3 counter measurements
-(`FETCH_SIZE`/`WRITE_SIZE`/`MfmaFlops*`) are `high`. Five degradation levels end in "emit nothing and
-behave exactly as before", so a missing peak table, an unmodellable op or a bad number cannot fail a run.
+**Roofline is advisory and never prunes a candidate.** Estimated shapes are low-confidence and
+display-only; captured shapes with supported models can guide secondary prioritization. Matched
+counters raise confidence only for quantities with validated definitions, units and capacities.
+Unsupported quantities remain unknown, and missing tools or models do not fail the run.
 
-**A saturated head is rerouted, not dropped** — the point that matters most for the *largest* kernel.
-Being at the wall means it is done with micro-tuning, not done being optimized; it routes to a
-**byte-reduction track** (fuse an adjacent op away, stop reading unrouted experts, layout/packing,
-lower-precision weights). Those levers must preserve the measurement contract: the user-supplied
-workload (`isl`/`osl`/`conc`/batch) is fixed and speculative decoding is not an optimization.
+A high model fraction can motivate hypotheses in `byte_reduction_levers`: avoiding intermediates,
+reusing weights/KV, skipping unused experts or changing packing. It does not establish that local
+tuning is exhausted or the current work is necessary. Keep the supplied workload and numerical
+contract; broader fusion needs the surrounding computation and full-operation measurement.
 
-Calibrated on a real run (Qwen3.5-35B-A3B-FP8, gfx950, vLLM TP1, 1k/1k, conc 64) — see
-`scripts/tests/test_roofline_skill.py`:
+The test fixture retains this historical example (Qwen3.5-35B-A3B-FP8, gfx950, vLLM TP1,
+1k/1k, conc 64). These calculations illustrate ranking behavior; they do not calibrate a universal
+roof or establish the model's predictive accuracy. See `scripts/tests/test_roofline_skill.py`.
 
-| kernel | %GPU | of roofline | attainable | predicted e2e | measured |
+| kernel | %GPU | model fraction | scenario speedup | modeled GPU-time reduction | measured |
 |---|---|---|---|---|---|
-| `fused_moe_kernel` | **26.45%** | 88% (memory-bound) | 1.02× | +0.6% | 1.047× iso, **−0.064% e2e** |
+| `fused_moe_kernel` | **26.45%** | 88% (memory model) | 1.02× | +0.6% | 1.047× iso, **−0.064% e2e** |
 | `kernel_paged_attention_2d` | 8.86% | 18% | 2.8× | +5.7% | **1.56× iso** |
 
-Ranking by `%GPU` sends the budget to the MoE, where it was in fact wasted; ranking by headroom sends
-it to attention, where the win was. Add a skill by dropping a directory into
+The scenario ranks attention first; `%GPU` ranks MoE first. Isolated speedups and end-to-end deltas
+need their own repeat variability before drawing conclusions about workload benefit. Add a skill in
 `knowledge/analysis_skills/`; swap with `analysis_skill=<name>`; disable with `analysis_skill=none`.
 
 ## Accuracy gate (gsm8k) — OFF by default

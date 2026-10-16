@@ -7,6 +7,13 @@ requirement, the SDK-vs-CLI choice) is hidden behind one command and two JSON
 files. The result schema is versioned so callers can distinguish contract
 changes while the workflow evolves internally.
 
+The Python implementation is split by responsibility. `run_e2e.py` owns CLI
+handling, environment settings, launch configuration, runtime dispatch and disk
+recovery. `e2e/normalization.py` interprets measurement artifacts and builds the
+result, while `e2e/reports.py` renders and writes reports from that result. The
+entrypoint retains its existing helper imports; it passes recovery, workload
+classification and the current alignment threshold to normalization explicitly.
+
 ## Command
 
 ```bash
@@ -146,9 +153,9 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "schema_version": 2,
   "model_path": "/models/Qwen-Qwen3.5-27B",
   "framework": "sglang",                 // -> backend (sglang|vllm|atom)
-  "gpu_type": "MI300X",
+  "gpu_type": "MI355X",
   "expected_gfx": "gfx950",              // optional pair; otherwise probed
-  "expected_target": "unknown",          // r9700|unknown; supply with expected_gfx
+  "expected_target": "mi355x",           // r9700|mi350x|mi355x|unknown; pair with expected_gfx
   "expected_device_name": "AMD Instinct MI355X",
   "expected_physical_cu_count": 256,
   "tp": 8,                               // serving tensor-parallel size (honoured, no TP=1 lock)
@@ -802,3 +809,21 @@ the ambient process `PATH` stands. GEAK's own CI entrypoint
 and pins the same value into the patched handoff, so a shipped
 `baseline_config.with_envs.yaml` cannot silently flip the CI server start path
 to magpie.
+
+### Retained measurement evidence
+
+A completed final remeasurement takes precedence over an intermediate claimed win,
+including when it shows no gain. A low final is not a missing result and must not
+trigger recovery of an earlier higher number. Cold baseline/final diagnostics need
+a matched same-session pair; otherwise their pairing limitation stays visible.
+
+The optional `correctness_baseline` result identifies the original serving flags,
+environment and overlay retained by the workflow. Empty strings are known empty
+settings; `null` means the old state did not retain that value. `known` describes
+those stored settings, not proof that correctness passed. The seed flags/environment
+are the Director-reported launch settings (or explicit initial inputs); this field
+does not independently reconstruct the running server configuration. It does not replace
+`baseline_config`, which records the caller's configuration.
+
+The retired `ablation_*` study controls now fail at startup. Remove these keys
+from new handoffs; do not reinterpret or resume old study records on the new branch.

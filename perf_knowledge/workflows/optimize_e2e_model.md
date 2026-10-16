@@ -7,7 +7,6 @@ status: sota
 updated: 2026-06-08
 sources:
   - GEAK/e2e_workflow/README.md
-  - GEAK/e2e_workflow/PLAN.md
   - GEAK/e2e_workflow/roles/e2e_integrator.md
   - GEAK/e2e_workflow/roles/op_benchmarker.md
 ---
@@ -132,7 +131,7 @@ tune banked **+2.23% e2e** through the full flow above. Full recipe + traps:
 - Skill: [`GEAK/e2e_workflow/`](../../e2e_workflow/)
 
 ## Sources
-- Phases, roles, fractal two-altitude design: `GEAK/e2e_workflow/README.md`, `GEAK/e2e_workflow/PLAN.md`.
+- Phases, roles, fractal two-altitude design: `GEAK/e2e_workflow/README.md`.
 - The gate, three verdicts, tight 2-launch protocol, engagement proof: `GEAK/e2e_workflow/roles/e2e_integrator.md`.
 - Head-op ladder + author_plan: `GEAK/e2e_workflow/roles/op_benchmarker.md`.
 - aiter default backend / config levers: https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html

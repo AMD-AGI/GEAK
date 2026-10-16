@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <title id="title">GEAK versus GEAK-EVO search</title>
+  <desc id="desc">Left: GEAK starts each round from the selected candidate; earlier tests inform later rounds. Right: GEAK-EVO keeps alternative branches in a lineage tree and can recombine code from two branches into a combined child.</desc>
+  <defs><marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2477B8"/></marker><marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#A9B4C2"/></marker><marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7E57B5"/></marker><marker id="at" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#12907E"/></marker></defs>
+  <rect width="1200" height="520" fill="#FFFFFF"/>
+  <rect x="24" y="24" width="564" height="360" rx="12" fill="#F2F5FA" stroke="#DCE3EC" stroke-width="2"/>
+  <rect x="612" y="24" width="564" height="360" rx="12" fill="#F5F2FA" stroke="#DCE3EC" stroke-width="2"/>
+  <text x="56" y="70" font-size="26" fill="#2477B8" font-weight="bold" text-anchor="start">GEAK — greedy</text>
+  <text x="56" y="100" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">Start the next round from the selected candidate</text>
+  <circle cx="100" cy="222" r="16" fill="#2477B8" stroke="#2477B8" stroke-width="2"/>
+  <path d="M 117.2 213.9 L 221.5 164.8" fill="none" stroke="#2477B8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ab)"/>
+  <path d="M 250.5 164.8 L 354.8 213.9" fill="none" stroke="#A9B4C2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="5 5" marker-end="url(#ag)"/>
+  <path d="M 119 222 L 220 222" fill="none" stroke="#2477B8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ab)"/>
+  <path d="M 252 222 L 353 222" fill="none" stroke="#2477B8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ab)"/>
+  <path d="M 117.2 230.1 L 221.5 279.2" fill="none" stroke="#2477B8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ab)"/>
+  <path d="M 250.5 279.2 L 354.8 230.1" fill="none" stroke="#A9B4C2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="5 5" marker-end="url(#ag)"/>
+  <circle cx="236" cy="158" r="13" fill="#FFFFFF" stroke="#2477B8" stroke-width="2"/>
+  <circle cx="236" cy="222" r="13" fill="#2477B8" stroke="#2477B8" stroke-width="2"/>
+  <circle cx="236" cy="286" r="13" fill="#FFFFFF" stroke="#2477B8" stroke-width="2"/>
+  <circle cx="372" cy="222" r="16" fill="#2477B8" stroke="#2477B8" stroke-width="2"/>
+  <circle cx="500" cy="222" r="16" fill="#2477B8" stroke="#2477B8" stroke-width="2"/>
+  <path d="M 391 222 L 481 222" fill="none" stroke="#2477B8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ab)"/>
+  <path d="M 519 222 L 556 222" fill="none" stroke="#2477B8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="4 5" marker-end="url(#ab)"/>
+  <text x="100" y="334" font-size="15" fill="#556375" font-weight="normal" text-anchor="middle">Current best</text>
+  <text x="236" y="334" font-size="15" fill="#556375" font-weight="normal" text-anchor="middle">Candidates</text>
+  <text x="372" y="334" font-size="15" fill="#556375" font-weight="normal" text-anchor="middle">Pick best</text>
+  <text x="500" y="334" font-size="15" fill="#556375" font-weight="normal" text-anchor="middle">Next round</text>
+  <circle cx="62" cy="357" r="6" fill="#2477B8" stroke="#2477B8" stroke-width="2"/>
+  <text x="76" y="362" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">selected</text>
+  <circle cx="160" cy="357" r="6" fill="#FFFFFF" stroke="#2477B8" stroke-width="2"/>
+  <text x="174" y="362" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">not selected</text>
+  <text x="644" y="70" font-size="26" fill="#7E57B5" font-weight="bold" text-anchor="start">GEAK-EVO — evolutionary</text>
+  <text x="644" y="100" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">Keep alternative branches and recombine them</text>
+  <path d="M 687.4 212.7 L 759.1 169.7" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ap)"/>
+  <path d="M 687.4 231.3 L 759.1 274.3" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ap)"/>
+  <path d="M 786.4 157.7 L 857.6 136.3" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ap)"/>
+  <path d="M 786.2 166.8 L 857.8 191.2" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ap)"/>
+  <path d="M 787 282 L 857 282" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ap)"/>
+  <path d="M 886.4 191.7 L 957.6 170.3" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ap)"/>
+  <path d="M 886.6 285.5 L 957.4 302.5" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ap)"/>
+  <path d="M 886.8 198.3 L 1070.3 226.6" fill="none" stroke="#12907E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#at)"/>
+  <path d="M 886.6 278.5 L 1070.6 235.1" fill="none" stroke="#12907E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 6" marker-end="url(#at)"/>
+  <circle cx="672" cy="222" r="15" fill="#7E57B5" stroke="#7E57B5" stroke-width="2"/>
+  <circle cx="772" cy="162" r="12" fill="#7E57B5" stroke="#7E57B5" stroke-width="2"/>
+  <circle cx="772" cy="282" r="12" fill="#7E57B5" stroke="#7E57B5" stroke-width="2"/>
+  <circle cx="872" cy="196" r="12" fill="#7E57B5" stroke="#7E57B5" stroke-width="2"/>
+  <circle cx="872" cy="282" r="12" fill="#7E57B5" stroke="#7E57B5" stroke-width="2"/>
+  <circle cx="872" cy="132" r="12" fill="#FFFFFF" stroke="#7E57B5" stroke-width="2"/>
+  <circle cx="972" cy="166" r="12" fill="#FFFFFF" stroke="#7E57B5" stroke-width="2"/>
+  <circle cx="972" cy="306" r="12" fill="#FFFFFF" stroke="#7E57B5" stroke-width="2"/>
+  <circle cx="1092" cy="230" r="19" fill="#12907E" stroke="#12907E" stroke-width="2"/>
+  <text x="672" y="270" font-size="15" fill="#556375" font-weight="normal" text-anchor="middle">Original</text>
+  <text x="1092" y="276" font-size="15" fill="#12907E" font-weight="bold" text-anchor="middle">Combined child</text>
+  <circle cx="650" cy="357" r="6" fill="#7E57B5" stroke="#7E57B5" stroke-width="2"/>
+  <text x="664" y="362" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">kept branch</text>
+  <circle cx="776" cy="357" r="6" fill="#FFFFFF" stroke="#7E57B5" stroke-width="2"/>
+  <text x="790" y="362" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">tried</text>
+  <path d="M 860 357 L 900 357" fill="none" stroke="#12907E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="6 5" marker-end="url(#at)"/>
+  <text x="912" y="362" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">recombination</text>
+  <text x="44" y="428" font-size="16" text-anchor="start"><tspan fill="#22313F" font-weight="bold">Starts from: </tspan><tspan dx="4" fill="#556375" font-weight="normal">the selected candidate</tspan></text>
+  <text x="44" y="462" font-size="16" text-anchor="start"><tspan fill="#22313F" font-weight="bold">Reuses: </tspan><tspan dx="4" fill="#556375" font-weight="normal">earlier test results inform later rounds</tspan></text>
+  <text x="632" y="428" font-size="16" text-anchor="start"><tspan fill="#22313F" font-weight="bold">Starts from: </tspan><tspan dx="4" fill="#556375" font-weight="normal">any kept branch, chosen by the planner</tspan></text>
+  <text x="632" y="462" font-size="16" text-anchor="start"><tspan fill="#22313F" font-weight="bold">Reuses: </tspan><tspan dx="4" fill="#556375" font-weight="normal">code and evidence from any branch</tspan></text>
+  <text x="44" y="502" font-size="15" fill="#556375">Engine library implemented · Hyperloom integration pending</text>
+</svg>

@@ -330,9 +330,22 @@ class TestMapArgs(_RunE2ECase):
         with self.assertRaisesRegex(ValueError, "invalid expected_gfx"):
             rx._expected_gpu_identity(
                 {"expected_gfx": "rdna4", "expected_target": "unknown"})
-        with self.assertRaisesRegex(ValueError, "must be 'r9700' or 'unknown'"):
+        with self.assertRaisesRegex(ValueError, "expected_target must be"):
             rx._expected_gpu_identity(
                 {"expected_gfx": "gfx1201", "expected_target": "r9600"})
+
+    def test_instinct_products_survive_explicit_and_probed_handoffs(self):
+        for target in ("mi350x", "mi355x"):
+            with self.subTest(target=target):
+                ps = rx.map_args(self._handoff(expected_gfx="gfx950", expected_target=target))
+                self.assertEqual(ps["expected_target"], target)
+                os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps({"gfx": "gfx950", "target": target})
+                self.assertEqual(rx._expected_gpu_identity({})["target"], target)
+                with self.assertRaisesRegex(ValueError, "requires expected_gfx=gfx950"):
+                    rx._expected_gpu_identity({"expected_gfx": "gfx942", "expected_target": target})
+                os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps({"gfx": "gfx942", "target": target})
+                with self.assertRaisesRegex(RuntimeError, "non-gfx950 ISA"):
+                    rx._expected_gpu_identity({})
 
     def test_env_identity_must_be_valid_and_consistent(self):
         cases = [
@@ -348,6 +361,25 @@ class TestMapArgs(_RunE2ECase):
                 os.environ["GEAK_GPU_IDENTITY_JSON"] = raw
                 with self.assertRaisesRegex(exc, pattern):
                     rx._expected_gpu_identity({})
+
+    def test_supplied_product_name_cannot_contradict_target_or_isa(self):
+        for gfx, target, name in (
+            ("gfx950", "mi355x", "AMD Instinct MI350X"),
+            ("gfx950", "mi350x", "AMD Instinct MI355X"),
+            ("gfx1201", "r9700", "Another gfx1201 Product"),
+            ("gfx942", "unknown", "AMD Instinct MI355X"),
+        ):
+            with self.subTest(gfx=gfx, target=target, name=name):
+                with self.assertRaisesRegex(ValueError, "product/name contradiction"):
+                    rx._expected_gpu_identity({"expected_gfx": gfx, "expected_target": target,
+                                               "expected_device_name": name})
+                os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(
+                    {"gfx": gfx, "target": target, "marketing_name": name})
+                with self.assertRaisesRegex(RuntimeError, "product/name contradiction"):
+                    rx._expected_gpu_identity({})
+        os.environ["GEAK_GPU_IDENTITY_JSON"] = "[]"
+        with self.assertRaisesRegex(RuntimeError, "JSON object"):
+            rx._expected_gpu_identity({})
 
     def test_identity_probe_is_structured_and_fails_closed(self):
         """Without a pinned or env identity, the rocminfo probe is the only

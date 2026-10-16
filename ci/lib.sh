@@ -248,12 +248,12 @@ normalize_gpu_arch() {
 }
 
 detect_gpu_arch() {
-  local expected rocminfo_bin gfx target normalized identity parsed requested_target
+  local expected rocminfo_bin gfx target normalized identity parsed requested_target required_gfx
   expected="$(printf '%s' "${GEAK_EXPECTED_TARGET:-}" | tr '[:upper:]' '[:lower:]')"
   case "$expected" in
-    ""|unknown|r9700) ;;
+    ""|unknown|r9700|mi350x|mi355x) ;;
     *)
-      echo "E_TARGET_UNSUPPORTED: unsupported GEAK_EXPECTED_TARGET '$GEAK_EXPECTED_TARGET' (want r9700|unknown)" >&2
+      echo "E_TARGET_UNSUPPORTED: unsupported GEAK_EXPECTED_TARGET '$GEAK_EXPECTED_TARGET' (want r9700|mi350x|mi355x|unknown)" >&2
       return 1
       ;;
   esac
@@ -264,10 +264,22 @@ detect_gpu_arch() {
       echo "E_ARCH_EXPECTED_MISMATCH: expected R9700 but GPU arch override resolved to $normalized" >&2
       return 1
     fi
+    if [[ "$expected" == mi350x || "$expected" == mi355x ]] && [ "$normalized" != "MI355" ]; then
+      echo "E_ARCH_EXPECTED_MISMATCH: expected $expected (gfx950) but GPU arch override resolved to $normalized" >&2
+      return 1
+    fi
     case "$normalized" in
-      MI300|MI355)
+      MI300)
         echo "$normalized"
         return
+        ;;
+      MI355)
+        if [ -z "$expected" ] || [ "$expected" = "unknown" ]; then
+          echo "$normalized"
+          return
+        fi
+        # A family override cannot prove the exact expected product.
+        normalized=gfx950
         ;;
       R9700)
         requested_target=r9700
@@ -298,9 +310,13 @@ detect_gpu_arch() {
   fi
   gfx="${gfx:-${normalized:-}}"
   requested_target="${requested_target:-$expected}"
-  if [ "$requested_target" = "r9700" ] \
-      && { [ "$gfx" != "gfx1201" ] || [ "${target:-unknown}" != "r9700" ]; }; then
-    echo "E_TARGET_EXPECTED_MISMATCH: expected exact R9700 but structured rocminfo identity was gfx='${gfx:-missing}' target='${target:-unknown}'" >&2
+  case "$requested_target" in
+    r9700) required_gfx=gfx1201 ;;
+    mi350x|mi355x) required_gfx=gfx950 ;;
+  esac
+  if [ -n "$requested_target" ] && [ "$requested_target" != "unknown" ] \
+      && { [ "$gfx" != "$required_gfx" ] || [ "${target:-unknown}" != "$requested_target" ]; }; then
+    echo "E_TARGET_EXPECTED_MISMATCH: expected exact $requested_target but structured rocminfo identity was gfx='${gfx:-missing}' target='${target:-unknown}'" >&2
     return 1
   fi
 

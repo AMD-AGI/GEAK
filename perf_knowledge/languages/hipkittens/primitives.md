@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3, fp6]
 regimes: [both]
 status: experimental
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://arxiv.org/html/2511.08083v1
   - https://github.com/HazyResearch/HipKittens
@@ -13,12 +13,9 @@ sources:
 
 # HipKittens primitives
 
-## TL;DR
-HK gives you **tiles** (register or shared), **bulk ops** (`mma`/`exp`/`add`/load/store), **swizzles**
-that are bank-conflict-free per layout (solved, not hand-derived), and two **wave-scheduling patterns**
-(8-wave ping-pong, 4-wave interleave) that replace NVIDIA-style producer/consumer specialization. Plus
-**pinned register tiles** to bypass HIPCC's AGPR restriction, and an **XCD grid swizzle** for chiplet L2
-reuse.
+HipKittens provides register/shared tiles, bulk operations, layouts and scheduling
+examples. Their lane mapping and resource use must match the target and instruction
+mode; see [overview](overview.md) for build and source context.
 
 ## Tile types
 | dim | values |
@@ -51,10 +48,9 @@ reuse.
   8 starting from the 8th row," killing 2-way bank conflicts and enabling conflict-free column-major reads
   via `ds_read_b64_tr_b16`.
 
-## Wave scheduling — two patterns (replaces wave specialization)
-Wave specialization (producer/consumer) **underperforms on CDNA3/CDNA4**: registers are statically split
-across all waves, so producer waves burn registers without producing output, shrinking output tile size /
-arithmetic intensity (only ~80% of peak BF16 GEMM). The two performant AMD patterns:
+## Wave scheduling examples
+The cited paper compares producer/consumer specialization with ping-pong
+and interleaving in its own implementations. Treat these as schedule candidates.
 
 | pattern | layout | idea | code size | example perf (FP8 GEMM) |
 |---|---|---|---|---|
@@ -62,8 +58,7 @@ arithmetic intensity (only ~80% of peak BF16 GEMM). The two performant AMD patte
 | **4-wave interleave** (imbalanced) | 1 wave/SIMD | finely staggered compute+memory within each wave; needs **small** base tiles | large (**183 LoC**) | **3327 TFLOPS** |
 
 (MHA backward, paper Table 3: 8-wave = 331 LoC / 894 TFLOPS; 4-wave = 989 LoC / 1091 TFLOPS — interleave
-buys ~22% on backward at ~3× the code.) **8-wave ping-pong is the default** — it already reaches SOTA for
-GEMM and attention-forward on MI355X.
+buys ~22% on backward at ~3× the code.) These results motivate comparing both schedules at the required shape.
 
 > **The backward row does not generalise.** It is symmetric `hdim=128` non-causal on MI355X. A gfx942
 > counter-measurement on a register-heavier backward (fused five-GEMM causal, asymmetric head dims) has every 4-wave

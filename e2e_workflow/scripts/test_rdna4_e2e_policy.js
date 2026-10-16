@@ -244,14 +244,14 @@ const R9700 = {
       {
         stopAtPhase: 2,
         setupIdentity: {
-          gfx: 'gfx950', target: 'unknown',
+          gfx: 'gfx950', target: 'mi355x',
           name: 'AMD Instinct MI355X', cu: 256,
         },
       },
     );
     let msg = '';
     try { await run(); } catch (e) { msg = e.message; }
-    ok(msg === PROBE_STOP, 'CDNA setup reached the next phase', msg || 'no throw');
+    ok(msg === PROBE_STOP, 'unknown expected product accepts exact MI355X setup', msg || 'no throw');
     const directorPrompt = (trace.agentPrompts.find((p) => p.label === 'director:setup') || {}).prompt || '';
     ok(/E2E_LEARNED_KB: on/.test(directorPrompt),
       'effective CDNA role inputs preserve the E2E learned KB', directorPrompt.slice(-500));

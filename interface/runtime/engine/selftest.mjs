@@ -6,12 +6,13 @@
 //
 // Exits non-zero on the first failed assertion.
 
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRuntime } from './run_workflow.mjs';
+import { runProcess, runtimeFault } from './backends/base.mjs';
 import { extractJson, validate } from './schema.mjs';
-import { resolveSelection, buildInvocation, neutralizeForBackend, loadRegistry, deriveAgentFromEnv, codexEffort } from './config.mjs';
+import { parseArgv, resolveSelection, buildInvocation, neutralizeForBackend, loadRegistry, deriveAgentFromEnv, codexEffort } from './config.mjs';
 
 let passed = 0;
 const fails = [];
@@ -159,6 +160,15 @@ async function testAgentCap() {
 }
 
 async function testConfig() {
+  eq(parseArgv(['workflow.js', '--args', '{"x":1}', '--fake', '--quick']),
+    { _: ['workflow.js'], args: '{"x":1}', fake: true, quick: true },
+    'all runtime CLIs share positional, string-value and bare-flag parsing');
+  eq(parseArgv(['--count', '-1', '--count', '2', '--empty', '', 'tail']),
+    { _: ['tail'], count: '2', empty: '' },
+    'negative/empty values remain strings and the last repeated option wins');
+  eq(parseArgv(['--name=value', '--', 'literal']),
+    { _: [], 'name=value': true, '': 'literal' },
+    'legacy equals-sign and double-dash token handling remains unchanged');
   const reg = {
     default_profile: 'claude',
     agents: {
@@ -455,6 +465,55 @@ async function testProviderDefaultModel() {
     'and the pinned value is the one that survives');
 }
 
+// runProcess: the process group is gone when it returns, whether the command finished, timed out or
+// left a background child behind.
+async function testRunProcess() {
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  let r = await runProcess({ cmd: 'sh', args: ['-c', 'cat; echo err >&2; exit 3'], input: 'in' });
+  eq([r.status, r.code, r.signal, r.stdout, r.stderr, r.strays_killed, r.group_cleared],
+    ['completed', 3, null, 'in', 'err\n', false, true], 'runProcess: exit code, stdin and output');
+
+  r = await runProcess({ cmd: 'sh', args: ['-c', 'sleep 30 & echo $!; wait'], timeoutMs: 300, graceMs: 200 });
+  eq([r.status, r.group_cleared], ['timeout', true], 'runProcess: timeout ends the group');
+  ok(!alive(+r.stdout.trim()), 'runProcess: timeout kills the background grandchild too');
+
+  r = await runProcess({ cmd: 'sh', args: ['-c', 'trap "" TERM; sleep 30'], timeoutMs: 200, graceMs: 200 });
+  eq([r.status, r.signal, r.group_cleared], ['timeout', 'SIGKILL', true], 'runProcess: SIGKILL after the grace period');
+
+  for (const redirect of ['', ' >/dev/null 2>&1']) {
+    r = await runProcess({ cmd: 'sh', args: ['-c', `sleep 30${redirect} & echo $! >&2; exit 0`], graceMs: 200 });
+    eq([r.status, r.code, r.strays_killed, r.group_cleared], ['completed', 0, true, true],
+      `runProcess: a child left behind is killed and reported (${redirect ? 'own stdio' : 'shared stdio'})`);
+    ok(!alive(+r.stderr.trim()), 'runProcess: the stray is dead when it returns');
+  }
+
+  // A process that left the group but kept our stdout: bounded wait, reported, not claimed gone, no
+  // further command starts, and the run fails. Run through the CLI runner so this runtime stays usable.
+  const dir = await mkdtemp(join(tmpdir(), 'geak-selftest-'));
+  await writeFile(join(dir, 'escape.js'), `
+    const a = await runProcess({ cmd: 'sh', args: ['-c',
+      'setsid sleep 5 & p=$!; while [ "$(ps -o sid= -p $p | tr -d \\' \\')" != "$p" ]; do sleep 0.01; done; echo $p >&2'],
+      graceMs: 100, settleMs: 300 });
+    const b = await runProcess({ cmd: 'true' });
+    try { process.kill(+a.stderr.trim(), 'SIGKILL'); } catch {}
+    return { a, b };`);
+  r = await runProcess({ cmd: process.execPath, timeoutMs: 20000, args: [
+    new URL('./run_workflow.mjs', import.meta.url).pathname, join(dir, 'escape.js'),
+    '--result-file', join(dir, 'result.json'), '--metrics-file', join(dir, 'metrics.json')] });
+  const read = async (f) => { try { return JSON.parse(await readFile(join(dir, f), 'utf8')); } catch { return {}; } };
+  const { a = {}, b = {} } = await read('result.json');
+  const metrics = await read('metrics.json');
+  await rm(dir, { recursive: true, force: true });
+  eq([a.status, a.code, a.group_cleared, a.stdio_held], ['completed', 0, true, true], 'runProcess: escaped process holding the pipes is reported');
+  ok(a.duration_ms < 2000, `runProcess: an escaped process does not hold settlement (${a.duration_ms} ms)`);
+  eq(b.status, 'spawn_error', 'runProcess: no command starts after an escaped process held the pipes');
+  eq([r.code, metrics.ok, /escaped/.test(metrics.error)], [1, false, true], 'runner: the run fails and says why after an escape');
+  eq(runtimeFault(), null, 'runtimeFault: null in a runtime that saw no escape or survivor');
+
+  r = await runProcess({ cmd: '/nonexistent/geak-selftest' });
+  eq(r.status, 'spawn_error', 'runProcess: a missing command is a spawn_error, not a throw');
+}
+
 async function main() {
   await testSchemaUnit();
   await testConfig();
@@ -466,6 +525,7 @@ async function main() {
   await testSchemaAgent();
   await testRunScriptAndNesting();
   await testAgentCap();
+  await testRunProcess();
 
   console.log(`\n${passed} checks passed, ${fails.length} failed.`);
   if (fails.length) process.exit(1);

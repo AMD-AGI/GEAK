@@ -1,364 +1,184 @@
-# SKILL — roofline headroom analysis
-
-Turn the standardized Top-N into a per-kernel answer to: **"how much of this hardware's ceiling is this
-kernel already getting, and therefore how much is left to win?"**
-
-You (an agent) can execute this skill by reading this file. `roofline_tools.py` next to it holds
-mechanical primitives (peak-table parsing, counter parsing, unit math) — use them if they import, do
-the arithmetic yourself if they don't. **A broken helper must not disable this skill; a broken skill
-must not fail the run.**
-
+---
+name: roofline
+description: Add conditional roofline and headroom estimates to a standardized kernel profile. Use for profile prioritization when work, traffic, timing and device capacities can be matched.
 ---
 
-## 0. The one doctrine that matters
+# Roofline estimates for head kernels
 
-> `roofline_pct` measures **how well the kernel executes its current algorithm's byte/FLOP budget.**
-> It says **nothing about whether that budget is necessary.**
+Annotate the Top-N to guide experiments. `pct_gpu_time` remains the primary ordering;
+this skill never prunes a candidate or accepts an optimization. A high fraction of
+an implementation's modeled roof does not prove its work or traffic is necessary.
+Correctness and measured full-operation/workload results decide acceptance.
 
-A kernel at 90% of the memory roofline is not "done" — it is **done with kernel micro-tuning**. The
-remaining lever is to move fewer bytes. Never read a high `roofline_pct` as "stop optimizing this
-kernel", especially when it is the largest consumer of GPU time. See §7.
+Use [roofline_tools.py](roofline_tools.py) for parsing and arithmetic when available.
+Its labels and fixed thresholds are heuristics, not measured bottlenecks or
+achievable limits. If a helper fails, compute from supported operands or emit an
+unknown result and continue the run.
 
-Corollary: this skill is **advisory**. It reorders and annotates. `pct_gpu_time` remains the primary
-key and the measurement remains the judge. This skill may never prune a candidate.
+## Inputs and scope
 
----
+Read `profile/round_<R>/profile_topN.json`, `env_report.json` and [peaks.md](peaks.md).
+Use captured shapes/dtypes, model configuration and counters where available.
+Select entries with `pct_gpu_time >= HEAD_THRESHOLD_PCT` (default 5), largest first,
+up to 8. This is a work-budget default, not a universal noise threshold. Skipped
+entries are absent, not modeling failures. Read the Top-N `editable` flag as a
+source-editing hint. The task's edit boundary decides whether a library/binary
+implementation can be replaced through another supported backend.
 
-## 1. Inputs
+Identify the actual source/configuration, shape/dtype/strides, physical product,
+runtime and measured phase. Match bytes/work to one launch's time, or aggregate
+all stages and time of one logical operation. Do not divide a whole-call counter
+total by one stage's duration. Keep decode and prefill separate. Choose the regime
+from measured phase costs (`base_latency_ms[regime] * phase_calls_measured[regime]`),
+then use its `base_latency_ms[regime]` for `t_ms`. The profile's
+`serving.n_decode_steps` / `serving.n_prefill_steps` show phase coverage, not time shares.
+A mixed-phase `avg_us` is not that regime's latency. If phase timing is missing,
+leave the regime estimate unknown or explicitly label a whole-profile estimate.
 
-- `profile/round_<R>/profile_topN.json` — the standardized Top-N (required).
-- `env_report.json` — `gfx`, structured `device_target`, `physical_cu_count`,
-  `model_arch_class`, `model_dtype`, `workload` (required).
-- The model's `config.json` — layer count, expert count, hidden/intermediate sizes, head counts
-  (optional but needed for a good MoE/attention byte model).
-- `peaks.md` — hardware denominators, keyed by `gfx`.
-- Optionally, captured shapes from the Kernel Extractor and/or rocprofv3 counters (stage B/C, §5).
+Call `resolve_peaks(peaks_md_path, gfx, device=device_id, product=env_report.device_target)`
+with this skill's `peaks.md` path and the measured GPU's device index. Use
+`peak_flops_for()` for the actual arithmetic dtype/unit. `device_target=unknown`
+does not restrict the existing ISA-keyed tables. Client `gfx120x` requires a known
+product table (`r9700`); a bare `gfx1201` has no numeric fallback. `gfx125x` is CDNA5,
+not that client family. Unknown dtype means unknown compute capacity, never the
+largest available peak. The `dtype_bytes()` compatibility default is not evidence
+for an unknown storage dtype. Derived peaks are low-confidence, display-only estimates.
 
-## 2. Output artifact
+## Model the work and traffic
 
-Write `profile/round_<R>/profile_roofline.json` and a human-readable `profile_roofline.md` beside it.
+Keep useful operation work, executed work and logical footprint separate. A logical
+byte rate is not measured HBM utilization. Support cache residency with matching
+cache/interface counters or a controlled warm/cold reuse comparison; fitting in
+cache is insufficient. Counter bytes need documented interface,
+units, read/write treatment, instance aggregation and call attribution.
 
-```jsonc
-{
-  "skill": "roofline", "skill_version": "1",
-  "gfx": "gfx950",
-  "peaks": { "hbm_bw_bytes_s": 8.0e12, "flops": {"fp8": 5.0e15},
-             "source": "table|derived", "confidence": "high|low" },
-  "stage": "A|B|C",
-  "entries": [{
-    "name": "...", "short_name": "...",
-    "pct_gpu_time": 26.45,              // COPIED verbatim from the Top-N, never recomputed
-    "regime": "decode|prefill",
-    "op_class": "gemm|moe|attn|elementwise|unknown",
-    "modeled": true,
-    "t_ms": 0.049471,                   // per-launch time for this regime
-    "launches_per_step": 80,
-    "bytes_est": 0, "flops_est": 0,
-    "achieved_bw_bytes_s": 0, "achieved_flops": 0,
-    "hbm_util": 0.88, "compute_util": 0.01,   // achieved/peak on each axis; the pair decides bound_type
-    "arithmetic_intensity": 4.6, "ridge_point": 625.0,
-    "bound_type": "memory|compute|latency|unknown",  // latency = neither roof near its ceiling
-    "roofline_pct": 0.88,               // achieved / peak on the AI-selected roof
-    "target_eff": 0.90,
-    "attainable_speedup": 1.023,
-    "expected_e2e_gain_pct": 0.59,
-    "headroom_class": "underperforming|moderate|saturated|unknown",
-    "confidence": "low|medium|high",
-    "suspect": false,
-    "byte_reduction_levers": ["..."],   // populated only when headroom_class=saturated
-    "notes": "assumptions made, what would sharpen this"
-  }],
-  "ranking_by_pct": ["..."],            // BOTH rankings are emitted, side by side
-  "ranking_by_expected_gain": ["..."],
-  "degraded": [ {"name": "...", "reason": "..."} ],
-  "skill_errors": []
-}
+Examples of logical models, with explicit assumptions:
+
+| Operation | Work and footprint |
+|---|---|
+| Dense GEMM `[M,K] × [K,N]` | `W = 2*M*N*K`; `Q = M*K*a + K*N*w + M*N*c`, for input/weight/output bytes per element `a,w,c`, each transferred once |
+| Grouped MoE | Work from routed token/expert pairs; weight bytes from experts actually used by the implementation. `E*(1-(1-1/E)^pairs)` assumes independent uniform routing and is only an estimate |
+| Paged decode attention | KV footprint `batch*context*n_kv_heads*head_dim*2*kv_bytes`; work approximately `4*batch*n_q_heads*context*head_dim`, plus other stages when material |
+| Elementwise/norm/quant | Count all inputs, outputs, scales, metadata and passes; estimate arithmetic separately |
+
+For each decode launch, `context` is the mean current attended length across its
+active sequences, not the maximum configured length. Model each launch with its
+captured context/routing distribution and aggregate with matching time and weights.
+If lengths are missing, `ISL + OSL/2` is a labeled, low-confidence approximation
+only for a full-run fixed-length synthetic workload. Missing lengths for a trace
+replay or partial profile window leave the context-dependent estimate unknown.
+Include padding, rereads, workspace, quantization metadata and helper stages.
+Name the byte method and its evidence: for example, a one-transfer footprint or
+an implementation model with repeated passes. If reuse is uncertain, show those
+scenarios as a range; do not choose whichever falls below a peak. Unknown classes
+remain unmodeled.
+
+For `W` FLOPs (FMA = 2), `Q` bytes, `T` seconds, `P` FLOP/s and `B` bytes/s:
+
+```text
+achieved_bw = Q/T; achieved_flops = W/T
+AI = W/Q; ridge_point = P/B
+hbm_util = (Q/T)/B; compute_util = (W/T)/P
+roofline_pct = max(hbm_util, compute_util)
+model_time = max(Q/B, W/P)
 ```
 
-`ranking_by_pct` and `ranking_by_expected_gain` are **both** emitted deliberately. The consumer must
-see the disagreement rather than a single blended number that hides it.
+These are conditional model ratios. Use matching memory level, arithmetic mode,
+dense/sparse convention and device conditions. An empirical microbenchmark is a
+comparator for its own conditions, not a universal roof. Arithmetic intensity
+selects the tighter model resource; low utilization alone does not prove latency
+or occupancy is limiting. Use targeted evidence to distinguish causes.
 
-## 3. Procedure
+Preserve raw out-of-range ratios; investigate units, scope, traffic assumptions
+and capacities. Clamping for display never establishes saturation. Very short
+launches need an applicable overhead measurement.
 
-0. **Scope to the head.** Analyse ONLY entries with `pct_gpu_time >= HEAD_THRESHOLD_PCT` (default 5),
-   biggest first, capped at ~8. Below that bar the Amdahl ceiling is under the noise band no matter
-   what the roofline says, so a headroom estimate cannot change a decision — modelling those kernels
-   only adds failure modes. Skipped entries are **absent** from the artifact; they are NOT `degraded[]`
-   (a kernel too small to matter is not a modelling failure and must not read as one).
-1. Resolve peaks from `peaks.md` via
-   `resolve_peaks(gfx, product=env_report.device_target)`.
-   `device_target=unknown` (every non-R9700 card, MI300/MI355 included) is no
-   product constraint: the ISA-keyed tables still resolve. Client RDNA4
-   numeric peaks exist only for product `r9700`. A bare gfx1201 (or any other
-   gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
-   unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4
-   — it must not use that gate. Other unknown architectures may derive from
-   device props with `peaks.confidence="low"` (§6 L1). Use `peak_flops_for()`
-   canonical dtype keys; a missing dtype is unknown, never the table maximum.
-2. For each selected entry, pick the **e2e-critical regime** — the one carrying the launches
-   (`serving.n_decode_steps` vs `n_prefill_steps`; a decode-dominated run means decode). Use that
-   regime's `base_latency_ms` as `t_ms`.
-3. Classify `op_class` from `name`/`classification`/shapes.
-4. Apply the §4 byte/FLOP model for that class. Cannot model it → §6 L2 (degrade this entry only).
-5. Compute:
-   ```
-   achieved_bw    = bytes_est / t
-   achieved_flops = flops_est / t
-   hbm_util       = achieved_bw    / peak_bw
-   compute_util   = achieved_flops / peak_flops
-   AI             = flops_est / bytes_est
-   ridge_point    = peak_flops / peak_bw
+## Existing ranking fields
 
-   # AI picks which roof the kernel walks TOWARD; roofline_pct is measured on that roof.
-   roof_axis    = "compute" if AI > ridge_point else "memory"
-   roofline_pct = compute_util if roof_axis == "compute" else hbm_util
+For compatibility, the helper uses these `target_eff` priors:
 
-   # But which roof actually BINDS is decided by utilization, not by AI alone. A small AI does NOT
-   # by itself mean memory-bound — that is the most common mislabel. If neither roof is near its
-   # ceiling (both utils < 0.60) and the launch is above the dispatch floor, the kernel is
-   # LATENCY / occupancy-bound, not bandwidth- or compute-bound.
-   bound_type   = "latency" if (hbm_util < 0.60 and compute_util < 0.60) else roof_axis
+| Class | Prior |
+|---|---:|
+| dense GEMM | **0.90** |
+| MoE / grouped GEMM | **0.90** |
+| elementwise / norm / quant | 0.875 |
+| attention decode (paged) | **0.50** |
+| R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76** |
 
-   attainable_speedup    = max(1.0, target_eff / roofline_pct)
-   expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable_speedup)
-   ```
-   A latency-bound kernel **still gets a headroom verdict** (its `roofline_pct` on the AI-selected
-   roof is real, and `target_eff` already prices in the occupancy penalty for irregular classes like
-   paged attention) — so a low-utilization head still ranks by its headroom. What changes is the
-   **lever**: latency-bound underperformance is fixed by occupancy / shorter dependency chains /
-   fusion, **not** by byte reduction (§7.1). Byte reduction only helps a genuinely bandwidth-bound
-   (high-`hbm_util`) head.
-6. Classify headroom, banded against `target_eff` (**not** against the raw roofline — what matters is
-   the distance to what a good implementation of this class can realistically reach):
-   `roofline_pct ≥ 0.9×target_eff` → **saturated**; `≥ 0.6×target_eff` → **moderate**; else →
-   **underperforming**; unmodelled or low-confidence → **unknown**.
-   *88% against a 0.90 target is **saturated**, not "nearly there" — tuning has nothing left to give.*
+The R9700 override comes from a 485.8 GB/s median read+write copy result against
+640 GB/s pin bandwidth (30 event-timed 1 GiB copies). Transfer to MoE/elementwise
+is still a prior; it does not establish their attainable rates. Other priors are
+not measured product efficiencies.
 
-   **Two outcomes must produce NO verdict** (`headroom_class: "unknown"`), because in each the ratio
-   is not evidence about the kernel:
-   - **Dispatch-bound** — the per-launch time is within launch-overhead scale (~5 µs), so the launch is
-     timed by dispatch, not by its transfer or its math. Emit `bound_type: "latency"`; the lever is
-     fusion / graph capture, not kernel tuning. Typical of tiny high-call-count kernels. *This is the
-     no-verdict sub-case of latency-bound* — distinct from the general latency-bound kernel in step 5
-     (low utilization but well above the dispatch floor), which **keeps its verdict** because it is
-     doing real work and has recoverable occupancy/dependency headroom.
-   - **Infeasible** — `roofline_pct` outside `(0,1]`. That is the byte/FLOP model being wrong, not the
-     kernel being at the wall. **A clamped 100% must NEVER be reported as `saturated`** — that turns a
-     modelling failure into a routing decision. A compute-axis ratio above 1.0 is most often an
-     **unvalidated peak** (the BF16 MFMA microbench commonly reads ~2× low; see §4). See §6 L3.
-
-   `bound_type` is a CLOSED set: `memory | compute | latency | unknown`. If none fits, emit `unknown`
-   — never invent a category the consumer has no routing rule for.
-7. Sanity-check (§6 L3), emit both rankings, write the artifact.
-
-**Per-launch, not aggregate.** Compare bytes for ONE launch against ONE launch's `base_latency_ms`. If
-a logical op is split across several launches (e.g. a fused-MoE layer issuing a stage-1 and a stage-2
-kernel), sum the launches for one logical unit and compare against the summed time. Getting this
-factor wrong is the single most common way to produce a nonsense `roofline_pct` — state in `notes`
-which unit you used.
-
-## 4. Byte / FLOP models by op class
-
-Weight bytes use the **weight** dtype (fp8 = 1 B/elem, bf16 = 2 B). Activation bytes use the activation
-dtype. Only count HBM traffic — a tensor re-read within one launch and small enough to sit in L2
-(`l2_bytes`) counts once.
-
-**Trust the memory axis over the compute axis, especially at decode.** The compute peaks in `peaks.md`
-are validated for fp8, but empirical MFMA peaks are not always right — the BF16 microbench commonly
-reads ~2× low, which makes a BF16 `compute_util` read ~2× high (and can push `roofline_pct` above 1.0,
-where §6 L3 catches it as `suspect`). A decode workload is memory-bound anyway, so prefer `hbm_util`;
-only rank on a compute-axis `roofline_pct` after the peak for that dtype has been validated (§8 rule:
-BF16 and FP16 MFMA run at the same rate, so those two peaks must be equal — if they are not, the peak
-is mis-calibrated and the compute-axis number is not usable).
-
-### dense GEMM `[M,K]×[K,N]`
-```
-flops = 2·M·N·K
-bytes = M·K·a + K·N·w + M·N·a            # A + B + C
+```text
+attainable_speedup = max(1, target_eff / roofline_pct)
+expected_e2e_gain_pct = pct_gpu_time * (1 - 1/attainable_speedup)
 ```
 
-### MoE / grouped expert GEMM
-The decisive question is **how many expert weights are streamed**, which dominates at decode.
-```
-pairs        = M · top_k
-experts_hit  = E · (1 − (1 − 1/E)^pairs)      # expected distinct experts touched
-flops = 2 · pairs · (per-expert MAC count for this stage)
-bytes ≈ experts_hit · (per-expert weight elems) · w   + activations
-```
-If the implementation streams **all** `E` experts regardless of routing, use `E` instead of
-`experts_hit` — and note that the difference between the two IS a byte-reduction lever (§7). When
-unsure which the kernel does, compute both, report the `experts_hit` figure, and put the all-expert
-figure in `notes`.
+Despite its historical name, `attainable_speedup` is a scenario estimate.
+`expected_e2e_gain_pct` estimates reduction in the profiled GPU-time sum; it predicts
+workload latency only if that fraction matches the critical elapsed interval and
+other costs/overlap remain unchanged. Measure the workload result separately.
 
-**Feasibility rule (general, applies to every op class with more than one plausible byte model).**
-A byte estimate implying a rate above peak is refuted by the measurement itself. When you have
-several candidate models, pick the **largest one that stays feasible** (`bytes ≤ peak_bw × t`) and say
-which you used. If *every* candidate is infeasible, the class model is wrong: emit no verdict (§6 L3)
-rather than clamping to 100% and calling it saturated.
+The helper bands `headroom_class` at 0.9 and 0.6 times the prior. Its `latency`
+label applies at `t <= 2*launch_overhead_s` (default `2*5 µs = 10 µs`). After the
+sanity checks, it also applies when both utilization ratios are below 0.60. Treat these as hints; use
+`unknown` when the claimed bottleneck or headroom is unsupported. High model
+fractions can motivate fewer bytes/work, fusion or reuse; low fractions can motivate
+scheduling or parallelism. Neither fixes the allowed implementation. Respect the
+actual editable boundary and available backend; check integration before a rewrite.
+Use `byte_reduction_levers` for concrete hypotheses such as removing an intermediate,
+reusing weights/KV, skipping unused experts or changing packing. State which bytes
+each could remove and its contract/integration constraints; an empty list is valid.
 
-### attention (paged decode)
-KV traffic dominates; Q and the output are negligible at decode.
-```
-bytes ≈ batch · seq_len · n_kv_heads · head_dim · 2 (K and V) · kv_dtype_bytes
-flops ≈ 2 · batch · n_q_heads · seq_len · head_dim · 2 (QK^T and PV)
-```
-`seq_len` is the *current* average context, not the max — for an isl/osl workload sampled mid-run,
-`isl + osl/2` is a reasonable estimate. Say so in `notes`; it is a real source of error.
+The supplied workload (`isl`, `osl`, concurrency/batch) and measurement contract
+must not be changed. Do not introduce speculative decoding as a kernel optimization.
+Precision changes need the existing numerical/accuracy gate.
 
-### elementwise / norm / quant
-```
-bytes = (input elems · in_dtype) + (output elems · out_dtype)
-flops = small — assume memory-bound unless clearly otherwise
-```
+## Output and degradation
 
-### unknown
-Do not guess. Emit `modeled: false` and degrade this entry (§6 L2).
+Write `profile/round_<R>/profile_roofline.json` and a concise sibling
+`profile_roofline.md`. Preserve the existing JSON field names:
 
-## 5. Confidence stages — the estimate sharpens as the run proceeds
+- Top level: `skill: "roofline"`, `skill_version: "1"`, `gfx`, `peaks`, `stage`,
+  `entries`, `ranking_by_pct`, `ranking_by_expected_gain`, `degraded`, `skill_errors`.
+- Entry identity/scope: `name`, `short_name`, `pct_gpu_time` copied unchanged,
+  `regime`, `op_class`, `modeled`, `t_ms`, `launches_per_step`.
+- Model: `bytes_est`, `flops_est`, `achieved_bw_bytes_s`, `achieved_flops`, `hbm_util`,
+  `compute_util`, `arithmetic_intensity`, `ridge_point`, `roofline_pct`, `target_eff`,
+  `attainable_speedup`, `expected_e2e_gain_pct`.
+- Interpretation: `bound_type` (`memory|compute|latency|unknown`), `headroom_class`
+  (`underperforming|moderate|saturated|unknown`), `confidence`, `suspect`,
+  `byte_reduction_levers`, and `notes` with assumptions, raw evidence and limits.
 
-| stage | source of shapes/bytes | confidence | consumer may |
-|---|---|---|---|
-| **A** profile time | `est_shape`/`shapes` from the Top-N, model `config.json` | `low` | display + annotate only — **do not rank on it** |
-| **B** after extract | the REAL shapes/dtypes the Kernel Extractor captured for the unittest | `medium` | rank as a secondary key |
-| **C** after op_bench | rocprofv3 counters on the isolated op (measured bytes/FLOPs) | `high` | rank as a secondary key; may be cited in the report |
+Use null for unavailable numbers. If displaying a clamped value, retain
+`roofline_pct_raw` and `suspect:true`; the verdict stays unknown. Preserve the
+helper's singular `note` diagnostic alongside the report's explanatory `notes`.
+Its `bytes_upper_bound=B*T` and `flops_upper_bound=P*T` are conditional capacity
+checks, not measured traffic/work or proven bounds on removable cost.
 
-Stage A is inherently coarse: at profile time the exact operand shapes have not been captured yet.
-**Re-run this skill at stage B/C and overwrite the artifact.** Because the decision to spend the *next*
-budget unit happens after the *previous* kernel's extract, refined numbers arrive in time to matter.
-
-### Stage C — counter measurement (rocprofv3)
-Measure on the ISOLATED op (the Op Benchmarker already has it isolated — no extra server run):
-- bytes: `FETCH_SIZE` + `WRITE_SIZE` (both in **KiB**) → `(FETCH_SIZE + WRITE_SIZE) · 1024`
-- FLOPs: `MfmaFlops`, or `MfmaFlopsBF16`/`F16`/`F32`/`F64` per dtype
-- **fp8 has no `MfmaFlopsF8`** on current builds — use `SQ_INSTS_VALU_MFMA_MOPS_F8` and convert
-  MFMA-ops → FLOPs for the instruction shape in play.
-- corroborate `bound_type` with `MemUnitStalled`, `MfmaUtil`, `OccupancyPercent`.
-
-Counter names and availability vary by ROCm build. Probe with `rocprofv3 --list-avail`; a missing
-counter degrades to stage A/B (§6 L4), it does not fail the skill.
-
-## 6. Degradation ladder — every level is non-fatal
-
-| level | trigger | behavior |
+| Evidence | Stage/confidence | Use |
 |---|---|---|
-| **L0** | `analysis_skill=none`, skill dir missing/unreadable | Emit nothing. Caller behaves exactly as before this feature existed. |
-| **L1** | `gfx` absent from `peaks.md` | Derive peaks from device props; `peaks.confidence="low"` → every entry is `confidence: low` → display-only. |
-| **L2** | an op class cannot be modelled | Degrade **that entry only**: `modeled:false`, `headroom_class:"unknown"`, add to `degraded[]`. Other entries are unaffected and the consumer falls back to the pre-skill prior for this one. |
-| **L3** | result is impossible: `roofline_pct > 1.0`, or `< 0.001`, or a negative/zero byte count | Clamp for display, set `suspect:true`, **force `headroom_class:"unknown"`** (an infeasible ratio is not a verdict), keep `roofline_pct_raw`, emit `bytes_upper_bound = peak_bw × t` (what the model violated), and flag the entry as a **stage-C counter-measurement candidate**. |
-| **L4** | counters unavailable / unstable | Keep the stage-A/B analytic result; do not raise confidence. |
-| **L5** | anything else raises | Catch it, append to `skill_errors[]`, write whatever entries succeeded, and continue. **The run never fails because of this skill.** |
+| Estimated shapes/model config | A / low | Display only |
+| Captured shapes/dtypes with supported model | B / medium | Secondary prioritization |
+| Matched counters and validated definitions/capacities | C / high for the supported quantities | Secondary prioritization; causal claims still need evidence |
 
-`roofline_pct > 1.0` is a real and expected occurrence — it usually means the byte model over-counts
-(e.g. assuming all experts are streamed when the kernel skips unrouted ones). Treat it as a signal that
-the model needs stage-C measurement, not as a hardware anomaly.
+Emit both rankings; low-confidence, suspect or unknown entries fall back to
+`pct_gpu_time`. Refine when new evidence changes a decision, retaining source and
+measurement identity. Counter availability alone does not raise confidence.
+`FETCH_SIZE`/`WRITE_SIZE` convert by 1024 only where their definitions say KiB;
+MFMA counters require the actual dtype/instruction work factor. Do not treat a
+missing read/write component as measured zero or sum unrelated replays.
+For `SQ_INSTS_VALU_MFMA_MOPS_F8`, verify the installed event definition and its units
+and supply the verified conversion factor; otherwise leave the FLOP count unknown.
+See the [counter and calibration guidance](../../../../perf_knowledge/skills/kernel-hardware-evidence/references/collection.md)
+for version-specific limitations.
 
-## 7. `target_eff` and how to route on the result
-
-`target_eff` = how close a **well-implemented** kernel of this class gets to its roofline bound. It is
-set by **access regularity**, not by how important the kernel is.
-
-| op class | `target_eff` | why |
-|---|---|---|
-| dense GEMM | **0.90** | regular, dense compute |
-| MoE / grouped GEMM | **0.90** | decode weight streaming is essentially a memcpy |
-| elementwise / norm / quant | 0.85–0.90 | pure streaming |
-| attention decode (paged) | **0.50** | irregular paged KV access, occupancy-sensitive |
-
-These are **priors, not constants** — §8 corrects them from observed outcomes.
-One measured product override is available through
-`roofline_tools.target_eff_for(op_class, product)`:
-
-| product / class | `target_eff` | evidence |
-|---|---:|---|
-| R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76** | 30 event-timed 1 GiB→1 GiB copies: median 485.8 GB/s read+write, or 0.759× the 640 GB/s datasheet pin rate |
-
-This override does not change dense-GEMM compute efficiency or paged-attention
-priors. It is product-scoped; do not apply it to an unknown gfx1201 card.
-
-### Routing table (the actual point of this skill)
-
-| `headroom_class` | `bound_type` | `pct_gpu_time` | route |
-|---|---|---|---|
-| underperforming | memory / compute | high | **kernel track, top priority** — real micro-optimization headroom |
-| underperforming | latency | high | kernel track — but the lever is **occupancy / dependency-chain / fusion / split-K**, not byte reduction |
-| **saturated** | memory | **high** | **byte-reduction / algorithmic track — NOT dropped** (§7.1) |
-| saturated | latency | high | occupancy/access-pattern is the ceiling — fewer bytes (e.g. fp8 KV) or fusion; not more tuning |
-| any | any | low | low priority (ordinary Amdahl) |
-| unknown, or `confidence: low` | any | any | **fall back entirely to `pct_gpu_time` ordering** |
-
-**Shippability gate (applies before any of the above).** A head kernel with no editable call site —
-a monolithic hand-written assembly `.co` or a precompiled CK `.so` — cannot take an in-kernel rewrite
-no matter how much headroom it shows. Its only levers are **host-side**: dispatch/path selection, the
-tuning DB (`tuned_fmoe`, `AITER_CONFIG_*`), or a backend swap. When the profiler marks an entry
-non-editable, route it to the host-side track and say so; do not dispatch a rewrite that cannot be
-integrated. (The `editable` flag comes from the profiler's Top-N, not from this skill.)
-
-### 7.1 Saturated + high `pct_gpu_time` → byte-reduction levers
-
-The biggest kernel stays the biggest target; only the *class of fix* changes. Enumerate levers that
-make the kernel move **fewer bytes for the same work**:
-
-- **Fuse an adjacent op away.** If a prologue/epilogue kernel (activation quant, silu, a norm) appears
-  separately in the Top-N, fusing it into the saturated kernel removes an entire activation round-trip
-  — and removes that kernel's own GPU time too.
-- **Stop reading what isn't used.** If the kernel streams all `E` experts but routing only touches
-  `experts_hit`, the difference is pure waste.
-- **Layout / packing.** Remove padding waste, improve coalescing, improve L2 reuse between stages of
-  the same logical op.
-- **Lower-precision weights** (e.g. fp8 → fp4). Directly cuts bytes. **Lossy — must pass the accuracy
-  gate.**
-
-**Hard constraints on every byte-reduction lever (do not violate):**
-> The **measurement contract and output semantics are fixed.** The workload — `isl`, `osl`,
-> **`conc` / batch size — is supplied by the user and must not be changed**. Do **not** introduce
-> speculative decoding (MTP or otherwise) as an optimization. A lever that raises throughput by
-> changing what is being measured is not a win. Lossy levers (fp4, kv-cache-dtype) must pass the
-> accuracy gate before they count.
-
-## 8. Guarding against being wrong
-
-1. **Sanity band** — §6 L3.
-2. **Validate the denominator before believing a `roofline_pct`.** The table
-   records datasheet ceilings; any separately measured achievable peak must be
-   labeled with its product, toolchain, and workload. The load-bearing cross-check:
-   BF16 and FP16 run at the same rate on the
-   matrix core of every tabulated part (MFMA on CDNA, WMMA on RDNA), so their peaks must be equal —
-   when they are not, the compute-axis number is inflated
-   (a "kernel at 85%" may really be at 43%). The memory `target_eff` values are
-   generic op-class priors, not measured R9700 GDDR6 efficiency factors.
-3. **Two noise bands, not one.** An **isolated-kernel** speedup is real only if it clears the
-   isolated repeat band (**~3.4%** on identical reruns here — much wider than people assume), while an
-   **e2e serving** delta uses the serving band (~0.5%). Do not judge an isolated kernel win against the
-   e2e band, and never call a sub-3.4% isolated speedup real.
-4. **Contradiction check.** If a kernel squad measures an isolated speedup **larger** than this skill's
-   `attainable_speedup`, the model was wrong. Flag it, and prefer the measurement — always.
-5. **Self-correction across runs.** Record `predicted vs actual` (predicted `attainable_speedup` and
-   `expected_e2e_gain_pct` vs measured isolated speedup and measured e2e delta) into
-   `knowledge/backend_playbook.md`, which already grows every run. Systematic error in a class's
-   `target_eff` or byte model shows up there and is corrected in the next run.
-6. **Never sole authority.** No candidate is ever pruned because of this skill; no result is ever
-   accepted because of it. The e2e gate decides.
-
-## 9. Worked example (real data — Qwen3.5-35B-A3B-FP8, gfx950, vLLM, TP1, isl/osl 1k, conc 64)
-
-Decode-dominated (2033 decode steps vs 24 prefill). Peaks: 8.0 TB/s HBM, 5.0 PFLOP/s fp8.
-
-**`fused_moe_kernel`** — `pct_gpu_time` 26.45%, decode `t` = 49.47 µs/launch, 80 launches/step over 40
-layers ⇒ 2 launches per layer ⇒ one logical layer = 98.9 µs.
-E=256, top_k=8, hidden=2048, moe_intermediate=512, fp8 weights. At M=64, `pairs`=512 ⇒
-`experts_hit` ≈ 221/256. Layer weight bytes ≈ 697 MB (all-expert: 805 MB).
-⇒ achieved 7.04 TB/s = **88% of roofline**, AI ≈ 4.6 ≪ ridge 625 ⇒ **memory-bound**.
-⇒ `attainable_speedup` = 0.90/0.88 = **1.023×**, `expected_e2e_gain_pct` = **+0.59%** → **saturated**.
-*(All-expert bytes give 102% — an L3 `suspect` case, and evidence for the "stop reading unused
-experts" lever.)*
-
-**`kernel_paged_attention_2d`** — `pct_gpu_time` 8.86%, decode `t` = 141.1 µs, 10 launches/step
-(= the 10 full-attention layers of 40, `full_attention_interval`=4).
-⇒ achieved ≈ 1.4–2.3 TB/s = **18–29% of roofline** ⇒ `attainable_speedup` ≈ **1.7–2.8×**,
-`expected_e2e_gain_pct` ≈ **+3.7%** → **underperforming**.
-
-**Why this matters:** ranking by `pct_gpu_time` puts MoE first (26.45% vs 8.86%). Ranking by roofline
-headroom puts attention first. The run that produced these numbers spent its budget on the MoE and
-measured **−0.064% e2e** (isolated 1.047×, predicted 1.023× ✅); the attention kernel it reached later
-yielded **1.56× isolated** (predicted 1.7× ✅). Both predictions were calibrated — and the MoE was
-correctly identified as needing a byte-reduction lever, not another tuning pass.
+`analysis_skill=none` or unreadable skill: emit nothing. Missing peaks/model/counters:
+leave affected quantities unknown, add the entry/reason to `degraded`, retain other
+results. Unexpected failure: record it in `skill_errors` and continue. Compare
+predictions with accepted results in the existing experiment/playbook notes;
+a faster result can revise the assumptions without proving a particular cause.
+Report isolated-kernel repeat variability separately from end-to-end variability.
+A repeatable isolated gain can be too small to resolve in the workload measurement;
+use that workload's measured uncertainty, not a universal percent cutoff.

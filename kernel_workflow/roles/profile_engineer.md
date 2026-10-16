@@ -18,7 +18,8 @@ schema with the cached `bottleneck` / metrics. Re-profile fully only if no prior
 keeps the per-wave fixed cost low so the burst spends its budget on optimization rounds. (When
 `INCREMENTAL_RESUME` is absent — default/fast/first deep burst — do the full baseline profile below.)
 
-Read `SKILL_DIR/knowledge/profiling_guide.md` first. Then **identify the actual accelerator on this
+Read `SKILL_DIR/../perf_knowledge/skills/kernel-hardware-evidence/SKILL.md` for hardware-dependent
+claims, and relevant commands in `SKILL_DIR/knowledge/profiling_guide.md`. Then **identify the actual accelerator on this
 box** (`rocminfo` for the gfx arch + CU/WGP count, `rocm-smi --showproductname` for the card) and read the
 hardware reference that matches what you found:
 
@@ -54,14 +55,15 @@ kernel-trace + latency table (`amd_rdna4.md` §5).
    compute-bound / memory-bound / latency-bound / lds-bound / balanced. ALSO flag **overhead-bound**
    when per-case latencies are similar across very different problem sizes, or dispatch count > 1
    with small kernels — this points at host/dispatch overhead (see `geomean_levers.md`).
-   - **Do not call it memory-bound on a small AI alone** — only when HBM/VMEM utilization is actually
-     high. A small AI with low HBM util is latency-bound (`profiling_guide.md` → decision tree note).
+   - Small arithmetic intensity alone does not establish a memory bottleneck. Low bandwidth alone
+     also cannot establish latency or occupancy limits: check dispatch size, dependency/issue evidence,
+     cache traffic and measurement boundary before naming the cause.
    - **When latency-bound, name the sub-case in your opportunities**: dependency-wait dominant (C1,
      shorten the serial chain) vs issue-wait dominant (C2, raise occupancy / GPU fill). They have
      opposite fixes, so the TechLead needs the sub-case, not just "latency". Re-read this split after
      any tile / `num_stages` / `num_warps` change — it is a property of the config, not the source.
    - **Run the cheap peak/fill sanity-checks** (`profiling_guide.md` → "Cheap checks…") before trusting
-     the label: any roofline efficiency > 100% is a mis-calibrated peak (use HBM%/F32), and
+     the label: roofline efficiency > 100% requires checking work, traffic, peak and timing scope;
      `CTAs = Grid/Workgroup < CU count` means the GPU is not even filled — call that out first.
 5. Write `EVAL_DIR/baseline_metrics.json` (or `round_N_metrics.json`) and
    `EVAL_DIR/profiling_summary.md` (or `round_N_shift_analysis.md`). For reprofile, include a

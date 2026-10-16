@@ -67,13 +67,25 @@ def test_gfx1201_does_not_imply_r9700(product: str) -> None:
     assert identity["target"] == "unknown"
 
 
-def test_instinct_identity_stays_unknown_product() -> None:
+@pytest.mark.parametrize("target", ["mi350x", "mi355x"])
+def test_exact_instinct_identity_selects_product(target: str) -> None:
     identity = gpu_identity.parse_rocminfo(
-        _rocminfo("gfx950", "AMD Instinct MI355X", cu=256)
+        _rocminfo("gfx950", f"AMD Instinct {target.upper()}", cu=256)
     )
     assert identity["gfx"] == "gfx950"
-    assert identity["target"] == "unknown"
+    assert identity["target"] == target
     assert identity["physical_cu_count"] == 256
+
+
+@pytest.mark.parametrize("gfx, product", [
+    ("gfx950", ""),
+    ("gfx950", "AMD Instinct MI350X / MI355X"),
+    ("gfx950", "AMD Instinct MI355X Engineering Sample"),
+    ("gfx942", "AMD Instinct MI355X"),
+    ("gfx942", "AMD Instinct MI300X"),
+])
+def test_ambiguous_or_mismatched_instinct_product_stays_unknown(gfx, product) -> None:
+    assert gpu_identity.parse_rocminfo(_rocminfo(gfx, product))["target"] == "unknown"
 
 
 def test_homogeneous_visible_agents_are_accepted() -> None:

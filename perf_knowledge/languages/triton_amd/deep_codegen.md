@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e5m2_fnuz, int8]
 regimes: [both]
 status: competitive
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
   - https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
@@ -50,7 +50,9 @@ with a different swizzle). The two layout costs that matter:
 - **dot-operand convert** (loaded blocked tile → MFMA dot-operand layout): unavoidable for GEMM, but
   its LDS swizzle is tuned by `kpack` (wider `ds_read_b128`) and tile shape.
 
-`grep "triton_gpu.shared"` in `MLIR_ENABLE_DUMP` output to see the LDS bytes each layout reserves.
+Search `MLIR_ENABLE_DUMP` output with `rg 'triton_gpu\.shared|ttg\.shared'` for
+shared-memory metadata. Attribute names depend on the Triton version; inspect
+the actual field scope rather than treating it as bytes reserved by every layout.
 
 ## 3. The stream pipeliner (`num_stages` on AMD)
 AMD does **not** use NVIDIA's `cp.async` + mbarrier pipeline. Instead the TritonAMDGPU
@@ -95,7 +97,7 @@ The LLVM-IR stage attaches:
 - `"amdgpu-flat-work-group-size"` from `num_warps·64`.
 - denormal-fp-math flags.
 The register allocator then sets `.vgpr_count`, `.sgpr_count`, `.group_segment_fixed_size` (LDS), and
-`.private_segment_fixed_size` (**scratch — must be 0**; nonzero = spilling to HBM).
+`.private_segment_fixed_size` (private allocation; inspect actual accesses before attributing spills or HBM traffic).
 
 ## 7. Worked: an annotated K-loop you can predict the ISA of
 ```python
@@ -108,9 +110,11 @@ for k in range(0, tl.cdiv(K, BLOCK_K)):
     b_ptrs += BLOCK_K * stride_bk
 c = acc.to(c_ptr.dtype.element_ty)                   # OPTIMIZE_EPILOGUE=1 -> no convert_layout
 ```
-With `matrix_instr_nonkdim=16, kpack=2, num_stages=2, OPTIMIZE_EPILOGUE=1` you should see, in the inner
-loop: `global_load_dwordx4` (×N), `ds_read_b128`, dense `v_mfma_f32_16x16x16`, no `v_accvgpr_*`, and
-`.private_segment_fixed_size: 0`. Anything else → retune (see [isa_verify.md](isa_verify.md)).
+With `matrix_instr_nonkdim=16, kpack=2, num_stages=2, OPTIMIZE_EPILOGUE=1`,
+inspect which loads, LDS operations, MFMA variants and conversions the compiler
+actually emits. This example is not a required instruction sequence. A nonzero
+private segment or `v_accvgpr` movement needs access/lifetime context before
+attributing spills or a regression; see [ISA inspection](isa_verify.md).
 
 ## Sources
 - Triton AMD backend `HIPOptions` / stream-pipeliner / knobs.amd.*: https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py

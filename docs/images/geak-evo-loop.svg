@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="580" viewBox="0 0 1200 580" role="img" aria-labelledby="title desc" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <title id="title">The GEAK-EVO research loop</title>
+  <desc id="desc">Original kernel and GPU seed a store of saved code and ideas (measured implementations and unfinished ideas; unfinished ideas are not treated as validated). A planner chooses a parent, an idea and an optional donor; engineers implement, test and repair it, and GPU evaluation checks correctness and timing. Tested results are saved; evidence and corrections also feed back to the planner.</desc>
+  <defs><marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2477B8"/></marker><marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7E57B5"/></marker><marker id="at" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#12907E"/></marker><marker id="ad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#22313F"/></marker></defs>
+  <rect width="1200" height="580" fill="#FFFFFF"/>
+  <text x="40" y="54" font-size="24" fill="#22313F" font-weight="bold" text-anchor="start">How GEAK-EVO improves a kernel</text>
+  <text x="40" y="84" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">An engineering round picks a kept branch, develops it, tests it on the GPU and stores the result.</text>
+  <rect x="40" y="124" width="200" height="100" rx="12" fill="#FFFFFF" stroke="#B7C2CF" stroke-width="2"/>
+  <text x="140.0" y="170.0" font-size="18" fill="#22313F" font-weight="bold" text-anchor="middle">Original kernel</text>
+  <text x="140.0" y="196.0" font-size="15" fill="#556375" font-weight="normal" text-anchor="middle">+ GPU</text>
+  <rect x="290" y="124" width="230" height="100" rx="12" fill="#F2F5FA" stroke="#7E57B5" stroke-width="2"/>
+  <text x="405.0" y="170.0" font-size="18" fill="#7E57B5" font-weight="bold" text-anchor="middle">Saved code and ideas</text>
+  <text x="405.0" y="196.0" font-size="15" fill="#556375" font-weight="normal" text-anchor="middle">code, ideas, and test results</text>
+  <rect x="610" y="124" width="230" height="100" rx="12" fill="#F2F5FA" stroke="#7E57B5" stroke-width="2"/>
+  <text x="725.0" y="170.0" font-size="18" fill="#7E57B5" font-weight="bold" text-anchor="middle">Planner</text>
+  <text x="725.0" y="196.0" font-size="15" fill="#556375" font-weight="normal" text-anchor="middle">choose a branch and an idea</text>
+  <rect x="930" y="124" width="230" height="100" rx="12" fill="#F2F5FA" stroke="#2477B8" stroke-width="2"/>
+  <text x="1045.0" y="170.0" font-size="18" fill="#2477B8" font-weight="bold" text-anchor="middle">Engineers</text>
+  <text x="1045.0" y="196.0" font-size="15" fill="#556375" font-weight="normal" text-anchor="middle">implement, test, repair</text>
+  <rect x="930" y="350" width="230" height="100" rx="12" fill="#F2F5FA" stroke="#12907E" stroke-width="2"/>
+  <text x="1045.0" y="396.0" font-size="18" fill="#12907E" font-weight="bold" text-anchor="middle">GPU evaluation</text>
+  <text x="1045.0" y="422.0" font-size="15" fill="#556375" font-weight="normal" text-anchor="middle">correctness + timing</text>
+  <path d="M 244 174 L 286 174" fill="none" stroke="#22313F" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ad)"/>
+  <path d="M 524 174 L 606 174" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ap)"/>
+  <path d="M 844 174 L 926 174" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ap)"/>
+  <path d="M 1045 228 L 1045 346" fill="none" stroke="#2477B8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ab)"/>
+  <text x="1059" y="292" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">candidate code</text>
+  <path d="M 926 378 L 725 378 L 725 228" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 6" marker-end="url(#ap)"/>
+  <text x="832" y="366" font-size="15" fill="#7E57B5" font-weight="bold" text-anchor="middle" font-style="italic">evidence + corrections</text>
+  <path d="M 926 426 L 405 426 L 405 228" fill="none" stroke="#12907E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#at)"/>
+  <text x="668" y="452" font-size="15" fill="#12907E" font-weight="normal" text-anchor="middle">Save the tested code and results; keep unfinished ideas for later work</text>
+  <rect x="40" y="270" width="336" height="112" rx="12" fill="#FFFFFF" stroke="#C9D2DE" stroke-width="2" stroke-dasharray="6 5"/>
+  <text x="60" y="302" font-size="15" fill="#22313F" font-weight="bold" text-anchor="start">Selection</text>
+  <text x="60" y="328" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">Balance promising and</text>
+  <text x="60" y="352" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">less-tried branches</text>
+  <path d="M 40 519 L 84 519" fill="none" stroke="#22313F" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#ad)"/>
+  <text x="96" y="524" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">main flow</text>
+  <path d="M 200 519 L 244 519" fill="none" stroke="#7E57B5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 6" marker-end="url(#ap)"/>
+  <text x="256" y="524" font-size="15" fill="#556375" font-weight="normal" text-anchor="start">feedback to the planner</text>
+  <text x="40" y="558" font-size="15" fill="#556375">Engine library implemented · Hyperloom integration pending</text>
+</svg>

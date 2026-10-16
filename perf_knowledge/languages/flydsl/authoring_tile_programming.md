@@ -300,41 +300,33 @@ def buffer_kernel(A: fx.Tensor, B: fx.Tensor, N: fx.Constexpr[int]):
 
 ---
 
-## Step 3: Fill in the compute logic
+## Scalar arithmetic
 
-Common compute recipes (all work on vectors):
+Use the installed typed operations; match scalar/vector shapes and preserve the
+contract's rounding, NaN and signed-zero behavior. With matching vector operands:
 
 ```python
-from flydsl.expr import arith
-from flydsl._mlir.ir import VectorType
-
 vec_ty = VectorType.get([VEC_WIDTH], fx.T.f32())
-
-# Scale: C = A * scalar
 scale = arith.constant_vector(2.0, vec_ty)
-vC = arith.mulf(vA, scale)
-
-# Add: C = A + B
-vC = arith.addf(vA, vB)
-
-# FMA: D = A * B + C
-vC = arith.addf(arith.mulf(vA, vB), vC)
-
-# ReLU: C = max(A, 0)
+v_scaled = arith.mulf(vA, scale)
+v_sum = arith.addf(vA, vB)
+v_mul_add = arith.addf(arith.mulf(vA, vB), vC)  # not a promised fused FMA
 zero = arith.constant_vector(0.0, vec_ty)
-vC = arith.maximumf(vA, zero)
-
-# Abs: C = |A| (no arith.absf -- use this pattern)
-neg = arith.negf(vA)
-is_neg = arith.cmpf(vA, arith.constant_vector(0.0, vec_ty), predicate="olt")
-vC = arith.select(is_neg, neg, vA)
-
-# Type conversion
-vC = arith.sitofp(vI32, fx.T.f32())   # int -> float
-vC = arith.trunc_f(vF32, fx.T.f16())  # f32 -> f16
+v_relu = arith.maximumf(vA, zero)
+is_neg = arith.cmpf(vA, zero, predicate="olt")
+v_abs = arith.select(is_neg, arith.negf(vA), vA)
 ```
 
----
+The compare/select absolute-value pattern preserves negative zero; use a primitive
+with the required semantics if the contract needs canonical positive zero. For
+scalar conversions, `arith.sitofp(vI32, fx.T.f32())` and
+`arith.trunc_f(vF32, fx.T.f16())` express signed-int conversion and narrowing;
+vector conversions require the corresponding vector result type.
+
+Before a new kernel launch, check the selected copy atom and layout against
+`VEC_WIDTH * element_bits`, pointer alignment and tail masks; do not compare a byte
+count with a bit width. Confirm that launch geometry covers every required output,
+shared allocations fit the target, and the full numerical/state test passes.
 
 ## Step 4: Add control flow
 
@@ -516,16 +508,6 @@ For `make_tiled_mma` atom_layout, the shape is `(M_rep, N_rep, K_rep)`:
 - Stride `(1,2,0)` means M varies fastest, then N, K is broadcast
 
 ---
-
-## Checklist for new kernels
-
-- [ ] Identified kernel pattern (elementwise / reduction / copy / GEMM)
-- [ ] Chose appropriate copy atom type (Universal vs Buffer, bit width)
-- [ ] Set tile sizes matching MFMA instruction shape (if GEMM)
-- [ ] Verified VEC_WIDTH * sizeof(elem) <= copy atom bits
-- [ ] Used `Constexpr[int]` for compile-time constants, `Int32` for runtime
-- [ ] Added `torch.cuda.synchronize()` before checking results
-- [ ] Verified correctness with `torch.allclose()`
 
 ## Sources
 - AMD-AGI/GEAK@c0a1f937:src/minisweagent/skills/flydsl/docs/flydsl_tile_programming.md — origin (ingested as reference).

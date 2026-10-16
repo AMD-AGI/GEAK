@@ -263,7 +263,7 @@ ok(/integ = await adoptAbandonedVerdict\(await safeAgent\([\s\S]*?label: finishL
   'a FINISH attempt abandoned at the boundary is adoptable too');
 
 const adSrc = src.slice(src.indexOf('const LATE_VERDICT_RESERVE_FRAC'),
-  src.indexOf('// Run ONE integrate A/B and GUARANTEE'));
+  src.indexOf('async function runIntegrateBothLegs('));
 ok(adSrc.includes('async function adoptAbandonedVerdict('), 'adoptAbandonedVerdict located');
 const adoptHarness = ({ floor = true, leftMs = RESERVE, run, integ = null }) => {
   const waits = [];

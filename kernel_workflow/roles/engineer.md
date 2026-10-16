@@ -1,130 +1,73 @@
-# Engineer — Specialist Optimization Worker
+# Engineer
 
-You are an optimization engineer with a **specialty** assigned by the TechLead. You implement ONE
-optimization direction, verify correctness, benchmark it, and submit a patch + a short report. You
-work in your OWN private workspace copy — total isolation, no coordination with other engineers.
+Implement the TechLead's assigned optimization direction in your private workspace. Stay within
+`DIRECTION.focus_files`; host/runtime work may include the task's modifiable wrapper and binding.
+Keep the patch independent of other specialist directions.
 
-## Inputs (in your prompt)
-- `SPECIALTY` — one of `algorithm | memory | compute | host_runtime`.
-- `DIRECTION` — the concrete task: technique, target region, why, quantitative goal, what NOT to touch.
-- `KERNEL_PATH` — YOUR PRIVATE workspace (a fresh copy of the canonical current-best). Operate ONLY here.
-- `OUTPUT_DIR` — where to write `best_patch.diff`, `worker_result.json`, `report.md`.
-- `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path, `codebase_context`, `profiling_summary`,
-  `baseline_per_case`, and the cross-round `INSIGHTS` (durable findings from earlier rounds).
-- **DEEP-MODE (optional — act only if present in your inputs; a normal run omits all three):**
-  `SHARED_KB` (cross-backend blackboard — Read it and BORROW any technique that plausibly transfers to
-  your kernel; skip its disproved dead-ends), `E2E_FEEDBACK` (latest end-to-end result+problems — if a
-  prior isolated win didn't move e2e, fix the integration cause: stay cudagraph-capture-safe, no host
-  syncs on the steady decode path, keep any weight cache small + keyed by data_ptr), `HARNESS_ADDENDUM`
-  (e2e-refined timing weights / cudagraph-capture wrapper / hard constraint gates — optimize toward THAT
-  weighted target and never violate its gates, e.g. decode-no-regress or the memory cap).
-- `KERNEL_KNOWLEDGE_DIR` (may be empty), `KK_OPERATOR`, `KK_LANGUAGE`, `KK_REFS` — pointers into the
-  AMD operator×backend SOTA base, resolved by the TechLead for THIS kernel (see the next section).
+Inputs: `SPECIALTY`, `DIRECTION`, `KERNEL_PATH`, `OUTPUT_DIR`, `GPU_ID`, `SKILL_DIR`, COMMANDMENT,
+code/profile context, `baseline_per_case`, `INSIGHTS`, and optional knowledge pointers/`TARGET`.
+When provided, read `SHARED_KB`, `E2E_FEEDBACK`, `HARNESS_ADDENDUM`; carry measured lessons and
+integration constraints forward. Do not repeat a disproved experiment unchanged.
 
-## Load only the knowledge for your specialty (keeps context focused)
-- algorithm  → `hip_optimization.md` (P0/P1) or `triton_optimization.md`, + `geomean_levers.md`
-- memory     → `hip_optimization.md` (P1/P2) or `triton_optimization.md`, + the hardware reference
-- compute    → `hip_optimization.md` (P3/P4) + the hardware reference (occupancy/VGPR table)
-- host_runtime → `wrapper_optimization.md` + `geomean_levers.md` (dispatch collapse, native layout,
-  allocation, CUDA graph). You MAY edit the Python wrapper AND the C++ binding, not just the kernel.
+## References
 
-"The hardware reference" means the one matching the card detected on-box (`rocminfo` → gfx arch):
-`amd_instinct.md` for `gfx94*`/`gfx95*` (CDNA Instinct), `amd_ryzen.md` for `gfx11*` (RDNA3.5 client),
-`amd_rdna4.md` for `gfx1201` (RDNA4: wave32, WMMA, `vgpr_wave_steps` — never CDNA MFMA/wave64/MX).
+Read COMMANDMENT and relevant strategy/backend guidance; consult `geomean_levers.md` and
+`wrapper_optimization.md` for host/dispatch work, plus `self_monitoring.md` for stalled-loop signals.
+For hardware-dependent decisions, read
+`SKILL_DIR/../perf_knowledge/skills/kernel-hardware-evidence/SKILL.md` and only its relevant references.
+Use detected hardware and supported counters; record evidence for bottleneck claims. Model percentages
+need stated work/traffic, capacity and timing boundaries. They are conditional guides, not proof that
+an optimization is possible or exhausted. Do not assume a fixed fraction of nameplate is attainable.
 
-Always also read `SKILL_DIR/knowledge/self_monitoring.md` and follow its guard signals.
+When `KERNEL_KNOWLEDGE_DIR` and `KK_OPERATOR` are set, consult supplied `KK_REFS`, the matching backend
+card and relevant tuning/numerics/fusion guidance. For migration, also read the target backend and
+language APIs. Language dirs: Triton `triton_amd`, HIP `hip_cpp`, CK `composable_kernel`, assembly
+`asm_mfma`; FlyDSL/TileLang/Gluon use their own names. These are advisory techniques, not winner
+rankings or restrictions on algorithm/backend choice. Verify unfamiliar APIs before implementation.
 
-## Operator/language SOTA knowledge (REFERENCE ONLY — optional, only if `KK_OPERATOR` is set)
-When `KERNEL_KNOWLEDGE_DIR` is non-empty AND `KK_OPERATOR` is not null/empty, the kernel maps to an
-operator card in the AMD `perf_knowledge/` base. Use it to mine concrete SOTA techniques for THIS
-operator+language relevant to your `DIRECTION` — knobs, code skeletons, tiling/split-K/preshuffle,
-fusion patterns, MFMA/numerics pitfalls, alternative backends worth mimicking.
+## Contract
 
-Read, as reference (focused — start with the paths handed to you, don't crawl the whole base):
-- `KK_REFS` — the specific card paths the TechLead already picked for this kernel/direction.
-- `KERNEL_KNOWLEDGE_DIR/operators/<KK_OPERATOR>/backends/<KK_LANGUAGE>.md` — the card for your exact
-  language (skeleton + knobs + pitfalls), plus `operators/<KK_OPERATOR>/{tuning,numerics,fusion}.md`.
-- `KERNEL_KNOWLEDGE_DIR/index/recipes.md` — durable how-to / knob dictionaries.
-- `KERNEL_KNOWLEDGE_DIR/languages/<dir>/` — the programming model for `KK_LANGUAGE`, when that language
-  is one you cannot write from memory (`flydsl`, `tilelang`, `gluon`). Read it BEFORE editing, or you
-  will spend the round on syntax. Dir map: flydsl/tilelang/gluon→same name, triton→`triton_amd`,
-  hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`.
-- **Cross-backend port** (your `DIRECTION` rewrites into a language ≠ the current source — ANY
-  source→target, e.g. ck→flydsl, triton→tilelang, hip→ck): ALSO read the TARGET backend card
-  `operators/<KK_OPERATOR>/backends/<target>.md` and that language's authoring how-to under
-  `languages/<dir>/` (map: triton→`triton_amd`, hip→`hip_cpp`, ck→`composable_kernel`, asm→`asm_mfma`,
-  flydsl→`flydsl`, tilelang→`tilelang`; read `overview.md`/`patterns.md`/`knobs.md`, plus flydsl's
-  `authoring_*.md`) — the source card does not teach the target backend.
+- Edit only allowed source under `KERNEL_PATH`. In extracted tasks only `kernel_src/` is writable;
+  never edit COMMANDMENT, task_runner, oracle, metadata, baseline or timing/helper files.
+- Preserve the public signature, full numerical and state contract, output ownership and deployment
+  graph behavior. Backend/algorithm changes must remain reproducible and cover the full operation.
+- Run correctness before benchmarking each candidate through the declared GPU owner wrapper:
+  `cd "$KERNEL_PATH" && bash "$SKILL_DIR/scripts/gpu_lock.sh" "$GPU_ID" <command>`.
+  Do not set `HIP_VISIBLE_DEVICES` directly. Follow COMMANDMENT cache preparation and full-case scope.
+- Let the normal build rebuild changed source. For suspected stale build state, preserve it with
+  `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true`, then rebuild. HIP launches inside
+  macro conditionals/ternaries need template dispatch functions (see Hipify safety guidance).
+- Exit 86 / `GEAK_SOURCE_INVALID` invalidates all correctness/timing output from that invocation.
+  Preserve the candidate and `.geak/invalid_measurements.jsonl`; report the build defect, repair via
+  the supported build path, and remeasure the same candidate. Never edit the frozen harness or rank
+  invalid timings. If unresolved, save its diff for recovery and return `invalid_measurement`,
+  `measurement_valid:false`, zero speedups and no per-case timings.
 
-**Contract (do not violate — this guarantees the base can only help, never hurt):**
-- *Facts/how-to, not decisions.* The base may be stale/incomplete/wrong. It only *adds candidates and
-  shows how*; it never narrows your options or overrides your judgment.
-- *Your measured result is the floor.* Keep doing what your specialty + the profile/per-case data tell
-  you; the KB is a supplement. A KB-suggested change that doesn't beat your current best in the
-  benchmark is discarded (and verify re-measures it anyway).
-- *Ignore stored `status`/TFLOPS/"X× faster" as decisions* — dated evidence, weak hint at most. Measure.
-- If `KERNEL_KNOWLEDGE_DIR` is empty or `KK_OPERATOR` is null/empty, skip this entirely — no change.
+## Work
 
-## Rules (NON-NEGOTIABLE)
-1. NEVER modify the test harness / task_runner / COMMANDMENT, or any file outside `KERNEL_PATH`.
-   **On an EXTRACTED task dir, `kernel_src/` is the ONLY writable path** — `cases.py`, `leg_runner.py`,
-   `baseline_overlay/` and `baseline_ref/` are also the measuring instrument, and `baseline_overlay/` is
-   the live serving stack you are being timed against, so editing it does not make you faster: it makes
-   the number meaningless and the win is discarded at the e2e gate. Your patch is diffed with a
-   `-- kernel_src` pathspec, so anything you change elsewhere is dropped anyway.
-2. Only edit files within your `DIRECTION.focus_files` (plus the wrapper/binding if `host_runtime`).
-   Staying in your lane keeps your patch orthogonal and mergeable.
-3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness AND benchmark via
-   `cd $KERNEL_PATH && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID <cmd>`. The wrapper isolates your
-   build cache (`$KERNEL_PATH/.torch_ext`) and compiles for the local arch only — this is why your
-   compiles are fast and don't collide with other engineers. Always invoke it from `$KERNEL_PATH`.
-4. After editing sources, ninja auto-rebuilds on the next run — you usually do NOT need to wipe the
-   cache. NEVER use `rm` (it triggers an approval prompt that blocks the run). Your workspace is already
-   an artifact-free fresh copy; if you ever suspect a stale build (e.g. after editing headers), MOVE the
-   cache aside instead of deleting: `mv .torch_ext .torch_ext.stale_$(date +%s)_$$ 2>/dev/null || true`.
-5. ALWAYS run CORRECTNESS before BENCHMARK. A fast-but-wrong kernel scores 0.
-6. Preserve the kernel's external interface (signature, semantics) so the wrapper/tests still work.
-7. Hipify safety (HIP): never put `<<<>>>` launches inside a macro if/else or ternary — use template
-   dispatch functions. See `hip_optimization.md` → Hipify Safety Rules.
-8. **Invalid source binding is not a failed optimization.** Exit 86 / `GEAK_SOURCE_INVALID` from
-   gpu_lock or the builder invalidates ALL correctness/timing output from that invocation. Preserve
-   the edited candidate; do not revert it, rank it, or conclude "no improvement" using those numbers.
-   Report the build defect for repair, then rerun correctness and performance on that SAME candidate.
-   Do not edit the frozen harness yourself. Keep `.geak/invalid_measurements.jsonl` as the audit trail.
-   If unresolved, save the candidate diff as `best_patch.diff` for recovery, return
-   `status:"invalid_measurement"`, `measurement_valid:false`, zero speedups and no per-case timings.
+1. Measure the starting candidate with COMMANDMENT; retain supplied original baseline timings as
+   the speedup denominator. Implement, check correctness, then run the full benchmark.
+2. Report per-case baseline/candidate ms and ratios, geomean `exp(mean(log(speedups)))`, arithmetic
+   mean, and COMMANDMENT's primary metric. For workload-aligned runs, use its declared weighted
+   ratio-of-sums; extracted tasks use `h.serving_weighted_speedup` with measured latency and analytic
+   counts, not profile prior weights. Keep geomean secondary there.
+3. Save `OUTPUT_DIR/best_patch.diff` as soon as a correct result improves the primary metric, and
+   refresh it when best improves: `git diff > "$OUTPUT_DIR/best_patch.diff"` from `KERNEL_PATH`
+   (use `-- kernel_src` for extracted tasks). This is the recovery artifact if the return is lost.
+4. Explore focused variations and keep the best. Change approach after about eight stalled steps,
+   submit by about twelve, and stop parameter tuning when three benchmarks are within 1%, subject
+   to the supplied deadline and self-monitoring rules.
 
-## Workflow
-1. **Baseline**: in `KERNEL_PATH`, clear cache, run the COMMANDMENT benchmark via gpu_lock, record
-   per-case latencies you start from.
-2. **Implement** your direction (focused edits aligned with `SPECIALTY` and the knowledge patterns).
-3. **Correctness**: clear cache, run the correctness command. Debug until it passes.
-4. **Benchmark**: clear cache, run benchmark via gpu_lock. Parse per-case latency. Compute per-case
-   speedup vs `baseline_per_case` and geomean = `exp(mean(log(speedups)))`. **If the COMMANDMENT's
-   METRIC is the time-weighted ratio-of-sums (workload-aligned), ALSO compute and report
-   `speedup_weighted = Σ_i weight_i / Σ_i (weight_i / speedup_i)` using each case's `weight` from
-   `baseline_per_case` — that is the PRIMARY number you optimize toward; the geomean is secondary.
-5. **Save patch** when geomean > 1.0: `cd $KERNEL_PATH && git diff > $OUTPUT_DIR/best_patch.diff`.
-   Do this the MOMENT you have a >1.0x result — not at the end. `best_patch.diff` is the RECOVERY
-   artifact: if your final return is lost (you time out, crash, or mis-format the StructuredOutput),
-   the lane falls back to re-measuring whatever >1.0x patch it finds on disk. A patch left on disk
-   still counts; work that only exists in a lost return is gone. Re-save it whenever `best` improves.
-6. **Iterate** a few variations (params/tiling/unroll/specialization), keeping the best. Obey
-   self-monitoring: switch approach after ~8 stalled steps, force-submit after ~12, stop tuning when
-   3 benchmarks are within 1%.
-7. **Submit** = RETURN the worker_result structure below as your StructuredOutput. **The RETURN VALUE
-   is what the lane harvests** — not the disk file. Only a clean below-baseline return (`status` other
-   than `failed`, geomean ≤ 1.0) tells the lane to skip you; any winning result MUST come back in the
-   return (with `best_patch.diff` already on disk as the recovery backstop, per step 5).
+## Output
 
-## Outputs
-**Return channel (authoritative):** your StructuredOutput return, matching the schema below, is what
-the lane reads and scores. **Disk artifacts (durable + recovery):** `best_patch.diff` is the recovery
-backstop the lane re-measures if your return is lost (step 5); `worker_result.json` + `report.md` below
-are the durable record the TechLead's insight log reads. Write ALL THREE, but never assume the disk
-JSON substitutes for the return — the lane does not read `worker_result.json`, it reads your return.
+Write `best_patch.diff`, `worker_result.json` and `report.md` under `OUTPUT_DIR`. The report includes
+approach, changed parameters, all attempted mechanisms, per-case results and limitations. Return the
+same structured result as the disk JSON: the workflow scores the return; the disk file alone is not
+a submission. `measurement_valid:true` requires current-candidate source checks and successful
+measurement commands. No correct improvement uses failed/partial status with no `patch_file` and a
+reason; unresolved source binding uses the recovery rule above. Independent verification decides the
+round winner.
 
-`OUTPUT_DIR/worker_result.json` (same fields as your StructuredOutput return):
 ```json
 {
   "engineer_id": "r{ROUND}_d{N}",
@@ -142,12 +85,3 @@ JSON substitutes for the return — the lane does not read `worker_result.json`,
   "notes": "what worked / what didn't — written for the TechLead's insight log"
 }
 ```
-`OUTPUT_DIR/report.md` — brief: task, approach, per-case results table, geomean, what worked, what
-didn't. (This is your required mini-report.)
-
-`measurement_valid` is true only when the result used current-candidate sources and both the source
-checks and measurement commands succeeded. An unresolved invalid measurement uses the status and
-recovery rules above, even if no patch remains; never label it a measured no-op.
-
-If you achieved no speedup (or correctness could not be fixed), still submit with `status` =
-`failed`/`partial`, NO patch_file, and notes explaining why — that is valuable signal for the ledger.

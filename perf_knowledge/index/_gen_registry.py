@@ -68,6 +68,30 @@ for c in CARDS:
 
 # ---------- sota_registry.yaml ----------
 def yl(xs): return "[" + ", ".join(xs) + "]"
+
+ordered_ops = [op for _, ops in FAMILY for op in ops]
+ordered_ops += [op for op in recs if op not in ordered_ops]
+entries = [(op, bk, recs[op][bk]) for op in ordered_ops if op in recs
+           for bk in sorted(recs[op])]
+
+
+def registry_rows(include_status):
+    """Render shared card fields; only the human registry includes status."""
+    for op, bk, r in entries:
+        yield f"  - operator: {op}"
+        yield f"    backend: {bk}"
+        if include_status:
+            yield f"    status: {r['status']}"
+        yield f"    gens: {yl(r['gens'])}"
+        yield f"    dtypes: {yl(r['dtypes'])}"
+        yield f"    regimes: {yl(r['regimes'])}"
+        yield f"    card: {r['card']}"
+        if r["sources"]:
+            yield "    sources:"
+            for source in r["sources"][:4]:
+                yield f"      - {source}"
+
+
 out = []
 out.append("# sota_registry.yaml — HUMAN/AUDIT view (status badges for browsing). AUTO-GENERATED.")
 out.append("# NOT consumed by the workflows. The `status` field is TIME-SENSITIVE, dated evidence — it goes")
@@ -80,22 +104,8 @@ out.append("  version: 2")
 out.append("  entry: {operator, backend, status: sota|competitive|experimental|legacy|na, gens, dtypes, regimes, card, sources}")
 out.append("")
 out.append("entries:")
-nentry = 0
-for op in [o for _,ops in FAMILY for o in ops] + [o for o in recs if o not in {o for _,ops in FAMILY for o in ops}]:
-    if op not in recs: continue
-    for bk in sorted(recs[op]):
-        r = recs[op][bk]; nentry += 1
-        out.append(f"  - operator: {op}")
-        out.append(f"    backend: {bk}")
-        out.append(f"    status: {r['status']}")
-        out.append(f"    gens: {yl(r['gens'])}")
-        out.append(f"    dtypes: {yl(r['dtypes'])}")
-        out.append(f"    regimes: {yl(r['regimes'])}")
-        out.append(f"    card: {r['card']}")
-        if r["sources"]:
-            out.append("    sources:")
-            for s in r["sources"][:4]:
-                out.append(f"      - {s}")
+nentry = len(entries)
+out.extend(registry_rows(include_status=True))
 open(os.path.join(KK,"index","sota_registry.yaml"),"w",encoding="utf-8").write("\n".join(out)+"\n")
 
 # ---------- capability_index.yaml (what the WORKFLOWS consume) ----------
@@ -114,21 +124,7 @@ cap.append("# Query: filter by (operator, gen, dtype, regime) -> candidate backe
 cap.append("")
 cap.append("schema: {operator, backend, gens, dtypes, regimes, card, sources}")
 cap.append("candidates:")
-ncap = 0
-for op in [o for _,ops in FAMILY for o in ops] + [o for o in recs if o not in {o for _,ops in FAMILY for o in ops}]:
-    if op not in recs: continue
-    for bk in sorted(recs[op]):
-        r = recs[op][bk]; ncap += 1
-        cap.append(f"  - operator: {op}")
-        cap.append(f"    backend: {bk}")
-        cap.append(f"    gens: {yl(r['gens'])}")
-        cap.append(f"    dtypes: {yl(r['dtypes'])}")
-        cap.append(f"    regimes: {yl(r['regimes'])}")
-        cap.append(f"    card: {r['card']}")
-        if r["sources"]:
-            cap.append("    sources:")
-            for s in r["sources"][:4]:
-                cap.append(f"      - {s}")
+cap.extend(registry_rows(include_status=False))
 open(os.path.join(KK,"index","capability_index.yaml"),"w",encoding="utf-8").write("\n".join(cap)+"\n")
 
 # ---------- sota_matrix.md ----------

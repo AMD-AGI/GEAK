@@ -69,8 +69,9 @@ lose to spill. The four structural decisions, in the order they must be made:
    live in arch VGPRs — against a cap that does **not** move with occupancy. This is why the
    fewer-waves direction can lose here while it wins on GEMM.
 
-Full derivations, the geometry constraints and the anti-pattern table are in
-[[languages/flydsl/authoring_attention_levers]]; this skill is the regulated procedure that applies them.
+Design questions and geometry constraints are summarized in
+[FlyDSL attention design](../../../languages/flydsl/authoring_attention_levers.md);
+the measured alternatives are retained in the [MLA card](../../../operators/mla_attention/backends/flydsl.md#pitfalls--anti-patterns).
 
 ## Procedure
 Build in dependency order; each phase gates the next. Add the structural optimisations **one at a time**
@@ -125,7 +126,7 @@ relocated into the accumulator file where it does not appear as scratch. Count `
 ([[optimization/occupancy_and_registers]]).
 
 **Dead ends, built and measured — do not re-derive** (mechanisms in
-[[languages/flydsl/authoring_attention_levers]] §anti-patterns): growing the KV tile beyond the point
+[the retained MLA example](../../../operators/mla_attention/backends/flydsl.md#pitfalls--anti-patterns)): growing the KV tile beyond the point
 where the operand set fits the arch-VGPR cap; halving the q tile to relieve it; fanning dQ atomics across
 more slots; `sched_group_barrier` hints once the region is already branch-free and single; hoisting
 invariant staging address math out of the hot loop; folding the loop to a single barrier by deferring the
@@ -154,7 +155,7 @@ prologue.
   vendor path typically folds that cast into an existing pass.
 
 ## Sources
-- Levers, derivations and anti-patterns (general): [[languages/flydsl/authoring_attention_levers]].
+- Design questions and geometry constraints: [FlyDSL attention design](../../../languages/flydsl/authoring_attention_levers.md).
 - Worked instance with per-step deltas, counter expectations and the full dead-end ledger — fused
   five-GEMM MLA backward, `HD_QK=192`/`HD_V=128`, bf16, causal, varlen, gfx942 MI300X/MI325X SPX/NPS1,
   ROCm 7.1.0: [[operators/mla_attention/backends/flydsl]]. Measured 715–745 µs
@@ -163,5 +164,5 @@ prologue.
   configurations.
 - Wave-count counter-measurement against HipKittens §3.3.2: [[optimization/mfma_scheduling]] ·
   [[languages/hipkittens/perf_findings]].
-- FlyDSL authoring surface: [[languages/flydsl/authoring_optimization]] (register-allocation gate) ·
+- FlyDSL authoring surface: [FlyDSL inspection guidance](../../../languages/flydsl/authoring_optimization.md#inspect-and-measure) ·
   [[languages/flydsl/debugging]].

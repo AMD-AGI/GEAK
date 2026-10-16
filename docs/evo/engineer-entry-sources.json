@@ -1,0 +1,37 @@
+{
+  "files": [
+    {
+      "path": "geak_evo/engineer/js/entry-provenance.json",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/entry/entry-provenance.json",
+        "sha256": "31526ad8958b22dacc4ab6e3e040c9d37395f9cfc1ae762611ea5f5fba4f01ad"
+      },
+      "ported_sha256": "bd17af9f01ebe4dbbe37e3370dcecc7374dc660e6d03004a30f8245532c30be2"
+    },
+    {
+      "path": "geak_evo/engineer/js/host_backend.mjs",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/entry/host_backend.mjs",
+        "sha256": "fcf682e23258b59a7e4005fe8a276f85a9b8e89f97b71f607f7717a6583a9acf"
+      },
+      "ported_sha256": "fcf682e23258b59a7e4005fe8a276f85a9b8e89f97b71f607f7717a6583a9acf"
+    },
+    {
+      "path": "geak_evo/engineer/js/one_engineer.js",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/entry/one_engineer.js",
+        "sha256": "b3753281ac6152cf124c809cfff67588fe794e563298efe019e09ad75b37db56"
+      },
+      "ported_sha256": "b3753281ac6152cf124c809cfff67588fe794e563298efe019e09ad75b37db56"
+    },
+    {
+      "path": "geak_evo/engineer/js/run_one_engineer.mjs",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/entry/run_one_engineer.mjs",
+        "sha256": "609967009bcbd391eea180450b24e99a8b7de397a9c974f4eb6496c63ed22046"
+      },
+      "ported_sha256": "4afdf4b00cb29f5fbaa5c2081e7db03390415ea1fc1f95cdc08ac60f7ce34eeb"
+    }
+  ],
+  "changes": "Runtime import uses the existing repository runtime. Entry provenance keeps the same entry and workflow hashes checked at runtime; unused historical study metadata stays in the exact original source reference above."
+}

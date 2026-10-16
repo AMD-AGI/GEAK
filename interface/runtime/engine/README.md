@@ -16,7 +16,7 @@ schema layer and the backend contract mention no CLI at all; everything backend-
 | `schema.mjs` | structured-output contract + extraction + validation (incl. enum) |
 | `config.mjs` | registry loading, `(agent, model, profile)` resolution, invocation build, env neutralization |
 | `registry.json` | the data: agents × models × profiles |
-| `backends/base.mjs` | backend contract + `spawnAgent` + `defaultConcurrency` |
+| `backends/base.mjs` | backend contract + `runProcess` (one command in its own process group) + `spawnAgent` + `defaultConcurrency` |
 | `backends/generic.mjs` | config-driven backend, good for any CLI describable in `registry.json` |
 | `selftest.mjs` | unit tests of the primitives — no GPU, no network, no key |
 | `conformance.mjs` | backend capability probes + static contract-drift audit |
@@ -33,7 +33,7 @@ Only agents that have passed that gate belong in the registry; an untested entry
 person as a supported backend.
 
 ```bash
-node interface/runtime/engine/selftest.mjs                        # expect 105/105
+node interface/runtime/engine/selftest.mjs                        # expect 125/125
 node interface/runtime/engine/run_workflow.mjs <workflow.js> --agent codex --args '{...}'
 ```
 

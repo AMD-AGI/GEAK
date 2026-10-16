@@ -19,6 +19,7 @@ export const meta = {
   ],
 };
 
+// GENERATED from e2e_workflow/src/e2e_workflow/ by scripts/build_workflows.mjs. Edit the parts there, then rebuild.
 // ---------------------------------------------------------------------------
 // Args + defaults. A JS workflow can't read its own path, so workflow_dir is passed in.
 // ---------------------------------------------------------------------------
@@ -39,35 +40,11 @@ if (typeof _rawArgs === 'string') {
   }
 }
 const A = _rawArgs || {};
-// LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
-// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
-// duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
-// role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
-const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
-const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'e2e_workflow', events: [], nested: [] };
-const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
-// Called AT DISPATCH (before the await), so LLM_TL.events is in dispatch order, not completion
-// order. Two same-key agents that finish out of order no longer swap identities under the parser's
-// positional join. Returns the event so the caller flips `ok` once the attempt resolves (null when
-// off). Even an attempt that hangs or throws is recorded, because the record predates the await.
-function tlAgent(prompt, o, attempt) {
-  if (!LLM_STATS) return null;
-  // Identity comes from the PROMPT, not opts.label: labels are free-form display strings. The
-  // prompt's opening line always carries `You are the <role>. PHASE=<sub_phase>.`, the same line the
-  // transcript records, so the ledger folds this call under its own agent instead of its predecessor.
-  const m = TL_ROLE_RE.exec(String(prompt || ''));
-  const e = {
-    seq: LLM_TL.events.length,
-    phase: (o && o.phase) || '',
-    label: (o && o.label) || 'agent',
-    role: m ? m[1] : '',
-    sub_phase: m ? m[2] : '',
-    attempt: attempt,
-    ok: false,
-  };
-  LLM_TL.events.push(e);
-  return e;
+if (Object.keys(A).some((key) => key.startsWith('ablation_'))) {
+  throw new Error('ablation_* study controls are retired; use the original revision to replay those studies.');
 }
+// Agent timeline for the LLM ledger (LLM_STATS + tlAgent: src/shared/tl_agent.js).
+const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'e2e_workflow', events: [], nested: [] };
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
   let _preview;
@@ -93,12 +70,44 @@ const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
 // worker = 3 levels) and the runtime forbids it. The worker's behavior/args are unchanged.
 const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
+// LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
+// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
+// duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
+// role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
+// Each workflow declares its own LLM_TL (it names the workflow).
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
+// Called AT DISPATCH (before the await), so LLM_TL.events is in dispatch order, not completion
+// order. Two same-key agents that finish out of order no longer swap identities under the parser's
+// positional join. Returns the event so the caller flips `ok` once the attempt resolves (null when
+// off). Even an attempt that hangs or throws is recorded, because the record predates the await.
+function tlAgent(prompt, o, attempt) {
+  if (!LLM_STATS) return null;
+  // Identity comes from the PROMPT, not opts.label: labels are free-form display strings. The
+  // prompt's opening line always carries `You are the <role>. PHASE=<sub_phase>.`, the same line the
+  // transcript records, so the ledger folds this call under its own agent instead of its predecessor.
+  const m = TL_ROLE_RE.exec(String(prompt || ''));
+  const e = {
+    seq: LLM_TL.events.length,
+    phase: (o && o.phase) || '',
+    label: (o && o.label) || 'agent',
+    role: m ? m[1] : '',
+    sub_phase: m ? m[2] : '',
+    attempt: attempt,
+    ok: false,
+  };
+  LLM_TL.events.push(e);
+  return e;
+}
 const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
 const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
 const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
 if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
   throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+}
+if (['mi350x', 'mi355x'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx950') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx950`);
 }
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
@@ -125,15 +134,12 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 // be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
 // silently take the lane's own default (on) with nothing to catch it. test_e2e_lane_defaults.py
 // fails if a `scriptPath: KERNEL_WF_SCRIPT` call is added that does not route through this.
-// GEAK-ABLATION-ARMS-v2: ablLaneArgs() forwards the arm to the nested kernel lane.
-// Without it B6 was staged in the parent and silently never activated in the child.
 // llm_stats is forwarded ONLY when the parent was given one explicitly, so an unset parent keeps the
 // original argument shape (child defaults on) and a parent opt-out (`llm_stats:"false"`) reaches the
 // lane instead of silently reverting to the lane's default. wfArgs spreads last so a per-call override wins.
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
-    ...ablLaneArgs(),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };
@@ -651,7 +657,6 @@ const WARM_START_OFF = ['off', 'false', 'none'].includes(KB_ARGS.warm_start.trim
 // vocabulary the kernel lane accepts, so an `off` run is off everywhere:
 //   on (default)      | read the ladder, validate the top candidate on this box, ADOPT if it wins.
 //   reference         | read only; never bench, never adopt — the offer is prose for later agents.
-//   return_after_read | resolve + validate, then return before the optimization flow runs.
 //   off/false/none    | nothing: no phase, no agent, no log, and every role prompt byte-identical.
 const E2E_WARM_START = KB_ARGS.warm_start.trim().toLowerCase() || 'on';
 const E2E_WARM_START_ON = !WARM_START_OFF;
@@ -659,7 +664,6 @@ const E2E_WARM_START_ON = !WARM_START_OFF;
 // (FAST_SKIP already drops 'config'), so a warm-start config bench — a 20-40min server launch that
 // this mode has explicitly declined to spend anywhere else — is forced down to reference-only.
 const E2E_WARM_START_REF_ONLY = E2E_WARM_START === 'reference' || FAST_MODE;
-const E2E_WARM_START_RETURN_AFTER = E2E_WARM_START === 'return_after_read';
 // Which plane the DEPLOYMENT store is read from and written to. Translated from the kernel layer's
 // kb_mode vocabulary ONCE, here, so the reader and the writer can never disagree about it.
 //   local   on-disk store only (offline rehearsal; no network, nothing permanent).
@@ -774,7 +778,6 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
 const EXPERT_SKILL_ROLES = new Set(['system_architect', 'op_benchmarker', 'e2e_integrator']);
 const GEMM_SYNTH = String(A.gemm_synth != null ? A.gemm_synth : 'true');     // synth GEMM inputs (cheap)
 const ENABLE_FP8 = String(A.enable_fp8 != null ? A.enable_fp8 : 'false');    // Tier-D quant (parity-breaking)
-const FAST_PATH_FIRST = String(A.fast_path_first != null ? A.fast_path_first : 'true') === 'true';
 // What the CALLER declared, kept apart from the shape roles finally optimize
 // against. On a trace replay those two are not the same thing, and telling them
 // apart needs the workload kind, which is parsed further down -- so the resolved
@@ -1241,12 +1244,17 @@ let tuning = ST.tuning || null;
 if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel-only; budget ${Math.round(FAST_BUDGET_MS / 60000)}min (stop new heads at ${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min, per-head workflow cap ${Math.round(FAST_HEAD_WF_MS / 60000)}min).`);
 
 // ---------------------------------------------------------------------------
-// Schema fragments.
+// Small helpers every workflow uses: the "## Inputs" list in role prompts and
+// JSON-schema builders for structured agent output.
 // ---------------------------------------------------------------------------
+const cfg = (o) => Object.entries(o).map(([k, v]) =>
+  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
-const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
 const arrStr = { type: 'array', items: { type: 'string' } };
-
+const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
+// ---------------------------------------------------------------------------
+// Schemas (obj/arrStr/arrObj: src/shared/helpers.js).
+// ---------------------------------------------------------------------------
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, model_name: { type: 'string' },
   baseline_throughput_tok_s: { type: 'number' }, baseline_spread_pct: { type: 'number' },
@@ -1428,12 +1436,6 @@ const EXTRACT_SCHEMA = obj({
   reference_io_sha256: { type: 'string' }, notes: { type: 'string' },
 }, ['editable', 'task_dir', 'unittest_smoke']);
 
-const KERNEL_LAYER_SCHEMA = obj({
-  ran: { type: 'boolean' }, kernel_eval_dir: { type: 'string' },
-  final_patch: { type: 'string' }, final_geomean: { type: 'number' },
-  validation_status: { type: 'string' }, note: { type: 'string' },
-}, ['ran', 'final_patch', 'final_geomean']);
-
 const INTEGRATE_SCHEMA = obj({
   short_name: { type: 'string' }, provenance_ok: { type: 'boolean' },
   isolated_speedup: { type: 'number' }, pct_gpu_time: { type: 'number' },
@@ -1490,9 +1492,6 @@ const CHECKPOINT_WRITE_SCHEMA = obj({
 // ---------------------------------------------------------------------------
 // Prompt helpers (mirror the single-kernel workflow).
 // ---------------------------------------------------------------------------
-const cfg = (o) => Object.entries(o).map(([k, v]) =>
-  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
-
 // Workflow scripts have no filesystem API. The writer agent is therefore the
 // one component that can atomically snapshot mutable replay assets while the
 // measured stack still exists. The intent remains structured so every phase
@@ -1571,7 +1570,6 @@ function expertSkillsBlock(role) {
 let KB_DIMS = null;        // the deployment dimensions the Director established during preflight
 let KB_REF_DIR = '';       // where Module A left its references; '' when it never ran
 let KB_CACHE_DIR = '';     // where Module A materialized the records' FILES (patches, tuned tables)
-let KB_REF_VERDICT = '';   // what we MEASURED about the offer, threaded into later roles' Inputs
 let KB_READ_PLANE = '';    // which plane ANSWERED the read, which `both` alone does not tell you
 // Everything this run RECALLED, in one report-ready object: which address was asked, what came back,
 // what re-measuring it HERE produced, and whether it was accepted. Threaded into the Report role's
@@ -1904,121 +1902,9 @@ function atReserveFloor() {
     remainingMs() - FINAL_RESERVE_MS <= AGENT_TIMEOUT_FLOOR_MS;
 }
 
-// ===========================================================================
-// GEAK-ABLATION-ARMS-v1 — phase-resumed cost ablations (research/ablations/README.md)
-// ===========================================================================
-// Inert unless args.ablation_arm names an arm. `''` and `A1` are the control:
-// every helper below returns its off-value, so the dispatched prompts and the
-// head loop are byte-identical to the pre-patch build.
-//
-// Math.random() and Date.now() throw in workflow scripts, so the audit draw is a
-// SEEDED hash of (seed, head) — which is also what the protocol requires: a
-// recorded seed that makes the continuation set reproducible across arms.
-// GEAK-ABLATION-ARMS-v2 canonical names. The wall-clock arm is B4-TIME because this
-// runtime is never told a price, so "$10 or 20 minutes" can only be the 20 minutes.
-// The routing arm is B5-EFFORT because a lower effort tier is the SAME model, not a
-// cheaper one: it is not evidence about a cheap/strong model cascade. B4/B5 remain
-// aliases so a v1 handoff still runs, and the resolved name goes in the return.
-const ABL_RAW_ARM = String(A.ablation_arm || '').trim().toUpperCase();
-const ABL_ALIASES = { B4: 'B4-TIME', B5: 'B5-EFFORT', B45: 'B45-TIME-EFFORT' };
-const ABLATION_ARM = ABL_ALIASES[ABL_RAW_ARM] || ABL_RAW_ARM;
-const ABL_ACTIVE = ABLATION_ARM !== '' && ABLATION_ARM !== 'A1';
-const ABL = (arm) => ABLATION_ARM === arm || ABLATION_ARM === ABL_ALIASES[arm] ||
-  (ABLATION_ARM === 'B45-TIME-EFFORT' && (arm === 'B4' || arm === 'B5'));
-// The kernel lane is a separate workflow script with its own args. laneArgs() used to
-// forward only use_learned_kb, so B6 -- which lives in the lane -- never switched on.
-function ablLaneArgs() {
-  // A1 and the unset case forward NOTHING: the control's lane args must be byte-identical
-  // to the pre-patch build, not merely behaviourally inert.
-  if (!ABL_ACTIVE) return {};
-  return { ablation_arm: ABL_RAW_ARM, ablation_seed: String(A.ablation_seed || '') };
-}
-const ABL_SEED = String(A.ablation_seed || 'geak-ablation-2026');
-// Pilot limits, NOT calibrated thresholds (study.json says so explicitly). The
-// dollar half of "$10 or 20 minutes" is unenforceable here: the workflow runtime
-// is never told what a call cost. Wall-clock is the half this layer owns.
-// v1 charged extraction, bake-off and authoring to ONE clock, so a head could be
-// killed for slow PREPARATION, or be admitted at 19 minutes and then author for hours.
-// v2 separates them: preparation, the implementation trial, and an audited
-// continuation each have their own cap. Validation is NOT cut by any of them -- it is
-// the run's own FINAL_RESERVE, and the arm must pay it in full.
-const ABL_IMPL_MS = parseInt(A.ablation_head_trial_ms != null ? A.ablation_head_trial_ms : 1200000, 10);
-const ABL_PREP_MS = parseInt(A.ablation_prep_ms != null ? A.ablation_prep_ms : 1200000, 10);
-const ABL_AUDIT_MS = parseInt(A.ablation_audit_ms != null ? A.ablation_audit_ms : ABL_IMPL_MS, 10);
-const ABL_HEAD_TRIAL_MS = ABL_IMPL_MS;                 // v1 name kept for the event log
-const ABL_AUDIT_P = Number(A.ablation_audit_probability != null ? A.ablation_audit_probability : 0.1);
-const ABL_EVENTS = [];
-function ablEvent(o) { if (ABLATION_ARM) ABL_EVENTS.push(o); }
-// The elapsed clock is only armed when time_budget_s is supplied, so B4 without one
-// would silently never fire and report itself as "identical to A1" -- the one failure
-// mode that would quietly invalidate the whole comparison. Refuse to run instead.
-if (ABL('B4') && TIME_BUDGET_MS == null) {
-  throw new Error('ablation_arm=' + ABLATION_ARM + ' requires time_budget_s: without it the ' +
-    'elapsed clock is never armed and the head trial gate can never fire.');
-}
-function ablDraw(key) {
-  let h = 2166136261; const s = ABL_SEED + ':' + key;
-  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
-  return ((h >>> 0) % 1000000) / 1000000;
-}
-// B4 readiness: promote to measurement ONLY for an exact non-incumbent candidate
-// that compiled, was correct, and actually integrated on the frozen workload.
-// Readiness is not a gain claim -- adoption still needs the unchanged A/B harness.
-// v1 accepted "isolated > 1 and some patch-like field", which is a SPEEDUP claim wearing
-// readiness' clothes. v2 returns the evidence itself: an exact candidate identity hash,
-// whether that identity differs from the frozen incumbent, and the compile/correctness
-// records the authoring layer actually produced. Integration is reported, never inferred
-// -- at the pre-author gate nothing has been integrated yet, and saying otherwise is how
-// a gate starts promoting unmeasured candidates.
-function ablCandId(c) {
-  const body = [c && c.final_patch, c && c.code_patch, c && c.apply_env, c && c.apply_flags,
-    c && c.tuning_artifact, c && c.kernel_eval_dir].map((x) => String(x || '')).join('\u0000');
-  let h1 = 2166136261, h2 = 2246822519;
-  for (let i = 0; i < body.length; i++) {
-    h1 ^= body.charCodeAt(i); h1 = Math.imul(h1, 16777619);
-    h2 ^= body.charCodeAt(body.length - 1 - i); h2 = Math.imul(h2, 2654435761);
-  }
-  return body.trim() ? ((h1 >>> 0).toString(16) + (h2 >>> 0).toString(16)) : '';
-}
-function ablCandEvidence(c, incumbentId) {
-  const id = ablCandId(c);
-  return {
-    candidate_id: id,
-    has_identity: !!id,
-    non_incumbent: !!id && id !== incumbentId,
-    // The kernel layer only emits final_patch after its immutable oracle passed, and the
-    // bake-off only reports a winner after it ran. Those are the compile/correctness
-    // records available here; nothing else is claimed.
-    compile_ok: !!(c && (c.final_patch || c.code_patch || c.tuning_artifact || c.apply_env || c.apply_flags)),
-    correctness_ok: !!(c && (c.kind === 'authored' ? c.final_patch : c.isolated > 0)),
-    integration_ok: !!(c && c.integration_ok),      // only the e2e A/B can set this
-    isolated: (c && c.isolated) || 0,
-  };
-}
-function ablHeadReady(cands, ext, incumbentId) {
-  if (!(ext && ext.task_dir)) return false;
-  return (cands || []).some((c) => {
-    const e = ablCandEvidence(c, incumbentId);
-    return e.has_identity && e.non_incumbent && e.compile_ok && e.correctness_ok;
-  });
-}
-// B5 router: cheap tier ONLY for bounded tasks with an objective validator, never
-// for authoring, oracles, or adjudication, and never on a retry (attempt > 0
-// escalates with the failure attached, charging both attempts to the task).
-const ABL_CHEAP_LABELS = /^(storage:reclaim|bakeoff |extract_op |roofline )/;
-function ablEffortFor(opts, attempt) {
-  if (!ABL('B5') || attempt > 0) return null;
-  const label = String((opts && opts.label) || '');
-  return ABL_CHEAP_LABELS.test(label) ? 'low' : null;
-}
-
-function agentBounded(rawPrompt, opts, ablAttempt, onHung) {
+// Agent calls, extraction, integration and workflow deadlines.
+function agentBounded(rawPrompt, opts, onHung) {
   const prompt = withProcessSafety(rawPrompt);
-  const ablEffort = ablEffortFor(opts, ablAttempt || 0);
-  if (ablEffort) {
-    opts = { ...(opts || {}), effort: ablEffort };
-    ablEvent({ event: 'route', label: (opts && opts.label) || '', tier: 'cheap', effort: ablEffort });
-  }
   const timeoutMs = agentTimeoutFor();
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
@@ -2045,16 +1931,9 @@ async function safeAgent(prompt, opts, tries = 3) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
-      // B5-EFFORT is a CASCADE, not a coin flip: the escalated attempt must see what the
-      // cheap attempt actually produced, or it is just an independent retry at a higher
-      // tier. Both attempts are charged to the task. Inert for every other arm, so A1's
-      // retry prompt stays byte-identical.
-      const p2 = (ABL('B5') && i > 0 && typeof prompt === 'string')
-        ? prompt + `\n\n## PREVIOUS ATTEMPT FAILED — do not repeat it\nA cheaper-effort attempt at this exact task failed with:\n\`\`\`\n${String(lastErr).slice(0, 2000)}\n\`\`\`\nDiagnose that failure before acting.\n`
-        : prompt;
       const ev = tlAgent(prompt, opts, i + 1);   // record AT DISPATCH; ok=false until it resolves
       let hung = null;
-      const r = await agentBounded(p2, opts, i, (run) => { hung = run; });
+      const r = await agentBounded(prompt, opts, (run) => { hung = run; });
       if (r) {
         if (r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
         if (ev) ev.ok = true;
@@ -2565,18 +2444,14 @@ async function adoptAbandonedVerdict(integ, label) {
   return late;
 }
 
-// Run ONE integrate A/B and GUARANTEE both legs complete. The first call does a
-// normal apply+gate; if the integrator returns incomplete (ran only ref, hung,
-// or degraded mid-A/B) we RE-INVOKE it in resume mode to run the MISSING leg,
-// up to AB_FINISH_RETRIES times. General contract used by every integrate site
-// (head, milestone, finalize-gate, disk-recovered): an A/B never ends after the
-// reference leg alone — it is driven to a complete ref+cand measurement.
+// Retry an incomplete A/B within the remaining budget. Acceptance requires both
+// legs; a missing leg at the deadline remains incomplete.
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
-  // Caller inputs win; the accuracy gate and the tuning carve-out only ever ADD keys (each is {} when
-  // off / when no tuning was banked).
+  // Caller inputs win for the candidate; correctness always uses the retained original seed.
   const withTuning = {
     MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
     ...ACCURACY_INPUTS, ...tuningIntegrateInputs(), ...inputs,
+    BASELINE_FLAGS, BASELINE_ENV, BASELINE_OVERLAY,
   };
   let integ = await adoptAbandonedVerdict(await safeAgent(
     roleAgent('e2e_integrator', 'integrate', intro, withTuning),
@@ -2592,9 +2467,9 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
       roleAgent('e2e_integrator', 'integrate',
         'FINISH this e2e A/B. A reference leg may already exist on disk under $CB/ref — reuse it and ' +
         'run ONLY the missing candidate leg (or re-run both if no usable ref exists), then return ' +
-        'accepted/stack/rejected with ab_complete:true. Do NOT return gate:"incomplete" unless a hard ' +
-        'hardware/harness fault persists after this retry. If short on time, keep one isolated search ' +
-        'replica per leg so BOTH legs still run.',
+        'accepted/stack/rejected with ab_complete:true only after both legs satisfy the declared ' +
+        'measurement protocol. Keep the required cases, samples, replicas and lifecycle. If time ' +
+        'or execution fails before completion, return gate:"incomplete" with the saved evidence.',
         { ...withTuning, RESUME_AB: true }),
       { phase: phaseName, label: finishLabel, schema: INTEGRATE_SCHEMA }), finishLabel);
   }
@@ -2808,25 +2683,15 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
 // Run a nested kernel workflow with a fast-mode time cap. When FAST_MODE is off it returns the raw
 // workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
 // existing null-guards treat it as "no kernel" and continue.
-// GEAK-ABLATION-ARMS-v2: the head loop publishes the REMAINING implementation cap here
-// before each nested author. A budget the parent cannot enforce on in-flight work is not
-// a budget, so B4's cap races the nested workflow exactly as fast-mode's does. null means
-// no ablation cap, and then this function behaves exactly as it did pre-patch.
-let ABL_NESTED_CAP_MS = null;
 function fastBoundedWorkflow(ref, wfArgs, label) {
   // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
-  const ablCap = ABL('B4') && ABL_NESTED_CAP_MS != null ? ABL_NESTED_CAP_MS : null;
-  const fastCap = FAST_MODE && FAST_HEAD_WF_MS > 0 ? FAST_HEAD_WF_MS : null;
-  const capMs = ablCap != null && fastCap != null ? Math.min(ablCap, fastCap) : (ablCap != null ? ablCap : fastCap);
+  const capMs = FAST_MODE && FAST_HEAD_WF_MS > 0 ? FAST_HEAD_WF_MS : null;
   if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
   let to;
   const guard = new Promise((resolve) => {
     to = setTimeout(() => {
-      log(`  [${ablCap != null && capMs === ablCap ? ABLATION_ARM : 'fast-mode'}] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
-      if (ablCap != null && capMs === ablCap) {
-        ablEvent({ event: 'nested_cap', label: label || '', cap_ms: capMs, action: 'abandon' });
-      }
+      log(`  [fast-mode] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
       resolve(null);
     }, capMs);
   });
@@ -3136,6 +3001,8 @@ const kbSeedKernels = [];
 let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
+// Keep the original measured seed separate from the evolving timing reference.
+let BASELINE_FLAGS = null, BASELINE_ENV = null, BASELINE_OVERLAY = null;
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
@@ -3165,7 +3032,7 @@ if (want('setup')) {
   if (EXPECTED_GFX && detectedGfx !== EXPECTED_GFX) {
     throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${detectedGfx}`);
   }
-  if (EXPECTED_TARGET && detectedTarget !== EXPECTED_TARGET) {
+  if (EXPECTED_TARGET && EXPECTED_TARGET !== 'unknown' && detectedTarget !== EXPECTED_TARGET) {
     throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${detectedTarget}`);
   }
   const normalizeDeviceName = (name) =>
@@ -3192,6 +3059,11 @@ if (want('setup')) {
   curFlags = INIT_FLAGS || (setup.server_flags && setup.server_flags.extra) || '';
   curEnv = INIT_ENV || (setup.server_env || '');
   curOverlay = INIT_BASE_OVERLAY;
+  // The Director may resolve launch defaults beyond INIT_*; retain its complete measured config.
+  BASELINE_FLAGS = typeof (setup.server_flags && setup.server_flags.extra) === 'string'
+    ? setup.server_flags.extra : (INIT_FLAGS || null);
+  BASELINE_ENV = typeof setup.server_env === 'string' ? setup.server_env : (INIT_ENV || null);
+  BASELINE_OVERLAY = curOverlay;
   log(`Setup done. EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT} tok/s (noise band ${NOISE_BAND}%)`);
   if (IS_AGENTX) {
     log(`Setup: AgentX graded on metric_basis=${AGENTX_METRIC_BASIS} (E2E_METRIC=${AGENTX_E2E_METRIC}, ` +
@@ -4178,6 +4050,10 @@ print(json.dumps(res))
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
   curOverlay = ST.overlay || INIT_BASE_OVERLAY;
+  // Older states did not retain the seed. Missing evidence must not mean an empty/pristine seed.
+  BASELINE_FLAGS = typeof ST.baseline_flags === 'string' ? ST.baseline_flags : null;
+  BASELINE_ENV = typeof ST.baseline_env === 'string' ? ST.baseline_env : null;
+  BASELINE_OVERLAY = typeof ST.baseline_overlay === 'string' ? ST.baseline_overlay : null;
   profile = { profile_topN_json: ST.profile_topn_json || '' };
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
@@ -4923,6 +4799,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           },
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
           CURRENT_THROUGHPUT: curTput,
+          BASELINE_FLAGS, BASELINE_ENV, BASELINE_OVERLAY,
           MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
           SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
           ...tuningIntegrateInputs(), ...ACCURACY_INPUTS,
@@ -5315,8 +5192,6 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       break;
     }
     headDispatched++;
-    // B4 measures THIS head's trial against its own start, not the run clock.
-    const ablHeadStart = ELAPSED_MS;
     // (h1) Extract the op into a standalone immutable unittest. The op-identity guard already forced a
     // fused/monolithic head to op_kind=moe with GEMM_SYNTH off (gemmSynthFor) so it is extracted as the
     // fused op bound at its live seam — never decomposed into a standalone dense GEMM. Nothing is skipped.
@@ -5387,63 +5262,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // layer. mode=author writes a from-scratch baseline then optimizes it; mode=optimize rewrites an
     // existing editable impl. The immutable oracle in ext.task_dir is the judge for both.
     let plan = (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX);
-    // --- B4 gate -----------------------------------------------------------
-    // The author route is the expensive part of a head. Give it one bounded trial;
-    // at the deadline continue only if this head already holds an integrated
-    // non-incumbent candidate, else pause -- with a seeded 10% audit continuation
-    // so late winners inside that horizon remain estimable.
-    // Identity of the incumbent this head is measured against: a candidate equal to it is
-    // not a candidate. Taken from the frozen config the checkpoint was resumed on.
-    const ablIncumbentId = ablCandId({ apply_env: curEnv, apply_flags: curFlags, code_patch: curOverlay });
-    let ablImplStart = ELAPSED_MS;      // the implementation clock starts AFTER preparation
-    let ablImplCap = ABL_IMPL_MS;
-    let ablAudited = false;
-    if (ABL('B4')) {
-      const prepMs = ELAPSED_MS - ablHeadStart;
-      const ready = ablHeadReady(headCands, ext, ablIncumbentId);
-      // GATE 1 -- preparation. Extraction + bake-off had their own budget; blowing it is a
-      // reason to stop spending on this head, and it is charged to preparation, not to the
-      // implementation trial that has not started yet.
-      if (!ready && prepMs >= ABL_PREP_MS) {
-        const draw = ablDraw(h.short_name);
-        ablAudited = draw < ABL_AUDIT_P;
-        ablEvent({ event: 'prep_gate', head: h.short_name, pct_gpu_time: h.pct_gpu_time,
-          action: ablAudited ? 'audit_continue' : 'pause', ready: false, draw,
-          audit_probability: ABL_AUDIT_P, prep_ms: prepMs, prep_cap_ms: ABL_PREP_MS,
-          candidates: headCands.length,
-          reason: 'preparation budget exhausted with no evidence-bearing non-incumbent candidate' });
-        log(`  [${ABLATION_ARM}] ${h.short_name}: PREP budget spent (${Math.round(prepMs / 60000)}min), no candidate -> ${ablAudited ? 'AUDIT-CONTINUE' : 'PAUSE'} (draw ${draw.toFixed(4)} vs p=${ABL_AUDIT_P}).`);
-        if (!ablAudited) {
-          history.ledger.push({ direction: h.short_name, verdict: 'paused',
-            lesson: `${ABLATION_ARM}: preparation budget expired before any candidate existed` });
-          plan = [];
-        } else {
-          ablImplCap = ABL_AUDIT_MS;    // the audit continuation is a SEPARATE budget line
-        }
-      } else {
-        ablEvent({ event: 'prep_gate', head: h.short_name, pct_gpu_time: h.pct_gpu_time,
-          action: 'admit', ready, prep_ms: prepMs, prep_cap_ms: ABL_PREP_MS,
-          candidates: headCands.length, impl_cap_ms: ablImplCap });
-      }
-    }
     for (const ap of plan) {
-      // GATE 2 -- implementation. v1 admitted the author route and then never looked at the
-      // clock again, so a head admitted at 19 minutes could author for hours. The cap is
-      // checked before every language AND handed down to the nested workflow, which is the
-      // only boundary that can actually contain work already in flight.
-      if (ABL('B4')) {
-        const implMs = ELAPSED_MS - ablImplStart;
-        if (implMs >= ablImplCap) {
-          ablEvent({ event: 'impl_gate', head: h.short_name, action: 'stop',
-            impl_ms: implMs, impl_cap_ms: ablImplCap, audited: ablAudited,
-            remaining_plan: plan.length, reason: 'implementation trial budget exhausted' });
-          log(`  [${ABLATION_ARM}] ${h.short_name}: implementation budget spent (${Math.round(implMs / 60000)}min of ${Math.round(ablImplCap / 60000)}min) — stopping the author route.`);
-          history.ledger.push({ direction: h.short_name, verdict: 'paused',
-            lesson: `${ABLATION_ARM}: implementation trial budget expired` });
-          break;
-        }
-        ABL_NESTED_CAP_MS = Math.max(60000, ablImplCap - implMs);
-      }
       const lang = ap.language || 'triton';
       let al;
       // Retry the nested author on a TRANSIENT/early failure (threw, or returned with no real
@@ -6058,8 +5877,8 @@ if (want('final')) {
   phase('Report');
   report = await safeAgent(
     roleAgent('system_architect', 'report',
-      'Write architect_report.md AND the full final_report.md in English (with the Phases tree + ' +
-      'artifacts tree modules). final_report.md MUST contain a "## Knowledge-base recall" section ' +
+      'Write concise architect_report.md and final_report.md in English: measured results, ' +
+      'accepted changes, limits and artifact links. Include a "## Knowledge-base recall" section ' +
       'built from KB_RECALL — see your role file. Write it even when nothing was recalled: report ' +
       'the exact canonical ids that were tried and the read_reason. On an exact-lookup store a miss ' +
       'and a never-recorded page are the same 404, so the address asked is the finding, and a reader ' +
@@ -6083,7 +5902,7 @@ if (want('final')) {
   validation = await safeAgent(
     roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
-      BASELINE_OVERLAY: INIT_BASE_OVERLAY,
+      BASELINE_FLAGS, BASELINE_ENV, BASELINE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
       FINAL_FLAGS: { flags: curFlags, env: curEnv },
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL,
@@ -6152,6 +5971,7 @@ const carryState = {
   backend: BACKEND,
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
+  baseline_flags: BASELINE_FLAGS, baseline_env: BASELINE_ENV, baseline_overlay: BASELINE_OVERLAY,
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
@@ -6243,11 +6063,6 @@ const wfReturn = {
   deep_mode: DEEP_MODE,   // true => HeadKernel runs the long cross-backend co-optimization scheduler (20h)
   backend: BACKEND,
   phases_run: PHASES,
-  ablation: { arm: ABLATION_ARM || 'A1', requested_arm: ABL_RAW_ARM || 'A1',
-    active: ABL_ACTIVE, seed: ABL_SEED, patch_version: 'GEAK-ABLATION-ARMS-v2',
-    budgets_ms: { prep: ABL_PREP_MS, implementation: ABL_IMPL_MS, audit_continuation: ABL_AUDIT_MS,
-      validation_reserve: FINAL_RESERVE_MS, total_time_budget: TIME_BUDGET_MS },
-    head_trial_ms: ABL_HEAD_TRIAL_MS, audit_probability: ABL_AUDIT_P, events: ABL_EVENTS },
   eval_dir: EVAL_DIR,
   model_name: MODEL_NAME,
   baseline_throughput_tok_s: BASELINE_TPUT,
@@ -6340,6 +6155,22 @@ if (EVAL_DIR) {
   }
 }
 
+
+// Prompt for the file_writer agent that persists the agent timeline and renders the run report.
+// A function DECLARATION so it is hoisted above every caller (kernel_workflow's pass-through branch
+// runs before most definitions).
+function persistLlmStatsPrompt(evalDir, tlJson) {
+  const tlPath = `${evalDir}/reports/trace/agent_timeline.json`;
+  return `You are the file_writer. PHASE=persist_llm_stats.\n` +
+    `Do exactly two things, in order:\n` +
+    `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
+    `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
+    '```json\n' + tlJson + '\n```\n\n' +
+    `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
+    `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
+    `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${evalDir}"\n\n` +
+    `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`;
+}
 // ===========================================================================
 // MODULE B — record this run in the deployment knowledge base.
 //
@@ -6432,17 +6263,7 @@ if (EVAL_DIR && LLM_STATS) {
     // nested timeline reached twice (parent-merge + glob) WITHOUT collapsing two distinct lanes
     // that happen to share a shape. Unique per run, and available with no Date/random.
     const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
-    const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
-    await safeAgent(
-      `You are the file_writer. PHASE=persist_llm_stats.\n` +
-      `Do exactly two things, in order:\n` +
-      `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
-      `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
-      '```json\n' + tlJson + '\n```\n\n' +
-      `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
-      `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
-      `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${EVAL_DIR}"\n\n` +
-      `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
+    await safeAgent(persistLlmStatsPrompt(EVAL_DIR, tlJson),
       { phase: 'Validate', label: 'file_writer:persist_llm_stats',
         schema: obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []) },
       2);

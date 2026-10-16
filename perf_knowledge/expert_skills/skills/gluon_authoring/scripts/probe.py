@@ -122,12 +122,6 @@ def simds_per_cu(arch, default=4):
     return default
 
 
-    for k, v in LDS_PER_CU_BY_ARCH.items():
-        if arch.startswith(k):
-            return v
-    return default
-
-
 LDS_PER_CU = 65536         # fallback only; prefer lds_per_cu(<arch>)
 WAVE = 64
 MAX_WAVES_PER_SIMD = 8

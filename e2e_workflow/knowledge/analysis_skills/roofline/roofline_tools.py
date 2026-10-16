@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """Mechanical primitives for the `roofline` analysis skill.
 
-OPTIONAL helpers only. The skill is defined by SKILL.md and an agent can execute it by hand; this
-module exists so the boring parts (peak-table parsing, counter parsing, unit math) are not retyped.
-
-Design rules, per knowledge/analysis_skills/INDEX.md:
-  * no hard third-party dependency (stdlib only; torch is imported lazily and optionally)
-  * every helper is defensive and returns a value or None -- it never raises at the caller
-  * nothing here decides anything; the routing rules live in SKILL.md
+Optional parsing and arithmetic; no hard third-party dependency. Labels, target efficiencies
+and thresholds are prioritization heuristics. Follow SKILL.md for interpretation and unknowns.
 
 Self-test:  python3 roofline_tools.py --selftest
 """
@@ -45,7 +40,7 @@ def _normalize_dtype_name(name):
     return raw
 
 
-# target_eff priors -- SKILL.md section 7 is the source of truth; keep the two in sync.
+# Prior values are documented in SKILL.md; they are not attainable hardware limits.
 TARGET_EFF = {
     "gemm": 0.90,
     "moe": 0.90,
@@ -65,23 +60,15 @@ def target_eff_for(op_class, product=None):
     prod = str(product or "").strip().lower()
     return PRODUCT_TARGET_EFF.get(prod, {}).get(op, TARGET_EFF.get(op))
 
-#: Only kernels big enough for a headroom estimate to change a decision are worth analysing.
-#: Below this the Amdahl ceiling is under the noise band anyway, so modelling them adds failure
-#: modes without adding information. Callers should pass the run's HEAD_THRESHOLD_PCT.
+# Work-budget defaults; callers may supply the run's HEAD_THRESHOLD_PCT.
 DEFAULT_MIN_PCT_GPU = 5.0
 DEFAULT_TOP_N = 8
 
-#: Kernel launch + scheduling overhead. A launch whose duration is within a small multiple of this
-#: is timed by dispatch, not by its transfer or its math, so a roofline ratio is meaningless for it
-#: (its lever is fusion / graph capture, not kernel tuning). Order-of-magnitude runtime constant,
-#: not a per-model tuning knob -- override per box if measured.
+# Short-duration heuristic; use an applicable measurement to interpret dispatch overhead.
 LAUNCH_OVERHEAD_S = 5e-6
 LATENCY_BOUND_FACTOR = 2.0
 
-#: A roof (memory or compute) counts as the binding limiter only when the kernel actually gets near
-#: it. Below this utilization on BOTH axes -- and above the dispatch floor -- the kernel is
-#: latency/occupancy-bound, NOT bandwidth- or compute-bound. This is the single most common mislabel:
-#: a small arithmetic intensity does not by itself make a kernel memory-bound.
+# Low-utilization routing heuristic; neither AI nor this threshold proves a bottleneck.
 UTIL_BOUND_THRESHOLD = 0.60
 
 #: The only bound types this skill may emit. Anything else is a modelling escape and must degrade
@@ -123,10 +110,10 @@ def dtype_bytes(name, default=2):
 def load_peaks(peaks_md_path, gfx, product=None):
     """Parse the ```yaml blocks in peaks.md and return the matching section.
 
-    Product-scoped blocks (``product: r9700``) match only when `product` is that
-    identity. A gfx1201 lookup without an R9700 product must not inherit R9700 peaks.
-    ``product="unknown"`` (what gpu_identity reports for every non-R9700 card,
-    MI300/MI355 included) is no product constraint: ISA-keyed blocks still match.
+    Product-scoped blocks match only when `product` names that product. In
+    particular, gfx950 needs mi350x or mi355x, and gfx1201 needs r9700.
+    ``product="unknown"`` leaves legacy ISA-keyed blocks eligible; it never
+    selects a product-scoped block.
 
     Returns {"hbm_bw_bytes_s": float, "flops": {dtype: float}, "cu": int, "source": "table",
              "confidence": "high"} or None when the file or the section is absent.
@@ -137,6 +124,7 @@ def load_peaks(peaks_md_path, gfx, product=None):
     except (OSError, UnicodeDecodeError):
         return None
 
+    gfx = str(gfx or "").strip().lower()
     want_product = str(product or "").strip().lower()
     if want_product == "unknown":
         want_product = ""
@@ -212,22 +200,24 @@ def is_client_rdna4(gfx):
     gfx1250 is CDNA5 / MI450-class and must not match this family. A bare
     ``gfx12*`` prefix is therefore wrong.
     """
-    return bool(re.fullmatch(r"gfx120\d+", str(gfx or "").lower()))
+    return bool(re.fullmatch(r"gfx120\d+", str(gfx or "").strip().lower()))
 
 
 def resolve_peaks(peaks_md_path, gfx, device=0, product=None):
-    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA4.
+    """Resolve tabulated peaks, requiring product identity for shared-ISA tables.
 
+    gfx950 alone cannot select between MI350X and MI355X compute capacities.
     Navi 48 reports properties that are insufficient to derive WMMA throughput,
     and its GDDR clock interpretation is toolchain-dependent. An absent table
     entry on gfx120x is therefore a hard unknown rather than a low-confidence
     numeric denominator. R9700 peaks require product='r9700'. CDNA5 gfx1250
     is not in that family and may derive.
     """
+    gfx = str(gfx or "").strip().lower()
     peaks = load_peaks(peaks_md_path, gfx, product=product)
     if peaks:
         return peaks
-    if is_client_rdna4(gfx):
+    if gfx == "gfx950" or is_client_rdna4(gfx):
         return None
     return derive_peaks_from_props(device)
 
@@ -280,13 +270,10 @@ def experts_hit(num_experts, pairs):
 
 def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_eff,
                      pct_gpu_time=0.0, launch_overhead_s=LAUNCH_OVERHEAD_S):
-    """Core arithmetic of SKILL.md section 3 step 5. Returns a dict, or None on unusable input.
+    """Conditional ratios and ranking hints, or None for unusable input.
 
-    Two outcomes deliberately produce NO verdict (`headroom_class="unknown"`), because in both the
-    ratio is not evidence about the kernel:
-      * dispatch-bound -- the launch is timed by overhead, not by its transfer or its math;
-      * infeasible (`raw_pct` outside (0,1]) -- the byte/FLOP model is wrong. A clamped 100% must
-        never be read as "saturated"; that would turn a modelling failure into a routing decision.
+    Short durations and ratios outside the helper's sanity band get no headroom verdict.
+    The caller must also reject unsupported scope, units and capacities; see SKILL.md.
     """
     try:
         b, f, t = float(bytes_moved or 0), float(flops or 0), float(t_seconds or 0)
@@ -301,9 +288,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
     ai = (f / b) if b > 0 else float("inf")
     ridge = (pfl / pbw) if (pfl > 0 and pbw > 0) else None
 
-    # AI picks which roof the kernel is walking TOWARD (the ceiling it would hit if it stopped
-    # stalling); utilization tells whether it is actually near that roof. Both are needed -- a small
-    # AI does NOT by itself mean memory-bound. roofline_pct is measured on the AI-selected roof.
+    # Select the tighter modeled resource; this does not establish the measured bottleneck.
     compute_bound = bool(ridge is not None and pfl > 0 and ai > ridge)
     hbm_util = achieved_bw / pbw
     compute_util = (achieved_flops / pfl) if pfl > 0 else 0.0
@@ -318,35 +303,27 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
         "roofline_pct_raw": raw_pct, "target_eff": tgt, "suspect": False,
     }
 
-    # (1) Dispatch-bound by time: the launch is timed by scheduling overhead, not by its own transfer
-    # or math, so no roofline ratio applies. No verdict; the lever is fusion / graph capture.
+    # Short-duration heuristic: defer a headroom verdict.
     if t <= float(launch_overhead_s or 0) * LATENCY_BOUND_FACTOR:
         out.update(bound_type="latency", roofline_pct=min(max(raw_pct, 0.0), 1.0),
                    attainable_speedup=1.0, expected_e2e_gain_pct=0.0,
                    headroom_class="unknown",
-                   note="per-launch time is within launch-overhead scale -> dispatch-bound; "
-                        "roofline not applicable, lever is fusion / graph capture")
+                   note="duration is within the configured overhead heuristic; "
+                        "verify the timing boundary before testing fusion or other changes")
         return out
 
-    # (2) Infeasible: raw_pct outside (0,1] means the byte/FLOP model is wrong, NOT that the kernel is
-    # at the wall -- so it must not yield a verdict. (A compute-axis >100% is usually an unvalidated
-    # peak, e.g. the BF16 MFMA microbench reading ~2x low.) Clamp for display, refuse to classify, and
-    # hand back the feasibility bound the model violated so stage C knows what to measure.
+    # Preserve ratios outside the sanity band; display clamping cannot establish saturation.
     if not (0.001 <= raw_pct <= 1.0):
         out.update(bound_type=roof_axis, roofline_pct=min(max(raw_pct, 0.0), 1.0),
                    attainable_speedup=1.0, expected_e2e_gain_pct=0.0,
                    headroom_class="unknown", suspect=True,
                    bytes_upper_bound=pbw * t, flops_upper_bound=(pfl * t) if pfl > 0 else None,
-                   note="model infeasible (raw %.3f outside (0,1]) -> NOT a saturation verdict; "
-                        "re-estimate with a tighter model or measure with counters (stage C)"
+                   note="raw ratio %.3f outside helper sanity band [0.001,1]; "
+                        "check units, scope, traffic model and capacity; no saturation verdict"
                         % raw_pct)
         return out
 
-    # (3) True limiter by utilization. If NEITHER roof is near its ceiling (and we already ruled out
-    # the dispatch floor), the kernel is latency/occupancy-bound. It still has recoverable headroom --
-    # keep the verdict, so a low-utilization head like paged attention still ranks by its headroom --
-    # but the lever is occupancy / shorter dependency chains / fusion, NOT byte reduction (which only
-    # helps a genuinely bandwidth-bound, high-util head).
+    # Compatibility labels for prioritization; targeted evidence must test the suggested cause.
     if compute_util < UTIL_BOUND_THRESHOLD and hbm_util < UTIL_BOUND_THRESHOLD:
         bound = "latency"
     else:
@@ -360,12 +337,7 @@ def roofline_metrics(bytes_moved, flops, t_seconds, peak_bw, peak_flops, target_
 
 
 def classify_headroom(roofline_pct, target_eff):
-    """SKILL.md section 3 step 6.
-
-    Banded against `target_eff`, NOT against the raw roofline: what matters is the distance to what
-    a good implementation of this class can realistically reach. Within 10% of that target means
-    tuning has nothing left to give (88% vs a 90% target is saturated, not "nearly there").
-    """
+    """Band against the prior target; labels do not establish remaining achievable speedup."""
     try:
         p, t = float(roofline_pct), float(target_eff)
     except (TypeError, ValueError):
@@ -381,9 +353,7 @@ def classify_headroom(roofline_pct, target_eff):
 
 # ---------------------------------------------------------------- counters (stage C)
 
-#: rocprofv3 counters to request. FETCH_SIZE/WRITE_SIZE are in KiB. fp8 has no MfmaFlopsF8 on
-#: current builds -- SQ_INSTS_VALU_MFMA_MOPS_F8 stands in. Availability varies by ROCm build;
-#: probe with `rocprofv3 --list-avail` and drop whatever is missing (degrades to L4, never fatal).
+# Candidate counters. Verify names, definitions and units in the actual ROCm build before use.
 COUNTERS = ["FETCH_SIZE", "WRITE_SIZE", "MfmaFlops", "MfmaFlopsBF16", "MfmaFlopsF16",
             "SQ_INSTS_VALU_MFMA_MOPS_F8", "MemUnitStalled", "MfmaUtil", "OccupancyPercent"]
 
@@ -416,7 +386,10 @@ def parse_counter_csv(path, kernel_substr=None):
 
 
 def bytes_from_counters(counters):
-    """(FETCH_SIZE + WRITE_SIZE) KiB -> bytes. None when neither counter was collected."""
+    """Convert defined KiB components to bytes; absent components are omitted.
+
+    The caller must report partial coverage when only one component exists.
+    """
     if not counters:
         return None
     fetch, write = counters.get("FETCH_SIZE"), counters.get("WRITE_SIZE")
@@ -425,11 +398,12 @@ def bytes_from_counters(counters):
     return (float(fetch or 0.0) + float(write or 0.0)) * 1024.0
 
 
-def flops_from_counters(counters, mfma_flops_per_mop_f8=512.0):
+def flops_from_counters(counters, mfma_flops_per_mop_f8=None):
     """Measured FLOPs from MFMA counters. None when no usable counter is present.
 
-    `MfmaFlops*` are already FLOP counts. fp8 only exposes an MFMA *ops* count, so it needs the
-    per-instruction FLOP factor of the MFMA shape in play -- pass the right one for the kernel.
+    `MfmaFlops*` are already FLOP counts. For the FP8 event, the caller must
+    supply a conversion supported by its documented units and aggregation.
+    An instruction shape alone does not establish the event's FLOP factor.
     """
     if not counters:
         return None
@@ -437,26 +411,31 @@ def flops_from_counters(counters, mfma_flops_per_mop_f8=512.0):
         if counters.get(key):
             return float(counters[key])
     mops = counters.get("SQ_INSTS_VALU_MFMA_MOPS_F8")
-    if mops:
-        return float(mops) * float(mfma_flops_per_mop_f8)
+    if mops and mfma_flops_per_mop_f8 is not None:
+        try:
+            factor = float(mfma_flops_per_mop_f8)
+        except (TypeError, ValueError):
+            return None
+        if math.isfinite(factor) and factor > 0:
+            return float(mops) * factor
     return None
 
 
 # ---------------------------------------------------------------- self-test
 
 def _selftest():
-    """Reproduces the SKILL.md section 9 worked example from real measured numbers."""
+    """Arithmetic regression using retained example operands; no hardware measurement."""
     here = os.path.dirname(os.path.abspath(__file__))
     ok = True
 
-    peaks = load_peaks(os.path.join(here, "peaks.md"), "gfx950")
+    peaks = load_peaks(os.path.join(here, "peaks.md"), "gfx950", product="mi355x")
     assert peaks and abs(peaks["hbm_bw_bytes_s"] - 8.0e12) < 1e9, peaks
     assert abs(peak_flops_for(peaks, "fp8") - 5.0e15) < 1e12, peaks["flops"]
     assert abs(peak_flops_for(peaks, "fp8_e4m3") - 5.0e15) < 1e12
     assert abs(peak_flops_for(peaks, "float8_e4m3fn") - 5.0e15) < 1e12
     assert abs(peak_flops_for(peaks, "half") - 2.5e15) < 1e12
     assert load_peaks(os.path.join(here, "peaks.md"), "gfxNOPE") is None      # L1 path
-    print("peaks: gfx950 %.2f TB/s, fp8 %.2f PFLOP/s; unknown gfx -> None  OK"
+    print("peaks: MI355X %.2f TB/s, fp8 %.2f PFLOP/s; unknown gfx -> None  OK"
           % (peaks["hbm_bw_bytes_s"] / 1e12, peak_flops_for(peaks, "fp8") / 1e15))
 
     E, M, tk, H, I, L = 256, 64, 8, 2048, 512, 40
@@ -482,16 +461,14 @@ def _selftest():
           % (100 * attn["roofline_pct"], 100 * attn["hbm_util"], 100 * attn["compute_util"],
              attn["bound_type"], attn["attainable_speedup"], attn["expected_e2e_gain_pct"],
              attn["headroom_class"]))
-    # low util on both axes above the dispatch floor -> latency/occupancy-bound, but the verdict is
-    # KEPT (real headroom) so the ranking inversion below survives.
+    # Preserve the existing heuristic classification and ranking arithmetic.
     ok &= (attn["bound_type"] == "latency" and attn["headroom_class"] == "underperforming"
            and attn["attainable_speedup"] > 1.4
            and attn["expected_e2e_gain_pct"] > moe["expected_e2e_gain_pct"])
 
-    # the whole point: the two rankings disagree, and roofline is the one that matched reality
+    # The two prioritization views can disagree.
     ok &= (26.45 > 8.86) and (attn["expected_e2e_gain_pct"] > moe["expected_e2e_gain_pct"])
-    print("Rank  : by pct -> MoE first; by expected gain -> Attn first (measured: MoE -0.064%% e2e, "
-          "Attn 1.56x isolated)  OK")
+    print("Rank  : by pct -> MoE first; by modeled gain -> Attn first  OK")
 
     # L3 sanity band: all-expert bytes overshoot the roofline -> clamped + suspect, not discarded
     allx = roofline_metrics(E * (2 * I * H + H * I) * 1, 1.0, t_layer, peaks["hbm_bw_bytes_s"],
@@ -516,13 +493,15 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--selftest", action="store_true", help="reproduce the SKILL.md worked example")
+    ap.add_argument("--selftest", action="store_true", help="check parsing and model arithmetic")
     ap.add_argument("--peaks", metavar="GFX", help="print the peak table entry for GFX as JSON")
+    ap.add_argument("--product", help="product identity, e.g. mi350x, mi355x or r9700")
     a = ap.parse_args()
     if a.peaks:
         p = resolve_peaks(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "peaks.md"),
             a.peaks,
+            product=a.product,
         )
         print(json.dumps(p or {"error": "no calibrated peaks for %s" % a.peaks}, indent=2))
         raise SystemExit(0)

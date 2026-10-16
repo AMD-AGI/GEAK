@@ -5,7 +5,7 @@ gens: [gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e5m2_fnuz, fp8_e4m3, fp8_e5m2, fp6_e2m3, fp6_e3m2, fp4_e2m1, int8]
 regimes: [both]
 status: sota
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
   - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
@@ -15,15 +15,10 @@ sources:
 
 # ASM / MFMA overview
 
-## TL;DR
-This is the foundation under CK / ck_tile / rocWMMA / Triton / TileLang. The **fastest** AMD AI kernels —
-the AITER library's hot paths — are **hand-written assembly** by a handful of experts; everything else is
-a tradeoff of editability vs that ceiling (HipKittens, arXiv 2511.08083). You reach this level for: the
-last 10–20% over a library, a fused op no template expresses, or to diagnose why a higher-level kernel
-underperforms. The three sub-levels: **MFMA intrinsics** (`__builtin_amdgcn_mfma_*`, scheduler-friendly,
-the default), **inline `asm volatile`** (hand-scheduled micro-loops), and **raw `.s`** (peak
-micro-kernels). See [mfma_intrinsics.md](mfma_intrinsics.md), [raw_asm.md](raw_asm.md),
-[register_alloc.md](register_alloc.md), [pitfalls.md](pitfalls.md).
+AMD matrix instructions can be used through HIP intrinsics or assembly. Read
+the target ISA and compiler constraints before assigning lane layouts, work or
+resource costs. Use lower-level code when it helps test the required design,
+without assuming that a language determines the attainable performance.
 
 ## Core concepts — the CDNA3 execution model (MI300X)
 | Unit | count/size | notes |

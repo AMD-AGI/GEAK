@@ -1,0 +1,122 @@
+{
+  "schema": "geak-engineer-entry-files-v1",
+  "entry_sha256": "b3753281ac6152cf124c809cfff67588fe794e563298efe019e09ad75b37db56",
+  "common_reference_overrides": [
+    {
+      "path": "knowledge/amd_instinct.md",
+      "sha256": "7ec06fa0c258b0a718555e2b3ed080c598e29d009081569b68f8d3f5ca6c6f32"
+    },
+    {
+      "path": "knowledge/geomean_levers.md",
+      "sha256": "da537d918f220d87f8cf29edae7b613bdae9234794df59b908c7f923d3820fd2"
+    },
+    {
+      "path": "knowledge/hip_optimization.md",
+      "sha256": "f25b58ae98f948665051d6a7357d7d934fbb19d32b89482fb05a15444e9edd92"
+    },
+    {
+      "path": "knowledge/optimization_strategies.md",
+      "sha256": "bc1b12edc9839bba1b00a95c840e843b42e1457a40bee2d27b7f7031ffaf2f68"
+    },
+    {
+      "path": "knowledge/profiling_guide.md",
+      "sha256": "f92d9a5ed1c4fbdbaf034a81914c1bcf6d86522854b12c72da6cd4c715820e3d"
+    },
+    {
+      "path": "knowledge/self_monitoring.md",
+      "sha256": "5281fc0c91728970a32ee0350d3721f0b5f05ebc7beed52e663ce7bdcec36651"
+    },
+    {
+      "path": "knowledge/triton_optimization.md",
+      "sha256": "ed0159fa1ca1daff2918022ea2a8d13ab823dbb67aec19fe1969ac0949598e95"
+    },
+    {
+      "path": "knowledge/wrapper_optimization.md",
+      "sha256": "debd9e547ec60dff4cf6897600517524dda49d4b09439fcf7b3282ea65742d9d"
+    },
+    {
+      "path": "roles/deep_engineer.md",
+      "sha256": "91bdc997916560e48d1f3e7b719c7857e315048a3062f7ac2b4a390a36a45860"
+    },
+    {
+      "path": "roles/engineer.md",
+      "sha256": "e181377baa11dd726921468785e9fe14b87c7add3a9034977ccb37bc7518bdda"
+    },
+    {
+      "path": "scripts/experience_store.py",
+      "sha256": "d1b1cc2e68665aa2a567527f6e8a2cd57074bbd6ef84dcfdb9e73586da88c411"
+    },
+    {
+      "path": "scripts/gpu_lock.sh",
+      "sha256": "b1f509614d97887fef7cd2466f6e2d1ae71b0c82397d59f669211510c79a2dc8"
+    },
+    {
+      "path": "scripts/kb.py",
+      "sha256": "ff9a4eb1a19c5e3b9c7e35b985a145bee1bab5308bfd734fc34b62bc3ba22cf8"
+    },
+    {
+      "path": "scripts/materialize_workspace.sh",
+      "sha256": "0ceb94e2f447702ea6c040c7ee13b3e18e003e6e23d0768a352cff8065f9d690"
+    },
+    {
+      "path": "scripts/profile_kernel.sh",
+      "sha256": "c638aee36b43b84a2e8247a6550454b325edad2e7f908bdf4a527cf60cece8cf"
+    },
+    {
+      "path": "scripts/reclaim_eval_artifacts.sh",
+      "sha256": "5978298d6858b91d0c458e2afea4ba158250bd930a043b6ff9a00fe85ab2a65a"
+    },
+    {
+      "path": "scripts/test_candidate_floor.js",
+      "sha256": "a0ef22411125d51c122e7904a1038facee6fe8aa2742d9595fe0ea23eeedcb7b"
+    },
+    {
+      "path": "scripts/test_kb.py",
+      "sha256": "1378c6474dc90d39dfc6664e6a4063b781c3f77fcdc11bedc3d11084035720a7"
+    },
+    {
+      "path": "scripts/test_kb_switch.py",
+      "sha256": "8aaa5cd321882dff554defd15337c6b17f02a6b8882db5417baae34c4e7f4bd3"
+    },
+    {
+      "path": "scripts/test_lane_refs.py",
+      "sha256": "fe5209309765d5f32c4f300741d9f259587ff0165d4f90bd8a955b511715cf5e"
+    },
+    {
+      "path": "scripts/test_mode_dispatch.js",
+      "sha256": "d4bc3b07bd35ce8dfaea6b1ebd1250a1d2de0a952d1e2a34d3e5b88e5d377db8"
+    },
+    {
+      "path": "scripts/tests/fixtures/source_binding/README.md",
+      "sha256": "416c30e6123f4159c5d5c3e0b47dd5219e358bbc13812400b6816651ab4b847f"
+    },
+    {
+      "path": "scripts/tests/fixtures/source_binding/harness.py",
+      "sha256": "d3b8a14e9783ca852a57da6672f6657b4e343dedbf3af0edddfd4ab3ec4a99b6"
+    },
+    {
+      "path": "scripts/tests/fixtures/source_binding/scale_kernel.cu",
+      "sha256": "52d96c948b2b9d9efef1263a5ed35307f581dde1ff0b6154374cb5c8fe975b8a"
+    },
+    {
+      "path": "scripts/tests/test_eval_storage_reclaim.py",
+      "sha256": "2351678fde5594541abbdb807933f571e4c7e61abc985c1858c13cf8723e0ec3"
+    },
+    {
+      "path": "scripts/tests/test_experience_store.py",
+      "sha256": "3ee349ca50c4fd966bb3764e63d045f45fdc2d9bb0d93e48b2de50c98adbf766"
+    },
+    {
+      "path": "scripts/tests/test_kb_loop_offline.py",
+      "sha256": "234d22fa5d995dcc876c9ad2981b8204a600fdeecadd95c7986ae0c1eac516a9"
+    },
+    {
+      "path": "scripts/tests/test_workspace_sources.py",
+      "sha256": "74a3d4525448d225b49af66f79834d092ef7d5739fc9d70d841f266491aa4d8d"
+    },
+    {
+      "path": "scripts/workspace_sources.py",
+      "sha256": "15a97e8db9471e77275428affbcbdfde7a9c4ba948690f043a9c544ee14d360b"
+    }
+  ]
+}

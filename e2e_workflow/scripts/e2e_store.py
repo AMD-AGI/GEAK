@@ -51,13 +51,11 @@ No delete exists on the service. Every `--apply` is permanent.
 
 import argparse
 import hashlib
-import io
 import json
 import os
 import re
 import shutil
 import sys
-import tarfile
 import tempfile
 import time
 
@@ -73,8 +71,18 @@ from kb.ladder import publish                                               # no
 from kb.plane import open_plane, read_planes                                             # noqa: E402
 from kb.retract import (is_retired, retract_session, retraction_ok,        # noqa: E402
                         retracted_document)
-from kb.store_local import (KBStoreError, SAFE_COMPONENT_CHARS,             # noqa: E402
-                            finite_speedup)
+from kb.store_local import KBStoreError, finite_speedup                      # noqa: E402
+
+# Artifact collection has one implementation; these direct imports preserve the
+# existing e2e_store helper names for callers without adding forwarding wrappers.
+# Private artifact constants now belong to e2e_artifacts; patch them there.
+from e2e_workflow.scripts.e2e_artifacts import (                              # noqa: E402
+    OVERLAY_MANIFEST, OVERLAY_SKIP_DIRS, OVERLAY_TARBALL,
+    TUNING_FILE_MAX, TUNING_FILE_MAX_BYTES, TUNING_PREFIX,
+    _ARTIFACT_KEYS, _IMPORT_RE, _PACKED, _UNSAFE_NAME_RE,
+    _artifact_files, _overlay_modules, _pack_overlay, _rebind_tuning_artifacts,
+    _safe_basename, _sibling_imports, _tuning_files,
+)
 
 SCHEMA = "geak.e2e.v1"
 THROUGHPUT_METRIC = "throughput_tok_s"      # ranks the exact-workload rung, and every read
@@ -990,303 +998,6 @@ def _accepted_kernels(a, result: dict):
             entry["patch"] = stored
         entries.append(entry)
     return entries, files
-
-
-_ARTIFACT_KEYS = (("patch", "final_patch", "final.patch"),
-                  ("launch", "final_launch_script", "launch.sh"),
-                  ("report", "report_path", "report.md"),
-                  ("overlay", "final_overlay", "overlay.py"))
-
-OVERLAY_MANIFEST = "_overlay_manifest.json"
-OVERLAY_TARBALL = "overlay.tar.gz"
-# Build/interpreter caches. Neither survives being moved to another reader's box, and both are
-# larger than the source they were derived from.
-OVERLAY_SKIP_DIRS = ("__pycache__", ".torch_ext")
-# Holds the TemporaryDirectory objects alive for the life of the process. The tarball has to still
-# be on disk when the store uploads it, which happens long after _artifact_files() returns, and a
-# TemporaryDirectory that goes out of scope deletes its tree immediately.
-_PACKED = []
-
-
-_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z_]\w*)\s+import\b|import\s+([A-Za-z_]\w*))",
-                        re.MULTILINE)
-
-
-def _sibling_imports(path: str) -> list:
-    """Top-level module names `path` imports, by source text rather than by importing it.
-
-    Reading the source is the only option here: importing an overlay module off the write path
-    would run its top-level code — which for an authored kernel means compiling Triton against
-    whatever GPU the writer happens to be on. The regex takes plain `import X` / `from X import`
-    only; a dotted or relative form is somebody else's package, not an overlay sibling.
-    """
-    try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            source = handle.read()
-    except OSError:
-        return []
-    return [a or b for a, b in _IMPORT_RE.findall(source)]
-
-
-def _overlay_modules(manifest_path: str) -> list:
-    """Every overlay-root module the mechanism needs, transitively, deduplicated.
-
-    Two roots, because the overlay has two entry points. The manifest names the module each
-    rebind binds TO, and sitecustomize.py is the code that installs them — an overlay that
-    captures shapes or traces a seam does that work in siblings sitecustomize.py imports
-    directly, with no manifest entry naming them at all.
-
-    Neither root is the whole story on its own, because what they name is regularly a shim:
-    GLM-5.2's `dsa_engage_c0_triton` is 1.6 KB of `from dsa_authored_c0_triton import
-    tilelang_sparse_fwd` wrapping a 23 KB authored Triton kernel, and packing the manifest's
-    name alone shipped a tarball that raises ImportError the moment sitecustomize.py runs it.
-    So each packed module's own imports are followed, and any that resolves to a sibling at the
-    overlay root is packed too. Names that resolve to nothing at the root are just ordinary
-    third-party imports and are left alone; the closure therefore terminates at the overlay
-    boundary.
-
-    A malformed manifest still yields sitecustomize.py's side of the closure rather than
-    raising: the caller is packing a best-effort artifact, and `_repro()` is the thing that
-    decides whether what came out is enough.
-    """
-    root = os.path.dirname(manifest_path)
-    try:
-        with open(manifest_path) as handle:
-            manifest = json.load(handle)
-    except (OSError, ValueError):
-        manifest = {}
-    if not isinstance(manifest, dict):
-        manifest = {}
-    seen, out = set(), []
-    queue = [str((entry or {}).get("impl_module") or "") for entry in (manifest.get("rebinds") or [])]
-    queue.extend(str((entry or {}).get("module") or "") for entry in (manifest.get("installers") or []))
-    queue.extend(_sibling_imports(os.path.join(root, "sitecustomize.py")))
-    while queue:
-        # A submodule rebind (`geak_authored.gemm_flydsl`) is addressed by its top-level package,
-        # which is what sits at the overlay root and what has to be packed. An absolute or
-        # separator-bearing name is not a module name at all and is refused rather than resolved
-        # into somebody's filesystem.
-        module = queue.pop(0).split(".")[0]
-        if not module or module in seen or os.path.isabs(module) or os.sep in module:
-            continue
-        as_file, as_pkg = os.path.join(root, module + ".py"), os.path.join(root, module)
-        if not os.path.isfile(as_file) and not os.path.isdir(as_pkg):
-            continue
-        seen.add(module)
-        out.append(module)
-        if os.path.isfile(as_file):
-            queue.extend(_sibling_imports(as_file))
-        else:
-            for base, dirs, names in os.walk(as_pkg):
-                dirs[:] = [d for d in dirs if d not in OVERLAY_SKIP_DIRS]
-                for name in names:
-                    if name.endswith(".py"):
-                        queue.extend(_sibling_imports(os.path.join(base, name)))
-    return out
-
-
-def _pack_overlay(dirpath: str) -> str:
-    """`final_overlay`'s directory -> a .tar.gz of the overlay mechanism, or "" if it is not one.
-
-    `final_overlay` names a DIRECTORY, always: the mechanism is a sitecustomize.py plus the modules
-    it swaps in, and no single file carries it. _artifact_files() used to take only
-    `os.path.isfile`, so that directory was dropped without a word and no e2e record ever carried
-    an overlay — the runs that cleared _repro()'s reproducibility gate were the ones that also
-    happened to emit a kernel patch, and a pure-overlay win could not be recorded at all.
-
-    Only the mechanism goes in: the manifest, the sitecustomize.py that installs it, and the code
-    the manifest names. The manifest names it two different ways and BOTH have to be packed. A
-    `modules` entry replaces a whole upstream module and points at a file under `_patched/`. A
-    `rebinds` entry leaves the module alone and swaps one symbol for `impl_module`'s — a sibling
-    package or .py file at the overlay's top level, NOT under `_patched/`. Packing only `_patched/`
-    silently produced a tarball with a manifest that rebinds to an import that is not in it: the
-    gpt-oss-120b `_fwd_kernel` win is a `rebinds` overlay whose entire HIP kernel lives in
-    `geak_hip_extend/`, and the record would have promised a reproducible run and shipped nothing
-    to reproduce it with.
-
-    An accepted-candidate directory also holds the A/B evidence it was judged on (`cand/`, `ref/`,
-    server logs, profiles) — that is how the number was arrived at, not how it is reproduced, and
-    it is several times the size of what a reader needs. `__pycache__` is skipped: a .pyc is stale
-    the moment the reader's interpreter differs. `.torch_ext/` is skipped for the same reason one
-    step further along: it is a torch cpp_extension BUILD cache (ninja logs, .o, a gfx-specific
-    .so) that the reader's own load() rebuilds from the .hip source that is packed.
-
-    Everything is packed under a single `overlay/` top level so the reader can untar into the
-    bundle root and get one predictable directory to point PYTHONPATH at (see _launch_text).
-
-    No manifest means this is not an overlay directory. Returning "" then is deliberate — the gate
-    refuses the record rather than have it promise a tarball of something nobody can install.
-    """
-    manifest_path = os.path.join(dirpath, OVERLAY_MANIFEST)
-    if not os.path.isfile(manifest_path):
-        return ""
-    holder = tempfile.TemporaryDirectory(prefix="e2e_overlay_")
-    _PACKED.append(holder)
-    out = os.path.join(holder.name, OVERLAY_TARBALL)
-    with open(manifest_path) as handle:
-        manifest = json.load(handle)
-    packed_manifest = None
-    if isinstance(manifest, dict) and manifest.get("installers"):
-        from overlay_setup import installer_module_manifest
-        packed_manifest = json.dumps(installer_module_manifest(dirpath, manifest), indent=2).encode()
-
-    def _add_tree(tar, root_dir):
-        for root, dirs, names in os.walk(root_dir):
-            dirs[:] = [d for d in dirs if d not in OVERLAY_SKIP_DIRS]
-            for name in names:
-                if name.endswith(".pyc"):
-                    continue
-                src = os.path.join(root, name)
-                tar.add(src, arcname="overlay/" + os.path.relpath(src, dirpath))
-
-    with tarfile.open(out, "w:gz") as tar:
-        for name in (OVERLAY_MANIFEST, "sitecustomize.py"):
-            src = os.path.join(dirpath, name)
-            if name == OVERLAY_MANIFEST and packed_manifest is not None:
-                info = tarfile.TarInfo("overlay/" + name)
-                info.size = len(packed_manifest)
-                info.mode = 0o644
-                tar.addfile(info, io.BytesIO(packed_manifest))
-            elif os.path.isfile(src):
-                tar.add(src, arcname="overlay/" + name)
-        _add_tree(tar, os.path.join(dirpath, "_patched"))
-        for module in _overlay_modules(manifest_path):
-            pkg = os.path.join(dirpath, module)
-            if os.path.isdir(pkg):
-                _add_tree(tar, pkg)
-            elif os.path.isfile(pkg + ".py"):
-                tar.add(pkg + ".py", arcname="overlay/" + module + ".py")
-    return out
-
-
-TUNING_PREFIX = "tuning/"
-# Bounds on what the tuning phase can drag into a record. Tuned tables are small (the a8w8 blockscale
-# CSVs run 0.5-1 MB), so a path far outside that is a deploy bundle or a built .so that got listed by
-# mistake, and a record is the wrong place to discover it. Both caps report what they dropped rather
-# than truncating quietly — a record that silently carries half its lever is the failure being fixed.
-TUNING_FILE_MAX = 24
-TUNING_FILE_MAX_BYTES = 64 * 1024 * 1024
-
-
-_UNSAFE_NAME_RE = re.compile("[^%s]" % SAFE_COMPONENT_CHARS)
-
-
-def _safe_basename(path: str) -> str:
-    """A stored name `kb.store_local.safe_rel_path()` will accept, whatever the box named the file.
-
-    That validator REJECTS (raises) on `:` and `\\` rather than sanitizing, and both stores build
-    their whole `{stored_name: source}` map up front, before a single byte is uploaded. So one tuned
-    table whose name carries a shape spec — `gemm_m:1024_n:8192.csv` is a perfectly ordinary thing
-    for a tuner to emit — would abort the write for the ENTIRE record, taking final.patch, launch.sh
-    and report.md down with it. The record is the thing worth protecting; the exact filename is not.
-    Names are mangled toward the validator, never dropped, and the untouched source path stays in
-    `accepted_kernels[].tuning_artifact_source` so a reader can still say where it came from.
-    """
-    name = _UNSAFE_NAME_RE.sub("_", os.path.basename(path).strip()) or "artifact"
-    return name.lstrip(".") or "artifact"      # ".", ".." and dotfiles are rejected the same way
-
-
-def _tuning_files(result: dict, dropped: list) -> dict:
-    """{role: (stored_name, local_path)} for the tuning phase's deployable artifacts.
-
-    A tuned table is applied through an env var and deployed INTO the installed package
-    (`site-packages/aiter/configs/...`), not into the framework's git tree. It is therefore
-    STRUCTURALLY absent from `final.patch` — no amount of diffing the source tree will pick it up —
-    and a record carrying only the patch reproduces the launch command but not the win. The
-    DeepSeek-V4-Pro 20260823 run wrote files [final.patch, launch.sh, report.md] while its actual
-    lever, a 56-row a8w8 blockscale table measured at 3.29x isolated, stayed on the box and was lost
-    with it. `live_tree_files` exists precisely because these paths sit outside the patchable tree,
-    so it is read here alongside `artifacts`.
-
-    Only an ACCEPTED tuning contributes. A withdrawn or unproven one has no artifact worth carrying,
-    and copying one in would let a reader mistake a rejected search residue for a banked lever.
-    """
-    tuning = result.get("tuning_skillset") or {}
-    if not isinstance(tuning, dict) or str(tuning.get("gate") or "") != "accepted":
-        return {}
-    found, seen = {}, set()
-    for path in (list(tuning.get("artifacts") or []) + list(tuning.get("live_tree_files") or [])):
-        path = str(path or "")
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        if not os.path.isfile(path):
-            dropped.append("%s (missing)" % path)
-            continue
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            dropped.append("%s (unreadable)" % path)
-            continue
-        if size > TUNING_FILE_MAX_BYTES:
-            dropped.append("%s (%d bytes > cap)" % (path, size))
-            continue
-        if len(found) >= TUNING_FILE_MAX:
-            dropped.append("%s (over %d-file cap)" % (path, TUNING_FILE_MAX))
-            continue
-        # Index-prefixed: two tuned tables can share a basename across trees (the deploy bundle's copy
-        # and the installed one), and a bare basename would silently drop one of them.
-        stored = "%s%02d_%s" % (TUNING_PREFIX, len(found), _safe_basename(path))
-        found["tuning:" + path] = (stored, path)
-    return found
-
-
-def _rebind_tuning_artifacts(kernels, files: dict) -> None:
-    """Point each tuned kernel at where its table lives IN THE RECORD, not on the box that made it.
-
-    The workflow banks `tuning_artifact` as the absolute path the tuner wrote — correct at write
-    time, meaningless to every reader afterwards, since the next box has no such file. The bundle
-    name is the only address that survives the trip, so it is substituted here, once, at the one
-    point where both the kernel list and the stored-name map exist. The original is kept as
-    `tuning_artifact_source`: when a recalled table fails to reproduce, the first question is which
-    tree it was captured from, and that answer is otherwise gone.
-    """
-    # First stored name wins, not last. Two roles can hand back the same source path (the deploy
-    # bundle's copy of a table and the installed one are one file to `artifacts` + `live_tree_files`),
-    # and `files` is built in insertion order, so the first entry is the one whose stored name the
-    # rest of the record already refers to. Taking the last would point the kernel at a bundle name
-    # that is a duplicate copy of its table under a different index prefix — reproducible, but it
-    # makes two names for one artifact and a reader cannot tell which is canonical.
-    by_source = {}
-    for stored, src in files.values():
-        by_source.setdefault(src, stored)
-    for k in kernels:
-        if not isinstance(k, dict):
-            continue
-        source = str(k.get("tuning_artifact") or "")
-        stored = by_source.get(source) if source else ""
-        if stored:
-            k["tuning_artifact"] = stored
-            k["tuning_artifact_source"] = source
-
-
-def _artifact_files(a, result: dict) -> dict:
-    """{role: (stored_name, local_path)} for the run outputs that actually exist on disk.
-
-    A path the result names but the filesystem does not have is dropped here rather than at upload
-    time, so `value.artifacts` never promises a file the record does not carry — the kernel lane's
-    materialize() now treats that promise as a hard error, and it should.
-    """
-    found = {}
-    for role, field, stored in _ARTIFACT_KEYS:
-        path = str(result.get(field) or "")
-        if not path:
-            continue
-        if os.path.isfile(path):
-            found[role] = (stored, path)
-        elif role == "overlay" and os.path.isdir(path):
-            packed = _pack_overlay(path)
-            if packed:
-                found[role] = (OVERLAY_TARBALL, packed)
-    dropped = []
-    found.update(_tuning_files(result, dropped))
-    for why in dropped:
-        sys.stderr.write("e2e_store: tuning artifact NOT carried into the record: %s\n" % why)
-    for extra in (getattr(a, "file", None) or []):   # retract recomputes a record but takes no --file
-        path = str(extra)
-        if os.path.isfile(path):
-            found["file:" + os.path.basename(path)] = (os.path.basename(path), path)
-    return found
 
 
 def _env_pairs(env: str) -> dict:

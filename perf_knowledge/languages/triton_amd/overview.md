@@ -5,7 +5,7 @@ gens: [gfx90a, gfx942, gfx950]
 dtypes: [bf16, fp16, fp8_e4m3_fnuz, fp8_e5m2_fnuz, fp8_e4m3, fp8_e5m2, int8]
 regimes: [prefill, decode, training, both]
 status: competitive
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
   - https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
@@ -15,16 +15,10 @@ sources:
 
 # Triton on AMD — overview
 
-## TL;DR
-Triton is the fastest way to **author and iterate** an MI300X/MI350X kernel, and it is the backend
-PyTorch-Inductor `max-autotune` emits. The Python API is **identical** to NVIDIA; what changes is the
-lowering (`TritonGPU → TritonAMDGPU → AMDGCN`) and the hardware mapping. The recurring AMD facts that
-break CUDA habits: **wavefront = 64 lanes**, **LDS = 64 KB/CU** (CDNA3) / 160 KB (CDNA4),
-**512 VGPR/EU** (16-granule), **FNUZ fp8** on CDNA3, and **`num_stages` semantics differ** (a single
-GEMM pipelines best at 1–2, not 3–4). On a *plain* dense GEMM, AMD Triton still typically **loses to
-tuned hipBLASLt/aiter** — the honest win is **fusion** (epilogue/attention) or skinny split-K decode.
-Honest limit corroborated by HipKittens (arXiv 2511.08083): compiler backends including Triton
-under-perform hand-tuned assembly/CK on CDNA3/CDNA4 GEMM and attention.
+Triton provides a Python tile language and an AMD compiler backend. Use the installed
+backend options and target support; CUDA and ROCm lowering can differ in layouts,
+pipelining and FP8 formats. This guide locates those controls, not a guaranteed
+performance ranking against libraries.
 
 ## Where it fits in the backend landscape
 | Use Triton when | Reach for something else when |
@@ -92,7 +86,7 @@ MFMA layout op and the K-loop is software-pipelined.
 - [patterns.md](patterns.md) — GEMM/attention/reduction templates tuned for CDNA3/4.
 - [knobs.md](knobs.md) — full `HIPOptions` knob set, ranges, autotune config space, baking winners.
 - [pitfalls.md](pitfalls.md) — porting checklist + AMD-specific anti-patterns.
-- [isa_verify.md](isa_verify.md) — `AMDGCN_ENABLE_DUMP` workflow; what good ISA looks like.
+- [isa_verify.md](isa_verify.md) — dump commands, versioned metadata names and interpretation limits.
 
 ## Sources
 - Optimizing Triton kernels (knobs, ISA verify): https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html

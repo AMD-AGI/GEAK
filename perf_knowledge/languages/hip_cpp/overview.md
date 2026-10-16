@@ -5,7 +5,7 @@ gens: [gfx908, gfx90a, gfx942, gfx950]
 dtypes: [fp32, bf16, fp16, fp8_e4m3_fnuz, fp8_e4m3, int8]
 regimes: [both]
 status: sota
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/programming_model.html
@@ -14,13 +14,9 @@ sources:
 
 # HIP / C++ on AMD Instinct — overview
 
-## TL;DR
-HIP/C++ is the **lowest-level portable** way to author CDNA kernels: full control of LDS, registers,
-wave/cross-lane ops, MFMA intrinsics, and instruction scheduling, compiled by `hipcc`/`amdclang++`.
-The two facts that break every CUDA habit: **wavefront = 64 lanes** (not 32) and **LDS = 64 KB/CU**
-(CDNA3; 160 KB on CDNA4, vs 228 KB on H100). Reach for HIP when Triton/CK/FlyDSL can't express a
-fusion, or to read/own the exact ISA. For the matrix-core and async-LDS layer see
-[intrinsics.md](intrinsics.md) and [lds_async.md](lds_async.md).
+HIP/C++ exposes device kernels, runtime integration and AMD compiler intrinsics.
+Use target-specific wave, memory and instruction definitions. See [intrinsics](intrinsics.md)
+and [LDS/async memory](lds_async.md) when a design needs that control.
 
 ## MI300X (gfx942) hardware constants — memorize
 | Resource | Value |

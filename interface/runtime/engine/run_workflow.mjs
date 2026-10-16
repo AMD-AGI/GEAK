@@ -5,6 +5,8 @@
 // GEAK's orchestration (kernel_workflow.js / e2e_workflow.js) is plain JS that
 // depends on globals injected ONLY by Claude Code's `Workflow` tool:
 //   agent() parallel() pipeline() phase() log() workflow() args budget
+// (plus runProcess(), which only this runtime provides: one command in its own
+// process group, see backends/base.mjs; under the Workflow tool it is undefined).
 // That runtime is Claude-Code-only, so the workflows cannot run under any other
 // agent. This module re-implements those globals as an ordinary Node process and
 // dispatches each agent() call to a PLUGGABLE backend (claude | codex | ...).
@@ -28,28 +30,9 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve as resolvePath } from 'node:path';
 import { cpus } from 'node:os';
 import { extractJson, validate, schemaInstruction } from './schema.mjs';
-import { defaultConcurrency } from './backends/base.mjs';
-import { loadRegistry, resolveSelection, neutralizeForBackend } from './config.mjs';
+import { defaultConcurrency, runProcess, runtimeFault } from './backends/base.mjs';
+import { parseArgv, loadRegistry, resolveSelection, neutralizeForBackend } from './config.mjs';
 import { makeGenericBackend } from './backends/generic.mjs';
-
-// ---------------------------------------------------------------------------
-// CLI parsing
-// ---------------------------------------------------------------------------
-function parseArgv(argv) {
-  const out = { _: [] };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) { out[key] = true; }
-      else { out[key] = next; i++; }
-    } else {
-      out._.push(a);
-    }
-  }
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // Counting semaphore — bounds concurrent agent subprocesses. Shared across the
@@ -230,13 +213,13 @@ export function createRuntime({
     let fn;
     try {
       fn = new AsyncFunction(
-        'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget',
+        'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget', 'runProcess',
         body
       );
     } catch (e) {
       throw new Error(`failed to compile workflow ${absScriptPath}: ${e.message}`);
     }
-    return fn(agent, parallel, pipeline, phase, log, makeWorkflow(depth), scriptArgs, budget);
+    return fn(agent, parallel, pipeline, phase, log, makeWorkflow(depth), scriptArgs, budget, runProcess);
   }
 
   return { agent, parallel, pipeline, phase, log, budget, makeWorkflow, runScript, state };
@@ -323,6 +306,13 @@ async function main() {
   } catch (e) {
     errMsg = String(e && e.message || e);
     rt.log(`runtime ERROR: ${errMsg}`);
+  }
+  // Agent failures degrade to null inside the workflow; this one must still fail the run.
+  const fault = runtimeFault();
+  if (fault) {
+    ok = false;
+    errMsg = errMsg ? `${errMsg}; ${fault}` : fault;
+    rt.log(`runtime ERROR: ${fault}`);
   }
   const wallMs = Date.now() - startedMs;
 

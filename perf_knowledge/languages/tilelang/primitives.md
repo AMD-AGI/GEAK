@@ -64,7 +64,7 @@ A FlashAttention forward is ~80 lines: allocate Q in fragments + K/V in shared, 
 ## Verify
 - Inspect the emitted config (`block_M`, `block_N`, `threads`, `num_stages`, coalesced widths) from the
   autotuner output and confirm it matches expectations (FA optimal: `128/32/512`, rasterization on).
-- Numerics: greedy temp=0 parity vs a reference; isolated kernel bench vs Triton at the same shape.
+- Numerics: task-defined output/state checks against the reference; unprofiled timing at matching shapes.
 
 ## Sources
 - TileLang FlashAttention on MI300X (primitive names `T.alloc_shared`/`T.alloc_fragment`/`T.copy`/`T.gemm`/`T.reduce_*`/`T.Pipelined`/`T.Parallel`/`T.use_swizzle`, `GemmWarpPolicy.FullRow`, coalesced widths): https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html

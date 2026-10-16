@@ -1,0 +1,78 @@
+{
+  "schema_version": 2,
+  "prompt_version": "2026-10-16.concise-v1",
+  "applies_to": "Prospective instructions only. Saved runs retain their exact prompt references and bytes.",
+  "revision_base": "3619cd04b51c11cc3728473c53986dda246ac8c4",
+  "source_inventory": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/NATIVE_COPY_INVENTORY.json",
+  "source_ref_meaning": "Historical import provenance, not the current packaged bytes. current_sha256 identifies this revision.",
+  "retired_guidance": [
+    "Repeated process narration and exhaustive hardware-check lists; retain evidence needed for the decision.",
+    "Study-specific blanket tool bans; the current host capability and access contract determines available tools.",
+    "Unconditional narrative engineer output; a native invocation uses its required JSON and source-selection artifacts."
+  ],
+  "files": [
+    {
+      "target": "prompts/crossover.md",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/evolution/prompts/crossover.md",
+        "sha256": "e0350fccc40abe257b430ad838fbf4c55c1f0263ee6dc1dc07fa291828b6d433"
+      },
+      "current_sha256": "01c2beb6489ab8d50ad1a92a566e99968554a8960d572105f4ef73793bbc584b",
+      "current_bytes": 1770
+    },
+    {
+      "target": "prompts/donor.md",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/evolution/prompts/donor.md",
+        "sha256": "5edd30a1370a1b9498c2bee3d8b88a6d34c1c613b7d7563d791fe128f096a5c5"
+      },
+      "current_sha256": "28422977431dc83f189294107b3bf44be2520dd72a09b0d4ca986d540f079f83",
+      "current_bytes": 846
+    },
+    {
+      "target": "prompts/engineer.md",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/evolution/prompts/engineer.md",
+        "sha256": "bc57e3e422b8e9f7c1bae85cf3500d73377a1d702a705fcd78cd0f88bd5fb78f"
+      },
+      "current_sha256": "8108eeae240c2dc869281e42d34483f49d3d22b2340e0806fc37578133d4c4e9",
+      "current_bytes": 6282
+    },
+    {
+      "target": "prompts/planner.md",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/evolution/prompts/planner.md",
+        "sha256": "82a1980b3dcbd53be096e8188029da033ef3b0148da5b6fb4a8df153596251e7"
+      },
+      "current_sha256": "984961a897b24016bc58d9920ea82961eb3908460af2c1ee692c124ae66546ea",
+      "current_bytes": 13765
+    },
+    {
+      "target": "prompts/program_lease_engineer.md",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/evolution/prompts/program_lease_engineer.md",
+        "sha256": "da1d6ecc942168addf98b814d81ea76fbe6cb5dc45186cbfb60b09c2f3f9d0cc"
+      },
+      "current_sha256": "807406c196d2005a63caf030a2f4dc42b7296ea334bb667ce8e8fb11c9443498",
+      "current_bytes": 632
+    },
+    {
+      "target": "prompts/program_lease_planner.md",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/evolution/prompts/program_lease_planner.md",
+        "sha256": "ff23badddf4b8d2c221f0ac480ffcbb79d80eb9e9ce06a421e094dcd7f2b46f7"
+      },
+      "current_sha256": "e2887caa1d9ee4cbd06e954ef982e955bfad2e5c0d71a9f2117cb1bb1320d1ba",
+      "current_bytes": 1861
+    },
+    {
+      "target": "prompts/scientific_reviewer.md",
+      "source_ref": {
+        "path": "/home/sapmajum/research-collab/codex/astra_current_native_code_owner_export_20261013_v1/native/evolution/prompts/scientific_reviewer.md",
+        "sha256": "0a22afa0044f294981c7c2788cb7e84e3d12a0f8a4b030228cb6dab109c5fda3"
+      },
+      "current_sha256": "1c64c2f3060a582cd2f8bce158b4b8408bbcb2c67f59bac68935051d50b41ffc",
+      "current_bytes": 4471
+    }
+  ]
+}

@@ -275,6 +275,18 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
   }
 
   console.log('\n# L. bakeoff forwards expected identity and fail-closes R9700 knowledge before Discover');
+  for (const target of ['mi350x', 'mi355x']) {
+    const { run, trace } = build({
+      ...BASE, mode: 'bakeoff', expected_gfx: 'gfx950', expected_target: target,
+      backends: ['hip'], gpu_ids: '0',
+    }, { agent: healthy('hip', [], {
+      device_gfx: 'gfx950', device_target: target,
+      device_name: `AMD Instinct ${target.toUpperCase()}`, physical_cu_count: 256,
+    }) });
+    await run();
+    ok(trace.workflowCalls[0]?.args.expected_target === target,
+      `${target} survives bakeoff dispatch`);
+  }
   {
     const { run, trace } = build({
       ...BASE, mode: 'bakeoff', expected_gfx: 'gfx1201', expected_target: 'r9700',

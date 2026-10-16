@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Detect AMD GPU ISA and product identity from one structured rocminfo agent.
 
-`gfx1201` is an ISA shared by multiple products.  This helper returns target
-`r9700` only when the same GPU agent reports the exact marketing name
-`AMD Radeon AI PRO R9700`; every other product remains `unknown`.
+Shared ISAs do not identify a product. This helper reports a known target only
+when the same GPU agent's ISA and exact marketing name match a supported product.
 """
 
 from __future__ import annotations
@@ -20,6 +19,11 @@ from pathlib import Path
 from typing import Any
 
 R9700_MARKETING_NAME = "AMD Radeon AI PRO R9700"
+PRODUCT_TARGETS = {
+    ("gfx1201", R9700_MARKETING_NAME): "r9700",
+    ("gfx950", "AMD Instinct MI350X"): "mi350x",
+    ("gfx950", "AMD Instinct MI355X"): "mi355x",
+}
 INTEGRATED_MARKETING_NAMES = frozenset({"AMD Radeon Graphics"})
 _AGENT_RE = re.compile(r"^\s*Agent\s+\d+\s*$")
 _FIELD_RE = re.compile(r"^\s*([^:]+):\s*(.*?)\s*$")
@@ -79,9 +83,7 @@ def parse_rocminfo(text: str) -> dict[str, Any]:
             {
                 "gfx": gfx,
                 "marketing_name": marketing_name,
-                "target": (
-                    "r9700" if marketing_name == R9700_MARKETING_NAME else "unknown"
-                ),
+                "target": PRODUCT_TARGETS.get((gfx, marketing_name), "unknown"),
                 "physical_cu_count": physical_cu_count,
             }
         )

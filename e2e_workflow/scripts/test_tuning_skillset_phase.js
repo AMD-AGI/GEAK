@@ -308,11 +308,11 @@ ok(/OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curE
 ok(/reversible \*\*overlay\*\*/.test(role) && /Never edit a `\.py` in/.test(role),
   'the role routes code through the overlay and forbids live-tree source edits');
 // result.json must gain the tuning block WITHOUT any existing key changing.
-const runE2e = fs.readFileSync(path.join(ROOT, 'interface', 'run_e2e.py'), 'utf8');
-ok(/def _tuning_skillset_section\(/.test(runE2e), 'run_e2e.py builds an additive tuning_skillset block');
-ok(/if tuning_section is not None:\n\s+result\["tuning_skillset"\] = tuning_section/.test(runE2e),
+const resultNormalization = fs.readFileSync(path.join(ROOT, 'interface', 'e2e', 'normalization.py'), 'utf8');
+ok(/def _tuning_skillset_section\(/.test(resultNormalization), 'result normalization builds an additive tuning_skillset block');
+ok(/if tuning_section is not None:\n\s+result\["tuning_skillset"\] = tuning_section/.test(resultNormalization),
   'the block is appended after the result dict is complete, so no existing key is touched');
-ok(/reaches_production_via/.test(runE2e),
+ok(/reaches_production_via/.test(resultNormalization),
   'result.json tells the caller that final_patch/final_launch_script now carry the tuning');
 
 // ---------------------------------------------------------------------------

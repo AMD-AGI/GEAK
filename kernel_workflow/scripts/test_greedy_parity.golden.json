@@ -1,0 +1,12 @@
+{
+  "comment": "SHA256 of JSON.stringify(record) for each reviewed greedy scenario; includes calls, prompts, options, phases, logs, loop state and result.",
+  "source_lane_sha256": "da9133716af1eacc902e61744fe37d85f07bb61f13e12f82a2f670c654be5fbc",
+  "scenarios": {
+    "a_improve_then_budget": "701f4794cba1ad9713d1bc7fc3c68ef12507ed377dde7e1ba2997bb62dd19735",
+    "b_warmstart_then_no_improve": "ab8b303dbb8197e0be0dcb159b55ef2a16318826de0d79a762dff6268fffe957",
+    "c_planner_filter_stop": "0a97090874990649d380ed73a6456407741d330c536d34f77d2003afbd57fe90",
+    "d_deadline_mid_loop": "291fe90d31c869fec7f862be6189f14900c3bccce30b5a2d6134e405d0418661",
+    "e_forced_replan_failures": "d4d359950bb6b62bd46d8bf70aca5aba3f8cb6a9b91dcf74e21661fe885cbdf7",
+    "f_citations_kb_cap": "baffce8b3778d870dded1d6a136554a235922def6987ed40c3b706f89a60da16"
+  }
+}

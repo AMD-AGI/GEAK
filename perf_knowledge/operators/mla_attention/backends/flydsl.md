@@ -18,8 +18,8 @@ sources:
 > boundary, MFMA fragment orientation, which output goes on atomics, wave count vs the register cap,
 > geometry derivation, verification gates — are in
 > [`languages/flydsl/authoring_attention_levers.md`](../../../languages/flydsl/authoring_attention_levers.md).
-> Read that for the *rules*; read this for the numbers that back them. The constants here are one
-> resolution of those derivations, not defaults to copy.
+> Read that for design questions; this card retains one measured instance. Its constants
+> and causal explanations require checking before transfer to another source or task.
 
 ## TL;DR
 For the **unabsorbed MLA training backward** — `qk_head_dim=192`, `v_head_dim=128`, bf16, causal, varlen —
@@ -40,8 +40,8 @@ Three device-side steps per backward call: zero the fp32 dQ accumulator, a prepr
 kernel forces S and dP to be recomputed there, raising work from 1664 to 2304 FLOPs per score element
 (+38%), which loses to the ASM baseline on its own.
 
-Four structural decisions carry the performance — the general form of each is a lever in
-[[languages/flydsl/authoring_attention_levers]]; here is how they resolved at these head dims. Two are
+Four structural decisions in this instance relate to the questions in
+[FlyDSL attention design](../../../languages/flydsl/authoring_attention_levers.md); here is how they resolved at these head dims. Two are
 layout choices that are painful to retrofit:
 
 - **Operand-swapped MFMA fragments** (`v_mfma_f32_16x16x16_bf16_1k`) make the score land as

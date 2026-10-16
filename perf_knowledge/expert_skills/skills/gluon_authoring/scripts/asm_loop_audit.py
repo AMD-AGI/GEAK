@@ -294,12 +294,6 @@ def lds_per_cu(arch, default=None):
     return _o.lds_per_cu(arch) or default
 
 
-    for k, v in LDS_PER_CU_BY_ARCH.items():
-        if arch.startswith(k):
-            return v
-    return default
-
-
 def print_lds_budget(meta_path: str | None, lds_per_cu: int | None) -> None:
     """LDS/WG -> WGs/CU. A SECOND occupancy limiter, independent of the register one: a kernel
     can be capped by both at once, and relieving only one buys nothing."""

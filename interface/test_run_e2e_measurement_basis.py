@@ -92,6 +92,33 @@ def _wf(eval_dir: Path, *, base: float, final: float, speedup: float, **extra) -
     return wf
 
 
+def test_correctness_baseline_preserves_known_empty_seed(tmp_path):
+    eval_dir = _eval_dir(tmp_path, base_leg=1000.0, final_leg=1100.0)
+    handoff = {"accepted_flags": "--upstream", "accepted_env": "UPSTREAM=1"}
+    wf = _wf(eval_dir, base=1000.0, final=1100.0, speedup=1.1, state={
+        "baseline_flags": "", "baseline_env": "", "baseline_overlay": "",
+        "flags": "--tuned", "env": "TUNED=1", "overlay": "/tuned",
+    })
+    out = rx.normalize_result(handoff, wf)
+
+    assert out["correctness_baseline"] == {"flags": "", "env": "", "overlay": "", "known": True}
+    assert out["baseline_basis"]["baseline_config"] == handoff
+
+
+def test_correctness_baseline_keeps_legacy_missing_seed_unknown(tmp_path):
+    eval_dir = _eval_dir(tmp_path, base_leg=1000.0, final_leg=1100.0)
+    wf = _wf(eval_dir, base=1000.0, final=1100.0, speedup=1.1,
+             recovered_from_disk=True, validation_status="validated_win", state={
+                 "flags": "--tuned", "env": "TUNED=1", "overlay": "/tuned",
+                 "baseline_env": None,
+             })
+    out = rx.normalize_result({"accepted_flags": "--upstream", "accepted_env": "UPSTREAM=1"}, wf)
+
+    assert out["correctness_baseline"] == {"flags": None, "env": None, "overlay": None, "known": False}
+    assert out["status"] == "ok"
+    assert out["throughput_speedup"] == 1.1
+
+
 def test_kb_return_retains_the_normalized_keep_verdict_and_pair(tmp_path):
     eval_dir = _eval_dir(tmp_path, setup_base=90, base_leg=100, final_leg=102)
     for leg in ("base", "final"):

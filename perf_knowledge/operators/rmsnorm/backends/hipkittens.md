@@ -35,7 +35,7 @@ arXiv 2511.08083 (memory-bound results).
 | impl | source | gens / dtypes / shapes | measured perf | when it's best |
 |---|---|---|---|---|
 | HK fused norm (RMSNorm/LayerNorm, dropout-residual-layernorm) | arXiv 2511.08083v1; `github.com/HazyResearch/HipKittens` | gfx950 (gfx942 validated); bf16/fp16 | **beats AITER & torch.compile 1.1–2.2× @ MI355X, Hazy Nov 2025 (academic/author-reported)** | mem-bound norm / custom fused norm |
-| (ref) AITER fused RMSNorm (+vLLM Inductor) | landscape §4; vLLM fusions | gfx942/gfx950; bf16/fp16 | production default; RMSNorm+quant fusion 1–6% e2e | shipping norm path |
+| (ref) AITER fused RMSNorm (+vLLM Inductor) | [vLLM fusion passes](https://docs.vllm.ai/en/latest/design/fusions/) | gfx942/gfx950; bf16/fp16 | production default; RMSNorm+quant fusion 1–6% e2e | shipping norm path |
 
 ## Config space / knobs (backend-specific)
 - **Schedule**: less critical than for GEMM (mem-bound) — focus on **vectorized load width** and
@@ -48,7 +48,7 @@ arXiv 2511.08083 (memory-bound results).
   tolerance; if fused with FP8 quant, gate FP8 accuracy downstream.
 
 ## Integration (how it gets used at serving time)
-- HK is positioned as **an aiter backend** per the landscape. Authoring path: build with HIPCC for
+- An authored HK kernel can be integrated through a supported call site. Authoring path: build with HIPCC for
   gfx950/gfx942 (pinned HK commit), wire the fused norm via the aiter norm dispatch seam or a model
   call-site rebind, then **e2e-gate** against [[operators/rmsnorm/backends/aiter]] — for a mem-bound op the
   e2e win is small, so confirm it survives end-to-end, not just microbench.
@@ -76,4 +76,4 @@ hipcc --offload-arch=gfx950 ...   # pinned HK commit, RMSNorm/LayerNorm micro-be
 ## Sources
 - HipKittens — arXiv 2511.08083 (Hazy Research, Nov 2025): https://arxiv.org/abs/2511.08083 ; HTML https://arxiv.org/html/2511.08083v1
 - HazyResearch blog: https://hazyresearch.stanford.edu/blog/2025-11-09-hk ; code https://github.com/HazyResearch/HipKittens
-- AMD SOTA landscape §4 norm (HK beats AITER/PyTorch 1.1–2.2× mem-bound): [[landscape/amd_sota_2026]]
+- Historical measured comparisons: [HipKittens results](../../../languages/hipkittens/perf_findings.md); use the cited paper for exact configurations.

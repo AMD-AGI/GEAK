@@ -58,8 +58,9 @@ an authored Triton GEMM measured 0.99–1.47× *isolated* but did **not** beat t
 (2026-06).
 
 ## Verify before you trust (see isa_verify.md)
-`AMDGCN_ENABLE_DUMP=1` → want `global_load_dwordx4`/`buffer_load_dwordx4`, `ds_*_b128`, dense
-`v_mfma_*`, no `v_accvgpr_*` in loop, `.private_segment_fixed_size: 0`.
+Use a matching dump to check the intended instruction types, widths and movement.
+Narrow accesses, accumulator moves and nonzero private allocation need context;
+none alone establishes a failed optimization.
 
 ## Sources
 - Optimizing Triton kernels (tuning pitfalls, OPTIMIZE_EPILOGUE, ISA): https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html

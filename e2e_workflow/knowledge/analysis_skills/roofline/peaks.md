@@ -1,6 +1,8 @@
 # Hardware peaks — roofline denominators
 
-Pure data. One section per calibrated product (or per `gfx` when the ISA is the product).
+Pure data. One section per tabulated product (or per `gfx` for legacy tables).
+MI350X and MI355X share `gfx950` but have different compute peaks. A bare `gfx950`
+lookup has no table; select `product: mi350x` or `product: mi355x` from device identity.
 Client RDNA4 peaks are **R9700-only**. A bare `gfx1201` lookup without `product: r9700`
 must not inherit these numbers — several SKUs share that ISA.
 
@@ -13,13 +15,11 @@ and selected by `target_eff_for`. Do
 not pre-derate the numbers here. Do not put sparse (2:4)
 rates in the yaml `flops` map.
 
-**Compute peaks need validation; the memory axis is the trustworthy one.** BF16 and FP16 run at the
-same rate on the matrix core of every part below (MFMA on CDNA, WMMA on RDNA), so the two `flops`
-entries in each section must be **equal** — they are, and that equality is the check to keep.
-Empirical matrix-core microbenchmarks (e.g. from rocprof-compute) frequently report a BF16 peak ~2×
-low, which inflates any BF16 compute-axis `roofline_pct` (sometimes above 100%, where `SKILL.md` §6
-L3 flags it `suspect`). At decode, prefer `hbm_util` and only rank on a compute-axis number once its
-dtype peak has been validated against this equality.
+Validate each denominator against the actual product, dtype, instruction unit and
+clock/power conditions. The equal BF16/FP16 entries below follow the tabulated
+matrix modes; equality alone does not validate an empirical benchmark. Memory
+and compute models both need matching definitions and measurement boundaries.
+The legacy `hbm_bw_bytes_s` field also holds GDDR/LPDDR pin rates where labeled.
 
 ## r9700 — Radeon AI PRO R9700 (Navi 48, gfx1201, 300 W)
 ```yaml
@@ -43,25 +43,51 @@ MX path. Memory sits behind 64 MB Infinity Cache and 8 MB L2. Clocks: 1620 base 
 their own `product:` section. `gfx1250` is CDNA5, not RDNA4 — do not inherit these numbers.
 
 The FP16/BF16 ridge is ~298 FLOP/byte (`191e12 / 640e9`), between the tabulated
-MI300X (~247) and MI350/355 (~312) ridges. A repeatedly reused working set that fits
+MI300X (~247) and MI355X (~312) ridges; MI350X is ~288. A repeatedly reused working set that fits
 the 64 MB Infinity Cache can report effective bandwidth above 640 GB/s; do not call
 that impossible GDDR bandwidth. Measure the external-memory roof with a streaming
 working set larger than the cache.
 
-## gfx950 — CDNA4, MI350X / MI355X class
+## mi350x — AMD Instinct MI350X (CDNA4, gfx950)
 ```yaml
+product: mi350x
 gfx: gfx950
 cu: 256
-hbm_bw_bytes_s: 8.0e12        # HBM3E, ~8 TB/s
+source_url: https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html
+source_checked: 2026-10-16
+hbm_bw_bytes_s: 8.0e12        # HBM3E, 8 TB/s
+flops:                         # dense matrix-core peaks, FLOP/s
+  fp64: 7.21e13
+  fp32: 1.442e14
+  bf16: 2.3e15
+  fp16: 2.3e15
+  fp8:  4.6e15
+  fp4:  9.2e15                # MXFP4, not an arbitrary FP4 instruction mode
+```
+
+## mi355x — AMD Instinct MI355X (CDNA4, gfx950)
+```yaml
+product: mi355x
+gfx: gfx950
+cu: 256
+source_url: https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
+source_checked: 2026-10-16
+hbm_bw_bytes_s: 8.0e12        # HBM3E, 8 TB/s
 flops:                         # dense matrix-core peaks, FLOP/s
   fp64: 7.86e13
-  fp32: 1.57e14
+  fp32: 1.573e14
   bf16: 2.5e15
   fp16: 2.5e15
   fp8:  5.0e15
-  fp4:  1.0e16
-l2_bytes: 4194304
+  fp4:  1.01e16               # MXFP4, not an arbitrary FP4 instruction mode
 ```
+
+These are AMD's published rounded per-GPU specifications, checked on the date
+above: BF16/FP16 matrix, OCP-FP8 matrix (E5M2/E4M3), MXFP4 matrix, and FP32/FP64
+matrix rates. AMD lists the same FP32/FP64 vector rates. The separate structured
+sparsity rows are excluded. The listed peak engine clocks and typical board powers
+are 2200 MHz / 1000 W for MI350X and 2400 MHz / 1400 W for MI355X. These are
+conditional specification ceilings, not measured throughput or guaranteed headroom.
 
 ## gfx942 — CDNA3, MI300X class
 ```yaml
@@ -93,14 +119,9 @@ mall_bytes: 33554432
 
 ## Unknown gfx — derived fallback (confidence: low)
 
-If the running `gfx` has no section above, DERIVE from `torch.cuda.get_device_properties(0)` and mark
-`peaks.source="derived"`, `peaks.confidence="low"`:
-
-```
-hbm_bw_bytes_s ≈ memory_clock_rate_hz × (memory_bus_width_bits / 8) × 2     # DDR
-flops[dtype]   ≈ multi_processor_count × clock_rate_hz × mfma_flops_per_cycle_per_cu[dtype]
-```
-
-The derived bandwidth is **frequently wrong for HBM3/3E** — the reported memory clock often understates
-the effective pin rate (on gfx950 it derives ~4.1 TB/s against a real ~8 TB/s). Treat any derived-peak
-result as `confidence: low`, which per `SKILL.md` means **display only, do not rank on it**.
+`derive_peaks_from_props()` can estimate external-memory pin bandwidth from
+reported memory clock and bus width, with `confidence="low"`. Clock units and
+DDR factors vary by device/tool; verify them before interpretation. The helper
+does not derive compute throughput. These estimates are display-only, and
+`resolve_peaks()` disables this fallback for unidentified `gfx950` and unknown
+client `gfx120x` products.

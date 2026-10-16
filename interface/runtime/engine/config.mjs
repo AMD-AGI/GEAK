@@ -16,9 +16,23 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_REGISTRY_PATH = resolvePath(HERE, 'registry.json');
 
+// Shared CLI convention: positionals in _, bare flags as true, values as strings.
+export function parseArgv(argv) {
+  const out = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) out[key] = true;
+      else { out[key] = next; i++; }
+    } else out._.push(a);
+  }
+  return out;
+}
+
 export async function loadRegistry(path = DEFAULT_REGISTRY_PATH) {
-  const raw = JSON.parse(await readFile(path, 'utf8'));
-  return raw;
+  return JSON.parse(await readFile(path, 'utf8'));
 }
 
 // Credential-derived agent selection, so that configuring a key is by itself
@@ -148,21 +162,17 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
   if (agent.approve_env && penv[agent.approve_env] !== undefined) approve = penv[agent.approve_env];
   if (approve) args.push(...String(approve).split(/\s+/).filter(Boolean));
 
-  // Which provider_autoselect entry this run resolves to, if any. Resolved here
-  // because it supplies BOTH the provider block below AND the default model id:
-  // an endpoint and the ids it actually serves are one fact, so both come from
-  // one registry entry and a gateway id can never leak onto another endpoint.
-  // Deliberately skipped when a base_url is supplied explicitly — an endpoint
-  // chosen by hand needs its model named by hand too.
-  const autoProvider = (() => {
-    if (agent.provider_autoconfig !== 'codex') return null;
-    if (String(penv.GEAK_CODEX_AUTOCONFIG ?? '1') === '0') return null;
-    if (String(penv.OPENAI_BASE_URL || (model && model.base_url) || '').trim()) return null;
-    for (const p of agent.provider_autoselect || []) {
-      if (p && p.trigger_env && String(penv[p.trigger_env] || '').trim()) return p;
-    }
-    return null;
-  })();
+  const isCodex = agent.provider_autoconfig === 'codex';
+  const autoConfig = isCodex && String(penv.GEAK_CODEX_AUTOCONFIG ?? '1') !== '0';
+  const extra = (agent.extra_args_env && penv[agent.extra_args_env]) || '';
+  const explicitBaseUrl = autoConfig
+    ? String(penv.OPENAI_BASE_URL || (model && model.base_url) || '').trim()
+    : '';
+  // A selected provider supplies both its endpoint and default model. An explicit
+  // endpoint skips selection, so it cannot inherit a different provider's model.
+  const autoProvider = autoConfig && !explicitBaseUrl
+    ? (agent.provider_autoselect || []).find((p) => p && p.trigger_env && isSet(penv, p.trigger_env))
+    : null;
 
   // model id: explicit override > pinned model > agent's model_env > the
   // auto-selected provider's own default (absent on providers whose CLI default
@@ -174,25 +184,10 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
     || '';
   if (modelId && agent.model_flag) args.push(agent.model_flag, modelId);
 
-  // codex provider auto-config (Hyperloom-style): emit `-c model_providers.geak_auto.*`
-  // overrides so NO hand-written config.toml and NO `-c model_provider=` selection are
-  // needed. Two resolution modes (first wins), gated on agent.provider_autoconfig==='codex':
-  //   (1) base_url-driven — an explicit OPENAI_BASE_URL (or the selected model's
-  //       base_url) is used directly. key_env defaults to OPENAI_API_KEY.
-  //   (2) key-driven auto-SELECT — when no base_url is available, walk
-  //       agent.provider_autoselect in order and pick the first provider whose
-  //       trigger_env is set: GEAK_AMDKEY->AMD gateway, OPENAI_API_KEY->OpenAI official.
-  //       Each entry carries base_url / key_env / default_model and optional
-  //       env_http_headers, so "give the AMD key -> AMD, the OpenAI key ->
-  //       OpenAI". The same list drives deriveAgentFromEnv, which picks the agent
-  //       itself from the key.
-  // Emitted BEFORE extra_args so GEAK_CODEX_EXTRA_ARGS still wins. Skipped when
-  // disabled (GEAK_CODEX_AUTOCONFIG=0) or when the caller already pins
-  // model_provider via extra_args. OPENAI_CUSTOM_HEADERS (JSON
-  // {"Header":"ENV_VAR_NAME"}) overrides a selected provider's headers.
-  if (agent.provider_autoconfig === 'codex'
-      && String(penv.GEAK_CODEX_AUTOCONFIG ?? '1') !== '0') {
-    let baseUrl = String(penv.OPENAI_BASE_URL || (model && model.base_url) || '').trim();
+  // Emit provider config before extra args, which retain the final say. A pinned
+  // model_provider skips this block's overrides; custom headers replace defaults.
+  if (autoConfig) {
+    let baseUrl = explicitBaseUrl;
     let keyEnv = (model && model.key_env) || 'OPENAI_API_KEY';
     let headers = null;
     if (autoProvider) {
@@ -203,7 +198,6 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
     // explicit OPENAI_CUSTOM_HEADERS wins over an auto-selected provider's headers
     try { const h = JSON.parse(penv.OPENAI_CUSTOM_HEADERS || 'null'); if (h && typeof h === 'object') headers = h; } catch { /* ignore */ }
 
-    const extra = (agent.extra_args_env && penv[agent.extra_args_env]) || '';
     const providerPinned = /model_provider\s*=/.test(extra);
     if (baseUrl && !providerPinned) {
       const P = 'geak_auto';
@@ -219,15 +213,7 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
         }
       }
     }
-    // Fail fast when autoconfig is ON, nothing is pinned, and yet no endpoint
-    // resolved: that means no key matched any provider_autoselect entry and no
-    // base_url was given, so the block above emitted NOTHING and codex silently
-    // falls back to its own ~/.codex/config.toml -- which does not exist in the
-    // containers GEAK runs in. The run then dies at the FIRST agent call, hours
-    // into a workflow, with an error that names neither the key nor the config.
-    // This is the exact shape hyperloom's .env filter produces when the key name
-    // is not allowlisted: GEAK_AGENT_BACKEND=codex gets through, the key does
-    // not. Raising here costs one line of startup and names the fix.
+    // Report missing provider setup before the first workflow agent call.
     if (!baseUrl && !providerPinned) {
       const names = (agent.provider_autoselect || [])
         .map((p) => p && p.key_env).filter(Boolean);
@@ -238,23 +224,14 @@ export function buildInvocation(agent, model, prompt, opts = {}) {
     }
   }
 
-  // codex thinking level. codex only knows none|low|medium|high|xhigh — 'max' is
-  // NOT one of them, so the generic "maximum thinking" has to be translated onto
-  // xhigh (same mapping as hyperloom's resolve_codex_reasoning_effort). Default is
-  // therefore xhigh; override via GEAK_CODEX_EFFORT, or pin through
-  // GEAK_CODEX_EXTRA_ARGS (appended after, so it wins). Emitted only when
-  // extra_args does not already set it.
-  if (agent.provider_autoconfig === 'codex') {
-    const extra0 = (agent.extra_args_env && penv[agent.extra_args_env]) || '';
-    if (!/model_reasoning_effort\s*=/.test(extra0)) {
-      const effort = codexEffort(penv.GEAK_CODEX_EFFORT);
-      if (effort) args.push('-c', `model_reasoning_effort=${effort}`);
-    }
+  // Reasoning effort still applies when provider auto-config is disabled.
+  if (isCodex && !/model_reasoning_effort\s*=/.test(extra)) {
+    args.push('-c', `model_reasoning_effort=${codexEffort(penv.GEAK_CODEX_EFFORT)}`);
   }
 
   // extra args (env only) — an escape hatch for build-specific flags
-  if (agent.extra_args_env && penv[agent.extra_args_env]) {
-    args.push(...String(penv[agent.extra_args_env]).split(/\s+/).filter(Boolean));
+  if (extra) {
+    args.push(...String(extra).split(/\s+/).filter(Boolean));
   }
 
   // env: agent.env + model endpoint (base_url routed to the agent's dialect env)

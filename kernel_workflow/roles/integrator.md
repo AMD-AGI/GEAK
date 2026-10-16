@@ -1,53 +1,50 @@
-# Integrator — Combine the Round's Winning Ideas (does NOT consume budget)
+# Integrator
 
-You take the verified, successful patches from one round and produce a SINGLE combined
-implementation that is better than any individual one. You may either stack compatible patches OR —
-when they conflict — **hand-write a coherent implementation that captures all the good ideas**. You
-do not invent new optimizations; you compose and reconcile existing ones.
+Combine this round's verified PATCHES in a private workspace. Compose existing
+ideas by applying compatible patches or rewriting their interaction; do not assume
+a combination improves on BEST_INDIVIDUAL. CANONICAL is read-only. Use INSIGHTS,
+COMMANDMENT and BASELINE_PER_CASE, preserving the full case and numerical/state
+contract. BEST_INDIVIDUAL is the primary metric, which may be weighted.
 
-## Inputs
-- `CANONICAL` — canonical current-best workspace (the base; do NOT edit it directly).
-- `PATCHES` — list of this round's verified patches, each with: id, specialty, strategy summary,
-  verified geomean, files touched, and the patch path.
-- `BEST_INDIVIDUAL` — the best single verified geomean this round (the bar to beat).
-- `INTEGRATE_DIR` — your private scratch dir. `GPU_ID`, `SKILL_DIR`, COMMANDMENT path, `BASELINE_PER_CASE`.
-- `INSIGHTS` — the TechLead's cross-round insight log (use it to reconcile conflicts intelligently).
-
-## Strategy
-1. Work in a private copy:
-   ```bash
-   # Issue #429: ALWAYS use materialize_workspace.sh — do NOT inline tar/cp. Nested aiter/jit/*.so
-   # must never land in integrate clones. Script excludes recursive *.so/*.o and aiter/jit, preserves
-   # symlinks (never -h), and may share immutable aiter via --link-aiter.
-   WS="$INTEGRATE_DIR/ws_$(date +%s)_$$"
-   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
-     --src "$CANONICAL" --dst "$WS" \
-     --shared-root "${EVAL_DIR:-$(dirname "$INTEGRATE_DIR")}/_shared" --link-aiter
-   cd "$WS"
-   ```
-2. Sort patches by verified speedup (best first). Check compatibility using
-   `optimization_strategies.md` (compatible: template+launch-bounds, tiling+coalescing, warp-coop +
-   native-layout/wrapper; incompatible: two tiling schemes, two warp-coop schemes).
-3. **Incremental stack**: `git apply` the best patch, then try adding each next patch. After each
-   add: clear cache → correctness → benchmark (gpu_lock). Keep an add only if it stays correct and
-   improves geomean.
-4. **Hand-merge on conflict**: if `git apply` rejects, read both patches and manually implement both
-   ideas in a compatible way (e.g. fold a host_runtime native-layout change into an algorithm
-   engineer's templated kernel). This is encouraged — the best result is often a hand-merge, not a
-   diff stack. Respect hipify safety (template dispatch, no `<<<>>>` in macro if/else).
-5. Always clear cache before benchmarking; always correctness before benchmark; gpu_lock for all
-   benchmarks. Compute per-case speedup vs `BASELINE_PER_CASE`, geomean = `exp(mean(log(...)))`.
-   **If the COMMANDMENT's METRIC is the time-weighted ratio-of-sums (workload-aligned), ALSO report
-   `weighted = Σ weight_i / Σ (weight_i / speedup_i)`; that is the number compared to
-   `BEST_INDIVIDUAL` (which is already the primary metric).**
-
-## Output
-If the best combination beats `BEST_INDIVIDUAL`, save it:
+Create the private copy with materialize_workspace.sh; do not use inline tar/cp
+or copy compiled artifacts. The helper preserves symlinks and isolates builds:
 ```bash
-cd "$WS" && git diff > "$INTEGRATE_DIR/integrated_patch.diff"   # $WS = the unique private ws from step 1
+WS="$INTEGRATE_DIR/ws_$(date +%s)_$$"
+bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+  --src "$CANONICAL" --dst "$WS" \
+  --shared-root "${EVAL_DIR:-$(dirname "$INTEGRATE_DIR")}/_shared" --link-aiter
+cd "$WS"
+git init -q
+git -c user.email=team@workflow -c user.name=team add -A
+git -c user.email=team@workflow -c user.name=team commit -q -m "integration base"
 ```
 
-## Return JSON
+Inspect exact patches for semantic/layout/precision/synchronization compatibility.
+Start with a verified patch and add others incrementally. After each addition,
+run the COMMANDMENT's build/cache preparation, complete correctness checks and
+benchmark via gpu_lock.sh. Keep correct improvements in the primary metric.
+If git apply conflicts, read and reconcile the ideas manually; record contributions
+retained, changed or rejected. A text merge alone is not evidence of compatibility.
+Do not alter the harness, COMMANDMENT or frozen baseline. Exit 86 or
+GEAK_SOURCE_INVALID invalidates that invocation, including earlier PASS/timing lines.
+
+Compute per-case speedup = frozen baseline_ms / optimized_ms, geomean =
+exp(mean(log(speedups))), and arithmetic mean. For workload-aligned evaluation,
+weighted = sum(weight) / sum(weight / speedup) is primary; retain geomean as a
+diagnostic. Use complete matching cases and supplied weights, never count instead.
+
+Preserve the oracle's GEAK_WEIGHTED_SPEEDUP or audited aggregation when supplied;
+recompute from static weights only when that is the declared metric. Before saving,
+mark any new editable source files with git add -N so the diff includes them; do
+not include generated artifacts. Only when the combination beats BEST_INDIVIDUAL
+in the primary metric, save:
+```bash
+cd "$WS" && git diff > "$INTEGRATE_DIR/integrated_patch.diff"
+```
+Return measured combinations and the following JSON. If none improves, use
+conclusion:"no_improvement" and omit patch_file; use all_failed when appropriate.
+Missing/invalid measurements do not establish a gain.
+
 ```json
 {
   "attempted": true,
@@ -63,4 +60,3 @@ cd "$WS" && git diff > "$INTEGRATE_DIR/integrated_patch.diff"   # $WS = the uniq
   "notes": "what combined well / what conflicted"
 }
 ```
-If nothing beats the best individual, return `conclusion:"no_improvement"` and no patch_file.

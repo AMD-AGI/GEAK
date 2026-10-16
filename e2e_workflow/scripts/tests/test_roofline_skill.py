@@ -1,18 +1,9 @@
-"""Unit tests for the `roofline` analysis skill (stdlib only; no pytest, no GPU, no model needed).
+"""CPU checks for roofline arithmetic, product lookup and missing evidence.
 
-Two things are locked here.
-
-1. **Calibration against a real run.** The numbers below are the measured profile of
-   Qwen3.5-35B-A3B-FP8 on gfx950 / vLLM / TP1 / isl-osl 1k / conc 64 — a run whose outcome we know.
-   The skill must reproduce the call it would have made:
-     fused_moe   26.45% GPU, ~88% of roofline -> saturated, ~1.02x attainable  (measured: 1.047x
-                 isolated, -0.064% e2e -> the budget spent there was wasted)
-     paged_attn   8.86% GPU, ~18% of roofline -> underperforming, >1.4x        (measured: 1.56x isolated)
-   The load-bearing assertion is `test_rankings_disagree`: ranking by pct_gpu_time puts MoE first,
-   ranking by roofline headroom puts attention first. That inversion is the entire point of the skill.
-
-2. **Degradation is non-fatal.** Every level of the SKILL.md ladder returns a value instead of raising,
-   so a bad peak table / unmodellable op / impossible result / missing counter cannot fail a run.
+Historical Qwen profile operands provide repeatable numerical scenarios, not
+calibration of an attainable ceiling. Conditional model ranking can differ from
+ranking by summed GPU time; neither establishes a causal optimization benefit.
+Unknown products, work models and counters must remain explicit.
 """
 import importlib.util
 import os
@@ -47,7 +38,9 @@ ATTN = dict(batch=64, isl=1024, osl=1024, kv_heads=2, q_heads=16, head_dim=256,
 
 
 def _peaks():
-    return rt.load_peaks(PEAKS_MD, "gfx950")
+    # Retain the arithmetic fixture under an explicit MI355X specification
+    # assumption; this does not establish the historical run's product identity.
+    return rt.load_peaks(PEAKS_MD, "gfx950", product="mi355x")
 
 
 def _moe_metrics(all_experts=False):
@@ -93,7 +86,7 @@ class TestPeaks(unittest.TestCase):
             "torch.half": 2.5e15,
             "bfloat16": 2.5e15,
             "float16": 2.5e15,
-            "float32": 1.57e14,
+            "float32": 1.573e14,
         }
         for dtype, peak in expected.items():
             with self.subTest(dtype=dtype):
@@ -135,8 +128,9 @@ class TestPeaks(unittest.TestCase):
     def test_bf16_equals_fp16_on_every_arch_that_tabulates_flops(self):
         """peaks.md's own load-bearing cross-check: the matrix core runs both at the same rate
         (MFMA on CDNA, WMMA on RDNA), so an inequality means the compute axis is inflated."""
-        for gfx in ("gfx942", "gfx950", "gfx1151"):
-            p = rt.load_peaks(PEAKS_MD, gfx)
+        for gfx, product in (("gfx942", None), ("gfx1151", None),
+                             ("gfx950", "mi350x"), ("gfx950", "mi355x")):
+            p = rt.load_peaks(PEAKS_MD, gfx, product=product)
             self.assertEqual(p["flops"]["bf16"], p["flops"]["fp16"], gfx)
             
     def test_r9700_peaks_require_product_identity(self):
@@ -166,9 +160,8 @@ class TestPeaks(unittest.TestCase):
         self.assertIsNone(rt.peak_flops_for(p, "fp4"))
         self.assertNotIn("fp4", p["flops"])
 
-    def test_unknown_product_identity_keeps_instinct_tables(self):
-        """gpu_identity reports target=unknown for every card except an exact R9700. Passing that
-        straight through as `product` must still find the ISA-keyed CDNA tables, not derive."""
+    def test_identity_selects_instinct_product_without_deriving(self):
+        """The same ISA selects different AMD specifications through the identity producer."""
         original = rt.derive_peaks_from_props
 
         def no_derive(device=0):
@@ -176,17 +169,43 @@ class TestPeaks(unittest.TestCase):
 
         rt.derive_peaks_from_props = no_derive
         try:
-            for gfx, name, cu in (("gfx950", "AMD Instinct MI355X", 256),
-                                  ("gfx942", "AMD Instinct MI300X", 304)):
-                with self.subTest(gfx=gfx):
+            for gfx, name, cu, target, bf16 in (
+                    ("gfx950", "AMD Instinct MI350X", 256, "mi350x", 2.3e15),
+                    ("gfx950", "AMD Instinct MI355X", 256, "mi355x", 2.5e15),
+                    ("gfx942", "AMD Instinct MI300X", 304, "unknown", 1.31e15)):
+                with self.subTest(product=name):
                     identity = _identity(gfx, name, cu)
-                    self.assertEqual(identity["target"], "unknown")
+                    self.assertEqual(identity["target"], target)
                     p = rt.resolve_peaks(PEAKS_MD, identity["gfx"], product=identity["target"])
-                    self.assertEqual(p, rt.load_peaks(PEAKS_MD, gfx))
+                    self.assertEqual(rt.peak_flops_for(p, "bf16"), bf16)
                     self.assertEqual(p["source"], "table")
                     self.assertEqual(p["confidence"], "high")
         finally:
             rt.derive_peaks_from_props = original
+
+    def test_gfx950_requires_a_matching_product_and_retains_provenance(self):
+        from unittest.mock import patch
+
+        with patch.object(rt, "derive_peaks_from_props", side_effect=AssertionError("must not probe")):
+            self.assertIsNone(rt.resolve_peaks(PEAKS_MD, " GFX950 "))
+            self.assertIsNone(rt.resolve_peaks(PEAKS_MD, " gfx1201 "))
+            self.assertEqual(rt.resolve_peaks(PEAKS_MD, " GFX950 ", product="mi350x")["product"], "mi350x")
+            for product in (None, "unknown", "mi350", "r9700"):
+                with self.subTest(product=product):
+                    self.assertIsNone(rt.load_peaks(PEAKS_MD, "gfx950", product=product))
+                    self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx950", product=product))
+            for product, fp8, fp4, fp32, fp64 in (
+                    ("mi350x", 4.6e15, 9.2e15, 1.442e14, 7.21e13),
+                    ("mi355x", 5.0e15, 1.01e16, 1.573e14, 7.86e13)):
+                p = rt.resolve_peaks(PEAKS_MD, "gfx950", product=product)
+                self.assertEqual(p["product"], product)
+                self.assertEqual(p["hbm_bw_bytes_s"], 8e12)
+                self.assertEqual(p["cu"], 256)
+                for dtype, peak in (("fp8", fp8), ("fp4", fp4), ("fp32", fp32), ("fp64", fp64)):
+                    self.assertEqual(rt.peak_flops_for(p, dtype), peak)
+                self.assertTrue(p["source_url"].endswith(f"/mi350/{product}.html"))
+                self.assertEqual(p["source_checked"], "2026-10-16")
+                self.assertIsNone(rt.load_peaks(PEAKS_MD, "gfx942", product=product))
 
     def test_identity_product_still_scopes_the_r9700_table(self):
         r9700 = _identity("gfx1201", gpu_identity.R9700_MARKETING_NAME, 64)
@@ -420,6 +439,10 @@ class TestHeadScoping(unittest.TestCase):
         self.assertEqual(rt.bytes_from_counters({"FETCH_SIZE": 1024.0, "WRITE_SIZE": 512.0}),
                          1536.0 * 1024)
         self.assertEqual(rt.flops_from_counters({"MfmaFlopsBF16": 42.0}), 42.0)
+        fp8 = {"SQ_INSTS_VALU_MFMA_MOPS_F8": 2.0}
+        self.assertIsNone(rt.flops_from_counters(fp8))
+        for factor in (0, -1, float("inf"), float("nan"), "unknown"):
+            self.assertIsNone(rt.flops_from_counters(fp8, mfma_flops_per_mop_f8=factor))
         self.assertEqual(rt.flops_from_counters({"SQ_INSTS_VALU_MFMA_MOPS_F8": 2.0},
                                                 mfma_flops_per_mop_f8=512.0), 1024.0)
 

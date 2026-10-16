@@ -95,12 +95,12 @@ const harness = (retry, agentImpl, inReserve = false) => {
   const calls = { agent: 0 };
   const logs = [];
   const { safeAgent, ABANDONED_RUNS } = new Function(
-    'withProcessSafety', 'ablEffortFor', 'ablEvent', 'agentTimeoutFor', 'agent', 'log', 'ABL', 'tlAgent',
+    'withProcessSafety', 'agentTimeoutFor', 'agent', 'log', 'tlAgent',
     'LLM_TL', 'AGENT_TIMEOUT_RETRY', 'atReserveFloor',
     `${loopSrc}\nreturn { safeAgent, ABANDONED_RUNS };`)(
-    (p) => p, () => null, () => {}, () => 5,
+    (p) => p, () => 5,
     (...a) => { calls.agent++; return agentImpl(...a); },
-    (m) => logs.push(m), () => false, () => null, { nested: [] }, retry, () => inReserve);
+    (m) => logs.push(m), () => null, { nested: [] }, retry, () => inReserve);
   return { safeAgent, ABANDONED_RUNS, calls, logs };
 };
 const never = () => new Promise(() => {});

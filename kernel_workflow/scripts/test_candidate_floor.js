@@ -84,7 +84,7 @@ ok(knobs({ progress_delta: 'nonsense' }).PROGRESS_DELTA === o.MIN_IMPROVE,
 console.log('\n# nothing was left behind on a hard-coded 1.0');
 // A missed site means a lowered floor applies to only part of the pipeline -- e.g. the engineer saves
 // a 0.7x patch that the `verified` filter then drops, which looks exactly like the stall it removes.
-ok(/Save best_patch\.diff[^\n]*geomean>\$\{CANDIDATE_FLOOR_TXT\}/.test(src),
+ok(/Save best_patch\.diff[^\n]*primary speedup exceeds \$\{CANDIDATE_FLOOR_TXT\}/.test(src),
    'the Optimize prompt tells the engineer to save above CANDIDATE_FLOOR');
 ok(/trustworthyBelowBaseline = eng && eng\.status !== 'failed' && !\(primSpeedup\(eng\) > CANDIDATE_FLOOR\)/.test(src),
    'the harvest shortcut suppresses against CANDIDATE_FLOOR');

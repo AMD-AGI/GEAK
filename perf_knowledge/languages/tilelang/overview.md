@@ -5,7 +5,7 @@ gens: [gfx90a, gfx942]
 dtypes: [fp16, bf16]
 regimes: [both]
 status: competitive
-updated: 2026-06-08
+updated: 2026-10-16
 sources:
   - https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html
   - https://github.com/tile-ai/tilelang
@@ -15,16 +15,10 @@ sources:
 
 # TileLang overview
 
-## TL;DR
-TileLang (`tile-ai/tilelang`) is a Python tile DSL (built on a TVM/TIR backend) that compiles concise
-tile programs to AMD via LLVM IR. On MI300X (CDNA3/gfx942) it is **competitive**: FlashAttention fwd
-~**1.53× Triton** and ~**2.7× PyTorch**, and FlashMLA reaches **~parity with hand-tuned AITER asm** while
-beating Triton ~1.98× (vendor/project-reported). Its strength is editability-with-near-asm-performance in
-~80 lines of Python. Its weakness (per HipKittens, arXiv 2511.08083): it lacks abstractions for several
-AMD constraints and leans on CUTLASS/CK backend calls — so it is **CDNA3-validated**, not yet a CDNA4
-peak path. Choose TileLang for fast iteration on attention; for the absolute ceiling use AITER asm or
-[../asm_mfma/](../asm_mfma/overview.md). See [primitives.md](primitives.md), [autotune.md](autotune.md),
-[vs_triton.md](vs_triton.md), [pitfalls.md](pitfalls.md).
+TileLang provides Python tile operations with generated backend code. AMD support
+and lowering vary by release and target. Use [primitives](primitives.md) and
+[autotuning](autotune.md) for implementation details; published examples are scoped
+comparisons, not a rule that one DSL or assembly path is fastest.
 
 ## Core concepts — the 3-level abstraction
 TileLang layers the API so beginners use built-in primitives and experts drop to low-level control:
@@ -56,20 +50,17 @@ Copy support) and emits the LDS swizzle for AMD's bank-conflict rules without co
 - **Different bank-conflict rules** → a different swizzle strategy, applied automatically (no code diff
   vs the Hopper version of the same kernel).
 
-## Pitfalls (summary — full list in [pitfalls.md](pitfalls.md))
-- **CDNA3-only** today: HipKittens notes TileLang lacks abstractions for flexible tile sizing under
-  register pressure, thread-block scheduling, and cache-aware grid ordering, and uses **32×32×16 MFMA /
-  `buffer_load_dwordx4` / XCD swizzle** less than peak AMD asm. Treat MI350/CDNA4 perf as unproven.
-- Reported single-attention-kernel **257 TFLOPs on MI300X** (HipKittens) — well below peak; good for
-  iteration, not the ceiling.
-- Depends on **CUTLASS/CK** backend calls for some paths.
+## Compatibility
+
+Check the actual backend, target and emitted operations; historical measurements
+do not define current compiler coverage. See [pitfalls](pitfalls.md).
 
 ## Verify
 ```bash
-pip install tilelang        # validated: ROCm 7.0.1, PyTorch 2.9.0, Triton 3.0.0, TileLang 0.1.7
+python -m pip show tilelang  # inspect the installed version; use its ROCm build instructions
 # run the example, compare latency vs Triton/PyTorch at the same shape; check the autotuned config
 ```
-Greedy temp=0 parity vs a reference attention; isolated kernel bench vs Triton at identical b/h/s/d.
+Use the task's numerical/state checks and matching unprofiled operation timing.
 
 ## Sources
 - Quickly Developing Powerful Flash Attention Using TileLang on AMD MI300X (ROCm Blog, 2026-01-20 — 1.53× Triton, 2.7× PyTorch, 3-level API, MI300X-vs-Hopper notes, ROCm 7.0.1/TileLang 0.1.7): https://rocm.blogs.amd.com/ecosystems-and-partners/rocm-tilelang-kernel/README.html

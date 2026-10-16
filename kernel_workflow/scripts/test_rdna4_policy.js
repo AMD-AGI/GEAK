@@ -107,6 +107,14 @@ function mustInclude(hay, needle, msg) {
 }
 
 (async () => {
+  for (const target of ['mi350x', 'mi355x']) {
+    const detected = await run('gfx950', 'gfx950', {
+      expectedTarget: 'unknown', deviceTarget: target,
+      deviceName: `AMD Instinct ${target.toUpperCase()}`, physicalCuCount: 256,
+    });
+    const prompt = detected.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt;
+    mustInclude(prompt, `- DEVICE_TARGET: ${target}`);
+  }
   const { prompts } = await run('gfx1201', 'gfx1201', {
     deviceTarget: 'r9700', deviceName: 'AMD Radeon AI PRO R9700',
     physicalCuCount: 64, expectedTarget: 'r9700',
@@ -134,6 +142,20 @@ function mustInclude(hay, needle, msg) {
   }
   if (unknownAnalyze.includes('calibrated-r9700')) {
     throw new Error('gfx1201 architecture alone was promoted to calibrated R9700');
+  }
+  const unpinnedR9700 = await run('gfx1201', 'gfx1201', {
+    expectedTarget: 'unknown', deviceTarget: 'r9700',
+  });
+  mustInclude(unpinnedR9700.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt,
+    '- DEVICE_TARGET: r9700');
+  const unknownInstinct = await run('gfx950', 'gfx950', {
+    deviceTarget: 'unknown', budget: 1,
+    planDirections: [{ id: 'roof', title: 'Use roofline peak bandwidth', prompt: 'Reach 90% of peak' }],
+  });
+  mustInclude(unknownInstinct.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt,
+    '- ROOFLINE_STATUS: unknown_peaks');
+  if (unknownInstinct.result.stopped_by !== 'all_directions_filtered_unknown_peaks') {
+    throw new Error('unidentified gfx950 retained a direction based on unknown peaks');
   }
 
   await run('gfx1201', 'gfx1201', { omitGfx: true }).then(
