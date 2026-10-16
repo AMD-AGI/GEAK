@@ -161,9 +161,9 @@ a separately specified endpoint measurement; this port does not establish them.
 
 Source and build artifacts are hashed by streaming. The metadata needed for
 semantic checks stays bounded; oracle bodies have a separate streaming check.
-Neither validation nor the fixture mount plan grants execution or measurement
-authority. Runtime ownership, final measurement, and the public optimizer switch
-remain separate work; this addition does not launch or resume a task.
+This reader and its fixture mount plan do not launch or resume a task.
+Generated-task execution and final paired measurements still need their runtime
+adapter; see [current support](../../geak_evo/README.md#current-support).
 
 Source provenance (under `research-collab/codex/`):
 

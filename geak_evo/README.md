@@ -1,13 +1,30 @@
 # The GEAK-EVO engine
 
-This package contains the existing evolutionary search code, grouped by responsibility.
-The Hyperloom adapter is a separate feature. Importing this package does not
-start an engineer, reserve a GPU, or change a saved run.
+This package contains the evolutionary search and its native task adapter.
+Importing it starts no work and changes no saved run.
+
+## Current support
+
+This is a code-review version. Source and CPU checks do not establish model,
+GPU or full Hyperloom readiness. The host must supply and qualify its model,
+workspace, evaluator and process-ownership services; the bootstrap wheel has
+no standalone EVO runner.
+
+| Path | Current support |
+| --- | --- |
+| [Native search and final measurements](../docs/evo/admitted-command.md) | Implemented with the existing owner and original budget. Numeric export supports native-v2 `task-report-v1` graph samples and phase cache receipts. |
+| [Common optimizer dispatcher](../docs/evo/dispatch-adapter.md) | Native EVO adapter and owner-entry patch implemented; installation and live validation remain. |
+| [Hyperloom-generated tasks](../docs/evo/evaluation-port.md#generated-geak-tasks) | Task reader implemented; the result adapter for their paired timing is still needed. |
+| [Archive export](../docs/evo/archive.md) | Exact sources, ideas, measurements and retained research statements in a deterministic folder view. Full runtime resume also needs the original store and pinned dependencies. |
+
+## Code map
 
 | Start here | What it does |
 | --- | --- |
 | [loop.py](loop.py) | Save a step, run it, and continue from saved state |
 | [host.py](host.py) | Compose the search with existing admitted GEAK execution services |
+| [command.py](command.py), [dispatch.py](dispatch.py) | Run an admitted task and connect it to the common dispatcher |
+| [result.py](result.py) | Export the selected source and matching measurements |
 | [planner/context.py](planner/context.py) | Give the planner the current ideas, code and evidence |
 | [planner/native.py](planner/native.py) | Turn a planner reply into checked work |
 | [engineer/assignment.py](engineer/assignment.py) | Prepare an engineer's source, budget and task |
@@ -33,14 +50,10 @@ establish the gain against the correct baseline. Missing evidence stays missing.
 
 ## Runtime wiring
 
-The host supplies model services, GPU ownership, workspace preparation,
-evaluation and process cleanup. The package uses those existing services;
-there is no second device manager or serving stack here.
-The host must also verify the loaded runtime code and permission to settle a
-call, as described in the [planner notes](../docs/evo/planner-port.md).
-The [shared host](../docs/evo/shared-host.md) now constructs the cleaned native
-search from those explicit services. It keeps the existing Arena native-v2
-callback protocol; installation and live qualification remain separate.
+The [shared host](../docs/evo/shared-host.md) constructs the search using the
+existing Arena native-v2 callbacks. It reuses the host's GPU ownership, evaluation
+and process cleanup. The host also checks the loaded runtime code and permission
+to settle a call; see the [planner notes](../docs/evo/planner-port.md).
 
 `EvolutionLoop(store, campaign_id, ...)` reads an existing campaign. Its
 constructor starts no work. Recovery uses the saved operation identity and
@@ -59,13 +72,9 @@ work; saved instruction references must keep their original bytes. The manifest
 also records retired guidance. Native adapter instructions are versioned with
 their source code separately.
 
-The source move preserves the record formats. References to older runtime
-files still need their exact original bytes and a compatible host; copying
-only this package does not qualify a historical run for a new runtime.
-Saved archives can be read across the two layouts. In-flight operation folders
-also pin their evaluator, backend and instructions. Those folders must resume
-with the original runtime or a separately checked migration. New code must not
-rewrite their pins to make them pass.
+Saved record formats remain readable. In-flight operations pin their evaluator,
+backend and instructions and require the original runtime or a checked migration.
+Never rewrite those pins to force resume.
 
 ## Check a change
 
@@ -76,10 +85,9 @@ PYTHONPATH="$PWD" python3 -m unittest discover -s tests/geak_evo -t tests/geak_e
 node --test tests/geak_evo/test_engineer_entry.mjs
 ```
 
-These checks use CPU fixtures. They do not establish model or GPU readiness.
-Comparisons with the pre-port source are skipped unless `GEAK_EVO_ORIGINAL_SRC`
-and `GEAK_EVO_OCT15_SOURCE` point to that saved source. The regular CI run does
-not provide those paths; the cleanup review also ran with both references.
+These checks use CPU fixtures. Reference-gated compatibility checks can skip in
+ordinary CI. A compatibility claim requires all three source references and zero
+skips, as listed in the [cleanup validation notes](../docs/evo/cleanup.md#validation-and-remaining-work).
 The [planner](../docs/evo/planner-port.md),
 [engineer](../docs/evo/engineer-port.md) and
 [evaluation](../docs/evo/evaluation-port.md) notes record source compatibility

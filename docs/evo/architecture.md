@@ -40,9 +40,10 @@ geak_evo/
   evaluate/        Use the shared correctness and timing tools
 ```
 
-The archive stores exact source versions and separate records for ideas and
-measurements. Every measurement points to its program, test cases, hardware,
-baseline, units, and method. Parent and donor links explain where code came from.
+The [archive](archive.md) stores exact source versions, ideas and measurements.
+Measurements retain their program, test cases, hardware, units and method;
+comparisons also identify their baseline. Missing context stays explicit.
+Parent and donor links record source ancestry.
 Unfinished ideas and slower correct programs remain distinct from the selected
 result. Large traces stay in artifact files, with links from concise records.
 
@@ -77,11 +78,6 @@ final choice, measures both ORIGINAL and the selected program, and exports the
 result. It uses the owner's existing budget and saved operation IDs for recovery.
 The caller must leave time for final measurements within the original deadline.
 
-Numeric export currently supports native-v2 tasks with published graph samples
-and cache receipts. The [task reader](evaluation-port.md#generated-geak-tasks)
-can also read Hyperloom's generated tasks, but their paired timing evidence still
-needs a result adapter. Reading a task alone does not make it runnable here.
-
 The kernel lane can dispatch an optimizer command directly with `--task` and
 `--out` in a separate clone. Before adopting its commit, the lane checks the
 process outcome, matching baseline/candidate measurements, required improvement,
@@ -90,13 +86,10 @@ blocks further subprocess work. This path needs the standalone runtime's
 `runProcess`; the Claude Code Workflow tool does not provide it.
 
 The [native EVO adapter](dispatch-adapter.md) connects that dispatcher to the
-admitted command. A small patch wires the existing owner entrypoint; it still
-needs installation and live qualification. The command uses supplied services;
-the bootstrap wheel has
-no standalone EVO runner. These source paths have CPU checks but have not yet
-completed a model/GPU search together or returned a validated Hyperloom workload
-improvement. A deployment must pin and qualify the actual search, engineer,
-evaluator and instruction versions it uses.
+admitted command through the existing owner entrypoint. See
+[current support](../../geak_evo/README.md#current-support) for supported task
+formats and remaining live qualification. Each deployment must pin and qualify
+its actual search, engineer, evaluator and instruction versions.
 
 ## Code to edit today
 

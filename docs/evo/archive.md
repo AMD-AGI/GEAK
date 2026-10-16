@@ -6,10 +6,10 @@ Do not maintain a second best-program log by hand.
 
 ## What to save
 
-The native host captures source before evaluation and retains the evaluation output.
-At engineer settlement, the native collector supplies every trial it captured.
-The engine registers each exact source, including slower, failed and unfinished
-implementations. A missing snapshot stays an explicit retention error.
+The native host snapshots source before evaluation. At engineer settlement, the
+collector supplies its retained trials, including slower, failed and unfinished
+implementations. Missing snapshots stay explicit errors. An unfinished episode
+may not yet have a complete trial index.
 
 | Record | Required meaning |
 | --- | --- |
@@ -27,11 +27,6 @@ and what to try next. Link existing evidence instead of copying logs. Record
 unknowns explicitly. A slow implementation does not by itself refute an idea.
 Keep the original question separate from the implementation report. Parent and
 donor links describe source ancestry; they do not prove a useful contribution.
-
-The native evaluation path already snapshots before testing. The outer trial
-index is populated after the engineer settles. It cannot recover a source that
-an external collector never saved, and it does not guarantee a complete view of
-an unfinished episode. Ordinary GEAK's old best-patch memory is not this archive.
 
 ## Browse a saved store
 
@@ -62,40 +57,35 @@ view/
   EXPORT.json                journal identity and exported file hashes/modes
 ```
 
-Export one campaign store at a time. Current direction revisions must carry
-forward their `archive_card_ref` to retain the current idea link in this view;
-older cards and raw evidence remain in the store.
+Start with `index.csv`, then open a program's `program.json`. Its `research_files`
+links lead to the investigation, current direction review and source-specific
+claims. Use `measurements.csv` and `observations/` for the measured results.
+Check the program/source IDs: a direction review describes its current tip, and
+an investigation's strategy need not describe every intermediate trial.
 
-This view is derived from committed records. The same store snapshot produces
-the same files and modes; an altered or stale destination is rejected. Use a new output
-directory for a newer journal. A journal timestamp is when a record was saved,
-not when code was discovered or measured. The timeline copies host choices;
-it does not rank incomparable measurements or invent a speedup for a failed test.
-Several outcomes saved in one checkpoint remain separate; a mixed result cannot
-hide a failed test behind a passing one.
+Missing explanations stay null. Long strategies have a marked 4,096-character
+preview plus the full exact UTF-8 text in `attempts/<hash>.strategy.txt`, its
+SHA-256, and the original artifact/field reference. Claims and corrections come
+from the saved campaign head. These are attributed statements, not new validation;
+blinded reviewers must exclude them as required by their study's review policy.
+Conversations and bulk reports are not copied.
 
-Each program and idea links to its investigation and current direction review.
-An investigation's strategy names the source reported by the collector; it does
-not describe every intermediate trial. Missing explanations stay null. Long
-strategy fields use an explicitly marked 4,096-character prefix and retain the
-exact artifact/field reference. The full exact UTF-8 text is in the linked
-`attempts/<hash>.strategy.txt` file, with its SHA-256 recorded beside the preview.
-No conversation or bulk report is copied.
-Direction notes remain attributed interpretations. Claim files preserve exact
-records and corrections from the saved campaign head; the export does not
-reassess their truth or measurement authority.
-The export includes attributed agent statements; blinded reviewers must exclude
-those contents as required by their study's review policy.
+Export one campaign at a time to a new directory for each journal snapshot.
+The same snapshot produces identical files and modes; stale or changed output
+is rejected. Current direction revisions must retain `archive_card_ref` for the
+current idea link; older cards remain in the store.
+
+Journal timestamps record saving, not discovery or measurement. `timeline.json`
+shows host choices, not a newly calculated best-speedup curve. Mixed test outcomes
+remain separate; failed or incomparable measurements do not become improvements.
 
 ## Continue an idea
 
-Restore the candidate's exact source and read its idea, attempt and trial records.
+Restore the candidate's exact source and read its linked research and trials.
 A reviewed intermediate trial can start a fresh direction through the host's
-normal parent checks. Retaining
-a source does not promote it to a verified best result.
+parent checks. Retention alone does not promote it to a verified best result.
 
-The exported source and included observation files are portable; the export is
-not a complete live-run backup.
-Keep the original store and pinned task, harness, runtime and evidence files.
-Full resume still needs those dependencies and compatible host services. Never
-rewrite historical pins to make a changed runtime appear equivalent.
+The export is portable research material, not a complete live-run backup. Keep
+the original store and pinned task, harness, runtime and evidence files. Full
+resume needs those dependencies and compatible host services; never rewrite
+historical pins to make a changed runtime appear equivalent.

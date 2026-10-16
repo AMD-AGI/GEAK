@@ -58,10 +58,10 @@ work, a failed baseline or changed campaign gives empty `final_patch` and null
 metrics. A passing result retains exact source, measurements and provisional
 flags through `export_final_result`.
 
-The implemented numeric route is an admitted native-v2 task with published
-`task-report-v1` graph samples and phase cache receipts. Generated paired tasks
-and the generic dispatcher's task/result JSON are not yet adapted here. The
-result's `improved` means measured speedup above 1; the common lane still gates
+The [native dispatcher adapter](dispatch-adapter.md) converts the common
+task/result files around this callable. See [current support](../../geak_evo/README.md#current-support)
+for the supported timing formats. The result's `improved` means measured speedup
+above 1; the common lane still gates
 writeback against `incumbent_speedup * (1 + min_improvement)` and performs its
 existing final validation. Exit status 0 is not final framework acceptance.
 

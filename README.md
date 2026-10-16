@@ -6,12 +6,10 @@ develops them over many rounds, and can combine earlier work.
 
 ![GEAK and GEAK-EVO search](docs/images/geak-vs-geak-evo.svg)
 
-The `evo` branch is the home for the production cleanup. Existing GEAK commands
-stay available. The [EVO engine](geak_evo/README.md) connects to supplied model
-and execution services and can run an admitted native task through checked
-result export. The common dispatcher and its native EVO adapter are implemented;
-their prospective installation and live Hyperloom validation remain. The bootstrap
-wheel does not provide a standalone EVO runner.
+The `evo` branch is available for code review. Existing GEAK commands remain.
+The native EVO search, result exporter and dispatcher adapter are implemented
+and have CPU tests; installation and live Hyperloom validation remain.
+See [current support](geak_evo/README.md#current-support) before running EVO.
 
 ## Start here
 
@@ -23,6 +21,7 @@ wheel does not provide a standalone EVO runner.
 | Use GEAK from Hyperloom | [Task and result interface](interface/run_e2e.md) |
 | Understand or change EVO | [Architecture](docs/evo/architecture.md) |
 | Run EVO with an existing native owner | [Admitted task command](docs/evo/admitted-command.md) |
+| Browse saved programs, ideas and measurements | [Archive guide](docs/evo/archive.md) |
 | Find existing examples and results | [GEAK guide](docs/reference/geak-guide.md) |
 
 Build and test the original kernel in its GPU environment before optimizing it.

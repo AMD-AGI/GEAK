@@ -1,9 +1,8 @@
 # Cleanup on the evo branch
 
-This branch organizes GEAK and the existing EVO engine for continued development.
-The engine now connects to supplied execution services. An admitted native task
-can run through search, final measurements and checked result export. The full
-EVO dispatcher adapter is implemented; installation and live validation remain.
+This branch organizes GEAK and the EVO engine for continued development.
+See [current support](../../geak_evo/README.md#current-support) for execution paths
+and readiness; this page records the cleanup's behavior changes.
 
 ## Changes
 
