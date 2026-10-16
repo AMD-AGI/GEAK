@@ -73,7 +73,7 @@ records, and return an error without another search step or a winner. These are
 source and CPU results; this entry has not been installed or qualified in a live
 run.
 
-Numeric support remains limited to admitted native-v2 `task-report-v1` graph
-measurements with phase cache receipts. Real generated paired tasks still need
-their existing internal baseline-leg reader; the adapter does not manufacture
-a native contract for them.
+Numeric support covers admitted native-v2 `task-report-v1` graph measurements
+and [generated raw paired reports](evaluation-port.md#generated-paired-results).
+Both require their existing admitted owner and actual producer evidence; the
+adapter does not manufacture a task contract or native report.

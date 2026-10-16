@@ -105,10 +105,12 @@ def _configuration(reference, store, evaluator, budget):
           and evaluator.root == Path(native["evaluation_root"])
           and evaluator.artifact_root == Path(native["artifact_root"]), "evaluator differs from native admission")
     protocol = evaluator.contract.get("report_contract", {}).get("published_protocol", {})
-    _need(evaluator.contract["schema"] == "geak-arena-native-operator-v2"
-          and protocol.get("schema") == "geak-published-task-protocol-v1"
-          and protocol.get("report_format") == "task-report-v1" and protocol.get("private_cache_scope") == "phase",
-          "command currently supports admitted native task-report-v1 with phase cache receipts")
+    published = (evaluator.contract["schema"] == "geak-arena-native-operator-v2"
+                 and protocol.get("schema") == "geak-published-task-protocol-v1"
+                 and protocol.get("report_format") == "task-report-v1" and protocol.get("private_cache_scope") == "phase")
+    generated = (evaluator.contract["schema"] == "geak-arena-generated-task-v1"
+                 and evaluator.contract["report_contract"].get("protocol") == "geak-generated-task-paired-report-v1")
+    _need(published or generated, "command requires a supported admitted raw timing report")
     final = config["final_measurements"]
     _need(set(final) == {"baseline_seconds", "selected_seconds"}
           and all(type(value) in (int, float) and math.isfinite(value) and value > 0

@@ -69,13 +69,16 @@ collection receipts before propagating interruptions; its source hash differs
 from the frozen version. New installations must admit that exact version.
 Saved operations keep their original authenticated runtime.
 
-Numeric export currently supports published `task-report-v1` graph measurements
+Numeric export supports published `task-report-v1` graph measurements
 with phase cache receipts. It checks the actual report/request/phase hashes,
 derives each mean from raw samples, and matches observed timer, replay-state
 checks, seeded cache manifests and empty cache paths. Unsupported, missing or
-incompatible timing evidence yields null metrics and no final patch. Generated
-paired reports need their own internal baseline-leg reader; two candidate timing
-vectors cannot replace that pairing.
+incompatible timing evidence yields null metrics and no final patch.
+
+Generated tasks use [their raw paired reader](evaluation-port.md#generated-paired-results).
+The selected evaluation supplies both the external baseline leg and candidate
+leg. The separate ORIGINAL evaluation remains a reference; its candidate timing
+is never substituted for the selected evaluation's internal baseline.
 
 The supported published `evaluation_contract.validate_report` derives each
 scalar as `math.fsum(samples) / benchmark_iterations`. The host's

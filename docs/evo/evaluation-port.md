@@ -174,3 +174,42 @@ Source provenance (under `research-collab/codex/`):
 The eleven imported validator function bodies match that source. The projection
 matches its original output for complete input; missing or conflicting input
 raises instead of inventing metadata.
+
+
+## Generated paired results
+
+`evaluate.generated_report.read_generated_report` reads the existing owner
+collection's bytes. It imports no task code and starts no work. It recomputes
+full-case results from the actual raw harness records: parent request, child
+starts/exits, source observations, signatures, correctness, 50 samples per leg,
+upper-middle sample reduction, separate replicate medians and adaptive stopping.
+Missing records or inconsistent derived scores cannot supply a result.
+
+The command and `result.export_final_result` support this route. For generated
+tasks the selected evaluation's **internal baseline/candidate pair** supplies
+the ratio. The separate ORIGINAL evaluation remains a checked reference; its
+candidate-side timing is not used as the paired baseline. The external baseline
+is identified by its protected closure and resolved-file observations. The
+admitted editable source ID is retained separately and does not name that
+external implementation.
+
+Raw timer, graph fallback, cache, compile and dispatch details remain in the
+paired score. Export additionally requires matching actual timer/cache settings
+across both legs and replicates, and the ORIGINAL reference. This prospective
+comparability check is stricter than merely parsing a valid harness report.
+A matching wall fallback remains labeled `wall`; it is never graph evidence.
+Cases and replications are not pooled with native-v2 graph means. All exported
+measurement/custody/reward/framework-acceptance flags remain false.
+
+This ports the existing generated observer (`5eb07dd9`) and its producer-shaped
+CPU tests, replacing filesystem reads with the owner's retained byte map. Byte
+identities and protected metadata are rechecked; the source ID binds recorded
+executable modes. The existing owner still checks fixture/alias preparation and
+physical settlement. CPU composition and parsing retained K6 producer output
+establish reader compatibility, not a new GPU run or workload acceptance.
+
+Retained source provenance under `research-collab/codex/`:
+
+- `hyperloom_generated_task_native_protocol_source_20261012_v1/source/observer/generated_task_observations.py`, SHA256 `5eb07dd9fdd105c95c9615f84c1f233ef60ef23c7187e59da37d200df2e4d98b`.
+- `raw_harness_evidence_source_20261012_v1/source/harness_lib.py`, SHA256 `5bb5f4496126a12af85be69dbc9a8393070a66c3ee6b725bdd862c129cfb79a7`.
+- `raw_harness_evidence_source_20261012_v1/source/leg_runner.py`, SHA256 `0959dccc59dd0d1bd07963761223b9847280ae4f4921b19f93bb07e47f6b0953`.

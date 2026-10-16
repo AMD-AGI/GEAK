@@ -122,6 +122,57 @@ def _published_timing(request, host, artifacts, assessed):
                           "native/performance/empty-cache-receipt.json")}}
 
 
+def _generated_timing(request, host, artifacts, assessed):
+    """Recompute the generated harness's internal baseline/candidate pair."""
+    from .evaluate.generated_report import read_generated_report
+
+    prefix = "observer/"
+    source = {row["path"]: row["blob_id"] for row in request["source"]["files"]}
+    observed = read_generated_report(request["contract"],
+        {name[len(prefix):]: raw for name, raw in artifacts.items() if name.startswith(prefix)}, source)
+    _need(not observed["issues"] and observed["phase_validated"] == {"evaluate": True},
+          "generated raw report failed validation: " + "; ".join(observed["issues"]))
+    for name, raw in observed["artifacts"].items():
+        _need(artifacts.get(prefix + name) == raw, "generated retained artifact differs: " + name)
+    groups = copy.deepcopy(observed["observations"])
+    for group in groups.values():
+        group["evidence"] = [prefix + name for name in group["evidence"]]
+    _need(groups == host["observations"], "generated report and owner observations differ")
+    paired = observed["paired_score"]
+    _need(paired["status"] == "passed" and paired["parent_evaluation"] == {
+        "operation_id": request["operation_id"], "request_sha256": sha256(canonical(request)),
+        "binding": request["binding"]}, "generated report belongs to another owner request")
+    _need(paired["candidate_source_id"] == request["binding"]["candidate_source_id"]
+          and {row["case_id"]: row["optimized_ms"] for row in paired["per_case"]}
+          == assessed["per_case_times_ms"], "generated source or candidate timing scalar differs")
+    contexts, diagnostics, cases = {}, {}, {}
+    for row in paired["per_case"]:
+        case, settings, details = row["case_id"], [], []
+        for pair in row["pairs"]:
+            detail = {}
+            for role in ("baseline", "candidate"):
+                leg = pair[role]
+                timer = leg["timing_evidence"]
+                settings.append({"timer": timer["timer"], "requested": timer["requested"],
+                    "effective": timer["effective"], "cache_condition": leg["timing_detail"]["cache_condition"]})
+                detail[role] = {key: leg[key] for key in ("leg_id", "timing_detail", "compile_evidence")}
+                detail[role]["graph_capture"] = timer["graph_capture"]
+            details.append(detail)
+        _need(settings and all(value == settings[0] for value in settings),
+              "generated baseline/candidate actual timer or cache conditions differ")
+        contexts[case], diagnostics[case] = settings[0], details
+        cases[case] = {key: row[key] for key in
+                       ("baseline_ms", "optimized_ms", "speedup", "reps", "speedup_spread")}
+    return {"timing_basis": "generated_task_paired", "request_id": request["operation_id"],
+            "admitted_source_id": paired["baseline_source_id"],
+            "baseline_implementation": "external_callable_in_generated_baseline_closure",
+            "baseline_closure_sha256": paired["baseline_closure_sha256"],
+            "per_case": contexts, "paired_cases": cases, "diagnostics": diagnostics,
+            "evidence": {name: host["artifacts_sha256"][name] for name in
+                         ("observer/paired-score.json", "observer/evaluate/stdout.bin",
+                          "observer/evaluate/protocol-binding.json")}}
+
+
 def read_evaluation(evaluator, candidate_id, *, evaluation_id):
     """Recheck one owner collection under its lock without changing evaluator pins.
 
@@ -159,7 +210,9 @@ def read_evaluation(evaluator, candidate_id, *, evaluation_id):
             _need(result["settled"] == settled and all(result[key] == value for key, value in assessed.items()),
                   "retained evaluation assessment differs")
             if settled and assessed["native_suite_pass_observed"]:
-                timing = _published_timing(request, host, artifacts, assessed)
+                reader = (_generated_timing if request["contract"]["schema"] == "geak-arena-generated-task-v1"
+                          else _published_timing)
+                timing = reader(request, host, artifacts, assessed)
         return {"receipt": result, "request": request,
                 "timing_context": timing,
                 "receipt_ref": {"path": str(collection / "arena_evaluation.json"), "sha256": sha256(raw_result)}}
@@ -237,7 +290,8 @@ def _matched(evaluator, baseline_id, selected_id, baseline_evaluation_id, select
               role + " measurements do not cover the complete benchmark domain")
     _need(records["baseline"]["timing_context"]["request_id"] != records["candidate"]["timing_context"]["request_id"],
           "baseline and selected reused a performance request")
-    timing = [{key: value for key, value in records[role]["timing_context"].items() if key not in ("evidence", "request_id")}
+    timing = [{key: value for key, value in records[role]["timing_context"].items()
+               if key not in ("evidence", "request_id", "paired_cases", "diagnostics")}
               for role in ("baseline", "candidate")]
     _need(timing[0] == timing[1], "baseline and selected actual timer/cache conditions differ")
     return records, runtime
@@ -258,10 +312,11 @@ def export_final_result(store, snapshot, *, evaluator, selection_options, baseli
     default) or ``time_weighted``. Its optional ``weights`` are positive workload
     time shares covering every case, used as sum(w) / sum(w / paired_speedup).
     The mapping, including workload provenance, is retained exactly as supplied;
-    this does not authenticate a workload capture. Numeric export requires
-    published task-report-v1 graph samples and phase cache receipts. Generated
-    paired timing needs its own internal baseline-leg reader and is rejected
-    here, with null result metrics. "improved" means only a ratio above one;
+    this does not authenticate a workload capture. Numeric export rereads native
+    graph samples or generated-task raw paired evidence. A generated task uses
+    BOTH legs from the selected evaluation; the separate ORIGINAL evaluation
+    remains a reference and its timings are not pooled. Actual timer/cache
+    conditions must match. "improved" means only a ratio above one;
     the command/lane must apply its incumbent and minimum-improvement threshold.
     """
     _need(isinstance(evaluator, ArenaEvaluator) and evaluator.store is store,
@@ -317,7 +372,17 @@ def export_final_result(store, snapshot, *, evaluator, selection_options, baseli
             selected_source = _source(store, selected_source_id)
             records, runtime = _matched(evaluator, baseline_candidate_id, choice["candidate_id"],
                                         baseline_evaluation_id, selected_evaluation_id)
-            before, after = (records[role]["receipt"]["per_case_times_ms"] for role in ("baseline", "candidate"))
+            paired = records["candidate"]["timing_context"].get("paired_cases")
+            if paired is None:
+                before, after = (records[role]["receipt"]["per_case_times_ms"] for role in ("baseline", "candidate"))
+            else:
+                before = {case: paired[case]["baseline_ms"] for case in cases}
+                after = {case: paired[case]["optimized_ms"] for case in cases}
+                result["comparison_basis"] = "selected_evaluation_internal_baseline_candidate_pair"
+                result["baseline_closure_sha256"] = records["candidate"]["timing_context"]["baseline_closure_sha256"]
+                result["scope"] = ("Provisional generated-harness comparison against the external baseline closure. "
+                                   "baseline_source_id names the admitted editable source, not that external callable. "
+                                   "Final Director and workload validation remain required.")
             ratios = {case: before[case] / after[case] for case in cases}
             geometric = math.exp(math.fsum(math.log(ratios[case]) for case in cases) / len(cases))
             weighted = (math.fsum(weights.values()) /

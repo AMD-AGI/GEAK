@@ -14,7 +14,7 @@ no standalone EVO runner.
 | --- | --- |
 | [Native search and final measurements](../docs/evo/admitted-command.md) | Implemented with the existing owner and original budget. Numeric export supports native-v2 `task-report-v1` graph samples and phase cache receipts. |
 | [Common optimizer dispatcher](../docs/evo/dispatch-adapter.md) | Native EVO adapter and owner-entry patch implemented; installation and live validation remain. |
-| [Hyperloom-generated tasks](../docs/evo/evaluation-port.md#generated-geak-tasks) | Task reader implemented; the result adapter for their paired timing is still needed. |
+| [Hyperloom-generated tasks](../docs/evo/evaluation-port.md#generated-paired-results) | Task reader, raw paired-report reader and result export implemented. The existing owner's runner/admission and live validation remain required. |
 | [Archive export](../docs/evo/archive.md) | Exact sources, ideas, measurements and retained research statements in a deterministic folder view. Full runtime resume also needs the original store and pinned dependencies. |
 
 ## Code map

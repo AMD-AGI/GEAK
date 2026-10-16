@@ -80,7 +80,8 @@ without those private source references; that does not establish compatibility.
 
 The native adapter connects the generic dispatcher to the admitted EVO command.
 The next step qualifies its installed model/GPU path and full-workload result.
-Generated Hyperloom tasks still need support for their paired timing evidence.
+Generated Hyperloom paired-report reading/export is implemented; its installed
+owner and live workload path still need qualification.
 Weighted scoring requires the caller's complete workload weights; the exporter
 checks those weights and preserves the lane's objective. A prompt cannot supply
 missing workload evidence.
