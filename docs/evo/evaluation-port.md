@@ -91,6 +91,13 @@ operation or quantity index under a new identity. Old-run continuation must
 retain its original authenticated runtime, or use an explicitly admitted new
 measurement path. This port adds no compatibility shim or guessed source pin.
 
+The prospective Arena evaluator propagates non-`Exception` interruptions from
+launch or settlement after saving `arena_evaluation.json`. A dispatcher cutoff
+therefore cannot become a failed candidate that permits another search step.
+This correction changes the evaluator source hash and requires a new admitted
+code closure before installation. It does not change the frozen c08 evaluator
+or authorize old-run continuation with the corrected source.
+
 ## Verification
 
 The existing 12 job and 26 timing tests pass against both the original and port.

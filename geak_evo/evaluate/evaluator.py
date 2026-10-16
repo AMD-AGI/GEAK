@@ -78,6 +78,7 @@ class ArenaEvaluator:
     ``evaluate`` returns {receipt, artifacts, costs}. Missing or unauthenticated
     positive evaluator cleanup raises ArenaEvaluationUnsettled *after* retaining
     raw artifacts. A positively settled failed run returns a failure observation.
+    Non-Exception interruptions propagate after the collection receipt is saved.
     All observations remain ineligible for reward and anchor promotion.
     """
 
@@ -239,6 +240,7 @@ class ArenaEvaluator:
             request, root, existing = self._prepare(candidate_id, evaluation_id)
             intent = root / "dispatch_intent.json"
             recovered, handle, errors = existing, None, []
+            interruption = None
             if recovered:
                 require(not intent.exists() or _parse(_read(root, intent.name)[0]) == {"request_sha256": sha256(canonical(request))},
                       "dispatch intent differs from retained request", ArenaEvaluationError)
@@ -248,6 +250,8 @@ class ArenaEvaluator:
                     handle = self.launch(copy.deepcopy(request), root)
                 except BaseException as exc:
                     errors.append({"stage": "launch", "error_kind": type(exc).__name__})
+                    if not isinstance(exc, Exception):
+                        interruption = exc
             artifacts, receipt = {}, None
             try:
                 collected = self.settle(handle, copy.deepcopy(request), root)
@@ -260,6 +264,8 @@ class ArenaEvaluator:
                     artifacts[name] = raw
             except BaseException as exc:
                 errors.append({"stage": "settle", "error_kind": type(exc).__name__})
+                if not isinstance(exc, Exception):
+                    interruption = exc
             indices = [int(path.name[11:]) for path in root.glob("collection-*")
                        if re.fullmatch(r"collection-[0-9]+", path.name)]
             collection = root / ("collection-%04d" % (max(indices, default=0) + 1))
@@ -308,6 +314,8 @@ class ArenaEvaluator:
             if "host_receipt.json" in retained:
                 _write(collection / "host_receipt.json", retained["host_receipt.json"], immutable=True)
             _save(collection / "arena_evaluation.json", result)
+            if interruption is not None:
+                raise interruption
             if not settled:
                 raise ArenaEvaluationUnsettled(response)
             return response

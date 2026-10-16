@@ -33,7 +33,10 @@ using current wall and monotonic time. The original native monotonic deadline
 plus export margin must fit that cutoff; historical wall timestamps cannot
 extend it. Git work uses the same converted cutoff. The CLI temporarily handles
 SIGTERM as `CommandInterrupted`, a dedicated `BaseException` that engineer and
-planner turns propagate after recording settlement and elapsed time. The admitted
+planner turns propagate after recording settlement and elapsed time. Arena
+evaluations save their collection receipt before propagating the interruption.
+The corrected evaluator source requires a new admitted code closure; existing
+frozen evaluator pins do not authorize this prospective version. The admitted
 command retains pending work and costs and writes an incomplete result; search
 cannot treat the cutoff as a recoverable transport failure and launch another
 turn. The CLI restores the prior handler when it returns. Recovery never makes
@@ -64,10 +67,11 @@ is no new provider loader, source-adoption service or device manager.
 
 CPU tests exercise the real command/evaluator/export/Git path with synthetic
 search and owner receipts, and apply the owner patch to its exact source files
-to check argument and service wiring. SIGTERM checks interrupt actual engineer
-and planner paths, retain settlement/accounting records, and return an error
-without another search step or a winner. These are source and CPU results; this
-entry has not been installed or qualified in a live run.
+to check argument and service wiring. SIGTERM checks interrupt actual engineer,
+planner, and evaluation launch/settlement paths, retain settlement/accounting
+records, and return an error without another search step or a winner. These are
+source and CPU results; this entry has not been installed or qualified in a live
+run.
 
 Numeric support remains limited to admitted native-v2 `task-report-v1` graph
 measurements with phase cache receipts. Real generated paired tasks still need

@@ -166,22 +166,62 @@ class DispatchAdapterTests(unittest.TestCase):
         self.assertFalse((self.workspace / "kernel.py").exists())
         dispatch._clean(self.repo, commit)
 
-    def test_sigterm_unwinds_native_accounting_and_restores_handler(self):
+    def interrupted_evaluation(self, phase, *, during_search=False):
         previous = signal.getsignal(signal.SIGTERM)
-        def terminated(handle, request, operation):
+        callback = getattr(self.f.engine, phase)
+        def terminated(*args):
+            callback(*args)
             os.kill(os.getpid(), signal.SIGTERM)
-            raise AssertionError("signal handler should interrupt settlement")
-        self.f.engine.settle = terminated
+            raise AssertionError("signal handler should interrupt evaluation")
+        setattr(self.f.engine, phase, terminated)
+        next_decision = mock.Mock(return_value=self.owner.snapshot)
+        if during_search:
+            def search(**kwargs):
+                try:
+                    self.f.engine.evaluate(self.f.candidate, evaluation_id="search-evaluation")
+                except command.ArenaEvaluationUnsettled:
+                    pass
+                return next_decision()
+            self.owner.search.run.side_effect = search
         code, value = self.invoke(cli=True)
         self.assertEqual(code, 1)
         self.assertEqual(value["status"], "error")
         self.assertIsNone(value["best"])
         self.assertEqual(len(self.f.launches), 1)
-        row = next(iter(self.owner.budget.operations.values()))
-        self.assertEqual(row["status"], "unsettled")
-        self.assertGreater(row["elapsed_seconds"], 0)
+        next_decision.assert_not_called()
+        receipts = list(self.f.engine.root.glob("*/collection-*/arena_evaluation.json"))
+        self.assertEqual(len(receipts), 1)
+        receipt = json.loads(receipts[0].read_bytes())
+        self.assertIn({"stage": phase, "error_kind": "CommandInterrupted"}, receipt["collection_errors"])
+        self.assertFalse(receipt["native_suite_pass_observed"])
+        self.assertEqual(receipt["settled"], phase == "launch")
+        self.assertEqual(len(self.f.handles), 1)
+        if phase == "launch":
+            self.assertIsNone(self.f.handles[0])
+            self.assertTrue((receipts[0].parent / "host_receipt.json").is_file())
+            self.assertTrue((receipts[0].parent / "raw" / "host" / "cleanup.json").is_file())
+        native = json.loads((self.directory / "native-result" / "result.json").read_bytes())
+        self.assertEqual((native["validation_status"], native["error_kind"]),
+                         ("command_incomplete", "CommandInterrupted"))
+        self.assertEqual(native["command"]["stage"], "search" if during_search else "baseline")
+        if not during_search:
+            row = next(iter(self.owner.budget.operations.values()))
+            self.assertEqual(row["status"], "unsettled")
+            self.assertGreater(row["elapsed_seconds"], 0)
         self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
         dispatch._clean(self.repo, self.base)
+
+    def test_sigterm_unwinds_native_accounting_and_restores_handler(self):
+        self.interrupted_evaluation("settle")
+
+    def test_sigterm_during_final_evaluation_launch_preserves_interruption(self):
+        self.interrupted_evaluation("launch")
+
+    def test_sigterm_during_search_evaluation_launch_stops_search(self):
+        self.interrupted_evaluation("launch", during_search=True)
+
+    def test_sigterm_during_search_evaluation_settlement_stops_search(self):
+        self.interrupted_evaluation("settle", during_search=True)
 
     def test_sigterm_during_engineer_turn_writes_receipt_and_stops_search(self):
         engineer = engineer_fixtures.EngineerTests(methodName="runTest")

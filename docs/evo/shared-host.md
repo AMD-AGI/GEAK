@@ -64,7 +64,10 @@ export and full-workload validation must still use the existing owner path.
 and reads its selected and explicit baseline evaluations from the existing Arena
 owner root. The baseline must match admitted task bytes; source, case, runtime
 and device identities must agree. The reader takes the existing owner lock and
-leaves `evaluate/evaluator.py` unchanged, preserving its admitted source hash.
+checks the evaluator source identity recorded in the request. The prospective
+evaluator now propagates interruptions after saving collection receipts, so its
+source hash differs from the frozen evaluator. A new installation must admit
+that exact version; old operations retain their original authenticated runtime.
 
 Numeric export currently supports published `task-report-v1` graph measurements
 with phase cache receipts. It checks the actual report/request/phase hashes,
