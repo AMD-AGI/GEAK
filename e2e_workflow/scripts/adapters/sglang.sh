@@ -82,27 +82,61 @@ adapter_bench() {
 # (and MEM/RPD activities) shrinks the trace ~an order of magnitude while KEEPING everything parse_profile
 # needs: the GPU kernel timeline, cpu_op Input Dims (record_shapes), and execute_* phase annotations.
 # Override via SGLANG_PROFILE_ACTIVITIES / SGLANG_PROFILE_WITH_STACK.
+_sglang_finalized_ranks() {
+  # One line per TP rank whose NEW trace (newer than $1) is a complete gzip stream. A trace file exists
+  # from the moment its export starts, so only a stream that passes ``gzip -t`` counts as written.
+  find "$PROFILE_DIR" -type f -newer "$1" -name '*.trace.json.gz' -print0 2>/dev/null |
+    while IFS= read -r -d '' _trace; do
+      gzip -t "$_trace" >/dev/null 2>&1 && basename "$_trace"
+    done | sed -nE 's#^.*-(TP-[0-9]+).*$#\1#p' | sort -u
+}
+
 adapter_profile_window() {
-  local before after
-  before=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
+  local marker expected count sz last_sz=-1 stopped=0
+  mkdir -p "$PROFILE_DIR"
+  marker="$PROFILE_DIR/.sglang_profile_started.$$"
+  : > "$marker"
+  expected="${SGLANG_PROFILE_EXPECTED_RANKS:-${TP:-1}}"
+  case "$expected" in ''|*[!0-9]*|0) echo "!!! sglang: invalid expected profiler rank count '$expected'" >&2; rm -f "$marker"; return 1 ;; esac
   local _acts="${SGLANG_PROFILE_ACTIVITIES:-[\"CPU\",\"GPU\"]}" _stack="${SGLANG_PROFILE_WITH_STACK:-false}"
   # num_steps set => the server records that many forward steps then auto-saves (async; returns at once).
   if ! curl -sf -X POST "${BASE_URL}/start_profile" -H 'Content-Type: application/json' \
         -d "{\"output_dir\":\"${PROFILE_DIR}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true,\"with_stack\":${_stack},\"activities\":${_acts}}" \
         >/dev/null 2>&1; then
     echo "!!! /start_profile request failed (sglang HTTP profiler unavailable?)" >&2
+    rm -f "$marker"
     return 1
   fi
-  # wait for a NEW trace to land (server saves after num_steps forward passes)
-  local deadline=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
-    [ "$after" -gt "$before" ] && { sleep 2; return 0; }   # +2s for the write to flush
+  # Wait for a finalized trace from every TP rank. Returning when the first file appears let teardown
+  # kill the server mid-export: every rank's gzip was truncated before its GPU kernel events, which torch
+  # writes last. The quiet deadline restarts while any new trace is still growing (TP x ~100 MB exports
+  # outlast a fixed timeout); the hard deadline bounds the whole wait.
+  local hard=$(( $(date +%s) + ${SGLANG_PROFILE_FINALIZE_TIMEOUT:-900} ))
+  local quiet=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
+  while [ "$(date +%s)" -lt "$hard" ]; do
+    count=$(_sglang_finalized_ranks "$marker" | wc -l)
+    if [ "$count" -ge "$expected" ]; then
+      rm -f "$marker"
+      return 0
+    fi
+    sz=$(find "$PROFILE_DIR" -type f -newer "$marker" -name '*.trace.json*' -printf '%s\n' 2>/dev/null | sort -rn | head -1)
+    if [ -n "$sz" ] && [ "$sz" != "$last_sz" ]; then
+      last_sz="$sz"; quiet=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
+    fi
+    if [ "$(date +%s)" -ge "$quiet" ]; then
+      [ "$stopped" = 1 ] && break
+      # num_steps may not be honored on some builds — force a stop, then give the export its own quiet window.
+      curl -sf -X POST "${BASE_URL}/stop_profile" >/dev/null 2>&1 || true
+      stopped=1; quiet=$(( $(date +%s) + ${PROFILE_WINDOW_TIMEOUT:-180} ))
+    fi
     sleep 3
   done
-  # num_steps may not be honored on some builds — force a stop and re-check
-  curl -sf -X POST "${BASE_URL}/stop_profile" >/dev/null 2>&1 || true
-  sleep 3
-  after=$(ls "$PROFILE_DIR"/*.trace.json* 2>/dev/null | wc -l)
-  [ "$after" -gt "$before" ]
+  count=$(_sglang_finalized_ranks "$marker" | wc -l)
+  echo "!!! sglang: profiler finalized ${count}/${expected} expected rank traces; refusing partial profile." >&2
+  # Keep the evidence without leaving a *.trace.json.gz the profile parser would read as a whole capture.
+  while IFS= read -r -d '' _trace; do
+    mv "$_trace" "${_trace}.PARTIAL_missing_ranks" 2>/dev/null || true
+  done < <(find "$PROFILE_DIR" -type f -newer "$marker" -name '*.trace.json.gz' -print0 2>/dev/null)
+  rm -f "$marker"
+  return 1
 }
