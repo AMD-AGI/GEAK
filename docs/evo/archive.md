@@ -65,7 +65,12 @@ claims. Use `measurements.csv` and `observations/` for the measured results.
 handoff. It lists every supplied trial, including repeated measurements of the
 same source, and links exact inventory, outcome and feedback records. Query its
 `groups` by task, measurement epoch and source, then follow the `trial_ids`.
-The view reports its row count and coverage; work absent from a collected
+These are view row IDs: newly discovered links can change the canonical group.
+Keep `inventory_refs` for stable references to exact immutable input rows; source,
+candidate, operation and evaluation identities retain their original meanings.
+Only explicitly linked identical inventories are deduplicated. Unlinked episodes
+remain separate, even if their bytes match.
+The view counts retained trial rows in any state and reports coverage; work absent from a collected
 inventory remains unknown. A missing row does not mean an idea was never tried.
 
 Request identity, reported admission, correctness and benchmark stages stay
@@ -74,6 +79,12 @@ conflicts suppress displayed values while retaining the conflicting references.
 Recorded timing is a development observation: no new speedup, winner, or verdict
 on an idea is calculated. Stage fields come only from structured saved feedback
 with matching source, operation and turn. Generic status words remain separate.
+
+This view and its per-parent counts are visible to the planner and engineer.
+They change the evidence presentation and therefore belong only in prospectively
+pinned runs. They must not be inserted into a frozen study. The projection reads
+needed metadata and linked feedback rather than eagerly loading every raw build
+or trace; existing source and ancestry validation still applies.
 
 Check the program/source IDs: a direction review describes its current tip, and
 an investigation's strategy need not describe every intermediate trial.

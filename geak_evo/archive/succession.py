@@ -199,7 +199,7 @@ def parent_prompt_context(store, snapshot, candidate_id, *, direction_id,
     summary["all_parent_outcomes_ref"] = {"file": snapshot_ref, "field": "native_parent_outcomes"}
     summary["exact_role_review"] = latest["review"] if latest else None
     summary["trial_history"] = {"file": snapshot_ref, "field": "native_trial_history",
-        "coverage": history["coverage"], "scope": history["scope"]}
+        "coverage": history["coverage"], "scope": history["scope"], "identity": history["identity"]}
     context = ("Native parent identity and charged prior investigation costs. The selected/faithful/unfinished/terminal "
                "roles and agent review are retained observations/interpretations; no accepted anchor is implied. "
                "Raw parent role/cost history is in the referenced file.\n" + encoded(summary).decode() + "\n" + context)

@@ -5,10 +5,12 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from geak_evo.archive.store import ResearchStore, StateError
 from geak_evo.archive.trials import trial_history
-from geak_evo.archive.succession import snapshot_trial_history
+from geak_evo.archive.export import build
+from geak_evo.archive.succession import snapshot_trial_history, retained_trial_candidates
 
 
 def encoded(value):
@@ -41,7 +43,7 @@ class TrialHistoryTests(unittest.TestCase):
             rows.append(dict(trial_index=index, candidate_id=candidate, source_id=self.source,
                 operation_id=feedback.get('operation_id'), owner_turn_id='attempt', feedback_ref=ref,
                 source_retention_error=None, feedback_error=None))
-        inventory = encoded(dict(attempt_id='attempt', trials=rows))
+        inventory = encoded(dict(schema_version=1, attempt_id='attempt', trials=rows))
         raw.update({'native_trial_sources.json': inventory, 'archive/manifest.json': encoded(dict(trials=trials))})
         raw_id = self.store.archive_evidence(candidate, raw)
         for index, row in enumerate(rows):
@@ -61,7 +63,8 @@ class TrialHistoryTests(unittest.TestCase):
                      for i in range(35)]
         identity, _ = self.collection(feedbacks=feedbacks, observations=[{'case': float(i + 1)} for i in range(35)])
         view = trial_history(self.store, [identity])
-        self.assertEqual(view['coverage'], dict(inventory_count=1, trial_count=35, omitted_rows=0, outside_inventory='unknown'))
+        self.assertEqual(view['coverage'], dict(inventory_count=1, trial_count=35,
+            count_label='retained trial rows (any state)', omitted_rows=0, outside_inventory='unknown'))
         self.assertEqual(len(view['groups']), 1)
         self.assertEqual({row['operation_id'] for row in view['trials']}, {'op-%s' % i for i in range(35)})
         self.assertEqual(len({row['trial_id'] for row in view['trials']}), 35)
@@ -131,6 +134,77 @@ class TrialHistoryTests(unittest.TestCase):
             broken = self.store.archive_evidence(self.candidate, altered)
             with self.assertRaisesRegex(StateError, 'inventory position'):
                 trial_history(self.store, [broken])
+
+    def test_multiple_linked_copies_are_one_component_in_every_caller(self):
+        identity, _ = self.collection(observations=[{'case': 9.0}])
+        _, collection = self.store.evidence(identity)
+        links = json.loads(collection['native_evidence_index.json'])
+        first = links[0]['evidence_ref']['evidence_id']
+        _, raw = self.store.evidence(first)
+        third = self.store.archive_evidence(self.candidate, dict(raw, marker=b'third copy'))
+        onward = dict(original_ref=links[0]['original_ref'],
+                      evidence_ref=dict(evidence_id=third, artifact='feedback-0.json'))
+        second = self.store.archive_evidence(self.candidate, dict(raw, marker=b'second copy',
+            **{'native_evidence_index.json': encoded([onward])}))
+        links.append(dict(original_ref=links[0]['original_ref'],
+                          evidence_ref=dict(evidence_id=second, artifact='feedback-0.json')))
+        root = self.store.archive_evidence(self.candidate, dict(collection,
+            **{'native_evidence_index.json': encoded(links)}))
+        snapshot = dict(state=dict(opportunities=[], history=[dict(attempt_id='attempt',
+            collection_ref=dict(evidence_id=root, artifact='native_idea_harvest.json'))]))
+        parent = snapshot_trial_history(self.store, snapshot)
+        for seeds in ([root], [second, root, third, first], [first, third, root, second]):
+            planner = snapshot_trial_history(self.store, snapshot, seeds)
+            self.assertEqual(parent, planner)
+            self.assertEqual(planner['coverage']['inventory_count'], 1)
+            self.assertEqual(planner['coverage']['trial_count'], 1)
+            self.assertEqual(len(planner['trials'][0]['inventory_refs']), 4)
+        # Adding a previously unseen link can change the canonical display ID.
+        # The original immutable row alias remains valid and is retained.
+        prior = trial_history(self.store, [first])
+        self.assertIn(prior['trials'][0]['inventory_refs'][0], parent['trials'][0]['inventory_refs'])
+        self.assertIn('later links may change', parent['identity']['trial_id'])
+        unlinked = self.store.archive_evidence(self.candidate, dict(raw, marker=b'unlinked episode'))
+        independent = trial_history(self.store, [root, unlinked])
+        self.assertEqual(independent['coverage']['trial_count'], 2)
+        self.assertEqual(len({row['trial_id'] for row in independent['trials']}), 2)
+        self.store.checkpoint('campaign', self.candidate, expected_revision=0, evidence=[root],
+            note=dict(claim='synthetic', scope='test', next_test='none', evolution={'history': []}))
+        _, _, files = build(self.store)
+        exported = json.loads(files['trial-history.json'])
+        self.assertEqual(exported['coverage']['trial_count'], 1)
+        self.assertEqual(len(json.loads(files['trials.json'])), 1)
+        self.assertEqual({row['trial_id'] for row in exported['trials']},
+                         {row['trial_id'] for row in parent['trials']})
+
+    def test_legacy_manifest_builds_without_loading_unrelated_artifact(self):
+        identity, rows = self.collection(outcomes=['unfinished'])
+        _, collection = self.store.evidence(identity)
+        first = json.loads(collection['native_evidence_index.json'])[0]['evidence_ref']['evidence_id']
+        _, raw = self.store.evidence(first)
+        harvest = json.loads(raw['archive/manifest.json'])
+        harvest['terminal'] = {'source_id': self.source}
+        harvest['trials'][0]['source_archive'] = {'source_id': self.source}
+        raw['archive/manifest.json'] = encoded(harvest)
+        raw['native_source_roles.json'] = encoded({'terminal': self.candidate})
+        self.assertEqual(retained_trial_candidates(self.store, raw), {self.candidate: [0]})
+        legacy = self.store.archive_evidence(self.candidate, dict(raw, **{'build/kernel.so': b'unrelated build'}))
+        unrelated = self.store._bound_evidence(legacy)['artifacts']['build/kernel.so']
+        snapshot = dict(state=dict(opportunities=[], history=[dict(attempt_id='attempt',
+            collection_ref=dict(evidence_id=legacy, artifact='archive/manifest.json'))]))
+        original_read = self.store._bytes
+        def read_selected(blob):
+            self.assertNotEqual(blob, unrelated, 'trial view must not load an unrelated build')
+            return original_read(blob)
+        with mock.patch.object(self.store, '_bytes', side_effect=read_selected):
+            parent = snapshot_trial_history(self.store, snapshot)
+            planner = snapshot_trial_history(self.store, snapshot, [legacy])
+        self.assertEqual(parent, planner)
+        self.assertEqual(parent['trials'][0]['outcome']['error'], 'unfinished')
+        self.assertEqual(parent['trials'][0]['raw_trial_ref']['artifact'], 'archive/manifest.json')
+        self.assertEqual(parent['trials'][0]['candidate_id'], rows[0]['candidate_id'])
+        self.assertIsNone(parent['trials'][0]['times_ms'])
+        self.assertIsNone(parent['trials'][0]['stages']['correctness'])
 
     def test_parent_view_uses_same_rows_and_saved_episode_handles(self):
         identity, _ = self.collection(observations=[{'case': 9.0}])

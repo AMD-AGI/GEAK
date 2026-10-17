@@ -1101,7 +1101,7 @@ class NativePlanner:
                 'candidate_ref': identity_refs[0], 'source_manifest_ref': identity_refs[1],
                 'current_claim_context': current_claim_context(context.get('claims', {}),
                     binding={key: candidate[key] for key in ('job_id', 'source_id', 'measurement_epoch_id')})})
-            parent_candidates[-1]['trial_count'] = sum(
+            parent_candidates[-1]['retained_trial_row_count'] = sum(
                 row.get('source_id') == candidate['source_id']
                 and all(row[key] == candidate[key] for key in ('job_id', 'measurement_epoch_id'))
                 for row in history['trials'])
@@ -1125,7 +1125,8 @@ class NativePlanner:
         _put(call / 'trial-history.json', history)
         history_ref = file_ref(call / 'trial-history.json')
         references.append(history_ref)
-        brief['trial_history'] = {'file': history_ref, 'coverage': history['coverage'], 'scope': history['scope']}
+        brief['trial_history'] = {'file': history_ref, 'coverage': history['coverage'], 'scope': history['scope'],
+            'identity': history['identity']}
         brief['available_parent_candidates'] = parent_candidates
         if self.quantities is not None:
             brief['host_recorded_quantities'] = self.quantities.catalog(context)
