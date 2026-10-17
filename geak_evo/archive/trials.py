@@ -1,0 +1,195 @@
+"""Complete, rebuildable trial views. The saved evidence remains authoritative.
+
+Rows describe supplied collector inventories, not every action an engineer took.
+No outcome, stage, comparator or timing is inferred from missing data or prose.
+"""
+
+import json
+
+from .._util import sha256_hex
+from .store import StateError
+
+SCOPE = ("Every row in the supplied retained trial inventories, including missing sources and feedback. "
+         "In-flight work, uncollected episodes and requests absent from those inventories are unknown. "
+         "A missing row does not establish that a source or idea was never tested.")
+
+
+def _key(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def trial_history(store, evidence_ids, *, attempts=None):
+    """Project exact inventories and their linked feedback; never follow external paths.
+
+    ``attempts`` only adds the caller's saved direction/idea/engineer handles.
+    Duplicate collection/raw copies merge only through native_evidence_index;
+    repeated operations and independent investigations remain separate rows.
+    """
+    attempts = attempts or {}
+    evidence, links = {}, {}
+    pending = sorted(set(evidence_ids))
+    while pending:
+        identity = pending.pop(0)
+        if identity in evidence:
+            continue
+        envelope, artifacts = store.evidence(identity)
+        evidence[identity] = envelope, artifacts
+        for link in json.loads(artifacts.get("native_evidence_index.json", b"[]")):
+            ref = link["evidence_ref"]
+            pending.append(ref["evidence_id"])
+            if link.get("original_ref"):
+                domain = envelope["binding"]
+                links.setdefault((domain["job_id"], domain["measurement_epoch_id"],
+                                  _key(link["original_ref"])), []).append(ref)
+
+    def artifact(identity, name):
+        raw = evidence[identity][1].get(name)
+        return json.loads(raw) if raw is not None else None
+
+    observations, groups = {}, {}
+    for identity, (envelope, artifacts) in evidence.items():
+        binding = envelope["binding"]
+        for index, row in enumerate((artifact(identity, "native_idea_context.json") or {}).get("native_observations", [])):
+            key = (binding["job_id"], binding["measurement_epoch_id"], row.get("source_id"),
+                   row.get("operation_id"), _key(row.get("feedback_ref")))
+            observations.setdefault(key, []).append((row, {"evidence_id": identity,
+                "artifact": "native_idea_context.json", "field": "native_observations", "index": index}))
+        inventory = artifacts.get("native_trial_sources.json")
+        if inventory is None:
+            continue
+        copies = [link["evidence_ref"]["evidence_id"] for link in
+                  artifact(identity, "native_evidence_index.json") or []
+                  if evidence[link["evidence_ref"]["evidence_id"]][1].get("native_trial_sources.json") == inventory
+                  and all(evidence[link["evidence_ref"]["evidence_id"]][0]["binding"][key] == binding[key]
+                          for key in ("job_id", "measurement_epoch_id"))]
+        groups[identity] = min(copies) if copies else identity
+
+    rows = {}
+    for identity, (envelope, artifacts) in evidence.items():
+        inventory = artifact(identity, "native_trial_sources.json")
+        if inventory is None:
+            continue
+        harvest_name = next((name for name in ("native_idea_harvest.json", "archive/manifest.json")
+                             if name in artifacts), None)
+        harvest = artifact(identity, harvest_name) if harvest_name else None
+        roles = artifact(identity, "native_source_roles.json") or {}
+        if harvest is not None and len(harvest["trials"]) != len(inventory["trials"]):
+            raise StateError("trial inventory and harvest counts differ")
+        for position, trial in enumerate(inventory["trials"]):
+            index = trial["trial_index"]
+            if type(index) is not int or index != position:
+                raise StateError("trial index differs from inventory position")
+            binding = {key: envelope["binding"][key] for key in ("job_id", "measurement_epoch_id")}
+            if trial.get("candidate_id"):
+                candidate = store.get_candidate(trial["candidate_id"])
+                if candidate["source_id"] != trial.get("source_id") or any(candidate[key] != value for key, value in binding.items()):
+                    raise StateError("trial source binding differs from candidate")
+            row_key = groups[identity], _key(trial)
+            row = rows.setdefault(row_key, dict(trial, **binding, attempt_id=inventory.get("attempt_id"),
+                investigation_evidence_id=groups[identity], evidence_id=identity, evidence_ids=[],
+                inventory_refs=[], raw_trial_refs=[], source_roles=[], outcomes=[]))
+            row["evidence_ids"].append(identity)
+            row["inventory_refs"].append({"evidence_id": identity, "artifact": "native_trial_sources.json",
+                                           "field": "trials", "index": index})
+            row["source_roles"] = sorted(set(row["source_roles"]) | {role for role, candidate_id in roles.items()
+                                                   if candidate_id == trial.get("candidate_id")})
+            if harvest is not None:
+                raw = harvest["trials"][index]
+                if raw.get("archive_ref") != trial.get("feedback_ref"):
+                    raise StateError("trial inventory differs from retained harvest")
+                outcome = {"error": raw.get("error"), "status": raw.get("status"),
+                    "source_archive_error": raw.get("source_archive_error"),
+                    "verified_status": (raw.get("verified") or {}).get("status"),
+                    "diagnostic_status": (raw.get("diagnostic") or {}).get("status")}
+                if outcome not in row["outcomes"]:
+                    row["outcomes"].append(outcome)
+                row["raw_trial_refs"].append({"evidence_id": identity, "artifact": harvest_name,
+                                             "field": "trials", "index": index})
+
+    result = []
+    for row in rows.values():
+        row["trial_id"] = sha256_hex(_key([row["investigation_evidence_id"], row["trial_index"]]).encode())
+        row.update({key: (attempts.get(row["attempt_id"]) or {}).get(key)
+                    for key in ("direction_id", "idea_id", "engineer_id")})
+        row["outcome"] = row["outcomes"][0] if len(row["outcomes"]) == 1 else None
+        row["raw_trial_ref"] = row["raw_trial_refs"][0] if row["raw_trial_refs"] else None
+        key = (row["job_id"], row["measurement_epoch_id"], row.get("source_id"),
+               row.get("operation_id"), _key(row.get("feedback_ref")))
+        matches = observations.get(key, [])
+        unique = {_key(value): value for value, _ in matches}
+        row["observation_refs"] = [ref for _, ref in matches]
+        conflicts = []
+        if row.get("feedback_error"):
+            conflicts.append("collector_feedback_error")
+        if len(unique) > 1:
+            conflicts.append("conflicting_observations")
+        if len(row["outcomes"]) > 1:
+            conflicts.append("conflicting_outcomes")
+        bound = bool(row.get("source_id") and row.get("operation_id") and row.get("feedback_ref"))
+        observation = next(iter(unique.values())) if bound and len(unique) == 1 and not conflicts else None
+        row["observation"] = observation
+        row["times_ms"] = observation.get("per_case_times_ms") if observation else None
+        row["timing_context"] = {"units": "ms" if row["times_ms"] is not None else None,
+            "case_ids": sorted(row["times_ms"]) if isinstance(row["times_ms"], dict) else [],
+            "raw_benchmarks": observation.get("raw_benchmarks", []) if observation else [],
+            "comparator_source_id": None, "comparison": "not derived"}
+        feedbacks, feedback_refs = {}, []
+        feedback_key = row["job_id"], row["measurement_epoch_id"], _key(row.get("feedback_ref"))
+        for ref in links.get(feedback_key, []):
+            envelope, artifacts = evidence[ref["evidence_id"]]
+            raw = artifacts.get(ref["artifact"])
+            if raw is None or sha256_hex(raw) != row["feedback_ref"].get("sha256"):
+                conflicts.append("feedback_reference_conflict")
+                continue
+            try:
+                value = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                conflicts.append("invalid_feedback_json")
+                continue
+            if not isinstance(value, dict):
+                conflicts.append("invalid_feedback_object")
+                continue
+            if (not bound or not row.get("owner_turn_id") or not row.get("attempt_id")
+                    or value.get("source_id") != row.get("source_id") or value.get("operation_id") != row.get("operation_id")
+                    or value.get("turn_id") != row.get("owner_turn_id")
+                    or row.get("owner_turn_id") != row.get("attempt_id")
+                    or any(envelope["binding"][key] != row[key] for key in ("job_id", "measurement_epoch_id"))):
+                conflicts.append("feedback_binding_conflict")
+                continue
+            feedbacks[_key(value)] = value
+            feedback_refs.append(ref)
+        feedback = next(iter(feedbacks.values())) if len(feedbacks) == 1 and not conflicts else {}
+        if len(feedbacks) > 1:
+            conflicts.append("conflicting_feedback")
+        if conflicts:
+            row["observation"], row["times_ms"] = None, None
+            row["timing_context"] = {"units": None, "case_ids": [], "raw_benchmarks": [],
+                                     "comparator_source_id": None, "comparison": "not derived"}
+        row["feedback_refs"] = feedback_refs
+        row["feedback_state"] = "conflict" if conflicts else "available" if feedback else "unavailable"
+        native = feedback.get("native_observations")
+        native = native if isinstance(native, dict) else {}
+        phases = {key: value if isinstance(value, dict) else {} for key, value in native.items()}
+        row["stages"] = {"request": "operation_recorded" if row.get("operation_id") else "unknown",
+            "admission": feedback.get("admitted"), "execution_started": feedback.get("execution_started"),
+            "correctness": phases.get("correctness", {}).get("status"),
+            "benchmark": phases.get("benchmark", {}).get("status"),
+            "reported_status": feedback.get("status"), "error_kind": feedback.get("error_kind")}
+        row["association"] = {"status": "conflict" if conflicts else "matched_observation" if observation else "unknown",
+                              "issues": sorted(set(conflicts))}
+        row.update(kind="native_trial", evaluation_id=row.get("operation_id"),
+            status="recorded_observation" if row["observation"] else "outcome_recorded" if row["outcomes"] else "incomplete",
+            basis="retained native development trial; no endpoint qualification or idea verdict inferred")
+        result.append(row)
+    result.sort(key=lambda row: (row["job_id"], row["measurement_epoch_id"], row.get("source_id") or "", row["trial_id"]))
+    grouped = {}
+    for row in result:
+        key = row["job_id"], row["measurement_epoch_id"], row.get("source_id")
+        grouped.setdefault(key, []).append(row)
+    return {"schema": "geak-evo-trial-history-v1", "scope": SCOPE,
+        "coverage": {"inventory_count": len(set(groups.values())), "trial_count": len(result),
+                     "omitted_rows": 0, "outside_inventory": "unknown"},
+        "groups": [{"job_id": key[0], "measurement_epoch_id": key[1], "source_id": key[2],
+                    "candidate_ids": sorted({row["candidate_id"] for row in values if row.get("candidate_id")}),
+                    "trial_ids": [row["trial_id"] for row in values]} for key, values in grouped.items()],
+        "trials": result}

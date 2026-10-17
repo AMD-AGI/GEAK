@@ -221,6 +221,11 @@ class ExportTests(unittest.TestCase):
         self.assertEqual([row["outcome"]["error"] for row in measurements], ["correctness failed", "interrupted"])
         self.assertEqual(manifest["source_retention_failures"], 1)
         self.assertEqual(manifest["programs"], 3)
+        history = json.loads((self.out / "trial-history.json").read_bytes())
+        self.assertEqual(history["coverage"]["trial_count"], 2)
+        self.assertEqual({row["trial_id"] for row in history["trials"]},
+                         {row["trial_id"] for row in measurements})
+        self.assertEqual(history["coverage"]["outside_inventory"], "unknown")
 
     def test_corrupt_source_never_publishes(self):
         evidence = self.evaluate(self.child, "eval")

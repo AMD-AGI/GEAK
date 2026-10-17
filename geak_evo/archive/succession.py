@@ -13,6 +13,7 @@ import json
 
 from .._util import require
 from .refs import file_ref
+from .trials import trial_history
 
 ROLES = ("selected", "faithful", "unfinished", "terminal")
 
@@ -133,19 +134,49 @@ def parent_outcomes(store, snapshot, candidate_id, *, require_review=True):
     return outcomes
 
 
+def snapshot_trial_history(store, snapshot, evidence_ids=()):
+    """Add saved episode/idea handles to the shared complete trial projection."""
+    identities, attempts = set(evidence_ids), {}
+    owners = {row["opportunity_id"]: row["direction_id"]
+              for row in snapshot["state"]["opportunities"]}
+    for row in snapshot["state"]["history"]:
+        if not row.get("collection_ref"):
+            continue
+        identities.add(row["collection_ref"]["evidence_id"])
+        direction = owners.get(row.get("attempt_id"))
+        card = snapshot.get("archive", {}).get("directions", {}).get(direction, {}).get("card") or {}
+        attempts[row.get("attempt_id")] = {"direction_id": direction,
+            "idea_id": (card.get("idea") or {}).get("idea_id"), "engineer_id": None}
+        if row.get("packet_ref"):
+            _, data = store.evidence_artifact(row["packet_ref"]["evidence_id"], row["packet_ref"]["artifact"])
+            proposal = json.loads(data).get("proposal") or {}
+            attempts[row.get("attempt_id")]["engineer_id"] = proposal.get("engineer_id")
+    return trial_history(store, identities, attempts=attempts)
+
+
 def parent_prompt_context(store, snapshot, candidate_id, *, direction_id,
                           search_policy, campaign_root):
     """Build the parent part of an engineer prompt; return ``(text, snapshot_ref)``.
 
-    The full outcome list is saved as evidence on the parent and referenced by
-    file; the prompt carries a compact summary of the latest outcome.
+    The full outcome list and same-source trial history are saved as evidence
+    on the parent. The prompt carries the latest outcome and complete-view counts.
     """
     from ..planner.context import outcome_prompt_context
 
     outcomes = parent_outcomes(store, snapshot, candidate_id)
     # Saved as ordinary evidence with exact notes, corrections, roles and costs.
     # No prose or flag in it becomes validated fitness.
-    frozen = dict(snapshot, native_parent_outcomes=outcomes)
+    history = snapshot_trial_history(store, snapshot)
+    candidate = store.get_candidate(candidate_id)
+    history["trials"] = [row for row in history["trials"] if all(
+        row[key] == candidate[key] for key in ("job_id", "measurement_epoch_id", "source_id"))]
+    history["groups"] = [row for row in history["groups"] if all(
+        row[key] == candidate[key] for key in ("job_id", "measurement_epoch_id", "source_id"))]
+    history["coverage"]["input_inventory_count"] = history["coverage"]["inventory_count"]
+    history["coverage"]["inventory_count"] = len({row["investigation_evidence_id"] for row in history["trials"]})
+    history["coverage"]["trial_count"] = len(history["trials"])
+    history["coverage"]["filter"] = "exact parent job, measurement epoch and source; all candidate identities retained"
+    frozen = dict(snapshot, native_parent_outcomes=outcomes, native_trial_history=history)
     evidence = store.archive_evidence(candidate_id, {"native_parent_snapshot.json": encoded(frozen)})
     envelope, _ = store.evidence(evidence)
     snapshot_ref = file_ref(store.root / "objects" / envelope["artifacts"]["native_parent_snapshot.json"])
@@ -167,6 +198,8 @@ def parent_prompt_context(store, snapshot, candidate_id, *, direction_id,
                    "native_parent_outcome": None}
     summary["all_parent_outcomes_ref"] = {"file": snapshot_ref, "field": "native_parent_outcomes"}
     summary["exact_role_review"] = latest["review"] if latest else None
+    summary["trial_history"] = {"file": snapshot_ref, "field": "native_trial_history",
+        "coverage": history["coverage"], "scope": history["scope"]}
     context = ("Native parent identity and charged prior investigation costs. The selected/faithful/unfinished/terminal "
                "roles and agent review are retained observations/interpretations; no accepted anchor is implied. "
                "Raw parent role/cost history is in the referenced file.\n" + encoded(summary).decode() + "\n" + context)

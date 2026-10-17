@@ -51,6 +51,7 @@ view/
   measurements.csv           one row per evaluation/trial; per-case times inside
   observations/              exact saved measurements and their task/source inputs
   trials.json                all supplied trials, including retention errors
+  trial-history.json          complete shared trial view, grouped by task/epoch/source
   timeline.json              changes to the host's selected program
   lineage.json               parent and donor links
   RESUME.json                saved directions and restoration limits
@@ -60,6 +61,20 @@ view/
 Start with `index.csv`, then open a program's `program.json`. Its `research_files`
 links lead to the investigation, current direction review and program-specific
 claims. Use `measurements.csv` and `observations/` for the measured results.
+`trial-history.json` is the same derived view used by the planner and parent
+handoff. It lists every supplied trial, including repeated measurements of the
+same source, and links exact inventory, outcome and feedback records. Query its
+`groups` by task, measurement epoch and source, then follow the `trial_ids`.
+The view reports its row count and coverage; work absent from a collected
+inventory remains unknown. A missing row does not mean an idea was never tried.
+
+Request identity, reported admission, correctness and benchmark stages stay
+separate. Unknown stages stay null; error prose does not fill them. Timing
+conflicts suppress displayed values while retaining the conflicting references.
+Recorded timing is a development observation: no new speedup, winner, or verdict
+on an idea is calculated. Stage fields come only from structured saved feedback
+with matching source, operation and turn. Generic status words remain separate.
+
 Check the program/source IDs: a direction review describes its current tip, and
 an investigation's strategy need not describe every intermediate trial.
 
