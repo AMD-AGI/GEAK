@@ -214,12 +214,35 @@ export function createRuntime({
     try {
       fn = new AsyncFunction(
         'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget', 'runProcess',
+        'setTimeout', 'clearTimeout',
         body
       );
     } catch (e) {
       throw new Error(`failed to compile workflow ${absScriptPath}: ${e.message}`);
     }
-    return fn(agent, parallel, pipeline, phase, log, makeWorkflow(depth), scriptArgs, budget, runProcess);
+    // Deadline flags may outlive an early return or failure. Keep them active
+    // while this script runs, then clear only timers created by this invocation.
+    const timers = new Set();
+    let closed = false;
+    const scriptSetTimeout = (...args) => {
+      const timer = setTimeout(...args);
+      // Late continuations must not keep the process alive after script return.
+      if (closed) timer.unref();
+      else timers.add(timer);
+      return timer;
+    };
+    const scriptClearTimeout = (timer) => {
+      timers.delete(timer);
+      clearTimeout(timer);
+    };
+    try {
+      return await fn(agent, parallel, pipeline, phase, log, makeWorkflow(depth), scriptArgs, budget,
+        runProcess, scriptSetTimeout, scriptClearTimeout);
+    } finally {
+      closed = true;
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+    }
   }
 
   return { agent, parallel, pipeline, phase, log, budget, makeWorkflow, runScript, state };
