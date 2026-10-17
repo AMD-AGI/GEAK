@@ -1176,6 +1176,9 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             spd = b / o
         rows.append({"sig": c.get("sig") or c.get("name") or "", "regime": reg, "m": c.get("m"),
                      "baseline_ms": b, "optimized_ms": o, "speedup": spd})
+        for key in ("reps", "speedup_spread", "timing_pairs", "timing_conditions"):
+            if key in c:
+                rows[-1][key] = c[key]
 
     # assign analytic passes: the largest-M bucket in each regime carries that regime's calls, rest = 1.
     by_reg = {}
@@ -1488,6 +1491,29 @@ def _median(xs):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
+def _timing_conditions(pairs):
+    """Describe reported differences across legs/repetitions; never gate the score.
+
+    `primed` is measured host-supply evidence, not a benchmark policy setting.
+    Missing/null metadata cannot establish a match, even when absent on both legs.
+    Matched recorded values alone do not establish benchmark comparability.
+    `cross_leg_mismatch_pairs` lists zero-based pairs with observed disagreement;
+    an empty list means none observed, not that missing values matched.
+    """
+    rows = [pair[leg] for pair in pairs for leg in ("baseline", "candidate")]
+    status = {"cross_leg_mismatch_pairs": {}}
+    for key in ("timer", "cache_condition", "primed"):
+        values = [row[key] for row in rows if row.get(key) is not None]
+        differs = any(value != values[0] for value in values[1:])
+        status[key] = ("mismatch" if differs else
+                       "matched" if values and len(values) == len(rows) else "unknown")
+        status["cross_leg_mismatch_pairs"][key] = [
+            i for i, pair in enumerate(pairs)
+            if pair["baseline"].get(key) is not None and pair["candidate"].get(key) is not None
+            and pair["baseline"][key] != pair["candidate"][key]]
+    return status
+
+
 def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10)):
     """`per_case` for `serving_weighted_speedup`, one bucket per FRESH subprocess per leg.
 
@@ -1514,14 +1540,16 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
 
     `baseline_ms`/`optimized_ms` are the MEDIAN over the pairs actually run, so one unlucky process
     cannot carry the bucket. `reps` and `speedup_spread` (per-pair speedup range / median, 0.0 for a
-    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence."""
+    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence.
+    `timing_pairs` retains each leg's raw receipt; `timing_conditions` reports differences or missing
+    metadata across all legs/repetitions. These diagnostics do not change scoring or repetition."""
     task = os.path.abspath(task_dir)
     base, cand = build_candidate_overlay(task, meta)
     assert_legs_differ(task, base, cand, meta)
     lo, hi = undecided
     per_case = []
     for sig in _run_leg(task, base, "list", timeout=timeout)["sigs"]:
-        row, bms, oms = None, [], []
+        row, bms, oms, timing_pairs = None, [], [], []
         for _ in range(max(1, int(max_reps))):
             b = _run_leg(task, base, "time", bucket=sig, timeout=timeout)["cases"]
             o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout)["cases"]
@@ -1529,6 +1557,7 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
                 break
             if row is None:
                 row = b[0]
+            timing_pairs.append({"baseline": b[0], "candidate": o[0]})
             bms.append(b[0].get("ms"))
             oms.append(o[0].get("ms"))
             good_b, good_o = [x for x in bms if x], [y for y in oms if y]
@@ -1546,6 +1575,8 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
                          "baseline_ms": bm, "optimized_ms": om,
                          "speedup": (bm / om) if (bm and om) else None,
                          "reps": len(bms),
+                         "timing_pairs": timing_pairs,
+                         "timing_conditions": _timing_conditions(timing_pairs),
                          "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
                                             if len(pair_sp) > 1 else 0.0)})
     return per_case
