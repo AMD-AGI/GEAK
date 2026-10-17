@@ -10,7 +10,7 @@
     {
       "id": "report-context-v1",
       "patch": "patches/report-context.patch",
-      "patch_sha256": "fd7239faa029ef10ae44abaf596e50c64019496c18407d1e2344c01a8da80a2e",
+      "patch_sha256": "249a03a69e71a0205994bd575fd4a5adb531f58d45fe9e5289f7fe730941c021",
       "strip": 1,
       "files": [
         {
@@ -51,8 +51,8 @@
           "original_ref": null,
           "source_ref": {
             "path": "/home/sapmajum/research-collab/codex/per_evaluation_idea_context_implementation_20261017_v1/native-draft/workspace_helpers/report_context.py",
-            "sha256": "d254541f397494afe7e215fba5f467ec03a4fe808d7d6b86c04147e9946de784",
-            "size_bytes": 10864,
+            "sha256": "7f96f5224e76bffda8af5e40f3d474a9d0f03ce8cbf128da1768cb7366ff688d",
+            "size_bytes": 11595,
             "executable": 0
           }
         }
