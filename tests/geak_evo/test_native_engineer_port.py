@@ -186,6 +186,128 @@ class NativeEngineerTests(unittest.TestCase):
                                         parents=[self.request["tip"]["candidate_id"]])
         return native, result, candidate
 
+    def committed_episode_fixture(self, result, candidate, collected):
+        """Commit real store records; only the external material reader is a CPU fixture."""
+        from geak_evo.archive import episodes
+        attempt = Path(result["attempt_dir"])
+        prepared = investigation.read(base.file_ref(attempt / "native_prepared.json"))
+        native_receipt = investigation.read(result["receipt"]["native_receipt_ref"])
+        opportunity = {"job_id": self.job_id, "measurement_epoch_id": self.epoch,
+            "opportunity_id": self.operation_id, "direction_id": self.request["direction_id"],
+            "island_id": "island", "engineer_id": "engineer", "question": self.request["next_question"],
+            "opened_at": 100, "review_at": 105, "requested": {"wall_seconds": 5, "evaluations": 2},
+            "reserved": {"wall_seconds": 5, "evaluations": 2}, "membership_ref": None,
+            "receipts": [], "settled": True, "completed_sequence": 1, "progress_complete": False}
+        proposal = {key: opportunity[key] for key in episodes._PROPOSAL_FIELDS}
+        proposal.update(parent_candidate_id=self.request["tip"]["candidate_id"],
+                        reservation=opportunity["reserved"])
+        packet = {"proposal": proposal, "opportunity": dict(opportunity,
+            receipts=[], settled=False, completed_sequence=None, progress_complete=False)}
+        packet_id = self.store.archive_evidence(self.request["tip"]["candidate_id"], {
+            "assignment.json": investigation.encoded(packet), "engineer_prompt.txt": self.prompt.read_bytes()})
+        transport = {name: (attempt / name).read_bytes() for name in
+                     ("native_prepared.json", "native_entry_result.json", "native_receipt.json", "prompt.txt")}
+        transport["transport.json"] = investigation.encoded(result["receipt"])
+        transport_id = self.store.archive_evidence(candidate, transport)
+        artifacts = dict(collected["artifacts"], **{"collection.json": investigation.encoded({"costs": collected["costs"]})})
+        collection_id = self.store.archive_evidence(candidate, artifacts)
+        history = {"attempt_id": self.operation_id, "candidate_id": candidate, "settled": True,
+            "packet_ref": {"evidence_id": packet_id, "artifact": "assignment.json"},
+            "transport_ref": {"evidence_id": transport_id, "artifact": "transport.json"},
+            "collection_ref": {"evidence_id": collection_id, "artifact": "collection.json"}}
+        note = {"claim": "CPU fixture", "scope": "source retention", "next_test": "continue exact source",
+            "research_status": "reported", "research_review_id": "fixture-review",
+            "reviewed_outcome_refs": [history["transport_ref"], history["collection_ref"]],
+            "research_update_ref": history["collection_ref"], "latest_transport_ref": history["transport_ref"]}
+        direction = self.request["direction_id"]
+        self.store.checkpoint(direction, candidate, note=note, expected_revision=0)
+        review = {"review_kind": "research_review", "direction_revision": 1, "proposal": {
+            "direction_id": direction, "transport_ref": history["transport_ref"],
+            "collection_ref": history["collection_ref"], "expected_revision": 0,
+            "note": {"research_review_id": "fixture-review"}}}
+        state = {"binding": {"job_id": self.job_id, "measurement_epoch_id": self.epoch},
+                 "history": [history, review], "opportunities": [opportunity]}
+        self.store.checkpoint("campaign", candidate, note=dict(note, evolution=state), expected_revision=0)
+        snapshot = {"campaign_id": "campaign", "revision": 1, "state": state}
+        def material_reader(receipt_ref, manifest_ref, expected, **kwargs):
+            self.assertEqual(receipt_ref, result["receipt_ref"])
+            self.assertEqual(expected["turn_id"], self.operation_id)
+            self.assertEqual(expected["starting_source_id"], self.request["tip"]["source_id"])
+            manifest = investigation.read(manifest_ref)
+            return result["receipt"], {"harvest": manifest, "native_receipt": native_receipt,
+                "refs": {"native_entry_binding": investigation.read(base.file_ref(attempt / "native_entry_binding.json"))}}
+        kwargs = dict(harvest=None, episode_material=material_reader, scratch_root=self.root,
+            runtime_refs={key: prepared[key] for key in ("entry_runner_ref", "collector_ref", "entry_provenance_ref")})
+        return snapshot, history, kwargs
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_recovered_collection_passes_committed_episode_and_parent_continuation(self):
+        from geak_evo.archive import episodes, succession
+        native, result, candidate = self.collection_fixture()
+        def interrupted(command, **kwargs):
+            kwargs["stderr"].write(b"interrupted\n")
+            raise KeyboardInterrupt
+        native.process_runner = interrupted
+        with self.assertRaises(KeyboardInterrupt):
+            native.collect(result, candidate)
+        native.process_runner = self.process
+        collected = native.collect(result, candidate)
+        snapshot, history, kwargs = self.committed_episode_fixture(result, candidate, collected)
+        outer, material = episodes.committed_native_episode(self.store, self.root, snapshot, history, **kwargs)
+        self.assertEqual(outer, result["receipt"])
+        self.assertEqual(material["harvest"]["terminal"]["source_id"], self.terminal_source)
+        # A later bad/stale original output is irrelevant to the successful retry.
+        old = Path(result["attempt_dir"]) / "collection/archive"
+        old.mkdir(parents=True)
+        (old / "manifest.json").write_bytes(b"corrupt abandoned collection")
+        self.assertEqual(episodes.committed_native_episode(self.store, self.root, snapshot, history, **kwargs),
+                         (outer, material))
+        parents = succession.selected_parent_material(self.store, snapshot, {
+            "parent_candidate_id": candidate, "semantic_donors": []})
+        self.assertEqual(parents[0]["source_id"], self.terminal_source)
+        self.assertEqual(parents[0]["candidate_id"], candidate)
+        self.assertEqual(sum("--input" in call[0] for call in self.calls), 1)
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_committed_legacy_collection_remains_readable(self):
+        from geak_evo.archive import episodes
+        native, result, candidate = self.collection_fixture()
+        collected = native.collect(result, candidate)
+        del collected["artifacts"]["native_collection_attempt.json"]
+        snapshot, history, kwargs = self.committed_episode_fixture(result, candidate, collected)
+        self.assertEqual(episodes.committed_native_episode(self.store, self.root, snapshot, history, **kwargs)[0],
+                         result["receipt"])
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_collection_locator_rejects_wrong_provenance_and_supports_first_retry_records(self):
+        from geak_evo.archive import episodes
+        native, result, candidate = self.collection_fixture()
+        collected = native.collect(result, candidate)
+        attempt = Path(result["attempt_dir"])
+        prepared = investigation.read(base.file_ref(attempt / "native_prepared.json"))
+        clock = investigation.read(self.clock_ref)
+        record = json.loads(collected["artifacts"]["native_collection_attempt.json"])
+        def locate(value):
+            return episodes._collection_manifest(attempt, {"native_collection_attempt.json": investigation.encoded(value)},
+                prepared, result["receipt_ref"], candidate, clock)
+        self.assertEqual(locate(record), record["manifest_ref"])
+        first_version = copy.deepcopy(record)
+        del first_version["manifest_ref"]
+        self.assertEqual(locate(first_version), record["manifest_ref"])
+        changes = [lambda v: v.update(revision=1), lambda v: v.update(revision=True),
+            lambda v: v.update(manifest_ref=base.file_ref(self.prompt)),
+            lambda v: v["intent"].update(receipt_ref=base.file_ref(self.prompt)),
+            lambda v: v["intent"].update(candidate_id=self.request["tip"]["candidate_id"]),
+            lambda v: v["status"].update(returncode=7),
+            lambda v: v["status"]["command"].extend(["--output", str(self.root)]),
+            lambda v: v["status"]["command"].__setitem__(-1, str(self.root)),
+            lambda v: v.update(status_ref=base.file_ref(self.prompt))]
+        for change in changes:
+            value = copy.deepcopy(record)
+            change(value)
+            with self.subTest(value=value), self.assertRaises((ValueError, FileNotFoundError)):
+                locate(value)
+
     @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
     def test_collection_recovers_interruption_before_output_and_charges_downtime(self):
         native, result, candidate = self.collection_fixture()
