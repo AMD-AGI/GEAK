@@ -311,13 +311,16 @@ class ModeList(_LegRunnerTestCase):
 
 class ModeTime(_LegRunnerTestCase):
     def test_time_reports_every_case_plus_the_leg_identity(self):
-        self._task_dir()
+        self._task_dir(harness=_HARNESS_STUB.replace(
+            '"timer": "event"', '"timer": "event", "host_ms": 2.0, "primed": False'))
         self._target_module()
         out = json.loads(self._main("--task", self.task, "--mode", "time"))
         self.assertEqual([c["sig"] for c in out["cases"]], ["decode", "prefill"])
         self.assertEqual(out["cases"][0]["ms"], 1.25)
         self.assertEqual(out["cases"][1]["m"], 4096)
         self.assertEqual(out["cases"][0]["regime"], "decode")
+        self.assertEqual(out["cases"][0]["host_ms"], 2.0)
+        self.assertIs(out["cases"][0]["primed"], False)
         self.assertTrue(out["identity"]["qualname"].endswith("<lambda>"))
 
     def test_bucket_selects_exactly_one_case(self):
@@ -349,6 +352,8 @@ class ModeTime(_LegRunnerTestCase):
         out = json.loads(self._main("--task", self.task, "--mode", "time"))
         self.assertIsNone(out["cases"][0]["ms"])
         self.assertIsNone(out["cases"][0]["timer"])
+        self.assertNotIn("host_ms", out["cases"][0])
+        self.assertNotIn("primed", out["cases"][0])
 
 
 class ModeOracle(_LegRunnerTestCase):

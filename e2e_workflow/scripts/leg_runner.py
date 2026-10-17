@@ -128,6 +128,9 @@ def main():
                         # not comparable to one read under 'read-evict' (1.40 vs 1.12 on MI355X --
                         # see harness_lib.cache_policy), so the two must never be folded together.
                         "cache_condition": (r or {}).get("cache_condition")})
+            for key in ("host_ms", "primed"):
+                if key in (r or {}):
+                    out[-1][key] = r[key]
         print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
         return
 
