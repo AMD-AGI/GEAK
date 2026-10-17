@@ -18,6 +18,31 @@ def _key(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _feedback_stages(feedback, row):
+    """Read the native producer's nested receipt without inventing lifecycle state."""
+    stages = {"request": "operation_recorded" if row.get("operation_id") else "unknown",
+              "admission": None, "execution_started": None, "correctness": None,
+              "benchmark": None, "reported_status": None, "error_kind": None}
+    if feedback.get("schema") != "geak-native-probe-feedback-v1" or feedback.get("profile") != "native":
+        return stages, None
+    receipt = feedback.get("receipt")
+    if not isinstance(receipt, dict) or receipt.get("schema") != "geak-arena-evaluation-v1":
+        return stages, None
+    binding = receipt.get("binding")
+    if (not isinstance(binding, dict) or receipt.get("evaluation_id") != row.get("operation_id")
+            or binding.get("candidate_source_id") != row.get("source_id")
+            or any(binding.get(key) != row[key] for key in ("job_id", "measurement_epoch_id"))):
+        return stages, "feedback_receipt_binding_conflict"
+    native = receipt.get("native_observations")
+    if isinstance(native, dict):
+        for phase in ("correctness", "benchmark"):
+            value = native.get(phase)
+            status = value.get("status") if isinstance(value, dict) else None
+            if isinstance(status, str) and status in ("passed", "failed", "not_run", "unknown"):
+                stages[phase] = status
+    return stages, None
+
+
 def trial_history(store, evidence_ids, *, attempts=None):
     """Project exact inventories and their linked feedback; never follow external paths.
 
@@ -190,20 +215,16 @@ def trial_history(store, evidence_ids, *, attempts=None):
         feedback = next(iter(feedbacks.values())) if len(feedbacks) == 1 and not conflicts else {}
         if len(feedbacks) > 1:
             conflicts.append("conflicting_feedback")
+        stages, stage_conflict = _feedback_stages(feedback, row)
+        if stage_conflict:
+            conflicts.append(stage_conflict)
         if conflicts:
             row["observation"], row["times_ms"] = None, None
             row["timing_context"] = {"units": None, "case_ids": [], "raw_benchmarks": [],
                                      "comparator_source_id": None, "comparison": "not derived"}
         row["feedback_refs"] = feedback_refs
         row["feedback_state"] = "conflict" if conflicts else "available" if feedback else "unavailable"
-        native = feedback.get("native_observations")
-        native = native if isinstance(native, dict) else {}
-        phases = {key: value if isinstance(value, dict) else {} for key, value in native.items()}
-        row["stages"] = {"request": "operation_recorded" if row.get("operation_id") else "unknown",
-            "admission": feedback.get("admitted"), "execution_started": feedback.get("execution_started"),
-            "correctness": phases.get("correctness", {}).get("status"),
-            "benchmark": phases.get("benchmark", {}).get("status"),
-            "reported_status": feedback.get("status"), "error_kind": feedback.get("error_kind")}
+        row["stages"] = stages
         row["association"] = {"status": "conflict" if conflicts else "matched_observation" if observation else "unknown",
                               "issues": sorted(set(conflicts))}
         row.update(kind="native_trial", evaluation_id=row.get("operation_id"),

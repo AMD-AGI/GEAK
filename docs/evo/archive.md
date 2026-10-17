@@ -77,8 +77,13 @@ Request identity, reported admission, correctness and benchmark stages stay
 separate. Unknown stages stay null; error prose does not fill them. Timing
 conflicts suppress displayed values while retaining the conflicting references.
 Recorded timing is a development observation: no new speedup, winner, or verdict
-on an idea is calculated. Stage fields come only from structured saved feedback
-with matching source, operation and turn. Generic status words remain separate.
+on an idea is calculated. Native correctness and benchmark stages come from
+`geak-native-probe-feedback-v1`'s nested `geak-arena-evaluation-v1` receipt,
+with matching source, operation, turn, job and measurement epoch. Missing or
+unsupported fields stay null; a native pass does not supply admission or
+execution-started fields. Raw feedback and its references remain unchanged.
+The archive candidate may carry different ancestry from the evaluator candidate;
+their candidate IDs are not required to match.
 
 This view and its per-parent counts are visible to the planner and engineer.
 They change the evidence presentation and therefore belong only in prospectively
