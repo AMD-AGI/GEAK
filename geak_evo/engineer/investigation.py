@@ -145,6 +145,15 @@ def inspect_prepared_identity(prepared, request, *, prompt_ref, operation_id):
     collect = read(prepared["collection_config_ref"])
     native = config["backend_config"]
     probe = native["probe_config"]
+    context_policy = probe.get("report_context")
+    if context_policy is not None:
+        need(context_policy in ({"capture": "off", "delivery": "off"},
+                                {"capture": "report-v1", "delivery": "history-v1"}),
+             "report context requires explicit history delivery; private capture-only is unsupported")
+        if context_policy["capture"] != "off":
+            output = str(Path(request["workspace"]) / ".idea-output" / operation_id)
+            need(entry.get("output_dir") == collect.get("output_dir") == output,
+                 "trial report must use the host-assigned engineer output directory")
     need(entry["protocol"] == "geak-one-engineer-v1"
          and entry["turn_id"] == probe["turn_id"] == collect["turn_id"] == operation_id,
          "native turn differs from reserved operation")

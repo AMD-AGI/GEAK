@@ -1,0 +1,295 @@
+--- a/host/host.py
++++ b/host/host.py
+@@ -20,6 +20,11 @@
+ import tempfile
+ import time
+ import zlib
++
++_context_spec = importlib.util.spec_from_file_location("_geak_report_context",
++    Path(__file__).resolve().parents[1] / "workspace_helpers/report_context.py")
++report_context = importlib.util.module_from_spec(_context_spec)
++_context_spec.loader.exec_module(report_context)
+
+ REQUEST_SCHEMA = 'geak-native-probe-request-v1'
+ FEEDBACK_SCHEMA = 'geak-native-probe-feedback-v1'
+@@ -678,8 +683,9 @@
+         expected = {'schema', 'session_id', 'turn_id', 'workspace', 'request_root', 'reply_root',
+                     'state_root', 'job_id', 'measurement_epoch_id', 'max_calls_per_turn',
+                     'native_envelope_seconds', 'turn_deadline_ns', 'budget'}
+-        need(set(config) in (expected, expected | {'native_only'})
++        need(expected <= set(config) <= expected | {'native_only', 'report_context'}
+              and config['schema'] == 'geak-native-probe-host-v1', 'host config differs')
++        self.capture_report = report_context.enabled(config)
+         self.profiles = admitted_profiles(config)
+         self.diagnostic_success = {profile: 'completed_uninterpreted' for profile in self.profiles[1:]}
+         need(getattr(backend, 'profiles', self.profiles) == self.profiles, 'backend profiles differ from host admission')
+@@ -794,6 +800,9 @@
+                 self.check_turn_clock()
+                 self.budget.check_clock(self.config['native_envelope_seconds'])
+                 atomic(folder / 'evaluate-intent.json', {'operation_id': row['operation_id'], 'snapshot': snapshot}, immutable=True)
++            if self.capture_report:
++                report_context.capture(self.config, self.backend.store, row, snapshot, folder,
++                                       write=atomic, recovery=recovery)
+             entered = True
+             profile = row['request']['profile']
+             response = (self.backend.reconcile(snapshot, row['operation_id'], profile) if recovery
+@@ -1025,6 +1034,9 @@
+             'measurement_valid': False, 'custody_proven': False, 'reward_eligible': False,
+             'wall_accounting': 'Nested probe wait is already inside role elapsed time; do not add it again.'}
+         present_diagnostic(feedback, publication)
++        if self.capture_report:
++            feedback['context_refs'] = report_context.publish(self.config, self.backend.store,
++                row, result['snapshot'], self.turn / request_id, publication, write=atomic)
+         target = publication / 'feedback.json'
+         atomic(target, feedback, immutable=True, public=True)
+         atomic(root / 'latest.json', {'path': str(target), 'sha256': sha(regular(target, MAX_ARTIFACT_BYTES))}, public=True)
+--- a/workspace_helpers/harvest.py
++++ b/workspace_helpers/harvest.py
+@@ -17,6 +17,11 @@
+ import shutil
+ import stat
+ import subprocess
++
++_context_spec = importlib.util.spec_from_file_location("_geak_report_context",
++    Path(__file__).resolve().with_name("report_context.py"))
++report_context = importlib.util.module_from_spec(_context_spec)
++_context_spec.loader.exec_module(report_context)
+
+
+ class HarvestError(ValueError):
+@@ -781,7 +786,7 @@
+         row = {"feedback_ref": entry.get("feedback_ref") if type(entry) is dict else None,
+                "archive_ref": None, "verified": None, "diagnostic": None, "artifacts": [], "error": None,
+                "source_archive": None, "source_archive_error": None}
+-        native_source_spec = diagnostic_source_spec = None
++        native_source_spec = diagnostic_source_spec = feedback = None
+         try:
+             need(type(entry) is dict and set(entry) == {"feedback_ref"}, "trial input must contain only feedback_ref")
+             raw = read_ref(entry["feedback_ref"])
+@@ -827,6 +832,14 @@
+                     output, objects, observation, retained_trial_sources)
+             except (ValueError, OSError, KeyError, TypeError) as exc:
+                 row["source_archive_error"] = type(exc).__name__ + ": " + str(exc)
++        if feedback is not None and "context_refs" in feedback:
++            owner_spec = native_source_spec or diagnostic_source_spec
++            row["context"] = (report_context.retain(feedback, owner_spec,
++                output / "trials" / ("%04d.context" % index), write=write_bytes) if owner_spec else
++                {"availability": "capture_unavailable", "error": "trial ownership unavailable", "artifacts": []})
++            # Only successful optional links join archive navigation, after all
++            # native validation. Context errors never become trial errors.
++            row["artifacts"].extend(row["context"]["artifacts"])
+         result["trials"].append(row)
+     faithful_id = spec.get("faithful_source_id")
+     if faithful_id is not None:
+--- /dev/null
++++ b/workspace_helpers/report_context.py
+@@ -0,0 +1,209 @@
++"""Optional trial-time report copies; never native measurement authority.
++
++The host supplies all identities and paths. Delivery is explicit: this version
++does not support private capture-only storage or add report-writing guidance.
++"""
++import contextlib
++import hashlib
++import json
++import os
++from pathlib import Path
++import stat
++import time
++
++MAX_REPORT_BYTES = 256 * 1024
++MAX_RECORD_BYTES = 16 * 1024
++POLICY = {"capture": "report-v1", "delivery": "history-v1"}
++
++
++def enabled(config):
++    policy = config.get("report_context")
++    if policy is None or policy == {"capture": "off", "delivery": "off"}:
++        return False
++    if policy != POLICY:
++        raise ValueError("report context requires explicit history delivery; private capture-only is unsupported")
++    return True
++
++
++def encoded(value):
++    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
++
++
++def digest(raw):
++    return hashlib.sha256(raw).hexdigest()
++
++
++class Unavailable(ValueError):
++    def __init__(self, status, size=None):
++        super().__init__(status)
++        self.status, self.size = status, size
++
++
++def bounded_read(path, limit):
++    """Read a complete stable regular file; never follow any symlink or hash overflow."""
++    path = Path(path)
++    if not path.is_absolute() or ".." in path.parts:
++        raise Unavailable("unsafe")
++    with contextlib.ExitStack() as stack:
++        fd = os.open("/", os.O_PATH | os.O_DIRECTORY)
++        stack.callback(os.close, fd)
++        for name in path.parts[1:-1]:
++            fd = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
++            stack.callback(os.close, fd)
++        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
++        stream = stack.enter_context(os.fdopen(fd, "rb"))
++        before = os.fstat(fd)
++        if not stat.S_ISREG(before.st_mode):
++            raise Unavailable("unsafe")
++        if before.st_size > limit:
++            raise Unavailable("too_large", before.st_size)
++        raw = stream.read(limit + 1)
++        after = os.fstat(fd)
++        if len(raw) > limit:
++            raise Unavailable("too_large", after.st_size)
++        fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
++        if len(raw) != after.st_size or any(getattr(before, key) != getattr(after, key) for key in fields):
++            raise Unavailable("unstable")
++        return raw
++
++
++def binding(config, row, snapshot):
++    return {"session_id": config["session_id"], "turn_id": config["turn_id"],
++        "request_id": row["request"]["request_id"], "operation_id": row["operation_id"],
++        "probe_request_sha256": row["request_sha256"], "source_id": row["request"]["expected_source_id"],
++        "candidate_id": snapshot.get("candidate_id"), "job_id": config["job_id"],
++        "measurement_epoch_id": config["measurement_epoch_id"]}
++
++
++def capture(config, store, row, snapshot, folder, *, write, recovery=False):
++    """Save once before evaluate; same-ID recovery never reads today's report."""
++    if not enabled(config):
++        return
++    pointer = Path(folder) / "report-context.json"
++    if pointer.exists() or pointer.is_symlink():
++        return  # Publication checks this original pointer; corruption is optional missingness.
++    bound = binding(config, row, snapshot)
++    record = {"schema": "geak-evaluation-report-v1", "binding": bound,
++        "classification": "narrator_text", "relevance": "unverified", "policy": POLICY,
++        "capture_point": "after_source_snapshot_before_evaluate" if not recovery else None,
++        "observed_monotonic_ns": time.monotonic_ns() if not recovery else None,
++        "observed_realtime_ns": time.time_ns() if not recovery else None,
++        "boot_id": config["budget"]["boot_id"], "availability": "capture_unavailable",
++        "report": None, "observed_size_bytes": None, "full_content_sha256": None}
++    artifacts = {}
++    if not recovery:
++        try:
++            report = Path(config["workspace"]) / ".idea-output" / config["turn_id"] / "report.md"
++            raw = bounded_read(report, MAX_REPORT_BYTES)
++            raw.decode("utf-8")
++            record.update(availability="present" if raw else "empty", observed_size_bytes=len(raw),
++                          full_content_sha256=digest(raw), report={"sha256": digest(raw), "size_bytes": len(raw)})
++            artifacts["report.md"] = raw
++        except Unavailable as exc:
++            record.update(availability=exc.status, observed_size_bytes=exc.size)
++        except FileNotFoundError:
++            record["availability"] = "missing"
++        except UnicodeError:
++            record["availability"] = "invalid_utf8"
++        except OSError:
++            record["availability"] = "unreadable_or_unsafe"
++    try:
++        artifacts["context.json"] = encoded(record)
++        identity = store.archive_evidence(snapshot["candidate_id"], artifacts)
++        write(pointer, {"schema": "geak-evaluation-report-pointer-v1", "binding": bound,
++                        "evidence_id": identity}, immutable=True)
++    except Exception:
++        # Optional capture cannot discard a native result. A missing pointer is
++        # published as unavailable, including if storage failed after an orphan write.
++        return
++
++
++def publish(config, store, row, snapshot, folder, publication, *, write):
++    """Use only the original capture and publish it outside native artifact_index."""
++    bound = binding(config, row, snapshot or {})
++    envelope = {"schema": "geak-evaluation-report-envelope-v1", "binding": bound,
++                "availability": "capture_unavailable", "evidence_id": None, "artifacts": [], "error": None}
++    try:
++        pointer = json.loads(bounded_read(Path(folder) / "report-context.json", MAX_RECORD_BYTES))
++        if pointer["schema"] != "geak-evaluation-report-pointer-v1" or pointer["binding"] != bound:
++            raise ValueError("report pointer binding differs")
++        evidence, artifacts = store.evidence(pointer["evidence_id"])
++        if evidence["candidate_id"] != bound["candidate_id"]:
++            raise ValueError("report evidence candidate differs")
++        record = checked_record(artifacts, bound)
++        root = Path(publication) / "context"
++        root.mkdir(mode=0o755)
++        refs = []
++        for name, raw in artifacts.items():
++            path = root / name
++            write(path, raw, immutable=True, public=True)
++            refs.append({"name": name, "path": str(path), "sha256": digest(raw), "size_bytes": len(raw)})
++        envelope.update(availability=record["availability"], evidence_id=pointer["evidence_id"], artifacts=refs)
++    except Exception as exc:
++        envelope["error"] = type(exc).__name__ + ": " + str(exc)[:256]
++    return envelope
++
++
++def checked_record(artifacts, bound):
++    if set(artifacts) not in ({"context.json"}, {"context.json", "report.md"}):
++        raise ValueError("report context has unexpected files")
++    if len(artifacts["context.json"]) > MAX_RECORD_BYTES:
++        raise ValueError("report context metadata too large")
++    record = json.loads(artifacts["context.json"])
++    if (record["schema"] != "geak-evaluation-report-v1" or record["binding"] != bound
++            or record["classification"] != "narrator_text" or record["policy"] != POLICY):
++        raise ValueError("report context binding or policy differs")
++    if "report.md" in artifacts:
++        raw = artifacts["report.md"]
++        if (len(raw) > MAX_REPORT_BYTES or record["report"] != {"sha256": digest(raw), "size_bytes": len(raw)}
++                or record["availability"] != ("present" if raw else "empty")
++                or record["full_content_sha256"] != digest(raw) or record["observed_size_bytes"] != len(raw)):
++            raise ValueError("report body differs from its captured identity")
++        raw.decode("utf-8")
++    elif (record["report"] is not None or record["full_content_sha256"] is not None
++          or record["availability"] not in ("capture_unavailable", "missing", "invalid_utf8", "unsafe",
++                                             "unreadable_or_unsafe", "unstable", "too_large")):
++        raise ValueError("captured report body missing")
++    return record
++
++
++def retain(feedback, spec, output, *, write):
++    """Nonfatal bounded retention; return only successful artifact links for delivery."""
++    result = {"availability": "unsupported_or_not_supplied", "error": None, "artifacts": []}
++    envelope = feedback.get("context_refs")
++    if envelope is None:
++        return result
++    try:
++        snapshot = feedback["snapshot"]
++        bound = {key: feedback[key] for key in ("session_id", "turn_id", "request_id", "operation_id", "source_id")}
++        bound.update(probe_request_sha256=feedback["request_sha256"], candidate_id=snapshot["candidate_id"],
++                     job_id=spec["job_id"], measurement_epoch_id=spec["measurement_epoch_id"])
++        if (envelope["schema"] != "geak-evaluation-report-envelope-v1" or envelope["binding"] != bound
++                or any(feedback[key] != spec[key] for key in ("session_id", "turn_id"))
++                or any(snapshot[key] != bound[key] for key in ("source_id", "job_id", "measurement_epoch_id"))):
++            raise ValueError("report context belongs to another trial")
++        result.update(availability=envelope["availability"], error=envelope["error"], evidence_id=envelope["evidence_id"])
++        if not envelope["artifacts"]:
++            if envelope["availability"] != "capture_unavailable" or envelope["evidence_id"] is not None:
++                raise ValueError("report context claims a capture without retained metadata")
++            return result
++        if type(envelope["artifacts"]) is not list or len(envelope["artifacts"]) > 2:
++            raise ValueError("report context file count differs")
++        artifacts = {}
++        for ref in envelope["artifacts"]:
++            name = ref["name"]
++            if name not in ("context.json", "report.md") or name in artifacts:
++                raise ValueError("unexpected or duplicate report context file")
++            raw = bounded_read(ref["path"], MAX_REPORT_BYTES if name == "report.md" else MAX_RECORD_BYTES)
++            if digest(raw) != ref["sha256"] or len(raw) != ref["size_bytes"]:
++                raise ValueError("report context size or hash differs")
++            artifacts[name] = raw
++        record = checked_record(artifacts, bound)
++        if record["availability"] != envelope["availability"]:
++            raise ValueError("report context status differs")
++        for ref in envelope["artifacts"]:
++            archived = write(Path(output) / ref["name"], artifacts[ref["name"]])
++            result["artifacts"].append({"input_ref": ref, "archive_ref": archived, "error": None})
++    except Exception as exc:
++        result.update(availability="capture_unavailable", error=type(exc).__name__ + ": " + str(exc)[:256])
++    return result

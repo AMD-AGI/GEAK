@@ -109,6 +109,19 @@ test('one engineer call retains its result and never retries a bad return', asyn
       if (expected === 'native_return_unavailable') assert.equal(result.native_result, null);
       else assert.deepEqual(result.native_result.eng, valid);
     }
+    const prompts = [];
+    for (const instruction of [undefined, 'off', 'before-trial-v1']) {
+      await runOneEngineer({ ...input, report_update_instruction: instruction }, {
+        name: 'codex', async runAgent(call) {
+          prompts.push(call.prompt);
+          return { settled: true, text: JSON.stringify(valid) };
+        },
+      });
+    }
+    assert.equal(prompts[0], prompts[1], 'disabled report guidance adds no prompt text');
+    const reportInstruction = `Before each trial, update ${input.output_dir}/report.md with the change, why it may help, the observation that would support it, relevant source/result references, and the next unresolved test. Keep it concise; use a temporary file and rename. Missing notes do not block evaluation.\n`;
+    assert.ok(prompts[2].includes(reportInstruction));
+    assert.equal(prompts[2].replace(reportInstruction, ''), prompts[0]);
     let calls = 0;
     await assert.rejects(runOneEngineer(input, { name: 'codex', async runAgent() {
       calls++;

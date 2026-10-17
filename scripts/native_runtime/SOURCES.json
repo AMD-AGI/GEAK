@@ -1,0 +1,68 @@
+{
+  "schema": "geak-evo-external-native-patches-v1",
+  "evo_base_commit": "a6a48fc8c1a622c3f314a2614b528ebf205c03da",
+  "branch": "feat/evo-per-evaluation-context",
+  "native_source_map_ref": {
+    "path": "/mnt/sapmajum-evo-scratch/hyperloom-kernel-arm-evo-20261014-v1/full-host-followon-4h-v2/control/saved-session-evo-recovery-8h-20261017-v1/runtime-bindings-postadoption-v1/qualifier-native-source-map.json",
+    "sha256": "18018921a5f091fb3c10a1954cbbce262f33b16e5aae75c94f545cdd6154432b"
+  },
+  "patches": [
+    {
+      "id": "report-context-v1",
+      "patch": "patches/report-context.patch",
+      "patch_sha256": "fd7239faa029ef10ae44abaf596e50c64019496c18407d1e2344c01a8da80a2e",
+      "strip": 1,
+      "files": [
+        {
+          "native_root_relative_path": "host/host.py",
+          "status": "modified",
+          "original_ref": {
+            "path": "/mnt/sapmajum-evo-scratch/hyperloom-kernel-arm-evo-20261014-v1/full-host-followon-4h-v2/control/saved-session-evo-recovery-8h-20261017-v1/source/native-runtime-postadoption-v1/host/host.py",
+            "sha256": "fb874eb3d4f5d4b8e763a8ffc3b120866da787c9450372542663338a74bfddc4",
+            "size_bytes": 73000,
+            "executable": 0
+          },
+          "source_ref": {
+            "path": "/home/sapmajum/research-collab/codex/per_evaluation_idea_context_implementation_20261017_v1/native-draft/host/host.py",
+            "sha256": "0a7a5acf35bbdd9e94117071529a071e364db509eabf8bb3d6f8aaa1b43ac815",
+            "size_bytes": 73775,
+            "executable": 0
+          }
+        },
+        {
+          "native_root_relative_path": "workspace_helpers/harvest.py",
+          "status": "modified",
+          "original_ref": {
+            "path": "/mnt/sapmajum-evo-scratch/hyperloom-kernel-arm-evo-20261014-v1/full-host-followon-4h-v2/control/saved-session-evo-recovery-8h-20261017-v1/source/native-runtime-postadoption-v1/workspace_helpers/harvest.py",
+            "sha256": "4248b68b7c58527a1cb02427c5031665f8ace997f2890c5d4d192d93899b66c9",
+            "size_bytes": 55995,
+            "executable": 0
+          },
+          "source_ref": {
+            "path": "/home/sapmajum/research-collab/codex/per_evaluation_idea_context_implementation_20261017_v1/native-draft/workspace_helpers/harvest.py",
+            "sha256": "bd7fcdd210ee7700c3931e0dcdc21a8d88b30a2764dc9f521836ecb2deebdc7b",
+            "size_bytes": 56902,
+            "executable": 0
+          }
+        },
+        {
+          "native_root_relative_path": "workspace_helpers/report_context.py",
+          "status": "added",
+          "original_ref": null,
+          "source_ref": {
+            "path": "/home/sapmajum/research-collab/codex/per_evaluation_idea_context_implementation_20261017_v1/native-draft/workspace_helpers/report_context.py",
+            "sha256": "d254541f397494afe7e215fba5f467ec03a4fe808d7d6b86c04147e9946de784",
+            "size_bytes": 10864,
+            "executable": 0
+          }
+        }
+      ]
+    }
+  ],
+  "runtime_requirements": [
+    "Apply only to a fresh copy of the exact original sources; verify before/after hashes.",
+    "Add the new helper and changed sources to a new authenticated source graph and installation closure.",
+    "Enable the protected probe_config report_context capture=report-v1 delivery=history-v1 explicitly.",
+    "Record the exact evo descendant and complete external map for a new study. No live installation or qualification implied."
+  ]
+}
