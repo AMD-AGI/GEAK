@@ -60,6 +60,53 @@ def _check_reservation(clock, probe, entry, opportunity, request):
          "native prepared work exceeds its immutable reservation")
 
 
+def _collection_manifest(attempt, artifacts, prepared, receipt_ref, candidate_id, clock):
+    """Locate the successful CPU collection from its committed attempt record.
+
+    Older collections used one fixed directory. New records must authenticate
+    their exact revision; malformed records never fall back to an older result.
+    """
+    if "native_collection_attempt.json" not in artifacts:
+        return file_ref(attempt / "collection/archive/manifest.json")
+    record = json.loads(artifacts["native_collection_attempt.json"])
+    revision = record["revision"]
+    need(type(revision) is int and revision >= 0, "invalid native collection revision")
+    name = "collection" if revision == 0 else "collection-%04d" % revision
+    intent, status = record["intent"], record["status"]
+    need(record["intent_ref"] == file_ref(attempt / "collection_intent.json")
+         and record["status_ref"] == file_ref(attempt / (name + ".status.json"))
+         and json.loads(read_ref(record["intent_ref"])) == intent
+         and json.loads(read_ref(record["status_ref"])) == status,
+         "native collection record differs from its saved intent or status")
+    expected = {"receipt_ref": receipt_ref, "prepared_ref": file_ref(attempt / "native_prepared.json"),
+                "entry_result_ref": file_ref(attempt / "native_entry_result.json"),
+                "candidate_id": candidate_id, "boot_id": clock["boot_id"]}
+    need(set(intent) == set(expected) | {"started_monotonic_ns"}
+         and all(intent[key] == value for key, value in expected.items())
+         and type(intent["started_monotonic_ns"]) is int and intent["started_monotonic_ns"] >= 0,
+         "native collection intent belongs to another attempt")
+    binding = {"entry_result_ref": expected["entry_result_ref"],
+               "entry_input_ref": prepared["entry_input_ref"],
+               "entry_provenance_ref": prepared["entry_provenance_ref"]}
+    binding_ref = file_ref(attempt / "native_entry_binding.json")
+    need(json.loads(read_ref(binding_ref)) == binding, "native collection entry binding differs")
+    command = status["command"]
+    need(type(status["returncode"]) is int and status["returncode"] == 0
+         and status["collection_intent_ref"] == record["intent_ref"]
+         and type(command) is list and len(command) == 10
+         and type(command[0]) is str and command[0]
+         and command[1:] == ["-I", "-B", prepared["collector_ref"]["path"],
+             "--config", prepared["collection_config_ref"]["path"],
+             "--native-entry-binding", binding_ref["path"], "--output", str(attempt / name)],
+         "native collection did not complete through the admitted collector")
+    manifest_ref = file_ref(attempt / name / "archive/manifest.json")
+    # The first retry-capable producer omitted this field. Its authenticated
+    # revision/status still determines one exact path, never a directory scan.
+    need(record.get("manifest_ref", manifest_ref) == manifest_ref,
+         "native collection manifest differs from its completed output")
+    return manifest_ref
+
+
 def committed_native_episode(store, campaign_root, snapshot, history, assigned_candidate_id=None,
                              *, harvest, episode_material, scratch_root, runtime_refs):
     """Return ``(receipt, material)`` for one settled turn after checking all its records."""
@@ -125,7 +172,8 @@ def committed_native_episode(store, campaign_root, snapshot, history, assigned_c
     collection_envelope, _ = resolve_artifact(history["collection_ref"], store.evidence)
     _, artifacts = store.evidence(history["collection_ref"]["evidence_id"])
     need(collection_envelope["candidate_id"] == history["candidate_id"], "native collection owner differs")
-    manifest_ref = file_ref(attempt / "collection/archive/manifest.json")
+    manifest_ref = _collection_manifest(attempt, artifacts, prepared, receipt_ref,
+                                        history["candidate_id"], clock)
     inventory = json.loads(artifacts["native_evidence_index.json"])
     manifests = [row for row in inventory if row["original_ref"] == manifest_ref]
     need(len(manifests) == 1, "native manifest lacks its exact committed raw evidence index")
