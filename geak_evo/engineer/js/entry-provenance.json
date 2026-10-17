@@ -1,6 +1,6 @@
 {
   "schema": "geak-engineer-entry-files-v1",
-  "entry_sha256": "b3753281ac6152cf124c809cfff67588fe794e563298efe019e09ad75b37db56",
+  "entry_sha256": "51b56ed90f0a8f5bc507b4d056e8649109f493f8d654516dfbf7de3aa20f7390",
   "common_reference_overrides": [
     {
       "path": "knowledge/amd_instinct.md",

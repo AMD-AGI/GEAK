@@ -1,0 +1,77 @@
+{
+  "schema": "geak-evo-external-context-validation-v1",
+  "observed_at_utc": "2026-10-17T07:44:33.472132+00:00",
+  "evo_base_commit": "a6a48fc8c1a622c3f314a2614b528ebf205c03da",
+  "status": "source draft; independent Codex review passed; actual Claude review pending; not installed or enabled",
+  "files": [
+    {
+      "repository_path": "geak_evo/engineer/investigation.py",
+      "sha256": "ab004b9d2de7fd35875e33e5d92d3a3e6c47f29480a0b97d1e6964d8b6712703"
+    },
+    {
+      "repository_path": "geak_evo/engineer/js/one_engineer.js",
+      "sha256": "51b56ed90f0a8f5bc507b4d056e8649109f493f8d654516dfbf7de3aa20f7390"
+    },
+    {
+      "repository_path": "geak_evo/engineer/js/entry-provenance.json",
+      "sha256": "5cbf35ca60d7f5466ddf00562c35fb4cb553e08fbf2aea976d6edd89a919c42c"
+    },
+    {
+      "repository_path": "tests/geak_evo/test_report_context_patch.py",
+      "sha256": "caf2380d0ec3fd8a8f7a619567438d44fed299f15aa18b3d897558b4684b0595"
+    },
+    {
+      "repository_path": "tests/geak_evo/test_engineer_entry.mjs",
+      "sha256": "b1683d90c9820147b131b7432fbcc0e76dbd5548b6fcbd5e0f3fbc278dc1288c"
+    },
+    {
+      "repository_path": "scripts/native_runtime/patches/report-context.patch",
+      "sha256": "fd7239faa029ef10ae44abaf596e50c64019496c18407d1e2344c01a8da80a2e"
+    },
+    {
+      "repository_path": "scripts/native_runtime/SOURCES.json",
+      "sha256": "5637a04b43d92e7688696a04e8df5800101d875a50c7fcb67c1315b6600ef370"
+    },
+    {
+      "repository_path": "scripts/native_runtime/README.md",
+      "sha256": "b157ee7eb54629bd955849a5597c67cc49e37e3104c8b8761f8f7df85d10cb09"
+    }
+  ],
+  "tests": [
+    {
+      "command": "PYTHONPATH=.:tests/geak_evo python3 -B -m unittest test_report_context_patch test_native_engineer_port test_succession",
+      "passed": 43
+    },
+    {
+      "command": "node --test tests/geak_evo/test_engineer_entry.mjs",
+      "passed": 2
+    }
+  ],
+  "scope": [
+    "Exact patch replays from hash-pinned external originals and resulting sources match.",
+    "Patched ProbeHost._work takes a pre-evaluation capture before a synthetic failure; editing report during evaluation and same-ID recovery retain original bytes.",
+    "Bounded optional helper covers missing, oversized, invalid, unsafe, empty, storage failure and corrupted context, without changing source/native fields.",
+    "Actual public collector interruption/retry retains original feedback ref through receipt/intent and normal assignment.archive_files delivers original note. External collector/native outcome are synthetic.",
+    "Report instruction is separately opt-in. Absent and off render identical prompts; on adds only the declared concise instruction."
+  ],
+  "limitations": [
+    "No model/GPU/native execution or installed runtime qualification.",
+    "No private capture-only mode or claim of behavior neutrality.",
+    "Captures preserve written narrator text, not every idea or verified causal reasoning.",
+    "Normal archive delivery is covered, not a new compact report viewer/export.",
+    "Provider uses its existing owner legacy-module bridge; test aliases reflect that boundary."
+  ],
+  "independent_codex_review": {
+    "reviewer": "/root/idea_realization_rank_0510",
+    "path": "/home/sapmajum/research-collab/codex/per_evaluation_context_review_20261017_v1/REVIEW.md",
+    "sha256": "123af1bee6f3acc643cdfb427c2c12fb2f1ac2c8837f3e661abb73b0801b6231",
+    "decision": "no blocker in source/CPU-fixture scope",
+    "python_checks": 9,
+    "node_checks": 2
+  },
+  "patch_transport_normalization": {
+    "reviewed_patch_sha256": "874e091f078dc61956f905b5a5c868b67eb583524a750102c6cc31a926c524ba",
+    "packaged_patch_sha256": "fd7239faa029ef10ae44abaf596e50c64019496c18407d1e2344c01a8da80a2e",
+    "change": "Removed whitespace-only unified context markers; git apply --check/apply produces exactly the same pinned source hashes. No runtime, prompt or fixture source changed."
+  }
+}

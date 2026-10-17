@@ -37,6 +37,11 @@ const expertSkillsBlock = () => ''; // Native default-disabled optional expert s
 // The qualified backend enforces the actual absolute deadline and positive cleanup.
 // Native agentT's Promise.race timeout can return while work remains live; it is not reused.
 const agentT = (prompt, options) => agent(prompt, options);
+need(A.report_update_instruction == null || ['off', 'before-trial-v1'].includes(A.report_update_instruction),
+     'Unknown report-update instruction');
+const reportUpdate = A.report_update_instruction === 'before-trial-v1'
+  ? `Before each trial, update ${A.output_dir}/report.md with the change, why it may help, the observation that would support it, relevant source/result references, and the next unresolved test. Keep it concise; use a temporary file and rename. Missing notes do not block evaluation.\n`
+  : '';
 const ideaAddendum = `
 
 ## Host idea-investigation contract (takes precedence over conflicting role instructions)
@@ -60,7 +65,7 @@ retained, transformed or dropped. If no source was selected, describe that outco
 Keep report.md as the detailed source/evaluation evidence, failures and limitations. Do not create
 another implemented-idea form or worker_result.json. A bound strategy remains an unreviewed engineer
 claim. The returned measurement_valid boolean is not host validity, fitness or endpoint authority.
-Also write ${A.output_dir}/idea_selection.json with selected_source_id (or null), selection_reason,
+${reportUpdate}Also write ${A.output_dir}/idea_selection.json with selected_source_id (or null), selection_reason,
 faithful_source_id (or null), and relevant trial/evidence references. Use these source roles:
 - Select the best correct realization yourself. Copy its exact source_id from that source's checked
   host feedback and include the feedback_ref returned by status. Require matching snapshot.source_id,
