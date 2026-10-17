@@ -84,7 +84,15 @@ This view and its per-parent counts are visible to the planner and engineer.
 They change the evidence presentation and therefore belong only in prospectively
 pinned runs. They must not be inserted into a frozen study. The projection reads
 needed metadata and linked feedback rather than eagerly loading every raw build
-or trace; existing source and ancestry validation still applies.
+or trace; existing source and ancestry validation still applies. It checks the
+objects it reads, but does not check the integrity of unrelated artifacts.
+
+Compatibility note for `geak-evo-program-records-v1`: `trials.json` now uses the
+shared history rows. `outcomes` retains all distinct recorded outcomes; scalar
+`outcome` is null when they conflict. `raw_trial_ref` also names the field and
+index, and `raw_trial_refs` retains every copy. Conflicting observations are
+reported in `association.issues` with timing withheld. Readers should follow
+these explicit states rather than assume a scalar outcome or timing is present.
 
 Check the program/source IDs: a direction review describes its current tip, and
 an investigation's strategy need not describe every intermediate trial.
