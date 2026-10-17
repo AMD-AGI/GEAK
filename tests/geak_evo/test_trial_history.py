@@ -38,11 +38,14 @@ class TrialHistoryTests(unittest.TestCase):
             source_id=self.source, operation_id='op', turn_id='attempt',
             native_pass=True, settled=True, error=None,
             receipt=dict(schema='geak-arena-evaluation-v1', evaluation_id='op',
-                binding=dict(candidate_source_id=self.source, job_id='job', measurement_epoch_id='epoch'),
+                binding=dict(candidate_id='e' * 64, candidate_source_id=self.source,
+                             job_id='job', measurement_epoch_id='epoch'),
+                native_suite_pass_observed=True, host_errors=[], collection_errors=[],
                 native_observations={'correctness': {'status': 'passed'}, 'benchmark': {'status': 'passed'}}))
 
     def collection(self, *, outcomes=None, feedbacks=None, observations=None, candidate=None):
         candidate = candidate or self.candidate
+        # Legacy schema-less fixture: its flattened status is never projected.
         feedbacks = feedbacks or [dict(status='slower', source_id=self.source, operation_id='op', turn_id='attempt')]
         links, raw, trials, rows = [], {}, [], []
         for index, feedback in enumerate(feedbacks):
@@ -70,6 +73,7 @@ class TrialHistoryTests(unittest.TestCase):
         return collection, rows
 
     def test_middle_trials_and_same_source_repetitions_remain_present(self):
+        # Legacy schema-less trials still participate in inventory grouping.
         feedbacks = [dict(status='slower', source_id=self.source, operation_id='op-%s' % i, turn_id='attempt')
                      for i in range(35)]
         identity, _ = self.collection(feedbacks=feedbacks, observations=[{'case': float(i + 1)} for i in range(35)])
@@ -114,12 +118,50 @@ class TrialHistoryTests(unittest.TestCase):
         row = trial_history(self.store, [identity])['trials'][0]
         self.assertEqual(row['feedback_state'], 'available')
         self.assertEqual(row['stages'], dict(request='operation_recorded', admission=None,
-            execution_started=None, correctness='passed', benchmark='passed', reported_status=None, error_kind=None))
+            execution_started=None, correctness='passed', benchmark='passed', native_suite_pass_observed=True,
+            host_errors={'count': 0, 'json_pointer': '/receipt/host_errors'},
+            collection_errors={'count': 0, 'json_pointer': '/receipt/collection_errors'},
+            reported_status=None, error_kind=None))
         self.assertEqual(row['times_ms'], {'case': 9.0})  # Existing checked observation remains the timing source.
         self.assertEqual(row['feedback_ref'], inventory[0]['feedback_ref'])
         for ref in row['feedback_refs']:
             _, artifacts = self.store.evidence(ref['evidence_id'])
             self.assertEqual(artifacts[ref['artifact']], encoded(feedback))
+
+    def test_passed_phases_do_not_override_failed_suite_or_host_errors(self):
+        feedback = self.native_feedback()
+        feedback['native_pass'] = False
+        feedback['receipt'].update(native_suite_pass_observed=False,
+            host_errors=['transport omitted an artifact'],
+            collection_errors=[{'stage': 'settle', 'error_kind': 'RuntimeError'}])
+        identity, inventory = self.collection(feedbacks=[feedback], observations=[{'case': 9.0}])
+        row = trial_history(self.store, [identity])['trials'][0]
+        self.assertEqual(row['stages']['correctness'], 'passed')
+        self.assertEqual(row['stages']['benchmark'], 'passed')
+        self.assertIs(row['stages']['native_suite_pass_observed'], False)
+        self.assertIsNone(row['stages']['execution_started'])
+        self.assertEqual(row['stages']['host_errors'], {'count': 1, 'json_pointer': '/receipt/host_errors'})
+        self.assertEqual(row['stages']['collection_errors'], {'count': 1, 'json_pointer': '/receipt/collection_errors'})
+        self.assertIsNone(row['stages']['error_kind'])
+        self.assertEqual(row['times_ms'], {'case': 9.0})
+        self.assertEqual(row['feedback_ref'], inventory[0]['feedback_ref'])
+        for ref in row['feedback_refs']:
+            _, artifacts = self.store.evidence(ref['evidence_id'])
+            self.assertEqual(artifacts[ref['artifact']], encoded(feedback))
+
+    def test_suite_and_error_fields_require_supported_types(self):
+        for value in (None, 'true', 1, [], {}, False, True):
+            with self.subTest(value=value):
+                feedback = self.native_feedback()
+                feedback['receipt'].update(native_suite_pass_observed=value,
+                    host_errors={'error': 'failed'}, collection_errors=['failed'])
+                identity, _ = self.collection(feedbacks=[feedback])
+                row = trial_history(self.store, [identity])['trials'][0]
+                expected = value if type(value) is bool else None
+                self.assertIs(row['stages']['native_suite_pass_observed'], expected)
+                self.assertIsNone(row['stages']['execution_started'])
+                self.assertIsNone(row['stages']['host_errors'])
+                self.assertIsNone(row['stages']['collection_errors'])
 
     def test_nested_receipt_binding_conflicts_withhold_stages_and_timing(self):
         for key in ('evaluation_id', 'candidate_source_id', 'job_id', 'measurement_epoch_id'):
@@ -134,6 +176,9 @@ class TrialHistoryTests(unittest.TestCase):
                 self.assertIsNone(row['times_ms'])
                 self.assertIsNone(row['stages']['correctness'])
                 self.assertIsNone(row['stages']['benchmark'])
+                self.assertIsNone(row['stages']['native_suite_pass_observed'])
+                self.assertIsNone(row['stages']['host_errors'])
+                self.assertIsNone(row['stages']['collection_errors'])
                 self.assertTrue(row['feedback_refs'])
 
     def test_missing_or_unsupported_receipts_do_not_infer_stages(self):

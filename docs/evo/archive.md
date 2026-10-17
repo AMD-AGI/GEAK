@@ -81,7 +81,15 @@ on an idea is calculated. Native correctness and benchmark stages come from
 `geak-native-probe-feedback-v1`'s nested `geak-arena-evaluation-v1` receipt,
 with matching source, operation, turn, job and measurement epoch. Missing or
 unsupported fields stay null; a native pass does not supply admission or
-execution-started fields. Raw feedback and its references remain unchanged.
+execution-started fields; this receipt schema does not supply them.
+`native_suite_pass_observed` is copied only when the receipt contains a boolean.
+Passed phases do not establish a suite pass; host or collection errors can still fail it.
+The view's `host_errors` and `collection_errors` contain counts and JSON pointers
+to the supported lists in `feedback_refs`. Follow those references for the
+exact errors; missing or malformed lists stay null, and error prose does not
+establish an error category. Raw feedback and its references remain unchanged.
+Suite pass does not establish measurement
+validity, an accepted speedup, or promotion eligibility.
 The archive candidate may carry different ancestry from the evaluator candidate;
 their candidate IDs are not required to match.
 

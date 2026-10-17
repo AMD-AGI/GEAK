@@ -22,7 +22,9 @@ def _feedback_stages(feedback, row):
     """Read the native producer's nested receipt without inventing lifecycle state."""
     stages = {"request": "operation_recorded" if row.get("operation_id") else "unknown",
               "admission": None, "execution_started": None, "correctness": None,
-              "benchmark": None, "reported_status": None, "error_kind": None}
+              "benchmark": None, "native_suite_pass_observed": None,
+              "host_errors": None, "collection_errors": None,
+              "reported_status": None, "error_kind": None}
     if feedback.get("schema") != "geak-native-probe-feedback-v1" or feedback.get("profile") != "native":
         return stages, None
     receipt = feedback.get("receipt")
@@ -33,6 +35,15 @@ def _feedback_stages(feedback, row):
             or binding.get("candidate_source_id") != row.get("source_id")
             or any(binding.get(key) != row[key] for key in ("job_id", "measurement_epoch_id"))):
         return stages, "feedback_receipt_binding_conflict"
+    if type(receipt.get("native_suite_pass_observed")) is bool:
+        stages["native_suite_pass_observed"] = receipt["native_suite_pass_observed"]
+    errors = receipt.get("host_errors")
+    if isinstance(errors, list) and all(isinstance(item, str) for item in errors):
+        stages["host_errors"] = {"count": len(errors), "json_pointer": "/receipt/host_errors"}
+    errors = receipt.get("collection_errors")
+    if isinstance(errors, list) and all(isinstance(item, dict)
+            and all(isinstance(item.get(key), str) for key in ("stage", "error_kind")) for item in errors):
+        stages["collection_errors"] = {"count": len(errors), "json_pointer": "/receipt/collection_errors"}
     native = receipt.get("native_observations")
     if isinstance(native, dict):
         for phase in ("correctness", "benchmark"):
