@@ -26,15 +26,29 @@ def trial_history(store, evidence_ids, *, attempts=None):
     repeated operations and independent investigations remain separate rows.
     """
     attempts = attempts or {}
-    evidence, links = {}, {}
+    evidence, links, payloads = {}, {}, {}
+
+    def raw_artifact(identity, name):
+        blob = evidence[identity]["artifacts"].get(name)
+        if blob is None:
+            return None
+        if blob not in payloads:
+            payloads[blob] = store._bytes(blob)
+        return payloads[blob]
+
+    def artifact(identity, name):
+        raw = raw_artifact(identity, name)
+        return json.loads(raw) if raw is not None else None
+
     pending = sorted(set(evidence_ids))
     while pending:
         identity = pending.pop(0)
         if identity in evidence:
             continue
-        envelope, artifacts = store.evidence(identity)
-        evidence[identity] = envelope, artifacts
-        for link in json.loads(artifacts.get("native_evidence_index.json", b"[]")):
+        # Preserve candidate/ancestry checks; do not load unrelated raw builds,
+        # traces or other payloads merely to read an evidence envelope.
+        envelope = evidence[identity] = store._bound_evidence(identity)
+        for link in artifact(identity, "native_evidence_index.json") or []:
             ref = link["evidence_ref"]
             pending.append(ref["evidence_id"])
             if link.get("original_ref"):
@@ -42,12 +56,10 @@ def trial_history(store, evidence_ids, *, attempts=None):
                 links.setdefault((domain["job_id"], domain["measurement_epoch_id"],
                                   _key(link["original_ref"])), []).append(ref)
 
-    def artifact(identity, name):
-        raw = evidence[identity][1].get(name)
-        return json.loads(raw) if raw is not None else None
-
-    observations, groups = {}, {}
-    for identity, (envelope, artifacts) in evidence.items():
+    links = {key: sorted({_key(ref): ref for ref in refs}.values(), key=_key) for key, refs in links.items()}
+    observations, neighbors = {}, {}
+    for identity, envelope in sorted(evidence.items()):
+        artifacts = envelope["artifacts"]
         binding = envelope["binding"]
         for index, row in enumerate((artifact(identity, "native_idea_context.json") or {}).get("native_observations", [])):
             key = (binding["job_id"], binding["measurement_epoch_id"], row.get("source_id"),
@@ -57,15 +69,32 @@ def trial_history(store, evidence_ids, *, attempts=None):
         inventory = artifacts.get("native_trial_sources.json")
         if inventory is None:
             continue
-        copies = [link["evidence_ref"]["evidence_id"] for link in
-                  artifact(identity, "native_evidence_index.json") or []
-                  if evidence[link["evidence_ref"]["evidence_id"]][1].get("native_trial_sources.json") == inventory
-                  and all(evidence[link["evidence_ref"]["evidence_id"]][0]["binding"][key] == binding[key]
-                          for key in ("job_id", "measurement_epoch_id"))]
-        groups[identity] = min(copies) if copies else identity
+        neighbors.setdefault(identity, set())
+        for link in artifact(identity, "native_evidence_index.json") or []:
+            other = link["evidence_ref"]["evidence_id"]
+            target = evidence[other]
+            if (target["artifacts"].get("native_trial_sources.json") == inventory
+                    and all(target["binding"][key] == binding[key] for key in ("job_id", "measurement_epoch_id"))):
+                neighbors[identity].add(other)
+                neighbors.setdefault(other, set()).add(identity)
+
+    # A collection can point to several raw copies, and copies can link onward.
+    # Canonicalize the entire undirected component, including the collection.
+    groups = {}
+    for identity in sorted(neighbors):
+        if identity in groups:
+            continue
+        pending, component = [identity], set()
+        while pending:
+            member = pending.pop()
+            if member not in component:
+                component.add(member)
+                pending.extend(neighbors[member])
+        groups.update(dict.fromkeys(component, min(component)))
 
     rows = {}
-    for identity, (envelope, artifacts) in evidence.items():
+    for identity, envelope in sorted(evidence.items()):
+        artifacts = envelope["artifacts"]
         inventory = artifact(identity, "native_trial_sources.json")
         if inventory is None:
             continue
@@ -136,8 +165,8 @@ def trial_history(store, evidence_ids, *, attempts=None):
         feedbacks, feedback_refs = {}, []
         feedback_key = row["job_id"], row["measurement_epoch_id"], _key(row.get("feedback_ref"))
         for ref in links.get(feedback_key, []):
-            envelope, artifacts = evidence[ref["evidence_id"]]
-            raw = artifacts.get(ref["artifact"])
+            envelope = evidence[ref["evidence_id"]]
+            raw = raw_artifact(ref["evidence_id"], ref["artifact"])
             if raw is None or sha256_hex(raw) != row["feedback_ref"].get("sha256"):
                 conflicts.append("feedback_reference_conflict")
                 continue
@@ -187,7 +216,10 @@ def trial_history(store, evidence_ids, *, attempts=None):
         key = row["job_id"], row["measurement_epoch_id"], row.get("source_id")
         grouped.setdefault(key, []).append(row)
     return {"schema": "geak-evo-trial-history-v1", "scope": SCOPE,
+        "identity": {"trial_id": "canonical row ID within this linked-component view; later links may change it",
+            "stable_references": "inventory_refs identify exact immutable input rows, independent of grouping"},
         "coverage": {"inventory_count": len(set(groups.values())), "trial_count": len(result),
+                     "count_label": "retained trial rows (any state)",
                      "omitted_rows": 0, "outside_inventory": "unknown"},
         "groups": [{"job_id": key[0], "measurement_epoch_id": key[1], "source_id": key[2],
                     "candidate_ids": sorted({row["candidate_id"] for row in values if row.get("candidate_id")}),

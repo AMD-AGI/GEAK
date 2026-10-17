@@ -203,7 +203,6 @@ def _research_files(journal, directions, evo):
 def _scan(journal):
     """Programs in first-seen journal order (ancestors first), evidence, ideas and directions."""
     programs, evidence, ideas, directions, evo, seed, count = {}, {}, {}, {}, {"history": []}, None, [0]
-    trials = {}
 
     def visit(identity, sequence):  # Journal order keeps the recursion shallow.
         if identity in programs:
@@ -265,25 +264,12 @@ def _scan(journal):
             found += [card["last_faithful"]["candidate_id"]] if card.get("last_faithful") else []
             directions[state["direction_id"]]["idea_id"] = idea["idea_id"]
         refs = list(dict.fromkeys(refs))
-        trial_groups = {}
-        for evidence_id in refs:
-            envelope = journal.obj(evidence_id, "evidence")
-            inventory_blob = envelope["artifacts"].get("native_trial_sources.json")
-            for link in journal.artifact(evidence_id, "native_evidence_index.json") or []:
-                raw_id = link["evidence_ref"]["evidence_id"]
-                if raw_id not in refs:
-                    refs.append(raw_id)
-                if inventory_blob and journal.obj(raw_id, "evidence")["artifacts"].get("native_trial_sources.json") == inventory_blob:
-                    trial_groups[evidence_id] = raw_id
         for evidence_id in refs:  # Grows: retained raw evidence and paired baselines.
             envelope = journal.obj(evidence_id, "evidence")
             found.append(envelope["candidate_id"])
             roles = journal.artifact(evidence_id, "native_source_roles.json") or {}
             found += [roles[role] for role in sorted(roles)]
             inventory = journal.artifact(evidence_id, "native_trial_sources.json") or {}
-            harvest_name = next((name for name in ("native_idea_harvest.json", "archive/manifest.json")
-                                 if name in envelope["artifacts"]), None)
-            harvest = journal.artifact(evidence_id, harvest_name) if harvest_name else None
             for trial in inventory.get("trials", []):
                 if trial.get("candidate_id"):
                     candidate = journal.obj(trial["candidate_id"], "candidate")
@@ -291,25 +277,6 @@ def _scan(journal):
                             candidate[key] != envelope["binding"][key] for key in ("job_id", "measurement_epoch_id"))):
                         raise StateError("trial source binding differs from candidate")
                     found.append(trial["candidate_id"])
-                group = trial_groups.get(evidence_id, evidence_id)
-                key = (group, sha256_hex(_enc(trial)))
-                retained = trials.setdefault(key, dict(trial, evidence_id=evidence_id, investigation_evidence_id=group,
-                    evidence_ids=[], first_journal_sequence=sequence, job_id=envelope["binding"]["job_id"],
-                    measurement_epoch_id=envelope["binding"]["measurement_epoch_id"]))
-                if evidence_id not in retained["evidence_ids"]:
-                    retained["evidence_ids"].append(evidence_id)
-                if harvest is not None:
-                    raw = harvest["trials"][trial["trial_index"]]
-                    if raw.get("archive_ref") != trial.get("feedback_ref"):
-                        raise StateError("trial inventory differs from retained harvest")
-                    outcome = {"error": raw.get("error"), "status": raw.get("status"),
-                        "source_archive_error": raw.get("source_archive_error"),
-                        "verified_status": (raw.get("verified") or {}).get("status"),
-                        "diagnostic_status": (raw.get("diagnostic") or {}).get("status")}
-                    if retained.get("outcome", outcome) != outcome:
-                        raise StateError("conflicting retained trial outcomes")
-                    retained["outcome"] = outcome
-                    retained["raw_trial_ref"] = {"evidence_id": evidence_id, "artifact": harvest_name}
             for ref in journal.artifact(evidence_id, "native_evidence_index.json") or []:
                 identity = ref["evidence_ref"]["evidence_id"]
                 if identity not in refs:
@@ -322,7 +289,7 @@ def _scan(journal):
             visit(identity, sequence)
         evidence.update({e: sequence for e in refs if e not in evidence})
     journal.evidence_sequences = evidence
-    return programs, list(evidence), ideas, directions, evo, seed, list(trials.values())
+    return programs, list(evidence), ideas, directions, evo, seed
 
 
 def _status(row):
@@ -348,9 +315,9 @@ def _trial_evaluations(journal, evidence):
 def build(store, *, frozen_cases=None):
     """Return the journal, ordered programs and {relative path: bytes} except sources and EXPORT.json."""
     journal = _Journal(store, frozen_cases)
-    programs, evidence, ideas, directions, evo, seed, trials = _scan(journal)
+    programs, evidence, ideas, directions, evo, seed = _scan(journal)
     history = _trial_evaluations(journal, evidence)
-    trial_evaluations = history["trials"]
+    trials = trial_evaluations = history["trials"]
     for evidence_id in evidence:
         result = _evaluation(journal, evidence_id)
         if result and result[0] in programs and result[1] not in programs[result[0]]["evaluations"]:
