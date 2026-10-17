@@ -98,8 +98,11 @@ same boot with the same saved receipt, preparation, entry result and candidate.
 The retry runs only the pinned CPU collector and its normal checks into a fresh
 `collection-NNNN` directory. Earlier output and logs remain intact; a complete
 old output tree is not treated as proof that its collector succeeded. No model
-or GPU evaluation is repeated. `native_collection_attempt.json` records which
-collection produced the archived result.
+or GPU evaluation is repeated. `native_collection_attempt.json` records the
+successful manifest and its original intent and process status. Later episode
+checks follow that exact collection and its committed evidence index. A bad
+retry record cannot fall back to an earlier output. This check protects later
+episode rechecks and continuation; it is not an additional initial commit gate.
 
 The immutable collection intent preserves the first collection start, and the
 charge includes retries and recovery downtime from that point. It does not

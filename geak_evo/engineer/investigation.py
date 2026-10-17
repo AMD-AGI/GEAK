@@ -460,7 +460,8 @@ class NativeInvestigation:
         artifacts = {"native_idea_harvest.json": encoded(manifest), "native_receipt.json": encoded(native)}
         artifacts["native_collection_attempt.json"] = encoded({"revision": revision,
             "intent_ref": status["collection_intent_ref"], "intent": intent,
-            "status_ref": status_ref, "status": status})
+            "status_ref": status_ref, "status": status,
+            "manifest_ref": file_ref(destination / "archive/manifest.json")})
         observations = observation_context(manifest)
         # This is an evidence view, not a replacement claim schema or verifier.
         # Scientific claims remain unverified; the separate quantity index has exact scope.
