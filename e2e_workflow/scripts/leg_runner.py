@@ -123,7 +123,7 @@ def main():
             r = h.time_op(lambda c=c: call(c["args"]), graph=graph, detail=True)
             out.append({"sig": c["sig"], "regime": c.get("regime", ""), "m": c.get("m"),
                         "ms": (r or {}).get("ms"), "wall_ms": (r or {}).get("wall_ms"),
-                        "timer": (r or {}).get("timer"),
+                        "timer": (r or {}).get("timer"), "requested_graph": graph,
                         # Which cache condition produced `ms`. A decode A/B read under 'write-evict' is
                         # not comparable to one read under 'read-evict' (1.40 vs 1.12 on MI355X --
                         # see harness_lib.cache_policy), so the two must never be folded together.

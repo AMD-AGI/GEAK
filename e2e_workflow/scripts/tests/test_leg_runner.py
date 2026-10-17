@@ -321,6 +321,7 @@ class ModeTime(_LegRunnerTestCase):
         self.assertEqual(out["cases"][0]["regime"], "decode")
         self.assertEqual(out["cases"][0]["host_ms"], 2.0)
         self.assertIs(out["cases"][0]["primed"], False)
+        self.assertIs(out["cases"][0]["requested_graph"], False)
         self.assertTrue(out["identity"]["qualname"].endswith("<lambda>"))
 
     def test_bucket_selects_exactly_one_case(self):
@@ -340,10 +341,11 @@ class ModeTime(_LegRunnerTestCase):
         self._task_dir(meta={"target_callable": "fake_live_stack:op",
                              "regime": {"compile_mode": "max-autotune", "graph_mode": True}})
         self._target_module()
-        self._main("--task", self.task, "--mode", "time")
+        out = json.loads(self._main("--task", self.task, "--mode", "time"))
         h = sys.modules["harness_lib"]
         self.assertIn(("compiled_op", "max-autotune"), h.calls)
         self.assertTrue(all(c[1] is True for c in h.calls if c[0] == "time_op"))
+        self.assertTrue(all(c["requested_graph"] is True for c in out["cases"]))
 
     def test_a_timer_returning_none_degrades_to_null_fields(self):
         self._task_dir(harness=_HARNESS_STUB.replace(

@@ -1497,14 +1497,20 @@ def _timing_conditions(pairs):
     `primed` is measured host-supply evidence, not a benchmark policy setting.
     Missing/null metadata cannot establish a match, even when absent on both legs.
     Matched recorded values alone do not establish benchmark comparability.
+    `cross_leg_mismatch_pairs` lists zero-based pairs with observed disagreement;
+    an empty list means none observed, not that missing values matched.
     """
     rows = [pair[leg] for pair in pairs for leg in ("baseline", "candidate")]
-    status = {}
+    status = {"cross_leg_mismatch_pairs": {}}
     for key in ("timer", "cache_condition", "primed"):
         values = [row[key] for row in rows if row.get(key) is not None]
         differs = any(value != values[0] for value in values[1:])
         status[key] = ("mismatch" if differs else
                        "matched" if values and len(values) == len(rows) else "unknown")
+        status["cross_leg_mismatch_pairs"][key] = [
+            i for i, pair in enumerate(pairs)
+            if pair["baseline"].get(key) is not None and pair["candidate"].get(key) is not None
+            and pair["baseline"][key] != pair["candidate"][key]]
     return status
 
 

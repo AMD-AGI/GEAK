@@ -2813,7 +2813,7 @@ class TestMeasureLegsResolution(_LegTestCase):
 
     def test_timing_receipts_survive_measurement_and_weighted_reporting(self):
         policy = {"mode": "read-evict", "bytes": 64 << 20, "deployment_calibrated": False}
-        common = {"timer": "cuda_event_graph", "cache_condition": policy,
+        common = {"timer": "cuda_event_graph", "requested_graph": True, "cache_condition": policy,
                   "host_ms": 2.0, "primed": False}
         for scenario, expected in (
             ("fallback", {"timer": "mismatch", "cache_condition": "matched", "primed": "mismatch"}),
@@ -2838,7 +2838,10 @@ class TestMeasureLegsResolution(_LegTestCase):
                     pairs[0][1]["primed"] = None
                 self._sequenced({"decode": pairs})
                 row, = hl.measure_legs(self.task, self.meta, max_reps=2)
-                self.assertEqual(row["timing_conditions"], expected)
+                cross_leg = {"timer": [0], "cache_condition": [], "primed": [0]} if scenario == "fallback" else {
+                    "timer": [], "cache_condition": [], "primed": []}
+                self.assertEqual(row["timing_conditions"],
+                                 dict(expected, cross_leg_mismatch_pairs=cross_leg))
                 self.assertEqual(row["reps"], 2)
                 self.assertEqual(row["speedup"], 1.04)
                 for actual, pair in zip(row["timing_pairs"], pairs):
