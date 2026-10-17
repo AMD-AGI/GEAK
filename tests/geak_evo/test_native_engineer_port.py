@@ -179,6 +179,145 @@ class NativeEngineerTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.run_native(native)
 
+    def collection_fixture(self):
+        native = self.native()
+        result = self.run_native(native)
+        candidate = self.store.candidate(self.job_id, self.epoch, self.terminal_source,
+                                        parents=[self.request["tip"]["candidate_id"]])
+        return native, result, candidate
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_collection_recovers_interruption_before_output_and_charges_downtime(self):
+        native, result, candidate = self.collection_fixture()
+        attempt = Path(result["attempt_dir"])
+        def interrupted(command, **kwargs):
+            self.calls.append((command, kwargs))
+            kwargs["stderr"].write(b"collector interrupted before output\n")
+            self.now += 1
+            raise KeyboardInterrupt
+        native.process_runner = interrupted
+        with self.assertRaises(KeyboardInterrupt):
+            native.collect(result, candidate)
+        original_intent = (attempt / "collection_intent.json").read_bytes()
+        self.now += 10  # Recovery downtime remains inside the original charge.
+        native.process_runner = self.process
+        collected = native.collect(result, candidate)
+        self.assertEqual(collected["costs"], {"wall_seconds": 11.75, "evaluations": 2})
+        self.assertEqual((attempt / "collection_intent.json").read_bytes(), original_intent)
+        self.assertEqual((attempt / "collection.stderr").read_bytes(), b"collector interrupted before output\n")
+        self.assertTrue((attempt / "collection-0001/archive/manifest.json").is_file())
+        self.assertEqual(sum("--input" in call[0] for call in self.calls), 1)
+        self.assertEqual(sum("--config" in call[0] for call in self.calls), 2)
+        replay = json.loads(collected["artifacts"]["native_collection_attempt.json"])
+        self.assertEqual(replay["revision"], 1)
+        self.assertEqual(replay["intent"]["receipt_ref"], result["receipt_ref"])
+        self.assertEqual(replay["status"]["returncode"], 0)
+        self.assertEqual(investigation.read(replay["intent_ref"]), replay["intent"])
+        self.assertEqual(investigation.read(replay["status_ref"]), replay["status"])
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_collection_preserves_partial_output_and_rechecks_in_fresh_directory(self):
+        native, result, candidate = self.collection_fixture()
+        attempt = Path(result["attempt_dir"])
+        def partial(command, **kwargs):
+            self.calls.append((command, kwargs))
+            archive = Path(command[command.index("--output") + 1]) / "archive"
+            archive.mkdir(parents=True)
+            (archive / "manifest.json").write_bytes(b'{"unfinished":')
+            raise KeyboardInterrupt
+        native.process_runner = partial
+        with self.assertRaises(KeyboardInterrupt):
+            native.collect(result, candidate)
+        native.process_runner = self.process
+        collected = native.collect(result, candidate)
+        self.assertEqual((attempt / "collection/archive/manifest.json").read_bytes(), b'{"unfinished":')
+        self.assertEqual(json.loads(collected["artifacts"]["native_source_roles.json"]), {"terminal": candidate})
+        self.assertTrue((attempt / "collection-0001.status.json").is_file())
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_complete_output_from_failed_collector_is_not_reused_as_success(self):
+        native, result, candidate = self.collection_fixture()
+        attempt = Path(result["attempt_dir"])
+        def failed_after_output(command, **kwargs):
+            self.process(command, **kwargs)
+            return SimpleNamespace(returncode=7)
+        native.process_runner = failed_after_output
+        with self.assertRaisesRegex(ValueError, "collection failed"):
+            native.collect(result, candidate)
+        first_manifest = (attempt / "collection/archive/manifest.json").read_bytes()
+        native.process_runner = self.process
+        native.collect(result, candidate)
+        self.assertEqual((attempt / "collection/archive/manifest.json").read_bytes(), first_manifest)
+        self.assertEqual(json.loads((attempt / "collection.status.json").read_bytes())["returncode"], 7)
+        self.assertEqual(json.loads((attempt / "collection-0001.status.json").read_bytes())["returncode"], 0)
+        self.assertEqual(len(self.calls), 3)  # One engineer; two CPU collections.
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_collection_repeats_validation_after_output_but_before_return(self):
+        native, result, candidate = self.collection_fixture()
+        attempt = Path(result["attempt_dir"])
+        def interrupted_after_output(command, **kwargs):
+            self.process(command, **kwargs)
+            raise KeyboardInterrupt
+        native.process_runner = interrupted_after_output
+        with self.assertRaises(KeyboardInterrupt):
+            native.collect(result, candidate)
+        self.assertTrue((attempt / "collection/archive/manifest.json").is_file())
+        self.assertFalse((attempt / "collection.status.json").exists())
+        native.process_runner = self.process
+        # The newly run collection must still reject changed terminal bytes.
+        (self.workspace / self.paths[0]).write_text("corrupted terminal\n")
+        with self.assertRaisesRegex(ValueError, "retained source changed"):
+            native.collect(result, candidate)
+        self.assertEqual(len(self.calls), 3)
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_collection_retry_rejects_changed_binding_before_any_process(self):
+        native, result, candidate = self.collection_fixture()
+        native.collect(result, candidate)
+        attempt = Path(result["attempt_dir"])
+        binding = attempt / "native_entry_binding.json"
+        binding.chmod(0o600)
+        binding.write_bytes(b"different input\n")
+        with self.assertRaisesRegex(ValueError, "saved collection input changed"):
+            native.collect(result, candidate)
+        self.assertEqual(len(self.calls), 2)
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_collection_retry_rejects_new_input_refs_and_new_boot(self):
+        native, result, candidate = self.collection_fixture()
+        native.collect(result, candidate)
+        attempt = Path(result["attempt_dir"])
+        path = attempt / "native_prepared.json"
+        original = path.read_bytes()
+        # Even identical parsed preparation through differently hashed bytes
+        # must not silently replace the original collection intent.
+        path.write_bytes(original + b"\n")
+        with self.assertRaisesRegex(ValueError, "saved inputs or boot"):
+            native.collect(result, candidate)
+        path.write_bytes(original)
+        with mock.patch.object(self.clock, "boot_id", return_value="another-boot"):
+            with self.assertRaisesRegex(ValueError, "saved inputs or boot"):
+                native.collect(result, candidate)
+        self.assertEqual(len(self.calls), 2)
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_collection_retry_rejects_corrupted_pinned_collector(self):
+        native, result, candidate = self.collection_fixture()
+        native.collect(result, candidate)
+        self.collector.write_text("changed collector\n")
+        with self.assertRaises(ValueError):
+            native.collect(result, candidate)
+        self.assertEqual(len(self.calls), 2)
+
+    @unittest.skipIf(ORIGINAL, "same-operation collection recovery")
+    def test_old_partial_collection_without_timing_intent_requires_owner_recovery(self):
+        native, result, candidate = self.collection_fixture()
+        (Path(result["attempt_dir"]) / "collection.stdout").write_bytes(b"old attempt\n")
+        with self.assertRaisesRegex(ValueError, "lacks its original intent"):
+            native.collect(result, candidate)
+        self.assertEqual(len(self.calls), 1)
+
     def test_faithful_source_retains_selected_parent_and_semantic_donor_ancestry(self):
         donor_dir = self.root / "donor-source"
         donor_dir.mkdir()

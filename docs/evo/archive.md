@@ -90,3 +90,23 @@ The export is portable research material, not a complete live-run backup. Keep
 the original store and pinned task, harness, runtime and evidence files. Full
 resume needs those dependencies and compatible host services; never rewrite
 historical pins to make a changed runtime appear equivalent.
+
+## Recover an interrupted collection
+
+After the host positively settles an engineer, it can retry collection on the
+same boot with the same saved receipt, preparation, entry result and candidate.
+The retry runs only the pinned CPU collector and its normal checks into a fresh
+`collection-NNNN` directory. Earlier output and logs remain intact; a complete
+old output tree is not treated as proof that its collector succeeded. No model
+or GPU evaluation is repeated. `native_collection_attempt.json` records which
+collection produced the archived result.
+
+The immutable collection intent preserves the first collection start, and the
+charge includes retries and recovery downtime from that point. It does not
+establish time before the first collection call. Changed inputs, another boot,
+or older partial output without that intent require explicit owner recovery.
+Binding, intent and status files are read-only (`0444`). Interrupted evidence
+writes may leave unreferenced content objects, but the outer loop still settles
+the original engineer operation once. Preserve the store and use the existing
+`recover_engineer` or saved `resume_settlement` path; do not launch a replacement
+for an unresolved operation.
