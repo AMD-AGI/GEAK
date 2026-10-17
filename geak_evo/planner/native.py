@@ -1045,7 +1045,7 @@ class NativePlanner:
 
     def _freeze(self, context, call):
         from ..engineer.assignment import archive_files
-        from ..archive.succession import retained_trial_candidates
+        from ..archive.succession import retained_trial_candidates, snapshot_trial_history
         # Only the existing evidence builder is reused. No CLIPlanner constructor,
         # __call__, transport, process launch, continuation or recovery is called.
         builder = object.__new__(CLIPlanner)
@@ -1083,6 +1083,9 @@ class NativePlanner:
                 candidates.update(_decode(artifacts['native_source_roles.json']).values())
             retained_trials.update(retained_trial_candidates(self.store, artifacts))
             candidates.update(retained_trials)
+        history = snapshot_trial_history(self.store, context,
+            [ref['evidence_id'] for ref in list(_evidence_refs(context)) + self.evidence_refs
+             if ref['artifact'] != 'recommendation-binding.json'])
         parent_candidates, candidate_refs = [], []
         # Group sync publishes/imports reviewed code through its local evidence map.
         immigrants = self.island_group.sync(self.store, context) if self.island_group is not None else {}
@@ -1098,6 +1101,10 @@ class NativePlanner:
                 'candidate_ref': identity_refs[0], 'source_manifest_ref': identity_refs[1],
                 'current_claim_context': current_claim_context(context.get('claims', {}),
                     binding={key: candidate[key] for key in ('job_id', 'source_id', 'measurement_epoch_id')})})
+            parent_candidates[-1]['trial_count'] = sum(
+                row.get('source_id') == candidate['source_id']
+                and all(row[key] == candidate[key] for key in ('job_id', 'measurement_epoch_id'))
+                for row in history['trials'])
             parent_candidates[-1]['retained_trial_source'] = identity in retained_trials
             parent_candidates[-1]['quality_scope'] = 'Source availability is not correctness or eligible fitness; read the exact trial outcomes.'
             candidate_refs.extend(identity_refs)
@@ -1115,6 +1122,10 @@ class NativePlanner:
         builder.evidence_refs = self.evidence_refs
         builder.search_policy, builder.campaign_root = self.search_policy, self.campaign_root
         brief, references = builder._freeze(context, call)
+        _put(call / 'trial-history.json', history)
+        history_ref = file_ref(call / 'trial-history.json')
+        references.append(history_ref)
+        brief['trial_history'] = {'file': history_ref, 'coverage': history['coverage'], 'scope': history['scope']}
         brief['available_parent_candidates'] = parent_candidates
         if self.quantities is not None:
             brief['host_recorded_quantities'] = self.quantities.catalog(context)

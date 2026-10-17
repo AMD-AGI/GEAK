@@ -26,6 +26,7 @@ from .._util import sha256_hex
 from .claims import ClaimLog
 from .records import ArchiveError, read_record
 from .store import ResearchStore, StateError, _read
+from .trials import trial_history
 
 SCHEMA = "geak-evo-program-records-v1"
 IDEA_FIELDS = ("idea_id", "statement", "status", "next_test", "applicability", "competing_explanations")
@@ -336,32 +337,20 @@ def _status(row):
     return "eligible" if row.get("eligible") is True else "correct_not_eligible"
 
 
-def _trial_evaluations(journal, evidence, trials):
-    observations = {}
-    for identity in evidence:
-        context = journal.artifact(identity, "native_idea_context.json") or {}
-        for row in context.get("native_observations", []):
-            key = (row.get("source_id"), row.get("operation_id"), _enc(row.get("feedback_ref")))
-            if key in observations and observations[key] != row:
-                raise StateError("conflicting retained trial observations")
-            observations[key] = row
-    result = []
-    for trial in trials:
-        key = (trial.get("source_id"), trial.get("operation_id"), _enc(trial.get("feedback_ref")))
-        observation = observations.get(key) if not trial.get("feedback_error") else None
-        result.append(dict(trial, kind="native_trial", evaluation_id=trial.get("operation_id"),
-            times_ms=observation.get("per_case_times_ms") if observation else None,
-            observation=observation,
-            status="recorded_observation" if observation else "outcome_recorded" if trial.get("outcome") else "incomplete",
-            basis="retained native development trial; no endpoint qualification inferred"))
-    return result
+def _trial_evaluations(journal, evidence):
+    history = trial_history(journal.store, evidence)
+    for row in history["trials"]:
+        row["first_journal_sequence"] = min(journal.evidence_sequences[identity]
+                                            for identity in row["evidence_ids"])
+    return history
 
 
 def build(store, *, frozen_cases=None):
     """Return the journal, ordered programs and {relative path: bytes} except sources and EXPORT.json."""
     journal = _Journal(store, frozen_cases)
     programs, evidence, ideas, directions, evo, seed, trials = _scan(journal)
-    trial_evaluations = _trial_evaluations(journal, evidence, trials)
+    history = _trial_evaluations(journal, evidence)
+    trial_evaluations = history["trials"]
     for evidence_id in evidence:
         result = _evaluation(journal, evidence_id)
         if result and result[0] in programs and result[1] not in programs[result[0]]["evaluations"]:
@@ -392,6 +381,11 @@ def build(store, *, frozen_cases=None):
                         "attempt_id": attempt["attempt_id"], "attempt_ref": attempt["transport_ref"]})
             if attempt["parent_id"] in programs:
                 programs[attempt["parent_id"]]["attempts_from_here"].append(row["attempt_id"])
+    by_attempt = {row["attempt_id"]: row for row in attempts.values()}
+    for row in trial_evaluations:
+        attempt = by_attempt.get(row["attempt_id"], {})
+        row.update({key: attempt.get(key) for key in ("direction_id", "engineer_id")})
+        row["idea_id"] = directions.get(row["direction_id"], {}).get("idea_id")
     for idea_id, entry in ideas.items():
         idea_directions = {revision["direction_id"] for revision in entry["revisions"]}
         for row in programs.values():
@@ -511,6 +505,7 @@ def build(store, *, frozen_cases=None):
     files["measurements.json"] = _enc(measurements)
     files["measurements.csv"] = measured_table.getvalue().encode()
     files["trials.json"] = _enc(trials)
+    files["trial-history.json"] = _enc(history)
     files["evidence.json"] = _enc({identity: journal.obj(identity, "evidence") for identity in evidence})
     # Copy bounded measurement/context payloads verbatim, without computing or
     # requalifying their numbers. Other artifacts remain addressed in evidence.json.
