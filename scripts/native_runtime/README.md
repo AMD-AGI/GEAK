@@ -42,6 +42,11 @@ turn. After saving the source and before evaluating it, the host saves up to
 files have explicit availability. Oversized files are not read in full or hashed;
 their full-content digest remains unknown. Identical report hashes mean identical
 bytes, not that an idea is stale or relevant to a changed source.
+Retained context exposes `report_sha256`, `capture_monotonic_ns` and `boot_id`
+for this comparison. Compare captures within the same turn and boot using their
+recorded time; file-list or request-name order is not a capture order. Equal
+hashes are repeated text, not additional ideas. Missing or ambiguous ordering
+must remain unknown; this package does not invent a previous-capture link.
 
 Source, candidate, operation, job, epoch and owning turn come from the host.
 The `probe_request_sha256` field identifies the probe request, not the different
@@ -55,6 +60,11 @@ report and labels it pre-evaluation. Feedback carries a separate optional
 `context_refs` envelope. Its exact feedback ref is already bound by the native
 receipt and the outer collection intent, so a collector retry inherits the same
 capture without searching the store or starting another evaluation.
+If publication stops after writing context files but before feedback, a retry
+checks and reuses the original files and writes only missing ones. Different
+existing bytes remain an explicit optional-context error; they are not replaced.
+For missingness reports, inspect `context_refs.error` as well as `availability`:
+`capture_unavailable` can mean a publication conflict, not only a missing capture.
 
 Optional files stay outside `artifact_index` and native validity checks. The
 harvester catches note failures separately and adds only retained links to the

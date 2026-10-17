@@ -2,7 +2,7 @@
   "schema": "geak-evo-external-context-validation-v1",
   "observed_at_utc": "2026-10-17T07:44:33.472132+00:00",
   "evo_base_commit": "a6a48fc8c1a622c3f314a2614b528ebf205c03da",
-  "status": "source draft; independent Codex review passed; actual Claude review pending; not installed or enabled",
+  "status": "Source implementation and additive helper retry reviewed by Codex and actual Claude; no blocker in the stated CPU/source scope. Not installed or enabled.",
   "files": [
     {
       "repository_path": "geak_evo/engineer/investigation.py",
@@ -18,7 +18,7 @@
     },
     {
       "repository_path": "tests/geak_evo/test_report_context_patch.py",
-      "sha256": "caf2380d0ec3fd8a8f7a619567438d44fed299f15aa18b3d897558b4684b0595"
+      "sha256": "378dcc065d910b324031b49a3350f628f3fe696bfa73d9fb773108dce7a33629"
     },
     {
       "repository_path": "tests/geak_evo/test_engineer_entry.mjs",
@@ -26,25 +26,27 @@
     },
     {
       "repository_path": "scripts/native_runtime/patches/report-context.patch",
-      "sha256": "fd7239faa029ef10ae44abaf596e50c64019496c18407d1e2344c01a8da80a2e"
+      "sha256": "249a03a69e71a0205994bd575fd4a5adb531f58d45fe9e5289f7fe730941c021"
     },
     {
       "repository_path": "scripts/native_runtime/SOURCES.json",
-      "sha256": "5637a04b43d92e7688696a04e8df5800101d875a50c7fcb67c1315b6600ef370"
+      "sha256": "1ac04a1374cf83d9bbfdc9c4674dbe9b0785becad3fdd316890793e89900f68a"
     },
     {
       "repository_path": "scripts/native_runtime/README.md",
-      "sha256": "b157ee7eb54629bd955849a5597c67cc49e37e3104c8b8761f8f7df85d10cb09"
+      "sha256": "888f5425f347cfdd7a2760e1c5d1604c7c05cc82e449e1609f58552e15eb6015"
     }
   ],
   "tests": [
     {
       "command": "PYTHONPATH=.:tests/geak_evo python3 -B -m unittest test_report_context_patch test_native_engineer_port test_succession",
-      "passed": 43
+      "passed": 43,
+      "source_commit": "3d344f6dcb13002043e538523225c3066aec3ed4"
     },
     {
       "command": "node --test tests/geak_evo/test_engineer_entry.mjs",
-      "passed": 2
+      "passed": 2,
+      "source_commit": "3d344f6dcb13002043e538523225c3066aec3ed4"
     }
   ],
   "scope": [
@@ -73,5 +75,25 @@
     "reviewed_patch_sha256": "874e091f078dc61956f905b5a5c868b67eb583524a750102c6cc31a926c524ba",
     "packaged_patch_sha256": "fd7239faa029ef10ae44abaf596e50c64019496c18407d1e2344c01a8da80a2e",
     "change": "Removed whitespace-only unified context markers; git apply --check/apply produces exactly the same pinned source hashes. No runtime, prompt or fixture source changed."
+  },
+  "republish_followup": {
+    "observed_at_utc": "2026-10-17T07:58:10.531235+00:00",
+    "patch_sha256": "249a03a69e71a0205994bd575fd4a5adb531f58d45fe9e5289f7fe730941c021",
+    "helper_sha256": "7f96f5224e76bffda8af5e40f3d474a9d0f03ce8cbf128da1768cb7366ff688d",
+    "command": "PYTHONPATH=.:tests/geak_evo python3 -B -m unittest -q test_report_context_patch",
+    "passed": 7,
+    "scope": "Exact external patch replay including helper publication interrupted after immutable write, same-byte re-publication, mismatch rejection, source capture and collection retry. The re-publication fixture calls the helper again on the same directory; the live host allocates new collection revisions. Not a full host crash/recovery or power-loss qualification. No model/native/GPU work.",
+    "repeated_text": "Retained full report hash and clock/boot exposed; no automatic idea counts or invented previous-capture links.",
+    "independent_review": {
+      "reviewer": "/root/context_republish_review",
+      "decision": "No blocking defect found in exact additive source; helper retry scope only",
+      "helper_sha256": "7f96f5224e76bffda8af5e40f3d474a9d0f03ce8cbf128da1768cb7366ff688d",
+      "patch_sha256": "249a03a69e71a0205994bd575fd4a5adb531f58d45fe9e5289f7fe730941c021"
+    },
+    "actual_claude_review": {
+      "utc": "2026-10-17T08:05:08Z",
+      "scope": "Exact publish helper code; no live/whole-host recovery qualification",
+      "decision": "No blocker; document error-based missingness and replace stale predecessor-link wording"
+    }
   }
 }

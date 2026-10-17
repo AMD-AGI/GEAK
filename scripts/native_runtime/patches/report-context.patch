@@ -83,7 +83,7 @@
      if faithful_id is not None:
 --- /dev/null
 +++ b/workspace_helpers/report_context.py
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,223 @@
 +"""Optional trial-time report copies; never native measurement authority.
 +
 +The host supplies all identities and paths. Delivery is explicit: this version
@@ -218,12 +218,24 @@
 +            raise ValueError("report evidence candidate differs")
 +        record = checked_record(artifacts, bound)
 +        root = Path(publication) / "context"
-+        root.mkdir(mode=0o755)
++        root.mkdir(mode=0o755, exist_ok=True)
++        if root.is_symlink() or not root.is_dir():
++            raise ValueError("unsafe context publication directory")
 +        refs = []
 +        for name, raw in artifacts.items():
 +            path = root / name
-+            write(path, raw, immutable=True, public=True)
++            try:
++                write(path, raw, immutable=True, public=True)
++            except FileExistsError:
++                limit = MAX_REPORT_BYTES if name == "report.md" else MAX_RECORD_BYTES
++                if bounded_read(path, limit) != raw:
++                    raise ValueError("existing context publication differs")
 +            refs.append({"name": name, "path": str(path), "sha256": digest(raw), "size_bytes": len(raw)})
++        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
++        try:
++            os.fsync(fd)
++        finally:
++            os.close(fd)
 +        envelope.update(availability=record["availability"], evidence_id=pointer["evidence_id"], artifacts=refs)
 +    except Exception as exc:
 +        envelope["error"] = type(exc).__name__ + ": " + str(exc)[:256]
@@ -287,6 +299,8 @@
 +        record = checked_record(artifacts, bound)
 +        if record["availability"] != envelope["availability"]:
 +            raise ValueError("report context status differs")
++        result.update(report_sha256=record["full_content_sha256"],
++                      capture_monotonic_ns=record["observed_monotonic_ns"], boot_id=record["boot_id"])
 +        for ref in envelope["artifacts"]:
 +            archived = write(Path(output) / ref["name"], artifacts[ref["name"]])
 +            result["artifacts"].append({"input_ref": ref, "archive_ref": archived, "error": None})

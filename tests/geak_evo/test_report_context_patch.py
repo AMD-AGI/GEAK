@@ -141,6 +141,34 @@ class ReportContextTests(unittest.TestCase):
         self.capture()
         self.assertTrue((self.folder / "report-context.json").is_file())
 
+    def test_partial_context_publication_reuses_original_bytes(self):
+        self.capture()
+        original_report = self.report.read_bytes()
+        original_pointer = (self.folder / "report-context.json").read_bytes()
+        def interrupted_write(path, raw, **kwargs):
+            self.host_module.atomic(path, raw, **kwargs)
+            raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.context.publish(self.config, self.store, self.row, self.snapshot,
+                self.folder, self.publication, write=interrupted_write)
+        self.report.write_text("A later explanation must not replace the capture.\n")
+        first = self.feedback()
+        self.assertIsNone(first["context_refs"]["error"])
+        self.assertEqual(self.feedback(), first)
+        self.assertEqual((self.folder / "report-context.json").read_bytes(), original_pointer)
+        self.assertEqual((self.publication / "context/report.md").read_bytes(), original_report)
+        retained = self.context.retain(first, self.config, self.root / "recovered",
+                                       write=self.harvest.write_bytes)
+        self.assertEqual(retained["report_sha256"], hashlib.sha256(original_report).hexdigest())
+        self.assertIsInstance(retained["capture_monotonic_ns"], int)
+        # A mismatched prior publication is never overwritten or accepted.
+        body = self.publication / "context/report.md"
+        body.chmod(0o600); body.write_bytes(b"corrupt")
+        failed = self.feedback()
+        self.assertEqual(failed["context_refs"]["availability"], "capture_unavailable")
+        self.assertIn("publication differs", failed["context_refs"]["error"])
+        self.assertEqual(body.read_bytes(), b"corrupt")
+
     def test_missing_recovery_capture_is_explicit_and_storage_failure_is_nonfatal(self):
         self.capture(recovery=True)
         pointer = json.loads((self.folder / "report-context.json").read_bytes())
