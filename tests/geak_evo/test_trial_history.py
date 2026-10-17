@@ -30,6 +30,17 @@ class TrialHistoryTests(unittest.TestCase):
         self.source = self.store.capture_source(work, ['main.py'])
         self.candidate = self.store.candidate('job', 'epoch', self.source)
 
+    def native_feedback(self):
+        # Minimal structure of the real geak-native-probe-feedback-v1 producer.
+        # Receipt phase fields are nested; these are test identities, not a
+        # translated historical event or an accepted performance measurement.
+        return dict(schema='geak-native-probe-feedback-v1', profile='native',
+            source_id=self.source, operation_id='op', turn_id='attempt',
+            native_pass=True, settled=True, error=None,
+            receipt=dict(schema='geak-arena-evaluation-v1', evaluation_id='op',
+                binding=dict(candidate_source_id=self.source, job_id='job', measurement_epoch_id='epoch'),
+                native_observations={'correctness': {'status': 'passed'}, 'benchmark': {'status': 'passed'}}))
+
     def collection(self, *, outcomes=None, feedbacks=None, observations=None, candidate=None):
         candidate = candidate or self.candidate
         feedbacks = feedbacks or [dict(status='slower', source_id=self.source, operation_id='op', turn_id='attempt')]
@@ -78,16 +89,15 @@ class TrialHistoryTests(unittest.TestCase):
         self.assertIsNone(row['stages']['correctness'])
         self.assertIsNone(row['stages']['benchmark'])
         self.assertIsNone(row['times_ms'])
-        self.assertEqual(row['stages']['reported_status'], 'slower')
+        self.assertIsNone(row['stages']['reported_status'])
         self.assertIsNone(row['timing_context']['comparator_source_id'])
 
     def test_structured_stages_require_source_operation_and_turn_binding(self):
-        feedback = dict(source_id=self.source, operation_id='op', turn_id='attempt', admitted=False,
-                        status='admission_refused', native_observations={'correctness': {'status': 'not_run'}})
+        feedback = self.native_feedback()
         identity, _ = self.collection(feedbacks=[feedback])
         row = trial_history(self.store, [identity])['trials'][0]
-        self.assertIs(row['stages']['admission'], False)
-        self.assertEqual(row['stages']['correctness'], 'not_run')
+        self.assertIsNone(row['stages']['admission'])
+        self.assertEqual(row['stages']['correctness'], 'passed')
         for key, wrong in [('source_id', '0' * 64), ('turn_id', 'another-attempt')]:
             broken = dict(feedback, **{key: wrong})
             identity, _ = self.collection(feedbacks=[broken], observations=[{'case': 1.0}])
@@ -96,6 +106,65 @@ class TrialHistoryTests(unittest.TestCase):
             self.assertIsNone(row['times_ms'])
             self.assertIsNone(row['stages']['admission'])
             self.assertIsNone(row['stages']['correctness'])
+
+    def test_nested_native_stages_preserve_raw_feedback_and_timing_source(self):
+        feedback = self.native_feedback()
+        feedback['receipt']['per_case_times_ms'] = {'case': 0.001}
+        identity, inventory = self.collection(feedbacks=[feedback], observations=[{'case': 9.0}])
+        row = trial_history(self.store, [identity])['trials'][0]
+        self.assertEqual(row['feedback_state'], 'available')
+        self.assertEqual(row['stages'], dict(request='operation_recorded', admission=None,
+            execution_started=None, correctness='passed', benchmark='passed', reported_status=None, error_kind=None))
+        self.assertEqual(row['times_ms'], {'case': 9.0})  # Existing checked observation remains the timing source.
+        self.assertEqual(row['feedback_ref'], inventory[0]['feedback_ref'])
+        for ref in row['feedback_refs']:
+            _, artifacts = self.store.evidence(ref['evidence_id'])
+            self.assertEqual(artifacts[ref['artifact']], encoded(feedback))
+
+    def test_nested_receipt_binding_conflicts_withhold_stages_and_timing(self):
+        for key in ('evaluation_id', 'candidate_source_id', 'job_id', 'measurement_epoch_id'):
+            with self.subTest(key=key):
+                feedback = self.native_feedback()
+                target = feedback['receipt'] if key == 'evaluation_id' else feedback['receipt']['binding']
+                target[key] = 'different'
+                identity, _ = self.collection(feedbacks=[feedback], observations=[{'case': 9.0}])
+                row = trial_history(self.store, [identity])['trials'][0]
+                self.assertEqual(row['feedback_state'], 'conflict')
+                self.assertIn('feedback_receipt_binding_conflict', row['association']['issues'])
+                self.assertIsNone(row['times_ms'])
+                self.assertIsNone(row['stages']['correctness'])
+                self.assertIsNone(row['stages']['benchmark'])
+                self.assertTrue(row['feedback_refs'])
+
+    def test_missing_or_unsupported_receipts_do_not_infer_stages(self):
+        original = self.native_feedback()
+        variants = []
+        for receipt in (None, [], {'schema': 'other-receipt'}):
+            variants.append(dict(original, receipt=receipt))
+        variants += [dict(original, schema='other-feedback'), dict(original, profile='hardware')]
+        variants.append(dict(schema='geak-native-probe-lifecycle-v1', profile='native',
+            source_id=self.source, operation_id='op', turn_id='attempt', phase='terminal',
+            outcome='admission_failed', settled=None))
+        flattened = dict(original, native_observations={'correctness': {'status': 'passed'}},
+                         admitted=True, execution_started=True, status='native_pass', error_kind='none')
+        flattened.pop('receipt')
+        variants.append(flattened)
+        for feedback in variants:
+            with self.subTest(feedback=feedback):
+                identity, _ = self.collection(feedbacks=[feedback])
+                row = trial_history(self.store, [identity])['trials'][0]
+                self.assertEqual(row['feedback_state'], 'available')
+                self.assertTrue(all(value is None for key, value in row['stages'].items() if key != 'request'))
+
+    def test_native_stage_statuses_are_literal_supported_values(self):
+        for status in ('failed', 'not_run', 'unknown', 'measured', True, ['passed']):
+            with self.subTest(status=status):
+                feedback = self.native_feedback()
+                feedback['receipt']['native_observations']['correctness']['status'] = status
+                identity, _ = self.collection(feedbacks=[feedback])
+                row = trial_history(self.store, [identity])['trials'][0]
+                expected = status if status in ('failed', 'not_run', 'unknown') else None
+                self.assertEqual(row['stages']['correctness'], expected)
 
     def test_conflicting_observations_withhold_scalar_without_dropping_trial(self):
         identity, rows = self.collection(observations=[{'case': 9.0}])
