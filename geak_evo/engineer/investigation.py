@@ -12,7 +12,7 @@ import subprocess
 from ..clock import SystemClock
 from .._util import require
 from ..archive.refs import file_ref, read_ref as _read_ref
-from ..archive.store import StateError
+from ..archive.store import StateError, _write as _store_write
 from .request import validate_request
 
 
@@ -34,6 +34,15 @@ def write(path, raw):
         stream.write(raw)
         stream.flush()
         os.fsync(stream.fileno())
+    return file_ref(path)
+
+
+def write_or_match(path, raw):
+    """Keep an immutable input across collection retries; changed bytes fail."""
+    try:
+        _store_write(path, raw, immutable=True)
+    except FileExistsError:
+        need(_read_ref(file_ref(path)) == raw, "saved collection input changed")
     return file_ref(path)
 
 
@@ -382,7 +391,7 @@ class NativeInvestigation:
 
     def collect(self, result, candidate_id):
         """Reuse saved local native trials; never append a post-turn evaluation."""
-        began = self.clock.monotonic()
+        began_ns = self.clock.monotonic_ns()
         attempt = Path(result["attempt_dir"])
         receipt = result["receipt"]
         native = read(receipt["native_receipt_ref"])
@@ -392,21 +401,66 @@ class NativeInvestigation:
         if not receipt["settlement"].get("settled") or receipt["captured_tip_source_id"] is None:
             return {"costs": costs, "artifacts": {"native_receipt.json": encoded(native)},
                     "card": None, "exchange_receipt": None}
+        need(read(result["receipt_ref"]) == receipt, "collection receipt differs from saved bytes")
+        inspect_prepared_identity(prepared, receipt["request"],
+            prompt_ref=file_ref(attempt / "prompt.txt"), operation_id=receipt["attempt_id"])
+        candidate = self.store.get_candidate(candidate_id)
+        need(all(candidate[key] == value for key, value in {
+            "job_id": native["job_id"], "measurement_epoch_id": native["measurement_epoch_id"],
+            "source_id": receipt["captured_tip_source_id"]}.items()), "collection candidate differs")
         binding = {"entry_result_ref": file_ref(attempt / "native_entry_result.json"),
             "entry_input_ref": prepared["entry_input_ref"], "entry_provenance_ref": prepared["entry_provenance_ref"]}
-        binding_ref = write(attempt / "native_entry_binding.json", encoded(binding))
-        destination = attempt / "collection"
+        inputs = {"receipt_ref": result["receipt_ref"], "prepared_ref": file_ref(attempt / "native_prepared.json"),
+                  "entry_result_ref": binding["entry_result_ref"], "candidate_id": candidate_id,
+                  "boot_id": self.clock.boot_id()}
+        intent_path = attempt / "collection_intent.json"
+        if intent_path.exists() or intent_path.is_symlink():
+            intent = read(file_ref(intent_path))
+            need(set(intent) == set(inputs) | {"started_monotonic_ns"}
+                 and all(intent[key] == value for key, value in inputs.items()),
+                 "collection retry changed its saved inputs or boot")
+            began_ns = intent["started_monotonic_ns"]
+            need(type(began_ns) is int and 0 <= began_ns <= self.clock.monotonic_ns(),
+                 "invalid original collection clock")
+        else:
+            previous = (attempt / "native_entry_binding.json").exists() or any(
+                path.name == "collection" or path.name.startswith("collection-")
+                or path.name in ("collection.stdout", "collection.stderr", "collection.status.json")
+                for path in attempt.iterdir())
+            need(not previous, "saved collection lacks its original intent; owner reconciliation required")
+            intent = dict(inputs, started_monotonic_ns=began_ns)
+            write_or_match(intent_path, encoded(intent))
+        binding_ref = write_or_match(attempt / "native_entry_binding.json", encoded(binding))
+        # Re-run only the pinned CPU collector, including all its validators.
+        # Partial or complete earlier output is preserved, never inferred successful.
+        revision = 0
+        while True:
+            name = "collection" if revision == 0 else "collection-%04d" % revision
+            destination = attempt / name
+            stdout_path, stderr_path = attempt / (name + ".stdout"), attempt / (name + ".stderr")
+            status_path = attempt / (name + ".status.json")
+            paths = (destination, stdout_path, stderr_path, status_path)
+            need(not any(path.is_symlink() for path in paths), "unsafe saved collection path")
+            if not any(path.exists() for path in paths):
+                break
+            revision += 1
         command = [self.python_executable, "-I", "-B", prepared["collector_ref"]["path"],
             "--config", prepared["collection_config_ref"]["path"], "--native-entry-binding", binding_ref["path"],
             "--output", str(destination)]
         _read_ref(prepared["collector_ref"])
-        with (attempt / "collection.stdout").open("xb") as stdout, (attempt / "collection.stderr").open("xb") as stderr:
+        with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
             completed = self.process_runner(command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                 env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), shell=False)
+        status = {"command": command, "returncode": completed.returncode,
+                  "collection_intent_ref": file_ref(intent_path)}
+        status_ref = write_or_match(status_path, encoded(status))
         need(completed.returncode == 0, "collection failed; retain collecting phase for same-ID reconciliation")
         manifest = read(file_ref(destination / "archive/manifest.json"))
         need(manifest["terminal"]["source_id"] == receipt["captured_tip_source_id"], "harvest terminal differs")
         artifacts = {"native_idea_harvest.json": encoded(manifest), "native_receipt.json": encoded(native)}
+        artifacts["native_collection_attempt.json"] = encoded({"revision": revision,
+            "intent_ref": status["collection_intent_ref"], "intent": intent,
+            "status_ref": status_ref, "status": status})
         observations = observation_context(manifest)
         # This is an evidence view, not a replacement claim schema or verifier.
         # Scientific claims remain unverified; the separate quantity index has exact scope.
@@ -470,7 +524,7 @@ class NativeInvestigation:
             card["last_faithful"] = {"candidate_id": roles["faithful"],
                 "claim": "Engineer-designated faithful source; semantic fidelity and explanation remain unreviewed.",
                 "evidence_refs": [{"evidence_id": evidence_id, "artifact": "native_idea_harvest.json"}]}
-        costs["wall_seconds"] += self.clock.monotonic() - began
+        costs["wall_seconds"] += (self.clock.monotonic_ns() - began_ns) / 1e9
         # Omitting research_update intentionally invokes EvolutionLoop's existing
         # pending_review gate. The next metered planner reviews exact raw outcome
         # + corrections through research.claim_update and ClaimLog.
