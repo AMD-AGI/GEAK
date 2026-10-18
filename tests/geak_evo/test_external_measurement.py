@@ -7,6 +7,7 @@ import io
 import importlib.util
 import json
 import shutil
+import subprocess
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace as NS
@@ -18,6 +19,8 @@ _spec = importlib.util.spec_from_file_location("measurement", _script)
 measurement = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(measurement)
 from geak_evo.archive import store as store_module
+from geak_evo import control_result
+from geak_evo.archive.refs import file_ref
 from geak_evo.evaluate.jobs import job_digest
 from geak_evo.evaluate.evaluator import ArenaEvaluationError
 import test_external_ut as external_fixtures
@@ -215,6 +218,55 @@ class MeasurementTests(unittest.TestCase):
             launch.assert_called_once()
             with self.assertRaisesRegex(ValueError, "identity is already in use"):
                 measurement.measure(services, task, "fresh-final", capture_only=True)
+
+    def test_canonical_capture_joins_commit_clock_source_and_only_matching_native_evidence(self):
+        fixture = external_fixtures.ExternalTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        task = fixture.root / "workspace"
+        shutil.copytree(fixture.root / "task", task)
+        def git(*args):
+            subprocess.run(["git", "-C", str(task), *args], check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        git("init", "-q")
+        git("add", ".")
+        git("-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture")
+        clock_path = fixture.root / "clock.json"
+        clock_path.write_text(json.dumps({"boot_id": "fixture", "started_monotonic_ns": 100, "wall_seconds": 28800}))
+        services = NS(store=fixture.store, evaluator=fixture.evaluator, store_module=store_module,
+            reader=control_result, job_id=fixture.evaluator.contract_id, epoch=fixture.evaluator.epoch,
+            clock_ref=file_ref(clock_path))
+        fixture.evaluator.evaluate(fixture.original, evaluation_id="existing")
+        selected = {"candidate_id": fixture.original, "evaluation_id": "existing"}
+        def capture(boot="fixture"):
+            output = io.StringIO()
+            instants = iter([200, 300])
+            with contextlib.redirect_stdout(output):
+                measurement.capture_selection(services, task, selected=selected,
+                    clock=lambda: (boot, next(instants)))
+            row = json.loads(output.getvalue())
+            _, raw = fixture.store.evidence_artifact(row["capture_ref"]["evidence_id"], "canonical-selection.json")
+            self.assertEqual(json.loads(raw), {k: v for k, v in row.items() if k != "capture_ref"})
+            return row
+        with mock.patch.object(fixture.evaluator, "launch", side_effect=AssertionError("no new evaluation")):
+            original = capture()
+            self.assertEqual(original["source_id"], fixture.original_source)
+            self.assertEqual(original["canonical_commit"]["status"], "committed")
+            self.assertEqual(original["development_evidence"]["status"], "validated")
+            self.assertEqual(original["clock_ref"], services.clock_ref)
+            self.assertEqual((original["lower_monotonic_ns"], original["upper_monotonic_ns"]), (200, 300))
+            (task / "kernel_src/module.py").write_bytes(b"# different hand merge\n")
+            dirty = capture()
+            self.assertEqual(dirty["canonical_commit"]["status"], "unresolved")
+            git("add", ".")
+            git("-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "hand merge")
+            changed = capture()
+            self.assertEqual(changed["canonical_commit"]["status"], "committed")
+            self.assertNotEqual(changed["source_id"], original["source_id"])
+            self.assertEqual(changed["development_evidence"]["status"], "unresolved")
+            self.assertNotIn("result", changed["development_evidence"])
+            with self.assertRaisesRegex(ValueError, "original clock"):
+                capture("other-boot")
 
 
 if __name__ == "__main__":

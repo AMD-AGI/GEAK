@@ -9,6 +9,7 @@ const history = start.history;   // extended in place, as before
 const citations = [];
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
+await captureCanonicalSelection(history, 'initial', 0, finalWinner);
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
@@ -286,6 +287,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
+    await captureCanonicalSelection(history, 'before_commit', round, finalWinner);
     let commitBase = null, priorUntracked = [], commitResult = null, commitDeadline = false;
     try {
       if (PROCESS_BOUNDED) {
@@ -344,6 +346,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       // Search has settled. Only host recovery may use the existing Report allowance.
       setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
       const recovery = commitBase ? await restoreUncommittedRound(commitBase, priorUntracked, round) : null;
+      await captureCanonicalSelection(history, 'after_restore', round, finalWinner);
       if (!atDeadline) {
         setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
         atDeadline = await secondsLeft(`restored-r${round}`) <= 7;
@@ -362,6 +365,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       failedCommitRecovery = recovery;
     }
     if (improved) {
+      await captureCanonicalSelection(history, 'after_commit', round, winner);
       cumulative = winner.geomean;
       bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
       finalWinner = winner;

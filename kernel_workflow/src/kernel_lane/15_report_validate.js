@@ -2,6 +2,7 @@
 // PHASE: Final report (TechLead)
 // ===========================================================================
 if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+await captureCanonicalSelection(history, 'terminal', round, finalWinner, stopReason);
 try {
   await captureFinalEvaluation(CANONICAL);
 } catch (cause) {

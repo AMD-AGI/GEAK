@@ -30,6 +30,7 @@ from .planner import model
 from .planner.native import ENGINEER_RESERVATION, NativePlanner, planner_model_profile
 from .selection.advice import (NativeAdviceInputs, NativeAdviceReview,
                               NativeDevelopmentAdvice, native_advice_config)
+from .selection.frontier import CommitFrontier, horizon_cutoffs
 
 
 def _document(reference):
@@ -123,12 +124,13 @@ def prepare_native_search(store, campaign_id, seed_candidate_id, *, campaign_roo
                           planner_decision_limit, sealed_root, root_state_root,
                           common_read_roots, common_refs=(), common_tool_addendum="",
                           review_objective="ordinary", clock=None, prompt_dir=None,
-                          search_reserve_seconds=0):
+                          search_reserve_seconds=0, checkpoint_horizons=()):
     """Compose one member from the existing config/admission/entry/collection refs.
 
     This is the callable replacement for the construction inside the old
-    coordinator.host. The surrounding owner keeps task adoption, frontier
-    registration, sealing, population selection and final completion unchanged.
+    coordinator.host. Optional checkpoint_horizons registers the existing
+    commit frontier before the first journal write. The surrounding owner keeps
+    task adoption, horizon sealing, population selection and final completion.
     New campaigns persist their exact profile and original limits. Opening an
     old campaign without this binding requires a separately reviewed migration.
     An explicit search reserve shortens search only; it never rebases the
@@ -197,6 +199,11 @@ def prepare_native_search(store, campaign_id, seed_candidate_id, *, campaign_roo
                           if "codex_runtime_family_ref" in model_config else None)
     now = lambda: original["started_unix"] + (clock.monotonic_ns() - original["started_monotonic_ns"]) / 1e9
     search_seconds = search_wall_seconds(original, search_reserve_seconds)
+    cutoffs = horizon_cutoffs(original, checkpoint_horizons) if checkpoint_horizons else None
+    if cutoffs is not None:
+        require(all(name == "END" or cutoff <= original["started_monotonic_ns"] + int(search_seconds * 1e9)
+                    for name, cutoff in cutoffs.items()),
+                "checkpoint exceeds the declared search interval", ValueError)
     deadline = original["started_unix"] + search_seconds
     limits = {"wall_seconds": search_seconds, "evaluations": evaluation_limit}
     packaged_entry = Path(__file__).parent / "engineer" / "js"
@@ -216,6 +223,8 @@ def prepare_native_search(store, campaign_id, seed_candidate_id, *, campaign_roo
         "model_backend_ref": file_ref(Path(model.__file__)), "backend_driver_ref": services.backend_driver_ref}
     if search_reserve_seconds:
         binding["search_reserve_seconds"] = search_reserve_seconds
+    if cutoffs is not None:
+        binding["checkpoint_horizons"] = list(checkpoint_horizons)
     binding_path = root / "host-binding.json"
     existing = campaign_id in store.get()
     if binding_path.exists():
@@ -223,6 +232,28 @@ def prepare_native_search(store, campaign_id, seed_candidate_id, *, campaign_roo
     else:
         require(not existing, "saved campaign has no shared host binding", ValueError)
         write(binding_path, encoded(binding))
+    if cutoffs is not None:
+        expected = {"campaign_id": campaign_id, "job_id": probe["job_id"],
+                    "measurement_epoch_id": probe["measurement_epoch_id"]}
+
+        def frontier_clock():
+            boot, instant = clock.boot_id(), clock.monotonic_ns()
+            require(clock.boot_id() == boot, "checkpoint clock boot changed", ValueError)
+            return boot, instant
+
+        contract_path = store.root / "commit-frontier" / "CONTRACT.json"
+        if contract_path.exists():
+            frontier = CommitFrontier.open(store.root, file_ref(contract_path), clock=frontier_clock)
+            require(frontier.contract["binding"] == expected and frontier.contract["clock_ref"] == clock_ref
+                    and frontier.contract["clock"] == original and frontier.contract["horizons"] == cutoffs
+                    and frontier.contract["registration_ref"] == file_ref(binding_path),
+                    "saved checkpoint frontier differs", ValueError)
+            store.commit_frontier = frontier
+        else:
+            CommitFrontier.register(store, expected_binding=expected, clock_ref=clock_ref,
+                clock_raw=read_ref(clock_ref), horizons=checkpoint_horizons,
+                registration_ref=file_ref(binding_path), registration_raw=read_ref(file_ref(binding_path)),
+                clock=frontier_clock)
     quantities = NativeQuantities(store, campaign_id, contract=contract, admission=admission,
         case_id=case_id, producer_ref=file_ref(Path(__file__).with_name("evaluate") / "quantities.py"))
     options = dict(clock=now, monotonic=clock.monotonic, verify_quantity=quantities,

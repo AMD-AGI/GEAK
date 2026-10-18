@@ -161,6 +161,41 @@ async function captureFinalEvaluation(workspace) {
   frozenFinalEvaluation = Object.freeze(captured);
 }
 
+// Optional prospective source history. Keep exact nanosecond values in the
+// existing Store evidence bytes; JavaScript numbers must not round them.
+const CAPTURE_CANONICAL_SELECTIONS = A.capture_canonical_selections === true;
+if (CAPTURE_CANONICAL_SELECTIONS && (!EXTERNAL_OBJECTIVE || String(A.optimizer || 'greedy') !== 'greedy')) {
+  throw new Error('canonical selection capture requires the external_primary GEAK lane');
+}
+async function captureCanonicalSelection(history, kind, round, winner = null, stoppedBy = null) {
+  if (!CAPTURE_CANONICAL_SELECTIONS) return;
+  const row = {kind, round, stopped_by: stoppedBy, status: 'unresolved'};
+  if (!history.canonical_selections) history.canonical_selections = [];
+  history.canonical_selections.push(row);
+  try {
+    const argv = A.external_measurement_command;
+    const selected = winner && winner.external_evaluation;
+    const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+      '--workspace', CANONICAL, '--capture-selection', ...(selected ? [
+        '--selected-candidate-id', selected.candidate_id, '--selected-evaluation-id', selected.evaluation_id] : [])],
+      timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+    if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+        || !result.group_cleared || result.stdio_held) throw new Error('canonical source capture failed');
+    const capture = JSON.parse(result.stdout);
+    if (capture.schema !== 'geak-canonical-source-capture-v1'
+        || ![capture.candidate_id, capture.source_id, capture.capture_ref && capture.capture_ref.evidence_id]
+          .every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))
+        || capture.capture_ref.artifact !== 'canonical-selection.json') throw new Error('invalid canonical capture');
+    Object.assign(row, {capture_ref: capture.capture_ref, candidate_id: capture.candidate_id,
+      source_id: capture.source_id, clock_ref: capture.clock_ref,
+      development_status: capture.development_evidence.status});
+    if (capture.canonical_commit.status !== 'committed') throw new Error('canonical Git state is unresolved');
+    Object.assign(row, {status: 'captured', git_commit: capture.canonical_commit.git_commit});
+  } catch (error) {
+    row.reason = String(error);
+  }
+}
+
 async function checkedExternalMeasurement(value, workspace, patch = null, final = false) {
   if (!EXTERNAL_OBJECTIVE || (!value && !final)) return value;
   const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,

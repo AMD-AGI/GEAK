@@ -219,6 +219,41 @@ async function captureFinalEvaluation(workspace) {
   frozenFinalEvaluation = Object.freeze(captured);
 }
 
+// Optional prospective source history. Keep exact nanosecond values in the
+// existing Store evidence bytes; JavaScript numbers must not round them.
+const CAPTURE_CANONICAL_SELECTIONS = A.capture_canonical_selections === true;
+if (CAPTURE_CANONICAL_SELECTIONS && (!EXTERNAL_OBJECTIVE || String(A.optimizer || 'greedy') !== 'greedy')) {
+  throw new Error('canonical selection capture requires the external_primary GEAK lane');
+}
+async function captureCanonicalSelection(history, kind, round, winner = null, stoppedBy = null) {
+  if (!CAPTURE_CANONICAL_SELECTIONS) return;
+  const row = {kind, round, stopped_by: stoppedBy, status: 'unresolved'};
+  if (!history.canonical_selections) history.canonical_selections = [];
+  history.canonical_selections.push(row);
+  try {
+    const argv = A.external_measurement_command;
+    const selected = winner && winner.external_evaluation;
+    const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+      '--workspace', CANONICAL, '--capture-selection', ...(selected ? [
+        '--selected-candidate-id', selected.candidate_id, '--selected-evaluation-id', selected.evaluation_id] : [])],
+      timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+    if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+        || !result.group_cleared || result.stdio_held) throw new Error('canonical source capture failed');
+    const capture = JSON.parse(result.stdout);
+    if (capture.schema !== 'geak-canonical-source-capture-v1'
+        || ![capture.candidate_id, capture.source_id, capture.capture_ref && capture.capture_ref.evidence_id]
+          .every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))
+        || capture.capture_ref.artifact !== 'canonical-selection.json') throw new Error('invalid canonical capture');
+    Object.assign(row, {capture_ref: capture.capture_ref, candidate_id: capture.candidate_id,
+      source_id: capture.source_id, clock_ref: capture.clock_ref,
+      development_status: capture.development_evidence.status});
+    if (capture.canonical_commit.status !== 'committed') throw new Error('canonical Git state is unresolved');
+    Object.assign(row, {status: 'captured', git_commit: capture.canonical_commit.git_commit});
+  } catch (error) {
+    row.reason = String(error);
+  }
+}
+
 async function checkedExternalMeasurement(value, workspace, patch = null, final = false) {
   if (!EXTERNAL_OBJECTIVE || (!value && !final)) return value;
   const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
@@ -1559,6 +1594,7 @@ const history = start.history;   // extended in place, as before
 const citations = [];
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
+await captureCanonicalSelection(history, 'initial', 0, finalWinner);
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
@@ -1836,6 +1872,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
+    await captureCanonicalSelection(history, 'before_commit', round, finalWinner);
     let commitBase = null, priorUntracked = [], commitResult = null, commitDeadline = false;
     try {
       if (PROCESS_BOUNDED) {
@@ -1894,6 +1931,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       // Search has settled. Only host recovery may use the existing Report allowance.
       setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
       const recovery = commitBase ? await restoreUncommittedRound(commitBase, priorUntracked, round) : null;
+      await captureCanonicalSelection(history, 'after_restore', round, finalWinner);
       if (!atDeadline) {
         setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
         atDeadline = await secondsLeft(`restored-r${round}`) <= 7;
@@ -1912,6 +1950,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       failedCommitRecovery = recovery;
     }
     if (improved) {
+      await captureCanonicalSelection(history, 'after_commit', round, winner);
       cumulative = winner.geomean;
       bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
       finalWinner = winner;
@@ -2396,6 +2435,7 @@ applyOptimizeResult(OPTIMIZER === 'greedy'
 // PHASE: Final report (TechLead)
 // ===========================================================================
 if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+await captureCanonicalSelection(history, 'terminal', round, finalWinner, stopReason);
 try {
   await captureFinalEvaluation(CANONICAL);
 } catch (cause) {
@@ -2639,6 +2679,7 @@ return {
   final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
   ...(EXTERNAL_OBJECTIVE ? externalFields(validation || {objective: EXTERNAL_OBJECTIVE}) : {}),
   ...(EXTERNAL_OBJECTIVE ? {final_selection: frozenFinalEvaluation} : {}),
+  ...(CAPTURE_CANONICAL_SELECTIONS ? {canonical_selections: history.canonical_selections || []} : {}),
   ...(EXTERNAL_OBJECTIVE ? {outcome: !validation || !validation.external_measurement_valid
     ? 'invalid_measurement' : externalPromotion ? 'improved' : 'no_improvement'} : {}),
   final_weighted: finalWeighted,

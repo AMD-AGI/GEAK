@@ -98,6 +98,7 @@ return {
   final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
   ...(EXTERNAL_OBJECTIVE ? externalFields(validation || {objective: EXTERNAL_OBJECTIVE}) : {}),
   ...(EXTERNAL_OBJECTIVE ? {final_selection: frozenFinalEvaluation} : {}),
+  ...(CAPTURE_CANONICAL_SELECTIONS ? {canonical_selections: history.canonical_selections || []} : {}),
   ...(EXTERNAL_OBJECTIVE ? {outcome: !validation || !validation.external_measurement_valid
     ? 'invalid_measurement' : externalPromotion ? 'improved' : 'no_improvement'} : {}),
   final_weighted: finalWeighted,

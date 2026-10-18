@@ -64,10 +64,11 @@ const make = (A) => new Function('A', 'HAS_WORKLOAD', 'runProcess', 'log', sourc
   await fullLane(false, false, true, 'changed-candidate');
   await fullLane(false, false, true, 'stale-evaluation');
   await fullLane(false, false, true, 'capture-failed');
+  await fullLane(false, false, false, null, true);
   console.log('external primary: checked development geomean, native export score and gain, no legacy fallback, source/patch arguments passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 
-async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal = null) {
+async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal = null, captureSelections = false) {
   const body = fs.readFileSync(path.join(__dirname, '../kernel_lane.js'), 'utf8')
     .replace(/^export const meta/m, 'const meta');
   const selectedCandidate = 'c'.repeat(64);
@@ -76,11 +77,12 @@ async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal 
   const records = {original: [1, false, 1], a: [1.4, true, 1.2], b: [1.6, true, 1.1],
     c: [9, false, 1.5], integrated: [1.5, true, 1.3], final: [1.55, !finalNoGain, 1.45],
     warm: [1.4, true, 1.2]};
-  let cumulative, commits = 0, captured = false, finalReads = 0;
+  let cumulative, commits = 0, captured = false, finalReads = 0, canonicalCaptures = 0;
   const g = {
     args: {kernel_path: '/original', workflow_dir: '/workflow', budget: 3,
       agent_timeout_ms: 0, agent_retries: 1, objective,
       external_measurement_command: ['/owner/evaluate'], external_result_command: ['/owner/read'],
+      capture_canonical_selections: captureSelections,
       ...(staged ? {external_final_measurement_command: ['/owner/final-evaluate'],
         external_final_result_command: ['/owner/final-read']} : {}),
       warm_start: warm ? 'on' : 'off', update_experience: 'off', llm_stats: 'false'},
@@ -93,6 +95,18 @@ async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal 
       return item;
     })),
     runProcess: async opts => {
+      if (opts.args.includes('--capture-selection')) {
+        canonicalCaptures++;
+        assert.equal(opts.cmd, '/owner/evaluate');
+        assert.equal(opts.args.includes('--selected-evaluation-id'), commits > 0);
+        return {status: 'completed', code: 0, group_cleared: true, stdout: JSON.stringify({
+          schema: 'geak-canonical-source-capture-v1', candidate_id: selectedCandidate,
+          source_id: (commits ? 'd' : 'e').repeat(64),
+          capture_ref: {evidence_id: 'f'.repeat(64), artifact: 'canonical-selection.json'},
+          clock_ref: {path: '/owner/clock', sha256: 'a'.repeat(64)},
+          canonical_commit: {status: 'committed', git_commit: 'b'.repeat(40)},
+          development_evidence: {status: commits ? 'unresolved' : 'missing'}})};
+      }
       if (warm && opts.cmd === '/usr/bin/test') return {status: 'completed', code: 1, group_cleared: true};
       if (opts.args.includes('--capture-only')) {
         assert.equal(opts.cmd, staged ? '/owner/final-evaluate' : '/owner/evaluate');
@@ -142,10 +156,14 @@ async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal 
         verified_geomean: 999, external_evaluation: ids(label.split(' ')[1])};
       if (label.startsWith('integrate ')) return {attempted: true, conclusion: 'improved',
         best: {geomean: 999, patch_file: '/integrated.diff', external_evaluation: ids('integrated')}};
-      if (label.startsWith('commit ')) {commits++; return {committed: true};}
+      if (label.startsWith('commit ')) {
+        if (captureSelections) assert.equal(canonicalCaptures, 2, 'source is captured before canonical mutation');
+        commits++; return {committed: true};
+      }
       if (label.startsWith('tech_lead:memory')) return {insights: [], ledger: []};
       if (label.startsWith('storage:') || label.startsWith('kb:')) return {};
       if (label === 'tech_lead:report') {
+        if (captureSelections) assert.equal(canonicalCaptures, 4, 'terminal capture precedes Report');
         assert.equal(captured, true, 'source is fixed before Report can edit it');
         cumulative = Number(prompt.split('\n').find(x => x.startsWith('- CUMULATIVE_SPEEDUP: ')).split(': ')[1]);
         return {final_speedup_geomean: 999, final_patch: '/final.diff', report_path: '/report'};
@@ -172,6 +190,14 @@ async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal 
   assert.equal(commits, 1);
   assert.equal(value.final_selection.candidate_id, selectedCandidate);
   assert.equal(value.final_selection.evaluation_id, 'final');
+  if (captureSelections) {
+    assert.deepEqual(value.canonical_selections.map(row => row.kind),
+      ['initial', 'before_commit', 'after_commit', 'terminal']);
+    assert.deepEqual(value.canonical_selections.map(row => row.source_id),
+      ['e', 'e', 'd', 'd'].map(value => value.repeat(64)));
+    assert.equal(value.canonical_selections[2].development_status, 'unresolved');
+    assert.equal(value.canonical_selections[3].stopped_by, value.stopped_by);
+  }
   if (invalidFinal) {
     assert.equal(finalReads, 0, 'reject a changed or stale identity before reading its score');
     assert.equal(value.final_speedup, null);

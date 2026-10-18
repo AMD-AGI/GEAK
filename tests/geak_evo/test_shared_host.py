@@ -170,6 +170,37 @@ class SharedHostTests(unittest.TestCase):
                 self.prepare(search_reserve_seconds=reserve)
         self.assertEqual(self.transport.launches, [])
 
+    def test_checkpoint_registration_precedes_first_real_loop_commit_and_reopens(self):
+        horizons = ["H0.5", "H1", "H2"]
+        search = self.prepare(checkpoint_horizons=horizons)
+        frontier = self.fixture.store.commit_frontier
+        reference = dict(frontier.contract_ref)
+        records = list((self.fixture.store.root / "records").glob("*.json"))
+        receipts = list((frontier.directory / "receipts").glob("*.json"))
+        self.assertGreater(len(records), 0)
+        self.assertEqual(len(records), len(receipts))
+        self.assertEqual(frontier.contract["clock_ref"], self.clock_ref)
+        self.assertEqual(frontier.contract["horizons"]["H0.5"], 1900_000_000_000)
+        self.fixture.store.commit_frontier = None
+        self.clock.now = 4000  # Resume after a checkpoint; never re-register.
+        self.assertEqual(self.prepare(checkpoint_horizons=horizons).loop.snapshot(), search.loop.snapshot())
+        self.assertEqual(self.fixture.store.commit_frontier.contract_ref, reference)
+        with self.assertRaisesRegex(ValueError, "saved host binding changed"):
+            self.prepare(checkpoint_horizons=["H0.5", "H2"])
+        with self.assertRaisesRegex(ValueError, "saved host binding changed"):
+            self.prepare()
+        self.assertEqual(self.transport.launches, [])
+
+    def test_checkpoint_refuses_nonempty_journal_and_short_search_interval(self):
+        with self.assertRaisesRegex(ValueError, "checkpoint exceeds"):
+            self.prepare(checkpoint_horizons=["H2"], search_reserve_seconds=3000)
+        self.fixture.store.checkpoint("prior", self.fixture.candidate, expected_revision=0,
+            note={"claim": "existing", "scope": "fixture", "next_test": "none"})
+        with self.assertRaisesRegex(ValueError, "registration_requires_new_journal"):
+            self.prepare(checkpoint_horizons=["H1"])
+        self.assertFalse((self.fixture.store.root / "commit-frontier").exists())
+        self.assertEqual(self.transport.launches, [])
+
     def test_native_callbacks_keep_same_id_raw_metrics_and_physical_mapping(self):
         evaluator = host.make_native_evaluator(self.fixture.store, self.config, callbacks=self.fixture)
         first = evaluator.evaluate(self.fixture.candidate, evaluation_id="same-operation")

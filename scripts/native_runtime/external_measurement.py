@@ -14,7 +14,9 @@ import math
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
+import time
 from types import SimpleNamespace
 import uuid
 
@@ -131,8 +133,9 @@ def bind_services(admission_ref):
     output_root = ordinary_directory(arm["request_root"])
     # Reading the existing owner clock is a prerequisite. No clock is created,
     # extended or reset here; NativeCallbacks/root_helper retain enforcement.
-    protected(arm["study_clock_path"])
-    need(Path(arm["study_clock_path"]).is_file(), "existing admitted study clock required")
+    clock_path = protected(arm["study_clock_path"])
+    need(clock_path.is_file(), "existing admitted study clock required")
+    clock_ref = {"path": str(clock_path), "sha256": hashlib.sha256(clock_path.read_bytes()).hexdigest()}
     jobs = imported["geak_evo.evaluate.jobs"]
     contract = jobs.load_arena_job(native / "contract.json", artifact_root=artifact_root,
                                    expected_digest=admission["contract_id"])
@@ -151,7 +154,8 @@ def bind_services(admission_ref):
     need(evaluator.evaluator_sha256 == admission["evaluator_sha256"] == arm["evaluator_sha256"],
          "evaluator differs from existing admission")
     return SimpleNamespace(store=store, evaluator=evaluator, store_module=store_module,
-                           reader=imported["geak_evo.control_result"], job_id=job, epoch=epoch)
+                           reader=imported["geak_evo.control_result"], job_id=job, epoch=epoch,
+                           clock_ref=clock_ref)
 
 
 def verify_protected_workspace(services, workspace):
@@ -163,6 +167,93 @@ def verify_protected_workspace(services, workspace):
             raw, _ = services.store_module._read(root, name)
             need(hashlib.sha256(raw).hexdigest() == digest, "protected workspace artifact changed: " + name)
     return root
+
+
+def sample_clock():
+    path = Path("/proc/sys/kernel/random/boot_id")
+    boot = path.read_text().strip()
+    instant = time.monotonic_ns()
+    need(path.read_text().strip() == boot, "capture clock boot changed")
+    return boot, instant
+
+
+def committed_source(workspace, source):
+    """Join every captured byte/mode to one actual canonical Git commit."""
+    def git(*args):
+        result = subprocess.run(["git", *args], cwd=workspace, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=10, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C",
+                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CEILING_DIRECTORIES": str(workspace.parent)})
+        need(result.returncode == 0, "canonical Git source is unavailable")
+        return result.stdout
+    head = git("rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    tree = {}
+    for entry in git("ls-tree", "-rz", head, "--", *[row["path"] for row in source["files"]]).split(b"\0"):
+        if entry:
+            mode_kind_id, path = entry.split(b"\t", 1)
+            tree[path.decode()] = mode_kind_id.split()
+    need(set(tree) == {row["path"] for row in source["files"]}, "canonical Git source closure differs")
+    for row in source["files"]:
+        mode, kind, blob = tree[row["path"]]
+        need(kind == b"blob" and mode in (b"100644", b"100755")
+             and (0o111 if mode == b"100755" else 0) == row["executable"]
+             and hashlib.sha256(git("cat-file", "blob", blob.decode())).hexdigest() == row["blob_id"],
+             "canonical source differs from Git commit: " + row["path"])
+    need(git("rev-parse", "--verify", "HEAD^{commit}").decode().strip() == head,
+         "canonical Git commit changed during capture")
+    return head
+
+
+def capture_selection(services, workspace, *, selected=None, clock=sample_clock):
+    """Retain canonical bytes and their original-clock observation, without evaluation.
+
+    The host brackets canonical mutation with two captures. This receipt alone
+    observes source availability; it is not a Git-commit timestamp or privileged
+    attestation. A proposed winner's settled evidence is checked against these
+    exact bytes; a hand merge cannot inherit metrics for a different source.
+    """
+    clock_raw = Path(services.clock_ref["path"]).read_bytes()
+    need(hashlib.sha256(clock_raw).hexdigest() == services.clock_ref["sha256"], "original clock changed")
+    original = json.loads(clock_raw)
+    boot, lower = clock()
+    need(boot == original["boot_id"] and lower >= original["started_monotonic_ns"],
+         "capture differs from original clock")
+    root = verify_protected_workspace(services, workspace)
+    source = services.store.capture_source(root, services.evaluator.contract["source_paths"])
+    need(all(row["blob_id"] is not None for row in services.store.source(source)["files"]),
+         "canonical source closure is incomplete")
+    candidate = services.store.candidate(services.job_id, services.epoch, source)
+    try:
+        commit = {"status": "committed", "git_commit": committed_source(root, services.store.source(source))}
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        commit = {"status": "unresolved", "error_kind": type(error).__name__, "reason": str(error)}
+    evidence = {"status": "missing", "reason": "no_selected_evaluation"}
+    if selected is not None:
+        try:
+            checked_result = services.reader.read_control_result(services.evaluator, selected["candidate_id"],
+                evaluation_id=selected["evaluation_id"], workspace=root)
+            # Source IDs, rather than candidate IDs, define program identity.
+            need(services.store.get_candidate(selected["candidate_id"])["source_id"] == source,
+                 "selected evaluation source differs from canonical capture")
+            evidence = {"status": "validated", "result": checked_result}
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            evidence = {"status": "unresolved", "selected_evaluation": selected,
+                        "error_kind": type(error).__name__, "reason": str(error)}
+    verify_protected_workspace(services, root)
+    need(services.store.capture_source(root, services.evaluator.contract["source_paths"]) == source,
+         "canonical source changed during capture")
+    end_boot, upper = clock()
+    need(end_boot == boot and lower <= upper, "capture clock changed")
+    need(Path(services.clock_ref["path"]).read_bytes() == clock_raw, "original clock changed")
+    capture = {"schema": "geak-canonical-source-capture-v1", "candidate_id": candidate, "source_id": source,
+               "clock_ref": services.clock_ref, "boot_id": boot,
+               "lower_monotonic_ns": lower, "upper_monotonic_ns": upper,
+               "canonical_commit": commit, "development_evidence": evidence}
+    identity = services.store.archive_evidence(candidate, {
+        "canonical-selection.json": canonical(capture).encode(), "original-clock.json": clock_raw})
+    print(canonical({**capture, "capture_ref": {"evidence_id": identity,
+                                              "artifact": "canonical-selection.json"}}), flush=True)
+    return 0
 
 
 def measure(services, workspace, evaluation_id, *, candidate_id=None, capture_only=False):
@@ -210,7 +301,19 @@ def main(argv=None):
     arguments.add_argument("--evaluation-id", default=None)
     arguments.add_argument("--candidate-id", default=None)
     arguments.add_argument("--capture-only", action="store_true")
+    arguments.add_argument("--capture-selection", action="store_true")
+    arguments.add_argument("--selected-candidate-id")
+    arguments.add_argument("--selected-evaluation-id")
     args = arguments.parse_args(remaining)
+    need(bool(args.selected_candidate_id) == bool(args.selected_evaluation_id),
+         "selected candidate and evaluation IDs must be supplied together")
+    need(args.capture_selection or args.selected_candidate_id is None, "selected evidence requires source capture")
+    if args.capture_selection:
+        need(not args.capture_only and args.evaluation_id is None and args.candidate_id is None,
+             "canonical capture does not allocate an evaluation")
+        selected = ({"candidate_id": args.selected_candidate_id, "evaluation_id": args.selected_evaluation_id}
+                    if args.selected_candidate_id else None)
+        return capture_selection(services, args.workspace, selected=selected)
     need(not args.capture_only or (args.evaluation_id is None and args.candidate_id is None),
          "capture allocates a fresh final evaluation identity")
     return measure(services, args.workspace, args.evaluation_id or "geak-" + uuid.uuid4().hex,

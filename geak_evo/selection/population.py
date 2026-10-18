@@ -28,6 +28,7 @@ import stat
 import statistics
 
 from .._util import EvoError, canonical_json, is_sha256, require, sha256_hex
+from .frontier import SUPPORTED_HORIZONS
 
 
 CONTRACT_SCHEMA = "geak-population-native-selector-contract-v1"
@@ -173,7 +174,7 @@ def _contract(raw, ref):
          and len(set(mapping.values())) == len(mapping), "exact_report_mapping_required")
     for key in ("population_id", "operator", "job_id", "runtime_image", "runtime_config_digest"):
         need(type(value[key]) is str and bool(value[key]), "contract_identity_required")
-    need(value["horizon"] in ("H4", "H8", "H12", "END"), "registered_horizon_required")
+    need(value["horizon"] in SUPPORTED_HORIZONS, "registered_horizon_required")
     need(type(value["selection_seal_path"]) is str and Path(value["selection_seal_path"]).is_absolute(),
          "registered_selection_seal_path_required")
     need(is_sha256(value["native_contract_sha256"]), "native_contract_hash_required")

@@ -29,6 +29,41 @@ class InjectedClockTest(fx.PortScratch, unittest.TestCase):
     def test_cutoffs_come_from_the_campaign_clock(self):
         cutoffs = frontier_module.horizon_cutoffs(fx.CLOCK, ["H4", "H8", "END"])
         self.assertEqual(cutoffs, {"H4": fx.H4, "H8": fx.H8, "END": fx.CLOCK["deadline_ns"]})
+        self.assertEqual(frontier_module.horizon_cutoffs(fx.CLOCK, ["H16"]),
+                         {"H16": fx.START_NS + 16 * 3600 * fx.NS})
+        short = fx.Campaign(self.api, self.root / "short-for-h16")
+        with self.assertRaisesRegex(FrontierError, "registration_clock_or_horizon_differs"):
+            self.api["register"](short.store, fx.Ticker(fx.START_NS + 10), expected_binding=fx.EXPECTED,
+                clock_ref=fx.CLOCK_REF, clock_raw=fx.CLOCK_RAW, horizons=("H16",))
+
+    def test_eight_hour_grid_has_integer_cutoffs_and_carries_early_stop(self):
+        horizons = frontier_module.CHECKPOINT_HORIZONS
+        cutoffs = frontier_module.horizon_cutoffs(fx.CLOCK, horizons)
+        self.assertEqual(list(cutoffs.values()), [fx.START_NS + seconds * fx.NS
+            for seconds in (1800, 3600, 7200, 14400, 21600, 28800)])
+        self.assertTrue(all(type(value) is int for value in cutoffs.values()))
+        campaign, ticker, frontier = self.frontier_campaign("grid", horizons=horizons)
+        campaign.plan(fx.set_directive(campaign.choices[0]), proposal={"action": "stop"})
+        ticker.now = fx.H8
+        for horizon in horizons:
+            seal = self.seal(campaign, frontier, horizon)
+            self.assertEqual(seal["status"], "selected")
+            self.assertEqual(seal["recommendation"]["choice"], campaign.choices[0])
+
+    def test_early_grid_distinguishes_missing_and_clear_without_source_fallback(self):
+        campaign, ticker, frontier = self.frontier_campaign("clear-grid", horizons=("H0.5", "H1", "H2"))
+        ticker.now = fx.START_NS + 1800 * fx.NS
+        missing = self.seal(campaign, frontier, "H0.5")
+        self.assertEqual(missing["status"], "missing")
+        campaign.plan(fx.set_directive(campaign.choices[0]), proposal={"action": "stop"})
+        ticker.now = fx.START_NS + 3600 * fx.NS
+        selected = self.seal(campaign, frontier, "H1")
+        self.assertEqual(selected["recommendation"]["choice"], campaign.choices[0])
+        campaign.plan(fx.CLEAR, proposal={"action": "stop"})
+        ticker.now = fx.START_NS + 7200 * fx.NS
+        cleared = self.seal(campaign, frontier, "H2")
+        self.assertEqual(cleared["status"], "missing")
+        self.assertNotEqual(cleared["recommendation"], missing["recommendation"])
 
     def test_commit_after_cutoff_is_excluded(self):
         campaign, ticker, frontier = self.frontier_campaign("timeline")

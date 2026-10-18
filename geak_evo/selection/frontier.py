@@ -2,7 +2,7 @@
 
 A ``CommitFrontier`` is registered on a new store before its first commit. From
 then on every journal write is bracketed by two clock samples and the pair is
-saved as a commit receipt. At a declared horizon (H4, H8, H12 or END),
+saved as a commit receipt. At a declared horizon,
 ``seal_horizon`` takes exactly the commits that finished before the cutoff,
 runs ``final.validate_final_recommendation`` on that prefix and writes an
 immutable seal with status ``selected``, ``missing`` or ``unresolved``. There
@@ -37,7 +37,8 @@ from ..archive.store import _read, _sync_directory, _write
 from .final import validate_final_recommendation
 
 
-HOURS = {"H4": 4, "H8": 8, "H12": 12}
+CHECKPOINT_HORIZONS = ("H0.5", "H1", "H2", "H4", "H6", "H8")
+HOURS = {"H0.5": Fraction(1, 2), "H1": 1, "H2": 2, "H4": 4, "H6": 6, "H8": 8, "H12": 12, "H16": 16}
 SUPPORTED_HORIZONS = frozenset(HOURS) | {"END"}
 NS = 1_000_000_000
 CONTRACT_SCHEMA = "geak-committed-frontier-contract-v1"
@@ -75,7 +76,7 @@ def _sample(clock):
 
 
 def horizon_cutoffs(clock, horizons):
-    """Monotonic cutoffs: start + 4/8/12 hours, plus END = the clock's own deadline.
+    """Exact declared hour offsets, plus END = the clock's own deadline.
 
     ``clock`` is the campaign clock record. END uses its integer ``deadline_ns``,
     never a fresh sample; ``wall_seconds`` (decimal JSON) must describe exactly the
@@ -86,7 +87,7 @@ def horizon_cutoffs(clock, horizons):
          and len(set(horizons)) == len(horizons), "declared_horizons_required")
     start = clock["started_monotonic_ns"]
     need(type(start) is int and start >= 0, "registration_clock_or_horizon_differs")
-    selected = {name: start + hours * 3600 * NS for name, hours in HOURS.items() if name in horizons}
+    selected = {name: start + int(hours * 3600 * NS) for name, hours in HOURS.items() if name in horizons}
     if "END" in horizons:
         deadline = clock.get("deadline_ns")
         need(type(deadline) is int and deadline > start, "terminal_clock_deadline_required")
