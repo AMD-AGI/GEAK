@@ -176,6 +176,7 @@ ${resolveScript}
         }
         ver = await checkedExternalMeasurement(ver, CANONICAL, checkedWarmPatch);
         const sp = primSpeedup(ver);
+        const spReported = nativePrimary(ver);   // reported/attested score; sp ranks and gates
         if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && sp > 1.0) {
           const adopt = await agentT(
             `You are the TechLead adopting a validated warm-start patch into the canonical workspace.
@@ -203,13 +204,13 @@ correctness check; only report committed=true if it still passes. Return JSON {c
               ...externalFields(ver) };
             if (bestSeen < sp) bestSeen = sp;
             warm_start.adopted = true;
-            warm_start.adopted_speedup = sp;
+            warm_start.adopted_primary = spReported;
             warm_start.slug = c.slug;
             // Carried into the write-back: the idea this run started from, and the entry it
             // descends from — lineage a later curation pass cannot recover from the diff alone.
             warm_start.direction = c.direction || '';
             warm_start.exp_dir = c.exp_dir || '';
-            if (rec) { rec.status = 'adopted'; rec.outcome = 'validated'; rec.verified_speedup = sp; }
+            if (rec) { rec.status = 'adopted'; rec.outcome = 'validated'; rec.verified_speedup = spReported; }
             log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
             profileSummary = await agentT(
               roleAgent('profile_engineer', 'reprofile',
@@ -226,7 +227,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
         if (rec && rec.status !== 'adopted') {
           rec.status = (ver && ver.status) ? `rejected:${ver.status}` : 'rejected:apply_failed';
           rec.outcome = kbVerdict(ver, sp);
-          rec.verified_speedup = sp || 0;
+          rec.verified_speedup = spReported || 0;
         }
         log(`[kb] warm-start candidate c${c.rank} ${rec ? rec.status : 'rejected'} (${sp ? sp.toFixed(2) + 'x' : 'no measure'}).`);
       }

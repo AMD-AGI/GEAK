@@ -56,22 +56,24 @@ const make = (A) => new Function('A', 'HAS_WORKLOAD', 'runProcess', 'log', sourc
   assert.equal(bad.validation_status, 'invalid_measurement');
   await fullLane(false);
   await fullLane(true);
+  await fullLane(false, true);
   console.log('external primary: checked development geomean, native export score and gain, no legacy fallback, source/patch arguments passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 
-async function fullLane(finalNoGain) {
+async function fullLane(finalNoGain, warm = false) {
   const body = fs.readFileSync(path.join(__dirname, '../kernel_lane.js'), 'utf8')
     .replace(/^export const meta/m, 'const meta');
   const ids = id => ({candidate_id: id, evaluation_id: id});
   // [native primary, native gain, development geomean]
   const records = {original: [1, false, 1], a: [1.4, true, 1.2], b: [1.6, true, 1.1],
-    c: [9, false, 1.5], integrated: [1.5, true, 1.3], final: [1.55, !finalNoGain, 1.45]};
+    c: [9, false, 1.5], integrated: [1.5, true, 1.3], final: [1.55, !finalNoGain, 1.45],
+    warm: [1.4, true, 1.2]};
   let cumulative, commits = 0;
   const g = {
     args: {kernel_path: '/original', workflow_dir: '/workflow', budget: 3,
       agent_timeout_ms: 0, agent_retries: 1, objective,
       external_measurement_command: ['/owner/evaluate'], external_result_command: ['/owner/read'],
-      warm_start: 'off', update_experience: 'off', llm_stats: 'false'},
+      warm_start: warm ? 'on' : 'off', update_experience: 'off', llm_stats: 'false'},
     phase: () => {}, log: () => {},
     workflow: async () => {throw new Error('unexpected nested workflow');},
     budget: {total: null, spent: () => 0, remaining: () => Infinity},
@@ -81,6 +83,7 @@ async function fullLane(finalNoGain) {
       return item;
     })),
     runProcess: async opts => {
+      if (warm && opts.cmd === '/usr/bin/test') return {status: 'completed', code: 1, group_cleared: true};
       assert.equal(opts.cmd, '/owner/read');
       const id = opts.args[1], [score, gain, dev] = records[id];
       return {status: 'completed', code: 0, group_cleared: true, stdout: JSON.stringify({
@@ -98,6 +101,11 @@ async function fullLane(finalNoGain) {
       if (label === 'tech_lead:analyze') return {kernel_type: 'gemm', modifiable_files: ['k.py']};
       if (label === 'benchmark_engineer') return {external_evaluation: ids('original'),
         commandment_path: '/eval/COMMANDMENT.md', correctness_cmd: 'owner', benchmark_cmd: 'owner'};
+      if (label === 'warm_start:resolve') return {read_reason: 'read', slug: 'fixture',
+        candidates: [{rank: 1, slug: 'fixture', speedup: 2, patch_path: '/kb/warm.diff', exp_dir: '/kb/exp'}]};
+      if (label === 'warm_start:verify c1') return {status: 'verified', correctness: 'pass',
+        verified_geomean: 999, external_evaluation: ids('warm')};
+      if (label === 'warm_start:adopt c1') return {committed: true};
       if (label.includes('profile')) return {bottleneck: 'memory', top_opportunities: []};
       if (label.startsWith('tech_lead:plan')) return {stop: false, directions: ['a','b','c'].map(id =>
         ({id, title: id, specialty: 'memory', prompt: id}))};
@@ -132,4 +140,11 @@ async function fullLane(finalNoGain) {
   assert.equal(value.stopped_by, 'budget');
   assert.equal(value.outcome, finalNoGain ? 'no_improvement' : 'improved');
   assert.equal(value.final_patch, finalNoGain ? '' : '/final.diff');
+  if (warm) {
+    // Adopted on the development geomean (1.2 > 1); reported and divided on the native primary only.
+    assert.equal(value.warm_start.adopted, true);
+    assert.equal(value.warm_start.adopted_speedup, 1.4);
+    assert.ok(Math.abs(value.warm_start.incremental_speedup - 1.55 / 1.4) < 1e-12);
+    assert.equal(value.warm_start.incremental_improved, true);
+  } else assert.equal(value.warm_start.adopted, false);
 }
