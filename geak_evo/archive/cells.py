@@ -478,11 +478,19 @@ class NativeCellProjector:
                 coordinates, descriptor_reason = descriptor_coordinates(charter["descriptor_spec"], member["assignment"])
             except CellError as error:
                 coordinates, descriptor_reason = None, str(error)
+            # Semantic membership and timing eligibility answer different questions.
+            # Keep the source-supported assignment visible even when this exact
+            # implementation cannot enter development-quality competition.
+            semantic = {"coordinates": copy.deepcopy(coordinates),
+                        "descriptor_status": member["assignment"]["status"]}
+            quality_status = "unreviewed" if reason else "descriptor_unsupported"
             reason = reason or descriptor_reason
             if source in failures:
                 reason = "same source has failed native validation; retained pending adjudication"
+                quality_status = "native_trial_error"
             if reason:
-                found["unplaced"].append(dict(base, reason=reason,
+                found["unplaced"].append(dict(base, **semantic, reason=reason,
+                                              quality_status=quality_status,
                                               failed_trials=list(failures.get(source, {}).values())))
                 continue
             grouped = {}
@@ -490,7 +498,8 @@ class NativeCellProjector:
                 if observed_source == source:
                     grouped.setdefault(context_id, []).append(observation)
             if not grouped:
-                found["unplaced"].append(dict(base, reason="no complete comparable native timing observation"))
+                found["unplaced"].append(dict(base, **semantic, quality_status="no_comparable_timing",
+                                              reason="no complete comparable native timing observation"))
             for context_id, rows in grouped.items():
                 cell_binding = {"island_id": member["island_id"], "charter_ref": member["charter_ref"],
                                 "coordinates": coordinates, "comparison_id": context_id}

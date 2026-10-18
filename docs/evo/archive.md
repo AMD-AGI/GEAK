@@ -28,6 +28,27 @@ unknowns explicitly. A slow implementation does not by itself refute an idea.
 Keep the original question separate from the implementation report. Parent and
 donor links describe source ancestry; they do not prove a useful contribution.
 
+## Semantic membership without a timing score
+
+The planner's `native_cells.unplaced` membership rows retain `descriptor_status`
+and supported `coordinates` even when an implementation has
+no complete comparable timing or has failed native validation. `quality_status`
+distinguishes `no_comparable_timing`, `native_trial_error`, `unreviewed` and
+`descriptor_unsupported`; the existing reason and exact failure references remain.
+Unknown or unsupported assignments keep null coordinates. Retired memberships
+remain historical.
+
+A native trial error can mean failed validation or unavailable verification;
+follow the exact feedback rather than inferring a particular failed phase.
+These optional fields apply only to membership rows; other unplaced rows describe
+trial or episode issues. Consumers should use `.get` for optional fields and
+resolve descriptor definitions through the existing `charter_ref`.
+
+These fields expose already committed assignments from the same archive; they
+create no new records, score, elite or parent offer. Coordinates describe the
+agent's supported source classification, not useful diversity or idea promise.
+Existing native validation and selection rules still govern further work.
+
 ## Browse a saved store
 
 From the repository root, export to a new directory:
