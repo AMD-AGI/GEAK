@@ -1,6 +1,18 @@
 --- a/base_helper.py
 +++ b/base_helper.py
-@@ -153,15 +153,33 @@
+@@ -120,7 +120,10 @@
+     require(all(request[name] is False for name in ("measurement_valid", "custody_proven", "reward_eligible")),
+             "native observations remain provisional")
+     require(request.get("schema") == "geak-arena-evaluation-request-v1", "wrong request schema")
+-    require(request["contract"] == contract and sha(canonical(contract)) == config["contract_id"],
++    # Task IDs use UTF-8 JSON; request and source identities keep their own encoding.
++    contract_id = sha(json.dumps(contract, sort_keys=True, separators=(",", ":"),
++                                 allow_nan=False, ensure_ascii=False).encode())
++    require(request["contract"] == contract and contract_id == config["contract_id"],
+             "only the sealed live contract is admitted")
+     binding = request["binding"]
+     require(set(binding) == {"job_id", "measurement_epoch_id", "candidate_id", "candidate_source_id"}
+@@ -153,15 +156,33 @@
  def prepare_candidate(request, config, inputs):
      contract = validate_request(request, config)
      snapshot = inputs / "snapshot"
@@ -41,7 +53,7 @@
          path = task / name
          require(path.is_symlink() and path.resolve() == task / target, "candidate alias changed: " + name)
      sources = {}
-@@ -178,7 +196,7 @@
+@@ -178,7 +199,7 @@
      manifest["candidate_binding"] = request["binding"]
      put(snapshot / "manifest.json", manifest)
      put(inputs / "source-sha256.json", sources)
@@ -50,7 +62,7 @@
          "config_digest": contract["runtime"]["config_digest"], "cohort": config["cohort"], "gpu": config["gpu"],
          "binding": request["binding"], "request_sha256": sha(canonical(request)), "measurement_valid": False})
      inputs.chmod(0o755)
-@@ -190,6 +208,10 @@
+@@ -190,6 +211,10 @@
 
  def admission_projection(config):
      """Bind the selected sealed admission, including its existing arm selection."""
@@ -61,7 +73,7 @@
      path = Path(ADMISSION_PATH)
      trusted(path)
      raw = regular(path)
-@@ -226,10 +248,12 @@
+@@ -226,10 +251,12 @@
          {"source": str(HERE), "target": "/native", "readonly": True},
          admission_mount,
          {"source": str(folder / "inputs"), "target": "/evaluation", "readonly": True},
@@ -76,7 +88,7 @@
      result["file_sha256"] = {str(HERE / name): digest for name, digest in config["assets_sha256"].items()}
      result["file_sha256"][admission_mount["source"]] = admission_sha256
      for path in (folder / "inputs").rglob("*"):
-@@ -384,7 +408,8 @@
+@@ -384,7 +411,8 @@
          if evidence.get("boot_id") != report.get("cutoff", {}).get("boot_id"):
              errors.append("Cleanup and cutoff boot identity differ; strict session budget unqualified")
      task_name = request["contract"]["source"]["task_selector"].split("/")[-1]
@@ -86,7 +98,7 @@
      # Wrapper failures precede the task directory; retain their exact streams.
      for suffix in ("stdout", "stderr"):
          path = folder / "outputs/native" / (task_name + "." + suffix)
-@@ -399,17 +424,39 @@
+@@ -399,17 +427,39 @@
                  phases[phase] = row.get("returncode")
      obs = {"correctness": {"status": "unknown", "case_ids": [], "evidence": []},
             "benchmark": {"status": "unknown", "times_ms": {}, "evidence": []}}
@@ -132,7 +144,7 @@
                      check=False, env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"})
              stdout = retain("host/observer.stdout", out.name)
              retain("host/observer.stderr", err.name)
-@@ -417,6 +464,8 @@
+@@ -417,6 +467,8 @@
              parsed = json.loads(stdout)
              errors.extend(parsed["issues"])
              obs = parsed["observations"]
@@ -141,7 +153,7 @@
              for name, raw in parsed["artifacts_base64"].items():
                  artifacts["observer/" + name] = base64.b64decode(raw, validate=True)
              for group in obs.values():
-@@ -425,7 +474,7 @@
+@@ -425,7 +477,7 @@
              errors.append("Native observation collection: " + str(exc))
      # Retain producer reports even when observation validation fails. These
      # known report locations precede bulk outputs and compiled/cache files.
@@ -150,7 +162,7 @@
      for phase in ("compile", "correctness", "performance"):
          phase_root = attempt / phase
          if phase_root.exists():
-@@ -436,7 +485,10 @@
+@@ -436,7 +488,10 @@
              retain("native/" + path.relative_to(attempt).as_posix(), path)
      # Acquire shallow diagnostics across both roots before deep bulk trees.
      bulk = []
