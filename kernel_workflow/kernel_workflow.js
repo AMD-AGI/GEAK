@@ -316,7 +316,9 @@ ${cfg(inputs)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
   return base + expertSkillsBlock(role)
-    + (typeof EXTERNAL_METRIC_INSTRUCTIONS === 'string' ? EXTERNAL_METRIC_INSTRUCTIONS : '');
+    + (typeof externalMetricInstructions === 'function'
+      ? externalMetricInstructions(role === 'director' && phase === 'validate')
+      : typeof EXTERNAL_METRIC_INSTRUCTIONS === 'string' ? EXTERNAL_METRIC_INSTRUCTIONS : '');
 }
 // This workflow's own roles live under WORKFLOW_DIR/roles/.
 function roleAgent(role, phase, intro, inputs) {

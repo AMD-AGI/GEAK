@@ -1,0 +1,11 @@
+{
+  "schema": "geak-native-phase-patch-base-v1",
+  "files": [
+    {
+      "name": "root_helper.py",
+      "source_path": "/mnt/sapmajum-evo-scratch/primary-mla-full8-astra-20261015-v1/native/root_helper.py",
+      "sha256": "4190d62ea93f9af4a7ed7f55af13c9aaa2502bc587765f8b31f32bc108a7aae5",
+      "patched_sha256": "e35c26e2310994f11c81b066e5ca2f4784752c1f8b1a43a40687198cd64bcd6d"
+    }
+  ]
+}

@@ -62,3 +62,42 @@ the existing owner. A prospective source/admission closure and installed-owner
 qualification are required before use. CPU tests exercise source capture,
 protected files, IDs, reader argument wiring and same-ID reconciliation with
 synthetic callbacks; they do not establish installed custody or native results.
+
+## Search and final deadlines
+
+A model-process timeout does not cancel the independently owned native GPU
+operation. For a bounded search, apply `native-phase.patch` to the exact helper
+in `native-phase-base.json`, then register the resulting source through the
+existing owner. The optional immutable admission field `phase_deadline_seconds`
+is an offset from the original monotonic start. It requires the full evaluation
+envelope to fit before that phase ends; it never shortens the native session,
+settlement reserve, or original clock. Admissions without the field retain their
+existing behavior.
+
+Use separate admitted command prefixes for search and Director validation:
+
+```json
+{
+  "external_measurement_command": ["/owner/measure-search"],
+  "external_result_command": ["/owner/read-search"],
+  "external_final_measurement_command": ["/owner/measure-final"],
+  "external_final_result_command": ["/owner/read-final"]
+}
+```
+
+Both final prefixes must be supplied together. Only `director:validate` receives
+the final measurement prefix, and its result is checked with the final reader.
+All other native measurements use the search prefix. The two admissions use the
+same task, source store, measurement epoch and original clock; their immutable
+phase deadlines differ. The owner must install both before launch. Paths above
+are examples, not installed commands.
+
+GEAK-EVO's command also performs its own baseline/selected final pair. Keep that
+existing final evaluator on its appropriate final admission, not on GEAK's
+search-only admission. Its original shared call allowance must retain the final
+calls; its smaller search limit already has a separate configuration field.
+
+The common search window and latest permitted native start must be declared for
+both arms. Account for the full evaluation envelope and any existing preparation
+margin. A short pipeline check establishes execution compatibility; it does not
+establish a long-horizon advantage for either optimizer.

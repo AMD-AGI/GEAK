@@ -1,0 +1,28 @@
+--- a/root_helper.py
++++ b/root_helper.py
+@@ -59,7 +59,24 @@
+     arm_end = min(clock["started_monotonic_ns"] + config["arm_seconds"] * NS,
+                   now_ns + int((clock["deadline"] - now_unix) * NS))
+     end = min(start + config["evaluation_seconds"] * NS, arm_end)
+-    return {"schema": "geak-native-study-envelope-v1", "boot_id": boot,
++    phase = {}
++    if "phase_deadline_seconds" in config:
++        seconds = config["phase_deadline_seconds"]
++        base.require(type(seconds) in (int, float) and math.isfinite(seconds)
++                     and 0 < seconds <= config["arm_seconds"],
++                     "immutable phase deadline must be positive and within the original arm")
++        phase_end = clock["started_monotonic_ns"] + int(seconds * NS)
++        original_end = clock["started_monotonic_ns"] + int(
++            (clock["deadline"] - clock["started_unix"]) * NS)
++        phase_limit = min(arm_end, original_end, phase_end)
++        # A phase is an offset from the original monotonic origin, never a new
++        # clock or a candidate-supplied request timeout. Refuse a late complete
++        # evaluation rather than shortening its native or settlement allowance.
++        base.require(start + config["evaluation_seconds"] * NS <= phase_limit,
++                     "complete native evaluation does not fit the immutable phase/original deadline")
++        end = min(end, phase_limit)
++        phase = {"phase_deadline_seconds": seconds, "phase_deadline_monotonic_ns": phase_end}
++    return {"schema": "geak-native-study-envelope-v1", "boot_id": boot, **phase,
+             "study_clock_path": config["study_clock_path"], "study_clock_sha256": base.sha(clock_raw),
+             "study_clock": clock, "submission_sha256": base.sha(submitted_raw),
+             "started_monotonic_ns": start, "deadline_monotonic_ns": end,

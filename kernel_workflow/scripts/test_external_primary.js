@@ -28,6 +28,9 @@ const make = (A) => new Function('A', 'HAS_WORKLOAD', 'runProcess', 'log', sourc
   assert.equal(legacy.nativePrimary({verified_weighted: 2, verified_geomean: 3}), 2);
   const mode = make({objective, external_measurement_command: ['/owner/evaluate'],
     external_result_command: ['/owner/read']});
+  assert.throws(() => make({objective, external_measurement_command: ['/owner/evaluate'],
+    external_result_command: ['/owner/read'], external_final_measurement_command: ['/owner/final']}),
+    /both admitted command prefixes/);
   assert.equal(mode.primSpeedup({verified_geomean: 3, verified_weighted: 2}), null);
   assert.equal(mode.primSpeedup(null), null);
   assert.equal(mode.nativeGainEligible({...native, native_reproducible_gain: false}), false);
@@ -57,10 +60,11 @@ const make = (A) => new Function('A', 'HAS_WORKLOAD', 'runProcess', 'log', sourc
   await fullLane(false);
   await fullLane(true);
   await fullLane(false, true);
+  await fullLane(false, false, true);
   console.log('external primary: checked development geomean, native export score and gain, no legacy fallback, source/patch arguments passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 
-async function fullLane(finalNoGain, warm = false) {
+async function fullLane(finalNoGain, warm = false, staged = false) {
   const body = fs.readFileSync(path.join(__dirname, '../kernel_lane.js'), 'utf8')
     .replace(/^export const meta/m, 'const meta');
   const ids = id => ({candidate_id: id, evaluation_id: id});
@@ -73,6 +77,8 @@ async function fullLane(finalNoGain, warm = false) {
     args: {kernel_path: '/original', workflow_dir: '/workflow', budget: 3,
       agent_timeout_ms: 0, agent_retries: 1, objective,
       external_measurement_command: ['/owner/evaluate'], external_result_command: ['/owner/read'],
+      ...(staged ? {external_final_measurement_command: ['/owner/final-evaluate'],
+        external_final_result_command: ['/owner/final-read']} : {}),
       warm_start: warm ? 'on' : 'off', update_experience: 'off', llm_stats: 'false'},
     phase: () => {}, log: () => {},
     workflow: async () => {throw new Error('unexpected nested workflow');},
@@ -84,8 +90,8 @@ async function fullLane(finalNoGain, warm = false) {
     })),
     runProcess: async opts => {
       if (warm && opts.cmd === '/usr/bin/test') return {status: 'completed', code: 1, group_cleared: true};
-      assert.equal(opts.cmd, '/owner/read');
       const id = opts.args[1], [score, gain, dev] = records[id];
+      assert.equal(opts.cmd, staged && id === 'final' ? '/owner/final-read' : '/owner/read');
       return {status: 'completed', code: 0, group_cleared: true, stdout: JSON.stringify({
         ...native, external_evaluation: ids(id), primary_speedup: score,
         native_reproducible_gain: gain, timing_basis: 'external_whole_call_ut',
@@ -95,6 +101,12 @@ async function fullLane(finalNoGain, warm = false) {
     },
     agent: async (prompt, options) => {
       const label = options.label;
+      if (staged && label === 'director:validate') {
+        assert.ok(prompt.includes('["/owner/final-evaluate"]'));
+        assert.ok(!prompt.includes('["/owner/evaluate"]'));
+      } else if (staged) {
+        assert.ok(!prompt.includes('["/owner/final-evaluate"]'));
+      }
       if (label === 'director:setup') return {eval_dir: '/eval', workspace: '/canonical',
         kernel_name: 'fixture', device_gfx: 'gfx950', device_target: 'unknown',
         physical_cu_count: 256, baseline_frozen: true, source_files: ['k.py']};

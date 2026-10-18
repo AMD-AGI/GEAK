@@ -28,7 +28,7 @@ let validation = await agentT(
   }),
   { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
 validation = await checkedExternalMeasurement(validation, KERNEL_PATH_ORIG,
-  report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`);
+  report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`, true);
 if (EXTERNAL_OBJECTIVE && validation && validation.external_measurement_valid && !nativeGainEligible(validation)) {
   validation.validation_status = 'no_improvement';
 }

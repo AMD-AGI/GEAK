@@ -102,9 +102,17 @@ if (EXTERNAL_OBJECTIVE && (!externalArgv(A.external_result_command)
     || !externalArgv(A.external_measurement_command) || typeof runProcess !== 'function')) {
   throw new Error('external_primary requires the existing owner measurement and result-reader argv plus runProcess');
 }
-const EXTERNAL_METRIC_INSTRUCTIONS = EXTERNAL_OBJECTIVE ? `
+const EXTERNAL_FINAL_COMMANDS = A.external_final_measurement_command != null
+  || A.external_final_result_command != null;
+if (EXTERNAL_OBJECTIVE && EXTERNAL_FINAL_COMMANDS
+    && (!externalArgv(A.external_final_measurement_command)
+        || !externalArgv(A.external_final_result_command))) {
+  throw new Error('final external measurements require both admitted command prefixes');
+}
+const externalMetricInstructions = (final = false) => EXTERNAL_OBJECTIVE ? `
 External measurement contract: ${JSON.stringify(EXTERNAL_OBJECTIVE)}.
-Use the existing admitted owner command ${JSON.stringify(A.external_measurement_command)}
+Use the existing admitted owner command ${JSON.stringify(final && EXTERNAL_FINAL_COMMANDS
+  ? A.external_final_measurement_command : A.external_measurement_command)}
 from the candidate workspace according to COMMANDMENT. One evaluation runs the
 unchanged full UT in three fresh processes with native min_runs=2. This combined
 operation replaces the role's separate correctness/benchmark repetitions and any
@@ -121,6 +129,7 @@ Final reports and patch export use the native primary and reproducible-gain gate
 Keep both metrics separate. The reader supplies development_geomean_speedup;
 legacy geomean fields may be omitted.
 ` : '';
+const EXTERNAL_METRIC_INSTRUCTIONS = externalMetricInstructions();
 const externalFields = (o) => EXTERNAL_OBJECTIVE && o ? Object.fromEntries(
   ['objective', 'primary_regime', 'primary_speedup', 'native_reproducible_gain',
    'native_reproducible_regression', 'phase_speedups', 'external_evaluation',
@@ -129,7 +138,7 @@ const externalFields = (o) => EXTERNAL_OBJECTIVE && o ? Object.fromEntries(
 const nativeGainEligible = (o) => !EXTERNAL_OBJECTIVE || !!(o && o.external_measurement_valid === true
   && o.native_reproducible_gain === true && o.native_reproducible_regression === false);
 
-async function checkedExternalMeasurement(value, workspace, patch = null) {
+async function checkedExternalMeasurement(value, workspace, patch = null, final = false) {
   if (!EXTERNAL_OBJECTIVE || !value) return value;
   const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
     status: 'invalid_measurement', correctness: 'not_checked', validation_status: 'invalid_measurement',
@@ -138,7 +147,8 @@ async function checkedExternalMeasurement(value, workspace, patch = null) {
   const ref = value.external_evaluation;
   if (!ref || typeof ref.candidate_id !== 'string' || typeof ref.evaluation_id !== 'string') return invalid;
   try {
-    const argv = A.external_result_command;
+    const argv = final && EXTERNAL_FINAL_COMMANDS
+      ? A.external_final_result_command : A.external_result_command;
     const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
       '--candidate-id', ref.candidate_id, '--evaluation-id', ref.evaluation_id,
       '--workspace', workspace, ...(patch ? ['--patch', patch] : [])],
