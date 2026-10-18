@@ -276,7 +276,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   candidates.sort((a, b) => b.geomean - a.geomean);
   const winner = candidates[0] || null;
-  const improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  let improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  let failedCommitRecovery = null;
   // Separate question from `improved`: is the SEARCH advancing, not did it beat the incumbent. The
   // `bestSeen > 0` guard keeps round 1 deciding on `improved` alone; from then on bestSeen >= cumulative
   // at the default floor, so at the default PROGRESS_DELTA this implies `improved` and changes nothing.
@@ -348,29 +349,32 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         atDeadline = await secondsLeft(`restored-r${round}`) <= 7;
       }
       const status = atDeadline ? 'deadline_uncommitted' : 'commit_failed';
-      history.rounds.push({round, status, cumulative, improved: false,
-        directions: directions.map(d => ({id: d.id, title: d.title, specialty: d.specialty})),
-        winner: {source: winner.source, geomean: winner.geomean, patch: winner.patch}, recovery});
       if (atDeadline) {
+        history.rounds.push({round, status, cumulative, improved: false,
+          directions: directions.map(d => ({id: d.id, title: d.title, specialty: d.specialty})),
+          winner: {source: winner.source, geomean: winner.geomean, patch: winner.patch}, recovery});
         plannerStopReason = status;
         log(`Round ${round}: commit did not finish at the cutoff; retained the previous winner for Report/Validate.`);
         break;
       }
       log(`Round ${round}: commit failed; retained the previous winner and continuing search.`);
-      continue;
+      improved = false;
+      failedCommitRecovery = recovery;
     }
-    cumulative = winner.geomean;
-    bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
-    finalWinner = winner;
-    roundsCommitted += 1;
+    if (improved) {
+      cumulative = winner.geomean;
+      bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
+      finalWinner = winner;
+      roundsCommitted += 1;
 
-    // --- (f) Re-profile the new best ------------------------------------
-    profileSummary = await agentT(
-      roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
-        COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-      }),
-      { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+      // --- (f) Re-profile the new best ------------------------------------
+      profileSummary = await agentT(
+        roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
+          WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
+          COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+        }),
+        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+    }
   }
 
   if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;
@@ -447,6 +451,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
   }
   history.rounds.push({
     round,
+    ...(failedCommitRecovery ? {status: 'commit_failed', recovery: failedCommitRecovery} : {}),
     directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
       learned_refs: d.learned_refs || [] })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,

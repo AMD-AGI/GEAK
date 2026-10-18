@@ -17,7 +17,7 @@ const perCase = [{name: 'c1', baseline_ms: 8, optimized_ms: 4, speedup: 2}];
 
 async function lane({bounded, commitResult = {committed: true}, planExpired = false, externalExpired = false,
     successfulRounds = 0, commitAdvanced = false, pinExpired = false, commitAtDeadline = true,
-    failThenSucceed = false, dirtyBeforeCommit = false}) {
+    failThenSucceed = false, dirtyBeforeCommit = false, repeatedFailures = false}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-cutoff-'));
   try {
   const canonical = path.join(temp, 'canonical'), evalDir = path.join(temp, 'eval');
@@ -38,7 +38,8 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
   const setProcessDeadline = epoch => {activeDeadline = epoch; deadlines.push(epoch);};
   setProcessDeadline.secondsLeft = () => activeDeadline - currentEpoch;
   const g = {
-    args: {kernel_path: '/original', workflow_dir: '/workflow', budget: failThenSucceed ? 2 : successfulRounds + 1,
+    args: {kernel_path: '/original', workflow_dir: '/workflow', budget: repeatedFailures ? 5 : failThenSucceed ? 2 : successfulRounds + 1,
+      max_no_improve: 2,
       agent_timeout_ms: 45000, agent_retries: 1,
       warm_start: 'off', update_experience: 'off', llm_stats: 'false',
       ...(bounded ? {deadline_epoch: total, search_reserve_s: 5100,
@@ -98,7 +99,7 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
           fs.writeFileSync(path.join(canonical, 'dirty_added.py'), 'dirty staged new source\n');
           git('add', 'k.py', 'dirty_added.py');
         }
-        return {status: 'verified', correctness: 'pass', verified_geomean: roundNumber + 1, per_case: perCase};
+        return {status: 'verified', correctness: 'pass', verified_geomean: repeatedFailures ? 2 : roundNumber + 1, per_case: perCase};
       }
       if (label.startsWith('commit ')) {
         const result = roundNumber <= successfulRounds || (failThenSucceed && roundNumber === 2)
@@ -131,7 +132,10 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
         }
         return result;
       }
-      if (label.startsWith('tech_lead:memory')) return {insights: [], ledger: []};
+      if (label.startsWith('tech_lead:memory')) {
+        if (repeatedFailures) assert.match(prompt, /- IMPROVED: false(?:\n|$)/);
+        return {insights: [], ledger: []};
+      }
       if (label.startsWith('storage:') || label.startsWith('kb:')) return {};
       if (label === 'tech_lead:report') {
         reports.push(prompt);
@@ -154,15 +158,22 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
   const expectedSpeedup = failThenSucceed ? 3 : expired || (uncommitted && !successfulRounds) ? 1 : 2;
   assert.equal(value.final_speedup, expectedSpeedup);
   assert.equal(value.warm_start.rounds_committed, expired ? 0 : uncommitted ? successfulRounds : 1);
-  assert.equal(value.stopped_by, deadlineFailure ? 'deadline_uncommitted' : expired ? 'deadline' : 'budget');
+  assert.equal(value.stopped_by, deadlineFailure ? 'deadline_uncommitted' : expired ? 'deadline' : repeatedFailures ? 'no_improve' : 'budget');
   assert.equal(value.deadline_hit, deadlineFailure || expired);
   assert.equal(reports.length, 1);
   assert.match(reports[0], new RegExp(`- CUMULATIVE_SPEEDUP: ${expectedSpeedup}(?:\\n|$)`));
   assert.equal(calls.filter(c => c.label === 'director:validate').length, 1);
   assert.deepEqual(deadlines, bounded
     ? [cutoffs.search, ...(externalExpired ? [total - 2000] : []),
-      ...(failedCommit ? [cutoffs.report, ...(!deadlineFailure ? [cutoffs.search] : [])] : []),
+      ...(failedCommit ? Array.from({length: repeatedFailures ? 2 : 1}, () =>
+        [cutoffs.report, ...(!deadlineFailure ? [cutoffs.search] : [])]).flat() : []),
       cutoffs.report, cutoffs.validate] : []);
+  if (repeatedFailures) {
+    assert.equal(roundNumber, 2, 'repeated failed commits count toward plateau stopping');
+    assert.equal(calls.filter(c => c.label.startsWith('tech_lead:memory')).length, 2);
+    assert.equal((reports[0].match(/"status":"commit_failed"/g) || []).length, 2,
+      'one complete history record is retained per failed round');
+  }
   if (failThenSucceed) {
     assert.equal(calls.filter(c => c.label.startsWith('commit ')).length, 2);
     assert.equal(fs.readFileSync(path.join(canonical, 'k.py'), 'utf8'), 'candidate 2\n');
@@ -217,6 +228,7 @@ async function lane({bounded, commitResult = {committed: true}, planExpired = fa
   await lane({bounded: true, commitResult: {committed: false}, commitAtDeadline: false,
     failThenSucceed: true, commitAdvanced: true});
   await lane({bounded: true, commitResult: null, commitAtDeadline: false, failThenSucceed: true});
+  await lane({bounded: true, commitResult: {committed: false}, commitAtDeadline: false, repeatedFailures: true});
   await lane({bounded: true, dirtyBeforeCommit: true});
   await lane({bounded: true, pinExpired: true});
   await lane({bounded: true, planExpired: true});
