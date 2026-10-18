@@ -13,7 +13,7 @@ import json
 
 from .._util import require
 from .refs import file_ref
-from .trials import trial_history
+from .trials import merge_trial_attempt, trial_history
 
 ROLES = ("selected", "faithful", "unfinished", "terminal")
 
@@ -195,8 +195,9 @@ def snapshot_trial_history(store, snapshot, evidence_ids=()):
         ceiling = snapshot.get("archive", {}).get("directions", {}).get(direction, {}).get("revision", 0)
         first = proposal.get("expected_revision", 0) + 1
         revisions = (store.get_revision(direction, revision) for revision in range(first, ceiling + 1))
-        attempts[(row["attempt_id"], (row.get("collection_ref") or {}).get("evidence_id"))] = {"direction_id": direction,
-            "engineer_id": proposal.get("engineer_id"), **settlement_idea(store, row, revisions)}
+        merge_trial_attempt(attempts, (row["attempt_id"], (row.get("collection_ref") or {}).get("evidence_id")),
+            {"direction_id": direction, "engineer_id": proposal.get("engineer_id"),
+             **settlement_idea(store, row, revisions)})
     return trial_history(store, identities, attempts=attempts)
 
 

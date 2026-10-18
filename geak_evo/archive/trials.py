@@ -54,6 +54,13 @@ def _feedback_stages(feedback, row):
     return stages, None
 
 
+def merge_trial_attempt(attempts, key, value):
+    """Retain only unanimous projection fields when saved keys repeat."""
+    prior = attempts.get(key)
+    attempts[key] = {field: value.get(field) if prior is None or prior.get(field) == value.get(field) else None
+                     for field in ("direction_id", "engineer_id", "idea_id", "idea_attribution")}
+
+
 def trial_attempt(row, attempts):
     """Keep idea handles collection-bound; agreed direction/engineer may carry."""
     matches = [attempts[(row["attempt_id"], identity)] for identity in row["evidence_ids"]

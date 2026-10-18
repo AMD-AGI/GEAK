@@ -454,6 +454,30 @@ class TrialHistoryTests(unittest.TestCase):
         row['evidence_ids'] = ['first']
         self.assertEqual(trial_attempt(row, saved), first)
 
+    def test_duplicate_packet_keys_keep_only_unanimous_fields_in_either_order(self):
+        identity, _ = self.collection()
+        histories = []
+        for engineer in ('e1', 'e2'):
+            proposal = dict(parent_candidate_id=self.candidate, direction_id='direction', island_id='island',
+                            engineer_id=engineer)
+            packet = self.store.archive_evidence(self.candidate, {'packet.json': encoded(dict(proposal=proposal, decision={}))})
+            histories.append(dict(attempt_id='attempt', candidate_id=self.candidate, settled=False,
+                                  packet_ref=dict(evidence_id=packet, artifact='packet.json')))
+        for revision, order in enumerate(((0, 1, 0), (1, 0, 1), (0, 0, 0))):
+            with self.subTest(order=order):
+                state = dict(opportunities=[dict(opportunity_id='attempt', direction_id='direction')],
+                             history=[histories[order[0]]], superseded_attempts=[histories[index] for index in order[1:]])
+                snapshot = snapshot_trial_history(self.store, dict(state=state), [identity])['trials'][0]
+                self.store.checkpoint('campaign', self.candidate, expected_revision=revision, evidence=[identity],
+                    note=dict(claim='CPU fixture', scope='synthetic', next_test='inspect', evolution=state))
+                _, _, files = build(self.store)
+                exported = json.loads(files['trial-history.json'])['trials'][0]
+                for row in (snapshot, exported):
+                    self.assertEqual(row['direction_id'], 'direction')
+                    self.assertEqual(row['engineer_id'], 'e1' if len(set(order)) == 1 else None)
+                    self.assertIsNone(row['idea_id'])
+                    self.assertIsNone(row['idea_attribution'])
+
     def test_inconsistent_settlement_card_keeps_row_and_never_borrows_repair(self):
         identity, _ = self.collection(observations=[{'case': 9.0}])
         transport = self.store.archive_evidence(self.candidate, {'transport.json': b'{}'})

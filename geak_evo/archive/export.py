@@ -27,7 +27,7 @@ from .claims import ClaimLog
 from .records import ArchiveError, read_record
 from .succession import card_matches_checkpoint, settlement_idea
 from .store import ResearchStore, StateError, _read
-from .trials import trial_history, trial_attempt
+from .trials import merge_trial_attempt, trial_history, trial_attempt
 
 SCHEMA = "geak-evo-program-records-v1"
 IDEA_FIELDS = ("idea_id", "statement", "status", "next_test", "applicability", "competing_explanations")
@@ -342,7 +342,7 @@ def build(store, *, frozen_cases=None):
     for trial in trial_evaluations:
         if trial.get("candidate_id") in programs:
             programs[trial["candidate_id"]]["evaluations"].append(trial)
-    attempts, planner_rows = {}, 0
+    attempts, by_collection, planner_rows = {}, {}, 0
     for superseded, rows in ((False, evo["history"]), (True, evo.get("superseded_attempts", []))):
         for row in rows:
             if not row.get("attempt_id") or not row.get("packet_ref"):
@@ -350,6 +350,8 @@ def build(store, *, frozen_cases=None):
                 continue
             key = json.dumps([row["attempt_id"], superseded])
             attempt = attempts[key] = _attempt(journal, row, superseded)
+            merge_trial_attempt(by_collection,
+                (row["attempt_id"], (row.get("collection_ref") or {}).get("evidence_id")), attempt)
             produced = attempt["retained_trial_candidate_ids"] + ([attempt["program_id"]] if attempt["new_source"] else [])
             for identity in dict.fromkeys(produced):
                 if identity in programs:
@@ -360,8 +362,6 @@ def build(store, *, frozen_cases=None):
                         "attempt_id": attempt["attempt_id"], "attempt_ref": attempt["transport_ref"]})
             if attempt["parent_id"] in programs:
                 programs[attempt["parent_id"]]["attempts_from_here"].append(row["attempt_id"])
-    by_collection = {(row["attempt_id"], (row.get("collection_ref") or {}).get("evidence_id")): row
-                     for row in attempts.values()}
     for row in trial_evaluations:
         attempt = trial_attempt(row, by_collection)
         row.update({key: attempt.get(key) for key in
