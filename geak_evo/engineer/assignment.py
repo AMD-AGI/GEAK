@@ -14,6 +14,42 @@ from .investigation import NativeInvestigation, flat_action, need, read
 from .operations import build_files, prepare_workspace
 
 
+QUANTITY_CATALOG_BYTES = 16 * 1024
+
+
+def quantity_catalog_text(catalog, limit=QUANTITY_CATALOG_BYTES):
+    """Catalog JSON for the outer assignment: the recent suffix of each stored list within ``limit`` bytes.
+
+    Every row stays in its collection's native_quantity_index.json (``index_refs``);
+    the ordinary read grant publishes those collections, listed in READ_INDEX.
+    """
+    text = json.dumps(catalog, sort_keys=True)
+    if len(text.encode()) <= limit:
+        return text
+    lists = ("index_refs", "quantities", "unavailable")
+    view = dict(catalog, **{key: [] for key in lists}, inline_bound={"bytes": limit,
+        "totals": {key: len(catalog[key]) for key in lists},
+        "omitted": "earlier rows in stored order; each is in a native_quantity_index.json named by the full index_refs, "
+                   "whose collection evidence is in READ_INDEX"})
+    used = len(json.dumps(view, sort_keys=True).encode())
+    pending = {key: len(catalog[key]) - 1 for key in lists if catalog[key]}
+    while pending:
+        for key in tuple(pending):
+            item = catalog[key][pending[key]]
+            size = len(json.dumps(item, sort_keys=True).encode()) + 2
+            if used + size > limit:
+                del pending[key]
+                continue
+            view[key].insert(0, item)
+            used += size
+            pending[key] -= 1
+            if pending[key] < 0:
+                del pending[key]
+    text = json.dumps(view, sort_keys=True)
+    need(len(text.encode()) <= limit, "bounded quantity catalog exceeds its inline bound")
+    return text
+
+
 def reservation_preflight(policy, snapshot, proposal):
     """Check the actual admission on a private copy; never recredit a snapshot.
 
@@ -205,7 +241,7 @@ class NativeAssignment:
                 text, ref = result
                 catalog = self.quantities.catalog(current)
                 # These exact quantity objects also enter the ordinary read grant below.
-                text = "Host-recorded quantity catalog; free-text rationale remains unverified.\n" + json.dumps(catalog, sort_keys=True) + "\n" + text
+                text = "Host-recorded quantity catalog; free-text rationale remains unverified.\n" + quantity_catalog_text(catalog) + "\n" + text
                 result = text, ref
             need(self.clock.monotonic_ns() + envelope_ns < review_ns - 30_000_000_000,
                  "fixed native opportunity cannot fit its native envelope before admission")

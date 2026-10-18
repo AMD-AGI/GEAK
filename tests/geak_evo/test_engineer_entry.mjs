@@ -122,6 +122,39 @@ test('one engineer call retains its result and never retries a bad return', asyn
     const reportInstruction = `Before each trial, update ${input.output_dir}/report.md with the change, why it may help, the observation that would support it, relevant source/result references, and the next unresolved test. Keep it concise; use a temporary file and rename. Missing notes do not block evaluation.\n`;
     assert.ok(prompts[2].includes(reportInstruction));
     assert.equal(prompts[2].replace(reportInstruction, ''), prompts[0]);
+    const parent = { candidate_id: 'c'.repeat(64), source_id: 'd'.repeat(64), role: 'working_parent',
+      source_files: [], reviewed_outcomes: [], evidence: [], current_claim_context: { claim_states: [] } };
+    const hub = { ...parent, reviewed_outcomes: Array.from({ length: 80 }, (_, i) =>
+      ({ attempt_id: `attempt-${i}`, review: `Review ${i}: ` + 'evidence '.repeat(200) })) };
+    for (const parents of [[parent], [hub, { ...parent, candidate_id: 'e'.repeat(64),
+      source_id: 'f'.repeat(64), role: 'agent_selected_semantic_donor' }]]) {
+      const raw = JSON.stringify(parents);
+      const ref = { path: join(root, 'PARENTS.json'), sha256: sha(raw) };
+      await writeFile(ref.path, raw);
+      let prompt;
+      await runOneEngineer({ ...input, parents, insights: [ref] }, {
+        name: 'codex', async runAgent(call) {
+          prompt = call.prompt;
+          return { settled: true, text: JSON.stringify(valid) };
+        },
+      });
+      const start = prompt.indexOf('Parent implementation/evidence packets');
+      const text = prompt.slice(prompt.indexOf('\n', start) + 1,
+        prompt.indexOf('\n\n## Admitted local tools', start));
+      assert.ok(Buffer.byteLength(text) <= 24 * 1024);
+      const delivered = JSON.parse(text);
+      assert.deepEqual(delivered.map(p => p.candidate_id), parents.map(p => p.candidate_id));
+      if (parents.length === 1) assert.deepEqual(delivered, parents);
+      else {
+        assert.deepEqual(delivered[1], parents[1], 'small donor stays complete');
+        assert.ok(delivered[0].reviewed_outcomes.length > 0);
+        assert.equal(delivered[0].reviewed_outcomes.at(-1).attempt_id, 'attempt-79');
+        assert.deepEqual(delivered[0].inline_cap.full_packets_ref, ref);
+        assert.equal(delivered[0].inline_cap.full_packet, 'PARENTS.json[0]');
+      }
+      assert.equal(sha(await readFile(ref.path)), ref.sha256);
+      assert.deepEqual(JSON.parse(await readFile(ref.path, 'utf8')), parents);
+    }
     let calls = 0;
     await assert.rejects(runOneEngineer(input, { name: 'codex', async runAgent() {
       calls++;

@@ -28,6 +28,68 @@ const COMMANDMENT = A.commandment;
 const profileSummary = A.profiling_summary ? { summary_path: A.profiling_summary } : null;
 const BASELINE_PER_CASE = A.baseline_per_case || [];
 const history = { insights: A.insights || [] };
+// Rendering only: the parent part of the prompt is bounded; PARENTS.json (an INSIGHTS
+// ref) keeps every complete packet. Above the bound each parent keeps identities, source
+// refs and fixed fields, and its growing lists keep a recent suffix of stored order within its share (bytes
+// left after parents that fit an equal share whole, split equally among the rest),
+// with exact totals and omitted counts. Last resort: identity/ref rows per packet.
+const PARENT_PART_BYTES = 24 * 1024;
+const utf8 = (text) => new TextEncoder().encode(text).length;
+const render = (value) => JSON.stringify(value, null, 2);
+function parentPackets(parents, insights) {
+  const full = render(parents);
+  if (utf8(full) <= PARENT_PART_BYTES) return full;
+  const file = (insights || []).find((ref) => ref && /\/PARENTS\.json$/.test(String(ref.path)));
+  need(file, 'Bounded parent delivery needs the published PARENTS.json ref');
+  const sizes = parents.map((p) => utf8(render([p])));
+  const whole = sizes.map((size) => size <= Math.floor(PARENT_PART_BYTES / parents.length));
+  const used = sizes.reduce((sum, size, i) => sum + (whole[i] ? size : 0), 0);
+  const share = Math.floor((PARENT_PART_BYTES - used) / Math.max(1, whole.filter((fits) => !fits).length));
+  const concise = parents.map((p, i) => (whole[i] ? p : capPacket(p, `PARENTS.json[${i}]`, file, share)));
+  if (concise.every(Boolean) && utf8(render(concise)) <= PARENT_PART_BYTES) return render(concise);
+  const n = (value) => (Array.isArray(value) ? value.length : 0);
+  const rows = parents.map((p, i) => ({ packet: `PARENTS.json[${i}]`, candidate_id: p.candidate_id,
+    source_id: p.source_id, role: p.role, candidate_ref: p.candidate_ref, source_manifest_ref: p.source_manifest_ref,
+    source_files: p.source_files, omitted: { reviewed_outcomes: n(p.reviewed_outcomes), evidence: n(p.evidence),
+      claim_states: n((p.current_claim_context || {}).claim_states), group_origin: n(p.group_origin) } }));
+  for (const list of [rows, rows.map(({ packet, candidate_id, source_id, role }) => ({ packet, candidate_id, source_id, role }))]) {
+    const index = render({ full_packets_ref: file, parents: list });
+    if (utf8(index) <= PARENT_PART_BYTES) return index;
+  }
+  throw new Error('Parent identities exceed their inline bound');
+}
+// Measured as an array member, so the shares sum to at most the bound.
+function capPacket(p, packet, file, budget) {
+  if (utf8(render([p])) <= budget) return p;
+  const ctx = p.current_claim_context || {};
+  const lists = { reviewed_outcomes: p.reviewed_outcomes, claim_states: ctx.claim_states,
+    corrections_newest_first: ctx.corrections_newest_first, evidence: p.evidence,
+    source_bound_claim_refs: ctx.source_bound_claim_refs };
+  const names = Object.keys(lists).filter((name) => Array.isArray(lists[name]));
+  const kept = Object.fromEntries(names.map((name) => [name, 0]));
+  // Outcomes and evidence keep the recent suffix of stored order (origin evidence is stored by
+  // publication group, not a proven global time order); the other lists keep their stored head.
+  const suffix = (name) => ['reviewed_outcomes', 'evidence'].includes(name);
+  const pick = (name) => (!names.includes(name) ? lists[name] : suffix(name)
+    ? lists[name].slice(lists[name].length - kept[name]) : lists[name].slice(0, kept[name]));
+  const build = () => ({ ...p, reviewed_outcomes: pick('reviewed_outcomes'), evidence: pick('evidence'),
+    ...(p.current_claim_context ? { current_claim_context: { ...ctx, claim_states: pick('claim_states'),
+      corrections_newest_first: pick('corrections_newest_first'), source_bound_claim_refs: pick('source_bound_claim_refs') } } : {}),
+    inline_cap: { bytes: budget, full_packet: packet, full_packets_ref: file,
+      totals: Object.fromEntries(names.map((name) => [name, lists[name].length])),
+      omitted: Object.fromEntries(names.map((name) => [name, lists[name].length - kept[name]])) } });
+  if (utf8(render([build()])) > budget) return null;
+  const open = names.filter((name) => lists[name].length);
+  while (open.length) {
+    for (const name of [...open]) {
+      kept[name] += 1;
+      const fits = utf8(render([build()])) <= budget;
+      if (!fits) kept[name] -= 1;
+      if (!fits || kept[name] === lists[name].length) open.splice(open.indexOf(name), 1);
+    }
+  }
+  return build();
+}
 const KERNEL_KNOWLEDGE_DIR = A.kernel_knowledge_dir || '';
 const KK_OPERATOR = A.kk_operator || '';
 const KK_LANGUAGE = A.kk_language || '';
@@ -91,7 +153,7 @@ The existing host checks source identity and native evidence; no model declarati
 Idea identity: ${A.idea_id}
 Writable source paths: ${JSON.stringify(A.source_paths)}
 Parent implementation/evidence packets (read exact code and actual engineer explanations):
-${JSON.stringify(A.parents, null, 2)}
+${parentPackets(A.parents, A.insights)}
 
 ## Admitted local tools and hardware evidence scope
 ${A.tool_addendum}
