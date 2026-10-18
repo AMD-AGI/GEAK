@@ -1,0 +1,215 @@
+--- a/host_driver.py
++++ b/host_driver.py
+@@ -13,7 +13,7 @@
+ from pathlib import Path
+ import stat
+ import sys
+-from types import ModuleType
++from types import ModuleType, SimpleNamespace
+ 
+ 
+ def need(value, message):
+@@ -124,6 +124,45 @@
+         path, artifact_root=artifact_root, expected_digest=expected_digest)
+ 
+ 
++def load_cleaned_publisher_contract(manifest):
++    """Bind root validation to the exact ordinary producer's read-only helpers.
++
++    Only this fixed closure is loaded; empty package paths forbid discovery of
++    another module or bytecode cache. No cleaned host, model transport or native
++    launcher is imported, and the canonical retained namespace is unchanged.
++    """
++    root = immutable(manifest["cleaned_root"])
++    names = ("_util", "archive.store", "archive.refs", "archive.claims", "archive.policy",
++             "archive.trials", "archive.succession", "planner.context", "engineer.instructions")
++    source_refs = {}
++    for name in names:
++        relative = "geak_evo/" + name.replace(".", "/") + ".py"
++        ref = manifest["cleaned_source_refs"][relative]
++        need(ref["path"] == str(root / relative) and ref in manifest["source_refs"],
++             "publisher reader omitted from pinned cleaned source closure")
++        source_refs[name] = (ref, checked(ref))
++    namespace = "_geak_evo_publisher_contract"
++    need(not any(key == namespace or key.startswith(namespace + ".") for key in sys.modules),
++         "fresh publisher reader namespace required")
++    for name in (namespace, namespace + ".archive", namespace + ".planner", namespace + ".engineer"):
++        package = ModuleType(name)
++        package.__path__ = []
++        sys.modules[name] = package
++    modules = {}
++    for name, (ref, raw) in source_refs.items():
++        module = ModuleType(namespace + "." + name)
++        module.__file__ = ref["path"]
++        module.__package__ = module.__name__.rpartition(".")[0]
++        sys.modules[module.__name__] = module
++        exec(compile(raw, ref["path"], "exec", dont_inherit=True), module.__dict__)
++        modules[name] = module
++    parents = modules["archive.succession"]
++    return SimpleNamespace(parent_snapshot=parents.parent_snapshot, archive_files=parents.archive_files,
++        selected_parent_material=parents.selected_parent_material,
++        tool_addendum=modules["engineer.instructions"].tool_addendum,
++        bound_evidence=modules["archive.store"].ResearchStore._bound_evidence)
++
++
+ def provider_check(transport, model_config, route, route_ref, audit_ref, manifest, *, audit):
+     """Construct the actual provider; never substitute a command builder."""
+     runtime = transport.create_runtime(model_config, route, route_ref, audit_ref)
+@@ -253,7 +292,9 @@
+     saved_argv = sys.argv
+     try:
+         sys.argv = [coordinator.__file__, *remaining]
+-        return coordinator.main(contract_loader=lambda path, **kwargs: load_cleaned_contract(manifest, path, **kwargs))
++        return coordinator.main(
++            contract_loader=lambda path, **kwargs: load_cleaned_contract(manifest, path, **kwargs),
++            parent_contract=load_cleaned_publisher_contract(manifest))
+     finally:
+         sys.argv = saved_argv
+ 
+--- a/bridge/coordinator.py
++++ b/bridge/coordinator.py
+@@ -532,7 +532,7 @@
+     return 1 if error or result["phase"] not in ("idle", "stopped") else 0
+ 
+ 
+-def main(*, contract_loader=None):
++def main(*, contract_loader=None, parent_contract=None):
+     args = parser().parse_args()
+     need(sys.flags.isolated and sys.flags.dont_write_bytecode
+          and os.environ.get("PYTHONDONTWRITEBYTECODE") == "1", "isolated Python -B required")
+@@ -625,7 +625,7 @@
+                         shared_budget=budget, common_read_roots=args.common_read_root,
+                         tools_manifest_ref=refs["tools_manifest"],
+                         common_tool_addendum=args.common_tool_addendum, search_policy=policy,
+-                        island_group=group_for_policy(policy, args.campaign_root,
++                        parent_contract=parent_contract, island_group=group_for_policy(policy, args.campaign_root,
+                             docs["config"]["backend_config"]["probe_config"]["job_id"]))
+                 response = publisher.publish(request["directory"], request["files"])
+                 publication_committed = True
+--- a/bridge/finite_publisher.py
++++ b/bridge/finite_publisher.py
+@@ -46,16 +46,22 @@
+ 
+ class _HistoricalView:
+     """Read existing APIs at exact committed pre-grant revisions; never checkpoint."""
+-    def __init__(self, store, replacements):
++    def __init__(self, store, replacements, *, bound_evidence=None):
+         self.store = store
+         self.directions = store.get()
+         self.directions.update(replacements)
++        self.bound_evidence = bound_evidence
+ 
+     def get(self, direction_id=None):
+         return self.directions if direction_id is None else self.directions[direction_id]
+ 
++    def _bound_evidence(self, identity):
++        need(callable(self.bound_evidence), "explicit bound evidence reader required")
++        return self.bound_evidence(self.store, identity)
++
+     def __getattr__(self, name):
+-        need(name in ("get_candidate", "source", "evidence", "get_revision", "_binding", "root"),
++        need(name in ("get_candidate", "source", "evidence", "get_revision", "_binding", "root",
++                      "evidence_artifact", "_bytes"),
+              "historical publisher view is read-only")
+         return getattr(self.store, name)
+ 
+@@ -229,7 +235,7 @@
+ class Publisher:
+     def __init__(self, loop_or_store, campaign_id=None, *, templates, campaign_root,
+                  sealed_root, root_state_root, clock_ref, shared_budget, common_read_roots, tools_manifest_ref,
+-                 common_tool_addendum="", search_policy=None, island_group=None):
++                 common_tool_addendum="", search_policy=None, island_group=None, parent_contract=None):
+         self.store = loop_or_store.store if hasattr(loop_or_store, "store") else loop_or_store
+         self.campaign_id = getattr(loop_or_store, "campaign_id", campaign_id)
+         self.verify_quantity = getattr(loop_or_store, "verify_quantity", None)
+@@ -238,6 +244,12 @@
+         self.campaign = canonical(campaign_root, directory=True)
+         self.search_policy = validate_policy(search_policy, self.campaign)
+         self.island_group = island_group
++        # Supplied only by the root owner's pinned source loader, never by an
++        # operation request. Legacy callers retain their original projection.
++        self.parent_contract = parent_contract
++        need(parent_contract is None or all(callable(getattr(parent_contract, name, None)) for name in
++             ("parent_snapshot", "archive_files", "selected_parent_material", "tool_addendum", "bound_evidence")),
++             "explicit publisher shared contract readers required")
+         self.store_root = canonical(self.store.root, directory=True)
+         need(_within(self.store_root, self.campaign) and self.store_root != self.campaign,
+              "campaign must contain its private source store")
+@@ -480,7 +492,8 @@
+             before = self.store.get_revision(proposal["direction_id"], proposal["expected_revision"])
+             need(before["note"].get("maturation_ref") == proposal["protection_ref"], "pre-grant nomination changed")
+             replacements[proposal["direction_id"]] = before
+-            view = _HistoricalView(self.store, replacements)
++            view = _HistoricalView(self.store, replacements, bound_evidence=(
++                self.parent_contract.bound_evidence if self.parent_contract is not None else None))
+             now = self.clock["started_unix"] + (time.monotonic_ns() - self.clock["started_monotonic_ns"]) / 1e9
+             accounting = account_opportunities(admitted["opportunities"], binding=admitted["binding"],
+                 limits=admitted["limits"], deadline=admitted["deadline"], now=now,
+@@ -533,7 +546,8 @@
+         else:
+             need(pending["protection_intent"] is None, "unprotected admission carries a grant intent")
+         need(expected == state, "dispatch differs from the exact admitted transition")
+-        return planned_record, admitted, _HistoricalView(self.store, replacements), extra_objects
++        return planned_record, admitted, _HistoricalView(self.store, replacements, bound_evidence=(
++                self.parent_contract.bound_evidence if self.parent_contract is not None else None)), extra_objects
+ 
+     def _claims_at(self, view, planned):
+         """Recheck quantity authority against the validated pre-grant history."""
+@@ -552,6 +566,8 @@
+         snapshot = json.loads(raw)
+         fields = {"campaign_id", "revision", "state", "archive", "claims", "frozen_cases",
+                   "maturation", "direction_notes", "accounting", "owed_maturation_reviews", "native_parent_outcomes"}
++        if self.parent_contract is not None:
++            fields.add("native_trial_history")
+         need(type(snapshot) is dict and set(snapshot) == fields and snapshot["campaign_id"] == self.campaign_id
+              and snapshot["revision"] == planned_record["revision"], "exact planned parent snapshot schema/revision required")
+         planned = planned_record["note"]["evolution"]
+@@ -580,8 +596,14 @@
+              and snapshot["owed_maturation_reviews"] == pending_maturation_reviews(view, accounting),
+              "parent snapshot differs from exact pre-grant source/review/claim/accounting records")
+         parent = packet["proposal"]["parent_candidate_id"]
+-        need(snapshot["native_parent_outcomes"] == parent_outcomes(view, snapshot, parent),
+-             "parent snapshot role/review outcomes differ")
++        if self.parent_contract is None:
++            need(snapshot["native_parent_outcomes"] == parent_outcomes(view, snapshot, parent),
++                 "parent snapshot role/review outcomes differ")
++        else:
++            core = {key: value for key, value in snapshot.items()
++                    if key not in ("native_parent_outcomes", "native_trial_history")}
++            need(snapshot == self.parent_contract.parent_snapshot(view, core, parent),
++                 "parent snapshot role/review/trial history differs")
+         envelope = {"kind": "evidence", "candidate_id": parent,
+                     "binding": self.store._binding(self.store.get_candidate(parent)),
+                     "artifacts": {"native_parent_snapshot.json": ref["sha256"]}}
+@@ -735,14 +757,17 @@
+         immigrants = (self.island_group.lookup(view, pre_snapshot["state"]["binding"]["measurement_epoch_id"],
+                       view.get(self.campaign_id)["tip"]) if self.island_group else {})
+         imported, import_evidence = selected_immigrants(immigrants, proposal)
+-        own_refs = archive_files(view, pre_snapshot,
++        corpus = archive_files if self.parent_contract is None else self.parent_contract.archive_files
++        own_refs = corpus(view, pre_snapshot,
+                                  [proposal["parent_candidate_id"]] + imported, import_evidence)
+         allowed_objects = {ref["sha256"] for ref in own_refs}
+         allowed_objects.add(envelope["artifacts"]["assignment.json"])
+         snapshot = self._parent_snapshot(admitted["pending"]["request"], state, packet, allowed_objects, planned_record, view)
+         validate_action(self.search_policy, snapshot, packet["proposal"], store=view)
+         allowed_objects.update(protection_objects)
+-        parents = selected_parent_material(view, snapshot, packet["proposal"], immigrants)
++        material = (selected_parent_material if self.parent_contract is None
++                    else self.parent_contract.selected_parent_material)
++        parents = material(view, snapshot, packet["proposal"], immigrants)
+         need(state["pending"]["donors"] == proposal.get("semantic_donors", []), "retained donor ancestry differs")
+         insights, parents = self._public(request, operation / "readonly", prompt_raw, allowed_objects, parents)
+         expected = self._expected(sealed, op, request, pins, config["workspace_ref"], deadline, insights, parents, proposal)
+@@ -844,6 +869,11 @@
+         if not native_only:
+             entry["tool_addendum"] += "\n\nHardware result access and coverage\n\nThe settled native feedback contains an artifact_index with exact paths, byte\ncounts and SHA-256 values. Follow the returned references inside this operation's\nreadable reply directory. Small records are inline. A larger raw archive can be\nlisted with transport=owned_request_file; that is an ordinary immutable tar/gzip\nfile published into the same reply directory. It is not missing evidence and does\nnot require another profiling request. The existing host and collection reader\nverify its size/hash and preserve the original member manifest.\n\nInspect raw/hardware/artifact-index.json first. It identifies the archive and\nits member manifest, or the separate compressed-file records. The member manifest\nrecords the original member names, sizes and hashes.\nUse the exact returned archive path and member name to read a selected member,\nfor example with tar -tzf ARCHIVE or tar -xOzf ARCHIVE EXACT_MEMBER. Quote paths,\ndo not execute artifact contents, and do not extract unvalidated paths over the\nworkspace. Verify the selected member against its recorded original size/hash\nbefore using its content. The complete archive hash applies to compressed bytes;\nthe original member hash applies to that member's decoded bytes. Successful file\npublication and positive cleanup do not turn a failed diagnostic into a pass.\n\nFor the corrected Compute result, inspect faithful_summary and the referenced\nraw call/code evidence. selected_call_isa_evidence_available means every selected\ncall's joined callback has validated entry assembly. selected_call_isa_complete\nremains false: this collector does not establish gap-free function reconstruction.\nselected_call_isa_extent_by_pass records each pass's exact coverage. A\nbounded_entry_region has a verified descriptor/entry and address interval, but\nthe true function extent and assignment of every instruction to that function\nremain unknown. A positive ELF symbol size is distinct from verified whole-body\ncoverage. Vendor disassembly does not recover compiler IR. Returned JIT IR, when\npresent, has its own source/specialization binding.\n\nRead the evidence fields actually supplied in this assignment. When present,\nCOHORT_HARDWARE_CALIBRATIONS links prior calibration records with their own\nsource, runtime, physical-device and method limits; those records do not supply\ncurrent-source diagnostics. HARDWARE_EVIDENCE_SKILL, when present, links the\ninvestigation guidance. HARDWARE_EVIDENCE_VIEW, when present, supplies navigation;\nan empty raw_refs list supplies no current-source diagnostic. Use\nCURRENT_ORIGINAL_HARDWARE_EVIDENCE only when that field is actually supplied,\nand follow its exact references for common ORIGINAL observations.\n\nFor every observation, verify source, case, runtime, physical-device and method\napplicability. Current-source diagnostics can supersede prior observations after\na rewrite; a prior result is not evidence for a changed source without that\ncheck. Tool availability, successful collection, complete attribution and\nvalidated physical interpretation are separate. Missing physical HBM traffic,\nachieved residency or workload roofline headroom remains unknown. Keep profiled\ndurations separate from the native unprofiled score.\n"
+         entry["tool_addendum"] += native_capability_context(self.search_policy) + self.common_tool_addendum
++        if self.parent_contract is not None:
++            entry["tool_addendum"] = self.parent_contract.tool_addendum(
++                config=config, admission=admission, request=request, operation=operation,
++                turn_deadline_ns=deadline, native_only=native_only, search_policy=self.search_policy,
++                common_tool_addendum=self.common_tool_addendum)
+         config.update(store_root=str(self.store_root), evaluation_root=str(operation / "evaluations"),
+             hardware_evaluation_root=None if native_only else str(operation / "hardware-evaluations"), workspace_ref=workspace_ref,
+             entry_input_ref=future_ref(sealed / "entry-input.json", entry))

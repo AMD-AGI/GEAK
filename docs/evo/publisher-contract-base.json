@@ -1,0 +1,25 @@
+{
+  "apply_after": [
+    "docs/evo/owner-dispatch.patch",
+    "docs/evo/native-search-phase.patch"
+  ],
+  "files": [
+    {
+      "name": "host_driver.py",
+      "patched_sha256": "fd40279a18367e007ab85a3062e101f7deaa7241ebbf19b5eab0a28e0a72e433",
+      "sha256": "77ddd143f493d9e37e3cbbe368d2dbbd2b645a104f6a4ead54aab096784490f0"
+    },
+    {
+      "name": "bridge/coordinator.py",
+      "patched_sha256": "cb9c18a9de244d7b6bc48425c170b7479ad7647f850d293ad26692f5b10aed6f",
+      "sha256": "7050d8162ad7b4670fb5ae3af33eeb9c7673923f4e694bf43a94e7386767c9fd"
+    },
+    {
+      "name": "bridge/finite_publisher.py",
+      "patched_sha256": "cc8be2fe86dcc6f365917326066a3bf1348b405a37924432832da1957647affb",
+      "sha256": "580f0424b658a7990fd97b17c3c2691229b9c293859530d3b798137cb6f12e2e"
+    }
+  ],
+  "release_base": "d8893f697871b94fa623e1d51429fd8bb491a271",
+  "schema": "geak-publisher-shared-contract-patch-v1"
+}

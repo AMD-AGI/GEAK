@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..clock import SystemClock
 from ..archive.refs import source_reference, file_ref
+from ..archive.succession import archive_files
 from .investigation import NativeInvestigation, flat_action, need, read
 from .operations import build_files, prepare_workspace
 
@@ -50,78 +51,6 @@ def selected_immigrants(immigrants, proposal):
               if identity in immigrants]
     return chosen, [identity for candidate in chosen for record in immigrants[candidate]
                     for identity in [record["evidence_id"], *record["origin_evidence_map"].values()]]
-
-
-
-def archive_files(store, snapshot, extra_candidates=(), imported_evidence=()):
-    """Explicit own-campaign source and evidence files for a native read corpus."""
-    from ..archive.policy import lineage_candidates
-    from ..archive.succession import retained_trial_candidates
-
-    imported_evidence = set(imported_evidence)
-    refs, candidates, evidence = [], set(extra_candidates), set(imported_evidence)
-    for direction in snapshot["archive"]["directions"].values():
-        candidates.add(direction["tip"])
-        if direction.get("anchor"):
-            candidates.add(direction["anchor"]["candidate_id"])
-        card = direction.get("card") or {}
-        if card.get("last_faithful"):
-            candidates.add(card["last_faithful"]["candidate_id"])
-        for ref in card.get("observation_refs", []):
-            evidence.add(ref["evidence_id"])
-    for row in snapshot["state"]["history"]:
-        for key in ("transport_ref", "collection_ref"):
-            if row.get(key):
-                evidence.add(row[key]["evidence_id"])
-    for name, direction in snapshot["archive"]["directions"].items():
-        # The archive has current cards; old native raw groups are followed below.
-        if direction.get("card_ref"):
-            evidence.add(direction["card_ref"]["evidence_id"])
-        note = snapshot.get("direction_notes", {}).get(name, {}).get("note", {})
-        if note.get("maturation_ref"):
-            evidence.add(note["maturation_ref"]["evidence_id"])
-    queue, visited = sorted(evidence), set()
-    while queue:
-        identity = queue.pop()
-        if identity in visited:
-            continue
-        visited.add(identity)
-        envelope, artifacts = store.evidence(identity)
-        refs.append(file_ref(store.root / "objects" / identity))
-        for blob in envelope["artifacts"].values():
-            refs.append(file_ref(store.root / "objects" / blob))
-        # Origin records retain origin IDs. The verified import map already
-        # supplies every local evidence copy; expose bytes without following
-        # origin role/index/card/maturation semantics as recipient identities.
-        if identity in imported_evidence:
-            continue
-        if "native_source_roles.json" in artifacts:
-            candidates.update(json.loads(artifacts["native_source_roles.json"]).values())
-        candidates.update(retained_trial_candidates(store, artifacts))
-        if "native_evidence_index.json" in artifacts:
-            queue.extend(row["evidence_ref"]["evidence_id"]
-                         for row in json.loads(artifacts["native_evidence_index.json"]))
-        if "native_quantity_index.json" in artifacts:
-            queue.extend(row["ref"]["evidence_id"] for row in
-                         json.loads(artifacts["native_quantity_index.json"])["quantities"])
-        for name in ("archive_card.json", "maturation.json"):
-            if name in artifacts:
-                record = json.loads(artifacts[name])
-                if record.get("previous_ref"):
-                    queue.append(record["previous_ref"]["evidence_id"])
-                queue.extend(ref["evidence_id"] for key in ("observation_refs", "historical_refs")
-                             for ref in record.get(key, []))
-                witness = record.get("last_faithful")
-                if witness:
-                    candidates.add(witness["candidate_id"])
-                    queue.extend(ref["evidence_id"] for ref in witness["evidence_refs"])
-    for identity in lineage_candidates(store, candidates):
-        candidate = store.get_candidate(identity)
-        ids = [identity, candidate["source_id"]] + [row["blob_id"] for row in
-            store.source(candidate["source_id"])["files"] if row["blob_id"]]
-        refs.extend(file_ref(store.root / "objects" / value) for value in ids)
-    return list({ref["path"]: ref for ref in refs}.values())
-
 
 class NativeAssignment:
     def __init__(self, loop, *, campaign_root, job, workspace_helper, templates,

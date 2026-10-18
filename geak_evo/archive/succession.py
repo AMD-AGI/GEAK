@@ -154,15 +154,8 @@ def snapshot_trial_history(store, snapshot, evidence_ids=()):
     return trial_history(store, identities, attempts=attempts)
 
 
-def parent_prompt_context(store, snapshot, candidate_id, *, direction_id,
-                          search_policy, campaign_root):
-    """Build the parent part of an engineer prompt; return ``(text, snapshot_ref)``.
-
-    The full outcome list and same-source trial history are saved as evidence
-    on the parent. The prompt carries the latest outcome and complete-view counts.
-    """
-    from ..planner.context import outcome_prompt_context
-
+def parent_snapshot(store, snapshot, candidate_id):
+    """Rebuild the exact parent projection without writing evidence or launching work."""
     outcomes = parent_outcomes(store, snapshot, candidate_id)
     # Saved as ordinary evidence with exact notes, corrections, roles and costs.
     # No prose or flag in it becomes validated fitness.
@@ -176,7 +169,20 @@ def parent_prompt_context(store, snapshot, candidate_id, *, direction_id,
     history["coverage"]["inventory_count"] = len({row["investigation_evidence_id"] for row in history["trials"]})
     history["coverage"]["trial_count"] = len(history["trials"])
     history["coverage"]["filter"] = "exact parent job, measurement epoch and source; all candidate identities retained"
-    frozen = dict(snapshot, native_parent_outcomes=outcomes, native_trial_history=history)
+    return dict(snapshot, native_parent_outcomes=outcomes, native_trial_history=history)
+
+
+def parent_prompt_context(store, snapshot, candidate_id, *, direction_id,
+                          search_policy, campaign_root):
+    """Build the parent part of an engineer prompt; return ``(text, snapshot_ref)``.
+
+    The full outcome list and same-source trial history are saved as evidence
+    on the parent. The prompt carries the latest outcome and complete-view counts.
+    """
+    from ..planner.context import outcome_prompt_context
+
+    frozen = parent_snapshot(store, snapshot, candidate_id)
+    outcomes, history = frozen["native_parent_outcomes"], frozen["native_trial_history"]
     evidence = store.archive_evidence(candidate_id, {"native_parent_snapshot.json": encoded(frozen)})
     envelope, _ = store.evidence(evidence)
     snapshot_ref = file_ref(store.root / "objects" / envelope["artifacts"]["native_parent_snapshot.json"])
@@ -284,3 +290,72 @@ def selected_parent_material(store, snapshot, proposal, immigrants=None):
                 "report identify which contribution survives, transforms, is rejected (with reason), or remains "
                 "unknown in each selected/faithful/unfinished/terminal source. Delivery is not contribution survival."})
     return material
+
+
+def archive_files(store, snapshot, extra_candidates=(), imported_evidence=()):
+    """Explicit own-campaign source and evidence files for a native read corpus."""
+    from .policy import lineage_candidates
+
+    imported_evidence = set(imported_evidence)
+    refs, candidates, evidence = [], set(extra_candidates), set(imported_evidence)
+    for direction in snapshot["archive"]["directions"].values():
+        candidates.add(direction["tip"])
+        if direction.get("anchor"):
+            candidates.add(direction["anchor"]["candidate_id"])
+        card = direction.get("card") or {}
+        if card.get("last_faithful"):
+            candidates.add(card["last_faithful"]["candidate_id"])
+        for ref in card.get("observation_refs", []):
+            evidence.add(ref["evidence_id"])
+    for row in snapshot["state"]["history"]:
+        for key in ("transport_ref", "collection_ref"):
+            if row.get(key):
+                evidence.add(row[key]["evidence_id"])
+    for name, direction in snapshot["archive"]["directions"].items():
+        # The archive has current cards; old native raw groups are followed below.
+        if direction.get("card_ref"):
+            evidence.add(direction["card_ref"]["evidence_id"])
+        note = snapshot.get("direction_notes", {}).get(name, {}).get("note", {})
+        if note.get("maturation_ref"):
+            evidence.add(note["maturation_ref"]["evidence_id"])
+    queue, visited = sorted(evidence), set()
+    while queue:
+        identity = queue.pop()
+        if identity in visited:
+            continue
+        visited.add(identity)
+        envelope, artifacts = store.evidence(identity)
+        refs.append(file_ref(store.root / "objects" / identity))
+        for blob in envelope["artifacts"].values():
+            refs.append(file_ref(store.root / "objects" / blob))
+        # Origin records retain origin IDs. The verified import map already
+        # supplies every local evidence copy; expose bytes without following
+        # origin role/index/card/maturation semantics as recipient identities.
+        if identity in imported_evidence:
+            continue
+        if "native_source_roles.json" in artifacts:
+            candidates.update(json.loads(artifacts["native_source_roles.json"]).values())
+        candidates.update(retained_trial_candidates(store, artifacts))
+        if "native_evidence_index.json" in artifacts:
+            queue.extend(row["evidence_ref"]["evidence_id"]
+                         for row in json.loads(artifacts["native_evidence_index.json"]))
+        if "native_quantity_index.json" in artifacts:
+            queue.extend(row["ref"]["evidence_id"] for row in
+                         json.loads(artifacts["native_quantity_index.json"])["quantities"])
+        for name in ("archive_card.json", "maturation.json"):
+            if name in artifacts:
+                record = json.loads(artifacts[name])
+                if record.get("previous_ref"):
+                    queue.append(record["previous_ref"]["evidence_id"])
+                queue.extend(ref["evidence_id"] for key in ("observation_refs", "historical_refs")
+                             for ref in record.get(key, []))
+                witness = record.get("last_faithful")
+                if witness:
+                    candidates.add(witness["candidate_id"])
+                    queue.extend(ref["evidence_id"] for ref in witness["evidence_refs"])
+    for identity in lineage_candidates(store, candidates):
+        candidate = store.get_candidate(identity)
+        ids = [identity, candidate["source_id"]] + [row["blob_id"] for row in
+            store.source(candidate["source_id"])["files"] if row["blob_id"]]
+        refs.extend(file_ref(store.root / "objects" / value) for value in ids)
+    return list({ref["path"]: ref for ref in refs}.values())
