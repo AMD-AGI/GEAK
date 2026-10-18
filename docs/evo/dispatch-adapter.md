@@ -83,6 +83,13 @@ planner window no longer fits, the loop returns its settled snapshot for final
 selection. Pending work still requires same-ID reconciliation. Neither an
 expired deadline nor a source-only test establishes native settlement.
 
+The existing `search.evaluation_limit` may also be smaller than the original
+coordinator allowance. The adapter validates that it is positive and does not
+exceed that original limit, then uses it for search preparation. The original
+shared budget `max_calls` stays unchanged. Leave at least three calls outside
+the search limit when the same budget must fund the command pair and common
+Director Validate; native grant and settlement checks remain authoritative.
+
 The common lane remeasures the selected patch again in Director Validate.
 Thus an EVO schedule must reserve three native envelopes in all: two inside
 this command and one afterward. Command export, process termination/settlement,

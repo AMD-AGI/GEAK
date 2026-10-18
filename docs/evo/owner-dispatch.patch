@@ -119,11 +119,12 @@
      """Replace only coordinator.host after its existing inspect and UID drop.
 
      Services are the same authenticated modules used by the original host.
-@@ -105,6 +106,18 @@
+@@ -105,14 +106,36 @@
      services = cleaned.host.HostServices(model_runtime, workspace, harvest, episode_material,
          seal_channel(coordinator, channel), cleaned.refs.file_ref(stable / "workspace_helpers/collect_investigation.py"),
          cleaned.refs.file_ref(stable / "host_driver.py"))
 +    search_reserve_seconds = 0
++    search_evaluation_limit = args.evaluation_limit
 +    if dispatch_options is not None:
 +        need(callable(final_services), "existing final evaluator and budget services required")
 +        binding = json.loads(cleaned.refs.read_ref(dispatch_options["owner_binding_ref"]))
@@ -135,10 +136,14 @@
 +             and owner["baseline_candidate_id"] == seed, "dispatch owner inputs differ from current admission")
 +        need(binding["max_steps"] == args.max_steps, "dispatch decision bound differs from owner admission")
 +        search_reserve_seconds = owner["search"].get("search_reserve_seconds", 0)
++        search_evaluation_limit = owner["search"].get("evaluation_limit", args.evaluation_limit)
++        need(type(search_evaluation_limit) is int and 0 < search_evaluation_limit <= args.evaluation_limit,
++             "search evaluation limit exceeds the original native allowance")
      search = cleaned.host.prepare_native_search(store, args.campaign_id, seed,
          campaign_root=root, templates={key: refs[key] for key in ("config", "admission", "entry", "collection")},
          clock_ref=refs["clock"], search_policy=policy, shared_budget=budget, profile=profile, services=services,
-@@ -112,7 +125,13 @@
+-        case_id=args.case_id, evaluation_limit=args.evaluation_limit, planner_seconds=args.planner_seconds,
++        case_id=args.case_id, evaluation_limit=search_evaluation_limit, planner_seconds=args.planner_seconds,
          planner_decision_limit=args.planner_decision_limit, sealed_root=args.sealed_root,
          root_state_root=args.root_state_root, common_read_roots=args.common_read_root,
          common_refs=args.common_refs, common_tool_addendum=args.common_tool_addendum,

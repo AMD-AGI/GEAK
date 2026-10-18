@@ -106,13 +106,13 @@ class OwnerDispatchPatchTests(unittest.TestCase):
             seed_root="seed", seed_source_id="source", case_id="case", evaluation_limit=10,
             planner_seconds=1, planner_decision_limit=1, sealed_root="sealed", root_state_root="state",
             common_read_root=[], common_refs=[], common_tool_addendum="", review_objective="ordinary", max_steps=1)
-        budget_config, budget, evaluator = {"existing": "budget"}, object(), object()
+        budget_config, budget, evaluator = {"existing": "budget", "max_calls": 10}, object(), object()
         owner_config = root / "owner-config.json"
         owner_config.write_text(json.dumps({"baseline_candidate_id": "seed", "search": {
             "campaign_id": "campaign", "seed_candidate_id": "seed", "campaign_root": str(campaign),
             "templates": {key: template_refs[key] for key in ("config", "admission", "entry", "collection")},
             "clock_ref": template_refs["clock"], "shared_budget": budget_config,
-            "search_reserve_seconds": 4800}}))
+            "search_reserve_seconds": 4800, "evaluation_limit": 7}}))
         binding.write_text(json.dumps({"max_steps": 1, "owner_config_ref": refs.file_ref(owner_config)}))
         binding_ref = refs.file_ref(binding)
         make_budget = mock.Mock(return_value=budget)
@@ -151,6 +151,8 @@ class OwnerDispatchPatchTests(unittest.TestCase):
         make_budget.assert_called_once_with(budget_config)
         cleaned.host.prepare_native_search.assert_called_once()
         self.assertEqual(cleaned.host.prepare_native_search.call_args.kwargs["search_reserve_seconds"], 4800)
+        self.assertEqual(cleaned.host.prepare_native_search.call_args.kwargs["evaluation_limit"], 7)
+        self.assertEqual(cleaned.host.prepare_native_search.call_args.kwargs["shared_budget"]["max_calls"], 10)
         contract_loader.assert_called_once()
 
     def test_preflight_external_contract_preserves_pins_without_importing_host_or_task(self):

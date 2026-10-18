@@ -142,16 +142,18 @@ class SharedHostTests(unittest.TestCase):
     def test_search_reserve_shortens_search_without_replacing_original_native_budget(self):
         original = model.read(self.clock_ref["path"])
         shared_budget = dict(self.arguments["shared_budget"])
-        search = self.prepare(search_reserve_seconds=4800)
+        shared_budget["max_calls"] = 10
+        search = self.prepare(search_reserve_seconds=4800, evaluation_limit=7, shared_budget=shared_budget)
         state = search.loop.snapshot()["state"]
         self.assertEqual(state["deadline"], 6200)
-        self.assertEqual(state["limits"], {"wall_seconds": 5200, "evaluations": 10})
+        self.assertEqual(state["limits"], {"wall_seconds": 5200, "evaluations": 7})
         self.assertEqual(search.assignment.shared_budget, shared_budget)
         self.assertEqual(search.assignment.clock_ref, self.clock_ref)
         self.assertEqual(search.planner.clock_ref, self.clock_ref)
         self.assertEqual(model.read(self.clock_ref["path"]), original)
         self.assertEqual(model.read(self.root / "host-binding.json")["search_reserve_seconds"], 4800)
-        self.assertEqual(self.prepare(search_reserve_seconds=4800).loop.snapshot(), search.loop.snapshot())
+        self.assertEqual(self.prepare(search_reserve_seconds=4800, evaluation_limit=7,
+                                      shared_budget=shared_budget).loop.snapshot(), search.loop.snapshot())
         with self.assertRaisesRegex(ValueError, "saved host binding changed"):
             self.prepare(search_reserve_seconds=4700)
         # No complete planner window remains: return settled history without
