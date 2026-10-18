@@ -29,6 +29,12 @@ if (PROCESS_BOUNDED) {
       || typeof setProcessDeadline !== 'function' || !agent.processDeadlineActive) {
     throw new Error('search reserve requires the process-bounded runtime and ordered final reserves');
   }
+  const optimizerReserve = Math.max(0, parseInt(A.optimizer_reserve_s != null ? A.optimizer_reserve_s : 600, 10));
+  // Importing the optimizer's committed result must have time before Report/Validate.
+  if (String(A.optimizer || 'greedy') !== 'greedy'
+      && (!Number.isFinite(optimizerReserve) || optimizerReserve <= FINAL_VALIDATION_RESERVE_S + 60)) {
+    throw new Error('optimizer reserve must exceed the final validation reserve plus 60 seconds for result import');
+  }
   setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
 }
 const NO_STOP_S = Math.max(0, parseInt(A.no_stop_s != null ? A.no_stop_s : 900, 10));

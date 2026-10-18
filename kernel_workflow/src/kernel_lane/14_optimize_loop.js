@@ -285,7 +285,22 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
-    const commitResult = await agentT(
+    let commitBase = null, priorUntracked = [], commitResult = null;
+    try {
+      if (PROCESS_BOUNDED) {
+        const top = ((await git(CANONICAL, 'rev-parse', '--show-toplevel')) || '').trim();
+        if (top !== CANONICAL.replace(/\/+$/, '')
+            || await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no') !== '') {
+          throw new Error('bounded commit requires a clean isolated canonical repository');
+        }
+        const untracked = await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z');
+        commitBase = ((await git(CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}')) || '').trim();
+        if (untracked === null || !/^[0-9a-f]{40,64}$/.test(commitBase)) {
+          throw new Error('could not pin the previous committed canonical source');
+        }
+        priorUntracked = untracked.split('\0').filter(Boolean);
+      }
+      commitResult = await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -306,8 +321,19 @@ check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only re
 it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
 re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
+    } catch (error) {
+      if (!PROCESS_BOUNDED || error.code !== 'GEAK_PROCESS_DEADLINE') throw error;
+    }
     if (PROCESS_BOUNDED && (!commitResult || commitResult.committed !== true)) {
-      throw new Error('bounded commit did not finish; retain workspace for owner reconciliation');
+      // Search has settled. Only host recovery may use the existing Report allowance.
+      setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+      const recovery = commitBase ? await restoreUncommittedRound(commitBase, priorUntracked, round) : null;
+      history.rounds.push({round, status: 'deadline_uncommitted', cumulative, improved: false,
+        directions: directions.map(d => ({id: d.id, title: d.title, specialty: d.specialty})),
+        winner: {source: winner.source, geomean: winner.geomean, patch: winner.patch}, recovery});
+      plannerStopReason = 'deadline_uncommitted';
+      log(`Round ${round}: commit did not finish; retained the previous committed winner for Report/Validate.`);
+      break;
     }
     cumulative = winner.geomean;
     bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
@@ -435,11 +461,49 @@ return {
   rounds: round, dispatched, cumulativeSpeedup: cumulative, bestPerCase, finalWinner, roundsCommitted,
   history, citations, profileSummary, forcedReplans, kbCapBound,
   // Which condition actually ended the loop (see `stopped_by` in the return value).
-  stopReason: deadlineHit ? 'deadline'
+  stopReason: plannerStopReason === 'deadline_uncommitted' ? plannerStopReason : deadlineHit ? 'deadline'
     : (dispatched >= BUDGET) ? 'budget'
     : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
     : (plannerStopReason || 'tech_lead_stop'),
 };
+}
+
+async function restoreUncommittedRound(previous, priorUntracked, round) {
+  const unfinished = ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim();
+  const retainedRef = `refs/geak/incomplete-round-${round}`;
+  const diffPath = `${EVAL_DIR}/uncommitted_round_${round}.diff`;
+  const pending = await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z');
+  if (pending === null) throw new Error('could not inspect unfinished canonical files');
+  const newFiles = pending.split('\0').filter(name => name && !priorUntracked.includes(name));
+  // Include newly created source bytes in the retained diff before removing them.
+  if (newFiles.length && await git(CANONICAL, '--literal-pathspecs', 'add', '--intent-to-add', '--', ...newFiles) === null) {
+    throw new Error('could not retain new unfinished canonical files');
+  }
+  const partial = await git(CANONICAL, 'diff', '--binary', previous, '--', '.');
+  if (!/^[0-9a-f]{40,64}$/.test(unfinished) || partial === null
+      || await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', diffPath], {input: partial}) === null
+      || await git(CANONICAL, 'update-ref', retainedRef, unfinished, '') === null
+      // Mixed reset preserves untracked files, including files staged by an unfinished add -A.
+      || await git(CANONICAL, 'reset', '--mixed', previous) === null
+      || await git(CANONICAL, 'restore', '--source', previous, '--worktree', '--', '.') === null) {
+    throw new Error('could not retain and restore the unfinished canonical commit');
+  }
+  const untracked = await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z');
+  if (untracked === null) throw new Error('could not inspect unfinished canonical files');
+  const added = untracked.split('\0').filter(name => name && !priorUntracked.includes(name));
+  if (added.length && await git(CANONICAL, '--literal-pathspecs', 'clean', '-f', '--', ...added) === null) {
+    throw new Error('could not remove unfinished canonical files');
+  }
+  const baseline = ((await git(CANONICAL, 'rev-list', '--max-parents=0', previous)) || '').trim();
+  const patch = /^[0-9a-f]{40,64}$/.test(baseline)
+    ? await git(CANONICAL, 'diff', '--binary', baseline, previous, '--', '.') : null;
+  if (patch === null || await writeFile(`${EVAL_DIR}/current_best.diff`, patch) === null
+      || ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim() !== previous
+      || await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no') !== '') {
+    throw new Error('restored canonical source differs from the previous committed winner');
+  }
+  return {previous_commit: previous, unfinished_commit: unfinished, retained_ref: retainedRef,
+    partial_patch: diffPath};
 }
 
 // Set the variables the Report/Validate postlude reads from one OptimizeResult.
@@ -455,7 +519,7 @@ function applyOptimizeResult(r) {
   citations.push(...r.citations);
   profileSummary = r.profileSummary;
   stopReason = r.stopReason;
-  deadlineHit = r.stopReason === 'deadline';
+  deadlineHit = r.stopReason === 'deadline' || r.stopReason === 'deadline_uncommitted';
   forcedReplans = r.forcedReplans;
   kbCapBound = r.kbCapBound;
 }
