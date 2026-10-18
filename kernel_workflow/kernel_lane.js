@@ -1835,13 +1835,12 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
-    let commitBase = null, priorUntracked = [], commitResult = null;
+    let commitBase = null, priorUntracked = [], commitResult = null, commitDeadline = false;
     try {
       if (PROCESS_BOUNDED) {
         const top = ((await git(CANONICAL, 'rev-parse', '--show-toplevel')) || '').trim();
-        if (top !== CANONICAL.replace(/\/+$/, '')
-            || await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no') !== '') {
-          throw new Error('bounded commit requires a clean isolated canonical repository');
+        if (top !== CANONICAL.replace(/\/+$/, '')) {
+          throw new Error('bounded commit requires an isolated canonical repository');
         }
         const untracked = await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z');
         commitBase = ((await git(CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}')) || '').trim();
@@ -1849,6 +1848,20 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           throw new Error('could not pin the previous committed canonical source');
         }
         priorUntracked = untracked.split('\0').filter(Boolean);
+        const status = await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no');
+        if (status === null) throw new Error('could not inspect the canonical source before commit');
+        if (status !== '') {
+          const dirty = await git(CANONICAL, 'diff', '--binary', commitBase, '--', '.');
+          const dirtyPath = `${EVAL_DIR}/precommit_round_${round}.diff`;
+          if (dirty === null
+              || await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', dirtyPath], {input: dirty}) === null
+              || await git(CANONICAL, 'restore', '--source', commitBase, '--staged', '--worktree', '--', '.') === null
+              || ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim() !== commitBase
+              || await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no') !== '') {
+            throw new Error('could not retain and restore tracked changes before commit');
+          }
+          log(`Round ${round}: retained tracked changes in ${dirtyPath} before restoring the committed source.`);
+        }
       }
       commitResult = await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
@@ -1873,17 +1886,28 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
     } catch (error) {
       if (!PROCESS_BOUNDED || error.code !== 'GEAK_PROCESS_DEADLINE') throw error;
+      commitDeadline = true;
     }
     if (PROCESS_BOUNDED && (!commitResult || commitResult.committed !== true)) {
+      let atDeadline = commitDeadline || await secondsLeft(`uncommitted-r${round}`) <= 7;
       // Search has settled. Only host recovery may use the existing Report allowance.
       setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
       const recovery = commitBase ? await restoreUncommittedRound(commitBase, priorUntracked, round) : null;
-      history.rounds.push({round, status: 'deadline_uncommitted', cumulative, improved: false,
+      if (!atDeadline) {
+        setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
+        atDeadline = await secondsLeft(`restored-r${round}`) <= 7;
+      }
+      const status = atDeadline ? 'deadline_uncommitted' : 'commit_failed';
+      history.rounds.push({round, status, cumulative, improved: false,
         directions: directions.map(d => ({id: d.id, title: d.title, specialty: d.specialty})),
         winner: {source: winner.source, geomean: winner.geomean, patch: winner.patch}, recovery});
-      plannerStopReason = 'deadline_uncommitted';
-      log(`Round ${round}: commit did not finish; retained the previous committed winner for Report/Validate.`);
-      break;
+      if (atDeadline) {
+        plannerStopReason = status;
+        log(`Round ${round}: commit did not finish at the cutoff; retained the previous winner for Report/Validate.`);
+        break;
+      }
+      log(`Round ${round}: commit failed; retained the previous winner and continuing search.`);
+      continue;
     }
     cumulative = winner.geomean;
     bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
