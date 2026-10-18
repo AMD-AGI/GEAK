@@ -8,14 +8,29 @@ Follow the requested `PHASE` and return structured JSON. `KERNEL_PATH_ORIG` is r
 
 Inputs: `KERNEL_PATH_ORIG`, `EXP_ROOT`, `EVAL_DIR_OVERRIDE`, `KERNEL_NAME_HINT`, `TASK`,
 `MODE` (`optimize` or `author`), device expectations, and optional `TARGET_LANGUAGE`, `OP_SPEC`,
-`STATE_DIR`.
+`STATE_DIR`, `GPU_IDENTITY_CAPTURE_REF`.
 
-Run `python3 "$WORKFLOW_DIR/../scripts/gpu_identity.py"` and use its JSON for `device_gfx`,
-`device_target`, `device_name`, `physical_cu_count`. It binds fields to the same real GPU and rejects
+When `GPU_IDENTITY_CAPTURE_REF` is absent, run
+`python3 "$WORKFLOW_DIR/../scripts/gpu_identity.py"` as before. When present, it contains the
+owner-supplied absolute `path` and `sha256` of captured **raw rocminfo stdout**. Use the supplied
+`WORKFLOW_DIR` and reference values to run:
+
+```text
+python3 <WORKFLOW_DIR>/../scripts/gpu_identity.py --input <path> --input-sha256 <sha256>
+```
+
+Quote each actual path as a shell argument. This route hashes the captured bytes before parsing
+and does not open a GPU. Do not run a live probe when a capture reference is supplied. A read,
+hash or parse failure fails Setup; do not substitute expected values or fall back to a live probe.
+The owner authenticates the capture's observation and physical-device provenance separately.
+
+Use the successful helper JSON exactly: `gfx` → `device_gfx`, `target` → `device_target`,
+`marketing_name` → `device_name`, and `physical_cu_count` → `physical_cu_count`.
+The parser binds fields to the same GPU identity and rejects
 mixed visible identities. Only exact Marketing Name `AMD Radeon AI PRO R9700` maps to `r9700`;
 other gfx1201 products stay `unknown`. Physical CUs are not PyTorch's WGP count. Report mismatches
 against `EXPECTED_GFX`, `EXPECTED_TARGET`, `EXPECTED_DEVICE_NAME`, `EXPECTED_PHYSICAL_CU_COUNT`;
-the workflow enforces them.
+the captured route requires all four to match before Setup can proceed.
 
 Create a unique run ID `TS=$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}`. Use a supplied
 `EVAL_DIR_OVERRIDE`, otherwise `$EXP_ROOT/team_${KERNEL_NAME}_${TS}/${KERNEL_NAME}`. Never overwrite

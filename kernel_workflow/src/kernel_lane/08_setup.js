@@ -1,6 +1,28 @@
 // ===========================================================================
 // PHASE: Setup
 // ===========================================================================
+// An operational owner may supply a captured identity when this process has no
+// direct GPU access. The owner authenticates its observation/device provenance;
+// the Director verifies these exact bytes with the shared offline parser.
+const GPU_IDENTITY_CAPTURE_REF = A.gpu_identity_capture_ref;
+if (GPU_IDENTITY_CAPTURE_REF !== undefined) {
+  const ref = GPU_IDENTITY_CAPTURE_REF;
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref)
+      || Object.keys(ref).sort().join(',') !== 'path,sha256'
+      || typeof ref.path !== 'string' || !ref.path.startsWith('/')
+      || /[\0\r\n]/.test(ref.path)
+      || !ref.path.slice(1).split('/').every(part => part && part !== '.' && part !== '..')
+      || typeof ref.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(ref.sha256)) {
+    throw new Error('invalid GPU identity capture reference');
+  }
+  if (typeof A.expected_gfx !== 'string' || !/^gfx[0-9a-f]+$/.test(EXPECTED_GFX)
+      || typeof A.expected_target !== 'string'
+      || !['r9700', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET)
+      || typeof A.expected_device_name !== 'string' || !EXPECTED_DEVICE_NAME
+      || !Number.isSafeInteger(A.expected_physical_cu_count) || A.expected_physical_cu_count <= 0) {
+    throw new Error('captured GPU identity requires complete expected identity');
+  }
+}
 phase('Setup');
 const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
@@ -8,6 +30,7 @@ const setup = await agentT(
     WORKFLOW_DIR, SKILL_DIR: WORKFLOW_DIR,
     MODE, TARGET_LANGUAGE, OP_SPEC, EXPECTED_GFX, EXPECTED_TARGET,
     EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
+    ...(GPU_IDENTITY_CAPTURE_REF !== undefined ? { GPU_IDENTITY_CAPTURE_REF } : {}),
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
   { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
@@ -27,6 +50,14 @@ if (!DEVICE_TARGET) {
 if (!Number.isFinite(SETUP_PHYSICAL_CU_COUNT) || SETUP_PHYSICAL_CU_COUNT <= 0) {
   throw new Error('Setup failed: director did not return a positive physical_cu_count');
 }
+const normalizeDeviceName = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+if (GPU_IDENTITY_CAPTURE_REF !== undefined
+    && (GFX !== EXPECTED_GFX || DEVICE_TARGET !== EXPECTED_TARGET
+      || normalizeDeviceName(SETUP_DEVICE_NAME) !== normalizeDeviceName(EXPECTED_DEVICE_NAME)
+      || !Number.isSafeInteger(setup.physical_cu_count)
+      || SETUP_PHYSICAL_CU_COUNT !== EXPECTED_PHYSICAL_CU_COUNT)) {
+  throw new Error('captured GPU identity differs from expected identity');
+}
 if (GFX === 'gfx1200') {
   throw new Error('Detected gfx1200, which is not validated by this workflow; refusing R9700 guidance');
 }
@@ -36,7 +67,6 @@ if (EXPECTED_GFX && GFX !== EXPECTED_GFX) {
 if (EXPECTED_TARGET && EXPECTED_TARGET !== 'unknown' && DEVICE_TARGET !== EXPECTED_TARGET) {
   throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${DEVICE_TARGET || 'unknown'}`);
 }
-const normalizeDeviceName = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
 if (EXPECTED_DEVICE_NAME &&
     normalizeDeviceName(SETUP_DEVICE_NAME) !== normalizeDeviceName(EXPECTED_DEVICE_NAME)) {
   log(`Setup identity telemetry differs from the deterministic probe: device_name expected ` +
