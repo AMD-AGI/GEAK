@@ -1,0 +1,11 @@
+{
+  "schema": "geak-native-search-phase-patch-base-v1",
+  "files": [
+    {
+      "name": "bridge/finite_publisher.py",
+      "source_path": "/mnt/sapmajum-evo-scratch/hyperloom-kernel-arm-evo-20261014-v1/full-host-followon-4h-v2/control/saved-session-evo-recovery-8h-20261017-v1/source/native-runtime-postadoption-v1/bridge/finite_publisher.py",
+      "sha256": "79e2eea26b141026a072b13e90dadfad04ceb4d7fd3af3614950dabdd1b297d8",
+      "patched_sha256": "066af700009c1787a6a4832c78b21ad099dd2856173e64935e4f3078c103bee1"
+    }
+  ]
+}

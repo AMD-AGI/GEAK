@@ -1,0 +1,20 @@
+--- a/bridge/finite_publisher.py
++++ b/bridge/finite_publisher.py
+@@ -861,6 +861,17 @@
+     def publish(self, sealed, files):
+         need(os.geteuid() == 0, "only finite root coordinator may seal")
+         expected = self.validate(sealed, files)
++        template = self.templates["admission"]
++        if "search_phase_deadline_seconds" in template:
++            seconds = template["search_phase_deadline_seconds"]
++            inherited = template.get("phase_deadline_seconds")
++            need(type(inherited) in (int, float) and math.isfinite(inherited) and inherited > 0,
++                 "search phase requires a positive finite inherited phase deadline")
++            need(type(seconds) in (int, float) and 0 < seconds <= inherited and math.isfinite(seconds),
++                 "search phase must be positive, finite, and within the inherited phase deadline")
++            # Validate ordinary files against the unchanged protected templates
++            # first, then narrow only the generated engineer admission at seal.
++            expected["admission.json"]["phase_deadline_seconds"] = seconds
+         self.used.add(Path(sealed).name)  # A partial write is never retried.
+         trusted_path(self.sealed_root, directory=True)
+         return publish_sealed(sealed, expected)
