@@ -121,7 +121,8 @@ search thresholds still apply. Legacy geomean fields may be omitted.
 const externalFields = (o) => EXTERNAL_OBJECTIVE && o ? Object.fromEntries(
   ['objective', 'primary_regime', 'primary_speedup', 'native_reproducible_gain',
    'native_reproducible_regression', 'phase_speedups', 'external_evaluation',
-   'external_measurement_valid', 'receipt_ref', 'timing_basis'].map(k => [k, o[k]])) : {};
+   'external_measurement_valid', 'receipt_ref', 'timing_basis', 'development_geomean_speedup',
+  ].map(k => [k, o[k]])) : {};
 const nativeGainEligible = (o) => !EXTERNAL_OBJECTIVE || !!(o && o.external_measurement_valid === true
   && o.native_reproducible_gain === true && o.native_reproducible_regression === false);
 
@@ -129,7 +130,8 @@ async function checkedExternalMeasurement(value, workspace, patch = null) {
   if (!EXTERNAL_OBJECTIVE || !value) return value;
   const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
     status: 'invalid_measurement', correctness: 'not_checked', validation_status: 'invalid_measurement',
-    native_reproducible_gain: false, native_reproducible_regression: false };
+    native_reproducible_gain: false, native_reproducible_regression: false,
+    development_geomean_speedup: null };
   const ref = value.external_evaluation;
   if (!ref || typeof ref.candidate_id !== 'string' || typeof ref.evaluation_id !== 'string') return invalid;
   try {
@@ -146,6 +148,7 @@ async function checkedExternalMeasurement(value, workspace, patch = null) {
         || read.primary_regime !== EXTERNAL_OBJECTIVE.primary_regime
         || read.objective.primary_regime !== EXTERNAL_OBJECTIVE.primary_regime
         || !Number.isFinite(read.primary_speedup) || read.primary_speedup <= 0
+        || !Number.isFinite(read.development_geomean_speedup) || read.development_geomean_speedup <= 0
         || read.external_evaluation.candidate_id !== ref.candidate_id
         || read.external_evaluation.evaluation_id !== ref.evaluation_id) return invalid;
     return { ...value, ...read };
@@ -154,13 +157,18 @@ async function checkedExternalMeasurement(value, workspace, patch = null) {
     return invalid;
   }
 }
+// Checked external fields only; invalid or foreign-regime readings score null.
+const checkedExternal = (o, key) => o && o.external_measurement_valid === true
+  && o.primary_regime === EXTERNAL_OBJECTIVE.primary_regime
+  && Number.isFinite(o[key]) ? o[key] : null;
+// Native primary: report/export only. Development decisions keep GEAK's own scalar below.
+const nativePrimary = (o) => EXTERNAL_OBJECTIVE ? checkedExternal(o, 'primary_speedup') : primSpeedup(o);
 // PRIMARY-metric selector: prefer the time-weighted number when a workload spec is in play and the
 // agent reported one; otherwise fall back to the geomean (unweighted runs => unchanged behavior).
+// External mode: the unweighted geomean of the checked per-case pairs, as GEAK ranks by default.
 const primSpeedup = (o) => {
   if (!o) return EXTERNAL_OBJECTIVE ? null : 0;
-  if (EXTERNAL_OBJECTIVE) return o.external_measurement_valid === true
-    && o.primary_regime === EXTERNAL_OBJECTIVE.primary_regime
-    && Number.isFinite(o.primary_speedup) ? o.primary_speedup : null;
+  if (EXTERNAL_OBJECTIVE) return checkedExternal(o, 'development_geomean_speedup');
   const w = o.verified_weighted != null ? o.verified_weighted
           : (o.speedup_weighted != null ? o.speedup_weighted : null);
   if (HAS_WORKLOAD && Number.isFinite(w)) return w;

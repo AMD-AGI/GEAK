@@ -91,7 +91,8 @@ ok(/trustworthyBelowBaseline = eng && eng\.status !== 'failed' && !\(primSpeedup
 // Exercise the real shortcut: invalid or unconfirmed experiments must reach Verify
 // even when an engineer returned zero speedup and an empty patch (#480).
 const shortcut = src.match(/const trustworthyBelowBaseline = ([\s\S]*?);/)[1];
-const maySkip = new Function('eng', 'CANDIDATE_FLOOR', 'primSpeedup', `return ${shortcut};`);
+const maySkip = new Function('eng', 'CANDIDATE_FLOOR', 'primSpeedup', 'EXTERNAL_OBJECTIVE = null',
+  `return ${shortcut};`);
 for (const eng of [
   { status: 'invalid_measurement', measurement_valid: false, speedup_geomean: 0 },
   { status: 'invalid_measurement', measurement_valid: true, speedup_geomean: 0 },
@@ -102,6 +103,11 @@ for (const eng of [
 }
 ok(maySkip({ status: 'partial', measurement_valid: true, speedup_geomean: 1 }, 1,
            e => e.speedup_geomean), 'a valid measured no-op can still skip Verify');
+const external = { kind: 'external_primary', primary_regime: 'extend' };
+ok(!maySkip({ status: 'partial', measurement_valid: true, development_geomean_speedup: 1 }, 1,
+            () => null, external), 'external mode: an unchecked reading is sent to Verify');
+ok(maySkip({ status: 'partial', measurement_valid: true, external_measurement_valid: true }, 1,
+           () => 1, external), 'external mode: a checked measured no-op can still skip Verify');
 ok(/says\(r\.ver\.correctness, 'pass'\) && primSpeedup\(r\.ver\) > CANDIDATE_FLOOR/.test(src),
    'the verified filter admits against CANDIDATE_FLOOR');
 

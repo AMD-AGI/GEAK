@@ -37,7 +37,7 @@ const finalGeomean = EXTERNAL_OBJECTIVE ? null : (validation ? validation.direct
 // PRIMARY headline: the time-weighted speedup when workload-aligned, else the geomean (unchanged).
 const finalWeighted = !EXTERNAL_OBJECTIVE && validation && validation.director_verified_speedup_weighted != null
   ? validation.director_verified_speedup_weighted : null;
-const finalPrimary = EXTERNAL_OBJECTIVE ? (validation ? primSpeedup(validation) : null)
+const finalPrimary = EXTERNAL_OBJECTIVE ? (validation ? nativePrimary(validation) : null)
   : (HAS_WORKLOAD && Number.isFinite(finalWeighted) ? finalWeighted : finalGeomean);
 log(`COMPLETE. ${KERNEL_NAME}: verified ${EXTERNAL_OBJECTIVE ? 'external primary' : HAS_WORKLOAD ? 'time-weighted' : 'geomean'} ${finalPrimary ? finalPrimary.toFixed(2) : '?'}x` +
     `${HAS_WORKLOAD && Number.isFinite(finalGeomean) ? ` (unweighted geomean ${finalGeomean.toFixed(2)}x)` : ''}` +

@@ -82,6 +82,22 @@ class ControlResultTests(unittest.TestCase):
         self.assertTrue(value["external_measurement_valid"])
         self.assertTrue({"measurement_valid", "custody_proven", "reward_eligible", "framework_final_pass"}.isdisjoint(value))
 
+    def test_development_geomean_is_unweighted_over_every_declared_case(self):
+        self.evaluator.contract["benchmark_case_ids"] = ["prefill", "decode"]
+        self.record["timing_context"]["paired_cases"]["decode"] = {
+            "baseline_ms": 4., "optimized_ms": 1., "speedup": 4.}
+        value = self.read()
+        self.assertAlmostEqual(value["development_geomean_speedup"], 2.)
+        self.assertEqual(value["primary_speedup"], 1.01)
+
+    def test_non_positive_or_non_finite_case_speedup_fails_without_stdout(self):
+        for bad in (0., -1., float("inf"), float("nan"), True):
+            with self.subTest(bad=bad):
+                record = copy.deepcopy(self.record)
+                record["timing_context"]["paired_cases"]["prefill"]["speedup"] = bad
+                with self.assertRaisesRegex(ValueError, "positive finite per-case speedups"):
+                    self.read(record=record)
+
     def test_patch_matches_evaluated_candidate_without_changing_workspace(self):
         self.record["request"]["source"]["files"][0]["blob_id"] = sha256_hex(self.after)
         self.read(patch=self.patch)

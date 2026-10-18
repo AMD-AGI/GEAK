@@ -222,7 +222,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   const clean = results.filter(Boolean);
   const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
-    says(r.ver.correctness, 'pass') && nativeGainEligible(r.ver) && primSpeedup(r.ver) > CANDIDATE_FLOOR);
+    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
@@ -258,7 +258,6 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
     if (integrate && integrate.conclusion === 'improved' && integrate.best &&
-      nativeGainEligible(integrate.best) &&
       integPrim > Math.max(...candidates.map(c => c.geomean))) {
       candidates.push({
         source: 'integrated', id: `r${round}_integrated`, title: 'integrated', specialty: 'integrate',

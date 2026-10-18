@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // The native fold deliberately differs from every legacy scalar in this fixture.
+// Development decisions use GEAK's geomean of checked per-case pairs; only export uses the native fold.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -10,7 +11,7 @@ const objective = {kind: 'external_primary', primary_regime: 'prefill_extend'};
 const ref = {candidate_id: 'candidate', evaluation_id: 'evaluation'};
 const native = {objective, primary_regime: 'prefill_extend', primary_speedup: 1.4,
   native_reproducible_gain: true, native_reproducible_regression: false,
-  external_measurement_valid: true, external_evaluation: ref};
+  development_geomean_speedup: 1.2, external_measurement_valid: true, external_evaluation: ref};
 const calls = [];
 let output = native;
 const runProcess = async (options) => {
@@ -19,11 +20,12 @@ const runProcess = async (options) => {
     strays_killed: false, stdout: JSON.stringify(output)};
 };
 const make = (A) => new Function('A', 'HAS_WORKLOAD', 'runProcess', 'log', source
-  + '\nreturn {primSpeedup,nativeGainEligible,checkedExternalMeasurement};')(
+  + '\nreturn {primSpeedup,nativePrimary,nativeGainEligible,checkedExternalMeasurement};')(
     A, true, runProcess, () => {});
 (async () => {
   const legacy = make({});
   assert.equal(legacy.primSpeedup({verified_weighted: 2, verified_geomean: 3}), 2);
+  assert.equal(legacy.nativePrimary({verified_weighted: 2, verified_geomean: 3}), 2);
   const mode = make({objective, external_measurement_command: ['/owner/evaluate'],
     external_result_command: ['/owner/read']});
   assert.equal(mode.primSpeedup({verified_geomean: 3, verified_weighted: 2}), null);
@@ -31,30 +33,39 @@ const make = (A) => new Function('A', 'HAS_WORKLOAD', 'runProcess', 'log', sourc
   assert.equal(mode.nativeGainEligible({...native, native_reproducible_gain: false}), false);
   const read = await mode.checkedExternalMeasurement({external_evaluation: ref,
     primary_speedup: 999, verified_geomean: 3}, '/candidate', '/candidate.diff');
-  assert.equal(mode.primSpeedup(read), 1.4);
+  assert.equal(mode.primSpeedup(read), 1.2);
+  assert.equal(mode.nativePrimary(read), 1.4);
   assert.equal(mode.nativeGainEligible(read), true);
   assert.deepEqual(calls[0].args, ['--candidate-id','candidate','--evaluation-id','evaluation',
     '--workspace','/candidate','--patch','/candidate.diff']);
   output = {...native, native_reproducible_gain: false};
   const noGain = await mode.checkedExternalMeasurement({external_evaluation: ref}, '/candidate');
-  assert.equal(mode.primSpeedup(noGain), 1.4);
+  assert.equal(mode.primSpeedup(noGain), 1.2); // the gate does not enter development scoring
+  assert.equal(mode.nativePrimary(noGain), 1.4);
   assert.equal(mode.nativeGainEligible(noGain), false);
+  output = {...native, development_geomean_speedup: undefined};
+  const noDev = await mode.checkedExternalMeasurement({external_evaluation: ref}, '/candidate');
+  assert.equal(noDev.external_measurement_valid, false);
+  assert.equal(mode.primSpeedup(noDev), null);
+  assert.equal(mode.nativePrimary(noDev), null);
   output = {...native, external_evaluation: {...ref, evaluation_id: 'different'}};
   const bad = await mode.checkedExternalMeasurement({external_evaluation: ref,
     validation_status: 'accepted', primary_speedup: 999}, '/candidate');
   assert.equal(mode.primSpeedup(bad), null);
+  assert.equal(mode.nativePrimary(bad), null);
   assert.equal(bad.validation_status, 'invalid_measurement');
   await fullLane(false);
   await fullLane(true);
-  console.log('external primary: checked native score, separate gain, no legacy fallback, source/patch arguments passed');
+  console.log('external primary: checked development geomean, native export score and gain, no legacy fallback, source/patch arguments passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 
 async function fullLane(finalNoGain) {
   const body = fs.readFileSync(path.join(__dirname, '../kernel_lane.js'), 'utf8')
     .replace(/^export const meta/m, 'const meta');
   const ids = id => ({candidate_id: id, evaluation_id: id});
-  const records = {original: [1, false], a: [1.4, true], b: [1.6, true],
-    c: [9, false], integrated: [1.5, true], final: [1.55, !finalNoGain]};
+  // [native primary, native gain, development geomean]
+  const records = {original: [1, false, 1], a: [1.4, true, 1.2], b: [1.6, true, 1.1],
+    c: [9, false, 1.5], integrated: [1.5, true, 1.3], final: [1.55, !finalNoGain, 1.45]};
   let cumulative, commits = 0;
   const g = {
     args: {kernel_path: '/original', workflow_dir: '/workflow', budget: 3,
@@ -71,11 +82,12 @@ async function fullLane(finalNoGain) {
     })),
     runProcess: async opts => {
       assert.equal(opts.cmd, '/owner/read');
-      const id = opts.args[1], [score, gain] = records[id];
+      const id = opts.args[1], [score, gain, dev] = records[id];
       return {status: 'completed', code: 0, group_cleared: true, stdout: JSON.stringify({
         ...native, external_evaluation: ids(id), primary_speedup: score,
         native_reproducible_gain: gain, timing_basis: 'external_whole_call_ut',
-        per_case: [{name: 'c1', baseline_ms: 8, optimized_ms: 1, speedup: 8}]
+        development_geomean_speedup: dev,
+        per_case: [{name: 'c1', baseline_ms: 8, optimized_ms: 8 / dev, speedup: dev}]
       })};
     },
     agent: async (prompt, options) => {
@@ -108,9 +120,11 @@ async function fullLane(finalNoGain) {
     }
   };
   const value = await new Function(...Object.keys(g), `return (async () => {${body}})();`)(...Object.values(g));
-  assert.equal(cumulative, 1.6); // no-gain9x and integrated1.5x did not replace candidate b.
+  // GEAK ranks by the development geomean: c (1.5) wins despite its native no-gain gate;
+  // integrated (1.3) does not beat it; native 9x/1.6x never enter development ranking.
+  assert.equal(cumulative, 1.5);
   assert.equal(commits, 1);
-  assert.equal(value.final_speedup, 1.55); // fresh director result, never the relayed999.
+  assert.equal(value.final_speedup, 1.55); // native primary of the fresh director result, never 999 or 1.45.
   assert.equal(value.final_geomean, null);
   assert.equal(value.final_arithmetic, null);
   assert.equal(value.workload_aligned, false);

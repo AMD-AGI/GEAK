@@ -176,7 +176,7 @@ ${resolveScript}
         }
         ver = await checkedExternalMeasurement(ver, CANONICAL, checkedWarmPatch);
         const sp = primSpeedup(ver);
-        if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && nativeGainEligible(ver) && sp > 1.0) {
+        if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && sp > 1.0) {
           const adopt = await agentT(
             `You are the TechLead adopting a validated warm-start patch into the canonical workspace.
 \`\`\`bash

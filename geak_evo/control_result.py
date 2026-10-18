@@ -6,6 +6,7 @@ evaluation and grants no measurement, custody or reward qualification.
 
 import argparse
 import copy
+import math
 from pathlib import Path
 import subprocess
 import tempfile
@@ -117,13 +118,20 @@ def read_control_result(evaluator, candidate_id, *, evaluation_id, workspace, pa
               "patch changed during source verification")
 
     pairs = timing["paired_cases"]
+    per_case = [{"name": name, **{key: pairs[name][key] for key in
+                 ("baseline_ms", "optimized_ms", "speedup")}}
+                for name in contract["benchmark_case_ids"]]
+    speedups = [row["speedup"] for row in per_case]
+    _need(speedups and all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                           and math.isfinite(value) and value > 0 for value in speedups),
+          "positive finite per-case speedups required")
     return {"objective": objective,
             **{key: copy.deepcopy(native[key]) for key in
                ("primary_regime", "primary_speedup", "native_reproducible_gain",
                 "native_reproducible_regression", "phase_speedups")},
-            "per_case": [{"name": name, **{key: pairs[name][key] for key in
-                          ("baseline_ms", "optimized_ms", "speedup")}}
-                         for name in contract["benchmark_case_ids"]],
+            "per_case": per_case,
+            # GEAK's own development scalar: unweighted geomean of per-case speedups.
+            "development_geomean_speedup": math.exp(sum(map(math.log, speedups)) / len(speedups)),
             "external_evaluation": {"candidate_id": candidate_id, "evaluation_id": evaluation_id},
             "receipt_ref": copy.deepcopy(record["receipt_ref"]),
             "timing_basis": "external_whole_call_ut", "external_measurement_valid": True}
