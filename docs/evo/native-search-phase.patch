@@ -1,20 +1,62 @@
 --- a/bridge/finite_publisher.py
 +++ b/bridge/finite_publisher.py
-@@ -861,6 +861,17 @@
+@@ -268,14 +268,36 @@
+         self.binding = copy.deepcopy(state["binding"])
+         need(self.binding["job_id"] == self.templates["admission"]["contract_id"],
+              "campaign and admitted contract differ")
+-        need(state["deadline"] == self.clock["started_unix"] + self.clock["wall_seconds"],
+-             "campaign deadline differs from original clock")
++        need(state["deadline"] == self._campaign_deadline(),
++             "campaign deadline differs from admitted search/original clock")
+         self.limits = copy.deepcopy(state["limits"])
+
+     def _state(self):
+         state = self.store.get(self.campaign_id)["note"]["evolution"]
+         need(type(state) is dict and state.get("schema_version") == 1, "existing EvolutionLoop campaign required")
+         return copy.deepcopy(state)
++
++    def _search_bounds(self):
++        template = self.templates["admission"]
++        phase = template.get("search_phase_deadline_seconds")
++        seconds = self.clock["wall_seconds"]
++        if not {"search_phase_deadline_seconds", "search_deadline_seconds"}.intersection(template):
++            return None, seconds
++        inherited = template.get("phase_deadline_seconds")
++        need(type(inherited) in (int, float) and math.isfinite(inherited) and inherited > 0,
++             "search phase requires a positive finite inherited phase deadline")
++        if "search_phase_deadline_seconds" in template:
++            need(type(phase) in (int, float) and 0 < phase <= inherited and math.isfinite(phase),
++                 "search phase must be positive, finite, and within the inherited phase deadline")
++        if "search_deadline_seconds" in template:
++            seconds = template["search_deadline_seconds"]
++            need(type(seconds) in (int, float) and 0 < seconds <= min(inherited, self.clock["wall_seconds"])
++                 and math.isfinite(seconds), "search deadline must be positive, finite, and within the phase/original clock")
++            need(phase is not None and phase <= seconds, "native search phase must fit the search deadline")
++        return phase, seconds
++
++    def _campaign_deadline(self):
++        return self.clock["started_unix"] + self._search_bounds()[1]
+
+     def _clock(self):
+         need(json.loads(read_ref(self.clock_ref, trusted=True)) == self.clock, "original clock changed")
+@@ -617,7 +639,7 @@
+         state = self._state()
+         need(state["phase"] == "dispatching", "only the exact committed dispatch may be sealed")
+         need(state["binding"] == self.binding and state["limits"] == self.limits
+-             and state["deadline"] == self.clock["started_unix"] + self.clock["wall_seconds"],
++             and state["deadline"] == self._campaign_deadline(),
+              "campaign authority changed")
+         pending = state["pending"]
+         op = pending["operation_id"]
+@@ -861,6 +883,11 @@
      def publish(self, sealed, files):
          need(os.geteuid() == 0, "only finite root coordinator may seal")
          expected = self.validate(sealed, files)
-+        template = self.templates["admission"]
-+        if "search_phase_deadline_seconds" in template:
-+            seconds = template["search_phase_deadline_seconds"]
-+            inherited = template.get("phase_deadline_seconds")
-+            need(type(inherited) in (int, float) and math.isfinite(inherited) and inherited > 0,
-+                 "search phase requires a positive finite inherited phase deadline")
-+            need(type(seconds) in (int, float) and 0 < seconds <= inherited and math.isfinite(seconds),
-+                 "search phase must be positive, finite, and within the inherited phase deadline")
++        phase, _ = self._search_bounds()
++        if phase is not None:
 +            # Validate ordinary files against the unchanged protected templates
 +            # first, then narrow only the generated engineer admission at seal.
-+            expected["admission.json"]["phase_deadline_seconds"] = seconds
++            expected["admission.json"]["phase_deadline_seconds"] = phase
          self.used.add(Path(sealed).name)  # A partial write is never retried.
          trusted_path(self.sealed_root, directory=True)
          return publish_sealed(sealed, expected)
