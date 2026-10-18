@@ -139,6 +139,35 @@ class SharedHostTests(unittest.TestCase):
         self.assertEqual(len(self.transport.launches), 1)
         self.assertEqual(search.loop.snapshot(), snapshot)
 
+    def test_search_reserve_shortens_search_without_replacing_original_native_budget(self):
+        original = model.read(self.clock_ref["path"])
+        shared_budget = dict(self.arguments["shared_budget"])
+        search = self.prepare(search_reserve_seconds=4800)
+        state = search.loop.snapshot()["state"]
+        self.assertEqual(state["deadline"], 6200)
+        self.assertEqual(state["limits"], {"wall_seconds": 5200, "evaluations": 10})
+        self.assertEqual(search.assignment.shared_budget, shared_budget)
+        self.assertEqual(search.assignment.clock_ref, self.clock_ref)
+        self.assertEqual(search.planner.clock_ref, self.clock_ref)
+        self.assertEqual(model.read(self.clock_ref["path"]), original)
+        self.assertEqual(model.read(self.root / "host-binding.json")["search_reserve_seconds"], 4800)
+        self.assertEqual(self.prepare(search_reserve_seconds=4800).loop.snapshot(), search.loop.snapshot())
+        with self.assertRaisesRegex(ValueError, "saved host binding changed"):
+            self.prepare(search_reserve_seconds=4700)
+        # No complete planner window remains: return settled history without
+        # calling a model or consuming the final measurement reserve.
+        self.clock.now = 5290
+        snapshot = search.run(max_steps=2)
+        self.assertEqual(snapshot["state"]["phase"], "idle")
+        self.assertEqual(snapshot["state"]["opportunities"], [])
+        self.assertEqual(self.transport.launches, [])
+
+    def test_invalid_search_reserves_fail_before_any_dispatch(self):
+        for reserve in (-1, True, float("nan"), float("inf"), 10000, 10001):
+            with self.subTest(reserve=reserve), self.assertRaisesRegex(ValueError, "search reserve"):
+                self.prepare(search_reserve_seconds=reserve)
+        self.assertEqual(self.transport.launches, [])
+
     def test_native_callbacks_keep_same_id_raw_metrics_and_physical_mapping(self):
         evaluator = host.make_native_evaluator(self.fixture.store, self.config, callbacks=self.fixture)
         first = evaluator.evaluate(self.fixture.candidate, evaluation_id="same-operation")

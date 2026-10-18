@@ -36,6 +36,20 @@ def _document(reference):
     return model.decode(read_ref(reference))
 
 
+def search_wall_seconds(original_clock, reserve_seconds=0):
+    """Keep a final-stage reserve inside the unchanged original clock.
+
+    This shortens only search accounting and its absolute deadline. Native
+    callbacks and final measurements retain the owner's original shared budget.
+    """
+    wall = original_clock["wall_seconds"]
+    require(type(wall) in (int, float) and math.isfinite(wall) and wall > 0
+            and type(reserve_seconds) in (int, float) and math.isfinite(reserve_seconds)
+            and 0 <= reserve_seconds < wall,
+            "finite search reserve must fit inside the original clock", ValueError)
+    return wall - reserve_seconds
+
+
 @dataclass(frozen=True)
 class HostServices:
     """Existing, admitted services; constructing this value starts no work.
@@ -80,11 +94,13 @@ class NativeSearch:
     """
 
     def __init__(self, loop, planner, assignment, *, profile, planner_seconds,
-                 planner_decision_limit, advice, advice_inputs, after_review):
+                 planner_decision_limit, advice, advice_inputs, after_review,
+                 stop_before_deadline=False):
         self.loop, self.planner, self.assignment = loop, planner, assignment
         self.profile = profile
         self.planner_seconds, self.planner_decision_limit = planner_seconds, planner_decision_limit
         self.advice, self.advice_inputs, self.after_review = advice, advice_inputs, after_review
+        self.stop_before_deadline = stop_before_deadline
 
     def run(self, *, max_steps):
         self.profile.verify()
@@ -97,7 +113,8 @@ class NativeSearch:
             planning_reservation={"wall_seconds": self.planner_seconds + 60, "evaluations": 0},
             planning_seconds=self.planner_seconds + 60, advice_config=self.advice,
             max_steps=max_steps, planner_decision_limit=self.planner_decision_limit,
-            advice_inputs=self.advice_inputs, after_review=self.after_review)
+            advice_inputs=self.advice_inputs, after_review=self.after_review,
+            stop_before_deadline=self.stop_before_deadline)
 
 
 def prepare_native_search(store, campaign_id, seed_candidate_id, *, campaign_root,
@@ -105,7 +122,8 @@ def prepare_native_search(store, campaign_id, seed_candidate_id, *, campaign_roo
                           services, case_id, evaluation_limit, planner_seconds,
                           planner_decision_limit, sealed_root, root_state_root,
                           common_read_roots, common_refs=(), common_tool_addendum="",
-                          review_objective="ordinary", clock=None, prompt_dir=None):
+                          review_objective="ordinary", clock=None, prompt_dir=None,
+                          search_reserve_seconds=0):
     """Compose one member from the existing config/admission/entry/collection refs.
 
     This is the callable replacement for the construction inside the old
@@ -113,6 +131,8 @@ def prepare_native_search(store, campaign_id, seed_candidate_id, *, campaign_roo
     registration, sealing, population selection and final completion unchanged.
     New campaigns persist their exact profile and original limits. Opening an
     old campaign without this binding requires a separately reviewed migration.
+    An explicit search reserve shortens search only; it never rebases the
+    original clock or changes the native budget used by later measurements.
     """
     require(isinstance(services, HostServices) and isinstance(profile, ModelProfile),
             "explicit host services and model profile required", ValueError)
@@ -176,8 +196,9 @@ def prepare_native_search(store, campaign_id, seed_candidate_id, *, campaign_roo
     descriptor_factory = (services.model_runtime.transport.derive_descriptor
                           if "codex_runtime_family_ref" in model_config else None)
     now = lambda: original["started_unix"] + (clock.monotonic_ns() - original["started_monotonic_ns"]) / 1e9
-    deadline = original["started_unix"] + original["wall_seconds"]
-    limits = {"wall_seconds": original["wall_seconds"], "evaluations": evaluation_limit}
+    search_seconds = search_wall_seconds(original, search_reserve_seconds)
+    deadline = original["started_unix"] + search_seconds
+    limits = {"wall_seconds": search_seconds, "evaluations": evaluation_limit}
     packaged_entry = Path(__file__).parent / "engineer" / "js"
     runtime_refs = {"entry_runner_ref": file_ref(packaged_entry / "run_one_engineer.mjs"),
         "entry_provenance_ref": file_ref(packaged_entry / "entry-provenance.json"),
@@ -193,6 +214,8 @@ def prepare_native_search(store, campaign_id, seed_candidate_id, *, campaign_roo
         "runtime_refs": runtime_refs, "host_ref": file_ref(Path(__file__)),
         "prompt_refs": prompt_refs,
         "model_backend_ref": file_ref(Path(model.__file__)), "backend_driver_ref": services.backend_driver_ref}
+    if search_reserve_seconds:
+        binding["search_reserve_seconds"] = search_reserve_seconds
     binding_path = root / "host-binding.json"
     existing = campaign_id in store.get()
     if binding_path.exists():
@@ -264,4 +287,5 @@ def prepare_native_search(store, campaign_id, seed_candidate_id, *, campaign_roo
 
     return NativeSearch(loop, planner, assignment, profile=profile, planner_seconds=planner_seconds,
         planner_decision_limit=planner_decision_limit, advice=advice,
-        advice_inputs=advice_inputs, after_review=after_review)
+        advice_inputs=advice_inputs, after_review=after_review,
+        stop_before_deadline=bool(search_reserve_seconds))

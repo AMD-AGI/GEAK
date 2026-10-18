@@ -18,6 +18,7 @@ from ._util import EvoError, canonical_json, require, sha256_hex
 from .archive.refs import file_ref, read_ref
 from .archive.store import _path, _read, _write
 from .command import CommandInterrupted, run_admitted_task
+from .host import search_wall_seconds
 from .planner.model import decode
 
 
@@ -91,8 +92,15 @@ def _check_inputs(task, binding, config, evaluator, budget):
         _need(_positive(deadline), "finite common command deadline required")
         now_unix, now_ns = time.time(), time.monotonic_ns()
         cutoff_ns = now_ns + int((deadline - now_unix) * 1e9)
-        _need(budget.config["deadline_ns"] + int(binding["export_seconds"] * 1e9) <= cutoff_ns,
-              "owner clock and export margin exceed the common command deadline")
+        reserve = config["search"].get("search_reserve_seconds", 0)
+        search_wall_seconds(_document(config["search"]["clock_ref"]), reserve)
+        command_end_ns = budget.config["deadline_ns"]
+        if reserve:
+            final_seconds = sum(config["final_measurements"].values())
+            _need(reserve >= final_seconds, "search reserve cannot cover the command final measurements")
+            command_end_ns -= int((reserve - final_seconds) * 1e9)
+        _need(command_end_ns + int(binding["export_seconds"] * 1e9) <= cutoff_ns,
+              "owner search, final measurements and export margin exceed the common command deadline")
         _need(now_ns < cutoff_ns, "common command deadline expired")
         cutoff = cutoff_ns / 1e9
     _need(budget.config == config["search"]["shared_budget"], "dispatch and search must use the same native budget")

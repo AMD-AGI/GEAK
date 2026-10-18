@@ -215,7 +215,10 @@ class NativeAssignment:
         # Translate the reserved review time with the supplied campaign clock.
         # Cleanup remains inside that reservation.
         review_ns = clock["started_monotonic_ns"] + int((proposal["review_at"] - clock["started_unix"]) * 1e9)
-        review_ns = min(review_ns, clock["started_monotonic_ns"] + int(clock["wall_seconds"] * 1e9))
+        search_end_ns = clock["started_monotonic_ns"] + int(
+            (snapshot["state"]["deadline"] - clock["started_unix"]) * 1e9)
+        review_ns = min(review_ns, search_end_ns,
+                        clock["started_monotonic_ns"] + int(clock["wall_seconds"] * 1e9))
         envelope_ns = int(template["backend_config"]["probe_config"]["native_envelope_seconds"] * 1e9)
         need(self.clock.monotonic_ns() + envelope_ns < review_ns - 30_000_000_000,
              "fixed native opportunity cannot fit its native envelope before workspace preparation")

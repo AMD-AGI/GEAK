@@ -136,6 +136,23 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(len(self.f.launches), 2)
         self.assertIsNone(self.f.handles[-1])
 
+    def test_search_reserve_must_cover_both_final_envelopes(self):
+        self.config["search"]["search_reserve_seconds"] = 119
+        with self.assertRaisesRegex(ValueError, "two final measurement envelopes"):
+            self.invoke()
+        self.assertEqual(self.f.launches, [])
+        self.search.run.assert_not_called()
+
+    def test_search_reserve_is_forwarded_with_the_same_shared_budget(self):
+        self.config["search"]["search_reserve_seconds"] = 210
+        original_budget = copy.deepcopy(self.budget.config)
+        value, prepare = self.invoke()
+        self.assertEqual(value["outcome"], "improved")
+        self.assertEqual(prepare.call_args.kwargs["search_reserve_seconds"], 210)
+        self.assertEqual(prepare.call_args.kwargs["shared_budget"], original_budget)
+        self.assertEqual(self.budget.config, original_budget)
+        self.assertEqual(len(self.f.launches), 2)
+
     def test_final_recovery_after_the_original_deadline_actually_expires(self):
         # A short real monotonic window, with each tiny CPU operation admitted
         # before it expires. The second invocation starts after that same bound.

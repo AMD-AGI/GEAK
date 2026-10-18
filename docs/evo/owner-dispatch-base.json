@@ -10,6 +10,11 @@
       "name": "native_host_adapter.py",
       "source_path": "/home/sapmajum/research-collab/codex/geak_evo_cleanup_20261016/pilot-adapter/native_host_adapter.py",
       "sha256": "c7165d59485965e6b75fba036f8ef71f08d27d4aa1b51b82c3337fc5369b2107"
+    },
+    {
+      "name": "coordinator.py",
+      "source_path": "/mnt/sapmajum-evo-scratch/primary-mla-full8-astra-20261015-v1/native/bridge/coordinator.py",
+      "sha256": "f82cbaffed38b81609dbf0aefb1cabe05f21edeb49cb12873f936f9d7efdc1ad"
     }
   ]
 }

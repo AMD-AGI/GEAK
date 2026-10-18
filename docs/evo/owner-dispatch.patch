@@ -1,6 +1,57 @@
 --- a/host_driver.py
 +++ b/host_driver.py
-@@ -175,7 +175,17 @@
+@@ -13,6 +13,7 @@
+ from pathlib import Path
+ import stat
+ import sys
++from types import ModuleType
+
+
+ def need(value, message):
+@@ -85,6 +86,42 @@
+
+ def cleaned_package(adapter, manifest):
+     return adapter.load_cleaned(manifest["cleaned_root"], manifest["cleaned_source_refs"])
++
++def load_cleaned_contract(manifest, path, *, artifact_root, expected_digest):
++    """Read the task at root preflight using only pinned contract-reader sources.
++
++    Empty private package paths disable normal package discovery. This closure
++    imports no cleaned host/model code and never imports the task's source.
++    """
++    root = immutable(manifest["cleaned_root"])
++    names = ("_util", "evaluate.jobs_v1", "evaluate.jobs", "evaluate.external",
++             "evaluate.native_contract", "evaluate.generated_task")
++    source_refs = {}
++    for name in names:
++        relative = "geak_evo/" + name.replace(".", "/") + ".py"
++        ref = manifest["cleaned_source_refs"][relative]
++        need(ref["path"] == str(root / relative) and ref in manifest["source_refs"],
++             "contract reader omitted from pinned cleaned source closure")
++        source_refs[name] = (ref, checked(ref))
++    namespace = "_geak_evo_pilot_contracts"
++    need(not any(key == namespace or key.startswith(namespace + ".") for key in sys.modules),
++         "fresh contract reader namespace required")
++    for name in (namespace, namespace + ".evaluate"):
++        package = ModuleType(name)
++        package.__path__ = []
++        sys.modules[name] = package
++    modules = {}
++    for name, (ref, raw) in source_refs.items():
++        module = ModuleType(namespace + "." + name)
++        module.__file__ = ref["path"]
++        module.__package__ = module.__name__.rpartition(".")[0]
++        sys.modules[module.__name__] = module
++        # Execute authenticated bytes directly; -B alone does not forbid
++        # SourceFileLoader from reading an unregistered bytecode cache.
++        exec(compile(raw, ref["path"], "exec", dont_inherit=True), module.__dict__)
++        modules[name] = module
++    return modules["evaluate.jobs"].load_engineer_job(
++        path, artifact_root=artifact_root, expected_digest=expected_digest)
+
+
+ def provider_check(transport, model_config, route, route_ref, audit_ref, manifest, *, audit):
+@@ -175,7 +212,17 @@
      parser = argparse.ArgumentParser(add_help=False)
      parser.add_argument("--pilot-manifest", nargs=2, required=True)
      parser.add_argument("--cpu-provider-check", action="store_true")
@@ -18,7 +69,7 @@
      manifest = installation(dict(zip(("path", "sha256"), options.pilot_manifest)))
      coordinator = load("pilot_retained_coordinator", manifest["coordinator_ref"])
      adapter = load("pilot_cleaned_adapter", manifest["adapter_ref"])
-@@ -185,10 +195,22 @@
+@@ -185,16 +232,28 @@
      def host(args, refs, docs, policy, budget, contract, channel):
          cleaned, runtime, workspace, harvest, episode, frontier, _ = owner_services(
              args, refs, docs, coordinator, adapter, manifest, audit=True)
@@ -42,6 +93,13 @@
 
      coordinator.host = host
      saved_argv = sys.argv
+     try:
+         sys.argv = [coordinator.__file__, *remaining]
+-        return coordinator.main()
++        return coordinator.main(contract_loader=lambda path, **kwargs: load_cleaned_contract(manifest, path, **kwargs))
+     finally:
+         sys.argv = saved_argv
+
 --- a/native_host_adapter.py
 +++ b/native_host_adapter.py
 @@ -51,6 +51,7 @@
@@ -61,10 +119,11 @@
      """Replace only coordinator.host after its existing inspect and UID drop.
 
      Services are the same authenticated modules used by the original host.
-@@ -113,6 +114,20 @@
-         root_state_root=args.root_state_root, common_read_roots=args.common_read_root,
-         common_refs=args.common_refs, common_tool_addendum=args.common_tool_addendum,
-         review_objective=args.review_objective, prompt_dir=prompt_dir)
+@@ -105,6 +106,18 @@
+     services = cleaned.host.HostServices(model_runtime, workspace, harvest, episode_material,
+         seal_channel(coordinator, channel), cleaned.refs.file_ref(stable / "workspace_helpers/collect_investigation.py"),
+         cleaned.refs.file_ref(stable / "host_driver.py"))
++    search_reserve_seconds = 0
 +    if dispatch_options is not None:
 +        need(callable(final_services), "existing final evaluator and budget services required")
 +        binding = json.loads(cleaned.refs.read_ref(dispatch_options["owner_binding_ref"]))
@@ -75,6 +134,18 @@
 +        need(all(owner["search"].get(key) == value for key, value in current.items())
 +             and owner["baseline_candidate_id"] == seed, "dispatch owner inputs differ from current admission")
 +        need(binding["max_steps"] == args.max_steps, "dispatch decision bound differs from owner admission")
++        search_reserve_seconds = owner["search"].get("search_reserve_seconds", 0)
+     search = cleaned.host.prepare_native_search(store, args.campaign_id, seed,
+         campaign_root=root, templates={key: refs[key] for key in ("config", "admission", "entry", "collection")},
+         clock_ref=refs["clock"], search_policy=policy, shared_budget=budget, profile=profile, services=services,
+@@ -112,7 +125,13 @@
+         planner_decision_limit=args.planner_decision_limit, sealed_root=args.sealed_root,
+         root_state_root=args.root_state_root, common_read_roots=args.common_read_root,
+         common_refs=args.common_refs, common_tool_addendum=args.common_tool_addendum,
+-        review_objective=args.review_objective, prompt_dir=prompt_dir)
++        review_objective=args.review_objective, prompt_dir=prompt_dir,
++        search_reserve_seconds=search_reserve_seconds)
++    if dispatch_options is not None:
 +        evaluator, native_budget = final_services(store)
 +        return cleaned.dispatch.main(["--task", dispatch_options["task"], "--out", dispatch_options["out"]],
 +            owner_binding_ref=dispatch_options["owner_binding_ref"], store=store, services=services,
@@ -82,3 +153,43 @@
      error = None
      try:
          search.run(max_steps=args.max_steps)
+--- a/coordinator.py
++++ b/coordinator.py
+@@ -191,7 +191,7 @@
+     return roots, refs, suffix
+
+
+-def inspect(args):
++def inspect(args, *, contract_loader=None):
+     """Read-only preflight; no clock creation/reset or state directories."""
+     need(getattr(args, "native_capabilities", None) is not None,
+          "native_capabilities must be explicit; use [] to disable all native capabilities")
+@@ -309,9 +309,11 @@
+     shared_budget = {"root": str(campaign / "shared-budget"), "session_id": clock["session_id"],
+         "boot_id": clock["boot_id"], "deadline_ns": deadline_ns,
+         "max_calls": args.evaluation_limit, "max_seconds": args.native_seconds_limit}
+-    from geak_evo.arena_job import load_engineer_job
+-    contract = load_engineer_job(config["contract_ref"]["path"], artifact_root=config["artifact_root"],
+-                                expected_digest=probe["job_id"])
++    if contract_loader is None:
++        from geak_evo.arena_job import load_engineer_job as contract_loader
++    need(callable(contract_loader), "reviewed contract loader required")
++    contract = contract_loader(config["contract_ref"]["path"], artifact_root=config["artifact_root"],
++                               expected_digest=probe["job_id"])
+     need(args.case_id in contract["benchmark_case_ids"], "claim scope must name an actual complete case")
+     return refs, docs, user, policy, shared_budget, contract
+
+@@ -530,11 +532,11 @@
+     return 1 if error or result["phase"] not in ("idle", "stopped") else 0
+
+
+-def main():
++def main(*, contract_loader=None):
+     args = parser().parse_args()
+     need(sys.flags.isolated and sys.flags.dont_write_bytecode
+          and os.environ.get("PYTHONDONTWRITEBYTECODE") == "1", "isolated Python -B required")
+-    refs, docs, user, policy, budget, contract = inspect(args)
++    refs, docs, user, policy, budget, contract = inspect(args, contract_loader=contract_loader)
+     from writer_authority import inspect_scope, WriterAuthority
+     writer_scope = inspect_scope(args, refs, docs, checked=checked)
+     if args.check_only:

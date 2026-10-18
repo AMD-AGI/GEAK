@@ -18,7 +18,7 @@ The owner binding JSON has these fields:
 | `dispatch_root` | Canonical parent of the task's evaluation directory. |
 | `device` | The common task's device mapping, as admitted by the existing owner. Actual physical-device evidence remains in the native measurements. |
 | `max_steps` | Existing owner decision bound, no larger than the common task's round bound. |
-| `export_seconds` | Positive margin between the owner's original deadline and the command cutoff for result conversion and Git work. |
+| `export_seconds` | Positive margin after native work and before the command cutoff for result conversion and Git work. |
 
 The common objective is preserved, with only its weight keys translated through
 `case_map`. It must equal the admitted command's objective. The adapter computes
@@ -30,8 +30,12 @@ acceptance still follow.
 This adapter targets the dispatcher whose `task.budget.deadline_epoch` is the
 actual SIGTERM cutoff (introduced in `1125c24b`). It converts that epoch once
 using current wall and monotonic time. The original native monotonic deadline
-plus export margin must fit that cutoff; historical wall timestamps cannot
-extend it. Git work uses the same converted cutoff. The CLI temporarily handles
+plus export margin must fit that cutoff by default; historical wall timestamps
+cannot extend it. With an explicit `search.search_reserve_seconds`, search ends
+that many seconds before the original clock ends. The shortened search deadline,
+the command's two final measurement envelopes, and export margin must fit the
+common command cutoff. The original native clock and shared budget retain their
+original deadline. Git work uses the same converted cutoff. The CLI temporarily handles
 SIGTERM as `CommandInterrupted`, a dedicated `BaseException` that engineer and
 planner turns propagate after recording settlement and elapsed time. Arena
 evaluations save their collection receipt before propagating the interruption.
@@ -50,9 +54,9 @@ are refused. The adapter changes only source paths and uses raw Git plumbing
 for the commit, so commit bytes do not pass through attribute filters or hooks.
 
 The existing owner entry is wired by [owner-dispatch.patch](owner-dispatch.patch),
-against the two exact files listed in [owner-dispatch-base.json](owner-dispatch-base.json).
+against the three exact files listed in [owner-dispatch-base.json](owner-dispatch-base.json).
 Apply it to a prospective copy containing `host_driver.py` and
-`native_host_adapter.py`, then include those changed files and the cleaned
+`native_host_adapter.py` plus `coordinator.py`, then include those changed files and the cleaned
 package in a new authenticated installation manifest and native code closure.
 The frozen pilot files remain unchanged. The installed command is the existing
 owner invocation, with `--dispatch-owner PATH SHA256` added before the lane
@@ -65,6 +69,28 @@ search preparation, it calls `dispatch.main` with those services and the actual
 episode reader. The command config must match that preparation exactly. There
 is no new provider loader, source-adoption service or device manager.
 
+Before the existing UID transition, the coordinator accepts an explicit task
+reader supplied by the pinned owner wrapper. The wrapper checks six exact
+contract-reader source files and executes their verified bytes under an empty
+private package namespace. It imports neither task source nor cleaned host or
+model code. This lets the same root preflight validate external UT contracts
+through `evaluate.jobs.load_engineer_job`; the coordinator's default retained
+reader remains available to unchanged callers.
+
+An optional search reserve is frozen in the host binding. It reduces loop wall
+allowance, planner deadline and engineer review cutoff. If a complete next
+planner window no longer fits, the loop returns its settled snapshot for final
+selection. Pending work still requires same-ID reconciliation. Neither an
+expired deadline nor a source-only test establishes native settlement.
+
+The common lane remeasures the selected patch again in Director Validate.
+Thus an EVO schedule must reserve three native envelopes in all: two inside
+this command and one afterward. Command export, process termination/settlement,
+Report and final cleanup also need bounded time. A shared search horizon for
+GEAK and GEAK-EVO uses this larger reserve for both arms. The owner must bind
+the actual duration and absolute cutoff before either arm begins; these source
+options do not create or reset a clock.
+
 CPU tests exercise the real command/evaluator/export/Git path with synthetic
 search and owner receipts, and apply the owner patch to its exact source files
 to check argument and service wiring. SIGTERM checks interrupt actual engineer,
@@ -73,7 +99,7 @@ records, and return an error without another search step or a winner. These are
 source and CPU results; this entry has not been installed or qualified in a live
 run.
 
-Numeric support covers admitted native-v2 `task-report-v1` graph measurements
-and [generated raw paired reports](evaluation-port.md#generated-paired-results).
-Both require their existing admitted owner and actual producer evidence; the
+Numeric support covers admitted native-v2 `task-report-v1` graph measurements,
+[generated raw paired reports](evaluation-port.md#generated-paired-results), and
+external UT reports. All require their existing admitted owner and actual producer evidence; the
 adapter does not manufacture a task contract or native report.

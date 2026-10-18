@@ -15,7 +15,7 @@ from ._util import EvoError, canonical_json, require, sha256_hex
 from .archive.refs import read_ref
 from .archive.store import _read, _write
 from .evaluate.evaluator import ArenaEvaluator, ArenaEvaluationUnsettled
-from .host import HostServices, prepare_native_search
+from .host import HostServices, prepare_native_search, search_wall_seconds
 from .model_profile import ModelProfile
 from .planner.model import decode
 from .result import export_final_result, read_evaluation
@@ -117,6 +117,10 @@ def _configuration(reference, store, evaluator, budget):
           and all(type(value) in (int, float) and math.isfinite(value) and value > 0
                   and value == probe["native_envelope_seconds"] for value in final.values()),
           "final measurements require the existing native operation envelope")
+    reserve = search.get("search_reserve_seconds", 0)
+    search_wall_seconds(clock, reserve)
+    _need(reserve == 0 or reserve >= sum(final.values()),
+          "search reserve cannot cover the two final measurement envelopes")
     baseline = store.get_candidate(config["baseline_candidate_id"])
     _need(baseline["job_id"] == evaluator.contract_id and baseline["measurement_epoch_id"] == evaluator.epoch,
           "baseline belongs to another task or epoch")

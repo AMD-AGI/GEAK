@@ -1284,7 +1284,8 @@ class EvolutionLoop:
     # --- driver ---------------------------------------------------------------
 
     def run(self, planner, host_assignment, *, planning_reservation, planning_seconds,
-            advice_config, max_steps, advice_inputs=None, after_review=None, planner_decision_limit=None):
+            advice_config, max_steps, advice_inputs=None, after_review=None, planner_decision_limit=None,
+            stop_before_deadline=False):
         """Run up to max_steps planner decisions; the planner sees every settled result.
 
         host_assignment returns execute() arguments for engineer work, only
@@ -1301,6 +1302,8 @@ class EvolutionLoop:
         for step_index in range(max_steps):
             state = self.snapshot()["state"]
             if state["phase"] == "idle":
+                if stop_before_deadline and self.clock() + planning_seconds >= state["deadline"]:
+                    break  # Leave the settled snapshot available for final selection.
                 capacity = ({"total_limit": planner_decision_limit,
                              "steps_after_current": max_steps - step_index - 1}
                             if planner_decision_limit is not None else None)

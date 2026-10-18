@@ -158,6 +158,24 @@ class DispatchAdapterTests(unittest.TestCase):
         value = self.invoke()
         self.assertEqual(value["status"], "improved", value)
 
+    def test_search_cutoff_and_pair_fit_before_common_final_validation(self):
+        self.config["search"]["search_reserve_seconds"] = 1800
+        self.task["budget"]["deadline_epoch"] = time.time() + 2000
+        original_deadline = self.owner.budget.config["deadline_ns"]
+        value = self.invoke()
+        self.assertEqual(value["status"], "improved", value)
+        self.assertEqual(self.owner.budget.config["deadline_ns"], original_deadline)
+        self.assertEqual(len(self.f.launches), 2)
+
+    def test_search_cutoff_still_requires_pair_and_export_to_fit(self):
+        self.config["search"]["search_reserve_seconds"] = 1800
+        self.task["budget"]["deadline_epoch"] = time.time() + 1900
+        value = self.invoke()
+        self.assertEqual(value["status"], "error")
+        self.assertIn("final measurements and export margin", value["notes"])
+        self.owner.search.run.assert_not_called()
+        self.assertEqual(self.f.launches, [])
+
     def test_declared_absent_selected_file_can_already_be_absent(self):
         (self.owner.boundary.selected_root / "kernel.py").unlink()
         source = self.f.store.capture_source(self.owner.boundary.selected_root, ["kernel.py"])
