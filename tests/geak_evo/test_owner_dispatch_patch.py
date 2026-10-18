@@ -78,6 +78,12 @@ class OwnerDispatchPatchTests(unittest.TestCase):
         return manifest, path, task, contract
 
     def test_existing_owner_entry_reaches_dispatch_main_with_same_final_services(self):
+        self._owner_entry_dispatch()
+
+    def test_checkpoint_owner_uses_cleaned_registration_and_identical_host_options(self):
+        self._owner_entry_dispatch(["H0.5", "H1", "H2", "H4", "H6", "H8", "END"])
+
+    def _owner_entry_dispatch(self, checkpoint_horizons=()):
         root = self.root
         entry, adapter = self.load("host_driver"), self.load("native_host_adapter")
         stable = root / "native"
@@ -112,7 +118,8 @@ class OwnerDispatchPatchTests(unittest.TestCase):
             "campaign_id": "campaign", "seed_candidate_id": "seed", "campaign_root": str(campaign),
             "templates": {key: template_refs[key] for key in ("config", "admission", "entry", "collection")},
             "clock_ref": template_refs["clock"], "shared_budget": budget_config,
-            "search_reserve_seconds": 4800, "evaluation_limit": 7}}))
+            "search_reserve_seconds": 4800, "evaluation_limit": 7,
+            **({"checkpoint_horizons": checkpoint_horizons} if checkpoint_horizons else {})}}))
         binding.write_text(json.dumps({"max_steps": 1, "owner_config_ref": refs.file_ref(owner_config)}))
         binding_ref = refs.file_ref(binding)
         make_budget = mock.Mock(return_value=budget)
@@ -126,6 +133,7 @@ class OwnerDispatchPatchTests(unittest.TestCase):
             return coordinator.host(args, template_refs, {"config": config, "entry": {"source_paths": ["kernel.py"]}},
                                     {}, budget_config, {}, object())
         coordinator.main = owner_main
+        configure_frontier = mock.Mock()
         modules = {"pilot_retained_coordinator": coordinator, "pilot_cleaned_adapter": adapter,
                    "pilot_dispatch_retained_driver": retained}
         with mock.patch.object(entry, "checked"), mock.patch.object(entry, "authenticated"), \
@@ -133,7 +141,7 @@ class OwnerDispatchPatchTests(unittest.TestCase):
              mock.patch.object(entry, "installation", return_value={"coordinator_ref": {}, "adapter_ref": {}, "retained_driver_ref": {}}), \
              mock.patch.object(entry, "load", side_effect=lambda name, ref: modules[name]), \
              mock.patch.object(entry, "owner_services", return_value=(cleaned, object(), object(), object(),
-                NS(native_episode_material=lambda *args: None), NS(configure_store_frontier=mock.Mock()), {})), \
+                NS(native_episode_material=lambda *args: None), NS(configure_store_frontier=configure_frontier), {})), \
              mock.patch.object(adapter, "evaluator_for_driver", return_value=evaluator), \
              mock.patch.object(adapter.os, "geteuid", return_value=1000):
             code = entry.owner_main(["--pilot-manifest", "manifest", "sha", "--dispatch-owner", binding_ref["path"],
@@ -153,6 +161,13 @@ class OwnerDispatchPatchTests(unittest.TestCase):
         self.assertEqual(cleaned.host.prepare_native_search.call_args.kwargs["search_reserve_seconds"], 4800)
         self.assertEqual(cleaned.host.prepare_native_search.call_args.kwargs["evaluation_limit"], 7)
         self.assertEqual(cleaned.host.prepare_native_search.call_args.kwargs["shared_budget"]["max_calls"], 10)
+        if checkpoint_horizons:
+            configure_frontier.assert_not_called()
+            self.assertEqual(cleaned.host.prepare_native_search.call_args.kwargs["checkpoint_horizons"],
+                             checkpoint_horizons)
+        else:
+            configure_frontier.assert_called_once()
+            self.assertNotIn("checkpoint_horizons", cleaned.host.prepare_native_search.call_args.kwargs)
         contract_loader.assert_called_once()
 
     def test_preflight_external_contract_preserves_pins_without_importing_host_or_task(self):

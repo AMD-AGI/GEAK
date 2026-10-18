@@ -119,7 +119,32 @@
      """Replace only coordinator.host after its existing inspect and UID drop.
 
      Services are the same authenticated modules used by the original host.
-@@ -105,14 +106,36 @@
+@@ -88,11 +89,20 @@
+     store = cleaned.store.ResearchStore(root / "store",
+         allowed_epochs=[(probe["job_id"], probe["measurement_epoch_id"])],
+         source_paths={probe["job_id"]: docs["entry"]["source_paths"]})
++    binding = owner = None
++    checkpoint_horizons = ()
++    if dispatch_options is not None:
++        binding = json.loads(cleaned.refs.read_ref(dispatch_options["owner_binding_ref"]))
++        owner = json.loads(cleaned.refs.read_ref(binding["owner_config_ref"]))
++        checkpoint_horizons = owner["search"].get("checkpoint_horizons", ())
+     need(args.frontier_settings is not None, "pilot must preserve its registered frontier")
+-    configure_frontier(store, campaign_id=args.campaign_id, clock_ref=refs["clock"],
+-        clock_raw=coordinator.checked(refs["clock"]), expected_job_id=probe["job_id"],
+-        expected_epoch_id=probe["measurement_epoch_id"], settings_ref=coordinator.reference(args.frontier_settings),
+-        read_ref=lambda ref: coordinator.checked(ref, trusted=False))
++    # Explicit admitted checkpoints use the cleaned host's single registration
++    # before its first journal write; legacy END settings must not pre-create it.
++    if not checkpoint_horizons:
++        configure_frontier(store, campaign_id=args.campaign_id, clock_ref=refs["clock"],
++            clock_raw=coordinator.checked(refs["clock"]), expected_job_id=probe["job_id"],
++            expected_epoch_id=probe["measurement_epoch_id"], settings_ref=coordinator.reference(args.frontier_settings),
++            read_ref=lambda ref: coordinator.checked(ref, trusted=False))
+     source = store.capture_source(args.seed_root, docs["entry"]["source_paths"])
+     need(source == args.seed_source_id, "original admitted seed changed")
+     seed = store.candidate(probe["job_id"], probe["measurement_epoch_id"], source)
+@@ -105,14 +115,35 @@
      services = cleaned.host.HostServices(model_runtime, workspace, harvest, episode_material,
          seal_channel(coordinator, channel), cleaned.refs.file_ref(stable / "workspace_helpers/collect_investigation.py"),
          cleaned.refs.file_ref(stable / "host_driver.py"))
@@ -127,8 +152,6 @@
 +    search_evaluation_limit = args.evaluation_limit
 +    if dispatch_options is not None:
 +        need(callable(final_services), "existing final evaluator and budget services required")
-+        binding = json.loads(cleaned.refs.read_ref(dispatch_options["owner_binding_ref"]))
-+        owner = json.loads(cleaned.refs.read_ref(binding["owner_config_ref"]))
 +        current = {"campaign_id": args.campaign_id, "seed_candidate_id": seed, "campaign_root": str(root),
 +            "templates": {key: refs[key] for key in ("config", "admission", "entry", "collection")},
 +            "clock_ref": refs["clock"], "shared_budget": budget}
@@ -149,7 +172,8 @@
          common_refs=args.common_refs, common_tool_addendum=args.common_tool_addendum,
 -        review_objective=args.review_objective, prompt_dir=prompt_dir)
 +        review_objective=args.review_objective, prompt_dir=prompt_dir,
-+        search_reserve_seconds=search_reserve_seconds)
++        search_reserve_seconds=search_reserve_seconds,
++        **({"checkpoint_horizons": checkpoint_horizons} if checkpoint_horizons else {}))
 +    if dispatch_options is not None:
 +        evaluator, native_budget = final_services(store)
 +        return cleaned.dispatch.main(["--task", dispatch_options["task"], "--out", dispatch_options["out"]],
