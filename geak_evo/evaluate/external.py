@@ -194,7 +194,7 @@ def read_external_report(request, artifacts):
         names = [prefix+name for name in ("RECEIPT.json", "ut_result.json", "_runs_v2.jsonl")]
         receipt, report = [_decode(artifacts[name]) for name in names[:2]]
         rows = [_decode(line) for line in artifacts[names[2]].splitlines() if line.strip()]
-        need(receipt["index"] == index and receipt["returncode"] == 0
+        need(receipt["index"] == index and receipt["returncode"] == 0 and not receipt.get("artifact_errors")
              and receipt["sources_unchanged"] is True, "external process failed or changed source")
         for name in ("ut_result.json", "_runs_v2.jsonl"):
             need(receipt[name+"_sha256"] == sha256_hex(artifacts[prefix+name]), "external result hash differs")

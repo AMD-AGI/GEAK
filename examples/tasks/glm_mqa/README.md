@@ -78,10 +78,19 @@ owned operation. Each process uses the existing five legs, discards the first
 leg, then takes the minimum of the remaining legs; warmup=5, repeats=20,
 inner=1. Baseline/candidate/control timing and per-case null floors are retained.
 
-The native gain gate needs at least **two** distinct valid processes. The
-replay policy requires **three**, and preserves all three results. Setting
+The native gate needs at least **two** distinct valid processes before it can
+assess repeatability. This replay policy requires **three** and keeps all three
+results. The final gain must exceed each process's measured null floor in
+**all three** processes. A case vetoes the gain if its regression exceeds its
+null floor in **all three** processes. Setting
 `GLM_UT_REQUIRE_REPRODUCIBLE_GAIN=0` avoids treating the first missing history as
 a correctness failure; it does not remove the final native gain gate.
+
+The runner forwards an explicit list of runtime, device, cache and compiler
+environment settings and records exactly those values in `START.json`. Unset
+settings remain unset; credentials and unrelated workflow settings are omitted.
+UT reports are retained through regular-file reads that reject symlinks. Each
+process receipt includes hashes for its reports, history, stdout and stderr.
 
 The `external_primary` objective is the median of the three native
 `prefill_extend` folds. Each process fold is
