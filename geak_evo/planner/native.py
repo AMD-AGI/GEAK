@@ -578,6 +578,21 @@ def _program_lease_prompt_text(ref):
               'to consume the existing commitment. The host preserves your question and donors.\n')
 
 
+def _supplied_skill_prompt(index):
+    """Point to frozen supplied skills without copying their bodies into the prompt."""
+    skills = [row for row in index
+              if row['original_ref']['path'].endswith('/SKILL.md')]
+    if not skills:
+        return ''
+    lines = ['\nBefore choosing an investigation, read these supplied skills:']
+    for row in skills:
+        original, readable = row['original_ref'], row['readable_ref']
+        lines.append(f"- {readable['path']} (sha256: {readable['sha256']}; original: {original['path']})")
+    lines.append('Resolve relative references against each skill\'s original directory, '
+                 'then use READ_INDEX.json original_ref paths to find their readable_ref copies.\n')
+    return '\n'.join(lines)
+
+
 def _program_lease_accounting(context, intent):
     return program_lease_accounting(context, intent)
 
@@ -1073,7 +1088,8 @@ class NativePlanner:
         # __call__, transport, process launch, continuation or recovery is called.
         builder = object.__new__(CLIPlanner)
         builder.store = self.store
-        builder.read_only = list(self.read_only(context) if callable(self.read_only) else self.read_only)
+        supplied_refs = list(self.read_only(context) if callable(self.read_only) else self.read_only)
+        builder.read_only = list(supplied_refs)
         builder.read_only.extend(archive_files(self.store, context))
         measurement = copy.deepcopy(self.current_measurement)
         if measurement is not None:
@@ -1145,6 +1161,14 @@ class NativePlanner:
         builder.evidence_refs = self.evidence_refs
         builder.search_policy, builder.campaign_root = self.search_policy, self.campaign_root
         brief, references = builder._freeze(context, call)
+        skill_roots = {Path(ref['path']).parent for ref in supplied_refs
+                       if Path(ref['path']).name == 'SKILL.md'}
+        aliased_paths = {ref['path'] for ref in references}
+        for ref in supplied_refs:
+            # Preserve only supplied skill assets' names, never archive/object aliases.
+            if ref['path'] not in aliased_paths and any(root in Path(ref['path']).parents for root in skill_roots):
+                references.append(ref)
+                aliased_paths.add(ref['path'])
         _put(call / 'trial-history.json', history)
         history_ref = file_ref(call / 'trial-history.json')
         references.append(history_ref)
@@ -1306,6 +1330,7 @@ class NativePlanner:
                           + '\n' + RECOMMENDATION_SCOPE + '\n'
                           + '\nRead corpus index: ' + str(public / 'READ_INDEX.json')
                           + '\nBefore choosing an investigation, read the supplied task commandment, codebase_context and idea contract through their frozen READ_INDEX copies.\n'
+                          + _supplied_skill_prompt(index)
                           + '\n' + DECISION_RETRIEVAL_SCOPE
                           + '\nFrozen campaign decision navigation:\n' + brief + '\n')
                 request = {'schema': 'geak-standalone-model-request-v1', 'invocation_id': operation_id,

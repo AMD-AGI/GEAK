@@ -880,7 +880,7 @@ Read any knowledge files it points you to under ${dir}/knowledge/.
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 
 ## Inputs
-${cfg(inputs)}
+${cfg({ ...(typeof TASK === 'string' && TASK ? { TASK } : {}), ...inputs })}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
   return base + expertSkillsBlock(role)
@@ -1758,6 +1758,7 @@ Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patc
 
 ## Inputs
 ${cfg({
+        ...(TASK ? { TASK } : {}),
         SPECIALTY: d.specialty,
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: (d.expected_speedup ? `Investigate the proposed ${d.expected_speedup}x speedup. ` : '') +

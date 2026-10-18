@@ -173,6 +173,7 @@ Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patc
 
 ## Inputs
 ${cfg({
+        ...(TASK ? { TASK } : {}),
         SPECIALTY: d.specialty,
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: (d.expected_speedup ? `Investigate the proposed ${d.expected_speedup}x speedup. ` : '') +
