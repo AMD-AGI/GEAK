@@ -115,8 +115,11 @@ Return the operation's exact IDs as external_evaluation:{candidate_id,evaluation
 (under best for an integrated candidate). The workflow's trusted owner reader
 checks source, settlement and raw results. A scalar or OBSERVATIONS.json relayed
 by a model is not accepted as measurement. Report missing/failed operations and
-preserve artifacts. The native primary and gain gate govern eligibility; existing
-search thresholds still apply. Legacy geomean fields may be omitted.
+preserve artifacts. GEAK development ranks the checked unweighted geomean of all
+per-case speedups; its existing improvement thresholds and stopping rules apply.
+Final reports and patch export use the native primary and reproducible-gain gate.
+Keep both metrics separate. The reader supplies development_geomean_speedup;
+legacy geomean fields may be omitted.
 ` : '';
 const externalFields = (o) => EXTERNAL_OBJECTIVE && o ? Object.fromEntries(
   ['objective', 'primary_regime', 'primary_speedup', 'native_reproducible_gain',

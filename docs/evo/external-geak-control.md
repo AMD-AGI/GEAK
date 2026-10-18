@@ -45,10 +45,17 @@ director validation, return the existing IDs as:
 An integrator places this under `best`. A warm-start check uses the same fixed
 remapped-or-original patch selection as adoption. The host reader supplies the primary score, both
 phase folds, descriptive case pairs, native gain/regression verdicts and retained
-receipt reference. Missing or invalid evidence has no scalar fallback. A valid
-ORIGINAL or no-gain evaluation remains a measured observation; adoption and
-export require the unchanged native gain gate and the existing GEAK improvement
-threshold. The final score is independently reread, and an absent final evaluation
+receipt reference. It also derives `development_geomean_speedup`, the unweighted
+geomean of all checked per-case speedups. GEAK uses this development score for
+ranking, adoption and its existing improvement and stopping thresholds. The
+prospective GLM comparison supplies no separate caller workload specification.
+GEAK-EVO retains its own declared development ranking; this is a common final
+endpoint, not a claim that the two optimizers rank candidates identically.
+
+Missing or invalid evidence has no scalar fallback. A valid ORIGINAL or no-gain
+evaluation remains a measured observation. Final reporting uses the native
+primary; patch export also requires the unchanged native gain gate. The final
+score is independently reread, and an absent final evaluation
 does not fall back to the planner's cumulative claim. Final no-gain observations
 retain their measured score with `outcome: "no_improvement"` and no promoted patch.
 
