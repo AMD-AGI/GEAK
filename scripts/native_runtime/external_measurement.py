@@ -230,6 +230,10 @@ def capture_selection(services, workspace, *, selected=None, transition=None, cl
         if kind in ("initial", "resume_unknown"):
             need(sequence == 1 and previous is None and transition["round"] == 0,
                  "initial canonical transition differs")
+        elif previous is None:
+            # Keep later source bytes after a failed first observation. The
+            # missing anchor remains an explicit gap for the cutoff reader.
+            need(sequence > 1, "noninitial canonical capture requires an attempted predecessor")
         else:
             need(type(previous) is dict and set(previous) == {"evidence_id", "artifact"}
                  and previous["artifact"] == "canonical-selection.json", "previous canonical capture required")

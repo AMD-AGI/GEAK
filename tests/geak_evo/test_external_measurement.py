@@ -327,6 +327,16 @@ class MeasurementTests(unittest.TestCase):
             resume_ref, resume = capture("resume_unknown", 1)
             self.assertEqual(resume["transition"]["kind"], "resume_unknown")
             self.assertNotEqual(resume_ref, initial_ref)
+            # Losing the initial capture must not prevent every later source
+            # from being retained. This segment has no qualified root.
+            unanchored_ref, unanchored = capture("before_commit", 2, round=1)
+            self.assertIsNone(unanchored["transition"]["previous_capture_ref"])
+            self.assertEqual(unanchored["transition"]["sequence"], 2)
+            _, completed = capture("after_commit", 3, unanchored_ref, round=1)
+            self.assertEqual(completed["source_id"], unanchored["source_id"])
+            self.assertEqual(completed["transition"]["previous_capture_ref"], unanchored_ref)
+            with self.assertRaisesRegex(ValueError, "attempted predecessor"):
+                capture("before_commit", 1, round=1)
 
 
 if __name__ == "__main__":
