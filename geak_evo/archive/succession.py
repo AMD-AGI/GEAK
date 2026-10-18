@@ -286,6 +286,8 @@ def selected_parent_material(store, snapshot, proposal, immigrants=None):
             "instruction": "Read actual code, implemented review, raw methods and failures. "
                 "Inspect group_origin's newest imported origin_claim_context before relying on an inherited "
                 "claim. Older origin publications are historical; their quantities are not local facts. "
+                "Check prerequisites and dataflow interfaces across the whole selected combination; "
+                "record conflicts, unresolved coverage and the smallest useful repair or interaction test. "
                 "Reconcile, rederive, modify or reject inherited parts through the native edit/test/profile/repair loop. In the final "
                 "report identify which contribution survives, transforms, is rejected (with reason), or remains "
                 "unknown in each selected/faithful/unfinished/terminal source. Delivery is not contribution survival."})
