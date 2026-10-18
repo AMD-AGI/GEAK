@@ -110,7 +110,8 @@ def _configuration(reference, store, evaluator, budget):
                  and protocol.get("report_format") == "task-report-v1" and protocol.get("private_cache_scope") == "phase")
     generated = (evaluator.contract["schema"] == "geak-arena-generated-task-v1"
                  and evaluator.contract["report_contract"].get("protocol") == "geak-generated-task-paired-report-v1")
-    _need(published or generated, "command requires a supported admitted raw timing report")
+    external = evaluator.contract["schema"] == "geak-arena-external-task-v1"
+    _need(published or generated or external, "command requires a supported admitted raw timing report")
     final = config["final_measurements"]
     _need(set(final) == {"baseline_seconds", "selected_seconds"}
           and all(type(value) in (int, float) and math.isfinite(value) and value > 0
@@ -127,8 +128,13 @@ def _configuration(reference, store, evaluator, budget):
               (_read(store.root / "objects", row["blob_id"])[0], row["executable"])
               == _read(evaluator.artifact_root, row["path"]), "baseline differs from admitted task source")
     objective = config["objective"]
-    _need(type(objective) is dict and objective.get("kind") in ("geomean", "time_weighted"),
+    _need(type(objective) is dict and objective.get("kind") in ("geomean", "time_weighted", "external_primary"),
           "invalid common measurement objective")
+    if external:
+        from .evaluate.external import validate_objective
+        validate_objective(evaluator.contract, objective)
+    else:
+        _need(objective["kind"] != "external_primary", "external objective requires an external UT contract")
     weights = objective.get("weights")
     _need((weights is None or (type(weights) is dict and set(weights) == set(evaluator.contract["benchmark_case_ids"])
           and all(type(value) in (int, float) and math.isfinite(value) and value > 0 for value in weights.values())))

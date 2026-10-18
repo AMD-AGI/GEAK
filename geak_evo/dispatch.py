@@ -226,6 +226,13 @@ def run_dispatch_task(task_path, out_path, *, owner_binding_ref, store, services
             primary = (math.fsum(weights.values()) / math.fsum(weights[name] / ratios[name] for name in mapping)
                        if objective["kind"] == "time_weighted" else
                        math.exp(math.fsum(math.log(ratio) for ratio in ratios.values()) / len(ratios)))
+            if objective["kind"] == "external_primary":
+                # The checked UT reader owns this method's phase reduction and
+                # repeatability gate; per-case medians are only descriptive.
+                from .evaluate.external import validate_objective
+                validate_objective(evaluator.contract, objective)
+                _need(native.get("native_reproducible_gain") is True, "external native gain gate did not pass")
+                primary = native["timing_context"]["candidate"]["diagnostics"]["primary_speedup"]
             _need(_positive(primary) and math.isclose(primary, native["final_speedup"], rel_tol=1e-12),
                   "native and common-lane metrics disagree")
             if primary > task["incumbent_speedup"] * (1 + task["min_improvement"]):

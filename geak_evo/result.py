@@ -173,6 +173,29 @@ def _generated_timing(request, host, artifacts, assessed):
                           "observer/evaluate/protocol-binding.json")}}
 
 
+def _external_timing(request, host, artifacts, assessed):
+    from .evaluate.external import read_external_report
+
+    prefix = "observer/"
+    report = read_external_report(request, {name[len(prefix):]: raw for name, raw in artifacts.items()
+                                           if name.startswith(prefix)})
+    groups = copy.deepcopy(report["observations"])
+    for group in groups.values():
+        group["evidence"] = [prefix+name for name in group["evidence"]]
+    _need(groups == host["observations"], "external UT and owner observations differ")
+    _need(groups["benchmark"]["times_ms"] == assessed["per_case_times_ms"], "external UT times differ")
+    closure = {name: digest for name, digest in request["contract"]["artifacts"].items()
+               if name not in request["contract"]["source_paths"]}
+    return {"timing_basis": "external_whole_call_ut", "request_id": request["operation_id"],
+            "baseline_closure_sha256": sha256(canonical(closure)),
+            "per_case": request["contract"]["timing_policy"],
+            "runtime": report["runtime"], "runtime_fingerprint": report["runtime_fingerprint"],
+            "paired_cases": report["paired_cases"],
+            "diagnostics": {key: report[key] for key in ("method", "primary_regime", "primary_speedup",
+                "native_reproducible_gain", "native_reproducible_regression", "phase_speedups", "per_process")},
+            "evidence": {prefix+name: host["artifacts_sha256"][prefix+name] for name in report["evidence"]}}
+
+
 def read_evaluation(evaluator, candidate_id, *, evaluation_id):
     """Recheck one owner collection under its lock without changing evaluator pins.
 
@@ -210,8 +233,8 @@ def read_evaluation(evaluator, candidate_id, *, evaluation_id):
             _need(result["settled"] == settled and all(result[key] == value for key, value in assessed.items()),
                   "retained evaluation assessment differs")
             if settled and assessed["native_suite_pass_observed"]:
-                reader = (_generated_timing if request["contract"]["schema"] == "geak-arena-generated-task-v1"
-                          else _published_timing)
+                reader = {"geak-arena-generated-task-v1": _generated_timing,
+                          "geak-arena-external-task-v1": _external_timing}.get(request["contract"]["schema"], _published_timing)
                 timing = reader(request, host, artifacts, assessed)
         return {"receipt": result, "request": request,
                 "timing_context": timing,
@@ -322,8 +345,14 @@ def export_final_result(store, snapshot, *, evaluator, selection_options, baseli
     _need(isinstance(evaluator, ArenaEvaluator) and evaluator.store is store,
           "the selected store's existing Arena evaluator is required")
     objective = {"kind": "geomean"} if objective is None else copy.deepcopy(objective)
-    _need(type(objective) is dict and objective.get("kind") in ("geomean", "time_weighted"),
+    _need(type(objective) is dict and objective.get("kind") in ("geomean", "time_weighted", "external_primary"),
           "unsupported lane objective")
+    external = evaluator.contract["schema"] == "geak-arena-external-task-v1"
+    if external:
+        from .evaluate.external import validate_objective
+        validate_objective(evaluator.contract, objective)
+    else:
+        _need(objective["kind"] != "external_primary", "external objective requires an external UT contract")
     kind, weights = objective["kind"], objective.get("weights")
     cases = evaluator.contract["benchmark_case_ids"]
     _need(weights is None or (type(weights) is dict and set(weights) == set(cases)
@@ -388,7 +417,7 @@ def export_final_result(store, snapshot, *, evaluator, selection_options, baseli
                     "per_case": copy.deepcopy(original_pair),
                     "geomean_speedup": math.exp(math.fsum(math.log(original_pair[case]["speedup"])
                                                           for case in cases) / len(cases))}
-                result["scope"] = ("Provisional generated-harness comparison against the external baseline closure. "
+                result["scope"] = ("Provisional whole-call harness comparison against the external baseline closure. "
                                    "baseline_source_id names the admitted editable source, not that external callable. "
                                    "Final Director and workload validation remain required.")
             ratios = {case: before[case] / after[case] for case in cases}
@@ -398,9 +427,21 @@ def export_final_result(store, snapshot, *, evaluator, selection_options, baseli
             primary = weighted if kind == "time_weighted" else geometric
             _need(all(math.isfinite(value) and value > 0 for value in [geometric, primary, *ratios.values()]),
                   "nonfinite measured ratio")
+            if external:
+                diagnostics = records["candidate"]["timing_context"]["diagnostics"]
+                primary = diagnostics["primary_speedup"]
+                result["phase_speedups"] = diagnostics["phase_speedups"]
+                result["native_reproducible_gain"] = diagnostics["native_reproducible_gain"]
+                result["original_paired_reference"]["phase_speedups"] = records["baseline"]["timing_context"]["diagnostics"]["phase_speedups"]
+                result["original_paired_reference"].pop("geomean_speedup")
+                # A cross-phase fold would change this UT's objective. Retain
+                # every case but do not publish a blended headline.
+                geometric = weighted = None
             measured = measured_outcome(outcome, primary)
+            if external and not result["native_reproducible_gain"]:
+                measured = {"outcome": "no_improvement", "detail": "external_native_gain_gate_not_met"}
             result.update(outcome=measured["outcome"], detail=measured["detail"], final_geomean=geometric,
-                          final_weighted=weighted, final_arithmetic=math.fsum(ratios.values()) / len(cases),
+                          final_weighted=weighted, final_arithmetic=None if external else math.fsum(ratios.values()) / len(cases),
                           final_speedup=primary, runtime=runtime, baseline_candidate_id=baseline_candidate_id,
                           timing_basis=records["candidate"]["timing_context"]["timing_basis"],
                           timing_context={role: record["timing_context"] for role, record in records.items()},

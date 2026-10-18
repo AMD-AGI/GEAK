@@ -1,5 +1,13 @@
 # Evaluation port
 
+External whole-call UTs can also use the existing Arena request/settlement
+boundary. The first supported external method is GLM `weight_lib` v2: three
+fresh processes, its unchanged minimum-two-process gain gate, and separate
+phase folds. See the [ORIGINAL-only MQA task](../../examples/tasks/glm_mqa/README.md).
+This route adds no device manager and does not acquire graph or serving
+qualification. `external_primary` exports the method's native primary-phase
+score; it never substitutes a cross-phase geomean.
+
 The engine retains both existing evaluation contracts. `ArenaEvaluator` records
 provisional native task observations; `NativeEvaluator` retains the separate
 workload-native correctness, repeated timing and eligibility rules. A result

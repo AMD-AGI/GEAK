@@ -133,6 +133,9 @@ def _ids(value):
 
 def validate_arena_job(contract, artifact_root=None):
     """Return detached validated JSON; artifact_root additionally checks exact bytes."""
+    if type(contract) is dict and contract.get("schema") == "geak-arena-external-task-v1":
+        from .external import validate_external_task
+        return validate_external_task(contract, artifact_root)
     if type(contract) is dict and contract.get("schema") == "geak-arena-generated-task-v1":
         from .generated_task import validate_generated_task
         return validate_generated_task(contract, artifact_root)
@@ -298,7 +301,7 @@ def load_engineer_job(path, artifact_root=None, expected_digest=None):
     value = _decode(_read(path))
     require(type(value) is dict, "job must be a JSON object", ValueError)
     if "schema" in value:
-        require(value["schema"] in (SCHEMA, "geak-arena-native-operator-v2", "geak-arena-generated-task-v1"), "unsupported explicit task schema", ValueError)
+        require(value["schema"] in (SCHEMA, "geak-arena-native-operator-v2", "geak-arena-generated-task-v1", "geak-arena-external-task-v1"), "unsupported explicit task schema", ValueError)
         return load_arena_job(path, artifact_root, expected_digest)
     require(type(value.get("schema_version")) is int and value["schema_version"] == 1,
           "unsupported task schema", ValueError)
