@@ -152,7 +152,12 @@ class ResultBoundaryTests(unittest.TestCase):
     def test_varying_samples_match_the_published_fsum_producer_exactly(self):
         samples = [0.1, 0.2] * 50
         published_mean = math.fsum(samples) / len(samples)
-        naive_mean = sum(samples) / len(samples)
+        # Python 3.12's sum compensates float roundoff; this fixture needs the
+        # deliberately naive accumulation rejected by the published reader.
+        naive_total = 0.0
+        for sample in samples:
+            naive_total += sample
+        naive_mean = naive_total / len(samples)
         self.assertNotEqual(published_mean, naive_mean)
         def varying(report):
             for row in report["cases"]:

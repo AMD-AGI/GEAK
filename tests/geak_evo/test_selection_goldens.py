@@ -9,6 +9,11 @@ suites every 64-hex string is renamed by first appearance; for population the
 fields the port deliberately changed (created_utc, implementation_ref,
 metric_source_ref) are dropped.
 
+The extract-16 digest retains the Python 3.9 diagnostic for a deeply nested
+array. Python 3.12 can decode that depth, then rejects the same invalid root
+type. That fixture checks rejection below without fixing the JSON decoder's
+interpreter-dependent recursion limit.
+
 The byte tests run the frontier and population scenarios with the same fake
 clock on the original and on the port, in turn at the same path. Every frontier
 file (journal, receipts, seals, retained objects) must be byte-identical; every
@@ -152,7 +157,13 @@ class SelectionGoldenTest(unittest.TestCase):
         self.assertEqual(sorted(outputs), sorted(expected))
         for name in sorted(outputs):
             with self.subTest(name=name):
-                self.assertEqual(fx.golden_digest(outputs[name]), expected[name])
+                if (suite, name) == ("recommendation", "extract-16"):
+                    self.assertIn(outputs[name], [
+                        {"error": "ValueError", "message": "structured response nesting is too deep"},
+                        {"error": "ValueError", "message": "structured response must be an object or whole-response null"},
+                    ])
+                else:
+                    self.assertEqual(fx.golden_digest(outputs[name]), expected[name])
 
     def test_recommendation(self):
         self.check_suite("recommendation")
