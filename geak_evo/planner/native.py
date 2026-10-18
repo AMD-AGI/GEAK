@@ -9,6 +9,7 @@ import copy
 from dataclasses import replace
 import fcntl
 import hashlib
+from json import JSONDecodeError
 import math
 import os
 from pathlib import Path
@@ -531,6 +532,18 @@ def _rejection(stage, exc):
     return {'stage': stage, 'kind': type(exc).__name__, 'message': str(exc)[:800]}
 
 
+def _response_diagnostics(raw):
+    """Explain rejection; locations are characters in the decoder's JSON document."""
+    try:
+        _parse_recommendation_response(raw)
+    except ValueError as exc:
+        while exc is not None:
+            if isinstance(exc, JSONDecodeError):
+                return [_rejection('json_decode', exc)]
+            exc = exc.__cause__
+    return []
+
+
 def _bounded_engineer_reservation(available, campaign_end, planner_end, native_envelope_seconds, followup):
     return bounded_engineer_reservation(available, campaign_end, planner_end,
         native_envelope_seconds, engineer_limit=ENGINEER_RESERVATION, followup=followup)
@@ -725,7 +738,7 @@ def _rejected_planner_context(store, context):
             references.extend((failure_file, raw_file))
             summaries.append({'history_index': history_index, 'operation_id': row['operation_id'],
                               'costs': row['costs'], 'validation_error': row['failure'],
-                              'secondary_diagnostics': [],
+                              'secondary_diagnostics': _response_diagnostics(artifacts['response.txt']),
                               'raw_response_ref': {'evidence_id': ref['evidence_id'], 'artifact': 'response.txt'},
                               'scientific_outcome': None, 'failure_ref': ref,
                               'failure_file_ref': failure_file, 'raw_response_file_ref': raw_file})

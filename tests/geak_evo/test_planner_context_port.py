@@ -388,7 +388,9 @@ class PlannerContextPortTests(unittest.TestCase):
         }
         for old_path, new_name, exclusions in (
             ("evolution/src/geak_evo/cli_planner.py", "context", {"_need", "_private"} | retired_cli),
-            ("bridge/native_planner.py", "native", {"planner_model_identity", "planner_model_observation", "_program_lease_prompt_ref", "NativePlanner.__init__"}),
+            # Rejection context now derives JSON locations from retained bytes;
+            # test_planner_json_diagnostics covers this prospective difference.
+            ("bridge/native_planner.py", "native", {"planner_model_identity", "planner_model_observation", "_program_lease_prompt_ref", "NativePlanner.__init__", "_rejected_planner_context"}),
         ):
             def functions(tree):
                 result = {}
