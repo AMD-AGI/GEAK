@@ -133,6 +133,36 @@ class MeasurementTests(unittest.TestCase):
                 measurement.measure(services, task, "same-id")
         launch.assert_called_once()
 
+    def test_final_capture_does_not_dispatch_and_rejects_later_source_changes(self):
+        original = external_fixtures.ExternalTests()
+        original.setUp()
+        self.addCleanup(original.doCleanups)
+        services = NS(store=original.store, evaluator=original.evaluator, store_module=store_module,
+                      job_id=original.evaluator.contract_id, epoch=original.evaluator.epoch)
+        task = original.root / "workspace"
+        shutil.copytree(original.root / "task", task)
+        with mock.patch.object(original.evaluator, "launch", wraps=original.evaluator.launch) as launch:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                measurement.measure(services, task, "fresh-final", capture_only=True)
+            selected = json.loads(output.getvalue())
+            self.assertTrue(selected["capture_only"])
+            launch.assert_not_called()
+            self.assertFalse((original.evaluator.root / "fresh-final").exists())
+            path = task / "kernel_src/module.py"
+            before = path.read_bytes()
+            path.write_bytes(b"# post-selection edit\n")
+            with self.assertRaisesRegex(ValueError, "candidate selected before final validation"):
+                measurement.measure(services, task, "fresh-final", candidate_id=selected["candidate_id"])
+            launch.assert_not_called()
+            path.write_bytes(before)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(measurement.measure(services, task, "fresh-final",
+                                 candidate_id=selected["candidate_id"]), 0)
+            launch.assert_called_once()
+            with self.assertRaisesRegex(ValueError, "identity is already in use"):
+                measurement.measure(services, task, "fresh-final", capture_only=True)
+
 
 if __name__ == "__main__":
     unittest.main()

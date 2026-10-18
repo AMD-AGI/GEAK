@@ -109,10 +109,16 @@ if (EXTERNAL_OBJECTIVE && EXTERNAL_FINAL_COMMANDS
         || !externalArgv(A.external_final_result_command))) {
   throw new Error('final external measurements require both admitted command prefixes');
 }
+let frozenFinalEvaluation = null;
+const finalMeasurementArgv = () => [
+  ...(EXTERNAL_FINAL_COMMANDS ? A.external_final_measurement_command : A.external_measurement_command),
+  ...(frozenFinalEvaluation ? ['--candidate-id', frozenFinalEvaluation.candidate_id,
+    '--evaluation-id', frozenFinalEvaluation.evaluation_id] : []),
+];
 const externalMetricInstructions = (final = false) => EXTERNAL_OBJECTIVE ? `
 External measurement contract: ${JSON.stringify(EXTERNAL_OBJECTIVE)}.
-Use the existing admitted owner command ${JSON.stringify(final && EXTERNAL_FINAL_COMMANDS
-  ? A.external_final_measurement_command : A.external_measurement_command)}
+Use the existing admitted owner command ${JSON.stringify(final
+  ? finalMeasurementArgv() : A.external_measurement_command)}
 from the candidate workspace according to COMMANDMENT. One evaluation runs the
 unchanged full UT in three fresh processes with native min_runs=2. This combined
 operation replaces the role's separate correctness/benchmark repetitions and any
@@ -138,6 +144,22 @@ const externalFields = (o) => EXTERNAL_OBJECTIVE && o ? Object.fromEntries(
 const nativeGainEligible = (o) => !EXTERNAL_OBJECTIVE || !!(o && o.external_measurement_valid === true
   && o.native_reproducible_gain === true && o.native_reproducible_regression === false);
 
+async function captureFinalEvaluation(workspace) {
+  if (!EXTERNAL_OBJECTIVE) return;
+  const argv = EXTERNAL_FINAL_COMMANDS ? A.external_final_measurement_command : A.external_measurement_command;
+  const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+    '--workspace', workspace, '--capture-only'], timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+  if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+      || !result.group_cleared || result.stdio_held) throw new Error('final source capture failed');
+  const captured = JSON.parse(result.stdout);
+  if (captured.schema !== 'geak-native-measurement-identity-v1' || captured.capture_only !== true
+      || ![captured.candidate_id, captured.source_id].every(v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v))
+      || typeof captured.evaluation_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/.test(captured.evaluation_id)) {
+    throw new Error('invalid final source capture');
+  }
+  frozenFinalEvaluation = Object.freeze(captured);
+}
+
 async function checkedExternalMeasurement(value, workspace, patch = null, final = false) {
   if (!EXTERNAL_OBJECTIVE || !value) return value;
   const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
@@ -146,6 +168,8 @@ async function checkedExternalMeasurement(value, workspace, patch = null, final 
     development_geomean_speedup: null };
   const ref = value.external_evaluation;
   if (!ref || typeof ref.candidate_id !== 'string' || typeof ref.evaluation_id !== 'string') return invalid;
+  if (final && (!frozenFinalEvaluation || ref.candidate_id !== frozenFinalEvaluation.candidate_id
+      || ref.evaluation_id !== frozenFinalEvaluation.evaluation_id)) return invalid;
   try {
     const argv = final && EXTERNAL_FINAL_COMMANDS
       ? A.external_final_result_command : A.external_result_command;

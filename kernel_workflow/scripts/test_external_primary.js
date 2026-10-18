@@ -61,18 +61,21 @@ const make = (A) => new Function('A', 'HAS_WORKLOAD', 'runProcess', 'log', sourc
   await fullLane(true);
   await fullLane(false, true);
   await fullLane(false, false, true);
+  await fullLane(false, false, true, 'changed-candidate');
+  await fullLane(false, false, true, 'stale-evaluation');
   console.log('external primary: checked development geomean, native export score and gain, no legacy fallback, source/patch arguments passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 
-async function fullLane(finalNoGain, warm = false, staged = false) {
+async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal = null) {
   const body = fs.readFileSync(path.join(__dirname, '../kernel_lane.js'), 'utf8')
     .replace(/^export const meta/m, 'const meta');
-  const ids = id => ({candidate_id: id, evaluation_id: id});
+  const selectedCandidate = 'c'.repeat(64);
+  const ids = id => ({candidate_id: id === 'final' ? selectedCandidate : id, evaluation_id: id});
   // [native primary, native gain, development geomean]
   const records = {original: [1, false, 1], a: [1.4, true, 1.2], b: [1.6, true, 1.1],
     c: [9, false, 1.5], integrated: [1.5, true, 1.3], final: [1.55, !finalNoGain, 1.45],
     warm: [1.4, true, 1.2]};
-  let cumulative, commits = 0;
+  let cumulative, commits = 0, captured = false, finalReads = 0;
   const g = {
     args: {kernel_path: '/original', workflow_dir: '/workflow', budget: 3,
       agent_timeout_ms: 0, agent_retries: 1, objective,
@@ -90,7 +93,16 @@ async function fullLane(finalNoGain, warm = false, staged = false) {
     })),
     runProcess: async opts => {
       if (warm && opts.cmd === '/usr/bin/test') return {status: 'completed', code: 1, group_cleared: true};
-      const id = opts.args[1], [score, gain, dev] = records[id];
+      if (opts.args.includes('--capture-only')) {
+        assert.equal(opts.cmd, staged ? '/owner/final-evaluate' : '/owner/evaluate');
+        assert.deepEqual(opts.args, ['--workspace', '/canonical', '--capture-only']);
+        captured = true;
+        return {status: 'completed', code: 0, group_cleared: true, stdout: JSON.stringify({
+          schema: 'geak-native-measurement-identity-v1', capture_only: true,
+          candidate_id: selectedCandidate, source_id: 'd'.repeat(64), evaluation_id: 'final'})};
+      }
+      const id = opts.args[3], [score, gain, dev] = records[id];
+      if (id === 'final') finalReads++;
       assert.equal(opts.cmd, staged && id === 'final' ? '/owner/final-read' : '/owner/read');
       return {status: 'completed', code: 0, group_cleared: true, stdout: JSON.stringify({
         ...native, external_evaluation: ids(id), primary_speedup: score,
@@ -102,7 +114,8 @@ async function fullLane(finalNoGain, warm = false, staged = false) {
     agent: async (prompt, options) => {
       const label = options.label;
       if (staged && label === 'director:validate') {
-        assert.ok(prompt.includes('["/owner/final-evaluate"]'));
+        assert.ok(prompt.includes(JSON.stringify(['/owner/final-evaluate', '--candidate-id',
+          selectedCandidate, '--evaluation-id', 'final'])));
         assert.ok(!prompt.includes('["/owner/evaluate"]'));
       } else if (staged) {
         assert.ok(!prompt.includes('["/owner/final-evaluate"]'));
@@ -131,11 +144,14 @@ async function fullLane(finalNoGain, warm = false, staged = false) {
       if (label.startsWith('tech_lead:memory')) return {insights: [], ledger: []};
       if (label.startsWith('storage:') || label.startsWith('kb:')) return {};
       if (label === 'tech_lead:report') {
+        assert.equal(captured, true, 'source is fixed before Report can edit it');
         cumulative = Number(prompt.split('\n').find(x => x.startsWith('- CUMULATIVE_SPEEDUP: ')).split(': ')[1]);
         return {final_speedup_geomean: 999, final_patch: '/final.diff', report_path: '/report'};
       }
       if (label === 'director:validate') return {validation_status: 'accepted',
-        director_verified_speedup_geomean: 999, external_evaluation: ids('final')};
+        director_verified_speedup_geomean: 999, external_evaluation: invalidFinal === 'changed-candidate'
+          ? {candidate_id: 'e'.repeat(64), evaluation_id: 'final'} : invalidFinal === 'stale-evaluation'
+          ? {candidate_id: selectedCandidate, evaluation_id: 'c'} : ids('final')};
       throw new Error('unhandled agent ' + label);
     }
   };
@@ -144,6 +160,15 @@ async function fullLane(finalNoGain, warm = false, staged = false) {
   // integrated (1.3) does not beat it; native 9x/1.6x never enter development ranking.
   assert.equal(cumulative, 1.5);
   assert.equal(commits, 1);
+  assert.equal(value.final_selection.candidate_id, selectedCandidate);
+  assert.equal(value.final_selection.evaluation_id, 'final');
+  if (invalidFinal) {
+    assert.equal(finalReads, 0, 'reject a changed or stale identity before reading its score');
+    assert.equal(value.final_speedup, null);
+    assert.equal(value.outcome, 'invalid_measurement');
+    assert.equal(value.final_patch, '');
+    return;
+  }
   assert.equal(value.final_speedup, 1.55); // native primary of the fresh director result, never 999 or 1.45.
   assert.equal(value.final_geomean, null);
   assert.equal(value.final_arithmetic, null);

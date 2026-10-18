@@ -35,6 +35,15 @@ candidate using that ID is refused. The script preserves the initial ID output
 if evaluation raises or is interrupted and performs no automatic retry or
 cleanup operation.
 
+Before Report, the common lane calls `measure --capture-only --workspace PATH`.
+This saves the selected source in the same store and returns one identity record
+with `capture_only: true` and a fresh planned evaluation ID. It makes no native
+call. Director receives that fixed candidate and evaluation ID; the measurement
+command rejects later workspace edits before dispatch. The final reader also
+rejects a different candidate or a search-phase evaluation ID. The returned
+`final_selection` keeps the captured identity with the result. No new archive
+or clock is created.
+
 The common lane appends the reader's existing arguments:
 
 ```text
@@ -85,11 +94,13 @@ Use separate admitted command prefixes for search and Director validation:
 }
 ```
 
-Both final prefixes must be supplied together. Only `director:validate` receives
-the final measurement prefix, and its result is checked with the final reader.
-All other native measurements use the search prefix. The two admissions use the
+Both final prefixes must be supplied together. The workflow captures the selected
+source through the final prefix before Report; only `director:validate` receives
+it for native measurement, and its result is checked with the final reader.
+All other GEAK native measurements use the search prefix. The two admissions use the
 same task, source store, measurement epoch and original clock; their immutable
-phase deadlines differ. The owner must install both before launch. Paths above
+phase deadlines and evaluation directories differ. The owner must install both
+before launch and preserve final call capacity. Paths above
 are examples, not installed commands.
 
 GEAK-EVO's command also performs its own baseline/selected final pair. Keep that

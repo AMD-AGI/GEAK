@@ -2,6 +2,8 @@
 // PHASE: Final report (TechLead)
 // ===========================================================================
 if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+await captureFinalEvaluation(CANONICAL);
+if (EXTERNAL_OBJECTIVE) history.final_selection = frozenFinalEvaluation;
 phase('Report');
 const report = await agentT(
   roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.', {

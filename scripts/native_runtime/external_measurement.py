@@ -151,7 +151,7 @@ def verify_protected_workspace(services, workspace):
     return root
 
 
-def measure(services, workspace, evaluation_id):
+def measure(services, workspace, evaluation_id, *, candidate_id=None, capture_only=False):
     root = verify_protected_workspace(services, workspace)
     paths = services.evaluator.contract["source_paths"]
     source = services.store.capture_source(root, paths)
@@ -159,7 +159,18 @@ def measure(services, workspace, evaluation_id):
          "candidate source closure is incomplete")
     verify_protected_workspace(services, root)
     candidate = services.store.candidate(services.job_id, services.epoch, source)
+    need(candidate_id is None or candidate == candidate_id,
+         "workspace differs from the candidate selected before final validation")
     identity = {"candidate_id": candidate, "evaluation_id": evaluation_id, "source_id": source}
+    if capture_only:
+        # Validate the planned identity without prepare(): a prepared operation
+        # is intentionally not launchable. The final call creates its request.
+        services.evaluator._request(candidate, evaluation_id)
+        need(not (services.evaluator.root / evaluation_id).exists(),
+             "final evaluation identity is already in use")
+        print(canonical({"schema": "geak-native-measurement-identity-v1",
+                         "capture_only": True, **identity}), flush=True)
+        return 0
     # Expose the exact identity before the existing callback may block. The
     # measurement argv is used by the engineer, not the JSON-only lane reader.
     print(canonical({"schema": "geak-native-measurement-identity-v1", **identity}), flush=True)
@@ -183,8 +194,13 @@ def main(argv=None):
         verify_protected_workspace(services, args.workspace)
         return services.reader.main(remaining, evaluator=services.evaluator)
     arguments.add_argument("--evaluation-id", default=None)
+    arguments.add_argument("--candidate-id", default=None)
+    arguments.add_argument("--capture-only", action="store_true")
     args = arguments.parse_args(remaining)
-    return measure(services, args.workspace, args.evaluation_id or "geak-" + uuid.uuid4().hex)
+    need(not args.capture_only or (args.evaluation_id is None and args.candidate_id is None),
+         "capture allocates a fresh final evaluation identity")
+    return measure(services, args.workspace, args.evaluation_id or "geak-" + uuid.uuid4().hex,
+                   candidate_id=args.candidate_id, capture_only=args.capture_only)
 
 
 if __name__ == "__main__":
