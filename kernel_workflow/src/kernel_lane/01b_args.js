@@ -140,6 +140,7 @@ const externalFields = (o) => EXTERNAL_OBJECTIVE && o ? Object.fromEntries(
   ['objective', 'primary_regime', 'primary_speedup', 'native_reproducible_gain',
    'native_reproducible_regression', 'phase_speedups', 'external_evaluation',
    'external_measurement_valid', 'receipt_ref', 'timing_basis', 'development_geomean_speedup',
+   'final_failure',
   ].map(k => [k, o[k]])) : {};
 const nativeGainEligible = (o) => !EXTERNAL_OBJECTIVE || !!(o && o.external_measurement_valid === true
   && o.native_reproducible_gain === true && o.native_reproducible_regression === false);
@@ -161,15 +162,18 @@ async function captureFinalEvaluation(workspace) {
 }
 
 async function checkedExternalMeasurement(value, workspace, patch = null, final = false) {
-  if (!EXTERNAL_OBJECTIVE || !value) return value;
+  if (!EXTERNAL_OBJECTIVE || (!value && !final)) return value;
   const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
     status: 'invalid_measurement', correctness: 'not_checked', validation_status: 'invalid_measurement',
     native_reproducible_gain: false, native_reproducible_regression: false,
     development_geomean_speedup: null };
-  const ref = value.external_evaluation;
+  const ref = value && value.external_evaluation;
+  if (final && (!ref || !frozenFinalEvaluation || ref.candidate_id !== frozenFinalEvaluation.candidate_id
+      || ref.evaluation_id !== frozenFinalEvaluation.evaluation_id)) {
+    return {...invalid, final_failure: {class: 'final_identity_mismatch',
+      expected: frozenFinalEvaluation, returned: ref || null}};
+  }
   if (!ref || typeof ref.candidate_id !== 'string' || typeof ref.evaluation_id !== 'string') return invalid;
-  if (final && (!frozenFinalEvaluation || ref.candidate_id !== frozenFinalEvaluation.candidate_id
-      || ref.evaluation_id !== frozenFinalEvaluation.evaluation_id)) return invalid;
   try {
     const argv = final && EXTERNAL_FINAL_COMMANDS
       ? A.external_final_result_command : A.external_result_command;

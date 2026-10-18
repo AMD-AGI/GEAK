@@ -41,8 +41,10 @@ with `capture_only: true` and a fresh planned evaluation ID. It makes no native
 call. Director receives that fixed candidate and evaluation ID; the measurement
 command rejects later workspace edits before dispatch. The final reader also
 rejects a different candidate or a search-phase evaluation ID. The returned
-`final_selection` keeps the captured identity with the result. No new archive
-or clock is created.
+`final_selection` keeps the captured identity with the result. Capture errors
+are named `final_capture_failed`; absent or different Director IDs produce
+`final_failure.class: final_identity_mismatch` with expected and returned IDs.
+These are invalid finals, not no-gain results. No new archive or clock is created.
 
 The common lane appends the reader's existing arguments:
 

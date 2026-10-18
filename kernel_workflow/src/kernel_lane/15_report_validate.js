@@ -2,7 +2,13 @@
 // PHASE: Final report (TechLead)
 // ===========================================================================
 if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
-await captureFinalEvaluation(CANONICAL);
+try {
+  await captureFinalEvaluation(CANONICAL);
+} catch (cause) {
+  const error = new Error(`final_capture_failed: ${String(cause)}`);
+  error.code = 'final_capture_failed';
+  throw error;
+}
 if (EXTERNAL_OBJECTIVE) history.final_selection = frozenFinalEvaluation;
 phase('Report');
 const report = await agentT(

@@ -63,6 +63,7 @@ const make = (A) => new Function('A', 'HAS_WORKLOAD', 'runProcess', 'log', sourc
   await fullLane(false, false, true);
   await fullLane(false, false, true, 'changed-candidate');
   await fullLane(false, false, true, 'stale-evaluation');
+  await fullLane(false, false, true, 'capture-failed');
   console.log('external primary: checked development geomean, native export score and gain, no legacy fallback, source/patch arguments passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 
@@ -96,6 +97,7 @@ async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal 
       if (opts.args.includes('--capture-only')) {
         assert.equal(opts.cmd, staged ? '/owner/final-evaluate' : '/owner/evaluate');
         assert.deepEqual(opts.args, ['--workspace', '/canonical', '--capture-only']);
+        if (invalidFinal === 'capture-failed') return {status: 'completed', code: 1, group_cleared: true};
         captured = true;
         return {status: 'completed', code: 0, group_cleared: true, stdout: JSON.stringify({
           schema: 'geak-native-measurement-identity-v1', capture_only: true,
@@ -155,7 +157,15 @@ async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal 
       throw new Error('unhandled agent ' + label);
     }
   };
-  const value = await new Function(...Object.keys(g), `return (async () => {${body}})();`)(...Object.values(g));
+  const execute = () => new Function(...Object.keys(g), `return (async () => {${body}})();`)(...Object.values(g));
+  if (invalidFinal === 'capture-failed') {
+    await assert.rejects(execute, /final_capture_failed/);
+    assert.equal(captured, false);
+    assert.equal(cumulative, undefined, 'Report did not run after capture failed');
+    assert.equal(finalReads, 0);
+    return;
+  }
+  const value = await execute();
   // GEAK ranks by the development geomean: c (1.5) wins despite its native no-gain gate;
   // integrated (1.3) does not beat it; native 9x/1.6x never enter development ranking.
   assert.equal(cumulative, 1.5);
@@ -167,6 +177,8 @@ async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal 
     assert.equal(value.final_speedup, null);
     assert.equal(value.outcome, 'invalid_measurement');
     assert.equal(value.final_patch, '');
+    assert.equal(value.final_failure.class, 'final_identity_mismatch');
+    assert.equal(value.final_failure.expected.evaluation_id, 'final');
     return;
   }
   assert.equal(value.final_speedup, 1.55); // native primary of the fresh director result, never 999 or 1.45.
