@@ -34,6 +34,11 @@ It does not describe the idea at admission or prove what each trial implemented.
 Missing settlement bindings stay unknown. Later card changes do not relabel old
 attempts. Exported program `idea_ids` list only explicit committed card/program
 associations; sharing a direction does not associate every program with every idea.
+An inconsistent card association keeps the trial with `card_inconsistent` and
+its exact card reference/revision; evidence hash and storage failures still raise.
+On a missing collection match, agreed saved direction/engineer metadata can carry
+across the same attempt, while the idea remains unknown. Conflicting attempt
+metadata stays unknown.
 
 ## Semantic membership without a timing score
 

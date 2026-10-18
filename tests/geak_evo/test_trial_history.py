@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from geak_evo.archive.store import ResearchStore, StateError
-from geak_evo.archive.records import archive_checkpoint, read_archive
+from geak_evo.archive.records import archive_checkpoint, archive_record, read_archive
 from geak_evo.archive.trials import trial_history
 from geak_evo.archive.export import build
 from geak_evo.archive.succession import snapshot_trial_history, retained_trial_candidates
@@ -334,7 +334,7 @@ class TrialHistoryTests(unittest.TestCase):
         self.assertEqual(row['idea_attribution'], {'status': 'unknown'})
         self.assertEqual(row['times_ms'], {'case': 9.0})
         self.assertEqual(view['trials'], trial_history(self.store, [identity], attempts={
-            'attempt': dict(direction_id='direction', idea_id=None, engineer_id='e1',
+            ('attempt', identity): dict(direction_id='direction', idea_id=None, engineer_id='e1',
                             idea_attribution={'status': 'unknown'})})['trials'])
 
     def test_settlement_idea_survives_protection_and_later_card_changes(self):
@@ -408,20 +408,100 @@ class TrialHistoryTests(unittest.TestCase):
         by_error = {row['outcome']['error']: row for row in view['trials']}
         self.assertIsNone(by_error['unfinished']['idea_id'])
         self.assertEqual(by_error['recovered']['idea_id'], 'settlement')
-        packet = self.store.archive_evidence(self.candidate, {'packet.json': encoded(dict(proposal={'engineer_id': 'e1'}))})
+        proposal = dict(parent_candidate_id=self.candidate, direction_id='direction', island_id='island', engineer_id='e1')
+        packet = self.store.archive_evidence(self.candidate, {'packet.json': encoded(dict(proposal=proposal, decision={}))})
         snapshot = dict(state=dict(opportunities=[dict(opportunity_id='attempt', direction_id='direction')],
-            history=[dict(attempt_id='attempt', collection_ref=dict(evidence_id=second, artifact='native_idea_harvest.json'),
+            history=[dict(attempt_id='attempt', candidate_id=self.candidate, settled=True,
+                          collection_ref=dict(evidence_id=second, artifact='native_idea_harvest.json'),
                           packet_ref=dict(evidence_id=packet, artifact='packet.json'))]))
         projected = snapshot_trial_history(self.store, snapshot, [first])
         by_error = {row['outcome']['error']: row for row in projected['trials']}
-        self.assertIsNone(by_error['unfinished']['engineer_id'])
+        self.assertEqual(by_error['unfinished']['engineer_id'], 'e1')
+        self.assertIsNone(by_error['unfinished']['idea_id'])
         self.assertEqual(by_error['recovered']['engineer_id'], 'e1')
+        conflicting = self.store.archive_evidence(self.candidate, {'packet.json': encoded(dict(proposal=dict(proposal, engineer_id='e2'), decision={}))})
+        snapshot['state']['superseded_attempts'] = [dict(attempt_id='attempt', candidate_id=self.candidate, settled=False,
+            packet_ref=dict(evidence_id=conflicting, artifact='packet.json'))]
+        projected = snapshot_trial_history(self.store, snapshot, [first])
+        by_error = {row['outcome']['error']: row for row in projected['trials']}
+        self.assertIsNone(by_error['unfinished']['engineer_id'])
+        self.assertIsNone(by_error['unfinished']['idea_id'])
+        self.assertEqual(by_error['recovered']['engineer_id'], 'e1')
+        self.store.checkpoint('campaign', self.candidate, expected_revision=0, evidence=[first],
+            note=dict(claim='CPU fixture', scope='synthetic', next_test='inspect', evolution=snapshot['state']))
+        _, _, files = build(self.store)
+        exported = {row['outcome']['error']: row for row in json.loads(files['trial-history.json'])['trials']}
+        self.assertIsNone(exported['unfinished']['engineer_id'])
+        self.assertIsNone(exported['unfinished']['idea_id'])
+        self.assertEqual(exported['recovered']['engineer_id'], 'e1')
         # The inventory component's canonical hash can name a linked raw copy.
         from geak_evo.archive.trials import trial_attempt
         row = dict(attempt_id='attempt', investigation_evidence_id='raw', evidence_ids=['raw', second])
         self.assertEqual(trial_attempt(row, {('attempt', second): handles}), handles)
         self.assertEqual(trial_attempt(row, {('attempt', 'raw'): dict(idea_id='other'),
                                              ('attempt', second): handles}), {})
+
+    def test_attempt_metadata_fallback_requires_agreement_and_never_carries_idea(self):
+        from geak_evo.archive.trials import trial_attempt
+        row = dict(attempt_id='attempt', evidence_ids=['unmatched'])
+        first = dict(direction_id='direction', engineer_id='e1', idea_id='first', idea_attribution={'card_ref': 'first'})
+        second = dict(first, idea_id='second', idea_attribution={'card_ref': 'second'})
+        saved = {('attempt', 'first'): first, ('attempt', 'second'): second}
+        self.assertEqual(trial_attempt(row, saved), dict(direction_id='direction', engineer_id='e1'))
+        self.assertEqual(trial_attempt(row, {'attempt': first}), dict(direction_id='direction', engineer_id='e1'))
+        saved[('attempt', 'second')] = dict(second, engineer_id='e2')
+        self.assertEqual(trial_attempt(row, saved), {})
+        row['evidence_ids'] = ['first']
+        self.assertEqual(trial_attempt(row, saved), first)
+
+    def test_inconsistent_settlement_card_keeps_row_and_never_borrows_repair(self):
+        identity, _ = self.collection(observations=[{'case': 9.0}])
+        transport = self.store.archive_evidence(self.candidate, {'transport.json': b'{}'})
+        history = dict(attempt_id='attempt', candidate_id=self.candidate, settled=True,
+            transport_ref=dict(evidence_id=transport, artifact='transport.json'),
+            collection_ref=dict(evidence_id=identity, artifact='native_idea_harvest.json'))
+        other = self.store.candidate('job', 'epoch', self.source, parents=[self.candidate])
+        for field in ('kind', 'direction', 'candidate', 'evidence', 'envelope'):
+            with self.subTest(field=field):
+                direction = 'direction-' + field
+                card = dict(kind='evo_archive_card', direction_id=direction, candidate_id=self.candidate,
+                            idea=dict(idea_id='inconsistent', statement='test', status='unassessed'))
+                if field in ('kind', 'direction', 'candidate'):
+                    card[{'kind': 'kind', 'direction': 'direction_id', 'candidate': 'candidate_id'}[field]] = 'other'
+                evidence = self.store.archive_evidence(other if field == 'envelope' else self.candidate,
+                                                       {'card.json': encoded(card)})
+                ref = dict(evidence_id=evidence, artifact='card.json')
+                note = dict(claim='CPU fixture', scope='synthetic', next_test='inspect', archive_card_ref=ref,
+                    evolution_operation_id='attempt', latest_transport_ref=history['transport_ref'],
+                    research_update_ref=history['collection_ref'])
+                self.store.checkpoint(direction, self.candidate, expected_revision=0, note=note,
+                                      evidence=[] if field == 'evidence' else [evidence])
+                good = archive_record(self.store, self.candidate, dict(kind='evo_archive_card', direction_id=direction,
+                    idea=dict(idea_id='repaired', statement='test', status='unassessed')))
+                self.store.checkpoint(direction, self.candidate, expected_revision=1,
+                                      note=dict(note, archive_card_ref=good), evidence=[good['evidence_id']])
+                snapshot = dict(state=dict(opportunities=[dict(opportunity_id='attempt', direction_id=direction)],
+                    history=[history]), archive=dict(directions={direction: dict(revision=2)}))
+                row = snapshot_trial_history(self.store, snapshot)['trials'][0]
+                self.assertEqual(row['idea_attribution'], dict(status='card_inconsistent', card_ref=ref, direction_revision=1))
+                self.assertIsNone(row['idea_id'])
+                self.assertEqual(row['times_ms'], {'case': 9.0})
+        # The export also skips the inconsistent historical program/idea links.
+        self.store.checkpoint('inconsistent-current', self.candidate, expected_revision=0, note=note, evidence=[evidence])
+        _, programs, files = build(self.store)
+        self.assertNotIn('inconsistent', next(row for row in programs if row['program_id'] == self.candidate)['idea_ids'])
+        current = next(json.loads(data) for name, data in files.items() if name.startswith('directions/')
+                       and json.loads(data)['direction_id'] == 'inconsistent-current')
+        self.assertEqual(current['idea_attribution']['status'], 'card_inconsistent')
+        self.assertEqual(current['refs']['archive_card_ref'], ref)
+        self.assertIn(evidence, json.loads(files['evidence.json']))
+        # Real immutable-byte damage still propagates instead of becoming unknown.
+        envelope = self.store._bound_evidence(evidence)
+        blob = self.store.root / 'objects' / envelope['artifacts']['card.json']
+        blob.chmod(0o600)
+        blob.write_bytes(b'corrupt')
+        with self.assertRaisesRegex(StateError, 'hash mismatch'):
+            snapshot_trial_history(self.store, snapshot)
 
 
 if __name__ == '__main__':

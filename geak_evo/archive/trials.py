@@ -55,20 +55,24 @@ def _feedback_stages(feedback, row):
 
 
 def trial_attempt(row, attempts):
-    """Resolve exact collection handles across linked raw/collection copies."""
+    """Keep idea handles collection-bound; agreed direction/engineer may carry."""
     matches = [attempts[(row["attempt_id"], identity)] for identity in row["evidence_ids"]
                if (row["attempt_id"], identity) in attempts]
-    if matches:
-        return matches[0] if all(item == matches[0] for item in matches) else {}
-    return attempts.get(row["attempt_id"], {})
+    if matches and all(item == matches[0] for item in matches):
+        return matches[0]
+    metadata = [{field: value.get(field) for field in ("direction_id", "engineer_id")}
+                for key, value in attempts.items() if key == row["attempt_id"]
+                or (isinstance(key, tuple) and key[0] == row["attempt_id"])]
+    return metadata[0] if metadata and all(item == metadata[0] for item in metadata) else {}
 
 
 def trial_history(store, evidence_ids, *, attempts=None):
     """Project exact inventories and their linked feedback; never follow external paths.
 
     ``attempts`` only adds the caller's saved direction/idea/engineer handles.
-    Saved projections key them by (attempt_id, collection_evidence_id); the
-    older caller-supplied attempt_id mapping remains supported.
+    Saved projections key them by (attempt_id, collection_evidence_id). An
+    attempt_id-only mapping can supply agreed direction/engineer metadata,
+    never an idea from another collection.
     Duplicate collection/raw copies merge only through native_evidence_index;
     repeated operations and independent investigations remain separate rows.
     """

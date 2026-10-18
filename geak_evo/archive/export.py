@@ -25,7 +25,7 @@ from pathlib import Path
 from .._util import sha256_hex
 from .claims import ClaimLog
 from .records import ArchiveError, read_record
-from .succession import settlement_idea
+from .succession import card_matches_checkpoint, settlement_idea
 from .store import ResearchStore, StateError, _read
 from .trials import trial_history, trial_attempt
 
@@ -187,6 +187,7 @@ def _research_files(journal, directions, evo):
             "research_status": note.get("research_status"),
             "note": {key: note.get(key) for key in ("claim", "scope", "next_test", "evidence_uptake")},
             "refs": {key: note.get(key) for key in ("archive_card_ref", "research_update_ref", "latest_transport_ref")},
+            "idea_attribution": direction.get("idea_attribution"),
             "basis": "Current saved direction review; interpretation, not validation. It describes this direction/tip, not every earlier trial."})
     head = evo.get("claim_head")
     rows = []
@@ -255,7 +256,14 @@ def _scan(journal):
         else:
             directions[state["direction_id"]] = dict(state, idea_id=None)
         card_ref = state["note"].get("archive_card_ref")
-        if card_ref and "evolution" not in state["note"]:
+        has_card = card_ref and "evolution" not in state["note"]
+        associated = has_card and card_matches_checkpoint(journal.ref(card_ref),
+            journal.obj(card_ref["evidence_id"], "evidence"), state, card_ref)
+        if has_card:
+            directions[state["direction_id"]]["idea_attribution"] = {
+                "status": "committed_card" if associated else "card_inconsistent",
+                "card_ref": card_ref, "direction_revision": state["revision"]}
+        if associated:
             card = read_record(journal.store, card_ref, frozen_cases=journal.frozen_cases)
             idea = card["idea"]
             entry = ideas.setdefault(idea["idea_id"], {"revisions": []})
@@ -352,8 +360,8 @@ def build(store, *, frozen_cases=None):
                         "attempt_id": attempt["attempt_id"], "attempt_ref": attempt["transport_ref"]})
             if attempt["parent_id"] in programs:
                 programs[attempt["parent_id"]]["attempts_from_here"].append(row["attempt_id"])
-    by_collection = {(row["attempt_id"], row["collection_ref"]["evidence_id"]): row
-                     for row in attempts.values() if row.get("collection_ref")}
+    by_collection = {(row["attempt_id"], (row.get("collection_ref") or {}).get("evidence_id")): row
+                     for row in attempts.values()}
     for row in trial_evaluations:
         attempt = trial_attempt(row, by_collection)
         row.update({key: attempt.get(key) for key in

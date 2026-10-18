@@ -134,6 +134,14 @@ def parent_outcomes(store, snapshot, candidate_id, *, require_review=True):
     return outcomes
 
 
+def card_matches_checkpoint(card, envelope, state, ref):
+    """Association only; callers still authenticate the evidence bytes."""
+    return (isinstance(card, dict) and card.get("kind") == "evo_archive_card"
+            and card.get("direction_id") == state["direction_id"]
+            and card.get("candidate_id") == envelope["candidate_id"] == state["tip"]
+            and ref["evidence_id"] in state["evidence"])
+
+
 def settlement_idea(store, history, revisions):
     """Idea on the first committed result card, not the admission or current card.
 
@@ -155,13 +163,12 @@ def settlement_idea(store, history, revisions):
         ref = note.get("archive_card_ref")
         if ref is None:
             return missing
-        _, data = store.evidence_artifact(ref["evidence_id"], ref["artifact"])
+        envelope, data = store.evidence_artifact(ref["evidence_id"], ref["artifact"])
         card = json.loads(data)
-        need(card.get("kind") == "evo_archive_card"
-             and card.get("direction_id") == state["direction_id"]
-             and card.get("candidate_id") == state["tip"]
-             and ref["evidence_id"] in state["evidence"],
-             "settlement idea card differs from its committed checkpoint")
+        if not card_matches_checkpoint(card, envelope, state, ref):
+            return {"idea_id": None, "idea_attribution": {
+                "status": "card_inconsistent", "card_ref": ref,
+                "direction_revision": state["revision"]}}
         return {"idea_id": card["idea"]["idea_id"], "idea_attribution": {
             "status": "committed_settlement_card", "card_ref": ref,
             "direction_revision": state["revision"]}}
@@ -173,19 +180,22 @@ def snapshot_trial_history(store, snapshot, evidence_ids=()):
     identities, attempts = set(evidence_ids), {}
     owners = {row["opportunity_id"]: row["direction_id"]
               for row in snapshot["state"]["opportunities"]}
-    for row in snapshot["state"]["history"]:
-        if not row.get("collection_ref"):
+    history = snapshot["state"]["history"]
+    identities.update(row["collection_ref"]["evidence_id"] for row in history if row.get("collection_ref"))
+    for row in history + snapshot["state"].get("superseded_attempts", []):
+        if not row.get("attempt_id"):
             continue
-        identities.add(row["collection_ref"]["evidence_id"])
         direction = owners.get(row.get("attempt_id"))
         proposal = {}
         if row.get("packet_ref"):
             _, data = store.evidence_artifact(row["packet_ref"]["evidence_id"], row["packet_ref"]["artifact"])
             proposal = json.loads(data).get("proposal") or {}
+        proposed_direction = proposal.get("direction_id", direction)
+        direction = proposed_direction if direction in (None, proposed_direction) else None
         ceiling = snapshot.get("archive", {}).get("directions", {}).get(direction, {}).get("revision", 0)
         first = proposal.get("expected_revision", 0) + 1
         revisions = (store.get_revision(direction, revision) for revision in range(first, ceiling + 1))
-        attempts[(row.get("attempt_id"), row["collection_ref"]["evidence_id"])] = {"direction_id": direction,
+        attempts[(row["attempt_id"], (row.get("collection_ref") or {}).get("evidence_id"))] = {"direction_id": direction,
             "engineer_id": proposal.get("engineer_id"), **settlement_idea(store, row, revisions)}
     return trial_history(store, identities, attempts=attempts)
 
