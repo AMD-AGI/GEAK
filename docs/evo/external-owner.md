@@ -28,7 +28,11 @@ The new copy needs these additional inputs:
   imports must not resolve to a writable checkout or candidate directory.
 
 Keep the original `root_helper.py`, `adapter.py`, `gpu_lock.sh` and owner code
-pinned in the admission. Set the image and device admission for the chosen
+pinned in the admission. Before sealing, stage a root-owned regular
+`native/admission.json` file even when `--admission` selects another sealed file.
+Docker needs this existing target for its nested bind inside read-only `/native`;
+the helper checks it before making an owner plan. The selected admission remains
+the bind source. Set the image and device admission for the chosen
 task; the prepared GLM packets use the immutable ac30 SGLang image and gfx950.
 Provide enough existing session/evaluation allowance for all three UT
 processes, first-use compilation and cleanup. The task's combined UT timeout
