@@ -28,6 +28,13 @@ unknowns explicitly. A slow implementation does not by itself refute an idea.
 Keep the original question separate from the implementation report. Parent and
 donor links describe source ancestry; they do not prove a useful contribution.
 
+Trial and attempt `idea_id` names the idea on the first committed settlement
+card, with its exact card reference and direction revision in `idea_attribution`.
+It does not describe the idea at admission or prove what each trial implemented.
+Missing settlement bindings stay unknown. Later card changes do not relabel old
+attempts. Exported program `idea_ids` list only explicit committed card/program
+associations; sharing a direction does not associate every program with every idea.
+
 ## Semantic membership without a timing score
 
 The planner's `native_cells.unplaced` membership rows retain `descriptor_status`

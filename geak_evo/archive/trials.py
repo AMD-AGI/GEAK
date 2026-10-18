@@ -54,10 +54,21 @@ def _feedback_stages(feedback, row):
     return stages, None
 
 
+def trial_attempt(row, attempts):
+    """Resolve exact collection handles across linked raw/collection copies."""
+    matches = [attempts[(row["attempt_id"], identity)] for identity in row["evidence_ids"]
+               if (row["attempt_id"], identity) in attempts]
+    if matches:
+        return matches[0] if all(item == matches[0] for item in matches) else {}
+    return attempts.get(row["attempt_id"], {})
+
+
 def trial_history(store, evidence_ids, *, attempts=None):
     """Project exact inventories and their linked feedback; never follow external paths.
 
     ``attempts`` only adds the caller's saved direction/idea/engineer handles.
+    Saved projections key them by (attempt_id, collection_evidence_id); the
+    older caller-supplied attempt_id mapping remains supported.
     Duplicate collection/raw copies merge only through native_evidence_index;
     repeated operations and independent investigations remain separate rows.
     """
@@ -174,8 +185,9 @@ def trial_history(store, evidence_ids, *, attempts=None):
     result = []
     for row in rows.values():
         row["trial_id"] = sha256_hex(_key([row["investigation_evidence_id"], row["trial_index"]]).encode())
-        row.update({key: (attempts.get(row["attempt_id"]) or {}).get(key)
-                    for key in ("direction_id", "idea_id", "engineer_id")})
+        handles = trial_attempt(row, attempts)
+        row.update({key: handles.get(key)
+                    for key in ("direction_id", "idea_id", "engineer_id", "idea_attribution")})
         row["outcome"] = row["outcomes"][0] if len(row["outcomes"]) == 1 else None
         row["raw_trial_ref"] = row["raw_trial_refs"][0] if row["raw_trial_refs"] else None
         key = (row["job_id"], row["measurement_epoch_id"], row.get("source_id"),

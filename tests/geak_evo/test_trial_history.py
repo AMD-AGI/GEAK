@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from geak_evo.archive.store import ResearchStore, StateError
+from geak_evo.archive.records import archive_checkpoint, read_archive
 from geak_evo.archive.trials import trial_history
 from geak_evo.archive.export import build
 from geak_evo.archive.succession import snapshot_trial_history, retained_trial_candidates
@@ -329,10 +330,98 @@ class TrialHistoryTests(unittest.TestCase):
             archive=dict(directions={'direction': {'card': {'idea': {'idea_id': 'idea'}}}}))
         view = snapshot_trial_history(self.store, snapshot)
         row = view['trials'][0]
-        self.assertEqual((row['direction_id'], row['idea_id'], row['engineer_id']), ('direction', 'idea', 'e1'))
+        self.assertEqual((row['direction_id'], row['idea_id'], row['engineer_id']), ('direction', None, 'e1'))
+        self.assertEqual(row['idea_attribution'], {'status': 'unknown'})
         self.assertEqual(row['times_ms'], {'case': 9.0})
         self.assertEqual(view['trials'], trial_history(self.store, [identity], attempts={
-            'attempt': dict(direction_id='direction', idea_id='idea', engineer_id='e1')})['trials'])
+            'attempt': dict(direction_id='direction', idea_id=None, engineer_id='e1',
+                            idea_attribution={'status': 'unknown'})})['trials'])
+
+    def test_settlement_idea_survives_protection_and_later_card_changes(self):
+        identity, _ = self.collection(observations=[{'case': 9.0}])
+        note = dict(claim='CPU fixture', scope='synthetic', next_test='inspect')
+        def checkpoint(idea, revision, candidate=None, saved_note=None):
+            return archive_checkpoint(self.store, 'direction', candidate or self.candidate,
+                expected_revision=revision, note=saved_note or note,
+                card=dict(idea=dict(idea_id=idea, statement=idea, status='unassessed')))
+        checkpoint('admission', 0)
+        proposal = dict(parent_candidate_id=self.candidate, direction_id='direction',
+                        island_id='island', engineer_id='e1', expected_revision=1)
+        packet = self.store.archive_evidence(self.candidate, {'packet.json': encoded(dict(proposal=proposal, decision={}))})
+        transport = self.store.archive_evidence(self.candidate, {'transport.json': b'{}'})
+        history = dict(attempt_id='attempt', candidate_id=self.candidate, settled=True,
+            collection_ref=dict(evidence_id=identity, artifact='native_idea_harvest.json'),
+            transport_ref=dict(evidence_id=transport, artifact='transport.json'),
+            packet_ref=dict(evidence_id=packet, artifact='packet.json'))
+        # The real protection grant adds one checkpoint after the saved packet.
+        prior = self.store.get('direction')
+        self.store.checkpoint('direction', self.candidate, expected_revision=1,
+                              note=prior['note'], evidence=prior['evidence'])
+        settled_note = dict(note, evolution_operation_id='attempt',
+            latest_transport_ref=history['transport_ref'], research_update_ref=history['collection_ref'])
+        checkpoint('settlement', 2, saved_note=settled_note)
+        exact = self.store.get_revision('direction', 3)['note']['archive_card_ref']
+        checkpoint('renamed', 3, saved_note=settled_note)
+        work = self.root / 'work'
+        (work / 'main.py').write_text('later\n')
+        later = self.store.candidate('job', 'epoch', self.store.capture_source(work, ['main.py']))
+        checkpoint('later-program', 4, candidate=later)
+        snapshot = dict(state=dict(opportunities=[dict(opportunity_id='attempt', direction_id='direction')],
+                                   history=[history]), archive=read_archive(self.store))
+        row = snapshot_trial_history(self.store, snapshot)['trials'][0]
+        self.assertEqual(row['idea_id'], 'settlement')
+        self.assertEqual(row['idea_attribution'], dict(status='committed_settlement_card',
+            direction_revision=3, card_ref=exact))
+        snapshot['archive']['directions']['direction']['revision'] = 2
+        self.assertIsNone(snapshot_trial_history(self.store, snapshot)['trials'][0]['idea_id'])
+        self.store.checkpoint('campaign', self.candidate, expected_revision=0,
+                              note=dict(note, evolution=snapshot['state']))
+        _, programs, files = build(self.store)
+        exported = json.loads(files['trial-history.json'])['trials'][0]
+        self.assertEqual(exported['idea_attribution'], row['idea_attribution'])
+        first = next(item for item in programs if item['program_id'] == self.candidate)
+        self.assertNotIn('later-program', first['idea_ids'])
+        self.assertEqual(next(item for item in programs if item['program_id'] == later)['idea_ids'], ['later-program'])
+
+    def test_cardless_settlement_does_not_borrow_a_later_idea(self):
+        from geak_evo.archive.succession import settlement_idea
+        note = dict(claim='CPU fixture', scope='synthetic', next_test='inspect')
+        evidence = self.store.archive_evidence(self.candidate, {'outcome.json': b'{}'})
+        ref = dict(evidence_id=evidence, artifact='outcome.json')
+        history = dict(attempt_id='attempt', candidate_id=self.candidate,
+                       transport_ref=ref, collection_ref=ref)
+        note.update(evolution_operation_id='attempt', latest_transport_ref=ref, research_update_ref=ref)
+        self.store.checkpoint('direction', self.candidate, note=note, expected_revision=0)
+        archive_checkpoint(self.store, 'direction', self.candidate, note=note, expected_revision=1,
+            card=dict(idea=dict(idea_id='later', statement='later', status='unassessed')))
+        revisions = [self.store.get_revision('direction', revision) for revision in (1, 2)]
+        self.assertEqual(settlement_idea(self.store, history, revisions),
+                         dict(idea_id=None, idea_attribution={'status': 'unknown'}))
+        history['attempt_id'] = 'unmatched'
+        self.assertIsNone(settlement_idea(self.store, history, revisions)['idea_id'])
+
+    def test_same_attempt_collections_do_not_share_attribution(self):
+        first, _ = self.collection(outcomes=['unfinished'])
+        second, _ = self.collection(outcomes=['recovered'])
+        handles = dict(direction_id='direction', idea_id='settlement', engineer_id='e1')
+        view = trial_history(self.store, [first, second], attempts={('attempt', second): handles})
+        by_error = {row['outcome']['error']: row for row in view['trials']}
+        self.assertIsNone(by_error['unfinished']['idea_id'])
+        self.assertEqual(by_error['recovered']['idea_id'], 'settlement')
+        packet = self.store.archive_evidence(self.candidate, {'packet.json': encoded(dict(proposal={'engineer_id': 'e1'}))})
+        snapshot = dict(state=dict(opportunities=[dict(opportunity_id='attempt', direction_id='direction')],
+            history=[dict(attempt_id='attempt', collection_ref=dict(evidence_id=second, artifact='native_idea_harvest.json'),
+                          packet_ref=dict(evidence_id=packet, artifact='packet.json'))]))
+        projected = snapshot_trial_history(self.store, snapshot, [first])
+        by_error = {row['outcome']['error']: row for row in projected['trials']}
+        self.assertIsNone(by_error['unfinished']['engineer_id'])
+        self.assertEqual(by_error['recovered']['engineer_id'], 'e1')
+        # The inventory component's canonical hash can name a linked raw copy.
+        from geak_evo.archive.trials import trial_attempt
+        row = dict(attempt_id='attempt', investigation_evidence_id='raw', evidence_ids=['raw', second])
+        self.assertEqual(trial_attempt(row, {('attempt', second): handles}), handles)
+        self.assertEqual(trial_attempt(row, {('attempt', 'raw'): dict(idea_id='other'),
+                                             ('attempt', second): handles}), {})
 
 
 if __name__ == '__main__':

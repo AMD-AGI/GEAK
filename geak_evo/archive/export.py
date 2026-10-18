@@ -25,8 +25,9 @@ from pathlib import Path
 from .._util import sha256_hex
 from .claims import ClaimLog
 from .records import ArchiveError, read_record
+from .succession import settlement_idea
 from .store import ResearchStore, StateError, _read
-from .trials import trial_history
+from .trials import trial_history, trial_attempt
 
 SCHEMA = "geak-evo-program-records-v1"
 IDEA_FIELDS = ("idea_id", "statement", "status", "next_test", "applicability", "competing_explanations")
@@ -143,6 +144,9 @@ def _attempt(journal, row, superseded):
     strategy = explanation.get("strategy")
     has_strategy = isinstance(strategy, str) and bool(strategy.strip())
     return {"attempt_id": row["attempt_id"], "settled": row["settled"], "superseded": superseded,
+            **settlement_idea(journal.store, row, (state for state in journal.records
+                if state["direction_id"] == proposal["direction_id"]
+                and state["revision"] > proposal.get("expected_revision", 0))),
             "parent_id": proposal["parent_candidate_id"], "program_id": row["candidate_id"],
             "source_roles": roles,
             "new_source": candidate is not None and candidate["source_id"] != parent["source_id"],
@@ -348,16 +352,13 @@ def build(store, *, frozen_cases=None):
                         "attempt_id": attempt["attempt_id"], "attempt_ref": attempt["transport_ref"]})
             if attempt["parent_id"] in programs:
                 programs[attempt["parent_id"]]["attempts_from_here"].append(row["attempt_id"])
-    by_attempt = {row["attempt_id"]: row for row in attempts.values()}
+    by_collection = {(row["attempt_id"], row["collection_ref"]["evidence_id"]): row
+                     for row in attempts.values() if row.get("collection_ref")}
     for row in trial_evaluations:
-        attempt = by_attempt.get(row["attempt_id"], {})
-        row.update({key: attempt.get(key) for key in ("direction_id", "engineer_id")})
-        row["idea_id"] = directions.get(row["direction_id"], {}).get("idea_id")
+        attempt = trial_attempt(row, by_collection)
+        row.update({key: attempt.get(key) for key in
+                    ("direction_id", "engineer_id", "idea_id", "idea_attribution")})
     for idea_id, entry in ideas.items():
-        idea_directions = {revision["direction_id"] for revision in entry["revisions"]}
-        for row in programs.values():
-            if idea_directions.intersection(row["directions"]) and idea_id not in row["idea_ids"]:
-                row["idea_ids"].append(idea_id)
         for revision in entry["revisions"]:
             row = programs[revision["program_id"]]
             if revision.get("author") and revision["author"] not in row["authors"]:

@@ -268,7 +268,7 @@ class ExportTests(unittest.TestCase):
         child = next(row for row in programs if row["candidate_id"] == self.child)
         self.assertEqual(child["authors"][0]["engineer_id"], "engineer")
         intermediate = next(row for row in programs if row["candidate_id"] == self.failed)
-        self.assertEqual(intermediate["idea_ids"], ["idea-1"])
+        self.assertEqual(intermediate["idea_ids"], [])
         self.assertEqual(intermediate["directions"], ["direction"])
         missing = json.loads(attempt.read_bytes())["implemented_idea"]
         self.assertIsNone(missing["strategy"])
