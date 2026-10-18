@@ -1,0 +1,212 @@
+--- a/base_helper.py
++++ b/base_helper.py
+@@ -153,15 +153,33 @@
+ def prepare_candidate(request, config, inputs):
+     contract = validate_request(request, config)
+     snapshot = inputs / "snapshot"
+-    shutil.copytree(HERE / "snapshot", snapshot, symlinks=True)
+-    manifest = read(snapshot / "manifest.json")
+-    row = manifest["tasks"][0]
+-    require(len(manifest["tasks"]) == 1 and "tasks/" + row["task"] == contract["source"]["task_selector"],
+-            "sealed snapshot task mismatch")
+-    task = snapshot / "tasks" / row["task"]
++    external = contract["schema"] == "geak-arena-external-task-v1"
++    if external:
++        # Copy only the sealed ORIGINAL task closure, never old run outputs.
++        task = snapshot / "task"
++        for name, digest in contract["artifacts"].items():
++            raw = regular(HERE / "task" / name)
++            require(sha(raw) == digest, "original task closure changed: " + name)
++            path = task / name
++            path.parent.mkdir(parents=True, exist_ok=True)
++            path.write_bytes(raw)
++            path.chmod(0o644)
++        for path in [snapshot] + [p for p in snapshot.rglob("*") if p.is_dir()]:
++            path.chmod(0o755)
++        row = {"task": contract["source"]["task_selector"], "fixtures": [], "task_file_manifest": {}}
++        manifest = {"tasks": [row], "setup": {"files": []}}
++        put(inputs / "request.json", request)
++        (inputs / "request.json").chmod(0o644)
++    else:
++        shutil.copytree(HERE / "snapshot", snapshot, symlinks=True)
++        manifest = read(snapshot / "manifest.json")
++        row = manifest["tasks"][0]
++        require(len(manifest["tasks"]) == 1 and "tasks/" + row["task"] == contract["source"]["task_selector"],
++                "sealed snapshot task mismatch")
++        task = snapshot / "tasks" / row["task"]
+     for name, digest in contract["artifacts"].items():
+         require(sha(regular(task / name)) == digest, "original task closure changed: " + name)
+-    for name, target in contract["aliases"].items():
++    for name, target in contract.get("aliases", {}).items():
+         path = task / name
+         require(path.is_symlink() and path.resolve() == task / target, "candidate alias changed: " + name)
+     sources = {}
+@@ -178,7 +196,7 @@
+     manifest["candidate_binding"] = request["binding"]
+     put(snapshot / "manifest.json", manifest)
+     put(inputs / "source-sha256.json", sources)
+-    put(inputs / "run.json", {"task": row["task"], "image": contract["runtime"]["image"],
++    put(inputs / "run.json", {"task": row["task"], "task_schema": contract["schema"], "image": contract["runtime"]["image"],
+         "config_digest": contract["runtime"]["config_digest"], "cohort": config["cohort"], "gpu": config["gpu"],
+         "binding": request["binding"], "request_sha256": sha(canonical(request)), "measurement_valid": False})
+     inputs.chmod(0o755)
+@@ -226,10 +244,12 @@
+         {"source": str(HERE), "target": "/native", "readonly": True},
+         admission_mount,
+         {"source": str(folder / "inputs"), "target": "/evaluation", "readonly": True},
+-        {"source": config["fixture_root"], "target": "/fixtures", "readonly": True},
+-        {"source": config["setup_root"], "target": "/shared_nfs", "readonly": True},
+         {"source": str(folder / "outputs"), "target": "/results", "readonly": False},
+         {"source": config["pool_lock_root"], "target": "/gpu-locks", "readonly": False}]
++    if contract["schema"] != "geak-arena-external-task-v1":
++        result["mounts"].extend([
++            {"source": config["fixture_root"], "target": "/fixtures", "readonly": True},
++            {"source": config["setup_root"], "target": "/shared_nfs", "readonly": True}])
+     result["file_sha256"] = {str(HERE / name): digest for name, digest in config["assets_sha256"].items()}
+     result["file_sha256"][admission_mount["source"]] = admission_sha256
+     for path in (folder / "inputs").rglob("*"):
+@@ -384,7 +404,8 @@
+         if evidence.get("boot_id") != report.get("cutoff", {}).get("boot_id"):
+             errors.append("Cleanup and cutoff boot identity differ; strict session budget unqualified")
+     task_name = request["contract"]["source"]["task_selector"].split("/")[-1]
+-    attempt = folder / "outputs/native" / task_name
++    external = request["contract"]["schema"] == "geak-arena-external-task-v1"
++    attempt = folder / "outputs/external" if external else folder / "outputs/native" / task_name
+     # Wrapper failures precede the task directory; retain their exact streams.
+     for suffix in ("stdout", "stderr"):
+         path = folder / "outputs/native" / (task_name + "." + suffix)
+@@ -399,17 +420,33 @@
+                 phases[phase] = row.get("returncode")
+     obs = {"correctness": {"status": "unknown", "case_ids": [], "evidence": []},
+            "benchmark": {"status": "unknown", "times_ms": {}, "evidence": []}}
+-    if (attempt / "identity.json").exists() and (folder / "inputs/source-sha256.json").exists():
++    if external:
++        # Retain failures as well as successes; OBSERVATIONS alone is never a score.
++        lock_log = folder / "outputs/external.gpu-lock.jsonl"
++        if lock_log.exists():
++            retain("native-worker/gpu-lock.jsonl", lock_log, limit=4*1024*1024)
++        names = ["START.json", "OBSERVATIONS.json"] + [f"process_{index:02d}/{name}"
++            for index in range(1, 4) for name in
++            ("START.json", "RECEIPT.json", "ut_result.json", "_runs_v2.jsonl", "stdout.log", "stderr.log")]
++        for name in names:
++            path = attempt / name
++            if path.exists() or path.is_symlink():
++                retain("observer/" + name, path, limit=4*1024*1024 if name.endswith(".log") else LIMIT)
++    ready = (attempt / ("START.json" if external else "identity.json")).exists()
++    if ready and (folder / "inputs/source-sha256.json").exists():
+         try:
+-            identity = read(attempt / "identity.json")
+             run = retain("host/run.json", folder / "inputs/run.json")
+-            require(identity.get("runtime_receipt_sha256") == sha(artifacts["host/run.json"])
+-                and run["request_sha256"] == sha(canonical(request)) and run["binding"] == request["binding"]
+-                and identity.get("assigned_gpu_ordinal") == config["gpu"], "native attempt/request binding differs")
++            require(run["request_sha256"] == sha(canonical(request)) and run["binding"] == request["binding"],
++                    "native attempt/request binding differs")
++            if not external:
++                identity = read(attempt / "identity.json")
++                require(identity.get("runtime_receipt_sha256") == sha(artifacts["host/run.json"])
++                    and identity.get("assigned_gpu_ordinal") == config["gpu"], "native runtime binding differs")
+             with (folder / ("observer-" + str(os.getpid()) + ".stdout")).open("xb") as out, \
+                  (folder / ("observer-" + str(os.getpid()) + ".stderr")).open("xb") as err:
+                 proc = subprocess.run([sys.executable, "-B", str(HERE / "observe.py"), str(HERE / "contract.json"),
+-                    str(attempt), str(folder / "inputs/source-sha256.json")], stdout=out, stderr=err, timeout=60,
++                    str(attempt), str(folder / "inputs/source-sha256.json"), str(folder / "request.json")],
++                    stdout=out, stderr=err, timeout=60,
+                     check=False, env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"})
+             stdout = retain("host/observer.stdout", out.name)
+             retain("host/observer.stderr", err.name)
+@@ -417,6 +454,8 @@
+             parsed = json.loads(stdout)
+             errors.extend(parsed["issues"])
+             obs = parsed["observations"]
++            if external:
++                phases["evaluate"] = 0  # Reader requires all three complete, successful UT processes.
+             for name, raw in parsed["artifacts_base64"].items():
+                 artifacts["observer/" + name] = base64.b64decode(raw, validate=True)
+             for group in obs.values():
+@@ -425,7 +464,7 @@
+             errors.append("Native observation collection: " + str(exc))
+     # Retain producer reports even when observation validation fails. These
+     # known report locations precede bulk outputs and compiled/cache files.
+-    reports = list(attempt.glob("*.json")) if attempt.exists() else []
++    reports = list(attempt.glob("*.json")) if attempt.exists() and not external else []
+     for phase in ("compile", "correctness", "performance"):
+         phase_root = attempt / phase
+         if phase_root.exists():
+@@ -436,7 +475,10 @@
+             retain("native/" + path.relative_to(attempt).as_posix(), path)
+     # Acquire shallow diagnostics across both roots before deep bulk trees.
+     bulk = []
+-    for root, prefix in ((attempt, "native"), (folder / "outputs/session", "session")):
++    roots = [(folder / "outputs/session", "session")]
++    if not external:
++        roots.append((attempt, "native"))
++    for root, prefix in roots:
+         if root.exists():
+             for path in root.rglob("*"):
+                 relative = path.relative_to(root)
+--- a/launch_native.py
++++ b/launch_native.py
+@@ -32,6 +32,29 @@
+     lock.symlink_to("/gpu-locks", target_is_directory=True)
+ if lock.resolve() != Path("/gpu-locks"):
+     raise RuntimeError("unexpected GPU lock namespace")
++if run.get("task_schema") == "geak-arena-external-task-v1":
++    if not lock.resolve().is_mount():
++        raise RuntimeError("shared GPU lock mount required")
++    for path in ("/native", "/evaluation"):
++        if not os.statvfs(path).f_flag & os.ST_RDONLY:
++            raise RuntimeError("external source mount must be read-only: " + path)
++    env = dict(os.environ)
++    for name in ("ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GEAK_MASTER_PORT", "GEAK_ACTIVE_TASK_CANDIDATE",
++                 "AITER_CONFIG_GEMM_BF16", "AITER_FLYDSL_FORCE_REDUCE", "GEAK_MLA_DECODE_BLOCK_N", "GEAK_MLA_DECODE_WAVES_PER_EU"):
++        env.pop(name, None)
++    env.update(PYTHONPATH="/native/cleaned", PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1",
++               GEAK_GPU_ALLOWED=str(run["gpu"]), HIP_VISIBLE_DEVICES=str(run["gpu"]),
++               KERNEL_ENV_SKIP_ENUM_REAP="1", KERNEL_ENV_KEEP_ARCH="1", PYTORCH_ROCM_ARCH="gfx950",
++               GPU_ARCHS="gfx950", GEAK_GPU_REQUIRE_IDLE="1", GEAK_GPU_USE_LOG="/results/external.gpu-lock.jsonl")
++    for name, child in (("TRITON_CACHE_DIR", "triton"), ("TORCH_EXTENSIONS_DIR", "torch"),
++                        ("XDG_CACHE_HOME", "xdg"), ("AITER_JIT_DIR", "aiter"), ("AITER_ROOT_DIR", "aiter_root")):
++        path = Path("/results/cache") / child
++        path.mkdir(parents=True, exist_ok=False)
++        env[name] = str(path)
++    argv = ["bash", "/native/gpu_lock.sh", str(run["gpu"]), sys.executable, "-B", "-m",
++            "geak_evo.evaluate.external_runner", "--request", "/evaluation/request.json",
++            "--task", "/evaluation/snapshot/task", "--out", "/results/external"]
++    os.execve("/bin/bash", argv, env)
+ argv = [sys.executable, "-B", "/native/runner/native_quickcheck.py",
+         "--snapshot", "/evaluation/snapshot", "--fixtures", "/fixtures",
+         "--output", "/results/native", "--runtime-receipt", "/evaluation/run.json",
+--- a/observe.py
++++ b/observe.py
+@@ -6,13 +6,27 @@
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parent / "observer"))
+ contract = json.loads(Path(sys.argv[1]).read_text())
+-if "published_protocol" in contract.get("report_contract", {}):
++if contract["schema"] == "geak-arena-external-task-v1":
++    from base_helper import regular
++    sys.path.insert(0, str(Path(__file__).resolve().parent / "cleaned"))
++    from geak_evo.evaluate.external import read_external_report
++    request = json.loads(regular(Path(sys.argv[4])))
++    if request["contract"] != contract:
++        raise ValueError("external observer contract differs from owner request")
++    root = Path(sys.argv[2])
++    names = ["START.json"] + [f"process_{index:02d}/{name}" for index in range(1, 4)
++        for name in ("RECEIPT.json", "ut_result.json", "_runs_v2.jsonl")]
++    artifacts = {name: regular(root / name) for name in names}
++    observed = read_external_report(request, artifacts)
++    result = {"issues": [], "observations": observed["observations"], "artifacts": artifacts}
++elif "published_protocol" in contract.get("report_contract", {}):
+     sys.path.insert(0, str(Path(__file__).resolve().parent / "runner"))
+     from published_observations import observations
+ else:
+     from native_observations import observations
+-sources = json.loads(Path(sys.argv[3]).read_text())
+-result = observations(contract, sys.argv[2], sources)
++if contract["schema"] != "geak-arena-external-task-v1":
++    sources = json.loads(Path(sys.argv[3]).read_text())
++    result = observations(contract, sys.argv[2], sources)
+ result["artifacts_base64"] = {name: base64.b64encode(raw).decode()
+                               for name, raw in result.pop("artifacts").items()}
+ print(json.dumps(result, sort_keys=True, allow_nan=False))

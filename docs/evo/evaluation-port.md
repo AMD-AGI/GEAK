@@ -7,6 +7,8 @@ phase folds. See the [ORIGINAL-only MQA task](../../examples/tasks/glm_mqa/READM
 This route adds no device manager and does not acquire graph or serving
 qualification. `external_primary` exports the method's native primary-phase
 score; it never substitutes a cross-phase geomean.
+The [native provider patch](external-owner.md) connects that method to the
+existing owner callbacks without a separate launch or recovery subsystem.
 
 The engine retains both existing evaluation contracts. `ArenaEvaluator` records
 provisional native task observations; `NativeEvaluator` retains the separate

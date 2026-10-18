@@ -1,0 +1,37 @@
+{
+  "schema": "geak-external-owner-patch-base-v1",
+  "files": [
+    {
+      "name": "base_helper.py",
+      "source_path": "/mnt/sapmajum-evo-scratch/primary-mla-full8-astra-20261015-v1/native/base_helper.py",
+      "sha256": "46b05384cab0bbac8f1dcad4f66f38a2e46046eece90d7658e3a7bcac6932041"
+    },
+    {
+      "name": "launch_native.py",
+      "source_path": "/mnt/sapmajum-evo-scratch/primary-mla-full8-astra-20261015-v1/native/launch_native.py",
+      "sha256": "090f1996f79da6e2d72a82241be0efb412cbe7d6ff369116b98c1b92b50a2a2a"
+    },
+    {
+      "name": "observe.py",
+      "source_path": "/mnt/sapmajum-evo-scratch/primary-mla-full8-astra-20261015-v1/native/observe.py",
+      "sha256": "7abf3c3340f7217bc319948dfa0f450bc87d5371feb361777239d66a2a2d6e1e"
+    }
+  ],
+  "unchanged_dependencies": [
+    {
+      "name": "root_helper.py",
+      "source_path": "/mnt/sapmajum-evo-scratch/primary-mla-full8-astra-20261015-v1/native/root_helper.py",
+      "sha256": "4190d62ea93f9af4a7ed7f55af13c9aaa2502bc587765f8b31f32bc108a7aae5"
+    },
+    {
+      "name": "gpu_lock.sh",
+      "source_path": "/mnt/sapmajum-evo-scratch/primary-mla-full8-astra-20261015-v1/native/gpu_lock.sh",
+      "sha256": "62c08ec92bc4f37923bfe676eb39a456963e434d89cd842e304255a549a7beb3"
+    },
+    {
+      "name": "adapter.py",
+      "source_path": "/mnt/sapmajum-evo-scratch/primary-mla-full8-astra-20261015-v1/native/adapter.py",
+      "sha256": "2c6475e6e1b237f3fd2a6fb68faa9aa84f7044093ca50311f26efbaba9d96989"
+    }
+  ]
+}

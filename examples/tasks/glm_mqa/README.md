@@ -28,7 +28,8 @@ device before installing the task. Preparation starts no process or GPU work.
 
 There is no C++ helper in ORIGINAL MQA. Additional compiled helpers require a
 declared source/build closure before use. The same evaluator method can read
-BMM results, but BMM's Python/C++ source closure needs its own task preparation.
+BMM results, but BMM needs its own ORIGINAL-only task preparation. Its ORIGINAL
+source is Python; copied optimized C++ must not enter the engineer packet.
 An undeclared installed optimized module is not a candidate source.
 
 The exported entry is:
