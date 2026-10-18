@@ -61,6 +61,14 @@ continuation below the highest score, explain why in existing override_reason;
 a new/unmatched direction is not_comparable. No new response field is required.
 '''
 _BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+OBSERVATIONS_SCHEMA = "native-development-observations-v1"
+OBSERVATION_ROWS = {"directions": 6, "admitted_memberships": 3, "combined_source_outcomes": 2}
+NESTED_ITEMS = 1  # Inline lists inside retained rows keep their last items; the full file keeps all.
+OBSERVATIONS_SCOPE = ("Saved per-episode proofs only: each episode's selected outcome (not its terminal) against the "
+                      "comparator frozen before it opened. admitted_memberships: the parent's admitted membership at "
+                      "that episode, not a MAP-Elites cell or the child's classification. Missing: settled without a "
+                      "saved proof; incomplete: unknown outcome. Recency order; does not change host credit or "
+                      "admission rules.")
 
 
 
@@ -410,8 +418,8 @@ class NativeDevelopmentAdvice:
             snapshot = self.loop.snapshot()
         return snapshot
 
-    def _checked_credit(self, state, opportunity, events, sources):
-        """Check one saved review/proof against committed state; return (ref, proof) or None."""
+    def _checked_proof(self, state, opportunity, events):
+        """Check one saved review/proof against committed state; return (ref, review, proof) or None."""
         existing = self._existing(opportunity)
         if existing is None:
             return None
@@ -432,9 +440,15 @@ class NativeDevelopmentAdvice:
               and opportunity.get("progress_outcome_kind") == value.get("outcome_kind"),
               "committed native progress proof or coverage differs")
         _outcome(value, proof)
-        credit = proof["credit"]
-        if credit is None:
+        return ref, value, proof
+
+    def _checked_credit(self, state, opportunity, events, sources):
+        """The checked (ref, proof) of a saved credit, or None."""
+        checked = self._checked_proof(state, opportunity, events)
+        if checked is None or checked[2]["credit"] is None:
             return None
+        ref, value, proof = checked
+        credit = proof["credit"]
         _need(value["complete"] is True and credit["gain_kind"] == OBSERVED_GAIN_KIND
               and credit["opportunity_id"] == opportunity["opportunity_id"]
               and all(credit[key] == item for key, item in state["binding"].items())
@@ -473,6 +487,80 @@ class NativeDevelopmentAdvice:
             return expected == bound and actual == proof
 
         return {"progress": progress, "verify_progress": verify_progress}
+
+    def observations(self, snapshot):
+        """Latest complete saved proof per direction and per assigned membership (read-only)."""
+        self._committed(snapshot)
+        state, groups, combined = snapshot["state"], {}, []
+        events = {row["attempt_id"]: row for row in state["history"] if row.get("attempt_id")}
+        settled = [row for row in state["opportunities"] if events.get(row["opportunity_id"], {}).get("settled")
+                   is True and events[row["opportunity_id"]].get("collection_ref")]
+        for opportunity in sorted(settled, key=lambda row: (row["completed_sequence"], row["opportunity_id"])):
+            event, direction = events[opportunity["opportunity_id"]], opportunity["direction_id"]
+            checked = self._checked_proof(state, opportunity, events)
+            selection = (self._artifact(event["packet_ref"])[2].get("decision") or {}).get("selection") or {}
+            donors = selection.get("donor_source_ids")  # None: not recorded by this assignment.
+            row = {"opportunity_id": opportunity["opportunity_id"], "status": "missing",
+                   "ref": event["collection_ref"]}
+            if checked is not None:
+                ref, value, proof = checked
+                row.update(status="complete" if value["complete"] else "incomplete",
+                           outcome_kind=value.get("outcome_kind"), selected_source_id=proof["selected_source_id"],
+                           selected_value_ms=(proof["selected_quality"] or {}).get("value_ms"),
+                           signed_frontier_log_ratio=proof["signed_frontier_log_ratio"],
+                           ref={"evidence_id": ref["evidence_id"], "artifact": PROOF_ARTIFACT})
+            if donors:
+                combined.append(dict(row, direction_id=direction, donor_source_ids=donors,
+                                     donor_marginal_credit="unknown"))
+            keys = [("direction", direction)]
+            if opportunity.get("membership_ref") is not None:  # The parent's admitted membership, as recorded.
+                keys.append(("membership", opportunity["island_id"], _hash(opportunity["membership_ref"])))
+            for key in keys:
+                group = groups.setdefault(key, {"episode_count": 0, "last_complete": None, "incomplete_count": 0,
+                                                "incomplete_refs": [], "missing_count": 0, "missing_refs": []})
+                if key[0] == "membership":  # direction_ids: least to most recent.
+                    group.update(island_id=key[1], parent_membership_ref=opportunity["membership_ref"],
+                                 direction_ids=[item for item in group.get("direction_ids", []) if item != direction]
+                                 + [direction])
+                group.update(episode_count=group["episode_count"] + 1, last_sequence=opportunity["completed_sequence"])
+                if row["status"] == "complete":
+                    group["last_complete"] = dict(row, donor_source_ids=donors)
+                else:
+                    group[row["status"] + "_count"] += 1
+                    group[row["status"] + "_refs"].append({"opportunity_id": row["opportunity_id"], "ref": row["ref"]})
+        rows = sorted(groups.items(), key=lambda item: (-item[1]["last_sequence"], item[0]))
+        return {"schema": OBSERVATIONS_SCHEMA, "status": "available", "campaign_revision": snapshot["revision"],
+                "directions": [dict(value, direction_id=key[1]) for key, value in rows if key[0] == "direction"],
+                "admitted_memberships": [value for key, value in rows if key[0] == "membership"],
+                "combined_source_outcomes": combined[::-1], "cumulative_rate": "unknown",
+                "donor_marginal_credit": "unknown", "scope": OBSERVATIONS_SCOPE}
+
+
+def observation_view(development, snapshot, rows=OBSERVATION_ROWS):
+    """(full, inline); inline keeps the most recent rows and nested items, and no failure reason."""
+    try:
+        full = development.observations(snapshot)
+    except StateError:
+        raise
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        inline = {"schema": OBSERVATIONS_SCHEMA, "status": "unavailable", "error_type": type(error).__name__}
+        return dict(inline, reason=str(error)[:1000]), inline
+    inline = dict(full, omitted={name: max(0, len(full[name]) - limit) for name, limit in rows.items()})
+    inline.update({name: [_capped(row) for row in full[name][:limit]] for name, limit in rows.items()})
+    return full, inline
+
+
+def _capped(value):
+    """Inline copy whose nested lists keep their last NESTED_ITEMS, with _total and _omitted when cut."""
+    if type(value) is list:
+        return [_capped(item) for item in value[-NESTED_ITEMS:]]
+    if type(value) is not dict:
+        return value
+    capped = {key: _capped(item) for key, item in value.items()}
+    for key, item in value.items():
+        if type(item) is list and len(item) > NESTED_ITEMS:
+            capped.update({key + "_total": len(item), key + "_omitted": len(item) - NESTED_ITEMS})
+    return capped
 
 
 # ------------------------------------------------------------------ offers

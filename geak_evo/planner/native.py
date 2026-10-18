@@ -25,7 +25,8 @@ from ..budget import planner_followup_reserve, bounded_engineer_reservation
 from ..archive.policy import native_enabled, native_capability_context, ProposalError, proposal_need, lineage_candidates, validate_action, validate_policy, validate_read_scope
 from ..archive.cells import CellProposalError, bind_engineer_identity
 from ..archive.maturation import COMMON_SCOPE, opportunity_view
-from ..selection.advice import ADVICE_SCOPE, verify_delivered_advice, program_lease_accounting, program_lease_offer
+from ..selection.advice import (ADVICE_SCOPE, NativeDevelopmentAdvice, observation_view, verify_delivered_advice,
+                                program_lease_accounting, program_lease_offer)
 from ..selection.choices import checkpoint_choices, authenticate_choice, choice_references
 
 # A native planner turn that failed with authenticated positive cleanup is a
@@ -1215,6 +1216,11 @@ class NativePlanner:
                 and native_enabled(self.search_policy, 'puct')):
             brief['native_allocation_advice'] = verify_delivered_advice(
                 context['advice'], context, offer, self.store)
+            full, observed = observation_view(NativeDevelopmentAdvice(self.loop, self.native_evidence), context)
+            _put(call / 'development-observations.json', full)
+            observed['full_view_ref'] = file_ref(call / 'development-observations.json')
+            references.append(observed['full_view_ref'])
+            brief['native_development_observations'] = observed
         if self.search_policy is not None and self.search_policy['arm'] == 'EVO':
             brief['native_maturation_opportunity'] = opportunity_view(
                 context, offer, parent_candidates, enabled=native_enabled(self.search_policy, 'protection'))
