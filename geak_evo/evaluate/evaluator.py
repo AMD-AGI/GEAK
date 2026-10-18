@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 import re
 
-from .jobs import job_digest, validate_arena_job
+from .jobs import declared_call_counts, job_digest, validate_arena_job
 from .artifacts import pack
 from ..archive.store import _path, _read, _write
 
@@ -96,6 +96,10 @@ class ArenaEvaluator:
         require(self.root.resolve(strict=True) == self.root, "canonical evaluator root required", ArenaEvaluationError)
         self.launch, self.settle = launch, settle
         self.evaluator_sha256 = sha256(_read(Path(__file__).parent, Path(__file__).name)[0])
+
+    def declared_call_counts(self):
+        """Timer invocations per case within one process/leg, warmups separate."""
+        return declared_call_counts(self.contract)
 
     def _request(self, candidate_id, evaluation_id):
         require(isinstance(evaluation_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}", evaluation_id),

@@ -154,6 +154,23 @@ The editable file list follows the extractor's `kernel_src/` layout; the host
 must verify that this directory contains the complete permitted source set.
 Declared timer settings do not establish that a later run executed them.
 
+`jobs.declared_call_counts` exposes declared timer invocations per case within
+one process or leg through `ArenaEvaluator.declared_call_counts()`. Warmups are
+separate from measured invocations: native-v2 declares 10 warmups and 100 direct
+calls or graph replays; generated-v1 declares 10 warmups and 50 samples with one
+inner call each. Generated outer paired repetitions remain separate. These
+counts exclude setup and do not count total kernel dispatches or establish
+observed collector coverage. They do not change latency units, statistics or
+actual timer/fallback evidence.
+
+The accessor first validates the full existing contract, then returns a fresh
+integer mapping. This preserves native validation's acceptance of equivalent
+values such as `10.0` and `100.0`; the declaration bytes and digest remain
+unchanged. Generated validation still requires integer counts and one inner
+call. Other schemas are unsupported by this count API. Host-specific patches,
+absolute source references and synthetic integration evidence belong to the
+provider review packet; the canonical count tests use portable CPU fixtures.
+
 These adaptive, baseline-first ratios are selection evidence only. Keep them
 separate from native-v2 graph timing. An optimizer-only GEAK versus GEAK-EVO
 comparison requires the same task, cases, harness and timer in both arms, plus

@@ -262,6 +262,24 @@ def validate_arena_job(contract, artifact_root=None):
     return contract
 
 
+def declared_call_counts(contract):
+    """Declared timer invocations per case within one process or leg.
+
+    Warmup invocations are separate from measured direct calls or graph
+    replays. Generated samples have one inner call by contract. Counts exclude
+    outer paired repetitions and do not describe total kernel dispatches or
+    observed collector coverage.
+    """
+    value = validate_arena_job(contract)
+    sections = {"geak-arena-native-operator-v2": "primary",
+                "geak-arena-generated-task-v1": "in_process"}
+    require(value["schema"] in sections, "Arena schema has no supported timing call counts", ValueError)
+    timing = value["timing_policy"][sections[value["schema"]]]
+    # Full schema validation fixes these counts to exact positive values;
+    # native declarations also accept their integer-valued float equivalents.
+    return {"measured": int(timing["measured_calls"]), "warmup": int(timing["warmup_calls"])}
+
+
 def job_digest(validated_contract):
     """Identity of the complete Arena task contract, excluding candidate source changes."""
     return sha256_hex(_canonical(validate_arena_job(validated_contract)))
