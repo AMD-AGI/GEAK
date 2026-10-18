@@ -8,6 +8,7 @@ from decimal import Decimal
 import json
 
 from .._util import canonical_json, require, sha256_hex
+from . import jobs
 
 
 SCHEMA = "native-host-recorded-quantities-v1"
@@ -70,7 +71,7 @@ class NativeQuantities:
         except (ValueError, TypeError, IndexError):
             mapping = None  # Unknown device identity permits hypotheses, never timing facts.
         self.descriptors = {case: {"schema": SCHEMA, "producer_ref": producer_ref,
-            "job_id": digest(contract), "case_id": case, "case_binding": contract["case_bindings"][case],
+            "job_id": jobs.job_digest(contract), "case_id": case, "case_binding": contract["case_bindings"][case],
             "report_contract": contract["report_contract"], "runtime": contract["runtime"],
             "physical_mapping": mapping, "scope": SCOPE} for case in contract["benchmark_case_ids"]}
         self.descriptor = self.descriptors[case_id]

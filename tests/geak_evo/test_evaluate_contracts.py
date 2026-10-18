@@ -187,6 +187,36 @@ class EvaluationContractTests(unittest.TestCase):
             producer._derive(self.candidate, {"claim": refs["evaluation"]})
         self.assertFalse(producer({"evidence_id": evidence, "artifact": "quantity.json"}, pair, pair["binding"]))
 
+    def test_quantities_bind_registered_ascii_and_unicode_tasks(self):
+        for label in ("ascii", "Unicode: μ × β"):
+            with self.subTest(label=label):
+                contract = copy.deepcopy(self.contract)
+                contract["report_contract"]["description"] = label
+                job_id = jobs.job_digest(contract)
+                if label == "ascii":
+                    self.assertEqual(job_id, sha(encoded(contract)))
+                else:
+                    self.assertNotEqual(job_id, sha(encoded(contract)))
+                store = ResearchStore(self.root / label, allowed_epochs=[(job_id, "epoch")],
+                                      source_paths={job_id: contract["source_paths"]})
+                source = store.capture_source(self.task, contract["source_paths"])
+                self.assertEqual(source, self.source)
+                candidate = store.candidate(job_id, "epoch", source)
+                producer = quantities.NativeQuantities(store, "no-campaign", contract=contract,
+                    admission={}, case_id="case-a", producer_ref={"synthetic": True})
+                for case, binding in producer.case_bindings(candidate).items():
+                    self.assertEqual(producer.descriptors[case]["job_id"], job_id)
+                    self.assertEqual(binding["job_id"], job_id)
+                    self.assertEqual(binding["source_id"], source)
+                engine = arena.ArenaEvaluator(store, contract=contract, contract_id=job_id,
+                    artifact_root=self.task, output_root=self.root / (label + "-evaluation"),
+                    measurement_epoch_id="epoch", launch=self.launch, settle=self.settle)
+                request = engine.prepare(candidate, evaluation_id="quantity-identity")
+                # Task IDs use UTF-8; quantity and request JSON keep their existing bytes.
+                self.assertEqual(quantities.encoded(contract), encoded(contract))
+                self.assertEqual(arena.canonical(request), encoded(request))
+                self.assertEqual(quantities.digest(request), sha(encoded(request)))
+
     def test_native_contract_rejects_comparable_fallback(self):
         changed = copy.deepcopy(self.contract)
         changed["timing_policy"]["fallback"]["comparable"] = True
