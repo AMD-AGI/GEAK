@@ -268,6 +268,66 @@ class MeasurementTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "original clock"):
                 capture("other-boot")
 
+    def test_canonical_transition_survives_lost_host_history_and_exposes_missing_attempts(self):
+        fixture = external_fixtures.ExternalTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        task = fixture.root / "workspace"
+        shutil.copytree(fixture.root / "task", task)
+        def git(*args):
+            subprocess.run(["git", "-C", str(task), *args], check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        git("init", "-q")
+        git("add", ".")
+        git("-c", "user.name=fixture", "-c", "user.email=f@test", "commit", "-qm", "original")
+        clock_path = fixture.root / "clock.json"
+        clock_path.write_text(json.dumps({"boot_id": "fixture", "started_monotonic_ns": 100,
+                                         "wall_seconds": 28800}))
+        services = NS(store=fixture.store, evaluator=fixture.evaluator, store_module=store_module,
+            reader=control_result, job_id=fixture.evaluator.contract_id, epoch=fixture.evaluator.epoch,
+            clock_ref=file_ref(clock_path))
+        def capture(kind, sequence, previous=None, round=0):
+            instants = iter([100 + sequence * 100, 150 + sequence * 100])
+            transition = {"kind": kind, "round": round, "sequence": sequence,
+                "previous_capture_ref": previous, "stopped_by": "budget" if kind == "terminal" else None}
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                measurement.capture_selection(services, task, transition=transition,
+                    clock=lambda: ("fixture", next(instants)))
+            value = json.loads(output.getvalue())
+            return value["capture_ref"], value
+        with mock.patch.object(fixture.evaluator, "launch", side_effect=AssertionError("no evaluation")):
+            initial_ref, initial = capture("initial", 1)
+            before_ref, before = capture("before_commit", 2, initial_ref, round=1)
+            # A host crash before OR after mutation cannot rewrite the pending artifact.
+            _, pending_raw = fixture.store.evidence_artifact(before_ref["evidence_id"], before_ref["artifact"])
+            self.assertEqual(json.loads(pending_raw)["transition"]["kind"], "before_commit")
+            self.assertEqual(before["source_id"], initial["source_id"])
+            (task / "kernel_src/module.py").write_bytes(b"# after host mutation\n")
+            git("add", ".")
+            git("-c", "user.name=fixture", "-c", "user.email=f@test", "commit", "-qm", "changed")
+            self.assertEqual(fixture.store.evidence_artifact(before_ref["evidence_id"], before_ref["artifact"])[1], pending_raw)
+            # Reordering cannot turn an initial capture into a completed mutation.
+            with self.assertRaisesRegex(ValueError, "matching before"):
+                capture("after_commit", 2, initial_ref, round=1)
+            after_ref, after = capture("after_commit", 3, before_ref, round=1)
+            self.assertNotEqual(after["source_id"], initial["source_id"])
+            self.assertEqual(after["transition"]["previous_capture_ref"], before_ref)
+            with self.assertRaisesRegex(ValueError, "sequence or clock"):
+                capture("before_commit", 3, after_ref, round=2)
+            # A failed attempted capture is visible even when later source bytes survive.
+            tail_ref, tail = capture("terminal", 5, after_ref, round=1)
+            self.assertEqual(tail["transition"]["sequence"], 5)
+            self.assertEqual(tail["transition"]["previous_capture_ref"], after_ref)
+            self.assertEqual(tail["source_id"], after["source_id"])
+            # The query must reject the explicit 3 -> 5 gap; no guessed row is emitted.
+            self.assertNotEqual(tail["transition"]["sequence"], after["transition"]["sequence"] + 1)
+            with self.assertRaisesRegex(ValueError, "transition order"):
+                capture("before_commit", 6, tail_ref, round=2)
+            resume_ref, resume = capture("resume_unknown", 1)
+            self.assertEqual(resume["transition"]["kind"], "resume_unknown")
+            self.assertNotEqual(resume_ref, initial_ref)
+
 
 if __name__ == "__main__":
     unittest.main()

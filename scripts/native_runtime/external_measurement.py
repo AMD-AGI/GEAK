@@ -204,7 +204,7 @@ def committed_source(workspace, source):
     return head
 
 
-def capture_selection(services, workspace, *, selected=None, clock=sample_clock):
+def capture_selection(services, workspace, *, selected=None, transition=None, clock=sample_clock):
     """Retain canonical bytes and their original-clock observation, without evaluation.
 
     The host brackets canonical mutation with two captures. This receipt alone
@@ -215,9 +215,48 @@ def capture_selection(services, workspace, *, selected=None, clock=sample_clock)
     clock_raw = Path(services.clock_ref["path"]).read_bytes()
     need(hashlib.sha256(clock_raw).hexdigest() == services.clock_ref["sha256"], "original clock changed")
     original = json.loads(clock_raw)
+    parent = None
+    if transition is not None:
+        need(set(transition) == {"kind", "round", "sequence", "previous_capture_ref", "stopped_by"},
+             "exact canonical transition required")
+        kind, sequence = transition["kind"], transition["sequence"]
+        need(kind in ("initial", "resume_unknown", "before_commit", "after_commit", "after_restore", "terminal")
+             and type(sequence) is int and sequence > 0
+             and type(transition["round"]) is int and transition["round"] >= 0,
+             "valid canonical transition required")
+        need((kind == "terminal" and type(transition["stopped_by"]) is str and transition["stopped_by"])
+             or (kind != "terminal" and transition["stopped_by"] is None), "canonical stop reason differs")
+        previous = transition["previous_capture_ref"]
+        if kind in ("initial", "resume_unknown"):
+            need(sequence == 1 and previous is None and transition["round"] == 0,
+                 "initial canonical transition differs")
+        else:
+            need(type(previous) is dict and set(previous) == {"evidence_id", "artifact"}
+                 and previous["artifact"] == "canonical-selection.json", "previous canonical capture required")
+            envelope, raw = services.store.evidence_artifact(previous["evidence_id"], previous["artifact"])
+            parent = json.loads(raw)
+            need(parent["schema"] == "geak-canonical-source-capture-v2"
+                 and parent["clock_ref"] == services.clock_ref
+                 and parent["transition"]["sequence"] < sequence
+                 and envelope["candidate_id"] == parent["candidate_id"]
+                 and envelope["binding"] == {"job_id": services.job_id,
+                    "measurement_epoch_id": services.epoch, "candidate_source_id": parent["source_id"]},
+                 "canonical capture sequence or clock differs")
+            before = parent["transition"]
+            if sequence != before["sequence"] + 1:
+                pass  # Retain later bytes; the explicit sequence gap makes the timeline unresolved.
+            elif kind in ("after_commit", "after_restore"):
+                need(before["kind"] == "before_commit" and before["round"] == transition["round"],
+                     "canonical mutation has no matching before capture")
+            else:
+                need(before["kind"] in ("initial", "resume_unknown", "after_commit", "after_restore")
+                     and (transition["round"] > before["round"] if kind == "before_commit"
+                          else transition["round"] >= before["round"]),
+                     "canonical transition order differs")
     boot, lower = clock()
     need(boot == original["boot_id"] and lower >= original["started_monotonic_ns"],
          "capture differs from original clock")
+    need(parent is None or lower >= parent["upper_monotonic_ns"], "canonical capture clock went backwards")
     root = verify_protected_workspace(services, workspace)
     source = services.store.capture_source(root, services.evaluator.contract["source_paths"])
     need(all(row["blob_id"] is not None for row in services.store.source(source)["files"]),
@@ -249,6 +288,8 @@ def capture_selection(services, workspace, *, selected=None, clock=sample_clock)
                "clock_ref": services.clock_ref, "boot_id": boot,
                "lower_monotonic_ns": lower, "upper_monotonic_ns": upper,
                "canonical_commit": commit, "development_evidence": evidence}
+    if transition is not None:
+        capture.update(schema="geak-canonical-source-capture-v2", transition=transition)
     identity = services.store.archive_evidence(candidate, {
         "canonical-selection.json": canonical(capture).encode(), "original-clock.json": clock_raw})
     print(canonical({**capture, "capture_ref": {"evidence_id": identity,
@@ -304,6 +345,11 @@ def main(argv=None):
     arguments.add_argument("--capture-selection", action="store_true")
     arguments.add_argument("--selected-candidate-id")
     arguments.add_argument("--selected-evaluation-id")
+    arguments.add_argument("--selection-kind")
+    arguments.add_argument("--selection-round", type=int)
+    arguments.add_argument("--selection-sequence", type=int)
+    arguments.add_argument("--previous-selection")
+    arguments.add_argument("--selection-stop-reason")
     args = arguments.parse_args(remaining)
     need(bool(args.selected_candidate_id) == bool(args.selected_evaluation_id),
          "selected candidate and evaluation IDs must be supplied together")
@@ -313,7 +359,13 @@ def main(argv=None):
              "canonical capture does not allocate an evaluation")
         selected = ({"candidate_id": args.selected_candidate_id, "evaluation_id": args.selected_evaluation_id}
                     if args.selected_candidate_id else None)
-        return capture_selection(services, args.workspace, selected=selected)
+        transition = None
+        if args.selection_kind is not None:
+            transition = {"kind": args.selection_kind, "round": args.selection_round,
+                "sequence": args.selection_sequence, "stopped_by": args.selection_stop_reason,
+                "previous_capture_ref": ({"evidence_id": args.previous_selection,
+                    "artifact": "canonical-selection.json"} if args.previous_selection else None)}
+        return capture_selection(services, args.workspace, selected=selected, transition=transition)
     need(not args.capture_only or (args.evaluation_id is None and args.candidate_id is None),
          "capture allocates a fresh final evaluation identity")
     return measure(services, args.workspace, args.evaluation_id or "geak-" + uuid.uuid4().hex,

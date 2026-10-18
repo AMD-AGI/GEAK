@@ -65,10 +65,11 @@ const make = (A) => new Function('A', 'HAS_WORKLOAD', 'runProcess', 'log', sourc
   await fullLane(false, false, true, 'stale-evaluation');
   await fullLane(false, false, true, 'capture-failed');
   await fullLane(false, false, false, null, true);
+  await fullLane(false, false, false, null, true, true);
   console.log('external primary: checked development geomean, native export score and gain, no legacy fallback, source/patch arguments passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});
 
-async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal = null, captureSelections = false) {
+async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal = null, captureSelections = false, failBefore = false) {
   const body = fs.readFileSync(path.join(__dirname, '../kernel_lane.js'), 'utf8')
     .replace(/^export const meta/m, 'const meta');
   const selectedCandidate = 'c'.repeat(64);
@@ -99,8 +100,23 @@ async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal 
         canonicalCaptures++;
         assert.equal(opts.cmd, '/owner/evaluate');
         assert.equal(opts.args.includes('--selected-evaluation-id'), commits > 0);
+        const field = key => opts.args[opts.args.indexOf(key) + 1];
+        const sequence = Number(field('--selection-sequence'));
+        assert.equal(sequence, canonicalCaptures);
+        if (failBefore && canonicalCaptures === 2) {
+          return {status: 'spawn_error', code: null, group_cleared: true, stdout: ''};
+        }
+        if (failBefore && canonicalCaptures === 3) {
+          assert.equal(opts.args.includes('--previous-selection'), true, 'later bytes retain the last successful reference');
+          assert.equal(sequence, 3, 'failed attempted sequence is never renumbered');
+        }
+        const previous = opts.args.includes('--previous-selection') ? {
+          evidence_id: field('--previous-selection'), artifact: 'canonical-selection.json'} : null;
         return {status: 'completed', code: 0, group_cleared: true, stdout: JSON.stringify({
-          schema: 'geak-canonical-source-capture-v1', candidate_id: selectedCandidate,
+          schema: 'geak-canonical-source-capture-v2', candidate_id: selectedCandidate,
+          transition: {sequence, previous_capture_ref: previous, round: Number(field('--selection-round')),
+            kind: field('--selection-kind'), stopped_by: opts.args.includes('--selection-stop-reason')
+              ? field('--selection-stop-reason') : null},
           source_id: (commits ? 'd' : 'e').repeat(64),
           capture_ref: {evidence_id: 'f'.repeat(64), artifact: 'canonical-selection.json'},
           clock_ref: {path: '/owner/clock', sha256: 'a'.repeat(64)},
@@ -194,7 +210,8 @@ async function fullLane(finalNoGain, warm = false, staged = false, invalidFinal 
     assert.deepEqual(value.canonical_selections.map(row => row.kind),
       ['initial', 'before_commit', 'after_commit', 'terminal']);
     assert.deepEqual(value.canonical_selections.map(row => row.source_id),
-      ['e', 'e', 'd', 'd'].map(value => value.repeat(64)));
+      ['e', failBefore ? null : 'e', 'd', 'd'].map(value => value ? value.repeat(64) : undefined));
+    if (failBefore) assert.equal(value.canonical_selections[1].status, 'unresolved');
     assert.equal(value.canonical_selections[2].development_status, 'unresolved');
     assert.equal(value.canonical_selections[3].stopped_by, value.stopped_by);
   }

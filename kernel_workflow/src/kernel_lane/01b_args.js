@@ -171,18 +171,32 @@ async function captureCanonicalSelection(history, kind, round, winner = null, st
   if (!CAPTURE_CANONICAL_SELECTIONS) return;
   const row = {kind, round, stopped_by: stoppedBy, status: 'unresolved'};
   if (!history.canonical_selections) history.canonical_selections = [];
+  const previous = [...history.canonical_selections].reverse().find(item => item.capture_ref);
+  const transition = {kind, round, stopped_by: stoppedBy,
+    sequence: history.canonical_selections.length + 1,
+    previous_capture_ref: previous ? previous.capture_ref || null : null};
+  Object.assign(row, transition);
   history.canonical_selections.push(row);
   try {
     const argv = A.external_measurement_command;
     const selected = winner && winner.external_evaluation;
     const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
-      '--workspace', CANONICAL, '--capture-selection', ...(selected ? [
+      '--workspace', CANONICAL, '--capture-selection', '--selection-kind', kind,
+      '--selection-round', String(round), '--selection-sequence', String(transition.sequence),
+      ...(transition.previous_capture_ref ? ['--previous-selection', transition.previous_capture_ref.evidence_id] : []),
+      ...(stoppedBy ? ['--selection-stop-reason', stoppedBy] : []), ...(selected ? [
         '--selected-candidate-id', selected.candidate_id, '--selected-evaluation-id', selected.evaluation_id] : [])],
       timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
     if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
         || !result.group_cleared || result.stdio_held) throw new Error('canonical source capture failed');
     const capture = JSON.parse(result.stdout);
-    if (capture.schema !== 'geak-canonical-source-capture-v1'
+    const returned = capture.transition;
+    const prior = returned && returned.previous_capture_ref;
+    const expectedPrior = transition.previous_capture_ref;
+    if (capture.schema !== 'geak-canonical-source-capture-v2'
+        || !returned || !['kind', 'round', 'sequence', 'stopped_by'].every(key => returned[key] === transition[key])
+        || (expectedPrior ? !prior || prior.evidence_id !== expectedPrior.evidence_id
+          || prior.artifact !== expectedPrior.artifact : prior !== null)
         || ![capture.candidate_id, capture.source_id, capture.capture_ref && capture.capture_ref.evidence_id]
           .every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))
         || capture.capture_ref.artifact !== 'canonical-selection.json') throw new Error('invalid canonical capture');
@@ -194,6 +208,8 @@ async function captureCanonicalSelection(history, kind, round, winner = null, st
   } catch (error) {
     row.reason = String(error);
   }
+  // This is observational. Failure cannot stop authentic GEAK search. Attempted
+  // sequence numbers still advance, so a gap cannot become a complete chain.
 }
 
 async function checkedExternalMeasurement(value, workspace, patch = null, final = false) {
