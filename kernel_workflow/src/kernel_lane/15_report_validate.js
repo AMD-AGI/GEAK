@@ -14,7 +14,7 @@ const report = await agentT(
 // PHASE: Director validation + arbitration
 // ===========================================================================
 phase('Validate');
-const validation = await agentT(
+let validation = await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {
     KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     APPLY_TO_ORIGINAL, COMMANDMENT, FROZEN_ORACLE: FROZEN_ORACLE ? 'true' : 'false',
@@ -25,13 +25,20 @@ const validation = await agentT(
     BASELINE_TIMING: BASELINE_PER_CASE,
   }),
   { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
+validation = await checkedExternalMeasurement(validation, KERNEL_PATH_ORIG,
+  report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`);
+if (EXTERNAL_OBJECTIVE && validation && validation.external_measurement_valid && !nativeGainEligible(validation)) {
+  validation.validation_status = 'no_improvement';
+}
+const externalPromotion = !EXTERNAL_OBJECTIVE || !!(nativeGainEligible(validation)
+  && validation && says(validation.validation_status, 'accepted'));
 
-const finalGeomean = validation ? validation.director_verified_speedup_geomean : cumulative;
+const finalGeomean = EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_geomean : cumulative);
 // PRIMARY headline: the time-weighted speedup when workload-aligned, else the geomean (unchanged).
-const finalWeighted = validation && validation.director_verified_speedup_weighted != null
+const finalWeighted = !EXTERNAL_OBJECTIVE && validation && validation.director_verified_speedup_weighted != null
   ? validation.director_verified_speedup_weighted : null;
-const finalPrimary = HAS_WORKLOAD && Number.isFinite(finalWeighted) ? finalWeighted : finalGeomean;
-log(`COMPLETE. ${KERNEL_NAME}: verified ${HAS_WORKLOAD ? 'time-weighted' : 'geomean'} ${finalPrimary ? finalPrimary.toFixed(2) : '?'}x` +
+const finalPrimary = EXTERNAL_OBJECTIVE ? (validation ? primSpeedup(validation) : null)
+  : (HAS_WORKLOAD && Number.isFinite(finalWeighted) ? finalWeighted : finalGeomean);
+log(`COMPLETE. ${KERNEL_NAME}: verified ${EXTERNAL_OBJECTIVE ? 'external primary' : HAS_WORKLOAD ? 'time-weighted' : 'geomean'} ${finalPrimary ? finalPrimary.toFixed(2) : '?'}x` +
     `${HAS_WORKLOAD && Number.isFinite(finalGeomean) ? ` (unweighted geomean ${finalGeomean.toFixed(2)}x)` : ''}` +
     ` (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
-

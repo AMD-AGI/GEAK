@@ -91,10 +91,76 @@ const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
 const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
   (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
   (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
+const EXTERNAL_OBJECTIVE = A.objective && A.objective.kind === 'external_primary' ? A.objective : null;
+if (EXTERNAL_OBJECTIVE && (Object.keys(EXTERNAL_OBJECTIVE).sort().join(',') !== 'kind,primary_regime'
+    || typeof EXTERNAL_OBJECTIVE.primary_regime !== 'string' || !EXTERNAL_OBJECTIVE.primary_regime.trim())) {
+  throw new Error('external_primary requires exactly kind and primary_regime');
+}
+const externalArgv = (value) => Array.isArray(value) && value.length
+  && value.every(v => typeof v === 'string' && v) ? value : null;
+if (EXTERNAL_OBJECTIVE && (!externalArgv(A.external_result_command)
+    || !externalArgv(A.external_measurement_command) || typeof runProcess !== 'function')) {
+  throw new Error('external_primary requires the existing owner measurement and result-reader argv plus runProcess');
+}
+const EXTERNAL_METRIC_INSTRUCTIONS = EXTERNAL_OBJECTIVE ? `
+External measurement contract: ${JSON.stringify(EXTERNAL_OBJECTIVE)}.
+Use the existing admitted owner command ${JSON.stringify(A.external_measurement_command)}
+from the candidate workspace according to COMMANDMENT. One evaluation runs the
+unchanged full UT in three fresh processes with native min_runs=2. This combined
+operation replaces the role's separate correctness/benchmark repetitions and any
+extra numerical or graph coverage; preserve the copied UT exactly. Do not invoke
+the UT directly, rebuild its case folds, require gain for ORIGINAL qualification,
+or repeat valid no-gain results as failures. Retain both native phase folds.
+Return the operation's exact IDs as external_evaluation:{candidate_id,evaluation_id}
+(under best for an integrated candidate). The workflow's trusted owner reader
+checks source, settlement and raw results. A scalar or OBSERVATIONS.json relayed
+by a model is not accepted as measurement. Report missing/failed operations and
+preserve artifacts. The native primary and gain gate govern eligibility; existing
+search thresholds still apply. Legacy geomean fields may be omitted.
+` : '';
+const externalFields = (o) => EXTERNAL_OBJECTIVE && o ? Object.fromEntries(
+  ['objective', 'primary_regime', 'primary_speedup', 'native_reproducible_gain',
+   'native_reproducible_regression', 'phase_speedups', 'external_evaluation',
+   'external_measurement_valid', 'receipt_ref', 'timing_basis'].map(k => [k, o[k]])) : {};
+const nativeGainEligible = (o) => !EXTERNAL_OBJECTIVE || !!(o && o.external_measurement_valid === true
+  && o.native_reproducible_gain === true && o.native_reproducible_regression === false);
+
+async function checkedExternalMeasurement(value, workspace, patch = null) {
+  if (!EXTERNAL_OBJECTIVE || !value) return value;
+  const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
+    status: 'invalid_measurement', correctness: 'not_checked', validation_status: 'invalid_measurement',
+    native_reproducible_gain: false, native_reproducible_regression: false };
+  const ref = value.external_evaluation;
+  if (!ref || typeof ref.candidate_id !== 'string' || typeof ref.evaluation_id !== 'string') return invalid;
+  try {
+    const argv = A.external_result_command;
+    const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+      '--candidate-id', ref.candidate_id, '--evaluation-id', ref.evaluation_id,
+      '--workspace', workspace, ...(patch ? ['--patch', patch] : [])],
+      timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+    if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+        || !result.group_cleared || result.stdio_held) return invalid;
+    const read = JSON.parse(result.stdout);
+    if (read.external_measurement_valid !== true || !read.objective
+        || read.objective.kind !== 'external_primary'
+        || read.primary_regime !== EXTERNAL_OBJECTIVE.primary_regime
+        || read.objective.primary_regime !== EXTERNAL_OBJECTIVE.primary_regime
+        || !Number.isFinite(read.primary_speedup) || read.primary_speedup <= 0
+        || read.external_evaluation.candidate_id !== ref.candidate_id
+        || read.external_evaluation.evaluation_id !== ref.evaluation_id) return invalid;
+    return { ...value, ...read };
+  } catch (error) {
+    log(`External measurement reader failed: ${String(error)}`);
+    return invalid;
+  }
+}
 // PRIMARY-metric selector: prefer the time-weighted number when a workload spec is in play and the
 // agent reported one; otherwise fall back to the geomean (unweighted runs => unchanged behavior).
 const primSpeedup = (o) => {
-  if (!o) return 0;
+  if (!o) return EXTERNAL_OBJECTIVE ? null : 0;
+  if (EXTERNAL_OBJECTIVE) return o.external_measurement_valid === true
+    && o.primary_regime === EXTERNAL_OBJECTIVE.primary_regime
+    && Number.isFinite(o.primary_speedup) ? o.primary_speedup : null;
   const w = o.verified_weighted != null ? o.verified_weighted
           : (o.speedup_weighted != null ? o.speedup_weighted : null);
   if (HAS_WORKLOAD && Number.isFinite(w)) return w;
@@ -141,4 +207,3 @@ const DRA_MAX_BLINDSPOTS = (() => {
   const v = parseInt(A.dra_max_blindspots != null ? A.dra_max_blindspots : 4, 10);
   return Number.isFinite(v) && v >= 1 ? v : 4;
 })();
-

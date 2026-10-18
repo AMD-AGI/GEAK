@@ -187,9 +187,9 @@ ${cfg({
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
-      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
+      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + EXTERNAL_METRIC_INSTRUCTIONS,
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
-    ).then((eng) => ({ d, eng }));
+    ).then(async (eng) => ({ d, eng: await checkedExternalMeasurement(eng, `${d.out_dir}/workspace`) }));
     },
 
     (prev) => {
@@ -199,7 +199,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       // only after a valid measurement at or below the floor. Verify checks whether
       // the patch exists, applies cleanly, and passes the oracle.
       const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR) &&
-        eng.status !== 'invalid_measurement' && eng.measurement_valid === true;
+        eng.status !== 'invalid_measurement' && eng.measurement_valid === true &&
+        (!EXTERNAL_OBJECTIVE || (eng.external_measurement_valid === true && Number.isFinite(primSpeedup(eng))));
       if (trustworthyBelowBaseline) {
         return { d, eng, ver: null };
       }
@@ -215,13 +216,13 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then((ver) => ({ d, eng, ver, patch }));
+      ).then(async (ver) => ({ d, eng, ver: await checkedExternalMeasurement(ver, CANONICAL, patch), patch }));
     }
   );
 
   const clean = results.filter(Boolean);
   const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
-    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR);
+    says(r.ver.correctness, 'pass') && nativeGainEligible(r.ver) && primSpeedup(r.ver) > CANDIDATE_FLOOR);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
@@ -233,6 +234,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
+    ...externalFields(r.ver),
   }));
 
   let integrate = null;
@@ -245,14 +247,18 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
+          ...externalFields(r.ver),
           files: r.d.focus_files || [], patch: r.patch })),
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
-    const integPrim = integrate && integrate.best ? primSpeedup({
+    if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
+      integrate.best, CANONICAL, integrate.best.patch_file);
+    const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
     if (integrate && integrate.conclusion === 'improved' && integrate.best &&
+      nativeGainEligible(integrate.best) &&
       integPrim > Math.max(...candidates.map(c => c.geomean))) {
       candidates.push({
         source: 'integrated', id: `r${round}_integrated`, title: 'integrated', specialty: 'integrate',
@@ -260,6 +266,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        ...externalFields(integrate.best),
       });
     }
   }
@@ -321,6 +328,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         expected: r.d.expected_speedup, claimed: r.eng ? r.eng.speedup_geomean : 0,
         verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
         notes: r.eng ? r.eng.notes : '' })),
+      ...(EXTERNAL_OBJECTIVE ? { EXTERNAL_RESULTS: clean.map(r => ({id: r.d.id,
+        engineer: externalFields(r.eng), verified: externalFields(r.ver)})) } : {}),
       INTEGRATE: integrate, WINNER: winner ? { source: winner.source, geomean: winner.geomean } : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
       PRIOR_HISTORY: history,
@@ -370,8 +379,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         card: cardRef, round, direction: r.d.id, specialty: r.d.specialty,
         // null, NOT 0, when the verifier produced nothing. `kb.py` scores <=1.0 as a real loss, so
         // encoding "no evidence" as 0 charged a card for a verifier that crashed or timed out.
-        cited_then_verified: r.ver && Number.isFinite(r.ver.verified_geomean)
-          ? r.ver.verified_geomean : null,
+        cited_then_verified: EXTERNAL_OBJECTIVE ? primSpeedup(r.ver)
+          : (r.ver && Number.isFinite(r.ver.verified_geomean) ? r.ver.verified_geomean : null),
         // `winner` is only the best candidate OF THIS ROUND; `improved` is whether it beat the
         // incumbent by MIN_IMPROVE. Crediting on `winner` alone let a 1.5x round winner confirm a
         // card while the committed best already sat at 2x — a confirmation for advancing nothing,
@@ -385,7 +394,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
       learned_refs: d.learned_refs || [] })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
-      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none') })),
+      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
+      ...(EXTERNAL_OBJECTIVE ? {engineer_external: externalFields(r.eng), verified_external: externalFields(r.ver)} : {}) })),
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, cumulative,
@@ -443,4 +453,3 @@ function applyOptimizeResult(r) {
   forcedReplans = r.forcedReplans;
   kbCapBound = r.kbCapBound;
 }
-

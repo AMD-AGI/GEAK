@@ -55,7 +55,7 @@ async function externalOptimize(name, start) {
     };
   };
   if (typeof runProcess !== 'function') return noWinner('this runtime provides no runProcess()');
-  const weighted = HAS_WORKLOAD;
+  const weighted = !EXTERNAL_OBJECTIVE && HAS_WORKLOAD;
   if (weighted && !BASELINE_PER_CASE.every(c => Number.isFinite(c.weight) && c.weight > 0)) {
     return noWinner('the run is workload-aligned but its cases carry no workload weights');
   }
@@ -106,11 +106,11 @@ async function externalOptimize(name, start) {
       ...(bench.profile_cmd ? { profile: bench.profile_cmd } : {}) },
     baseline: { per_case: Object.fromEntries(BASELINE_PER_CASE.map(c => [c.name, c.baseline_ms])),
       geomean_ms: BASELINE_GEOMEAN_MS },
-    objective: weighted
+    objective: EXTERNAL_OBJECTIVE || (weighted
       ? { kind: 'time_weighted', weights: Object.fromEntries(BASELINE_PER_CASE.map(c => [c.name, c.weight])),
           ...(WORKLOAD_SPEC_PATH ? { workload_spec_path: WORKLOAD_SPEC_PATH } : {}),
           ...(WORKLOAD_SPEC ? { workload: WORKLOAD_SPEC } : {}) }
-      : { kind: 'geomean' },
+      : { kind: 'geomean' }),
     incumbent_speedup: start.cumulative, min_improvement: MIN_IMPROVE,
     ...(start.profileSummary ? { profile_summary: start.profileSummary } : {}),
     device: { arch: GFX, gpus: GPU_LIST },
@@ -180,8 +180,16 @@ async function externalOptimize(name, start) {
   const arithmetic = perCase && perCase.reduce((a, c) => a + c.speedup, 0) / perCase.length;
   const timeWeighted = perCase && weighted
     ? perCase.reduce((a, c) => a + c.weight, 0) / perCase.reduce((a, c) => a + c.weight / c.speedup, 0) : null;
-  const primary = weighted ? timeWeighted : geomean;
-  if (perCase && Math.abs(primary / best.speedup - 1) > 1e-6) {
+  if (best && EXTERNAL_OBJECTIVE && !(best.objective
+      && best.objective.kind === 'external_primary'
+      && best.objective.primary_regime === EXTERNAL_OBJECTIVE.primary_regime
+      && best.native_reproducible_gain === true && best.native_reproducible_regression === false)) {
+    return noWinner('external optimizer result lacks the declared native primary objective and gain gate');
+  }
+  // A native phase score is reduced from complete processes. Per-case medians
+  // remain descriptive and cannot be folded again to replace that score.
+  const primary = EXTERNAL_OBJECTIVE ? (best ? best.speedup : null) : (weighted ? timeWeighted : geomean);
+  if (perCase && !EXTERNAL_OBJECTIVE && Math.abs(primary / best.speedup - 1) > 1e-6) {
     return noWinner(`best.speedup ${best.speedup} is not the ${weighted ? 'time-weighted' : 'geomean'} ` +
       `speedup of its per-case pairs (${primary})`);
   }
@@ -203,8 +211,11 @@ async function externalOptimize(name, start) {
     cumulativeSpeedup: best ? primary : start.cumulative,
     bestPerCase: perCase || start.bestPerCase,
     // geomean is the PRIMARY metric, as in the greedy loop's candidates; the raw one is kept apart.
-    finalWinner: best ? { source: name, geomean: primary, geomean_unweighted: geomean,
+    finalWinner: best ? { source: name, geomean: primary, geomean_unweighted: EXTERNAL_OBJECTIVE ? null : geomean,
       weighted: timeWeighted, arithmetic, per_case: perCase,
+      ...(EXTERNAL_OBJECTIVE ? { objective: EXTERNAL_OBJECTIVE,
+        primary_speedup: primary, native_reproducible_gain: true, native_reproducible_regression: false,
+        phase_speedups: best.phase_speedups } : {}),
       patch: `${EVAL_DIR}/current_best.diff`, commit: best.commit } : start.finalWinner,
     roundsCommitted: best ? 1 : 0,
     history: { ...start.history, ...(r.history_path ? { history_path: r.history_path } : {}) },

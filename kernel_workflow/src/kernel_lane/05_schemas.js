@@ -24,6 +24,10 @@ const perCase = {
   },
 };
 
+const externalEvaluation = obj({ candidate_id: { type: 'string' }, evaluation_id: { type: 'string' } },
+  ['candidate_id', 'evaluation_id']);
+const metricRequired = (fields) => EXTERNAL_OBJECTIVE ? fields.filter(k => !k.includes('geomean')) : fields;
+
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' },
@@ -67,6 +71,7 @@ const ANALYZE_SCHEMA = obj({
 }, ['kernel_type', 'roadmap_summary']);
 
 const BENCH_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   commandment_path: { type: 'string' }, correctness_cmd: { type: 'string' },
   benchmark_cmd: { type: 'string' }, profile_cmd: { type: 'string' }, parse_hint: { type: 'string' },
   baseline_per_case: { type: 'array', items: { type: 'object', additionalProperties: true } },
@@ -78,7 +83,7 @@ const BENCH_SCHEMA = obj({
   baseline_weighted_total_ms: { type: 'number' },
   weights_provenance: { type: 'string' }, // e.g. "trace" | "regime" | "regime_floor" | "prior" | "caller" | "mixed"
   reliable: { type: 'boolean' }, notes: { type: 'string' },
-}, ['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']);
+}, metricRequired(['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']));
 
 const PROFILE_SCHEMA = obj({
   bottleneck: { type: 'string' }, profiler_used: { type: 'string' }, dispatch_count: { type: 'number' },
@@ -170,6 +175,7 @@ const PLAN_SCHEMA = obj({
 }, ['stop', 'directions']);
 
 const ENG_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   engineer_id: { type: 'string' }, specialty: { type: 'string' }, task: { type: 'string' },
   strategy: { type: 'string' }, speedup_geomean: { type: 'number' }, speedup_arithmetic: { type: 'number' },
   // Time-weighted ratio-of-sums vs the TRUE baseline (PRIMARY metric when workload_aligned).
@@ -178,15 +184,16 @@ const ENG_SCHEMA = obj({
   per_case: perCase, status: { type: 'string' }, patch_file: { type: 'string' },
   measurement_valid: { type: 'boolean' },
   strategies_tried: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
-}, ['status', 'speedup_geomean', 'measurement_valid']);
+}, metricRequired(['status', 'speedup_geomean', 'measurement_valid']));
 
 const VERIFY_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   status: { type: 'string' }, correctness: { type: 'string' },
   verified_geomean: { type: 'number' }, verified_arithmetic: { type: 'number' },
   verified_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   per_case: perCase, variance_note: { type: 'string' }, notes: { type: 'string' },
   graph_safe: { type: 'string' },
-}, ['status', 'verified_geomean']);
+}, metricRequired(['status', 'verified_geomean']));
 
 const INTEGRATE_SCHEMA = obj({
   attempted: { type: 'boolean' },
@@ -211,5 +218,4 @@ const REPORT_SCHEMA = obj({
   final_speedup_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   rounds: { type: 'number' }, budget_used: { type: 'number' },
   report_path: { type: 'string' }, final_patch: { type: 'string' }, per_case: perCase,
-}, ['final_speedup_geomean', 'report_path', 'final_patch']);
-
+}, metricRequired(['final_speedup_geomean', 'report_path', 'final_patch']));

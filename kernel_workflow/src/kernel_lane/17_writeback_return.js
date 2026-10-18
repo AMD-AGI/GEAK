@@ -6,7 +6,7 @@
 // pre-check just avoids spending an agent on a run that cannot pass the gate anyway.
 // ===========================================================================
 let kb_written = null;
-if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+if (KB_WRITE_OK && GFX && externalPromotion && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   const kernelClass = (analysis && analysis.kernel_type) || 'unknown';
   const finalPatch = report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`;
   const reportPath = report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`;
@@ -15,7 +15,7 @@ if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   // it would mint a unique label every time and group nothing. Unlabeled is honest — resolve treats
   // such an entry as its own direction, and a curation pass assigns the shared label later.
   const winnerDirection = kebab(warm_start.direction || '');
-  const metricKind = HAS_WORKLOAD ? 'time_weighted' : 'geomean';
+  const metricKind = EXTERNAL_OBJECTIVE ? 'external_primary' : HAS_WORKLOAD ? 'time_weighted' : 'geomean';
   // Commas separate the list, so a case name may not contain one.
   const caseNames = (bestPerCase || []).map(c => c && String(c.name || '').replace(/,/g, ';'))
     .filter(Boolean).join(',');
@@ -44,7 +44,7 @@ if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
 ${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE_STORE)} ${writeCmd} --root ${JSON.stringify(KB_ARTIFACTS_DIR)} \\
   --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\
   --gfx ${GFX} --kernel-class ${JSON.stringify(kernelClass)} \\
-  --speedup ${finalPrimary} --baseline-wall-ms ${BASELINE_GEOMEAN_MS} \\
+  --speedup ${finalPrimary}${EXTERNAL_OBJECTIVE ? '' : ` --baseline-wall-ms ${BASELINE_GEOMEAN_MS}`} \\
   --patch ${JSON.stringify(finalPatch)} --eval-dir ${JSON.stringify(EVAL_DIR)} \\
   --report ${JSON.stringify(reportPath)} --metric-kind ${metricKind} \\
   --direction ${JSON.stringify(winnerDirection)} --case-names ${JSON.stringify(caseNames)}\
@@ -93,11 +93,14 @@ return {
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
   kernel_name: KERNEL_NAME,
-  workload_aligned: HAS_WORKLOAD,
+  workload_aligned: !EXTERNAL_OBJECTIVE && HAS_WORKLOAD,
   final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
+  ...(EXTERNAL_OBJECTIVE ? externalFields(validation || {objective: EXTERNAL_OBJECTIVE}) : {}),
+  ...(EXTERNAL_OBJECTIVE ? {outcome: !validation || !validation.external_measurement_valid
+    ? 'invalid_measurement' : externalPromotion ? 'improved' : 'no_improvement'} : {}),
   final_weighted: finalWeighted,
   final_geomean: finalGeomean,
-  final_arithmetic: validation ? validation.director_verified_speedup_arithmetic : null,
+  final_arithmetic: EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_arithmetic : null),
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,
   validation_status: validation ? validation.validation_status : 'unknown',
   // What KIND of number `final_speedup` is, so bake-off ranking and campaign summaries don't read a
@@ -108,7 +111,8 @@ return {
   budget_used: dispatched,
   budget_total: BUDGET,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
-  final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+  final_patch: EXTERNAL_OBJECTIVE && !externalPromotion ? ''
+    : (report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`),
   // null when the step was off, or the run earned nothing worth a card.
   // Which condition actually ended the loop. RECORDED, not inferred: on the previous campaign this
   // existed only in the driver's return value, which the caller sees after ALL its kernels finish —

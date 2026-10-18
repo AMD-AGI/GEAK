@@ -149,10 +149,76 @@ const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
 const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
   (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
   (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
+const EXTERNAL_OBJECTIVE = A.objective && A.objective.kind === 'external_primary' ? A.objective : null;
+if (EXTERNAL_OBJECTIVE && (Object.keys(EXTERNAL_OBJECTIVE).sort().join(',') !== 'kind,primary_regime'
+    || typeof EXTERNAL_OBJECTIVE.primary_regime !== 'string' || !EXTERNAL_OBJECTIVE.primary_regime.trim())) {
+  throw new Error('external_primary requires exactly kind and primary_regime');
+}
+const externalArgv = (value) => Array.isArray(value) && value.length
+  && value.every(v => typeof v === 'string' && v) ? value : null;
+if (EXTERNAL_OBJECTIVE && (!externalArgv(A.external_result_command)
+    || !externalArgv(A.external_measurement_command) || typeof runProcess !== 'function')) {
+  throw new Error('external_primary requires the existing owner measurement and result-reader argv plus runProcess');
+}
+const EXTERNAL_METRIC_INSTRUCTIONS = EXTERNAL_OBJECTIVE ? `
+External measurement contract: ${JSON.stringify(EXTERNAL_OBJECTIVE)}.
+Use the existing admitted owner command ${JSON.stringify(A.external_measurement_command)}
+from the candidate workspace according to COMMANDMENT. One evaluation runs the
+unchanged full UT in three fresh processes with native min_runs=2. This combined
+operation replaces the role's separate correctness/benchmark repetitions and any
+extra numerical or graph coverage; preserve the copied UT exactly. Do not invoke
+the UT directly, rebuild its case folds, require gain for ORIGINAL qualification,
+or repeat valid no-gain results as failures. Retain both native phase folds.
+Return the operation's exact IDs as external_evaluation:{candidate_id,evaluation_id}
+(under best for an integrated candidate). The workflow's trusted owner reader
+checks source, settlement and raw results. A scalar or OBSERVATIONS.json relayed
+by a model is not accepted as measurement. Report missing/failed operations and
+preserve artifacts. The native primary and gain gate govern eligibility; existing
+search thresholds still apply. Legacy geomean fields may be omitted.
+` : '';
+const externalFields = (o) => EXTERNAL_OBJECTIVE && o ? Object.fromEntries(
+  ['objective', 'primary_regime', 'primary_speedup', 'native_reproducible_gain',
+   'native_reproducible_regression', 'phase_speedups', 'external_evaluation',
+   'external_measurement_valid', 'receipt_ref', 'timing_basis'].map(k => [k, o[k]])) : {};
+const nativeGainEligible = (o) => !EXTERNAL_OBJECTIVE || !!(o && o.external_measurement_valid === true
+  && o.native_reproducible_gain === true && o.native_reproducible_regression === false);
+
+async function checkedExternalMeasurement(value, workspace, patch = null) {
+  if (!EXTERNAL_OBJECTIVE || !value) return value;
+  const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
+    status: 'invalid_measurement', correctness: 'not_checked', validation_status: 'invalid_measurement',
+    native_reproducible_gain: false, native_reproducible_regression: false };
+  const ref = value.external_evaluation;
+  if (!ref || typeof ref.candidate_id !== 'string' || typeof ref.evaluation_id !== 'string') return invalid;
+  try {
+    const argv = A.external_result_command;
+    const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+      '--candidate-id', ref.candidate_id, '--evaluation-id', ref.evaluation_id,
+      '--workspace', workspace, ...(patch ? ['--patch', patch] : [])],
+      timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+    if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+        || !result.group_cleared || result.stdio_held) return invalid;
+    const read = JSON.parse(result.stdout);
+    if (read.external_measurement_valid !== true || !read.objective
+        || read.objective.kind !== 'external_primary'
+        || read.primary_regime !== EXTERNAL_OBJECTIVE.primary_regime
+        || read.objective.primary_regime !== EXTERNAL_OBJECTIVE.primary_regime
+        || !Number.isFinite(read.primary_speedup) || read.primary_speedup <= 0
+        || read.external_evaluation.candidate_id !== ref.candidate_id
+        || read.external_evaluation.evaluation_id !== ref.evaluation_id) return invalid;
+    return { ...value, ...read };
+  } catch (error) {
+    log(`External measurement reader failed: ${String(error)}`);
+    return invalid;
+  }
+}
 // PRIMARY-metric selector: prefer the time-weighted number when a workload spec is in play and the
 // agent reported one; otherwise fall back to the geomean (unweighted runs => unchanged behavior).
 const primSpeedup = (o) => {
-  if (!o) return 0;
+  if (!o) return EXTERNAL_OBJECTIVE ? null : 0;
+  if (EXTERNAL_OBJECTIVE) return o.external_measurement_valid === true
+    && o.primary_regime === EXTERNAL_OBJECTIVE.primary_regime
+    && Number.isFinite(o.primary_speedup) ? o.primary_speedup : null;
   const w = o.verified_weighted != null ? o.verified_weighted
           : (o.speedup_weighted != null ? o.speedup_weighted : null);
   if (HAS_WORKLOAD && Number.isFinite(w)) return w;
@@ -199,7 +265,6 @@ const DRA_MAX_BLINDSPOTS = (() => {
   const v = parseInt(A.dra_max_blindspots != null ? A.dra_max_blindspots : 4, 10);
   return Number.isFinite(v) && v >= 1 ? v : 4;
 })();
-
 // ---------------------------------------------------------------------------
 // LEARNED-KNOWLEDGE SINK. Derived from WORKFLOW_DIR and nothing else, so a lane spawned by
 // e2e_workflow still curates into kernel_workflow/knowledge/learned/ — e2e's learned/ is a
@@ -397,6 +462,10 @@ const perCase = {
   },
 };
 
+const externalEvaluation = obj({ candidate_id: { type: 'string' }, evaluation_id: { type: 'string' } },
+  ['candidate_id', 'evaluation_id']);
+const metricRequired = (fields) => EXTERNAL_OBJECTIVE ? fields.filter(k => !k.includes('geomean')) : fields;
+
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' },
@@ -440,6 +509,7 @@ const ANALYZE_SCHEMA = obj({
 }, ['kernel_type', 'roadmap_summary']);
 
 const BENCH_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   commandment_path: { type: 'string' }, correctness_cmd: { type: 'string' },
   benchmark_cmd: { type: 'string' }, profile_cmd: { type: 'string' }, parse_hint: { type: 'string' },
   baseline_per_case: { type: 'array', items: { type: 'object', additionalProperties: true } },
@@ -451,7 +521,7 @@ const BENCH_SCHEMA = obj({
   baseline_weighted_total_ms: { type: 'number' },
   weights_provenance: { type: 'string' }, // e.g. "trace" | "regime" | "regime_floor" | "prior" | "caller" | "mixed"
   reliable: { type: 'boolean' }, notes: { type: 'string' },
-}, ['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']);
+}, metricRequired(['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']));
 
 const PROFILE_SCHEMA = obj({
   bottleneck: { type: 'string' }, profiler_used: { type: 'string' }, dispatch_count: { type: 'number' },
@@ -543,6 +613,7 @@ const PLAN_SCHEMA = obj({
 }, ['stop', 'directions']);
 
 const ENG_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   engineer_id: { type: 'string' }, specialty: { type: 'string' }, task: { type: 'string' },
   strategy: { type: 'string' }, speedup_geomean: { type: 'number' }, speedup_arithmetic: { type: 'number' },
   // Time-weighted ratio-of-sums vs the TRUE baseline (PRIMARY metric when workload_aligned).
@@ -551,15 +622,16 @@ const ENG_SCHEMA = obj({
   per_case: perCase, status: { type: 'string' }, patch_file: { type: 'string' },
   measurement_valid: { type: 'boolean' },
   strategies_tried: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
-}, ['status', 'speedup_geomean', 'measurement_valid']);
+}, metricRequired(['status', 'speedup_geomean', 'measurement_valid']));
 
 const VERIFY_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   status: { type: 'string' }, correctness: { type: 'string' },
   verified_geomean: { type: 'number' }, verified_arithmetic: { type: 'number' },
   verified_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   per_case: perCase, variance_note: { type: 'string' }, notes: { type: 'string' },
   graph_safe: { type: 'string' },
-}, ['status', 'verified_geomean']);
+}, metricRequired(['status', 'verified_geomean']));
 
 const INTEGRATE_SCHEMA = obj({
   attempted: { type: 'boolean' },
@@ -584,8 +656,7 @@ const REPORT_SCHEMA = obj({
   final_speedup_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   rounds: { type: 'number' }, budget_used: { type: 'number' },
   report_path: { type: 'string' }, final_patch: { type: 'string' }, per_case: perCase,
-}, ['final_speedup_geomean', 'report_path', 'final_patch']);
-
+}, metricRequired(['final_speedup_geomean', 'report_path', 'final_patch']));
 const UPDATE_EXPERIENCE_SCHEMA = obj({
   action: { type: 'string' },      // created | merged | skipped
   card_path: { type: 'string' },   // path under knowledge/learned/, or "" if nothing distilled
@@ -593,6 +664,7 @@ const UPDATE_EXPERIENCE_SCHEMA = obj({
 }, []);
 
 const VALIDATE_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   kernel_name: { type: 'string' },
   director_verified_speedup_geomean: { type: 'number' },
   director_verified_speedup_arithmetic: { type: 'number' },
@@ -604,7 +676,7 @@ const VALIDATE_SCHEMA = obj({
   timing_basis: { type: 'string' },
   per_case: perCase, applied_to_original: { type: 'string' },
   arbitration_note: { type: 'string' }, final_patch: { type: 'string' },
-}, ['director_verified_speedup_geomean', 'validation_status']);
+}, metricRequired(['director_verified_speedup_geomean', 'validation_status']));
 
 // Warm-start resolver output = experience_store.py `resolve` JSON, verbatim.
 const WARMSTART_RESOLVE_SCHEMA = obj({
@@ -655,7 +727,6 @@ const WARMSTART_WRITE_SCHEMA = obj({
     session_id: { type: 'string' }, champion: { type: 'boolean' }, replaced: { type: 'boolean' },
   }),
 }, ['written']);
-
 // ---------------------------------------------------------------------------
 // Prompt helpers. Every agent reads its role file from WORKFLOW_DIR and the
 // relevant knowledge files itself; the script only passes paths + JSON inputs.
@@ -728,7 +799,8 @@ Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 ${cfg(inputs)}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role);
+  return base + expertSkillsBlock(role)
+    + (typeof EXTERNAL_METRIC_INSTRUCTIONS === 'string' ? EXTERNAL_METRIC_INSTRUCTIONS : '');
 }
 // This workflow's own roles live under WORKFLOW_DIR/roles/.
 function roleAgent(role, phase, intro, inputs) {
@@ -982,7 +1054,7 @@ const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs
 // PHASE: Benchmark setup (Benchmark Engineer)
 // ===========================================================================
 phase('Benchmark');
-const bench = await agentT(
+let bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     ANALYSIS: analysis,
@@ -991,6 +1063,12 @@ const bench = await agentT(
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
   }),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
+if (EXTERNAL_OBJECTIVE) {
+  bench = await checkedExternalMeasurement(bench, CANONICAL);
+  if (!bench || !bench.external_measurement_valid) throw new Error('Original external evaluation is missing or invalid');
+  bench.baseline_per_case = bench.per_case;
+  bench.baseline_geomean_ms = null;
+}
 if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
@@ -1008,7 +1086,6 @@ let profileSummary = await agentT(
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
 log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
-
 // ===========================================================================
 // PHASE: Research (Deep Research Agent — OPT-IN via args.dra_enabled)
 // Runs AFTER Profile / BEFORE the optimize loop: profile + COMMANDMENT + analysis exist by now, so
@@ -1267,7 +1344,7 @@ ${resolveScript}
       for (const c of cands) {                              // already rank-ordered (fastest first)
         const rec = warm_start.candidates.find(x => x.rank === c.rank);
         const remapOut = `${EVAL_DIR}/warm_start/cand_${c.rank}/remapped.diff`;
-        const ver = await agentT(
+        let ver = await agentT(
           roleAgent('verify_engineer', 'verify',
             'Validate a HISTORICAL warm-start patch — the SAME gate as any round candidate. The patch was ' +
             'won in the workspace that produced it, whose paths need not exist here, so FIRST run EXACTLY:\n' +
@@ -1292,8 +1369,20 @@ ${resolveScript}
             ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
           }),
           { phase: 'WarmStart', label: `warm_start:verify c${c.rank}`, schema: VERIFY_SCHEMA });
+        let checkedWarmPatch = c.patch_path;
+        if (EXTERNAL_OBJECTIVE) {
+          // Match the adoption command's exact -f choice; the model does not
+          // choose a different patch for checking than the one later applied.
+          const exists = await runProcess({cmd: '/usr/bin/test', args: ['-f', remapOut],
+            timeoutMs: 5000, graceMs: 1000, settleMs: 1000});
+          if (exists.status !== 'completed' || ![0, 1].includes(exists.code)
+              || exists.strays_killed || !exists.group_cleared || exists.stdio_held) {
+            ver = null;
+          } else if (exists.code === 0) checkedWarmPatch = remapOut;
+        }
+        ver = await checkedExternalMeasurement(ver, CANONICAL, checkedWarmPatch);
         const sp = primSpeedup(ver);
-        if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && sp > 1.0) {
+        if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && nativeGainEligible(ver) && sp > 1.0) {
           const adopt = await agentT(
             `You are the TechLead adopting a validated warm-start patch into the canonical workspace.
 \`\`\`bash
@@ -1316,7 +1405,8 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             cumulative = sp;
             bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
             finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
-              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path };
+              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path,
+              ...externalFields(ver) };
             if (bestSeen < sp) bestSeen = sp;
             warm_start.adopted = true;
             warm_start.adopted_speedup = sp;
@@ -1376,7 +1466,6 @@ correctness check; only report committed=true if it still passes. Return JSON {c
     }
   }
 }
-
 // The Optimize phase. An optimizer starts from the state Setup/resume/WarmStart left behind and
 // returns an OptimizeResult; applyOptimizeResult() hands it to the Report/Validate postlude:
 //   { rounds, dispatched, cumulativeSpeedup, bestPerCase, finalWinner, roundsCommitted, history,
@@ -1566,9 +1655,9 @@ ${cfg({
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
-      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
+      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + EXTERNAL_METRIC_INSTRUCTIONS,
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
-    ).then((eng) => ({ d, eng }));
+    ).then(async (eng) => ({ d, eng: await checkedExternalMeasurement(eng, `${d.out_dir}/workspace`) }));
     },
 
     (prev) => {
@@ -1578,7 +1667,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
       // only after a valid measurement at or below the floor. Verify checks whether
       // the patch exists, applies cleanly, and passes the oracle.
       const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR) &&
-        eng.status !== 'invalid_measurement' && eng.measurement_valid === true;
+        eng.status !== 'invalid_measurement' && eng.measurement_valid === true &&
+        (!EXTERNAL_OBJECTIVE || (eng.external_measurement_valid === true && Number.isFinite(primSpeedup(eng))));
       if (trustworthyBelowBaseline) {
         return { d, eng, ver: null };
       }
@@ -1594,13 +1684,13 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then((ver) => ({ d, eng, ver, patch }));
+      ).then(async (ver) => ({ d, eng, ver: await checkedExternalMeasurement(ver, CANONICAL, patch), patch }));
     }
   );
 
   const clean = results.filter(Boolean);
   const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
-    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR);
+    says(r.ver.correctness, 'pass') && nativeGainEligible(r.ver) && primSpeedup(r.ver) > CANDIDATE_FLOOR);
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
@@ -1612,6 +1702,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
+    ...externalFields(r.ver),
   }));
 
   let integrate = null;
@@ -1624,14 +1715,18 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
+          ...externalFields(r.ver),
           files: r.d.focus_files || [], patch: r.patch })),
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
-    const integPrim = integrate && integrate.best ? primSpeedup({
+    if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
+      integrate.best, CANONICAL, integrate.best.patch_file);
+    const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
     if (integrate && integrate.conclusion === 'improved' && integrate.best &&
+      nativeGainEligible(integrate.best) &&
       integPrim > Math.max(...candidates.map(c => c.geomean))) {
       candidates.push({
         source: 'integrated', id: `r${round}_integrated`, title: 'integrated', specialty: 'integrate',
@@ -1639,6 +1734,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        ...externalFields(integrate.best),
       });
     }
   }
@@ -1700,6 +1796,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         expected: r.d.expected_speedup, claimed: r.eng ? r.eng.speedup_geomean : 0,
         verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
         notes: r.eng ? r.eng.notes : '' })),
+      ...(EXTERNAL_OBJECTIVE ? { EXTERNAL_RESULTS: clean.map(r => ({id: r.d.id,
+        engineer: externalFields(r.eng), verified: externalFields(r.ver)})) } : {}),
       INTEGRATE: integrate, WINNER: winner ? { source: winner.source, geomean: winner.geomean } : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
       PRIOR_HISTORY: history,
@@ -1749,8 +1847,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         card: cardRef, round, direction: r.d.id, specialty: r.d.specialty,
         // null, NOT 0, when the verifier produced nothing. `kb.py` scores <=1.0 as a real loss, so
         // encoding "no evidence" as 0 charged a card for a verifier that crashed or timed out.
-        cited_then_verified: r.ver && Number.isFinite(r.ver.verified_geomean)
-          ? r.ver.verified_geomean : null,
+        cited_then_verified: EXTERNAL_OBJECTIVE ? primSpeedup(r.ver)
+          : (r.ver && Number.isFinite(r.ver.verified_geomean) ? r.ver.verified_geomean : null),
         // `winner` is only the best candidate OF THIS ROUND; `improved` is whether it beat the
         // incumbent by MIN_IMPROVE. Crediting on `winner` alone let a 1.5x round winner confirm a
         // card while the committed best already sat at 2x — a confirmation for advancing nothing,
@@ -1764,7 +1862,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
     directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
       learned_refs: d.learned_refs || [] })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
-      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none') })),
+      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
+      ...(EXTERNAL_OBJECTIVE ? {engineer_external: externalFields(r.eng), verified_external: externalFields(r.ver)} : {}) })),
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, cumulative,
@@ -1822,7 +1921,6 @@ function applyOptimizeResult(r) {
   forcedReplans = r.forcedReplans;
   kbCapBound = r.kbCapBound;
 }
-
 // An external optimizer (args.optimizer other than 'greedy', e.g. GEAK-EVO) replaces the greedy
 // loop above and nothing else: Setup, the cases, the commands, the baseline and Report/Validate stay
 // the same. It is one supplied command, run by the runtime's runProcess() -- no agent in the path:
@@ -1880,7 +1978,7 @@ async function externalOptimize(name, start) {
     };
   };
   if (typeof runProcess !== 'function') return noWinner('this runtime provides no runProcess()');
-  const weighted = HAS_WORKLOAD;
+  const weighted = !EXTERNAL_OBJECTIVE && HAS_WORKLOAD;
   if (weighted && !BASELINE_PER_CASE.every(c => Number.isFinite(c.weight) && c.weight > 0)) {
     return noWinner('the run is workload-aligned but its cases carry no workload weights');
   }
@@ -1931,11 +2029,11 @@ async function externalOptimize(name, start) {
       ...(bench.profile_cmd ? { profile: bench.profile_cmd } : {}) },
     baseline: { per_case: Object.fromEntries(BASELINE_PER_CASE.map(c => [c.name, c.baseline_ms])),
       geomean_ms: BASELINE_GEOMEAN_MS },
-    objective: weighted
+    objective: EXTERNAL_OBJECTIVE || (weighted
       ? { kind: 'time_weighted', weights: Object.fromEntries(BASELINE_PER_CASE.map(c => [c.name, c.weight])),
           ...(WORKLOAD_SPEC_PATH ? { workload_spec_path: WORKLOAD_SPEC_PATH } : {}),
           ...(WORKLOAD_SPEC ? { workload: WORKLOAD_SPEC } : {}) }
-      : { kind: 'geomean' },
+      : { kind: 'geomean' }),
     incumbent_speedup: start.cumulative, min_improvement: MIN_IMPROVE,
     ...(start.profileSummary ? { profile_summary: start.profileSummary } : {}),
     device: { arch: GFX, gpus: GPU_LIST },
@@ -2005,8 +2103,16 @@ async function externalOptimize(name, start) {
   const arithmetic = perCase && perCase.reduce((a, c) => a + c.speedup, 0) / perCase.length;
   const timeWeighted = perCase && weighted
     ? perCase.reduce((a, c) => a + c.weight, 0) / perCase.reduce((a, c) => a + c.weight / c.speedup, 0) : null;
-  const primary = weighted ? timeWeighted : geomean;
-  if (perCase && Math.abs(primary / best.speedup - 1) > 1e-6) {
+  if (best && EXTERNAL_OBJECTIVE && !(best.objective
+      && best.objective.kind === 'external_primary'
+      && best.objective.primary_regime === EXTERNAL_OBJECTIVE.primary_regime
+      && best.native_reproducible_gain === true && best.native_reproducible_regression === false)) {
+    return noWinner('external optimizer result lacks the declared native primary objective and gain gate');
+  }
+  // A native phase score is reduced from complete processes. Per-case medians
+  // remain descriptive and cannot be folded again to replace that score.
+  const primary = EXTERNAL_OBJECTIVE ? (best ? best.speedup : null) : (weighted ? timeWeighted : geomean);
+  if (perCase && !EXTERNAL_OBJECTIVE && Math.abs(primary / best.speedup - 1) > 1e-6) {
     return noWinner(`best.speedup ${best.speedup} is not the ${weighted ? 'time-weighted' : 'geomean'} ` +
       `speedup of its per-case pairs (${primary})`);
   }
@@ -2028,8 +2134,11 @@ async function externalOptimize(name, start) {
     cumulativeSpeedup: best ? primary : start.cumulative,
     bestPerCase: perCase || start.bestPerCase,
     // geomean is the PRIMARY metric, as in the greedy loop's candidates; the raw one is kept apart.
-    finalWinner: best ? { source: name, geomean: primary, geomean_unweighted: geomean,
+    finalWinner: best ? { source: name, geomean: primary, geomean_unweighted: EXTERNAL_OBJECTIVE ? null : geomean,
       weighted: timeWeighted, arithmetic, per_case: perCase,
+      ...(EXTERNAL_OBJECTIVE ? { objective: EXTERNAL_OBJECTIVE,
+        primary_speedup: primary, native_reproducible_gain: true, native_reproducible_regression: false,
+        phase_speedups: best.phase_speedups } : {}),
       patch: `${EVAL_DIR}/current_best.diff`, commit: best.commit } : start.finalWinner,
     roundsCommitted: best ? 1 : 0,
     history: { ...start.history, ...(r.history_path ? { history_path: r.history_path } : {}) },
@@ -2097,7 +2206,7 @@ const report = await agentT(
 // PHASE: Director validation + arbitration
 // ===========================================================================
 phase('Validate');
-const validation = await agentT(
+let validation = await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {
     KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     APPLY_TO_ORIGINAL, COMMANDMENT, FROZEN_ORACLE: FROZEN_ORACLE ? 'true' : 'false',
@@ -2108,16 +2217,23 @@ const validation = await agentT(
     BASELINE_TIMING: BASELINE_PER_CASE,
   }),
   { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
+validation = await checkedExternalMeasurement(validation, KERNEL_PATH_ORIG,
+  report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`);
+if (EXTERNAL_OBJECTIVE && validation && validation.external_measurement_valid && !nativeGainEligible(validation)) {
+  validation.validation_status = 'no_improvement';
+}
+const externalPromotion = !EXTERNAL_OBJECTIVE || !!(nativeGainEligible(validation)
+  && validation && says(validation.validation_status, 'accepted'));
 
-const finalGeomean = validation ? validation.director_verified_speedup_geomean : cumulative;
+const finalGeomean = EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_geomean : cumulative);
 // PRIMARY headline: the time-weighted speedup when workload-aligned, else the geomean (unchanged).
-const finalWeighted = validation && validation.director_verified_speedup_weighted != null
+const finalWeighted = !EXTERNAL_OBJECTIVE && validation && validation.director_verified_speedup_weighted != null
   ? validation.director_verified_speedup_weighted : null;
-const finalPrimary = HAS_WORKLOAD && Number.isFinite(finalWeighted) ? finalWeighted : finalGeomean;
-log(`COMPLETE. ${KERNEL_NAME}: verified ${HAS_WORKLOAD ? 'time-weighted' : 'geomean'} ${finalPrimary ? finalPrimary.toFixed(2) : '?'}x` +
+const finalPrimary = EXTERNAL_OBJECTIVE ? (validation ? primSpeedup(validation) : null)
+  : (HAS_WORKLOAD && Number.isFinite(finalWeighted) ? finalWeighted : finalGeomean);
+log(`COMPLETE. ${KERNEL_NAME}: verified ${EXTERNAL_OBJECTIVE ? 'external primary' : HAS_WORKLOAD ? 'time-weighted' : 'geomean'} ${finalPrimary ? finalPrimary.toFixed(2) : '?'}x` +
     `${HAS_WORKLOAD && Number.isFinite(finalGeomean) ? ` (unweighted geomean ${finalGeomean.toFixed(2)}x)` : ''}` +
     ` (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
-
 // ===========================================================================
 // PHASE: UpdateExperience — distill ONE reusable card into this workflow's knowledge/learned/
 // (see knowledge/learned/README.md). Runs ONCE, at the very end: never per round, because only
@@ -2141,7 +2257,7 @@ if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
 // no-op, correctness fail, contended box), and curating from it teaches the next run a lesson this
 // run did not earn. Reported in review of #411.
 const kbAccepted = String((validation && validation.validation_status) || '').toLowerCase() === 'accepted';
-if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && nativeGainEligible(validation) && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   try {
     learned_card = await agentT(
       roleAgent('update_experience', 'Validate',
@@ -2211,7 +2327,6 @@ Return {"filed": <the "citations" number the command printed, or 0>}.`,
     log(`[kb] citation ledger NOT filed: ${e && e.message ? e.message : e}`);
   }
 }
-
 // ===========================================================================
 // Write this run's outcome back — the producer half of the loop. One call files all three: the
 // kb_artifacts/ tree (which the remote payload is derived FROM, and which a curation pass edits),
@@ -2220,7 +2335,7 @@ Return {"filed": <the "citations" number the command printed, or 0>}.`,
 // pre-check just avoids spending an agent on a run that cannot pass the gate anyway.
 // ===========================================================================
 let kb_written = null;
-if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+if (KB_WRITE_OK && GFX && externalPromotion && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   const kernelClass = (analysis && analysis.kernel_type) || 'unknown';
   const finalPatch = report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`;
   const reportPath = report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`;
@@ -2229,7 +2344,7 @@ if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   // it would mint a unique label every time and group nothing. Unlabeled is honest — resolve treats
   // such an entry as its own direction, and a curation pass assigns the shared label later.
   const winnerDirection = kebab(warm_start.direction || '');
-  const metricKind = HAS_WORKLOAD ? 'time_weighted' : 'geomean';
+  const metricKind = EXTERNAL_OBJECTIVE ? 'external_primary' : HAS_WORKLOAD ? 'time_weighted' : 'geomean';
   // Commas separate the list, so a case name may not contain one.
   const caseNames = (bestPerCase || []).map(c => c && String(c.name || '').replace(/,/g, ';'))
     .filter(Boolean).join(',');
@@ -2258,7 +2373,7 @@ if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
 ${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE_STORE)} ${writeCmd} --root ${JSON.stringify(KB_ARTIFACTS_DIR)} \\
   --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\
   --gfx ${GFX} --kernel-class ${JSON.stringify(kernelClass)} \\
-  --speedup ${finalPrimary} --baseline-wall-ms ${BASELINE_GEOMEAN_MS} \\
+  --speedup ${finalPrimary}${EXTERNAL_OBJECTIVE ? '' : ` --baseline-wall-ms ${BASELINE_GEOMEAN_MS}`} \\
   --patch ${JSON.stringify(finalPatch)} --eval-dir ${JSON.stringify(EVAL_DIR)} \\
   --report ${JSON.stringify(reportPath)} --metric-kind ${metricKind} \\
   --direction ${JSON.stringify(winnerDirection)} --case-names ${JSON.stringify(caseNames)}\
@@ -2307,11 +2422,14 @@ return {
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
   kernel_name: KERNEL_NAME,
-  workload_aligned: HAS_WORKLOAD,
+  workload_aligned: !EXTERNAL_OBJECTIVE && HAS_WORKLOAD,
   final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
+  ...(EXTERNAL_OBJECTIVE ? externalFields(validation || {objective: EXTERNAL_OBJECTIVE}) : {}),
+  ...(EXTERNAL_OBJECTIVE ? {outcome: !validation || !validation.external_measurement_valid
+    ? 'invalid_measurement' : externalPromotion ? 'improved' : 'no_improvement'} : {}),
   final_weighted: finalWeighted,
   final_geomean: finalGeomean,
-  final_arithmetic: validation ? validation.director_verified_speedup_arithmetic : null,
+  final_arithmetic: EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_arithmetic : null),
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,
   validation_status: validation ? validation.validation_status : 'unknown',
   // What KIND of number `final_speedup` is, so bake-off ranking and campaign summaries don't read a
@@ -2322,7 +2440,8 @@ return {
   budget_used: dispatched,
   budget_total: BUDGET,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
-  final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+  final_patch: EXTERNAL_OBJECTIVE && !externalPromotion ? ''
+    : (report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`),
   // null when the step was off, or the run earned nothing worth a card.
   // Which condition actually ended the loop. RECORDED, not inferred: on the previous campaign this
   // existed only in the driver's return value, which the caller sees after ALL its kernels finish —

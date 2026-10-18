@@ -138,7 +138,7 @@ ${resolveScript}
       for (const c of cands) {                              // already rank-ordered (fastest first)
         const rec = warm_start.candidates.find(x => x.rank === c.rank);
         const remapOut = `${EVAL_DIR}/warm_start/cand_${c.rank}/remapped.diff`;
-        const ver = await agentT(
+        let ver = await agentT(
           roleAgent('verify_engineer', 'verify',
             'Validate a HISTORICAL warm-start patch — the SAME gate as any round candidate. The patch was ' +
             'won in the workspace that produced it, whose paths need not exist here, so FIRST run EXACTLY:\n' +
@@ -163,8 +163,20 @@ ${resolveScript}
             ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
           }),
           { phase: 'WarmStart', label: `warm_start:verify c${c.rank}`, schema: VERIFY_SCHEMA });
+        let checkedWarmPatch = c.patch_path;
+        if (EXTERNAL_OBJECTIVE) {
+          // Match the adoption command's exact -f choice; the model does not
+          // choose a different patch for checking than the one later applied.
+          const exists = await runProcess({cmd: '/usr/bin/test', args: ['-f', remapOut],
+            timeoutMs: 5000, graceMs: 1000, settleMs: 1000});
+          if (exists.status !== 'completed' || ![0, 1].includes(exists.code)
+              || exists.strays_killed || !exists.group_cleared || exists.stdio_held) {
+            ver = null;
+          } else if (exists.code === 0) checkedWarmPatch = remapOut;
+        }
+        ver = await checkedExternalMeasurement(ver, CANONICAL, checkedWarmPatch);
         const sp = primSpeedup(ver);
-        if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && sp > 1.0) {
+        if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && nativeGainEligible(ver) && sp > 1.0) {
           const adopt = await agentT(
             `You are the TechLead adopting a validated warm-start patch into the canonical workspace.
 \`\`\`bash
@@ -187,7 +199,8 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             cumulative = sp;
             bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
             finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
-              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path };
+              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path,
+              ...externalFields(ver) };
             if (bestSeen < sp) bestSeen = sp;
             warm_start.adopted = true;
             warm_start.adopted_speedup = sp;
@@ -247,4 +260,3 @@ correctness check; only report committed=true if it still passes. Return JSON {c
     }
   }
 }
-

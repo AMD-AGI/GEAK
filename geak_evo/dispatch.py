@@ -245,6 +245,12 @@ def run_dispatch_task(task_path, out_path, *, owner_binding_ref, store, services
                 commit = _commit(store, source_id, root, workspace, base, deadline)
                 result.update(status="improved", stop_reason="budget",
                               best={"commit": commit, "speedup": primary, "per_case": pairs})
+                if objective["kind"] == "external_primary":
+                    diagnostics = native["timing_context"]["candidate"]["diagnostics"]
+                    result["best"].update(objective=copy.deepcopy(objective),
+                        native_reproducible_gain=diagnostics["native_reproducible_gain"],
+                        native_reproducible_regression=diagnostics["native_reproducible_regression"],
+                        phase_speedups=copy.deepcopy(diagnostics["phase_speedups"]))
             else:
                 result["notes"] = "Selected source did not beat the incumbent by the common improvement threshold."
     except (CommandInterrupted, EvoError, ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as exc:
