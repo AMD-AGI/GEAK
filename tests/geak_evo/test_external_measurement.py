@@ -1,6 +1,8 @@
 """CPU checks; native callbacks and admission custody are not exercised."""
 
 import contextlib
+import copy
+import hashlib
 import io
 import importlib.util
 import json
@@ -19,6 +21,57 @@ from geak_evo.archive import store as store_module
 from geak_evo.evaluate.jobs import job_digest
 from geak_evo.evaluate.evaluator import ArenaEvaluationError
 import test_external_ut as external_fixtures
+
+
+class OrdinaryRegistrationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.native = self.root / "native"
+        self.native.mkdir()
+        self.source = self.native / "adapter.py"
+        self.source.write_bytes(b"# synthetic ordinary source\n")
+        self.wrapper = self.root / "measurement.py"
+        self.wrapper.write_bytes(b"# synthetic registered entrypoint\n")
+        source_sha = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        self.admission = {
+            "assets_sha256": {"adapter.py": source_sha},
+            "registration_sha256": {
+                str(self.source): source_sha,
+                str(self.wrapper): hashlib.sha256(self.wrapper.read_bytes()).hexdigest(),
+                str(self.root / "inaccessible-owner/owner.py"): "a" * 64,
+            },
+        }
+        # Synthetic files are ordinary-owned; retain the real file/hash reader.
+        patch = mock.patch.object(measurement, "protected", side_effect=Path)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def verify(self):
+        return measurement.ordinary_registration(self.admission, self.native, self.wrapper)
+
+    def test_unreadable_owner_source_stays_in_full_admission_without_ordinary_read(self):
+        before = copy.deepcopy(self.admission)
+        checked = self.verify()
+        self.assertEqual(set(checked), {str(self.source), str(self.wrapper)})
+        self.assertEqual(self.admission, before)
+
+    def test_changed_native_source_refuses_before_import(self):
+        self.source.write_bytes(b"# changed reader code\n")
+        with self.assertRaisesRegex(ValueError, "registered file changed"):
+            self.verify()
+
+    def test_unregistered_entrypoint_refuses(self):
+        del self.admission["registration_sha256"][str(self.wrapper)]
+        with self.assertRaisesRegex(ValueError, "wrapper is absent"):
+            self.verify()
+
+    def test_asset_cannot_escape_native_root(self):
+        self.admission["assets_sha256"] = {"../measurement.py":
+            self.admission["registration_sha256"][str(self.wrapper)]}
+        with self.assertRaisesRegex(ValueError, "native asset differs"):
+            self.verify()
 
 
 class MeasurementTests(unittest.TestCase):

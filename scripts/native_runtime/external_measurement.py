@@ -57,6 +57,26 @@ def ordinary_directory(value):
     return path
 
 
+def ordinary_registration(admission, native, wrapper):
+    """Authenticate the ordinary reader; root_helper checks the full graph."""
+    registration = admission["registration_sha256"]
+    need(type(registration) is dict and registration, "existing registered source graph required")
+    assets = admission["assets_sha256"]
+    need(type(assets) is dict and assets, "existing native asset graph required")
+    result = {}
+    for relative, digest in assets.items():
+        path = native / relative
+        need(path.is_relative_to(native) and ".." not in Path(relative).parts
+             and registration.get(str(path)) == digest, "native asset differs from registration")
+        result[str(path)] = digest
+    need(str(wrapper) in registration,
+         "measurement wrapper is absent from admitted code closure")
+    result[str(wrapper)] = registration[str(wrapper)]
+    for path, digest in result.items():
+        checked({"path": path, "sha256": digest})
+    return result
+
+
 def bind_services(admission_ref):
     """Bind the same source graph and callback ABI as the ORIGINAL v2 recipe."""
     need(os.geteuid() != 0 and sys.flags.isolated and sys.flags.dont_write_bytecode
@@ -70,17 +90,11 @@ def bind_services(admission_ref):
     native = protected(admission["intended_install_root"])
     artifact_root = protected(admission["request_artifact_root"])
     need(artifact_root == native / "task", "admitted task root differs from native installation")
-    registration = admission["registration_sha256"]
-    need(type(registration) is dict and registration, "existing registered source graph required")
-    for path, digest in registration.items():
-        checked({"path": path, "sha256": digest})
     wrapper = Path(__file__).resolve(strict=True)
-    need(registration.get(str(wrapper)) == hashlib.sha256(wrapper.read_bytes()).hexdigest(),
-         "measurement wrapper is absent from admitted code closure")
-    for relative, digest in admission["assets_sha256"].items():
-        path = native / relative
-        need(path.is_relative_to(native) and ".." not in Path(relative).parts
-             and registration.get(str(path)) == digest, "native asset differs from registration")
+    # Owner-only prerequisites remain in the sealed admission and are checked
+    # by the privileged helper on every launch/collect. This process reads only
+    # the positive native asset closure and its own registered entrypoint.
+    registration = ordinary_registration(admission, native, wrapper)
     package = native / "cleaned/geak_evo"
     need(not list(package.rglob("*.pyc")) and not list((native / "__pycache__").glob("*.pyc")),
          "registered source graph must have no importable bytecode cache")
