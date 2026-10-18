@@ -121,3 +121,6 @@ navigation and allows shared code, but it increases the checkout's total size.
 Use separate `feat/evo-*` branches for later features and relevant checks before
 merging. Saved archives stay readable. In-flight work needs its original runtime
 and instructions or a tested migration; never change their pins to force resume.
+
+For the modules, effective limits and checkpoint comparison used in longer searches,
+see [Run a search that can keep learning](long_horizon.md).
