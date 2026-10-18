@@ -86,7 +86,7 @@
      # Wrapper failures precede the task directory; retain their exact streams.
      for suffix in ("stdout", "stderr"):
          path = folder / "outputs/native" / (task_name + "." + suffix)
-@@ -399,17 +424,33 @@
+@@ -399,17 +424,39 @@
                  phases[phase] = row.get("returncode")
      obs = {"correctness": {"status": "unknown", "case_ids": [], "evidence": []},
             "benchmark": {"status": "unknown", "times_ms": {}, "evidence": []}}
@@ -113,7 +113,13 @@
 -                and identity.get("assigned_gpu_ordinal") == config["gpu"], "native attempt/request binding differs")
 +            require(run["request_sha256"] == sha(canonical(request)) and run["binding"] == request["binding"],
 +                    "native attempt/request binding differs")
-+            if not external:
++            if external:
++                start = json.loads(artifacts["observer/START.json"])
++                environment = start.get("environment", {})
++                require(all(environment.get(key) == str(config["gpu"])
++                            for key in ("HIP_VISIBLE_DEVICES", "GEAK_GPU_ALLOWED")),
++                        "external runtime device binding differs")
++            else:
 +                identity = read(attempt / "identity.json")
 +                require(identity.get("runtime_receipt_sha256") == sha(artifacts["host/run.json"])
 +                    and identity.get("assigned_gpu_ordinal") == config["gpu"], "native runtime binding differs")
@@ -126,7 +132,7 @@
                      check=False, env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"})
              stdout = retain("host/observer.stdout", out.name)
              retain("host/observer.stderr", err.name)
-@@ -417,6 +458,8 @@
+@@ -417,6 +464,8 @@
              parsed = json.loads(stdout)
              errors.extend(parsed["issues"])
              obs = parsed["observations"]
@@ -135,7 +141,7 @@
              for name, raw in parsed["artifacts_base64"].items():
                  artifacts["observer/" + name] = base64.b64decode(raw, validate=True)
              for group in obs.values():
-@@ -425,7 +468,7 @@
+@@ -425,7 +474,7 @@
              errors.append("Native observation collection: " + str(exc))
      # Retain producer reports even when observation validation fails. These
      # known report locations precede bulk outputs and compiled/cache files.
@@ -144,7 +150,7 @@
      for phase in ("compile", "correctness", "performance"):
          phase_root = attempt / phase
          if phase_root.exists():
-@@ -436,7 +479,10 @@
+@@ -436,7 +485,10 @@
              retain("native/" + path.relative_to(attempt).as_posix(), path)
      # Acquire shallow diagnostics across both roots before deep bulk trees.
      bulk = []
