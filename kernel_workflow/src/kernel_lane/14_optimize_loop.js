@@ -73,6 +73,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).',
       planInputs(false)),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
+  if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
   // on the reasoning that a role repeating "stop" has run out of ideas. Measured at a 2h budget that
@@ -106,7 +107,10 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   }
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
-    if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
+    if (PROCESS_BOUNDED && left <= 7) {
+      deadlineHit = true; // No agent may start inside its seven-second cleanup reserve.
+      log(`Round ${round}: the search process cutoff was reached while planning.`);
+    } else if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
       log(`Round ${round}: harness stopped after all directions were filtered because calibrated peaks are unknown.`);
     } else {
       log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
@@ -281,7 +285,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
-    await agentT(
+    const commitResult = await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -302,6 +306,9 @@ check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only re
 it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
 re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
+    if (PROCESS_BOUNDED && (!commitResult || commitResult.committed !== true)) {
+      throw new Error('bounded commit did not finish; retain workspace for owner reconciliation');
+    }
     cumulative = winner.geomean;
     bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
     finalWinner = winner;

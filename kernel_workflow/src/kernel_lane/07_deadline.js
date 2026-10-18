@@ -15,6 +15,22 @@ const DEADLINE_EPOCH = (() => {
   const v = parseInt(A.deadline_epoch != null ? A.deadline_epoch : 0, 10);
   return Number.isFinite(v) && v > 0 ? v : 0;
 })();
+// Opt-in process cutoffs retain the original deadline and reserve later stages.
+const SEARCH_RESERVE_S = A.search_reserve_s == null ? 0 : Number(A.search_reserve_s);
+const FINAL_VALIDATION_RESERVE_S = Number(A.final_validation_reserve_s || 0);
+const FINAL_CLEANUP_RESERVE_S = Number(A.final_cleanup_reserve_s || 0);
+const PROCESS_BOUNDED = A.search_reserve_s != null;
+if (PROCESS_BOUNDED) {
+  if (!DEADLINE_EPOCH || !Number.isFinite(SEARCH_RESERVE_S) || SEARCH_RESERVE_S <= 0
+      || !Number.isFinite(FINAL_VALIDATION_RESERVE_S) || FINAL_VALIDATION_RESERVE_S < 0
+      || !Number.isFinite(FINAL_CLEANUP_RESERVE_S) || FINAL_CLEANUP_RESERVE_S < 0
+      || FINAL_CLEANUP_RESERVE_S > FINAL_VALIDATION_RESERVE_S
+      || FINAL_VALIDATION_RESERVE_S > SEARCH_RESERVE_S
+      || typeof setProcessDeadline !== 'function' || !agent.processDeadlineActive) {
+    throw new Error('search reserve requires the process-bounded runtime and ordered final reserves');
+  }
+  setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
+}
 const NO_STOP_S = Math.max(0, parseInt(A.no_stop_s != null ? A.no_stop_s : 900, 10));
 // Run-level cap on how many TechLead stops may be refused (forcedReplans is not reset per round).
 // Not 1: the refusal must scale with the window, or a long budget is handed back early.
@@ -26,6 +42,7 @@ let deadlineHit = false;
 let forcedReplans = 0;
 
 async function secondsLeft(tag) {
+  if (PROCESS_BOUNDED) return setProcessDeadline.secondsLeft();
   if (!DEADLINE_EPOCH) return Infinity;
   const r = await agentT(
     `Run EXACTLY this command and nothing else:
@@ -56,4 +73,3 @@ function expertSkillsBlock(role) {
     `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
-

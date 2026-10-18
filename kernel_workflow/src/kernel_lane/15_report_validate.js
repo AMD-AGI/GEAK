@@ -1,6 +1,7 @@
 // ===========================================================================
 // PHASE: Final report (TechLead)
 // ===========================================================================
+if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
 phase('Report');
 const report = await agentT(
   roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.', {
@@ -13,6 +14,7 @@ const report = await agentT(
 // ===========================================================================
 // PHASE: Director validation + arbitration
 // ===========================================================================
+if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_CLEANUP_RESERVE_S);
 phase('Validate');
 let validation = await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {

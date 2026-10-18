@@ -823,8 +823,11 @@ async function agentT(p, o) {
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
-        const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
+      // The standalone runtime's bounded mode terminates and settles the actual
+      // subprocess. Never race it with a Promise that abandons a live role.
+      if (agent.processDeadlineActive || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const opts = agent.processDeadlineActive ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
+        const r0 = await agent(p, opts); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
       const guard = new Promise((resolve) => {
@@ -841,6 +844,11 @@ async function agentT(p, o) {
       if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
+      if (agent.processDeadlineActive && e
+          && (e.code === 'GEAK_PROCESS_DEADLINE' || e.code === 'GEAK_AGENT_TIMEOUT')) {
+        log(`  [deadline] ${label} stopped (${e.code}); no retry after its process cutoff.`);
+        return null;
+      }
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
         log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);
@@ -869,6 +877,22 @@ const DEADLINE_EPOCH = (() => {
   const v = parseInt(A.deadline_epoch != null ? A.deadline_epoch : 0, 10);
   return Number.isFinite(v) && v > 0 ? v : 0;
 })();
+// Opt-in process cutoffs retain the original deadline and reserve later stages.
+const SEARCH_RESERVE_S = A.search_reserve_s == null ? 0 : Number(A.search_reserve_s);
+const FINAL_VALIDATION_RESERVE_S = Number(A.final_validation_reserve_s || 0);
+const FINAL_CLEANUP_RESERVE_S = Number(A.final_cleanup_reserve_s || 0);
+const PROCESS_BOUNDED = A.search_reserve_s != null;
+if (PROCESS_BOUNDED) {
+  if (!DEADLINE_EPOCH || !Number.isFinite(SEARCH_RESERVE_S) || SEARCH_RESERVE_S <= 0
+      || !Number.isFinite(FINAL_VALIDATION_RESERVE_S) || FINAL_VALIDATION_RESERVE_S < 0
+      || !Number.isFinite(FINAL_CLEANUP_RESERVE_S) || FINAL_CLEANUP_RESERVE_S < 0
+      || FINAL_CLEANUP_RESERVE_S > FINAL_VALIDATION_RESERVE_S
+      || FINAL_VALIDATION_RESERVE_S > SEARCH_RESERVE_S
+      || typeof setProcessDeadline !== 'function' || !agent.processDeadlineActive) {
+    throw new Error('search reserve requires the process-bounded runtime and ordered final reserves');
+  }
+  setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
+}
 const NO_STOP_S = Math.max(0, parseInt(A.no_stop_s != null ? A.no_stop_s : 900, 10));
 // Run-level cap on how many TechLead stops may be refused (forcedReplans is not reset per round).
 // Not 1: the refusal must scale with the window, or a long budget is handed back early.
@@ -880,6 +904,7 @@ let deadlineHit = false;
 let forcedReplans = 0;
 
 async function secondsLeft(tag) {
+  if (PROCESS_BOUNDED) return setProcessDeadline.secondsLeft();
   if (!DEADLINE_EPOCH) return Infinity;
   const r = await agentT(
     `Run EXACTLY this command and nothing else:
@@ -910,7 +935,6 @@ function expertSkillsBlock(role) {
     `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
-
 // ===========================================================================
 // PHASE: Setup
 // ===========================================================================
@@ -1553,6 +1577,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).',
       planInputs(false)),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
+  if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
   // on the reasoning that a role repeating "stop" has run out of ideas. Measured at a 2h budget that
@@ -1586,7 +1611,10 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   }
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
-    if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
+    if (PROCESS_BOUNDED && left <= 7) {
+      deadlineHit = true; // No agent may start inside its seven-second cleanup reserve.
+      log(`Round ${round}: the search process cutoff was reached while planning.`);
+    } else if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
       log(`Round ${round}: harness stopped after all directions were filtered because calibrated peaks are unknown.`);
     } else {
       log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
@@ -1761,7 +1789,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
-    await agentT(
+    const commitResult = await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -1782,6 +1810,9 @@ check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only re
 it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
 re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
+    if (PROCESS_BOUNDED && (!commitResult || commitResult.committed !== true)) {
+      throw new Error('bounded commit did not finish; retain workspace for owner reconciliation');
+    }
     cumulative = winner.geomean;
     bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
     finalWinner = winner;
@@ -1971,6 +2002,9 @@ const optimizerMsLeft = () => (OPTIMIZER_STOP_EPOCH ? OPTIMIZER_STOP_EPOCH * 100
 // One host command; null when it did not run cleanly to exit 0.
 async function hostRun(cmd, args, opts = {}) {
   const r = await runProcess({ cmd, args, timeoutMs: 300000, graceMs: 2000, ...opts });
+  if (PROCESS_BOUNDED && r.status === 'timeout') {
+    throw Object.assign(new Error('external host command timed out'), { code: 'GEAK_HOST_TIMEOUT' });
+  }
   return processClean(r) && r.code === 0 ? r.stdout : null;
 }
 // Finished by itself, and nothing it started can still be running.
@@ -1980,6 +2014,10 @@ const writeFile = (path, text) => hostRun('sh', ['-c', 'cat > "$1"', 'sh', path]
 
 async function externalOptimize(name, start) {
   if (skipLoop || !(BUDGET > 0)) return greedyOptimize(start);   // nothing to optimize: same no-op result
+  // The admitted external command includes its own final measurement pair.
+  // Its native search cutoff is enforced by the same owner's shared budget.
+  if (PROCESS_BOUNDED) setProcessDeadline(
+    OPTIMIZER_STOP_EPOCH + (OPTIMIZER_GRACE_MS + OPTIMIZER_SETTLE_MS) / 1000);
   const noWinner = (why, stopReason = 'optimizer_error') => {
     log(`[${name}] no winner, the workspace keeps the baseline: ${why}`);
     return {
@@ -1988,174 +2026,188 @@ async function externalOptimize(name, start) {
       profileSummary: start.profileSummary, stopReason, forcedReplans: 0, kbCapBound: 0,
     };
   };
-  if (typeof runProcess !== 'function') return noWinner('this runtime provides no runProcess()');
-  const weighted = !EXTERNAL_OBJECTIVE && HAS_WORKLOAD;
-  if (weighted && !BASELINE_PER_CASE.every(c => Number.isFinite(c.weight) && c.weight > 0)) {
-    return noWinner('the run is workload-aligned but its cases carry no workload weights');
-  }
-  const taskRef = A.optimizer_task_ref;
-  if (taskRef != null && !(taskRef && typeof taskRef.path === 'string' && taskRef.path
-      && /^[0-9a-f]{64}$/.test(String(taskRef.sha256)))) {
-    return noWinner('args.optimizer_task_ref must be {path, sha256}');
-  }
-  let argv = A.optimizer_command;
-  try { if (typeof argv === 'string') argv = JSON.parse(argv); } catch (_) { argv = null; }
-  if (!Array.isArray(argv) || !argv.length || !argv.every(a => typeof a === 'string' && a)) {
-    return noWinner('args.optimizer_command must be a non-empty argv array of strings');
-  }
-  const editable = (analysis && analysis.modifiable_files) || [];
-  if (!editable.length || !bench.correctness_cmd || !bench.benchmark_cmd) {
-    return noWinner('the analysis has no editable files or the benchmark has no correctness/benchmark command');
-  }
-  // A command naming the lane workspace would act on it, not on the optimizer's clone.
-  const commands = [bench.correctness_cmd, bench.benchmark_cmd, bench.profile_cmd].filter(Boolean);
-  if (commands.some(c => c.includes(CANONICAL))) {
-    return noWinner(`a benchmark command names the lane workspace ${CANONICAL}; it would not run in the optimizer's copy`);
-  }
-  const top = ((await git(CANONICAL, 'rev-parse', '--show-toplevel')) || '').trim();
-  const prefix = ((await git(CANONICAL, 'rev-parse', '--show-prefix')) || '').trim();   // '' or 'sub/dir/'
-  const base = ((await git(CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}')) || '').trim();
-  if (!top || !base) return noWinner('could not read the workspace HEAD');
-  // Editable paths relative to the lane workspace (the task's view) and to the repository (git's).
-  const editableRel = editable.map(p => wsRelPath(p));
-  if (editableRel.some(p => p === null)) return noWinner('an editable path lies outside the lane workspace');
-  if (optimizerMsLeft() <= 0) return noWinner('the lane deadline leaves no time to optimize', 'deadline');
-
-  const dir = `${EVAL_DIR}/optimizer/${name}-${base.slice(0, 12)}-${Date.now()}`;
-  const clone = `${dir}/repo`;
-  const owned = prefix ? `${clone}/${prefix.replace(/\/+$/, '')}` : clone;
-  if ((await hostRun('mkdir', ['-p', dir])) === null
-      || (await hostRun('git', ['clone', '-q', '--no-checkout', top, clone])) === null
-      || (await git(clone, 'checkout', '-q', '--detach', base)) === null) {
-    return noWinner(`could not create the optimizer's workspace ${owned}`);
-  }
-  const taskPath = `${dir}/task.json`;
-  const resultPath = `${dir}/result.json`;
-  const task = {
-    schema_version: 1, eval_dir: dir, workspace: owned, base_commit: base,
-    ...(taskRef != null ? { task_ref: taskRef } : {}),
-    editable_paths: editableRel,
-    kernel_name: KERNEL_NAME, language: TARGET_LANGUAGE,
-    commands: { correctness: bench.correctness_cmd, benchmark: bench.benchmark_cmd,
-      ...(bench.profile_cmd ? { profile: bench.profile_cmd } : {}) },
-    baseline: { per_case: Object.fromEntries(BASELINE_PER_CASE.map(c => [c.name, c.baseline_ms])),
-      geomean_ms: BASELINE_GEOMEAN_MS },
-    objective: EXTERNAL_OBJECTIVE || (weighted
-      ? { kind: 'time_weighted', weights: Object.fromEntries(BASELINE_PER_CASE.map(c => [c.name, c.weight])),
-          ...(WORKLOAD_SPEC_PATH ? { workload_spec_path: WORKLOAD_SPEC_PATH } : {}),
-          ...(WORKLOAD_SPEC ? { workload: WORKLOAD_SPEC } : {}) }
-      : { kind: 'geomean' }),
-    incumbent_speedup: start.cumulative, min_improvement: MIN_IMPROVE,
-    ...(start.profileSummary ? { profile_summary: start.profileSummary } : {}),
-    device: { arch: GFX, gpus: GPU_LIST },
-    // null = no limit. The command gets SIGTERM at deadline_epoch and SIGKILL 30 s later.
-    budget: { max_rounds: BUDGET, deadline_epoch: OPTIMIZER_STOP_EPOCH,
-      agent_timeout_s: AGENT_TIMEOUT_MS > 0 ? AGENT_TIMEOUT_MS / 1000 : null, min_improvement: MIN_IMPROVE },
-  };
-  if ((await writeFile(taskPath, JSON.stringify(task, null, 2) + '\n')) === null) {
-    return noWinner(`could not write ${taskPath}`);
-  }
-
-  // Never retried. The run is bounded by the deadline, and runProcess reports whether anything it
-  // started could still be running when it returned.
-  const runMs = optimizerMsLeft();
-  if (runMs <= 0) return noWinner('setup used up the time left to optimize', 'deadline');
-  const ran = await runProcess({
-    cmd: argv[0], args: [...argv.slice(1), '--task', taskPath, '--out', resultPath], cwd: owned,
-    timeoutMs: Number.isFinite(runMs) ? Math.round(runMs) : 0, graceMs: OPTIMIZER_GRACE_MS,
-    settleMs: OPTIMIZER_SETTLE_MS,
-  });
-  await writeFile(`${dir}/stdout.txt`, ran.stdout);
-  await writeFile(`${dir}/stderr.txt`, ran.stderr);
-  log(`[${name}] ${ran.status} exit=${ran.code} signal=${ran.signal} after ${Math.round(ran.duration_ms / 1000)}s` +
-    `${ran.strays_killed ? ', stray processes killed' : ''}${ran.group_cleared ? '' : ', PROCESS GROUP NOT CLEARED'}` +
-    `${ran.stdio_held ? ', AN ESCAPED PROCESS HELD ITS OUTPUT' : ''}`);
-  // A failed or timed-out run's own notes are logged as diagnostics; nothing else of its result is used.
-  const notes = async () => {
-    try {
-      const n = (JSON.parse((await hostRun('cat', [resultPath])) || 'null') || {}).notes;
-      return typeof n === 'string' && n ? `: ${n.slice(0, 500)}` : '';
-    } catch (_) { return ''; }
-  };
-  if (ran.status === 'timeout') return noWinner(`the optimizer ran past the lane deadline${await notes()}`, 'deadline');
-  if (ran.status !== 'completed' || ran.code !== 0) {
-    return noWinner(`the optimizer did not exit 0 (${ran.error || ran.code})${await notes()}`);
-  }
-  // A process left behind may have been writing; its result is not trusted.
-  if (!processClean(ran)) return noWinner('the optimizer left processes running');
-
-  let r = null;
-  try { r = JSON.parse((await hostRun('cat', [resultPath])) || 'null'); } catch (_) { r = null; }
-  const STOP = { deadline: 'deadline', budget: 'budget', no_improvement: 'no_improve', planner_stop: 'tech_lead_stop' };
-  if (!r || r.schema_version !== 1) return noWinner('missing result or unknown schema_version');
-  if (r.status === 'error') return noWinner(`the optimizer reported an error: ${r.notes || ''}`);
-  if (!['improved', 'no_improvement'].includes(r.status) || !STOP[r.stop_reason]
-      || !(Number.isInteger(r.rounds) && r.rounds >= 0)) {
-    return noWinner(`invalid result (status=${r.status}, stop_reason=${r.stop_reason})`);
-  }
-  const best = r.best;
-  if ((r.status === 'improved') !== !!best) return noWinner('status and best disagree');
-  const positive = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0;
-  if (best && !(positive(best.speedup) && /^[0-9a-f]{40,64}$/.test(String(best.commit || ''))
-      && best.per_case && typeof best.per_case === 'object')) {
-    return noWinner('invalid best');
-  }
-  // best.per_case is {case: {baseline_ms, optimized_ms}}, one pair per case of the lane.
-  const perCase = best && BASELINE_PER_CASE.map(c => {
-    const m = best.per_case[c.name] || {};
-    return { name: c.name, baseline_ms: m.baseline_ms, optimized_ms: m.optimized_ms,
-      speedup: m.baseline_ms / m.optimized_ms, ...(weighted ? { weight: c.weight } : {}) };
-  });
-  if (perCase && !perCase.every(c => positive(c.baseline_ms) && positive(c.optimized_ms) && positive(c.speedup))) {
-    return noWinner('best.per_case does not give a positive baseline/optimized pair for every case');
-  }
-  // best.speedup must be the lane's objective computed from those pairs, and beat the incumbent.
-  const geomean = perCase && Math.exp(perCase.reduce((a, c) => a + Math.log(c.speedup), 0) / perCase.length);
-  const arithmetic = perCase && perCase.reduce((a, c) => a + c.speedup, 0) / perCase.length;
-  const timeWeighted = perCase && weighted
-    ? perCase.reduce((a, c) => a + c.weight, 0) / perCase.reduce((a, c) => a + c.weight / c.speedup, 0) : null;
-  if (best && EXTERNAL_OBJECTIVE && !(best.objective
-      && best.objective.kind === 'external_primary'
-      && best.objective.primary_regime === EXTERNAL_OBJECTIVE.primary_regime
-      && best.native_reproducible_gain === true && best.native_reproducible_regression === false)) {
-    return noWinner('external optimizer result lacks the declared native primary objective and gain gate');
-  }
-  // A native phase score is reduced from complete processes. Per-case medians
-  // remain descriptive and cannot be folded again to replace that score.
-  const primary = EXTERNAL_OBJECTIVE ? (best ? best.speedup : null) : (weighted ? timeWeighted : geomean);
-  if (perCase && !EXTERNAL_OBJECTIVE && Math.abs(primary / best.speedup - 1) > 1e-6) {
-    return noWinner(`best.speedup ${best.speedup} is not the ${weighted ? 'time-weighted' : 'geomean'} ` +
-      `speedup of its per-case pairs (${primary})`);
-  }
-  if (perCase && !(primary > start.cumulative * (1 + MIN_IMPROVE))) {
-    return noWinner(`best ${primary.toFixed(3)}x does not beat the incumbent ${start.cumulative}x by ${MIN_IMPROVE}`,
-      STOP[r.stop_reason]);
-  }
-  if (best) {
-    const refused = await fastForward(clone, base, best.commit, editableRel.map(p => prefix + p));
-    if (refused) return noWinner(`winner not applied: ${refused}`);
-    const root = ((await git(CANONICAL, 'rev-list', '--max-parents=0', 'HEAD')) || '').trim().split('\n')[0];
-    const diff = root && await git(CANONICAL, '--no-pager', 'diff', `${root}..HEAD`);
-    if (diff === null || (await writeFile(`${EVAL_DIR}/current_best.diff`, diff)) === null) {
-      log(`[${name}] WARNING: could not write ${EVAL_DIR}/current_best.diff`);
+  let winnerImportStarted = false;
+  try {
+    if (typeof runProcess !== 'function') return noWinner('this runtime provides no runProcess()');
+    const weighted = !EXTERNAL_OBJECTIVE && HAS_WORKLOAD;
+    if (weighted && !BASELINE_PER_CASE.every(c => Number.isFinite(c.weight) && c.weight > 0)) {
+      return noWinner('the run is workload-aligned but its cases carry no workload weights');
     }
+    const taskRef = A.optimizer_task_ref;
+    if (taskRef != null && !(taskRef && typeof taskRef.path === 'string' && taskRef.path
+        && /^[0-9a-f]{64}$/.test(String(taskRef.sha256)))) {
+      return noWinner('args.optimizer_task_ref must be {path, sha256}');
+    }
+    let argv = A.optimizer_command;
+    try { if (typeof argv === 'string') argv = JSON.parse(argv); } catch (_) { argv = null; }
+    if (!Array.isArray(argv) || !argv.length || !argv.every(a => typeof a === 'string' && a)) {
+      return noWinner('args.optimizer_command must be a non-empty argv array of strings');
+    }
+    const editable = (analysis && analysis.modifiable_files) || [];
+    if (!editable.length || !bench.correctness_cmd || !bench.benchmark_cmd) {
+      return noWinner('the analysis has no editable files or the benchmark has no correctness/benchmark command');
+    }
+    // A command naming the lane workspace would act on it, not on the optimizer's clone.
+    const commands = [bench.correctness_cmd, bench.benchmark_cmd, bench.profile_cmd].filter(Boolean);
+    if (commands.some(c => c.includes(CANONICAL))) {
+      return noWinner(`a benchmark command names the lane workspace ${CANONICAL}; it would not run in the optimizer's copy`);
+    }
+    const top = ((await git(CANONICAL, 'rev-parse', '--show-toplevel')) || '').trim();
+    const prefix = ((await git(CANONICAL, 'rev-parse', '--show-prefix')) || '').trim();   // '' or 'sub/dir/'
+    const base = ((await git(CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}')) || '').trim();
+    if (!top || !base) return noWinner('could not read the workspace HEAD');
+    // Editable paths relative to the lane workspace (the task's view) and to the repository (git's).
+    const editableRel = editable.map(p => wsRelPath(p));
+    if (editableRel.some(p => p === null)) return noWinner('an editable path lies outside the lane workspace');
+    if (optimizerMsLeft() <= 0) return noWinner('the lane deadline leaves no time to optimize', 'deadline');
+
+    const dir = `${EVAL_DIR}/optimizer/${name}-${base.slice(0, 12)}-${Date.now()}`;
+    const clone = `${dir}/repo`;
+    const owned = prefix ? `${clone}/${prefix.replace(/\/+$/, '')}` : clone;
+    if ((await hostRun('mkdir', ['-p', dir])) === null
+        || (await hostRun('git', ['clone', '-q', '--no-checkout', top, clone])) === null
+        || (await git(clone, 'checkout', '-q', '--detach', base)) === null) {
+      return noWinner(`could not create the optimizer's workspace ${owned}`);
+    }
+    const taskPath = `${dir}/task.json`;
+    const resultPath = `${dir}/result.json`;
+    const task = {
+      schema_version: 1, eval_dir: dir, workspace: owned, base_commit: base,
+      ...(taskRef != null ? { task_ref: taskRef } : {}),
+      editable_paths: editableRel,
+      kernel_name: KERNEL_NAME, language: TARGET_LANGUAGE,
+      commands: { correctness: bench.correctness_cmd, benchmark: bench.benchmark_cmd,
+        ...(bench.profile_cmd ? { profile: bench.profile_cmd } : {}) },
+      baseline: { per_case: Object.fromEntries(BASELINE_PER_CASE.map(c => [c.name, c.baseline_ms])),
+        geomean_ms: BASELINE_GEOMEAN_MS },
+      objective: EXTERNAL_OBJECTIVE || (weighted
+        ? { kind: 'time_weighted', weights: Object.fromEntries(BASELINE_PER_CASE.map(c => [c.name, c.weight])),
+            ...(WORKLOAD_SPEC_PATH ? { workload_spec_path: WORKLOAD_SPEC_PATH } : {}),
+            ...(WORKLOAD_SPEC ? { workload: WORKLOAD_SPEC } : {}) }
+        : { kind: 'geomean' }),
+      incumbent_speedup: start.cumulative, min_improvement: MIN_IMPROVE,
+      ...(start.profileSummary ? { profile_summary: start.profileSummary } : {}),
+      device: { arch: GFX, gpus: GPU_LIST },
+      // null = no limit. The command gets SIGTERM at deadline_epoch and SIGKILL 30 s later.
+      budget: { max_rounds: BUDGET, deadline_epoch: OPTIMIZER_STOP_EPOCH,
+        agent_timeout_s: AGENT_TIMEOUT_MS > 0 ? AGENT_TIMEOUT_MS / 1000 : null, min_improvement: MIN_IMPROVE },
+    };
+    if ((await writeFile(taskPath, JSON.stringify(task, null, 2) + '\n')) === null) {
+      return noWinner(`could not write ${taskPath}`);
+    }
+
+    // Never retried. The run is bounded by the deadline, and runProcess reports whether anything it
+    // started could still be running when it returned.
+    const runMs = optimizerMsLeft();
+    if (runMs <= 0) return noWinner('setup used up the time left to optimize', 'deadline');
+    const ran = await runProcess({
+      cmd: argv[0], args: [...argv.slice(1), '--task', taskPath, '--out', resultPath], cwd: owned,
+      timeoutMs: Number.isFinite(runMs) ? Math.round(runMs) : 0, graceMs: OPTIMIZER_GRACE_MS,
+      settleMs: OPTIMIZER_SETTLE_MS,
+    });
+    // The process has settled; result import and Report share the next allowance.
+    if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+    await writeFile(`${dir}/stdout.txt`, ran.stdout);
+    await writeFile(`${dir}/stderr.txt`, ran.stderr);
+    log(`[${name}] ${ran.status} exit=${ran.code} signal=${ran.signal} after ${Math.round(ran.duration_ms / 1000)}s` +
+      `${ran.strays_killed ? ', stray processes killed' : ''}${ran.group_cleared ? '' : ', PROCESS GROUP NOT CLEARED'}` +
+      `${ran.stdio_held ? ', AN ESCAPED PROCESS HELD ITS OUTPUT' : ''}`);
+    // A failed or timed-out run's own notes are logged as diagnostics; nothing else of its result is used.
+    const notes = async () => {
+      try {
+        const n = (JSON.parse((await hostRun('cat', [resultPath])) || 'null') || {}).notes;
+        return typeof n === 'string' && n ? `: ${n.slice(0, 500)}` : '';
+      } catch (_) { return ''; }
+    };
+    if (ran.status === 'timeout') return noWinner(`the optimizer ran past the lane deadline${await notes()}`, 'deadline');
+    if (ran.status !== 'completed' || ran.code !== 0) {
+      return noWinner(`the optimizer did not exit 0 (${ran.error || ran.code})${await notes()}`);
+    }
+    // A process left behind may have been writing; its result is not trusted.
+    if (!processClean(ran)) return noWinner('the optimizer left processes running');
+
+    let r = null;
+    try { r = JSON.parse((await hostRun('cat', [resultPath])) || 'null'); } catch (_) { r = null; }
+    const STOP = { deadline: 'deadline', budget: 'budget', no_improvement: 'no_improve', planner_stop: 'tech_lead_stop' };
+    if (!r || r.schema_version !== 1) return noWinner('missing result or unknown schema_version');
+    if (r.status === 'error') return noWinner(`the optimizer reported an error: ${r.notes || ''}`);
+    if (!['improved', 'no_improvement'].includes(r.status) || !STOP[r.stop_reason]
+        || !(Number.isInteger(r.rounds) && r.rounds >= 0)) {
+      return noWinner(`invalid result (status=${r.status}, stop_reason=${r.stop_reason})`);
+    }
+    const best = r.best;
+    if ((r.status === 'improved') !== !!best) return noWinner('status and best disagree');
+    const positive = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0;
+    if (best && !(positive(best.speedup) && /^[0-9a-f]{40,64}$/.test(String(best.commit || ''))
+        && best.per_case && typeof best.per_case === 'object')) {
+      return noWinner('invalid best');
+    }
+    // best.per_case is {case: {baseline_ms, optimized_ms}}, one pair per case of the lane.
+    const perCase = best && BASELINE_PER_CASE.map(c => {
+      const m = best.per_case[c.name] || {};
+      return { name: c.name, baseline_ms: m.baseline_ms, optimized_ms: m.optimized_ms,
+        speedup: m.baseline_ms / m.optimized_ms, ...(weighted ? { weight: c.weight } : {}) };
+    });
+    if (perCase && !perCase.every(c => positive(c.baseline_ms) && positive(c.optimized_ms) && positive(c.speedup))) {
+      return noWinner('best.per_case does not give a positive baseline/optimized pair for every case');
+    }
+    // best.speedup must be the lane's objective computed from those pairs, and beat the incumbent.
+    const geomean = perCase && Math.exp(perCase.reduce((a, c) => a + Math.log(c.speedup), 0) / perCase.length);
+    const arithmetic = perCase && perCase.reduce((a, c) => a + c.speedup, 0) / perCase.length;
+    const timeWeighted = perCase && weighted
+      ? perCase.reduce((a, c) => a + c.weight, 0) / perCase.reduce((a, c) => a + c.weight / c.speedup, 0) : null;
+    if (best && EXTERNAL_OBJECTIVE && !(best.objective
+        && best.objective.kind === 'external_primary'
+        && best.objective.primary_regime === EXTERNAL_OBJECTIVE.primary_regime
+        && best.native_reproducible_gain === true && best.native_reproducible_regression === false)) {
+      return noWinner('external optimizer result lacks the declared native primary objective and gain gate');
+    }
+    // A native phase score is reduced from complete processes. Per-case medians
+    // remain descriptive and cannot be folded again to replace that score.
+    const primary = EXTERNAL_OBJECTIVE ? (best ? best.speedup : null) : (weighted ? timeWeighted : geomean);
+    if (perCase && !EXTERNAL_OBJECTIVE && Math.abs(primary / best.speedup - 1) > 1e-6) {
+      return noWinner(`best.speedup ${best.speedup} is not the ${weighted ? 'time-weighted' : 'geomean'} ` +
+        `speedup of its per-case pairs (${primary})`);
+    }
+    if (perCase && !(primary > start.cumulative * (1 + MIN_IMPROVE))) {
+      return noWinner(`best ${primary.toFixed(3)}x does not beat the incumbent ${start.cumulative}x by ${MIN_IMPROVE}`,
+        STOP[r.stop_reason]);
+    }
+    if (best) {
+      winnerImportStarted = true;
+      const refused = await fastForward(clone, base, best.commit, editableRel.map(p => prefix + p));
+      if (refused) return noWinner(`winner not applied: ${refused}`);
+      const root = ((await git(CANONICAL, 'rev-list', '--max-parents=0', 'HEAD')) || '').trim().split('\n')[0];
+      const diff = root && await git(CANONICAL, '--no-pager', 'diff', `${root}..HEAD`);
+      if (diff === null || (await writeFile(`${EVAL_DIR}/current_best.diff`, diff)) === null) {
+        log(`[${name}] WARNING: could not write ${EVAL_DIR}/current_best.diff`);
+      }
+    }
+    return {
+      rounds: r.rounds, dispatched: r.rounds,
+      cumulativeSpeedup: best ? primary : start.cumulative,
+      bestPerCase: perCase || start.bestPerCase,
+      // geomean is the PRIMARY metric, as in the greedy loop's candidates; the raw one is kept apart.
+      finalWinner: best ? { source: name, geomean: primary, geomean_unweighted: EXTERNAL_OBJECTIVE ? null : geomean,
+        weighted: timeWeighted, arithmetic, per_case: perCase,
+        ...(EXTERNAL_OBJECTIVE ? { objective: EXTERNAL_OBJECTIVE,
+          primary_speedup: primary, native_reproducible_gain: true, native_reproducible_regression: false,
+          phase_speedups: best.phase_speedups } : {}),
+        patch: `${EVAL_DIR}/current_best.diff`, commit: best.commit } : start.finalWinner,
+      roundsCommitted: best ? 1 : 0,
+      history: { ...start.history, ...(r.history_path ? { history_path: r.history_path } : {}) },
+      citations: [], profileSummary: start.profileSummary,
+      stopReason: STOP[r.stop_reason], forcedReplans: 0, kbCapBound: 0,
+    };
+  } catch (error) {
+    // Expired setup/reads leave the baseline intact. An interrupted import may
+    // have changed the canonical workspace and must remain an owner-visible failure.
+    if (PROCESS_BOUNDED && error && !winnerImportStarted
+        && ['GEAK_PROCESS_DEADLINE', 'GEAK_HOST_TIMEOUT'].includes(error.code)) {
+      return noWinner(error.message, error.code === 'GEAK_PROCESS_DEADLINE' ? 'deadline' : 'optimizer_error');
+    }
+    throw error;
   }
-  return {
-    rounds: r.rounds, dispatched: r.rounds,
-    cumulativeSpeedup: best ? primary : start.cumulative,
-    bestPerCase: perCase || start.bestPerCase,
-    // geomean is the PRIMARY metric, as in the greedy loop's candidates; the raw one is kept apart.
-    finalWinner: best ? { source: name, geomean: primary, geomean_unweighted: EXTERNAL_OBJECTIVE ? null : geomean,
-      weighted: timeWeighted, arithmetic, per_case: perCase,
-      ...(EXTERNAL_OBJECTIVE ? { objective: EXTERNAL_OBJECTIVE,
-        primary_speedup: primary, native_reproducible_gain: true, native_reproducible_regression: false,
-        phase_speedups: best.phase_speedups } : {}),
-      patch: `${EVAL_DIR}/current_best.diff`, commit: best.commit } : start.finalWinner,
-    roundsCommitted: best ? 1 : 0,
-    history: { ...start.history, ...(r.history_path ? { history_path: r.history_path } : {}) },
-    citations: [], profileSummary: start.profileSummary,
-    stopReason: STOP[r.stop_reason], forcedReplans: 0, kbCapBound: 0,
-  };
 }
 
 // An editable path from the analysis, relative to the lane workspace; null if it lies outside it.
@@ -2204,6 +2256,7 @@ applyOptimizeResult(OPTIMIZER === 'greedy'
 // ===========================================================================
 // PHASE: Final report (TechLead)
 // ===========================================================================
+if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
 phase('Report');
 const report = await agentT(
   roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.', {
@@ -2216,6 +2269,7 @@ const report = await agentT(
 // ===========================================================================
 // PHASE: Director validation + arbitration
 // ===========================================================================
+if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_CLEANUP_RESERVE_S);
 phase('Validate');
 let validation = await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {
