@@ -27,8 +27,10 @@ Run: python3 -m pytest GEAK/interface/test_run_e2e_alignment.py -v
 """
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -874,3 +876,41 @@ def test_no_orchestrator_log_keeps_an_opaque_identity_unverified(tmp_path: Path)
 
     assert identity["status"] == "unverified"
     assert "geak_launched" not in identity
+
+
+def _rotate_like_hyperloom(live: Path, attempt: int = 0) -> Path:
+    """Hyperloom's slot reuse: gzip the live log into attempts/<NNN>/ and unlink it."""
+    kept = live.parent / "attempts" / f"{attempt:03d}" / "server.log.gz"
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    with live.open("rb") as source, gzip.open(kept, "wb") as target:
+        shutil.copyfileobj(source, target)
+    live.unlink()
+    return kept
+
+
+def test_a_rotated_orchestrator_log_is_still_the_reference(tmp_path: Path) -> None:
+    """2026-10-16 GLM-5.2 run: the handoff named benchmark_atom_*/server.log, but
+    Hyperloom had gzipped it into attempts/000/, so every launch read "unverified"."""
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    _atom_log(eval_dir / "validation" / "base" / "server.log")
+    live = _atom_log(tmp_path / "hl" / "server.log")
+    _rotate_like_hyperloom(live)
+
+    identity = rx._server_identity_alignment(_atom_handoff(live), eval_dir)
+
+    assert identity["status"] == "matched"
+    assert identity["expected_source"] == "orchestrator_server_log"
+    assert [leg["status"] for leg in identity["geak_launched"]] == ["matched"]
+
+
+def test_a_rotated_reference_still_catches_a_dropped_recipe(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    _atom_log(eval_dir / "validation" / "base" / "server.log", seqs=512, block=16, mtp=False)
+    live = _atom_log(tmp_path / "hl" / "server.log")
+    _rotate_like_hyperloom(live)
+
+    identity = rx._server_identity_alignment(_atom_handoff(live), eval_dir)
+
+    assert identity["geak_launched"][0]["status"] == "mismatched"

@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import atexit
 import glob
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -3171,10 +3172,17 @@ def _parse_atom_engine_kwargs(text: str) -> dict[str, Any]:
     return observed
 
 
+def _open_server_log(log_path: Path):
+    """Open a server log as text; Hyperloom keeps rotated attempts gzipped."""
+    if log_path.suffix == ".gz":
+        return gzip.open(log_path, "rt", encoding="utf-8", errors="ignore")
+    return log_path.open(encoding="utf-8", errors="ignore")
+
+
 def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]:
     """Read direct launch identity evidence without loading an unbounded log."""
     try:
-        with log_path.open(encoding="utf-8", errors="ignore") as handle:
+        with _open_server_log(log_path) as handle:
             lines = iter(handle)
             for line in lines:
                 if "ServerArgs(" not in line:
@@ -3195,7 +3203,7 @@ def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]
 
     # ATOM logs its resolved engine configuration once, as one line.
     try:
-        with log_path.open(encoding="utf-8", errors="ignore") as handle:
+        with _open_server_log(log_path) as handle:
             for line in handle:
                 if _ATOM_ENGINE_KWARGS_MARKER not in line:
                     continue
@@ -3208,7 +3216,7 @@ def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]
     # A Magpie recipe can log its immutable identity directly. This is useful
     # for backends other than SGLang and for opaque upstream digest identities.
     try:
-        with log_path.open(encoding="utf-8", errors="ignore") as handle:
+        with _open_server_log(log_path) as handle:
             for line in handle:
                 match = re.search(
                     r"\b(?:observed_)?(?:server_|launch_)?identity\s*[:=]\s*"
@@ -3291,8 +3299,22 @@ def _orchestrator_server_log_identity(handoff: dict) -> dict[str, Any]:
     path = str((evidence or {}).get("actual_server_log_path") or "").strip() if isinstance(evidence, dict) else ""
     if not path:
         return {}
-    observed, _ = _read_server_identity_evidence(Path(path))
+    observed, _ = _read_server_identity_evidence(_resolve_rotated_server_log(Path(path)))
     return observed if observed.get("server_args") else {}
+
+
+def _resolve_rotated_server_log(path: Path) -> Path:
+    """Where the orchestrator's server log lives now.
+
+    Hyperloom reuses a round slot across attempts: before each relaunch it gzips the
+    live ``server.log`` into ``attempts/<NNN>/server.log.gz`` and unlinks it, but the
+    handoff keeps naming the live path. Every attempt in a slot serves the same
+    recipe, so the newest rotated copy carries the same launch facts.
+    """
+    if path.exists():
+        return path
+    rotated = sorted((path.parent / "attempts").glob(f"*/{path.name}.gz"))
+    return rotated[-1] if rotated else path
 
 
 # Servers GEAK itself launches after Setup. The Setup baseline may be imported from
