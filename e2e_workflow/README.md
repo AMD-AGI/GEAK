@@ -352,6 +352,35 @@ meaning, and a run without the phase produces a byte-identical `result.json`.
 Fast mode skips the phase; deep mode keeps it. Full contract:
 `knowledge/tuning_skillset_integration.md`.
 
+## AgentX kernel extraction and UT delivery
+
+An explicit `workload_kind: "agentx_trace_replay"` (or matching workload specification)
+activates the bundled [kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md).
+The extractor reads this complete standalone procedure directly: measured baseline logs
+→ observed workload → sampling points → runtime kernel selection → source extraction
+→ standalone GPU UTs. The skill owns its references and scripts, including coverage,
+reference-output checks and kernel self-noise measurement. Its provenance records the
+validated standalone source and the small integration changes.
+
+The default capture policy is `structure_only`: retain routing, indices, page tables
+and other operands whose values select work, and persist ordinary float payloads as
+seeded descriptors. Regenerate reference outputs before UT validation. An explicit
+`capture_persist_policy` overrides this; non-AgentX capture defaults are unchanged.
+
+GEAK supplies baseline/configuration paths, GPU allocation, accepted overlays and
+budgets through the [workflow handoff](knowledge/kernel_extraction_skills/kernel-extract/references/workflow-handoff.md).
+The skill completes scheduled UT work before returning a delivery path. The packaging
+adapter reads each task's saved declaration and return, preserves failed/deferred
+tasks and coverage, and feeds verified tasks into the existing optimization queues.
+It checks source/binding/UT evidence without repeating selection or GPU tests; changes
+to source, cases or recorded results invalidate reuse. Task-count budgets affect
+scheduling, not the selected inventory or its reported coverage.
+
+The default selection remains per-phase Top 5 intersected with whole-workload
+GPU-time share strictly greater than 3%, without backfilling. Explicit user scope
+wins. Fixed ISL/OSL workloads keep their existing extractor. Per-kernel UT results
+do not establish an E2E improvement.
+
 ## Roofline-guided routing (`analysis_skill`, default `roofline`)
 
 `pct_gpu_time` tells you where the time goes; it does **not** tell you whether that time is
