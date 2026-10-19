@@ -310,6 +310,39 @@ def decode_joint(expanded):
     return out
 
 
+# aiperf writes `Phase profiling (profiling) started | ...` and `... (profiling) complete`:
+# capitalised, with the phase repeated in parentheses. The event must follow the name (or
+# its parenthetical) directly, so `Phase profiling (profiling) sending complete` -- emitted
+# when the send loop drains, long before the phase ends -- does not match.
+PHASE_RE = re.compile(
+    r"phase\s+['\"]?(?P<ph>\w+)['\"]?(?:\s*\([^)]*\))?\s+(?P<ev>started|complete)\b",
+    re.IGNORECASE)
+DATED_TS_RE = re.compile(r"(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d:\d\d(?:\.\d+)?)")
+# The same client log stamps its lines with the time of day only.
+TIME_TS_RE = re.compile(r"\b(\d\d:\d\d:\d\d(?:\.\d+)?)\b")
+
+
+def _serving_log_dates(paths):
+    """Dates appearing in the serving log(s), to anchor a client log's time-only stamps."""
+    dates = set()
+    for path in paths:
+        if path.endswith(".gz"):
+            with __import__("gzip").open(path, "rb") as fh:
+                for raw in fh:
+                    m = DATED_TS_RE.search(raw.decode("utf-8", "replace"))
+                    if m:
+                        dates.add(m.group(1))
+            continue
+        with open(path, "rb") as fh:
+            head = fh.read(1 << 20).decode("utf-8", "replace")
+            dates.update(m[0] for m in DATED_TS_RE.findall(head))
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - (1 << 20)))
+            tail = fh.read().decode("utf-8", "replace")
+            dates.update(m[0] for m in DATED_TS_RE.findall(tail))
+    return sorted(dates)
+
+
 def read_window(args):
     if args.window_start and args.window_end:
         return (_ts(args.window_start), _ts(args.window_end))
@@ -317,25 +350,49 @@ def read_window(args):
         # The measured leg is delimited in the client's own log; using it keeps the
         # distribution scoped to the leg that produced the baseline number, excluding
         # warm-up and drain.
-        start = end = None
-        pat = re.compile(r"phase ['\"]?(?P<ph>\w+)['\"]? (?P<ev>started|complete)")
-        tsp = re.compile(r"(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?)")
+        found = {}
         for line in open(args.bench_log, "r", errors="replace"):
-            m = pat.search(line)
-            if not m or m.group("ph") != args.bench_phase:
+            m = PHASE_RE.search(line)
+            if not m or m.group("ph").lower() != args.bench_phase.lower():
                 continue
-            t = tsp.search(line)
-            if not t:
+            dated = DATED_TS_RE.search(line)
+            if dated:
+                found[m.group("ev").lower()] = ("dated", f"{dated.group(1)} {dated.group(2)}")
                 continue
-            if m.group("ev") == "started":
-                start = _ts(t.group(1).replace("T", " "))
-            else:
-                end = _ts(t.group(1).replace("T", " "))
-        if start and end:
-            return (start, end)
-        raise SystemExit(
-            "observed_workload: --bench-log given but phase %r start/complete not found "
-            "in it. Pass --window-start/--window-end explicitly." % args.bench_phase)
+            bare = TIME_TS_RE.search(line)
+            if bare:
+                found[m.group("ev").lower()] = ("time", bare.group(1))
+        start, end = found.get("started"), found.get("complete")
+        if not (start and end):
+            raise SystemExit(
+                "observed_workload: --bench-log given but phase %r start/complete not found "
+                "in it. Pass --window-start/--window-end explicitly." % args.bench_phase)
+        if start[0] == "dated" and end[0] == "dated":
+            return (_ts(start[1]), _ts(end[1]))
+
+        # Time-only stamps carry no date, so anchor them on the serving log's own dates.
+        # A leg that crosses midnight ends on the following day, which is why `end` is
+        # rolled forward rather than rejected.
+        dates = _serving_log_dates(args.log)
+        if not dates:
+            raise SystemExit(
+                "observed_workload: --bench-log phase lines carry a time of day but no date, "
+                "and the serving log has no dated timestamp to anchor them to. Pass "
+                "--window-start/--window-end explicitly.")
+        if len(dates) > 1:
+            # Guessing here would silently scope the distribution to the wrong day, which
+            # looks exactly like a correct run with fewer batches. Refuse instead.
+            raise SystemExit(
+                "observed_workload: the client log's phase stamps carry a time of day but no "
+                "date, and the serving log spans %d dates (%s), so the anchor is ambiguous. "
+                "Pass --window-start/--window-end explicitly."
+                % (len(dates), ", ".join(dates)))
+        day = dates[0]
+        a = _ts("%s %s" % (day, start[1])) if start[0] == "time" else _ts(start[1])
+        b = _ts("%s %s" % (day, end[1])) if end[0] == "time" else _ts(end[1])
+        if b < a:
+            b += dt.timedelta(days=1)   # the leg crossed midnight
+        return (a, b)
     return None
 
 
