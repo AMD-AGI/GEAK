@@ -391,9 +391,13 @@ resources; head and milestone use the workload-weighted result. Missing or chang
 preparation evidence fails the task locally. Current optimization lanes are single-GPU:
 completed multi-rank UTs retain their artifacts and are deferred for separate scheduling.
 
-The default selection remains per-phase Top 5 intersected with whole-workload
-GPU-time share strictly greater than 3%, without backfilling. Explicit user scope
-wins. Head routing uses the prepared task kind; milestones consume the remaining
+The default selection is whole-workload GPU-time share strictly greater than 3%, with no
+per-phase rank cut. That share is computed against the PREFILL/DECODE split estimated from
+the serving log's instance counts weighted by the measured sampling points, not against a
+single capture window, and a phase that carries mass but was measured at one point fails
+selection. Within-phase ranks remain in the artifact as inventory. Explicit user scope
+wins. PREFILL and DECODE may be delivered as separate UT tasks when the phases take
+different branches, provided both are covered. Head routing uses the prepared task kind; milestones consume the remaining
 kernel queue without Architect nomination or the fixed-load 5% filter. Optimization
 wins do not trigger another extraction; scheduling uses the original measured order
 and weights. Dispatched tasks leave the queue, pending tasks survive resume, and an

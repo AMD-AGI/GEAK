@@ -11,30 +11,52 @@ and the source of that scope. A request to audit or fix the skill uses existing
 artifacts as evidence; it does not start another extraction campaign.
 
 The selection rule itself is in [the core skill](../SKILL.md) §2; this file covers how to
-apply it to an inventory. Precisely: `(rank_in_PREFILL <= 5 OR rank_in_DECODE <= 5) AND
-overall_pct > 3`, where within-phase rank uses that phase's device time and `overall_pct`
-uses whole-replay time over total device time across all phases, one consistent rank/stream
-scope, current measured costs rather than historical percentages or expected gain. Exactly
-3% is excluded. A phase with fewer than five observed kernels contributes those available.
+apply it to an inventory. Precisely: `overall_pct > 3`, where
+`overall_pct = Σ_phase phase_share[phase] × share_of_phase_pct[phase]`, `phase_share` is
+the PREFILL/DECODE split estimated from the serving log's instance counts weighted by
+measured per-point cost, and `share_of_phase_pct` uses that phase's device time under one
+consistent rank/stream scope, from current measured costs rather than historical
+percentages or expected gain. Exactly 3% is excluded.
+
+There is no per-phase Top-K. Rank within a phase for inventory, disclosure and probe
+priority, never as a gate: a phase leader below 3% is excluded and a rank-20 row above 3%
+is selected. Dropping the Top-K is what lets a decode-heavy replay select decode work that
+a prefill-weighted window had buried, so do not reintroduce a rank cut to shorten the list
+— use `--top-k` if execution must be bounded, which keeps the remainder in `dropped_by_cap`
+as selected identities still owing a task or blocker.
+
 Deduplicate a kernel selected in both phases while preserving both phase/case obligations;
-distinct live dispatch identities stay separate even if one callable reaches them.
+distinct live dispatch identities stay separate even if one callable reaches them. A
+deduplicated identity may still be delivered as a prefill task and a decode task.
 
 Keep collectives and unsupported kernels in the ranking. A selected but
-unextractable kernel needs a blocker; it does not silently disappear or free
-a Top-5 slot. Additional targets or an explicit non-collective scope require
-recording that changed scope before ranking. Never renormalize the overall
-denominator merely because a target cannot be extracted. Joint tasks may
+unextractable kernel needs a blocker; it does not silently disappear. Under a
+threshold-only rule it also no longer consumes a slot that a schedulable kernel could
+have used, which is part of why the rank cut is gone: a deferred TP collective should
+cost the delivery its own mass and nothing more. Additional targets or an explicit
+non-collective scope require recording that changed scope before ranking. Never
+renormalize the overall denominator merely because a target cannot be extracted. Joint tasks may
 cover multiple selected kernels with proved boundaries, but joint/leaf
 overlaps must not inflate ranks, shares or the number of delivered kernels.
 
 `select_targets.py` (run it as shown in SKILL.md §2, after live identities are resolved)
-needs `ranking[]` rows with a unique `id` (or unique `name`), `selection_pct_gpu_time` and
-`share_of_phase_pct` keyed by phase. Pass `--phases` with the exact observed phase labels
-when they differ from the default `PREFILL DECODE`. The phase map must be complete for
-observed activity; absent keys mean zero only after that has been established, and
-missing/invalid costs fail selection. It ranks by phase share, breaks exact ties by stable
-identity, and records both retained and excluded Top-5 rows. Its output is a target plan,
-not dispatch, editability or GPU-validation evidence.
+needs a top-level `phase_share` block and `ranking[]` rows with a unique `id` (or unique
+`name`) and `share_of_phase_pct` keyed by phase. `selection_pct_gpu_time` is optional and
+is echoed as `window_pct_reported`; the threshold is never applied to it, because it is a
+capture-window figure. Pass `--phases` with the exact observed phase labels when they
+differ from the default `PREFILL DECODE`. The phase map must be complete for observed
+activity; absent keys mean zero only after that has been established, and missing/invalid
+costs fail selection.
+
+`phase_share` needs `basis`, one nonnegative weight per phase (fractions or percentages
+both work; they are normalized) and `points_measured` per phase. The selector refuses a
+`basis` naming a single capture window, and refuses a phase that carries mass but was
+measured at fewer than `--min-points-per-phase` points (default 2). Both refusals exist
+because a one-window split silently decides the whole ranking. `--allow-window-denominator`
+waives them for a declared-approximate scope and stamps the policy block accordingly;
+carry that stamp into the delivery. The output records per-phase ranks for every observed
+row, the selected set with its summed `selected_overall_pct`, and `dropped_by_cap`. It is
+a target plan, not dispatch, editability or GPU-validation evidence.
 
 Task/time budgets limit execution, not discovery: they never change the selection rule,
 remove a required target, or redefine the requested scope. Return all evidenced targets in
@@ -42,8 +64,9 @@ priority order and report the remainder the agent could not schedule. A budget-d
 candidate keeps its identity and evidence for resume rather than counting as rejected, and
 a below-threshold entry can leave the optimization queue while staying in the inventory. A
 phase leader can fall below the overall threshold; preserve both shares. A small
-optimization ceiling does not invalidate a UT. The final target count can be below five
-after the overall-share filter, or above five across the two phase lists.
+optimization ceiling does not invalidate a UT. The target count is whatever the threshold
+admits — one kernel, or twenty — and a long list is a scheduling problem to report, not a
+reason to cut the list back to a rank.
 
 Build the inventory from all available ranked rows, per-phase leaders, current
 source/dispatch evidence and any supplied delivery manifests. Group a small

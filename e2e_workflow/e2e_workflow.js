@@ -3353,8 +3353,12 @@ async function prepareAgentXKernels(round, throughput) {
     PREVIOUS_WORKLOAD_JSON: profile ? profile.profile_workload_json || '' : '',
     PREVIOUS_RANKING_JSON: profile ? profile.kernel_ranking_json || '' : '',
     PREVIOUS_UT_DELIVERY: profile ? profile.kernel_extraction_delivery_json || '' : '',
-    EXTRACTION_SELECTION_POLICY: { phases: ['PREFILL', 'DECODE'], top_k_per_phase: 5,
-      overall_pct_gt: 3, combination: 'phase_top_k_and_overall_threshold', backfill: false },
+    // Threshold-only, applied to the log-weighted phase split rather than to a capture
+    // window's raw device time. No rank cut: a phase leader can fall below 3% and a
+    // rank-20 row can sit above it. See kernel-extract SKILL.md §2.
+    EXTRACTION_SELECTION_POLICY: { phases: ['PREFILL', 'DECODE'], overall_pct_gt: 3,
+      combination: 'overall_share_threshold_on_log_weighted_phase_split',
+      rank_is_inventory_only: true, min_points_per_phase: 2 },
     SOURCE_DELIVERY_REQUIRED: true,
     BUDGET, HEAD_BUDGET, REMAINING_MIN: remainingMin(),
     SKILL_DIR: WORKFLOW_DIR, ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,

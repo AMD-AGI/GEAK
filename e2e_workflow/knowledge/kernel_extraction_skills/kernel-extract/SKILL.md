@@ -49,6 +49,33 @@ small set of profile points is executable: `observed_workload.py` → `plan_samp
 the commands in [workload measurement](references/dynamic-workloads.md); using them rather
 than your own is what makes two runs against one deployment comparable.
 
+**This pipeline is required, not a suggestion.** Sample **multiple points per material
+phase** and fit the cost model in [cost attribution](references/dynamic-workloads.md) over
+them; one capture is a single point and admits no fit. A phase that carries mass and was
+measured at fewer than two points fails selection rather than being ranked. Reusing a
+compatible window already captured from the baseline replay counts as one measured point,
+not as the census.
+
+One short window can establish *what* a phase executes. It cannot establish *how much of
+the workload* that phase is: a 5-second sample that contains one long prefill batch and
+thirty decode steps reports a prefill-dominated split for a decode-dominated replay, and
+every downstream percentage inherits that error. So derive the PREFILL/DECODE GPU-time
+split from the **log's instance counts weighted by the measured per-point cost**, over the
+whole measured leg, and record it as `phase_share` in `kernel_ranking.json`:
+
+```json
+"phase_share": {
+  "basis": "log_instance_counts_x_measured_point_cost",
+  "PREFILL": 0.1217, "DECODE": 0.8783,
+  "points_measured": {"PREFILL": 3, "DECODE": 3},
+  "evidence": {"observed_workload_json": "...", "sampling_points_json": "...",
+               "coverage_json": "..."}
+}
+```
+
+State the window's own span and step count as a limitation whenever the fit rests on a
+short capture, and never present a window percentage as a whole-workload percentage.
+
 These counts come from the log, never from a parametric ISL/OSL model.
 `parse_profile.analytic_regime_calls` assumes uniform request lengths and cannot see
 prefix-cache hits, accept length or the batch distribution; on an agentic replay it is
@@ -68,15 +95,26 @@ kernels in the denominator and inventory. Window percentages alone are not
 whole-workload percentages: `coverage_ledger.py` converts them using the observed
 instance counts, under the constraints listed in the reference.
 
-Default selection is **per-phase Top 5 AND overall GPU-time share strictly >3%**.
-Rank PREFILL and DECODE separately before filtering; union by live identity,
-without backfilling rank 6. Apply the same rule to other material phases in scope.
-Explicit user scope overrides this default. Run:
+Default selection is **whole-workload GPU-time share strictly >3%**, and nothing else.
+The share of a kernel is `Σ_phase phase_share[phase] × share_of_phase_pct[phase]`, so the
+threshold is applied once, on the log-weighted split above, across every material phase in
+scope. There is no per-phase Top-K: a phase leader can fall below 3% and a rank-20 row can
+sit above it, and both outcomes are correct. Within-phase ranks stay in the artifact as
+inventory and disclosure, never as a gate. Union by live identity. Explicit user scope
+overrides this default. Run:
 
 ```bash
 python3 "$SKILL_ROOT/scripts/select_targets.py" \
   "$EVAL_DIR/kernel_ranking.json" --output "$EVAL_DIR/selection_targets.json"
 ```
+
+The selector recomputes each overall share from `phase_share` rather than trusting the
+ranking's own `selection_pct_gpu_time`, which it retains as `window_pct_reported` for
+comparison. It refuses a missing or window-only `phase_share`, and refuses a phase that
+carries mass but was measured at one point. `--allow-window-denominator` exists only to
+record an explicitly declared-approximate scope; its output is stamped non-comparable and
+that stamp belongs in the delivery. `--top-k` is an optional execution cap — anything it
+drops stays in `dropped_by_cap` and remains a selected identity owing a task or blocker.
 
 Every selected identity needs a task or explicit blocker. Execution limits may
 defer tasks but cannot turn a partial batch into completed extraction.
@@ -95,8 +133,23 @@ Keep required companions even when below the selection threshold. Use
 Never demand mutually exclusive kernels in every invocation. Whole fused MoE
 tasks preserve routing and the complete operation, not a synthetic dense GEMM.
 
-For selected indexer score/top-k, deliver one unified task covering both served
-prefill and decode branches. Read [joint indexer UT](references/joint-indexer-ut.md).
+**PREFILL and DECODE may be delivered as separate tasks.** One callable serving both
+phases does not have to become one task: when the two phases take different branches,
+operand layouts, graph/compile modes or cases, a per-phase task is the clearer boundary
+and is explicitly allowed. Split or join on evidence, not on the callable's name. A split
+costs nothing in coverage as long as each task declares `served_regimes` for the phase it
+owns, the two together account for every selected identity and required companion of that
+callable, and neither silently drops the other phase's mass. Cross-link the siblings in
+`run/requested_kernel.json` so the pair is reviewable as one boundary, and keep per-phase
+results and weights separate — there is then no single cross-phase aggregate to report,
+and none should be invented. A joined task remains correct where one invocation genuinely
+spans both phases.
+
+For selected indexer score/top-k, deliver the score and top-k stages of the chain
+together, and cover both served prefill and decode branches — as one unified task, or as
+a prefill task and a decode task that cross-reference each other. Read
+[joint indexer UT](references/joint-indexer-ut.md). What is not optional is the coverage:
+a prefill-only indexer delivery leaves the decode branch owing a task or a blocker.
 For collectives read [multi-rank UT](references/collective-ut.md). Consult the
 [GLM example](references/glm-agentx-example.md) only for matching features;
 it supplies no default shapes, layer multipliers or kernel identities.

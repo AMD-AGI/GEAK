@@ -38,6 +38,24 @@ runs against the same deployment produced different points, different denominato
 different coverage claims, none of them comparable. The pipeline is now executable, and
 the prose that follows is the reasoning behind it, not a specification to implement.
 
+**It is also required.** Sample several points per material phase — `plan_sampling_points.py`
+defaults to six across both — and fit the cost model in *Cost attribution* over them.
+`select_targets.py` refuses a phase that carries mass but was measured at one point,
+because one point has no spread to fit and its mass is whatever that point happened to
+execute. Reusing one compatible window already captured from the baseline replay is one
+measured point, not a census; it is a legitimate way to spend less probe budget, not a way
+to skip the other points.
+
+The pipeline's purpose is not only to find kernels — it is to produce the
+PREFILL/DECODE split that every later percentage is computed against. Take the per-phase
+instance counts from `observed_workload.py` over the **whole measured leg**, multiply by
+the per-point cost measured at the sampling points, and write the normalized result to
+`kernel_ranking.json` as `phase_share` with its `basis`, `points_measured` per phase and
+evidence paths. A short window cannot supply this: a 5-second sample holding one long
+prefill batch and thirty decode steps reports a prefill-dominated split for a
+decode-dominated replay, and the 3% threshold then selects the wrong kernels in the wrong
+phase. Window percentages are reported as window percentages, always labelled as such.
+
 ```bash
 # 1. log + config -> what the measured leg actually executed
 python3 "$SKILL_ROOT/scripts/observed_workload.py" \

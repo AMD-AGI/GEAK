@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Select phase Top-K kernels whose whole-workload share exceeds a threshold.
+"""Select kernels whose whole-workload GPU-time share exceeds a threshold.
+
+The share is NOT a capture window's raw device time. It is
+`sum over phases of phase_share[phase] * share_of_phase_pct[kernel][phase]`,
+where `phase_share` is the PREFILL/DECODE split estimated from the serving log
+and the measured sampling points. A single short capture can establish what a
+phase executes; it cannot establish how much of the workload that phase is.
 
 This computes scope only. It neither proves editability nor launches GPU work.
 Input is the kernel-extract ranking artifact, on one common device-time basis.
@@ -10,6 +16,12 @@ import json
 import math
 from pathlib import Path
 
+# A phase measured at one point has no spread to fit a cost model against, so its
+# mass is whatever that one point happened to execute. Two is the minimum that can
+# disagree; plan_sampling_points.py defaults to far more than two.
+MIN_POINTS_PER_PHASE = 2
+WINDOW_BASES = {"single_window", "capture_window", "trace_window"}
+
 
 def _percent(value, field):
     if (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -18,15 +30,78 @@ def _percent(value, field):
     return value
 
 
-def select_targets(document, phases=("PREFILL", "DECODE"), top_k=5, overall_pct_gt=3):
-    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
-        raise ValueError("top_k must be a positive integer")
+def _phase_share(document, phases, min_points, allow_window_denominator):
+    """Validate the log-weighted phase split and return it as fractions summing to 1.
+
+    Refusing here rather than downstream is deliberate: a missing split used to fall
+    back to whatever `selection_pct_gpu_time` the ranking already carried, which on a
+    5-second window made one long prefill batch outrank the whole decode phase.
+    """
+    share = document.get("phase_share")
+    if not isinstance(share, dict) or not share:
+        raise ValueError(
+            "phase_share is missing. Run observed_workload.py -> plan_sampling_points.py "
+            "-> serving_probe.py (once per point) -> coverage_ledger.py and record the "
+            "log-weighted PREFILL/DECODE split, or pass --allow-window-denominator to "
+            "declare an explicitly non-comparable window-only selection.")
+
+    basis = share.get("basis")
+    if not isinstance(basis, str) or not basis.strip():
+        raise ValueError("phase_share.basis must name how the split was established")
+    if basis in WINDOW_BASES and not allow_window_denominator:
+        raise ValueError(
+            f"phase_share.basis={basis!r} is a single capture window. Phase mass must come "
+            "from the serving log's instance counts weighted by measured per-point cost. "
+            "Pass --allow-window-denominator only to record a declared-approximate scope.")
+
+    measured = share.get("points_measured")
+    if not allow_window_denominator:
+        if not isinstance(measured, dict):
+            raise ValueError("phase_share.points_measured must map each phase to its "
+                             "number of measured sampling points")
+        for phase in phases:
+            count = measured.get(phase)
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError(f"phase_share.points_measured.{phase} must be a "
+                                 "nonnegative integer")
+            # A phase with no observed activity contributes no mass and needs no points.
+            if share.get(phase) and count < min_points:
+                raise ValueError(
+                    f"phase {phase} carries mass but was measured at {count} sampling "
+                    f"point(s); at least {min_points} are required. Its shape variance "
+                    "and cost model are unobserved at one point.")
+
+    fractions, total = {}, 0.0
+    for phase in phases:
+        value = share.get(phase)
+        if value is None:
+            raise ValueError(f"phase_share.{phase} is missing; absent is not zero")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(value) or value < 0:
+            raise ValueError(f"phase_share.{phase} must be a finite nonnegative number")
+        fractions[phase] = float(value)
+        total += float(value)
+    if total <= 0:
+        raise ValueError("phase_share must assign positive mass to at least one phase")
+    # Accept either fractions or percentages; normalize so the two spellings agree.
+    return {phase: value / total for phase, value in fractions.items()}, share
+
+
+def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
+                   min_points=MIN_POINTS_PER_PHASE, allow_window_denominator=False,
+                   top_k=None):
     _percent(overall_pct_gt, "overall_pct_gt")
+    if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int)
+                              or top_k < 1):
+        raise ValueError("top_k must be a positive integer when given")
     if not phases or len(set(phases)) != len(phases):
         raise ValueError("phases must be nonempty and unique")
     ranking = document.get("ranking")
     if not isinstance(ranking, list) or not ranking:
         raise ValueError("ranking must be a nonempty list; missing evidence is not an empty target set")
+
+    weights, share_doc = _phase_share(document, phases, min_points,
+                                      allow_window_denominator)
 
     rows, seen = [], set()
     for row in ranking:
@@ -34,45 +109,68 @@ def select_targets(document, phases=("PREFILL", "DECODE"), top_k=5, overall_pct_
         if not isinstance(identity, str) or not identity.strip() or identity in seen:
             raise ValueError("ranking rows need unique, nonempty id or name values")
         seen.add(identity)
-        total = _percent(row.get("selection_pct_gpu_time"), f"{identity}.selection_pct_gpu_time")
         shares = row.get("share_of_phase_pct")
         if not isinstance(shares, dict) or not shares:
             raise ValueError(f"{identity}.share_of_phase_pct is missing")
         for phase, share in shares.items():
             _percent(share, f"{identity}.share_of_phase_pct.{phase}")
+        # The whole-workload share is reconstructed here, on the log-weighted split.
+        # A ranking's own selection_pct_gpu_time is kept for disclosure only; it is
+        # a window figure and is never what the threshold is applied to.
+        overall = sum(weights[p] * shares.get(p, 0.0) for p in phases)
+        reported = row.get("selection_pct_gpu_time")
+        if reported is not None:
+            _percent(reported, f"{identity}.selection_pct_gpu_time")
         rows.append({"id": identity, "name": row.get("name", identity),
-                     "overall_pct": total, "phase_shares": shares})
+                     "overall_pct": overall, "phase_shares": shares,
+                     "window_pct_reported": reported})
 
-    selected, per_phase = {}, {}
+    per_phase = {}
     for phase in phases:
         ordered = sorted((r for r in rows if r["phase_shares"].get(phase, 0) > 0),
                          key=lambda r: (-r["phase_shares"][phase], r["id"]))
-        top_rows = []
-        # Rank first, then filter. Filtering before [:top_k] would promote rank 6.
-        for rank, row in enumerate(ordered[:top_k], 1):
-            keep = row["overall_pct"] > overall_pct_gt
-            top_rows.append({"id": row["id"], "name": row["name"], "phase_rank": rank,
-                             "phase_pct": row["phase_shares"][phase],
-                             "overall_pct": row["overall_pct"], "selected": keep,
-                             "reason": "phase_top_k_and_overall_threshold" if keep
-                             else "overall_share_not_above_threshold"})
-            if keep:
-                target = selected.setdefault(row["id"], {
-                    "id": row["id"], "name": row["name"], "overall_pct": row["overall_pct"],
-                    "selected_phases": [], "phase_ranks": {},
-                })
-                target["selected_phases"].append(phase)
-                target["phase_ranks"][phase] = rank
-        per_phase[phase] = {"observed_kernel_count": len(ordered), "top_k": top_rows}
+        for rank, row in enumerate(ordered, 1):
+            row.setdefault("phase_ranks", {})[phase] = rank
+        per_phase[phase] = {
+            "observed_kernel_count": len(ordered),
+            "phase_share_of_workload": weights[phase],
+            # Ranks are inventory, not a gate: a phase leader can be below threshold
+            # and a rank-20 row can be above it.
+            "ranked": [{"id": r["id"], "name": r["name"], "phase_rank": r["phase_ranks"][phase],
+                        "phase_pct": r["phase_shares"][phase], "overall_pct": r["overall_pct"],
+                        "selected": r["overall_pct"] > overall_pct_gt} for r in ordered],
+        }
 
+    qualified = sorted((r for r in rows if r["overall_pct"] > overall_pct_gt),
+                       key=lambda r: (-r["overall_pct"], r["id"]))
+    capped = qualified[:top_k] if top_k is not None else qualified
+    dropped_by_cap = [{"id": r["id"], "name": r["name"], "overall_pct": r["overall_pct"],
+                       "reason": "above_threshold_but_outside_top_k"}
+                      for r in qualified[top_k:]] if top_k is not None else []
+
+    targets = [{"id": r["id"], "name": r["name"], "overall_pct": r["overall_pct"],
+                "selected_phases": [p for p in phases if r["phase_shares"].get(p, 0) > 0],
+                "phase_ranks": r.get("phase_ranks", {}),
+                "phase_pct": {p: r["phase_shares"][p] for p in phases
+                              if r["phase_shares"].get(p, 0) > 0},
+                "window_pct_reported": r["window_pct_reported"],
+                "reason": "overall_share_above_threshold"} for r in capped]
+
+    selected_mass = sum(r["overall_pct"] for r in capped)
     return {
         "scope": "extraction_target_selection_only",
-        "policy": {"phases": list(phases), "top_k_per_phase": top_k,
-                   "overall_pct_gt": overall_pct_gt,
-                   "combination": "phase_top_k_and_overall_threshold", "backfill": False},
+        "policy": {"phases": list(phases), "overall_pct_gt": overall_pct_gt,
+                   "combination": "overall_share_threshold_on_log_weighted_phase_split",
+                   "rank_is_inventory_only": True, "top_k_cap": top_k,
+                   "min_points_per_phase": min_points,
+                   "window_denominator_allowed": bool(allow_window_denominator)},
+        "phase_share": {"weights": weights, "declared": share_doc},
         "denominators": document.get("denominators", {}),
-        "per_phase": per_phase, "targets": list(selected.values()),
-        "target_count": len(selected),
+        "per_phase": per_phase,
+        "targets": targets,
+        "target_count": len(targets),
+        "selected_overall_pct": selected_mass,
+        "dropped_by_cap": dropped_by_cap,
     }
 
 
@@ -81,14 +179,21 @@ def main():
     parser.add_argument("ranking", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--phases", nargs="+", default=["PREFILL", "DECODE"])
-    parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--overall-pct-gt", type=float, default=3)
+    parser.add_argument("--min-points-per-phase", type=int, default=MIN_POINTS_PER_PHASE)
+    parser.add_argument("--allow-window-denominator", action="store_true",
+                        help="record a declared-approximate selection from one capture "
+                             "window; the output is stamped non-comparable")
+    parser.add_argument("--top-k", type=int, default=None,
+                        help="optional cap on how many above-threshold targets are "
+                             "returned; the remainder stays in dropped_by_cap")
     args = parser.parse_args()
     if args.output and args.output.resolve() == args.ranking.resolve():
         parser.error("output must not overwrite the source ranking")
     try:
         result = select_targets(json.loads(args.ranking.read_text()), args.phases,
-                                args.top_k, args.overall_pct_gt)
+                                args.overall_pct_gt, args.min_points_per_phase,
+                                args.allow_window_denominator, args.top_k)
     except (ValueError, TypeError, AttributeError) as error:
         parser.error(str(error))
     result["source_ranking_json"] = str(args.ranking.resolve())

@@ -26,9 +26,14 @@ retained or replacement inputs replay successfully.
 
 Deliver one task directory with one `python3 unittest.py` entry, one immutable
 case manifest and baseline, and editable implementations for every claimed
-branch. The task contains both served PREFILL and DECODE cases, with separate
-per-phase results and one observed-call-weighted aggregate. Preserve the
-deployed input/output contracts even if their signatures differ by phase.
+branch. Both served branches are delivered, as one task carrying PREFILL and
+DECODE cases with separate per-phase results and one observed-call-weighted
+aggregate, or as a PREFILL task and a DECODE task that name each other and
+report no cross-phase aggregate — there is no single invocation to weight.
+Split when the phases take different branches, operand layouts or graph modes
+and a joined manifest would only interleave two unrelated case sets. Covering
+one phase and dropping the other is a coverage gap, not a boundary choice.
+Preserve the deployed input/output contracts even if their signatures differ by phase.
 
 The default boundary begins with the actual query/key operands, scales,
 per-head weights and live metadata consumed by score, and ends with the final
@@ -37,7 +42,7 @@ gathers/transforms and top-k work that occurs inside that serving boundary.
 An upstream plan computed once and reused across layers remains an input;
 record its lifecycle instead of charging it once per layer. Include upstream
 projection/RoPE/quantization/cache writes only when the requested boundary
-includes them. Do not drop required glue because it is below the Top-5/3% rule.
+includes them. Do not drop required glue because it is below the 3% rule.
 
 Inspect implicit state getters as part of the boundary. A KV getter may launch
 a gather or conversion rather than just return a tensor. A bootstrap may use

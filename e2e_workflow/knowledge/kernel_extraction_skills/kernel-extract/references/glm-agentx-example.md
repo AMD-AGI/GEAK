@@ -21,9 +21,12 @@ implementation, and a draft model need not use the target model's kernels.
 ## Reconciling a supplied GLM UT delivery
 
 Use the core skill's [selection coverage contract](selection-coverage.md).
-The extraction target set is the union of PREFILL/DECODE Top-5 lists after
-filtering each by overall workload share >3%. Prior deliveries are discovery
-references; their full task lists do not override this rule.
+The extraction target set is every live identity whose whole-workload share, on the
+log-weighted phase split, exceeds 3% — no rank cut. Prior deliveries are discovery
+references; their full task lists do not override this rule. They are, however, useful
+evidence that the rule is being applied to the right denominator: a prior delivery whose
+families are mostly absent from the current selection usually means the phase split or
+the census window is wrong, not that the workload changed.
 For deliveries such as GLM-5.2 0917/0922, use the following families as search
 leads only when the supplied artifacts and current model contain them:
 
