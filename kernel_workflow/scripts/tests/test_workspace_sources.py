@@ -386,3 +386,45 @@ def test_metadata_excluded_from_patch_and_invalid_history_not_copied(parent, tmp
     )
     assert ignored.returncode == 0
     assert len(ignored.stdout.splitlines()) == 2
+
+
+@pytest.mark.parametrize("mode", ["optimize", "author"])
+def test_prepared_ut_resources_survive_lane_setup_and_next_copy(tmp_path, mode):
+    """Run the unchanged UT after the real setup recipe and another lane copy."""
+    parent = tmp_path / "prepared task"
+    for rel in ["captures/prefill", "captures/decode", "helpers", "kernel_src", "baseline_overlay"]:
+        (parent / rel).mkdir(parents=True, exist_ok=True)
+    for phase in ["prefill", "decode"]:
+        (parent / f"captures/{phase}/reference_io.pt").write_text(phase)
+    (parent / "helpers/check.py").write_text("def check(actual, expected):\n    assert actual == expected\n")
+    (parent / "kernel_src/original.py").write_text("VALUE = 1\n")
+    (parent / "baseline_overlay/baseline.json").write_text("{}")
+    (parent / "meta.json").write_text("{}")
+    (parent / "unittest.py").write_text(
+        "from pathlib import Path\nfrom helpers.check import check\n"
+        "root = Path(__file__).parent\n"
+        "for phase in ('prefill', 'decode'):\n"
+        "    check((root / 'captures' / phase / 'reference_io.pt').read_text(), phase)\n"
+        "assert (root / 'baseline_overlay/baseline.json').is_file()\n"
+    )
+    workspace = tmp_path / "eval/workspace"
+    if mode == "author":
+        director = (SCRIPTS.parent / "roles/director.md").read_text()
+        section = director.split("### `mode=author`", 1)[1]
+        setup = section.split("```bash\n", 1)[1].split("   cd ", 1)[0]
+        env = dict(os.environ, EVAL_DIR=str(workspace.parent), KERNEL_PATH_ORIG=str(parent),
+                   WORKFLOW_DIR=str(SCRIPTS.parent))
+        result = run("bash", "-e", "-c", setup, env=env)
+        assert result.returncode == 0, result.stderr
+        assert not list((workspace / "kernel_src").iterdir())
+    else:
+        materialize(parent, workspace)
+        assert (workspace / "kernel_src/original.py").is_file()
+    for clone in [workspace, materialize(workspace, tmp_path / "verify/workspace")]:
+        result = run(sys.executable, clone / "unittest.py", cwd=clone)
+        assert result.returncode == 0, result.stderr
+        for phase in ["prefill", "decode"]:
+            golden = clone / f"captures/{phase}/reference_io.pt"
+            assert golden.is_symlink()
+            assert golden.resolve() == parent / f"captures/{phase}/reference_io.pt"
+    assert (parent / "kernel_src/original.py").read_text() == "VALUE = 1\n"
