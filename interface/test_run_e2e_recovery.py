@@ -1050,6 +1050,27 @@ def test_a_failing_exit_cleanup_never_costs_the_result(monkeypatch, tmp_path, ca
     assert "could not stop this run's leftover processes (OSError: no /proc)" in capsys.readouterr().err
 
 
+def test_an_unmarked_run_still_runs_and_its_exit_stops_nothing(monkeypatch, tmp_path, capsys):
+    def unmarkable(eval_dir):
+        raise OSError("read-only eval dir")
+
+    monkeypatch.setattr(rx._run_reaper(), "mark_run", unmarkable)
+    assert rx._mark_run(str(tmp_path)) is None
+    assert "could not mark this run's processes (OSError: read-only eval dir)" in capsys.readouterr().err
+    assert rx._stop_run_processes(None, str(tmp_path)) is None
+
+
+def test_the_exit_line_names_what_is_still_up_and_what_the_reaper_noted(monkeypatch, tmp_path, capsys):
+    receipt = {"stopped": [{"pid": 7, "name": "sleep"}], "survivors": [{"pid": 8, "name": "python3 leg.py"}],
+               "note": "reaper error: OSError: x"}
+    monkeypatch.setattr(rx._run_reaper(), "reap", lambda *args, **kwargs: receipt)
+    assert rx._stop_run_processes({"mark": "m"}, str(tmp_path)) is receipt
+    assert capsys.readouterr().err == (
+        "[run_e2e] exit: stopped 1 process(es) this run left running (sleep); 1 still up: 8 python3 leg.py; "
+        "reaper error: OSError: x\n"
+    )
+
+
 def test_the_claude_child_inherits_the_run_mark(monkeypatch):
     assert rx.RUN_MARK_ENV == rx._run_reaper().MARK_ENV
     monkeypatch.setenv(rx.RUN_MARK_ENV, "outer:abc")

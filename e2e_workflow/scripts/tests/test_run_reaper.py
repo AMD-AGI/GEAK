@@ -20,6 +20,7 @@ orphans. Stopping is asserted on real processes this test starts, carrying a mar
 next to bystanders that must survive.
 """
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -29,6 +30,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _spec = importlib.util.spec_from_file_location("run_reaper", os.path.join(SCRIPTS_DIR, "run_reaper.py"))
@@ -132,6 +134,11 @@ class SelectionTest(unittest.TestCase):
     def test_a_parent_loop_terminates(self):
         procs = self.table(P(20, 21), P(21, 20))
         self.assertTrue(rr._detached(20, procs, self.WORKFLOW))
+
+    def test_without_the_runner_every_protected_process_but_pid_1_is_the_workflow(self):
+        procs = self.table(P(20, 1, marked=True, name="bash leg.sh"), P(55, 5, marked=True, name="bash leg.sh"))
+        chosen = {p.pid: why for p, why in rr.select(procs, "fence", self.KEEP)}
+        self.assertEqual(chosen, {20: "detached"}, "55 runs under the orchestrator, so it is not detached")
 
 
 class MatchingTest(unittest.TestCase):
@@ -385,6 +392,81 @@ class StopTest(unittest.TestCase):
         self.assertEqual([(row["pid"], row["why"]) for row in receipt["stopped"]], [(leg.pid, "run")])
         self.assertEqual(leg.wait(timeout=10), -signal.SIGTERM)
         self.assertIsNone(bystander.poll())
+
+
+class FaultTest(unittest.TestCase):
+    """/proc changes under the reaper and its own steps fail; it carries on, and the receipt says what happened."""
+
+    LEG = P(4242, 1, marked=True, gpu=True, name="python3 leg.py")
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="run_reaper_fault_"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.blocker = os.path.join(self.root, "not_a_dir")
+        open(self.blocker, "w").close()
+
+    @unittest.skipUnless(HAS_PROC, "the reaper reads /proc")
+    def test_a_process_gone_mid_scan_is_skipped(self):
+        with open("/proc/sys/kernel/pid_max") as fh:
+            gone = int(fh.read()) + 1  # above pid_max, so never a live pid
+        self.assertEqual(rr._argv(gone), [])
+        self.assertEqual(rr._open_files(gone), (False, False))
+        with mock.patch.object(rr.os, "listdir", return_value=["self", str(gone)]):
+            self.assertEqual(rr.snapshot("m", (), None), {})
+        with mock.patch.object(rr.Path, "read_text", return_value="42 (sh) S 1"):
+            self.assertIsNone(rr._stat(42), "a stat line cut short")
+
+    def test_a_proc_it_cannot_list_yields_no_processes(self):
+        with mock.patch.object(rr.os, "listdir", side_effect=OSError("no /proc")):
+            self.assertEqual(rr.snapshot("m", ("/run_ws/s/geak/e2e_cycle0",), 0), {})
+
+    def test_an_fd_closed_mid_scan_is_skipped_and_the_scan_ends_once_both_are_found(self):
+        targets = {"3": None, "4": rr.KFD, "5": rr.SERVING_LOCK_PREFIX + "0,1.lock", "6": rr.KFD}
+
+        def readlink(path):
+            target = targets[path.rsplit("/", 1)[1]]
+            if target is None:
+                raise FileNotFoundError(path)
+            return target
+
+        with mock.patch.object(rr.os, "listdir", return_value=list(targets)), \
+                mock.patch.object(rr.os, "readlink", side_effect=readlink) as read:
+            self.assertEqual(rr._open_files(4242), (True, True))
+        self.assertEqual(read.call_count, 3)
+
+    def test_the_ancestry_still_ends_at_pid_1_when_a_parent_cannot_be_read(self):
+        with mock.patch.object(rr, "_stat", return_value=None):
+            self.assertEqual(rr.protected_pids(), [os.getpid(), 1])
+
+    def test_a_process_it_may_not_signal_is_not_counted_as_signalled(self):
+        for error in (PermissionError, ProcessLookupError):
+            with mock.patch.object(rr, "_alive", return_value=True), \
+                    mock.patch.object(rr.os, "kill", side_effect=error) as kill:
+                self.assertFalse(rr._signal(self.LEG, signal.SIGTERM))
+            kill.assert_called_once_with(self.LEG.pid, signal.SIGTERM)
+
+    def test_a_process_that_outlives_sigkill_is_reported_and_ends_the_rounds(self):
+        with mock.patch.object(rr, "_signal", return_value=True), mock.patch.object(rr, "_alive", return_value=True):
+            stopped, survivors = rr.stop([(self.LEG, "gpu")], term_grace_s=0, kill_wait_s=0)
+        self.assertEqual((stopped, survivors), ([], [{"pid": 4242, "name": "python3 leg.py", "why": "gpu"}]))
+        with mock.patch.object(rr, "snapshot", return_value={}), \
+                mock.patch.object(rr, "select", return_value=[(self.LEG, "gpu")]) as select, \
+                mock.patch.object(rr, "stop", return_value=([], survivors)):
+            receipt = rr.reap(self.root, mode="exit", run={"mark": "m", "start_ticks": 1})
+        self.assertEqual(select.call_count, 1, "no second round once something survives")
+        self.assertEqual(receipt["survivors"], survivors)
+        self.assertFalse(receipt["ok"])
+
+    def test_a_receipt_it_cannot_record_is_still_returned(self):
+        receipt = rr.reap(self.blocker, mode="exit")
+        self.assertTrue(receipt["ok"], receipt)
+        self.assertIn(rr.RUN_FILE, receipt["note"])
+
+    def test_the_cli_exits_non_zero_when_the_reaper_could_not_do_its_job(self):
+        for argv, rc in ((["exit", "--eval-dir", self.root], 0), (["fence", "--eval-dir", self.blocker], 1)):
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(rr.main(argv), rc)
+            self.assertEqual(json.loads(out.getvalue())["mode"], argv[0])
 
 
 if __name__ == "__main__":
