@@ -151,6 +151,14 @@ class MatchingTest(unittest.TestCase):
         self.assertFalse(rr._mentions("bash\0/run_ws/s/geak/e2e_cycle01/leg.sh", self.ROOTS))
         self.assertFalse(rr._mentions("bash\0/run_ws/s/geak/e2e_cycle0_old/leg.sh", self.ROOTS))
 
+    def test_the_eval_dir_counts_only_where_a_path_starts(self):
+        self.assertFalse(rr._mentions("python3\0/backup/run_ws/s/geak/e2e_cycle0/leg.py", self.ROOTS))
+        self.assertFalse(rr._mentions("bash\0-c\0cd /data//run_ws/s/geak/e2e_cycle0 && ./leg.sh", self.ROOTS))
+        self.assertTrue(rr._mentions("cp\0/backup/run_ws/s/geak/e2e_cycle0/x\0/run_ws/s/geak/e2e_cycle0/x", self.ROOTS))
+        self.assertTrue(rr._mentions("env\0PYTHONPATH=/opt/lib:/run_ws/s/geak/e2e_cycle0/lib\0python3", self.ROOTS))
+        self.assertTrue(rr._mentions("bash\0-c\0set -e\n/run_ws/s/geak/e2e_cycle0/leg.sh", self.ROOTS))
+        self.assertTrue(rr._mentions("bash\0-c\0./leg.sh >/run_ws/s/geak/e2e_cycle0/leg.log", self.ROOTS))
+
     def test_a_shallow_eval_dir_matches_nothing(self):
         self.assertEqual(rr.eval_dir_roots("/"), ())
         self.assertEqual(rr.eval_dir_roots("/tmp"), ())
@@ -339,6 +347,8 @@ class StopTest(unittest.TestCase):
         unmarked_tree, unmarked_child = self.tree(env=self.marked, child_marked=False)
         in_dir = self.spawn(["sleep", "300"], env=self.plain, cwd=self.eval_dir)
         bystander = self.spawn(["sleep", "300"], env=self.plain)
+        backup_leg = self.spawn([sys.executable, "-c", "import time; time.sleep(300)", f"/backup{self.eval_dir}/leg.py"],
+                                env=self.plain)
 
         receipt = self.reap("exit", run=self.run)
 
@@ -349,6 +359,7 @@ class StopTest(unittest.TestCase):
         for pid in why:
             self.assertTrue(self.gone(pid), pid)
         self.assertIsNone(bystander.poll())
+        self.assertIsNone(backup_leg.poll())
 
     def test_a_process_older_than_the_run_is_not_taken_for_its_own(self):
         older = self.spawn(["sleep", "300"], env=self.plain, cwd=self.eval_dir)

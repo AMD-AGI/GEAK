@@ -50,6 +50,9 @@ ROUNDS = 3
 _POLL_S = 0.25
 # An eval dir this shallow is not a run's own directory; matching under it would select unrelated work.
 _MIN_ROOT_PARTS = 3
+# A path starts an argument or follows whitespace, a quote or shell punctuation; after "/" or a name character
+# the root is only the tail of a longer path (/backup/run_ws/... for /run_ws/...).
+_PATH_START = frozenset("\0\t\n \"'=:;,|&()<>`")
 _PATH_END = frozenset("/\"' :;,=)\0")
 _LAUNCHERS = frozenset({"bash", "sh", "dash", "zsh", "env", "nohup", "setsid", "timeout", "stdbuf", "nice"})
 
@@ -130,7 +133,7 @@ def _mentions(text: str, roots: tuple[str, ...]) -> bool:
         at = text.find(root)
         while at != -1:
             end = at + len(root)
-            if end == len(text) or text[end] in _PATH_END:
+            if (at == 0 or text[at - 1] in _PATH_START) and (end == len(text) or text[end] in _PATH_END):
                 return True
             at = text.find(root, at + 1)
     return False
