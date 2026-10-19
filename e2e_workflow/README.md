@@ -349,8 +349,57 @@ Results land in `EVAL_DIR/tuning/`, in `final_report.md` **§2b**, in
 `wfReturn.tuning_skillset` (`tuning_delta_pct`, `tuning_speedup`, `share_of_total_gain_pct`), and in
 `result.json` under a **purely additive** `tuning_skillset` key — no existing key changes name, type or
 meaning, and a run without the phase produces a byte-identical `result.json`.
-Fast mode skips the phase; deep mode keeps it. Full contract:
+Fast mode skips the phase; deep mode keeps it for fixed-load workloads. AgentX skips
+it as described below. Full contract:
 `knowledge/tuning_skillset_integration.md`.
+
+## AgentX kernel extraction and UT delivery
+
+An explicit `workload_kind: "agentx_trace_replay"` (or matching workload specification)
+activates the [kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md).
+The extractor follows the complete procedure: measured baseline logs
+→ observed workload → sampling points → runtime kernel selection → source extraction
+→ standalone GPU UTs. The method comes from the validated standalone skill at `ce1dbe5`. It retains the
+five-stage procedure and the additional sampling, coverage, reference-output and
+self-noise tools. Existing capture, trace, harness, GPU-lock and delivery helpers
+are reused from the repository; their regression tests remain in one place.
+
+UT inputs default to fixed-seed generators at the observed shapes/dtypes/layouts;
+reference outputs come from the frozen baseline in an isolated process. UT execution
+does not launch serving, profile or capture shapes. Reuse or reliably reconstruct
+routing, indices, page tables and other structural metadata; capture only missing
+state. Necessary captures default to `structure_only`, with reference regeneration
+before validation. An explicit `capture_persist_policy` overrides the fallback
+storage policy; non-AgentX capture defaults are unchanged.
+
+GEAK supplies baseline/configuration paths, GPU allocation, accepted overlays and
+budgets through the [workflow handoff](knowledge/kernel_extraction_skills/kernel-extract/references/workflow-handoff.md).
+The skill completes scheduled UT work before returning a delivery path. The packaging
+adapter reads each task's saved declaration and return, preserves failed/deferred
+tasks and coverage, and feeds verified tasks into the existing optimization queues.
+It checks source/binding/UT evidence without repeating selection or GPU tests; changes
+to source, cases or recorded results invalidate reuse. Task-count budgets affect
+scheduling, not the selected inventory or its reported coverage.
+
+AgentX follows baseline → B extraction and UT validation → head optimization →
+kernel milestones → E2E validation. Outer Profile/Strategize, ConfigSweep and Tune
+are skipped. B still uses bounded trace sampling to establish kernel identity and
+cost. All three head modes and the milestone loop reuse the prepared task directory
+and immutable UT, running it against optimization candidates instead of authoring
+another test. Workspace setup retains phase-local oracles, helpers and baseline
+resources; head and milestone use the workload-weighted result. Missing or changed
+preparation evidence fails the task locally. Current optimization lanes are single-GPU:
+completed multi-rank UTs retain their artifacts and are deferred for separate scheduling.
+
+The default selection remains per-phase Top 5 intersected with whole-workload
+GPU-time share strictly greater than 3%, without backfilling. Explicit user scope
+wins. Head routing uses the prepared task kind; milestones consume the remaining
+kernel queue without Architect nomination or the fixed-load 5% filter. Optimization
+wins do not trigger another extraction; scheduling uses the original measured order
+and weights. Dispatched tasks leave the queue, pending tasks survive resume, and an
+empty queue stops dispatch. Fast/deep modes retain their head-only scheduling.
+Fixed ISL/OSL workloads keep their existing flow. Each optimization still runs its
+existing UT and E2E A/B gate; a UT pass alone does not establish an E2E improvement.
 
 ## Roofline-guided routing (`analysis_skill`, default `roofline`)
 

@@ -105,11 +105,12 @@ def _reset_state(mod):
 class FakeTensor:
     """Just enough torch.Tensor surface for the recorder: shape/dtype/device + the detach/clone walk."""
 
-    def __init__(self, shape, dtype="torch.float16", device="cuda:0", contiguous=True):
+    def __init__(self, shape, dtype="torch.float16", device="cuda:0", contiguous=True, value=0):
         self.shape = tuple(shape)
         self.dtype = dtype
         self.device = device
         self._contiguous = contiguous
+        self.value = value
 
     def dim(self):
         return len(self.shape)
@@ -131,10 +132,28 @@ class FakeTensor:
         return self
 
     def to(self, device):
-        return FakeTensor(self.shape, self.dtype, device, self._contiguous)
+        return FakeTensor(self.shape, self.dtype, device, self._contiguous, self.value)
 
     def clone(self):
-        return FakeTensor(self.shape, self.dtype, self.device, self._contiguous)
+        return FakeTensor(self.shape, self.dtype, self.device, self._contiguous, self.value)
+
+    def contiguous(self):
+        return FakeTensor(self.shape, self.dtype, self.device, True, self.value)
+
+    def view(self, dtype):
+        assert dtype == "torch.uint8"
+        return FakeTensor((self.numel() * self.element_size(),), dtype,
+                          self.device, True, self.value)
+
+    def is_floating_point(self):
+        return "float" in self.dtype
+
+    def stride(self):
+        strides, current = [], 1
+        for size in reversed(self.shape):
+            strides.insert(0, current)
+            current *= size
+        return tuple(strides)
 
     def is_contiguous(self):
         return self._contiguous
@@ -155,6 +174,8 @@ def _fake_torch():
     torch.capturing = False
     torch.saved = []
     torch.is_tensor = lambda o: isinstance(o, (FakeTensor, ExplodingTensor))
+    torch.uint8 = "torch.uint8"
+    torch.equal = lambda a, b: (a.shape, a.dtype, a.value) == (b.shape, b.dtype, b.value)
     torch.cuda = types.SimpleNamespace(
         is_current_stream_capturing=lambda: torch.capturing)
 
@@ -241,6 +262,44 @@ class TestSig(_RecorderTestCase):
 # --------------------------------------------------------------------------- #
 # _shapes_dtypes -- the per-key shape/dtype payload
 # --------------------------------------------------------------------------- #
+class TestStructureOnly(_RecorderTestCase):
+    def test_capture_preserves_routing_and_marks_reduced_payload_for_regeneration(self):
+        with _env(CAPTURE_PERSIST_POLICY="structure_only", CAPTURE_SYNTH_MIN_BYTES="1",
+                  CAPTURE_STRUCTURAL_OPERANDS="custom_scale", CAPTURE_FLUSH_EVERY="1"):
+            mod, _ = self._hook(fn=lambda *a, **k: {"out": (FakeTensor((2,)), [None])})
+        hidden = FakeTensor((32, 32), value=9)
+        routing = FakeTensor((32, 4), dtype="torch.int32", value=3)
+        with _stderr():
+            mod.op([hidden], topk_ids=routing, weights={"w1": hidden},
+                   custom_scale=FakeTensor((32, 32), value=7))
+        self.assertEqual(len(cs._STATE["records"]), 1)
+        blob, _ = self.torch.saved[-1]
+        record = blob["records"][0]
+        self.assertEqual(blob["oracle_status"], "needs_regen")
+        self.assertEqual(record["kwargs"]["topk_ids"]["data"].value, 3)
+        self.assertEqual(record["kwargs"]["custom_scale"]["data"].value, 7)
+        descriptor = record["args"][0][0]
+        self.assertTrue(descriptor["__synth__"])
+        self.assertNotIn("data", descriptor)
+        self.assertEqual(descriptor["shape"], [32, 32])
+        self.assertNotEqual(descriptor["seed"], record["kwargs"]["weights"]["w1"]["seed"])
+        self.assertTrue(record["output"]["out"][0]["__needs_regen__"])
+        self.assertEqual(record["output"]["out"][1], [None])
+        harness = _load("structure_harness", "harness_lib.py")
+        for pending in [descriptor, record["output"]["out"][0]]:
+            with self.assertRaises(ValueError):
+                harness.reconstruct_captured(pending)
+
+    def test_float_routing_and_small_bookkeeping_remain_verbatim(self):
+        cs._STATE["synth_min_bytes"] = 64
+        for key, value in [("topk_weights", FakeTensor((128,), value=2)),
+                           ("misc", FakeTensor((1,), value=4)), ("scalar", 3)]:
+            self.assertTrue(cs._is_structural(key, value, set()))
+        payload = {"input": [cs._snapshot(FakeTensor((1,), value=4)), 7]}
+        self.assertEqual(cs.materialize_synth(payload), payload)
+        self.assertFalse(cs._should_share_kwarg("w1", FakeTensor((1024,)), "structure_only", 1))
+
+
 class TestShapesDtypes(_RecorderTestCase):
     def test_walks_nested_containers_in_args_and_kwargs(self):
         got = cs._shapes_dtypes(
@@ -1049,6 +1108,73 @@ class TestByteBudgetAndReclaim(_RecorderTestCase):
         self.assertTrue(cs._STATE["budget_exceeded"])
         self.assertEqual(cs._STATE["records"], [])
         self.assertIn("case byte limit exceeded", err.getvalue())
+
+    def test_shared_kwargs_preserve_new_values_and_shapes(self):
+        store = {}
+        first, _, _ = cs._snapshot_kwargs(
+            {"x": FakeTensor((2,), value=1)}, store, "share_large", 1)
+        second, added, _ = cs._snapshot_kwargs(
+            {"x": FakeTensor((3,), value=2)}, store, "share_large", 1)
+        a = cs.resolve_shared_refs(first, store)["x"]["data"]
+        b = cs.resolve_shared_refs(second, store)["x"]["data"]
+        self.assertEqual((a.shape, a.value), ((2,), 1))
+        self.assertEqual((b.shape, b.value), ((3,), 2))
+        self.assertEqual(added, 6)
+
+    def test_shared_kwargs_detect_in_place_changes_without_version_counters(self):
+        store = {}
+        value = FakeTensor((8,), value=1)
+        first, _, _ = cs._snapshot_kwargs({"w1": value}, store, "share_large", 1)
+        value.value = 2  # A native write need not update a torch version counter.
+        second, _, _ = cs._snapshot_kwargs({"w1": value}, store, "share_large", 1)
+        self.assertEqual(cs.resolve_shared_refs(first, store)["w1"]["data"].value, 1)
+        self.assertEqual(cs.resolve_shared_refs(second, store)["w1"]["data"].value, 2)
+
+    def test_equal_captured_values_can_share_across_distinct_tensor_objects(self):
+        store = {}
+        first, _, _ = cs._snapshot_kwargs(
+            {"x": FakeTensor((8,), value=3)}, store, "share_large", 1)
+        second, added, _ = cs._snapshot_kwargs(
+            {"x": FakeTensor((8,), value=3)}, store, "share_large", 1)
+        self.assertEqual(first, second)
+        self.assertEqual(added, 0)
+        self.assertEqual(len(store), 1)
+
+    def test_shared_payload_reuse_requires_comparable_contents_and_container_types(self):
+        from unittest.mock import patch
+
+        class OpaqueState:
+            def __repr__(self):
+                return "same display, unknown contents"
+
+        tensor = FakeTensor((8,), value=3)
+        pairs = [([tensor], (tensor,)),
+                 ([tensor, OpaqueState()], [tensor, OpaqueState()])]
+        for first_value, second_value in pairs:
+            with self.subTest(first=type(first_value).__name__, second=type(second_value).__name__):
+                store = {}
+                first, _, _ = cs._snapshot_kwargs({"w1": first_value}, store, "share_large", 1)
+                second, _, _ = cs._snapshot_kwargs({"w1": second_value}, store, "share_large", 1)
+                self.assertNotEqual(first, second)
+                self.assertEqual(len(store), 2)
+        # Unsupported byte comparison cannot silently alias a previous payload.
+        with patch.object(self.torch, "equal", side_effect=TypeError("unsupported dtype")):
+            store = {}
+            first, _, _ = cs._snapshot_kwargs({"w1": tensor}, store, "share_large", 1)
+            second, _, _ = cs._snapshot_kwargs({"w1": tensor}, store, "share_large", 1)
+            self.assertNotEqual(first, second)
+            self.assertEqual(len(store), 2)
+
+    def test_existing_kwarg_name_cannot_bypass_the_case_byte_limit(self):
+        with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="300",
+                  CAPTURE_PERSIST_POLICY="share_large", CAPTURE_SHARE_MIN_BYTES="1"):
+            mod, _ = self._hook(fn=lambda *a, **k: FakeTensor((1,)))
+        with _stderr():
+            mod.op(FakeTensor((1,)), w1=FakeTensor((8, 8), value=1))
+            mod.op(FakeTensor((2,)), w1=FakeTensor((64, 64), value=2))
+        self.assertEqual(len(cs._STATE["records"]), 1)
+        self.assertEqual(cs._STATE["budget_skip_count"], 1)
+        self.assertTrue(cs._STATE["budget_exceeded"])
 
     def test_parse_byte_budget_none_and_invalid(self):
         self.assertEqual(cs.parse_byte_budget(None), 0)

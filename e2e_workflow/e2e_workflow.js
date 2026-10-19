@@ -6,6 +6,7 @@ export const meta = {
 
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the isolated eval dir + records baseline throughput' },
+    { title: 'KernelExtract', detail: 'AgentX only: select kernels, extract source, and author and validate UTs before optimization' },
     { title: 'Profile', detail: 'Profiler captures a warm trace -> standardized Top-N' },
     { title: 'Strategize', detail: 'System Architect routes kernels by Amdahl (config vs kernel vs host)' },
     { title: 'ConfigSweep', detail: 'Config Tuner sweeps flags/env/backends FIRST (default ON)' },
@@ -799,9 +800,12 @@ const OSL_DECLARED = A.osl != null ? parseInt(A.osl, 10) : null;
 //     callers that want every field explicit; or
 //   * args.workload_kind: "agentx_trace_replay" — the shorthand, which fills
 //     the canonical AgentX setup below and lets workload_spec override any part.
-// Neither present => 'synthetic', AGENTX_ENV is empty, no bench_env.sh is
-// written, and the fixed ISL/OSL path is byte-identical to a build without this.
-const WORKLOAD_SPEC = (A.workload_spec && typeof A.workload_spec === 'object') ? A.workload_spec : {};
+// AgentX extraction resumes its saved declaration when no new workload is supplied.
+const WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object'
+  ? A.workload_spec
+  : ((!A.workload_kind || A.workload_kind === 'agentx_trace_replay') &&
+      A.state?.workload_spec?.kind === 'agentx_trace_replay'
+    ? A.state.workload_spec : {});
 const WORKLOAD_KIND = String(A.workload_kind || WORKLOAD_SPEC.kind || 'synthetic');
 const IS_AGENTX = WORKLOAD_KIND === 'agentx_trace_replay';
 // The canonical AgentX submission setup. These are the leaderboard's numbers,
@@ -1097,6 +1101,15 @@ const AGENTX_ENV = !AGENTX ? '' : [
   `export ${_agentxEnvPairs().map(([k]) => k).join(' ')}`,
   '',
 ].join('\n');
+// Only AgentX enables this method. Model/backend features select the method's
+// branches, never its activation. Fixed ISL/OSL keeps the original prompts/state.
+const KERNEL_EXTRACT_ON = !!MODEL_PATH && WORKLOAD_KIND === 'agentx_trace_replay';
+const KERNEL_EXTRACT_DIR = `${WORKFLOW_DIR}/knowledge/kernel_extraction_skills/kernel-extract`;
+if (KERNEL_EXTRACT_ON) {
+  WORKLOAD.kind = WORKLOAD_KIND;
+  WORKLOAD.spec = WORKLOAD_SPEC;
+}
+if (KERNEL_EXTRACT_ON) log(`Kernel extraction skill enabled (workload=${WORKLOAD_KIND}; verify features from current evidence).`);
 // Seed config: when an external orchestrator (e.g. Hyperloom) already did
 // config/param search, it passes its accepted best flags/env so the GEAK
 // baseline is measured ON that config (fair engagement start), not the stack
@@ -1197,7 +1210,7 @@ const BASELINE_EXTRACT_RETRIES = parseInt(A.baseline_extract_retries != null ? A
 // Issue #429: force capture storage bounds into every extraction EXTRA_ENV (override via args).
 const CAPTURE_BYTE_BUDGET = String(A.capture_byte_budget != null ? A.capture_byte_budget : '8GiB');
 const CAPTURE_CASE_BYTE_LIMIT = String(A.capture_case_byte_limit != null ? A.capture_case_byte_limit : '2GiB');
-const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy != null ? A.capture_persist_policy : 'share_large');
+const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy != null ? A.capture_persist_policy : (KERNEL_EXTRACT_ON ? 'structure_only' : 'share_large'));
 const CAPTURE_WORKSPACE_BUDGET = String(A.capture_workspace_budget != null ? A.capture_workspace_budget : '32GiB');
 const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${CAPTURE_BYTE_BUDGET} CAPTURE_CASE_BYTE_LIMIT=${CAPTURE_CASE_BYTE_LIMIT} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY}`;
 const TASK = A.task || '';
@@ -1232,7 +1245,9 @@ const FAST_SKIP = FAST_MODE ? new Set(['config', 'tune', 'kernel']) : null;
 // the tuning skillset ('tune' — same rationale, and a tuned stack is a strictly better starting point
 // for the co-opt lanes). Null in every other mode, so normal + fast are unchanged.
 const DEEP_SKIP = DEEP_MODE ? new Set(['kernel']) : null;
-const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p)) && !(DEEP_SKIP && DEEP_SKIP.has(p));
+// AgentX prepares UTs once, then optimizes them against the same serving baseline.
+const AGENTX_SKIP = KERNEL_EXTRACT_ON ? new Set(['profile', 'config', 'tune']) : null;
+const want = (p) => (RUN_ALL || PHASES.includes(p)) && !(FAST_SKIP && FAST_SKIP.has(p)) && !(DEEP_SKIP && DEEP_SKIP.has(p)) && !(AGENTX_SKIP && AGENTX_SKIP.has(p));
 const ST = A.state || {};   // carried state from a prior phase invocation
 // Hoisted: tuningIntegrateInputs() is reachable from runIntegrateBothLegs, which WarmStart drives
 // long before the TuningSkillset phase body — declaring `tuning` there left it in the temporal dead
@@ -1288,6 +1303,12 @@ const STRATEGY_SCHEMA = obj({
   kernel_candidates: arrObj,
   drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
 }, ['kernel_candidates']);
+
+// The skill returns only after source extraction and GPU UT validation. Its
+// selection/ranking metadata stays in files rather than an intermediate schema.
+const AGENTX_PREPARATION_SCHEMA = obj({
+  delivery_path: { type: 'string' },
+}, ['delivery_path']);
 
 // Result of the ensure_flydsl provisioning gate (build-on-demand). ok=true iff flydsl is importable
 // (flydsl + kernels.moe_gemm_2stage) after sourcing env_file; built distinguishes a fresh build from reuse.
@@ -1381,8 +1402,23 @@ const PLAN_SCHEMA = obj({
 // extraction and the head was silently dropped. The enum makes StructuredOutput reject anything else so
 // the agent must re-answer; the prose belongs in smoke_detail / notes.
 const SMOKE_STATUS = { type: 'string', enum: ['pass', 'fail'] };
+// Large machine verdicts travel as immutable task-local files, not LLM summaries.
+const SELECTION_VERDICT_REF_SCHEMA = obj({
+  path: { type: 'string' }, sha256: { type: 'string' },
+}, ['path', 'sha256']);
+const EXTRACTION_SELECTION_FIELDS = {
+  selection_validation_ref: SELECTION_VERDICT_REF_SCHEMA,
+  source_delivery_ref: SELECTION_VERDICT_REF_SCHEMA,
+  joint_ut: { type: 'object', additionalProperties: true },
+  phase_selection_validations: { type: 'array', items: obj({
+    regime: { type: 'string' }, target_callable: { type: 'string' }, seam_candidates: arrObj,
+    selection_validation: { type: 'object', additionalProperties: true },
+    selection_validation_ref: SELECTION_VERDICT_REF_SCHEMA,
+  }, ['regime', 'target_callable']) },
+};
 
 const EXTRACT_OP_SCHEMA = obj({
+  ...EXTRACTION_SELECTION_FIELDS,
   short_name: { type: 'string' }, op_kind: { type: 'string' }, editable: { type: 'boolean' },
   task_dir: { type: 'string' }, shapes: { type: 'object', additionalProperties: true },
   workload_path: { type: 'string' }, // per-(shape,dtype) weighted workload model for this kernel (optional)
@@ -1413,6 +1449,7 @@ const OPBENCH_SCHEMA = obj({
 }, ['gate', 'isolated_speedup']);
 
 const EXTRACT_SCHEMA = obj({
+  ...EXTRACTION_SELECTION_FIELDS,
   short_name: { type: 'string' }, editable: { type: 'boolean' }, task_dir: { type: 'string' },
   source_path_in_sglang: { type: 'string' }, target_callable: { type: 'string' },
   num_cases: { type: 'number' }, regimes_captured: arrStr, candidate_backends: arrStr,
@@ -1775,9 +1812,21 @@ function correctnessEnvBlock(role) {
     `acceptance off.`;
 }
 
+// Optimization roles consume the skill's delivery; only the extractor loads its full procedure.
+function kernelExtractBlock(role) {
+  if (!KERNEL_EXTRACT_ON || !['system_architect', 'op_benchmarker'].includes(role)) return '';
+  return `\n\n## AgentX prepared UTs\n` +
+    `Read ${KERNEL_EXTRACT_DIR}/references/workflow-handoff.md. Use the supplied prepared tasks ` +
+    `and saved workload/ranking evidence. Selection, cases, weights and source bindings are already ` +
+    `validated; do not repeat discovery, sampling or UT authoring, or replace them with fixed ISL/OSL ` +
+    `assumptions. Run the existing immutable UT against optimization candidates, then E2E A/B.\n` +
+    `Declared workload kind: ${WORKLOAD_KIND}; specification: ${JSON.stringify(WORKLOAD_SPEC)}`;
+}
+
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
+  const standaloneExtraction = KERNEL_EXTRACT_ON && role === 'kernel_extractor';
   const inall = {
     BACKEND, SERVING_TP, SERVING_GPU,
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
@@ -1787,10 +1836,20 @@ function roleAgent(role, phase, intro, inputs) {
     ...(IS_AGENTX ? { WORKLOAD_KIND } : {}),
     ...(correctnessEnvBlock(role) ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
     ...inputs,
+    ...(standaloneExtraction ? {
+      SKILL_ROOT: KERNEL_EXTRACT_DIR, SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
+      PARSE_PROFILE_STRICT_PHASES: '1', KERNEL_ENV_SKIP_ENUM_REAP: '1',
+      CAPTURE_PERSIST_POLICY, CAPTURE_STORAGE_ENV,
+    } : {}),
   };
+  const instruction = standaloneExtraction
+    ? `First Read ${KERNEL_EXTRACT_DIR}/SKILL.md and ${KERNEL_EXTRACT_DIR}/references/workflow-handoff.md.
+Use the complete extraction procedure and its shared and skill-specific tools. The handoff reference supplies only workflow inputs and output packaging.
+Do not load roles/kernel_extractor.md; it is the legacy procedure for other workloads.`
+    : `First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
+Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.`;
   const base = `You are the ${role}. PHASE=${phase}.
-First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
-Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.
+${instruction}
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 When you invoke bench_e2e.sh, pass BACKEND=${BACKEND} in its env so the correct serving adapter is used.
 
@@ -1811,8 +1870,8 @@ ${workloadIdentityBlock()}
 ## Inputs
 ${cfg(inall)}
 
-Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role) + warmStartBlock(role) + correctnessEnvBlock(role);
+Return ONLY the structured JSON the ${standaloneExtraction ? 'workflow handoff reference' : 'role file'} specifies (a StructuredOutput tool is forced).`;
+  return base + expertSkillsBlock(role) + warmStartBlock(role) + kernelExtractBlock(role) + correctnessEnvBlock(role);
 }
 
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
@@ -2258,13 +2317,22 @@ function selectionCandidatesForHead(h, ext) {
 }
 function prepareHeadSelection(h) {
   if (!h || typeof h !== 'object') return h;
+  // A completed UT already verified its callable; do not replace it with an
+  // untested nomination when the optimization queue is admitted.
+  if (typeof KERNEL_EXTRACT_ON !== 'undefined' && KERNEL_EXTRACT_ON && h.prepared_ut) return { ...h };
   const out = { ...h };
   const required = requiredDeviceKernel(out);
   if (required && !out.device_kernel) out.device_kernel = required;
   // live_call_seam and malformed target_callable values are prose, never machine targets.
   if (!validCallableSpec(out.target_callable)) out.target_callable = '';
   const fused = out.is_fused_kernel === true || out.op_kind === 'moe';
-  const deployable = selectionCandidatesForHead(out).filter((candidate) => {
+  const jointPhase = out.joint_ut && (out.joint_ut.phases || []).find(p =>
+    (p.required_device_kernels || []).some(k => kernelIdentitiesMatch(k, required)));
+  const deployable = selectionCandidatesForHead(jointPhase ? {
+    ...out, seam_candidates: jointPhase.seam_candidates || out.seam_candidates,
+  } : out).filter((candidate) => {
+    if (jointPhase && !(jointPhase.required_device_kernels || []).every(k =>
+        (candidate.device_kernels || []).some(v => kernelIdentitiesMatch(k, v)))) return false;
     const role = String(candidate.role || '').toLowerCase();
     return fused ? role === 'op_seam' : ['inner_launcher', 'op_seam'].includes(role);
   });
@@ -2275,7 +2343,78 @@ function prepareHeadSelection(h) {
     : 'extractor_must_discover_live_launcher';
   return out;
 }
-function kernelSelectionVerified(h, ext) {
+function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
+  if (ext && ext.selection_evidence_error) return { ok: false, why: ext.selection_evidence_error };
+  if (h && h.dispatch_ut) {
+    if (h.joint_ut) return { ok: false, why: 'choose joint_ut or dispatch_ut, not both' };
+    const phases = h.dispatch_ut.phases, rows = ext && ext.phase_selection_validations;
+    if (!Array.isArray(phases) || !phases.length || !Array.isArray(rows) || rows.length !== phases.length)
+      return { ok: false, why: 'dispatch UT requires one selection verdict per declared branch' };
+    const seen = new Set();
+    for (const spec of phases) {
+      if (!spec.regime || !spec.device_kernel || !Array.isArray(spec.seam_candidates) ||
+          !spec.seam_candidates.length || seen.has(spec.regime))
+        return { ok: false, why: 'dispatch branches must have distinct nonempty regime labels' };
+      seen.add(spec.regime);
+      const matches = rows.filter(r => r.regime === spec.regime);
+      if (matches.length !== 1 || matches[0].target_callable !== ext.target_callable)
+        return { ok: false, why: `${spec.regime}: dispatch branch must verify the same whole-op callable` };
+      const check = kernelSelectionVerified({ ...h, dispatch_ut: undefined,
+        is_fused_kernel: true, device_kernel: spec.device_kernel, seam_candidates: spec.seam_candidates }, matches[0]);
+      if (!check.ok) return { ok: false, why: `${spec.regime}: ${check.why}` };
+    }
+    if ([requiredDeviceKernel(h), ...(h.selected_device_kernels || [])].some(k =>
+        !phases.some(p => kernelIdentitiesMatch(k, p.device_kernel))))
+      return { ok: false, why: 'dispatch branches omit a selected device kernel' };
+    return { ok: true, why: 'verified whole-op dispatch branches independently' };
+  }
+  if (h && h.joint_ut) {
+    const phases = h.joint_ut.phases;
+    const results = ext && ext.phase_selection_validations;
+    if (!Array.isArray(phases) || !phases.length || !Array.isArray(results))
+      return { ok: false, why: 'joint UT requires declared phases and per-phase selection verdicts' };
+    if (!phases.some(p => (p.required_device_kernels || []).some(k =>
+        kernelIdentitiesMatch(k, requiredDeviceKernel(h)))))
+      return { ok: false, why: 'joint UT does not contain its profiled anchor kernel' };
+    const regimes = new Set();
+    for (const spec of phases) {
+      const regime = String(spec.regime || '').trim();
+      if (!regime || regimes.has(regime))
+        return { ok: false, why: 'joint UT phases must have distinct nonempty regime labels' };
+      regimes.add(regime);
+      const requiredMembers = spec.required_device_kernels;
+      if (!Array.isArray(requiredMembers) || requiredMembers.length < 2 ||
+          !requiredMembers.every(k => typeof k === 'string' && k.trim()) ||
+          requiredMembers.some((k, i) => requiredMembers.slice(0, i).some(v => kernelIdentitiesMatch(k, v))) ||
+          !requiredMembers.some(k => kernelIdentitiesMatch(k, spec.device_kernel)))
+        return { ok: false, why: `${regime}: joint phase must declare its anchor and companion kernels` };
+      const matches = results.filter(r => r.regime === regime);
+      if (matches.length !== 1)
+        return { ok: false, why: `${regime}: expected one joint selection verdict` };
+      const result = matches[0], verdict = result.selection_validation;
+      if (!verdict || verdict.selection_scope !== 'joint_chain')
+        return { ok: false, why: `${regime}: a leaf verdict cannot certify a joint chain` };
+      const reported = verdict.required_device_kernels || [];
+      if (reported.length !== requiredMembers.length ||
+          requiredMembers.some(k => !reported.some(v => kernelIdentitiesMatch(k, v))))
+        return { ok: false, why: `${regime}: joint verdict has the wrong member kernel set` };
+      if (requiredMembers.some(k => !(verdict.chain_members || []).some(m =>
+          kernelIdentitiesMatch(k, m.device_kernel) && Number(m.matched_kernel_calls) > 0)))
+        return { ok: false, why: `${regime}: missing positive member-kernel execution evidence` };
+      if (!Array.isArray(verdict.joint_call_coverage) || !verdict.joint_call_coverage.length ||
+          verdict.joint_call_coverage.some(c => !Array.isArray(c.missing_members) || c.missing_members.length))
+        return { ok: false, why: `${regime}: incomplete joint invocation coverage` };
+      const check = kernelSelectionVerified({ ...h, joint_ut: undefined,
+        device_kernel: spec.device_kernel, seam_candidates: spec.seam_candidates || result.seam_candidates },
+        result, requiredMembers);
+      if (!check.ok) return { ok: false, why: `${regime}: ${check.why}` };
+    }
+    if (results.length !== phases.length)
+      return { ok: false, why: 'joint UT returned undeclared or duplicate phase results' };
+    if (!results.some(r => r.target_callable === ext.target_callable))
+      return { ok: false, why: 'joint UT primary callable is not one of its verified phase entries' };
+    return { ok: true, why: `verified complete joint chains for ${Array.from(regimes).join(', ')}` };
+  }
   const required = requiredDeviceKernel(h);
   if (!required) return { ok: true, why: 'not a profiled GPU-head extraction' };
   const target = String((ext && ext.target_callable) || '').trim();
@@ -2284,6 +2423,8 @@ function kernelSelectionVerified(h, ext) {
   const verdict = ext && ext.selection_validation;
   if (!verdict || verdict.contract !== 'kernel_selection')
     return { ok: false, why: 'kernel_selection.py verdict is missing' };
+  if (verdict.selection_scope === 'joint_chain' && !jointScopeMembers)
+    return { ok: false, why: 'joint-chain selection requires a declared joint UT boundary' };
   if (verdict.ok !== true)
     return { ok: false,
       why: `kernel_selection.py failed: ${(verdict.failed || []).join(', ') || 'unknown'}` };
@@ -2359,6 +2500,48 @@ function adoptProfiledEntityKind(head, rows) {
   return true;
 }
 
+// Opt-in transport only: hydrate exact Python verdicts before applying the same
+// selection gate. A file or hash error cannot fall back to an inline claim of PASS.
+// This function is also used by kernel_extraction_delivery.mjs for preflight.
+async function hydrateExtractionVerdicts(ext) {
+  if (!ext || typeof ext !== 'object') return ext;
+  const phases = Array.isArray(ext.phase_selection_validations) ? ext.phase_selection_validations : [];
+  if (!ext.selection_validation_ref && !phases.some(p => p && p.selection_validation_ref)) return ext;
+  const out = { ...ext };
+  try {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const { createHash } = await import('node:crypto');
+    const task = await fs.realpath(ext.task_dir);
+    const readVerdict = async (row) => {
+      if (!row || !row.selection_validation_ref) return row;
+      const ref = row.selection_validation_ref;
+      if (typeof ref.path !== 'string' || !ref.path.trim() ||
+          typeof ref.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(ref.sha256))
+        throw new Error('selection_validation_ref requires path and lowercase SHA-256');
+      const file = await fs.realpath(path.resolve(task, ref.path));
+      const relative = path.relative(task, file);
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+        throw new Error('selection verdict must be a file inside task_dir');
+      const bytes = await fs.readFile(file);
+      if (createHash('sha256').update(bytes).digest('hex') !== ref.sha256)
+        throw new Error(`selection verdict SHA-256 mismatch: ${ref.path}`);
+      const verdict = JSON.parse(bytes.toString('utf8'));
+      if (!verdict || verdict.contract !== 'kernel_selection')
+        throw new Error(`not a kernel_selection verdict: ${ref.path}`);
+      return { ...row, selection_validation: verdict };
+    };
+    Object.assign(out, await readVerdict(out));
+    if (Array.isArray(ext.phase_selection_validations)) {
+      out.phase_selection_validations = [];
+      for (const row of phases) out.phase_selection_validations.push(await readVerdict(row));
+    }
+  } catch (error) {
+    out.selection_evidence_error = `selection evidence file invalid: ${error.message || error}`;
+  }
+  return out;
+}
+
 const PRE_FLAGGED_HEADS = [];
 function admitHeads(queue, stage) {
   const admitted = [];
@@ -2410,7 +2593,8 @@ const hasFrozenBaseline = (ext) =>
 const extractFailWhy = (e) => !e ? 'none'
   : [e.smoke_detail, e.notes].filter(Boolean).join(' | ') || e.smoke || e.unittest_smoke || 'none';
 
-// Run a kernel_extractor agent and GUARANTEE it froze a real baseline. safeAgent already retries
+// AgentX consumes a prepared UT and fails locally if its evidence is missing or stale.
+// Fixed-load runs invoke kernel_extractor and GUARANTEE it froze a real baseline. safeAgent already retries
 // transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
 // task dir present) but produced NO frozen baseline — re-invoking with a corrective instruction up
 // to BASELINE_EXTRACT_RETRIES times. If a baseline still can't be frozen, we force the caller's
@@ -2418,9 +2602,16 @@ const extractFailWhy = (e) => !e ? 'none'
 // (if dominant) or skipped, NEVER timed against its own scaffold. `role`/`phase`/`intro`/`inputs`
 // are the roleAgent args; `opts` is the safeAgent opts (phase/label/schema). Used by every extract
 // site (deep, opt-A, milestone/head extract_op, and the non-op milestone extract).
+// Authoring may overlap. GPU commands use the skill's per-device lock contract:
+// disjoint devices can validate concurrently; shared devices wait at execution.
+// Keep failures local so each caller can flag/skip its UT without cancelling peers.
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
   const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
   const head = (inputs && inputs.KERNEL) || {};
+  if (typeof KERNEL_EXTRACT_ON !== 'undefined' && KERNEL_EXTRACT_ON) {
+    const { reusePreparedUT } = await import(`${WORKFLOW_DIR}/scripts/agentx_kernel_preparation.mjs`);
+    return reusePreparedUT(head);
+  }
   const captureIntro = `${intro} CAPTURE STORAGE BOUNDS (issue #429): every capture EXTRA_ENV MUST include ` +
     `\`${CAPTURE_STORAGE_ENV}\`. Use kernel_selection.py with --task-dir "$TASK" so the selected oracle is ` +
     `promoted and all capture.pid-* dirs are reclaimed. Unittests for large MoE oracles MUST use ` +
@@ -2432,6 +2623,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
     CAPTURE_CASE_BYTE_LIMIT,
     CAPTURE_PERSIST_POLICY,
   }), opts);
+  ext = await hydrateExtractionVerdicts(ext);
   let tries = 0;
   const attemptedTargets = [];
   const complete = (e) => hasFrozenBaseline(e) && kernelSelectionVerified(head, e).ok;
@@ -2488,6 +2680,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
         ATTEMPTED_TARGET_CALLABLES: attemptedTargets.slice(),
       }),
       opts);
+    ext = await hydrateExtractionVerdicts(ext);
   }
   const finalSelection = kernelSelectionVerified(head, ext);
   if (smokeOk(ext) && !finalSelection.ok) {
@@ -2504,6 +2697,12 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       smoke_detail: `workflow forced fail: no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions`,
       notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
         `(baseline_overlay/ + meta.candidate_bind required as the speedup denominator) — ${ext.notes || ''}` };
+  }
+  if (smokeOk(ext) && head.source_delivery_required === true) {
+    const { verifySourceDelivery } = await import(`${WORKFLOW_DIR}/scripts/kernel_source_delivery.mjs`);
+    const source = await verifySourceDelivery(head, ext);
+    if (!source.ok) return { ...ext, smoke: 'fail', unittest_smoke: 'fail', source_delivery_failed: true,
+      smoke_detail: `source delivery incomplete: ${source.why}` };
   }
   return ext;
 }
@@ -3169,6 +3368,62 @@ const kbSeedKernels = [];
 let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
+
+async function readAgentXPreparation(deliveryPath) {
+  const { readPreparedKernels } = await import(`${WORKFLOW_DIR}/scripts/agentx_kernel_preparation.mjs`);
+  return readPreparedKernels(EVAL_DIR, deliveryPath);
+}
+
+async function prepareAgentXKernels(round, throughput) {
+  phase('KernelExtract');
+  const inputs = {
+    EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, TASK, ROUND: round,
+    BASELINE_LOG: `${EVAL_DIR}/baseline/server.log`, BASELINE_BENCH_DIR: `${EVAL_DIR}/baseline`,
+    BASELINE_SUMMARY: `${EVAL_DIR}/baseline_summary.md`,
+    EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_${round}`,
+    BASELINE_THROUGHPUT: BASELINE_TPUT, CURRENT_THROUGHPUT: throughput,
+    CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
+    PREVIOUS_WORKLOAD_JSON: profile ? profile.profile_workload_json || '' : '',
+    PREVIOUS_RANKING_JSON: profile ? profile.kernel_ranking_json || '' : '',
+    PREVIOUS_UT_DELIVERY: profile ? profile.kernel_extraction_delivery_json || '' : '',
+    EXTRACTION_SELECTION_POLICY: { phases: ['PREFILL', 'DECODE'], top_k_per_phase: 5,
+      overall_pct_gt: 3, combination: 'phase_top_k_and_overall_threshold', backfill: false },
+    SOURCE_DELIVERY_REQUIRED: true,
+    BUDGET, HEAD_BUDGET, REMAINING_MIN: remainingMin(),
+    SKILL_DIR: WORKFLOW_DIR, ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
+  };
+  let reply = await safeAgent(roleAgent('kernel_extractor', 'prepare',
+    'Complete the kernel-extract skill from the saved baseline through executable, GPU-validated UTs. ' +
+    'Selection, task grouping and bootstrap replay are INTERNAL steps: save their artifacts and continue ' +
+    'to source extraction, UT authoring and validation in this invocation. Prefer fixed-seed input factories ' +
+    'from saved shape/layout metadata; UT execution must not start serving or capture shapes. ' +
+    'Capture only missing structural state needed for faithful cases. Do not return a candidate list ' +
+    'before UTs have been attempted. Reuse compatible evidence and passing UTs. Never rerun the full ' +
+    'AgentX baseline for discovery. Follow TASK scope and the default per-phase selection rule. ' +
+    'Prove that edits to each opt GPU leaf affect candidate correctness while the frozen baseline passes; ' +
+    'restore the clean source and rerun the UT. Keep failures and budget-deferred tasks in the delivery. ' +
+    'Read references/workflow-handoff.md in the skill. Return ONLY {delivery_path} naming that ' +
+    'file under EVAL_DIR after all scheduled UT work is finished. Do not optimize or integrate.', inputs),
+    { phase: 'KernelExtract', label: `kernel_extractor:prepare ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      if (!reply?.delivery_path) throw new Error('completed skill did not return delivery_path');
+      const prepared = await readAgentXPreparation(reply.delivery_path);
+      log(`Kernel extraction ready: ${prepared.head_candidates.length + prepared.kernel_candidates.length} validated UTs, ` +
+        `${prepared.failed_tasks.length} failed, ${prepared.deferred_tasks.length} deferred.`);
+      return prepared;
+    } catch (error) {
+      if (attempt >= 1) throw new Error(`AgentX UT delivery unreadable: ${error.message}`);
+      reply = await safeAgent(roleAgent('kernel_extractor', 'repair_delivery',
+        'Repair only the completed-stage handoff using saved files. Do not repeat selection, captures or ' +
+        'passing GPU tests. Preserve every real failure and all task results. The reader failed with: ' +
+        error.message + '. Return {delivery_path} for the repaired file.',
+        { ...inputs, PREVIOUS_DELIVERY_PATH: reply?.delivery_path || '' }),
+        { phase: 'KernelExtract', label: `kernel_extractor:repair delivery ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
+    }
+  }
+}
+
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
@@ -4176,24 +4431,29 @@ print(json.dumps(res))
     kernelQueue = [];
     headQueue = [];
   } else {
-    phase('Profile');
-    profile = await safeAgent(
-      roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
-        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
-    log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
+    if (KERNEL_EXTRACT_ON) {
+      strategy = await prepareAgentXKernels('baseline', kbSeedTput || BASELINE_TPUT);
+      profile = strategy;
+    } else {
+      phase('Profile');
+      profile = await safeAgent(
+        roleAgent('profiler', 'baseline', 'Capture a warm trace and emit the standardized Top-N.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 0,
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Profile', label: 'profiler:baseline', schema: PROFILE_SCHEMA });
+      log(`Baseline profiled. ${profile ? (profile.top_kernels || []).length : 0} top kernels.`);
 
-    phase('Strategize');
-    strategy = await safeAgent(
-      roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
-        EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
-        WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
-        ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
-      }),
-      { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
+      phase('Strategize');
+      strategy = await safeAgent(
+        roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
+          WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
+          ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
+        }),
+        { phase: 'Strategize', label: 'architect:strategize', schema: STRATEGY_SCHEMA });
+    }
     kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
     headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
     headQueue = applyOpIdentityGuard(headQueue, 'strategize');
@@ -4211,10 +4471,27 @@ print(json.dumps(res))
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
   curOverlay = ST.overlay || INIT_BASE_OVERLAY;
-  profile = { profile_topN_json: ST.profile_topn_json || '' };
+  profile = { profile_topN_json: ST.profile_topn_json || '',
+    ...(KERNEL_EXTRACT_ON ? { profile_workload_json: ST.profile_workload_json || '',
+      kernel_ranking_json: ST.kernel_ranking_json || '',
+      kernel_extraction_delivery_json: ST.kernel_extraction_delivery_json || '',
+      failed_tasks: ST.kernel_extraction_summary?.failed_tasks || [],
+      deferred_tasks: ST.kernel_extraction_summary?.deferred_tasks || [],
+      coverage_summary: ST.kernel_extraction_summary?.coverage_summary || {} } : {}) };
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
   headQueue = admitHeads(ST.headQueue || [], 'resume');
+  if (KERNEL_EXTRACT_ON &&
+      (PHASES.includes('extract') ||
+       (want('head') && (!Array.isArray(ST.headQueue) || headQueue.some(k => !k.prepared_ut))) ||
+       (want('kernel') && (!Array.isArray(ST.kernelQueue) || kernelQueue.some(k => !k.prepared_ut))))) {
+    // Finish the skill through GPU UT validation. Existing selection-only queues
+    // are evidence to reuse, not completed tasks ready for optimization.
+    strategy = await prepareAgentXKernels('resume', ST.throughput || BASELINE_TPUT);
+    profile = strategy;
+    headQueue = applyOpIdentityGuard(strategy.head_candidates.slice(), 'resume selection');
+    kernelQueue = strategy.kernel_candidates.slice();
+  }
   log(`Loaded carried state: EVAL_DIR=${EVAL_DIR}, baseline ${BASELINE_TPUT}, flags='${curFlags}', env='${curEnv}', ${headQueue.length} head + ${kernelQueue.length} kernel candidates.`);
 }
 
@@ -4742,8 +5019,8 @@ function tuningIntegrateInputs() {
 // ===========================================================================
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   phase('HeadKernel');
-  log(`Head-kernel track: ${headQueue.length} candidate op(s), head_budget=${HEAD_BUDGET}, threshold=${HEAD_THRESHOLD_PCT}%.`);
-  // Head ops are taken in the Architect's Amdahl-ranked order — no forced GEMM-first reordering.
+  log(`Head-kernel track: ${headQueue.length} candidate op(s), head_budget=${HEAD_BUDGET}, ${KERNEL_EXTRACT_ON ? 'prepared UT inventory' : `threshold=${HEAD_THRESHOLD_PCT}%`}.`);
+  // Preserve the prepared inventory order for AgentX, Architect order for fixed-load runs.
   const heads = headQueue.slice(0, HEAD_BUDGET).map((c, i) => ({
     ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
     short_name: c.short_name || `${c.op_kind || 'op'}${i}`,
@@ -4778,6 +5055,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     // ---- per-head prep: extract + bake-off + roofline + lane roster (cheap agents on GPU_LIST[0]) ----
     const GLOBAL_KB = `${EVAL_DIR}/deep_head/GLOBAL_KB.md`;
     const prepHead = async (h) => {
+      if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
       const ext = await extractWithBaseline(
         'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
@@ -4876,10 +5154,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const byHead = {}; for (const l of set) (byHead[l.head.short_name] = byHead[l.head.short_name] || []).push(l);
       for (const sn of Object.keys(byHead)) {
         const ls = byHead[sn]; const base = ls[0].liveBaselineMs;
+        const metric = KERNEL_EXTRACT_ON
+          ? 'Use the prepared UT workload and frozen baseline. vs_live is the recorded workload-weighted speedup (sum of baseline_ms * effective_calls divided by sum of candidate_ms * effective_calls); best_ms is diagnostic only. Missing weighted evidence gives vs_live=1, never a scalar geomean fallback.'
+          : `LIVE baseline geomean = ${base || '?'} ms. best_ms is the absolute geomean across cases; vs_live=${base || 0}/best_ms when both>0, else 1.0.`;
         const harvest = await safeAgent(
-          `Deep-v2 co-opt harvest [${tag}] for head ${sn} (${ls[0].ext.op_kind}). LIVE baseline geomean = ${base || '?'} ms (the bar; a lane's own "cumulative" is self-relative and NOT comparable — compute speedup vs THIS baseline). Read DISK, do not guess. Lanes:\n` +
+          `Deep-v2 co-opt harvest [${tag}] for head ${sn} (${ls[0].ext.op_kind}). ${metric} A lane's own cumulative gain is self-relative, not vs-live. Read DISK, do not guess. Lanes:\n` +
           ls.map(l => `- uid=${l.uid}: STATE.json=${l.state_dir}/STATE.json; cumulative-best workspace=${l.state_dir}/best; newest finished run under ${l.deepDir}/runs/${l.key}/team_*/*/ with a final_patch.diff (+ baseline_timing.json / tech_lead_report.md for the optimized per-case ms)`).join('\n') + '\n' +
-          `For EACH uid return: uid; has_state (STATE.json AND best/kernel_src exist); best_ms (ABSOLUTE geomean ms of the lane's cumulative-best across cases); vs_live (= ${base || 0}/best_ms when both>0, else 1.0); cumulative (self-relative, ref); eval_dir (newest runs/<key>/team_*/<op> with non-empty final_patch.diff, else ""); patch (that diff path, else ""). Return {lanes:[{uid,has_state,best_ms,vs_live,cumulative,eval_dir,patch}]}.`,
+          `For EACH uid return: uid; has_state (STATE.json AND best/kernel_src exist); best_ms and vs_live using the metric above; cumulative (self-relative, ref); eval_dir (newest runs/<key>/team_*/<op> with non-empty final_patch.diff, else ""); patch (that diff path, else ""). Return {lanes:[{uid,has_state,best_ms,vs_live,cumulative,eval_dir,patch}]}.`,
           { phase: 'HeadKernel', label: `harvest ${sn} ${tag}`, schema: HARVEST_SCHEMA });
         const hmap = {}; for (const e of (harvest && Array.isArray(harvest.lanes) ? harvest.lanes : [])) hmap[e.uid] = e;
         const anyState = Object.values(hmap).some(e => e && e.has_state);
@@ -5011,7 +5292,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       gateFeedbackPath = (fb && fb.feedback_path) || `${EVAL_DIR}/deep_head/e2e_feedback.md`;
       gateHarnessPath = (fb && fb.addendum_path) || `${EVAL_DIR}/deep_head/HARNESS_ADDENDUM.md`;
       // re-profile if the stack moved enough — chase the new dominant bottleneck (Amdahl shifted).
-      if (want('profile') && curTput > lastReprofileTput * (1 + DEEP_REPROFILE_GAIN)) {
+      if (!KERNEL_EXTRACT_ON && want('profile') && curTput > lastReprofileTput * (1 + DEEP_REPROFILE_GAIN)) {
         log(`[deep] e2e +${((curTput / lastReprofileTput - 1) * 100).toFixed(1)}% since last profile — re-profiling to chase the moving bottleneck.`);
         const rp = await safeAgent(
           roleAgent('profiler', 'reprofile', 'Re-profile the CURRENT overlaid server; return refreshed head pct_gpu_time so EV re-weights toward the new bottleneck.', {
@@ -5021,7 +5302,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (rp && Array.isArray(rp.heads)) {
           for (const nh of rp.heads) {
             const tgt = allLanes.filter(l => l.head.short_name === (nh.short_name || nh.name));
-            for (const l of tgt) if (Number.isFinite(nh.pct_gpu_time)) l.head.pct_gpu_time = nh.pct_gpu_time;
+            for (const l of tgt) if (Number.isFinite(nh.pct_gpu_time)) {
+              l.head.pct_gpu_time = nh.pct_gpu_time;
+            }
           }
           log(`[deep] re-profile updated head Amdahl weights.`);
         }
@@ -5149,6 +5432,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       if (FAST_DEADLINE_HIT) return { h, dead: 'deadline' };
       return ISO.with(1, async (g) => {
         const gpu = g[0];
+        if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
         const ext = await extractWithBaseline(
           'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
@@ -5250,7 +5534,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       // direct_light candidate's bake.isolated_speedup), NOT the unweighted geomean. In a decode-bound
       // serving regime the geomean is dominated by zero/low-weight prefill buckets and buries the decode
       // bucket that governs throughput — ranking by geomean can drop the truly-best authored kernel.
-      const alIso = al.final_weighted != null ? al.final_weighted : al.final_geomean;
+      const alIso = KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
+        : (al.final_weighted != null ? al.final_weighted : al.final_geomean);
       if (al.authored !== false && alIso > 1.0 && al.final_patch) {
         st.cands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
@@ -5348,6 +5633,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       break;
     }
     headDispatched++;
+    if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
     // B4 measures THIS head's trial against its own start, not the run clock.
     const ablHeadStart = ELAPSED_MS;
     // (h1) Extract the op into a standalone immutable unittest. The op-identity guard already forced a
@@ -5515,8 +5801,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       // Rank on the WORKLOAD-WEIGHTED speedup (kernel layer's PRIMARY metric, same basis as the
       // env/direct_light candidate's bake.isolated_speedup) — NOT the unweighted geomean, which in a
       // decode-bound regime is dragged down by low/zero-weight prefill buckets and can bury the decode
-      // bucket that actually governs serving throughput. Fall back to geomean if no weighted number.
-      const alIso = al && (al.final_weighted != null ? al.final_weighted : al.final_geomean);
+      // bucket that actually governs serving throughput. Only fixed-load runs fall back to geomean.
+      const alIso = al && (KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
+        : (al.final_weighted != null ? al.final_weighted : al.final_geomean));
       if (al && al.authored !== false && alIso > 1.0 && al.final_patch) {
         headCands.push({ kind: 'authored', source: lang, winner_kind: 'authored', language: lang,
           final_patch: al.final_patch, kernel_eval_dir: al.eval_dir, isolated: alIso });
@@ -5664,7 +5951,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   }
   } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
   // Head wins reshape the profile massively (GEMM mass shrinks) — re-profile before the kernel loop.
-  if (acceptedHeads.length && !searchClosed('post-head re-profile')) {
+  if (!KERNEL_EXTRACT_ON && acceptedHeads.length && !searchClosed('post-head re-profile')) {
     profile = await safeAgent(
       roleAgent('profiler', 'reprofile', 'Re-profile after head-kernel wins.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: 'head',
@@ -5698,26 +5985,35 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   // MUST nominate (it may not stop); it draws fresh editable candidates from the re-profile + the broad
   // candidate pool, never re-using a confirmed e2e-null direction verbatim. ---
   phase('Milestone');
-  const plan = (milestone === 1 && kernelQueue.length)
-    ? { stop: false, kernel_candidates: kernelQueue }
-    : await safeAgent(
-      roleAgent('system_architect', 'plan_milestone', `Nominate next kernels — ONLY editable kernels with pct_gpu_time >= ${MILESTONE_MIN_PCT}% (below that, Amdahl says they can't move e2e; do not nominate them even to meet the floor). Each candidate MUST carry its pct_gpu_time.`, {
-        EVAL_DIR, ROUND: milestone, BUDGET_REMAINING: remaining, CURRENT_THROUGHPUT: curTput,
-        BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
-        MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
-        PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
+  let plan;
+  if (KERNEL_EXTRACT_ON) {
+    plan = { stop: !kernelQueue.length, kernel_candidates: kernelQueue };
+    kernelQueue = [];
+  } else {
+    plan = (milestone === 1 && kernelQueue.length)
+      ? { stop: false, kernel_candidates: kernelQueue }
+      : await safeAgent(
+        roleAgent('system_architect', 'plan_milestone', `Nominate next kernels — ONLY editable kernels with pct_gpu_time >= ${MILESTONE_MIN_PCT}% (below that, Amdahl says they can't move e2e; do not nominate them even to meet the floor). Each candidate MUST carry its pct_gpu_time.`, {
+          EVAL_DIR, ROUND: milestone, BUDGET_REMAINING: remaining, CURRENT_THROUGHPUT: curTput,
+          BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND, MILESTONE_MIN_PCT,
+          MIN_KERNEL_TASKS, DISPATCHED_SO_FAR: dispatched, BELOW_MIN_FLOOR: belowFloor,
+          PROFILE_TOPN: profile ? profile.profile_topN_json : '', HISTORY: history, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Milestone', label: `architect:plan m${milestone}`, schema: PLAN_SCHEMA });
+
+  }
 
   const planCandsRaw = (plan && plan.kernel_candidates) ? plan.kernel_candidates : [];
-  // pct_gpu_time gate: only optimize kernels above MILESTONE_MIN_PCT (a candidate missing pct is kept,
+  // AgentX keeps the skill-selected inventory; only execution budgets apply here.
+  // Fixed-load pct_gpu_time gate: only optimize kernels above MILESTONE_MIN_PCT (missing pct is kept,
   // not silently dropped — but logged). This gate OVERRIDES the min-floor: low-pct kernels are not worth it.
-  const planCands = planCandsRaw.filter(c => c.pct_gpu_time == null || c.pct_gpu_time >= MILESTONE_MIN_PCT);
-  const skipped = planCandsRaw.filter(c => c.pct_gpu_time != null && c.pct_gpu_time < MILESTONE_MIN_PCT);
+  const planCands = KERNEL_EXTRACT_ON ? planCandsRaw : planCandsRaw.filter(c => c.pct_gpu_time == null || c.pct_gpu_time >= MILESTONE_MIN_PCT);
+  const skipped = KERNEL_EXTRACT_ON ? [] : planCandsRaw.filter(c => c.pct_gpu_time != null && c.pct_gpu_time < MILESTONE_MIN_PCT);
   if (skipped.length) log(`Milestone ${milestone}: skipped ${skipped.length} kernel(s) below ${MILESTONE_MIN_PCT}% GPU [${skipped.map(c => `${c.short_name || '?'}@${(+c.pct_gpu_time).toFixed(1)}%`).join(', ')}].`);
   if (!planCands.length) {
-    if (planCandsRaw.length) log(`Milestone ${milestone}: stop — no remaining kernel clears the ${MILESTONE_MIN_PCT}% GPU bar (Amdahl: sub-threshold kernels can't move e2e). Floor is overridden by the pct gate.`);
+    if (KERNEL_EXTRACT_ON) log(`Milestone ${milestone}: prepared UT queue exhausted; stopping.`);
+    else if (planCandsRaw.length) log(`Milestone ${milestone}: stop — no remaining kernel clears the ${MILESTONE_MIN_PCT}% GPU bar (Amdahl: sub-threshold kernels can't move e2e). Floor is overridden by the pct gate.`);
     else if (belowFloor) log(`Milestone ${milestone}: below floor (${dispatched}/${MIN_KERNEL_TASKS}) but Architect nominated nothing — cannot fabricate candidates; stopping.`);
     else log(`Milestone ${milestone}: stop (floor ${MIN_KERNEL_TASKS} met). ${plan ? plan.reasoning || '' : ''}`);
     break;
@@ -5727,6 +6023,9 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     ...c, idx: i, gpu_id: GPU_LIST[i % GPU_LIST.length],
     short_name: c.short_name || `k${milestone}_${i}`,
   }));
+  // AgentX selection inventories more work than this execution budget can run.
+  // Preserve undispatched eligible candidates in carried state for resume.
+  if (KERNEL_EXTRACT_ON) kernelQueue = planCands.slice(cands.length);
   dispatched += cands.length;
   log(`Milestone ${milestone}: ${cands.length} kernel candidate(s) [${cands.map(c => c.short_name).join(', ')}], dispatched ${dispatched}/${BUDGET} (floor ${MIN_KERNEL_TASKS})`);
 
@@ -5759,10 +6058,12 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       }));
       noteKernelKB(r, String(c.short_name || ext.op_kind || 'milestone'));
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
-        final_geomean: r.final_geomean, validation_status: r.validation_status,
+        final_geomean: r.final_geomean,
+        isolated_speedup: KERNEL_EXTRACT_ON ? (r.final_weighted ?? r.final_speedup ?? 0) : r.final_geomean,
+        validation_status: r.validation_status,
         note: (r.winner && r.winner.source) || '' };
     } catch (e) {
-      kl = { ran: false, final_patch: '', final_geomean: 0, validation_status: 'error', note: String(e) };
+      kl = { ran: false, final_patch: '', final_geomean: 0, isolated_speedup: 0, validation_status: 'error', note: String(e) };
     }
     return { c, ext, kl };
   }));
@@ -5778,18 +6079,18 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       continue;
     }
     const { ext, kl } = o;
-    if (!kl || !kl.ran || !(kl.final_geomean > 1.0) || !kl.final_patch) {
-      log(`  ${c.short_name}: kernel layer produced no speedup (${kl ? kl.final_geomean : '?'}x); skipping integrate.`);
-      history.ledger.push({ direction: c.short_name, isolated_speedup: kl ? kl.final_geomean : 0, verdict: 'dead_end', lesson: 'no isolated speedup' });
+    if (!kl || !kl.ran || !(kl.isolated_speedup > 1.0) || !kl.final_patch) {
+      log(`  ${c.short_name}: kernel layer produced no speedup (${kl ? kl.isolated_speedup : '?'}x); skipping integrate.`);
+      history.ledger.push({ direction: c.short_name, isolated_speedup: kl ? kl.isolated_speedup : 0, verdict: 'dead_end', lesson: 'no isolated speedup' });
       continue;
     }
-    log(`  ${c.short_name}: kernel layer ${kl.final_geomean.toFixed(2)}x isolated. Integrating to e2e.`);
+    log(`  ${c.short_name}: kernel layer ${kl.isolated_speedup.toFixed(2)}x isolated. Integrating to e2e.`);
     // Build inputs ONCE so Fix C can re-issue the SAME A/B for a pending win at Finalize.
     const mileIntegrateInputs = {
       EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
       KERNEL_RESULT: { short_name: c.short_name, task_dir: ext.task_dir,
         source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
-        final_patch: kl.final_patch, verified_isolated_speedup: kl.final_geomean, pct_gpu_time: c.pct_gpu_time },
+        final_patch: kl.final_patch, verified_isolated_speedup: kl.isolated_speedup, pct_gpu_time: c.pct_gpu_time },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
     };
@@ -5801,24 +6102,24 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // Backward-compatible: null (timeout/hang/degrade) or an explicit incomplete
     // flag => not done; a legacy return without ab_complete behaves as before.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
-    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.final_geomean) && integ.e2e_throughput_tok_s > curTput) {
+    if (abDone && integAccepted(integ, c.pct_gpu_time, kl.isolated_speedup) && integ.e2e_throughput_tok_s > curTput) {
       curOverlay = integ.accepted_overlay || curOverlay;
       curTput = integ.e2e_throughput_tok_s;
-      bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: kl.final_geomean }, krOf(mileIntegrateInputs));
+      bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: kl.isolated_speedup }, krOf(mileIntegrateInputs));
       milestoneImproved = true;
       log(`  ${c.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
-      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
+      history.ledger.push({ direction: c.short_name, isolated_speedup: kl.isolated_speedup, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
     } else {
       // Unified reject/incomplete handling (same as the head track): a FIXABLE reject OR fixable
       // crash-during-warmup (ab_complete=false) of an iso-verified editable kernel earns a corrective
       // re-author (re-optimize the EXISTING kernel; NOT charged to HEAD_BUDGET); only keep PENDING if the
       // A/B was merely incomplete for a NON-fixable reason (real transient timeout/hang). See tryCorrectiveReauthor.
-      const reason = gateRejectReason(integ, c.pct_gpu_time, kl.final_geomean);
+      const reason = gateRejectReason(integ, c.pct_gpu_time, kl.isolated_speedup);
       const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
             short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
             gpu_id: c.gpu_id, kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
-            isolated: kl.final_geomean, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
+            isolated: kl.isolated_speedup, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
             cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
           })
         : { banked: false };
@@ -5829,14 +6130,14 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         log(`  ${c.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
         history.ledger.push({ direction: c.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
       } else if (!abDone) {
-        pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: kl.final_geomean,
+        pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: kl.isolated_speedup,
           pct_gpu_time: c.pct_gpu_time, inputs: mileIntegrateInputs, backend: kl.note || '',
           partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
         log(`  ${c.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
-        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
+        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.isolated_speedup, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
       } else {
         log(`  ${c.short_name}: REJECTED at e2e gate (${reason}).`);
-        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.final_geomean, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
+        history.ledger.push({ direction: c.short_name, isolated_speedup: kl.isolated_speedup, e2e_delta_pct: integ.e2e_delta_pct || 0, verdict: 'dead_end', lesson: reason || 'no e2e gain' });
       }
     }
   }
@@ -5844,13 +6145,15 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   // --- (c) If improved: re-profile + grow the experience library ----------
   if (milestoneImproved) {
     noImprove = 0;
-    profile = await safeAgent(
-      roleAgent('profiler', 'reprofile', 'Re-profile the new best server.', {
-        EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: milestone,
-        OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...ANALYSIS_SKILL_INPUTS,
-      }),
-      { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
+    if (!KERNEL_EXTRACT_ON) {
+      profile = await safeAgent(
+        roleAgent('profiler', 'reprofile', 'Re-profile the new best server.', {
+          EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, ROUND: milestone,
+          OVERLAY_PYTHONPATH: curOverlay, EXTRA_SERVER_ARGS: curFlags, EXTRA_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
+          ...ANALYSIS_SKILL_INPUTS,
+        }),
+        { phase: 'Profile', label: `profiler:reprofile m${milestone}`, schema: PROFILE_SCHEMA });
+    }
   } else {
     noImprove++;
   }
@@ -6220,6 +6523,15 @@ if (want('final')) {
 // State to carry into the NEXT phase invocation (args.state) when driving phase-by-phase.
 const carryState = {
   backend: BACKEND,
+  ...(KERNEL_EXTRACT_ON
+    ? { workload_spec: { ...WORKLOAD_SPEC, kind: WORKLOAD_KIND },
+        profile_workload_json: profile ? profile.profile_workload_json || '' : '',
+        kernel_ranking_json: profile ? profile.kernel_ranking_json || '' : '',
+        kernel_extraction_delivery_json: profile ? profile.kernel_extraction_delivery_json || '' : '',
+        kernel_extraction_summary: {
+          failed_tasks: profile?.failed_tasks || [], deferred_tasks: profile?.deferred_tasks || [],
+          coverage_summary: profile?.coverage_summary || {},
+        } } : {}),
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
@@ -6338,6 +6650,11 @@ const wfReturn = {
   // gain those legs account for. Reported separately from accepted_heads/accepted_kernels precisely
   // because the phase is standalone — "how much did tuning buy" is answerable, not folded into the total.
   tuning_skillset: tuningReturn(),
+  ...(KERNEL_EXTRACT_ON ? { kernel_extraction: {
+    delivery_path: profile?.kernel_extraction_delivery_json || '',
+    failed_tasks: profile?.failed_tasks || [], deferred_tasks: profile?.deferred_tasks || [],
+    coverage_summary: profile?.coverage_summary || {},
+  } } : {}),
   // Verified-isolated wins whose e2e A/B never completed (timeout/hang mid-gate).
   // A REAL isolated speedup that simply ran out of A/B time — surfaced (slim) so
   // the caller can resume/finish it, never silently discarded as a rejection.

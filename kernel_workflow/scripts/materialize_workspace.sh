@@ -71,13 +71,13 @@ find "$DST" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
 # Critical: do NOT pass -h/--dereference. Symlinks must be preserved as symlinks.
 ( cd "$SRC" && tar "${TAR_EXCLUDES[@]}" -cf - . ) | ( cd "$DST" && tar -xf - )
 
-# Share the immutable golden when present on SRC (or as a dangling absolute link target).
-if [[ -e "$SRC/reference_io.pt" || -L "$SRC/reference_io.pt" ]]; then
-  rm -f "$DST/reference_io.pt"
-  ln -s "$(readlink -f "$SRC/reference_io.pt" 2>/dev/null || echo "$SRC/reference_io.pt")" \
-    "$DST/reference_io.pt" 2>/dev/null \
-    || ln -s "$SRC/reference_io.pt" "$DST/reference_io.pt"
-fi
+# Share root and phase-local goldens; the tar excludes both. Keep each relative
+# path intact so B tasks can load captures/<phase>/reference_io.pt after cloning.
+while IFS= read -r -d '' golden; do
+  relative="${golden#"$SRC/"}"
+  [[ -d "$DST/$(dirname "$relative")" ]] || continue  # excluded build/archive tree
+  ln -sfn "$(readlink -f "$golden" 2>/dev/null || echo "$golden")" "$DST/$relative"
+done < <(find "$SRC" \( -type f -o -type l \) -name reference_io.pt -print0)
 
 # Optional: one physical aiter/ tree per eval (shared-root), symlink into DST.
 # Only for immutable vendor trees — never for editable kernel_src/.
