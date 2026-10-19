@@ -29,6 +29,44 @@ export async function loadContract(filename = workflowPath) {
   };`)();
 }
 
+// A UT written at one observed shape per phase passes every correctness gate and tells
+// you nothing about the served distribution -- the bootstrap case and the deliverable
+// look identical from the outside. So the delivery must carry coverage_ledger.py's own
+// per-phase verdict, and a phase below target must say so with its uncovered mass. This
+// reads a recorded number; it does not recompute coverage or run the ledger.
+export function checkShapeCoverage(result) {
+  const coverage = result?.shape_coverage;
+  if (!coverage || typeof coverage !== 'object')
+    return { ok: false, why: 'shape_coverage is missing: record coverage_ledger.py per-phase verdict for the frozen case manifest' };
+  if (typeof coverage.ledger !== 'string' || !coverage.ledger.trim())
+    return { ok: false, why: 'shape_coverage.ledger must name the coverage_ledger.py output' };
+  const phases = coverage.phases;
+  if (!phases || typeof phases !== 'object' || !Object.keys(phases).length)
+    return { ok: false, why: 'shape_coverage.phases must carry one entry per served phase' };
+
+  const below = [];
+  for (const [name, entry] of Object.entries(phases)) {
+    if (!entry || typeof entry !== 'object')
+      return { ok: false, why: `shape_coverage.phases.${name} must be an object` };
+    const pct = entry.coverage_pct;
+    if (typeof pct !== 'number' || !Number.isFinite(pct) || pct < 0 || pct > 100)
+      return { ok: false, why: `shape_coverage.phases.${name}.coverage_pct must be a finite percentage` };
+    if (typeof entry.basis !== 'string' || !entry.basis.trim())
+      return { ok: false, why: `shape_coverage.phases.${name}.basis must say whether the number is mass or instance coverage` };
+    if (typeof entry.meets_target !== 'boolean')
+      return { ok: false, why: `shape_coverage.phases.${name}.meets_target must be a boolean` };
+    if (entry.meets_target) continue;
+    // Below target is allowed and often honest; silently below target is not.
+    const shortfall = entry.shortfall;
+    const uncovered = shortfall?.uncovered_pct;
+    if (!shortfall || typeof uncovered !== 'number' || !Number.isFinite(uncovered)
+        || typeof shortfall.reason !== 'string' || !shortfall.reason.trim())
+      return { ok: false, why: `shape_coverage.phases.${name} is below target and must declare shortfall.uncovered_pct and shortfall.reason` };
+    below.push(`${name} ${pct}% (${entry.basis})`);
+  }
+  return { ok: true, ...(below.length ? { below_target: below } : {}) };
+}
+
 export async function checkDelivery(kernel, result, phase, contract = null) {
   if (!['extract', 'extract_op'].includes(phase)) throw new Error('phase must be extract or extract_op');
   contract ||= await loadContract();
@@ -44,6 +82,7 @@ export async function checkDelivery(kernel, result, phase, contract = null) {
     task: { ok: !!hydrated?.task_dir && hydrated?.editable !== false },
     ut_status: { ok: smoke === 'pass', reported: smoke ?? null },
     source_delivery: await verifySourceDelivery(kernel, hydrated),
+    shape_coverage: checkShapeCoverage(hydrated),
   };
   return { ok: Object.values(checks).every(c => c.ok), phase, checks,
     scope: 'delivery contract only; reads recorded evidence, does not run or independently certify GPU UTs' };
@@ -64,6 +103,7 @@ export async function checkPreparedUT(kernel, result, phase, contract = null) {
     task: { ok: typeof result?.task_dir === 'string' && !!result.task_dir && result.editable !== false },
     ut_status: { ok: smoke === 'pass', reported: smoke ?? null },
     source_delivery: await verifySourceDelivery({ ...kernel, source_delivery_required: true }, result),
+    shape_coverage: checkShapeCoverage(result),
     boundary: { ok: Array.isArray(selected) && selected.length > 0 &&
       selected.every(k => typeof k === 'string' && k.trim()) &&
       (phases.length ? selected.every(k => declared.has(k)) : selected.length === 1) },

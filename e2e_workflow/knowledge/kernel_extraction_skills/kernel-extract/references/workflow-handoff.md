@@ -77,6 +77,13 @@ entry with its identities, reason and evidence paths. Retain required companion
 leaves, per-phase coverage and uncovered mass. Keep classification and attributed
 cost in the saved declaration/ranking; packaging never recomputes them.
 
+`coverage_summary` carries selection coverage — how much workload device time the
+selected identities hold. It is not shape coverage, and one does not substitute for the
+other: each task's `shape_coverage` block states how much of its own served distribution
+its frozen cases exercise, and travels with that task into the delivery. Downstream
+optimization runs these fixed cases, so a task tested at one batch size optimizes against
+one batch size; surface both numbers rather than reporting the larger one.
+
 ```bash
 node "$WORKFLOW_DIR/scripts/agentx_kernel_preparation.mjs" \
   --eval-dir "$EVAL_DIR" --manifest "$EVIDENCE_DIR/workflow_tasks.json" \

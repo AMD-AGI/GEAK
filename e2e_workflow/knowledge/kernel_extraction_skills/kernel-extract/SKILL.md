@@ -195,12 +195,43 @@ failed verdict into a pass or rerun an unchanged UT to repair JSON fields.
 Read [source extraction](references/source-extraction.md) and
 [task authoring](references/task-authoring.md). Default to fixed-seed generated inputs
 at shapes/dtypes/layouts established from existing workload evidence. Run one such
-baseline case per phase, then expand cases and editable leaves. The UT reads its
+baseline case per phase to establish replay — **that is a bootstrap checkpoint, never
+the deliverable** — then expand the manifest to span the measured distribution before
+any gate is reported. The UT reads its
 frozen case manifest; it never launches serving, profiles, or captures shapes.
 Each `tasks/<name>/` contains its own `kernel_src/`, `cases.py`, `meta.json`,
 `unittest.py`, baseline manifest/overlay and `run/` evidence. Captured oracles are
 optional; preserve minimal structural fixtures only where needed.
 Copy the shared harness/leg/overlay helpers into the task; freeze them once authored.
+
+**The case manifest covers the measured shape distribution, not the one shape the census
+happened to open on.** A decode kernel served at batch sizes 1 through 9 is not tested by
+a case at batch 3, and a prefill kernel served from 1 to 32768 new tokens is not tested by
+a single 15k instance — yet both pass every correctness gate, because the bootstrap case
+and the finished UT are indistinguishable from the outside. Build the manifest from
+`plan_sampling_points.py`'s points: each planned point's shape needs a case within the
+ledger's shape tolerance, and each case carries the `effective_calls` that point represents,
+so the weighting is the observed one. Add dispatch boundaries, graph-padding buckets and
+material tails as their own cases; a bucket that changes branch or kernel is a separate
+case even when its mass is small.
+
+Emit the frozen manifest as `run/ut_cases.json`
+(`[{"sig":…, "phase":"DECODE", "shape":18, "effective_calls":N}, …]`) and grade it:
+
+```bash
+python3 "$SKILL_ROOT/scripts/coverage_ledger.py" \
+  --points "$EVAL_DIR/sampling_points.json" --ut-cases "$TASK_DIR/run/ut_cases.json" \
+  --census <point_id>=<census.json> --target 90 \
+  --out "$TASK_DIR/run/coverage.json"
+```
+
+Record the result as `shape_coverage` on the task return, with the ledger path, the
+target, and per phase its `basis` (`mass` or `instance`), `coverage_pct` and
+`meets_target`. A phase below target is allowed and often honest, but it must carry
+`shortfall.uncovered_pct` and `shortfall.reason`; the delivery gate rejects a missing or
+silently-below-target coverage block. Remember the ledger refuses mass coverage for a
+phase measured at one point and reports instance coverage instead — a 100% from one point
+is the denominator agreeing with itself, not coverage.
 
 Deliver actual native/JIT/generated computation source for every claimed leaf,
 with build resources and version/hash provenance. A copied dispatcher that
@@ -216,8 +247,11 @@ whole allocated set. Never run a GPU command outside a lease.
 The UT must cover baseline/candidate binding, frozen-oracle and random-value
 correctness at served shapes, phase-specific graph/compile behavior and input
 refresh, each editable leaf's numerical negative control, restored-source
-integrity, and both timing legs for every positive-mass signature. Compilation
-failure is not a successful numerical negative control. Report missing cases
+integrity, both timing legs for every positive-mass signature, and the measured
+shape distribution graded by `coverage_ledger.py`. Compilation
+failure is not a successful numerical negative control. A green gate report on a
+one-shape manifest is not a passing UT; report the achieved coverage with the same
+prominence as the pass. Report missing cases
 and mass; do not renormalize survivors into full coverage.
 
 Before reporting a verdict, verify deterministic input construction, baseline
@@ -264,7 +298,11 @@ tests. Keep failures visible and continue independent tasks when possible.
 
 Write `REPORT.md` and `results.json` with all selected identities, task/source
 locations, actual commands and devices, per-gate status, declared and achieved
-coverage, uncovered mass and limitations. Separate inventory completion, task
-completion, GPU UT status and delivery consistency. A CPU-only check or a
+coverage, uncovered mass and limitations. Report **two** coverage numbers and never let
+one stand for the other: selection coverage (how much of the workload's device time the
+selected identities carry) and, per task and per phase, shape coverage (how much of that
+kernel's own served distribution the frozen case manifest exercises). A delivery can
+select 60% of device time and still test one shape of it. Separate inventory completion,
+task completion, GPU UT status and delivery consistency. A CPU-only check or a
 subset of passing tasks is not full acceptance. Do not report E2E improvement
 without a separately authorized and measured E2E result.

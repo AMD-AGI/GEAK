@@ -5,11 +5,20 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { loadContract, checkDelivery, attachVerdict } from './kernel_extraction_delivery.mjs';
+import { loadContract, checkDelivery, checkShapeCoverage, attachVerdict } from './kernel_extraction_delivery.mjs';
 import { createRuntime } from '../../interface/runtime/engine/run_workflow.mjs';
 
 const contract = await loadContract();
 const cli = fileURLToPath(new URL('./kernel_extraction_delivery.mjs', import.meta.url));
+
+const COVERAGE_OK = {
+  ledger: 'run/coverage.json', target_pct: 90,
+  phases: {
+    DECODE: { basis: 'mass', coverage_pct: 93.1, meets_target: true },
+    PREFILL: { basis: 'mass', coverage_pct: 91.0, meets_target: true },
+  },
+};
+const coverageWith = (overrides) => ({ ...COVERAGE_OK, ...overrides });
 
 async function fixture(t) {
   const task = await fs.mkdtemp(path.join(os.tmpdir(), 'extraction-delivery-'));
@@ -35,6 +44,7 @@ async function fixture(t) {
     op_kind: 'attn', joint_ut: { phases: phases.map(p => p.spec) } };
   const result = { ...phases[0].row, task_dir: task, editable: true, baseline_frozen: true,
     op_kind: 'attn', smoke: 'pass', unittest_smoke: 'pass',
+    shape_coverage: COVERAGE_OK,
     phase_selection_validations: phases.map(p => p.row) };
   for (const p of phases) await fs.writeFile(path.join(task, `${p.spec.regime}.json`), JSON.stringify(p.row.selection_validation));
   const pack = async (value = result) => {
@@ -237,4 +247,52 @@ test('runtime preserves legacy file verdicts and refuses unprepared AgentX dispa
   assert.equal(unprepared.unittest_smoke, 'fail');
   assert.match(unprepared.smoke_detail, /missing prepared UT/);
   assert.equal(agentCalls, before, 'AgentX cannot fall back to legacy UT authoring');
+});
+
+// A correctness-green UT at one shape and a correctness-green UT across the served
+// distribution are indistinguishable without this block, so its absence is a failure,
+// not a default.
+test('shape coverage must be recorded', () => {
+  assert.equal(checkShapeCoverage({ shape_coverage: COVERAGE_OK }).ok, true);
+  for (const bad of [undefined, null, 'run/coverage.json', {}, { ledger: 'run/coverage.json' },
+                     { ledger: '  ', phases: COVERAGE_OK.phases },
+                     { ledger: 'run/coverage.json', phases: {} }]) {
+    const verdict = checkShapeCoverage({ shape_coverage: bad });
+    assert.equal(verdict.ok, false, `accepted ${JSON.stringify(bad)}`);
+    assert.match(verdict.why, /shape_coverage/);
+  }
+});
+
+test('a malformed per-phase entry fails', () => {
+  for (const entry of [null, 'mass', { basis: 'mass', meets_target: true },
+                       { basis: 'mass', coverage_pct: 101, meets_target: true },
+                       { basis: 'mass', coverage_pct: NaN, meets_target: true },
+                       { basis: '', coverage_pct: 95, meets_target: true },
+                       { basis: 'mass', coverage_pct: 95 }]) {
+    const verdict = checkShapeCoverage({ shape_coverage: coverageWith({
+      phases: { DECODE: entry } }) });
+    assert.equal(verdict.ok, false, `accepted ${JSON.stringify(entry)}`);
+  }
+});
+
+test('below target is allowed only with a declared shortfall', () => {
+  const below = (shortfall) => checkShapeCoverage({ shape_coverage: coverageWith({
+    phases: { DECODE: { basis: 'instance', coverage_pct: 41, meets_target: false,
+                        ...(shortfall ? { shortfall } : {}) } } }) });
+  assert.equal(below(null).ok, false, 'a silent shortfall must fail');
+  assert.equal(below({ uncovered_pct: 59 }).ok, false, 'a shortfall needs a reason');
+  assert.equal(below({ reason: 'one measured point' }).ok, false, 'a shortfall needs its mass');
+  assert.equal(below({ uncovered_pct: 59, reason: '  ' }).ok, false, 'an empty reason is not a reason');
+  const declared = below({ uncovered_pct: 59, reason: 'one measured point; mass coverage unavailable' });
+  assert.equal(declared.ok, true, 'honest partial coverage is accepted');
+  assert.deepEqual(declared.below_target, ['DECODE 41% (instance)']);
+});
+
+test('the delivery preflight rejects a task with no shape coverage', async (t) => {
+  const { kernel, result } = await fixture(t);
+  const { shape_coverage, ...without } = result;
+  const verdict = await checkDelivery(kernel, without, 'extract_op', contract);
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.checks.shape_coverage.ok, false);
+  assert.equal(verdict.checks.ut_status.ok, true, 'a passing smoke does not excuse it');
 });

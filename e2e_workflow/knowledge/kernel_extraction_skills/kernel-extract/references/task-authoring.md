@@ -78,6 +78,22 @@ trace metadata and verified source/configuration to establish that manifest. If
 needed, collect missing shape metadata once during extraction; UT execution must
 never invoke `capture_shapes.py`, a profiler or the serving model.
 
+The manifest spans the **served distribution**, not one point in it. Derive its shape set
+from `plan_sampling_points.py`'s points: one case per planned point of the phases this
+task owns, within the ledger's shape tolerance, each carrying that point's
+`effective_calls`. Then add the buckets the points do not already name — dispatch
+boundaries, graph-padding sizes, chunk tails, the smallest and largest served shapes —
+as their own cases, because a bucket that switches branch or kernel is a different test
+regardless of its mass. One case per phase is a bootstrap, and a manifest that never grew
+past it will pass every gate while testing a single batch size of a kernel served across
+ten. Export the frozen manifest to `run/ut_cases.json` and grade it with
+`coverage_ledger.py`; the resulting `shape_coverage` block is part of the task return and
+the delivery gate rejects a task without it.
+
+A case whose shape is reconstructed rather than observed stays in the manifest with zero
+observed weight and is labelled as an envelope probe: it extends correctness coverage and
+must not be weighted as served mass.
+
 Generate ordinary activations and weights directly with the supplied seeded
 `torch.Generator`. Preserve each operand's valid range and format: scales may need
 positive values, and packed quantized operands must be constructed with the real
