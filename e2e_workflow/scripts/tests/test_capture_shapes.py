@@ -1140,6 +1140,31 @@ class TestByteBudgetAndReclaim(_RecorderTestCase):
         self.assertEqual(added, 0)
         self.assertEqual(len(store), 1)
 
+    def test_shared_payload_reuse_requires_comparable_contents_and_container_types(self):
+        from unittest.mock import patch
+
+        class OpaqueState:
+            def __repr__(self):
+                return "same display, unknown contents"
+
+        tensor = FakeTensor((8,), value=3)
+        pairs = [([tensor], (tensor,)),
+                 ([tensor, OpaqueState()], [tensor, OpaqueState()])]
+        for first_value, second_value in pairs:
+            with self.subTest(first=type(first_value).__name__, second=type(second_value).__name__):
+                store = {}
+                first, _, _ = cs._snapshot_kwargs({"w1": first_value}, store, "share_large", 1)
+                second, _, _ = cs._snapshot_kwargs({"w1": second_value}, store, "share_large", 1)
+                self.assertNotEqual(first, second)
+                self.assertEqual(len(store), 2)
+        # Unsupported byte comparison cannot silently alias a previous payload.
+        with patch.object(self.torch, "equal", side_effect=TypeError("unsupported dtype")):
+            store = {}
+            first, _, _ = cs._snapshot_kwargs({"w1": tensor}, store, "share_large", 1)
+            second, _, _ = cs._snapshot_kwargs({"w1": tensor}, store, "share_large", 1)
+            self.assertNotEqual(first, second)
+            self.assertEqual(len(store), 2)
+
     def test_existing_kwarg_name_cannot_bypass_the_case_byte_limit(self):
         with _env(CAPTURE_BYTE_BUDGET="0", CAPTURE_CASE_BYTE_LIMIT="300",
                   CAPTURE_PERSIST_POLICY="share_large", CAPTURE_SHARE_MIN_BYTES="1"):
