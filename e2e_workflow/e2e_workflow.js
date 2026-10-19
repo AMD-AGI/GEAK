@@ -1498,7 +1498,7 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // measured stack still exists. The intent remains structured so every phase
 // feeds the same schema-v2 contract rather than inventing a private summary.
 let lastCommittedCheckpoint = null;
-async function persistE2EValidationCheckpoint(relativePath, intent) {
+async function persistE2EValidationCheckpoint(relativePath, intent, timeoutFor = agentTimeoutFor) {
   if (!EVAL_DIR) return null;
   const target = `${EVAL_DIR}/${relativePath}`;
   const payload = {
@@ -1519,7 +1519,8 @@ async function persistE2EValidationCheckpoint(relativePath, intent) {
     '```json\n' + JSON.stringify(payload, null, 2) + '\n```',
     { phase: intent.phase || 'Finalize', label: `persist-e2e-checkpoint:${relativePath}`,
       schema: CHECKPOINT_WRITE_SCHEMA },
-    2
+    2,
+    timeoutFor
   );
   // Candidate-local A/B snapshots are diagnostic evidence, never a replay
   // parent; only a complete accepted stack may advance the digest chain.
@@ -1538,7 +1539,7 @@ async function persistE2EValidationCheckpoint(relativePath, intent) {
 // accepted config/tuning/overlay/final result must never silently continue
 // without the checkpoint that makes it replayable after an interrupted run.
 async function requireE2EValidationCheckpoint(relativePath, intent) {
-  const written = await persistE2EValidationCheckpoint(relativePath, intent);
+  const written = await persistE2EValidationCheckpoint(relativePath, intent, checkpointTimeoutFor);
   if (!written || written.written !== true || !written.checkpoint_sha256) {
     throw new Error(
       `checkpoint_write_failed: ${relativePath}; accepted result cannot be committed without a replayable checkpoint`
@@ -1903,6 +1904,16 @@ function atReserveFloor() {
   return TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED &&
     remainingMs() - FINAL_RESERVE_MS <= AGENT_TIMEOUT_FLOOR_MS;
 }
+// A required checkpoint commits a result that was already measured. Its writer copies and hashes the
+// replay assets, holds no GPU and starts nothing new, so the reserve cap does not bound it: that cap
+// gives a commit dispatched at the boundary the 2min floor, and the write takes 4-8min. The bound is
+// passed at one call site, requireE2EValidationCheckpoint, never keyed on a label. A writer that hangs
+// past it is still not retried beside itself: two writers leave the checkpoint's digests disagreeing
+// with its assets, and recovery rejects it.
+const CHECKPOINT_COMMIT_TIMEOUT_MS = 30 * 60000;
+function checkpointTimeoutFor() {
+  return Math.max(agentTimeoutFor(), Math.min(AGENT_TIMEOUT_MS, CHECKPOINT_COMMIT_TIMEOUT_MS));
+}
 
 // ===========================================================================
 // GEAK-ABLATION-ARMS-v1 — phase-resumed cost ablations (research/ablations/README.md)
@@ -2012,14 +2023,14 @@ function ablEffortFor(opts, attempt) {
   return ABL_CHEAP_LABELS.test(label) ? 'low' : null;
 }
 
-function agentBounded(rawPrompt, opts, ablAttempt, onHung) {
+function agentBounded(rawPrompt, opts, ablAttempt, onHung, timeoutFor = agentTimeoutFor) {
   const prompt = withProcessSafety(rawPrompt);
   const ablEffort = ablEffortFor(opts, ablAttempt || 0);
   if (ablEffort) {
     opts = { ...(opts || {}), effort: ablEffort };
     ablEvent({ event: 'route', label: (opts && opts.label) || '', tier: 'cheap', effort: ablEffort });
   }
-  const timeoutMs = agentTimeoutFor();
+  const timeoutMs = timeoutFor();
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
   const run = agent(prompt, opts);
@@ -2041,7 +2052,7 @@ function agentBounded(rawPrompt, opts, ablAttempt, onHung) {
 // (adoptAbandonedVerdict).
 const ABANDONED_RUNS = new Map();
 
-async function safeAgent(prompt, opts, tries = 3) {
+async function safeAgent(prompt, opts, tries = 3, timeoutFor = agentTimeoutFor) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
@@ -2054,7 +2065,7 @@ async function safeAgent(prompt, opts, tries = 3) {
         : prompt;
       const ev = tlAgent(prompt, opts, i + 1);   // record AT DISPATCH; ok=false until it resolves
       let hung = null;
-      const r = await agentBounded(p2, opts, i, (run) => { hung = run; });
+      const r = await agentBounded(p2, opts, i, (run) => { hung = run; }, timeoutFor);
       if (r) {
         if (r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
         if (ev) ev.ok = true;
