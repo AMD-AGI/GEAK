@@ -5,6 +5,14 @@ import { createHash } from 'node:crypto';
 import { checkPreparedUT } from './kernel_extraction_delivery.mjs';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+// Keep whole-op routing consistent with the head consumer's vocabulary.
+function opKind(kernel, result) {
+  const canonical = value => value === 'attention' ? 'attn' : value;
+  const requested = canonical(kernel.op_kind), returned = canonical(result.op_kind);
+  if (requested && returned && requested !== returned)
+    throw new Error(`op_kind differs between declaration and result: ${requested} / ${returned}`);
+  return returned || requested;
+}
 async function within(root, name) {
   const file = await fs.realpath(path.resolve(root, name));
   const relative = path.relative(root, file);
@@ -60,8 +68,9 @@ async function readPreparedDocument(root, delivery, deliveryPath) {
         throw new Error('selected kernel has no attributed cost in its saved ranking');
       const candidate = { ...kernel, short_name: label, entity_kind: 'gpu_kernel',
         target_callable: result.target_callable,
-        op_kind: kernel.op_kind || result.op_kind, kernel_extraction: evidence,
+        op_kind: opKind(kernel, result), kernel_extraction: evidence,
         pct_gpu_time: share, source_delivery_required: true };
+      if (task.phase === 'extract_op' && !candidate.op_kind) throw new Error('whole-op task requires op_kind');
       const checked = await checkPreparedUT(candidate, result, task.phase);
       if (!checked.ok) {
         output.failed_tasks.push({ short_name: label, task_dir: result.task_dir,
@@ -73,6 +82,17 @@ async function readPreparedDocument(root, delivery, deliveryPath) {
       }
       for (const id of candidate.selected_device_kernels || [candidate.device_kernel]) selectedOwners.set(id, label);
       candidate.prepared_ut = { phase: task.phase, result_path: resultPath, sha256: sha256(bytes) };
+      // Existing optimization lanes lease one GPU. A validated multi-rank UT
+      // remains a deliverable, but cannot be dispatched to that single-card lane.
+      const gpuCount = kernel.required_gpu_count ?? result.required_gpu_count ??
+        (candidate.op_kind === 'collective' ? 2 : 1);
+      if (!Number.isInteger(gpuCount) || gpuCount < 1) throw new Error('invalid required_gpu_count');
+      if (gpuCount > 1) {
+        output.deferred_tasks.push({ ...candidate, task_dir: result.task_dir,
+          result_path: resultPath, required_gpu_count: gpuCount,
+          reason: 'UT validated; optimization requires a multi-GPU lane, current head/milestone lanes lease one GPU' });
+        continue;
+      }
       const queue = task.phase === 'extract_op' && ['gemm', 'attn', 'moe'].includes(candidate.op_kind)
         ? 'head_candidates' : 'kernel_candidates';
       output[queue].push(candidate);
@@ -94,7 +114,7 @@ export async function reusePreparedUT(kernel) {
     const result = JSON.parse(bytes.toString('utf8'));
     const checked = await checkPreparedUT({ ...kernel, source_delivery_required: true }, result, ref.phase);
     if (!checked.ok) throw new Error(JSON.stringify(checked.checks));
-    return { ...result, smoke: 'pass', unittest_smoke: 'pass' };
+    return { ...result, op_kind: opKind(kernel, result), smoke: 'pass', unittest_smoke: 'pass' };
   } catch (error) {
     return { smoke: 'fail', unittest_smoke: 'fail',
       smoke_detail: `prepared UT is no longer valid: ${error.message}` };

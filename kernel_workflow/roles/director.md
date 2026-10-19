@@ -67,32 +67,22 @@ continued wave build on the cumulative best instead of restarting. Handle it as 
 
 ### `mode=author` — seed an empty workspace anchored on the immutable oracle
 When `MODE=author`, `KERNEL_PATH_ORIG` is an **op task dir** (holds `meta.json` + immutable
-`unittest.py` + optional `reference_io.pt`), NOT a kernel to optimize. There is no source to copy.
+`unittest.py` + optional captured oracles). Any existing candidate source will be
+replaced by the new implementation; preserve the complete test and baseline resources.
 Do this instead of the optimize-mode steps below:
 1. Same collision-proof `TS` + `EVAL_DIR` decision as below.
-2. Build the layout WITHOUT copying any kernel source:
+2. Build the layout, then empty only the candidate source directory:
    ```bash
    mkdir -p "$EVAL_DIR/workspace/kernel_src" "$EVAL_DIR/baseline"
    echo "$KERNEL_PATH_ORIG" > "$EVAL_DIR/original_kernel_path.txt"
-   # Copy the IMMUTABLE oracle in read-only (the Author/optimize loop judge against it, never edit it).
-   # This INCLUDES baseline_overlay/ + harness_lib.py: the frozen live serving stack IS the timing-baseline
-   # denominator regardless of TARGET_LANGUAGE — it must ride along, immutable, so the unittest can time
-   # the authored seed against the live online path (never against the seed's own language scaffold).
-   # reference_io.pt is OPTIONAL and usually ABSENT: only e2e's kernel_extractor records a golden (it
-   # captures unsynthesizable real routing / paged-KV metadata off a live server). An oracle_freezer dir
-   # has no golden — it re-derives operands from meta.cases[] seeds and checks parity against the
-   # frozen baseline live. The [ -e ] guards below already handle both; do not "fix" a missing file.
-   for f in meta.json unittest.py cases.py harness_lib.py leg_runner.py overlay_setup.py; do
-     [ -e "$KERNEL_PATH_ORIG/$f" ] && cp "$KERNEL_PATH_ORIG/$f" "$EVAL_DIR/workspace/$f"
-   done
-   # golden is BIG (~1 GB) and IMMUTABLE — SHARE the single original via an ABSOLUTE symlink instead of
-   # copying it into every workspace. unittest loads it with os.path.join(HERE, "reference_io.pt") and the
-   # sha check hashes the file bytes, both transparent through a symlink. Downstream tars (engineer/verify)
-   # carry the symlink verbatim (no -h/--dereference anywhere), so the whole lane shares one physical file.
-   [ -e "$KERNEL_PATH_ORIG/reference_io.pt" ] && ln -s "$KERNEL_PATH_ORIG/reference_io.pt" "$EVAL_DIR/workspace/reference_io.pt"
-   for d in baseline_overlay baseline_ref baseline_src; do
-     [ -d "$KERNEL_PATH_ORIG/$d" ] && cp -r "$KERNEL_PATH_ORIG/$d" "$EVAL_DIR/workspace/$d"
-   done
+   # Preserve the complete task: phase-local captures, baseline overlays, helpers
+   # and build resources may live below subdirectories. Share immutable goldens.
+   bash "${WORKFLOW_DIR:-$SKILL_DIR}/scripts/materialize_workspace.sh" \
+     --src "$KERNEL_PATH_ORIG" --dst "$EVAL_DIR/workspace" \
+     --shared-root "$EVAL_DIR/_shared" --link-aiter
+   # Only candidate source is replaced for author mode; retain every UT dependency.
+   rm -rf "$EVAL_DIR/workspace/kernel_src"
+   mkdir -p "$EVAL_DIR/workspace/kernel_src"
    chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
    for d in baseline_overlay baseline_ref baseline_src; do
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true

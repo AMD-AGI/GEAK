@@ -44,6 +44,12 @@ Queue exhaustion ends dispatch; undispatched tasks remain in carried state. Fast
 and deep modes retain their head-only scheduling. Missing or stale UT evidence
 fails that task rather than invoking another extractor from an optimization phase.
 
+Declare `required_gpu_count` for multi-rank tasks in `run/requested_kernel.json`.
+Current head/milestone lanes allocate one GPU per task. Completed multi-GPU UTs
+remain in the delivery and are listed as deferred for optimization, with evidence
+paths; they are not retried on one card. A collective without an explicit rank
+requirement is deferred as well. Its extraction coverage remains recorded.
+
 ## Package the completed tasks
 
 Run the skill's own per-task preflight first, preserving `run/requested_kernel.json`

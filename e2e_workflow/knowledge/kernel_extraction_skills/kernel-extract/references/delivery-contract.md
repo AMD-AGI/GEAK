@@ -13,7 +13,7 @@ called `KERNEL` by the local checker; no external queue or orchestrator is invol
 {
   "short_name": "example_operation",
   "entity_kind": "gpu_kernel",
-  "op_kind": "attention",
+  "op_kind": "attn",
   "device_kernel": "exact_selected_device_symbol",
   "selected_device_kernels": ["exact_selected_device_symbol"],
   "source_delivery_required": true,
@@ -88,6 +88,9 @@ Use one of the two local forms; both require source evidence here:
 |---|---|
 | `extract` | `editable:true`, `task_dir`, `unittest_smoke:"pass"` |
 | `extract_op` | `op_kind`, `task_dir`, `smoke:"pass"`; also set `editable:true` |
+
+Use `op_kind=gemm|attn|moe` for the corresponding head operators. The workflow
+accepts `attention` as an alias for `attn`; declaration and result must agree.
 
 Both forms also supply `target_callable`, applicable `candidate_bind` and
 `baseline_frozen`, exact `device_kernel`, `seam_candidates`, full selection

@@ -190,6 +190,8 @@ The shared leg runner already performs this isolation.
 7. `h.measure_legs(task, meta)` measures interleaved baseline/candidate subprocess
    legs with the same mode and shared timer. Use
    `h.serving_weighted_speedup(per_case, meta)` for the observed-call aggregate.
+   Print the aggregate as `GEAK_WEIGHTED_SPEEDUP=<value>` for downstream optimization;
+   retain per-case timings and unweighted geomean as diagnostics.
    Every positive-mass signature must have finite timings on both sides.
 
 The shared tensor checker assumes independent returned outputs. If the actual

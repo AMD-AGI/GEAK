@@ -383,7 +383,10 @@ kernel milestones → E2E validation. Outer Profile/Strategize, ConfigSweep and 
 are skipped. B still uses bounded trace sampling to establish kernel identity and
 cost. All three head modes and the milestone loop reuse the prepared task directory
 and immutable UT, running it against optimization candidates instead of authoring
-another test. Missing or changed preparation evidence fails the task locally.
+another test. Workspace setup retains phase-local oracles, helpers and baseline
+resources; head and milestone use the workload-weighted result. Missing or changed
+preparation evidence fails the task locally. Current optimization lanes are single-GPU:
+completed multi-rank UTs retain their artifacts and are deferred for separate scheduling.
 
 The default selection remains per-phase Top 5 intersected with whole-workload
 GPU-time share strictly greater than 3%, without backfilling. Explicit user scope

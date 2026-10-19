@@ -187,3 +187,31 @@ test('all optimization dispatch sites reuse UTs and fail locally without authori
   await fs.appendFile(path.join(f.task, 'cases.py'), '# invalidates the frozen UT\n');
   for (const dispatch of dispatchers) assert.equal((await dispatch(prepared)).ext.smoke, 'fail');
 });
+
+test('whole-op metadata routes attention aliases to head and preserves the consumer op kind', async t => {
+  const f = await delivered(t);
+  await f.write('run/requested_kernel.json', {...f.kernel, op_kind: 'attention'});
+  await f.write('run/RETURN.json', {...f.result, smoke: 'pass'});
+  await f.writeEval('manifest.json', {...f.manifest, tasks: [{task_dir: 'tasks/leaf', phase: 'extract_op'}]});
+  await f.pack();
+  const queues = await readPreparedKernels(f.evalDir, 'delivery.json');
+  assert.equal(queues.kernel_candidates.length, 0);
+  assert.equal(queues.head_candidates[0].op_kind, 'attn');
+  assert.equal((await reusePreparedUT(queues.head_candidates[0])).op_kind, 'attn');
+  await f.write('run/RETURN.json', {...f.result, smoke: 'pass', op_kind: 'moe'});
+  await assert.rejects(f.pack(), /op_kind differs/);
+});
+
+test('completed multi-rank UTs retain evidence but do not enter single-GPU optimization lanes', async t => {
+  const f = await delivered(t);
+  for (const declaration of [{required_gpu_count: 8}, {op_kind: 'collective'}]) {
+    await f.write('run/requested_kernel.json', {...f.kernel, ...declaration});
+    await f.pack();
+    const queues = await readPreparedKernels(f.evalDir, 'delivery.json');
+    assert.equal(queues.head_candidates.length + queues.kernel_candidates.length, 0);
+    const task = queues.deferred_tasks.at(-1);
+    assert.equal(task.task_dir, f.task);
+    assert.match(task.reason, /UT validated.*multi-GPU lane/);
+    assert.equal((await reusePreparedUT(task)).unittest_smoke, 'pass');
+  }
+});

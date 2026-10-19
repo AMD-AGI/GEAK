@@ -203,6 +203,33 @@ async function run(body, overrides = {}, reply = selection()) {
       mode === 'normal' ? ['setup', 'head', 'kernel', 'final'] : ['setup', 'head', 'final']);
   }
 
+  // Execute the actual optimization + integration block with disagreeing metrics.
+  const optimizeAndIntegrate = between('  const optimized = await parallel(cands.map', '  // --- (c) If improved:');
+  async function metricDispatch(enabled, weighted, geomean) {
+    const integrated = [];
+    const env = {KERNEL_EXTRACT_ON: enabled, cands: [candidate('weighted')],
+      EVAL_DIR: '/eval', MODEL_PATH: '/model', WORKLOAD: {}, WORKFLOW_DIR: '/wf', profile: {},
+      curOverlay: '', curFlags: '', curEnv: '', curTput: 100, NOISE_BAND: 0.5,
+      KERNEL_WF_SCRIPT: '/kernel.js', KERNEL_WF_DIR: '/kernel', USE_EXPERT_SKILLS: false,
+      EXPERT_SKILLS_DIR: '', KB_ARGS: {}, KERNEL_BUDGET: 1, GRAPH_REQ: '', TASK: '', EXTRACT_SCHEMA: {},
+      history: {ledger: []}, acceptedKernels: [], log: () => {}, noteKernelKB: () => {},
+      laneArgs: a => a, parallel: jobs => Promise.all(jobs.map(f => f())),
+      extractWithBaseline: async () => ({unittest_smoke: 'pass', task_dir: '/task', target_callable: 'pkg:leaf'}),
+      workflow: async () => ({final_patch: '/patch', final_geomean: geomean, final_weighted: weighted}),
+      runIntegrateBothLegs: async (_intro, inputs) => {
+        integrated.push(inputs);
+        return {e2e_throughput_tok_s: 110};
+      },
+      integAccepted: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}),
+    };
+    await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${optimizeAndIntegrate}`)(env);
+    return integrated;
+  }
+  assert.equal((await metricDispatch(true, 1.4, 0.8))[0].KERNEL_RESULT.verified_isolated_speedup, 1.4);
+  assert.deepEqual(await metricDispatch(true, 0.8, 1.4), [], 'unweighted wins cannot override an AgentX regression');
+  assert.deepEqual(await metricDispatch(false, 1.4, 0.8), [], 'fixed-load metric choice stays unchanged');
+  assert.deepEqual(await metricDispatch(true, undefined, 1.4), [], 'missing primary metrics cannot fall back to unweighted wins');
+
   const baselineOnly = { eval_dir: '/saved', baseline_throughput_tok_s: 400 };
   const resumed = await run(resume, { ST: baselineOnly });
   assert.deepEqual(resumed.calls.map(c => c.role), ['kernel_extractor']);
