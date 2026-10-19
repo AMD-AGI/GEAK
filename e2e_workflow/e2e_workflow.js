@@ -1535,7 +1535,7 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // measured stack still exists. The intent remains structured so every phase
 // feeds the same schema-v2 contract rather than inventing a private summary.
 let lastCommittedCheckpoint = null;
-async function persistE2EValidationCheckpoint(relativePath, intent) {
+async function persistE2EValidationCheckpoint(relativePath, intent, timeoutFor = agentTimeoutFor) {
   if (!EVAL_DIR) return null;
   const target = `${EVAL_DIR}/${relativePath}`;
   const payload = {
@@ -1556,7 +1556,8 @@ async function persistE2EValidationCheckpoint(relativePath, intent) {
     '```json\n' + JSON.stringify(payload, null, 2) + '\n```',
     { phase: intent.phase || 'Finalize', label: `persist-e2e-checkpoint:${relativePath}`,
       schema: CHECKPOINT_WRITE_SCHEMA },
-    2
+    2,
+    timeoutFor
   );
   // Candidate-local A/B snapshots are diagnostic evidence, never a replay
   // parent; only a complete accepted stack may advance the digest chain.
@@ -1575,7 +1576,7 @@ async function persistE2EValidationCheckpoint(relativePath, intent) {
 // accepted config/tuning/overlay/final result must never silently continue
 // without the checkpoint that makes it replayable after an interrupted run.
 async function requireE2EValidationCheckpoint(relativePath, intent) {
-  const written = await persistE2EValidationCheckpoint(relativePath, intent);
+  const written = await persistE2EValidationCheckpoint(relativePath, intent, checkpointTimeoutFor);
   if (!written || written.written !== true || !written.checkpoint_sha256) {
     throw new Error(
       `checkpoint_write_failed: ${relativePath}; accepted result cannot be committed without a replayable checkpoint`
@@ -1929,6 +1930,12 @@ Launch it so it is orphaned to init, OUTSIDE the manager's reach, then poll its 
 Then poll in SEPARATE short calls (\`sleep 300; tail -5 run_bench.out\`) until the summary lands. Before
 you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and whether
 the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
+
+## ONCE THE FINAL PHASE STARTS, IT OWNS THE GPUS
+When \$EVAL_DIR/.final_phase_fence exists the search is over: the workflow stopped every leg, tuner and
+waiter still running from it, on purpose, so Finalize and Validate measure on quiet GPUs. Unless you are
+the e2e_integrator finalizing or the director validating, start nothing more on the GPUs (no server, leg,
+tuner or profiler), do not relaunch anything of yours that was stopped, and return what you already have.
 `;
 function withProcessSafety(prompt) {
   return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
@@ -1961,6 +1968,16 @@ function agentTimeoutFor() {
 function atReserveFloor() {
   return TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED &&
     remainingMs() - FINAL_RESERVE_MS <= AGENT_TIMEOUT_FLOOR_MS;
+}
+// A required checkpoint commits a result that was already measured. Its writer copies and hashes the
+// replay assets, holds no GPU and starts nothing new, so the reserve cap does not bound it: that cap
+// gives a commit dispatched at the boundary the 2min floor, and the write takes 4-8min. The bound is
+// passed at one call site, requireE2EValidationCheckpoint, never keyed on a label. A writer that hangs
+// past it is still not retried beside itself: two writers leave the checkpoint's digests disagreeing
+// with its assets, and recovery rejects it.
+const CHECKPOINT_COMMIT_TIMEOUT_MS = 30 * 60000;
+function checkpointTimeoutFor() {
+  return Math.max(agentTimeoutFor(), Math.min(AGENT_TIMEOUT_MS, CHECKPOINT_COMMIT_TIMEOUT_MS));
 }
 
 // ===========================================================================
@@ -2071,14 +2088,14 @@ function ablEffortFor(opts, attempt) {
   return ABL_CHEAP_LABELS.test(label) ? 'low' : null;
 }
 
-function agentBounded(rawPrompt, opts, ablAttempt, onHung) {
+function agentBounded(rawPrompt, opts, ablAttempt, onHung, timeoutFor = agentTimeoutFor) {
   const prompt = withProcessSafety(rawPrompt);
   const ablEffort = ablEffortFor(opts, ablAttempt || 0);
   if (ablEffort) {
     opts = { ...(opts || {}), effort: ablEffort };
     ablEvent({ event: 'route', label: (opts && opts.label) || '', tier: 'cheap', effort: ablEffort });
   }
-  const timeoutMs = agentTimeoutFor();
+  const timeoutMs = timeoutFor();
   if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) return agent(prompt, opts);
   let to;
   const run = agent(prompt, opts);
@@ -2100,7 +2117,7 @@ function agentBounded(rawPrompt, opts, ablAttempt, onHung) {
 // (adoptAbandonedVerdict).
 const ABANDONED_RUNS = new Map();
 
-async function safeAgent(prompt, opts, tries = 3) {
+async function safeAgent(prompt, opts, tries = 3, timeoutFor = agentTimeoutFor) {
   let lastErr = 'unknown';
   for (let i = 0; i < tries; i++) {
     try {
@@ -2113,7 +2130,7 @@ async function safeAgent(prompt, opts, tries = 3) {
         : prompt;
       const ev = tlAgent(prompt, opts, i + 1);   // record AT DISPATCH; ok=false until it resolves
       let hung = null;
-      const r = await agentBounded(p2, opts, i, (run) => { hung = run; });
+      const r = await agentBounded(p2, opts, i, (run) => { hung = run; }, timeoutFor);
       if (r) {
         if (r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
         if (ev) ev.ok = true;
@@ -3075,6 +3092,22 @@ if (TIME_BUDGET_EFFECTIVE_MS != null && typeof setTimeout === 'function' && TIME
 function searchClosed(what) {
   if (FINAL_PHASE_STARTED || (!TIME_FINAL_DEADLINE_HIT && !atReserveFloor())) return false;
   log(`[time-budget] ${what} SKIPPED — the final reserve has begun.`);
+  return true;
+}
+// The tuning loop is hours of GPU work (a tuner sweep over every GPU, then a pre/post A/B of two serving
+// legs) under ONE agent, which the reserve boundary can abandon but not stop: started too close to the
+// reserve, it runs on into Finalize and Validate and takes their GPUs. On a large model the whole loop
+// took ~5h, so it starts only with this much left before the reserve. tuning_min_window_s=0 disables.
+const _tuningMinWindowS = parseInt(A.tuning_min_window_s, 10);
+const TUNING_MIN_WINDOW_MS = (Number.isFinite(_tuningMinWindowS) && _tuningMinWindowS >= 0
+  ? _tuningMinWindowS : 21600) * 1000;   // 6h
+function tuningWindowShort() {
+  if (TIME_BUDGET_MS == null || !(TUNING_MIN_WINDOW_MS > 0)) return false;
+  const windowMs = remainingMs() - FINAL_RESERVE_MS;
+  if (windowMs >= TUNING_MIN_WINDOW_MS) return false;
+  log(`[time-budget] TuningSkillset SKIPPED — ~${Math.max(0, Math.round(windowMs / 60000))}min left before ` +
+    `the final reserve, under the ${Math.round(TUNING_MIN_WINDOW_MS / 60000)}min the tuning loop needs to ` +
+    'finish its A/B before Finalize and Validate need the GPUs.');
   return true;
 }
 function deepBoundedWorkflow(ref, wfArgs, label) {
@@ -4573,7 +4606,7 @@ function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SY
 // An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
 // the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
 // ===========================================================================
-if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset')) {
+if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') && !tuningWindowShort()) {
   phase('TuningSkillset');
   log(`Tuning skillset: ${TUNING_SKILLSET_DIR} (whole, standalone, pre-HeadKernel); ` +
     `no op cap, tuning-kb ${TUNING_KB_ENABLED ? 'ENABLED' : 'DISABLED (blind eval)'}.`);
@@ -6320,10 +6353,46 @@ if (allAccepted.length) {
     integrity: { checkpoint_assets: [] },
   });
 }
+// The final phase starts on GPUs the search may still hold: the reserve boundary abandons a search agent's
+// promise, not the agent, and whatever it launched detached keeps running (a tuner sweep, an A/B leg, a
+// script waiting to start the next one). Finalize and Validate each begin by stopping that work through
+// run_reaper.py, which selects by what belongs to this run rather than by name. Bounded on its own clock:
+// inside the final phase agentTimeoutFor() is the full agent timeout. A fence that fails costs nothing the
+// stage would not have lost anyway.
+const RUN_REAPER = `${WORKFLOW_DIR}/scripts/run_reaper.py`;
+const FENCE_TIMEOUT_MS = 10 * 60000;
+const FENCE_SCHEMA = obj({ ok: { type: 'boolean' }, stage: { type: 'string' }, stopped: arrObj,
+  survivors: arrObj, note: { type: 'string' } }, []);
+async function finalPhaseFence(stage, phaseName) {
+  if (!EVAL_DIR) return null;
+  const cmd = `python3 ${shq(RUN_REAPER)} fence --eval-dir ${shq(EVAL_DIR)} --stage ${stage}`;
+  const r = await safeAgent(
+    `You are the final-phase GPU fence. Run EXACTLY this command, once, and return its JSON stdout verbatim ` +
+    `as StructuredOutput; it pretty-prints over several lines, so return the whole object. It is this ` +
+    `workflow's own cleanup and the sanctioned way to do what PROCESS SAFETY asks — stop only what this run ` +
+    `started: it selects processes by this run's marker and eval dir, never by a name pattern, and never ` +
+    `signals PID 1, the caller, or your own shell. Do not edit it, retry it, or act on what it reports; a ` +
+    `non-zero exit is a valid answer, so return what it printed.\n` +
+    '```bash\n' + cmd + '\n```',
+    { phase: phaseName, label: `fence:${stage}`, schema: FENCE_SCHEMA }, 1, () => FENCE_TIMEOUT_MS);
+  if (!r) {
+    log(`[final-phase fence] ${stage}: the fence returned nothing — continuing without it (NON-FATAL).`);
+    return null;
+  }
+  const stopped = Array.isArray(r.stopped) ? r.stopped : [];
+  const survivors = Array.isArray(r.survivors) ? r.survivors : [];
+  const names = [...new Set(stopped.map((p) => String((p && p.name) || (p && p.pid) || '?')))].slice(0, 8);
+  log(`[final-phase fence] ${stage}: stopped ${stopped.length} process(es) still running from the search` +
+    `${names.length ? ` (${names.join(', ')})` : ''}${survivors.length ? `; ${survivors.length} still up` : ''}` +
+    `${r.note ? ` — ${r.note}` : ''}.`);
+  return r;
+}
+
 if (want('final')) {
   if (TIME_BUDGET_MS != null) log(`[time-budget] entering the final phase with ~${remainingMin()}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget left (reserve was ${Math.round(FINAL_RESERVE_MS / 60000)}min).`);
   FINAL_PHASE_STARTED = true;   // the one place the reserve exemption is granted — by position, not label
   phase('Finalize');
+  await finalPhaseFence('finalize', 'Finalize');
   finalize = await safeAgent(
     roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {
       EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv,
@@ -6383,6 +6452,7 @@ if (want('final')) {
   // bounded — Report already wrote architect_report.md + final_report.md, and run_e2e.py falls back
   // (director_e2e_validation.json → best overlay's integrate_result.json), so a real win still reaches the caller.
   phase('Validate');
+  await finalPhaseFence('validate', 'Validate');
   validation = await safeAgent(
     roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
