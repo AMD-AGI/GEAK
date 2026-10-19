@@ -22,6 +22,15 @@ from pathlib import Path
 MIN_POINTS_PER_PHASE = 2
 WINDOW_BASES = {"single_window", "capture_window", "trace_window"}
 
+# A fusion group may be summed only when its members are DISJOINT device-kernel rows.
+# Launch adjacency establishes that: two kernels that ran one after the other occupied
+# different device time. Name similarity does not -- a shared callable name is exactly
+# how a parent op and its own child kernel look, and summing those double-counts.
+ADJACENCY_EVIDENCE_KINDS = {
+    "observed_consecutive_launches",   # measured launch order on one stream
+    "observed_dispatch_chain",         # one seam dispatching the stages in order
+}
+
 
 def _percent(value, field):
     if (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -87,9 +96,69 @@ def _phase_share(document, phases, min_points, allow_window_denominator):
     return {phase: value / total for phase, value in fractions.items()}, share
 
 
+def _fusion_groups(document, by_id, group_pct_gt):
+    """Evaluate declared fusion groups and return their verdicts.
+
+    A chain of consecutive stages is a fusion candidate as a whole: rope-then-cache-write,
+    norm-then-quant, score-then-top-k, gemm1-then-gemm2. Judging each stage alone against
+    the threshold hides the chain, because the fusable mass is the sum and no single stage
+    carries it. So a group whose combined share clears the threshold RECALLS every member,
+    including stages far below it on their own.
+
+    Summing is only sound for disjoint rows, which is why adjacency evidence is required
+    and name-based grouping is rejected: a parent op and its child kernel share a name and
+    overlap completely, and adding them inflates the group by the child's whole cost.
+    """
+    groups = document.get("fusion_groups", [])
+    if groups in (None, []):
+        return []
+    if not isinstance(groups, list):
+        raise ValueError("fusion_groups must be a list when present")
+
+    verdicts, seen_ids = [], set()
+    for group in groups:
+        if not isinstance(group, dict):
+            raise ValueError("each fusion group must be an object")
+        gid = group.get("id")
+        if not isinstance(gid, str) or not gid.strip() or gid in seen_ids:
+            raise ValueError("fusion groups need unique, nonempty id values")
+        seen_ids.add(gid)
+
+        members = group.get("members")
+        if not isinstance(members, list) or len(members) < 2:
+            raise ValueError(f"fusion group {gid!r} needs at least two members; a single "
+                             "kernel is not a chain")
+        if len(set(members)) != len(members):
+            raise ValueError(f"fusion group {gid!r} repeats a member, which double-counts it")
+        missing = [m for m in members if m not in by_id]
+        if missing:
+            raise ValueError(f"fusion group {gid!r} names rows absent from the ranking: "
+                             f"{', '.join(map(str, missing))}")
+
+        evidence = group.get("adjacency_evidence")
+        kind = evidence.get("kind") if isinstance(evidence, dict) else None
+        if kind not in ADJACENCY_EVIDENCE_KINDS:
+            raise ValueError(
+                f"fusion group {gid!r} needs adjacency_evidence.kind in "
+                f"{sorted(ADJACENCY_EVIDENCE_KINDS)}; a grouping inferred from shared "
+                "callable or kernel names is not evidence that the members are disjoint")
+
+        group_pct = sum(by_id[m]["overall_pct"] for m in members)
+        verdicts.append({
+            "id": gid, "members": list(members), "group_overall_pct": group_pct,
+            "member_overall_pct": {m: by_id[m]["overall_pct"] for m in members},
+            "recalled": group_pct > group_pct_gt,
+            "adjacency_evidence": evidence,
+            "rationale": group.get("rationale", ""),
+            "reason": "fusion_group_share_above_threshold" if group_pct > group_pct_gt
+            else "fusion_group_share_not_above_threshold",
+        })
+    return verdicts
+
+
 def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
                    min_points=MIN_POINTS_PER_PHASE, allow_window_denominator=False,
-                   top_k=None):
+                   top_k=None, group_pct_gt=None):
     _percent(overall_pct_gt, "overall_pct_gt")
     if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int)
                               or top_k < 1):
@@ -141,7 +210,27 @@ def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
                         "selected": r["overall_pct"] > overall_pct_gt} for r in ordered],
         }
 
-    qualified = sorted((r for r in rows if r["overall_pct"] > overall_pct_gt),
+    by_id = {r["id"]: r for r in rows}
+    group_threshold = overall_pct_gt if group_pct_gt is None else _percent(
+        group_pct_gt, "group_pct_gt")
+    groups = _fusion_groups(document, by_id, group_threshold)
+
+    # Recall every member of a group whose combined share clears the threshold, so the
+    # chain stays whole for a later fusion. Membership is recorded per row; the group's
+    # own mass is NOT added anywhere, so a member counts once no matter how many groups
+    # name it.
+    recalled_by = {}
+    for group in groups:
+        if not group["recalled"]:
+            continue
+        for member in group["members"]:
+            recalled_by.setdefault(member, []).append(group["id"])
+    for identity, group_ids in recalled_by.items():
+        by_id[identity]["fusion_groups"] = group_ids
+
+    individually = {r["id"] for r in rows if r["overall_pct"] > overall_pct_gt}
+    qualified = sorted((r for r in rows
+                        if r["id"] in individually or r["id"] in recalled_by),
                        key=lambda r: (-r["overall_pct"], r["id"]))
     capped = qualified[:top_k] if top_k is not None else qualified
     dropped_by_cap = [{"id": r["id"], "name": r["name"], "overall_pct": r["overall_pct"],
@@ -154,8 +243,11 @@ def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
                 "phase_pct": {p: r["phase_shares"][p] for p in phases
                               if r["phase_shares"].get(p, 0) > 0},
                 "window_pct_reported": r["window_pct_reported"],
-                "reason": "overall_share_above_threshold"} for r in capped]
+                "fusion_groups": r.get("fusion_groups", []),
+                "reason": "overall_share_above_threshold" if r["id"] in individually
+                else "recalled_by_fusion_group"} for r in capped]
 
+    # capped holds distinct rows, so this is already deduplicated across groups.
     selected_mass = sum(r["overall_pct"] for r in capped)
     return {
         "scope": "extraction_target_selection_only",
@@ -163,12 +255,16 @@ def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
                    "combination": "overall_share_threshold_on_log_weighted_phase_split",
                    "rank_is_inventory_only": True, "top_k_cap": top_k,
                    "min_points_per_phase": min_points,
+                   "fusion_group_pct_gt": group_threshold,
                    "window_denominator_allowed": bool(allow_window_denominator)},
         "phase_share": {"weights": weights, "declared": share_doc},
         "denominators": document.get("denominators", {}),
         "per_phase": per_phase,
+        "fusion_groups": groups,
         "targets": targets,
         "target_count": len(targets),
+        "recalled_count": sum(1 for t in targets
+                              if t["reason"] == "recalled_by_fusion_group"),
         "selected_overall_pct": selected_mass,
         "dropped_by_cap": dropped_by_cap,
     }
@@ -187,13 +283,17 @@ def main():
     parser.add_argument("--top-k", type=int, default=None,
                         help="optional cap on how many above-threshold targets are "
                              "returned; the remainder stays in dropped_by_cap")
+    parser.add_argument("--fusion-group-pct-gt", type=float, default=None,
+                        help="threshold a declared fusion group's combined share must "
+                             "exceed to recall its members (defaults to --overall-pct-gt)")
     args = parser.parse_args()
     if args.output and args.output.resolve() == args.ranking.resolve():
         parser.error("output must not overwrite the source ranking")
     try:
         result = select_targets(json.loads(args.ranking.read_text()), args.phases,
                                 args.overall_pct_gt, args.min_points_per_phase,
-                                args.allow_window_denominator, args.top_k)
+                                args.allow_window_denominator, args.top_k,
+                                args.fusion_group_pct_gt)
     except (ValueError, TypeError, AttributeError) as error:
         parser.error(str(error))
     result["source_ranking_json"] = str(args.ranking.resolve())

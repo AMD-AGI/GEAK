@@ -29,6 +29,12 @@ def doc(rows, prefill=0.5, decode=0.5, basis="log_instance_counts_x_measured_poi
         else {"PREFILL": 3, "DECODE": 3}}}
 
 
+def group_doc(rows, groups):
+    """A decode-only workload, so a row's decode share IS its whole-workload share."""
+    return {**doc(rows, prefill=0, decode=1.0,
+                  points={"PREFILL": 0, "DECODE": 3}), "fusion_groups": groups}
+
+
 class ExtractionTargetsTest(unittest.TestCase):
     def test_threshold_only_selection_without_a_rank_cut(self):
         # p_lead leads PREFILL but PREFILL is only 12% of the workload, so it misses.
@@ -129,6 +135,81 @@ class ExtractionTargetsTest(unittest.TestCase):
                                     points={"PREFILL": 0, "DECODE": 3}))
         self.assertEqual([r["id"] for r in result["targets"]],
                          ["a", "b", "c", "d", "e", "f"])
+
+    def test_fusion_group_recalls_members_that_miss_the_threshold_alone(self):
+        # rope 1.5% + cache 1.2% + norm 1.0% = 3.7% of the workload: no stage clears 3%,
+        # the chain does, and a later fusion needs all three.
+        rows = [row("rope", decode=1.5), row("cache", decode=1.2), row("norm", decode=1.0),
+                row("big", decode=30)]
+        result = select_targets(group_doc(rows, [{
+            "id": "qk_rope_cache_norm", "members": ["rope", "cache", "norm"],
+            "adjacency_evidence": {"kind": "observed_consecutive_launches",
+                                   "observed_sequences": 30, "intervening_kernels": 0},
+            "rationale": "consecutive stages of the QK path"}]))
+        by_id = {t["id"]: t for t in result["targets"]}
+        self.assertEqual(set(by_id), {"rope", "cache", "norm", "big"})
+        self.assertEqual(by_id["rope"]["reason"], "recalled_by_fusion_group")
+        self.assertEqual(by_id["big"]["reason"], "overall_share_above_threshold")
+        self.assertEqual(by_id["cache"]["fusion_groups"], ["qk_rope_cache_norm"])
+        self.assertEqual(result["recalled_count"], 3)
+        self.assertTrue(result["fusion_groups"][0]["recalled"])
+        self.assertAlmostEqual(result["fusion_groups"][0]["group_overall_pct"], 3.7, places=6)
+
+    def test_a_group_below_the_threshold_recalls_nothing(self):
+        rows = [row("a", decode=1.0), row("b", decode=1.2)]
+        result = select_targets(group_doc(rows, [{
+            "id": "tiny", "members": ["a", "b"],
+            "adjacency_evidence": {"kind": "observed_dispatch_chain"}}]))
+        self.assertEqual(result["targets"], [])
+        self.assertFalse(result["fusion_groups"][0]["recalled"])
+        self.assertEqual(result["fusion_groups"][0]["reason"],
+                         "fusion_group_share_not_above_threshold")
+
+    def test_a_member_is_counted_once_across_overlapping_groups(self):
+        rows = [row("shared", decode=2.0), row("x", decode=2.0), row("y", decode=2.0)]
+        evidence = {"kind": "observed_consecutive_launches"}
+        result = select_targets(group_doc(rows, [
+            {"id": "g1", "members": ["shared", "x"], "adjacency_evidence": evidence},
+            {"id": "g2", "members": ["shared", "y"], "adjacency_evidence": evidence}]))
+        by_id = {t["id"]: t for t in result["targets"]}
+        self.assertEqual(by_id["shared"]["fusion_groups"], ["g1", "g2"])
+        # 2 + 2 + 2, not 2 + 2 + 2 + 2 with `shared` booked twice.
+        self.assertAlmostEqual(result["selected_overall_pct"], 6.0, places=6)
+        self.assertEqual(result["target_count"], 3)
+
+    def test_a_grouping_without_adjacency_evidence_is_rejected(self):
+        rows = [row("parent", decode=5), row("child", decode=5)]
+        for evidence in [None, {}, {"kind": "name_similarity"},
+                         {"kind": "shared_callable_name"}, "observed_consecutive_launches"]:
+            with self.subTest(evidence=evidence), self.assertRaises(ValueError):
+                select_targets(group_doc(rows, [{"id": "g", "members": ["parent", "child"],
+                                                 "adjacency_evidence": evidence}]))
+
+    def test_malformed_groups_are_rejected(self):
+        rows = [row("a", decode=2), row("b", decode=2)]
+        evidence = {"kind": "observed_consecutive_launches"}
+        bad = [
+            {"id": "g", "members": ["a"], "adjacency_evidence": evidence},          # one stage
+            {"id": "g", "members": ["a", "a"], "adjacency_evidence": evidence},     # repeat
+            {"id": "g", "members": ["a", "ghost"], "adjacency_evidence": evidence}, # absent
+            {"members": ["a", "b"], "adjacency_evidence": evidence},                # no id
+        ]
+        for group in bad:
+            with self.subTest(group=group), self.assertRaises(ValueError):
+                select_targets(group_doc(rows, [group]))
+        with self.assertRaises(ValueError):  # duplicate group id
+            select_targets(group_doc(rows, [
+                {"id": "g", "members": ["a", "b"], "adjacency_evidence": evidence},
+                {"id": "g", "members": ["a", "b"], "adjacency_evidence": evidence}]))
+
+    def test_group_threshold_can_differ_from_the_kernel_threshold(self):
+        rows = [row("a", decode=1.0), row("b", decode=1.2)]
+        groups = [{"id": "g", "members": ["a", "b"],
+                   "adjacency_evidence": {"kind": "observed_dispatch_chain"}}]
+        self.assertEqual(select_targets(group_doc(rows, groups))["targets"], [])
+        relaxed = select_targets(group_doc(rows, groups), group_pct_gt=2)
+        self.assertEqual({t["id"] for t in relaxed["targets"]}, {"a", "b"})
+        self.assertEqual(relaxed["policy"]["fusion_group_pct_gt"], 2)
 
     def test_invalid_or_missing_costs_and_duplicate_identity_fail(self):
         for bad in [None, "4", True, float("nan"), float("inf"), -1, 101]:

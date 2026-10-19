@@ -25,6 +25,19 @@ a prefill-weighted window had buried, so do not reintroduce a rank cut to shorte
 — use `--top-k` if execution must be bounded, which keeps the remainder in `dropped_by_cap`
 as selected identities still owing a task or blocker.
 
+A declared `fusion_groups[]` entry is evaluated on its **summed** share and recalls every
+member when that clears the threshold, so a chain of consecutive sub-threshold stages
+survives into extraction as a fusion candidate instead of being deleted stage by stage.
+This is the one place member shares may be added, and only because adjacency evidence
+establishes that the members are disjoint device-kernel rows. It does not license adding
+parent/child shares, inferring a joint seam's editable share from one child, or summing
+overlapping members — those remain prohibited below and the selector rejects a grouping
+whose evidence is a shared name. A recalled member counts once toward
+`selected_overall_pct` no matter how many groups contain it, and the group total is never
+itself added. Record the group id on each recalled identity so the chain stays reviewable
+as one fusion unit, and keep a group that failed the threshold in the artifact with its
+measured total rather than dropping it silently.
+
 Deduplicate a kernel selected in both phases while preserving both phase/case obligations;
 distinct live dispatch identities stay separate even if one callable reaches them. A
 deduplicated identity may still be delivered as a prefill task and a decode task.
@@ -54,9 +67,16 @@ both work; they are normalized) and `points_measured` per phase. The selector re
 measured at fewer than `--min-points-per-phase` points (default 2). Both refusals exist
 because a one-window split silently decides the whole ranking. `--allow-window-denominator`
 waives them for a declared-approximate scope and stamps the policy block accordingly;
-carry that stamp into the delivery. The output records per-phase ranks for every observed
-row, the selected set with its summed `selected_overall_pct`, and `dropped_by_cap`. It is
-a target plan, not dispatch, editability or GPU-validation evidence.
+carry that stamp into the delivery.
+
+Optional `fusion_groups[]` entries need `id`, at least two `members` naming ranking rows,
+and `adjacency_evidence.kind` of `observed_consecutive_launches` or
+`observed_dispatch_chain`; `--fusion-group-pct-gt` sets their bar when it differs from the
+per-kernel one. The output records per-phase ranks for every observed row, every group
+with its summed `group_overall_pct` and verdict, the selected set with its deduplicated
+`selected_overall_pct` and `recalled_count`, and `dropped_by_cap`. It is a target plan,
+not dispatch, editability or GPU-validation evidence — a recalled chain is a fusion
+candidate to investigate, not a proof that the stages can be fused.
 
 Task/time budgets limit execution, not discovery: they never change the selection rule,
 remove a required target, or redefine the requested scope. Return all evidenced targets in

@@ -116,6 +116,35 @@ record an explicitly declared-approximate scope; its output is stamped non-compa
 that stamp belongs in the delivery. `--top-k` is an optional execution cap — anything it
 drops stays in `dropped_by_cap` and remains a selected identity owing a task or blocker.
 
+**Recall fusable chains whose combined share clears the threshold.** A per-kernel
+threshold hides the one optimization a chain of small consecutive stages actually admits:
+rope-then-cache-write, norm-then-quant, score-then-top-k, gemm1-then-gemm2. No stage
+carries the mass, the chain does, and judging the stages one at a time deletes the fusion
+candidate before anyone can see it. Declare such chains in `kernel_ranking.json` and the
+selector recalls **every** member of a group whose summed share exceeds the threshold:
+
+```json
+"fusion_groups": [{
+  "id": "qk_rope_cache_norm",
+  "members": ["fused_qk_rmsnorm|...", "_fused_qk_rope_cat_and_cache_mla_kernel|..."],
+  "adjacency_evidence": {"kind": "observed_consecutive_launches",
+                         "trace": "...", "observed_sequences": 30,
+                         "same_stream": true, "intervening_kernels": 0},
+  "rationale": "consecutive stages of the QK path, fusable into one pass"
+}]
+```
+
+A group needs at least two members, all present in the ranking, and
+`adjacency_evidence.kind` of `observed_consecutive_launches` or `observed_dispatch_chain`.
+Grouping inferred from a shared callable or kernel name is rejected, because summing is
+only sound for **disjoint** rows and a parent op and its own child kernel overlap
+completely — that is the same prohibition as "do not add parent/child shares". A recalled
+member keeps its own share and is booked once however many groups name it; the group's
+total is never added to the selected mass. Set `--fusion-group-pct-gt` to hold chains to
+a different bar than single kernels. Recalled members appear with
+`reason=recalled_by_fusion_group` and owe a task or blocker like any other selected
+identity; the group id travels with them so the chain stays reviewable as one fusion unit.
+
 Every selected identity needs a task or explicit blocker. Execution limits may
 defer tasks but cannot turn a partial batch into completed extraction.
 
