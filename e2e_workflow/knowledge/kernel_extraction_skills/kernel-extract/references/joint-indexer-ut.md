@@ -10,14 +10,14 @@ file/hash transport and preflight against the saved original task declaration `K
 ## Boundary and package
 
 Begin with a bootstrap: write a minimal case adapter and executable baseline
-replay, then pass one real captured case through each declared phase entry.
-Use existing valid captures and resolve concrete replay errors before a broader
-sweep. Continue in the same task directory with editable leaves, full cases,
+replay, then pass one seeded case with valid structural metadata through each declared
+phase entry. Use a minimal captured case only where state cannot be reconstructed.
+Resolve concrete replay errors before a broader sweep. Continue in the same task directory with editable leaves, full cases,
 weights and all GPU gates. Save per-phase bootstrap results; they are an
 intermediate checkpoint, never a complete UT pass.
 
-Keep a separate authoritative oracle for each phase. Run selection with
-`--task-dir` pointing to the corresponding phase capture directory: selection
+Keep separate frozen-baseline reference outputs for each phase. If capture files
+are used, run selection with `--task-dir` pointing to the corresponding phase capture directory: selection
 promotes one oracle and recursively reclaims the other process-local captures
 below that directory. Running it against the whole joint task would discard
 the other phases. Preserve bootstrap inputs across selection/binding retries;

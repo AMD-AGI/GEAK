@@ -1,5 +1,11 @@
 # Bounded live capture without a workflow runner
 
+This is a fallback during extraction, not a step inside the UT. Prefer seeded
+inputs from the fixed case manifest in [task authoring](task-authoring.md#seeded-inputs-by-default).
+Use existing shape/dispatch metadata first; capture only evidence or structural
+state that cannot otherwise be recovered. Numerical test payloads do not require
+serving capture. Runtime launch attribution remains a separate selection check.
+
 Read the user's actual serving launch and request-client commands. Reuse a
 compatible trace/capture before launching another service. If a probe is needed,
 write a task-local capture launcher adapted to that environment. There is no
@@ -67,6 +73,6 @@ oracles under `--task-dir`; use a separate directory per phase and preserve
 needed captures before allowing that cleanup. No evidence from one phase may
 overwrite another phase's oracle.
 
-Replay one captured baseline case per declared phase before expanding source
+When capture was necessary, replay one baseline case per declared phase before expanding source
 extraction. Successful file persistence alone does not prove complete inputs,
 correct state reconstruction or faithful whole-call timing.

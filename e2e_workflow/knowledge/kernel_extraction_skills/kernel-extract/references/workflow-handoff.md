@@ -21,7 +21,10 @@ UTs. Do not also execute the legacy `roles/kernel_extractor.md` procedure.
 | `BUDGET`, `HEAD_BUDGET`, `REMAINING_MIN` | Scheduling limits; retain the complete selected inventory and explain deferred tasks |
 | `CAPTURE_PERSIST_POLICY` | Export into capture processes; defaults to `structure_only` for AgentX |
 
-`PHASE=prepare` executes all five skill stages in one invocation. Write baseline
+`PHASE=prepare` executes all five skill stages in one invocation. Prefer seeded
+UT input factories from fixed workload metadata; do not collect numerical inputs
+or rerun shape capture inside the UT. `CAPTURE_PERSIST_POLICY` controls only the
+fallback captures that remain necessary. Write baseline
 and sampling evidence under `EVIDENCE_DIR` and tasks anywhere under `EVAL_DIR`.
 Preserve supplied UT references and each requested source boundary. Verify actual
 installed/container source and build resources before reporting source unavailable.

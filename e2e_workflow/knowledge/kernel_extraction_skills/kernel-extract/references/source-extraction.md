@@ -51,6 +51,7 @@ smokes in the serving environment; parsing alone misses runtime errors.
 
 ## Bounded live captures
 
+These rules apply only when seeded cases and existing metadata are insufficient.
 Follow the [bounded capture procedure](capture.md) for launching the probe and choosing a
 persist policy; record expected/observed shapes and deviations from deployment. What
 follows is what the capture must contain to be replayable.

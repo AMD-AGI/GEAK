@@ -111,10 +111,13 @@ failed verdict into a pass or rerun an unchanged UT to repair JSON fields.
 ## 4. Extract source and build the standalone UT
 
 Read [source extraction](references/source-extraction.md) and
-[task authoring](references/task-authoring.md). Start by replaying one captured
-baseline case per phase; retain it while adding editable leaves and full cases.
+[task authoring](references/task-authoring.md). Default to fixed-seed generated inputs
+at shapes/dtypes/layouts established from existing workload evidence. Run one such
+baseline case per phase, then expand cases and editable leaves. The UT reads its
+frozen case manifest; it never launches serving, profiles, or captures shapes.
 Each `tasks/<name>/` contains its own `kernel_src/`, `cases.py`, `meta.json`,
-`unittest.py`, baseline manifest/overlay, captured oracles and `run/` evidence.
+`unittest.py`, baseline manifest/overlay and `run/` evidence. Captured oracles are
+optional; preserve minimal structural fixtures only where needed.
 Copy the shared harness/leg/overlay helpers into the task; freeze them once authored.
 
 Deliver actual native/JIT/generated computation source for every claimed leaf,
@@ -122,7 +125,7 @@ with build resources and version/hash provenance. A copied dispatcher that
 imports installed computation is not extraction of those leaves. Prove actual
 leaf invocation through the candidate overlay, independently of correct output
 or import location. Preserve deployed signatures, layouts, quantization,
-captured routing, cache/page state and complete outputs.
+routing semantics, cache/page state and complete outputs.
 
 Run every GPU command from its task directory under the lease tools in
 [setup](references/setup.md) — `gpu_lock.sh` for one device, `gpu_lock_set.py` for the
@@ -135,21 +138,21 @@ integrity, and both timing legs for every positive-mass signature. Compilation
 failure is not a successful numerical negative control. Report missing cases
 and mass; do not renormalize survivors into full coverage.
 
-Before any of those gates can return a verdict, run the two preconditions in
-[task authoring](references/task-authoring.md) step 0: `oracle_power.py` (can the
-captured oracle reject anything, or was it recorded during graph capture with
-placeholder buffers?) and `kernel_self_noise.py` (does the installed kernel
-reproduce itself, and are the inputs even reproducible first?). A gate run on a
-degenerate oracle or against a tolerance under the kernel's own noise floor
-reports UNRESOLVED, not PASS.
+Before reporting a verdict, verify deterministic input construction, baseline
+self-noise and that numerical bad-source controls actually fail. For generated
+cases, obtain reference outputs from the frozen baseline in a separate process
+using the same seeds; never use the candidate to generate its own expected output.
+Do not create a serving capture merely to obtain a golden file. With persisted
+capture oracles, also run `oracle_power.py`; regenerate `structure_only` placeholders
+before checking them. See [task authoring](references/task-authoring.md).
 
-Captures need not hold every byte the deployment held. Keep verbatim the operands whose
-**content selects work** — routing, gather indices, page tables, sequence bookkeeping —
-and reduce the bulk float payload to seeded descriptors
-(`CAPTURE_PERSIST_POLICY=structure_only`, structural names in
-`meta.structural_operands`), then regenerate the oracle with `regen_reference.py`. The
-dividing line is control flow and memory access, not "is it MoE". See
-[capture policy](references/task-authoring.md#capture-policy) for the cost.
+Randomize ordinary numerical payloads, not the workload definition. Keep observed
+shape/layout/quantization, phase and call weights. Routing, indices, page tables and
+sequence metadata must retain valid semantics and the observed work/access pattern:
+reuse or reconstruct them from existing metadata where reliable; capture only the
+missing structural state. Synthetic structural cases may extend correctness coverage,
+but do not claim they reproduce serving performance without evidence. Any necessary
+capture uses `CAPTURE_PERSIST_POLICY=structure_only` unless explicitly overridden.
 
 Use `h.measure_legs()` and `h.serving_weighted_speedup()` from the shared
 harness. Set `workload.kind="agentx_trace_replay"`, `weighting="observed"`, and

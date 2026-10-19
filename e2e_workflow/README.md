@@ -364,10 +364,13 @@ five-stage procedure and the additional sampling, coverage, reference-output and
 self-noise tools. Existing capture, trace, harness, GPU-lock and delivery helpers
 are reused from the repository; their regression tests remain in one place.
 
-The default capture policy is `structure_only`: retain routing, indices, page tables
-and other operands whose values select work, and persist ordinary float payloads as
-seeded descriptors. Regenerate reference outputs before UT validation. An explicit
-`capture_persist_policy` overrides this; non-AgentX capture defaults are unchanged.
+UT inputs default to fixed-seed generators at the observed shapes/dtypes/layouts;
+reference outputs come from the frozen baseline in an isolated process. UT execution
+does not launch serving, profile or capture shapes. Reuse or reliably reconstruct
+routing, indices, page tables and other structural metadata; capture only missing
+state. Necessary captures default to `structure_only`, with reference regeneration
+before validation. An explicit `capture_persist_policy` overrides the fallback
+storage policy; non-AgentX capture defaults are unchanged.
 
 GEAK supplies baseline/configuration paths, GPU allocation, accepted overlays and
 budgets through the [workflow handoff](knowledge/kernel_extraction_skills/kernel-extract/references/workflow-handoff.md).

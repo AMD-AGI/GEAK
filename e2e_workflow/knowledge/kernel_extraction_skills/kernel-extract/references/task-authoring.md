@@ -16,7 +16,7 @@ tasks/<name>/
   kernel_src/             actual editable native/JIT/generated source
   baseline_overlay/       immutable baseline overlay configuration
   baseline_ref/           original hashes/source text, not imported as baseline
-  captures/               phase-local input/oracle records
+  captures/               optional minimal structural fixtures or fallback oracles
   run/                    declarations, raw traces, gate logs, results
 ```
 
@@ -52,11 +52,12 @@ negative-control checks in separate untimed diagnostic processes.
   declared timing case. Construct actual operands before the timed call.
 - `random_shapes(h, meta)` yields `{sig, regime, make_inputs}`; the factory
   accepts a seeded torch Generator and varies values at the fixed served shapes.
-  Preserve captured routing where required by the math and dispatch contract.
+  Preserve required routing semantics and the observed work/access pattern; reuse
+  saved structural metadata rather than redrawing it blindly.
 
 For joint phases, include `meta.phase_target_callables` mapping each phase to
 its live entry, and `meta.phase_regimes` mapping phase labels to observed
-graph/compile settings. `cases.call` selects only those entries using captured
+graph/compile settings. `cases.call` selects only those entries using frozen
 phase metadata; a single candidate module may implement both. If multiple
 modules/leaves are needed, use a tested local binding adapter and prove all
 bindings. The stock harness's single `candidate_bind` is not automatic support
@@ -69,33 +70,47 @@ distribution coverage. Match cache residency to deployment; the vendored timer
 has a cache policy, so inspect `h.cache_policy` and explicitly record its chosen
 condition rather than treating defaults as measured deployment facts.
 
+## Seeded inputs by default
+
+Build `cases.py` from a fixed case manifest: shape, dtype, stride/layout,
+quantization parameters, phase, seed and observed call weight. Use existing logs,
+trace metadata and verified source/configuration to establish that manifest. If
+needed, collect missing shape metadata once during extraction; UT execution must
+never invoke `capture_shapes.py`, a profiler or the serving model.
+
+Generate ordinary activations and weights directly with the supplied seeded
+`torch.Generator`. Preserve each operand's valid range and format: scales may need
+positive values, and packed quantized operands must be constructed with the real
+packing/quantization contract. Use multiple fixed seeds and boundary-value cases;
+random values alone do not cover ties, masks, empty rows or numerical extremes.
+Keep construction outside the timed region. Freeze the generator code and seeds
+so baseline/candidate processes reconstruct identical inputs on the pinned stack.
+
+Use `h.baseline_random_outputs(task, meta, seed=0, draws=...)` to obtain reference
+outputs in the isolated frozen-baseline process. It records outputs keyed by
+`sig|draw`; input tensors need not be saved. Build eager/reference cases from the
+same seeded factory, and pass the recorded outputs to `h.run_correctness` for the
+additional draws. Use matching seeds and draw counts on both sides (the shared
+`run_correctness` random gate uses seed 0). Graph replay still needs its normal
+boundary cases and in-place input refresh. A serving-captured `reference_io.pt`
+is optional; generated reference outputs are not captures from the model.
+
+Record which inputs are generated and which are structural fixtures. For MoE
+routing, sparse indices, page tables and sequence state, first reuse existing
+metadata or a validated reconstruction that preserves the observed work/access
+pattern. Use a minimal structural capture only when those are insufficient.
+Valid synthetic structures can test correctness, but random uniform routing can
+change expert occupancy and gather locality, so report its timing scope honestly.
+
 ## Capture policy
 
-A capture buys three separable things, and only the middle one has to be the deployment's
-own bytes:
+Use `CAPTURE_PERSIST_POLICY=structure_only` when capture is necessary: retain
+structural operands and reduce bulk float payloads to seeded descriptors. Integer
+and boolean operands are structural by default; declare additional float structural
+operands with `CAPTURE_STRUCTURAL_OPERANDS` / `meta.structural_operands`.
 
-1. **Shape and call mass** — comes from the trace and the serving log, not from the oracle
-   file at all. `CAPTURE_PERSIST_POLICY` never affects it.
-2. **Structural operands** — the ones whose CONTENT selects work: `topk_ids`,
-   `sorted_expert_ids`, `m_indices`, `cumsum`, gather `indices`, page/block tables,
-   sequence lengths. Redrawing these changes *which* work runs. They must be real.
-3. **Bulk floating-point payload** — activations and weights. Redrawing these changes the
-   numbers inside the tiles, not the tiles that run.
-
-`CAPTURE_PERSIST_POLICY=structure_only` keeps (2) verbatim and reduces (3) to a seeded
-descriptor — on a real GLM-5.2 run, 138 GB of raw captures against ~30 MB of task captures.
-Integer and boolean tensors are structural by default; float operands are structural when
-named in `CAPTURE_STRUCTURAL_OPERANDS` / `meta.structural_operands` or when their name
-matches a routing pattern (`topk_weights` is float but scales per expert).
-
-The reduced operands are **persisted**, not omitted: the recorded seed reproduces the same
-tensor in every process, forever. That is the property the oracle needs and the property a
-rebuild-at-UT-time factory does not have — rebuilding through the serving stack re-runs
-whatever nondeterminism the stack contains, inside the correctness gate.
-
-Because the output recorded at capture time came from the real operands, a `structure_only`
-file ships as `oracle_status="needs_regen"` and both `harness_lib.reconstruct_captured` and
-`oracle_power.py` refuse it. Close the loop inside the serving container:
+A captured output was computed from the original values, so it is not a reference
+for regenerated random inputs. The reduced file is marked `oracle_status=needs_regen`:
 
 ```bash
 python3 "$SKILL_ROOT/scripts/regen_reference.py" captures/reference_io.pt \
@@ -103,20 +118,9 @@ python3 "$SKILL_ROOT/scripts/regen_reference.py" captures/reference_io.pt \
 python3 "$SKILL_ROOT/scripts/oracle_power.py" captures/reference_io.regen.pt --tol "$TOL"
 ```
 
-What it costs, and what to write in `meta.oracle_coverage`: gate 1 becomes a determinism
-check against the installed kernel rather than a deployment-value check, and the operands
-carry unit variance rather than the served activation's outlier distribution — so a kernel
-with value-dependent cost (denormals, early exit, saturation) needs a few captured cases
-kept as the control. It is still strictly more discriminating than what it replaces on a
-graphed seam, where the capture records placeholder buffers and the gate cannot fail at all.
-
-Per seam, as measured on this deployment: the MoE gemms keep `topk_ids` /
-`sorted_expert_ids` / `m_indices` / `cumsum` and must **not** regenerate routing from random
-logits — uniform routing is the slow end of the distribution (2.46x on decode), so a redraw
-moves the measurement, not just the values. Sparse-MLA decode/prefill keep `indices` and
-need a real-sized, densely populated pool. An indexer top-k keeps the score distribution,
-because ties and the reachable range are what its quality gate reads. A score-only prefill
-seam and a collective have no structural operands at all and can be fully random.
+This fallback persists reconstructed operands and baseline outputs. Prefer the
+seeded factory above when it avoids capture entirely. Never regenerate structural
+state through nondeterministic routing while pretending the inputs are unchanged.
 
 ## Correctness and timing
 
@@ -125,8 +129,12 @@ explicit file path and remove the task directory from `sys.path` before importin
 torch: a file named `unittest.py` otherwise shadows Python's standard library.
 The shared leg runner already performs this isolation.
 
-0. **Before any verdict, prove the comparison can produce one.** Two preconditions,
-   both executable, both of which a real run of this skill violated silently:
+0. **Before any verdict, prove the comparison can produce one.** Verify reproducible
+   inputs, a tolerance supported by baseline self-noise, and effective numerical
+   negative controls. For a seeded task, run these checks on generated cases and
+   frozen-baseline outputs without collecting a serving oracle. The following
+   helper commands apply when their input formats match: `oracle_power.py` for a
+   saved capture and `kernel_self_noise.py` for a shape-by-M `_build_args` adapter.
 
    ```bash
    # (a) can the captured oracle reject anything?
@@ -161,7 +169,7 @@ The shared leg runner already performs this isolation.
    (MXFP4 values + exponent bytes) the only meaningful criterion is byte-exactness;
    `rel_frobenius` over packed bytes is not a number about the computation.
 
-1. Replay frozen inputs through the baseline; verify output structure and full
+1. Run the frozen seeded/structural inputs through the baseline; verify output structure and full
    numerical/semantic contract. Reconstruct implicit state and all required glue.
 2. Build candidate overlay; prove distinct baseline/candidate entries in every
    phase and actual execution of every claimed editable leaf.

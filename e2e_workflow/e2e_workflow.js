@@ -3362,7 +3362,9 @@ async function prepareAgentXKernels(round, throughput) {
   let reply = await safeAgent(roleAgent('kernel_extractor', 'prepare',
     'Complete the kernel-extract skill from the saved baseline through executable, GPU-validated UTs. ' +
     'Selection, task grouping and bootstrap replay are INTERNAL steps: save their artifacts and continue ' +
-    'to source extraction, UT authoring and validation in this invocation. Do not return a candidate list ' +
+    'to source extraction, UT authoring and validation in this invocation. Prefer fixed-seed input factories ' +
+    'from saved shape/layout metadata; UT execution must not start serving or capture shapes. ' +
+    'Capture only missing structural state needed for faithful cases. Do not return a candidate list ' +
     'before UTs have been attempted. Reuse compatible evidence and passing UTs. Never rerun the full ' +
     'AgentX baseline for discovery. Follow TASK scope and the default per-phase selection rule. ' +
     'Prove that edits to each opt GPU leaf affect candidate correctness while the frozen baseline passes; ' +
