@@ -142,3 +142,48 @@ test('packaging validates task ownership, output containment and source evidence
   await f.write('run/RETURN.json', {...f.result, task_dir: f.evalDir});
   await assert.rejects(f.pack(), /differs from its declared task/);
 });
+
+// Execute each production call site with real saved artifacts, including the
+// serial, fast and deep head paths. No agent or GPU execution is needed here.
+test('all optimization dispatch sites reuse UTs and fail locally without authoring replacements', async t => {
+  const f = await delivered(t);
+  await f.pack();
+  const prepared = (await readPreparedKernels(f.evalDir, 'delivery.json')).kernel_candidates[0];
+  const workflowDir = fileURLToPath(new URL('..', import.meta.url));
+  const src = await fs.readFile(path.join(workflowDir, 'e2e_workflow.js'), 'utf8');
+  const helper = src.slice(src.indexOf('async function extractWithBaseline('), src.indexOf('\n// abDone =='));
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const sites = [...src.matchAll(/const ext = await extractWithBaseline\(/g)];
+  assert.equal(sites.length, 4, 'three head modes and the milestone path');
+  const dispatchers = sites.map(site => {
+    const start = site.index, end = src.indexOf('});', src.indexOf('schema:', start)) + 3;
+    const consume = src.lastIndexOf('if (KERNEL_EXTRACT_ON) headQueue =', start);
+    const isHead = src.slice(start, end).includes("'extract_op'");
+    const body = (isHead ? src.slice(consume, src.indexOf('\n', consume)) + '\n' : '') + src.slice(start, end);
+    return async kernel => {
+      const queued = {...kernel, prepared_ut: kernel.prepared_ut};
+      const pending = {...prepared, short_name: 'pending', prepared_ut: {...prepared.prepared_ut}};
+      const env = {KERNEL_EXTRACT_ON: true, WORKFLOW_DIR: workflowDir, EVAL_DIR: f.evalDir,
+        MODEL_PATH: '/model', GPU_LIST: ['0'], gpu: '0', WORKLOAD: {}, profile: {},
+        curOverlay: '', curFlags: '', curEnv: '', CONC: 32, EXTRACT_SCHEMA: {}, EXTRACT_OP_SCHEMA: {},
+        h: {...queued}, c: {...queued}, headQueue: [queued, pending], gemmSynthFor: () => false,
+        safeAgent: () => { throw new Error('downstream authoring is forbidden'); }};
+      return new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env;
+        ${helper}\n${body}\nreturn {ext, headQueue};`)(env);
+    };
+  });
+  const before = await fs.readFile(path.join(f.task, 'run/RETURN.json'), 'utf8');
+  for (const [i, dispatch] of dispatchers.entries()) {
+    const {ext, headQueue} = await dispatch(prepared);
+    assert.equal(ext.task_dir, f.task);
+    assert.equal(ext.smoke, 'pass');
+    if (i < 3) assert.deepEqual(headQueue.map(c => c.short_name), ['pending'],
+      'dispatched heads are consumed while undispatched heads remain resumable');
+    const missing = await dispatch({...prepared, prepared_ut: undefined});
+    assert.equal(missing.ext.smoke, 'fail');
+    assert.match(missing.ext.smoke_detail, /missing prepared UT/);
+  }
+  assert.equal(await fs.readFile(path.join(f.task, 'run/RETURN.json'), 'utf8'), before);
+  await fs.appendFile(path.join(f.task, 'cases.py'), '# invalidates the frozen UT\n');
+  for (const dispatch of dispatchers) assert.equal((await dispatch(prepared)).ext.smoke, 'fail');
+});

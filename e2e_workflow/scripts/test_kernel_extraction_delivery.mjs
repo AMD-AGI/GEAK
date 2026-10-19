@@ -190,7 +190,7 @@ test('CLI writes only a passing delivery; a failed draft preserves the existing 
   assert.equal(await fs.readFile(path.join(f.task, 'RETURN.json'), 'utf8'), saved);
 });
 
-test('actual extraction wrapper hydrates file returns inside the standalone runtime', async t => {
+test('runtime preserves legacy file verdicts and refuses unprepared AgentX dispatch', async t => {
   const f = await fixture(t);
   const kernel = { entity_kind: 'gpu_kernel', device_kernel: 'leaf_kernel',
     seam_candidates: [{ target_callable: 'pkg:leaf', role: 'inner_launcher', depth: 1,
@@ -210,19 +210,17 @@ test('actual extraction wrapper hydrates file returns inside the standalone runt
     const {loadContract} = await import(${JSON.stringify(new URL('./kernel_extraction_delivery.mjs', import.meta.url).href)});
     const {hydrateExtractionVerdicts, kernelSelectionVerified, hasFrozenBaseline, EXTRACT_SCHEMA} = await loadContract();
     const CAPTURE_STORAGE_ENV = '', CAPTURE_BYTE_BUDGET = 1, CAPTURE_CASE_BYTE_LIMIT = 1;
-    const CAPTURE_PERSIST_POLICY = '', BASELINE_EXTRACT_RETRIES = 1, KERNEL_EXTRACT_ON = true;
+    const CAPTURE_PERSIST_POLICY = '', BASELINE_EXTRACT_RETRIES = 0, KERNEL_EXTRACT_ON = !!args.agentx;
     const WORKFLOW_DIR = ${JSON.stringify(fileURLToPath(new URL('..', import.meta.url)))};
-    const roleAgent = (role, phase, prompt) => {
-      if (prompt.includes('--cleanup-task-dir')) throw new Error('AgentX repair would discard its evidence');
-      return 'fixture';
-    };
+    const roleAgent = () => 'fixture';
     const safeAgent = async () => agent('fixture', {schema: EXTRACT_SCHEMA});
     ${extraction}
     return extractWithBaseline('kernel_extractor', 'extract', '', {KERNEL: args.kernel});
   `);
   const logs = [];
+  let agentCalls = 0;
   const runtime = createRuntime({ backend: { name: 'fixture',
-    runAgent: async () => ({ text: JSON.stringify(result) }) }, log: line => logs.push(line) });
+    runAgent: async () => { agentCalls++; return { text: JSON.stringify(result) }; } }, log: line => logs.push(line) });
   const accepted = await runtime.runScript(script, { kernel }, 0);
   assert.equal(accepted.unittest_smoke, 'pass');
   assert.deepEqual(accepted.selection_validation, verdict);
@@ -234,11 +232,9 @@ test('actual extraction wrapper hydrates file returns inside the standalone runt
   const rejected = await runtime.runScript(script, { kernel }, 0);
   assert.equal(rejected.unittest_smoke, 'fail');
   assert.match(rejected.smoke_detail, /SHA-256 mismatch/);
-  assert(!logs.some(line => /reclaimed capture|capture reclaim skipped/.test(line)),
-    'return-only AgentX repairs do not attempt automatic capture cleanup');
-  await fs.writeFile(path.join(f.task, 'leaf.json'), JSON.stringify({ ...verdict, selection_scope: 'joint_chain' }));
-  Object.assign(result, await attachVerdict(result, 'leaf.json'));
-  const declarationFailure = await runtime.runScript(script, { kernel }, 0);
-  assert.equal(declarationFailure.needs_selection_repair, true);
-  assert.equal(declarationFailure.unittest_smoke, 'fail');
+  const before = agentCalls;
+  const unprepared = await runtime.runScript(script, {kernel, agentx: true}, 0);
+  assert.equal(unprepared.unittest_smoke, 'fail');
+  assert.match(unprepared.smoke_detail, /missing prepared UT/);
+  assert.equal(agentCalls, before, 'AgentX cannot fall back to legacy UT authoring');
 });

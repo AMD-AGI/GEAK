@@ -88,6 +88,7 @@ async function readPreparedDocument(root, delivery, deliveryPath) {
 export async function reusePreparedUT(kernel) {
   try {
     const ref = kernel.prepared_ut;
+    if (!ref) throw new Error('missing prepared UT; complete the extraction stage before optimization');
     const bytes = await fs.readFile(ref.result_path);
     if (sha256(bytes) !== ref.sha256) throw new Error('prepared UT result changed after validation');
     const result = JSON.parse(bytes.toString('utf8'));

@@ -29,15 +29,20 @@ Do not launch another full replay to obtain discovery evidence. Keep probes boun
 and reuse the supplied serving environment, TP layout and accepted overlays.
 
 `PHASE=repair_delivery` repairs only packaging from saved evidence. Do not restart
-selection or rerun unchanged passing GPU tests. For a legacy `extract`/`extract_op`
-call, use the supplied `KERNEL` declaration and return that task's validated result.
-`AUTHORING_STAGE=joint_bootstrap` may create replay scaffolding internally; only a
-complete UT satisfies a prepared delivery.
+selection or rerun unchanged passing GPU tests.
 
-For downstream profiler/architect/bakeoff roles, use the saved workload, ranking
-and prepared UTs. Their cases, weights and source binding come from this skill;
-do not execute extraction again or substitute fixed ISL/OSL weights. Optimization
-remains a downstream workflow action after extraction has finished.
+AgentX runs baseline → this complete preparation → head optimization → kernel
+milestones → E2E validation. It skips the outer Profile/Strategize, ConfigSweep and
+Tune stages; bounded trace sampling inside this skill still runs when needed.
+Downstream stages consume the prepared queues in saved order, subject to execution
+budgets. They do not nominate new kernels, apply another percentage threshold or
+author UTs. Cases, weights and source binding remain fixed; optimization runs the
+existing UT against changed candidate code and gates each integration with E2E A/B.
+Head wins and completed milestones do not refresh extraction. Saved cost weights
+remain those measured during preparation, not measurements of the optimized stack.
+Queue exhaustion ends dispatch; undispatched tasks remain in carried state. Fast
+and deep modes retain their head-only scheduling. Missing or stale UT evidence
+fails that task rather than invoking another extractor from an optimization phase.
 
 ## Package the completed tasks
 

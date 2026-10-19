@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 // Execute the actual dispatch branches: AgentX must reach extraction from baseline
-// evidence, with zero profiler calls, including refreshes and baseline-only resumes.
+// evidence once; downstream scheduling consumes prepared UTs without rediscovery.
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -21,14 +21,16 @@ const helper = between('async function prepareAgentXKernels(', "\nif (want('setu
 const initial = between("  if (searchClosed('Profile and Strategize')) {",
   '} else {\n  // Load carried state');
 const resume = between('  // Load carried state', '\n}\n\n// ===');
-const config = between('    let restrat;', '    // re-strategize may');
-const tuning = between("    if (!searchClosed('post-tuning re-profile and re-strategize')) {", '  } else if (tuned)');
-const deep = between('        let rp;', '        if (rp && Array.isArray(rp.heads))');
-const head = between("  if (acceptedHeads.length && !searchClosed('post-head re-profile')) {\n    if (KERNEL_EXTRACT_ON)",
+const phaseSelector = between('const PHASES =', 'const ST = A.state');
+const config = "if (want('config')) {\n" + between('      profile = await safeAgent(',
+  '      // re-strategize may', src.indexOf("post-config re-profile and re-strategize")) + '\n}';
+const tuning = "if (want('tune')) {\n" + between("    if (!searchClosed('post-tuning re-profile and re-strategize')) {", '  } else if (tuned)') + '\n}';
+const deep = between("      if (!KERNEL_EXTRACT_ON && want('profile')", '\n    };');
+const head = between("  if (!KERNEL_EXTRACT_ON && acceptedHeads.length && !searchClosed('post-head re-profile'))",
   '  log(`Head-kernel track done.');
-const milestoneRefresh = between('    if (KERNEL_EXTRACT_ON) {\n      profile = await prepareAgentXKernels(milestone',
-  '  } else {\n    noImprove++');
+const milestoneRefresh = between('  if (milestoneImproved) {', '\n  // --- (d) Update');
 const milestonePlan = between('  let plan;\n  if (KERNEL_EXTRACT_ON)', '\n  const planCandsRaw');
+const milestoneFilter = between('  const planCandsRaw =', '  if (!planCands.length)');
 const milestoneSchedule = between('  const cands = planCands.slice(0, remaining)',
   '  // --- (b) PARALLEL optimize');
 const carry = between('const carryState = {', '\n// What this run got from the KB');
@@ -60,12 +62,14 @@ async function run(body, overrides = {}, reply = selection()) {
     TRACELENS_INPUTS: {}, ANALYSIS_SKILL_INPUTS: {}, KB_REF_INPUTS: {},
     profile: { profile_workload_json: '/old/workload.json', kernel_ranking_json: '/old/ranking.json' },
     strategy: null, kernelQueue: [], headQueue: [], history: { ledger: [] },
-    ST: {}, e2eGateCount: 2, milestone: 2, remaining: 1, belowFloor: false,
+    ST: {}, A: {}, FAST_MODE: false, DEEP_MODE: false,
+    e2eGateCount: 2, milestone: 2, remaining: 1, belowFloor: false,
+    milestoneImproved: true, noImprove: 1, lastReprofileTput: 300, DEEP_REPROFILE_GAIN: 0.1, allLanes: [],
     MIN_KERNEL_TASKS: 1, dispatched: 1, acceptedHeads: [{}], acceptedKernels: [],
     flaggedHeads: [], pendingIntegrations: [], tuning: null, BACKEND: 'sglang',
     MEASUREMENT_MODE: 'isolated_server', VALIDATION_MEASUREMENT_MODE: 'isolated_server',
     VALIDATION_REPLICAS: 1, PLAN_SCHEMA: {},
-    searchClosed: () => false, gateNoiseBand: x => x, remainingMin: () => 120, log: () => {}, phase: p => phases.push(p), want: phase => phase !== 'extract',
+    searchClosed: () => false, gateNoiseBand: x => x, remainingMin: () => 120, log: () => {}, phase: p => phases.push(p),
     roleAgent: (role, phase, intro, inputs) => ({ role, phase, intro, inputs }),
     safeAgent: async (prompt, opts) => { calls.push({ ...prompt, opts }); return prompt.role === 'kernel_extractor' ? { delivery_path: '/eval/delivery.json' } : structuredClone(reply); },
     readAgentXPreparation: async () => structuredClone(reply),
@@ -73,7 +77,7 @@ async function run(body, overrides = {}, reply = selection()) {
     ...overrides,
   };
   const result = await new AsyncFunction('env', `let { ${Object.keys(env).join(',')} } = env;
-    ${schemas}\n${helper}\n${body}
+    ${schemas}\n${phaseSelector}\n${helper}\n${body}
     return {profile, strategy, headQueue, kernelQueue,
       plan: typeof plan === 'undefined' ? null : plan,
       scheduled: typeof cands === 'undefined' ? null : cands,
@@ -162,13 +166,8 @@ async function run(body, overrides = {}, reply = selection()) {
     ['milestone plan', milestonePlan, 1],
   ]) {
     const actual = await run(body);
-    assert.deepEqual(actual.calls.map(c => c.role), ['kernel_extractor'], name);
-    assert.deepEqual(actual.phases, ['KernelExtract'], name);
-    assert.equal(actual.calls[0].inputs.CURRENT_THROUGHPUT, 440, name);
-    assert.equal(actual.calls[0].inputs.CURRENT_OVERLAY, '/accepted-overlay', name);
-    assert.equal(actual.calls[0].inputs.TASK, input.TASK, `${name} preserves extraction scope`);
-    assert.deepEqual(actual.calls[0].inputs.EXTRACTION_SELECTION_POLICY,
-      input.EXTRACTION_SELECTION_POLICY, `${name} preserves the per-phase extraction rule`);
+    assert.deepEqual(actual.calls, [], `${name}: no downstream extraction or profiling`);
+    assert.deepEqual(actual.phases, [], name);
     const old = await run(body, { KERNEL_EXTRACT_ON: false });
     assert.equal(old.calls.length, expectedFixedCalls, name);
     assert(old.calls.every(c => ['profiler', 'system_architect'].includes(c.role)), name);
@@ -176,6 +175,33 @@ async function run(body, overrides = {}, reply = selection()) {
   const queued = await run(milestonePlan, { kernelQueue: [candidate('saved')] });
   assert.equal(queued.calls.length, 0, 'consume saved candidates without rediscovery');
   assert.equal(queued.plan.kernel_candidates[0].short_name, 'saved');
+
+  const lowShare = {...candidate('three_percent'), pct_gpu_time: 3.25};
+  const scoped = {...candidate('explicit_scope'), pct_gpu_time: 1};
+  const inventory = [lowShare, scoped, candidate('last')];
+  let queue = inventory;
+  for (const expected of inventory) {
+    const batch = await run(milestonePlan + milestoneFilter + milestoneSchedule + milestoneRefresh + carry,
+      {kernelQueue: queue, remaining: 1});
+    assert.equal(batch.scheduled[0].short_name, expected.short_name);
+    assert.deepEqual(batch.calls, [], 'an accepted optimization must not replenish the inventory');
+    const resumedBatch = await run(resume, {ST: batch.state});
+    assert.deepEqual(resumedBatch.calls, [], 'all-phase resume reuses the completed preparation');
+    queue = resumedBatch.kernelQueue;
+  }
+  const exhausted = await run(milestonePlan, {kernelQueue: queue});
+  assert.equal(exhausted.plan.stop, true);
+  assert.deepEqual(exhausted.calls, [], 'queue exhaustion never triggers another extraction');
+  const fixedFilter = await run(milestonePlan + milestoneFilter + milestoneSchedule,
+    {KERNEL_EXTRACT_ON: false, milestone: 1, kernelQueue: inventory, remaining: 3});
+  assert.deepEqual(fixedFilter.scheduled.map(k => k.short_name), ['last'],
+    'fixed-load milestone still enforces its original 5% threshold');
+  for (const mode of ['normal', 'fast', 'deep']) {
+    const phases = new Function('A', 'KERNEL_EXTRACT_ON', 'FAST_MODE', 'DEEP_MODE',
+      `${phaseSelector} return ['setup', 'profile', 'config', 'tune', 'head', 'kernel', 'final'].filter(want);`);
+    assert.deepEqual(phases({}, true, mode === 'fast', mode === 'deep'),
+      mode === 'normal' ? ['setup', 'head', 'kernel', 'final'] : ['setup', 'head', 'final']);
+  }
 
   const baselineOnly = { eval_dir: '/saved', baseline_throughput_tok_s: 400 };
   const resumed = await run(resume, { ST: baselineOnly });
@@ -193,7 +219,7 @@ async function run(body, overrides = {}, reply = selection()) {
   assert.equal(fixedResume.calls.length, 0, 'fixed-load resume adds no calls');
   assert.deepEqual(fixedResume.profile, { profile_topN_json: '' });
 
-  const extractOnly = await run(resume, { ST: baselineOnly, want: p => p === 'extract' });
+  const extractOnly = await run(resume, { ST: baselineOnly, A: { phases: 'extract' } });
   assert.equal(extractOnly.calls[0].phase, 'prepare', 'baseline-only extract phase completes UTs');
   const oldSelection = await run(resume, { ST: { ...baselineOnly,
     headQueue: [{ ...candidate('old'), prepared_ut: undefined }], kernelQueue: [] } });
@@ -247,8 +273,7 @@ async function run(body, overrides = {}, reply = selection()) {
   const noBaseline = makeDispatch(async () => ({ unittest_smoke: 'pass', task_dir: '/task' }));
   assert.equal((await noBaseline('kernel_extractor', 'extract', '', {})).unittest_smoke, 'fail',
     'batch authoring still requires a frozen baseline before admission');
-  // A live resume omitted a dispatcher marker, although its selected op seam was
-  // correct. Repairing probe coverage must not force selection of a wrong seam.
+  // Preserve the legacy extractor's omitted-dispatcher retry behavior.
   const identity = between('const CALLABLE_SPEC_RX =', 'const PRE_FLAGGED_HEADS =');
   const target = 'pkg.live:op', dispatcher = 'pkg.live:compile';
   const selectedHead = { entity_kind: 'gpu_kernel', device_kernel: 'device_kernel',
@@ -267,7 +292,8 @@ async function run(body, overrides = {}, reply = selection()) {
     ${extraction}
     return extractWithBaseline;
   `);
-  for (const enabled of [true, false]) {
+  {
+    const enabled = false;
     const retryPrompts = [];
     const retryDispatch = makeRetryDispatch(async prompt => {
       retryPrompts.push(prompt);
@@ -323,53 +349,6 @@ async function run(body, overrides = {}, reply = selection()) {
   const jointResult = { ...jointPhases[0].result,
     phase_selection_validations: jointPhases.map(p => p.result) };
   assert(checkSelection(jointHead, jointResult).ok, 'both whole-chain phase verdicts pass');
-  const makeJointExtract = reply => new Function('safeAgent', `
-    const CAPTURE_STORAGE_ENV = '', CAPTURE_BYTE_BUDGET = 1, CAPTURE_CASE_BYTE_LIMIT = 1;
-    const CAPTURE_PERSIST_POLICY = '', BASELINE_EXTRACT_RETRIES = 1, JOINT_BOOTSTRAP_SCHEMA = {};
-    const roleAgent = (role, phase, intro, inputs) => ({ role, phase, intro, inputs });
-    const hasFrozenBaseline = ext => ext && ext.baseline_frozen === true;
-    const log = () => {};
-    ${identity}\n${extraction}\nreturn extractWithBaseline;
-  `)(reply);
-  const bootstrap = { ready: true, task_dir: '/joint', report_path: '/joint/replay.json',
-    phase_results: jointPhases.map(p => ({ regime: p.spec.regime,
-      target_callable: p.result.target_callable, exit_code: 0, baseline_replay_passed: true })) };
-  const stageCalls = [];
-  const staged = await makeJointExtract(async p => {
-    stageCalls.push(p);
-    return stageCalls.length === 1 ? bootstrap : { ...jointResult, task_dir: '/joint',
-      smoke: 'pass', baseline_frozen: true };
-  })('kernel_extractor', 'extract_op', '', { KERNEL: jointHead });
-  assert.equal(stageCalls.length, 2);
-  assert.equal(stageCalls[0].inputs.AUTHORING_STAGE, 'joint_bootstrap');
-  assert.equal(stageCalls[1].inputs.AUTHORING_STAGE, 'complete_joint_ut');
-  assert.equal(stageCalls[1].inputs.PRIOR_TASK_DIR, '/joint');
-  assert(stageCalls[1].intro.includes('each phase capture directory separately'));
-  assert(stageCalls[1].intro.includes('Preserve one replayable oracle per phase'));
-  assert.equal(staged.smoke, 'pass');
-  const jointRetryCalls = [];
-  const retriedJoint = await makeJointExtract(async p => {
-    jointRetryCalls.push(p);
-    const result = structuredClone(jointResult);
-    if (jointRetryCalls.length === 1) result.phase_selection_validations.pop();
-    return { ...result, task_dir: '/joint', smoke: 'pass', baseline_frozen: true };
-  })('kernel_extractor', 'extract_op', '', { KERNEL: jointHead, JOINT_BOOTSTRAP: bootstrap });
-  assert.equal(retriedJoint.smoke, 'pass');
-  assert.equal(jointRetryCalls.length, 2);
-  assert(jointRetryCalls[1].intro.includes('Preserve the passing per-phase bootstrap inputs'));
-  assert(!jointRetryCalls[1].intro.includes('--cleanup-task-dir "$TASK" --no-promote'),
-    'joint retries must retain all passing bootstrap oracles');
-  let incompleteCalls = 0;
-  const incomplete = await makeJointExtract(async () => {
-    incompleteCalls++;
-    return { ...bootstrap, phase_results: bootstrap.phase_results.slice(0, 1) };
-  })('kernel_extractor', 'extract_op', '', { KERNEL: jointHead });
-  assert.equal(incompleteCalls, 1);
-  assert.equal(incomplete.smoke, 'fail', 'one phase cannot pass a joint bootstrap');
-  const fullFailure = await makeJointExtract(async () => ({ ...jointResult, task_dir: '/joint',
-    smoke: 'fail', baseline_frozen: true }))('kernel_extractor', 'extract_op', '',
-      { KERNEL: jointHead, JOINT_BOOTSTRAP: bootstrap });
-  assert.equal(fullFailure.smoke, 'fail', 'a passing bootstrap never substitutes for full UT gates');
   for (const change of [
     r => r.phase_selection_validations.pop(),
     r => r.phase_selection_validations[1].selection_validation.chain_members.pop(),
@@ -383,5 +362,5 @@ async function run(body, overrides = {}, reply = selection()) {
   assert(!checkSelection({ ...jointHead, joint_ut: undefined,
     seam_candidates: jointPhases[0].spec.seam_candidates }, jointResult).ok,
     'a joint scope cannot silently weaken a single-kernel selection gate');
-  console.log('PASS: baseline-to-skill dispatch, all six refresh/planning branches, evidence gates and resumes; fixed-load dispatch preserved.');
+  console.log('PASS: baseline-to-skill dispatch, single preparation, downstream queue consumption, evidence gates and resumes; fixed-load dispatch preserved.');
 })().catch(e => { console.error(e); process.exitCode = 1; });

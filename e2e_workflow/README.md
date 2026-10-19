@@ -349,7 +349,8 @@ Results land in `EVAL_DIR/tuning/`, in `final_report.md` **§2b**, in
 `wfReturn.tuning_skillset` (`tuning_delta_pct`, `tuning_speedup`, `share_of_total_gain_pct`), and in
 `result.json` under a **purely additive** `tuning_skillset` key — no existing key changes name, type or
 meaning, and a run without the phase produces a byte-identical `result.json`.
-Fast mode skips the phase; deep mode keeps it. Full contract:
+Fast mode skips the phase; deep mode keeps it for fixed-load workloads. AgentX skips
+it as described below. Full contract:
 `knowledge/tuning_skillset_integration.md`.
 
 ## AgentX kernel extraction and UT delivery
@@ -377,10 +378,22 @@ It checks source/binding/UT evidence without repeating selection or GPU tests; c
 to source, cases or recorded results invalidate reuse. Task-count budgets affect
 scheduling, not the selected inventory or its reported coverage.
 
+AgentX follows baseline → B extraction and UT validation → head optimization →
+kernel milestones → E2E validation. Outer Profile/Strategize, ConfigSweep and Tune
+are skipped. B still uses bounded trace sampling to establish kernel identity and
+cost. All three head modes and the milestone loop reuse the prepared task directory
+and immutable UT, running it against optimization candidates instead of authoring
+another test. Missing or changed preparation evidence fails the task locally.
+
 The default selection remains per-phase Top 5 intersected with whole-workload
 GPU-time share strictly greater than 3%, without backfilling. Explicit user scope
-wins. Fixed ISL/OSL workloads keep their existing extractor. Per-kernel UT results
-do not establish an E2E improvement.
+wins. Head routing uses the prepared task kind; milestones consume the remaining
+kernel queue without Architect nomination or the fixed-load 5% filter. Optimization
+wins do not trigger another extraction; scheduling uses the original measured order
+and weights. Dispatched tasks leave the queue, pending tasks survive resume, and an
+empty queue stops dispatch. Fast/deep modes retain their head-only scheduling.
+Fixed ISL/OSL workloads keep their existing flow. Each optimization still runs its
+existing UT and E2E A/B gate; a UT pass alone does not establish an E2E improvement.
 
 ## Roofline-guided routing (`analysis_skill`, default `roofline`)
 

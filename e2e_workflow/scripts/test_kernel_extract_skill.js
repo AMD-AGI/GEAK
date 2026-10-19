@@ -47,10 +47,8 @@ const make = new Function('A', 'process', `
     validationMeasurement: VALIDATION_MEASUREMENT_MODE, validationSamples: VALIDATION_SAMPLES };
 `);
 const consumers = [
-  ['profiler', 'baseline'], ['profiler', 'reprofile'],
-  ['system_architect', 'strategize'], ['system_architect', 'plan_milestone'],
+  ['system_architect', 'update_experience'],
   ['kernel_extractor', 'prepare'], ['kernel_extractor', 'repair_delivery'],
-  ['kernel_extractor', 'extract_op'], ['kernel_extractor', 'extract'],
   ['op_benchmarker', 'bakeoff'],
 ];
 for (const args of [
@@ -67,10 +65,9 @@ for (const args of [
   for (const [name, phase] of consumers) {
     const prompt = run.roleAgent(name, phase, 'Run the phase.', {WORKLOAD: run.workload});
     assert(prompt.includes(`PHASE=${phase}`));
-    const skill = prompt.match(/Read (\S+kernel-extract\/SKILL.md)/)[1];
-    assert(fs.existsSync(skill), 'injected skill must ship at the referenced path');
-    assert(prompt.includes('derive actual kernel shapes and call weights from dispatch evidence and captured operands'));
     if (name === 'kernel_extractor') {
+      const skill = prompt.match(/Read (\S+kernel-extract\/SKILL.md)/)[1];
+      assert(fs.existsSync(skill), 'injected skill must ship at the referenced path');
       assert(!prompt.includes(`First Read ${root}/roles/kernel_extractor.md`));
       assert(prompt.includes(`${path.dirname(skill)}/references/workflow-handoff.md`));
       assert(prompt.includes('"SKILL_ROOT":' + JSON.stringify(path.dirname(skill))));
@@ -78,6 +75,11 @@ for (const args of [
       assert(prompt.includes('"SHARED_TOOLS":' + JSON.stringify(path.join(root, 'scripts'))));
       assert(prompt.includes('"PARSE_PROFILE_STRICT_PHASES":"1"'));
       assert(prompt.includes('"KERNEL_ENV_SKIP_ENUM_REAP":"1"'));
+    } else {
+      const handoff = prompt.match(/Read (\S+kernel-extract\/references\/workflow-handoff.md)/)[1];
+      assert(fs.existsSync(handoff));
+      assert(!prompt.includes('kernel-extract/SKILL.md'), 'downstream roles load only the handoff');
+      assert(prompt.includes('do not repeat discovery, sampling or UT authoring'));
     }
   }
   assert.equal(run.block('director'), '');
@@ -99,8 +101,9 @@ for (let [backend, specification] of [
   assert.deepEqual(run.workload.spec, specification);
   for (const [name, phase] of consumers) {
     const prompt = run.roleAgent(name, phase, '', {});
-    assert(prompt.includes('kernel-extract/SKILL.md'));
-    assert(prompt.includes(JSON.stringify(specification)));
+    assert(prompt.includes(name === 'kernel_extractor'
+      ? 'kernel-extract/SKILL.md' : 'kernel-extract/references/workflow-handoff.md'));
+    if (name !== 'kernel_extractor') assert(prompt.includes(JSON.stringify(specification)));
     assert(prompt.includes(`BACKEND=${backend}`));
   }
   const saved = carryFor(specification.kind, specification);
