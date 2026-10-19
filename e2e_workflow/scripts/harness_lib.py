@@ -607,6 +607,19 @@ def to_device_like(ref, dev):
 
 def reconstruct_captured(obj, device="cpu"):
     """Inverse of capture_shapes._snapshot (shared refs must already be resolved)."""
+    if isinstance(obj, dict) and obj.get("__needs_regen__"):
+        # structure_only capture: the recorded output came from the real operands, which the
+        # file no longer holds, so there is nothing here to compare against. Raising is the
+        # point -- a placeholder that reached a correctness gate would pass it vacuously.
+        raise ValueError(
+            "this capture was taken with CAPTURE_PERSIST_POLICY=structure_only and its "
+            "output has not been regenerated. Run scripts/regen_reference.py against it "
+            "inside the serving container and point the task at the regenerated file.")
+    if isinstance(obj, dict) and obj.get("__synth__"):
+        raise ValueError(
+            "a __synth__ operand descriptor reached reconstruct_captured. Materialize it "
+            "first with capture_shapes.materialize_synth(...), which rebuilds it from the "
+            "recorded seed; do NOT rebuild operands through the serving stack at UT time.")
     if isinstance(obj, dict) and obj.get("__tensor__"):
         t = obj["data"]
         return t.to(device) if hasattr(t, "to") else t

@@ -5,12 +5,11 @@ description: Extract actual GPU kernel source and workload-weighted standalone t
 
 # AgentX kernel extraction
 
-This skill is self-contained. The agent performs the stages below using the
-bundled tools; no external workflow runner, role system or GEAK installation is
-required. When invoked by GEAK, first read [workflow handoff](references/workflow-handoff.md)
-for input paths and the final return format; the extraction stages below remain the same.
-Set `SKILL_ROOT` to the directory containing this file. All tool paths
-are relative to it. Read [setup and inputs](references/setup.md) first.
+The agent performs the five stages below using this skill's method and the
+repository's shared tools. Set `SKILL_ROOT` to this directory and `SHARED_TOOLS`
+to `e2e_workflow/scripts`. Read [setup and inputs](references/setup.md) first.
+When invoked by GEAK, also read [workflow handoff](references/workflow-handoff.md)
+for input paths and the final return format.
 
 The objective is a reviewable source-and-test delivery for the user's current
 AgentX workload. Preserve the installed stack, accepted overlays, baseline,
@@ -87,7 +86,7 @@ defer tasks but cannot turn a partial batch into completed extraction.
 Read [delivery contract](references/delivery-contract.md) before authoring.
 Save `task_plan.json` with one owner per complete math boundary. For each task,
 save the original declaration as `run/requested_kernel.json` (called `KERNEL`
-in the bundled contract), including exact selected identities, callable
+in the delivery contract), including exact selected identities, callable
 candidates, phases and `source_delivery_required=true`.
 
 Keep required companions even when below the selection threshold. Use
@@ -102,8 +101,8 @@ For collectives read [multi-rank UT](references/collective-ut.md). Consult the
 [GLM example](references/glm-agentx-example.md) only for matching features;
 it supplies no default shapes, layer multipliers or kernel identities.
 
-Trace live callable candidates using `scripts/seam_trace.py` and run
-`scripts/kernel_selection.py --help` for the verifier. Preserve complete raw
+Trace live callable candidates using `$SHARED_TOOLS/seam_trace.py` and run
+`python3 "$SHARED_TOOLS/kernel_selection.py" --strict-launch --help` for the verifier. Preserve complete raw
 verdicts and deeper-candidate evidence. Names alone cannot prove a binding or
 that the requested whole chain executes. If the declared boundary is wrong,
 repair the saved task plan with evidence before extracting; do not edit a
@@ -116,7 +115,7 @@ Read [source extraction](references/source-extraction.md) and
 baseline case per phase; retain it while adding editable leaves and full cases.
 Each `tasks/<name>/` contains its own `kernel_src/`, `cases.py`, `meta.json`,
 `unittest.py`, baseline manifest/overlay, captured oracles and `run/` evidence.
-Copy the bundled harness/leg/overlay helpers into the task; freeze them once authored.
+Copy the shared harness/leg/overlay helpers into the task; freeze them once authored.
 
 Deliver actual native/JIT/generated computation source for every claimed leaf,
 with build resources and version/hash provenance. A copied dispatcher that
@@ -152,7 +151,7 @@ and reduce the bulk float payload to seeded descriptors
 dividing line is control flow and memory access, not "is it MoE". See
 [capture policy](references/task-authoring.md#capture-policy) for the cost.
 
-Use `h.measure_legs()` and `h.serving_weighted_speedup()` from the bundled
+Use `h.measure_legs()` and `h.serving_weighted_speedup()` from the shared
 harness. Set `workload.kind="agentx_trace_replay"`, `weighting="observed"`, and
 `serving_weight_model.source="observed_workload"` with an evidence path.
 Each case has a unique `sig`, observed `regime` and finite nonnegative
@@ -164,17 +163,17 @@ or weighted geometric mean. A near-1x unmodified extraction is expected.
 
 Read [source records](references/source-delivery-records.md), freeze the task
 snapshot before GPU validation and generate records from actual outcomes.
-After real GPU tests, preflight the exact return with the bundled local gate:
+After real GPU tests, preflight the exact return with the shared delivery gate:
 
 ```bash
-node "$SKILL_ROOT/scripts/kernel_extraction_delivery.mjs" \
+node "$SHARED_TOOLS/kernel_extraction_delivery.mjs" \
   --kernel "$TASK_DIR/run/requested_kernel.json" \
   --result "$TASK_DIR/run/draft_return.json" --phase extract \
   --out "$TASK_DIR/run/RETURN.json"
 ```
 
 Use `extract_op` for the whole-op return form defined in the contract. Both
-forms require actual source delivery in this skill. The gate reads bundled
+forms require actual source delivery in this skill. The gate reads workflow
 schemas and hashed evidence; it does not execute or independently certify GPU
 tests. Keep failures visible and continue independent tasks when possible.
 

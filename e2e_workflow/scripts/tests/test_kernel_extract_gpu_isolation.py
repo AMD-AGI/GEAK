@@ -27,10 +27,7 @@ class KernelExtractGpuIsolationTest(unittest.TestCase):
         self.set_lock = self.root / "repo/e2e_workflow/scripts/gpu_lock_set.py"
         self.lock.parent.mkdir(parents=True)
         self.set_lock.parent.mkdir(parents=True)
-        source = LOCK.read_text()
-        self.assertEqual(source.count('LOCK_DIR="/tmp/team_gpu_locks"'), 1)
-        self.lock.write_text(source.replace('LOCK_DIR="/tmp/team_gpu_locks"',
-                                            f'LOCK_DIR="{lock_dir}"'))
+        shutil.copy2(LOCK, self.lock)
         (self.lock.parent / "workspace_sources.py").symlink_to(
             LOCK.parent / "workspace_sources.py")
         shutil.copy2(SET_LOCK, self.set_lock)
@@ -41,7 +38,7 @@ class KernelExtractGpuIsolationTest(unittest.TestCase):
         self.env.update(
             GEAK_GPU_ALLOWED=f"{self.gpu},{self.other_gpu}",
             GEAK_GPU_REQUIRE_IDLE="0", KERNEL_ENV_KEEP_ARCH="1",
-            KERNEL_ENV_SKIP_ENUM_REAP="1",
+            KERNEL_ENV_SKIP_ENUM_REAP="1", KERNEL_EXTRACT_LOCK_DIR=str(lock_dir),
         )
         self.worker = self.root / "worker.py"
         self.worker.write_text('''import os, pathlib, sys, time

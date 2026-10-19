@@ -52,6 +52,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 # A served KV pool or weight table of this size is densely populated. One that is almost
 # entirely zero while holding real content at a handful of locations was collapsed by the
@@ -141,13 +142,12 @@ def main(argv=None):
               file=sys.stderr)
         return 2
     # Prefer the task's own frozen copy (it is the one the gates actually run against); fall
-    # back to the skill's, so a capture can be judged before it has been placed in a task.
+    # back to the repository's, so a capture can be judged before it has been placed in a task.
     hl = next((p for p in (os.path.join(task_dir, "harness_lib.py"),
-                           os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                        "harness_lib.py"))
+                           str(Path(__file__).resolve().parents[4] / "scripts/harness_lib.py"))
                if os.path.exists(p)), None)
     if hl is None:
-        print("oracle_power: harness_lib.py found neither in %s nor beside this script."
+        print("oracle_power: harness_lib.py found neither in %s nor in the shared tools."
               % task_dir, file=sys.stderr)
         return 2
     spec = importlib.util.spec_from_file_location("harness_lib", hl)

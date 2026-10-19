@@ -21,7 +21,7 @@ tasks/<name>/
 ```
 
 Copy `harness_lib.py`, `leg_runner.py` and `overlay_setup.py` from
-`$SKILL_ROOT/scripts/` to the task unchanged. If a helper needs its sibling
+`$SHARED_TOOLS/` to the task unchanged. If a helper needs its sibling
 capture/trace utilities, copy those too. Record every vendored helper in
 `meta.kernel_extraction.source_delivery_files` so the snapshot binds the harness.
 Freeze the tests/oracles when authored; candidate edits belong under `kernel_src/`.
@@ -123,7 +123,7 @@ seam and a collective have no structural operands at all and can be fully random
 Use separate subprocesses for baseline and candidate. Import task helpers by
 explicit file path and remove the task directory from `sys.path` before importing
 torch: a file named `unittest.py` otherwise shadows Python's standard library.
-The bundled leg runner already performs this isolation.
+The shared leg runner already performs this isolation.
 
 0. **Before any verdict, prove the comparison can produce one.** Two preconditions,
    both executable, both of which a real run of this skill violated silently:

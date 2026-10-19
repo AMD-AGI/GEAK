@@ -6,9 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { sourceSnapshot, fileRef } from '../knowledge/kernel_extraction_skills/kernel-extract/scripts/kernel_source_delivery.mjs';
+import { sourceSnapshot, fileRef } from './kernel_source_delivery.mjs';
 
-const cli = fileURLToPath(new URL('../knowledge/kernel_extraction_skills/kernel-extract/scripts/kernel_extraction_delivery.mjs', import.meta.url));
+const cli = fileURLToPath(new URL('./kernel_extraction_delivery.mjs', import.meta.url));
 
 async function fixture(t) {
   const evalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'standalone handoff fixture '));
@@ -67,7 +67,7 @@ const adapter = fileURLToPath(new URL('./agentx_kernel_preparation.mjs', import.
 
 async function delivered(t) {
   const f = await fixture(t);
-  // Execute the actual bundled B preflight before exercising the workflow adapter.
+  // Execute the actual shared preflight used by the skill before exercising the workflow adapter.
   const checked = f.run();
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
   const write = (file, data) => fs.writeFile(path.join(f.evalDir, file), JSON.stringify(data));
@@ -83,7 +83,7 @@ async function delivered(t) {
     pack: () => packStandaloneTasks(f.evalDir, 'manifest.json', 'delivery.json')};
 }
 
-test('B local CLI -> workflow packaging CLI -> optimization queue preserves evidence and dispositions', async t => {
+test('skill preflight -> workflow packaging -> optimization queue preserves evidence and dispositions', async t => {
   const f = await delivered(t);
   const before = await fs.readFile(path.join(f.task, 'run/RETURN.json'), 'utf8');
   const proc = spawnSync(process.execPath, [adapter, '--eval-dir', f.evalDir,

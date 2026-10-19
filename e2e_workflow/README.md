@@ -355,12 +355,13 @@ Fast mode skips the phase; deep mode keeps it. Full contract:
 ## AgentX kernel extraction and UT delivery
 
 An explicit `workload_kind: "agentx_trace_replay"` (or matching workload specification)
-activates the bundled [kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md).
-The extractor reads this complete standalone procedure directly: measured baseline logs
+activates the [kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md).
+The extractor follows the complete procedure: measured baseline logs
 → observed workload → sampling points → runtime kernel selection → source extraction
-→ standalone GPU UTs. The skill owns its references and scripts, including coverage,
-reference-output checks and kernel self-noise measurement. Its provenance records the
-validated standalone source and the small integration changes.
+→ standalone GPU UTs. The method comes from the validated standalone skill at `ce1dbe5`. It retains the
+five-stage procedure and the additional sampling, coverage, reference-output and
+self-noise tools. Existing capture, trace, harness, GPU-lock and delivery helpers
+are reused from the repository; their regression tests remain in one place.
 
 The default capture policy is `structure_only`: retain routing, indices, page tables
 and other operands whose values select work, and persist ordinary float payloads as

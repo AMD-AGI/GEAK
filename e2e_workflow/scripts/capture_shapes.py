@@ -33,11 +33,24 @@ _DEFAULT_BYTE_BUDGET = os.environ.get("CAPTURE_BYTE_BUDGET", "8GiB")
 _DEFAULT_CASE_BYTE_LIMIT = os.environ.get("CAPTURE_CASE_BYTE_LIMIT", "2GiB")
 _DEFAULT_PERSIST_POLICY = os.environ.get("CAPTURE_PERSIST_POLICY", "share_large")
 _DEFAULT_SHARE_MIN_BYTES = os.environ.get("CAPTURE_SHARE_MIN_BYTES", "16MiB")
+_DEFAULT_STRUCTURAL_OPERANDS = os.environ.get("CAPTURE_STRUCTURAL_OPERANDS", "")
+_DEFAULT_SYNTH_MIN_BYTES = os.environ.get("CAPTURE_SYNTH_MIN_BYTES", "64KiB")
 _CAPTURE_DIR_RE = re.compile(r"^capture\.pid-")
 _TMP_ARTIFACT_RE = re.compile(r"\.(?:pt|json)\.tmp-\d+")
 # Heuristic names for expert/static parameter tensors (used by moe_slim / share_large).
 _WEIGHT_KEY_RE = re.compile(
     r"(^w[123]$|^weight$|expert_w|gate_up|down_proj|up_proj|_weight$)", re.I)
+# Operands whose CONTENT selects work: routing decisions, gather indices, page tables,
+# sequence bookkeeping. Under `structure_only` these are kept verbatim; everything else
+# floating-point and bulk is reduced to (shape, dtype, stride, seed). The dividing line is
+# "does the data decide control flow or which memory is touched", not "is it MoE": a random
+# redraw of a routing table changes which experts run and how balanced they are, and uniform
+# routing is the SLOW end of the MoE distribution, so redrawing it silently moves the
+# measurement. A random redraw of an activation changes only the numbers inside the tiles.
+_STRUCTURAL_KEY_RE = re.compile(
+    r"(topk_ids|topk_weight|expert_ids|expert_mask|m_indices|num_valid|cumsum|"
+    r"^indices$|_indices$|indptr|block_table|slot_mapping|page_table|positions|"
+    r"seq_len|cu_seqlen|kv_len|routing|^sorted_|_offsets?$|mask)", re.I)
 
 _STATE = {
     "target": None, "out_dir": None, "max_cases": 5, "num_steps": 0,
@@ -66,6 +79,11 @@ _STATE = {
     # storage bound (#429): estimated serialized tensor bytes already accepted into `records` + shared.
     "byte_budget": 0, "case_byte_limit": 0, "persist_policy": "share_large",
     "share_min_bytes": 16 << 20, "shared_tensors": {}, "shared_bytes_est": 0,
+    # structure_only: declared structural operands kept verbatim, bulk float payloads
+    # reduced to seeded descriptors. `synth_seed` is the running counter that makes each
+    # descriptor reproducible; it is persisted, so the operand IS persisted.
+    "structural_keys": set(), "synth_min_bytes": 64 << 10, "synth_seed": 0,
+    "synth_leaves": 0, "synth_bytes_saved": 0,
     "oracle_bytes_est": 0, "budget_exceeded": False,
     "budget_skip_count": 0, "oracle_save_count": 0, "meta_flush_count": 0,
 }
@@ -474,8 +492,102 @@ def _is_weight_key(key):
     return bool(_WEIGHT_KEY_RE.search(str(key)))
 
 
+def _is_structural(key, t, declared):
+    """Whether this operand's CONTENT selects work, and so must be kept verbatim.
+
+    Integer and boolean tensors are structural by default: an index, a page id or a mask
+    redrawn at random addresses different memory, and a kernel whose gather pattern changed
+    is not the kernel that was deployed. Float operands are structural only when declared
+    (`meta.structural_operands` / CAPTURE_STRUCTURAL_OPERANDS) or when their name matches a
+    routing/bookkeeping pattern -- e.g. `topk_weights`, which is float but decides scaling
+    per expert. Small tensors are kept whatever they are; reducing them saves nothing and
+    scalars-in-a-tensor are usually bookkeeping."""
+    torch = _torch()
+    if not torch.is_tensor(t):
+        return True
+    if str(key) in declared:
+        return True
+    if not t.is_floating_point() and "float8" not in str(t.dtype):
+        return True
+    if bool(_STRUCTURAL_KEY_RE.search(str(key))):
+        return True
+    return t.numel() * t.element_size() < int(_STATE.get("synth_min_bytes") or (64 << 10))
+
+
+def _synth_descriptor(t, seed):
+    """A bulk float operand reduced to what is needed to rebuild it bit-identically.
+
+    This is persistence, not omission: `materialize_synth` with the recorded seed returns
+    the same tensor on every call, on every process, forever. That is the property the
+    oracle needs and the property a rebuild-at-UT-time factory does NOT have -- rebuilding
+    through the serving stack re-runs whatever nondeterminism that stack contains (on this
+    deployment, `aiter.fused_moe.moe_sorting` returns different routing from bit-identical
+    inputs), and does it inside the correctness gate where nobody is looking."""
+    return {"__synth__": True, "dtype": str(t.dtype), "shape": list(t.shape),
+            "stride": list(t.stride()), "device": str(t.device), "seed": int(seed),
+            "dist": "randn_unit", "nbytes": int(t.numel() * t.element_size())}
+
+
+def _snapshot_structured(x, key, declared):
+    """`_snapshot`, except bulk non-structural float tensors become seeded descriptors."""
+    torch = _torch()
+    if torch.is_tensor(x) and not _is_structural(key, x, declared):
+        _STATE["synth_seed"] = int(_STATE.get("synth_seed") or 0) + 1
+        _STATE["synth_leaves"] = int(_STATE.get("synth_leaves") or 0) + 1
+        _STATE["synth_bytes_saved"] = (int(_STATE.get("synth_bytes_saved") or 0)
+                                       + x.numel() * x.element_size())
+        return _synth_descriptor(x, _STATE["synth_seed"])
+    if isinstance(x, (list, tuple)):
+        return type(x)(_snapshot_structured(v, key, declared) for v in x)
+    if isinstance(x, dict):
+        return {k: _snapshot_structured(v, k, declared) for k, v in x.items()}
+    return _snapshot(x)
+
+
+def _regen_placeholder(x):
+    """Shape/dtype of an output that must be RECOMPUTED, never the recorded value.
+
+    Under `structure_only` the recorded output came from the real operands while the record
+    keeps reduced ones, so the two do not correspond. A placeholder that announces itself is
+    the difference between a task that refuses to run and a task that quietly compares a
+    candidate against an output no operand in the file produces."""
+    torch = _torch()
+    if torch.is_tensor(x):
+        return {"__needs_regen__": True, "dtype": str(x.dtype), "shape": list(x.shape)}
+    if isinstance(x, (list, tuple)):
+        return type(x)(_regen_placeholder(v) for v in x)
+    if isinstance(x, dict):
+        return {k: _regen_placeholder(v) for k, v in x.items()}
+    return _snapshot(x)
+
+
+def materialize_synth(obj, device=None, generator_device="cpu"):
+    """Rebuild `__synth__` leaves. Deterministic in the recorded seed; safe to call anywhere.
+
+    Unit-variance draws, so the operands have the magnitude a normalized activation has.
+    They do NOT have the outlier distribution of served activations -- if the kernel under
+    test has value-dependent cost (denormals, early-exit, saturation) say so in
+    `meta.oracle_coverage` and keep a few captured cases as the control."""
+    torch = _torch()
+    if isinstance(obj, dict) and obj.get("__synth__"):
+        g = torch.Generator(device=generator_device).manual_seed(int(obj["seed"]))
+        dtype = getattr(torch, str(obj["dtype"]).replace("torch.", ""))
+        t = torch.randn(obj["shape"], generator=g, dtype=torch.float32)
+        t = t.to(dtype=dtype, device=device or obj.get("device") or "cpu")
+        return t.contiguous() if list(t.stride()) != list(obj["stride"]) else t
+    if isinstance(obj, dict) and obj.get("__tensor__"):
+        return obj
+    if isinstance(obj, dict):
+        return {k: materialize_synth(v, device, generator_device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(materialize_synth(v, device, generator_device) for v in obj)
+    return obj
+
+
 def _should_share_kwarg(key, value, policy, share_min_bytes):
     """Whether this kwarg should be stored once in the oracle's shared pool (not per-case)."""
+    if policy == "structure_only":
+        return False  # bulk payloads are already reduced to descriptors; nothing to share
     nbytes = _estimate_object_bytes(value)
     if policy in ("moe_slim", "share_large") and _is_weight_key(key) and nbytes >= (1 << 20):
         return True
@@ -484,8 +596,36 @@ def _should_share_kwarg(key, value, policy, share_min_bytes):
     return False
 
 
+def _snapshots_equal(a, b):
+    """Exact captured-value equality; names, shapes or live tensor identity are insufficient.
+
+    Inference tensors can be overwritten by native code without a version bump.
+    Compare detached CPU bytes, including NaN payloads and packed/float8 dtypes.
+    An unsupported comparison means no reuse, never an assumed match.
+    """
+    torch = _torch()
+    if torch.is_tensor(a) or torch.is_tensor(b):
+        if not (torch.is_tensor(a) and torch.is_tensor(b)):
+            return False
+        try:
+            return (a.dtype == b.dtype and tuple(a.shape) == tuple(b.shape)
+                    and bool(torch.equal(a.contiguous().view(torch.uint8),
+                                         b.contiguous().view(torch.uint8))))
+        except Exception:
+            return False
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        if "__repr__" in a or "__repr__" in b:
+            return False
+        return a.keys() == b.keys() and all(_snapshots_equal(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(_snapshots_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
 def _snapshot_kwargs(kwargs, shared_store, policy, share_min_bytes):
-    """Snapshot kwargs; large/static weight tensors are stored once in ``shared_store``."""
+    """Store equal captured values once, preserving different values of the same kwarg."""
     if policy == "full" or not isinstance(kwargs, dict):
         return _snapshot(kwargs), 0, []
     snap = {}
@@ -493,11 +633,20 @@ def _snapshot_kwargs(kwargs, shared_store, policy, share_min_bytes):
     shared_keys = []
     for key, value in kwargs.items():
         if _should_share_kwarg(key, value, policy, share_min_bytes):
-            if key not in shared_store:
-                shared_store[key] = _snapshot(value)
+            captured = _snapshot(value)
+            prefix = str(key) + "#"
+            slot = next((name for name, previous in shared_store.items()
+                         if (name == key or str(name).startswith(prefix))
+                         and _snapshots_equal(previous, captured)), None)
+            if slot is None:
+                slot, suffix = key, 1
+                while slot in shared_store:
+                    slot = f"{key}#{suffix}"
+                    suffix += 1
+                shared_store[slot] = captured
                 shared_added += _estimate_object_bytes(value)
-            snap[key] = {"__shared__": key}
-            shared_keys.append(key)
+            snap[key] = {"__shared__": slot}
+            shared_keys.append(slot)
         else:
             snap[key] = _snapshot(value)
     return snap, shared_added, shared_keys
@@ -581,7 +730,9 @@ def _wrapper(*args, **kwargs):
                 used = int(s.get("oracle_bytes_est") or 0) + int(s.get("shared_bytes_est") or 0)
                 policy = s.get("persist_policy") or "share_large"
                 share_min = int(s.get("share_min_bytes") or (16 << 20))
-                # Estimate after sharing: weight kwargs counted once into shared pool.
+                # Bound all new snapshots BEFORE cloning. Content equality can
+                # only be established after snapshotting; a repeated kwarg name
+                # must not make a different layer/activation appear free.
                 shared_store = s.setdefault("shared_tensors", {})
                 est_shared_add = 0
                 est_case = call_bytes
@@ -590,9 +741,13 @@ def _wrapper(*args, **kwargs):
                         if _should_share_kwarg(key, value, policy, share_min):
                             nbytes = _estimate_object_bytes(value)
                             est_case -= nbytes
-                            if key not in shared_store:
-                                est_shared_add += nbytes
+                            est_shared_add += nbytes
                 effective_need = max(0, est_case) + est_shared_add
+                if policy == "structure_only":
+                    # Structural operands only; the bulk payload never leaves the device.
+                    # A capture this small is never the thing that blows a byte budget, so
+                    # it must not be skipped by one -- skipping is what loses the shapes.
+                    effective_need = 0
                 if case_limit > 0 and effective_need > case_limit:
                     s["seen"].add(sig)
                     s["budget_exceeded"] = True
@@ -627,6 +782,32 @@ def _wrapper(*args, **kwargs):
                     except Exception as manifest_exc:
                         sys.stderr.write(
                             f"[capture_shapes] manifest write failed: {manifest_exc}\n")
+                elif policy == "structure_only":
+                    declared = set(s.get("structural_keys") or ())
+                    s["seen"].add(sig)
+                    s["regime_seen"].add(regime)
+                    # The recorded output is computed from the REAL operands, so it is not
+                    # an oracle for the reduced ones. Keep it as a descriptor and leave the
+                    # record explicitly unresolved: `regen_reference.py` materializes the
+                    # operands, runs the installed unmodified kernel and fills in the value.
+                    # Shipping the stale output would be a silent mismatch; refusing to ship
+                    # one is the whole point of the policy.
+                    s["records"].append({
+                        "sig": sig,
+                        "regime": regime,
+                        "args": tuple(_snapshot_structured(a, "arg%d" % i, declared)
+                                      for i, a in enumerate(args)),
+                        "kwargs": ({k: _snapshot_structured(v, k, declared)
+                                    for k, v in kwargs.items()}
+                                   if isinstance(kwargs, dict) else _snapshot(kwargs)),
+                        "output": _regen_placeholder(out),
+                        "output_status": "needs_regen",
+                        "shared_keys": [],
+                    })
+                    s["oracle_bytes_est"] = int(s.get("oracle_bytes_est") or 0)
+                    sys.stderr.write(
+                        f"[capture_shapes] recorded case {len(s['records'])} ({regime}) "
+                        f"structure_only: {sig}\n")
                 else:
                     snap_kwargs, shared_added, shared_keys = _snapshot_kwargs(
                         kwargs, shared_store, policy, share_min)
@@ -703,6 +884,10 @@ def _flush(write_oracle=True):
                 "records": records,
                 "shared": shared,
                 "persist_policy": s.get("persist_policy") or "share_large",
+                "structural_operands": sorted(s.get("structural_keys") or ()),
+                "oracle_status": ("needs_regen"
+                                  if s.get("persist_policy") == "structure_only"
+                                  else "captured"),
             }, tmp_io)
             os.replace(tmp_io, io_path)
         except Exception:
@@ -766,6 +951,11 @@ def _flush(write_oracle=True):
         "byte_budget": int(s.get("byte_budget") or 0),
         "case_byte_limit": int(s.get("case_byte_limit") or 0),
         "persist_policy": s.get("persist_policy") or "share_large",
+        "structural_operands": sorted(s.get("structural_keys") or ()),
+        "synth_leaves": int(s.get("synth_leaves") or 0),
+        "synth_bytes_saved": int(s.get("synth_bytes_saved") or 0),
+        "oracle_status": ("needs_regen" if s.get("persist_policy") == "structure_only"
+                          else "captured"),
         "shared_tensor_keys": sorted((s.get("shared_tensors") or {}).keys()),
         "oracle_bytes_est": int(s.get("oracle_bytes_est") or 0) + int(s.get("shared_bytes_est") or 0),
         "budget_exceeded": bool(s.get("budget_exceeded")),
@@ -873,18 +1063,25 @@ def install(target, out_dir, max_cases=5):
             os.environ.get("CAPTURE_CASE_BYTE_LIMIT", _DEFAULT_CASE_BYTE_LIMIT))
         share_min_bytes = parse_byte_budget(
             os.environ.get("CAPTURE_SHARE_MIN_BYTES", _DEFAULT_SHARE_MIN_BYTES))
+        synth_min_bytes = parse_byte_budget(
+            os.environ.get("CAPTURE_SYNTH_MIN_BYTES", _DEFAULT_SYNTH_MIN_BYTES))
     except ValueError as exc:
         raise RuntimeError(f"[capture_shapes] {exc}") from exc
     persist_policy = (os.environ.get("CAPTURE_PERSIST_POLICY", _DEFAULT_PERSIST_POLICY)
                       or "share_large").strip().lower()
-    if persist_policy not in ("full", "share_large", "moe_slim"):
+    if persist_policy not in ("full", "share_large", "moe_slim", "structure_only"):
         raise RuntimeError(
             f"[capture_shapes] invalid CAPTURE_PERSIST_POLICY={persist_policy!r} "
-            f"(expected full|share_large|moe_slim)")
+            f"(expected full|share_large|moe_slim|structure_only)")
+    structural = {k.strip() for k in
+                  os.environ.get("CAPTURE_STRUCTURAL_OPERANDS",
+                                 _DEFAULT_STRUCTURAL_OPERANDS).split(",") if k.strip()}
     s.update(target=target, out_dir=out_dir, max_cases=int(max_cases),
              orig=orig, mod=mod, attr=attr, installed=True,
              byte_budget=byte_budget, case_byte_limit=case_byte_limit,
              persist_policy=persist_policy, share_min_bytes=share_min_bytes or (16 << 20),
+             structural_keys=structural, synth_min_bytes=synth_min_bytes or (64 << 10),
+             synth_seed=0, synth_leaves=0, synth_bytes_saved=0,
              shared_tensors={}, shared_bytes_est=0,
              oracle_bytes_est=0, budget_exceeded=False,
              budget_skip_count=0, oracle_save_count=0, meta_flush_count=0)

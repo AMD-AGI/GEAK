@@ -1847,13 +1847,14 @@ function roleAgent(role, phase, intro, inputs) {
     ...(correctnessEnvBlock(role) ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
     ...inputs,
     ...(standaloneExtraction ? {
-      SKILL_ROOT: KERNEL_EXTRACT_DIR, WORKFLOW_DIR,
+      SKILL_ROOT: KERNEL_EXTRACT_DIR, SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
+      PARSE_PROFILE_STRICT_PHASES: '1', KERNEL_ENV_SKIP_ENUM_REAP: '1',
       CAPTURE_PERSIST_POLICY, CAPTURE_STORAGE_ENV,
     } : {}),
   };
   const instruction = standaloneExtraction
     ? `First Read ${KERNEL_EXTRACT_DIR}/SKILL.md and ${KERNEL_EXTRACT_DIR}/references/workflow-handoff.md.
-Use the complete bundled extraction procedure and scripts. The handoff reference supplies only workflow inputs and output packaging.
+Use the complete extraction procedure and its shared and skill-specific tools. The handoff reference supplies only workflow inputs and output packaging.
 Do not load roles/kernel_extractor.md; it is the legacy procedure for other workloads.`
     : `First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.`;

@@ -109,11 +109,28 @@ class TestJointChainSelection(unittest.TestCase):
         self.assertEqual(result["deeper_live_candidates"], [])
         self.assertFalse(self.verify(events, target=self.score)["ok"])
         self.assertFalse(self.verify(events, target=self.topk)["ok"])
-        # The stricter attribution belongs to the new joint UT path only.
+        # The legacy default remains permissive; AgentX can opt into strict attribution.
         legacy = ks.verify(self.score, "topk_kernel",
                            {"module": "pkg.indexer", "attr": "score", "total_calls_observed": 1},
                            events, [self.score])
         self.assertTrue(legacy["ok"], legacy)
+
+    def test_agentx_cli_can_reject_sibling_launches_without_changing_legacy_default(self):
+        events = self.chain_trace()
+        for event in events:
+            if event.get("cat") in ("hip_runtime", "kernel"):
+                event["args"]["External id"] = 6
+        with tempfile.TemporaryDirectory() as directory:
+            meta_path, trace_path = os.path.join(directory, "meta.json"), os.path.join(directory, "trace.json")
+            with open(meta_path, "w") as fh:
+                json.dump({"module": "pkg.indexer", "attr": "score", "total_calls_observed": 1}, fh)
+            with open(trace_path, "w") as fh:
+                json.dump({"traceEvents": events}, fh)
+            args = ["--target", self.score, "--device-kernel", "topk_kernel",
+                    "--capture-meta", meta_path, "--torch-trace", trace_path,
+                    "--candidate-target", self.score, "--no-reclaim-captures"]
+            self.assertEqual(ks.main(args), 0)
+            self.assertEqual(ks.main(args + ["--strict-launch"]), 1)
 
     def test_known_launch_outside_marker_cannot_fall_back_to_parent_external_id(self):
         events = self.chain_trace()

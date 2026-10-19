@@ -45,12 +45,13 @@ import json
 import os
 import random
 import sys
+from pathlib import Path
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
 
 
 def post(base, path, obj=None, timeout=1800):

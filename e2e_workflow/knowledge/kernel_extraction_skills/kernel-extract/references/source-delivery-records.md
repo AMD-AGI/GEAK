@@ -20,7 +20,7 @@ For `KERNEL.source_delivery_required=true`, return a task-local
 ```
 
 Compute the full `files` and `snapshot_sha256` with
-`node "$SKILL_ROOT/scripts/kernel_source_delivery.mjs" snapshot "$TASK"`.
+`node "$SHARED_TOOLS/kernel_source_delivery.mjs" snapshot "$TASK"`.
 It covers `meta.json`, `cases.py`, `unittest.py` and every source file under
 `kernel_src/`. Include other task-local harness/build/input adapters through
 `meta.kernel_extraction.source_delivery_files`. Freeze these files before GPU
@@ -45,7 +45,7 @@ Generate records from actual test outcomes. Hashing a file or copying these
 field names does not prove GPU execution. The checker enforces consistency,
 not independent truth of the recorded tests; preserve raw logs for review.
 It rejects missing members, changed sources/entry, stale UT results and
-negative controls that only fail compilation. The standalone CLI requires `source_delivery_required=true`; it does not accept
+negative controls that only fail compilation. Declare `source_delivery_required=true` for every task; do not accept
 a source-free declaration as an extraction delivery.
 
 <!-- Standalone adaptation, 2026-10-12: local tools and agent-owned stages. -->

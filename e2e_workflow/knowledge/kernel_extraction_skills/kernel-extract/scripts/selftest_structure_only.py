@@ -11,10 +11,11 @@ the one the policy rests on: a seed is persistence, a rebuild factory is not.
 import os
 import subprocess
 import sys
+from pathlib import Path
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
 
 import torch  # noqa: E402
 

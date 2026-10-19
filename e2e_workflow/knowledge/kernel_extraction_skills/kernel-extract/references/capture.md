@@ -22,17 +22,17 @@ exits. Do not attach cleanup to unrelated processes or stop an existing service
 unless the user authorized that lifecycle. Isolate a temporary capture overlay
 from the accepted baseline and restore it after the probe.
 
-For Python callables use the bundled overlay and trace hooks; inspect CLI help
+For Python callables use the shared overlay and trace hooks; inspect CLI help
 for exact options. A typical preparation sequence is:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/overlay_setup.py" add-capture \
+python3 "$SHARED_TOOLS/overlay_setup.py" add-capture \
   --target "$TARGET_CALLABLE" --out "$CAPTURE_DIR" \
   --overlay "$CAPTURE_OVERLAY" --from "$BASELINE_OVERLAY" \
-  --capture-file "$SKILL_ROOT/scripts/capture_shapes.py"
-python3 "$SKILL_ROOT/scripts/overlay_setup.py" add-marker \
+  --capture-file "$SHARED_TOOLS/capture_shapes.py"
+python3 "$SHARED_TOOLS/overlay_setup.py" add-marker \
   --target "$TARGET_CALLABLE" --overlay "$CAPTURE_OVERLAY" \
-  --marker-file "$SKILL_ROOT/scripts/seam_trace.py"
+  --marker-file "$SHARED_TOOLS/seam_trace.py"
 ```
 
 Pass the capture overlay through the serving process's `PYTHONPATH`; preserve
@@ -60,7 +60,7 @@ task-local, with source hashes and a bounded small replay before a larger sweep.
 
 Once captured, verify target-call markers, host-launch correlation, real device
 kernel names, grids, invocation counts, phase identity and rank integrity using
-`kernel_selection.py`. Pass `--required-device-kernel` only for simultaneous
+`kernel_selection.py --strict-launch`. Pass `--required-device-kernel` only for simultaneous
 mandatory members, not alternative dispatch. Run `--help` for its input contract.
 Store its complete JSON, raw trace and metadata. The CLI may promote/reclaim
 oracles under `--task-dir`; use a separate directory per phase and preserve

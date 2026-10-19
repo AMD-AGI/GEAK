@@ -493,6 +493,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True, help="exact module:attr selected seam")
     parser.add_argument("--device-kernel", required=True, help="GPU kernel selected from profile")
+    parser.add_argument("--strict-launch", action="store_true",
+                        help="attribute kernels by their own host launch (AgentX extraction)")
     parser.add_argument("--required-device-kernel", action="append", default=[],
                         help="additional mandatory joint-chain member; repeat for this phase")
     parser.add_argument("--capture-meta", required=True, nargs="+",
@@ -525,7 +527,8 @@ def main(argv=None):
             verdict = (verify_chain(args.target, args.device_kernel, args.required_device_kernel,
                                     meta, [], args.candidate_target)
                        if args.required_device_kernel else
-                       verify(args.target, args.device_kernel, meta, [], args.candidate_target))
+                       verify(args.target, args.device_kernel, meta, [], args.candidate_target,
+                              strict_launch=args.strict_launch))
             verdict["failed"].append("capture_process_trace_missing")
             verdict["ok"] = False
             verdict["deepest_verified"] = False
@@ -538,7 +541,8 @@ def main(argv=None):
                           merge_process_traces(matching_traces), args.candidate_target)
              if args.required_device_kernel else
              verify(args.target, args.device_kernel, meta,
-                    merge_process_traces(matching_traces), args.candidate_target)),
+                    merge_process_traces(matching_traces), args.candidate_target,
+                    strict_launch=args.strict_launch)),
         ))
     # The strongest single process seeds the verdict shape, but every field that survives below is
     # recomputed across ALL attempts. Only the meta path stays process-specific, so it is named for

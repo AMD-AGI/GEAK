@@ -31,6 +31,7 @@ import importlib
 import json
 import os
 import sys
+from pathlib import Path
 
 
 def _resolve(target):
@@ -81,7 +82,7 @@ def main(argv=None):
     sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != task_dir]
     import torch
 
-    skill_scripts = os.path.dirname(os.path.abspath(__file__))
+    skill_scripts = str(Path(__file__).resolve().parents[4] / "scripts")
     for name in ("harness_lib", "capture_shapes"):
         for root in (task_dir, skill_scripts):
             path = os.path.join(root, name + ".py")
@@ -93,7 +94,7 @@ def main(argv=None):
     h = sys.modules.get("harness_lib")
     cs = sys.modules.get("capture_shapes")
     if cs is None or h is None:
-        print("regen_reference: capture_shapes.py / harness_lib.py not found next to this "
+        print("regen_reference: capture_shapes.py / harness_lib.py not found in the shared tools for this "
               "script or in the task dir.", file=sys.stderr)
         return 2
 

@@ -137,7 +137,7 @@ Resolve `ns::op` through its registration/`torch.ops` when needed and verify the
 actual signature and math; do not replace unresolved calls with `torch.mm`.
 
 The unmodified extraction should preserve baseline dispatch and output behavior
-on equivalent inputs through the bundled harness's separate legs. Expect bitwise identity
+on equivalent inputs through the shared harness's separate legs. Expect bitwise identity
 for deterministic unchanged code; where it does not hold, establish the real floor with
 `kernel_self_noise.py` rather than asserting a contract — on this deployment one MoE gemm
 is byte-exact across repeats while its `epilog='atomic'` sibling carries a genuine 2-ULP

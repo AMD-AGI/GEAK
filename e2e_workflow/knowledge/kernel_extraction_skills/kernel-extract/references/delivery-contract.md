@@ -1,10 +1,8 @@
 # Local delivery contract
 
-The agent saves a task declaration, performs extraction and records evidence.
-`scripts/kernel_extraction_delivery.mjs` validates the serialized result using
-the bundled `delivery_contract.mjs`, `schema.mjs` and source-evidence checker.
-It never reads a workflow file, imports a runner or invokes an agent backend.
-This is CPU evidence-consistency validation, not independent GPU execution.
+Save the task declaration, perform extraction and record evidence. The shared
+`kernel_extraction_delivery.mjs` validates the result against the workflow's
+schemas and source evidence. This checks evidence consistency, not GPU execution.
 
 ## Declare the task before extraction
 
@@ -95,7 +93,7 @@ Both forms also supply `target_callable`, applicable `candidate_bind` and
 `baseline_frozen`, exact `device_kernel`, `seam_candidates`, full selection
 verdict or hashed reference, and `source_delivery_ref`. Keep `notes`,
 `smoke_detail` and `reference_io_sha256` strings. Use `"fail"` for incomplete or
-failed tests. The complete optional-field schemas are in `delivery_contract.mjs`.
+failed tests. The complete optional-field schemas are in `e2e_workflow.js`.
 
 Prefer `selection_validation_ref={"path":"run/selection.json","sha256":"..."}`
 over transcribing large machine verdicts. The referenced JSON must be a complete
@@ -108,7 +106,7 @@ For a joint/dispatch result, each `phase_selection_validations[]` row has
 Repeat the primary phase reference at top level. Save the draft result and run:
 
 ```bash
-node "$SKILL_ROOT/scripts/kernel_extraction_delivery.mjs" \
+node "$SHARED_TOOLS/kernel_extraction_delivery.mjs" \
   --kernel "$TASK_DIR/run/requested_kernel.json" \
   --result "$TASK_DIR/run/draft_return.json" --phase extract_op \
   --verdict run/selection_DECODE.json \

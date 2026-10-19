@@ -75,6 +75,9 @@ for (const args of [
       assert(prompt.includes(`${path.dirname(skill)}/references/workflow-handoff.md`));
       assert(prompt.includes('"SKILL_ROOT":' + JSON.stringify(path.dirname(skill))));
       assert(prompt.includes('"CAPTURE_PERSIST_POLICY":"structure_only"'));
+      assert(prompt.includes('"SHARED_TOOLS":' + JSON.stringify(path.join(root, 'scripts'))));
+      assert(prompt.includes('"PARSE_PROFILE_STRICT_PHASES":"1"'));
+      assert(prompt.includes('"KERNEL_ENV_SKIP_ENUM_REAP":"1"'));
     }
   }
   assert.equal(run.block('director'), '');
@@ -160,3 +163,20 @@ console.log('PASS: AgentX-only activation across models and resumes; fixed-load 
 
 const override = make({workload_kind: 'agentx_trace_replay', capture_persist_policy: 'full'}, undefined);
 assert(override.roleAgent('kernel_extractor', 'prepare', '', {}).includes('"CAPTURE_PERSIST_POLICY":"full"'));
+
+// Verify instruction paths after moving common tools out of the skill package.
+const skillRoot = path.join(root, 'knowledge/kernel_extraction_skills/kernel-extract');
+const documents = [path.join(skillRoot, 'SKILL.md'),
+  ...fs.readdirSync(path.join(skillRoot, 'references')).filter(n => n.endsWith('.md'))
+    .map(n => path.join(skillRoot, 'references', n))];
+for (const file of documents) {
+  const text = fs.readFileSync(file, 'utf8');
+  for (const [, href] of text.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+    if (/^(https?:|#)/.test(href)) continue;
+    assert(fs.existsSync(path.resolve(path.dirname(file), href.split('#')[0])), `${file}: ${href}`);
+  }
+  for (const [, variable, name] of text.matchAll(/\$(SKILL_ROOT|SHARED_TOOLS)\/([\w./-]+\.(?:py|mjs|sh))/g)) {
+    assert(fs.existsSync(path.resolve(variable === 'SKILL_ROOT' ? skillRoot : path.join(root, 'scripts'), name)),
+      `${file}: ${variable}/${name}`);
+  }
+}
