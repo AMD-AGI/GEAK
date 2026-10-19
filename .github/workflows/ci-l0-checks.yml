@@ -130,6 +130,7 @@ jobs:
             e2e_workflow/scripts/tests/test_leg_runner.py \
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
+            e2e_workflow/scripts/tests/test_run_reaper.py \
             e2e_workflow/scripts/tests/test_tuning_skillset_sync.py \
             ci/node/test_run_model_material_audit.py \
             perf_knowledge/expert_skills/_contribute/test_flydsl_skill_portability.py \
@@ -313,6 +314,10 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # The final phase measures on GPUs the search may still hold: the tuning window and the
+      # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
+      - name: final-phase GPU handover regression
+        run: node e2e_workflow/scripts/test_final_phase_gpu_handover.js
       - name: gfx1201 fail-closed knowledge regression
         run: node kernel_workflow/scripts/test_rdna4_policy.js
       - name: R9700 E2E identity and knowledge policy

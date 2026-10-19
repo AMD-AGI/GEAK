@@ -28,6 +28,7 @@ import ast
 import atexit
 import glob
 import hashlib
+import importlib.util
 import json
 import uuid as _uuid
 import datetime as _dt
@@ -122,6 +123,9 @@ E2E_DIR = GEAK_ROOT / "e2e_workflow"
 E2E_SCRIPT = E2E_DIR / "e2e_workflow.js"
 BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
 GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
+RUN_REAPER_SCRIPT = E2E_DIR / "scripts" / "run_reaper.py"
+# run_reaper.MARK_ENV: every process this run starts inherits it, which is how the run's exit finds them.
+RUN_MARK_ENV = "GEAK_E2E_RUN_MARK"
 
 # Workflow primitives are only available at this effort tier (see README).
 CLAUDE_EFFORT = os.environ.get("GEAK_CLAUDE_EFFORT", "ultracode")
@@ -288,6 +292,9 @@ def _sdk_child_env() -> dict[str, str]:
     config_dir = os.environ.get("GEAK_CLAUDE_CONFIG_DIR", "").strip()
     if config_dir:
         env["CLAUDE_CONFIG_DIR"] = config_dir
+    run_mark = os.environ.get(RUN_MARK_ENV, "")
+    if run_mark:
+        env[RUN_MARK_ENV] = run_mark
     return env
 
 
@@ -7115,6 +7122,67 @@ def _publish_protected_pgids() -> str:
     return value
 
 
+_RUN_REAPER: Any = None
+
+
+def _run_reaper() -> Any:
+    """``e2e_workflow/scripts/run_reaper.py``, loaded once: the workflow runs it as a script, the runner imports it."""
+    global _RUN_REAPER
+    if _RUN_REAPER is None:
+        spec = importlib.util.spec_from_file_location("geak_run_reaper", RUN_REAPER_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RUN_REAPER = module
+    return _RUN_REAPER
+
+
+def _mark_run(eval_dir: str) -> dict | None:
+    """Mark every process this run is about to start, so its exit can find them however they were detached.
+
+    Returns:
+        dict | None: the run record ``_stop_run_processes`` needs, or None when the run could not be marked.
+    """
+    try:
+        return _run_reaper().mark_run(eval_dir)
+    except Exception as exc:  # an unmarked run still runs; only its exit cleanup is lost
+        sys.stderr.write(
+            f"[run_e2e] could not mark this run's processes ({type(exc).__name__}: {exc}); "
+            "whatever it leaves running at exit will not be stopped\n"
+        )
+        return None
+
+
+def _stop_run_processes(run: dict | None, eval_dir: str) -> dict | None:
+    """Stop everything this run left running, so the caller gets its GPUs back free.
+
+    A leg launched detached (``setsid nohup``) outlives the workflow and every agent in it, and the caller's
+    next server boot fails its memory-balance check on GPUs that still hold that leg's weights. Called after
+    result.json is written: the interface files outrank this, so a slow stop can never cost them.
+
+    Returns:
+        dict | None: the reaper's receipt, or None when there was no run record or the reaper failed.
+    """
+    if not run:
+        return None
+    try:
+        receipt = _run_reaper().reap(eval_dir, mode="exit", run=run)
+    except Exception as exc:
+        sys.stderr.write(f"[run_e2e] could not stop this run's leftover processes ({type(exc).__name__}: {exc})\n")
+        return None
+    stopped = receipt.get("stopped") or []
+    survivors = receipt.get("survivors") or []
+    names = ", ".join(sorted({str(row.get("name")) for row in stopped}))[:300]
+    line = f"[run_e2e] exit: stopped {len(stopped)} process(es) this run left running"
+    if names:
+        line += f" ({names})"
+    if survivors:
+        line += f"; {len(survivors)} still up: " + ", ".join(f"{s.get('pid')} {s.get('name')}" for s in survivors)
+    if receipt.get("note"):
+        line += f"; {receipt['note']}"
+    sys.stderr.write(line + "\n")
+    return receipt
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -7478,6 +7546,7 @@ def main(argv: list[str]) -> int:
     wf: dict | None = None
     err: object = None
     err_class: str | None = None
+    run = _mark_run(eval_dir_hint)
     try:
         wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args)
     except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
@@ -7496,6 +7565,7 @@ def main(argv: list[str]) -> int:
             sys.stderr.write(f"GEAK e2e failed [{err_class}]: {e}\n")
     finally:
         out = _emit(wf=wf, error=err, error_class=err_class)
+        _stop_run_processes(run, eval_dir_hint)
 
     print(json.dumps({"status": out.get("status"),
                       "result_json": str(result_path),

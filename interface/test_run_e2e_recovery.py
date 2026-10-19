@@ -13,6 +13,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import signal
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -803,6 +805,8 @@ def _run_main(monkeypatch, tmp_path, eval_dir, *, invoke, handoff_extra=None):
     monkeypatch.setattr(rx, "invoke_workflow", invoke)
     monkeypatch.setattr(rx, "apply_bench_client", lambda h: "native")
     monkeypatch.setattr(rx, "apply_bench_protocol", lambda h: {})
+    # main() marks the run in os.environ; scope that to the test.
+    monkeypatch.setenv(rx.RUN_MARK_ENV, "")
     hp = tmp_path / "handoff.json"
     rp = tmp_path / "out" / "result.json"
     handoff = _handoff(eval_dir)
@@ -989,6 +993,69 @@ def test_emit_is_atomic_and_parseable(monkeypatch, tmp_path):
     assert rp.is_file()
     json.loads(rp.read_text())  # parseable
     assert not (rp.parent / (rp.name + ".tmp")).exists(), "no .tmp residue"
+
+
+# ── exit cleanup, after the guaranteed emit ─────────────────────────────────
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="the exit cleanup reads /proc")
+def test_exit_stops_a_detached_leg_once_result_json_is_written(monkeypatch, tmp_path):
+    """A leg an abandoned agent started with setsid outlives the workflow, and the caller's next server boot
+    fails its memory-balance check on the GPUs that leg still holds. The runner's exit stops it -- only after
+    result.json is on disk, so a slow stop can never cost the interface files."""
+    eval_dir = tmp_path / "e2e_leftover"
+    eval_dir.mkdir()
+    legs = []
+
+    def boom(prompt, t, ed, ps_args=None):
+        legs.append(subprocess.Popen(["sleep", "300"], start_new_session=True, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        raise TimeoutError("signal 15: self-stop to flush interface files")
+
+    reaper = rx._run_reaper()
+    real_reap = reaper.reap
+    seen = []
+
+    def reap(eval_dir_arg, **kw):
+        seen.append(((tmp_path / "out" / "result.json").is_file(), kw.get("mode")))
+        return real_reap(eval_dir_arg, **{**kw, "term_grace_s": 5.0, "kill_wait_s": 5.0})
+
+    monkeypatch.setattr(reaper, "reap", reap)
+    rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
+    try:
+        assert seen == [(True, "exit")]
+        assert legs[0].wait(timeout=10) == -signal.SIGTERM
+    finally:
+        for leg in legs:
+            if leg.poll() is None:
+                leg.kill()
+                leg.wait()
+    assert json.loads(rp.read_text())["status"] == "timeout"
+    run = json.loads((eval_dir / ".geak_run.json").read_text())
+    assert os.environ[rx.RUN_MARK_ENV] == run["mark"]
+
+
+def test_a_failing_exit_cleanup_never_costs_the_result(monkeypatch, tmp_path, capsys):
+    eval_dir = tmp_path / "e2e_reaper_fault"
+    eval_dir.mkdir()
+
+    def boom(prompt, t, ed, ps_args=None):
+        raise TimeoutError("signal 15: self-stop to flush interface files")
+
+    def broken(*args, **kwargs):
+        raise OSError("no /proc")
+
+    monkeypatch.setattr(rx._run_reaper(), "reap", broken)
+    rc, rp = _run_main(monkeypatch, tmp_path, eval_dir, invoke=boom)
+    assert json.loads(rp.read_text())["status"] == "timeout"
+    assert "could not stop this run's leftover processes (OSError: no /proc)" in capsys.readouterr().err
+
+
+def test_the_claude_child_inherits_the_run_mark(monkeypatch):
+    assert rx.RUN_MARK_ENV == rx._run_reaper().MARK_ENV
+    monkeypatch.setenv(rx.RUN_MARK_ENV, "outer:abc")
+    assert rx._sdk_child_env()[rx.RUN_MARK_ENV] == "outer:abc"
+    monkeypatch.delenv(rx.RUN_MARK_ENV)
+    assert rx.RUN_MARK_ENV not in rx._sdk_child_env()
 
 
 # ── kernel_journey reconstruction (discovery + config-only win) ─────────────
