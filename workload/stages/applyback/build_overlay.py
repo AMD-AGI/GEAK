@@ -74,6 +74,50 @@ def add_entry(tool, overlay, base, bind, src):
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
+SITECUSTOMIZE_GUARD = ("# --- GEAK applyback: keep the overlay off sys.path for "
+                       "everyone else ---")
+
+
+def sanitize_sitecustomize(overlay):
+    """Keep the overlay invisible to importlib.metadata.
+
+    sitecustomize injects the patched module eagerly, at interpreter startup. That import
+    reaches setuptools, which appends site-packages/setuptools/_vendor to sys.path -- a
+    directory holding older vendored copies of importlib_metadata, zipp, packaging, tomli,
+    platformdirs and typing_extensions. A serving stack that audits its own packages with
+    importlib.metadata.distributions() (last wins) then sees the vendored versions and
+    refuses to start, so the candidate leg dies before it serves a token while the
+    baseline leg -- same packages, no eager import -- starts fine.
+
+    The overlay has no business changing what any other code can import. Snapshot sys.path
+    before the injection and drop the vendor entries the injection added; setuptools
+    re-appends through its own VendorImporter if it needs them again. Idempotent.
+    """
+    path = os.path.join(overlay, "sitecustomize.py")
+    if not os.path.isfile(path):
+        return {"sanitized": False, "reason": "no sitecustomize.py in the overlay"}
+    text = open(path).read()
+    if SITECUSTOMIZE_GUARD in text:
+        return {"sanitized": True, "note": "already present"}
+    pre = ("# GEAK applyback: sys.path as the interpreter built it, before any overlay "
+           "import.\nimport sys as _geak_sys\n_GEAK_PATH_BEFORE = list(_geak_sys.path)\n")
+    post = "\n\n" + SITECUSTOMIZE_GUARD + """
+try:
+    _geak_before = set(_GEAK_PATH_BEFORE)
+    _geak_vendor = os.path.join("setuptools", "_vendor")
+    for _geak_p in list(sys.path):
+        if _geak_p not in _geak_before and _geak_vendor in _geak_p:
+            sys.path.remove(_geak_p)
+            sys.stderr.write("[overlay] removed sys.path entry added during injection: "
+                             "%s\\n" % _geak_p)
+except Exception as _geak_ex:          # never let hygiene break the run
+    sys.stderr.write("[overlay] sys.path cleanup FAILED: %r\\n" % (_geak_ex,))
+"""
+    with open(path, "w") as fh:
+        fh.write(pre + text + post)
+    return {"sanitized": True}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--optimized", required=True)
@@ -167,6 +211,8 @@ def main():
                     "others it is not in this overlay."
                     % (len(entry["kernel_src_files"]), os.path.basename(src)))
         out["applied"].append(entry)
+
+    out["sitecustomize"] = sanitize_sitecustomize(args.overlay)
 
     # --- Verify the overlay really shadows. Measuring without this check means "no gain"
     #     may simply be an overlay that was never loaded.
