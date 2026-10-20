@@ -90,7 +90,7 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
 
     def _launch(self, *, backend="vllm", extra_server_args="",
                 recipe=None, outer_rocr=None, extra_env=None,
-                profile="0", pythonpath=None, overlay_pythonpath=None):
+                profile="0", pythonpath=None, overlay_pythonpath=None, check=True):
         env = dict(os.environ)
         for k in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES",
                   "CUDA_VISIBLE_DEVICES", "RECIPE_ENV_FILE",
@@ -122,6 +122,8 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
             [BASH, self.driver], env=env, cwd=self.tmp,
             capture_output=True, text=True, timeout=60,
         )
+        if not check:
+            return {}, proc
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:] + proc.stdout[-2000:])
         captured = {}
         with open(self.capture, encoding="utf-8") as fh:
@@ -186,6 +188,22 @@ class MagpieLauncherExtraArgsTest(unittest.TestCase):
             '--online_quant_config {"exclude_layer":["*.mlp.gate"],"q":"ptpc_fp8"}'
             " --cudagraph-capture-sizes [1,2,4,8] --block-size 64",
         )
+
+    def test_an_arg_with_whitespace_refuses_to_launch(self):
+        """The recipe's unquoted expansion would split it; warning and launching anyway is not enough."""
+        _, proc = self._launch(backend="atom", extra_server_args="--name 'two words'", check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("contains whitespace", proc.stderr)
+        self.assertFalse(os.path.exists(self.capture))
+
+    def test_a_glob_that_matches_a_file_refuses_to_launch(self):
+        """`[1,2,4,8]` unquoted becomes `1` wherever a file named 1 exists."""
+        open(os.path.join(self.tmp, "1"), "w").close()
+        _, proc = self._launch(backend="atom", extra_server_args="--cudagraph-capture-sizes '[1,2,4,8]'",
+                               check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("matches files", proc.stderr)
+        self.assertFalse(os.path.exists(self.capture))
 
     def test_atom_wrap_survives_a_late_session_leader(self):
         """The pgid probe must SETTLE, not judge on one sample.

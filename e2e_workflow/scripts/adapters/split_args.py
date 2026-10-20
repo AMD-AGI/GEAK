@@ -15,12 +15,20 @@ that does not split (unbalanced quotes); the caller falls back loudly.
 """
 
 import json
+import secrets
 import shlex
 import sys
 
 
 def _protect_bare_json(text):
-    """Swap balanced bare JSON values for markers so shlex leaves them whole."""
+    """Swap balanced bare JSON values for markers so shlex leaves them whole.
+
+    The markers carry a nonce that does not occur in ``text``, so restoring them
+    can never rewrite a user-supplied token that happens to look like one.
+    """
+    nonce = secrets.token_hex(8)
+    while nonce in text:
+        nonce = secrets.token_hex(8)
     protected = {}
     out = []
     i = 0
@@ -60,7 +68,7 @@ def _protect_bare_json(text):
             out.append(char)
             i += 1
             continue
-        marker = f"__GEAK_JSON_{len(protected)}__"
+        marker = f"__GEAK_JSON_{nonce}_{len(protected)}__"
         protected[marker] = candidate
         out.append(marker)
         i = end

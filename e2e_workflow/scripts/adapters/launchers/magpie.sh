@@ -71,6 +71,8 @@ exit 0
 
 adapter_launch() {
   local backend_uc script var_script
+  # Inner-group state belongs to THIS launch only; never inherit a previous leg's.
+  unset MAGPIE_INNER_SERVER_PID MAGPIE_INNER_SERVER_START_TICKS
   backend_uc="$(printf '%s' "${BACKEND:-sglang}" | tr '[:lower:]' '[:upper:]')"
 
   # generic path first, then per-backend MAGPIE_<BACKEND>_SCRIPT (indirection).
@@ -249,23 +251,45 @@ PY
   # Recipe scripts expand ${_args_var} UNQUOTED (atom_mi355x.sh: `$EXTRA_ATOM_ARGS`), so a shell-quoted
   # value from the effective config (`--online_quant_config '{"a":1}'`) would reach the server with its
   # quotes still on. Re-render as bare words: a whitespace-free JSON value survives word splitting
-  # intact. A token that itself holds whitespace cannot be carried that way -- say so rather than ship
-  # a split value.
-  local _split_helper
-  _split_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/split_args.py"
-  if [ -n "$_extra_args" ] && [ -f "$_split_helper" ]; then
+  # intact. An argument the unquoted expansion cannot carry losslessly -- one holding whitespace, or a
+  # glob that matches a file where the recipe runs -- fails the launch instead of reaching the server
+  # changed.
+  if [ -n "${_extra_args//[[:space:]]/}" ]; then
+    local _split_helper _split_out _t
     local -a _argv=()
-    mapfile -d '' -t _argv < <(python3 "$_split_helper" "$_extra_args")
-    if [ "${#_argv[@]}" -gt 0 ]; then
-      local _t
-      for _t in "${_argv[@]}"; do
-        case "$_t" in *[[:space:]]*)
-          echo "!!! magpie launcher: server arg '$_t' contains whitespace; the recipe's unquoted" \
-               "\$${_args_var} will split it." >&2 ;;
-        esac
-      done
-      _extra_args="${_argv[*]}"
+    _split_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/split_args.py"
+    if [ ! -f "$_split_helper" ]; then
+      echo "!!! magpie launcher: $_split_helper is missing; refusing to launch with unsplit server args." >&2
+      return 2
     fi
+    _split_out="$(mktemp)" || return 2
+    if ! python3 "$_split_helper" "$_extra_args" > "$_split_out"; then
+      rm -f "$_split_out"
+      echo "!!! magpie launcher: server args do not split (see above); refusing to launch." >&2
+      return 2
+    fi
+    mapfile -d '' -t _argv < "$_split_out"
+    rm -f "$_split_out"
+    if [ "${#_argv[@]}" -eq 0 ]; then
+      echo "!!! magpie launcher: server args split to no arguments; refusing to launch." >&2
+      return 2
+    fi
+    for _t in "${_argv[@]}"; do
+      case "$_t" in *[[:space:]]*)
+        echo "!!! magpie launcher: server arg '$_t' contains whitespace; the recipe's unquoted" \
+             "\$${_args_var} would split it. Refusing to launch." >&2
+        return 2 ;;
+      esac
+      case "$_t" in *[*?[]*) : ;; *) continue ;; esac
+      # Expand it the way the recipe will (unquoted, default globbing) and compare.
+      # shellcheck disable=SC2086
+      if [ "$(shopt -u nullglob failglob dotglob; set +f; printf '%s\n' $_t)" != "$_t" ]; then
+        echo "!!! magpie launcher: server arg '$_t' matches files in $(pwd); the recipe's unquoted" \
+             "\$${_args_var} would replace it with their names. Refusing to launch." >&2
+        return 2
+      fi
+    done
+    _extra_args="${_argv[*]}"
   fi
 
   # Map GEAK's env onto Magpie's server-phase env. Ordering IS the precedence
@@ -405,8 +429,15 @@ PY
     setsid bash -c "$_MAGPIE_ATOM_SUPERVISOR" atom-magpie-supervisor \
       "$_mp_server_pid" "$_mp_pgid" "${ATOM_MAGPIE_STOP_GRACE_S:-5}" &
     SERVER_PID=$!
+    # Read only by server_teardown in this same shell's EXIT trap, so not exported. The start
+    # ticks let teardown refuse a pid that was reused after this group emptied.
+    # shellcheck disable=SC2034  # read by server_teardown.sh, sourced into this shell
     MAGPIE_INNER_SERVER_PID="$_mp_server_pid"
-    export MAGPIE_INNER_SERVER_PID
+    # shellcheck disable=SC2034
+    MAGPIE_INNER_SERVER_START_TICKS=""
+    if declare -F _start_ticks_of >/dev/null; then
+      MAGPIE_INNER_SERVER_START_TICKS="$(_start_ticks_of "$_mp_server_pid" || true)"
+    fi
     _mp_atom_wrapped=1
     echo ">>> magpie launcher: ATOM server pid=$_mp_server_pid wrapped by" \
          "supervisor pid=$SERVER_PID for worker-safe teardown."
