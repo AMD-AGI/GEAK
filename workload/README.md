@@ -39,7 +39,7 @@ files on disk.
 | `baseline` | `baseline.json` | `adopt-measured-receipt` | `agentx-trace-replay` (re-measure from scratch), `ci-run-replay` (reproduce a named CI run and prove every pin) |
 | `profile` | `tasks/<kernel>/` | `agentx-kernel-extraction-standalone` | any skill that emits `tasks/` + a ranking |
 | `roofline` | `roofline.json` | `kernel-roofline` | any skill that emits per-case `rows.json` + `fold.py` |
-| `optimize` | `verified.json` | `geak-kernel-workflow` | `subagent-raw` (an agent, no GEAK workflow) |
+| `optimize` | `optimized.json` | `geak-kernel-workflow` | `subagent-raw` (an agent, no GEAK workflow) |
 | `applyback` | `ab.json` | `overlay-e2e-ab` | any skill that applies and re-measures |
 
 ## Design
@@ -58,8 +58,9 @@ change — no code edit, nothing to register. `runners/stub.sh`, which calls no 
 all, exists as executable proof that the scheduler is genuinely agent-agnostic.
 
 **The slot owns the criterion; the skill owns the work.** How artifacts map to
-`result.json`, and what counts as ranked or passing, live in the slot (`finalize.py`,
-`rank.py`). Replacing an implementation therefore never rewrites the mapping — which is
+`result.json`, and what counts as ranked or passing, live in the slot — in a `finalize.py`
+or a `rank.py` where that is mechanism, and in `stages/<stage>/README.md` where it is
+judgement. Replacing an implementation therefore never rewrites the mapping — which is
 why the two upstream skills are vendored byte-identical, hash-enforced by
 `skill_manifest.py`, down to their own `scripts/` and `tests/`.
 
@@ -70,11 +71,14 @@ rather than the exception. So kernels are ranked by `pct_gpu_time × (1 − 1/at
 achievable speedup, operator and end-to-end numbers are written side by side so neither
 can stand in for the other, and only `applyback` may claim e2e.
 
-**No speedup counts until it survives a cold rerun.** `verify.py` re-measures every keep
-from cold, takes the **minimum** of N runs, and hashes the source against the original.
-Hot measurement is not enough: the unit-test leg allocates from a virgin allocator, so an
-output that is never written reads back as zeros and compares equal — a kernel can pass
-every correctness check while hot and fail from cold.
+**No speedup counts until it survives a cold rerun.** Every keep is re-measured from a
+fresh process and scored on the **minimum** of N runs. Hot measurement is not enough: the
+unit-test leg allocates from a virgin allocator, so an output that is never written reads
+back as zeros and compares equal — a kernel can pass every correctness check while hot
+and fail from cold. The rerun is the task's own unit test; the slot reads its verdict and
+does not re-derive one. A wrapper that re-implements the judgement eventually disagrees
+with the test it wraps, and then wins the disagreement — that is how a run that crashed
+before comparing any output was once recorded as a wrong answer.
 
 **Refuse to publish rather than publish something unfounded.** Every stage separates
 `blocked` (a missing precondition — no GPU, no benchmark client, no receipt) from `fail`

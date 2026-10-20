@@ -70,7 +70,7 @@ in `config/default.json`; `--no-watch` turns it off.
 | `baseline` | `adopt-measured-receipt` | reuse an already-measured receipt (no GPUs); `agentx-trace-replay` re-measures instead; `ci-run-replay` reproduces a named CI run under pinned digest/data/seed/`benchmark_id`/cache-bust and physical-core binding, and refuses a number that does not align | `baseline.json` |
 | `profile` | `agentx-kernel-extraction-standalone` | profile, then extract frozen-harness unit tests | `tasks/<k>/`, `kernel_ranking.json` |
 | `roofline` | `kernel-roofline` | per-kernel roofline; rank by **expected e2e gain** | `roofline.json` |
-| `optimize` | `geak-kernel-workflow` | one kernel per GPU in parallel, 48 h by default; `subagent-raw` optimizes without the GEAK workflow | `optimized.json`, `verified.json` |
+| `optimize` | `geak-kernel-workflow` | one kernel per GPU in parallel, 48 h by default; `subagent-raw` optimizes without the GEAK workflow | `optimized.json` |
 | `applyback` | `overlay-e2e-ab` | reversible overlay, fresh server, A/B against the baseline | `ab.json` |
 
 Each slot's I/O, artifact mapping and known pitfalls are in
@@ -119,10 +119,11 @@ Modularity rests on two contracts and nothing else:
    **only `applyback` may claim an end-to-end gain**.
 2. **The noise band is 1.045, not 1.02.** Measured: four kernels whose source was
    md5-identical to the original re-measured at 1.0246–1.0453 from cold.
-3. **No speedup counts until it survives a cold rerun.** `scripts/verify.py` previously
-   caught a kernel that passed hot and failed cold (a unit-test leg allocates from a
-   virgin allocator, so zeroed pages let a partially-written output compare equal), and
-   rescued a genuine 1.51× that a node failure had reverted.
+3. **No speedup counts until it survives a cold rerun.** This has caught a kernel that
+   passed hot and failed cold — a unit-test leg allocates from a virgin allocator, so
+   zeroed pages let a partially-written output compare equal. The rerun is step 2 of
+   `stages/optimize/README.md`, and it is the task's own unit test, run again from a
+   fresh process. Nothing re-judges that test's verdict on its behalf.
 
 ## Self-check
 

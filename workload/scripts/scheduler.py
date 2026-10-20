@@ -293,6 +293,9 @@ class DockerBackend(Backend):
                "--group-add", "video", "--ipc", "host",
                "--security-opt", "seccomp=unconfined",
                "--shm-size", "16g", "-v", "/shared_nfs:/shared_nfs"]
+        from container_runtime import runtime_options
+        runtime_args, entry_prefix = runtime_options(name)
+        cmd += runtime_args
         for gpu in gpus:
             render = "/dev/dri/renderD%d" % (128 + 8 * gpu)
             if not os.path.exists(render):
@@ -305,8 +308,12 @@ class DockerBackend(Backend):
             cmd += ["-e", "%s=%s" % (k, v)]
         # The container sees exactly this slot's GPUs, so the worker addresses them as
         # 0..N-1 whatever their physical indices are.
-        cmd += ["-e", "GPU_IDS=" + ",".join(str(i) for i in range(len(gpus))), self.image,
-                "bash", WORKER, kernel, slot_label(gpus)]
+        logical_ids = ",".join(str(i) for i in range(len(gpus)))
+        render_nodes = ",".join("renderD%d" % (128 + 8 * gpu) for gpu in sorted(gpus))
+        cmd += ["-e", "GPU_IDS=" + logical_ids,
+                "-e", "GEAK_GPU_ALLOWED=" + logical_ids,
+                "-e", "GEAK_GPU_RENDER_DEVICES=" + render_nodes, self.image,
+                *entry_prefix, "bash", WORKER, kernel, slot_label(gpus)]
         rc, out = sh(cmd, timeout=180)
         if rc != 0:
             log(self.work_root, "container failed to start slot=%s kernel=%s: %s"

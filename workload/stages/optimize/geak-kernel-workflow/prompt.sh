@@ -199,7 +199,7 @@ PY
 fi
 
 cat > "$PROMPT_OUT" <<EOF
-Optimize a Triton kernel using GEAK's kernel workflow. This is attempt $ATTEMPT; the best
+Optimize a GPU kernel using GEAK's kernel workflow. This is attempt $ATTEMPT; the best
 speedup achieved on this kernel so far is ${BEST_SPEEDUP}x (relative to the original
 implementation).
 

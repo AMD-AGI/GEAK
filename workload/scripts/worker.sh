@@ -62,47 +62,34 @@ mkdir -p "$RUN/snapshots" "$LOG" "$STATE"
 note() { echo "[$(date '+%F %T')] $*" >> "$LOG/worker.log"; }
 
 [ -d "$TASK_DIR/kernel_src" ] || { note "FATAL no kernel_src/ under $TASK_DIR"; exit 2; }
-# Which file(s) may the optimizer edit? The task's own meta.json knows, and guessing is
-# not safe: a seam can be split across two modules, and where the leaf is HIP C++ the
-# Python file beside it is only a dispatcher. The old alphabetical guess picked
-# mega_moe_flydsl.py for two tasks here -- the file meta.json calls "NOT the bind".
-KSRC_ALL="$(python3 - "$TASK_DIR/meta.json" <<'PY' 2>/dev/null || true
-import json, os, sys
-try:
-    m = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)
-out = []
-def add(v):
-    for f in (v if isinstance(v, list) else [v]):
-        if isinstance(f, str) and f.strip():
-            b = os.path.basename(f.strip())
-            # cand_bind.py is UT scaffolding by convention and says so itself.
-            if b not in out and b != "cand_bind.py":
-                out.append(b)
-cb = m.get("candidate_bind") or {}
-add((m.get("kernel_extraction") or {}).get("editable_leaves") or [])
-add(cb.get("editable_leaves") or [])
-if not out:
-    add(cb.get("file") or [])
-print(" ".join(out))
-PY
-)"
-KEPT=""
-for f in $KSRC_ALL; do [ -f "$TASK_DIR/kernel_src/$f" ] && KEPT="$KEPT $f"; done
-KSRC_ALL="${KEPT# }"
-if [ -n "$KSRC_ALL" ]; then
-  note "editable leaves from meta.json: $KSRC_ALL"
-else
-  # Regular files only, .py first: a __pycache__/ created by a previous attempt sorts
-  # ahead of the kernel and would otherwise be treated as the editable source.
-  KSRC_ALL="$(cd "$TASK_DIR/kernel_src" && ls -p | grep -v '/$' | grep -v '^__' | grep '\.py$' \
-              | head -1)"
-  [ -n "$KSRC_ALL" ] || KSRC_ALL="$(cd "$TASK_DIR/kernel_src" && ls -p | grep -v '/$' | grep -v '^__' | head -1)"
-  note "meta.json named no editable leaf; falling back to the first file: $KSRC_ALL"
+SOURCE_TREE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/source_tree.py"
+FROZEN="$RUN/frozen_harness"
+python3 "$SOURCE_TREE" freeze "$TASK_DIR" "$FROZEN" >> "$LOG/worker.log" 2>&1 || {
+  note "FATAL cannot snapshot the frozen harness"
+  exit 2
+}
+restore_frozen() {
+  python3 "$SOURCE_TREE" restore-frozen "$TASK_DIR" "$FROZEN" >> "$LOG/worker.log" 2>&1 || {
+    note "FATAL cannot restore frozen harness"
+    exit 2
+  }
+}
+if ! python3 "$SOURCE_TREE" check-frozen "$TASK_DIR" "$FROZEN" >> "$LOG/worker.log" 2>&1; then
+  note "restoring frozen harness left modified by an interrupted attempt"
+  restore_frozen
+fi
+if ! KSRC_ALL="$(python3 "$SOURCE_TREE" editable "$TASK_DIR" 2>> "$LOG/worker.log")"; then
+  note "FATAL invalid editable source metadata"
+  exit 2
 fi
 KSRC="${KSRC_ALL%% *}"
-[ -n "$KSRC" ] || { note "FATAL kernel_src/ holds no editable file"; exit 2; }
+note "editable leaves from meta.json: $KSRC_ALL"
+copy_sources() {
+  python3 "$SOURCE_TREE" copy "$1" "$2" >> "$LOG/worker.log" 2>&1 || {
+    note "FATAL source tree copy failed: $1 -> $2"
+    exit 2
+  }
+}
 
 [ -f "$CREDIT" ] || echo 0 > "$CREDIT"
 BASE="$(cat "$CREDIT" 2>/dev/null || echo 0)"
@@ -161,6 +148,11 @@ default_measure() {
   local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   ( timeout "$MEASURE_TIMEOUT" python3 "$here/run_task_entry.py" "$TASK_DIR" unittest.py ) \
       > "$RUN/.measure.log" 2>&1
+  local measure_rc=$?
+  if [ "$measure_rc" -ne 0 ]; then
+    echo "STATUS=0 SPEEDUP= CLEAN= SINGLE=0"
+    return
+  fi
   local sp ok
   sp="$(grep -oE 'GEAK_GEOMEAN_SPEEDUP [0-9.]+' "$RUN/.measure.log" | tail -1 | awk '{print $2}')"
   ok=0; grep -q '^CORRECTNESS: PASS' "$RUN/.measure.log" && ok=1
@@ -411,7 +403,7 @@ ${RESERVE}s measurement -- an unscored candidate is worth nothing"
   mkdir -p "$EVAL_DIR"
   SNAP="$RUN/snapshots/before_attempt_$N"
   mkdir -p "$SNAP"
-  for f in $KSRC_ALL; do cp -a "$TASK_DIR/kernel_src/$f" "$SNAP/$f"; done
+  copy_sources "$TASK_DIR/kernel_src" "$SNAP"
   note "attempt $N: cap=${CAP}s credited=${CRED}s best=${BEST}x"
 
   # --- skill hook: build this attempt's prompt.
@@ -487,8 +479,20 @@ PY
   if [ "$RC" = 78 ]; then
     # Unmet precondition. Ten thousand retries give the same result; do not spend budget.
     note "FATAL runner returned 78 (unmet precondition), see $LOG/attempt_$N.log"
+    copy_sources "$SNAP" "$TASK_DIR/kernel_src"
+    restore_frozen
     write_status blocked "$CRED" "$BEST" "$N"
     exit 78
+  fi
+
+  if ! FROZEN_CHANGES="$(python3 "$SOURCE_TREE" check-frozen "$TASK_DIR" "$FROZEN" 2>&1)"; then
+    note "attempt $N: $FROZEN_CHANGES -- rejecting and restoring"
+    record_rejected "$N" "" "" "0" "$FROZEN_CHANGES"
+    copy_sources "$SNAP" "$TASK_DIR/kernel_src"
+    restore_frozen
+    now="$(date +%s)"
+    write_status running "$(( BASE + now - START ))" "$BEST" "$N" "null" "$RC" "null" "0"
+    continue
   fi
 
   # --- measure, then decide KEEP or revert.
@@ -503,10 +507,17 @@ PY
   # An attempt that was killed at the cap -- or that decided against every edit it tried
   # -- leaves kernel_src byte-identical to the snapshot. Measuring that spends a full
   # sweep to rediscover 1.0x. There is no candidate here; record it and move on.
-  CHANGED=0
-  for f in $KSRC_ALL; do
-    cmp -s "$SNAP/$f" "$TASK_DIR/kernel_src/$f" || CHANGED=1
-  done
+  SOURCE_CHANGES="$(python3 "$SOURCE_TREE" check "$SNAP" "$TASK_DIR/kernel_src" \
+      --allowed "$KSRC_ALL" 2>&1)"
+  CHANGED=$?
+  if [ "$CHANGED" -gt 1 ]; then
+    note "attempt $N: $SOURCE_CHANGES -- restoring complete source tree"
+    record_rejected "$N" "" "" "0" "$SOURCE_CHANGES"
+    copy_sources "$SNAP" "$TASK_DIR/kernel_src"
+    now="$(date +%s)"
+    write_status running "$(( BASE + now - START ))" "$BEST" "$N" "null" "$RC" "null" "0"
+    continue
+  fi
   if [ "$CHANGED" = 0 ]; then
     note "attempt $N: kernel_src is byte-identical to the snapshot (runner rc=$RC) -- \
 no candidate to measure, skipping the sweep"
@@ -544,10 +555,22 @@ ${SINGLE} single-pair bucket(s) -- re-measuring once, and deciding on that"
     fi
   fi
 
+  if ! python3 "$SOURCE_TREE" check-frozen "$TASK_DIR" "$FROZEN" >> "$LOG/worker.log" 2>&1; then
+    note "attempt $N: measurement changed the frozen harness -- rejecting"
+    restore_frozen
+    OK=0; SP=""
+  fi
+  python3 "$SOURCE_TREE" check "$SNAP" "$TASK_DIR/kernel_src" \
+      --allowed "$KSRC_ALL" >> "$LOG/worker.log" 2>&1
+  if [ "$?" -gt 1 ]; then
+    note "attempt $N: measurement left invalid source edits -- rejecting"
+    OK=0; SP=""
+  fi
+
   if [ -z "$SP" ]; then
     note "attempt $N: no measurement -- reverting"
     record_rejected "$N" "" "" "0" "no measurement"
-    for f in $KSRC_ALL; do cp -a "$SNAP/$f" "$TASK_DIR/kernel_src/$f"; done
+    copy_sources "$SNAP" "$TASK_DIR/kernel_src"
   else
     KEEP="$(python3 -c "
 sp, best = $SP, $BEST
@@ -556,7 +579,7 @@ print(1 if $OK and sp >= $KEEP_THRESHOLD and sp > best + $KEEP_MARGIN else 0)")"
       note "attempt $N: KEEP ${SP}x (was ${BEST}x)"
       BEST="$SP"
       mkdir -p "$RUN/best_kernel_src"
-      for f in $KSRC_ALL; do cp -a "$TASK_DIR/kernel_src/$f" "$RUN/best_kernel_src/$f"; done
+      copy_sources "$TASK_DIR/kernel_src" "$RUN/best_kernel_src"
       cp -a "$RUN/.measure.log" "$RUN/best_measure.log" 2>/dev/null
     else
       # Separate "the harness would not run" from "a gate said no". The negative
@@ -586,7 +609,7 @@ be measured"
         record_rejected "$N" "$SP" "$CLEAN" "${SINGLE:-0}" \
             "$( [ "$OK" = 1 ] && echo "below the keep threshold" || echo "a gate failed" )"
       fi
-      for f in $KSRC_ALL; do cp -a "$SNAP/$f" "$TASK_DIR/kernel_src/$f"; done
+      copy_sources "$SNAP" "$TASK_DIR/kernel_src"
     fi
   fi
 

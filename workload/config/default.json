@@ -50,7 +50,7 @@
 
     "optimize": {
       "skill": "geak-kernel-workflow",
-      "mode": "script",
+      "mode": "agent",
       "params": {
         "time_budget_sec": 172800,
         "attempt_cap_sec": 1500,

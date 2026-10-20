@@ -129,6 +129,17 @@ def build_prompt(env, lay, params, attempt, why=None):
               "need the parts not quoted here, including anything it references under "
               "$SKILL_ROOT)",
               "=" * 78, "", read(lay["skill_md"], "(SKILL.md is missing)")]
+
+    slot = os.path.join(env.get("WORKLOAD_ROOT", ""), "stages",
+                        env.get("STAGE", ""), "README.md")
+    if os.path.exists(slot):
+        lines += ["", "=" * 78,
+                  "THE SLOT -- %s" % slot,
+                  "(what this stage owes the next one, how its artifacts map to "
+                   "result.json, and what its verdicts mean. The slot outlives any "
+                   "one implementation: where it and SKILL.md overlap, the slot "
+                   "holds.)",
+                  "=" * 78, "", read(slot, "")]
     return "\n".join(lines)
 
 

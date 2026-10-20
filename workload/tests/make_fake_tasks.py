@@ -54,8 +54,8 @@ def main():
         os.makedirs(os.path.join(d, "kernel_src_original"))
         open(os.path.join(d, "unittest.py"), "w").write(UNITTEST)
         open(os.path.join(d, "cases.py"), "w").write("CASES = []\n")
-        # The pristine copy: verify.py's code-identity check uses it to catch "claims a
-        # speedup without having changed anything".
+        # The pristine copy, so a reader can tell an edited source from an unchanged one
+        # that claims a speedup anyway.
         for sub in ("kernel_src", "kernel_src_original"):
             open(os.path.join(d, sub, "mod.py"), "w").write(MOD)
         json.dump({"kernel": k, "module": "fake", "pct_gpu_time": 10.0 - i,

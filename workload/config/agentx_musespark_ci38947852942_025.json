@@ -1,0 +1,142 @@
+{
+  "_comment": "Use existing Spur allocation 221802 on crsuse2-m2m-025. User explicitly forbids releasing the machine. No scheduler cancellation, submission, requeue, renewal, hold, or resource changes are authorized. Preserve all pre-existing jobs, containers, and processes. Run only this campaign\u2019s own workload processes.",
+  "run_root": "workload/campaigns/agentx_musespark_ci38947852942_025_20261020",
+  "runner": "claude",
+  "target": {
+    "model": "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
+    "image": "lmsysorg/sglang-rocm:muse-spark-open@sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4",
+    "commits": {
+      "inferencex": "59ec4f61e00386f9f45ee977d5c1753fad88ec02",
+      "sglang": "c722c0a160981f21c81cffaab7bbcc117089a2a6",
+      "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
+      "tilelang": "a55a82302bf7f3c5af635b5c9146f728185cc900"
+    },
+    "name_tokens": [
+      "musespark"
+    ],
+    "enforce": true
+  },
+  "runner_env": {
+    "env_file": "/shared_nfs/zihao/c_host/.workload-secrets/musespark-025.env",
+    "state_dir_base": "/dev/shm/wl_musespark025_agent_state"
+  },
+  "stages": {
+    "baseline": {
+      "skill": "adopt-measured-receipt",
+      "mode": "script",
+      "params": {
+        "receipt": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/harness/runs/musespark_38947852942_025_20261020T025409Z/musespark_38947852942_025_20261020T025409Z.json",
+        "throughput_key": "request_metrics.throughput.output.tokens_per_second",
+        "reference_receipt": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/harness/runs/musespark_38947852942_025_20261020T025409Z_repeat1/musespark_38947852942_025_20261020T025409Z_repeat1.json",
+        "reference_key": "request_metrics.throughput.output.tokens_per_second",
+        "max_reference_drift": 0.005,
+        "require_valid": true,
+        "node": "crsuse2-m2m-025",
+        "metric": "output_token_throughput",
+        "unit": "tok/s",
+        "noise_band": 1.045,
+        "config": {
+          "tp": 8,
+          "ep": 8,
+          "gpus": 8,
+          "concurrency": 8,
+          "spec_decoding": "draft_model",
+          "kv_offloading": "none"
+        },
+        "historical_ci": {
+          "throughput": 353.88446,
+          "strict_alignment_passed": false,
+          "qualification_archive": "ci-replay-qualification",
+          "note": "Do not label the adopted local A/B reference as an aligned historical CI replay."
+        }
+      }
+    },
+    "profile": {
+      "skill": "agentx-kernel-extraction-standalone",
+      "mode": "agent",
+      "params": {
+        "selection": "per-phase Top 5 AND overall GPU-time share > 3%",
+        "agent_brief": "Use only crsuse2-m2m-025. Do not substitute another node. Campaign evidence: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/ci. Source checkout: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/source/InferenceX, commit 59ec4f61e00386f9f45ee977d5c1753fad88ec02. Read /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/PREPARATION.md before acting. The archived CI receipt is external reference evidence, not a measured local baseline. Profile the stable, measured local baseline using all eight ranks and the identical workload. There are no imported GPU traces or kernel tasks for this campaign. Start with the observed SGLang Muse Spark implementation, FlyDSL MoE, AITER attention and DFLASH draft/verify phases; do not reuse GLM or DeepSeek boundaries. Capture representative steady state and account for the full workload phase mix. Write traces to local disk or /dev/shm, wait for completed flush before copying to shared storage, and release the TP8 server before optimization. Build complete frozen correctness/latency harnesses with independently recorded shapes and real candidate_bind descriptors. Finish using the profile slot finalize.py. USER CONSTRAINT (mandatory): Use the existing running Spur job 221802 on crsuse2-m2m-025. Never invoke scancel, sbatch, salloc, scontrol update/requeue/hold, spur cancel/submit/alloc, stop PID 1, stop the allocation holder, or otherwise release/recreate/alter this allocation. Do not change CPU cgroups or evade runtime authorization. Preserve every pre-existing process and container, including ax_coll and the DSV4 optimization agents. You may create and clean up only containers/processes clearly owned by this campaign, prefixed wl_musespark025_. Obtain actual runtime GPU and CPU visibility from ordinary permitted container execution. Driver-shell affinity is CPU 0, so it is not evidence of the serving container\u2019s affinity. If a real runtime limit blocks a measurement, report evidence instead of changing the allocation. The job currently expires 2026-10-21T04:01:56Z. Checkpoint progress on shared storage and reserve time for end-to-end verification; an unfinished 48-hour target may not be called complete. Never trade away the machine to obtain a longer budget. Use task directory names prefixed musespark025_ for this campaign, while preserving original kernel identities in metadata. The existing scheduler uses task names in container names; this prefix prevents collisions with unrelated campaigns. Do not stop existing ax_coll or DSV4 workers. REFERENCE SCOPE: the baseline is now the first stock run on this node (343.62428 tok/s), independently repeated at 344.41922 tok/s with zero request errors. Both ran the pinned CI deployment; the historical CI rate 353.88446 was not matched within 0.5%. Read control/local-baseline-assessment.json and baseline/out/ci-replay-qualification if you need the evidence. Profile the actual local deployment; do not claim the historical CI point was reproduced or treat the historical gap as a kernel gain. The throughput source remains the unchanged InferenceX aggregate. REUSE THE COMPLETED SETUP: harness/tools/run_tp8_c8.sh, harness/pins.env and baseline/out/ci-replay-qualification/DEVIATIONS.md describe the working user-mode runtime, prebuilt AITER cache staging, compiler PATH correction and client dataset loading. All model/draft/corpus files and AgentX-Harness are already on node-local storage; do not rebuild or re-download them. Read the archived qualification params.json when you need the original deployment pins; the active baseline/out/params.json now belongs to the receipt-adoption module. Preserve and reuse the existing harness. Do not run ci-run-replay merely to repeat its already-established historical throughput mismatch. OPERATOR HANDOFF FOR A FOLLOW-UP INVOCATION: Continue from existing profile artifacts, do not repeat the completed baseline/tracing/Attention/MoE measurements unnecessarily. Read control/profile-review-notes.md before final delivery. The existing assert_pristine .orig comparison rejects legitimate edits to declared candidate leaves (confirmed in /tmp/geak-profile-pristine-contract.dbbrxoio/results.json); preserve leftover negative-control detection but let declared candidate source differ from its frozen original. Original oracle/baseline references and harness remain immutable during optimization. Any harness correction must be requalified with actual GPU tests and regenerated delivery hashes; do not relabel an old test receipt as one run against new code. Shared worker/verifier and applyback source tracking are already fixed and CPU-forward-tested. Finish the real eight-GPU collective tests and exact return records, then the profile finalizer. This follow-up agent budget is bounded to 7200 seconds inside the existing allocation; never change scheduler allocations. LATEST OPERATOR UPDATE: The root agent has now corrected assert_pristine in all three tasks: legitimate candidate edits are accepted, while leftover negative-control markers are rejected. Exact CPU probes passed; see control/candidate_guard_correction.json. Old GPU verdicts and snapshots have been archived under control/profile_round1_20261020T1043Z, so CURRENT harnesses need real GPU requalification and fresh delivery hashes. Do not repeat the earlier repair or use the archived verdicts as current ones. The existing wl_musespark025_markers probe outlived the prior CLI budget; first inspect its progress and wait for its owned launcher to finish/release GPU locks before starting new GPU work. Do not duplicate the capture or stop it prematurely. No GPU optimization has run yet. ACTIVE CONTROLLER: wl_musespark025_controller2 uses the same image, mounts, user and device access. The old controller exited with its finished driver and remains stopped; do not try to run commands in it. The Spur allocation remains 221802 on node 025.",
+        "agent_budget_sec": 7200
+      }
+    },
+    "roofline": {
+      "skill": "kernel-roofline",
+      "mode": "agent",
+      "params": {
+        "roofline_mode": "tl-only",
+        "rank_key": "expected_e2e_gain_pct",
+        "agent_brief": "Use only crsuse2-m2m-025. Do not substitute another node. Campaign evidence: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/ci. Source checkout: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/source/InferenceX, commit 59ec4f61e00386f9f45ee977d5c1753fad88ec02. Read /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/PREPARATION.md before acting. The archived CI receipt is external reference evidence, not a measured local baseline. Use the measured MI355X/gfx950 architecture and the profile stage runnable tasks. Verify the rocprof-compute >=3.6.0 requirement before collecting counters; if unavailable, document and use the supported model-based route. Fold through the vendored fold.py and the slot rank.py. Rank by expected end-to-end savings, including the limiting rank in TP8/EP8; do not infer speedup from low roofline utilization alone. USER CONSTRAINT (mandatory): Use the existing running Spur job 221802 on crsuse2-m2m-025. Never invoke scancel, sbatch, salloc, scontrol update/requeue/hold, spur cancel/submit/alloc, stop PID 1, stop the allocation holder, or otherwise release/recreate/alter this allocation. Do not change CPU cgroups or evade runtime authorization. Preserve every pre-existing process and container, including ax_coll and the DSV4 optimization agents. You may create and clean up only containers/processes clearly owned by this campaign, prefixed wl_musespark025_. Obtain actual runtime GPU and CPU visibility from ordinary permitted container execution. Driver-shell affinity is CPU 0, so it is not evidence of the serving container\u2019s affinity. If a real runtime limit blocks a measurement, report evidence instead of changing the allocation. The job currently expires 2026-10-21T04:01:56Z. Checkpoint progress on shared storage and reserve time for end-to-end verification; an unfinished 48-hour target may not be called complete. Never trade away the machine to obtain a longer budget. OPERATOR PREFLIGHT: rocprof-compute exists at /opt/rocm/bin/rocprof-compute, but even --version exits 1 in the pinned controller because required Python packages (including plotext, astunparse, dash and sqlalchemy) are missing. Evidence: control/roofline-tool-preflight.json. Use the supported model-based route unless a working >=3.6.0 tool is already available; do not spend this bounded analysis stage rebuilding the serving environment. Keep measured trace/UT latency separate from estimated hardware bounds. The agent budget is 3600 seconds to preserve optimization and E2E time within the existing allocation. DECLARED ANALYSIS MODE: tl-only. Hardware-counter collection is unavailable in the pinned environment, as recorded in control/roofline-tool-preflight.json. Keep TraceLens predictions distinct from measured trace/UT latency and do not apply an additional derating to already-derated model peaks. TRACELENS READY: Use /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/control/venv-tracelens/bin/python for the TraceLens native model/reporting leg. Its clean source pin is a59a9c165bb64c7c416fd7cf79149803d552e43c, version 0.1.0.dev20261020+ga59a9c1. pip check, native GEMM arithmetic, and the report CLI --help passed; evidence is control/tracelens-environment.json and control/tracelens-cli-help.txt. This separate analysis environment has not modified the serving image. Reuse it without reinstalling dependencies. ARCH INPUT: The skill supplies /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/stages/roofline/kernel-roofline/assets/MI355X.measured.json. If used, record its SHA256 and identify it as the supplied MI355X reference calibration, not a new measurement on node 025. Keep model code unchanged and report unsupported model coverage explicitly; do not substitute another GPU type or silently invent a network/collective peak. NATIVE REPORT PREFLIGHT: control/tl-preflight/decode contains an actual native CLI report for the original rank0 decode trace. It lacks target shape/model coverage. Read control/tl-preflight/coverage-review.json: the real Muse MoE uses mfma_f32_16x16x32_bf16 with FP4 weights dequantized before MFMA, whereas TL moe_flydsl_stage1/2 assumes native A4W4 FP4 MFMA and selects the FP4 peak. Do not silently apply that model to this A16W4 implementation. EP-local routing also must match model scope. Map actual metadata to a truly matching native model where supported; otherwise leave the target bound unavailable and explain coverage. Do not fabricate durations or substitute handwritten physical models. Read control/roofline_handoff.md before analysis; it records current qualification, the missing trace shapes, actual BF16 compute, EP-local routing scope and probe limitations.",
+        "agent_budget_sec": 3600
+      }
+    },
+    "optimize": {
+      "skill": "geak-kernel-gpu-groups",
+      "mode": "agent",
+      "params": {
+        "time_budget_sec": 172800,
+        "attempt_cap_sec": 1500,
+        "attempt_min_sec": 600,
+        "budget": 4,
+        "min_improve": 0.05,
+        "gpus_per_task": 1,
+        "nodes": [
+          "crsuse2-m2m-025"
+        ],
+        "gpus": "0,1,2,3,4,5,6,7",
+        "image": "lmsysorg/sglang-rocm:muse-spark-open@sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4",
+        "keep_threshold": 1.045,
+        "apply_to_original": true,
+        "agent_brief": " USER CONSTRAINT (mandatory): Use the existing running Spur job 221802 on crsuse2-m2m-025. Never invoke scancel, sbatch, salloc, scontrol update/requeue/hold, spur cancel/submit/alloc, stop PID 1, stop the allocation holder, or otherwise release/recreate/alter this allocation. Do not change CPU cgroups or evade runtime authorization. Preserve every pre-existing process and container, including ax_coll and the DSV4 optimization agents. You may create and clean up only containers/processes clearly owned by this campaign, prefixed wl_musespark025_. Obtain actual runtime GPU and CPU visibility from ordinary permitted container execution. Driver-shell affinity is CPU 0, so it is not evidence of the serving container\u2019s affinity. If a real runtime limit blocks a measurement, report evidence instead of changing the allocation. The job currently expires 2026-10-21T04:01:56Z. Checkpoint progress on shared storage and reserve time for end-to-end verification; an unfinished 48-hour target may not be called complete. Never trade away the machine to obtain a longer budget.",
+        "task_name_prefix": "musespark025_",
+        "task_gpu_requirements_file": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/control/task_gpu_requirements.json",
+        "deadline_utc": "2026-10-21T04:01:56Z",
+        "reserve_after_optimization_sec": 21600,
+        "reserve_e2e_sec": 18000,
+        "verify_wall_sec": 7200,
+        "wall_overhead_factor": 1.5,
+        "measure_timeout_sec": 3600,
+        "verify_case_timeout_sec": 3600,
+        "single_gpu_method": "native-frozen",
+        "verify_wall_sec_by_gpu_count": {
+          "1": 9000,
+          "8": 5400
+        },
+        "container_runtime_file": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/control/optimization-runtime.json",
+        "keep_threshold_overrides": {
+          "musespark025_aiter_custom_allreduce": 1.15
+        }
+      }
+    },
+    "applyback": {
+      "skill": "reference-replay-ab",
+      "mode": "agent",
+      "params": {
+        "exclusive_node": true,
+        "harness_dir": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/harness",
+        "harness_cmd": "tools/run_tp8_c8.sh",
+        "case_file": "cases.json",
+        "case_name": "musespark_geak_applyback",
+        "base_case": "baseline",
+        "overlay_subdir": "overlays/musespark_geak_applyback",
+        "reference_run": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/harness/runs/musespark_38947852942_025_20261020T025409Z/musespark_38947852942_025_20261020T025409Z.json",
+        "reference_key": "request_metrics.throughput.output.tokens_per_second",
+        "run_tag_prefix": "musespark_38947852942_025_ab",
+        "repeats": 3,
+        "duration_s": 3600,
+        "port": 8000,
+        "stop_cmd": "tools/stop_owned_server.py",
+        "agent_brief": "Use only crsuse2-m2m-025. Do not substitute another node. Campaign evidence: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/ci. Source checkout: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/source/InferenceX, commit 59ec4f61e00386f9f45ee977d5c1753fad88ec02. Read /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020/PREPARATION.md before acting. The archived CI receipt is external reference evidence, not a measured local baseline. Run inside the same pinned serving environment. Use the harness created by baseline and the reference-replay-ab procedure. Build a reversible overlay from only the cold-reverified winners, prove every replacement loaded in the server, and compare against the local baseline aggregate metric. All three candidate legs need fresh servers, empty compile caches and unique benchmark ids. The existing summarizer supports the nested reference metric path. Report operator and end-to-end results separately. A failed/missing overlay check or unequal metric basis cannot produce an A/B claim. USER CONSTRAINT (mandatory): Use the existing running Spur job 221802 on crsuse2-m2m-025. Never invoke scancel, sbatch, salloc, scontrol update/requeue/hold, spur cancel/submit/alloc, stop PID 1, stop the allocation holder, or otherwise release/recreate/alter this allocation. Do not change CPU cgroups or evade runtime authorization. Preserve every pre-existing process and container, including ax_coll and the DSV4 optimization agents. You may create and clean up only containers/processes clearly owned by this campaign, prefixed wl_musespark025_. Obtain actual runtime GPU and CPU visibility from ordinary permitted container execution. Driver-shell affinity is CPU 0, so it is not evidence of the serving container\u2019s affinity. If a real runtime limit blocks a measurement, report evidence instead of changing the allocation. The job currently expires 2026-10-21T04:01:56Z. Checkpoint progress on shared storage and reserve time for end-to-end verification; an unfinished 48-hour target may not be called complete. Never trade away the machine to obtain a longer budget. REFERENCE SCOPE: reference_run is the first actual local stock aggregate (343.62428 tok/s), independently repeated at 344.41922. Compare candidate arms against that local stock reference using identical pinned harness/runtime. Report the unresolved historical-CI difference separately. Do not compare a candidate directly against 353.88446 and call that an optimization gain. The local baseline is adopted through the measured-receipt skill; the original strict CI alignment result remains failed in the qualification archive. FRESH STOCK CONTROL: If there are cold-verified winners, first run one fresh unchanged baseline leg with the existing harness, a unique tag and the same 3600-second metric window. Stop only that leg's owned server afterward. Record its raw receipt and its drift from the primary 343.62428 tok/s reference; the two earlier stock runs agreed within 0.5%. Use this control to check for elapsed-time/environment drift before attributing candidate gains. Keep the first receipt as the declared primary reference and report the fresh-control comparison explicitly; do not count a changed stock throughput as kernel improvement. The protected E2E budget is five hours, so keep all four launches bounded and reuse the provisioned model/client setup.",
+        "agent_budget_sec": 28800
+      }
+    }
+  },
+  "machine_policy": {
+    "node": "crsuse2-m2m-025",
+    "existing_job_id": "221802",
+    "preserve_allocation": true,
+    "scheduler_mutations_allowed": false,
+    "job_end_time_utc": "2026-10-21T04:01:56Z",
+    "owned_container_prefix": "wl_musespark025_"
+  }
+}

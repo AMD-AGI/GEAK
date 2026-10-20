@@ -150,7 +150,7 @@ implementation must produce files of the same names and structure to plug in.
 | `baseline` | `baseline.json` | `throughput`, `unit`, `metric`, `noise_band`, `provenance` |
 | `profile` | `kernel_workload.json`, `selection_targets.json`, `tasks/<name>/` | per-kernel `pct_gpu_time`, `phase`, plus independently runnable unit-test task directories |
 | `roofline` | `roofline.json` | per-kernel `roofline_pct`, `attainable_speedup`, `bound_type`, `expected_e2e_gain_pct` |
-| `optimize` | `optimized.json`, `verified.json` | kernels that survived cold re-verification, each with `speedup` and a `kernel_src` path |
+| `optimize` | `optimized.json` | kernels that survived cold re-verification, each with `speedup` and a `kernel_src` path |
 | `applyback` | `ab.json` | `baseline`, `candidate`, `e2e_delta_pct`, `verdict` |
 
 **The ranking key is `expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable_speedup)`,

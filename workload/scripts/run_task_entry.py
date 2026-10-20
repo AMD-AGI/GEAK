@@ -23,7 +23,9 @@ is imported, so the shim can silently disable the overlay and measure the baseli
 
 Usage: python3 run_task_entry.py <task_dir> [entry.py] [args...]
 """
+import json
 import os
+import time
 import runpy
 import sys
 
@@ -32,6 +34,33 @@ import sys
 # the cache instead of from the task directory.
 import unittest  # noqa: F401
 import unittest.mock  # noqa: F401
+
+
+def emit_fresh_sidecar(task_dir, started):
+    """Expose file-only gate receipts without accepting an earlier run's result.
+
+    Some frozen extraction harnesses print a human gate table but put their
+    structured verdict only in run/ut_result.json. Both worker and cold verifier
+    consume the same JSON summary emitted here after a successful entry exit.
+    """
+    path = os.path.join(task_dir, "run", "ut_result.json")
+    try:
+        with open(path) as stream:
+            receipt = json.load(stream)
+        observed_start = receipt.get("started")
+        if (not isinstance(observed_start, (int, float))
+                or not started <= observed_start <= time.time()):
+            return
+        gates = receipt.get("gates")
+        if not isinstance(gates, dict) or not gates or "exit_code" not in receipt:
+            return
+        verdicts = {key: isinstance(value, dict) and value.get("ok") is True
+                    for key, value in gates.items()}
+        passed = (receipt.get("ok") is True and receipt["exit_code"] == 0
+                  and all(verdicts.values()))
+        print(json.dumps({"ut_result": path, "ok": passed, "gates": verdicts}), flush=True)
+    except (OSError, ValueError, TypeError):
+        return
 
 
 def main(argv):
@@ -51,7 +80,13 @@ def main(argv):
     # harness_lib.py from it -- but only after the stdlib is already resolved.
     sys.path.insert(0, task_dir)
     sys.argv = [path] + rest
-    runpy.run_path(path, run_name="__main__")
+    started = time.time()
+    try:
+        runpy.run_path(path, run_name="__main__")
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            raise
+    emit_fresh_sidecar(task_dir, started)
     return 0
 
 

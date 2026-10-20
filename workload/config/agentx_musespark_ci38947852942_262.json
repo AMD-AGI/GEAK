@@ -1,0 +1,172 @@
+{
+  "_comment": "Muse Spark Open TP8/EP8 concurrency-8 reproduction and kernel campaign for InferenceX run 38947852942, job 117132178964. Hardware and harness provisioning remain pending until SSH access is available.",
+  "run_root": "workload/campaigns/agentx_musespark_ci38947852942_262_20261019",
+  "runner": "claude",
+  "target": {
+    "model": "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
+    "image": "lmsysorg/sglang-rocm:muse-spark-open@sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4",
+    "commits": {
+      "inferencex": "59ec4f61e00386f9f45ee977d5c1753fad88ec02",
+      "sglang": "c722c0a160981f21c81cffaab7bbcc117089a2a6",
+      "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
+      "tilelang": "a55a82302bf7f3c5af635b5c9146f728185cc900"
+    },
+    "name_tokens": [
+      "musespark"
+    ],
+    "enforce": true
+  },
+  "runner_env": {
+    "env_file": "/shared_nfs/zihao/c_host/.workload-secrets/musespark-262.env"
+  },
+  "stages": {
+    "baseline": {
+      "skill": "ci-run-replay",
+      "mode": "agent",
+      "params": {
+        "ci": {
+          "run_id": "38947852942",
+          "job_id": "117132178964",
+          "run_url": "https://github.com/SemiAnalysisAI/InferenceX/actions/runs/38947852942/job/117132178964",
+          "output_throughput": 353.88446,
+          "metric": "output_token_throughput",
+          "unit": "tok/s",
+          "max_drift_pct": 0.5
+        },
+        "pins": {
+          "image": "lmsysorg/sglang-rocm:muse-spark-open@sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4",
+          "image_digest": "sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4",
+          "model": "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
+          "model_revision": "c7bc74fd64371315a091bc15f9723882eead0dc1",
+          "draft_model": "RadixArk/Muse-Spark-Open-DFlash2",
+          "draft_model_revision": "46c90f412549c472941a68382d91a99e5e6372a0",
+          "seed": 42,
+          "server_random_seed": 125618933,
+          "benchmark_id": "musespark_38947852942_262_20261019T125204Z",
+          "cache_bust": "first_turn_prefix",
+          "duration_s": 3600,
+          "warmup_requests_per_lane": 10,
+          "trace_corpus": {
+            "loader": "semianalysis_cc_traces_weka_062126_256k",
+            "dataset": "semianalysisai/cc-traces-weka-062126-256k",
+            "revision": "8fecd2fc56694469f758f0afbbb6335ad3043740",
+            "entries": 393
+          }
+        },
+        "cpu": {
+          "bind": "physical-cores",
+          "sglang_set_cpu_affinity": 1
+        },
+        "isolation": {
+          "fresh_container": true,
+          "container_name": "wl_musespark_38947852942_262_baseline",
+          "cache_vars": [
+            "TRITON_CACHE_DIR",
+            "XDG_CACHE_HOME"
+          ],
+          "ledger": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/benchmark_id_ledger.json"
+        },
+        "docker": {
+          "volumes": [
+            "/shared_nfs:/shared_nfs"
+          ],
+          "extra_args": []
+        },
+        "env_map": {},
+        "env": {
+          "PYTHONNOUSERSITE": "1",
+          "SGLANG_TIMEOUT_KEEP_ALIVE": "900",
+          "SGLANG_USE_AITER": "1",
+          "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+          "MUSE_MOE_BACKEND": "flydsl",
+          "HF_HUB_OFFLINE": "1",
+          "SGLANG_SIMULATE_ACC_LEN": "4.05",
+          "SGLANG_SIMULATE_ACC_METHOD": "match-expected",
+          "SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token",
+          "SGLANG_SET_CPU_AFFINITY": "1",
+          "NCCL_MIN_NCHANNELS": "112"
+        },
+        "harness": {
+          "dir": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/harness",
+          "cmd": "tools/run_tp8_c8.sh",
+          "args": [
+            "CASE",
+            "RUN_TAG",
+            "DURATION"
+          ],
+          "case": "baseline",
+          "run_tag": "musespark_38947852942_262_20261019T125204Z",
+          "result_dir": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/harness/runs/musespark_38947852942_262_20261019T125204Z"
+        },
+        "config": {
+          "tp": 8,
+          "ep": 8,
+          "gpus": 8,
+          "concurrency": 8,
+          "spec_decoding": "draft_model",
+          "kv_offloading": "none"
+        },
+        "agent_brief": "Use only crsuse2-m2m-262. Do not substitute another node. Campaign evidence: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/ci. Source checkout: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/source/InferenceX, commit 59ec4f61e00386f9f45ee977d5c1753fad88ec02. Read /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/PREPARATION.md before acting. The archived CI receipt is external reference evidence, not a measured local baseline. Provision the pinned image, the main and draft model revisions, and AgentX-Harness 1.0.11 on the target node. First verify SSH access, Docker access, GPU inventory, current GPU owners, and available disk/memory. Do not stop unrelated work. There is no site harness yet: create one under /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/harness using the pinned InferenceX replay and result-processing implementation, not a new benchmark implementation. Follow the existing ci-run-replay script contract after provisioning. The harness must accept CASE RUN_TAG DURATION, write runs/RUN_TAG/RUN_TAG.json using the CI aggregate metric, support a case-table python_overlay hook and record actual server overlay hashes for reference-replay-ab. Keep reusable setup under this campaign. Pin TP8, EP8, concurrency 8, DFLASH with 8 draft tokens, accepted length 4.05 / match-expected / real-draft-token, AITER attention and FlyDSL MoE. No HiCache. The CLI requested mem-fraction-static 0.85; the engine internally logged 0.7225. Pass 0.85 so the engine performs its own adjustment exactly once. Preserve server seed 125618933 separately from client seed 42. Determine one logical CPU per physical core from the target node and test SGLang rank affinity before the hour run; record any topology mismatch against the CI EPYC 9575F host. Every formal replay uses a fresh container, empty compile caches and an unused benchmark id. Record cache-bust from actual AgentX configuration or a versioned implementation observation; do not invent client-export fields. Explicitly forward model/dataset caches and all client pins. Run the full 3600-second replay and apply the existing post-run alignment verifier. Only emit ok if local aggregate throughput is within 0.5% of 353.88446 and every required alignment is proven. If image, weights, machine access or another precondition is unavailable, write blocked with evidence. Never adopt the downloaded CI result as this node's baseline. After success, record the harness, real container identity, revisions, and local result path for subsequent stages. CURRENT EXECUTION CONTEXT: The driver is running inside the user-owned Spur job container on crsuse2-m2m-262, with all 236 logical CPUs and all 8 GPUs allocated. The direct host SSH route is not needed. Docker is available through the job; respect its authorization policy, avoid privileged or host-root workarounds, and use only owned paths for mounts. The pinned CI image was absent at the preflight; pull exactly the digest, do not substitute the similarly named primus-specforge image. Node-local storage /mnt/m2m_nobackup has ample room; keep new model/compile caches under a dedicated zihao_musespark_38947852942 directory, and record actual cache paths. Shared model paths checked so far do not contain the main or draft model. The agent runner is configured with the existing authenticated c5_new.sh gateway settings in a private environment file. Do not read credentials into logs. Resolve the runtime and harness preconditions before attempting the hour replay.",
+        "agent_budget_sec": 28800
+      }
+    },
+    "profile": {
+      "skill": "agentx-kernel-extraction-standalone",
+      "mode": "agent",
+      "params": {
+        "selection": "per-phase Top 5 AND overall GPU-time share > 3%",
+        "agent_brief": "Use only crsuse2-m2m-262. Do not substitute another node. Campaign evidence: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/ci. Source checkout: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/source/InferenceX, commit 59ec4f61e00386f9f45ee977d5c1753fad88ec02. Read /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/PREPARATION.md before acting. The archived CI receipt is external reference evidence, not a measured local baseline. Profile the locally aligned baseline using all eight ranks and the identical workload. There are no imported GPU traces or kernel tasks for this campaign. Start with the observed SGLang Muse Spark implementation, FlyDSL MoE, AITER attention and DFLASH draft/verify phases; do not reuse GLM or DeepSeek boundaries. Capture representative steady state and account for the full workload phase mix. Write traces to local disk or /dev/shm, wait for completed flush before copying to shared storage, and release the TP8 server before optimization. Build complete frozen correctness/latency harnesses with independently recorded shapes and real candidate_bind descriptors. Finish using the profile slot finalize.py."
+      }
+    },
+    "roofline": {
+      "skill": "kernel-roofline",
+      "mode": "agent",
+      "params": {
+        "roofline_mode": "combination",
+        "rank_key": "expected_e2e_gain_pct",
+        "agent_brief": "Use only crsuse2-m2m-262. Do not substitute another node. Campaign evidence: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/ci. Source checkout: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/source/InferenceX, commit 59ec4f61e00386f9f45ee977d5c1753fad88ec02. Read /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/PREPARATION.md before acting. The archived CI receipt is external reference evidence, not a measured local baseline. Use the measured MI355X/gfx950 architecture and the profile stage runnable tasks. Verify the rocprof-compute >=3.6.0 requirement before collecting counters; if unavailable, document and use the supported model-based route. Fold through the vendored fold.py and the slot rank.py. Rank by expected end-to-end savings, including the limiting rank in TP8/EP8; do not infer speedup from low roofline utilization alone."
+      }
+    },
+    "optimize": {
+      "skill": "geak-kernel-workflow",
+      "mode": "agent",
+      "params": {
+        "time_budget_sec": 172800,
+        "attempt_cap_sec": 1500,
+        "attempt_min_sec": 600,
+        "budget": 4,
+        "min_improve": 0.05,
+        "gpus_per_task": 1,
+        "nodes": [
+          "crsuse2-m2m-262"
+        ],
+        "gpus": "0,1,2,3,4,5,6,7",
+        "image": "lmsysorg/sglang-rocm:muse-spark-open@sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4",
+        "keep_threshold": 1.045,
+        "apply_to_original": true
+      }
+    },
+    "applyback": {
+      "skill": "reference-replay-ab",
+      "mode": "agent",
+      "params": {
+        "exclusive_node": true,
+        "harness_dir": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/harness",
+        "harness_cmd": "tools/run_tp8_c8.sh",
+        "case_file": "tools/cases_tp8_c8.json",
+        "case_name": "musespark_geak_applyback",
+        "base_case": "baseline",
+        "overlay_subdir": "overlays/musespark_geak_applyback",
+        "reference_run": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/harness/runs/musespark_38947852942_262_20261019T125204Z/musespark_38947852942_262_20261019T125204Z.json",
+        "reference_key": "request_metrics.throughput.output.tokens_per_second",
+        "run_tag_prefix": "musespark_38947852942_262_ab",
+        "repeats": 3,
+        "duration_s": 3600,
+        "port": 8000,
+        "stop_cmd": "tools/stop_owned_server.py",
+        "agent_brief": "Use only crsuse2-m2m-262. Do not substitute another node. Campaign evidence: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/ci. Source checkout: /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/source/InferenceX, commit 59ec4f61e00386f9f45ee977d5c1753fad88ec02. Read /shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_262_20261019/PREPARATION.md before acting. The archived CI receipt is external reference evidence, not a measured local baseline. Run inside the same pinned serving environment. Use the harness created by baseline and the reference-replay-ab procedure. Build a reversible overlay from only the cold-reverified winners, prove every replacement loaded in the server, and compare against the local baseline aggregate metric. All three candidate legs need fresh servers, empty compile caches and unique benchmark ids. The existing summarizer supports the nested reference metric path. Report operator and end-to-end results separately. A failed/missing overlay check or unequal metric basis cannot produce an A/B claim.",
+        "agent_budget_sec": 28800
+      }
+    }
+  }
+}

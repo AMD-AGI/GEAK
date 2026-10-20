@@ -62,9 +62,9 @@ actually violated:
 This skill does not write `result.json`. Per-kernel results are recorded by
 `scripts/worker.sh` in `$WORK_ROOT/state/<kernel>.status.json` (`best_speedup`,
 `credited_seconds`, `attempts`, `history`), with the best source in
-`$WORK_ROOT/runs/<kernel>/best_kernel_src`. The stage-level summary and `result.json` are
-produced by the **slot** adapter `stages/optimize/finalize.py` — it belongs to the slot,
-not to this implementation, so replacing the implementation does not require rewriting it.
+`$WORK_ROOT/runs/<kernel>/best_kernel_src`. Cold re-verification and the stage summary are
+steps 2 and 3 of [the slot's README](../README.md) — they belong to the slot, not to this
+implementation, so replacing the implementation does not require rewriting them.
 
 ## Preconditions
 

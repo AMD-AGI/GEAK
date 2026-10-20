@@ -16,7 +16,7 @@
   "stages": {
     "optimize": {
       "skill": "subagent-raw",
-      "mode": "script",
+      "mode": "agent",
       "params": {
         "time_budget_sec": 420,
         "attempt_cap_sec": 180,

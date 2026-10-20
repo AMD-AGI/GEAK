@@ -44,5 +44,5 @@ self-test command and the acceptance criteria far more explicitly.
 
 Identical to `geak-kernel-workflow` — which is precisely what makes the comparison
 possible: source lands in `$TASK_DIR/kernel_src/`, results are written by
-`scripts/worker.sh` into `$WORK_ROOT/state/<kernel>.status.json`, and the stage summary
-is produced by the slot adapter `stages/optimize/finalize.py`.
+`scripts/worker.sh` into `$WORK_ROOT/state/<kernel>.status.json`, and cold re-verification
+and the stage summary are steps 2 and 3 of [the slot's README](../README.md).
