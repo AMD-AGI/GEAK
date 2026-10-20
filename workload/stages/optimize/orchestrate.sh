@@ -47,6 +47,7 @@ fi
 
 TARGET="$(p time_budget_sec 172800)"
 CAP="$(p attempt_cap_sec 1500)"
+MEASTO="$(p measure_timeout_sec 1800)"
 AMIN="$(p attempt_min_sec 600)"
 BUDGET="$(p budget 4)"
 MIN_IMPROVE="$(p min_improve 0.05)"
@@ -54,6 +55,20 @@ KEEP="$(p keep_threshold 1.045)"
 STALE="$(p heartbeat_stale_sec 900)"
 BADLIM="$(p bad_node_limit 2)"
 MAXT="$(p max_tasks 0)"
+GPT="$(p gpus_per_task 1)"
+# exclude_tasks is a JSON list in the config; the generic reader above would print its
+# Python repr, so it is read on its own.
+EXCL="$(python3 -c "
+import json, os
+d = json.load(open('$PARAMS')) if os.path.exists('$PARAMS') else {}
+v = d.get('exclude_tasks') or []
+print(','.join(v) if isinstance(v, list) else str(v))")"
+# Per-seam noise bands: {"task": 1.35}. The band belongs to the seam, not the campaign.
+KEEPOV="$(python3 -c "
+import json, os
+d = json.load(open('$PARAMS')) if os.path.exists('$PARAMS') else {}
+v = d.get('keep_threshold_overrides') or {}
+print(','.join('%s=%s' % (k, x) for k, x in sorted(v.items())) if isinstance(v, dict) else '')")"
 IMAGE="$(p image '')"
 REPEATS="$(p verify_repeats 2)"
 BACKEND="${OPT_BACKEND:-$( [ -n "$IMAGE" ] && echo docker || echo local )}"
@@ -68,12 +83,18 @@ print(len(glob.glob('/dev/dri/renderD*')) or 1)" 2>/dev/null || echo 1)"
 fi
 
 echo "[optimize] skill=$(basename "$SKILL_ROOT") runner=$(basename "$RUNNER") backend=$BACKEND"
-echo "[optimize] gpus=$GPUS target=${TARGET}s cap=${CAP}s keep>=$KEEP tasks_dir=$TASKS_DIR"
+echo "[optimize] gpus=$GPUS gpus_per_task=$GPT target=${TARGET}s cap=${CAP}s keep>=$KEEP tasks_dir=$TASKS_DIR"
+[ -n "$EXCL" ] && echo "[optimize] excluded tasks: $EXCL"
+[ -n "$KEEPOV" ] && echo "[optimize] per-seam keep thresholds: $KEEPOV"
 
 ARGS=(--work-root "$WORK_ROOT" --tasks-dir "$TASKS_DIR" --skill-root "$SKILL_ROOT"
       --runner "$RUNNER" --gpus "$GPUS" --target "$TARGET" --attempt-cap "$CAP" --attempt-min "$AMIN"
       --keep-threshold "$KEEP" --budget "$BUDGET" --min-improve "$MIN_IMPROVE"
-      --stale-sec "$STALE" --bad-node-limit "$BADLIM" --backend "$BACKEND")
+      --stale-sec "$STALE" --bad-node-limit "$BADLIM" --backend "$BACKEND"
+      --gpus-per-task "$GPT")
+[ -n "$EXCL" ] && ARGS+=(--exclude "$EXCL")
+[ -n "$KEEPOV" ] && ARGS+=(--keep-threshold-override "$KEEPOV")
+ARGS+=(--measure-timeout "$MEASTO")
 [ -n "$ORDER_FILE" ] && ARGS+=(--order-file "$ORDER_FILE")
 [ "$MAXT" != "0" ] && [ -n "$MAXT" ] && ARGS+=(--max-tasks "$MAXT")
 [ -n "$IMAGE" ] && ARGS+=(--image "$IMAGE")
@@ -93,12 +114,21 @@ echo "[optimize] scheduler exited $SRC"
 # last step of the stage and nothing else wants the card.
 VERIFY=(python3 "$SCRIPTS/verify.py" --work-root "$WORK_ROOT" --tasks-dir "$TASKS_DIR"
         --repeats "$REPEATS" --threshold "$KEEP" --out "$OUT/verified.json")
+[ -n "$KEEPOV" ] && VERIFY+=(--threshold-override "$KEEPOV")
 if [ "$BACKEND" = docker ]; then
-  VGPU="${GPUS%%,*}"
-  VRENDER="/dev/dri/renderD$(( 128 + 8 * VGPU ))"   # same numbering as scheduler.py
+  # One slot's worth of GPUs, the same group the scheduler would have given a worker:
+  # a collective unit test re-verified on a single card fails for lack of ranks, not
+  # for lack of a speedup.
+  VDEV=()
+  for VGPU in $(python3 -c "
+gpus = '$GPUS'.split(',')
+print(' '.join(gpus[:max(1, int('$GPT'))]))"); do
+    VDEV+=(--device "/dev/dri/renderD$(( 128 + 8 * VGPU ))")   # numbering as scheduler.py
+  done
   docker run --rm --name "wl_verify_$$" \
-      --device /dev/kfd --device "$VRENDER" --group-add video --ipc host \
+      --device /dev/kfd "${VDEV[@]}" --group-add video --ipc host \
       --security-opt seccomp=unconfined --shm-size 16g -v /shared_nfs:/shared_nfs \
+      -e GPU_IDS="$(python3 -c "print(','.join(str(i) for i in range(max(1, int('$GPT')))))")" \
       "$IMAGE" "${VERIFY[@]}" 2>&1 | tee -a "$OUT/verify.out"
 else
   "${VERIFY[@]}" 2>&1 | tee -a "$OUT/verify.out"

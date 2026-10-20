@@ -2,7 +2,6 @@
   "_comment": "CI run 37608671586 / job 112750669255: DeepSeek-V4-Pro-0813 FP4 on 8x MI355X, TP8/EP8 with DP attention, concurrency 128, DSpark + MegaMoE/EPLB + HiCache. A different stack from agentx_glm52 in every way that matters to kernel selection: the MoE path is MegaMoE with EPLB expert migration rather than a fused MXFP4 MoE, attention is Opus MLA v4, and 19% of device time sits in peer-to-peer dispatch/combine rather than in GEMM.",
   "run_root": "workload/runs/agentx_dsv4pro",
   "runner": "claude",
-
   "target": {
     "model": "deepseek-ai/DeepSeek-V4-Pro-0813",
     "image": "zihao-inferencex112750:world-init-20261013",
@@ -11,14 +10,16 @@
       "aiperf": "89b21867872a5bbc4b0676bf5005c404da5e9f94",
       "srt_slurm": "848f72d45b05af0fc082a9d1df49a8b4e7e61507"
     },
-    "name_tokens": ["dsv4pro", "dsv4"],
+    "name_tokens": [
+      "dsv4pro",
+      "dsv4"
+    ],
     "enforce": true,
     "_note_image": "The declared image is NOT the recipe tag the CI run named. That tag -- lmsysorg/sglang-rocm:v0.5.21-rocm720-mi35x-20261007 -- was overwritten upstream at 14:49 UTC on 2026-10-07, after the CI job finished at 12:57 UTC, and now resolves to sha256:65c5a944... carrying SGLang 1e86143bf0 rather than the CI source. Pulling it would run a different stack under the CI's name. What this campaign actually targets is the image rebuilt from the CI pip record and source commit, which produced the adopted baseline: zihao-inferencex112750:world-init-20261013, sha256:9692a15cb5257aa524bc0ccc26e2bab2cc361a51f80c95ae33e7b25c44cbb44d as built on crsuse2-m2m-053. It is declared here so that every stage is checked against the thing that will really run. Byte identity with the historical CI image is unprovable and is never claimed. Build files: <harness>/control/Dockerfile.ci_source, Dockerfile.ci_packages, Dockerfile.world_init."
   },
   "runner_env": {
     "env_file": "/shared_nfs/zihao/kernel_agent/ax/.secrets/claude.env"
   },
-
   "stages": {
     "baseline": {
       "skill": "adopt-measured-receipt",
@@ -38,7 +39,6 @@
         "_note_drift": "-1.584% against CI is inside max_reference_drift but is not noise: 118 physical cores locally against 128 in CI, plus a derived image. It is the floor this campaign's gain is measured from, not a number to be improved by re-running."
       }
     },
-
     "profile": {
       "skill": "agentx-kernel-extraction-standalone",
       "params": {
@@ -54,7 +54,6 @@
         "_note_scope": "Ranking is deployment-scope (all 8 ranks), not rank 0. Rank 0 and rank 3 agree on only 3 of their 10 top targets, so a single-rank ranking would select a different kernel set from the same run."
       }
     },
-
     "roofline": {
       "skill": "kernel-roofline",
       "params": {
@@ -67,26 +66,38 @@
         "agent_brief": "MACHINE: crsuse2-m2m-318, 8 idle MI355X, the machine you are on.\n\nA roofline for these six boundaries already exists and is imported through the profile stage ($RUN_ROOT/profile/out): the selected set folds to 33.4% of roof (DECODE 39.1%, PREFILL 24.5%), MegaMoE GEMM1/GEMM2 are healthy at 48-76%, and 19.2% of all device time sits in megamoe_prepare_* plus ep_combine at 0.6-3.1% of any roof -- residency on a small block set waiting on peer barriers, not a bandwidth or FLOP limit. Treat that as the prior, and say explicitly where your numbers confirm or contradict it.\n\nTWO THINGS THE EARLIER PASS COULD NOT SETTLE, which is why this stage runs again now that section 4 has produced runnable harnesses. (1) The rocprof leg never ran: rocprof-compute on that node was 3.4.0, below the skill's 3.6.0 gate for gfx95x, and --roof-only needs a runnable --cmd, which only a built UT provides. Check the version on this machine; if it is still below the gate, say so and fall back to the corrections workflow (build_cases -> roofline_report -> fold) rather than reporting a roofline nobody measured. (2) The MLA-decode model was inferred rather than observed -- no recorded shapes, direct module launch. The captures from section 4 are what settle it.\n\nRANKING IS BY EXPECTED END-TO-END GAIN, not by operator speedup, and the reason is specific to this deployment: GPU busy fraction is 98.31%, but TP8/EP8 synchronises every rank each step, so a step shortens only by the MINIMUM per-rank saving. EPLB plus DP attention give each rank a different expert load -- rank 0 is an outlier for the MoE kernels -- so report the bound both ways, aggregate share for the upper bound and the weakest rank for the lower. prior_extraction/evidence/uplift_bounds.json has the earlier computation.\n\nFold multi-shape kernels with the skill's own fold.py. Do not sum by hand."
       }
     },
-
     "optimize": {
       "skill": "geak-kernel-workflow",
       "params": {
-        "time_budget_sec": 43200,
-        "attempt_cap_sec": 1500,
+        "time_budget_sec": 10800,
+        "attempt_cap_sec": 3000,
         "budget": 4,
         "min_improve": 0.05,
         "keep_threshold": 1.045,
         "apply_to_original": true,
-        "gpus_per_task": 1,
-        "nodes": ["crsuse2-m2m-318"],
+        "gpus_per_task": 8,
+        "nodes": [
+          "crsuse2-m2m-318"
+        ],
         "image": "zihao-inferencex112750:world-init-20261013",
         "gpus": "0,1,2,3,4,5,6,7",
-        "_note_backend": "image is set, so the scheduler uses the docker backend: one container per GPU, each mounting a single /dev/dri/renderD<128+i>. An env-only ROCR pin is not enough -- an optimizing agent resets its own environment, and a pin that lives only in the environment then lands on physical GPU 0 no matter what the scheduler intended. Physical isolation is what holds. The image must exist on this machine before this stage starts; the profile stage builds it.",
-        "_note_budget": "12 h per unit test. With 6 task boundaries on 8 GPUs every task owns a GPU for the whole window, so 12 h per test is also 12 h wall-clock.",
-        "_note_amdahl": "GPU busy fraction is 98.31%, so device time bounds the step -- but TP8/EP8 synchronises every rank each step, so a step shortens only by the *minimum* per-rank saving. A kernel sped up on one rank and not another buys nothing end to end."
+        "_note_backend": "image is set, so the scheduler uses the docker backend: one container per *slot*, mounting that slot's /dev/dri/renderD<128+8i> nodes. An env-only ROCR pin is not enough -- an optimizing agent resets its own environment, and a pin that lives only in the environment then lands on physical GPU 0 no matter what the scheduler intended. Physical isolation is what holds. The image must exist on this machine before this stage starts; the profile stage builds it.",
+        "_note_budget": "3 h per unit test x 4 tasks = the 12 h kernel-optimization budget for this campaign. With one 8-GPU slot the tasks are serial, so per-task budget and wall clock are the same number; roofline's ranking decides who goes first, which is what makes a truncated run still spend its hours on the kernels with the most expected e2e gain.",
+        "_note_amdahl": "GPU busy fraction is 98.31%, so device time bounds the step -- but TP8/EP8 synchronises every rank each step, so a step shortens only by the *minimum* per-rank saving. A kernel sped up on one rank and not another buys nothing end to end.",
+        "exclude_tasks": [
+          "mla_v4_decode_asm_a8w8",
+          "megamoe_stage1_fp8xfp4_grouped_gemm1"
+        ],
+        "keep_threshold_overrides": {
+          "ep_combine_intranode": 1.35
+        },
+        "_note_gpus_per_task": "8, not 1. Every unit test this stack delivered is a collective seam: the harness launches torchrun with 8 ranks (TP8/EP8 with DP attention), so a one-GPU slot does not run it slowly, it cannot run it at all. Measured on 2026-10-19 with gpus_per_task=1: six workers dispatched at 06:06, every attempt returned rc=0 with no measurement within three minutes, and the agents' own diagnosis -- independently, on two different tasks -- was 'schedule it on an 8-GPU slot'. One slot of 8 means tasks run one at a time, so the time budget below is per task AND the wall clock.",
+        "_note_exclude": "Two of the six extracted boundaries are not optimizable work and would each burn a 3 h slot proving it again. mla_v4_decode_asm_a8w8 ships as a gfx950 code object with no source and has no harness at all -- run/BLOCKER.md proves it, and two independent optimize attempts re-derived it from scratch on 2026-10-19. megamoe_stage1_fp8xfp4_grouped_gemm1 is the opposite case and the more painful one: it is the highest-value *realistic* target left (4.70% expected e2e gain at a modelled 1.665x attainable), but the profile stage never delivered it -- 5 of 6 gates, 11 of 13 timing buckets, 91.061% call coverage, lost to the harness_lib _try_capture race. Optimizing against a harness the pipeline itself refuses to certify would produce a speedup that applyback could not honestly carry. It is excluded here and named in the report as the first thing to fix upstream.",
+        "_note_keep_threshold_overrides": "The noise band belongs to the seam, not to the campaign. The global 1.045 was calibrated on single-rank kernels and matches what profile measured for the non-collective seams (stage1's null control 0.99979, sparse_prefill 1.0384-1.0474). ep_combine_intranode barriers across all 8 ranks on every launch, and its byte-identical null legs spread 0.799-1.330 per bucket -- at 1.045 that seam would report keeps that are pure rank skew. 1.35 is just above its measured null maximum.",
+        "measure_timeout_sec": 2700,
+        "_note_attempt_cap": "3000 s, up from 1500. Measured on this stack on 2026-10-19: one full pass of the frozen harness over the 13 serving buckets takes ~1280 s on 8 ranks, and the attempt cap bounds the *agent*, not the worker's own measurement. At 1500 s the agent cannot verify its own edit inside its attempt -- attempt 1 of megamoe_prepare_compact_dispatch said so and killed its own timing run with 2 of 13 cases left -- so it either guesses or wastes the attempt. measure_timeout_sec is the separate ceiling on the worker's post-attempt measurement and is what actually decides keep vs revert."
       }
     },
-
     "applyback": {
       "skill": "reference-replay-ab",
       "params": {

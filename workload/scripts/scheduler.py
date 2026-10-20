@@ -9,7 +9,8 @@ decides is who runs on which GPU, what happens when they die, and how time is ac
 Every design constraint below was learned the hard way in a previous 200 GPU-hour
 campaign:
 
-* **One container per GPU.** Mount exactly one /dev/dri/renderD<128+8*i> into the
+* **One container per slot.** A slot is `gpus_per_task` consecutive GPUs; mount
+  exactly that group's /dev/dri/renderD<128+8*i> nodes into the
   container. An env-only ROCR_VISIBLE_DEVICES does not hold — the agent resets it in its
   own subprocesses, two workers land on the same physical GPU, and both sets of numbers
   are worthless. Physical isolation is the only isolation.
@@ -33,6 +34,32 @@ import argparse, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER = os.path.join(HERE, "worker.sh")
+
+
+def parse_overrides(spec):
+    """"task=1.35,other=1.08" -> {"task": 1.35, "other": 1.08}. A malformed entry is a
+    configuration error and must not silently fall back to the global band."""
+    out = {}
+    for item in (spec or "").split(","):
+        if not item.strip():
+            continue
+        k, _, v = item.partition("=")
+        out[k.strip()] = float(v)
+    return out
+
+
+def slot_label(gpus):
+    """Stable name for a slot, used for container names, logs and state keys."""
+    return ("gpu%d" % gpus[0]) if len(gpus) == 1 else ("gpus%d-%d" % (gpus[0], gpus[-1]))
+
+
+def make_slots(gpus, per_task):
+    """Chunk the GPU list into slots of `per_task`. A tail too short to form a whole
+    slot is dropped rather than handed out short: a collective task given 5 of the 8
+    ranks it needs does not run slowly, it fails on every attempt."""
+    per_task = max(1, int(per_task))
+    slots = [gpus[i:i + per_task] for i in range(0, len(gpus), per_task)]
+    return [g for g in slots if len(g) == per_task], [g for g in slots if len(g) != per_task]
 
 
 def log(work_root, msg):
@@ -61,7 +88,7 @@ def sh(cmd, timeout=60):
 
 # ---------------------------------------------------------------- tasks and state
 
-def discover_tasks(tasks_dir, order_file=None, max_tasks=None):
+def discover_tasks(tasks_dir, order_file=None, max_tasks=None, exclude=()):
     """Task directories are the profile stage's output. Ordering prefers roofline's
     ranking (descending expected end-to-end gain).
 
@@ -69,26 +96,63 @@ def discover_tasks(tasks_dir, order_file=None, max_tasks=None):
     whether this campaign moves the end-to-end number at all.
     """
     present = sorted(d for d in os.listdir(tasks_dir)
-                     if os.path.isdir(os.path.join(tasks_dir, d, "kernel_src")))
+                     if os.path.isdir(os.path.join(tasks_dir, d, "kernel_src"))
+                     and d not in set(exclude))
     ordered = []
     if order_file and os.path.exists(order_file):
         try:
             data = json.load(open(order_file))
             rows = data.get("kernels") if isinstance(data, dict) else data
+            score, seen = {}, []
             for r in rows or []:
-                name = r.get("task") or r.get("kernel") if isinstance(r, dict) else r
-                # roofline keys may carry a module prefix; task directories are named
-                # after the kernel alone.
-                for cand in (name, str(name).rpartition("/")[2] if name else None):
-                    if cand in present and cand not in ordered:
-                        ordered.append(cand)
-                        break
-        except (ValueError, OSError, AttributeError):
-            pass
+                if isinstance(r, dict):
+                    name = r.get("task") or r.get("kernel") or r.get("case_id")
+                    gain = r.get("expected_e2e_gain_pct")
+                else:
+                    name, gain = r, None
+                t = match_task(name, present)
+                if not t:
+                    continue
+                if t not in seen:
+                    seen.append(t)
+                if gain is not None:
+                    score[t] = score.get(t, 0.0) + float(gain)
+            # Rank by summed expected e2e gain where roofline gave one; otherwise keep
+            # the order the ranking file listed them in.
+            ordered = sorted(seen, key=lambda t: (-score.get(t, 0.0), seen.index(t)))
+        except (ValueError, OSError, AttributeError, TypeError):
+            ordered = []
     ordered += [t for t in present if t not in ordered]
     if max_tasks:
         ordered = ordered[:max_tasks]
     return ordered
+
+
+def match_task(name, tasks):
+    """Map a ranking row's kernel name onto a task directory.
+
+    The two namespaces never agree exactly: the profiler names a kernel by its shape
+    variant (megamoe_prepare_m128, ep_combine_intranode_0) and the extraction names a
+    directory after the boundary (megamoe_prepare_compact_dispatch, ep_combine_intranode).
+    Leading underscore-tokens are what they share. Two must agree, so
+    megamoe_prepare_m128 cannot drift onto megamoe_stage2_*, and the longest agreement
+    wins.
+    """
+    if not name:
+        return None
+    base = str(name).rpartition("/")[2].split(".")[0]
+    if base in tasks:
+        return base
+    toks = base.split("_")
+    best, best_n = None, 1
+    for t in tasks:
+        tt = t.split("_")
+        k = 0
+        while k < min(len(toks), len(tt)) and toks[k] == tt[k]:
+            k += 1
+        if k > best_n:
+            best, best_n = t, k
+    return best
 
 
 def state_path(work_root, kernel, suffix):
@@ -139,16 +203,16 @@ class Backend(object):
         self.work_root = work_root
         self.image = image
 
-    def name_of(self, kernel, gpu):
-        return ("wl_opt_g%d_%s" % (gpu, kernel))[:200]
+    def name_of(self, kernel, gpus):
+        return ("wl_opt_%s_%s" % (slot_label(gpus), kernel))[:200]
 
-    def alive(self, kernel, gpu):
+    def alive(self, kernel, gpus):
         raise NotImplementedError
 
-    def start(self, kernel, gpu, env):
+    def start(self, kernel, gpus, env):
         raise NotImplementedError
 
-    def stop(self, kernel, gpu):
+    def stop(self, kernel, gpus):
         raise NotImplementedError
 
 
@@ -157,20 +221,20 @@ class LocalBackend(Backend):
         Backend.__init__(self, work_root, image)
         self.procs = {}
 
-    def _pidfile(self, kernel, gpu):
+    def _pidfile(self, kernel, gpus):
         return state_path(self.work_root, kernel, "pid")
 
-    def alive(self, kernel, gpu):
+    def alive(self, kernel, gpus):
         # Prefer the Popen handle. poll() also reaps the child — without reaping it
         # becomes a zombie, and a zombie is **alive** as far as `kill -0` is concerned, so
         # a worker that was -9'd would be judged still running.
-        p = self.procs.get((gpu, kernel))
+        p = self.procs.get((slot_label(gpus), kernel))
         if p is not None:
             return p.poll() is None
         # No handle means the scheduler itself restarted and the worker was left behind
         # by its previous life. Fall back to /proc, again counting zombies as dead.
         try:
-            pid = int(open(self._pidfile(kernel, gpu)).read().strip())
+            pid = int(open(self._pidfile(kernel, gpus)).read().strip())
         except (OSError, ValueError):
             return False
         try:
@@ -179,35 +243,35 @@ class LocalBackend(Backend):
         except (OSError, IndexError):
             return False
 
-    def start(self, kernel, gpu, env):
+    def start(self, kernel, gpus, env):
         e = dict(os.environ, **env)
         # The local backend can only pin via env. The agent can override it — which is
         # exactly why production uses docker.
-        e["ROCR_VISIBLE_DEVICES"] = str(gpu)
-        e["HIP_VISIBLE_DEVICES"] = str(gpu)
-        e["GPU_IDS"] = "0"
+        e["ROCR_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
+        e["HIP_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
+        e["GPU_IDS"] = ",".join(str(i) for i in range(len(gpus)))
         logf = os.path.join(self.work_root, "logs", kernel)
         os.makedirs(logf, exist_ok=True)
         out = open(os.path.join(logf, "spawn.log"), "a")
-        p = subprocess.Popen(["bash", WORKER, kernel, "gpu%d" % gpu],
+        p = subprocess.Popen(["bash", WORKER, kernel, slot_label(gpus)],
                              env=e, stdout=out, stderr=subprocess.STDOUT,
                              start_new_session=True)
-        os.makedirs(os.path.dirname(self._pidfile(kernel, gpu)), exist_ok=True)
-        with open(self._pidfile(kernel, gpu), "w") as f:
+        os.makedirs(os.path.dirname(self._pidfile(kernel, gpus)), exist_ok=True)
+        with open(self._pidfile(kernel, gpus), "w") as f:
             f.write(str(p.pid))
-        self.procs[(gpu, kernel)] = p
+        self.procs[(slot_label(gpus), kernel)] = p
         return True
 
-    def stop(self, kernel, gpu):
+    def stop(self, kernel, gpus):
         # Kill the whole process group: the worker has a ticker subshell and a runner
         # session beneath it, and killing only the worker leaves orphans that keep
         # crediting time.
         try:
-            pid = int(open(self._pidfile(kernel, gpu)).read().strip())
+            pid = int(open(self._pidfile(kernel, gpus)).read().strip())
             os.killpg(os.getpgid(pid), 15)
         except (OSError, ValueError):
             pass
-        p = self.procs.pop((gpu, kernel), None)
+        p = self.procs.pop((slot_label(gpus), kernel), None)
         if p is not None:
             try:
                 p.wait(timeout=10)          # reap it; leave no zombie
@@ -216,39 +280,51 @@ class LocalBackend(Backend):
 
 
 class DockerBackend(Backend):
-    def alive(self, kernel, gpu):
+    def alive(self, kernel, gpus):
         rc, out = sh(["docker", "inspect", "-f", "{{.State.Running}}",
-                      self.name_of(kernel, gpu)])
+                      self.name_of(kernel, gpus)])
         return rc == 0 and out.strip() == "true"
 
-    def start(self, kernel, gpu, env):
-        name = self.name_of(kernel, gpu)
+    def start(self, kernel, gpus, env):
+        name = self.name_of(kernel, gpus)
         sh(["docker", "rm", "-f", name])
-        render = "/dev/dri/renderD%d" % (128 + 8 * gpu)
-        if not os.path.exists(render):
-            log(self.work_root, "%s for GPU %d does not exist — this node does not number "
-                                "renderD as 128+8i; specify it with "
-                                "--render-base/--render-step" % (render, gpu))
-            return False
         cmd = ["docker", "run", "-d", "--name", name,
-               "--device", "/dev/kfd", "--device", render,
+               "--device", "/dev/kfd",
                "--group-add", "video", "--ipc", "host",
                "--security-opt", "seccomp=unconfined",
                "--shm-size", "16g", "-v", "/shared_nfs:/shared_nfs"]
+        for gpu in gpus:
+            render = "/dev/dri/renderD%d" % (128 + 8 * gpu)
+            if not os.path.exists(render):
+                log(self.work_root, "%s for GPU %d does not exist — this node does not "
+                                    "number renderD as 128+8i; specify it with "
+                                    "--render-base/--render-step" % (render, gpu))
+                return False
+            cmd += ["--device", render]
         for k, v in env.items():
             cmd += ["-e", "%s=%s" % (k, v)]
-        # The container sees exactly one GPU, so the worker always addresses it as 0.
-        cmd += ["-e", "GPU_IDS=0", self.image,
-                "bash", WORKER, kernel, "gpu%d" % gpu]
+        # The container sees exactly this slot's GPUs, so the worker addresses them as
+        # 0..N-1 whatever their physical indices are.
+        cmd += ["-e", "GPU_IDS=" + ",".join(str(i) for i in range(len(gpus))), self.image,
+                "bash", WORKER, kernel, slot_label(gpus)]
         rc, out = sh(cmd, timeout=180)
         if rc != 0:
-            log(self.work_root, "container failed to start gpu=%d kernel=%s: %s"
-                % (gpu, kernel, out.strip()[:300]))
+            log(self.work_root, "container failed to start slot=%s kernel=%s: %s"
+                % (slot_label(gpus), kernel, out.strip()[:300]))
             return False
         return True
 
-    def stop(self, kernel, gpu):
-        sh(["docker", "rm", "-f", self.name_of(kernel, gpu)])
+    def stop(self, kernel, gpus):
+        sh(["docker", "rm", "-f", self.name_of(kernel, gpus)])
+
+
+def measuring_since(work_root, kernel):
+    """Seconds since the worker marked a sweep in flight, or None if it is not."""
+    p = os.path.join(work_root, "state", kernel + ".measuring")
+    try:
+        return max(0, int(time.time() - os.path.getmtime(p)))
+    except OSError:
+        return None
 
 
 # ---------------------------------------------------------------- main loop
@@ -257,38 +333,48 @@ def tick(args, backend, tasks, assign, bad):
     now = int(time.time())
     target = args.target
 
-    # 1) Check reality: which GPUs still carry a live worker.
-    for gpu in list(assign):
-        kernel = assign[gpu]
+    # 1) Check reality: which slots still carry a live worker.
+    for label in list(assign):
+        kernel = assign[label]
+        gpus = args.slot_of[label]
         if is_done(args.work_root, kernel, target):
-            log(args.work_root, "%s exhausted its budget (%ds); withdrawing from gpu%d"
-                % (kernel, read_credit(args.work_root, kernel), gpu))
-            backend.stop(kernel, gpu)
-            del assign[gpu]
+            # Exhaustion is a between-attempts decision. If the worker is inside a sweep,
+            # the agent's time is already spent and only the verdict is outstanding; let
+            # it land. The mark ages out on its own, so a worker that died mid-sweep
+            # releases the slot on a later tick instead of holding it.
+            busy = measuring_since(args.work_root, kernel)
+            if busy is not None and busy <= args.measure_timeout + 300:
+                log(args.work_root, "%s is over budget but has been measuring for %ds; "
+                    "deferring the withdrawal until the sweep returns" % (kernel, busy))
+                continue
+            log(args.work_root, "%s exhausted its budget (%ds); withdrawing from %s"
+                % (kernel, read_credit(args.work_root, kernel), label))
+            backend.stop(kernel, gpus)
+            del assign[label]
             continue
         if is_blocked(args.work_root, kernel):
             log(args.work_root, "%s was judged blocked by the runner (unmet precondition); "
                 "no further retries" % kernel)
-            backend.stop(kernel, gpu)
-            del assign[gpu]
+            backend.stop(kernel, gpus)
+            del assign[label]
             continue
 
         hb = read_hb(args.work_root, kernel)
         age = now - hb if hb else None
-        running = backend.alive(kernel, gpu)
+        running = backend.alive(kernel, gpus)
         # Startup grace: a freshly dispatched worker has not written its first heartbeat
         # yet and must not be treated as dead.
-        grace = now - args.started_at.get((gpu, kernel), now) < args.startup_grace
+        grace = now - args.started_at.get((label, kernel), now) < args.startup_grace
         if not running and not grace:
-            log(args.work_root, "%s on gpu%d is gone (no container/process); reclaiming"
-                % (kernel, gpu))
-            backend.stop(kernel, gpu)
-            del assign[gpu]
+            log(args.work_root, "%s on %s is gone (no container/process); reclaiming"
+                % (kernel, label))
+            backend.stop(kernel, gpus)
+            del assign[label]
         elif age is not None and age > args.stale_sec and not grace:
-            log(args.work_root, "%s on gpu%d has not sent a heartbeat for %ds; declared "
-                "dead and reclaimed" % (kernel, gpu, age))
-            backend.stop(kernel, gpu)
-            del assign[gpu]
+            log(args.work_root, "%s on %s has not sent a heartbeat for %ds; declared "
+                "dead and reclaimed" % (kernel, label, age))
+            backend.stop(kernel, gpus)
+            del assign[label]
 
     # 2) Dispatch. Tasks that are unfinished, not blocked, and not already running on
     # another GPU, in ranked order.
@@ -301,27 +387,30 @@ def tick(args, backend, tasks, assign, bad):
                and not is_done(args.work_root, t, target)
                and not is_blocked(args.work_root, t)]
 
-    for gpu in args.gpus:
-        if gpu in assign or bad.get(gpu, 0) >= args.bad_node_limit:
+    for gpus in args.slots:
+        label = slot_label(gpus)
+        if label in assign or bad.get(label, 0) >= args.bad_node_limit:
             continue
         if not pending:
             break
         kernel = pending.pop(0)
         env = dict(args.worker_env)
         env["TASK_DIR"] = os.path.join(args.tasks_dir, kernel)
-        ok = backend.start(kernel, gpu, env)
+        if kernel in args.keep_overrides:
+            env["KEEP_THRESHOLD"] = str(args.keep_overrides[kernel])
+        ok = backend.start(kernel, gpus, env)
         if ok:
-            assign[gpu] = kernel
-            args.started_at[(gpu, kernel)] = now
-            bad[gpu] = 0
-            log(args.work_root, "dispatch gpu%d <- %s (credited %ds / %ds)"
-                % (gpu, kernel, read_credit(args.work_root, kernel), target))
+            assign[label] = kernel
+            args.started_at[(label, kernel)] = now
+            bad[label] = 0
+            log(args.work_root, "dispatch %s <- %s (credited %ds / %ds)"
+                % (label, kernel, read_credit(args.work_root, kernel), target))
         else:
-            bad[gpu] = bad.get(gpu, 0) + 1
+            bad[label] = bad.get(label, 0) + 1
             pending.insert(0, kernel)
-            if bad[gpu] >= args.bad_node_limit:
-                log(args.work_root, "gpu%d failed to start %d times in a row; blacklisted"
-                    % (gpu, bad[gpu]))
+            if bad[label] >= args.bad_node_limit:
+                log(args.work_root, "%s failed to start %d times in a row; blacklisted"
+                    % (label, bad[label]))
 
     remaining = [t for t in tasks if not is_done(args.work_root, t, target)
                  and not is_blocked(args.work_root, t)]
@@ -362,13 +451,24 @@ def main():
     ap.add_argument("--runner")
     ap.add_argument("--order-file", help="roofline.json, ranked by expected e2e gain")
     ap.add_argument("--gpus", default="")
+    ap.add_argument("--gpus-per-task", type=int, default=1,
+                    help="GPUs per slot. A collective harness (TP8/EP8 launches its own "
+                         "torchrun) needs the whole group or it cannot run at all.")
+    ap.add_argument("--exclude", default="",
+                    help="comma-separated task directory names to leave out of this run")
     ap.add_argument("--target", type=int, default=172800)
     ap.add_argument("--attempt-cap", type=int, default=1500)
+    ap.add_argument("--measure-timeout", type=int, default=1800,
+                    help="ceiling on the worker's own post-attempt measurement. This is "
+                         "not the attempt cap: the cap bounds the agent, this bounds the "
+                         "frozen harness re-run that decides keep vs revert. A collective "
+                         "sweep over 13 buckets took 1282 s on this stack.")
     # In the worker, ATTEMPT_MIN is the **floor** on the cap (so attempts are not sliced
     # too thin once the remaining budget is small). Without exposing it, a short-cap
     # smoke test gets silently raised back to 600 s.
     ap.add_argument("--attempt-min", type=int, default=600)
     ap.add_argument("--keep-threshold", type=float, default=1.045)
+    ap.add_argument("--keep-threshold-override", default="", help='comma-separated task=threshold overrides. The noise band belongs to the seam: a collective kernel that barriers across 8 ranks has a far wider null spread than a single-rank one, and one global band is wrong for both.')
     ap.add_argument("--budget", type=int, default=4)
     ap.add_argument("--min-improve", type=float, default=0.05)
     ap.add_argument("--max-tasks", type=int)
@@ -403,7 +503,26 @@ def main():
     for d in ("state", "logs", "runs"):
         os.makedirs(os.path.join(args.work_root, d), exist_ok=True)
 
-    tasks = discover_tasks(args.tasks_dir, args.order_file, args.max_tasks)
+    args.slots, short = make_slots(args.gpus, args.gpus_per_task)
+    args.slot_of = {slot_label(g): g for g in args.slots}
+    if short:
+        log(args.work_root, "%d GPU(s) left over by --gpus-per-task %d and not used: %s"
+            % (sum(len(g) for g in short), args.gpus_per_task,
+               ",".join(str(g) for grp in short for g in grp)))
+    if not args.slots:
+        print("--gpus-per-task %d but only %d GPU(s) given"
+              % (args.gpus_per_task, len(args.gpus)), file=sys.stderr)
+        return 2
+
+    args.keep_overrides = parse_overrides(args.keep_threshold_override)
+    for k, v in sorted(args.keep_overrides.items()):
+        log(args.work_root, "keep threshold for %s is %.4f, not the global %.4f"
+            % (k, v, args.keep_threshold))
+
+    excluded = [t for t in args.exclude.split(",") if t.strip()]
+    tasks = discover_tasks(args.tasks_dir, args.order_file, args.max_tasks, excluded)
+    if excluded:
+        log(args.work_root, "excluded by configuration: %s" % ", ".join(excluded))
     if not tasks:
         print("no task directory containing kernel_src/ was found under %s" % args.tasks_dir,
               file=sys.stderr)
@@ -414,7 +533,7 @@ def main():
     if args.backend == "docker" and not args.image:
         print("--backend docker requires --image", file=sys.stderr)
         return 2
-    if args.backend == "local" and len(args.gpus) > 1:
+    if args.backend == "local" and len(args.slots) > 1:
         log(args.work_root, "note: the local backend can only pin GPUs via env, which the "
                             "agent can override. For multi-GPU parallelism use "
                             "--backend docker (one container per GPU).")
@@ -427,6 +546,7 @@ def main():
         "RUNNER": args.runner,
         "TARGET": str(args.target),
         "ATTEMPT_CAP": str(args.attempt_cap),
+        "MEASURE_TIMEOUT": str(args.measure_timeout),
         "ATTEMPT_MIN": str(min(args.attempt_min, args.attempt_cap)),
         "KEEP_THRESHOLD": str(args.keep_threshold),
         "BUDGET": str(args.budget),
@@ -441,15 +561,15 @@ def main():
     assign, bad = {}, {}
 
     if args.command == "stop":
-        for gpu in args.gpus:
+        for gpus in args.slots:
             for t in tasks:
-                backend.stop(t, gpu)
+                backend.stop(t, gpus)
         log(args.work_root, "all workers stopped")
         return 0
 
-    log(args.work_root, "starting: %d tasks / %d GPUs / %ds per task / backend=%s / "
-        "skill=%s / runner=%s"
-        % (len(tasks), len(args.gpus), args.target, args.backend,
+    log(args.work_root, "starting: %d tasks / %d slot(s) of %d GPU(s) / %ds per task / "
+        "backend=%s / skill=%s / runner=%s"
+        % (len(tasks), len(args.slots), args.gpus_per_task, args.target, args.backend,
            os.path.basename(args.skill_root), os.path.basename(args.runner)))
     log(args.work_root, "task order: %s" % ", ".join(tasks))
 
@@ -460,8 +580,8 @@ def main():
             if not remaining:
                 log(args.work_root, "every task is finished or blocked — scheduling ends")
                 break
-            if all(bad.get(g, 0) >= args.bad_node_limit for g in args.gpus):
-                log(args.work_root, "every GPU is blacklisted; stopping for a human to look")
+            if all(bad.get(slot_label(g), 0) >= args.bad_node_limit for g in args.slots):
+                log(args.work_root, "every slot is blacklisted; stopping for a human to look")
                 return 3
             if args.max_wall_sec and time.time() - t0 > args.max_wall_sec:
                 log(args.work_root, "reached the scheduler wall-clock ceiling; exiting "
@@ -471,8 +591,8 @@ def main():
     except KeyboardInterrupt:
         log(args.work_root, "interrupted; stopping all workers (credit is on disk, a rerun "
             "resumes)")
-        for gpu, kernel in list(assign.items()):
-            backend.stop(kernel, gpu)
+        for label, kernel in list(assign.items()):
+            backend.stop(kernel, args.slot_of[label])
         return 130
 
     cmd_status(args.work_root, args.tasks_dir, args.target)
