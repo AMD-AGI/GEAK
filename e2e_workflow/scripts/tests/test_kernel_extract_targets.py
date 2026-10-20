@@ -21,12 +21,19 @@ def row(name, prefill=0, decode=0, window_pct=None):
     return entry
 
 
+def verified_points(counts):
+    """`counts` per phase -> that many verified, counted sampling points."""
+    return [{"point_id": "%s_%d" % (phase[:2].lower(), i), "phase": phase,
+             "verified": True, "counted": True}
+            for phase, n in counts.items() for i in range(n)]
+
+
 def doc(rows, prefill=0.5, decode=0.5, basis="log_instance_counts_x_measured_point_cost",
-        points=None):
+        points=None, point_records=None):
+    counts = points if points is not None else {"PREFILL": 3, "DECODE": 3}
     return {"ranking": rows, "phase_share": {
         "basis": basis, "PREFILL": prefill, "DECODE": decode,
-        "points_measured": points if points is not None
-        else {"PREFILL": 3, "DECODE": 3}}}
+        "points": point_records if point_records is not None else verified_points(counts)}}
 
 
 def group_doc(rows, groups):
@@ -226,3 +233,118 @@ class ExtractionTargetsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SamplingPointVerificationTest(unittest.TestCase):
+    """A split is only as good as the captures under it."""
+
+    ROWS = [row("d", decode=10)]
+
+    def share(self, point_records):
+        return select_targets(doc(self.ROWS, prefill=0.4, decode=0.6,
+                                  point_records=point_records))
+
+    def pts(self, **over):
+        base = [{"point_id": "pr_1", "phase": "PREFILL", "verified": True, "counted": True},
+                {"point_id": "pr_2", "phase": "PREFILL", "verified": True, "counted": True},
+                {"point_id": "de_1", "phase": "DECODE", "verified": True, "counted": True},
+                {"point_id": "de_2", "phase": "DECODE", "verified": True, "counted": True}]
+        for rec in base:
+            if rec["point_id"] in over:
+                rec.update(over[rec["point_id"]])
+        return base
+
+    def test_all_verified_points_pass(self):
+        self.assertEqual({t["id"] for t in self.share(self.pts())["targets"]}, {"d"})
+
+    def test_an_unverified_point_cannot_be_counted(self):
+        # The retest's four DECODE captures held no decode step span and were counted anyway.
+        with self.assertRaises(ValueError) as cm:
+            self.share(self.pts(de_1={"verified": False}))
+        self.assertIn("could not verify", str(cm.exception))
+
+    def test_excluding_an_unverified_point_is_allowed_if_enough_remain(self):
+        pts = self.pts(de_1={"verified": False, "counted": False,
+                             "why_excluded": "no DECODE step spans in the capture"})
+        pts.append({"point_id": "de_3", "phase": "DECODE", "verified": True, "counted": True})
+        self.assertEqual({t["id"] for t in self.share(pts)["targets"]}, {"d"})
+
+    def test_dropping_below_the_minimum_fails_the_phase(self):
+        with self.assertRaises(ValueError) as cm:
+            self.share(self.pts(de_1={"verified": False, "counted": False},
+                                de_2={"verified": False, "counted": False}))
+        self.assertIn("DECODE", str(cm.exception))
+        self.assertIn("verified", str(cm.exception))
+
+    def test_a_partial_point_needs_relabelling_before_it_counts(self):
+        # 'PREFILL captured, but not at new_tokens=2660' -- real, but about another shape.
+        with self.assertRaises(ValueError) as cm:
+            self.share(self.pts(pr_1={"verified": "partial"}))
+        self.assertIn("relabelled_to_achieved_shape", str(cm.exception))
+        ok = self.share(self.pts(pr_1={"verified": "partial",
+                                       "relabelled_to_achieved_shape": True}))
+        self.assertEqual({t["id"] for t in ok["targets"]}, {"d"})
+
+    def test_points_list_is_required_and_well_formed(self):
+        for bad in [None, [], {}, [{"phase": "DECODE", "verified": True, "counted": True}],
+                    [{"point_id": "x", "phase": "DECODE", "verified": "yes", "counted": True}]]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                select_targets({"ranking": self.ROWS, "phase_share": {
+                    "basis": "log_instance_counts_x_measured_point_cost",
+                    "PREFILL": 0.4, "DECODE": 0.6, "points": bad}})
+
+    def test_points_measured_must_agree_with_what_was_counted(self):
+        d = doc(self.ROWS, prefill=0.4, decode=0.6, point_records=self.pts())
+        d["phase_share"]["points_measured"] = {"PREFILL": 6, "DECODE": 2}
+        with self.assertRaises(ValueError) as cm:
+            select_targets(d)
+        self.assertIn("disagrees", str(cm.exception))
+
+
+class CommunicationOperatorScopeTest(unittest.TestCase):
+    """Collectives are selected for mass accounting but are not given UTs."""
+
+    def build(self, **kw):
+        rows = [{**row("allreduce", decode=20), "entity_kind": "collective"},
+                {**row("allreduce_pf", prefill=30), "entity_kind": "collective"},
+                row("gemm", decode=10)]
+        return select_targets(doc(rows, prefill=0.4, decode=0.6), **kw)
+
+    def test_collectives_are_selected_and_keep_their_mass(self):
+        out = self.build()
+        ids = {t["id"] for t in out["targets"]}
+        self.assertEqual(ids, {"allreduce", "allreduce_pf", "gemm"},
+                         "a collective stays selected; it holds real device time")
+        self.assertAlmostEqual(out["selected_overall_pct"],
+                               sum(t["overall_pct"] for t in out["targets"]), places=9)
+
+    def test_collectives_carry_no_ut_and_are_not_deferrals(self):
+        out = self.build()
+        scopes = {t["id"]: t["ut_scope"] for t in out["targets"]}
+        self.assertEqual(scopes, {"allreduce": "excluded", "allreduce_pf": "excluded",
+                                  "gemm": "ut"})
+        self.assertEqual(out["ut_target_count"], 1)
+        self.assertEqual({e["id"] for e in out["ut_excluded"]},
+                         {"allreduce", "allreduce_pf"})
+        for entry in out["ut_excluded"]:
+            self.assertIn("out of optimization scope", entry["why"])
+        # Nothing is parked as pending work: these are scope exclusions, not deferrals.
+        self.assertEqual(out["dropped_by_cap"], [])
+
+    def test_the_excluded_kinds_are_configurable_and_recorded(self):
+        out = self.build(ut_exclude_kinds=())
+        self.assertEqual(out["ut_target_count"], 3)
+        self.assertEqual(out["ut_excluded"], [])
+        self.assertEqual(out["policy"]["ut_excluded_entity_kinds"], [])
+        self.assertEqual(self.build()["policy"]["ut_excluded_entity_kinds"], ["collective"])
+
+    def test_an_unlabelled_row_defaults_to_a_gpu_kernel_owing_a_ut(self):
+        out = select_targets(doc([row("x", decode=10)], prefill=0.4, decode=0.6))
+        self.assertEqual(out["targets"][0]["entity_kind"], "gpu_kernel")
+        self.assertEqual(out["targets"][0]["ut_scope"], "ut")
+
+    def test_a_malformed_entity_kind_fails(self):
+        for bad in ["", "   ", 7, []]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                select_targets(doc([{**row("x", decode=10), "entity_kind": bad}],
+                                   prefill=0.4, decode=0.6))

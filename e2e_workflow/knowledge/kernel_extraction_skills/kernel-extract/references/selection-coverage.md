@@ -45,8 +45,15 @@ deduplicated identity may still be delivered as a prefill task and a decode task
 Keep collectives and unsupported kernels in the ranking. A selected but
 unextractable kernel needs a blocker; it does not silently disappear. Under a
 threshold-only rule it also no longer consumes a slot that a schedulable kernel could
-have used, which is part of why the rank cut is gone: a deferred TP collective should
-cost the delivery its own mass and nothing more. Additional targets or an explicit
+have used, which is part of why the rank cut is gone: a TP collective should
+cost the delivery its own mass and nothing more.
+
+Collectives are the one class that is selected without owing a UT. Mark them
+`entity_kind: "collective"` and the selector routes them to `ut_excluded`: their mass
+stays in the denominator and in the report, no UT is authored, and they are not
+optimized. Record them as an explicit scope exclusion rather than a deferral — a
+deferral says the work is pending, which for a communication operator out of scope is
+simply untrue, and it leaves a phantom obligation in every later coverage statement. Additional targets or an explicit
 non-collective scope require recording that changed scope before ranking. Never
 renormalize the overall denominator merely because a target cannot be extracted. Joint tasks may
 cover multiple selected kernels with proved boundaries, but joint/leaf

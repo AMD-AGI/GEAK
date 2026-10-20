@@ -67,11 +67,26 @@ whole measured leg, and record it as `phase_share` in `kernel_ranking.json`:
 "phase_share": {
   "basis": "log_instance_counts_x_measured_point_cost",
   "PREFILL": 0.1217, "DECODE": 0.8783,
-  "points_measured": {"PREFILL": 3, "DECODE": 3},
+  "points": [
+    {"point_id": "pr_2660", "phase": "PREFILL", "verified": true, "counted": true},
+    {"point_id": "pr_32768", "phase": "PREFILL", "verified": "partial",
+     "counted": true, "relabelled_to_achieved_shape": true},
+    {"point_id": "de_1", "phase": "DECODE", "verified": false, "counted": false,
+     "why_excluded": "no DECODE step spans in the capture"}
+  ],
   "evidence": {"observed_workload_json": "...", "sampling_points_json": "...",
                "coverage_json": "..."}
 }
 ```
+
+**Only a verified capture may be counted.** `points` carries `serving_probe.py`'s own
+verdict per point, and the selector refuses a counted point whose `verified` is `false`:
+a capture that holds no step span of the intended phase can hold another phase entirely,
+and four such DECODE points once produced a decode mass out of windows that contained no
+decode at all. A `"partial"` point is a real measurement of a *different* shape than
+planned; count it only after relabelling it to the achieved shape and re-deriving the
+instances it represents, and set `relabelled_to_achieved_shape`. Exclude the rest with a
+reason, and recapture if a phase then falls below the minimum.
 
 State the window's own span and step count as a limitation whenever the fit rests on a
 short capture, and never present a window percentage as a whole-workload percentage.
@@ -145,7 +160,19 @@ a different bar than single kernels. Recalled members appear with
 `reason=recalled_by_fusion_group` and owe a task or blocker like any other selected
 identity; the group id travels with them so the chain stays reviewable as one fusion unit.
 
-Every selected identity needs a task or explicit blocker. Execution limits may
+**Communication operators are selected but get no UT.** Mark every collective row with
+`entity_kind: "collective"` in the ranking. It stays selected, keeps its share and stays
+in the denominator — a TP all-reduce holding 27% of device time is a fact the report must
+carry — but no UT is authored for it and it is not optimized. The selector puts it in
+`ut_excluded` with that reason and counts only the rest in `ut_target_count`.
+
+This is a scope decision, not a deferral. `deferred` means pending work and invites a
+retry that is never coming; a collective excluded here needs no 8-rank lane, no budget
+and no follow-up. Say so in the delivery, keep its measured mass visible, and do not
+renormalize the denominator to hide it. `--ut-exclude-kind` changes the set if a run
+genuinely is scoped to optimize communication.
+
+Every other selected identity needs a task or explicit blocker. Execution limits may
 defer tasks but cannot turn a partial batch into completed extraction.
 
 ## 3. Declare complete task boundaries

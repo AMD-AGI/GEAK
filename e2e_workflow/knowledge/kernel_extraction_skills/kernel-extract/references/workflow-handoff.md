@@ -77,6 +77,12 @@ entry with its identities, reason and evidence paths. Retain required companion
 leaves, per-phase coverage and uncovered mass. Keep classification and attributed
 cost in the saved declaration/ranking; packaging never recomputes them.
 
+Selected communication operators belong in an `excluded_tasks` bucket with their
+`entity_kind`, measured share and the scope reason — never in `deferred_tasks`. A
+deferral tells every downstream stage the work is pending; an out-of-scope collective
+has nothing pending, and parking it as deferred leaves a permanent phantom obligation
+in the coverage statement.
+
 `coverage_summary` carries selection coverage — how much workload device time the
 selected identities hold. It is not shape coverage, and one does not substitute for the
 other: each task's `shape_coverage` block states how much of its own served distribution

@@ -121,6 +121,29 @@ probe request controls from observed work and validate the resulting launches:
 | Prefill | Joint uncached-token/context distribution, effective chunk budget, common chunks and tails | Prepare the observed cached prefix; choose total tokenized ISL to produce the target uncached suffix/context; arm before the intended extend; verify actual chunk/query/KV lengths |
 | Decode | Joint active-batch/per-request-context distribution, speculation and graph padding | Prepare target context and cache state; choose request concurrency to reach the observed server batch; choose OSL long enough to pass admission and capture complete steady-state cycles; arm after decode begins and verify executed M/KV |
 
+`serving_probe.py` implements both rows, and two of its details are the difference between
+a measurement of this workload and a measurement of a workload nobody runs:
+
+- **The cached prefix is part of the shape.** A point's `new_tokens` and `cached_tokens`
+  are batch totals from the scheduler's `#new-token` / `#cached-token`, and `running` is
+  how many sequences that batch held. The probe warms a prefix per sequence and then
+  sends prefix + new suffix, so the measured extend reports both numbers. Sending a fresh
+  prompt of `new_tokens` instead runs the same new tokens against a context fifty times
+  shorter on a 97%-prefix-cache replay, and attention, the indexer and the KV gather all
+  scale with that context. Splitting the batch totals across `running` sequences also
+  matters: issuing `running` requests of `new_tokens` each lets the scheduler merge them
+  into one extend of `running x new_tokens`, which is how points labelled 2660 and 4629
+  were measured at 5320 and 13887.
+- **Occupancy is not steady state.** A request with a 234k-token prompt counts as running
+  from admission while the scheduler spends the next ten seconds chunk-ingesting it. The
+  probe therefore arms only once `generation_tokens_total` is advancing by at least one
+  token per resident request and `prompt_tokens_total` has stopped moving. Without that
+  pair it falls back to occupancy plus throughput and records the caveat, because that
+  weaker condition is what produced four DECODE captures with no decode span in them.
+
+Carry each point's verdict into `kernel_ranking.json`'s `phase_share.points`. An
+unverified capture is excluded with its reason, not quietly averaged in.
+
 Record phase, request ISL/OSL, concurrency, cache preparation, server flags,
 capture trigger/length, expected and observed shapes, selection reason, trace
 path and covered mass in `kernel_workload.json`'s sampling plan. ISL is not

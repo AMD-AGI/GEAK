@@ -63,22 +63,60 @@ def _phase_share(document, phases, min_points, allow_window_denominator):
             "from the serving log's instance counts weighted by measured per-point cost. "
             "Pass --allow-window-denominator only to record a declared-approximate scope.")
 
-    measured = share.get("points_measured")
     if not allow_window_denominator:
-        if not isinstance(measured, dict):
-            raise ValueError("phase_share.points_measured must map each phase to its "
-                             "number of measured sampling points")
-        for phase in phases:
-            count = measured.get(phase)
-            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-                raise ValueError(f"phase_share.points_measured.{phase} must be a "
-                                 "nonnegative integer")
-            # A phase with no observed activity contributes no mass and needs no points.
-            if share.get(phase) and count < min_points:
+        # Counting a point that serving_probe.py could not verify is how a split gets
+        # built from captures of the wrong phase: four DECODE points whose traces held
+        # no decode step span at all still produced a decode mass, and the resulting
+        # 49/51 split outranked a workload that is really ~12/88.
+        points = share.get("points")
+        if not isinstance(points, list) or not points:
+            raise ValueError(
+                "phase_share.points must list every sampling point with its "
+                "serving_probe.py verdict and whether it was counted")
+        counted = {p: 0 for p in phases}
+        seen = set()
+        for i, rec in enumerate(points):
+            if not isinstance(rec, dict):
+                raise ValueError(f"phase_share.points[{i}] must be an object")
+            pid = rec.get("point_id")
+            if not isinstance(pid, str) or not pid.strip() or pid in seen:
+                raise ValueError("phase_share.points need unique, nonempty point_id values")
+            seen.add(pid)
+            verified, is_counted = rec.get("verified"), bool(rec.get("counted"))
+            if verified not in (True, False, "partial"):
                 raise ValueError(
-                    f"phase {phase} carries mass but was measured at {count} sampling "
-                    f"point(s); at least {min_points} are required. Its shape variance "
-                    "and cost model are unobserved at one point.")
+                    f"phase_share.points[{pid}].verified must be true, false or "
+                    '"partial" — serving_probe.py\'s own verdict, not a summary')
+            if not is_counted:
+                continue
+            if verified is False:
+                raise ValueError(
+                    f"phase_share.points[{pid}] is counted but serving_probe.py could not "
+                    "verify it. An unverified capture may hold another phase entirely; "
+                    "exclude it and say so, or recapture the point.")
+            if verified == "partial" and not rec.get("relabelled_to_achieved_shape"):
+                raise ValueError(
+                    f"phase_share.points[{pid}] verified only partially — the capture is "
+                    "real but stands for a different shape than planned. Count it only "
+                    "after relabelling it to the achieved shape and re-deriving the "
+                    "instances it represents, then set relabelled_to_achieved_shape.")
+            phase = rec.get("phase")
+            if phase in counted:
+                counted[phase] += 1
+        for phase in phases:
+            # A phase with no observed activity contributes no mass and needs no points.
+            if share.get(phase) and counted[phase] < min_points:
+                raise ValueError(
+                    f"phase {phase} carries mass but only {counted[phase]} verified "
+                    f"sampling point(s) were counted; at least {min_points} are required. "
+                    "Its shape variance and cost model are unobserved at one point.")
+        measured = share.get("points_measured")
+        if isinstance(measured, dict):
+            for phase in phases:
+                if measured.get(phase) is not None and measured[phase] != counted[phase]:
+                    raise ValueError(
+                        f"phase_share.points_measured.{phase}={measured[phase]} disagrees "
+                        f"with {counted[phase]} counted point(s) in phase_share.points")
 
     fractions, total = {}, 0.0
     for phase in phases:
@@ -158,7 +196,7 @@ def _fusion_groups(document, by_id, group_pct_gt):
 
 def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
                    min_points=MIN_POINTS_PER_PHASE, allow_window_denominator=False,
-                   top_k=None, group_pct_gt=None):
+                   top_k=None, group_pct_gt=None, ut_exclude_kinds=("collective",)):
     _percent(overall_pct_gt, "overall_pct_gt")
     if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int)
                               or top_k < 1):
@@ -169,6 +207,7 @@ def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
     if not isinstance(ranking, list) or not ranking:
         raise ValueError("ranking must be a nonempty list; missing evidence is not an empty target set")
 
+    ut_exclude = {str(k).strip().lower() for k in (ut_exclude_kinds or ())}
     weights, share_doc = _phase_share(document, phases, min_points,
                                       allow_window_denominator)
 
@@ -190,8 +229,12 @@ def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
         reported = row.get("selection_pct_gpu_time")
         if reported is not None:
             _percent(reported, f"{identity}.selection_pct_gpu_time")
+        kind = row.get("entity_kind")
+        if kind is not None and (not isinstance(kind, str) or not kind.strip()):
+            raise ValueError(f"{identity}.entity_kind must be a nonempty string when given")
         rows.append({"id": identity, "name": row.get("name", identity),
                      "overall_pct": overall, "phase_shares": shares,
+                     "entity_kind": (kind or "gpu_kernel").strip().lower(),
                      "window_pct_reported": reported})
 
     per_phase = {}
@@ -237,15 +280,33 @@ def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
                        "reason": "above_threshold_but_outside_top_k"}
                       for r in qualified[top_k:]] if top_k is not None else []
 
-    targets = [{"id": r["id"], "name": r["name"], "overall_pct": r["overall_pct"],
-                "selected_phases": [p for p in phases if r["phase_shares"].get(p, 0) > 0],
-                "phase_ranks": r.get("phase_ranks", {}),
-                "phase_pct": {p: r["phase_shares"][p] for p in phases
-                              if r["phase_shares"].get(p, 0) > 0},
-                "window_pct_reported": r["window_pct_reported"],
-                "fusion_groups": r.get("fusion_groups", []),
-                "reason": "overall_share_above_threshold" if r["id"] in individually
-                else "recalled_by_fusion_group"} for r in capped]
+    # A communication operator holds real device time, so it stays selected and stays in
+    # the denominator -- but it is not optimized here, so no UT is authored for it. That
+    # is a scope decision, not a deferral: `deferred` means pending work and invites a
+    # retry that is never coming.
+    def _ut_scope(r):
+        if r["entity_kind"] in ut_exclude:
+            return ("excluded",
+                    "%s is a communication operator: selected for mass accounting, "
+                    "out of optimization scope, no UT authored" % r["entity_kind"])
+        return ("ut", "")
+
+    targets = []
+    for r in capped:
+        scope, why = _ut_scope(r)
+        targets.append({
+            "id": r["id"], "name": r["name"], "overall_pct": r["overall_pct"],
+            "entity_kind": r["entity_kind"],
+            "selected_phases": [p for p in phases if r["phase_shares"].get(p, 0) > 0],
+            "phase_ranks": r.get("phase_ranks", {}),
+            "phase_pct": {p: r["phase_shares"][p] for p in phases
+                          if r["phase_shares"].get(p, 0) > 0},
+            "window_pct_reported": r["window_pct_reported"],
+            "fusion_groups": r.get("fusion_groups", []),
+            "ut_scope": scope,
+            **({"ut_excluded_because": why} if why else {}),
+            "reason": "overall_share_above_threshold" if r["id"] in individually
+            else "recalled_by_fusion_group"})
 
     # capped holds distinct rows, so this is already deduplicated across groups.
     selected_mass = sum(r["overall_pct"] for r in capped)
@@ -256,6 +317,7 @@ def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
                    "rank_is_inventory_only": True, "top_k_cap": top_k,
                    "min_points_per_phase": min_points,
                    "fusion_group_pct_gt": group_threshold,
+                   "ut_excluded_entity_kinds": sorted(ut_exclude),
                    "window_denominator_allowed": bool(allow_window_denominator)},
         "phase_share": {"weights": weights, "declared": share_doc},
         "denominators": document.get("denominators", {}),
@@ -265,6 +327,12 @@ def select_targets(document, phases=("PREFILL", "DECODE"), overall_pct_gt=3,
         "target_count": len(targets),
         "recalled_count": sum(1 for t in targets
                               if t["reason"] == "recalled_by_fusion_group"),
+        "ut_target_count": sum(1 for t in targets if t["ut_scope"] == "ut"),
+        "ut_excluded": [{"id": t["id"], "name": t["name"],
+                         "entity_kind": t["entity_kind"],
+                         "overall_pct": t["overall_pct"],
+                         "why": t["ut_excluded_because"]}
+                        for t in targets if t["ut_scope"] == "excluded"],
         "selected_overall_pct": selected_mass,
         "dropped_by_cap": dropped_by_cap,
     }
@@ -283,6 +351,10 @@ def main():
     parser.add_argument("--top-k", type=int, default=None,
                         help="optional cap on how many above-threshold targets are "
                              "returned; the remainder stays in dropped_by_cap")
+    parser.add_argument("--ut-exclude-kind", action="append", default=None,
+                        metavar="ENTITY_KIND",
+                        help="entity_kind selected for mass accounting but not given "
+                             "a UT (repeatable; defaults to 'collective')")
     parser.add_argument("--fusion-group-pct-gt", type=float, default=None,
                         help="threshold a declared fusion group's combined share must "
                              "exceed to recall its members (defaults to --overall-pct-gt)")
@@ -293,7 +365,9 @@ def main():
         result = select_targets(json.loads(args.ranking.read_text()), args.phases,
                                 args.overall_pct_gt, args.min_points_per_phase,
                                 args.allow_window_denominator, args.top_k,
-                                args.fusion_group_pct_gt)
+                                args.fusion_group_pct_gt,
+                                tuple(args.ut_exclude_kind)
+                                if args.ut_exclude_kind else ("collective",))
     except (ValueError, TypeError, AttributeError) as error:
         parser.error(str(error))
     result["source_ranking_json"] = str(args.ranking.resolve())

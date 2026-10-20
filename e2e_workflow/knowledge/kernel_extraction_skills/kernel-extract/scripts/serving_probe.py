@@ -62,8 +62,16 @@ def post(base, path, obj=None, timeout=1800):
         return fh.read().decode()
 
 
+METRIC_KEYS = ("num_running_reqs", "gen_throughput",
+               # Cumulative counters. `generation_tokens_total` advances ONLY during
+               # decode and `prompt_tokens_total` ONLY during prefill, so the pair says
+               # which phase the server is actually in -- which occupancy alone does not:
+               # a long prompt still being chunk-ingested reports its request as running.
+               "generation_tokens_total", "prompt_tokens_total")
+
+
 def scrape_metrics(base, timeout=30):
-    """(num_running_reqs, gen_throughput) from the server's own counters.
+    """The server's own counters as a dict, plus an error string.
 
     The scheduler, not the client, decides what is resident. This is the authoritative
     occupancy signal; a request count sent from outside is not.
@@ -72,17 +80,17 @@ def scrape_metrics(base, timeout=30):
         with urllib.request.urlopen(base + "/metrics", timeout=timeout) as fh:
             text = fh.read().decode()
     except Exception as exc:
-        return None, None, str(exc)
+        return {}, str(exc)
     out = {}
     for line in text.splitlines():
-        for key in ("sglang:num_running_reqs", "sglang:gen_throughput",
-                    "num_running_reqs", "gen_throughput"):
-            if line.startswith(key + "{") or line.startswith(key + " "):
-                try:
-                    out[key.split(":")[-1]] = float(line.rsplit(" ", 1)[1])
-                except ValueError:
-                    pass
-    return out.get("num_running_reqs"), out.get("gen_throughput"), None
+        for key in METRIC_KEYS:
+            for name in ("sglang:" + key, key):
+                if line.startswith(name + "{") or line.startswith(name + " "):
+                    try:
+                        out[key] = float(line.rsplit(" ", 1)[1])
+                    except ValueError:
+                        pass
+    return out, None
 
 
 def rand_ids(n, seed):
@@ -106,28 +114,59 @@ def generate(base, ids, max_new_tokens, journal, label, timeout=1800):
 
 
 def wait_for_occupancy(base, want_bs, journal, timeout, poll=2.0, tolerance=0):
-    """Block until the scheduler reports the intended batch, actively generating.
+    """Block until the scheduler reports the intended batch AND is past prefill.
+
+    Occupancy alone is not steady state. A request with a 234k-token prompt is counted
+    as running from the moment it is admitted, while the scheduler spends the next ten
+    seconds chunk-ingesting it -- so `num_running_reqs == want and gen_throughput > 0`
+    went true 2.1 s in, the window was armed on prefill chunks, and the capture carried
+    no decode step spans at all. Arm only once `generation_tokens_total` is advancing by
+    at least one token per resident request AND `prompt_tokens_total` has stopped moving.
 
     Returns (ok, observed_bs, observed_tps). Never arms on a guess.
     """
     t0 = time.time()
-    last = (None, None)
+    prev, last = None, {}
     while time.time() - t0 < timeout:
-        bs, tps, err = scrape_metrics(base)
-        last = (bs, tps)
-        if err is None and bs is not None:
-            if abs(bs - want_bs) <= tolerance and (tps or 0) > 0:
-                journal.append({"event": "steady_state_confirmed", "want_bs": want_bs,
-                                "observed_bs": bs, "gen_throughput": tps,
-                                "waited_s": round(time.time() - t0, 1)})
-                return True, bs, tps
+        cur, err = scrape_metrics(base)
+        last = cur
+        bs, tps = cur.get("num_running_reqs"), cur.get("gen_throughput")
+        if err is None and bs is not None and abs(bs - want_bs) <= tolerance:
+            gen, pro = cur.get("generation_tokens_total"), cur.get("prompt_tokens_total")
+            if gen is None or pro is None:
+                # Older/leaner metric sets: fall back to the weaker signal, and say so,
+                # because this is exactly the condition that produced an empty capture.
+                if (tps or 0) > 0:
+                    journal.append({
+                        "event": "steady_state_confirmed", "want_bs": want_bs,
+                        "observed_bs": bs, "gen_throughput": tps,
+                        "waited_s": round(time.time() - t0, 1),
+                        "basis": "occupancy+throughput only",
+                        "caveat": "generation_tokens_total/prompt_tokens_total absent, so "
+                                  "'past prefill' could not be confirmed; verify_trace is "
+                                  "the only remaining guard against a prefill window"})
+                    return True, bs, tps
+            elif prev is not None:
+                decoding = gen - prev.get("generation_tokens_total", gen) >= max(1, want_bs)
+                ingesting = pro - prev.get("prompt_tokens_total", pro) > 0
+                if decoding and not ingesting:
+                    journal.append({
+                        "event": "steady_state_confirmed", "want_bs": want_bs,
+                        "observed_bs": bs, "gen_throughput": tps,
+                        "waited_s": round(time.time() - t0, 1),
+                        "basis": "occupancy + generation advancing + prefill quiet",
+                        "generated_tokens_delta": gen - prev["generation_tokens_total"],
+                        "prompt_tokens_delta": pro - prev["prompt_tokens_total"]})
+                    return True, bs, tps
+            prev = cur
         time.sleep(poll)
     journal.append({"event": "steady_state_NOT_confirmed", "want_bs": want_bs,
-                    "observed_bs": last[0], "gen_throughput": last[1],
+                    "observed_bs": last.get("num_running_reqs"),
+                    "gen_throughput": last.get("gen_throughput"),
                     "waited_s": round(time.time() - t0, 1),
                     "consequence": "window NOT armed; arming here would capture the ramp "
                                    "or an unrelated batch and label it as this point"})
-    return False, last[0], last[1]
+    return False, last.get("num_running_reqs"), last.get("gen_throughput")
 
 
 def start_profile(base, out_dir, num_steps, journal, timeout):
@@ -230,15 +269,66 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
 
 
 # --------------------------------------------------------------------------- #
+def warm_prefix(base, prefixes, args, journal):
+    """Put each sequence's cached prefix in the radix cache BEFORE the measured extend.
+
+    Without this the probe sends a fresh prompt and the server reports
+    `#new-token: N, #cached-token: 0`, while the point it claims to stand for was
+    measured at `#new-token: N, #cached-token: 127040`. The served workload hits prefix
+    cache 97% of the time, so the uncached version runs the same new tokens against a
+    context roughly fifty times shorter -- and attention, the indexer and the KV gather
+    all scale with that context, not with N. The measurement is then real and about a
+    workload nobody runs.
+    """
+    if not any(prefixes):
+        return
+    with ThreadPoolExecutor(max_workers=max(1, len(prefixes))) as ex:
+        for i, ids in enumerate(prefixes):
+            if ids:
+                ex.submit(generate, base, list(ids), 1, journal,
+                          "prefix_warm%d" % i, args.request_timeout)
+    journal.append({"event": "prefix_warmed",
+                    "sequences": [len(p) for p in prefixes],
+                    "note": "the measured extend below should report these as cached"})
+
+
 def drive_prefill(base, point, args, journal):
-    """One request per intended sequence, each long enough to produce the token count."""
-    toks = int(point["new_tokens"])
-    nseq = int(point.get("running") or 1)
+    """Reproduce ONE observed prefill batch: its new tokens, its cached prefix, its width.
+
+    `new_tokens` and `cached_tokens` are BATCH totals read from the scheduler log's
+    `#new-token` / `#cached-token`, and `running` is how many sequences that batch held.
+    Sending `running` requests of `new_tokens` each made the scheduler merge them into a
+    single extend of `running x new_tokens`, so every multi-sequence point measured two
+    or three times the token count it was labelled with. Split the batch totals across
+    the sequences instead.
+    """
+    total_new = max(1, int(point["new_tokens"]))
+    total_cached = max(0, int(point.get("cached_tokens") or 0))
+    nseq = max(1, int(point.get("running") or 1))
+
+    per_new = [total_new // nseq] * nseq
+    per_cached = [total_cached // nseq] * nseq
+    for i in range(total_new - sum(per_new)):
+        per_new[i] += 1                      # keep the batch total exact
+    for i in range(total_cached - sum(per_cached)):
+        per_cached[i] += 1
+
+    # Distinct prefixes per sequence: they are separate requests in the served batch and
+    # a shared prefix would collapse their cached mass onto one radix path.
+    prefixes = [rand_ids(n, args.seed + 500 + i) if n else []
+                for i, n in enumerate(per_cached)]
+    warm_prefix(base, prefixes, args, journal)
+
+    journal.append({"event": "prefill_plan", "batch_new_tokens": total_new,
+                    "batch_cached_tokens": total_cached, "sequences": nseq,
+                    "per_sequence_new": per_new, "per_sequence_cached": per_cached})
+
     # max_new_tokens=1 keeps the request in prefill: we are measuring the context
     # forward, and a long generation would mix decode into the window.
     with ThreadPoolExecutor(max_workers=nseq) as ex:
         for i in range(nseq):
-            ex.submit(generate, base, rand_ids(toks, args.seed + i), 1, journal,
+            ids = prefixes[i] + rand_ids(per_new[i], args.seed + i)
+            ex.submit(generate, base, ids, 1, journal,
                       "prefill_seq%d" % i, args.request_timeout)
 
 
@@ -314,7 +404,8 @@ def main():
             deadline = time.time() + args.window_timeout
             while time.time() < deadline:
                 time.sleep(5)
-                bs, tps, _ = scrape_metrics(args.base_url)
+                metrics, _ = scrape_metrics(args.base_url)
+                bs = metrics.get("num_running_reqs")
                 if bs == 0:
                     journal.append({"event": "batch_drained", "note": "requests finished "
                                     "before the window closed; shorten --decode-tokens "
