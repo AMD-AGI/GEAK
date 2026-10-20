@@ -23,8 +23,10 @@ SETSID = shutil.which("setsid")
 
 
 def _group_members(pgid: int) -> list[int]:
-    out = subprocess.run(["ps", "-eo", "pid=,pgid="], capture_output=True, text=True).stdout
-    return [int(p) for p, g in (line.split() for line in out.splitlines()) if int(g) == pgid]
+    """Live members only: a zombie holds nothing and stays listed where PID 1 never reaps."""
+    out = subprocess.run(["ps", "-eo", "pid=,pgid=,stat="], capture_output=True, text=True).stdout
+    return [int(p) for p, g, st in (line.split() for line in out.splitlines())
+            if int(g) == pgid and not st.startswith("Z")]
 
 
 @unittest.skipIf(BASH is None or SETSID is None, "bash and setsid are required")
@@ -56,11 +58,12 @@ class MagpieInnerGroupReapTest(unittest.TestCase):
         except OSError:
             pass
 
-    def _teardown(self, inner: str) -> subprocess.CompletedProcess:
+    def _teardown(self, inner: str, ticks: str = "") -> subprocess.CompletedProcess:
         driver = (
             f'source "{LIB}"\n'
             f"server_record_identity {self.supervisor.pid}\n"
-            f"export MAGPIE_INNER_SERVER_PID={inner}\n"
+            f"MAGPIE_INNER_SERVER_PID={inner}\n"
+            f"MAGPIE_INNER_SERVER_START_TICKS={ticks}\n"
             "server_teardown\n"
         )
         return subprocess.run([BASH, "-c", driver], env={**os.environ, "SERVER_STOP_GRACE_S": "2"},
@@ -87,6 +90,25 @@ class MagpieInnerGroupReapTest(unittest.TestCase):
         time.sleep(0.2)
         proc = self._teardown(str(self.atom.pid))
         self.assertNotIn("Reaping Magpie inner server group", proc.stdout)
+
+    def test_a_zombie_only_group_is_not_signalled_or_waited_on(self):
+        """An exited leader its parent has not reaped yet: listed, holds nothing."""
+        zombie = subprocess.Popen(["true"], start_new_session=True)
+        self.addCleanup(zombie.wait)
+        deadline = time.time() + 5
+        while _group_members(zombie.pid) and time.time() < deadline:
+            time.sleep(0.05)
+        started = time.time()
+        proc = self._teardown(str(zombie.pid))
+        self.assertNotIn("Reaping Magpie inner server group", proc.stdout)
+        self.assertLess(time.time() - started, 10)
+
+    def test_a_reused_inner_pid_is_refused(self):
+        """A live group whose leader's start time no longer matches is not ours to signal."""
+        proc = self._teardown(str(self.atom.pid), ticks="1")
+        self.assertIn("REUSED", proc.stderr)
+        self.assertNotIn("Reaping Magpie inner server group", proc.stdout)
+        self.assertEqual(len(_group_members(self.atom.pid)), 2)
 
 
 if __name__ == "__main__":
