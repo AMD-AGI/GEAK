@@ -356,6 +356,51 @@ def test_an_unmet_precondition_is_not_retried(tmp_path):
     assert not (out / "agent_prompt.2.txt").exists(), "78 must not be retried"
 
 
+def test_blocked_gets_one_repair_session(tmp_path):
+    """Every other level of this pipeline repairs itself -- a wedged attempt is killed and
+    resumed, a lost node keeps its credit, a session out of window is continued. The stage
+    boundary was the exception: `blocked` stopped the campaign with hours of budget left,
+    even when the missing precondition was something the agent could produce itself."""
+    script = tmp_path / "work.sh"
+    script.write_text('if [ "$(ls "$OUT"/agent_prompt.*.txt | wc -l)" -le 1 ]; then\n'
+                      '  python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status blocked '
+                      '--notes "the reference harness is missing: run_tp8.sh"\n'
+                      'else\n'
+                      '  echo "{}" > "$OUT/kernel_ranking.json"\n'
+                      '  python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok '
+                      '--artifact ranking=kernel_ranking.json\n'
+                      'fi\n')
+    cfg = _stub_cfg(tmp_path, agent_budget_sec=900, agent_attempts=3)
+    r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
+             "run", "profile"], env_extra={"STUB_SCRIPT": str(script)})
+    out = tmp_path / "run" / "profile" / "out"
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.load(open(out / "result.json"))["status"] == "ok"
+    # the diagnosis is kept rather than overwritten, and the repair session was told it
+    assert json.load(open(out / "result.1.json"))["status"] == "blocked"
+    second = (out / "agent_prompt.2.txt").read_text()
+    assert "run_tp8.sh" in second
+    assert "report `blocked` again" in second
+
+
+def test_a_second_blocked_is_the_stage_s_answer(tmp_path):
+    """One repair session, not a loop. A precondition this machine cannot meet is a real
+    outcome, and a repair session that produces nothing must not erase the diagnosis it
+    was handed."""
+    script = tmp_path / "work.sh"
+    script.write_text('python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status blocked '
+                      '--notes "no GPU is visible in this container"\n')
+    cfg = _stub_cfg(tmp_path, agent_budget_sec=900, agent_attempts=4)
+    r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
+             "run", "profile"], env_extra={"STUB_SCRIPT": str(script)})
+    out = tmp_path / "run" / "profile" / "out"
+    assert r.returncode != 0
+    doc = json.load(open(out / "result.json"))
+    assert doc["status"] == "blocked"
+    assert "no GPU is visible" in doc["notes"]
+    assert not (out / "agent_prompt.3.txt").exists(), "one repair session, not a loop"
+
+
 def test_all_skips_what_is_already_done(tmp_path):
     """Resume is the default, not a mode: re-issuing the same command after any
     interruption continues instead of re-running finished stages."""

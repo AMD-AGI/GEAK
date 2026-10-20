@@ -83,7 +83,13 @@ external interface.
   - `ok` — the stage completed, artifacts are present, downstream may proceed.
   - `blocked` — an external precondition is missing (no GPUs, no `aiperf`, receipt not
     found). This is **not** a failure, but downstream must not continue. `notes` must
-    state what is missing and how to resume once it is supplied.
+    state what is missing and how to resume once it is supplied. A `blocked` from an
+    agent-mode stage costs **one repair session** before the order stops: the agent is
+    handed its own note back and asked either to satisfy the precondition — if it is a
+    file it can build, a path it can find, a step it skipped — or to report `blocked`
+    again naming exactly what is absent. The first note is preserved as
+    `$OUT/result.<n>.json` and restored if the repair session leaves nothing valid, so a
+    repair can never erase the diagnosis. A second `blocked` is the stage's answer.
   - `fail` — the work was attempted and did not succeed.
 - Values in `artifacts` are paths **relative to `$OUT`**, never absolute. The driver
   checks that each one exists.

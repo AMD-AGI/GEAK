@@ -31,6 +31,7 @@ Two properties worth stating, because both are failure modes that have cost real
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -89,7 +90,7 @@ def inventory(out_dir, limit=60):
     return rows, False
 
 
-def build_prompt(env, lay, params, attempt, why=None):
+def build_prompt(env, lay, params, attempt, why=None, repair=None):
     out = env["OUT"]
     lines = [CONTRACT, "", "ENVIRONMENT (already exported in your shell; use these paths "
                          "verbatim rather than retyping them):", ""]
@@ -108,13 +109,32 @@ def build_prompt(env, lay, params, attempt, why=None):
 
     if attempt > 1:
         rows, truncated = inventory(out)
-        lines += ["THIS IS A CONTINUATION (attempt %d). The previous session ended "
-                  "without a valid %s/result.json%s." % (attempt, out,
-                                                         (": " + why) if why else ""),
-                  "",
-                  "Do not start over. These artifacts are already on disk and were "
-                  "expensive to produce; read them, work out which step of SKILL.md they "
-                  "correspond to, and carry on from there:", ""]
+        if repair:
+            lines += ["THIS STAGE REPORTED `%s` (attempt %d) AND THERE IS BUDGET LEFT, so "
+                      "you get one more session. What it said was missing:"
+                      % (repair.get("status"), attempt - 1), "",
+                      "    " + (str(repair.get("notes") or "").strip()
+                                or "(nothing -- the note was empty, which is itself the "
+                                   "defect described below)"), "",
+                      "Do one of two things and nothing else:", "",
+                      "  * If that precondition is something you can satisfy here -- a "
+                      "file to build, a path to locate, a container to start, a step of "
+                      "SKILL.md that was skipped -- satisfy it and finish the stage.",
+                      "  * If it genuinely cannot be satisfied on this machine, report "
+                      "`blocked` again and make the note name exactly what is absent and "
+                      "the command that shows it absent. A vague or empty note is the one "
+                      "unacceptable outcome: nobody, human or agent, can act on "
+                      "\"  is missing\".", "",
+                      "Do not reinterpret the stage to get around the blocker, and do not "
+                      "start over -- what is already in $OUT was expensive:", ""]
+        else:
+            lines += ["THIS IS A CONTINUATION (attempt %d). The previous session ended "
+                      "without a valid %s/result.json%s." % (attempt, out,
+                                                             (": " + why) if why else ""),
+                      "",
+                      "Do not start over. These artifacts are already on disk and were "
+                      "expensive to produce; read them, work out which step of SKILL.md "
+                      "they correspond to, and carry on from there:", ""]
         for rel, size in rows:
             lines.append("  %10d  %s" % (size, rel))
         if truncated:
@@ -159,8 +179,11 @@ def dispatch(cfg, lay, env, log_cb=print):
     if not os.path.exists(runner):
         return 78, "runner %s does not exist" % runner
 
+    repairs = int(params.get("agent_repair_attempts")
+                  or cfg.get("agent_repair_attempts") or 1)
+    result_path = os.path.join(out, "result.json")
     deadline = time.time() + budget
-    why = None
+    why, repair, recorded = None, None, None
     for attempt in range(1, attempts + 1):
         left = int(deadline - time.time())
         if left <= 60:
@@ -169,7 +192,7 @@ def dispatch(cfg, lay, env, log_cb=print):
 
         prompt_path = os.path.join(out, "agent_prompt.%d.txt" % attempt)
         with open(prompt_path, "w") as f:
-            f.write(build_prompt(env, lay, params, attempt, why))
+            f.write(build_prompt(env, lay, params, attempt, why, repair))
         log = os.path.join(out, "agent.%d.log" % attempt)
 
         log_cb("[agent] attempt %d/%d  budget %ds left  prompt %s"
@@ -190,11 +213,31 @@ def dispatch(cfg, lay, env, log_cb=print):
 
         res, errs = stage_mod.validate_result(lay)
         if not errs:
-            return 0, None
+            status = (res or {}).get("status")
+            if (status == "ok" or repairs <= 0 or attempt == attempts
+                    or int(deadline - time.time()) <= 300):
+                return 0, None
+            # A precondition the agent could satisfy itself is not a reason to stop the
+            # campaign and wait for a person. Keep the diagnosis, then spend one session
+            # on it; a second `blocked` is the stage's answer and the order stops there.
+            recorded = os.path.join(out, "result.%d.json" % attempt)
+            shutil.copy(result_path, recorded)
+            repairs -= 1
+            repair, why = res, "the stage reported %s" % status
+            log_cb("[agent] %s reported %s; one repair session, record kept at %s"
+                   % (env.get("STAGE", "stage"), status, os.path.basename(recorded)))
+            continue
+        repair = None
         why = "; ".join(errs)
+        if recorded and not os.path.exists(result_path):
+            # A repair session that produced nothing must not erase what it was given.
+            shutil.copy(recorded, result_path)
         log_cb("[agent] result.json not yet valid: %s" % why)
         # An agent that exhausted its own window mid-work is the normal case for the long
         # stages; the next attempt resumes from the artifacts it left behind.
 
+    if recorded:
+        shutil.copy(recorded, result_path)
+        return 0, None
     return 1, ("%d agent attempts ended without a valid result.json; last problem: %s"
                % (attempts, why))
