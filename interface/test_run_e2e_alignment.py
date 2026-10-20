@@ -914,3 +914,80 @@ def test_a_rotated_reference_still_catches_a_dropped_recipe(tmp_path: Path) -> N
     identity = rx._server_identity_alignment(_atom_handoff(live), eval_dir)
 
     assert identity["geak_launched"][0]["status"] == "mismatched"
+
+
+def test_a_matching_opaque_setup_digest_still_checks_geak_launches(tmp_path: Path) -> None:
+    """Setup matched by digest says nothing about what GEAK launched later."""
+    eval_dir = tmp_path / "e2e"
+    (eval_dir / "baseline").mkdir(parents=True)
+    (eval_dir / "baseline" / "magpie_launch.log").write_text(
+        "launch_identity=sha256:" + "0" * 64 + "\n", encoding="utf-8"
+    )
+    _atom_log(eval_dir / "validation" / "base" / "server.log", seqs=512, block=16, mtp=False)
+    handoff = _atom_handoff(_atom_log(tmp_path / "hl" / "server.log"))
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert identity["expected"] == "sha256:" + "0" * 64
+    assert identity["status"] == "mismatched"
+    assert identity["geak_launched_reference"] == "orchestrator_server_log"
+    assert [leg["status"] for leg in identity["geak_launched"]] == ["mismatched"]
+
+
+def test_an_unverified_geak_launch_makes_the_aggregate_unverified(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    (eval_dir / "validation" / "base").mkdir(parents=True)
+    (eval_dir / "validation" / "base" / "server.log").write_text("[atom] booting\n", encoding="utf-8")
+    handoff = _atom_handoff(_atom_log(tmp_path / "hl" / "server.log"))
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert [leg["status"] for leg in identity["geak_launched"]] == ["unverified"]
+    assert identity["status"] == "unverified"
+
+
+def test_an_unknown_speculative_form_is_unparsed_not_absent() -> None:
+    facts = rx._parse_atom_engine_kwargs(
+        "Engine kwargs: {'max_num_seqs': 8, "
+        "'speculative_config': SpeculativeConfig(method=SpecMethod.MTP, num_spec_tokens=5)}"
+    )
+    assert "speculative_method" not in facts
+    assert facts["unparsed"] == ["speculative_config"]
+    assert rx._identity_value_equal({"server_args": facts}, {"server_args": facts}) is None
+
+
+def test_a_malformed_capture_sizes_value_is_unparsed_not_raised() -> None:
+    facts = rx._parse_atom_engine_kwargs(
+        "Engine kwargs: {'compilation_config': CompilationConfig(level=3, cudagraph_capture_sizes=[bad])}"
+    )
+    assert facts["unparsed"] == ["cudagraph_capture_sizes"]
+    assert facts["compilation_level"] == 3
+
+
+def test_rotation_skips_an_incomplete_newest_attempt_and_records_it(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    live = _atom_log(tmp_path / "hl" / "server.log")
+    complete = _rotate_like_hyperloom(live, attempt=9)
+    live.write_text("[atom] relaunch died before engine start\n", encoding="utf-8")
+    _rotate_like_hyperloom(live, attempt=10)
+
+    identity = rx._server_identity_alignment(_atom_handoff(live), eval_dir)
+
+    assert identity["status"] == "matched"
+    assert str(complete) in identity["evidence_paths"]
+
+
+def test_rotated_attempts_that_disagree_are_not_trusted(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    live = _atom_log(tmp_path / "hl" / "server.log")
+    _rotate_like_hyperloom(live, attempt=0)
+    _atom_log(live, seqs=16)
+    _rotate_like_hyperloom(live, attempt=1)
+
+    identity = rx._server_identity_alignment(_atom_handoff(live), eval_dir)
+
+    assert identity["status"] == "unverified"
+    assert "disagree" in identity["orchestrator_reference_problem"]

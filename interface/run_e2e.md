@@ -308,10 +308,19 @@ the baseline prior is stale) the workflow profiles/strategizes exactly as before
     "metric_status": "aligned | warning | warning_recipe_unaligned | unavailable",
     "primary_metric": "setup_seed_same_config_divergence_pct",
     "server_identity": {
-      "expected": { /* upstream handoff observation */ },
-      "observed": { /* GEAK Setup ServerArgs or Magpie identity */ },
-      "status": "matched | mismatched | unverified | unavailable",
-      "evidence_paths": [".../baseline/server.log", ".../baseline/magpie_launch.log"]
+      "expected": { /* upstream handoff observation, or orchestrator_server_log facts */ },
+      "expected_source": "<handoff key> | orchestrator_server_log",
+      "observed": { /* GEAK Setup: SGLang ServerArgs, ATOM Engine kwargs, or Magpie identity */ },
+      "status": "matched | mismatched | unverified | unavailable",  // worst of Setup and every geak_launched leg
+      "mismatches": [{"key": "...", "expected": "...", "observed": "..."}],  // Setup only, when it mismatched
+      "geak_launched": [                // servers GEAK launched itself, judged against the orchestrator log
+        {"leg": "profile | validation_base | validation_final", "path": "...",
+         "status": "matched | mismatched | unverified", "mismatches": [ /* as above */ ]}
+      ],
+      "geak_launched_reference": "orchestrator_server_log | <handoff key>",
+      "orchestrator_reference_problem": "<why no orchestrator log could be trusted>",  // only when set
+      "evidence_paths": [".../baseline/server.log", ".../baseline/magpie_launch.log",
+                         "<orchestrator server log actually read>", ".../profile/round_0/server.log"]
     }
   },
   "measurement_drift": {                // Setup vs Validate/base, never cross-handoff alignment
@@ -500,9 +509,20 @@ accepted configuration in both harnesses. It is the numeric compatibility
 metric for the cross-handoff comparison; `handoff_alignment` is the
 authoritative verdict and is `unverified` until actual Setup launch evidence
 matches an upstream observed identity. GEAK reads that evidence from
-`baseline/server.log` (parsed SGLang `ServerArgs`) or
-`baseline/magpie_launch.log` (an emitted launch identity) and records every
-existing evidence path in `server_identity.evidence_paths`.
+`baseline/server.log` (parsed SGLang `ServerArgs` or ATOM `Engine kwargs`) or
+`baseline/magpie_launch.log` (an emitted launch identity). When the handoff names
+the orchestrator's own baseline server log
+(`baseline_env_spec.measurement_evidence.actual_server_log_path`), GEAK parses it
+too, falling back to the newest `attempts/<NNN>/server.log.gz` that holds a complete
+launch record when Hyperloom has rotated the live file; attempts that disagree make
+it untrusted (`orchestrator_reference_problem`). Those facts judge Setup when the
+upstream identity is an opaque digest, and always judge the servers GEAK launched
+itself (`geak_launched`: profile round 0, validation base and final), because a
+matching Setup says nothing about a later launch. `server_identity.status` is the
+worst of all checks (mismatched > unverified > matched); a launch field logged in a
+form the parser does not know is recorded under `unparsed` and makes that check
+unverified. Every evidence path actually read is recorded in
+`server_identity.evidence_paths`.
 `measurement_divergence_pct` remains an exact compatibility alias for existing
 callers. If the handoff omits `orchestrator_best_tput_same_config`, both
 same-config fields are `null` and `handoff_alignment.status` is `unavailable`;
