@@ -115,10 +115,30 @@ def main():
                 "meta.json has no candidate_bind — the extraction skill did not record how "
                 "to bind this back, and guessing is not an option; skipped"})
             continue
-        # The optimized source: prefer best_kernel_src (re-verification has already
-        # restored it into kernel_src), otherwise whatever kernel_src currently holds.
+        # The optimized source. candidate_bind["file"] is authoritative when it names a
+        # file that exists in the task: the extraction skill wrote it knowing how this
+        # particular leaf binds, and for a leaf that is HIP C++ it points at a delivery
+        # module rather than at kernel_src. Overriding it with editable_src() installs the
+        # .py of a kernel whose edit lives in a .h -- an overlay that shadows the
+        # dispatcher with an identical dispatcher, leaves the image's prebuilt .so serving
+        # every token, and still passes the shadow check below. The e2e that follows would
+        # be measuring the baseline against itself.
         ksrc = os.path.join(task, "kernel_src")
-        src = editable_src(ksrc)
+        named = bind.get("file")
+        src, via = None, ""
+        if named:
+            for cand in (os.path.join(task, named), os.path.join(ksrc, named)):
+                if os.path.isfile(cand):
+                    src, via = cand, "candidate_bind.file"
+                    break
+            if not src:
+                out["skipped"].append({"kernel": k, "reason":
+                    "candidate_bind names file %r and it is not in the task directory; "
+                    "installing a different file would bind something the extraction "
+                    "skill did not describe" % named})
+                continue
+        if not src:
+            src, via = editable_src(ksrc), "kernel_src (candidate_bind named no file)"
         if not src:
             out["skipped"].append({"kernel": k, "reason": "kernel_src/ holds no editable file"})
             continue
@@ -128,10 +148,25 @@ def main():
                                    "reason": "overlay install failed: %s" % log[-400:]})
             continue
         base = args.overlay          # the next kernel seeds from this overlay
-        out["applied"].append({"kernel": k, "bind_kind": bind.get("kind"),
-                               "target": bind.get("target") or bind.get("module"),
-                               "impl_file": src,
-                               "verified_speedup": r.get("verified_speedup")})
+        entry = {"kernel": k, "bind_kind": bind.get("kind"),
+                 "target": bind.get("target") or bind.get("module"),
+                 "impl_file": src, "impl_file_from": via,
+                 "verified_speedup": r.get("verified_speedup")}
+        # A kernel spread over several files is delivered through one module. Record what
+        # that module is expected to pull in, so a reader can tell at a glance whether the
+        # .cu/.h actually travelled with the .py.
+        if os.path.isdir(ksrc):
+            entry["kernel_src_files"] = sorted(
+                n for n in os.listdir(ksrc)
+                if os.path.isfile(os.path.join(ksrc, n))
+                and not n.startswith("__") and n != "source_manifest.json")
+            if len(entry["kernel_src_files"]) > 1 and via != "candidate_bind.file":
+                entry["warning"] = (
+                    "kernel_src holds %d files but the overlay installs only %s, and "
+                    "candidate_bind named none. If the optimized edit is in one of the "
+                    "others it is not in this overlay."
+                    % (len(entry["kernel_src_files"]), os.path.basename(src)))
+        out["applied"].append(entry)
 
     # --- Verify the overlay really shadows. Measuring without this check means "no gain"
     #     may simply be an overlay that was never loaded.
