@@ -10,6 +10,12 @@ notes, which every stage must produce) for all five stages, and adds a detail se
 only when a well-known artifact is present. A replacement skill that writes the same
 artifact gets the same section; one that does not still appears in the summary.
 
+It is also the renderer `scripts/watch.py` calls on every tick, so the report an
+unattended run leaves behind mid-flight is the same document as the one it finishes
+with -- and a campaign that never reaches `applyback` still has a readable one. That is
+why `stage_rows` exists as a function rather than as a loop inside `main`: one mapping
+from artifacts to a row, used by both.
+
 Usage:
     python3 report.py --run-root <dir> [--out REPORT.md]
 """
@@ -33,16 +39,56 @@ def x_(v, nd=4):
     return ("%%.%df×" % nd) % v if isinstance(v, (int, float)) else "—"
 
 
-def main():
+def stage_rows(root, state=None):
+    """One row per stage the run knows about: skill, status, key metrics, notes.
+
+    The contract view -- the part that holds for every stage whatever skill implements
+    it -- and the only place that maps a stage's artifacts onto a row. `result.json` wins
+    over STATE.json where both exist, because the stage wrote one and the driver wrote
+    the other, and a stage that has written its result but is not recorded in STATE.json
+    yet still gets a row: mid-run that is the ordinary state of the stage that has just
+    finished, and a reporter that skipped it would describe the run as emptier than it is.
+    """
+    state = (rj(root, "STATE.json") or {}) if state is None else state
+    stages = state.get("stages") or state
+    order = ["baseline", "profile", "roofline", "optimize", "applyback"]
+    rows = []
+    for name in order + [k for k in stages if k not in order]:
+        st = stages.get(name)
+        res = rj(root, name, "out", "result.json")
+        if not isinstance(st, dict):
+            if not isinstance(res, dict):
+                continue
+            st = {}
+        res = res if isinstance(res, dict) else st
+        m = res.get("metrics") or {}
+        rows.append({"stage": name,
+                     "skill": res.get("skill") or st.get("skill") or "—",
+                     "status": res.get("status") or st.get("status") or "—",
+                     "metrics": {k: v for k, v in m.items() if not k.startswith("_")},
+                     "notes": res.get("notes") or ""})
+    return rows
+
+
+def stage_table(rows, limit=4):
+    L = ["| Stage | Skill | Status | Key metrics |", "| --- | --- | --- | --- |"]
+    for r in rows:
+        keys = list(r["metrics"])[:limit]
+        L.append("| `%s` | `%s` | %s | %s |"
+                 % (r["stage"], r["skill"], r["status"],
+                    ", ".join("%s=%s" % (k, r["metrics"][k]) for k in keys) or "—"))
+    return L
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-root", required=True)
     ap.add_argument("--out", default=None)
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     root = os.path.abspath(a.run_root)
     out = a.out or os.path.join(root, "REPORT.md")
 
     state = rj(root, "STATE.json") or {}
-    stages = state.get("stages") or state
     L = ["# Workload run — %s\n" % os.path.basename(root)]
 
     # --- What was optimized, stated next to the run's name. A report that names only the
@@ -65,21 +111,9 @@ def main():
         L.append("This run was renamed after it finished; see `RENAME.md`.\n")
 
     # --- The contract view: every stage, whatever its skill.
+    rows = stage_rows(root, state)
     L.append("## Stages\n")
-    L.append("| Stage | Skill | Status | Key metrics |\n| --- | --- | --- | --- |")
-    order = ["baseline", "profile", "roofline", "optimize", "applyback"]
-    names = order + [k for k in stages if k not in order]
-    for name in names:
-        st = stages.get(name)
-        if not isinstance(st, dict):
-            continue
-        res = rj(root, name, "out", "result.json") or st
-        m = res.get("metrics") or {}
-        keys = [k for k in m if not k.startswith("_")][:4]
-        L.append("| `%s` | `%s` | %s | %s |"
-                 % (name, res.get("skill") or st.get("skill") or "—",
-                    res.get("status") or st.get("status") or "—",
-                    ", ".join("%s=%s" % (k, m[k]) for k in keys) or "—"))
+    L.extend(stage_table(rows))
 
     # --- Baseline.
     b = rj(root, "baseline", "out", "baseline.json")
@@ -154,11 +188,7 @@ def main():
                  "did not move, and is reported as such rather than rounded upward.\n")
 
     # --- Whatever each stage flagged about itself.
-    said = []
-    for name in names:
-        res = rj(root, name, "out", "result.json")
-        if res and res.get("notes"):
-            said.append((name, res["notes"]))
+    said = [(r["stage"], r["notes"]) for r in rows if r["notes"]]
     if said:
         L.append("\n## What the stages recorded\n")
         L.extend("- **%s** — %s" % (n, t.replace("\n", " ")) for n, t in said)

@@ -133,6 +133,16 @@ Credit and adoption state live on disk, so a restart resumes rather than re-disp
 and the same kernel is never handed to two workers. A supervisor restart must not be able
 to reset a counter that a deliverable is read from.
 
+**R12a — Unattended also means reporting on a cadence, by default.**
+A run nobody hears from until it finishes is a run nobody can act on, and one killed
+before its last stage leaves nothing at all. `stage.py all` therefore starts the periodic
+reporter unless the caller opts out (`--no-report`, `report.enabled: false`): every
+interval it writes progress *and* re-renders `REPORT.md` from the stages that have
+finished, using the same renderer the final report uses — a separate mid-run format would
+eventually disagree with the real one. Reporting is not intervening: acting on what the
+monitor sees is a different, off-by-default setting, because a monitor that describes is
+safe for every run and a monitor that kills is only as safe as its stall test.
+
 **R13 — Never delete measurement data.**
 Run artifacts, receipts, traces and campaign evidence are inputs to conclusions that have
 not been drawn yet. Move them, archive them, gitignore them — `runs/` and `campaigns/`

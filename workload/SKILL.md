@@ -47,23 +47,31 @@ precondition was missing, and carrying on would optimize kernels nobody profiled
 
 ### While it runs
 
-`all` starts `scripts/watch.py` alongside the run. It appends a report to
-`$RUN_ROOT/PROGRESS.md` every 30 minutes — per-stage state, how much was written, what
-changed in the window, which GPUs are held — and keeps the latest snapshot in
-`progress.json`.
+**The run reports every 30 minutes without being asked.** `all` starts
+`scripts/watch.py` alongside it, which each tick appends a block to
+`$RUN_ROOT/PROGRESS.md` — per-stage state and results so far, how much was written, what
+changed in the window, which GPUs are held — keeps the latest snapshot in
+`progress.json`, and **re-renders `$RUN_ROOT/REPORT.md`** from whatever the stages have
+finished. The mid-run report is the same document as the final one, so a campaign that is
+stopped on its fourth stage still leaves a readable report of the first three.
 
-It intervenes in exactly one case: a live stage that has written nothing under `$OUT` for
-90 minutes **and** whose process tree used almost no CPU over that window. Both signals
-are required, because the long stages legitimately spend forty minutes building an image
-or loading weights without touching `$OUT`, and killing those turns a slow run into no
-run. The action is to kill that attempt — which is how it resumes, since the next attempt
-opens with a continuation prompt listing what is already there. Nothing on disk is
-touched. After three interventions on one stage it stops acting and says so.
+Turning it off: `--no-report` on the command line, `--report-interval SEC` to change the
+cadence, or `report.enabled: false` in the config. (`--no-watch` is the old spelling of
+`--no-report` and still works.)
 
-Everything else — a dead driver, a GPU held by another job, a stage that reported
-`blocked` — is reported, not acted on. Those need a decision, and a monitor inventing one
-is worse than a monitor that says plainly what it saw. Knobs, with reasons, under `watch`
-in `config/default.json`; `--no-watch` turns it off.
+By default it acts on nothing — a dead driver, a GPU held by another job, a stage that
+reported `blocked` are all described and left alone, because those need a decision and a
+monitor inventing one is worse than a monitor that says plainly what it saw.
+
+Set `report.on_stall` to `"restart-attempt"` to let it intervene in exactly one case: a
+live stage that has written nothing under `$OUT` for 90 minutes **and** whose process tree
+used almost no CPU over that window. Both signals are required, because the long stages
+legitimately spend forty minutes building an image or loading weights without touching
+`$OUT`, and killing those turns a slow run into no run. The action is to kill that
+attempt — which is how it resumes, since the next attempt opens with a continuation prompt
+listing what is already there. Nothing on disk is touched. After three interventions on
+one stage it stops acting and says so. Knobs, with reasons, under `report` in
+`config/default.json`.
 
 ## Stages
 
@@ -72,7 +80,7 @@ in `config/default.json`; `--no-watch` turns it off.
 | `baseline` | `adopt-measured-receipt` | reuse an already-measured receipt (no GPUs); `agentx-trace-replay` re-measures instead; `ci-run-replay` reproduces a named CI run under pinned digest/data/seed/`benchmark_id`/cache-bust and physical-core binding, and refuses a number that does not align | `baseline.json` |
 | `profile` | `agentx-kernel-extraction-standalone` | profile, then extract frozen-harness unit tests | `tasks/<k>/`, `kernel_ranking.json` |
 | `roofline` | `kernel-roofline` | per-kernel roofline; rank by **expected e2e gain** | `roofline.json` |
-| `optimize` | `geak-kernel-workflow` | one kernel per GPU in parallel, 48 h by default; `subagent-raw` optimizes without the GEAK workflow | `optimized.json` |
+| `optimize` | `geak-kernel-workflow` | optimize every extracted task, one per GPU slot in parallel, 48 h by default; plan at most 8 tasks by default; `subagent-raw` optimizes without the GEAK workflow | `optimized.json` |
 | `applyback` | `overlay-e2e-ab` | reversible overlay, fresh server, A/B against the baseline | `ab.json` |
 
 Each slot's I/O, artifact mapping and known pitfalls are in

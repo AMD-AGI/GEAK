@@ -712,12 +712,12 @@ def test_no_runner_overrides_gpu_visibility():
                 "%s.sh touches GPU visibility: %s" % (name, s)
 
 
-# ----------------------------------------------------------------- the watcher
+# ------------------------------------------------- periodic reporting, and the watcher
 #
-# A campaign is a day and a half of GPU time nobody is watching. The watcher exists for
-# the failure that costs the most: a session that stopped working without exiting. These
-# cover the line between "wedged" and "working on something that does not touch $OUT",
-# because getting that line wrong means either never intervening or killing live work.
+# A campaign is a day and a half of GPU time nobody is watching. Reporting on a cadence is
+# the default and these fix it there, including that the default never kills anything.
+# The rest cover the line between "wedged" and "working on something that does not touch
+# $OUT" -- getting that wrong means either never intervening or killing live work.
 
 def _snap(**over):
     s = {"at": 10_000.0, "driver_alive": True, "driver_pid": 42,
@@ -805,10 +805,41 @@ def test_a_tick_writes_a_report_and_acts_within_its_cap(tmp_path, monkeypatch):
     assert "| stage | state |" in report and "profile" in report
     assert "interventions have already been spent" in report
     assert json.load(open(str(tmp_path / "run" / "progress.json")))["stages"]["profile"]
+    assert (tmp_path / "run" / "REPORT.md").exists(), \
+        "every tick re-renders the run's report, so a campaign stopped early still has one"
 
 
-def test_the_watcher_starts_with_the_run_and_can_be_turned_off(tmp_path):
-    """One command still means one command: `all` brings its own reporting."""
+def test_a_tick_reports_the_results_stages_have_already_produced(tmp_path, monkeypatch):
+    """The point of reporting on a cadence is the numbers, not a liveness ping. The block
+    carries what the finished stages reported, rendered from the same rows as REPORT.md."""
+    import watch
+    cfg_path = _stub_cfg(tmp_path)
+    r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg_path),
+             "prepare", "profile"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = tmp_path / "run" / "profile" / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "result.json").write_text(json.dumps(
+        {"stage": "profile", "skill": "stub-profile", "status": "ok",
+         "artifacts": {}, "metrics": {"kernels_selected": 5, "pct_gpu_time": 34.867}}))
+
+    monkeypatch.setattr(watch, "tree_for", lambda o: [])
+    monkeypatch.setattr(watch, "gpu_usage", lambda: None)
+    args = type("A", (), {"driver_pid": 0, "stall_sec": 5400, "min_cpu_sec": 5.0,
+                          "on_stall": "report", "max_interventions": 3})()
+    cfg = __import__("stage").deep_merge(
+        json.load(open(os.path.join(WORKLOAD, "config", "default.json"))),
+        json.load(open(cfg_path)))
+    watch.tick_once(cfg, None, args, 1, {}, lambda m: None)
+
+    block = (tmp_path / "run" / "PROGRESS.md").read_text()
+    assert "Results so far" in block and "kernels_selected=5" in block
+    assert "pct_gpu_time=34.867" in (tmp_path / "run" / "REPORT.md").read_text()
+
+
+def test_reporting_is_on_by_default_and_can_be_turned_off(tmp_path):
+    """One command still means one command: `all` reports on a cadence without being
+    asked, and the off switch is explicit."""
     script = tmp_path / "work.sh"
     script.write_text('echo "{}" > "$OUT/kernel_ranking.json"\n'
                       'python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok '
@@ -817,10 +848,58 @@ def test_the_watcher_starts_with_the_run_and_can_be_turned_off(tmp_path):
     r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg), "all"],
             env_extra={"STUB_SCRIPT": str(script)})
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "watching:" in r.stdout
+    assert "reporting every" in r.stdout
     assert (tmp_path / "run" / "watch.log").exists()
 
     r2 = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg), "all",
-              "--force", "--no-watch"], env_extra={"STUB_SCRIPT": str(script)})
+              "--force", "--no-report"], env_extra={"STUB_SCRIPT": str(script)})
     assert r2.returncode == 0, r2.stdout + r2.stderr
-    assert "watching:" not in r2.stdout
+    assert "reporting every" not in r2.stdout
+
+    # The previous spelling appears in launch scripts and campaign notes; a rename that
+    # silently stops honouring it would turn "off" back into "on" without telling anyone.
+    r3 = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg), "all",
+              "--force", "--no-watch"], env_extra={"STUB_SCRIPT": str(script)})
+    assert r3.returncode == 0, r3.stdout + r3.stderr
+    assert "reporting every" not in r3.stdout
+
+
+def test_the_default_monitor_reports_and_never_kills(tmp_path, monkeypatch):
+    """Reporting is safe for every run; killing is only as safe as the stall test. So the
+    shipped default describes a stalled stage and leaves it running."""
+    import watch
+    cfg_path = _stub_cfg(tmp_path)
+    r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg_path),
+             "prepare", "profile"])
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    killed = []
+    monkeypatch.setattr(watch, "kill_tree", lambda pids, log: killed.append(list(pids)))
+    monkeypatch.setattr(watch, "tree_for", lambda o: [111])
+    monkeypatch.setattr(watch, "tree_cpu", lambda pids: 1.0)
+    monkeypatch.setattr(watch, "gpu_usage", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["watch.py"])
+
+    rc = watch.main(["--config", str(cfg_path), "--driver-pid", "0", "--stall-sec", "0",
+                     "--once"])
+    assert rc == 0
+    assert killed == [], "the default must not kill a stalled attempt"
+    assert "wedged rather than working" in (tmp_path / "run" / "PROGRESS.md").read_text()
+
+
+def test_the_old_watch_key_still_overrides_the_shipped_defaults():
+    """Renaming a config block is the kind of change whose failure mode is silence: the
+    old block sits next to the new defaults, is never read, and the only symptom is a
+    setting quietly back where it started."""
+    stage = __import__("stage")
+    defaults = json.load(open(os.path.join(WORKLOAD, "config", "default.json")))
+    assert defaults["report"]["interval_sec"] == 1800 and \
+        defaults["report"]["on_stall"] == "report", "the shipped default reports, " \
+        "and reporting is not intervening"
+
+    cfg = stage.deep_merge(defaults, {"watch": {"interval_sec": 77,
+                                                "on_stall": "restart-attempt"}})
+    got = stage.report_settings(cfg)
+    assert got["interval_sec"] == 77 and got["on_stall"] == "restart-attempt"
+    assert got["max_interventions"] == 3, "keys the old block did not mention still " \
+        "come from the defaults"

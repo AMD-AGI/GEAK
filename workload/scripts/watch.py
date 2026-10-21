@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-"""Watch an unattended run: report every half hour, and intervene when it is stuck.
+"""Report on an unattended run every half hour; intervene only if asked to.
 
 A campaign is a day and a half of GPU time started by one command. Two things can go
 wrong quietly, and both have:
 
+  * **Nobody looks until the end.** A stage that went wrong in its first ten minutes
+    spends the rest of the window going further wrong.
   * **The session stops working but does not exit.** An agent waiting on a prompt that
     will never be answered, or on a command that will never return, looks exactly like an
     agent thinking hard. The time budget notices eventually -- after hours.
-  * **Nobody looks until the end.** A stage that went wrong in its first ten minutes
-    spends the rest of the window going further wrong.
 
-So this process reports at a fixed interval and acts on one specific, provable condition.
-It writes `PROGRESS.md` (one block per tick, appended) and `progress.json` (the latest
-snapshot) in the run root.
+Reporting is therefore the default and the point: every tick writes `PROGRESS.md` (one
+block per tick, appended), `progress.json` (the latest snapshot) and a refreshed
+`REPORT.md` -- the run's real report, rendered by `report.py` from whatever the stages
+have finished so far, rather than a liveness ping. A campaign that is killed on its
+fourth stage still leaves a readable report of the first three.
+
+Acting on what it sees is a separate decision, off unless `on_stall` says
+`restart-attempt`. A monitor that reports is useful to everyone; a monitor that kills
+things is useful only when its stall test is right, so the killing is opt-in and the
+test below is deliberately conservative.
 
 WHAT COUNTS AS STUCK, and why it takes two signals rather than one. A stage is called
 stalled only when, across the whole stall window, **nothing under `$OUT` changed** *and*
@@ -35,7 +42,8 @@ one would be worse than a monitor that says clearly what it saw.
 
     python3 scripts/watch.py --config <cfg> [--interval 1800] [--once]
 
-`stage.py all` starts one of these itself, so a plain campaign already gets reports.
+`stage.py all` starts one of these itself, so a plain campaign already reports on a
+cadence without being asked; `--no-report` there turns it off.
 """
 
 import argparse
@@ -47,6 +55,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import report as report_mod  # noqa: E402
 import stage as stage_mod  # noqa: E402
 
 CLOCK_TICKS = float(os.sysconf("SC_CLK_TCK")) if hasattr(os, "sysconf") else 100.0
@@ -288,7 +297,7 @@ def findings(snap, prev, stall_sec, min_cpu_sec):
     return out
 
 
-def render(snap, prev, acts, tick):
+def render(snap, prev, acts, tick, rows=None):
     at = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(snap["at"]))
     gap = (" (+%s)" % human_age(snap["at"] - prev["at"])) if prev else ""
     L = ["", "## %s — tick %d%s" % (at, tick, gap), "",
@@ -312,6 +321,18 @@ def render(snap, prev, acts, tick):
                             time.strftime("%H:%M:%S", time.gmtime(mt))))
         else:
             L.append("  - nothing")
+    # --- What the run has produced so far, not merely that it is alive. Rendered from
+    # the same rows as the final REPORT.md, so a reader of a tick and a reader of the
+    # finished report are looking at one set of numbers.
+    done = [r for r in (rows or []) if r["status"] not in ("-", "running")]
+    if done:
+        L += ["", "Results so far:"]
+        for r in done:
+            keys = list(r["metrics"])[:4]
+            L.append("  - **%s** `%s` — %s%s"
+                     % (r["stage"], r["skill"], r["status"],
+                        (": " + ", ".join("%s=%s" % (k, r["metrics"][k]) for k in keys))
+                        if keys else ""))
     vram = snap.get("gpu_vram_used")
     if vram:
         busy = [i for i, v in enumerate(vram) if v > 2 << 30]
@@ -353,15 +374,30 @@ def tick_once(cfg, prev, args, tick, counts, log):
                       % (len(pids), counts[name], args.max_interventions)))
         snap["stages"][name]["quiet_since"] = snap["at"]
 
-    report = render(snap, prev, acts + acted, tick)
     run_root = stage_mod.resolve_path(cfg["run_root"])
     os.makedirs(run_root, exist_ok=True)
+    report = render(snap, prev, acts + acted, tick, report_mod.stage_rows(run_root))
     with open(os.path.join(run_root, "PROGRESS.md"), "a") as f:
         f.write(report)
     with open(os.path.join(run_root, "progress.json"), "w") as f:
         json.dump(snap, f, indent=2, ensure_ascii=False, default=str)
+    refresh_report(run_root, log)
     log(report.rstrip())
     return snap
+
+
+def refresh_report(run_root, log):
+    """Re-render REPORT.md from what has finished, so it is never only a final artifact.
+
+    A failure here is logged and nothing else. Rendering a report is the least important
+    thing happening on this machine, and a reporter that can take down the run it reports
+    on would be a worse bargain than no reporter at all.
+    """
+    try:
+        report_mod.main(["--run-root", run_root])
+    except Exception as exc:
+        log("[watch] REPORT.md not refreshed this tick: %s: %s"
+            % (type(exc).__name__, exc))
 
 
 def main(argv=None):
@@ -385,7 +421,7 @@ def main(argv=None):
     args.cmd = "plan"
     cfg = stage_mod.load_config(args)
 
-    w = cfg.get("watch") or {}
+    w = stage_mod.report_settings(cfg)
     if args.interval is None:
         args.interval = int(w.get("interval_sec") or 1800)
     if args.stall_sec is None:
@@ -393,14 +429,15 @@ def main(argv=None):
     if args.min_cpu_sec is None:
         args.min_cpu_sec = float(w.get("min_cpu_sec") or 5.0)
     if args.on_stall is None:
-        args.on_stall = w.get("on_stall") or "restart-attempt"
+        args.on_stall = w.get("on_stall") or "report"
     if args.max_interventions is None:
         args.max_interventions = int(w.get("max_interventions") or 3)
 
     def log(msg):
         print(msg, flush=True)
 
-    log("[watch] every %ds; stall = %ds quiet AND < %.0fs CPU; on stall: %s (max %d/stage)"
+    log("[watch] reporting every %ds into PROGRESS.md + REPORT.md; stall = %ds quiet AND "
+        "< %.0fs CPU; on stall: %s (max %d/stage)"
         % (args.interval, args.stall_sec, args.min_cpu_sec, args.on_stall,
            args.max_interventions))
     prev, counts, tick = None, {}, 0

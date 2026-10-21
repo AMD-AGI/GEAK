@@ -31,7 +31,11 @@
       "skill": "agentx-kernel-extraction-standalone",
       "mode": "agent",
       "params": {
-        "selection": "per-phase Top 5 AND overall GPU-time share > 3%",
+        "selection": "Broader candidate discovery through the profile slot; plan complete operators up to the task limit and retain every deferred candidate with its reason.",
+        "_note_selection": "Top 10 and overall >0.5% are heuristic discovery cutoffs requested to explore beyond Muse's former three UTs, not calibrated performance thresholds. The unchanged skill selector takes these explicit arguments; kernel KEEP and E2E bands are unchanged.",
+        "selection_top_k": 10,
+        "selection_overall_pct_gt": 0.5,
+        "selection_phases": ["PREFILL", "DECODE"],
         "max_targets": null,
         "trace_dir": null,
         "serving_env": null
@@ -53,6 +57,7 @@
       "mode": "agent",
       "params": {
         "time_budget_sec": 172800,
+        "require_full_budget": false,
         "attempt_cap_sec": 1500,
         "attempt_min_sec": 600,
         "budget": 4,
@@ -65,6 +70,8 @@
         "bad_node_limit": 2,
         "keep_threshold": 1.045,
         "apply_to_original": true,
+        "_note_task_limit": "Capacity policy requested for an eight-GPU campaign, not a performance threshold: plan at most eight independent optimization tasks in profile, then optimize every delivered task. A whole-node collective still needs its real GPU group. Over-limit deliveries must be replanned, never silently truncated by max_tasks or exclusions.",
+        "task_limit": 8,
         "max_tasks": null
       }
     },
@@ -81,13 +88,13 @@
     }
   },
 
-  "watch": {
-    "_comment": "scripts/watch.py, started automatically by `stage.py all`. It reports every interval_sec into <run_root>/PROGRESS.md and acts on exactly one condition: a live stage that has written nothing under $OUT for stall_sec AND whose process tree used less than min_cpu_sec of CPU over that window. One signal alone lies -- the long stages legitimately spend forty minutes building an image or loading weights without touching $OUT -- so both are required. The action is to kill that attempt, which is how it resumes: the dispatcher's next attempt opens with a continuation prompt listing the artifacts already on disk. Nothing is deleted. After max_interventions on one stage it stops acting and says so, because a stage that wedges that often needs a person. Set on_stall to \"report\" to watch without ever acting.",
+  "report": {
+    "_comment": "Periodic reporting, on by default: `stage.py all` starts scripts/watch.py, which every interval_sec appends a block to <run_root>/PROGRESS.md, rewrites progress.json, and re-renders <run_root>/REPORT.md from whatever the stages have finished. A run that reports only at the end is one nobody can act on, and a run killed before its last stage would otherwise leave no report at all. Turn it off with `stage.py all --no-report` or enabled:false. interval_sec is 1800 because the stages that take hours write something every few minutes, so a half-hourly block is one screen of real movement rather than a log. --- on_stall is separate and defaults to \"report\": the monitor describes what it sees and acts on nothing. Setting it to \"restart-attempt\" lets it kill one specific, provable condition -- a live stage that has written nothing under $OUT for stall_sec AND whose process tree used less than min_cpu_sec of CPU over that window. One signal alone lies (the long stages legitimately spend forty minutes building an image or loading 892 GB of weights without touching $OUT), so both are required; stall_sec 5400 is chosen well clear of that longest observed legitimate silence. Killing the attempt is how it resumes -- the dispatcher's next attempt opens with a continuation prompt listing the artifacts already on disk -- and nothing is deleted. After max_interventions on one stage it stops acting and says so, because a stage that wedges that often needs a person. The old key name \"watch\" is still read if present.",
     "enabled": true,
     "interval_sec": 1800,
     "stall_sec": 5400,
     "min_cpu_sec": 5,
-    "on_stall": "restart-attempt",
+    "on_stall": "report",
     "max_interventions": 3
   },
 

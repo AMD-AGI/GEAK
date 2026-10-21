@@ -122,13 +122,19 @@ resumes by re-issuing the same command — `all` skips the stages already record
 While `optimize` runs:
 `scheduler.py status --work-root $RUN_ROOT/optimize/out/work`.
 
-`all` also starts `scripts/watch.py`, which appends a progress report to
-`$RUN_ROOT/PROGRESS.md` every 30 minutes and kills an attempt that is provably stalled —
-nothing written under `$OUT` for 90 minutes *and* no CPU burned — so the dispatcher
-resumes it from the artifacts on disk. Both signals are required: the long stages spend
-long stretches building images and loading weights without touching `$OUT`. Anything else
-it finds is reported rather than acted on. `--no-watch` opts out; the knobs live under
-`watch` in `config/default.json`.
+`all` reports as it goes, by default: it starts `scripts/watch.py`, which every 30
+minutes appends a block to `$RUN_ROOT/PROGRESS.md` (per-stage state, results so far, what
+was written, which GPUs are held), rewrites `progress.json`, and re-renders
+`$RUN_ROOT/REPORT.md` from the stages that have finished — the same renderer the run ends
+with, so a campaign stopped early still has a report. `--no-report` opts out,
+`--report-interval SEC` changes the cadence, and the knobs live under `report` in
+`config/default.json`.
+
+It acts on nothing unless told to. Setting `report.on_stall` to `"restart-attempt"` lets
+it kill an attempt that is provably stalled — nothing written under `$OUT` for 90 minutes
+*and* no CPU burned — so the dispatcher resumes it from the artifacts on disk. Both
+signals are required: the long stages spend long stretches building images and loading
+weights without touching `$OUT`.
 
 Swapping a module, at the command line or in the config:
 

@@ -10,7 +10,8 @@ file knows no individual skill. Contract in ../stages/CONTRACT.md.
     stage.py prepare <stage>           # create OUT, write params.json/env.sh, print the SKILL.md path
     stage.py run <stage>               # prepare + execute + validate, script or agent mode
     stage.py all [stage ...]           # every stage in order, unattended; resumes by default
-                                       #   (also starts scripts/watch.py; --no-watch opts out)
+                                       #   (reports every 30 min via scripts/watch.py;
+                                       #    --no-report opts out)
     stage.py validate <stage>          # validate $OUT/result.json on its own
     stage.py status                    # print STATE.json
     stage.py next                      # print the next pending stage (for resume); empty when done
@@ -450,11 +451,12 @@ def cmd_all(cfg, args):
     A/B a stack nothing was applied to. The run stops with the reason on screen and in
     STATE.json, and resumes with the same command once the precondition is met.
 
-    It also starts a watcher (scripts/watch.py), because a day and a half of unattended
-    GPU time with nobody looking is how a stage that wedged in its first ten minutes gets
-    to spend the rest of its window wedged. The watcher reports every half hour into
-    PROGRESS.md and kills a provably stalled attempt so the dispatcher resumes it.
-    `--no-watch`, or `watch.enabled: false` in the config, turns it off.
+    It reports while it runs, by default: scripts/watch.py is started alongside and
+    writes PROGRESS.md, progress.json and a refreshed REPORT.md every half hour. A day
+    and a half of unattended GPU time that reports only at the end is how a stage that
+    went wrong in its first ten minutes gets to spend the rest of its window going
+    further wrong. `--no-report` (`--report-interval N` to change the cadence), or
+    `report.enabled: false` in the config, turns it off.
     """
     order = list(cfg["order"])
     only = [s for s in (args.stages or []) if s]
@@ -469,16 +471,37 @@ def cmd_all(cfg, args):
     state = load_state(cfg)
     print("run_root %s" % cfg["run_root"])
     print("stages   %s" % " -> ".join(order))
-    watcher = start_watcher(cfg, args)
+    reporter = start_reporter(cfg, args)
     try:
         return run_order(cfg, args, order, state)
     finally:
-        stop_watcher(watcher)
+        stop_reporter(reporter)
 
 
-def start_watcher(cfg, args):
-    """A reporting process alongside the run. Its absence must never stop the campaign."""
-    if getattr(args, "no_watch", False) or (cfg.get("watch") or {}).get("enabled") is False:
+def report_settings(cfg):
+    """The `report` block, with the older `watch` key overlaid on top of it.
+
+    `watch` was this block's name until reporting became the default and intervening
+    became opt-in. A scenario config still using the old name has to keep working, and a
+    plain `cfg.get("report") or cfg.get("watch")` would not do it: `default.json` always
+    ships a `report` block, so the user's `watch` would sit beside it, ignored, with no
+    symptom beyond a cadence quietly back at its default.
+    """
+    out = dict(cfg.get("report") or {})
+    out.update(cfg.get("watch") or {})
+    return out
+
+
+def start_reporter(cfg, args):
+    """The periodic reporter alongside the run. Its absence must never stop the campaign.
+
+    On by default: an unattended run that says nothing until it finishes is one nobody
+    can act on. Turning it off is a choice the caller makes (`--no-report`, or
+    `report.enabled: false`), not something a missing config key does by accident --
+    hence `is False` rather than a truthiness test.
+    """
+    rep = report_settings(cfg)
+    if getattr(args, "no_report", False) or rep.get("enabled") is False:
         return None
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch.py")
     run_root = resolve_path(cfg["run_root"])
@@ -490,21 +513,25 @@ def start_watcher(cfg, args):
         cmd += ["--set", s]
     if getattr(args, "run_root", None):
         cmd += ["--run-root", args.run_root]
+    if getattr(args, "report_interval", None):
+        cmd += ["--interval", str(args.report_interval)]
     log = os.path.join(run_root, "watch.log")
     try:
         lf = open(log, "a")
         proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL)
     except OSError as exc:
-        print("[stage] could not start the watcher (%s); the run continues unwatched"
+        print("[stage] could not start the reporter (%s); the run continues unreported"
               % exc, file=sys.stderr)
         return None
-    print("[stage] watching: %s (reports in %s/PROGRESS.md)"
-          % (log, os.path.basename(run_root)))
+    print("[stage] reporting every %ss into %s/PROGRESS.md and REPORT.md (log %s; "
+          "--no-report turns it off)"
+          % (getattr(args, "report_interval", None) or rep.get("interval_sec") or 1800,
+             os.path.basename(run_root), log))
     return proc
 
 
-def stop_watcher(proc):
+def stop_reporter(proc):
     if not proc:
         return
     try:
@@ -582,8 +609,12 @@ def main(argv=None):
     p = sub.add_parser("all")
     p.add_argument("stages", nargs="*", help="limit to these stages (default: all)")
     p.add_argument("--force", action="store_true", help="re-run stages already recorded ok")
-    p.add_argument("--no-watch", action="store_true",
-                   help="do not start scripts/watch.py alongside the run")
+    # --no-watch is the previous spelling, kept because the flag appears in launch
+    # scripts and in campaign notes; both names set the same dest.
+    p.add_argument("--no-report", "--no-watch", dest="no_report", action="store_true",
+                   help="do not report periodically (scripts/watch.py is not started)")
+    p.add_argument("--report-interval", type=int, default=None, metavar="SEC",
+                   help="seconds between progress reports (default from config: 1800)")
     p = sub.add_parser("validate"); p.add_argument("stage")
     sub.add_parser("status")
     sub.add_parser("next")
