@@ -21,6 +21,29 @@ export const meta = {
 };
 
 // ---------------------------------------------------------------------------
+// RUNTIME SANDBOX CONTRACT -- read this before adding any Node API to this file.
+//
+// This script runs on two runtimes and they do NOT offer the same globals:
+//
+//                                             process   require   import()
+//   Claude Code's native Workflow tool          no        no      REFUSED AT LAUNCH
+//   interface/runtime/engine/run_workflow.mjs   yes       no      yes
+//
+// The native sandbox is a sealed V8 realm. Its entire global surface is the JS built-ins plus
+// agent/parallel/pipeline/phase/log/workflow/args/budget/console/setTimeout. There is NO
+// filesystem, NO child_process, and a literal `import(` anywhere in this file is a STATIC
+// rejection of the WHOLE script -- "SyntaxError: import() is not available in workflow scripts"
+// -- so not one line runs, on any phase, AgentX or not. That is exactly how PR #520 took the
+// e2e workflow down: the four readers it added worked on the standalone Node runtime it was
+// validated against, and refused the script everywhere else.
+//
+// So: no `import(`, and never make a `require(` site load-bearing. Work that needs a file
+// belongs in a vendored CLI under scripts/ that an AGENT runs -- the same way every other
+// datum in this workflow (the profile, the strategy, every A/B number) already arrives.
+// e2e_workflow/scripts/tests/test_llm_ledger.py enforces the `import(` half of this in CI.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Args + defaults. A JS workflow can't read its own path, so workflow_dir is passed in.
 // ---------------------------------------------------------------------------
 let _rawArgs = args;
@@ -270,7 +293,13 @@ const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
 // the same model on the same stack with the experts sharded differently is a different deployment.
 // Unlike TP it is also a knob the Config Tuner may move mid-run (--ep-size rides EXTRA_SERVER_ARGS),
 // so this constant states the baseline's value and the accepted one lives in accepted_config.
-// Standalone runs resolve through the same Python parser as interface dispatch.
+// interface/run_e2e.py ALWAYS sends args.ep (it calls _resolve_ep when it builds these args), so
+// every dispatched run takes the first branch. A hand-rolled invocation that supplies launch
+// details but no ep used to shell out to that same parser -- which cannot work on either runtime,
+// because neither gives this script `require` (see RUNTIME SANDBOX CONTRACT); it died with
+// "require is not defined" at module scope, before anything else ran. Guessing 1 instead would be
+// worse than failing: ep is a KB addressing dimension, so a wrong value files the run's results on
+// another deployment's page. Say precisely what to pass.
 function resolveServingEp() {
   if (A.ep != null) {
     const ep = Number(A.ep);
@@ -278,19 +307,10 @@ function resolveServingEp() {
     return ep;
   }
   if (!A.initial_extra_server_args && !A.initial_extra_env && !A.launch_recipe) return 1;
-  const { execFileSync } = require('child_process');
-  const value = execFileSync('python3', ['-c', `
-import json, os, sys
-sys.path.insert(0, os.path.dirname(sys.argv[1]))
-from interface.run_e2e import _resolve_ep
-a = json.loads(sys.argv[2])
-print(_resolve_ep(a, None, int(sys.argv[3])))
-`, WORKFLOW_DIR, JSON.stringify({ accepted_flags: A.initial_extra_server_args || '',
-    accepted_env: A.initial_extra_env || '', launch_recipe: A.launch_recipe || '' }),
-  String(SERVING_TP)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 });
-  const ep = Number(value.trim());
-  if (!Number.isInteger(ep) || ep < 1) throw new Error('could not resolve baseline expert parallelism');
-  return ep;
+  throw new Error('args.ep is required when initial_extra_server_args / initial_extra_env / ' +
+    'launch_recipe are passed: the baseline expert-parallel degree cannot be derived from them ' +
+    'here (no subprocess in the workflow runtime), and it addresses the KB page beside tp. ' +
+    'Launch through interface/run_e2e.py, which resolves it with _resolve_ep, or pass args.ep.');
 }
 const SERVING_EP = resolveServingEp();
 // ---- WALL-CLOCK BUDGET (opt-in; default OFF when absent => byte-identical) ---------------------------
@@ -1304,11 +1324,22 @@ const STRATEGY_SCHEMA = obj({
   drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
 }, ['kernel_candidates']);
 
-// The skill returns only after source extraction and GPU UT validation. Its
-// selection/ranking metadata stays in files rather than an intermediate schema.
+// The skill returns only after source extraction and GPU UT validation. Its selection/ranking
+// metadata stays in files rather than an intermediate schema -- EXCEPT the finished envelope, which
+// has to travel in the reply: this script cannot open the delivery file (see RUNTIME SANDBOX
+// CONTRACT). `prepared` is the verbatim stdout of
+// `agentx_kernel_preparation.mjs --emit-prepared`, which is also what gates the packing, so the
+// validation is not weakened by moving the bytes this way. Same shape as STRATEGY_SCHEMA's queues,
+// because the queues are what it becomes.
 const AGENTX_PREPARATION_SCHEMA = obj({
   delivery_path: { type: 'string' },
-}, ['delivery_path']);
+  prepared: obj({
+    head_candidates: arrObj, kernel_candidates: arrObj,
+    failed_tasks: arrObj, deferred_tasks: arrObj,
+    profile_workload_json: { type: 'string' }, kernel_ranking_json: { type: 'string' },
+    kernel_extraction_delivery_json: { type: 'string' },
+  }, ['head_candidates', 'kernel_candidates']),
+}, ['delivery_path', 'prepared']);
 
 // Result of the ensure_flydsl provisioning gate (build-on-demand). ok=true iff flydsl is importable
 // (flydsl + kernels.moe_gemm_2stage) after sourcing env_file; built distinguishes a fresh build from reuse.
@@ -2500,46 +2531,29 @@ function adoptProfiledEntityKind(head, rows) {
   return true;
 }
 
-// Opt-in transport only: hydrate exact Python verdicts before applying the same
-// selection gate. A file or hash error cannot fall back to an inline claim of PASS.
-// This function is also used by kernel_extraction_delivery.mjs for preflight.
-async function hydrateExtractionVerdicts(ext) {
+// A selection verdict may travel as `selection_validation_ref` (a task-local path + SHA-256)
+// instead of inline JSON. RESOLVING that ref means reading and hashing a file, which this script
+// cannot do (see RUNTIME SANDBOX CONTRACT). The resolver therefore lives in
+// scripts/kernel_extraction_delivery.mjs::hydrateExtractionVerdicts, which the extractor runs as
+// its own preflight -- so by the time a return reaches the workflow the ref is already resolved.
+//
+// This is the backstop for the case that is NOT supposed to happen: a return that still carries an
+// unresolved ref. It is recorded as an explicit evidence error, never passed through as an inline
+// claim of PASS -- kernelSelectionVerified then has no verdict to read and the head is re-extracted
+// or flagged. The ref transport is offered only inside the kernel-extract skill, and AgentX returns
+// from extractWithBaseline before this runs, so no shipped path reaches the error branch today.
+function guardUnhydratedVerdicts(ext) {
   if (!ext || typeof ext !== 'object') return ext;
+  // A hydration that RAN and failed already said why (bad path, hash mismatch, wrong contract).
+  // That is the more specific diagnosis, so it wins; this guard is only for a ref nothing tried.
+  if (ext.selection_evidence_error) return ext;
   const phases = Array.isArray(ext.phase_selection_validations) ? ext.phase_selection_validations : [];
-  if (!ext.selection_validation_ref && !phases.some(p => p && p.selection_validation_ref)) return ext;
-  const out = { ...ext };
-  try {
-    const fs = await import('node:fs/promises');
-    const path = await import('node:path');
-    const { createHash } = await import('node:crypto');
-    const task = await fs.realpath(ext.task_dir);
-    const readVerdict = async (row) => {
-      if (!row || !row.selection_validation_ref) return row;
-      const ref = row.selection_validation_ref;
-      if (typeof ref.path !== 'string' || !ref.path.trim() ||
-          typeof ref.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(ref.sha256))
-        throw new Error('selection_validation_ref requires path and lowercase SHA-256');
-      const file = await fs.realpath(path.resolve(task, ref.path));
-      const relative = path.relative(task, file);
-      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
-        throw new Error('selection verdict must be a file inside task_dir');
-      const bytes = await fs.readFile(file);
-      if (createHash('sha256').update(bytes).digest('hex') !== ref.sha256)
-        throw new Error(`selection verdict SHA-256 mismatch: ${ref.path}`);
-      const verdict = JSON.parse(bytes.toString('utf8'));
-      if (!verdict || verdict.contract !== 'kernel_selection')
-        throw new Error(`not a kernel_selection verdict: ${ref.path}`);
-      return { ...row, selection_validation: verdict };
-    };
-    Object.assign(out, await readVerdict(out));
-    if (Array.isArray(ext.phase_selection_validations)) {
-      out.phase_selection_validations = [];
-      for (const row of phases) out.phase_selection_validations.push(await readVerdict(row));
-    }
-  } catch (error) {
-    out.selection_evidence_error = `selection evidence file invalid: ${error.message || error}`;
-  }
-  return out;
+  const unresolved = (row) => !!(row && row.selection_validation_ref && !row.selection_validation);
+  if (!unresolved(ext) && !phases.some(unresolved)) return ext;
+  return { ...ext, selection_evidence_error:
+    'selection_validation_ref arrived unresolved: the workflow sandbox cannot read or hash files. ' +
+    'Run scripts/kernel_extraction_delivery.mjs as the extraction preflight so the verdict is ' +
+    'hydrated into selection_validation before it is returned.' };
 }
 
 const PRE_FLAGGED_HEADS = [];
@@ -2593,6 +2607,59 @@ const hasFrozenBaseline = (ext) =>
 const extractFailWhy = (e) => !e ? 'none'
   : [e.smoke_detail, e.notes].filter(Boolean).join(' | ') || e.smoke || e.unittest_smoke || 'none';
 
+// What the SHIPPED envelope must still prove, re-asserted in pure JS on this side of the handoff.
+//
+// scripts/agentx_kernel_preparation.mjs ran the full gate (schema, frozen baseline, UT status,
+// source delivery, declared-kernel boundary) against the on-disk RETURN.json while packing, and
+// refused the packing outright if any completed task failed. But that gate ran in a different
+// process and its output reaches us THROUGH AN AGENT (see RUNTIME SANDBOX CONTRACT: this script
+// cannot open the delivery file to compare). A reply that was truncated, paraphrased, or assembled
+// by hand would otherwise be taken at face value, and a UT that never passed would be A/B'd as a
+// win. These are exactly the per-candidate invariants the old reader re-derived; they are cheap,
+// they need no filesystem, and they are checked both at intake (readAgentXPreparation) and again
+// at dispatch (reusePreparedUT), because carried state round-trips through args in between.
+//
+// What genuinely cannot be re-checked here is anything requiring bytes on disk: the RETURN.json
+// hash and the kernel_src snapshot. Those remain preparation's alone.
+function preparedUtDefect(kernel, result, phase) {
+  if (!result || typeof result !== 'object')
+    return 'prepared UT carries no validated result; re-pack the delivery with --emit-prepared';
+  if (typeof result.task_dir !== 'string' || !result.task_dir.trim())
+    return 'prepared UT result names no task_dir';
+  if (result.editable === false) return 'prepared UT task is not editable';
+  // extract reports unittest_smoke, extract_op reports smoke -- same split checkPreparedUT uses.
+  const status = phase === 'extract' ? result.unittest_smoke : result.smoke;
+  if (status !== 'pass') return `prepared UT did not pass (${phase}: ${status ?? 'no status'})`;
+  if (result.baseline_frozen !== true)
+    return 'prepared UT has no frozen baseline, so there is no speedup denominator';
+  if (!kernel || typeof kernel.pct_gpu_time !== 'number' ||
+      !Number.isFinite(kernel.pct_gpu_time) || kernel.pct_gpu_time < 0 || kernel.pct_gpu_time > 100)
+    return 'prepared candidate has no attributed GPU-time share in [0, 100]';
+  // `attention` and `attn` are one kind (agentx_kernel_preparation.mjs::opKind); a declaration that
+  // disagrees with its own result is a defect, not a routing choice.
+  const canonical = (v) => v === 'attention' ? 'attn' : v;
+  const requested = canonical(kernel.op_kind), returned = canonical(result.op_kind);
+  if (requested && returned && requested !== returned)
+    return `op_kind differs between declaration and result: ${requested} / ${returned}`;
+  return '';
+}
+
+// Hand an optimization lane the UT preparation validated, after re-asserting the invariants above.
+// A candidate with no prepared_ut.result never came through that gate at all, so it fails closed.
+// KNOWN LIMIT (accepted): a task dir mutated between packing and dispatch is not detected, because
+// detecting it means re-hashing kernel_src and this script has no filesystem.
+function reusePreparedUT(kernel) {
+  const fail = (why) => ({ smoke: 'fail', unittest_smoke: 'fail',
+    smoke_detail: `prepared UT is no longer valid: ${why}` });
+  const ref = kernel && kernel.prepared_ut;
+  if (!ref) return fail('missing prepared UT; complete the extraction stage before optimization');
+  const defect = preparedUtDefect(kernel, ref.result, ref.phase);
+  if (defect) return fail(defect);
+  const canonical = (v) => v === 'attention' ? 'attn' : v;
+  return { ...ref.result, op_kind: canonical(ref.result.op_kind) || canonical(kernel.op_kind),
+    smoke: 'pass', unittest_smoke: 'pass' };
+}
+
 // AgentX consumes a prepared UT and fails locally if its evidence is missing or stale.
 // Fixed-load runs invoke kernel_extractor and GUARANTEE it froze a real baseline. safeAgent already retries
 // transient failures; this wraps it to ALSO re-extract when the extraction succeeds (smoke passed,
@@ -2608,10 +2675,7 @@ const extractFailWhy = (e) => !e ? 'none'
 async function extractWithBaseline(role, phase, intro, inputs, opts) {
   const smokeOk = (e) => !!(e && e.task_dir && (e.smoke === 'pass' || e.unittest_smoke === 'pass'));
   const head = (inputs && inputs.KERNEL) || {};
-  if (typeof KERNEL_EXTRACT_ON !== 'undefined' && KERNEL_EXTRACT_ON) {
-    const { reusePreparedUT } = await import(`${WORKFLOW_DIR}/scripts/agentx_kernel_preparation.mjs`);
-    return reusePreparedUT(head);
-  }
+  if (typeof KERNEL_EXTRACT_ON !== 'undefined' && KERNEL_EXTRACT_ON) return reusePreparedUT(head);
   const captureIntro = `${intro} CAPTURE STORAGE BOUNDS (issue #429): every capture EXTRA_ENV MUST include ` +
     `\`${CAPTURE_STORAGE_ENV}\`. Use kernel_selection.py with --task-dir "$TASK" so the selected oracle is ` +
     `promoted and all capture.pid-* dirs are reclaimed. Unittests for large MoE oracles MUST use ` +
@@ -2623,7 +2687,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
     CAPTURE_CASE_BYTE_LIMIT,
     CAPTURE_PERSIST_POLICY,
   }), opts);
-  ext = await hydrateExtractionVerdicts(ext);
+  ext = guardUnhydratedVerdicts(ext);
   let tries = 0;
   const attemptedTargets = [];
   const complete = (e) => hasFrozenBaseline(e) && kernelSelectionVerified(head, e).ok;
@@ -2680,7 +2744,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
         ATTEMPTED_TARGET_CALLABLES: attemptedTargets.slice(),
       }),
       opts);
-    ext = await hydrateExtractionVerdicts(ext);
+    ext = guardUnhydratedVerdicts(ext);
   }
   const finalSelection = kernelSelectionVerified(head, ext);
   if (smokeOk(ext) && !finalSelection.ok) {
@@ -2698,11 +2762,16 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       notes: `no frozen baseline after ${BASELINE_EXTRACT_RETRIES} re-extractions ` +
         `(baseline_overlay/ + meta.candidate_bind required as the speedup denominator) — ${ext.notes || ''}` };
   }
+  // source_delivery_required is set ONLY by the AgentX preparation reader, and that mode returns at
+  // the reusePreparedUT branch above -- where the requirement was already discharged, by
+  // scripts/kernel_source_delivery.mjs::verifySourceDelivery running inside checkPreparedUT at
+  // packing time. So reaching here means a head demanded source evidence down a path that cannot
+  // produce it: the check needs to read and hash kernel_src, and this script has no filesystem
+  // (see RUNTIME SANDBOX CONTRACT). Fail closed rather than let the requirement silently lapse.
   if (smokeOk(ext) && head.source_delivery_required === true) {
-    const { verifySourceDelivery } = await import(`${WORKFLOW_DIR}/scripts/kernel_source_delivery.mjs`);
-    const source = await verifySourceDelivery(head, ext);
-    if (!source.ok) return { ...ext, smoke: 'fail', unittest_smoke: 'fail', source_delivery_failed: true,
-      smoke_detail: `source delivery incomplete: ${source.why}` };
+    return { ...ext, smoke: 'fail', unittest_smoke: 'fail', source_delivery_failed: true,
+      smoke_detail: 'source delivery incomplete: this head requires source evidence, but it was ' +
+        'extracted outside the AgentX preparation stage, which is what verifies it' };
   }
   return ext;
 }
@@ -3369,9 +3438,37 @@ let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
 
-async function readAgentXPreparation(deliveryPath) {
-  const { readPreparedKernels } = await import(`${WORKFLOW_DIR}/scripts/agentx_kernel_preparation.mjs`);
-  return readPreparedKernels(EVAL_DIR, deliveryPath);
+// The envelope arrives in the reply, not from the file: agentx_kernel_preparation.mjs computed it
+// while packing (and refused the packing if any completed task had invalid evidence), and this
+// script cannot read EVAL_DIR itself -- see RUNTIME SANDBOX CONTRACT. Throwing here is how the
+// caller's repair_delivery retry is armed, so every malformed reply must throw rather than degrade
+// to an empty queue that would read as "nothing to optimize".
+function readAgentXPreparation(reply) {
+  const prepared = reply && reply.prepared;
+  if (!prepared || typeof prepared !== 'object')
+    throw new Error('reply carries no prepared envelope; run agentx_kernel_preparation.mjs with ' +
+      '--emit-prepared and return its stdout verbatim');
+  for (const key of ['head_candidates', 'kernel_candidates'])
+    if (!Array.isArray(prepared[key])) throw new Error(`prepared.${key} must be an array`);
+  // Re-assert the per-candidate invariants the old on-disk reader re-derived. The envelope came
+  // through an agent, so "the packer said it was fine" is a claim about a file we cannot open --
+  // see preparedUtDefect. A bad candidate THROWS rather than being dropped: the caller's
+  // repair_delivery retry is the recovery, and a silently shortened queue would read as
+  // "nothing left to optimize" and end the run looking successful.
+  const defects = [];
+  for (const c of [...prepared.head_candidates, ...prepared.kernel_candidates]) {
+    const why = !c || !c.prepared_ut ? 'carries no prepared_ut'
+      : preparedUtDefect(c, c.prepared_ut.result, c.prepared_ut.phase);
+    if (why) defects.push(`${(c && c.short_name) || '(unnamed)'}: ${why}`);
+  }
+  if (defects.length)
+    throw new Error(`${defects.length} prepared candidate(s) failed re-validation — ${defects.join('; ')}`);
+  if (!prepared.kernel_extraction_delivery_json && reply.delivery_path)
+    prepared.kernel_extraction_delivery_json = reply.delivery_path;
+  for (const key of ['failed_tasks', 'deferred_tasks'])
+    if (!Array.isArray(prepared[key])) prepared[key] = [];
+  prepared.config_directions = Array.isArray(prepared.config_directions) ? prepared.config_directions : [];
+  return prepared;
 }
 
 async function prepareAgentXKernels(round, throughput) {
@@ -3402,13 +3499,17 @@ async function prepareAgentXKernels(round, throughput) {
     'AgentX baseline for discovery. Follow TASK scope and the default per-phase selection rule. ' +
     'Prove that edits to each opt GPU leaf affect candidate correctness while the frozen baseline passes; ' +
     'restore the clean source and rerun the UT. Keep failures and budget-deferred tasks in the delivery. ' +
-    'Read references/workflow-handoff.md in the skill. Return ONLY {delivery_path} naming that ' +
-    'file under EVAL_DIR after all scheduled UT work is finished. Do not optimize or integrate.', inputs),
+    'Read references/workflow-handoff.md in the skill. Pack with ' +
+    '`agentx_kernel_preparation.mjs --emit-prepared` and return ONLY {delivery_path, prepared}: ' +
+    'delivery_path names that file under EVAL_DIR, and prepared is that command\'s stdout envelope ' +
+    'VERBATIM — the workflow cannot open the file, so an envelope you summarise or rebuild by hand ' +
+    'is a corrupted handoff. Return it after all scheduled UT work is finished. Do not optimize or ' +
+    'integrate.', inputs),
     { phase: 'KernelExtract', label: `kernel_extractor:prepare ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
   for (let attempt = 0; ; attempt++) {
     try {
       if (!reply?.delivery_path) throw new Error('completed skill did not return delivery_path');
-      const prepared = await readAgentXPreparation(reply.delivery_path);
+      const prepared = await readAgentXPreparation(reply);
       log(`Kernel extraction ready: ${prepared.head_candidates.length + prepared.kernel_candidates.length} validated UTs, ` +
         `${prepared.failed_tasks.length} failed, ${prepared.deferred_tasks.length} deferred.`);
       return prepared;
@@ -3417,7 +3518,8 @@ async function prepareAgentXKernels(round, throughput) {
       reply = await safeAgent(roleAgent('kernel_extractor', 'repair_delivery',
         'Repair only the completed-stage handoff using saved files. Do not repeat selection, captures or ' +
         'passing GPU tests. Preserve every real failure and all task results. The reader failed with: ' +
-        error.message + '. Return {delivery_path} for the repaired file.',
+        error.message + '. Re-pack with `agentx_kernel_preparation.mjs --emit-prepared` and return ' +
+        '{delivery_path, prepared} for the repaired file, prepared being that stdout verbatim.',
         { ...inputs, PREVIOUS_DELIVERY_PATH: reply?.delivery_path || '' }),
         { phase: 'KernelExtract', label: `kernel_extractor:repair delivery ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
     }
@@ -4481,10 +4583,14 @@ print(json.dumps(res))
   strategy = { config_directions: ST.config_directions || [] };
   kernelQueue = ST.kernelQueue || [];
   headQueue = admitHeads(ST.headQueue || [], 'resume');
+  // Dispatch replays prepared_ut.result and cannot read it off disk, so a candidate carrying only
+  // the reference is unusable -- re-run preparation, which re-packs the saved evidence rather than
+  // redoing GPU work. For a normally carried queue this is the same test as `!k.prepared_ut`.
+  const unusable = (k) => !k || !k.prepared_ut || !k.prepared_ut.result;
   if (KERNEL_EXTRACT_ON &&
       (PHASES.includes('extract') ||
-       (want('head') && (!Array.isArray(ST.headQueue) || headQueue.some(k => !k.prepared_ut))) ||
-       (want('kernel') && (!Array.isArray(ST.kernelQueue) || kernelQueue.some(k => !k.prepared_ut))))) {
+       (want('head') && (!Array.isArray(ST.headQueue) || headQueue.some(unusable))) ||
+       (want('kernel') && (!Array.isArray(ST.kernelQueue) || kernelQueue.some(unusable))))) {
     // Finish the skill through GPU UT validation. Existing selection-only queues
     // are evidence to reuse, not completed tasks ready for optimization.
     strategy = await prepareAgentXKernels('resume', ST.throughput || BASELINE_TPUT);
@@ -6536,6 +6642,11 @@ const carryState = {
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
   config_directions: (strategy && strategy.config_directions) || [],
+  // AgentX candidates carry prepared_ut.result (the validated RETURN.json) through state as well:
+  // dispatch needs it and cannot re-read it from disk, and an undispatched task surviving a resume
+  // without re-running preparation is the contract in references/workflow-handoff.md. Bounded by
+  // the selection policy (per-phase top 5 + >3% share) and no larger than `tuning` or
+  // `pending_integrations`, which are carried whole for the same reason.
   headQueue, kernelQueue, accepted_heads: acceptedHeads, flagged_heads: flaggedHeads, accepted_kernels: acceptedKernels,
   // Full tuning-phase result, so a phase-by-phase resume does not re-run the tuning loop and the Report
   // phase still has the attribution numbers when it runs in a later invocation.

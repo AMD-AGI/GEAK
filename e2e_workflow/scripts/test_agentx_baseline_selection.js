@@ -36,7 +36,13 @@ const milestoneSchedule = between('  const cands = planCands.slice(0, remaining)
 const carry = between('const carryState = {', '\n// What this run got from the KB');
 
 function candidate(name) {
-  return { short_name: name, pct_gpu_time: 7.25, prepared_ut: { result_path: '/task/run/RETURN.json', sha256: 'hash' }, entity_kind: 'gpu_kernel', device_kernel: name, op_kind: 'attn',
+  // prepared_ut.result is the RETURN.json the packing adapter already validated. It travels WITH
+  // the envelope because the workflow sandbox has no filesystem to re-read it from.
+  return { short_name: name, pct_gpu_time: 7.25,
+    prepared_ut: { result_path: '/task/run/RETURN.json', sha256: 'hash', phase: 'extract_op',
+      result: { task_dir: '/task', target_callable: 'pkg:leaf', op_kind: 'attn',
+        baseline_frozen: true, smoke: 'pass', unittest_smoke: 'pass' } },
+    entity_kind: 'gpu_kernel', device_kernel: name, op_kind: 'attn',
     kernel_extraction: { workload_json: '/eval/kernel_extraction/workload.json',
       ranking_json: '/eval/kernel_extraction/ranking.json', selection_pct_gpu_time: 7.25 } };
 }
@@ -71,7 +77,7 @@ async function run(body, overrides = {}, reply = selection()) {
     VALIDATION_REPLICAS: 1, PLAN_SCHEMA: {},
     searchClosed: () => false, gateNoiseBand: x => x, remainingMin: () => 120, log: () => {}, phase: p => phases.push(p),
     roleAgent: (role, phase, intro, inputs) => ({ role, phase, intro, inputs }),
-    safeAgent: async (prompt, opts) => { calls.push({ ...prompt, opts }); return prompt.role === 'kernel_extractor' ? { delivery_path: '/eval/delivery.json' } : structuredClone(reply); },
+    safeAgent: async (prompt, opts) => { calls.push({ ...prompt, opts }); return prompt.role === 'kernel_extractor' ? { delivery_path: '/eval/delivery.json', prepared: structuredClone(reply) } : structuredClone(reply); },
     readAgentXPreparation: async () => structuredClone(reply),
     applyOpIdentityGuard: q => q, admitHeads: q => q, ensureFlydslGate: async () => {},
     ...overrides,
@@ -87,7 +93,9 @@ async function run(body, overrides = {}, reply = selection()) {
 
 (async () => {
   const { validate } = await import('../../interface/runtime/engine/schema.mjs');
-  assert(validate({ delivery_path: '/eval/delivery.json' }, selectionSchema).ok);
+  assert(validate({ delivery_path: '/eval/delivery.json', prepared: selection() }, selectionSchema).ok);
+  assert(!validate({ delivery_path: '/eval/delivery.json' }, selectionSchema).ok,
+    'the envelope must travel in the reply: the workflow cannot open the delivery file');
   assert(!validate({ head_candidates: [], kernel_candidates: [] }, selectionSchema).ok,
     'selection alone is no longer a workflow handoff');
   assert(!validate({ round: 'resume', profile_topN_json: '/p', top_kernels: [] }, profileSchema).ok,
@@ -115,7 +123,7 @@ async function run(body, overrides = {}, reply = selection()) {
   assert.deepEqual(closed.calls, [], 'a closed search must not start extraction or profiling');
   assert.deepEqual(closed.kernelQueue, []);
   assert.deepEqual(closed.headQueue, []);
-  assert.deepEqual(first.calls[0].opts.schema.required, ['delivery_path']);
+  assert.deepEqual(first.calls[0].opts.schema.required, ['delivery_path', 'prepared']);
   assert.equal(input.SOURCE_DELIVERY_REQUIRED, true);
   let release;
   const finishing = run(initial, { safeAgent: () => new Promise(resolve => { release = resolve; }) });
@@ -272,7 +280,7 @@ async function run(body, overrides = {}, reply = selection()) {
     const roleAgent = (role, phase, intro, inputs) => ({ role, phase, intro, inputs });
     const hasFrozenBaseline = ext => ext && ext.baseline_frozen === true;
     const kernelSelectionVerified = () => ({ ok: true });
-    const hydrateExtractionVerdicts = async ext => ext;
+    const guardUnhydratedVerdicts = ext => ext;
     const log = () => {};
     ${extraction}
     return extractWithBaseline;
