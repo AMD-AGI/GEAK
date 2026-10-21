@@ -162,6 +162,7 @@ jobs:
             scripts/tests/test_gpu_identity.py \
             tools/tests/test_ep_task_runner.py \
             tools/tests/test_gen_ep_task.py \
+            tools/tests/test_gen_author_hip_task.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation
