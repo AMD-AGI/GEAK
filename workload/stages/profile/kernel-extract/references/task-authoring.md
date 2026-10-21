@@ -13,12 +13,21 @@ tasks/<name>/
   harness_lib.py
   leg_runner.py
   overlay_setup.py
+  ut_contract.py          contract lint, operand construction, bound compares
+  reference_f64.py        float64 references
+  ut_driver.py            every gate below, driven by run/ut_contract.json
   kernel_src/             actual editable native/JIT/generated source
   baseline_overlay/       immutable baseline overlay configuration
   baseline_ref/           original hashes/source text, not imported as baseline
   captures/               optional minimal structural fixtures or fallback oracles
   run/                    declarations, raw traces, gate logs, results
+                          (ut_contract.json, ut_cases.json, ut_report.json, ut_result.json)
 ```
+
+`ut_contracts/scaffold_ut.py new` creates this layout from a UT contract family (see
+[UT contracts](../ut_contracts/README.md)); the rest of this page is what the family's
+contract and `ut_driver.py` implement, and what a task must still decide itself. A
+task that does not use a family must meet every requirement here by hand.
 
 Copy `harness_lib.py`, `leg_runner.py` and `overlay_setup.py` from
 `$SHARED_TOOLS/` to the task unchanged. If a helper needs its sibling
@@ -209,7 +218,11 @@ silently present an incompatible generic tensor gate as passing.
 
 Write a single `python3 unittest.py` entry that orchestrates and combines these
 checks, emits per-gate and per-case evidence and exits nonzero on failure or
-incompleteness. A prototype with only replay or timing is not a completed UT.
+incompleteness. The scaffolded `unittest.py` does this through `ut_driver.py`: steps 0-1
+are its `contract`/`inputs` gates, 2 `binding`, 3-4 `correctness` and `isolation`, 5
+`replay`, 6 `negative_controls` and `restore`, 7 `timing`; the controls you declare in
+`meta.ut_contract.negative_controls` must name the exact source fragment and the deviation
+you expect, and the gate requires the compare to fail by at least 10x its bound. A prototype with only replay or timing is not a completed UT.
 The collective case requires the real rank harness described in
 [collective UT](collective-ut.md); the single-process leg runner cannot test a
 multi-rank collective by itself.

@@ -1,0 +1,51 @@
+{
+  "ut_contract_version": 1,
+  "family": "sparse_mla",
+  "op_kind": "attn",
+  "description": "Sparse MLA attention: each token attends to the KV-pool slots its top-k indices name (-1 skipped); scores q . kv * sm_scale with q = [q_nope, q_rope], values the first d_v features. sglang triton_sparse_mla_fwd / flash_mla_sparse / aiter sparse MLA, decode and prefill (DSA models).",
+  "sikl_contract": "flash_mla_with_kvcache@1.0 (sparse branch)",
+  "reference": "sparse_mla",
+  "reference_rows": 32,
+  "axes": {
+    "n_tokens": {"var": true, "lo": 1, "hi": 1048576},
+    "context": {"var": true, "lo": 0, "hi": 16777216, "doc": "resident tokens the indices are drawn from"},
+    "pool": {"var": true, "lo": 1, "hi": 2147483647, "doc": "KV pool slots allocated in the case"},
+    "heads": {"lo": 1, "hi": 128},
+    "d_v": {"lo": 16, "hi": 1024},
+    "d_rope": {"lo": 0, "hi": 256},
+    "topk": {"lo": 1, "hi": 65536},
+    "d_qk": {"expr": "d_v + d_rope"}
+  },
+  "attrs": {
+    "q_dtype": {"values": ["bfloat16"]},
+    "kv_dtype": {"values": ["float8_e4m3fn", "float8_e4m3fnuz", "bfloat16"]}
+  },
+  "constraints": ["context <= pool"],
+  "inputs": {
+    "q_nope": {"shape": ["n_tokens", "heads", "d_v"], "dtype": "attr:q_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "q_rope": {"shape": ["n_tokens", "heads", "d_rope"], "dtype": "attr:q_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "kv": {"shape": ["pool", 1, "d_qk"], "dtype": "attr:kv_dtype", "dist": {"kind": "normal", "std": 0.5}, "lifetime": "state"},
+    "indices": {"shape": ["n_tokens", 1, "topk"], "dtype": "int32", "dist": {"kind": "sparse_indices", "context": "context", "pad": -1}, "lifetime": "per_call"},
+    "sm_scale": {"kind": "scalar", "value": "d_qk ** -0.5"},
+    "d_v_arg": {"kind": "scalar", "value": "d_v"}
+  },
+  "outputs": {
+    "output": {"shape": ["n_tokens", "heads", "d_v"], "dtype": "attr:q_dtype", "bound": {"kind": "baseline_relative"}},
+    "lse": {"shape": ["n_tokens", "heads"], "dtype": "float32", "bound": {"kind": "tolerance", "atol": 0.001, "rtol": 0.001}}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [],
+  "hooks": {},
+  "call": "Invoke the live entry with the backend's keyword names (q_nope, q_rope, kv, indices, sm_scale, d_v) and return (output, lse). If the deployment passes a strided q (q_nope/q_rope as views of one buffer), build that layout in a case of its own.",
+  "timing": {"cache": "kv is the long-lived pool; at long context the gathered rows are cold. indices are stratified across the whole context (sparse_indices) because the selector picks from a context far longer than topk; a contiguous window would be L2-friendly and too fast."},
+  "negative_controls": [
+    "drop the rope part of the score (q_nope . kv[:d_v] only): every probability changes",
+    "treat index -1 as slot 0 instead of skipping it: rows with padding attend to a stray value"
+  ],
+  "pitfalls": [
+    "The decode branch runs inside the CUDA graph: hooks fired during graph capture see placeholder buffers, so an oracle captured there is all zeros and 'passes' with max_rel_err 0.0. Seeded inputs avoid capture entirely; if one is ever used, take it from an eager leg.",
+    "Split-K over the top-k gather is chosen by batch size: replay sigs must span the kv_splits ladder (smallest served batch, modal batch, largest batch, largest captured graph size).",
+    "Rows with no valid index return output 0 and lse -inf in sglang's triton kernel; FlashMLA's sparse API returns +inf. Match the entry under test.",
+    "Allocate the pool once per case at the size the case needs: a pool sized for the largest case makes every small decode case gather from a cold, sparse region it would not touch when served."
+  ]
+}

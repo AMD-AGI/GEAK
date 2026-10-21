@@ -1,0 +1,52 @@
+{
+  "ut_contract_version": 1,
+  "family": "dsa_indexer",
+  "op_kind": "attn",
+  "description": "DeepSeek sparse-attention lightning indexer as one boundary: score[t, s] = sum_h weights[t, h] * relu(q[t, h] . k[s]) (x k_scale[s]) over keys ks[t] <= s < ke[t], then top-k positions. The joint score+top-k task of joint-indexer-ut.md (GLM-5.x DSA, DeepSeek-V3.2/V4); both the decode (paged, per-request) and prefill (ragged) branches.",
+  "reference": "dsa_indexer",
+  "reference_rows": 64,
+  "axes": {
+    "n_tokens": {"var": true, "lo": 1, "hi": 1048576},
+    "n_keys": {"var": true, "lo": 1, "hi": 16777216, "doc": "keys visible to this call (context incl. prefix cache)"},
+    "heads": {"lo": 1, "hi": 128},
+    "dim": {"lo": 16, "hi": 1024},
+    "topk": {"lo": 1, "hi": 4096}
+  },
+  "attrs": {
+    "q_dtype": {"values": ["float8_e4m3fn", "float8_e4m3fnuz", "bfloat16"]},
+    "k_dtype": {"values": ["float8_e4m3fn", "float8_e4m3fnuz", "bfloat16"]},
+    "has_k_scale": {"values": [true, false]},
+    "phase": {"values": ["decode", "prefill"]}
+  },
+  "inputs": {
+    "q": {"shape": ["n_tokens", "heads", "dim"], "dtype": "attr:q_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "k": {"shape": ["n_keys", "dim"], "dtype": "attr:k_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "state",
+          "layout": {"hook": "index_k_cache_layout"}},
+    "k_scale": {"shape": ["n_keys"], "dtype": "float32", "dist": {"kind": "log_uniform", "log2_lo": -2, "log2_hi": 0}, "lifetime": "state", "present_when": "has_k_scale"},
+    "weights": {"shape": ["n_tokens", "heads"], "dtype": "float32", "dist": {"kind": "normal", "std": 0.5}, "lifetime": "per_call"},
+    "ks": {"shape": ["n_tokens"], "dtype": "int32", "dist": {"kind": "hook", "hook": "key_ranges"}, "lifetime": "per_call"},
+    "ke": {"shape": ["n_tokens"], "dtype": "int32", "dist": {"kind": "produced", "by": "ks"}, "lifetime": "per_call"}
+  },
+  "outputs": {
+    "indices": {"shape": ["n_tokens", "topk"], "dtype": "int32",
+                "bound": {"kind": "topk_equivalent", "scores": "ref:scores", "pad": -1, "score_atol": 1e-3, "score_rtol": 1e-3}}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "any_in_full_rows"},
+  "layout_facts": [],
+  "hooks": {
+    "key_ranges": "(name, spec, shape, dtype, sym, gen, device) -> {'ks': (...), 'ke': (...)}: each token's visible key window as served. Decode: one request's whole context (ks = request start, ke = start + context). Prefill: causal over the request (ke = prefix + position + 1). Reuse the observed per-request context lengths from the case manifest; do not draw them uniformly.",
+    "index_k_cache_layout": "(t, name, sym) -> the indexer key cache in the layout the kernel reads (paged fp8 with per-block scales, or flat). The logical k stays row-major."
+  },
+  "call": "Invoke the joint entry (or the score entry followed by the live top-k, if that is how the deployment chains them) and return the top-k indices in token-row order. The decode and prefill branches are different kernels: one task with dispatch_ut/joint_ut phases, one regime per branch.",
+  "timing": {"cache": "k is a long-lived cache far beyond L2 at long context; read-evict matches. The decode branch runs inside the CUDA graph: time it in graph mode."},
+  "negative_controls": [
+    "drop the ReLU (or apply it after the head-weighted sum): many selections change, different_scores on most rows",
+    "skip the last head in the weighted sum: rows whose margin is small reorder"
+  ],
+  "pitfalls": [
+    "The score never leaves a fused kernel, so the selection is bounded against float64 reference scores with a small score tolerance: near-ties within that tolerance may legitimately swap, anything else is a wrong selection.",
+    "prefill and decode share nothing but the math: four different kernels across the two phases on GLM-5.2. One task must cover both served branches with per-phase regimes.",
+    "The prefill score is called once per run in some deployments; its e2e weight is whatever the observed effective_calls say, not 'prefill-heavy' because ISL is long.",
+    "Real key windows decide the work: a uniform window over n_keys misrepresents both the per-row cost and the tie structure."
+  ]
+}

@@ -676,10 +676,57 @@ def test_applyback_refuses_to_compare_across_metric_basis(tmp_path):
     assert ab["basis_comparable"] is False
 
 
+# ----------------------------------------------------------------- profile slot
+
+def _profile_out(tmp_path, receipt):
+    out = tmp_path / "out"
+    task = out / "tasks" / "t1"
+    (task / "kernel_src").mkdir(parents=True)
+    (task / "run").mkdir()
+    for f in ("unittest.py", "meta.json", "cases.py"):
+        (task / f).write_text("{}")
+    if receipt is not None:
+        (task / "run" / "ut_result.json").write_text(json.dumps(receipt))
+    for f, d in {"kernel_workload.json": {}, "kernel_ranking.json": {"ranking": [{}]},
+                 "selection_targets.json": {"targets": [{"id": "k1", "overall_pct": 12.0}]},
+                 "task_plan.json": {"tasks": [{"selected_identities": ["k1"]}]}}.items():
+        (out / f).write_text(json.dumps(d))
+    run([sys.executable, "workload/stages/profile/finalize.py"],
+        env_extra={"OUT": str(out), "STAGE": "profile", "STAGE_SKILL": "kernel-extract"})
+    return json.loads((out / "result.json").read_text())
+
+
+@pytest.mark.parametrize("receipt,status", [
+    (None, "blocked"),                                    # never run on a GPU
+    ({"exit_code": 1, "verdict": "fail"}, "blocked"),
+    ({"exit_code": 0, "verdict": "pass"}, "ok"),
+])
+def test_profile_requires_a_passing_ut_receipt_per_task(tmp_path, receipt, status):
+    """A task directory with the right files is not a finished task: the optimize stage
+    would spend its budget on a UT that never passed. Only exit_code 0 counts."""
+    res = _profile_out(tmp_path, receipt)
+    assert res["status"] == status, res
+    assert res["metrics"]["tasks_ut_passed"] == (1 if status == "ok" else 0)
+
+
+def test_profile_ut_contract_families_validate():
+    """Every UT contract family the profile skill ships loads and names a declared hook for
+    every hook it uses."""
+    sys.path.insert(0, os.path.join(WORKLOAD, "stages", "profile", "kernel-extract", "ut_contracts"))
+    import ut_contract as U
+    names = [f[:-5] for f in os.listdir(U.FAMILIES_DIR) if f.endswith(".json")]
+    assert len(names) >= 10
+    for n in names:
+        doc = U.load_family(n)
+        for s in doc["inputs"].values():
+            hook = (s.get("dist") or {}).get("hook") or (s.get("layout") or {}).get("hook")
+            assert not hook or hook in doc["hooks"], (n, hook)
+
+
 # ----------------------------------------------------------------- vendored skill integrity
 
 def test_vendored_skills_match_their_manifest():
-    """The two upstream skills are vendored byte-identical; modified, they are no longer
+    """The upstream roofline skill is vendored byte-identical; modified, it is no longer
     the same skill."""
     r = run([sys.executable, "workload/scripts/skill_manifest.py", "verify-all"])
     assert r.returncode == 0, r.stdout + r.stderr

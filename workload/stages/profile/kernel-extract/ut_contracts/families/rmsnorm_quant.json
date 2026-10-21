@@ -1,0 +1,55 @@
+{
+  "ut_contract_version": 1,
+  "family": "rmsnorm_quant",
+  "op_kind": "norm",
+  "description": "RMSNorm (optionally with residual add) fused with activation quantization of its output: FP8 per-token / per-1x128-group, or MXFP4 per-1x32 with e8m0 scales. aiter add_rmsnorm_quant / fused_rms_fp8_group_quant / rmsnorm + dynamic_mxfp4_quant fusions.",
+  "reference": "rmsnorm",
+  "reference_rows": 1024,
+  "axes": {
+    "rows": {"var": true, "lo": 1, "hi": 1048576},
+    "hidden": {"lo": 128, "hi": 65536, "multiple_of": 128},
+    "group": {"lo": 32, "hi": 65536, "doc": "elements per scale: hidden for per-token, 128 for fp8 group, 32 for mxfp4"},
+    "n_groups": {"expr": "hidden // group"},
+    "hidden_packed": {"expr": "hidden // 2"}
+  },
+  "attrs": {
+    "quant": {"values": ["fp8", "mxfp4"]},
+    "has_residual": {"values": [true, false]},
+    "act_dtype": {"values": ["bfloat16", "float16"]},
+    "fp8_dtype": {"values": ["float8_e4m3fn", "float8_e4m3fnuz"]}
+  },
+  "constraints": [
+    "hidden % group == 0",
+    "quant != 'mxfp4' or group == 32"
+  ],
+  "inputs": {
+    "x": {"shape": ["rows", "hidden"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "writable": true},
+    "residual": {"shape": ["rows", "hidden"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "present_when": "has_residual", "writable": true},
+    "weight": {"shape": ["hidden"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "mean": 1.0, "std": 0.1}, "lifetime": "weight"},
+    "eps": {"kind": "scalar", "value": 1e-6}
+  },
+  "outputs": {
+    "out_q": {"shape": ["rows", "hidden"], "dtype": "attr:fp8_dtype", "present_when": "quant == 'fp8'",
+              "bound": {"kind": "noise_relative", "multiple": 4.0, "rounding_multiple": 2.0}, "max_violation_fraction": 0.0005},
+    "out_q_packed": {"shape": ["rows", "hidden_packed"], "dtype": "uint8", "present_when": "quant == 'mxfp4'",
+                     "bound": {"kind": "bytes_exact"}, "max_violation_fraction": 0.0005},
+    "out_scale": {"shape": ["rows", "n_groups"], "dtype": "float32",
+                  "bound": {"kind": "tolerance", "atol": 0.0, "rtol": 1e-6, "against": "baseline"}},
+    "residual_out": {"shape": ["rows", "hidden"], "dtype": "attr:act_dtype", "present_when": "has_residual", "bound": {"kind": "output_rounding"}}
+  },
+  "compare": {"determinism": "bitwise", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [],
+  "hooks": {},
+  "call": "Return the quantized output (fp8 tensor, or packed uint8 view for mxfp4), its scales (as float32; decode e8m0 with reference_f64.decode_e8m0) and residual_out, in contract order. Clone in-place operands inside call().",
+  "timing": {"cache": "same as rmsnorm: operands are L2-warm in serving; record read-evict as the measured condition."},
+  "negative_controls": [
+    "compute the scale from amax of the un-normalized x: every scale and every quantized value shifts",
+    "round-to-zero instead of round-to-nearest-even in the fp8 cast: a biased one-ulp shift on about half the elements, beyond max_violation_fraction"
+  ],
+  "pitfalls": [
+    "Quantized outputs flip by one code where the fp32 value lands on a rounding boundary, and a different (correct) reduction order moves which elements do: that is why out_q is noise_relative with a 5e-4 violation budget and mxfp4 bytes are exact up to the same budget, not bit-identical.",
+    "Never measure packed fp4 bytes with a relative error; compare bytes, or dequantize both and compare values.",
+    "The scale is part of the output: a candidate that changes amax/448 to amax/447 passes a dequantized-value check and breaks the consumer GEMM's numerics.",
+    "These ops are bandwidth-bound and microsecond-scale in decode: the eager timing includes ~35-45 us of host dispatch; time in the deployment graph mode."
+  ]
+}

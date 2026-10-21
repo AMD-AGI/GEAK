@@ -87,7 +87,10 @@ Read [delivery contract](references/delivery-contract.md) before authoring.
 Save `task_plan.json` with one owner per complete math boundary. For each task,
 save the original declaration as `run/requested_kernel.json` (called `KERNEL`
 in the delivery contract), including exact selected identities, callable
-candidates, phases and `source_delivery_required=true`.
+candidates, phases and `source_delivery_required=true`. Name each task's UT
+contract family in `task_plan.json` (`tasks[].ut_family`; `python3
+"$SKILL_ROOT/ut_contracts/scaffold_ut.py" list`), or `custom` with the reason no
+family fits.
 
 Keep required companions even when below the selection threshold. Use
 `joint_ut.phases` for mandatory chains, including split-K plus reduce; use
@@ -119,6 +122,15 @@ Each `tasks/<name>/` contains its own `kernel_src/`, `cases.py`, `meta.json`,
 `unittest.py`, baseline manifest/overlay and `run/` evidence. Captured oracles are
 optional; preserve minimal structural fixtures only where needed.
 Copy the shared harness/leg/overlay helpers into the task; freeze them once authored.
+
+Build each task from its UT contract family: read [UT contracts](ut_contracts/README.md),
+create the task with `ut_contracts/scaffold_ut.py new`, and fill only what the family
+leaves open (the live `call`, the family's hooks, the case manifest, a replay bundle for
+graph phases, negative controls). The family fixes operand distributions, layout facts and
+each output's error bound; `unittest.py` runs every gate through `ut_driver.py`. Run the
+task's CPU lint (`python3 ut_contract.py <task>`) before any GPU session. Depart from a
+family only by an override with a stated reason; for an operator no family covers, write a
+contract in the same format (`--family-file`) rather than a free-form harness.
 
 Deliver actual native/JIT/generated computation source for every claimed leaf,
 with build resources and version/hash provenance. A copied dispatcher that
@@ -155,7 +167,7 @@ but do not claim they reproduce serving performance without evidence. Any necess
 capture uses `CAPTURE_PERSIST_POLICY=structure_only` unless explicitly overridden.
 
 Use `h.measure_legs()` and `h.serving_weighted_speedup()` from the shared
-harness. Set `workload.kind="agentx_trace_replay"`, `weighting="observed"`, and
+harness (the driver's timing gate does). Set `workload.kind="agentx_trace_replay"`, `weighting="observed"`, and
 `serving_weight_model.source="observed_workload"` with an evidence path.
 Each case has a unique `sig`, observed `regime` and finite nonnegative
 `effective_calls` on one consistent basis. Aggregate as

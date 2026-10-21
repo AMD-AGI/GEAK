@@ -1,0 +1,53 @@
+{
+  "ut_contract_version": 1,
+  "family": "gemm_a4w4_mxfp4",
+  "op_kind": "gemm",
+  "description": "MXFP4 GEMM: (a * a_scale) @ (b * b_scale).T, e2m1 values packed two per byte, one e8m0 scale per 1 x 32. aiter gemm_a4w4 (asm / CK / FlyDSL), MXFP4 checkpoints (GLM-5.x MXFP4, Kimi).",
+  "sikl_contract": "gemm_a4w4_mxfp4@1.0",
+  "reference": "gemm_a4w4_mxfp4",
+  "reference_rows": 256,
+  "axes": {
+    "m": {"var": true, "lo": 1, "hi": 1048576},
+    "n": {"lo": 16, "hi": 262144, "multiple_of": 16},
+    "k": {"lo": 64, "hi": 65536, "multiple_of": 64},
+    "k_packed": {"expr": "k // 2"},
+    "scale_k": {"expr": "k // 32"}
+  },
+  "attrs": {
+    "out_dtype": {"values": ["bfloat16", "float16"]},
+    "layout": {"values": ["row_major", "b_shuffled"], "doc": "b_shuffled: b preshuffled 16x16 and both scales from dynamic_mxfp4_quant(shuffle=True)"}
+  },
+  "inputs": {
+    "a": {"shape": ["m", "k_packed"], "dtype": "uint8", "lifetime": "per_call",
+          "dist": {"kind": "hook", "hook": "mxfp4_quant", "source": {"kind": "normal", "std": 1.0}, "scale_input": "a_scale"}},
+    "a_scale": {"shape": ["m", "scale_k"], "dtype": "uint8", "lifetime": "per_call", "dist": {"kind": "produced", "by": "a"}},
+    "b": {"shape": ["n", "k_packed"], "dtype": "uint8", "lifetime": "weight",
+          "dist": {"kind": "hook", "hook": "mxfp4_quant", "source": {"kind": "normal", "std": 1.0}, "scale_input": "b_scale"}},
+    "b_scale": {"shape": ["n", "scale_k"], "dtype": "uint8", "lifetime": "weight", "dist": {"kind": "produced", "by": "b"}}
+  },
+  "outputs": {
+    "out": {"shape": ["m", "n"], "dtype": "attr:out_dtype",
+            "bound": {"kind": "dot_product", "length": "k", "accumulate_dtype": "float32", "max_split_k": 1}}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [
+    {"tensor": "b", "attr": "is_shuffled", "equals": true, "when": "layout == 'b_shuffled'"}
+  ],
+  "hooks": {
+    "mxfp4_quant": "(name, spec, shape, dtype, sym, gen, device) -> {name: (packed, logical), spec.dist.scale_input: (scales, logical_scales)}. Draw the float source from dist.source with `gen`, quantize it with the INSTALLED quantizer (aiter dynamic_mxfp4_quant, shuffle per the layout attr), and return as logical the float64 dequantization of the UNshuffled packed values and scales (reference_f64.dequant_mxfp4 / decode_e8m0). Never pack fp4 by hand."
+  },
+  "call": "Pass packed a/b and their e8m0 scales as the live caller does (shuffled when layout == 'b_shuffled'); return out.",
+  "timing": {
+    "cache": "b/b_scale are weights; a/a_scale are produced by the preceding fused quant kernel and are L2-warm in serving."
+  },
+  "negative_controls": [
+    "use scale block j+1 for block j on the last K block",
+    "flip the nibble order of one packed operand load (low/high): a large, unbiased error the bound rejects"
+  ],
+  "pitfalls": [
+    "Packed bytes are not numbers: compare the GEMM output, and if a quantized intermediate is ever an output, compare it bytes_exact (rel error over packed bytes means nothing).",
+    "The quantizer is part of the input contract: a hand-written e2m1 packer that disagrees with dynamic_mxfp4_quant on rounding or nibble order produces a valid-looking but different operand.",
+    "Scale padding: aiter pads e8m0 scales to (256, 8) when shuffling; inside the domain (k % 256 == 0) the padding is a no-op, outside it the shuffled scale shape differs from (m, k/32).",
+    "kernelName ending in _fp4 in a fused-MoE CSV means the activation quant is fused in; that is a different operator boundary from this GEMM."
+  ]
+}

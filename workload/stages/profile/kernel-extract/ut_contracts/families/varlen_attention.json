@@ -1,0 +1,56 @@
+{
+  "ut_contract_version": 1,
+  "family": "varlen_attention",
+  "op_kind": "attn",
+  "description": "Prefill / extend attention over packed variable-length sequences with GQA, causal bottom-right aligned (query i of an Lq chunk over Lk keys sees keys < Lk - Lq + i + 1). aiter flash_attn_varlen / mha_varlen_fwd, sglang extend attention, dense MLA prefill (MHA form).",
+  "reference": "varlen_attention",
+  "reference_rows": 64,
+  "axes": {
+    "batch": {"var": true, "lo": 1, "hi": 65536},
+    "total_q": {"var": true, "lo": 1, "hi": 4194304},
+    "total_k": {"var": true, "lo": 1, "hi": 67108864},
+    "heads": {"lo": 1, "hi": 256},
+    "kv_heads": {"lo": 1, "hi": 256},
+    "head_size": {"lo": 16, "hi": 1024},
+    "v_head_size": {"lo": 16, "hi": 1024},
+    "n_offsets": {"expr": "batch + 1"}
+  },
+  "attrs": {
+    "causal": {"values": [true, false]},
+    "act_dtype": {"values": ["bfloat16", "float16"]},
+    "return_lse": {"values": [false, true]}
+  },
+  "constraints": [
+    "heads % kv_heads == 0",
+    "total_q <= total_k",
+    "batch <= total_q"
+  ],
+  "inputs": {
+    "q": {"shape": ["total_q", "heads", "head_size"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "k": {"shape": ["total_k", "kv_heads", "head_size"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "v": {"shape": ["total_k", "kv_heads", "v_head_size"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "cu_seqlens_q": {"shape": ["n_offsets"], "dtype": "int32", "dist": {"kind": "hook", "hook": "cu_seqlens_qk"}, "lifetime": "per_call"},
+    "cu_seqlens_k": {"shape": ["n_offsets"], "dtype": "int32", "dist": {"kind": "produced", "by": "cu_seqlens_q"}, "lifetime": "per_call"},
+    "scale": {"kind": "scalar", "value": "head_size ** -0.5"}
+  },
+  "outputs": {
+    "out": {"shape": ["total_q", "heads", "v_head_size"], "dtype": "attr:act_dtype", "bound": {"kind": "baseline_relative"}},
+    "lse": {"shape": ["total_q", "heads"], "dtype": "float32", "present_when": "return_lse", "bound": {"kind": "tolerance", "atol": 0.001, "rtol": 0.001}}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [],
+  "hooks": {
+    "cu_seqlens_qk": "(name, spec, shape, dtype, sym, gen, device) -> {'cu_seqlens_q': ..., 'cu_seqlens_k': ...}: per-request (new tokens, prefix + new tokens) as served — chunked-prefill chunk sizes and prefix-cache hits from the case manifest, not a uniform split. Every key length >= its query length."
+  },
+  "call": "Invoke the varlen entry with max_seqlen_q/k computed from the cu_seqlens as the server does; return out (and lse when the deployment consumes it).",
+  "timing": {"cache": "q/k/v were just written by the projections and rope; for long prefixes k/v come from the paged cache (cold). Record which."},
+  "negative_controls": [
+    "align the causal mask top-left instead of bottom-right: every chunk with a prefix attends to too few keys",
+    "use cu_seqlens_q for both q and k offsets: wrong keys for every request with a prefix"
+  ],
+  "pitfalls": [
+    "Chunked prefill with prefix cache is the served shape; a UT with prefix 0 tests a different mask path.",
+    "An empty key range gives lse -inf: non-finite positions must be identical on both sides, never 'within tolerance'.",
+    "Prefill is usually eager; time it eager, but say the timing includes host dispatch for small chunks."
+  ]
+}

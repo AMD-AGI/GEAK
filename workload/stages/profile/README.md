@@ -49,8 +49,8 @@ It checks for and records:
 | `tasks/<name>/` | §4, frozen harness | **one per GPU in the optimize stage**; must contain `unittest.py`, `meta.json`, `kernel_src/`, `cases.py` |
 | `REPORT.md` / `results.json` | §5 | reporting |
 
-`metrics` records `kernels_censused`, `targets_selected`, `tasks_built` and
-`selected_pct_gpu_time` (the summed share of the selected kernels).
+`metrics` records `kernels_censused`, `targets_selected`, `tasks_built`,
+`tasks_ut_passed` and `selected_pct_gpu_time` (the summed share of the selected kernels).
 
 ## Acceptance rules
 
@@ -59,6 +59,14 @@ It checks for and records:
   renormalizing the remainder to 100%.
 - A task directory without `unittest.py` cannot be run by the optimize stage and is
   rejected outright.
+- A task counts as built only with a passing receipt: `tasks/<name>/run/ut_result.json`
+  with `exit_code` 0, which the UT writes after every gate ran on a GPU. Any other task is
+  listed and the stage is `blocked` until it passes or its identities move to
+  `task_plan.json` `blocked_identities` with a reason.
+- Tasks are built from the skill's UT contract families (`kernel-extract/ut_contracts/`):
+  the family fixes operand distributions, layout facts and per-output error bounds, and
+  `ut_driver.py` runs every gate. A task-authored contract (`--family-file`) is the route
+  for an operator no family covers.
 - When GPUs are unavailable it is acceptable to complete the CPU-only portion and report
   `blocked`, but a CPU-only check must never be presented as a complete extraction.
 

@@ -36,6 +36,18 @@ def coverage(out, targets):
 TASK_FILES = ["unittest.py", "meta.json", "cases.py"]
 
 
+def ut_verdict(task_dir):
+    """(passed, why) from the task's own receipt, run/ut_result.json: exit_code 0 is a UT whose
+    every gate ran and passed. A task without one has not been run on a GPU."""
+    path = os.path.join(task_dir, "run", "ut_result.json")
+    if not os.path.exists(path):
+        return False, "no run/ut_result.json"
+    receipt = read_json(path)
+    if receipt.get("exit_code") != 0:
+        return False, "exit_code %r (%s)" % (receipt.get("exit_code"), receipt.get("verdict", "?"))
+    return True, ""
+
+
 def main():
     out = os.environ.get("OUT")
     if not out:
@@ -75,15 +87,28 @@ def main():
     if built:
         artifacts["tasks"] = "tasks"
 
+    unpassed = []
+    for name, _ in built:
+        passed, why = ut_verdict(os.path.join(tasks_dir, name))
+        if not passed:
+            unpassed.append("%s: %s" % (name, why))
+
     metrics = {
         "kernels_censused": censused,
         "targets_selected": len(targets),
         "tasks_built": len(built),
+        "tasks_ut_passed": len(built) - len(unpassed),
         "selected_pct_gpu_time": round(selected_pct, 4),
     }
 
     notes = []
     status = "ok"
+    if unpassed:
+        status = "blocked"
+        notes.append("these tasks have no passing UT receipt (run/ut_result.json with exit_code "
+                     "0): %s. Run each task's unittest.py on a GPU, or move the identities it "
+                     "owns to task_plan.json blocked_identities with the reason"
+                     % "; ".join(unpassed))
     if broken:
         status = "blocked"
         notes.append("these task directories are incomplete and the optimize stage cannot "

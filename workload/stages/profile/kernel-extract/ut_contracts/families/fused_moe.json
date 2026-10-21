@@ -1,0 +1,68 @@
+{
+  "ut_contract_version": 1,
+  "family": "fused_moe",
+  "op_kind": "moe",
+  "description": "Whole fused MoE: route each token to its top-k experts, run gate/up and down projections, combine with the routing weights. Covers aiter fused_moe (CK/asm/FlyDSL 2-stage, including the sorting and quant kernels it launches) for bf16, FP8 block-scaled and MXFP4 weights.",
+  "sikl_contract": "fused_moe@1.0",
+  "reference": "fused_moe",
+  "reference_rows": 128,
+  "axes": {
+    "n_tokens": {"var": true, "lo": 1, "hi": 65536, "doc": "tokens routed in this call"},
+    "model_dim": {"lo": 128, "hi": 16384, "multiple_of": 128},
+    "inter_dim": {"lo": 64, "hi": 16384, "multiple_of": 64, "doc": "per-expert intermediate size on this rank (after TP split)"},
+    "n_experts": {"lo": 1, "hi": 1024, "doc": "experts on this rank, including a fused shared expert if the deployment folds one in"},
+    "topk": {"lo": 1, "hi": 32, "doc": "experts per token, including the fused shared expert slot when there is one"},
+    "gate_up_rows": {"expr": "2 * inter_dim"}
+  },
+  "attrs": {
+    "quant": {"values": ["bf16", "fp8_blockscale", "mxfp4"]},
+    "activation": {"values": ["silu", "gelu", "gelu_tanh"]},
+    "act_dtype": {"values": ["bfloat16", "float16"]},
+    "layout": {"values": ["row_major", "shuffled_16x16", "gate_up_interleaved"], "doc": "the stored weight layout the dispatcher reads (w1/w2 is_shuffled, interleaved gate/up for SiTU-style kernels)"}
+  },
+  "constraints": [
+    "topk <= n_experts",
+    "quant != 'mxfp4' or (model_dim % 256 == 0 and inter_dim % 128 == 0)"
+  ],
+  "inputs": {
+    "hidden_states": {"shape": ["n_tokens", "model_dim"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "w1": {"shape": ["n_experts", "gate_up_rows", "model_dim"], "dtype": "uint8", "lifetime": "weight",
+           "dist": {"kind": "hook", "hook": "moe_weights", "produces": ["w1", "w1_scale", "w2", "w2_scale"]}},
+    "w2": {"shape": ["n_experts", "model_dim", "inter_dim"], "dtype": "uint8", "lifetime": "weight", "dist": {"kind": "produced", "by": "w1"}},
+    "w1_scale": {"shape": ["n_experts", "gate_up_rows", 1], "dtype": "float32", "lifetime": "weight", "dist": {"kind": "produced", "by": "w1"}, "present_when": "quant != 'bf16'"},
+    "w2_scale": {"shape": ["n_experts", "model_dim", 1], "dtype": "float32", "lifetime": "weight", "dist": {"kind": "produced", "by": "w1"}, "present_when": "quant != 'bf16'"},
+    "topk_ids": {"shape": ["n_tokens", "topk"], "dtype": "int32", "lifetime": "per_call",
+                 "dist": {"kind": "routing", "experts": "n_experts", "load": "uniform"},
+                 "doc": "override dist with load=observed and the per-expert token counts from the trace for timing buckets"},
+    "topk_weights": {"shape": ["n_tokens", "topk"], "dtype": "float32", "lifetime": "per_call", "dist": {"kind": "simplex"}}
+  },
+  "outputs": {
+    "out": {"shape": ["n_tokens", "model_dim"], "dtype": "attr:act_dtype",
+            "bound": {"kind": "baseline_relative"}, "max_violation_fraction": 0.001}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.001, "element_order": "fixed"},
+  "layout_facts": [
+    {"tensor": "w1", "attr": "is_shuffled", "equals": true, "when": "layout != 'row_major'"},
+    {"tensor": "w2", "attr": "is_shuffled", "equals": true, "when": "layout != 'row_major'"}
+  ],
+  "hooks": {
+    "moe_weights": "(name, spec, shape, dtype, sym, gen, device) -> {w1, w2, and w1_scale/w2_scale when quantized: (stored, logical)}. Draw float weights (w1 ~ N(0, 1/model_dim), w2 ~ N(0, 1/inter_dim)) with `gen`, quantize them with the INSTALLED quantizer for `quant`, store them in `layout` with the installed shuffle (and set is_shuffled), and return as logical the float64 DEQUANTIZED, row-major, gate-rows-first weights. Scale shapes in the contract are placeholders for per-channel; for fp8 block scales or MXFP4 e8m0 scales override inputs.w1_scale.shape with a why."
+  },
+  "call": "Invoke the whole fused_moe entry as the model layer does (including expert_mask / num_local_tokens / doweight_stage1 when the deployment passes them) and return the combined output. The sorting kernel it launches is part of the boundary.",
+  "timing": {
+    "cache": "w1/w2 are weights and far larger than L2; read-evict matches serving. Routing decides which experts are touched: time on the observed expert load (routing.load = observed with per-expert counts from the trace), and if only uniform routing is available, report that bucket as a bound.",
+    "notes": ["decode buckets differ by up to 2.5x between uniform and skewed routing on the same shape"]
+  },
+  "negative_controls": [
+    "drop the routing-weight multiply in the stage-2 combine (or apply it twice): an unbiased-looking but large error the bound rejects",
+    "route one expert's tokens to expert e+1 in the gather: wrong rows, error ~ |out|"
+  ],
+  "pitfalls": [
+    "moe_sorting is nondeterministic for bit-identical inputs: build each case's args ONCE outside any repeat loop, or the routing metadata change reads as kernel nondeterminism. check_reproducible covers the operands, not the kernel's internal sort.",
+    "The installed kernel combines top-k with bf16 atomics, so two baseline runs differ; that is why the bound is baseline_relative with max_violation_fraction 1e-3 rather than an exact or tight-tol self comparison (a fail-count gate on that oracle is unpassable even for the baseline).",
+    "Uniform routing is the slow end of expert occupancy; it is fine for correctness, not for the served timing.",
+    "Count experts and top-k the way the deployment does: GLM-5.2 fuses the shared expert as expert 257 with topk 9; writing 256/8 makes every tuned lookup miss.",
+    "An MTP draft layer may run its MoE in bf16 (quant_type No) while the main layers are MXFP4: that is a separate task, not a case of this one.",
+    "Which language ran is printed by the 'using 2stage' dispatch line; the 'not found' line is printed only on a miss, so counting it inverts the conclusion."
+  ]
+}

@@ -40,8 +40,10 @@ python3 "$WORKLOAD_ROOT/stages/profile/finalize.py"
 ```
 
 It reports `blocked` while a selected identity has neither a task nor a stated
-blocker, or a task directory lacks one of the four required entries. A CPU-only pass is
-`blocked`, not `ok`: say which GPU gates did not run.
+blocker, a task directory lacks one of the four required entries, or a task has no
+passing `run/ut_result.json` (`exit_code` 0). A CPU-only pass is `blocked`, not `ok`: say
+which GPU gates did not run. The optimize stage reads the same receipt and the
+`{"exit": .., "weighted": ..}` line `ut_driver.py` prints.
 
 ## What the pipeline does not ask for
 

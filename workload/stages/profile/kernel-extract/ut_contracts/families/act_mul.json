@@ -1,0 +1,36 @@
+{
+  "ut_contract_version": 1,
+  "family": "act_mul",
+  "op_kind": "elementwise",
+  "description": "Gated activation: out = act(x[..., :d]) * x[..., d:] with d = width // 2 (silu_and_mul, gelu_and_mul, gelu_tanh_and_mul). For a fused quantized output use rmsnorm_quant's output bounds as an override.",
+  "reference": "act_mul",
+  "reference_rows": 1024,
+  "axes": {
+    "rows": {"var": true, "lo": 1, "hi": 1048576},
+    "width": {"lo": 2, "hi": 131072, "multiple_of": 2, "doc": "2 * d: gate and up halves"},
+    "d": {"expr": "width // 2"}
+  },
+  "attrs": {
+    "activation": {"values": ["silu", "gelu", "gelu_tanh"]},
+    "act_dtype": {"values": ["bfloat16", "float16"]}
+  },
+  "inputs": {
+    "x": {"shape": ["rows", "width"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 2.0}, "lifetime": "per_call"}
+  },
+  "outputs": {
+    "out": {"shape": ["rows", "d"], "dtype": "attr:act_dtype", "bound": {"kind": "tolerance", "atol": 1e-6, "rtol": 0.0078125}}
+  },
+  "compare": {"determinism": "bitwise", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [],
+  "hooks": {},
+  "call": "Return out; when the entry writes a preallocated out, allocate it inside call() so every call returns a fresh tensor.",
+  "timing": {"cache": "x is the GEMM output just written; L2-warm in serving."},
+  "negative_controls": [
+    "swap gate and up halves: act applied to the wrong half, error ~|out|",
+    "replace sigmoid with a first-order approximation: error grows with |x|, std 2 inputs reach it"
+  ],
+  "pitfalls": [
+    "std 2.0 inputs exercise the saturating tails of sigmoid/erf/tanh; N(0,1) barely leaves the linear region and hides a bad approximation.",
+    "One bf16 ulp of rtol plus a 1e-6 floor: the activation is computed in fp32 and rounded once; an fp16/bf16 intermediate costs an extra rounding the bound exposes."
+  ]
+}

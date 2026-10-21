@@ -1,0 +1,40 @@
+{
+  "ut_contract_version": 1,
+  "family": "rmsnorm",
+  "op_kind": "norm",
+  "description": "RMSNorm, optionally fused with the residual add: x' = x + residual; out = x' * rsqrt(mean(x'^2) + eps) * weight; residual_out = x'. aiter rmsnorm2d / add_rmsnorm, sglang fused_add_rmsnorm, Triton variants.",
+  "reference": "rmsnorm",
+  "reference_rows": 1024,
+  "axes": {
+    "rows": {"var": true, "lo": 1, "hi": 1048576, "doc": "tokens (times heads for a per-head q/k norm)"},
+    "hidden": {"lo": 16, "hi": 65536, "multiple_of": 8}
+  },
+  "attrs": {
+    "has_residual": {"values": [true, false]},
+    "act_dtype": {"values": ["bfloat16", "float16"]}
+  },
+  "inputs": {
+    "x": {"shape": ["rows", "hidden"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "writable": true},
+    "residual": {"shape": ["rows", "hidden"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "present_when": "has_residual", "writable": true},
+    "weight": {"shape": ["hidden"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "mean": 1.0, "std": 0.1}, "lifetime": "weight"},
+    "eps": {"kind": "scalar", "value": 1e-6}
+  },
+  "outputs": {
+    "out": {"shape": ["rows", "hidden"], "dtype": "attr:act_dtype", "bound": {"kind": "tolerance", "atol": 0.0, "rtol": 0.0078125}},
+    "residual_out": {"shape": ["rows", "hidden"], "dtype": "attr:act_dtype", "present_when": "has_residual", "bound": {"kind": "output_rounding"}}
+  },
+  "compare": {"determinism": "bitwise", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [],
+  "hooks": {},
+  "call": "Many entries write out/residual in place (fused_add_rmsnorm overwrites x and residual). Clone the operands inside call() before invoking such an entry and return the written tensors as (out, residual_out); the driver checks that the caller's operands are unchanged after call().",
+  "timing": {"cache": "x and residual come from the preceding kernel and are L2-warm in serving; read-evict makes this bandwidth-bound op look slower than served. Record it as the measured condition."},
+  "negative_controls": [
+    "reduce the sum of squares over the first vector chunk only (or stop the row loop one chunk early): every output of the row rescales by a visible factor. Dropping eps is NOT a usable control: eps/mean(x^2) ~ 1e-6 sits below bf16 rounding",
+    "skip the weight multiply on the last vector chunk: error ~|y| on those columns"
+  ],
+  "pitfalls": [
+    "out's bound is one bf16 ulp (rtol 2^-7) against float64: a correct kernel rounds once (out) after an fp32 reduction; two roundings (normalize to bf16, then multiply weight) can land 2 ulp off. If the installed kernel does that, the task overrides the bound with a why rather than the candidate inheriting a loose one silently.",
+    "An in-place entry handed the same buffers across draws normalizes already-normalized data: call() must clone.",
+    "Per-head q/k norms (DeepSeek/GLM MLA) reshape (tokens, heads*dim) to (tokens*heads, dim): rows counts token-heads."
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "ut_contract_version": 1,
+  "family": "gemm_a8w8_blockscale",
+  "op_kind": "gemm",
+  "description": "FP8 GEMM dequantized per block: a fp32 scale per 1 x 128 of a (K-major or MN-major) and per 128 x 128 of b. aiter gemm_a8w8_blockscale (CK / asm / bpreshuffle), DeepSeek-style FP8 checkpoints.",
+  "sikl_contract": "gemm_a8w8_blockwise_scaled@1.0",
+  "reference": "gemm_a8w8_blockscale",
+  "reference_rows": 256,
+  "axes": {
+    "m": {"var": true, "lo": 1, "hi": 1048576},
+    "n": {"lo": 16, "hi": 262144, "multiple_of": 16},
+    "k": {"lo": 128, "hi": 65536, "multiple_of": 128},
+    "scale_n": {"expr": "ceil_div(n, 128)"},
+    "scale_k": {"expr": "ceil_div(k, 128)"}
+  },
+  "attrs": {
+    "fp8_dtype": {"values": ["float8_e4m3fn", "float8_e4m3fnuz"], "doc": "e4m3fn on gfx950, e4m3fnuz on gfx942 (harness_lib.regime_dtype decides; never hard-code)"},
+    "out_dtype": {"values": ["bfloat16", "float16"]},
+    "scale_major": {"values": ["K", "MN"], "doc": "a_scale is (m, scale_k) when K, (scale_k, m) when MN"},
+    "layout": {"values": ["row_major", "b_preshuffled_16x16"]}
+  },
+  "constraints": [
+    "layout == 'row_major' or scale_major == 'K'"
+  ],
+  "inputs": {
+    "a": {"shape": ["m", "k"], "dtype": "attr:fp8_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "b": {"shape": ["n", "k"], "dtype": "attr:fp8_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "weight",
+          "layout": {"hook": "preshuffle_16x16", "when": "layout == 'b_preshuffled_16x16'"}},
+    "a_scale": {"shape": {"by": "scale_major", "cases": {"K": ["m", "scale_k"], "MN": ["scale_k", "m"]}}, "dtype": "float32",
+                "dist": {"kind": "log_uniform", "log2_lo": -3, "log2_hi": 0}, "lifetime": "per_call"},
+    "b_scale": {"shape": ["scale_n", "scale_k"], "dtype": "float32", "dist": {"kind": "log_uniform", "log2_lo": -3, "log2_hi": 0}, "lifetime": "weight"}
+  },
+  "outputs": {
+    "out": {"shape": ["m", "n"], "dtype": "attr:out_dtype", "bound": {"kind": "baseline_relative"}}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [
+    {"tensor": "b", "attr": "is_shuffled", "equals": true, "when": "layout == 'b_preshuffled_16x16'"}
+  ],
+  "hooks": {
+    "preshuffle_16x16": "(t, name, sym) -> aiter shuffle_weight(t, layout=(16, 16)) with t.is_shuffled = True, exactly as the model loader stores the weight."
+  },
+  "call": "Pass a, b, a_scale, b_scale (and the output dtype) as the live caller does; return out.",
+  "timing": {
+    "cache": "b and b_scale are weights (cold between layers in serving; read-evict matches); a/a_scale come from the preceding quant kernel and are L2-warm in deployment."
+  },
+  "negative_controls": [
+    "apply b_scale of block (j, kb+1) to block (j, kb): a wrong-scale error proportional to the scale ratio, far outside baseline_relative",
+    "skip the a_scale multiply on the last K block"
+  ],
+  "pitfalls": [
+    "Bound is baseline_relative, not dot_product: gfx950 FP8 MFMA accumulates below the IEEE fp32 model, so even the installed kernel violates a dot_product bound. The candidate may not be more than 2x the installed kernel's own error against float64.",
+    "Scales must be positive and log-uniform; scales from U(0,1) include near-zero blocks that hide a misapplied scale.",
+    "fnuz vs OCP e4m3: the same bit pattern is a different value. Build fp8 operands with harness_lib.regime_dtype for the arch the server runs.",
+    "The CK blockscale tuned CSV is keyed by (M, N, K); a candidate that changes the tile list must be timed per padded-M tier the decode buckets hit."
+  ]
+}

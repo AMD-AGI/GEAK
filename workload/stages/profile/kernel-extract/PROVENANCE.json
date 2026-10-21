@@ -7,7 +7,8 @@
     "gpu_lock.sh, workspace_sources.py and schema.mjs bundled beside the helpers; gpu_lock_set.py and the skill scripts resolve them as siblings.",
     "delivery_contract.mjs is the five-block extraction of e2e_workflow.js that loadContract() performs, frozen; loadContract(path) still re-extracts from a given checkout.",
     "Tests that drive the GEAK workflow runtime or agentx_kernel_preparation.mjs are dropped; the remaining tests resolve the bundled layout.",
-    "references/workflow-handoff.md (GEAK e2e invocation) replaced by references/pipeline-handoff.md (this pipeline's profile slot)."
+    "references/workflow-handoff.md (GEAK e2e invocation) replaced by references/pipeline-handoff.md (this pipeline's profile slot).",
+    "ut_contracts/ (added on this branch): per-operator UT contract families, the contract library and float64 references, the generic gate driver and the task scaffold; SKILL.md \u00a73/\u00a74 and references/task-authoring.md point task authoring at them."
   ],
   "files": [
     {
@@ -55,7 +56,7 @@
     {
       "file": "references/pipeline-handoff.md",
       "source": null,
-      "modified": true
+      "added_here": true
     },
     {
       "file": "references/selection-coverage.md",
@@ -85,7 +86,7 @@
       "file": "references/task-authoring.md",
       "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/task-authoring.md",
       "source_sha256": "1d4f3c71cc4b1278dd8b4dd486e288a48303c4359823e2aedcf05bbd01971509",
-      "modified": false
+      "modified": true
     },
     {
       "file": "scripts/coverage_ledger.py",
@@ -296,6 +297,131 @@
       "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py",
       "source_sha256": "8e8a8fd966b24113c227419160e1dd6d6b59ff412bc79d9d77a6b8aeea286fb5",
       "modified": false
+    },
+    {
+      "file": "ut_contracts/README.md",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/act_mul.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/all_reduce.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/dsa_indexer.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/fused_moe.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/gemm.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/gemm_a4w4_mxfp4.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/gemm_a8w8.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/gemm_a8w8_blockscale.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/kv_cache_write.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/moe_grouped_topk.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/paged_attention_decode.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/rmsnorm.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/rmsnorm_quant.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/rope.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/sparse_mla.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/topk.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/families/varlen_attention.json",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/reference_f64.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/scaffold_ut.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/templates/cases.py.tmpl",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/templates/unittest.py.tmpl",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/tests/test_ut_contracts.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/ut_contract.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/ut_driver.py",
+      "source": null,
+      "added_here": true
     }
   ]
 }

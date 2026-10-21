@@ -1,0 +1,57 @@
+{
+  "ut_contract_version": 1,
+  "family": "gemm",
+  "op_kind": "gemm",
+  "description": "16-bit dense GEMM: out = a @ b.T + bias (b is (n, k) when trans_b, else (k, n)). Covers aiter tuned_gemm / gemm_a16w16, hipBLASLt and Triton dense projections.",
+  "sikl_contract": "gemm@1.0",
+  "reference": "gemm",
+  "reference_rows": 256,
+  "axes": {
+    "m": {"var": true, "lo": 1, "hi": 1048576, "doc": "tokens in this call; the only axis that varies across a task's cases"},
+    "n": {"lo": 16, "hi": 262144, "multiple_of": 16, "doc": "output columns; pinned per task"},
+    "k": {"lo": 16, "hi": 65536, "multiple_of": 8, "doc": "reduction length; pinned per task"}
+  },
+  "attrs": {
+    "trans_b": {"values": [true, false], "doc": "b is (n, k) when true"},
+    "has_bias": {"values": [false, true]},
+    "act_dtype": {"values": ["bfloat16", "float16"]},
+    "layout": {"values": ["row_major", "b_preshuffled_16x16"], "doc": "b_preshuffled_16x16 is aiter shuffle_weight(b, (16, 16)), the bpreshuffle asm/CK path"}
+  },
+  "constraints": [
+    "layout == 'row_major' or trans_b"
+  ],
+  "inputs": {
+    "a": {"shape": ["m", "k"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "b": {"shape": {"by": "trans_b", "cases": {"true": ["n", "k"], "false": ["k", "n"]}}, "dtype": "attr:act_dtype",
+          "dist": {"kind": "lecun_normal", "fan_in": "k"}, "lifetime": "weight",
+          "layout": {"hook": "preshuffle_16x16", "when": "layout == 'b_preshuffled_16x16'"}},
+    "bias": {"shape": ["n"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "weight", "present_when": "has_bias"}
+  },
+  "outputs": {
+    "out": {"shape": ["m", "n"], "dtype": "attr:act_dtype",
+            "bound": {"kind": "dot_product", "length": "k", "accumulate_dtype": "float32", "max_split_k": 16}}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [
+    {"tensor": "b", "attr": "is_shuffled", "equals": true, "when": "layout == 'b_preshuffled_16x16'"}
+  ],
+  "hooks": {
+    "preshuffle_16x16": "(t, name, sym) -> t stored the way the served dispatcher reads it: aiter.ops.shuffle.shuffle_weight(t, layout=(16, 16)), then set t.is_shuffled = True. Use the installed function, never a re-implementation."
+  },
+  "call": "Invoke the live entry with the exact keyword names of the inspected signature; return out only. Do not pass a preallocated `out` unless the deployed caller does.",
+  "timing": {
+    "cache": "b has lifetime weight: in serving it is evicted by the other layers' weights between calls, so the harness read-evict before each sample matches it; a reads warm in deployment and cold here — say so when a decode bucket is bandwidth bound on a.",
+    "notes": ["n and k are module-level constants of one task: a second (n, k) is a sibling task directory, not another case"]
+  },
+  "negative_controls": [
+    "drop the last K tile of the accumulation (loop bound k - BLOCK_K): the error is ~|a_k||b_k| per element, orders above the dot_product bound",
+    "swap two output columns' store offsets: an exact permutation the bound rejects at multiple >> 10"
+  ],
+  "pitfalls": [
+    "Operands must be unit variance (a ~ N(0,1), b ~ N(0,1/k)); a ~ U(0,1) makes every output ~k/4 and a K-tile bug vanishes into the relative error.",
+    "aiter tuned GEMM dispatch is keyed on (M, N, K) in a CSV and decode M is looked up by its padded tier; a miss silently takes the heuristic kernel. Record which kernel each case actually ran (AITER_LOG_TUNED_CONFIG) rather than inferring it.",
+    "AITER_CONFIG_* replaces the whole tuned table rather than merging: an A/B that sets it for one arm changes every other shape too.",
+    "A decode o_proj hot shape may run a Triton kernel while the meta language field says asm: the language belongs to the shape, not the op.",
+    "hipBLASLt / tuned GEMMs may split K: the bound already allows max_split_k = 16; do not loosen it further without a measured baseline violation."
+  ]
+}
