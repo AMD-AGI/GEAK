@@ -30,7 +30,7 @@ def main():
         command = command[1:]
     if not command:
         parser.error("a foreground command is required")
-    lock = Path(__file__).resolve().parents[2] / "kernel_workflow/scripts/gpu_lock.sh"
+    lock = Path(__file__).resolve().parent / "gpu_lock.sh"
     # The wrappers stay alive, retaining their individual flock descriptors and
     # source-provenance exit checks. A common acquisition order prevents cycles.
     # Restore visibility only inside the innermost, fully leased command.

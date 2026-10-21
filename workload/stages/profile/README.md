@@ -9,7 +9,7 @@ for each selected kernel.
 
 | Directory | Notes |
 | --- | --- |
-| `agentx-kernel-extraction-standalone/` | default. An external archive vendored byte-for-byte, carrying its own `SKILL.md`, `scripts/`, `references/`, `tests/` and `PROVENANCE.json`. Integrity is enforced by `../MANIFEST.agentx-kernel-extraction-standalone.json` |
+| `kernel-extract/` | default. GEAK main's `kernel-extract` skill (`e2e_workflow/knowledge/kernel_extraction_skills/`) with the shared tools it copies into each task bundled under `shared/`; `PROVENANCE.json` records the origin revision, the origin hash of every file and which ones differ |
 
 This skill is **agent-shaped** (contract §2B): it has no `run.sh`, because choosing a
 boundary, identifying the callable and deciding which dispatch branch constitutes a whole
@@ -17,17 +17,19 @@ operator are judgement calls, not a procedure. The driver only prepares the envi
 an agent reads the skill's `SKILL.md` and follows it.
 
 The skill's own convention has `SKILL_ROOT` pointing at itself and `EVAL_DIR` as its
-working directory. Wired into this pipeline:
+working directory. Wired into this pipeline (the skill's
+`references/pipeline-handoff.md` gives the full mapping):
 
 ```
-SKILL_ROOT = $SKILL_ROOT     (already exported by the driver; the names coincide)
-EVAL_DIR   = $OUT
+SKILL_ROOT   = $SKILL_ROOT     (already exported by the driver; the names coincide)
+SHARED_TOOLS = $SKILL_ROOT/shared
+EVAL_DIR     = $OUT
 ```
 
 ## Artifacts → `result.json`
 
-The skill knows nothing about `result.json` — it is an external archive and should not be
-edited to fit a pipeline. That mapping is performed by `finalize.py` in the **slot
+The skill knows nothing about `result.json`, and should not need to: it stays usable
+outside this pipeline. That mapping is performed by `finalize.py` in the **slot
 directory**. Because it belongs to the slot rather than to any implementation, it keeps
 working when the profile skill is replaced, as long as the new skill emits files of the
 same names.

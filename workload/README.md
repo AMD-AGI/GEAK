@@ -37,7 +37,7 @@ files on disk.
 | Step | Artifact | Default skill | Swap it for |
 | --- | --- | --- | --- |
 | `baseline` | `baseline.json` | `adopt-measured-receipt` | `agentx-trace-replay` (re-measure from scratch), `ci-run-replay` (reproduce a named CI run and prove every pin) |
-| `profile` | `tasks/<kernel>/` | `agentx-kernel-extraction-standalone` | any skill that emits `tasks/` + a ranking |
+| `profile` | `tasks/<kernel>/` | `kernel-extract` | any skill that emits `tasks/` + a ranking |
 | `roofline` | `roofline.json` | `kernel-roofline` | any skill that emits per-case `rows.json` + `fold.py` |
 | `optimize` | `optimized.json` | `geak-kernel-workflow` | `subagent-raw` (an agent, no GEAK workflow) |
 | `applyback` | `ab.json` | `overlay-e2e-ab` | any skill that applies and re-measures |
@@ -64,8 +64,10 @@ all, exists as executable proof that the scheduler is genuinely agent-agnostic.
 `result.json`, and what counts as ranked or passing, live in the slot — in a `finalize.py`
 or a `rank.py` where that is mechanism, and in `stages/<stage>/README.md` where it is
 judgement. Replacing an implementation therefore never rewrites the mapping — which is
-why the two upstream skills are vendored byte-identical, hash-enforced by
-`skill_manifest.py`, down to their own `scripts/` and `tests/`.
+why the upstream roofline skill is vendored byte-identical, hash-enforced by
+`skill_manifest.py`, and the profile skill — GEAK main's `kernel-extract`, carried here
+with the shared tools it copies into tasks — lists in its `PROVENANCE.json` the origin
+hash of every file and which ones this branch changed.
 
 **An operator win is not a system win.** This is the failure mode the whole pipeline is
 built around: a kernel that is unambiguously faster in isolation can leave the serving

@@ -52,7 +52,7 @@
       }
     },
     "profile": {
-      "skill": "agentx-kernel-extraction-standalone",
+      "skill": "kernel-extract",
       "mode": "agent",
       "params": {
         "selection": "per-phase Top 5 AND overall GPU-time share > 3%",

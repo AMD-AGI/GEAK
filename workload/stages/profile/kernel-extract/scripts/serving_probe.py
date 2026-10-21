@@ -51,7 +51,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shared"))
 
 
 def post(base, path, obj=None, timeout=1800):

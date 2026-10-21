@@ -1,9 +1,60 @@
-// Copyright (c) 2026 Advanced Micro Devices, Inc. Apache-2.0.
-// Standalone adaptation, 2026-10-12: extracted pure schemas/evidence gates.
-// No workflow runner or external repository is loaded.
+// Generated from e2e_workflow/e2e_workflow.js at GEAK 02bfbb0 by the same five-block
+// extraction kernel_extraction_delivery.mjs's loadContract() performs, so the profile slot
+// does not load the workflow runner. Regenerate rather than edit:
+//   node -e "import('./kernel_extraction_delivery.mjs').then(m => m.loadContract('<geak>/e2e_workflow/e2e_workflow.js'))"
+// checks a checkout's contract; this file is that extraction, frozen.
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
 const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
 const arrStr = { type: 'array', items: { type: 'string' } };
+
+const SETUP_SCHEMA = obj({
+  eval_dir: { type: 'string' }, model_name: { type: 'string' },
+  baseline_throughput_tok_s: { type: 'number' }, baseline_spread_pct: { type: 'number' },
+  noise_band_pct: { type: 'number' }, baseline_summary_path: { type: 'string' },
+  server_flags: { type: 'object', additionalProperties: true }, server_env: { type: 'string' },
+  tp: { type: 'number' }, workload: { type: 'object', additionalProperties: true },
+  bench_script: { type: 'string' }, notes: { type: 'string' },
+  // The four deployment dimensions the KB addresses a page by, beyond model/framework/workload which
+  // this script already knows. The Director establishes all four during its existing preflight (it
+  // has to, to launch the server at all) and previously just discarded them. gfx, product target,
+  // and physical CU count are required; device_name remains optional telemetry. A GUESS is not
+  // acceptable: the service has no DELETE, so a wrong-but-authoritative-looking page is permanent.
+  gfx: { type: 'string' }, device_target: { type: 'string' },
+  device_name: { type: 'string' }, physical_cu_count: { type: 'number' },
+  precision: { type: 'string' },
+  framework_version: { type: 'string' }, rocm_version: { type: 'string' },
+}, ['eval_dir', 'baseline_throughput_tok_s', 'gfx', 'device_target', 'physical_cu_count']);
+
+// admitHeads adopts entity_kind from these rows, so a row without it silently refuses every head.
+// device_kernel is required on gpu_kernel rows too; admitHeads checks that (no conditional schema here).
+const PROFILE_ROW_SCHEMA = obj({
+  entity_kind: { type: 'string',
+    enum: ['gpu_kernel', 'memory_op', 'dispatcher_op', 'python_launcher', 'unresolved'] },
+  device_kernel: { type: 'string' },
+}, ['entity_kind']);
+const PROFILE_SCHEMA = obj({
+  round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
+  profile_workload_json: { type: 'string' }, // per-(shape,dtype) weighted workload model (optional)
+  source: { type: 'string' }, total_gpu_time_ms: { type: 'number' },
+  top_kernels: { type: 'array', items: PROFILE_ROW_SCHEMA },
+  shift_note: { type: 'string' }, notes: { type: 'string' },
+}, ['profile_topN_json', 'top_kernels']);
+
+const STRATEGY_SCHEMA = obj({
+  regime_summary: { type: 'string' }, config_directions: arrObj,
+  head_candidates: { type: 'array', items: obj({
+    short_name: { type: 'string' }, entity_kind: { type: 'string' }, device_kernel: { type: 'string' },
+  }, ['short_name', 'entity_kind', 'device_kernel']) },
+  kernel_candidates: arrObj,
+  drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
+}, ['kernel_candidates']);
+
+// The skill returns only after source extraction and GPU UT validation. Its
+// selection/ranking metadata stays in files rather than an intermediate schema.
+const AGENTX_PREPARATION_SCHEMA = obj({
+  delivery_path: { type: 'string' },
+}, ['delivery_path']);
+
 
 const SMOKE_STATUS = { type: 'string', enum: ['pass', 'fail'] };
 // Large machine verdicts travel as immutable task-local files, not LLM summaries.
@@ -36,13 +87,6 @@ const EXTRACT_OP_SCHEMA = obj({
   selection_validation: { type: 'object', additionalProperties: true },
   smoke: SMOKE_STATUS, smoke_detail: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
-
-// A replay bootstrap is an intermediate artifact, never a completed UT or a
-// performance result. The full extractor below still runs every normal gate.
-const JOINT_BOOTSTRAP_SCHEMA = obj({
-  ready: { type: 'boolean' }, task_dir: { type: 'string' },
-  report_path: { type: 'string' }, phase_results: arrObj, notes: { type: 'string' },
-}, ['ready', 'task_dir', 'report_path', 'phase_results']);
 
 
 const EXTRACT_SCHEMA = obj({
@@ -187,6 +231,9 @@ function selectionCandidatesForHead(h, ext) {
 }
 function prepareHeadSelection(h) {
   if (!h || typeof h !== 'object') return h;
+  // A completed UT already verified its callable; do not replace it with an
+  // untested nomination when the optimization queue is admitted.
+  if (typeof KERNEL_EXTRACT_ON !== 'undefined' && KERNEL_EXTRACT_ON && h.prepared_ut) return { ...h };
   const out = { ...h };
   const required = requiredDeviceKernel(out);
   if (required && !out.device_kernel) out.device_kernel = required;
@@ -235,8 +282,6 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
       return { ok: false, why: 'dispatch branches omit a selected device kernel' };
     return { ok: true, why: 'verified whole-op dispatch branches independently' };
   }
-  if (ext && ext.selection_evidence_error)
-    return { ok: false, why: ext.selection_evidence_error };
   if (h && h.joint_ut) {
     const phases = h.joint_ut.phases;
     const results = ext && ext.phase_selection_validations;
@@ -345,6 +390,28 @@ function kernelSelectionVerified(h, ext, jointScopeMembers = null) {
   if (verdict.deepest_verified !== true)
     return { ok: false, why: 'selected callable is not machine-verified as deepest' };
   return { ok: true, why: `${target} launches profiled kernel ${required}` };
+}
+
+// The Architect restates each head and has emitted the row's classification (library_gemm,
+// triton_kernel) as entity_kind. The profiled row is the authority: a head whose device_kernel
+// matches a profiled gpu_kernel row takes that row's entity_kind.
+// Every row kind is evidence, not only gpu_kernel rows: canonicalization drops the namespace, so
+// `aten::mul` (dispatcher_op) and `mul` (gpu_kernel) fold together, as parse_profile.py guards.
+// Exact names decide first; a canonical match that reaches rows of different kinds is ambiguous.
+// A row is identified by its most specific name only: a display short_name is shared across
+// distinct kernels (every vectorized_elementwise_kernel instantiation), so it must not stand in for
+// a concrete symbol the row already carries.
+function adoptProfiledEntityKind(head, rows) {
+  if (!head || head.entity_kind === 'gpu_kernel' || !head.device_kernel) return false;
+  const want = String(head.device_kernel).trim();
+  const identity = (r) => [r.device_kernel, r.name, r.short_name]
+    .map((v) => String(v || '').trim()).find(Boolean) || '';
+  const profiled = (rows || []).filter((r) => r && identity(r));
+  let matched = profiled.filter((r) => identity(r) === want);
+  if (!matched.length) matched = profiled.filter((r) => kernelIdentitiesMatch(identity(r), want));
+  if (!matched.length || matched.some((r) => r.entity_kind !== 'gpu_kernel' || !r.device_kernel)) return false;
+  head.entity_kind = 'gpu_kernel';
+  return true;
 }
 
 // Opt-in transport only: hydrate exact Python verdicts before applying the same

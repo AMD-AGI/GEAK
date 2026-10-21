@@ -82,7 +82,7 @@ def main(argv=None):
     sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != task_dir]
     import torch
 
-    skill_scripts = str(Path(__file__).resolve().parents[4] / "scripts")
+    skill_scripts = str(Path(__file__).resolve().parents[1] / "shared")
     for name in ("harness_lib", "capture_shapes"):
         for root in (task_dir, skill_scripts):
             path = os.path.join(root, name + ".py")

@@ -9,7 +9,7 @@ import time
 import unittest
 
 
-LOCK = Path(__file__).resolve().parents[3] / "kernel_workflow/scripts/gpu_lock.sh"
+LOCK = Path(__file__).resolve().parents[1] / "gpu_lock.sh"
 SET_LOCK = Path(__file__).resolve().parents[1] / "gpu_lock_set.py"
 
 
@@ -23,10 +23,9 @@ class KernelExtractGpuIsolationTest(unittest.TestCase):
         # /tmp/team_gpu_locks may belong to another user, even for synthetic IDs.
         lock_dir = self.root / "locks"
         lock_dir.mkdir()
-        self.lock = self.root / "repo/kernel_workflow/scripts/gpu_lock.sh"
-        self.set_lock = self.root / "repo/e2e_workflow/scripts/gpu_lock_set.py"
+        self.lock = self.root / "repo/shared/gpu_lock.sh"
+        self.set_lock = self.root / "repo/shared/gpu_lock_set.py"
         self.lock.parent.mkdir(parents=True)
-        self.set_lock.parent.mkdir(parents=True)
         shutil.copy2(LOCK, self.lock)
         (self.lock.parent / "workspace_sources.py").symlink_to(
             LOCK.parent / "workspace_sources.py")

@@ -292,7 +292,7 @@ def _stub_cfg(tmp_path, stage="profile", **params):
     cfg = {"run_root": str(tmp_path / "run"), "runner": "stub",
            "order": ["profile"], "target": {"model": None, "enforce": False,
                                             "_note_enforce": "stub"},
-           "stages": {"profile": {"skill": "agentx-kernel-extraction-standalone",
+           "stages": {"profile": {"skill": "kernel-extract",
                                   "params": params}}}
     p = tmp_path / "cfg.json"
     p.write_text(json.dumps(cfg))

@@ -6,10 +6,10 @@ description: Extract actual GPU kernel source and workload-weighted standalone t
 # AgentX kernel extraction
 
 The agent performs the five stages below using this skill's method and the
-repository's shared tools. Set `SKILL_ROOT` to this directory and `SHARED_TOOLS`
-to `e2e_workflow/scripts`. Read [setup and inputs](references/setup.md) first.
-When invoked by GEAK, also read [workflow handoff](references/workflow-handoff.md)
-for input paths and the final return format.
+shared tools bundled with it. Set `SKILL_ROOT` to this directory and `SHARED_TOOLS`
+to `$SKILL_ROOT/shared`. Read [setup and inputs](references/setup.md) first.
+When run as the pipeline's `profile` stage, also read
+[pipeline handoff](references/pipeline-handoff.md) for input paths and outputs.
 
 The objective is a reviewable source-and-test delivery for the user's current
 AgentX workload. Preserve the installed stack, accepted overlays, baseline,

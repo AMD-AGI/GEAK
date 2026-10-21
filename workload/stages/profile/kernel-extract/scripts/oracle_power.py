@@ -144,7 +144,7 @@ def main(argv=None):
     # Prefer the task's own frozen copy (it is the one the gates actually run against); fall
     # back to the repository's, so a capture can be judged before it has been placed in a task.
     hl = next((p for p in (os.path.join(task_dir, "harness_lib.py"),
-                           str(Path(__file__).resolve().parents[4] / "scripts/harness_lib.py"))
+                           str(Path(__file__).resolve().parents[1] / "shared/harness_lib.py"))
                if os.path.exists(p)), None)
     if hl is None:
         print("oracle_power: harness_lib.py found neither in %s nor in the shared tools."

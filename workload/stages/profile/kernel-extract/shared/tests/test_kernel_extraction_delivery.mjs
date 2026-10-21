@@ -5,11 +5,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { loadContract, checkDelivery, attachVerdict } from './kernel_extraction_delivery.mjs';
-import { createRuntime } from '../../interface/runtime/engine/run_workflow.mjs';
+import { loadContract, checkDelivery, attachVerdict } from '../kernel_extraction_delivery.mjs';
 
 const contract = await loadContract();
-const cli = fileURLToPath(new URL('./kernel_extraction_delivery.mjs', import.meta.url));
+const cli = fileURLToPath(new URL('../kernel_extraction_delivery.mjs', import.meta.url));
 
 async function fixture(t) {
   const task = await fs.mkdtemp(path.join(os.tmpdir(), 'extraction-delivery-'));
@@ -188,53 +187,4 @@ test('CLI writes only a passing delivery; a failed draft preserves the existing 
   const failed = spawnSync(process.execPath, args, { encoding: 'utf8' });
   assert.equal(failed.status, 1);
   assert.equal(await fs.readFile(path.join(f.task, 'RETURN.json'), 'utf8'), saved);
-});
-
-test('runtime preserves legacy file verdicts and refuses unprepared AgentX dispatch', async t => {
-  const f = await fixture(t);
-  const kernel = { entity_kind: 'gpu_kernel', device_kernel: 'leaf_kernel',
-    seam_candidates: [{ target_callable: 'pkg:leaf', role: 'inner_launcher', depth: 1,
-      device_kernels: ['leaf_kernel'] }] };
-  const verdict = { contract: 'kernel_selection', ok: true, target_callable: 'pkg:leaf',
-    device_kernel: 'leaf_kernel', total_calls_observed: 1, target_marker_calls: 1,
-    matched_kernel_calls: 1, deepest_verified: true, candidate_targets_tested: ['pkg:leaf'],
-    live_candidate_targets: ['pkg:leaf'], deeper_live_candidates: [] };
-  await fs.writeFile(path.join(f.task, 'leaf.json'), JSON.stringify(verdict));
-  const result = await attachVerdict({ editable: true, task_dir: f.task, unittest_smoke: 'pass',
-    baseline_frozen: true, target_callable: 'pkg:leaf' }, 'leaf.json');
-  const workflow = await fs.readFile(new URL('../e2e_workflow.js', import.meta.url), 'utf8');
-  const start = workflow.indexOf('async function extractWithBaseline(');
-  const extraction = workflow.slice(start, workflow.indexOf('\n// abDone ==', start));
-  const script = path.join(f.task, 'driver.js');
-  await fs.writeFile(script, `
-    const {loadContract} = await import(${JSON.stringify(new URL('./kernel_extraction_delivery.mjs', import.meta.url).href)});
-    const {hydrateExtractionVerdicts, kernelSelectionVerified, hasFrozenBaseline, EXTRACT_SCHEMA} = await loadContract();
-    const CAPTURE_STORAGE_ENV = '', CAPTURE_BYTE_BUDGET = 1, CAPTURE_CASE_BYTE_LIMIT = 1;
-    const CAPTURE_PERSIST_POLICY = '', BASELINE_EXTRACT_RETRIES = 0, KERNEL_EXTRACT_ON = !!args.agentx;
-    const WORKFLOW_DIR = ${JSON.stringify(fileURLToPath(new URL('..', import.meta.url)))};
-    const roleAgent = () => 'fixture';
-    const safeAgent = async () => agent('fixture', {schema: EXTRACT_SCHEMA});
-    ${extraction}
-    return extractWithBaseline('kernel_extractor', 'extract', '', {KERNEL: args.kernel});
-  `);
-  const logs = [];
-  let agentCalls = 0;
-  const runtime = createRuntime({ backend: { name: 'fixture',
-    runAgent: async () => { agentCalls++; return { text: JSON.stringify(result) }; } }, log: line => logs.push(line) });
-  const accepted = await runtime.runScript(script, { kernel }, 0);
-  assert.equal(accepted.unittest_smoke, 'pass');
-  assert.deepEqual(accepted.selection_validation, verdict);
-  const missingSource = await runtime.runScript(script, { kernel: { ...kernel, source_delivery_required: true } }, 0);
-  assert.equal(missingSource.unittest_smoke, 'fail');
-  assert.equal(missingSource.source_delivery_failed, true,
-    'the actual production wrapper must enforce requested source records');
-  await fs.appendFile(path.join(f.task, 'leaf.json'), ' ');
-  const rejected = await runtime.runScript(script, { kernel }, 0);
-  assert.equal(rejected.unittest_smoke, 'fail');
-  assert.match(rejected.smoke_detail, /SHA-256 mismatch/);
-  const before = agentCalls;
-  const unprepared = await runtime.runScript(script, {kernel, agentx: true}, 0);
-  assert.equal(unprepared.unittest_smoke, 'fail');
-  assert.match(unprepared.smoke_detail, /missing prepared UT/);
-  assert.equal(agentCalls, before, 'AgentX cannot fall back to legacy UT authoring');
 });

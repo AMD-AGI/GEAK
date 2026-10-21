@@ -1,0 +1,301 @@
+{
+  "origin_repository": "https://github.com/AMD-AGI/GEAK",
+  "origin_revision": "02bfbb0b72746941be3ab3ad48fb21a284ae2fde",
+  "skill_source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract",
+  "adaptation": [
+    "SHARED_TOOLS is $SKILL_ROOT/shared, not e2e_workflow/scripts: the shared helpers the skill copies into tasks are bundled at the main revision so this slot does not depend on the e2e_workflow/scripts copies other stages use.",
+    "gpu_lock.sh, workspace_sources.py and schema.mjs bundled beside the helpers; gpu_lock_set.py and the skill scripts resolve them as siblings.",
+    "delivery_contract.mjs is the five-block extraction of e2e_workflow.js that loadContract() performs, frozen; loadContract(path) still re-extracts from a given checkout.",
+    "Tests that drive the GEAK workflow runtime or agentx_kernel_preparation.mjs are dropped; the remaining tests resolve the bundled layout.",
+    "references/workflow-handoff.md (GEAK e2e invocation) replaced by references/pipeline-handoff.md (this pipeline's profile slot)."
+  ],
+  "files": [
+    {
+      "file": "SKILL.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/SKILL.md",
+      "source_sha256": "8ee033cdaa8365b7663b9d091b81634c3bb48f7bfd785a9e40547906880b3da0",
+      "modified": true
+    },
+    {
+      "file": "references/capture.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/capture.md",
+      "source_sha256": "ee1c1459418afc5dd2a1817c8a8a87b955fdced5625c65652d9d036780c8cb84",
+      "modified": false
+    },
+    {
+      "file": "references/collective-ut.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/collective-ut.md",
+      "source_sha256": "bbef0a3d5adcdc1c15748b1b4305edf2f88e8e5435d90805390e415939bfe165",
+      "modified": false
+    },
+    {
+      "file": "references/delivery-contract.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/delivery-contract.md",
+      "source_sha256": "319639e8183d12a20d5292e367e3be78e00de7b875e653028228f0fd23b30926",
+      "modified": true
+    },
+    {
+      "file": "references/dynamic-workloads.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/dynamic-workloads.md",
+      "source_sha256": "c5474c5fdc65d8a7e0b2974b45dfbefc7c9c4a16678a5ea5bc92a29ebacf3baa",
+      "modified": false
+    },
+    {
+      "file": "references/glm-agentx-example.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/glm-agentx-example.md",
+      "source_sha256": "07807cc05789ded7bf20ad83172e46a9b4e529d9efccfc1f04c294d8bbb4f6d5",
+      "modified": false
+    },
+    {
+      "file": "references/joint-indexer-ut.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/joint-indexer-ut.md",
+      "source_sha256": "815a3f4099040035289e7e714621f96e4fed1f85f5be98934fc8ac5d20612e9f",
+      "modified": false
+    },
+    {
+      "file": "references/pipeline-handoff.md",
+      "source": null,
+      "modified": true
+    },
+    {
+      "file": "references/selection-coverage.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/selection-coverage.md",
+      "source_sha256": "1b8b41c6e269bdddc2109c1a10ebb17c60dd44bba17c9428bfda6a4e545ebe50",
+      "modified": false
+    },
+    {
+      "file": "references/setup.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/setup.md",
+      "source_sha256": "e4b9a3d808f5775eea6218ba0fe180a7ad8035439bf0f1825b865f4ba29fbc41",
+      "modified": true
+    },
+    {
+      "file": "references/source-delivery-records.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/source-delivery-records.md",
+      "source_sha256": "16f00490c765d0144745192b6325a21f586e2be781048390696aa8c82f0db5d6",
+      "modified": false
+    },
+    {
+      "file": "references/source-extraction.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/source-extraction.md",
+      "source_sha256": "ee4e841dd5030014faee5519f3ac5b4728ee950aa77cb674a37ccf6ed4abec05",
+      "modified": false
+    },
+    {
+      "file": "references/task-authoring.md",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/task-authoring.md",
+      "source_sha256": "1d4f3c71cc4b1278dd8b4dd486e288a48303c4359823e2aedcf05bbd01971509",
+      "modified": false
+    },
+    {
+      "file": "scripts/coverage_ledger.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/coverage_ledger.py",
+      "source_sha256": "0f43d2a826f7da1c2e3c831c07ebcfd2c5a50524c599f33ca4d61b926ed10d09",
+      "modified": false
+    },
+    {
+      "file": "scripts/kernel_self_noise.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/kernel_self_noise.py",
+      "source_sha256": "850fd5c32e90567c20e136f14f58c01f40690013a1d9117e45e536a68083cbea",
+      "modified": false
+    },
+    {
+      "file": "scripts/observed_workload.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/observed_workload.py",
+      "source_sha256": "77068a5f8cafbe3bf49d41aab0e5bb22fe0d4bc027e279c04c7bcdcde97fe4d8",
+      "modified": false
+    },
+    {
+      "file": "scripts/oracle_power.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/oracle_power.py",
+      "source_sha256": "ab81cafcbd5320bae5569ef936f76dad4004c6f86602ee3c68567967aaea3084",
+      "modified": true
+    },
+    {
+      "file": "scripts/plan_sampling_points.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/plan_sampling_points.py",
+      "source_sha256": "58ea922d21ab534e2155af890d34324debed7fb7de8e8c8cb9b59faba98e479d",
+      "modified": false
+    },
+    {
+      "file": "scripts/regen_reference.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/regen_reference.py",
+      "source_sha256": "f918cfccf766b5f19a5745a95e09382ab57a20b3e9df39618508e52e99eb012d",
+      "modified": true
+    },
+    {
+      "file": "scripts/select_targets.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/select_targets.py",
+      "source_sha256": "edb449b6fc2cfd0ef3b3f2d95cde0a991141ab9c835654c85eae470263eca141",
+      "modified": false
+    },
+    {
+      "file": "scripts/selftest_structure_only.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/selftest_structure_only.py",
+      "source_sha256": "442d7ec6b6aac25df1c39a5185c416ae93f45af685c7b05f5d2a200cbb45d62c",
+      "modified": true
+    },
+    {
+      "file": "scripts/serving_probe.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/serving_probe.py",
+      "source_sha256": "877020f06dc6279f7623b823fdd76ee6f85e521216271816613dd54636faf75f",
+      "modified": true
+    },
+    {
+      "file": "shared/capture_shapes.py",
+      "source": "e2e_workflow/scripts/capture_shapes.py",
+      "source_sha256": "9e4cc925ddff871f92a70c51e0df30d4feed56c250d3e2025b168ccb66e39ddb",
+      "modified": false
+    },
+    {
+      "file": "shared/delivery_contract.mjs",
+      "source": "e2e_workflow/e2e_workflow.js",
+      "source_sha256": "aef3d260ed0ae81a3f06ba39ae90cf5341b97d5f489ec7a8d063c59b40903522",
+      "modified": true
+    },
+    {
+      "file": "shared/gpu_lock.sh",
+      "source": "kernel_workflow/scripts/gpu_lock.sh",
+      "source_sha256": "b51f99375c738ba9ebbcfb6d249c4149e27ef5dd1e75dcdcf344a205703ab0bd",
+      "modified": false
+    },
+    {
+      "file": "shared/gpu_lock_set.py",
+      "source": "e2e_workflow/scripts/gpu_lock_set.py",
+      "source_sha256": "9aafca7a2610df73323f91cfaf55ef4785e9258f0a2259089c64910fe35aa3d9",
+      "modified": true
+    },
+    {
+      "file": "shared/harness_lib.py",
+      "source": "e2e_workflow/scripts/harness_lib.py",
+      "source_sha256": "f2176d020bab423ca24006ac3a281e794f45d304759980237c224a77fd2dc776",
+      "modified": false
+    },
+    {
+      "file": "shared/kernel_extraction_delivery.mjs",
+      "source": "e2e_workflow/scripts/kernel_extraction_delivery.mjs",
+      "source_sha256": "e1dbd07c11cf16047fb104893c9927cc10c4329e17eab487baa6b62f28571388",
+      "modified": true
+    },
+    {
+      "file": "shared/kernel_selection.py",
+      "source": "e2e_workflow/scripts/kernel_selection.py",
+      "source_sha256": "ebc24e05faf44585c7e7e224df6cdf9f02097009403ddb577f96a4f6d254ee1b",
+      "modified": false
+    },
+    {
+      "file": "shared/kernel_source_delivery.mjs",
+      "source": "e2e_workflow/scripts/kernel_source_delivery.mjs",
+      "source_sha256": "dec54adc26932291472c8a64d9c4b4a911de6a498bb369fa5a04b3ae0646b34d",
+      "modified": false
+    },
+    {
+      "file": "shared/leg_runner.py",
+      "source": "e2e_workflow/scripts/leg_runner.py",
+      "source_sha256": "7666e8ec6cba04eb65436e5b277ed2b67312dfc2c1328f6d61ab2b9383c29e28",
+      "modified": false
+    },
+    {
+      "file": "shared/overlay_setup.py",
+      "source": "e2e_workflow/scripts/overlay_setup.py",
+      "source_sha256": "e14c2d644c2a8785462fa8b22a7c6f54409f5379309846adca10a19cbc97bdd8",
+      "modified": false
+    },
+    {
+      "file": "shared/parse_profile.py",
+      "source": "e2e_workflow/scripts/parse_profile.py",
+      "source_sha256": "5571f0fcad5e85443b6208131b7dfa642c97abca40b9e41fcdf3cee89a7ae75e",
+      "modified": false
+    },
+    {
+      "file": "shared/schema.mjs",
+      "source": "interface/runtime/engine/schema.mjs",
+      "source_sha256": "19ba9273c7a443138eaf0ae0d072e278ec6f10e4477f2ee5e70b85f5b00454e3",
+      "modified": false
+    },
+    {
+      "file": "shared/seam_trace.py",
+      "source": "e2e_workflow/scripts/seam_trace.py",
+      "source_sha256": "f1a98e0b5acfcd2769df75d47e9811c1367d340d6a2e77bab20b3bd2db23a90b",
+      "modified": false
+    },
+    {
+      "file": "shared/tests/kernel_symbols.json",
+      "source": "e2e_workflow/scripts/tests/kernel_symbols.json",
+      "source_sha256": "c26f21dcc31f5e668461ee8423b225c8d61236b7f15a2adf816dc6968a400a10",
+      "modified": false
+    },
+    {
+      "file": "shared/tests/test_capture_shapes.py",
+      "source": "e2e_workflow/scripts/tests/test_capture_shapes.py",
+      "source_sha256": "0ba60e2e25fc965806a967b42c498edab29021f7fb842b53ec9f8ae290a9a0ed",
+      "modified": false
+    },
+    {
+      "file": "shared/tests/test_harness_lib.py",
+      "source": "e2e_workflow/scripts/tests/test_harness_lib.py",
+      "source_sha256": "2c1f9a8fe35c4c90afb793d90ecce52d44a3f7dc9f0d511419179324eb9fa799",
+      "modified": false
+    },
+    {
+      "file": "shared/tests/test_kernel_extract_gpu_isolation.py",
+      "source": "e2e_workflow/scripts/tests/test_kernel_extract_gpu_isolation.py",
+      "source_sha256": "2e33a568237edcf562f92c76373f658a1605dfccd8731776d1f458f8f44c1905",
+      "modified": true
+    },
+    {
+      "file": "shared/tests/test_kernel_extract_targets.py",
+      "source": "e2e_workflow/scripts/tests/test_kernel_extract_targets.py",
+      "source_sha256": "cc74f63ef687cce9a938f1d77d9872862fc43e82961ae253b8d63dcaf3aff69f",
+      "modified": true
+    },
+    {
+      "file": "shared/tests/test_kernel_extraction_delivery.mjs",
+      "source": "e2e_workflow/scripts/test_kernel_extraction_delivery.mjs",
+      "source_sha256": "862a6540d6a95b04bc4c136b2b2b64850063e87a3f19c84a8cdd2b1de34e450e",
+      "modified": true
+    },
+    {
+      "file": "shared/tests/test_kernel_selection.py",
+      "source": "e2e_workflow/scripts/tests/test_kernel_selection.py",
+      "source_sha256": "fab137b13c70a867357c98cb930d088d9f0b7b7e064f6b917838cab3b23bc378",
+      "modified": false
+    },
+    {
+      "file": "shared/tests/test_kernel_source_delivery.mjs",
+      "source": "e2e_workflow/scripts/test_kernel_source_delivery.mjs",
+      "source_sha256": "9d9ea45a9e19c291c558bc5a80605ca23765c44e0ac8720947e34c7280e87b7a",
+      "modified": true
+    },
+    {
+      "file": "shared/tests/test_leg_runner.py",
+      "source": "e2e_workflow/scripts/tests/test_leg_runner.py",
+      "source_sha256": "7fe49d490259f47907a6d53c625a07bbe0897f8b86e5caa17d3696ac65935f30",
+      "modified": false
+    },
+    {
+      "file": "shared/tests/test_observed_workload_weights.py",
+      "source": "e2e_workflow/scripts/tests/test_observed_workload_weights.py",
+      "source_sha256": "951f7fa6b1e36d703f9f3567cbc13b21f8f7bcfa31f74fe6751cc14bf0e5df38",
+      "modified": false
+    },
+    {
+      "file": "shared/tests/test_overlay_setup.py",
+      "source": "e2e_workflow/scripts/tests/test_overlay_setup.py",
+      "source_sha256": "811529a5abd6ee923e700d5e2831d4dfde84efc62725cd5bd3c8c3e3250a5042",
+      "modified": false
+    },
+    {
+      "file": "shared/workspace_sources.py",
+      "source": "kernel_workflow/scripts/workspace_sources.py",
+      "source_sha256": "b6809ad323bcce4994a7171629b4925569042e78e07c25535b11693689626139",
+      "modified": false
+    },
+    {
+      "file": "tests/test_sampling_pipeline.py",
+      "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py",
+      "source_sha256": "8e8a8fd966b24113c227419160e1dd6d6b59ff412bc79d9d77a6b8aeea286fb5",
+      "modified": false
+    }
+  ]
+}
