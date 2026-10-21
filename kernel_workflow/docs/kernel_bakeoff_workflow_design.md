@@ -107,17 +107,12 @@ worker's job** — it belongs to the **orchestrator layer**, and it happens **be
 | **e2e** | `e2e_workflow` | `kernel_extractor.extract_op` (`e2e_workflow.js:1153`) | live sglang/vllm **server** (monkeypatch capture) | `workflow(kernel_workflow, {kernel_path: ext.task_dir, mode, target_language})` (`:1468`, `:1596`) |
 | **standalone** | `kernel_bakeoff_workflow` | `oracle_freezer` (§4.1) | the **input kernel**, frozen into `baseline_src/` and re-run live per parity draw (no server, no stored golden) | `workflow(kernel_workflow, {kernel_path: oracle.task_dir, mode, target_language})` (§4.3) |
 
-The two differ in ONE respect: `kernel_extractor` also ships a recorded `reference_io.pt`, because its
-operands (real MoE routing tables, paged-KV metadata) are captured off a live server and cannot be
-synthesized. `oracle_freezer` synthesizes its operands from recorded seeds, so it records **no tensors at
-all** — storing a golden there would be redundant (the frozen baseline is already a runnable reference and
-must exist anyway as the timing denominator), would cost hundreds of MB–GB that every lane and every
-engineer workspace then tar-copies, and would add a failure mode of its own (a recorded golden is only
-valid while the operands reproduce bit-for-bit). Downstream roles must therefore treat `reference_io.pt`
-as **optional**. When it IS present (e2e dirs), it is never copied per workspace: the director places it
-as an absolute read-only **symlink** to the single immutable original, and every downstream tar
-(engineer, verify, STATE_DIR/best resume) carries the symlink verbatim — so the whole run shares one
-physical ~1 GB file instead of duplicating it dozens of times.
+Both paths prefer seeded input constructors and baseline references computed at runtime.
+The e2e extractor additionally validates observed serving shapes and access patterns; only
+indispensable structural state requires a bounded fixture. Neither path stores generated
+inputs or golden outputs by default. Downstream roles treat `reference_io.pt` as optional.
+Explicit legacy captures remain immutable and shared via read-only symlinks across workspaces;
+never duplicate tensor files per lane or include runtime reference buffers in archives.
 
 Sequence in both cases: **create oracle → `op_benchmarker` bake-off (on `task_dir`) → fan out lanes.**
 

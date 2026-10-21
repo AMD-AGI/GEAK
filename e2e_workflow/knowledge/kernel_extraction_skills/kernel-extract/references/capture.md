@@ -47,14 +47,18 @@ candidate callsites, including cached aliases, with separate `add-marker`
 calls as appropriate. Native/JIT kernel objects may not be safely monkeypatched;
 trace their real Python launchers and native launches instead.
 
-Choose a persist policy before launching, not after the workspace fills:
-Export `CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY:-structure_only}` into every
-capture server/process; GEAK supplies this value for AgentX. The library fallback remains
-`share_large` for callers that do not set a policy. Preserve an explicit policy override
-(`share_large`, `moe_slim` or `full`). With `structure_only`, use
-`CAPTURE_STRUCTURAL_OPERANDS` to name additional operands whose content selects work;
-regenerate the oracle afterwards with `regen_reference.py`. See *Capture policy* in
-[task authoring](task-authoring.md#capture-policy) for the dividing line and its cost.
+Capture defaults to `CAPTURE_PERSIST_POLICY=metadata_only` in both the library and
+GEAK. It saves JSON metadata, complete shape/layout/scalar signatures and call counts;
+it neither snapshots tensors nor writes `reference_io.pt`. `max_cases` does not cap
+this histogram. `reference_io=null`, `oracle_status=not_captured` and `num_tensor_records=0`
+are normal; validate `shape_counts` and launch evidence instead of requiring a golden file.
+
+If structural state cannot be reconstructed, explicitly select `structure_only`
+and name additional structural operands with `CAPTURE_STRUCTURAL_OPERANDS`. Defaults
+are 64 MiB per process and 8 MiB per case, enforced before CPU copies; skipped data
+still contributes shape metadata. Packed integer weights require format-aware
+constructors, not integer-to-float random casts. Legacy `share_large`, `moe_slim`
+and `full` policies remain explicit opt-ins. See [task authoring](task-authoring.md#capture-policy).
 
 Read the helpers' environment controls before choosing budgets and profiler
 windows. Do not assume their defaults capture every relevant shape or phase.

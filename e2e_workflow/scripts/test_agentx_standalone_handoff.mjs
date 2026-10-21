@@ -52,6 +52,8 @@ async function fixture(t) {
     target_callable:'pkg:leaf', ...snapshot, ut_result_ref:ut, kernels:[leaf]});
   const result = {editable:true, task_dir:task, target_callable:'pkg:leaf',
     unittest_smoke:'pass', baseline_frozen:true,
+    shape_coverage: { ledger: 'run/coverage.json', target_pct: 90, phases: {
+      DECODE: { basis: 'mass', coverage_pct: 93.1, meets_target: true } } },
     selection_validation_ref:selection, source_delivery_ref:source};
   await write('run/requested_kernel.json',kernel);
   await write('run/draft.json',result);

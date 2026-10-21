@@ -19,7 +19,7 @@ UTs. Do not also execute the legacy `roles/kernel_extractor.md` procedure.
 | `TASK`, `WORKLOAD` | User scope and replay specification |
 | `PREVIOUS_WORKLOAD_JSON`, `PREVIOUS_RANKING_JSON`, `PREVIOUS_UT_DELIVERY` | Reuse compatible evidence and passing tasks on resume/refresh |
 | `BUDGET`, `HEAD_BUDGET`, `REMAINING_MIN` | Scheduling limits; retain the complete selected inventory and explain deferred tasks |
-| `CAPTURE_PERSIST_POLICY` | Export into capture processes; defaults to `structure_only` for AgentX |
+| `CAPTURE_PERSIST_POLICY` | Export into capture processes; defaults to `metadata_only` (no tensor persistence) |
 
 `PHASE=prepare` executes all five skill stages in one invocation. Prefer seeded
 UT input factories from fixed workload metadata; do not collect numerical inputs
@@ -76,6 +76,19 @@ Every selected identity must have one complete owning task, or a failed/deferred
 entry with its identities, reason and evidence paths. Retain required companion
 leaves, per-phase coverage and uncovered mass. Keep classification and attributed
 cost in the saved declaration/ranking; packaging never recomputes them.
+
+Selected communication operators belong in an `excluded_tasks` bucket with their
+`entity_kind`, measured share and the scope reason — never in `deferred_tasks`. A
+deferral tells every downstream stage the work is pending; an out-of-scope collective
+has nothing pending, and parking it as deferred leaves a permanent phantom obligation
+in the coverage statement.
+
+`coverage_summary` carries selection coverage — how much workload device time the
+selected identities hold. It is not shape coverage, and one does not substitute for the
+other: each task's `shape_coverage` block states how much of its own served distribution
+its frozen cases exercise, and travels with that task into the delivery. Downstream
+optimization runs these fixed cases, so a task tested at one batch size optimizes against
+one batch size; surface both numbers rather than reporting the larger one.
 
 ```bash
 node "$WORKFLOW_DIR/scripts/agentx_kernel_preparation.mjs" \

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Capture real serving shapes + a reference I/O oracle for a hot kernel.
+"""Capture serving shape/layout metadata for a hot kernel without saving tensor data by default.
 
 The Kernel Extractor uses this to turn a profiled hot kernel into a standalone, IMMUTABLE unittest
 the single-kernel kernel_workflow can optimize. It hooks the target callable inside a live sglang
-server process (via the sitecustomize/monkeypatch overlay mechanism), records (args, kwargs)->output
-for the first few DISTINCT input-shape signatures seen during a short bench window, and writes a
-torch-loadable `reference_io.pt` + `meta.json`.
+server process (via the sitecustomize/monkeypatch overlay mechanism) and writes `meta.json`.
+Use deterministic constructors for UT operands and compute references at runtime. Explicit
+`structure_only` captures retain only necessary structure under byte limits; legacy full I/O
+policies are opt-in and may write `reference_io.pt`.
 
 This module is meant to be imported at server startup through an overlay PYTHONPATH (it registers the
 hook on import), OR called as a function from a custom preimport. It does NOT launch the server
@@ -20,18 +21,18 @@ Usage pattern (Extractor writes an overlay sitecustomize.py like):
         max_cases=5,
     )
 Then launch the server with PYTHONPATH=<overlay>:$PYTHONPATH and run a short bench. On process exit
-(atexit) the records are flushed to <out_dir>/reference_io.pt + meta.json.
+(atexit) metadata is flushed to <out_dir>/meta.json.
 
-Anti-cheating: the oracle is captured from the UNMODIFIED baseline kernel. The optimizer later must
-match it. The unittest + this file's outputs must not be edited during optimization.
+Anti-cheating: references come from the frozen baseline. The unittest, input constructors and
+coverage metadata must not be edited during optimization.
 """
 import atexit, functools, importlib, json, os, re, shutil, sys, threading
 
 # Issue #429: process-local MXFP4 MoE oracles can retain multi-GiB tensors per rank/retry until the
 # workspace is evicted. Defaults bound heavy oracle persistence; set CAPTURE_BYTE_BUDGET=0 for unlimited.
-_DEFAULT_BYTE_BUDGET = os.environ.get("CAPTURE_BYTE_BUDGET", "8GiB")
-_DEFAULT_CASE_BYTE_LIMIT = os.environ.get("CAPTURE_CASE_BYTE_LIMIT", "2GiB")
-_DEFAULT_PERSIST_POLICY = os.environ.get("CAPTURE_PERSIST_POLICY", "share_large")
+_DEFAULT_BYTE_BUDGET = os.environ.get("CAPTURE_BYTE_BUDGET", "64MiB")
+_DEFAULT_CASE_BYTE_LIMIT = os.environ.get("CAPTURE_CASE_BYTE_LIMIT", "8MiB")
+_DEFAULT_PERSIST_POLICY = os.environ.get("CAPTURE_PERSIST_POLICY", "metadata_only")
 _DEFAULT_SHARE_MIN_BYTES = os.environ.get("CAPTURE_SHARE_MIN_BYTES", "16MiB")
 _DEFAULT_STRUCTURAL_OPERANDS = os.environ.get("CAPTURE_STRUCTURAL_OPERANDS", "")
 _DEFAULT_SYNTH_MIN_BYTES = os.environ.get("CAPTURE_SYNTH_MIN_BYTES", "64KiB")
@@ -39,7 +40,7 @@ _CAPTURE_DIR_RE = re.compile(r"^capture\.pid-")
 _TMP_ARTIFACT_RE = re.compile(r"\.(?:pt|json)\.tmp-\d+")
 # Heuristic names for expert/static parameter tensors (used by moe_slim / share_large).
 _WEIGHT_KEY_RE = re.compile(
-    r"(^w[123]$|^weight$|expert_w|gate_up|down_proj|up_proj|_weight$)", re.I)
+    r"(^w[123]+$|^weights?$|expert_w|gate_up|down_proj|up_proj|_weights?$)", re.I)
 # Operands whose CONTENT selects work: routing decisions, gather indices, page tables,
 # sequence bookkeeping. Under `structure_only` these are kept verbatim; everything else
 # floating-point and bulk is reduced to (shape, dtype, stride, seed). The dividing line is
@@ -77,7 +78,7 @@ _STATE = {
     # past max_cases makes the oracle stale and triggers a rewrite so it never disagrees with meta.json.
     "flush_every": 64, "oracle_written": False, "oracle_sha": None, "oracle_records": 0,
     # storage bound (#429): estimated serialized tensor bytes already accepted into `records` + shared.
-    "byte_budget": 0, "case_byte_limit": 0, "persist_policy": "share_large",
+    "byte_budget": 0, "case_byte_limit": 0, "persist_policy": "metadata_only",
     "share_min_bytes": 16 << 20, "shared_tensors": {}, "shared_bytes_est": 0,
     # structure_only: declared structural operands kept verbatim, bulk float payloads
     # reduced to seeded descriptors. `synth_seed` is the running counter that makes each
@@ -427,6 +428,32 @@ def _shapes_dtypes(args, kwargs):
     return {"input_shapes": shapes, "input_dtypes": sorted(set(dtypes))}
 
 
+def _describe(obj):
+    """JSON-only operand contract; never read, clone or transfer tensor contents."""
+    if _torch().is_tensor(obj):
+        return {"__tensor_meta__": True, "shape": list(obj.shape),
+                "dtype": str(obj.dtype), "stride": list(obj.stride()),
+                "device": str(obj.device), "contiguous": bool(obj.is_contiguous())}
+    if isinstance(obj, (list, tuple)):
+        return {"container": type(obj).__name__, "items": [_describe(v) for v in obj]}
+    if isinstance(obj, dict):
+        return {str(k): _describe(v) for k, v in obj.items()}
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    return {"__type__": type(obj).__name__, "requires_constructor": True}
+
+
+def _structured_bytes(obj, key, declared):
+    """Count only tensors retained by _snapshot_structured, before any device copy."""
+    if _torch().is_tensor(obj):
+        return _tensor_nbytes(obj) if _is_structural(key, obj, declared) else 0
+    if isinstance(obj, (list, tuple)):
+        return sum(_structured_bytes(v, key, declared) for v in obj)
+    if isinstance(obj, dict):
+        return sum(_structured_bytes(v, k, declared) for k, v in obj.items())
+    return 0
+
+
 def _lead_regime(args, kwargs):
     """Coarse regime (decode vs prefill) of a call, used to tag oracle cases so the oracle covers BOTH
     regimes. Oracle records are captured only EAGERLY (a snapshot during CUDA-graph capture is illegal),
@@ -448,6 +475,8 @@ def _lead_regime(args, kwargs):
                 t = first(v)
                 if t is not None:
                     return t
+        if isinstance(o, dict):
+            return first(list(o.values()))
         return None
     t = first(list(args) + list(kwargs.values()))
     if t is None or t.dim() == 0:
@@ -495,34 +524,35 @@ def _is_weight_key(key):
 def _is_structural(key, t, declared):
     """Whether this operand's CONTENT selects work, and so must be kept verbatim.
 
-    Integer and boolean tensors are structural by default: an index, a page id or a mask
+    Unknown integer and boolean tensors are structural by default: an index, a page id or a mask
     redrawn at random addresses different memory, and a kernel whose gather pattern changed
     is not the kernel that was deployed. Float operands are structural only when declared
     (`meta.structural_operands` / CAPTURE_STRUCTURAL_OPERANDS) or when their name matches a
     routing/bookkeeping pattern -- e.g. `topk_weights`, which is float but decides scaling
-    per expert. Small tensors are kept whatever they are; reducing them saves nothing and
-    scalars-in-a-tensor are usually bookkeeping."""
+    per expert. Named numerical weights are excluded unless explicitly declared. Other small
+    tensors are kept since scalars-in-a-tensor are usually bookkeeping. Byte budgets still apply."""
     torch = _torch()
     if not torch.is_tensor(t):
         return True
     if str(key) in declared:
         return True
-    if not t.is_floating_point() and "float8" not in str(t.dtype):
-        return True
     if bool(_STRUCTURAL_KEY_RE.search(str(key))):
+        return True
+    # Packed integer weights are numerical payloads, not routing metadata. Unknown
+    # integer operands remain conservative; even those must fit the byte budget.
+    if _is_weight_key(key):
+        return False
+    if not t.is_floating_point() and "float8" not in str(t.dtype):
         return True
     return t.numel() * t.element_size() < int(_STATE.get("synth_min_bytes") or (64 << 10))
 
 
 def _synth_descriptor(t, seed):
-    """A bulk float operand reduced to what is needed to rebuild it bit-identically.
+    """Describe a seeded numerical replacement, not the original tensor contents.
 
-    This is persistence, not omission: `materialize_synth` with the recorded seed returns
-    the same tensor on every call, on every process, forever. That is the property the
-    oracle needs and the property a rebuild-at-UT-time factory does NOT have -- rebuilding
-    through the serving stack re-runs whatever nondeterminism that stack contains (on this
-    deployment, `aiter.fused_moe.moe_sorting` returns different routing from bit-identical
-    inputs), and does it inside the correctness gate where nobody is looking."""
+    Freeze the generator implementation and validate reproducibility on the pinned stack.
+    Structural state must be constructed independently of nondeterministic serving routing.
+    """
     return {"__synth__": True, "dtype": str(t.dtype), "shape": list(t.shape),
             "stride": list(t.stride()), "device": str(t.device), "seed": int(seed),
             "dist": "randn_unit", "nbytes": int(t.numel() * t.element_size())}
@@ -532,6 +562,9 @@ def _snapshot_structured(x, key, declared):
     """`_snapshot`, except bulk non-structural float tensors become seeded descriptors."""
     torch = _torch()
     if torch.is_tensor(x) and not _is_structural(key, x, declared):
+        if not x.is_floating_point() and "float8" not in str(x.dtype):
+            return {"__needs_constructor__": True, **_describe(x),
+                    "reason": "packed payload requires its quantization/scale contract"}
         _STATE["synth_seed"] = int(_STATE.get("synth_seed") or 0) + 1
         _STATE["synth_leaves"] = int(_STATE.get("synth_leaves") or 0) + 1
         _STATE["synth_bytes_saved"] = (int(_STATE.get("synth_bytes_saved") or 0)
@@ -569,6 +602,8 @@ def materialize_synth(obj, device=None, generator_device="cpu"):
     test has value-dependent cost (denormals, early-exit, saturation) say so in
     `meta.oracle_coverage` and keep a few captured cases as the control."""
     torch = _torch()
+    if isinstance(obj, dict) and obj.get("__needs_constructor__"):
+        raise ValueError("packed payload requires a format-aware input constructor")
     if isinstance(obj, dict) and obj.get("__synth__"):
         g = torch.Generator(device=generator_device).manual_seed(int(obj["seed"]))
         dtype = getattr(torch, str(obj["dtype"]).replace("torch.", ""))
@@ -704,7 +739,12 @@ def _wrapper(*args, **kwargs):
     s["calls"] += 1
     in_graph = _capturing()
     try:
-        sig = _sig(args, kwargs)
+        metadata_only = s.get("persist_policy") == "metadata_only"
+        inputs = _describe({"args": args, "kwargs": kwargs}) if metadata_only else None
+        # Include nested shapes, strides and scalar arguments so different layouts
+        # cannot collapse into the same histogram bucket.
+        sig = (json.dumps(inputs, sort_keys=True, separators=(",", ":"))
+               if metadata_only else _sig(args, kwargs))
         with s["lock"]:
             if in_graph:
                 s["in_graph_calls"] += 1
@@ -712,6 +752,8 @@ def _wrapper(*args, **kwargs):
             s["shape_counts"][sig] = s["shape_counts"].get(sig, 0) + 1
             if sig not in s["shape_meta"]:
                 s["shape_meta"][sig] = _shapes_dtypes(args, kwargs)
+                if metadata_only:
+                    s["shape_meta"][sig].update(inputs=inputs, output=_describe(out))
             if len(s["sequence"]) < s["seq_cap"]:
                 s["sequence"].append({"sig": sig, "in_graph": in_graph})
             # Record the heavy oracle ONLY from eager calls: a snapshot during CUDA-graph capture would
@@ -723,7 +765,11 @@ def _wrapper(*args, **kwargs):
             # oracle never freezes on a single regime (the "single-case oracle" bug).
             regime = _lead_regime(args, kwargs)
             need_regime = regime not in s["regime_seen"]
-            if sig not in s["seen"] and not in_graph and (len(s["records"]) < s["max_cases"] or need_regime):
+            if metadata_only:
+                s["regime_seen"].add(regime)
+                s["shape_meta"][sig]["regime"] = regime
+            if (not metadata_only and sig not in s["seen"] and not in_graph
+                    and (len(s["records"]) < s["max_cases"] or need_regime)):
                 call_bytes = _estimate_call_bytes(args, kwargs, out)
                 budget = int(s.get("byte_budget") or 0)
                 case_limit = int(s.get("case_byte_limit") or 0)
@@ -744,10 +790,10 @@ def _wrapper(*args, **kwargs):
                             est_shared_add += nbytes
                 effective_need = max(0, est_case) + est_shared_add
                 if policy == "structure_only":
-                    # Structural operands only; the bulk payload never leaves the device.
-                    # A capture this small is never the thing that blows a byte budget, so
-                    # it must not be skipped by one -- skipping is what loses the shapes.
-                    effective_need = 0
+                    declared = set(s.get("structural_keys") or ())
+                    effective_need = sum(_structured_bytes(a, "arg%d" % i, declared)
+                                         for i, a in enumerate(args))
+                    effective_need += _structured_bytes(kwargs, "", declared)
                 if case_limit > 0 and effective_need > case_limit:
                     s["seen"].add(sig)
                     s["budget_exceeded"] = True
@@ -788,8 +834,8 @@ def _wrapper(*args, **kwargs):
                     s["regime_seen"].add(regime)
                     # The recorded output is computed from the REAL operands, so it is not
                     # an oracle for the reduced ones. Keep it as a descriptor and leave the
-                    # record explicitly unresolved: `regen_reference.py` materializes the
-                    # operands, runs the installed unmodified kernel and fills in the value.
+                    # record explicitly unresolved: the UT constructs the operands and
+                    # computes references in the frozen baseline at runtime, in memory.
                     # Shipping the stale output would be a silent mismatch; refusing to ship
                     # one is the whole point of the policy.
                     s["records"].append({
@@ -804,7 +850,7 @@ def _wrapper(*args, **kwargs):
                         "output_status": "needs_regen",
                         "shared_keys": [],
                     })
-                    s["oracle_bytes_est"] = int(s.get("oracle_bytes_est") or 0)
+                    s["oracle_bytes_est"] = int(s.get("oracle_bytes_est") or 0) + effective_need
                     sys.stderr.write(
                         f"[capture_shapes] recorded case {len(s['records'])} ({regime}) "
                         f"structure_only: {sig}\n")
@@ -910,7 +956,8 @@ def _flush(write_oracle=True):
     for r in records:
         shapes, dtypes = [], []
         def walk(o):
-            if isinstance(o, dict) and o.get("__tensor__"):
+            if isinstance(o, dict) and any(o.get(k) for k in
+                    ("__tensor__", "__synth__", "__needs_constructor__")):
                 shapes.append(o["shape"]); dtypes.append(o["dtype"])
             elif isinstance(o, (list, tuple)):
                 for v in o: walk(v)
@@ -924,6 +971,12 @@ def _flush(write_oracle=True):
     shape_hist = sorted(
         ({"sig": k, "count": v, **shape_meta.get(k, {})} for k, v in shape_counts.items()),
         key=lambda e: e["count"], reverse=True)
+    if s.get("persist_policy") == "metadata_only":
+        # Legacy attribution consumes meta.cases, while newer coverage tools consume
+        # shape_counts. Both must expose the full observed set without tensor records.
+        cases = [{k: row[k] for k in
+                  ("sig", "regime", "input_shapes", "input_dtypes", "count") if k in row}
+                 for row in shape_hist]
     # Temporal fidelity (hole #2): the ordered, WITH-repeats call sequence + whether the op runs inside
     # a captured CUDA graph. num_distinct_shapes>1 means the deployment interleaves shapes
     # (chunked-prefill ⇄ decode); graph_replayed=True means decode runs under the server's replayed
@@ -936,7 +989,8 @@ def _flush(write_oracle=True):
         "rank": _rank(),
         "module": s["mod"].__name__ if s["mod"] else None,
         "attr": s["attr"],
-        "num_cases": len(records),
+        "num_cases": len(cases),
+        "num_tensor_records": len(records),
         "total_calls_observed": s["calls"],
         "regimes_covered": sorted(s["regime_seen"]),
         "cases": cases,
@@ -945,7 +999,7 @@ def _flush(write_oracle=True):
         "call_sequence": s["sequence"],
         "graph_replayed": bool(s["in_graph_calls"] > 0),
         "in_graph_calls": s["in_graph_calls"],
-        "reference_io": "reference_io.pt",
+        "reference_io": "reference_io.pt" if s["oracle_written"] else None,
         "reference_io_sha256": s["oracle_sha"],   # None until the oracle file is written (partial flush)
         "oracle_complete": bool(s["oracle_written"]),
         "byte_budget": int(s.get("byte_budget") or 0),
@@ -954,7 +1008,8 @@ def _flush(write_oracle=True):
         "structural_operands": sorted(s.get("structural_keys") or ()),
         "synth_leaves": int(s.get("synth_leaves") or 0),
         "synth_bytes_saved": int(s.get("synth_bytes_saved") or 0),
-        "oracle_status": ("needs_regen" if s.get("persist_policy") == "structure_only"
+        "oracle_status": ("not_captured" if not s["oracle_written"] else
+                          "needs_regen" if s.get("persist_policy") == "structure_only"
                           else "captured"),
         "shared_tensor_keys": sorted((s.get("shared_tensors") or {}).keys()),
         "oracle_bytes_est": int(s.get("oracle_bytes_est") or 0) + int(s.get("shared_bytes_est") or 0),
@@ -962,7 +1017,9 @@ def _flush(write_oracle=True):
         "budget_skip_count": int(s.get("budget_skip_count") or 0),
         "oracle_save_count": int(s.get("oracle_save_count") or 0),
         "build": False,  # default: pure-python/triton; Extractor flips to True for HIP/CK/asm tasks
-        "note": "Oracle captured from baseline. Do NOT edit unittest.py or reference_io.pt during opt.",
+        "note": "Freeze input constructors and coverage; compute references at UT runtime. "
+                "reference_io is optional and present only for explicit tensor capture. "
+                "Do NOT edit frozen test inputs, constructors or references during optimization.",
     }
     meta_path = os.path.join(out_dir, "meta.json")
     tmp_meta = f"{meta_path}.tmp-{os.getpid()}-{threading.get_ident()}"
@@ -1068,11 +1125,11 @@ def install(target, out_dir, max_cases=5):
     except ValueError as exc:
         raise RuntimeError(f"[capture_shapes] {exc}") from exc
     persist_policy = (os.environ.get("CAPTURE_PERSIST_POLICY", _DEFAULT_PERSIST_POLICY)
-                      or "share_large").strip().lower()
-    if persist_policy not in ("full", "share_large", "moe_slim", "structure_only"):
+                      or "metadata_only").strip().lower()
+    if persist_policy not in ("metadata_only", "full", "share_large", "moe_slim", "structure_only"):
         raise RuntimeError(
             f"[capture_shapes] invalid CAPTURE_PERSIST_POLICY={persist_policy!r} "
-            f"(expected full|share_large|moe_slim|structure_only)")
+            f"(expected metadata_only|full|share_large|moe_slim|structure_only)")
     structural = {k.strip() for k in
                   os.environ.get("CAPTURE_STRUCTURAL_OPERANDS",
                                  _DEFAULT_STRUCTURAL_OPERANDS).split(",") if k.strip()}

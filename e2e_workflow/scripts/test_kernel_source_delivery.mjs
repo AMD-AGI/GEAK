@@ -94,6 +94,8 @@ async function preparationFixture(t) {
   f.kernel = { device_kernel: 'score', short_name: 'score', entity_kind: 'gpu_kernel',
     selected_device_kernels: ['score'], seam_candidates: seams, source_delivery_required: true };
   const result = { ...await f.pack(), unittest_smoke: 'pass', baseline_frozen: true,
+    shape_coverage: { ledger: 'run/coverage.json', target_pct: 90, phases: {
+      DECODE: { basis: 'mass', coverage_pct: 93.1, meets_target: true } } },
     source: { path: 'kernel_src/score.py' }, notes: ['structured notes'], regime_summary: { DECODE: 3 },
     selection_validation: { contract: 'kernel_selection', ok: true, target_callable: 'pkg:op',
       device_kernel: 'score', total_calls_observed: 1, target_marker_calls: 1, matched_kernel_calls: 1,

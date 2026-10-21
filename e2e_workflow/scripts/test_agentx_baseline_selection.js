@@ -106,9 +106,10 @@ async function run(body, overrides = {}, reply = selection()) {
     'Review extraction coverage using /references/ut_delivery; preserve all observed families.',
     'selection receives user scope and delivery references, not just scheduler budgets');
   assert.deepEqual(input.EXTRACTION_SELECTION_POLICY, {
-    phases: ['PREFILL', 'DECODE'], top_k_per_phase: 5, overall_pct_gt: 3,
-    combination: 'phase_top_k_and_overall_threshold', backfill: false,
-  });
+    phases: ['PREFILL', 'DECODE'], overall_pct_gt: 3,
+    combination: 'overall_share_threshold_on_log_weighted_phase_split',
+    rank_is_inventory_only: true, min_points_per_phase: 2,
+  }, 'selection is a threshold on the log-weighted split, with no per-phase rank cut');
   assert.equal(first.headQueue[0].pct_gpu_time, 7.25, 'routing uses attributable share, not window pct');
   assert.equal(first.kernelQueue[0].pct_gpu_time, 7.25);
   const closed = await run(initial, { searchClosed: () => true });

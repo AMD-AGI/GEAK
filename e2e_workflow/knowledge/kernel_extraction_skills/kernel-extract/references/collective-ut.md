@@ -1,6 +1,13 @@
 # Multi-rank collective UTs
 
-A selected collective remains an extraction target. Establish the actual rank
+**Read this only when communication is explicitly in scope.** By default a collective is
+marked `entity_kind: "collective"`, selected for mass accounting and given no UT at all
+(see [the core skill](../SKILL.md) §2 and [selection coverage](selection-coverage.md)).
+Nothing below is owed for an out-of-scope collective: not a rank harness, not a blocker,
+not a deferral entry. Record the exclusion with its measured share and move on.
+
+When a run IS scoped to optimize communication, a selected collective remains an
+extraction target. Establish the actual rank
 contract and native API before declaring it unsupported. A single-GPU runner
 cannot exercise a TP8 collective, but an allocated and exclusively leased
 eight-device set may support a small standalone rank harness without launching

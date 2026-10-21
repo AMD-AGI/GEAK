@@ -80,6 +80,8 @@ _CASES_STUB = textwrap.dedent('''
         def detach(self): return self
         def clone(self): return self
         def cpu(self): return self
+        def numel(self): return 2
+        def element_size(self): return 4
 
     def timing_cases(h, meta):
         return [
@@ -381,6 +383,37 @@ class ModeTime(_LegRunnerTestCase):
 
 
 class ModeOracle(_LegRunnerTestCase):
+    def test_budget_rejects_before_snapshot_and_does_not_save_partial_oracle(self):
+        self._task_dir(cases=_CASES_STUB.replace(
+            "def clone(self): return self", "def clone(self): raise AssertionError('cloned')"))
+        with self.assertRaisesRegex(RuntimeError, "budget exceeded"):
+            self._main("--task", self.task, "--mode", "oracle", "--out", "/unused",
+                       "--max-output-bytes", "1")
+        self.assertFalse(self.torch.saved)
+
+    def test_budget_is_cumulative_across_draws(self):
+        self._task_dir()
+        with self.assertRaisesRegex(RuntimeError, "draw 1"):
+            self._main("--task", self.task, "--mode", "oracle", "--out", "/unused",
+                       "--max-output-bytes", "400", "--draws", "2")
+        self.assertFalse(self.torch.saved)
+
+    def test_bucket_filter_does_not_generate_unselected_inputs(self):
+        self._task_dir(cases=_CASES_STUB + '\noriginal_shapes = random_shapes\n'
+                       'def random_shapes(h, meta):\n'
+                       '    yield {"sig": "skip", "make_inputs": lambda rng: 1 / 0}\n'
+                       '    yield from original_shapes(h, meta)\n')
+        self._main("--task", self.task, "--mode", "oracle", "--out", "/unused",
+                   "--bucket", "decode", "--draws", "1")
+        self.assertEqual(list(self.torch.saved[-1][0]), ["decode|0"])
+
+    def test_empty_bucket_fails_instead_of_reporting_a_pass(self):
+        self._task_dir()
+        with self.assertRaisesRegex(RuntimeError, "no reference cases"):
+            self._main("--task", self.task, "--mode", "oracle", "--out", "/unused",
+                       "--bucket", "missing")
+        self.assertFalse(self.torch.saved)
+
     def test_oracle_saves_one_entry_per_shape_and_draw(self):
         self._task_dir()
         self._target_module()

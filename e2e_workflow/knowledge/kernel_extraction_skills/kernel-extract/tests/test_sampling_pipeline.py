@@ -71,3 +71,78 @@ class SamplingPipelineTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BenchLogWindowTest(unittest.TestCase):
+    """The canonical aiperf client log delimits the measured leg; parse it, don't ask."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='agentx benchwindow ')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.log = self.root / 'server.log'
+        self.log.write_text(''.join(
+            '[2026-09-14 %s TP0] Decode batch, #running-req: 2, #token: 256, accept len: 2.0, '
+            'cuda graph: True, gen throughput (token/s): 100.0, #queue-req: 0\n' % t
+            for t in ('01:10:00', '01:21:55', '02:00:00', '02:30:00')))
+
+    def bench(self, lines):
+        path = self.root / 'benchmark.log'
+        path.write_text(''.join(lines))
+        return path
+
+    def observe(self, bench):
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / 'observed_workload.py'), '--log', str(self.log),
+             '--decode-log-interval', '1', '--bench-log', str(bench),
+             '--out', str(self.root / 'observed.json')],
+            cwd=self.root, capture_output=True, text=True)
+
+    def test_capitalised_parenthesised_time_only_phase_lines_are_read(self):
+        # aiperf's real spelling: 'Phase profiling (profiling) started', time of day only.
+        proc = self.observe(self.bench([
+            '01:18:17.172 NOTICE   Phase warmup (warmup) started | target: 109 requests\n',
+            '01:21:54.543 NOTICE   Phase profiling (profiling) started | phase_index=0\n',
+            '02:21:54.544 NOTICE   Phase profiling (profiling) sending complete | sent=1,456\n',
+            '02:22:24.544 NOTICE   Phase profiling (profiling) complete | completed=1,456\n']))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        window = json.loads((self.root / 'observed.json').read_text())['measured_window']
+        self.assertEqual(window['start'], '2026-09-14T01:21:54.543000')
+        # 'sending complete' fires 30 s early and must not be mistaken for the phase end.
+        self.assertEqual(window['end'], '2026-09-14T02:22:24.544000')
+        self.assertAlmostEqual(window['duration_s'], 3630.001, places=3)
+
+    def test_a_leg_crossing_midnight_rolls_the_end_forward(self):
+        self.log.write_text(
+            '[2026-09-14 23:45:00 TP0] Decode batch, #running-req: 2, #token: 256, accept len: 2.0, '
+            'cuda graph: True, gen throughput (token/s): 100.0, #queue-req: 0\n')
+        proc = self.observe(self.bench([
+            '23:30:00.000 NOTICE   Phase profiling (profiling) started | x\n',
+            '00:30:00.000 NOTICE   Phase profiling (profiling) complete | x\n']))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        window = json.loads((self.root / 'observed.json').read_text())['measured_window']
+        self.assertEqual(window['duration_s'], 3600.0)
+        self.assertEqual(window['end'][:10], '2026-09-15')
+
+    def test_dated_phase_lines_still_work(self):
+        proc = self.observe(self.bench([
+            '2026-09-14 01:21:54 NOTICE phase "profiling" started\n',
+            '2026-09-14 02:22:24 NOTICE phase "profiling" complete\n']))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        window = json.loads((self.root / 'observed.json').read_text())['measured_window']
+        self.assertEqual(window['start'], '2026-09-14T01:21:54')
+
+    def test_an_ambiguous_date_is_refused_rather_than_guessed(self):
+        self.log.write_text(self.log.read_text() +
+            '[2026-09-15 01:21:55 TP0] Decode batch, #running-req: 2, #token: 256, accept len: 2.0, '
+            'cuda graph: True, gen throughput (token/s): 100.0, #queue-req: 0\n')
+        proc = self.observe(self.bench([
+            '01:21:54.543 NOTICE   Phase profiling (profiling) started | x\n',
+            '02:22:24.544 NOTICE   Phase profiling (profiling) complete | x\n']))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('ambiguous', proc.stdout + proc.stderr)
+
+    def test_a_missing_phase_still_reports_how_to_proceed(self):
+        proc = self.observe(self.bench(['01:21:54.543 NOTICE   nothing to see here\n']))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('--window-start', proc.stdout + proc.stderr)

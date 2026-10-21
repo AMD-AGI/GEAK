@@ -94,9 +94,31 @@ accepts `attention` as an alias for `attn`; declaration and result must agree.
 
 Both forms also supply `target_callable`, applicable `candidate_bind` and
 `baseline_frozen`, exact `device_kernel`, `seam_candidates`, full selection
-verdict or hashed reference, and `source_delivery_ref`. Keep `notes`,
+verdict or hashed reference, `source_delivery_ref`, and `shape_coverage`. Keep `notes`,
 `smoke_detail` and `reference_io_sha256` strings. Use `"fail"` for incomplete or
 failed tests. The complete optional-field schemas are in `e2e_workflow.js`.
+
+`shape_coverage` records `coverage_ledger.py`'s verdict for the frozen case manifest and
+is checked by the preflight, because `smoke:"pass"` says the cases that ran were correct
+and says nothing about how much of the served distribution they were:
+
+```json
+"shape_coverage": {
+  "ledger": "run/coverage.json", "target_pct": 90,
+  "phases": {
+    "DECODE": {"basis": "mass", "coverage_pct": 93.1, "meets_target": true},
+    "PREFILL": {"basis": "instance", "coverage_pct": 41.0, "meets_target": false,
+                "shortfall": {"uncovered_pct": 59.0,
+                              "reason": "one measured point; mass coverage unavailable"}}
+  }
+}
+```
+
+Every served phase needs an entry with a `basis` of `mass` or `instance`, a finite
+`coverage_pct` and a boolean `meets_target`. A phase below target is accepted — honest
+partial coverage is the point — but only with `shortfall.uncovered_pct` and a nonempty
+`shortfall.reason`. A missing block, or a below-target phase without a declared
+shortfall, fails the gate.
 
 Prefer `selection_validation_ref={"path":"run/selection.json","sha256":"..."}`
 over transcribing large machine verdicts. The referenced JSON must be a complete

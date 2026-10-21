@@ -78,6 +78,22 @@ trace metadata and verified source/configuration to establish that manifest. If
 needed, collect missing shape metadata once during extraction; UT execution must
 never invoke `capture_shapes.py`, a profiler or the serving model.
 
+The manifest spans the **served distribution**, not one point in it. Derive its shape set
+from `plan_sampling_points.py`'s points: one case per planned point of the phases this
+task owns, within the ledger's shape tolerance, each carrying that point's
+`effective_calls`. Then add the buckets the points do not already name — dispatch
+boundaries, graph-padding sizes, chunk tails, the smallest and largest served shapes —
+as their own cases, because a bucket that switches branch or kernel is a different test
+regardless of its mass. One case per phase is a bootstrap, and a manifest that never grew
+past it will pass every gate while testing a single batch size of a kernel served across
+ten. Export the frozen manifest to `run/ut_cases.json` and grade it with
+`coverage_ledger.py`; the resulting `shape_coverage` block is part of the task return and
+the delivery gate rejects a task without it.
+
+A case whose shape is reconstructed rather than observed stays in the manifest with zero
+observed weight and is labelled as an envelope probe: it extends correctness coverage and
+must not be weighted as served mass.
+
 Generate ordinary activations and weights directly with the supplied seeded
 `torch.Generator`. Preserve each operand's valid range and format: scales may need
 positive values, and packed quantized operands must be constructed with the real
@@ -86,14 +102,30 @@ random values alone do not cover ties, masks, empty rows or numerical extremes.
 Keep construction outside the timed region. Freeze the generator code and seeds
 so baseline/candidate processes reconstruct identical inputs on the pinned stack.
 
-Use `h.baseline_random_outputs(task, meta, seed=0, draws=...)` to obtain reference
-outputs in the isolated frozen-baseline process. It records outputs keyed by
-`sig|draw`; input tensors need not be saved. Build eager/reference cases from the
-same seeded factory, and pass the recorded outputs to `h.run_correctness` for the
-additional draws. Use matching seeds and draw counts on both sides (the shared
-`run_correctness` random gate uses seed 0). Graph replay still needs its normal
-boundary cases and in-place input refresh. A serving-captured `reference_io.pt`
-is optional; generated reference outputs are not captures from the model.
+Use `h.baseline_random_outputs(task, meta, seed=0, draws=..., bucket=sig)` to
+obtain reference outputs from the isolated frozen-baseline process. It returns a
+CPU mapping keyed by `sig|draw` via Linux anonymous memory (`memfd`); it creates no
+persistent `.pt` file and closes the transport on success, error and timeout.
+Vendor `harness_lib.py` and `leg_runner.py` together. Already-frozen task copies do
+not inherit this change: update helpers before freezing a new task, or use an
+external ephemeral transport launcher without altering its frozen correctness gate.
+
+The default reference payload budget is 256 MiB per call, checked before copying
+outputs. For large suites, generate, compare and release one bucket at a time;
+never collect every bucket's output mapping in a list or save it with `torch.save`.
+A single larger case needs an explicit positive `max_output_bytes` based on available
+memory, or a task-specific streaming comparison. Budget overflow is an error, never
+a skipped case or a pass. Keep full shape coverage and fold every batch's verdict
+into the final result. Memory transport, serialization and deserialization can
+require several copies of the bounded payload; the limit is not a process RSS cap.
+
+Build eager/reference cases from the same seeded factory and pass baseline outputs
+to `h.run_correctness` for additional draws. Match seeds and draw counts on both
+sides (the shared `run_correctness` random gate uses seed 0). Preserve multi-case
+independence checks and cross-shape graph replay boundary cases when batching.
+A serving-captured `reference_io.pt` is optional. If a separate candidate worker
+needs reference IPC, use a bounded anonymous buffer/pipe and close it in `finally`;
+do not replace the deleted file with another persistent tensor dump.
 
 Record which inputs are generated and which are structural fixtures. For MoE
 routing, sparse indices, page tables and sequence state, first reuse existing
@@ -104,23 +136,23 @@ change expert occupancy and gather locality, so report its timing scope honestly
 
 ## Capture policy
 
-Use `CAPTURE_PERSIST_POLICY=structure_only` when capture is necessary: retain
-structural operands and reduce bulk float payloads to seeded descriptors. Integer
-and boolean operands are structural by default; declare additional float structural
-operands with `CAPTURE_STRUCTURAL_OPERANDS` / `meta.structural_operands`.
+Default to `CAPTURE_PERSIST_POLICY=metadata_only` for missing shape or launch evidence.
+No input/output tensors are stored. For indispensable structural state only, explicitly
+choose `structure_only`: routing, masks and page/sequence metadata may be retained,
+subject to 64 MiB per process and 8 MiB per case defaults. Both budgets are checked
+before copying; all observed shapes stay in the histogram even when payload is skipped.
+Declare additional structural operands with `CAPTURE_STRUCTURAL_OPERANDS`.
 
-A captured output was computed from the original values, so it is not a reference
-for regenerated random inputs. The reduced file is marked `oracle_status=needs_regen`:
+Packed integer weights are numerical payloads, not routing. Rebuild them with the
+real quantization, packing and scale contract; a `__needs_constructor__` descriptor
+must be resolved by task-specific code, not silently converted from random floats.
 
-```bash
-python3 "$SKILL_ROOT/scripts/regen_reference.py" captures/reference_io.pt \
-    --out captures/reference_io.regen.pt
-python3 "$SKILL_ROOT/scripts/oracle_power.py" captures/reference_io.regen.pt --tol "$TOL"
-```
-
-This fallback persists reconstructed operands and baseline outputs. Prefer the
-seeded factory above when it avoids capture entirely. Never regenerate structural
-state through nondeterministic routing while pretending the inputs are unchanged.
+A reduced capture's output is marked `needs_regen` because it came from different
+numerical inputs. Compute its reference from the reconstructed operands in the
+frozen baseline at UT runtime and compare in memory. Do not run `regen_reference.py`
+to persist full generated operands and outputs as a routine step. That script is
+an explicit legacy-export tool. Prefer a seeded factory and retain only the small
+structural fixture when a fully deterministic reconstruction is unavailable.
 
 ## Correctness and timing
 
@@ -156,9 +188,10 @@ The shared leg runner already performs this isolation.
    If the capture turns out to carry no usable values, a reference generated by running
    the installed, unmodified kernel is a legitimate substitute — say so in
    `meta.oracle_coverage`, since gate 1 against it is then a determinism check rather
-   than a deployment-value check. **Persist the exact operands it was computed from
-   alongside the output.** Rebuilding them at UT time reintroduces (b) inside the
-   correctness gate, where it is much harder to see than in a probe.
+   than a deployment-value check. Freeze the constructor, seeds and required structural state; verify that the two
+   processes reconstruct identical operands. Keep expected outputs in memory only.
+   Do not rerun nondeterministic routing inside the factory; reconstruct its state
+   deterministically or retain only the minimal indispensable structural fixture.
 
    (b) A tolerance below the installed kernel's own noise floor decides nothing.
    Establish the floor with ONE set of args reused across repeats, and only after
@@ -174,7 +207,7 @@ The shared leg runner already performs this isolation.
 2. Build candidate overlay; prove distinct baseline/candidate entries in every
    phase and actual execution of every claimed editable leaf.
 3. Obtain independent baseline random outputs with
-   `h.baseline_random_outputs(task, meta, draws=...)`.
+   `h.baseline_random_outputs(task, meta, draws=..., bucket=sig)` per bounded batch.
 4. In the candidate process, use `h.run_correctness(regime, eager_cases=...,
    current_call=..., random_shapes=..., tol=..., baseline_outputs=...,
    draws=..., replay=...)`. Read its docstring for the callable bundle contracts.

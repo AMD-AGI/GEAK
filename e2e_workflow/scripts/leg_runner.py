@@ -85,6 +85,19 @@ def _snapshot(out):
         "tensor, or a tuple/list/dict of tensors")
 
 
+def _output_bytes(out):
+    """Conservative payload/entry estimate BEFORE copying to the reference buffer."""
+    if isinstance(out, (tuple, list)):
+        return 64 + sum(_output_bytes(v) for v in out)
+    if isinstance(out, dict):
+        return 64 + sum(_output_bytes(k) + _output_bytes(v) for k, v in out.items())
+    if hasattr(out, "detach"):
+        return 256 + int(out.numel()) * int(out.element_size())
+    if out is None or isinstance(out, (int, float, bool, str)):
+        return 64 + (len(out.encode("utf-8")) if isinstance(out, str) else 0)
+    raise TypeError(f"unsupported oracle output: {type(out).__name__}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True)
@@ -93,6 +106,8 @@ def main():
     ap.add_argument("--out", default="")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--draws", type=int, default=0)
+    ap.add_argument("--max-output-bytes", type=int, default=256 << 20,
+                    help="positive reference-buffer budget; split large suites by --bucket")
     ap.add_argument("--target-callable", default="", help="identity probe only; defaults to meta target")
     a = ap.parse_args()
 
@@ -148,16 +163,32 @@ def main():
         print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
         return
 
+    if not a.out or a.max_output_bytes <= 0:
+        ap.error("oracle requires --out and a positive --max-output-bytes")
     torch = h._torch()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     draws = a.draws or int(meta.get("random_draws", 3))
     blob = {}
+    output_bytes = 0
     for shape in cases.random_shapes(h, meta):
+        if a.bucket and shape["sig"] != a.bucket:
+            continue
         case_call, _ = case_execution(shape)
         for i in range(max(1, draws)):
             rng = torch.Generator(device=device).manual_seed(int(a.seed) + i)
             out = case_call(shape["make_inputs"](rng))
+            needed = _output_bytes(out) + len(shape["sig"].encode("utf-8")) + 64
+            if output_bytes + needed > a.max_output_bytes:
+                raise RuntimeError(
+                    f"baseline reference budget exceeded at {shape['sig']} draw {i}: "
+                    f"need={output_bytes + needed}, limit={a.max_output_bytes}; "
+                    "compare and release one bucket at a time, reduce draws per batch, "
+                    "or explicitly size max_output_bytes for a single large case")
             blob[f"{shape['sig']}|{i}"] = _snapshot(out)
+            output_bytes += needed
+            del out
+    if not blob:
+        raise RuntimeError(f"no reference cases selected for bucket {a.bucket!r}")
     torch.save(blob, a.out)
     print(json.dumps({"out": a.out, "n": len(blob)}))
 
