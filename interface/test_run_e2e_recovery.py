@@ -257,10 +257,9 @@ def test_a_stack_only_salvage_is_reported_as_provisional(tmp_path):
     assert out["validation_evidence"]["recovery"]["selected"] == "gemm1"
 
 
-def test_a_speedup_far_past_the_amdahl_ceiling_is_not_salvaged(tmp_path):
-    """The live path refuses to bank a soft-gated candidate whose delta exceeds
-    twice its theoretical ceiling (corruption doing less work looks like a win).
-    Recovery must not be a way around that check."""
+def test_a_surprising_speedup_without_confirmation_stays_pending_on_recovery(tmp_path):
+    """Recovery cannot run the independent review; it must preserve a pending win
+    rather than bypass the live review or classify it as incorrect output."""
     eval_dir = tmp_path / "e2e_implausible"
     # 25.5% GPU time at 1.0338x isolated caps the e2e gain at ~0.84%.
     _candidate(eval_dir, "corrupt", parity_kind="accuracy", pct_gpu_time=25.5,
@@ -268,6 +267,105 @@ def test_a_speedup_far_past_the_amdahl_ceiling_is_not_salvaged(tmp_path):
                ref_med=9216.263, cand_med=9395.961, e2e_throughput_tok_s=9395.961)
 
     assert rx._recover_best_intermediate_win(eval_dir) is None
+    record = rx._integrate_candidates(eval_dir)[0]
+    assert record["speedup_review_pending"] is True
+    assert record["output_parity"] == "pass"
+
+
+def _measurement(name, **extra):
+    return {
+        "measurement_id": name, "candidate_digest": "candidate-content",
+        "reference_digest": "h0-content", "workload_digest": "workload",
+        "ref_summary": f"/bench/{name}/ref.json", "cand_summary": f"/bench/{name}/cand.json",
+        "ref_replicas": 2, "cand_replicas": 2, "fresh_pair": True,
+        "configs_matched": True, "workload_matched": True, **extra,
+    }
+
+
+def _issue522_candidate(eval_dir, **extra):
+    return _candidate(eval_dir, "h1", **{
+        "parity_kind": "accuracy", "pct_gpu_time": 7.18, "isolated_speedup": 1.4596,
+        "e2e_delta_pct": 7.72, "ref_med": 335.171, "cand_med": 361.051,
+        "e2e_throughput_tok_s": 361.051, "measurement_evidence": _measurement("original"), **extra,
+    })
+
+
+def test_issue522_recovery_uses_full_module_coverage(tmp_path):
+    eval_dir = tmp_path / "e2e_coverage"
+    _issue522_candidate(eval_dir, affected_gpu_time={
+        "candidate_digest": "candidate-content",
+        "profile_path": "/profile/h0.json", "reference_digest": "h0-content", "workload_digest": "workload",
+        "kernels": [{"id": name, "pct_gpu_time": pct} for name, pct in
+                    (("decode_in", 7.18), ("decode_out", 3.47), ("prefill", 1.37))],
+    })
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["final_throughput_tok_s"] == pytest.approx(361.051)
+    estimate = wf["recovery_evidence"]["speedup_estimate"]
+    assert estimate["pct_gpu_time"] == pytest.approx(12.02)
+    assert estimate["estimate_pct"] == pytest.approx(3.9337544649)
+    assert estimate["source"] == "coverage_uniform_estimate"
+
+
+def test_per_path_coverage_counts_removed_reduce_once(tmp_path):
+    rows = [{"id": "gemm", "pct_gpu_time": 7.18, "isolated_speedup": 1.28},
+            {"id": "reduce", "pct_gpu_time": 2.65, "removed": True},
+            {"id": "prefill", "pct_gpu_time": 1.37, "isolated_speedup": 1.94}]
+    ir = {"pct_gpu_time": 7.18, "isolated_speedup": 1.4596,
+          "measurement_evidence": _measurement("original"), "affected_gpu_time": {
+              "candidate_digest": "candidate-content",
+              "profile_path": "/profile/h0.json", "reference_digest": "h0-content", "workload_digest": "workload",
+              "kernels": rows + [dict(rows[1])],
+          }}
+    estimate = rx._speedup_estimate(ir)
+    saved = .0718 * (1 - 1 / 1.28) + .0265 + .0137 * (1 - 1 / 1.94)
+    assert estimate["estimate_pct"] == pytest.approx((1 / (1 - saved) - 1) * 100)
+    assert estimate["source"] == "coverage_per_path"
+    ir["affected_gpu_time"]["reference_digest"] = "pre-h0"
+    assert rx._speedup_estimate(ir)["source"] == "head_estimate"
+    ir["affected_gpu_time"]["reference_digest"] = "h0-content"
+    ir["affected_gpu_time"]["kernels"][-1]["pct_gpu_time"] = 3
+    assert rx._speedup_estimate(ir)["source"] == "head_estimate"
+
+
+def test_confirmed_speedup_is_recovered_above_the_head_estimate(tmp_path):
+    eval_dir = tmp_path / "e2e_confirmed"
+    _issue522_candidate(eval_dir, measurement_evidence=_measurement("confirmation"),
+                        speedup_review={"status": "confirmed", "original_measurement": _measurement("original")})
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert wf["final_throughput_tok_s"] == pytest.approx(361.051)
+    assert wf["recovery_evidence"]["awaiting_speedup_review"] is None
+
+
+@pytest.mark.parametrize("changed", [
+    {"candidate_digest": "new-patch"}, {"reference_digest": "new-stack"}, {"workload_digest": "new-workload"},
+    {"measurement_id": "original"}, {"ref_summary": "/bench/original/ref.json"},
+    {"ref_replicas": 1}, {"cand_replicas": 1}, {"ref_replicas": "2"}, {"cand_replicas": 2.5},
+    {"fresh_pair": False}, {"configs_matched": False}, {"workload_matched": False},
+])
+def test_recovery_cannot_confirm_changed_or_cached_evidence(tmp_path, changed):
+    eval_dir = tmp_path / "e2e_unconfirmed"
+    _issue522_candidate(eval_dir, measurement_evidence=_measurement("confirmation", **changed),
+                        speedup_review={"status": "confirmed", "original_measurement": _measurement("original")})
+    assert rx._recover_best_intermediate_win(eval_dir) is None
+
+
+@pytest.mark.parametrize("status,measurement_id,recover", [
+    ("confirmed", "original", True), ("inconclusive", "original", False),
+    ("rejected", "original", False), ("confirmed", "other-candidate", False),
+])
+def test_recovery_reads_workflow_review_checkpoint_only_for_the_same_measurement(tmp_path, status, measurement_id, recover):
+    eval_dir = tmp_path / "e2e_review_checkpoint"
+    cand = _issue522_candidate(eval_dir)
+    raw = json.loads((cand / "integrate_result.json").read_text())
+    reviewed = {**raw, "measurement_evidence": _measurement("confirmation"),
+                "speedup_review": {"status": status, "original_measurement": _measurement(measurement_id)}}
+    checkpoint = eval_dir / "overlay" / "candidate_h1" / "e2e_validation.json"
+    checkpoint.parent.mkdir()
+    checkpoint.write_text(json.dumps({"integration_result": reviewed}))
+    wf = rx._recover_best_intermediate_win(eval_dir)
+    assert (wf is not None) is recover
+    if recover:
+        assert wf["final_throughput_tok_s"] == pytest.approx(361.051)
 
 
 def test_byte_exact_parity_is_trusted_above_its_ceiling(tmp_path):

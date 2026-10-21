@@ -299,6 +299,8 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      - name: Candidate coverage and independent speedup review regression
+        run: node --test e2e_workflow/scripts/test_speedup_review.js
       - name: AgentX-only kernel extraction and fixed-load compatibility
         run: |
           node e2e_workflow/scripts/test_kernel_extract_skill.js
