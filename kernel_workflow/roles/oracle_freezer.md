@@ -43,10 +43,10 @@ and `GPU_LOCK` (abs path to `gpu_lock.sh`).
   meta.json          # op_kind, dtype, regime, cases[], entry callable, baseline_callable, build,
                      #   random_draws, workload, integrity hashes; IMMUTABLE
 ```
-Same contract as e2e's `kernel_extractor` **minus the recorded golden**: a `kernel_extractor` task dir also
-ships `reference_io.pt` because it captures real, unsynthesizable operands (MoE routing tables, paged-KV
-metadata) off a live server. You synthesize your operands from recorded seeds, so you re-derive them on
-demand instead of storing them. Downstream lanes must handle both dir shapes.
+Same storage default as e2e's `kernel_extractor`: construct inputs from frozen seeds and
+compute reference outputs at runtime. An e2e task may additionally retain small indispensable
+structural fixtures when serving state cannot be reconstructed. `reference_io.pt` is optional;
+downstream lanes must handle tasks without it.
 
 ## PHASE=freeze — steps
 

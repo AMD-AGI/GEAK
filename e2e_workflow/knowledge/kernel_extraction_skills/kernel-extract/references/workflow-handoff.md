@@ -19,7 +19,7 @@ UTs. Do not also execute the legacy `roles/kernel_extractor.md` procedure.
 | `TASK`, `WORKLOAD` | User scope and replay specification |
 | `PREVIOUS_WORKLOAD_JSON`, `PREVIOUS_RANKING_JSON`, `PREVIOUS_UT_DELIVERY` | Reuse compatible evidence and passing tasks on resume/refresh |
 | `BUDGET`, `HEAD_BUDGET`, `REMAINING_MIN` | Scheduling limits; retain the complete selected inventory and explain deferred tasks |
-| `CAPTURE_PERSIST_POLICY` | Export into capture processes; defaults to `structure_only` for AgentX |
+| `CAPTURE_PERSIST_POLICY` | Export into capture processes; defaults to `metadata_only` (no tensor persistence) |
 
 `PHASE=prepare` executes all five skill stages in one invocation. Prefer seeded
 UT input factories from fixed workload metadata; do not collect numerical inputs

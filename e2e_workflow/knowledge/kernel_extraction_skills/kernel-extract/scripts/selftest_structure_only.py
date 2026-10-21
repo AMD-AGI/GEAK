@@ -3,11 +3,12 @@
 
 Exercises the whole loop on a toy routed op: capture -> the gate REFUSES the unregenerated
 file -> regenerate against the installed callable -> the gate accepts it, and the operands
-in the regenerated file are byte-identical to what the seeds produce. That last property is
-the one the policy rests on: a seed is persistence, a rebuild factory is not.
+in the regenerated file are byte-identical to what the fixed seeds produce. This is an
+explicit legacy-export compatibility test; it removes all temporary tensor files on exit.
 
     python3 selftest_structure_only.py        # no GPU required
 """
+import atexit
 import os
 import subprocess
 import sys
@@ -32,9 +33,8 @@ class _Mod:
     __name__ = "_selftest_mod"
 
 
-def main():
+def _run(out_dir):
     fails = []
-    out_dir = tempfile.mkdtemp(prefix="structonly-")
     # regen_reference resolves the target in a fresh process, so the toy op has to be
     # importable there too -- exactly as the real target is importable in the serving image.
     with open(os.path.join(out_dir, "_selftest_mod.py"), "w") as f:
@@ -130,6 +130,18 @@ def main():
     print("%s  structure_only self-test (%d checks failed)"
           % ("FAIL" if fails else "OK", len(fails)))
     return 1 if fails else 0
+
+
+def main():
+    # This explicitly tests legacy export; even those small tensors are temporary.
+    with tempfile.TemporaryDirectory(prefix="structonly-") as out_dir:
+        try:
+            return _run(out_dir)
+        finally:
+            # Otherwise the capture hook recreates the deleted directory at exit.
+            atexit.unregister(cs._flush)
+            if out_dir in sys.path:
+                sys.path.remove(out_dir)
 
 
 if __name__ == "__main__":

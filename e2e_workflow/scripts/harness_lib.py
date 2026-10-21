@@ -613,8 +613,10 @@ def reconstruct_captured(obj, device="cpu"):
         # point -- a placeholder that reached a correctness gate would pass it vacuously.
         raise ValueError(
             "this capture was taken with CAPTURE_PERSIST_POLICY=structure_only and its "
-            "output has not been regenerated. Run scripts/regen_reference.py against it "
-            "inside the serving container and point the task at the regenerated file.")
+            "output has not been regenerated. Construct the inputs deterministically and "
+            "compute the reference in the frozen baseline at UT runtime; compare in memory.")
+    if isinstance(obj, dict) and obj.get("__needs_constructor__"):
+        raise ValueError("packed payload requires a format-aware input constructor")
     if isinstance(obj, dict) and obj.get("__synth__"):
         raise ValueError(
             "a __synth__ operand descriptor reached reconstruct_captured. Materialize it "
@@ -1508,7 +1510,7 @@ def _kill_process_group(proc, grace=5.0):
 
 
 def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600,
-             target_callable=""):
+             target_callable="", max_output_bytes=None):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     cmd = [sys.executable, os.path.join(task_dir, "leg_runner.py"),
@@ -1519,6 +1521,8 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
         cmd += ["--out", out]
     if draws:
         cmd += ["--draws", str(int(draws))]
+    if max_output_bytes is not None:
+        cmd += ["--max-output-bytes", str(int(max_output_bytes))]
     if target_callable:
         if mode != "resolve":
             raise ValueError("target_callable override is only valid for identity resolution")
@@ -1667,11 +1671,28 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
     return per_case
 
 
-def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):
-    """Random-draw outputs recorded by the BASELINE leg in its own process, for
-    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides."""
+def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600,
+                            bucket="", max_output_bytes=256 << 20):
+    """Generate bounded references in an isolated baseline process, without a disk artifact.
+
+    Same seed => same inputs on both sides. Consume the returned CPU mapping with
+    `check_random_vs_baseline(baseline_outputs=...)`, then release it. For large suites,
+    call once per `bucket` and compare that bucket before generating the next one.
+    The positive byte limit is enforced before each output snapshot in leg_runner.
+    Linux memfd transports the result; there is deliberately no disk fallback.
+    Vendor this helper together with the matching leg_runner.py.
+    """
+    if int(max_output_bytes) <= 0:
+        raise ValueError("max_output_bytes must be positive")
+    if not hasattr(os, "memfd_create"):
+        raise RuntimeError("baseline reference transport requires Linux memfd; no disk fallback")
     task = os.path.abspath(task_dir)
-    out = os.path.join(task, "_baseline_random.pt")
-    _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
-             out=out, seed=seed, draws=draws, timeout=timeout)
-    return _torch().load(out, map_location="cpu")
+    fd = os.memfd_create("geak-baseline-reference", flags=os.MFD_CLOEXEC)
+    try:
+        out = f"/proc/{os.getpid()}/fd/{fd}"
+        _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
+                 out=out, seed=seed, draws=draws, timeout=timeout, bucket=bucket,
+                 max_output_bytes=max_output_bytes)
+        return _torch().load(out, map_location="cpu")
+    finally:
+        os.close(fd)

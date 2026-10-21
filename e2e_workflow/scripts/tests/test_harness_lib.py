@@ -2909,14 +2909,50 @@ class TestBaselineRandomOutputs(_LegTestCase):
         self._script(lambda cmd, env: _Proc(0, '{"out": "x", "n": 2}'))
         got = hl.baseline_random_outputs(self.task, self.meta, seed=100, draws=2)
 
-        dest = os.path.join(self.task, "_baseline_random.pt")
+        dest = self.sub.flag("--out")
+        self.assertTrue(dest.startswith(f"/proc/{os.getpid()}/fd/"))
+        self.assertFalse(os.path.exists(dest), "anonymous buffer descriptor leaked")
+        self.assertFalse(os.path.exists(os.path.join(self.task, "_baseline_random.pt")))
         self.assertEqual(self.sub.calls[0]["env"]["PYTHONPATH"].split(os.pathsep)[0], self.base)
         self.assertEqual(self.sub.modes(), ["oracle"])
         self.assertEqual(self.sub.flag("--out"), dest)
         self.assertEqual(self.sub.flag("--seed"), "100")
         self.assertEqual(self.sub.flag("--draws"), "2")
+        self.assertEqual(self.sub.flag("--max-output-bytes"), str(256 << 20))
         self.assertEqual(loaded, [(dest, "cpu")])          # CPU-side, so either leg can compare it
         self.assertEqual(list(got), ["decode|0"])
+
+    def test_reference_buffer_is_writable_and_closed_on_all_exit_paths(self):
+        for failure in (None, RuntimeError("failed"), subprocess.TimeoutExpired("leg", 1)):
+            for load_fails in (False, True):
+                paths = []
+                def run(*args, **kw):
+                    paths.append(kw["out"])
+                    self.assertEqual(kw["bucket"], "decode")
+                    with open(kw["out"], "wb") as f:
+                        f.write(b"reference")
+                    if failure:
+                        raise failure
+                def load(path, **kw):
+                    with open(path, "rb") as f:
+                        self.assertEqual(f.read(), b"reference")
+                    if load_fails:
+                        raise ValueError("load failed")
+                    return {"decode|0": 123}
+                self.torch.load = load
+                with patch.object(hl, "_run_leg", run):
+                    if failure or load_fails:
+                        with self.assertRaises(type(failure) if failure else ValueError):
+                            hl.baseline_random_outputs(self.task, self.meta, bucket="decode")
+                    else:
+                        self.assertEqual(hl.baseline_random_outputs(
+                            self.task, self.meta, bucket="decode"), {"decode|0": 123})
+                self.assertFalse(os.path.exists(paths[0]))
+                self.assertFalse(os.path.exists(os.path.join(self.task, "_baseline_random.pt")))
+
+    def test_unbounded_reference_budget_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "positive"):
+            hl.baseline_random_outputs(self.task, self.meta, max_output_bytes=0)
 
 
 # --------------------------------------------------------------------------- #
@@ -3062,6 +3098,13 @@ class ServedBucketsTest(unittest.TestCase):
 
 class TestOracleSharedAndLazy(_HarnessTestCase):
     """Issue #429: shared weight refs + per-case lazy correctness keep MoE oracles from OOM'ing."""
+
+    def test_unresolved_descriptors_cannot_be_used_as_references_or_inputs(self):
+        for descriptor, message in (("__needs_regen__", "compare in memory"),
+                                    ("__needs_constructor__", "format-aware"),
+                                    ("__synth__", "Materialize")):
+            with self.subTest(descriptor=descriptor), self.assertRaisesRegex(ValueError, message):
+                hl.reconstruct_captured({"nested": [{descriptor: True}]})
 
     def test_resolve_oracle_shared_expands_refs(self):
         shared = {"w1": {"__tensor__": True, "data": _T((2, 2), fill=3.0)}}

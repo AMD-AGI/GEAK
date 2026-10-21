@@ -71,7 +71,9 @@ for (const args of [
       assert(!prompt.includes(`First Read ${root}/roles/kernel_extractor.md`));
       assert(prompt.includes(`${path.dirname(skill)}/references/workflow-handoff.md`));
       assert(prompt.includes('"SKILL_ROOT":' + JSON.stringify(path.dirname(skill))));
-      assert(prompt.includes('"CAPTURE_PERSIST_POLICY":"structure_only"'));
+      assert(prompt.includes('"CAPTURE_PERSIST_POLICY":"metadata_only"'));
+      assert(prompt.includes('CAPTURE_BYTE_BUDGET=64MiB'));
+      assert(prompt.includes('CAPTURE_CASE_BYTE_LIMIT=8MiB'));
       assert(prompt.includes('"SHARED_TOOLS":' + JSON.stringify(path.join(root, 'scripts'))));
       assert(prompt.includes('"PARSE_PROFILE_STRICT_PHASES":"1"'));
       assert(prompt.includes('"KERNEL_ENV_SKIP_ENUM_REAP":"1"'));

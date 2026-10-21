@@ -216,10 +216,13 @@ class _RecorderTestCase(unittest.TestCase):
         self.addCleanup(sys.modules.pop, name, None)
         return mod
 
-    def _hook(self, fn=None, out_dir=None, max_cases=5, name="fake_serving_layer"):
+    def _hook(self, fn=None, out_dir=None, max_cases=5, name="fake_serving_layer",
+              policy="share_large"):
         """Install the recorder over a stub module's `op`, returning (module, install stderr)."""
         mod = self._target_module(fn, name)
-        with _stderr() as err:
+        # Legacy oracle tests opt in; production install() defaults to metadata only.
+        with _stderr() as err, _env(CAPTURE_PERSIST_POLICY=os.environ.get(
+                "CAPTURE_PERSIST_POLICY", policy)):
             cs.install(f"{name}:op", self.out_dir if out_dir is None else out_dir,
                        max_cases=max_cases)
         return mod, err.getvalue()
@@ -262,7 +265,79 @@ class TestSig(_RecorderTestCase):
 # --------------------------------------------------------------------------- #
 # _shapes_dtypes -- the per-key shape/dtype payload
 # --------------------------------------------------------------------------- #
+class TestMetadataOnly(_RecorderTestCase):
+    def test_default_keeps_all_shapes_layouts_and_graph_evidence_without_tensor_io(self):
+        mod = self._target_module(lambda *a, **k: a[0])
+        with _env(CAPTURE_PERSIST_POLICY=None, CAPTURE_FLUSH_EVERY="1"), _stderr():
+            cs.install("fake_serving_layer:op", self.out_dir, max_cases=1)
+            self.assertEqual(cs._STATE["persist_policy"], "metadata_only")
+            for size, graph in ((2, False), (4096, False), (4096, True)):
+                t = FakeTensor((size, 8))
+                t.detach = lambda: self.fail("metadata capture attempted tensor IO")
+                if graph:
+                    t.stride = lambda: (1, 4096)
+                self.torch.capturing = graph
+                mod.op({"nested": [t]}, epsilon=1e-5)
+            self.torch.capturing = False
+            cs._flush()
+        meta = self._meta()
+        self.assertFalse(self.torch.saved)
+        self.assertEqual(meta["num_distinct_shapes"], 3)
+        self.assertEqual(meta["num_cases"], 3)
+        self.assertEqual(meta["num_tensor_records"], 0)
+        self.assertEqual(meta["regimes_covered"], ["decode", "prefill"])
+        self.assertEqual([c["sig"] for c in meta["cases"]],
+                         [c["sig"] for c in meta["shape_counts"]])
+        self.assertEqual(sum(x["count"] for x in meta["shape_counts"]), 3)
+        self.assertEqual(meta["total_calls_observed"], 3)
+        self.assertTrue(meta["graph_replayed"])
+        self.assertEqual(len(meta["call_sequence"]), 3)
+        self.assertIsNone(meta["reference_io"])
+        self.assertFalse(meta["oracle_complete"])
+        self.assertEqual(meta["oracle_status"], "not_captured")
+        self.assertEqual(cs._STATE["records"], [])
+        self.assertEqual(os.listdir(self.out_dir), ["meta.json"])
+        inputs = meta["shape_counts"][-1]["inputs"]
+        self.assertEqual(inputs["args"]["items"][0]["nested"]["items"][0]["stride"], [1, 4096])
+        self.assertEqual(inputs["kwargs"]["epsilon"], 1e-5)
+
+
 class TestStructureOnly(_RecorderTestCase):
+    def test_structural_case_limit_is_checked_before_copy(self):
+        with _env(CAPTURE_PERSIST_POLICY="structure_only", CAPTURE_CASE_BYTE_LIMIT="8",
+                  CAPTURE_FLUSH_EVERY="1"), _stderr():
+            mod, _ = self._hook()
+            t = FakeTensor((1024,), dtype="torch.int32")
+            t.detach = lambda: self.fail("over-budget tensor was copied")
+            mod.op(topk_ids=t)
+        self.assertEqual(cs._STATE["records"], [])
+        self.assertEqual(self._meta()["num_distinct_shapes"], 1)
+        self.assertTrue(self._meta()["budget_exceeded"])
+        self.assertFalse(self.torch.saved)
+
+    def test_structural_bytes_accumulate_across_cases(self):
+        with _env(CAPTURE_PERSIST_POLICY="structure_only", CAPTURE_BYTE_BUDGET="20",
+                  CAPTURE_CASE_BYTE_LIMIT="20", CAPTURE_FLUSH_EVERY="1"), _stderr():
+            mod, _ = self._hook()
+            mod.op(topk_ids=FakeTensor((3,), dtype="torch.int32"))
+            mod.op(topk_ids=FakeTensor((4,), dtype="torch.int32"))
+        self.assertEqual(self._meta()["oracle_bytes_est"], 12)
+        self.assertEqual(self._meta()["budget_skip_count"], 1)
+        self.assertEqual(self._meta()["num_distinct_shapes"], 2)
+
+    def test_packed_weight_is_not_retained_as_structure_or_random_cast(self):
+        with _env(CAPTURE_PERSIST_POLICY="structure_only", CAPTURE_FLUSH_EVERY="1"), _stderr():
+            mod, _ = self._hook()
+            t = FakeTensor((1 << 30,), dtype="torch.uint8")
+            t.detach = lambda: self.fail("packed weight was copied")
+            mod.op(w13=t)
+        record = cs._STATE["records"][0]
+        self.assertTrue(record["kwargs"]["w13"]["__needs_constructor__"])
+        self.assertEqual(cs._STATE["oracle_bytes_est"], 0)
+        self.assertEqual(self._meta()["cases"][0]["input_shapes"], [[1 << 30]])
+        with self.assertRaisesRegex(ValueError, "format-aware"):
+            cs.materialize_synth(record["kwargs"])
+
     def test_capture_preserves_routing_and_marks_reduced_payload_for_regeneration(self):
         with _env(CAPTURE_PERSIST_POLICY="structure_only", CAPTURE_SYNTH_MIN_BYTES="1",
                   CAPTURE_STRUCTURAL_OPERANDS="custom_scale", CAPTURE_FLUSH_EVERY="1"):
@@ -905,7 +980,8 @@ class TestInstall(_RecorderTestCase):
         self.assertIsNot(mod.op, len)
         with _stderr():
             self.assertEqual(mod.op([1, 2, 3]), 3)
-        self.assertEqual(cs._STATE["shape_counts"], {"list": 1})
+        self.assertEqual(list(cs._STATE["shape_counts"].values()), [1])
+        self.assertEqual(cs._STATE["persist_policy"], "metadata_only")
 
     def test_install_registers_the_atexit_flush(self):
         registered = []
@@ -967,7 +1043,8 @@ class TestImportTimeInstall(_RecorderTestCase):
         self.assertIn("hooked overlay_serving_layer:op", err)
         with _stderr():
             self.assertEqual(target.op(FakeTensor((4, 8))), "OUT")
-        self.assertEqual(mod._STATE["shape_counts"], {"T(4, 8):torch.float16": 1})
+        self.assertEqual(list(mod._STATE["shape_counts"].values()), [1])
+        self.assertEqual(mod._STATE["persist_policy"], "metadata_only")
 
     def test_a_bad_target_is_reported_and_never_kills_server_startup(self):
         mod, err = self._fresh("capture_shapes_badtarget",

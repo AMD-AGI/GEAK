@@ -295,7 +295,14 @@ sequence metadata must retain valid semantics and the observed work/access patte
 reuse or reconstruct them from existing metadata where reliable; capture only the
 missing structural state. Synthetic structural cases may extend correctness coverage,
 but do not claim they reproduce serving performance without evidence. Any necessary
-capture uses `CAPTURE_PERSIST_POLICY=structure_only` unless explicitly overridden.
+capture defaults to `CAPTURE_PERSIST_POLICY=metadata_only`: save the complete
+shape/layout histogram and scalar metadata, with no tensor I/O. Explicitly choose
+`structure_only` only for indispensable structural fixtures (64 MiB per process,
+8 MiB per case by default, checked before copying). Packed integer weights are
+numerical payloads and require a format-aware constructor. Do not persist generated
+inputs or golden outputs. Compute references per bucket in the frozen baseline
+process, compare in memory, and release each batch; the shared helper uses a bounded
+anonymous memory buffer, never `_baseline_random.pt`.
 
 Use `h.measure_legs()` and `h.serving_weighted_speedup()` from the shared
 harness. Set `workload.kind="agentx_trace_replay"`, `weighting="observed"`, and
