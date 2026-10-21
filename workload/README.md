@@ -44,6 +44,9 @@ files on disk.
 
 ## Design
 
+`PRINCIPLES.md` is the charter: the mandate this pipeline was built to satisfy, and the rules any change to it has to leave intact. This section explains the reasoning; that file states the obligations. Read it before editing anything here.
+
+
 **Two contracts, and nothing else.** Modularity here is not a plugin system, a registry
 or a DSL.
 

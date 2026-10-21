@@ -19,6 +19,8 @@ token of that model, and every `validate` cross-checks the declaration against t
 the stages actually observed. Writing a new scenario config starts there; `scripts/target.py`
 says why, and refuses the run otherwise.
 
+Changing this pipeline rather than running it: read `PRINCIPLES.md` first. It is the charter — what the pipeline was asked to do, and the rules a change has to leave intact.
+
 Run the whole thing:
 
 ```bash
