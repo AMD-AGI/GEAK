@@ -1035,6 +1035,75 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
                     ok, why = js_balanced(fh.read())
                 self.assertTrue(ok, "%s: %s" % (rel, why))
 
+    # The `require('child_process')` sites that already exist. Every one is inside a try/catch,
+    # so on a runtime without `require` it degrades instead of crashing -- but it degrades
+    # SILENTLY, and `require` is undefined on BOTH workflow runtimes, so each of these is a
+    # feature that quietly does nothing: the live execution tracker, the measured-shape probe,
+    # capture reclaim before re-extraction and at Finalize, and the AgentX
+    # declaration-took-effect gate. Tracked debt, pinned here so the set cannot grow and so a
+    # NEW, unguarded require fails the build. Shrink this map when a site gets a real transport.
+    KNOWN_REQUIRE_SITES = {
+        "e2e_workflow/e2e_workflow.js": {
+            "const { spawn } = require('child_process');": 1,
+            "const { execFileSync } = require('child_process');": 4,
+        },
+        "kernel_workflow/kernel_workflow.js": {
+            "const { spawn } = require('child_process');": 1,
+        },
+        "kernel_workflow/kernel_lane.js": {},
+    }
+
+    @staticmethod
+    def _code_lines(path):
+        """Source lines with full-line `//` comments dropped -- these files document the
+        restriction by quoting the forbidden spelling, and that prose must not trip its guard."""
+        with open(path, encoding="utf-8") as fh:
+            return [(n, line) for n, line in enumerate(fh, 1)
+                    if not line.lstrip().startswith("//")]
+
+    def test_no_dynamic_import(self):
+        """A dynamic import in one of these files is a LAUNCH-TIME rejection of the WHOLE
+        script -- "SyntaxError: import() is not available in workflow scripts" -- so not one
+        line runs, on any phase, for any workload.
+
+        No parser catches it. Node accepts it, and so does the AsyncFunction check above; that
+        is exactly how PR #520 shipped four dynamic imports and took the e2e workflow down
+        while CI stayed green. The restriction is the host's, not JavaScript's, so the guard
+        has to be a source-level one. Work that needs a file belongs in a vendored CLI under
+        e2e_workflow/scripts/ that an agent runs.
+        """
+        for rel in self.FILES:
+            path = os.path.join(GEAK_ROOT, rel)
+            if not os.path.isfile(path):
+                continue      # NOT skipTest: that aborts the loop and drops the guard for the rest
+            for number, line in self._code_lines(path):
+                self.assertNotIn(
+                    "import(", line,
+                    "%s:%d uses a dynamic import; the workflow runtime refuses the whole "
+                    "script at launch. Move the work into a vendored CLI under "
+                    "e2e_workflow/scripts/ that an agent runs." % (rel, number))
+
+    def test_no_new_require_sites(self):
+        """`require` is undefined on both workflow runtimes. The existing sites are pinned in
+        KNOWN_REQUIRE_SITES; anything else -- a new spelling, or one more of an existing one --
+        is a feature that will silently do nothing, so it fails here instead."""
+        for rel in self.FILES:
+            path = os.path.join(GEAK_ROOT, rel)
+            if not os.path.isfile(path):
+                continue      # NOT skipTest: that aborts the loop and drops the guard for the rest
+            seen = {}
+            for number, line in self._code_lines(path):
+                if "require(" not in line:
+                    continue
+                stripped = line.strip()
+                allowed = self.KNOWN_REQUIRE_SITES.get(rel, {}).get(stripped, 0)
+                seen[stripped] = seen.get(stripped, 0) + 1
+                self.assertLessEqual(
+                    seen[stripped], allowed,
+                    "%s:%d introduces a `require` the sandbox cannot satisfy: %s. It would "
+                    "fail silently. Move the work into a vendored CLI under "
+                    "e2e_workflow/scripts/ that an agent runs." % (rel, number, stripped))
+
     def test_each_workflow_records_a_timeline(self):
         """Every LLM chokepoint must feed the ledger, or a whole layer goes uncounted."""
         for rel in self.FILES:

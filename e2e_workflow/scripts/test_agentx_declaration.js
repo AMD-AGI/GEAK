@@ -37,17 +37,30 @@ const src = fs.readFileSync(WF, 'utf8');
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) { console.error('  FAIL:', msg); failures++; } else console.log('  ok:', msg); };
 
+// EP is resolved UPSTREAM, by interface/run_e2e.py::_resolve_ep, and arrives as args.ep --
+// run_e2e.py sends it on every launch. The workflow used to re-derive it by shelling out to that
+// same parser, which could never run: neither workflow runtime defines `require`, so that branch
+// died with "require is not defined" at module scope the moment any launch detail was passed.
+// Guessing 1 instead would be worse than failing, because ep addresses the KB page beside tp. So
+// the contract is now: take args.ep, or 1 when there is nothing to resolve, or say what to pass.
+// The parser's own behaviour (--ep-size, EP_SIZE, --enable-expert-parallel x dp) is covered where
+// it lives, in interface/test_run_e2e_dispatch.py.
 const epSource = src.match(/function resolveServingEp\(\) \{[\s\S]*?\n\}/)[0];
-const standaloneEp = (args) => new Function('A', 'SERVING_TP', 'WORKFLOW_DIR', 'require',
-  epSource + '\nreturn resolveServingEp();')(args, 8, path.join(ROOT, 'e2e_workflow'), require);
-ok(standaloneEp({ initial_extra_server_args: '--ep-size=4' }) === 4,
-  'standalone initial flags resolve EP through the same parser as dispatch');
-ok(standaloneEp({ initial_extra_env: 'EP_SIZE=4' }) === 4,
-  'standalone EP_SIZE environment is part of baseline identity');
-ok(standaloneEp({ initial_extra_server_args: '--enable-expert-parallel --data-parallel-size 2' }) === 16,
-  'standalone vLLM EP includes data parallelism');
+const standaloneEp = (args) => new Function('A', 'SERVING_TP', 'WORKFLOW_DIR',
+  epSource + '\nreturn resolveServingEp();')(args, 8, path.join(ROOT, 'e2e_workflow'));
+ok(!/\brequire\s*\(/.test(epSource),
+  'EP resolution uses no Node API the workflow sandbox lacks');
 ok(standaloneEp({ ep: 2, initial_extra_server_args: '--ep-size=4' }) === 2,
   'an explicit standalone degree remains authoritative');
+ok(standaloneEp({}) === 1,
+  'nothing to resolve means no expert parallelism, which is also right for a dense model');
+for (const [key, value] of [['initial_extra_server_args', '--ep-size=4'],
+  ['initial_extra_env', 'EP_SIZE=4'], ['launch_recipe', 'envs:\n  EP_SIZE: 4\n']]) {
+  let thrown = '';
+  try { standaloneEp({ [key]: value }); } catch (e) { thrown = String(e.message || e); }
+  ok(thrown.includes('args.ep is required') && thrown.includes('run_e2e.py'),
+    `${key} without args.ep fails loudly and names the resolver (got: ${thrown.slice(0, 60) || 'no throw'})`);
+}
 
 // ── Rebuild the declaration block + the prompt injector with controlled inputs ──────────────────
 // Slice the contiguous region that defines WORKLOAD_SPEC..AGENTX_ENV, plus the standalone

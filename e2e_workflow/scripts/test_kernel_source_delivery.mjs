@@ -85,7 +85,7 @@ test('tampered logs and source symlinks outside the task cannot certify executio
 });
 
 // Recorded evidence fixtures exercise admission/reuse; they are not GPU tests.
-import { readPreparedKernels, reusePreparedUT } from './agentx_kernel_preparation.mjs';
+import { readPreparedKernels } from './agentx_kernel_preparation.mjs';
 import { checkPreparedUT } from './kernel_extraction_delivery.mjs';
 
 async function preparationFixture(t) {
@@ -119,11 +119,13 @@ test('complete-stage handoff accepts validated UTs without a separate selection 
   assert.equal(ready.kernel_candidates[0].pct_gpu_time, 7.2);
   assert.equal(ready.failed_tasks.length, 1);
   assert.equal(ready.deferred_tasks.length, 1);
-  const reused = await reusePreparedUT(ready.kernel_candidates[0]);
-  assert.equal(reused.unittest_smoke, 'pass');
-  assert.deepEqual(reused.notes, ['structured notes']);
+  const carried = ready.kernel_candidates[0].prepared_ut.result;
+  assert.equal(carried.unittest_smoke, 'pass');
+  assert.deepEqual(carried.notes, ['structured notes']);
   const source = await fs.readFile(new URL('../e2e_workflow.js', import.meta.url), 'utf8');
-  const block = source.slice(source.indexOf('async function extractWithBaseline('), source.indexOf('// abDone =='));
+  // From preparedUtDefect: the AgentX branch reuses the prepared UT through it, and both are
+  // plain functions in the workflow source -- the sandbox has no filesystem to import from.
+  const block = source.slice(source.indexOf('function preparedUtDefect('), source.indexOf('// abDone =='));
   const dispatch = new Function('WORKFLOW_DIR', `
     const KERNEL_EXTRACT_ON = true;
     const safeAgent = () => { throw new Error('must not invoke a second extractor'); };
@@ -142,14 +144,15 @@ test('failed UT remains visible and never enters an optimization queue', async t
   assert.equal(ready.failed_tasks[1].checks.ut_status.ok, false);
 });
 
-test('prepared reuse detects changed result files and changed candidate source', async t => {
-  const f = await preparationFixture(t), ready = await f.save(), kernel = ready.kernel_candidates[0];
-  const file = path.join(f.task, 'run/RETURN.json'), before = await fs.readFile(file);
-  await fs.appendFile(file, '\n');
-  assert.match((await reusePreparedUT(kernel)).smoke_detail, /result changed/);
-  await fs.writeFile(file, before);
+// Preparation is the single gate: dispatch replays its verdict and cannot re-hash anything, so
+// a result or source edited after validation has to stop a candidate HERE or not at all.
+test('preparation refuses a task whose result or candidate source changed after validation', async t => {
+  const f = await preparationFixture(t);
+  assert.equal((await f.save()).kernel_candidates.length, 1, 'the clean task is queued');
   await fs.appendFile(path.join(f.task, 'kernel_src/score.py'), '# edited after UT\n');
-  assert.equal((await reusePreparedUT(kernel)).smoke, 'fail');
+  const edited = await f.save();
+  assert.equal(edited.kernel_candidates.length, 0);
+  assert.match(JSON.stringify(edited.failed_tasks.at(-1)), /source|snapshot|changed/i);
 });
 
 test('duplicate UT ownership does not schedule the same selected implementation twice', async t => {
@@ -171,7 +174,7 @@ test('delivery requires UT files within eval and complete declared selected boun
 
 test('full extract-only workflow resumes from baseline and returns UT state without optimization', async t => {
   const f = await preparationFixture(t);
-  await f.save();
+  const prepared = await f.save();
   const { createRuntime } = await import('../../interface/runtime/engine/run_workflow.mjs');
   const calls = [], logs = [];
   const runtime = createRuntime({ backend: { name: 'fixture', runAgent: async input => {
@@ -180,7 +183,9 @@ test('full extract-only workflow resumes from baseline and returns UT state with
       assert.match(input.prompt, /workflow_return.json|PHASE=persist_llm_stats/);
       return { text: JSON.stringify({ written: true, path: f.root, ok: true }) };
     }
-    return { text: JSON.stringify({ delivery_path: path.join(f.task, 'run/delivery.json') }) };
+    // The envelope travels in the reply, not as a path: this is the stdout of
+    // `agentx_kernel_preparation.mjs --emit-prepared`, which the workflow cannot read itself.
+    return { text: JSON.stringify({ delivery_path: path.join(f.task, 'run/delivery.json'), prepared }) };
   } }, log: line => logs.push(line) });
   const workload = { kind: 'agentx_trace_replay', concurrency: 10 };
   const result = await runtime.runScript(path.resolve(import.meta.dirname, '../e2e_workflow.js'), {
