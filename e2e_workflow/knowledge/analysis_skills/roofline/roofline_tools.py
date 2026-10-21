@@ -220,8 +220,12 @@ def is_client_rdna3x(gfx):
 
     Discrete RDNA3 (gfx1100/gfx1101/gfx1102) and the gfx1103 iGPU are different
     parts and must not match, so the family is gfx115x rather than gfx11xx.
+    Exactly one trailing digit (not `\\d+`): must stay the same boundary as
+    `/^gfx115\\d$/` in e2e_workflow.js / kernel_lane.js, else a gfx1151-prefixed
+    but otherwise-invalid ISA string could be tabulated as a real part here
+    while being rejected or isolated differently in the JS layers.
     """
-    return bool(re.fullmatch(r"gfx115\d+", str(gfx or "").lower()))
+    return bool(re.fullmatch(r"gfx115\d", str(gfx or "").lower()))
 
 
 def resolve_peaks(peaks_md_path, gfx, device=0, product=None):
