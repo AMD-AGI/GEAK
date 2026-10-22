@@ -98,6 +98,25 @@ direct model-mode `Workflow` call must supply both `expected_gfx` and
 `expected_target`; this entry fails closed when either is missing.
 `workflow_dir` must be this folder (a JS workflow can't read its own path); the
 kernel layer defaults to the sibling `kernel_workflow/`.
+
+### The workflow scripts run in a sealed sandbox
+`e2e_workflow.js`, `kernel_workflow.js` and `kernel_lane.js` are evaluated as async
+function bodies in a realm whose entire global surface is the JS built-ins plus
+`agent` / `parallel` / `pipeline` / `phase` / `log` / `workflow` / `args` / `budget` /
+`console` / `setTimeout`. In particular:
+
+| | `process` | `require` | dynamic `import` |
+|---|---|---|---|
+| Claude Code's native `Workflow` tool (the default path) | no | no | **refused at launch** |
+| `interface/runtime/engine/run_workflow.mjs` (`--agent codex`, …) | yes | no | yes |
+
+A dynamic `import` anywhere in one of those three files is a **static** rejection of the
+whole script — not one line runs, on any phase. `require` is simply undefined on both
+runtimes, so a `require` site must never be load-bearing. Anything that needs the
+filesystem belongs in a vendored CLI under `scripts/` that an **agent** runs, which is how
+every other datum in the workflow (the profile, the strategy, every A/B number) already
+arrives. `scripts/tests/test_llm_ledger.py` enforces this in CI; `node --check` does not
+catch it, because plain Node accepts both.
 ```
 Workflow({
   scriptPath: "<E2E_DIR>/e2e_workflow.js",
