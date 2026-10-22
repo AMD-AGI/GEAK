@@ -27,7 +27,7 @@ from shapes import Shape, corpus, smoke  # noqa: E402
 
 # Rough bf16 dense peaks, TFLOPS. Used only as an implausibility check: a measurement
 # above peak means a broken harness (usually a missing synchronize), not a fast kernel.
-PEAK_TFLOPS = {"gfx942": 1300.0, "gfx950": 2500.0}
+PEAK_TFLOPS = {"gfx942": 1300.0, "gfx950": 2500.0, "gfx1151": 59.4}
 
 DTYPES = {
     "bf16": torch.bfloat16,
