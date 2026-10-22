@@ -512,7 +512,8 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
 
     A caller may explicitly pin the expected ISA/product. Otherwise the shared
     structured rocminfo parser establishes both. A bare gfx1201 remains product
-    `unknown`; only exact R9700 detection produces target `r9700`.
+    `unknown`; exact R9700 and R9600D detection produces the corresponding
+    product target without establishing serving-policy qualification.
     """
     explicit_gfx = str(h.get("expected_gfx") or "").strip().lower()
     explicit_target = str(h.get("expected_target") or "").strip().lower()
@@ -523,12 +524,12 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
             )
         if not re.fullmatch(r"gfx[0-9a-f]+", explicit_gfx):
             raise ValueError(f"invalid expected_gfx: {explicit_gfx!r}")
-        if explicit_target not in {"r9700", "unknown"}:
+        if explicit_target not in {"r9700", "r9600d", "unknown"}:
             raise ValueError(
-                "expected_target must be 'r9700' or 'unknown'"
+                "expected_target must be 'r9700', 'r9600d' or 'unknown'"
             )
-        if explicit_target == "r9700" and explicit_gfx != "gfx1201":
-            raise ValueError("expected_target=r9700 requires expected_gfx=gfx1201")
+        if explicit_target in {"r9700", "r9600d"} and explicit_gfx != "gfx1201":
+            raise ValueError(f"expected_target={explicit_target} requires expected_gfx=gfx1201")
         return {
             "gfx": explicit_gfx,
             "target": explicit_target,
@@ -565,10 +566,10 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     target = str(identity.get("target") or "unknown").strip().lower()
     if not re.fullmatch(r"gfx[0-9a-f]+", gfx):
         raise RuntimeError(f"GPU identity probe returned invalid gfx: {gfx!r}")
-    if target not in {"r9700", "unknown"}:
+    if target not in {"r9700", "r9600d", "unknown"}:
         raise RuntimeError(f"GPU identity probe returned invalid target: {target!r}")
-    if target == "r9700" and gfx != "gfx1201":
-        raise RuntimeError("GPU identity probe returned r9700 on a non-gfx1201 ISA")
+    if target in {"r9700", "r9600d"} and gfx != "gfx1201":
+        raise RuntimeError(f"GPU identity probe returned {target} on a non-gfx1201 ISA")
     return {
         "gfx": gfx,
         "target": target,

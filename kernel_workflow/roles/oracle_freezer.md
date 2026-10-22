@@ -266,7 +266,7 @@ value/layout-dependent op whose inputs cannot be reconstructed), set `smoke:"fai
   "baseline_frozen": true,
   "baseline_callable": "module:attr of the frozen input kernel",
   "device_gfx": "gfx950",
-  "device_target": "r9700|unknown",
+  "device_target": "r9700|r9600d|unknown",
   "device_name": "<exact Marketing Name>",
   "physical_cu_count": 256,
   "reference_io_sha256": "",

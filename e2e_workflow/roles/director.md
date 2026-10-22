@@ -158,7 +158,7 @@ Return JSON:
   "workload": {"isl": 1024, "osl": 1024, "conc": 64},
   "bench_script": "<EVAL_DIR>/bench_e2e.sh",
   "gfx": "<required gfx target from step 4, e.g. gfx950>",
-  "device_target": "r9700|unknown",
+  "device_target": "r9700|r9600d|unknown",
   "device_name": "<exact Marketing Name from the selected rocminfo agent>",
   "physical_cu_count": 64,
   "precision": "<serving precision, e.g. mxfp8 | fp8 | bf16 — or \"\" if not established>",

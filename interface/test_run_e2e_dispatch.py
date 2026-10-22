@@ -326,11 +326,42 @@ class TestMapArgs(_RunE2ECase):
                 expected_gfx="gfx950", expected_target="r9700",
             ))
 
+    def test_r9600d_identity_is_preserved(self):
+        expected = {
+            "gfx": "gfx1201", "target": "r9600d",
+            "marketing_name": "AMD Radeon AI PRO R9600D",
+            "physical_cu_count": 48,
+        }
+        identity = rx._expected_gpu_identity({
+            "expected_gfx": "gfx1201", "expected_target": "r9600d",
+            "expected_device_name": expected["marketing_name"],
+            "expected_physical_cu_count": 48,
+        })
+        self.assertEqual(identity, expected)
+        mapped = rx.map_args(self._handoff(
+            eval_dir=str(self.tmp / "e2e_r9600d"), backend="vllm",
+            expected_gfx="gfx1201", expected_target="r9600d",
+            expected_device_name=expected["marketing_name"],
+            expected_physical_cu_count=48,
+        ))
+        self.assertEqual(mapped["expected_target"], "r9600d")
+        self.assertEqual(mapped["expected_gfx"], "gfx1201")
+        self.assertEqual(mapped["expected_physical_cu_count"], 48)
+        self.assertEqual(mapped["expected_device_name"], expected["marketing_name"])
+        os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(expected)
+        self.assertEqual(rx._expected_gpu_identity({}), expected)
+
+    def test_r9600d_identity_rejects_wrong_isa(self):
+        with self.assertRaisesRegex(ValueError, "r9600d requires expected_gfx=gfx1201"):
+            rx._expected_gpu_identity({
+                "expected_gfx": "gfx950", "expected_target": "r9600d",
+            })
+
     def test_explicit_identity_rejects_malformed_values(self):
         with self.assertRaisesRegex(ValueError, "invalid expected_gfx"):
             rx._expected_gpu_identity(
                 {"expected_gfx": "rdna4", "expected_target": "unknown"})
-        with self.assertRaisesRegex(ValueError, "must be 'r9700' or 'unknown'"):
+        with self.assertRaisesRegex(ValueError, "must be 'r9700', 'r9600d' or 'unknown'"):
             rx._expected_gpu_identity(
                 {"expected_gfx": "gfx1201", "expected_target": "r9600"})
 
@@ -342,6 +373,8 @@ class TestMapArgs(_RunE2ECase):
              RuntimeError, "invalid target"),
             (json.dumps({"gfx": "gfx950", "target": "r9700"}),
              RuntimeError, "r9700 on a non-gfx1201 ISA"),
+            (json.dumps({"gfx": "gfx950", "target": "r9600d"}),
+             RuntimeError, "r9600d on a non-gfx1201 ISA"),
         ]
         for raw, exc, pattern in cases:
             with self.subTest(raw=raw):

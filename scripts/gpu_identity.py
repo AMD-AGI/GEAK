@@ -4,8 +4,9 @@
 """Detect AMD GPU ISA and product identity from one structured rocminfo agent.
 
 `gfx1201` is an ISA shared by multiple products.  This helper returns target
-`r9700` only when the same GPU agent reports the exact marketing name
-`AMD Radeon AI PRO R9700`; every other product remains `unknown`.
+`r9700` or `r9600d` only when the same GPU agent reports the corresponding
+exact marketing name; every other product remains `unknown`. Product identity
+does not establish serving-policy or performance-calibration qualification.
 """
 
 from __future__ import annotations
@@ -20,6 +21,11 @@ from pathlib import Path
 from typing import Any
 
 R9700_MARKETING_NAME = "AMD Radeon AI PRO R9700"
+R9600D_MARKETING_NAME = "AMD Radeon AI PRO R9600D"
+PRODUCT_TARGETS = {
+    R9700_MARKETING_NAME: "r9700",
+    R9600D_MARKETING_NAME: "r9600d",
+}
 INTEGRATED_MARKETING_NAMES = frozenset({"AMD Radeon Graphics"})
 _AGENT_RE = re.compile(r"^\s*Agent\s+\d+\s*$")
 _FIELD_RE = re.compile(r"^\s*([^:]+):\s*(.*?)\s*$")
@@ -66,6 +72,9 @@ def parse_rocminfo(text: str) -> dict[str, Any]:
         if not _GFX_RE.fullmatch(gfx) or gfx == "gfx000":
             continue
         marketing_name = fields.get("marketing name", "").strip()
+        target = PRODUCT_TARGETS.get(marketing_name, "unknown")
+        if target != "unknown" and gfx != "gfx1201":
+            raise IdentityError(f"GPU agent {target} requires gfx1201, observed {gfx}")
         raw_cu = fields.get("compute unit", "")
         try:
             physical_cu_count = int(raw_cu)
@@ -79,9 +88,7 @@ def parse_rocminfo(text: str) -> dict[str, Any]:
             {
                 "gfx": gfx,
                 "marketing_name": marketing_name,
-                "target": (
-                    "r9700" if marketing_name == R9700_MARKETING_NAME else "unknown"
-                ),
+                "target": target,
                 "physical_cu_count": physical_cu_count,
             }
         )
