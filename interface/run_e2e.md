@@ -148,7 +148,7 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "framework": "sglang",                 // -> backend (sglang|vllm|atom)
   "gpu_type": "MI300X",
   "expected_gfx": "gfx950",              // optional pair; otherwise probed
-  "expected_target": "unknown",          // r9700|unknown; supply with expected_gfx
+  "expected_target": "unknown",          // r9700|r9600d|unknown; supply with expected_gfx
   "expected_device_name": "AMD Instinct MI355X",
   "expected_physical_cu_count": 256,
   "tp": 8,                               // serving tensor-parallel size (honoured, no TP=1 lock)
