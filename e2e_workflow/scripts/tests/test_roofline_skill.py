@@ -211,6 +211,52 @@ class TestPeaks(unittest.TestCase):
     def test_unmeasured_gfx120x_is_hard_unknown_not_derived(self):
         self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
 
+    def test_client_rdna3x_family_is_gfx115x_not_discrete_rdna3(self):
+        """gfx1151 is the RDNA 3.5 APU; gfx1100/gfx1103 are different parts.
+
+        The predicate is deliberately gfx115x and not gfx11xx: widening it would
+        hand a discrete Navi 31 the APU's behaviour.
+        """
+        self.assertTrue(rt.is_client_rdna3x("gfx1151"))
+        self.assertTrue(rt.is_client_rdna3x("gfx1150"))
+        self.assertFalse(rt.is_client_rdna3x("gfx1100"))
+        self.assertFalse(rt.is_client_rdna3x("gfx1103"))
+        self.assertFalse(rt.is_client_rdna3x("gfx1201"))
+        self.assertFalse(rt.is_client_rdna3x(None))
+
+    def test_unmeasured_gfx115x_is_hard_unknown_not_derived(self):
+        """An untabulated RDNA 3.5 part must not fall through to torch props.
+
+        derive_peaks_from_props reads multi_processor_count and a memory clock.
+        On an APU the "memory clock" is system DRAM shared with the CPU, and the
+        WMMA rate is not derivable from CU count alone, so a derived number here
+        is not a low-confidence roofline — it is a wrong denominator that every
+        downstream utilisation percentage would be divided by.
+        """
+        called = []
+        original = rt.derive_peaks_from_props
+
+        def fake_derive(device=0):
+            called.append(device)
+            return {"hbm_bw_bytes_s": 1.0, "flops": {}, "cu": 1,
+                    "source": "derived", "confidence": "low"}
+
+        rt.derive_peaks_from_props = fake_derive
+        try:
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1152"))
+            self.assertEqual(called, [], "gfx115x must not reach derive_peaks_from_props")
+            # Negative control: discrete RDNA3 is outside the family and still derives.
+            self.assertIsNotNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1100"))
+            self.assertEqual(called, [0])
+        finally:
+            rt.derive_peaks_from_props = original
+
+    def test_tabulated_gfx1151_still_wins_over_the_hard_unknown(self):
+        """The guard is a fallback, not a veto: the real table must still resolve."""
+        p = rt.resolve_peaks(PEAKS_MD, "gfx1151")
+        self.assertIsNotNone(p, "the tabulated gfx1151 row was shadowed by the guard")
+        self.assertGreater(p.get("hbm_bw_bytes_s") or 0, 0)
+
     def test_gfx1250_missing_table_may_derive(self):
         called = []
         original = rt.derive_peaks_from_props
@@ -453,6 +499,24 @@ class TestSkillDocConsistency(unittest.TestCase):
                      "attention decode (paged) | **0.50**",
                      "R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76**"):
             self.assertIn(frag, text, "SKILL.md target_eff table drifted from roofline_tools.TARGET_EFF")
+
+    def test_skill_md_does_not_group_gfx1151_with_the_hard_unknowns(self):
+        """gfx1151 peaks are tabulated, and the agent-facing doc must say so.
+
+        `resolve_peaks` returns the 40-CU 8060S row, so achieved-vs-peak IS
+        available on this part. Stating the client-RDNA hard-unknown rule for
+        gfx120x alone invites the reader to generalise it one ISA over, and on
+        hardware a run did record "No roofline peak table exists for gfx1151"
+        in its environment report -- a claim the skill then had to contradict
+        from the tool's own output. The module and this doc are separate
+        contracts; keep them from drifting.
+        """
+        self.assertIsNotNone(rt.resolve_peaks(PEAKS_MD, "gfx1151"))
+        with open(os.path.join(os.path.dirname(PEAKS_MD), "SKILL.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("`gfx1151` is the opposite", text)
+        self.assertIn("that row IS tabulated", text)
+        self.assertIn("absent* gfx115x row is a", text)
 
     def test_workload_contract_is_stated(self):
         """The hard constraint the byte-reduction track must not violate."""

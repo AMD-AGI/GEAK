@@ -128,13 +128,28 @@ if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
 const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
+// RDNA 3.5 APU (Strix Halo). Kept separate from RDNA4_ISA so each name keeps
+// one meaning; CLIENT_RDNA_ISOLATE below is what every consumer reads.
+const RDNA35_ISA = /^gfx115\d$/.test(EXPECTED_GFX);
 const R9700_E2E = EXPECTED_TARGET === 'r9700';
 // ISA isolation and product policy are intentionally separate. Any gfx1201
 // target must avoid CDNA priors, but only exact R9700 identity selects its
 // calibrated peaks, serving backend, and image policy.
 const RDNA4_ISOLATE = RDNA4_ISA;
-const E2E_LEARNED_KB_ENABLED = !RDNA4_ISOLATE;
-const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA';
+const CLIENT_RDNA_ISOLATE = RDNA4_ISOLATE || RDNA35_ISA;
+const E2E_LEARNED_KB_ENABLED = !CLIENT_RDNA_ISOLATE;
+const MATRIX_CORE_NAME = CLIENT_RDNA_ISOLATE ? 'WMMA' : 'MFMA';
+// Renaming the matrix core is not enough to make the fp8 advice true. gfx1201
+// has fp8 WMMA (perf_knowledge .../rdna4_gfx1201/peaks.md tabulates fp8);
+// gfx1151 has NO fp8 matrix path at all — its peaks.md row carries no fp8 key
+// and knowledge/amd_ryzen.md records "fp8 matrix path: none". Telling a Strix
+// Halo run to "fold the scale into one fp8 WMMA" prescribes an instruction the
+// hardware does not have, and the emulated path it would actually get pays for
+// itself only in bytes moved and dispatch count.
+const HAS_FP8_MATRIX = !RDNA35_ISA;
+const FP8_GEMM_PHRASE = HAS_FP8_MATRIX
+  ? `one fp8 ${MATRIX_CORE_NAME} GEMM`
+  : 'one EMULATED fp8 GEMM (no fp8 matrix instruction on this ISA; the win is in bytes moved and dispatch count, not a narrower matrix op)';
 
 // The kernel workflow's learned KB is OFF by default for lanes launched from here, and ON by default
 // when kernel_workflow is driven directly. Same worker, different prior: a kernel_workflow campaign
@@ -161,7 +176,7 @@ const laneArgs = (wfArgs) => {
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };
-  if (RDNA4_ISOLATE) {
+  if (CLIENT_RDNA_ISOLATE) {
     out.use_learned_kb = 'false';
     out.use_expert_skills = 'false';
     out.perf_knowledge_dir = '';
@@ -272,10 +287,17 @@ if (MODEL_PATH && RDNA4_ISA && !R9700_E2E) {
 }
 
 const LAUNCH_SCRIPT = A.launch_script || '';
-const BACKEND = String(A.backend != null ? A.backend : (R9700_E2E ? 'vllm' : 'sglang')).trim()
-  || (R9700_E2E ? 'vllm' : 'sglang');  // serving adapter
+// Serving backends are opt-IN per architecture, not opt-out: there is no validated
+// R9700 SGLang image, and no gfx1151 one either (ci/docker_setup/docker_default.json
+// deliberately carries no vllm.gfx1151 / sglang.gfx1151 key — see its _note).
+const VLLM_ONLY = R9700_E2E || RDNA35_ISA;
+const BACKEND = String(A.backend != null ? A.backend : (VLLM_ONLY ? 'vllm' : 'sglang')).trim()
+  || (VLLM_ONLY ? 'vllm' : 'sglang');  // serving adapter
 if (R9700_E2E && BACKEND !== 'vllm') {
   throw new Error(`R9700 E2E is vLLM-only (got backend=${BACKEND}): there is no validated R9700 image for it; pass args.backend=vllm`);
+}
+if (RDNA35_ISA && BACKEND !== 'vllm') {
+  throw new Error(`${EXPECTED_GFX} E2E is vLLM-only (got backend=${BACKEND}): there is no validated Strix Halo image for it; pass args.backend=vllm`);
 }
 const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
@@ -424,7 +446,7 @@ const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true
 // A/B reference leg already contains the tuning.
 // tuning_skillset="false" disables the phase entirely: no prompt injection, no report inputs, no state
 // keys -> the run is byte-identical to a build without this feature.
-const TUNING_SKILLSET_ENABLED = !RDNA4_ISOLATE && String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
+const TUNING_SKILLSET_ENABLED = !CLIENT_RDNA_ISOLATE && String(A.tuning_skillset != null ? A.tuning_skillset : 'true') === 'true';
 // Lives under expert_skills/ so the tuning skills sit in the same hierarchy, and are selected through
 // the same index.yaml, as every other expert skill. The tree itself stays VENDORED and pinned whole —
 // the index entries that describe it are outside it, which is what lets both things be true at once.
@@ -433,7 +455,7 @@ const TUNING_SKILLSET_DIR = String(A.tuning_skillset_dir ||
 // tuning-kb/ is the skillset's per-model ANSWER KEY (verified wins + deployable artifacts). Useful in
 // production, contaminating in a blind evaluation — the skillset says so itself. Default ON; pass
 // tuning_kb="false" for eval runs and the role is told not to read it.
-const TUNING_KB_ENABLED = !RDNA4_ISOLATE && String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
+const TUNING_KB_ENABLED = !CLIENT_RDNA_ISOLATE && String(A.tuning_kb != null ? A.tuning_kb : 'true') === 'true';
 // NOTE: there is deliberately NO op budget here. The head track caps its ops because each one spends a
 // recursive kernel-authoring run; tuning ops are cheap by comparison and their value is cumulative, so
 // a cap would just leave measurable wins on the table. The role decides where the returns stop.
@@ -633,7 +655,7 @@ const CORRECTNESS_PROBE_ROLES = new Set(['e2e_integrator', 'director', 'config_t
 // index/capability_index.yaml; status/perf in cards are dated evidence, not routing inputs.
 let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
-if (RDNA4_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
+if (CLIENT_RDNA_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
 // Warm start = the kernel layer's LOCAL experience reuse: before round 1 a lane resolves this kernel's
 // own history in kb_artifacts/ and re-validates the top stored patches through the same verify gate as
 // a fresh candidate. The knobs live in the kernel layer; e2e only forwards them, so that (a) one store
@@ -644,7 +666,7 @@ const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
 const KB_ARGS = {
   kb_artifacts_dir: KB_ARTIFACTS_DIR,
-  warm_start: RDNA4_ISOLATE ? 'off' : String(A.warm_start != null ? A.warm_start : 'on'),
+  warm_start: CLIENT_RDNA_ISOLATE ? 'off' : String(A.warm_start != null ? A.warm_start : 'on'),
   ...(A.warm_start_match != null ? { warm_start_match: String(A.warm_start_match) } : {}),
   ...(A.warm_start_min_speedup != null ? { warm_start_min_speedup: A.warm_start_min_speedup } : {}),
   // Which plane the lanes read and write. Forwarded like the rest so one run uses one plane; omitted
@@ -788,7 +810,7 @@ const KB_ENV_PRELUDE = `. "${WORKFLOW_DIR}/scripts/kb_env.sh"; `;
 // a result below the measured baseline. Default OFF (opt-in): pass use_expert_skills="true" to enable.
 // When OFF (the default) NOTHING is injected into any role prompt -> the prompt (and thus the whole run)
 // is byte-identical to a build without this feature. The flag + dir are passed DOWN to the kernel layer.
-const USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+const USE_EXPERT_SKILLS = !CLIENT_RDNA_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR + '/expert_skills')).replace(/\/+$/, '');
 // Only routing/bake-off/integration roles consult skills; every other role gets no injection.
@@ -1174,7 +1196,7 @@ const CUDA_GRAPH_DEPLOY = (BACKEND === 'vllm' || BACKEND === 'sglang' || BACKEND
 const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   ' DEPLOYMENT REQUIREMENT — the server captures the steady-state decode path into a FULL CUDA/HIP graph, ' +
   'so this kernel runs INSIDE that captured graph. Your speedup MUST be INTRINSIC: better tiles/algorithm, ' +
-  `fused quant (one fp8 ${MATRIX_CORE_NAME}, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ` +
+  `fused quant (${FP8_GEMM_PHRASE}, kill the dequant), or fewer ops/launches that reduce work INSIDE the captured ` +
   'region. Do NOT rely on a per-call CUDA/HIP-graph capture+replay WRAPPER for the speedup — inside the ' +
   "server's graph that wrapper falls back to eager and the win vanishes, and the e2e integrate gate WILL " +
   'reject a wrapper-only win (this already happened: a 1.22x isolated MoE GEMM gave 0% e2e because only its ' +
@@ -5426,7 +5448,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ` DIRECTION=persistent-kernel: a persistent / grid-stride kernel that keeps tiles resident and overlaps global load with ${MATRIX_CORE_NAME}.`,
         ` DIRECTION=warp-specialization: split warps into a producer (async global->LDS copy) and a consumer (${MATRIX_CORE_NAME}) for software pipelining.`,
         ' DIRECTION=epilogue-fusion: fuse the scale/activation/cast epilogue into the GEMM to remove a memory round-trip.',
-        RDNA4_ISOLATE
+        CLIENT_RDNA_ISOLATE
           ? ' DIRECTION=wmma-layout: re-tune WMMA tile shape / LDS swizzle / num_warps / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).'
           : ' DIRECTION=mfma-layout: re-tune matrix_instr_nonkdim / kpack / LDS swizzle / waves_per_eu / GROUP_SIZE_M for this exact (N,K,M-bucket).',
         ' DIRECTION=double-buffer: deepen num_stages and LDS double-buffering to hide HBM latency on the K loop.',
@@ -5622,8 +5644,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `This kernel will be overlaid onto the LIVE decode path (CUDA-graph captured): its STEADY-STATE hot path MUST be ` +
               `host-sync-free (NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize(), no Python branch on a GPU scalar). ` +
               `Cache any weight prep (transpose/requant/preshuffle) by weight.data_ptr() done ONCE, not per call. ` +
-              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, one fp8 ${MATRIX_CORE_NAME} ` +
-              `GEMM) and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion); the integrated kernel MUST fit at the ` +
+              `MEMORY FOOTPRINT IS A HARD CONSTRAINT: use the FUSED fp8 path (fold the block-scale into the operand scale, ${FP8_GEMM_PHRASE}) ` +
+              `and cache only COMPACT fp8/preshuffled weights (never a bf16 expansion); the integrated kernel MUST fit at the ` +
               `accepted config's mem-fraction. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
           }, `${j.short_name}:${lang}`);
@@ -5894,7 +5916,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `MEMORY FOOTPRINT IS A HARD CONSTRAINT: the persistent weight cache is kept for ALL layers at once, so do NOT ` +
               `re-materialize full bf16 weights (raw+preshuffled bf16 across every layer = tens of GB → forces mem-fraction ` +
               `down → starves the KV-cache pool → net e2e REGRESSION even when the GEMM is faster). Use the FUSED fp8 path ` +
-              `(fold the block-scale into the operand scale, run ONE fp8 ${MATRIX_CORE_NAME} GEMM — the "kill the dequant" lever) and cache ` +
+              `(fold the block-scale into the operand scale, run ${FP8_GEMM_PHRASE} — the "kill the dequant" lever) and cache ` +
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
               `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',

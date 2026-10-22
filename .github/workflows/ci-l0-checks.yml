@@ -334,8 +334,12 @@ jobs:
         run: node e2e_workflow/scripts/test_final_phase_gpu_handover.js
       - name: gfx1201 fail-closed knowledge regression
         run: node kernel_workflow/scripts/test_rdna4_policy.js
+      - name: gfx1151 isolation and SKU-gated roofline peaks
+        run: node kernel_workflow/scripts/test_rdna3_policy.js
       - name: R9700 E2E identity and knowledge policy
         run: node e2e_workflow/scripts/test_rdna4_e2e_policy.js
+      - name: Strix Halo E2E isolation, vLLM-only backend and fp8 truth
+        run: node e2e_workflow/scripts/test_rdna3_e2e_policy.js
       - name: caller-pinned eval_dir regression
         run: node e2e_workflow/scripts/test_pinned_eval_dir.js
       - name: kernel_workflow mode dispatch / R9700 bakeoff isolation
