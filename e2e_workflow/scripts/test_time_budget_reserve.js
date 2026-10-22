@@ -251,6 +251,66 @@ for (const [gateArg, dispatch] of [
 ok(/if \(searchClosed\('Profile and Strategize'\)\) \{\s*kernelQueue = \[\];\s*headQueue = \[\];/.test(src),
   'skipping Strategize still leaves both queues arrays (they are declared without a value)');
 
+console.log('\n# a required checkpoint keeps its own bound at the reserve boundary');
+// The 20261014 GLM run: the accepted-stack checkpoint was dispatched as the reserve began, got the 2min
+// floor and was cut off mid-write. The throw that followed discarded a +36% stack with 6h of reserve left.
+const kStart = src.indexOf('function checkpointTimeoutFor');
+const kEnd = src.indexOf('\n}', kStart) + 2;
+ok(kStart > fEnd, 'checkpointTimeoutFor located after atReserveFloor');
+if (kStart === -1) process.exit(1);
+const COMMIT = 30 * 60000;
+const commitAt = (TIME_BUDGET_MS, leftMs, agentMax = AGENT_MAX) => new Function(
+  'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
+  `${src.slice(aStart, kEnd)}
+   return { agentTimeoutFor, checkpointTimeoutFor, enterFinalPhase: () => { FINAL_PHASE_STARTED = true; } };`)(
+  TIME_BUDGET_MS, agentMax, RESERVE, () => leftMs);
+const kBoundary = commitAt(H, RESERVE);
+ok(kBoundary.agentTimeoutFor() === 120000 && kBoundary.checkpointTimeoutFor() === COMMIT,
+  'at the boundary an optimization agent still floors at 2min, and a required checkpoint gets 30min');
+ok(commitAt(H, 10 * 60000).checkpointTimeoutFor() === COMMIT, 'deep inside the reserve it still gets 30min');
+const kMid = commitAt(H, 2 * 3600 * 1000);
+ok(kMid.checkpointTimeoutFor() === kMid.agentTimeoutFor() && kMid.agentTimeoutFor() === AGENT_MAX - RESERVE,
+  'mid-run it keeps the ordinary bound, which is the longer one there');
+const kFinal = commitAt(H, RESERVE);
+kFinal.enterFinalPhase();
+ok(kFinal.checkpointTimeoutFor() === AGENT_MAX, 'in the final phase it is the plain AGENT_TIMEOUT_MS, as before');
+ok(commitAt(H, RESERVE, 10 * 60000).checkpointTimeoutFor() === 10 * 60000,
+  'an agent_timeout_ms below 30min still caps it');
+ok(new Function('TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs',
+  `${src.slice(aStart, kEnd)}\nreturn checkpointTimeoutFor;`)(null, AGENT_MAX, null, () => Infinity)() === AGENT_MAX,
+'no time_budget_s => byte-identical');
+// Granted where the commit happens, not by a label a caller sets, so the round-2 hole stays closed.
+ok((src.match(/\bcheckpointTimeoutFor\b/g) || []).length === 2,
+  'checkpointTimeoutFor is defined once and passed at exactly one call site');
+ok(/async function requireE2EValidationCheckpoint\(relativePath, intent\) \{\s*const written = await persistE2EValidationCheckpoint\(relativePath, intent, checkpointTimeoutFor\);/.test(src),
+  'that call site is requireE2EValidationCheckpoint, so candidate-local diagnostics keep the ordinary cap');
+
+// The whole commit path, executed: requireE2EValidationCheckpoint -> persistE2EValidationCheckpoint ->
+// safeAgent -> agentBounded. Time is scaled (1min -> 4ms) so the writer and the guard really race.
+const persistSrc = src.slice(src.indexOf('let lastCommittedCheckpoint = null;'),
+  src.indexOf('// Expert-skills prompt injection.'));
+const dispatchSrc = src.slice(src.indexOf('function agentBounded('), src.indexOf('// --- FlyDSL provisioning gate'));
+ok(persistSrc.includes('async function requireE2EValidationCheckpoint(') &&
+  dispatchSrc.includes('async function safeAgent('), 'checkpoint writer and dispatch loop located');
+const SCALE = 15000;
+const commitHarness = ({ leftMs = RESERVE, retry = false, writer }) => {
+  const calls = [], logs = [];
+  const api = new Function(
+    'TIME_BUDGET_MS', 'AGENT_TIMEOUT_MS', 'FINAL_RESERVE_MS', 'remainingMs', 'AGENT_TIMEOUT_RETRY',
+    'withProcessSafety', 'ablEffortFor', 'ablEvent', 'ABL', 'tlAgent', 'LLM_TL', 'log', 'agent',
+    'EVAL_DIR', 'CHECKPOINT_WRITE_SCHEMA', 'setTimeout',
+    `${src.slice(aStart, kEnd)}\n${dispatchSrc}\n${persistSrc}
+     return { persistE2EValidationCheckpoint, requireE2EValidationCheckpoint, ABANDONED_RUNS };`)(
+    H, AGENT_MAX, RESERVE, () => leftMs, retry,
+    (p) => p, () => null, () => {}, () => false, () => null, { nested: [] }, (m) => logs.push(m),
+    (prompt, opts) => { calls.push(opts.label); return writer(calls.length); },
+    '/eval', {}, (fn, ms) => setTimeout(fn, ms / SCALE));
+  return { ...api, calls, logs };
+};
+const STACK = 'overlay/accepted_stack/e2e_validation.json';
+const WRITTEN = { written: true, path: `/eval/${STACK}`, checkpoint_sha256: 'ab12' };
+const eightMinWrite = () => new Promise((resolve) => setTimeout(() => resolve(WRITTEN), 8 * 60000 / SCALE));
+
 console.log("\n# an integrator abandoned at the reserve boundary keeps its verdict");
 const rib = src.slice(src.indexOf('async function runIntegrateBothLegs('),
   src.indexOf('if (integ && integ.short_name)', src.indexOf('async function runIntegrateBothLegs(')));
@@ -301,6 +361,28 @@ const verdict = { gate: 'accepted', ab_complete: true, e2e_delta_pct: 23.99 };
   const got = { gate: 'rejected', ab_complete: true };
   const returned = adoptHarness({ integ: got, run: Promise.resolve(verdict) });
   ok(await returned.adopt() === got && returned.waits.length === 0, 'a verdict already in hand is never replaced');
+
+  console.log('\n# the accepted-stack commit at the boundary, end to end (agent_timeout_retry=false, as in the GLM run)');
+  const cut = commitHarness({ writer: eightMinWrite });
+  ok(await cut.persistE2EValidationCheckpoint(STACK, { phase: 'Overlay' }) === null &&
+    cut.logs.some((m) => /exceeded 2min/.test(m)),
+  'through the ordinary cap an 8min write at the boundary is cut off at 2min');
+  const commit = commitHarness({ writer: eightMinWrite });
+  const landed = await commit.requireE2EValidationCheckpoint(STACK, { phase: 'Overlay' }).catch((e) => e);
+  ok(landed === WRITTEN && commit.calls.length === 1 && !commit.logs.some((m) => /hung-agent guard/.test(m)),
+    'through requireE2EValidationCheckpoint the same write lands, in one dispatch');
+
+  const stuck = commitHarness({ retry: true, writer: () => new Promise(() => {}) });
+  let threw = '';
+  try { await stuck.requireE2EValidationCheckpoint(STACK, { phase: 'Overlay' }); } catch (e) { threw = String(e); }
+  ok(/checkpoint_write_failed/.test(threw) && stuck.logs.some((m) => /exceeded 30min/.test(m)),
+    'a writer that never returns still fails the commit, after 30min');
+  ok(stuck.calls.length === 1 && stuck.ABANDONED_RUNS.has(`persist-e2e-checkpoint:${STACK}`),
+    'even with agent_timeout_retry on, it is not retried beside itself: one dispatch, the attempt kept');
+
+  const flaky = commitHarness({ writer: (n) => Promise.resolve(n === 1 ? null : WRITTEN) });
+  ok(await flaky.requireE2EValidationCheckpoint(STACK, { phase: 'Overlay' }).catch((e) => e) === WRITTEN &&
+    flaky.calls.length === 2, 'a writer that returns empty inside the reserve is retried once, and the retry commits');
 
   console.log(failures ? `\nFAILED (${failures})` : '\nPASS');
   process.exit(failures ? 1 : 0);

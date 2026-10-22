@@ -17,6 +17,7 @@ def _recipe(tmp_path: Path, framework: str, args: str, **env: str) -> str:
     arg_name = {
         "vllm": "EXTRA_VLLM_ARGS",
         "sglang": "EXTRA_SGLANG_ARGS",
+        "atom": "EXTRA_ATOM_ARGS",
     }[framework]
     env_lines = "\n".join(f"    {key}: {value!r}" for key, value in env.items())
     path = tmp_path / f"{framework}.yaml"
@@ -371,3 +372,23 @@ def test_a_handoff_that_is_not_an_object_is_rejected(tmp_path: Path) -> None:
     listy.write_text("[1, 2]", encoding="utf-8")
     with pytest.raises(ValueError, match="must be a JSON object"):
         ec._load_handoff(listy)
+
+
+def test_atom_recipe_args_become_server_flags_not_env(tmp_path: Path) -> None:
+    """An ATOM recipe names its server flags in EXTRA_ATOM_ARGS. Left as env, no native
+    adapter reads it and the server runs adapter defaults (no MTP, block 16, no quant)."""
+    recipe = _recipe(
+        tmp_path,
+        "atom",
+        "--block-size 64 --method mtp --num-speculative-tokens 5"
+        " --online_quant_config {\"global_quant_config\":\"ptpc_fp8\",\"exclude_layer\":[\"*.mlp.gate\"]}"
+        " --cudagraph-capture-sizes [1,2,4,8]",
+    )
+    result = resolve_effective_config(_handoff(recipe, framework="atom"))
+
+    assert "EXTRA_ATOM_ARGS" not in result.final_env
+    tokens = shlex.split(result.final_server_args)
+    assert tokens[:6] == ["--block-size", "64", "--method", "mtp", "--num-speculative-tokens", "5"]
+    quant = tokens[tokens.index("--online_quant_config") + 1]
+    assert json.loads(quant)["global_quant_config"] == "ptpc_fp8"
+    assert json.loads(tokens[tokens.index("--cudagraph-capture-sizes") + 1]) == [1, 2, 4, 8]

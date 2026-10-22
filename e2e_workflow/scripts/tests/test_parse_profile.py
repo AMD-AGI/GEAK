@@ -510,6 +510,28 @@ class TestDispatcherExpansion(_TmpMixin, unittest.TestCase):
 # serving-phase step windows
 # --------------------------------------------------------------------------- #
 class TestStepSpans(unittest.TestCase):
+    def test_sglang_step_dialect_preserves_prefill_and_speculative_decode(self):
+        self.assertEqual(pp._classify_step("step[EXTEND bs=2 toks=64]"), (True, 64, 0, 0))
+        self.assertEqual(pp._classify_step("step[TARGET_VERIFY bs=4]"), (False, 0, 4, 0))
+        self.assertIsNone(pp._classify_step("step[malformed]"))
+
+    def test_agentx_strict_phase_mode_rejects_an_unknown_forward_dialect(self):
+        from unittest.mock import patch
+        events = [{"cat": "gpu_user_annotation", "name": "step[NEW_MODE bs=4]", "ts": 1, "dur": 5}]
+        with tempfile.TemporaryDirectory() as directory:
+            filename = os.path.join(directory, "trace.json")
+            with open(filename, "w") as fh:
+                json.dump({"traceEvents": events}, fh)
+            with patch.dict(os.environ, {"PARSE_PROFILE_STRICT_PHASES": "0"}):
+                pp.parse_torch_trace(filename)
+            with patch.dict(os.environ, {"PARSE_PROFILE_STRICT_PHASES": "1", "PARSE_PROFILE_ALLOW_UNPHASED": "0"}):
+                with self.assertRaisesRegex(ValueError, "none parsed"):
+                    pp.parse_torch_trace(filename)
+            with patch.dict(os.environ, {"PARSE_PROFILE_STRICT_PHASES": "1", "PARSE_PROFILE_ALLOW_UNPHASED": "1"}):
+                with contextlib.redirect_stderr(io.StringIO()) as warnings:
+                    pp.parse_torch_trace(filename)
+                self.assertIn("continuing unphased", warnings.getvalue())
+
     def test_seg_without_the_tag_is_all_zeros(self):
         self.assertEqual(pp._seg("execute_model", "context"), (0, 0, 0))
         self.assertEqual(pp._seg("context_abc(12)", "context"), (0, 0, 0))

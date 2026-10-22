@@ -45,6 +45,142 @@ def trace(kernel=KERNEL, under_target=True):
     return events
 
 
+class TestJointChainSelection(unittest.TestCase):
+    joint = "pkg.indexer:joint"
+    score = "pkg.indexer:score"
+    topk = "pkg.indexer:topk"
+
+    def chain_trace(self):
+        events = []
+        for target in (self.joint, self.score, self.topk):
+            events.append({"cat": "cpu_op", "name": ks.INSTALL_PREFIX + target,
+                           "ph": "X", "pid": 1, "tid": 2, "ts": 90, "dur": 1})
+        for target, ts, dur in ((self.joint, 100, 100), (self.score, 105, 25),
+                                (self.topk, 140, 25)):
+            events.append({"cat": "cpu_op", "name": ks.MARKER_PREFIX + target,
+                           "ph": "X", "pid": 1, "tid": 2, "ts": ts, "dur": dur})
+        for kernel, ts, corr in (("score_kernel", 110, 7), ("topk_kernel", 145, 8)):
+            events.extend([
+                {"cat": "hip_runtime", "name": "hipLaunchKernel", "ph": "X",
+                 "pid": 1, "tid": 2, "ts": ts, "dur": 2, "args": {"correlation": corr}},
+                {"cat": "kernel", "name": kernel, "ph": "X", "pid": 5,
+                 "ts": ts + 500, "dur": 20, "args": {"correlation": corr}},
+            ])
+        return events
+
+    def verify(self, events, target=None, extra=()):
+        target = target or self.joint
+        module, attr = target.split(":")
+        return ks.verify_chain(target, "score_kernel", ["topk_kernel"],
+                               {"module": module, "attr": attr, "total_calls_observed": 1},
+                               events, [self.joint, self.score, self.topk, *extra])
+
+    def test_leaf_children_do_not_replace_the_joint_boundary(self):
+        events = self.chain_trace()
+        plain = ks.verify(self.joint, "score_kernel",
+                          {"module": "pkg.indexer", "attr": "joint", "total_calls_observed": 1},
+                          events, [self.joint, self.score, self.topk])
+        self.assertIn("deeper_live_candidate_exists", plain["failed"])
+        joint = self.verify(events)
+        self.assertTrue(joint["ok"], joint)
+        self.assertEqual(joint["live_candidate_targets"], [self.joint])
+        self.assertEqual(set(joint["partial_candidate_targets"]), {self.score, self.topk})
+        self.assertEqual(len(joint["chain_members"]), 2)
+
+    def test_missing_companion_or_score_only_target_fails(self):
+        events = self.chain_trace()
+        missing = self.verify([e for e in events if e.get("name") != "topk_kernel"])
+        self.assertFalse(missing["ok"])
+        self.assertIn("joint_member_missing_in_call", missing["failed"])
+        self.assertFalse(self.verify(events, target=self.score)["ok"])
+
+    def test_shared_parent_external_id_does_not_join_sibling_launchers(self):
+        events = self.chain_trace()
+        # AITER custom op: both stage launches and both device kernels inherit
+        # the enclosing CPU op's External id, while correlations identify launches.
+        events.append({"cat": "cpu_op", "name": "aiter::fused_moe_", "ph": "X",
+                       "pid": 1, "tid": 2, "ts": 102, "dur": 90,
+                       "args": {"External id": 6}})
+        for event in events:
+            if event.get("cat") in ("hip_runtime", "kernel"):
+                event["args"]["External id"] = 6
+        result = self.verify(events)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["deeper_live_candidates"], [])
+        self.assertFalse(self.verify(events, target=self.score)["ok"])
+        self.assertFalse(self.verify(events, target=self.topk)["ok"])
+        # The legacy default remains permissive; AgentX can opt into strict attribution.
+        legacy = ks.verify(self.score, "topk_kernel",
+                           {"module": "pkg.indexer", "attr": "score", "total_calls_observed": 1},
+                           events, [self.score])
+        self.assertTrue(legacy["ok"], legacy)
+
+    def test_agentx_cli_can_reject_sibling_launches_without_changing_legacy_default(self):
+        events = self.chain_trace()
+        for event in events:
+            if event.get("cat") in ("hip_runtime", "kernel"):
+                event["args"]["External id"] = 6
+        with tempfile.TemporaryDirectory() as directory:
+            meta_path, trace_path = os.path.join(directory, "meta.json"), os.path.join(directory, "trace.json")
+            with open(meta_path, "w") as fh:
+                json.dump({"module": "pkg.indexer", "attr": "score", "total_calls_observed": 1}, fh)
+            with open(trace_path, "w") as fh:
+                json.dump({"traceEvents": events}, fh)
+            args = ["--target", self.score, "--device-kernel", "topk_kernel",
+                    "--capture-meta", meta_path, "--torch-trace", trace_path,
+                    "--candidate-target", self.score, "--no-reclaim-captures"]
+            self.assertEqual(ks.main(args), 0)
+            self.assertEqual(ks.main(args + ["--strict-launch"]), 1)
+
+    def test_known_launch_outside_marker_cannot_fall_back_to_parent_external_id(self):
+        events = self.chain_trace()
+        # This CPU event exposes the same broad External id inside score. The
+        # top-k device row has an explicit correlation to its own later launch.
+        events.append({"cat": "cpu_op", "name": "broad_id", "ph": "X",
+                       "pid": 1, "tid": 2, "ts": 111, "dur": 1,
+                       "args": {"External id": 6}})
+        for event in events:
+            if event.get("cat") == "kernel":
+                event["args"]["External id"] = 6
+        self.assertFalse(self.verify(events, target=self.score)["ok"])
+
+    def test_external_only_fallback_requires_contained_cpu_op_not_a_runtime_id(self):
+        events = self.chain_trace()
+        events.append({"cat": "cpu_op", "name": "aiter::fused_moe_", "ph": "X",
+                       "pid": 1, "tid": 2, "ts": 102, "dur": 90,
+                       "args": {"External id": 6}})
+        for event in events:
+            if event.get("cat") in ("hip_runtime", "kernel"):
+                event["args"] = {"External id": 6}
+        self.assertFalse(self.verify(events, target=self.score)["ok"])
+        self.assertTrue(self.verify(events)["ok"])
+
+    def test_a_deeper_complete_joint_still_rejects_outer_wrapper(self):
+        deeper = "pkg.indexer:inner_joint"
+        events = self.chain_trace() + [
+            {"cat": "cpu_op", "name": ks.INSTALL_PREFIX + deeper,
+             "ph": "X", "pid": 1, "tid": 2, "ts": 90, "dur": 1},
+            {"cat": "cpu_op", "name": ks.MARKER_PREFIX + deeper,
+             "ph": "X", "pid": 1, "tid": 2, "ts": 102, "dur": 80},
+        ]
+        outer = self.verify(events, extra=[deeper])
+        self.assertFalse(outer["ok"])
+        self.assertEqual(outer["deeper_live_candidates"], [deeper])
+        self.assertTrue(self.verify(events, target=deeper, extra=[deeper])["ok"])
+
+    def test_disjoint_partial_calls_do_not_fake_a_complete_chain(self):
+        events = self.chain_trace()
+        for event in events:
+            if event["name"] == ks.MARKER_PREFIX + self.topk or event.get("args", {}).get("correlation") == 8:
+                event["ts"] += 200
+        events.append({"cat": "cpu_op", "name": ks.MARKER_PREFIX + self.joint,
+                       "ph": "X", "pid": 1, "tid": 2, "ts": 300, "dur": 100})
+        result = self.verify(events)
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(result["joint_call_coverage"]), 2)
+        self.assertTrue(all(c["missing_members"] for c in result["joint_call_coverage"]))
+
+
 class TestCallableSpec(unittest.TestCase):
     def test_only_exact_machine_specs_are_accepted(self):
         self.assertTrue(ks.valid_callable_spec(TARGET))
