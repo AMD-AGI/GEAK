@@ -94,6 +94,9 @@ def prefill_candidates(ow, bnd):
             "phase": "PREFILL",
             "new_tokens": b["new_token_median"],
             "running": b["running_mode"],
+            # Sequences IN this extend (`#new-seq`). `running` is `#running-req`: the
+            # other requests resident while it ran, not the extend's width.
+            "new_seq": b["new_seq_mode"],
             "cached_tokens": b["cached_token_median"],
             "bucket": b["bucket"],
             "proxy_mass": b["new_token_sum"],

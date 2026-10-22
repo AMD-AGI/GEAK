@@ -78,9 +78,19 @@ def _from_parse_profile(d, phase, path):
     inst = None
     tagged = None
     mixed = bool(serving.get("n_prefill_steps")) and bool(serving.get("n_decode_steps"))
+    per_phase_us = {}
     if phase:
         inst = serving.get("n_%s_steps" % phase.lower())
-        tagged = [r for r in rows if (r.get("phase") or "").upper() == phase]
+        # A row tagged "both" ran in this phase AND the other one. Filtering on the tag
+        # alone dropped it entirely -- in a prefill window that holds the trailing
+        # decode step, MoE and attention vanished from PREFILL. Rows carrying per-phase
+        # device time contribute exactly their share in this phase.
+        for r in rows:
+            pu = r.get("phase_us_measured")
+            if isinstance(pu, dict) and phase.lower() in pu:
+                per_phase_us[r["name"]] = float(pu[phase.lower()])
+        tagged = [r for r in rows if (r.get("phase") or "").upper() == phase
+                  or r["name"] in per_phase_us]
         if tagged:
             rows = tagged
     if mixed and not tagged:
@@ -101,7 +111,7 @@ def _from_parse_profile(d, phase, path):
         return (r["total_us"] if r.get("total_us") is not None
                 else float(r.get("total_ms", 0)) * 1000.0)
 
-    pk = {r["name"]: _row_us(r) for r in rows}
+    pk = {r["name"]: per_phase_us.get(r["name"], _row_us(r)) for r in rows}
     distinct = d.get("num_distinct_kernels")
     total_ms = d.get("total_gpu_time_ms")
     if distinct and total_ms and len(d["top_kernels"]) < distinct:

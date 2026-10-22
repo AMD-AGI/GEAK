@@ -168,7 +168,14 @@ def _seg(name, tag):
 _SGLANG_STEP_RE = re.compile(
     r"step\[(?P<mode>[A-Z_0-9]+) bs=(?P<bs>\d+)(?: toks=(?P<toks>\d+))?\]")
 _SGLANG_MODE_PREFILL = {"EXTEND": True, "DRAFT_EXTEND_V2": True,
-                        "DECODE": False, "TARGET_VERIFY": False}
+                        "DECODE": False, "TARGET_VERIFY": False,
+                        # DFlash-style speculative decoding labels one decode cycle as a
+                        # target `VERIFY` forward plus a draft-model `DRAFT` forward.
+                        "VERIFY": False, "DRAFT": False}
+# Decode-phase spans that are part of a cycle another span already counts. Their kernels
+# are decode work, but counting them as steps would double the cycle count and halve
+# every per-step cost.
+_SGLANG_SUBSTEP_MODES = {"DRAFT"}
 
 
 def _parse_sglang_step(name):
@@ -237,7 +244,11 @@ def _collect_step_spans(events, strict=False):
             if len(unparsed) < 5:
                 unparsed[nm[:160]] = unparsed.get(nm[:160], 0) + 1
             continue
-        spans.append((e["ts"], e["ts"] + e["dur"], "P" if c[0] else "D", c[1], c[2]))
+        # 'd': decode work that is not its own step (see _SGLANG_SUBSTEP_MODES).
+        m = _SGLANG_STEP_RE.search(nm)
+        ph = "P" if c[0] else ("d" if m and m.group("mode") in _SGLANG_SUBSTEP_MODES
+                               else "D")
+        spans.append((e["ts"], e["ts"] + e["dur"], ph, c[1], c[2]))
     if strict and seen and not spans:
         raise ValueError(
             "parse_profile: %d step-shaped annotation spans found, none parsed by any "
@@ -856,6 +867,10 @@ def build_summary(agg, total_us, launches, source, top_n, enrich=None,
             entry["served_regimes"] = ([phase] if phase != "both" else ["prefill", "decode"])
             entry["phase_calls_measured"] = {ph: pd["by_phase"][ph]["count"]
                                              for ph in pd["by_phase"]}
+            # Device time per phase, so a consumer can take one phase's share of a
+            # "both" kernel instead of all of it or none of it.
+            entry["phase_us_measured"] = {ph: round(pd["by_phase"][ph]["total_us"], 3)
+                                          for ph in pd["by_phase"]}
             entry["calls_per_step"] = {ph: round(pd["by_phase"][ph]["count"]
                                                  / max(pm.get(f"n_{ph}_steps", 0) or 1, 1), 2)
                                        for ph in pd["by_phase"]}

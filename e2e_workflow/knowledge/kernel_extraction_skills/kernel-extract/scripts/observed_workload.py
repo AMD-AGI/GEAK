@@ -78,6 +78,31 @@ SGLANG_DECODE_RE = re.compile(
 )
 
 
+# Hybrid-attention models (full + sliding-window KV pools, e.g. Muse Spark) report each
+# pool separately: `full token usage` / `swa token usage` on prefill, and `#full token`
+# plus `#swa token` on decode. `#full token` is the full-attention context, which is
+# what the plain dialect's `#token` means.
+SGLANG_HYBRID_PREFILL_RE = re.compile(
+    r"^\[(?P<ts>[\d\-]+ [\d:]+(?:\.\d+)?) (?:TP|DP)(?P<rank>\d+)[^\]]*\] Prefill batch[,.] "
+    r"#new-seq: (?P<new_seq>\d+), #new-token: (?P<new_token>\d+), "
+    r"#cached-token: (?P<cached_token>\d+), "
+    r"full token usage: (?P<usage>[\d.]+), swa token usage: [\d.]+, "
+    r"#running-req: (?P<running>\d+), #queue-req: (?P<queue>\d+)"
+    r"(?:, #pending-token: (?P<pending>\d+))?"
+    r"(?:, cuda graph: (?P<graph>\w+))?"
+)
+
+SGLANG_HYBRID_DECODE_RE = re.compile(
+    r"^\[(?P<ts>[\d\-]+ [\d:]+(?:\.\d+)?) (?:TP|DP)(?P<rank>\d+)[^\]]*\] Decode batch[,.] "
+    r"#running-req: (?P<running>\d+), #full token: (?P<token>\d+), "
+    r"full token usage: (?P<usage>[\d.]+), #swa token: \d+, swa token usage: [\d.]+, "
+    r"(?:accept len: (?P<accept_len>[\d.]+), )?"
+    r"(?:accept rate: (?P<accept_rate>[\d.]+), )?"
+    r"(?:cuda graph: (?P<graph>\w+), )?"
+    r"gen throughput \(token/s\): (?P<gen_tps>[\d.]+), #queue-req: (?P<queue>\d+)"
+)
+
+
 def _ts(s):
     s = s.strip()
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
@@ -92,8 +117,8 @@ def _b(s):
     return str(s).lower() == "true" if s is not None else None
 
 
-def _sglang_prefill(line):
-    m = SGLANG_PREFILL_RE.match(line)
+def _sglang_prefill(line, regex=SGLANG_PREFILL_RE):
+    m = regex.match(line)
     if not m:
         return None
     return dict(kind="prefill", rank=int(m.group("rank")), ts=_ts(m.group("ts")),
@@ -103,8 +128,8 @@ def _sglang_prefill(line):
                 cuda_graph=_b(m.group("graph")))
 
 
-def _sglang_decode(line):
-    m = SGLANG_DECODE_RE.match(line)
+def _sglang_decode(line, regex=SGLANG_DECODE_RE):
+    m = regex.match(line)
     if not m:
         return None
     acc = m.group("accept_len")
@@ -117,6 +142,9 @@ def _sglang_decode(line):
 
 LOG_DIALECTS = [
     ("sglang-scheduler", [_sglang_prefill, _sglang_decode]),
+    ("sglang-scheduler-hybrid-swa", [
+        lambda line: _sglang_prefill(line, SGLANG_HYBRID_PREFILL_RE),
+        lambda line: _sglang_decode(line, SGLANG_HYBRID_DECODE_RE)]),
 ]
 
 # A line that is plausibly a scheduler batch line. Used only to tell "this log has
