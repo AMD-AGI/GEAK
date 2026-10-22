@@ -37,6 +37,14 @@ Four rules, each of which was learned by a window failing
    this probe parses the trace and asserts the intended phase and shape are actually in
    it, and reports what it found either way.
 
+5. DETECT A STALLED WINDOW FROM THE CLIENT, DO NOT WAIT FOR THE SERVER TO DIE.
+   A profiler-armed decode window has been seen to freeze one TP rank: the streams stop,
+   the NCCL watchdog fires only after 600 s, and every request then hangs until its own
+   timeout (30 min). The streamed chunk counts already prove progress, so if no request
+   receives a chunk for --stall-timeout seconds the point is failed as `stalled`, the
+   window is closed with a short timeout, and the caller can restart the server instead
+   of waiting out the watchdog.
+
 Stdlib only.
 """
 import argparse
@@ -46,6 +54,7 @@ import os
 import random
 import sys
 from pathlib import Path
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -113,15 +122,99 @@ def generate(base, ids, max_new_tokens, journal, label, timeout=1800):
                         "wall_s": round(time.time() - t0, 2)})
 
 
-def wait_for_occupancy(base, want_bs, journal, timeout, poll=2.0, tolerance=0):
+def generate_stream(base, ids, max_new_tokens, journal, label, progress, timeout=1800):
+    """Like generate(), but streamed, counting chunks into progress[label].
+
+    The first chunk arrives when the request's prefill has finished (its first token);
+    every later chunk is one decode step. So `progress[label] >= 2` is a client-side
+    proof that this request is decoding, independent of which counters the server
+    exports or when it increments them.
+    """
+    body = {"input_ids": ids, "stream": True,
+            "sampling_params": {"max_new_tokens": max_new_tokens, "temperature": 0.0,
+                                "ignore_eos": True}}
+    req = urllib.request.Request(base + "/generate", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    progress[label] = 0
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as fh:
+            for raw in fh:
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("data:") and line != "data: [DONE]":
+                    progress[label] += 1
+        journal.append({"event": "request_done", "label": label,
+                        "prompt_tokens": len(ids), "max_new_tokens": max_new_tokens,
+                        "stream_chunks": progress[label],
+                        "wall_s": round(time.time() - t0, 2)})
+    except Exception as exc:
+        journal.append({"event": "request_failed", "label": label, "error": str(exc),
+                        "stream_chunks": progress.get(label),
+                        "wall_s": round(time.time() - t0, 2)})
+    finally:
+        progress[label] = -1    # finished: no longer resident
+
+
+def start_stream(*args):
+    """Run generate_stream on a DAEMON thread. ThreadPoolExecutor workers are joined at
+    interpreter exit, so one request stuck on a wedged server would keep the probe alive
+    for the whole request timeout after the point has already been failed as stalled."""
+    t = threading.Thread(target=generate_stream, args=args, daemon=True)
+    t.start()
+    return t
+
+
+class StallError(RuntimeError):
+    """No streamed request advanced for the stall timeout (rule 5)."""
+
+
+class StallWatch:
+    """Track streamed progress and raise StallError once nothing has advanced for stall_s.
+
+    `progress` is the label -> chunk-count map filled by generate_stream (-1 = finished).
+    Progress is any change of that map: a new chunk, a request finishing, or a new request.
+    stall_s <= 0 disables the check.
+    """
+
+    def __init__(self, progress, stall_s, journal, where):
+        self.progress, self.stall_s = progress, float(stall_s or 0)
+        self.journal, self.where = journal, where
+        self.snap, self.t_change = dict(progress), time.time()
+
+    def check(self):
+        now = time.time()
+        cur = dict(self.progress)
+        if cur != self.snap:
+            self.snap, self.t_change = cur, now
+            return
+        resident = [k for k, c in cur.items() if c >= 0]
+        if self.stall_s > 0 and resident and now - self.t_change > self.stall_s:
+            self.journal.append({
+                "event": "stalled", "where": self.where,
+                "no_progress_s": round(now - self.t_change, 1),
+                "stall_timeout_s": self.stall_s, "stream_chunks": cur,
+                "consequence": "point failed; the server is likely wedged (e.g. a TP rank "
+                               "stuck in a collective) -- restart it before the next point"})
+            raise StallError("no streamed progress for %.0f s during %s"
+                             % (now - self.t_change, self.where))
+
+
+def wait_for_occupancy(base, want_bs, journal, timeout, poll=2.0, tolerance=0,
+                       progress=None):
     """Block until the scheduler reports the intended batch AND is past prefill.
 
     Occupancy alone is not steady state. A request with a 234k-token prompt is counted
     as running from the moment it is admitted, while the scheduler spends the next ten
     seconds chunk-ingesting it -- so `num_running_reqs == want and gen_throughput > 0`
     went true 2.1 s in, the window was armed on prefill chunks, and the capture carried
-    no decode step spans at all. Arm only once `generation_tokens_total` is advancing by
-    at least one token per resident request AND `prompt_tokens_total` has stopped moving.
+    no decode step spans at all.
+
+    `generation_tokens_total` / `prompt_tokens_total` cannot close that gap: SGLang's
+    tokenizer manager increments both in observe_one_finished_request, i.e. only when a
+    request FINISHES, so during steady decode neither moves and a gate on them never
+    fires. When the caller streams its requests, `progress` (label -> chunks received)
+    is the signal instead: every resident request has streamed >= 2 chunks, i.e. it is
+    past prefill and has taken at least one decode step.
 
     Returns (ok, observed_bs, observed_tps). Never arms on a guess.
     """
@@ -131,7 +224,19 @@ def wait_for_occupancy(base, want_bs, journal, timeout, poll=2.0, tolerance=0):
         cur, err = scrape_metrics(base)
         last = cur
         bs, tps = cur.get("num_running_reqs"), cur.get("gen_throughput")
-        if err is None and bs is not None and abs(bs - want_bs) <= tolerance:
+        if err is None and bs is not None and abs(bs - want_bs) <= tolerance \
+                and progress is not None:
+            chunks = list(progress.values())
+            decoding = sum(1 for c in chunks if c >= 2)
+            if decoding >= want_bs and not any(c == -1 for c in chunks):
+                journal.append({
+                    "event": "steady_state_confirmed", "want_bs": want_bs,
+                    "observed_bs": bs, "gen_throughput": tps,
+                    "waited_s": round(time.time() - t0, 1),
+                    "basis": "occupancy + every request streamed >= 2 chunks",
+                    "stream_chunks": dict(progress)})
+                return True, bs, tps
+        elif err is None and bs is not None and abs(bs - want_bs) <= tolerance:
             gen, pro = cur.get("generation_tokens_total"), cur.get("prompt_tokens_total")
             if gen is None or pro is None:
                 # Older/leaner metric sets: fall back to the weaker signal, and say so,
@@ -292,8 +397,13 @@ def warm_prefix(base, prefixes, args, journal):
                     "note": "the measured extend below should report these as cached"})
 
 
-def drive_prefill(base, point, args, journal):
-    """Reproduce ONE observed prefill batch: its new tokens, its cached prefix, its width.
+def prepare_prefill(base, point, args, journal):
+    """Plan ONE observed prefill batch and warm its cached prefixes; send nothing measured.
+
+    Must run BEFORE the window is armed. The warm requests are themselves long uncached
+    prefills (a 127k-token prefix is ~8 chunked forwards at chunk 16384), so warming
+    inside the window spends the whole num_steps budget on the warm-up and the measured
+    extend never lands in the trace.
 
     `new_tokens` and `cached_tokens` are BATCH totals read from the scheduler log's
     `#new-token` / `#cached-token`, and `running` is how many sequences that batch held.
@@ -304,7 +414,10 @@ def drive_prefill(base, point, args, journal):
     """
     total_new = max(1, int(point["new_tokens"]))
     total_cached = max(0, int(point.get("cached_tokens") or 0))
-    nseq = max(1, int(point.get("running") or 1))
+    # The extend's width is `#new-seq` (point["new_seq"]). `running` is `#running-req`,
+    # the OTHER requests resident at the time: splitting by it turned a one-sequence
+    # 3717-token extend into two separately scheduled 1858/1859 extends.
+    nseq = max(1, int(point.get("new_seq") or 1))
 
     per_new = [total_new // nseq] * nseq
     per_cached = [total_cached // nseq] * nseq
@@ -322,26 +435,38 @@ def drive_prefill(base, point, args, journal):
     journal.append({"event": "prefill_plan", "batch_new_tokens": total_new,
                     "batch_cached_tokens": total_cached, "sequences": nseq,
                     "per_sequence_new": per_new, "per_sequence_cached": per_cached})
+    return prefixes, per_new
 
+
+def send_prefill(base, prefixes, per_new, args, journal, poll=2.0):
+    """Send the measured extend: each warmed prefix plus its new tokens, concurrently.
+    Streamed, so a wedged server is caught by the stall watch (rule 5) instead of
+    holding the probe for the full request timeout."""
     # max_new_tokens=1 keeps the request in prefill: we are measuring the context
     # forward, and a long generation would mix decode into the window.
-    with ThreadPoolExecutor(max_workers=nseq) as ex:
-        for i in range(nseq):
-            ids = prefixes[i] + rand_ids(per_new[i], args.seed + i)
-            ex.submit(generate, base, ids, 1, journal,
-                      "prefill_seq%d" % i, args.request_timeout)
+    progress = {"prefill_seq%d" % i: 0 for i in range(len(per_new))}
+    watch = StallWatch(progress, args.stall_timeout, journal, "prefill_window")
+    for i, n in enumerate(per_new):
+        ids = prefixes[i] + rand_ids(n, args.seed + i)
+        start_stream(base, ids, 1, journal, "prefill_seq%d" % i, progress,
+                     args.request_timeout)
+    while any(c != -1 for c in progress.values()):
+        time.sleep(poll)
+        watch.check()
 
 
 def drive_decode(base, point, args, journal):
-    """Hold `bs` requests resident and generating, then arm. Returns the futures so the
-    caller can keep them alive across the window."""
+    """Hold `bs` requests resident and generating, then arm. The requests run on daemon
+    threads, so they stay alive across the window without pinning the process after it;
+    returns the per-request stream progress that wait_for_occupancy and the stall watch
+    gate on."""
     bs = int(point["batch_size"])
     ctx = int(point.get("context_tokens") or 1024)
-    ex = ThreadPoolExecutor(max_workers=bs)
+    progress = {}
     for i in range(bs):
-        ex.submit(generate, base, rand_ids(ctx, args.seed + 100 + i),
-                  args.decode_tokens, journal, "decode_req%d" % i, args.request_timeout)
-    return ex
+        start_stream(base, rand_ids(ctx, args.seed + 100 + i), args.decode_tokens,
+                     journal, "decode_req%d" % i, progress, args.request_timeout)
+    return progress
 
 
 def main():
@@ -364,6 +489,10 @@ def main():
     ap.add_argument("--window-timeout", type=float, default=900)
     ap.add_argument("--decode-tokens", type=int, default=512)
     ap.add_argument("--request-timeout", type=float, default=1800)
+    ap.add_argument("--stall-timeout", type=float, default=180,
+                    help="fail the point as `stalled` when no streamed request advances "
+                         "for this many seconds inside the window (rule 5); 0 disables. "
+                         "Keep it above the server's trace-export pause")
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--out", required=True, help="journal JSON for this point")
     args = ap.parse_args()
@@ -383,17 +512,17 @@ def main():
     server_dir = args.server_trace_dir or args.trace_dir
     num_steps = args.num_steps or (32 if phase == "DECODE" else 8)
     ok = False
+    stalled = False
     verify = {}
-    ex = None
 
     try:
         if phase == "DECODE":
             # Steady state FIRST (rule 1): put the batch on, confirm the scheduler has
             # admitted it and is generating, and only then pay for the arm.
-            ex = drive_decode(args.base_url, point, args, journal)
+            progress = drive_decode(args.base_url, point, args, journal)
             want = int(point["batch_size"])
             confirmed, obs_bs, _ = wait_for_occupancy(
-                args.base_url, want, journal, args.steady_timeout)
+                args.base_url, want, journal, args.steady_timeout, progress=progress)
             if not confirmed:
                 raise RuntimeError(
                     "steady state not reached: wanted bs=%s, scheduler reported %s. Not "
@@ -401,9 +530,11 @@ def main():
             start_profile(args.base_url, server_dir, num_steps, journal, args.arm_timeout)
             # The scheduler closes the window itself once num_steps forwards have run;
             # the batch is already resident, so the steps are the intended shape.
+            watch = StallWatch(progress, args.stall_timeout, journal, "decode_window")
             deadline = time.time() + args.window_timeout
             while time.time() < deadline:
                 time.sleep(5)
+                watch.check()
                 metrics, _ = scrape_metrics(args.base_url)
                 bs = metrics.get("num_running_reqs")
                 if bs == 0:
@@ -412,20 +543,21 @@ def main():
                                     "or lower --num-steps"})
                     break
         else:
-            # Prefill is a single forward per request: arm first, then send, because
-            # there is no resident state to confirm. The window is still bounded by
-            # num_steps and still closed explicitly.
+            # Warm the cached prefixes OUTSIDE the window, then arm, then send only the
+            # measured extend. The window is still bounded by num_steps and still
+            # closed explicitly.
+            prefixes, per_new = prepare_prefill(args.base_url, point, args, journal)
             start_profile(args.base_url, server_dir, num_steps, journal, args.arm_timeout)
-            drive_prefill(args.base_url, point, args, journal)
+            send_prefill(args.base_url, prefixes, per_new, args, journal)
         ok = True
     except Exception as exc:
+        stalled = isinstance(exc, StallError)
         journal.append({"event": "probe_failed", "error": "%s: %s"
                         % (type(exc).__name__, exc)})
     finally:
-        # Rule 3: always, even on the failure path.
-        stop_profile(args.base_url, journal)
-        if ex is not None:
-            ex.shutdown(wait=False)
+        # Rule 3: always, even on the failure path. A wedged server will not answer
+        # /stop_profile either, so do not wait the full request timeout on it.
+        stop_profile(args.base_url, journal, timeout=60 if stalled else 1800)
 
     written = traces_written(args.trace_dir, t_start)
     journal.append({"event": "traces_written", "count": len(written),
@@ -447,6 +579,7 @@ def main():
         "point": point,
         "status": "ok" if (ok and verify.get("verified") is True) else
                   "partial" if (ok and verify.get("verified") == "partial") else "failed",
+        "stalled": stalled,
         "trace_verified": verify.get("verified"),
         "verify_reason": verify.get("reason"),
         "wall_s": round(time.time() - t_start, 1),
