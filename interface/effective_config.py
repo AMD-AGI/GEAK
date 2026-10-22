@@ -18,13 +18,15 @@ from typing import Any, Iterable, Mapping, MutableMapping, Optional, Union
 import yaml
 
 
+# A recipe names its server flags in EXTRA_<FRAMEWORK>_ARGS -- the same name the
+# Magpie launcher hands its script -- so a framework missing here has its recipe
+# flags left behind as an environment variable no native adapter reads.
 _RECIPE_ARG_ENVS = {
     "vllm": "EXTRA_VLLM_ARGS",
     "sglang": "EXTRA_SGLANG_ARGS",
+    "atom": "EXTRA_ATOM_ARGS",
 }
-_ALL_RECIPE_ARG_ENVS = frozenset(
-    {"EXTRA_SERVER_ARGS", "EXTRA_VLLM_ARGS", "EXTRA_SGLANG_ARGS"}
-)
+_ALL_RECIPE_ARG_ENVS = frozenset({"EXTRA_SERVER_ARGS", *_RECIPE_ARG_ENVS.values()})
 
 
 @dataclass(frozen=True)

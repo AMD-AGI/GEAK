@@ -49,7 +49,7 @@ _check_sources_on_exit() {
 }
 trap _check_sources_on_exit EXIT
 
-LOCK_DIR="/tmp/team_gpu_locks"
+LOCK_DIR="${KERNEL_EXTRACT_LOCK_DIR:-/tmp/team_gpu_locks}"
 mkdir -p "$LOCK_DIR"
 
 # ---- Allocation fence ---------------------------------------------------------------------------

@@ -96,6 +96,7 @@ jobs:
             interface/test_run_e2e_measurement_basis.py \
             interface/test_run_e2e_kb_write_tuned.py \
             e2e_workflow/scripts/tests/test_atom_adapter_lifecycle.py \
+            e2e_workflow/scripts/tests/test_atom_server_argv.py \
             interface/test_run_e2e_trace_mirror.py \
             interface/test_geak_outcome_report.py \
             interface/tests/test_geak_call_tree_html.py \
@@ -110,6 +111,7 @@ jobs:
             e2e_workflow/scripts/tests/test_agentx_smoke.py \
             e2e_workflow/scripts/tests/test_bench_env_channel.py \
             e2e_workflow/scripts/tests/test_magpie_launcher_extra_args.py \
+            e2e_workflow/scripts/tests/test_magpie_inner_reap.py \
             e2e_workflow/scripts/tests/test_bench_trust_remote_code.py \
             e2e_workflow/scripts/tests/test_workload_alignment.py \
             e2e_workflow/scripts/tests/test_run_correctness_gate.py \
@@ -124,12 +126,17 @@ jobs:
             e2e_workflow/scripts/tests/test_seam_trace.py \
             e2e_workflow/scripts/tests/test_seam_trace_capture_guard.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
+            e2e_workflow/scripts/tests/test_kernel_extract_targets.py \
+            e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py \
+            e2e_workflow/scripts/tests/test_kernel_extract_gpu_isolation.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
             e2e_workflow/scripts/tests/test_harness_lib.py \
+            e2e_workflow/scripts/tests/test_observed_workload_weights.py \
             e2e_workflow/scripts/tests/test_leg_runner.py \
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
+            e2e_workflow/scripts/tests/test_run_reaper.py \
             e2e_workflow/scripts/tests/test_tuning_skillset_sync.py \
             ci/node/test_run_model_material_audit.py \
             perf_knowledge/expert_skills/_contribute/test_flydsl_skill_portability.py \
@@ -294,6 +301,14 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      - name: AgentX-only kernel extraction and fixed-load compatibility
+        run: |
+          set -e   # without this only the LAST line's exit code is the step's verdict
+          node e2e_workflow/scripts/test_kernel_extract_skill.js
+          node e2e_workflow/scripts/test_agentx_baseline_selection.js
+          node --test e2e_workflow/scripts/test_kernel_extraction_delivery.mjs
+          node --test e2e_workflow/scripts/test_kernel_source_delivery.mjs
+          node --test e2e_workflow/scripts/test_agentx_standalone_handoff.mjs
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
       # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
@@ -313,6 +328,10 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # The final phase measures on GPUs the search may still hold: the tuning window and the
+      # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
+      - name: final-phase GPU handover regression
+        run: node e2e_workflow/scripts/test_final_phase_gpu_handover.js
       - name: gfx1201 fail-closed knowledge regression
         run: node kernel_workflow/scripts/test_rdna4_policy.js
       - name: R9700 E2E identity and knowledge policy
