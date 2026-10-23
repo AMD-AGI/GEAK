@@ -76,6 +76,9 @@ Workflow({
     deep_cost: 2,              // optional, default 2: budget cost of one deep_explore direction
                                //           (heavyweight; always runs in its own dedicated round)
     gpu_ids: "0",              // optional, comma-separated, default "0"
+    gpus_per_job: 1,           // optional: GPUs each GPU command needs; detected from the task's
+                               //   test when unset (see "Multi-GPU jobs"); >1 leases N of gpu_ids
+    job_gpu_ids: "",           // optional: one fixed GPU group for every command (subset of gpu_ids)
     task: "focus on ...",      // optional natural-language steer
     exp_root: "",              // optional, output root; default = sibling "exp/" next to workflow_dir
     eval_dir: "",              // optional, override the output dir for this single run
@@ -130,6 +133,20 @@ writes the simplest correct implementation in `target_language` (correctness-jud
 oracle), commits it as the baseline, and then the **same optimize loop** improves it. Returns
 `authored:false` / `validation_status:"author_failed"` if no correct baseline can be produced (the
 caller drops that language). `mode="optimize"` (default) is unchanged and fully backward compatible.
+
+### Multi-GPU jobs
+Some ops need several GPUs for every run (collectives, EP MoE, anything launched with torchrun or
+`mp.spawn`). The workflow sizes this itself: Setup runs `scripts/detect_gpu_requirement.py` on the
+task's test and benchmark, the Director confirms the rank count from the code, and every role then
+gets the group spec `pool:N:<gpu_ids>` as `GPU_ID`, so each `gpu_lock.sh $GPU_ID <cmd>` holds N GPUs
+for the whole command. Single-GPU tasks are unchanged. If the code is multi-GPU but the count cannot
+be read, or `gpu_ids` holds fewer than N GPUs, the run stops with the evidence and asks for
+`gpus_per_job` / more `gpu_ids`.
+
+`gpus_per_job`, `job_gpu_ids` (one fixed group) or `op_spec.resource` override the detection. Group
+leases share the per-GPU lock files with single-GPU jobs, are acquired all-or-nothing, and are killed
+after `GEAK_GPU_RUN_TIMEOUT` seconds (default 900). Supported in `optimize` and `author` modes;
+`bakeoff` rejects multi-GPU jobs.
 
 ### Deep Research Agent / Research phase (NEW, opt-in)
 `dra_enabled="true"` inserts a **`Research` phase AFTER Profile and BEFORE the optimize loop** (so the
@@ -295,7 +312,8 @@ knowledge/learned/   distilled experience cards (ADVISORY priors; each card self
                      TechLead update_experience step at the end of EVERY run). This sink is
                      kernel-gated (frozen-baseline isolated A/B); e2e-gated lessons stay in
                      e2e_workflow/knowledge/learned/ and cite these cards -- see learned/README.md
-scripts/             gpu_lock.sh, profile_kernel.sh,
+scripts/             gpu_lock.sh (single-GPU, pool and multi-GPU group leases), gpu_lease.py (the
+                     group lease manager), sweep_orphan_leases.sh, profile_kernel.sh,
                      kb.py ... index      (regenerate a learned/INDEX.md from the cards' discovery
                      frontmatter; sink-agnostic -- takes the dir, so it also serves
                      e2e_workflow/knowledge/learned; `--check` for CI), test_learned_index.js (its guard),

@@ -3228,6 +3228,7 @@ if (!MODEL_PATH && KERNEL_PATH) {
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       ...KB_ARGS,
       budget: KERNEL_BUDGET, gpu_ids: GPU_IDS, task: TASK, exp_root: EXP_ROOT,
+      gpus_per_job: A.gpus_per_job, job_gpu_ids: A.job_gpu_ids,
       apply_to_original: APPLY_TO_ORIGINAL,
     }));
     noteKernelKB(r, 'single-kernel pass-through');

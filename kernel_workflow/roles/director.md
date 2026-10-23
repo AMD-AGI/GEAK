@@ -221,6 +221,22 @@ RESTORE
 4. List the source files (so downstream agents know what exists):
    `find "$EVAL_DIR/workspace" -maxdepth 3 -type f \( -name '*.py' -o -name '*.hip' -o -name '*.cu' -o -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cuh' -o -name '*.yaml' \) | sort`
 
+### GPU requirement (both sub-modes)
+Decide how many GPUs ONE run of this task's correctness test / benchmark needs; every later GPU
+command leases that many together. Skip this if `OP_SPEC.resource` already sets `gpus_per_job`.
+1. Run `python3 "$SKILL_DIR/scripts/detect_gpu_requirement.py" <files>` on the task's own test and
+   benchmark entry files plus its `meta.json` (a small task dir may be passed whole; never a whole
+   repository).
+2. `single` → return it as is. Otherwise read the code it cites and find the rank count the test runs
+   with as written: torchrun `--nproc_per_node`, a `mp.spawn`/`Pool` process count, a count passed in
+   code (e.g. `run_test(8, ...)`), or a fixed parallel layout (e.g. EP8). Several counts → the largest.
+   A count that follows the visible GPUs → `scalable`.
+3. If the code does not say, return `unknown` — never guess; the run then stops and asks for
+   `gpus_per_job`.
+
+Return it as `"gpu_requirement": {"kind": "single|fixed|scalable|unknown", "gpus_per_job": <N>,
+"evidence": "<file:line and why>"}`.
+
 Return JSON:
 ```json
 {
@@ -233,6 +249,7 @@ Return JSON:
   "device_name": "<detected product/marketing name>",
   "physical_cu_count": 64,
   "source_files": ["<relative paths under workspace>"],
+  "gpu_requirement": {"kind": "single", "gpus_per_job": 1, "evidence": ""},
   "baseline_frozen": true,
   "baseline_callable": "<module:attr of the frozen real online kernel, or '' if the pristine EVAL_DIR/baseline is the anchor>",
   "notes": "anything unusual about the layout"
@@ -384,7 +401,14 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
    git apply "$EVAL_DIR/final_patch.diff"
    ```
    Otherwise leave the original untouched.
-8. Write `EVAL_DIR/director_validation.json` with the full result.
+8. After all of your own GPU commands have exited, stop lease jobs this run left behind (a
+   backgrounded `gpu_lock.sh` job can still acquire GPUs after the run ends):
+   ```bash
+   bash "$SKILL_DIR/scripts/sweep_orphan_leases.sh" --kill --eval-dir "$EVAL_DIR"
+   ```
+   If it found any, say so in `arbitration_note`: the run produced a measurement that is not in the
+   report, and it may have contended with the numbers you just validated.
+9. Write `EVAL_DIR/director_validation.json` with the full result.
 
 Return JSON:
 ```json

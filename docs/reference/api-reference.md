@@ -155,6 +155,8 @@ budget-controlled, each patch independently verified.
 | `min_improve` | `0.02` | Minimum accepted improvement (2%). |
 | `deep_cost` | `2` | Budget cost of a deep-explore engineer. |
 | `gpu_ids` | `0` | CSV GPU pool. |
+| `gpus_per_job` | detected | GPUs each GPU command needs (multi-rank ops). Unset: Setup detects it from the task's test/benchmark (`scripts/detect_gpu_requirement.py`). `>1` leases any N of `gpu_ids` per command (`pool:N:<ids>`). Also read from `op_spec.resource`. Not supported by `mode=bakeoff`. |
+| `job_gpu_ids` | — | Fixed GPU group for every command (`group:<ids>`); must be a subset of `gpu_ids`. Also read from `op_spec.resource`. |
 | `task` | `""` | Natural-language steer. |
 | `exp_root` | sibling `exp/` | Output root. |
 | `eval_dir` | — | Isolated evaluation directory. |
@@ -266,8 +268,22 @@ GPU lock + per-workspace build isolation. `flock` per GPU id (safe GPU sharing),
 `TORCH_EXTENSIONS_DIR`, pins `PYTORCH_ROCM_ARCH` to the local gfx, reaps orphaned enumerator processes.
 
 ```bash
-bash gpu_lock.sh <gpu_id> <command...>
+bash gpu_lock.sh <gpu_id> <command...>              # one GPU
+bash gpu_lock.sh <id,id,...> <command...>           # any one free GPU of the pool
+bash gpu_lock.sh group:<id,id,...> <command...>     # exactly these GPUs, held together
+bash gpu_lock.sh pool:<n>:<id,id,...> <command...>  # any n free GPUs of the pool, held together
 ```
+
+The two multi-GPU forms go through `gpu_lease.py`. It takes the same per-GPU lock files, acquires
+the whole group or nothing (no partial holds while waiting), serves older group requests first, and
+applies the idle check to every GPU of the group. The command sees `HIP_VISIBLE_DEVICES` and
+`GEAK_GPU_GROUP` set to the leased ids. It is stopped after `GEAK_GPU_RUN_TIMEOUT` seconds (default
+900, `<0` = no limit); its process group and any reparented lease workers under `GEAK_GPU_REAP_ROOT`
+(default: the working directory) are killed so a hung multi-rank job cannot keep the GPUs. A lease
+left by a dead manager is reclaimed only when its processes are gone (or, from another PID namespace,
+when its GPUs are idle). Nested `gpu_lock.sh` calls inside a lease are rejected.
+`scripts/sweep_orphan_leases.sh --eval-dir <dir> [--kill]` lists (or stops) lease jobs a run left
+behind.
 
 ### `kernel_workflow/scripts/profile_kernel.sh`
 
@@ -275,7 +291,7 @@ Thin profiling wrapper: warmup + `gpu_lock` + auto-detect best profiler + run + 
 Output entry point: `<output_dir>/profile_report.txt`.
 
 ```bash
-bash profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>
+bash profile_kernel.sh <gpu_spec> <benchmark_cmd> <output_dir>   # gpu_spec: any gpu_lock.sh form
 ```
 
 Env: `PROFILER_PRIORITY` (default: gfx1201 uses `rocprofv3 rocprof metrix rocprof-compute omniperf`;

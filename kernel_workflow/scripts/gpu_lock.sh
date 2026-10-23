@@ -23,8 +23,23 @@ set -euo pipefail
 # literal string "0,1,2,3" turned up in 15 invocations from runs that had been allocated neither
 # GPU 2 nor 3. An example in a usage line gets read as a default; here the value is never
 # defaultable, so it names no ids.
-GPU_SPEC="${1:?Usage: gpu_lock.sh <gpu_id|pool> <command...>   (pool = comma list of the GPUs THIS run was allocated)}"
+GPU_SPEC="${1:?Usage: gpu_lock.sh <gpu_id|pool|group:<ids>|pool:<n>:<ids>> <command...>   (ids = comma list of the GPUs THIS run was allocated)}"
 shift
+
+# Multi-GPU forms (see "Multi-GPU leases" below): group:<ids> holds exactly those GPUs,
+# pool:<n>:<ids> holds any n of them. _SPEC_IDS is the plain id list either way.
+case "$GPU_SPEC" in
+    group:*) _SPEC_IDS="${GPU_SPEC#group:}"; [ "${1:-}" = "--" ] && shift ;;
+    pool:*:*) _SPEC_IDS="${GPU_SPEC#pool:*:}"; [ "${1:-}" = "--" ] && shift ;;
+    *) _SPEC_IDS="$GPU_SPEC" ;;
+esac
+
+# A command already running under a multi-GPU lease must not request another: its GPUs are
+# held by the outer lease, so a nested request would wait on itself or escape the lease.
+if [ "${GEAK_GPU_LEASE_ACTIVE:-0}" = "1" ]; then
+    echo "ERROR: nested gpu_lock.sh call inside a GPU lease (GPUs ${GEAK_GPU_LEASE_IDS:-?}); run the command directly" >&2
+    exit 2
+fi
 
 # Source provenance is checked before executing any command and again on exit:
 # generated builders can recreate a stale overlay during the command itself.
@@ -71,7 +86,7 @@ mkdir -p "$LOCK_DIR"
 # has a bug, and quietly running elsewhere would hide it while still producing a number.
 if [ -n "${GEAK_GPU_ALLOWED:-}" ]; then
     _bad=""
-    for _r in $(echo "$GPU_SPEC" | tr ',' ' '); do
+    for _r in $(echo "$_SPEC_IDS" | tr ',' ' '); do
         case ",${GEAK_GPU_ALLOWED}," in *",${_r},"*) ;; *) _bad="$_bad $_r" ;; esac
     done
     if [ -n "$_bad" ]; then
@@ -107,6 +122,11 @@ _gpu_is_idle() {
 }
 
 case "$GPU_SPEC" in
+  group:*|pool:*:*)
+    # Multi-GPU lease: gpu_lease.py acquires the whole group or nothing, after compile setup below.
+    GROUP_MODE=1
+    GPU_ID="$_SPEC_IDS"
+    ;;
   *,*)
     # --- pool mode: block until some lane is free AND idle, then hold it for the whole command ---
     POOL="$(echo "$GPU_SPEC" | tr ',' ' ')"
@@ -216,7 +236,30 @@ _pin_compile_arch() {
     [ -n "${_ARCH:-}" ] && export GPU_ARCHS="${GPU_ARCHS:-$_ARCH}"
 }
 
-if [ -n "${POOL_FD:-}" ]; then
+if [ -n "${GROUP_MODE:-}" ]; then
+    # ---- Multi-GPU leases --------------------------------------------------------------------
+    # For jobs that need several GPUs at once (multi-rank ops). gpu_lease.py takes the same
+    # per-GPU flock files as the single-GPU paths, all-or-nothing under an allocator lock, so it
+    # never holds part of a group while waiting for the rest; older group requests are served
+    # first. The command sees HIP_VISIBLE_DEVICES / GEAK_GPU_GROUP = the leased ids. It is
+    # stopped after GEAK_GPU_RUN_TIMEOUT seconds (default 900, <0 = no limit), and its process
+    # group plus any reparented lease workers under GEAK_GPU_REAP_ROOT (default: this
+    # workspace) are killed, so a hung multi-rank job cannot keep the GPUs.
+    _pin_compile_arch || exit 1
+    _lease_args=(--wait-timeout "${GEAK_GPU_POOL_WAIT:-1200}"
+                 --run-timeout "${GEAK_GPU_RUN_TIMEOUT:-900}"
+                 --lock-dir "$LOCK_DIR"
+                 --reap-root "${GEAK_GPU_REAP_ROOT:-$PWD}")
+    case "$GPU_SPEC" in
+        group:*) _lease_args+=(--fixed-ids "$_SPEC_IDS") ;;
+        *) _n="${GPU_SPEC#pool:}"; _lease_args+=(--pool "$_SPEC_IDS" --count "${_n%%:*}") ;;
+    esac
+    if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ]; then
+        _lease_args+=(--require-idle --max-busy-pct "${GEAK_GPU_MAX_BUSY_PCT:-5}"
+                      --max-vram-mb "${GEAK_GPU_MAX_VRAM_MB:-1024}")
+    fi
+    python3 "$(dirname "$SOURCE_GUARD")/gpu_lease.py" run "${_lease_args[@]}" -- "$@"
+elif [ -n "${POOL_FD:-}" ]; then
     # Pool mode: (1) this process ALREADY holds the lane exclusively (and verified it idle).
     # Re-locking the same file from the same process would be a no-op at best, so just run --
     # the lane stays held until we exit, which is what guarantees no two evaluations share a GPU.
