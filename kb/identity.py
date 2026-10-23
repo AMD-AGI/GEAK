@@ -213,7 +213,8 @@ def kernel_canonical_ids(identity: dict):
 
 
 def e2e_identity(model: str, gfx: str, framework: str, framework_version: str, precision: str,
-                 tp=None, isl=None, osl=None, conc=None, ep=None, workload_kind="") -> dict:
+                 tp=None, isl=None, osl=None, conc=None, ep=None, workload_kind="",
+                 topology="") -> dict:
     """The e2e address: what is being served, on what, at what shape.
 
     `framework` here is the SERVING stack (vllm / sglang) — the opposite of the kernel scheme's
@@ -243,6 +244,11 @@ def e2e_identity(model: str, gfx: str, framework: str, framework_version: str, p
     too. That is the right place for them — that rung's question is "how should I shard this", and
     ep is sharding.
 
+    `topology` rides the same rung after `ep`, for the same reason: it is how the deployment is
+    spread over machines (`tpspan_n2`, `pd_p8x1_d8x2`), and TP16 over two nodes or a PD split
+    is a different deployment from one host at the same tp. Empty on one host, so single-host
+    addresses are unchanged.
+
     `workload_kind` selects the mandatory AgentX namespace and the workload tail — see
     _workload_segments. It is carried in the identity dict (rather than being resolved to segments
     immediately) so a caller can rebuild one variant of an address by replacing a single key; that
@@ -260,6 +266,7 @@ def e2e_identity(model: str, gfx: str, framework: str, framework_version: str, p
         "precision": segment(precision, UNKNOWN),
         "tp": counted("tp", tp),
         "ep": counted("ep", ep),
+        "topology": segment(topology, ""),
         "isl": counted("isl", isl),
         "osl": counted("osl", osl),
         "conc": counted("conc", conc),
@@ -302,8 +309,9 @@ def e2e_canonical_ids(identity: dict):
     base = [SCHEME, E2E_DOMAIN] + namespace + [
         identity["model"], identity["gpu"], identity["framework"],
         identity["framework_version"], identity["precision"]]
-    tp, ep = identity["tp"], identity.get("ep") or ""
-    parallel = ([tp] + ([ep] if ep else [])) if tp else []
+    tp = identity["tp"]
+    spread = [identity.get(k) for k in ("ep", "topology") if identity.get(k)]
+    parallel = [tp] + spread if tp else []
     workload = _workload_segments(identity)
     rungs = []
     if parallel and workload:
