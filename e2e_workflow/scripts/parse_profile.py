@@ -985,7 +985,8 @@ def to_markdown(summ):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--torch-trace", default="")
+    ap.add_argument("--torch-trace", action="append", default=[],
+                    help="repeatable with --annotate (one trace per engine of a multi-node run)")
     ap.add_argument("--rocprof-dir", default="")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--out", default="", help="path prefix; writes <out>.json and <out>.md")
@@ -1012,6 +1013,9 @@ def main():
 
     if not args.torch_trace and not args.rocprof_dir:
         ap.error("provide --torch-trace and/or --rocprof-dir")
+    if len(args.torch_trace) > 1 and not args.annotate:
+        ap.error("several --torch-trace go with --annotate; a Top-N run parses one trace")
+    traces = args.torch_trace
 
     capture_sizes = [int(x) for x in args.capture_sizes.split(",") if x.strip()]
     chunk = args.prefill_chunk or None
@@ -1020,8 +1024,10 @@ def main():
 
     torch_agg = torch_total = torch_launch = None
     torch_pmeta = {}
-    if args.torch_trace:
-        torch_agg, torch_total, torch_launch, torch_pmeta = parse_torch_trace(args.torch_trace)
+    torch_aggs = []
+    for trace in traces:
+        torch_agg, torch_total, torch_launch, torch_pmeta = parse_torch_trace(trace)
+        torch_aggs.append(torch_agg)
     rp_agg = rp_total = rp_launch = None
     if args.rocprof_dir:
         rp_agg, rp_total, rp_launch = parse_rocprof_dir(args.rocprof_dir)
@@ -1032,14 +1038,21 @@ def main():
         # Preserve all same-name evidence. A host span and a dispatched kernel can legitimately share
         # an exact name; overwriting either one fabricates certainty, so classify_entity marks that row
         # unresolved and the head gate refuses it.
-        host_agg = index_host_entities(args.torch_trace) if args.torch_trace else {}
-        ev_agg = merge_entity_evidence(rp_agg, host_agg, torch_agg)
+        # Several traces (one per engine) are one union: a kernel absent from every trace is unresolved.
+        host_aggs = [index_host_entities(t) for t in traces]
+        ev_agg = merge_entity_evidence(rp_agg, *host_aggs, *torch_aggs)
         ev_src = doc.get("source") or ("merged" if (rp_agg and torch_agg) else
                                        "rocprofv3" if rp_agg else "torch-trace")
         # A third-party Top-N may aggregate an outer custom op and its device children into one row.
         # Turn that row into the actual kernels first; merely labelling/rejecting the dispatcher would
         # repeat the 0802 failure mode instead of finding the launcher/kernel that 0720 optimized.
-        dispatch_edges = index_dispatch_edges(args.torch_trace) if args.torch_trace else {}
+        dispatch_edges = {}
+        for trace in traces:
+            for host, kids in index_dispatch_edges(trace).items():
+                for kernel, entry in kids.items():
+                    acc = dispatch_edges.setdefault(host, {}).setdefault(kernel, {"calls": 0, "total_us": 0.0})
+                    acc["calls"] += entry["calls"]
+                    acc["total_us"] += entry["total_us"]
         rows, expansions = expand_dispatcher_rows(
             doc.get("top_kernels") or [], dispatch_edges, ev_agg, ev_src)
         rows, stats = annotate_rows(rows, ev_agg, ev_src)
