@@ -1,0 +1,52 @@
+{
+  "schema_version": "geak-collector-v1",
+  "id": "transferbench_ceiling",
+  "maturity": "ready_after_build",
+  "tool": "ROCm TransferBench",
+  "purpose": "Measure local pairwise, parallel-copy, remote-write, and all-to-all transfer ceilings",
+  "capability_probe": [
+    "{transferbench_binary} --help",
+    "verify all eight leased GPUs are visible in the intended physical order",
+    "run the built-in p2p health/smoke preset before ceiling sweeps"
+  ],
+  "command_templates": [
+    "{transferbench_binary} p2p {bytes}",
+    "{transferbench_binary} pcopy {bytes}",
+    "{transferbench_binary} rwrite {bytes}",
+    "{transferbench_binary} a2a {bytes}"
+  ],
+  "preconditions": [
+    "run under the same eight-GPU visibility and topology as MegaMoE",
+    "sweep message sizes spanning MegaMoE payload and metadata regimes",
+    "record executor/engine mode instead of combining GFX and DMA results",
+    "repeat until variance is reported and retain per-link/pair results",
+    "do not substitute the best pairwise result for an all-to-all ceiling"
+  ],
+  "outputs": [
+    {
+      "artifact": "raw preset output per message size and engine",
+      "information": "transfer time and bandwidth for pairwise/pcopy/rwrite/a2a patterns"
+    },
+    {
+      "artifact": "geak-collection-provenance-v1 JSON",
+      "information": "git revision, build flags, commands, topology, repetitions and raw paths"
+    }
+  ],
+  "helps_diagnose": [
+    "pairwise XGMI bandwidth ceiling",
+    "fan-out/fan-in contention",
+    "all-to-all aggregate ceiling",
+    "message-size efficiency",
+    "GFX-versus-DMA engine sensitivity"
+  ],
+  "not_measured": [
+    "MegaMoE protocol overhead",
+    "logical metadata or padding bytes",
+    "compute/communication overlap",
+    "operator critical path"
+  ],
+  "provenance": {
+    "reference": "https://rocm.docs.amd.com/projects/TransferBench/en/latest/how%20to/use-transferbench.html",
+    "notes": "Preset CLI details are version-dependent; save the TransferBench git revision and --help output with each run."
+  }
+}
