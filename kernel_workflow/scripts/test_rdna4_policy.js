@@ -136,6 +136,35 @@ function mustInclude(hay, needle, msg) {
     throw new Error('gfx1201 architecture alone was promoted to calibrated R9700');
   }
 
+  const r9600d = await run('gfx1201', 'gfx1201', {
+    deviceTarget: 'r9600d', deviceName: 'AMD Radeon AI PRO R9600D',
+    physicalCuCount: 48, expectedTarget: 'r9600d',
+    expectedDeviceName: 'AMD Radeon AI PRO R9600D', expectedPhysicalCuCount: 48,
+  });
+  const r9600dAnalyze = r9600d.prompts.find((entry) => entry.label === 'tech_lead:analyze').prompt;
+  mustInclude(r9600dAnalyze, '- DEVICE_TARGET: r9600d');
+  mustInclude(r9600dAnalyze, '- PHYSICAL_CU_COUNT: 48');
+  mustInclude(r9600dAnalyze, 'calibrated-r9600d',
+    'R9600D did not receive its own calibrated roofline status');
+  if (r9600dAnalyze.includes('unknown-device-not-r9700')) {
+    throw new Error('R9600D received the unknown-peak gate despite a measured product block');
+  }
+  if (r9600dAnalyze.includes('calibrated-r9700')) {
+    throw new Error('R9600D inherited the calibrated R9700 roofline status');
+  }
+  await run('gfx950', 'gfx950', { deviceTarget: 'unknown', expectedTarget: 'r9600d' }).then(
+    () => { throw new Error('expected r9600d on a non-gfx1201 ISA was not rejected'); },
+    (error) => {
+      if (!/expected_target=r9600d requires expected_gfx=gfx1201/.test(String(error.message))) throw error;
+    },
+  );
+  await run('gfx1201', 'gfx1201', { deviceTarget: 'unknown', expectedTarget: 'r9600d' }).then(
+    () => { throw new Error('expected r9600d vs unknown product was not rejected'); },
+    (error) => {
+      if (!/product mismatch/.test(String(error.message))) throw error;
+    },
+  );
+
   await run('gfx1201', 'gfx1201', { omitGfx: true }).then(
     () => { throw new Error('missing device_gfx was not rejected'); },
     (error) => {
@@ -252,8 +281,8 @@ function mustInclude(hay, needle, msg) {
   mustInclude(dispatcher, 'R9700 / gfx1201 ISOLATION');
 
   const e2e = fs.readFileSync(path.join(geakRoot, 'e2e_workflow/e2e_workflow.js'), 'utf8');
-  mustInclude(e2e, 'R9700 E2E is vLLM-only');
-  mustInclude(e2e, 'R9700_E2E');
+  mustInclude(e2e, 'E2E is vLLM-only');
+  mustInclude(e2e, 'RDNA4_PRODUCT_E2E');
 
   const rdna = fs.readFileSync(path.join(wfDir, 'knowledge/amd_rdna4.md'), 'utf8');
   mustInclude(rdna, 'rocprofv3-avail list --pmc');
