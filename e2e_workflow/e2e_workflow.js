@@ -530,6 +530,8 @@ function confirmationEvidenceMatches(integ) {
       || after.fresh_pair !== true || after.configs_matched !== true || after.workload_matched !== true
       || !Number.isInteger(after.ref_replicas) || !Number.isInteger(after.cand_replicas)
       || after.ref_replicas < 2 || after.cand_replicas < 2) return false;
+  // protocol_digest is newer than the other identities: older evidence may omit it on both sides.
+  if ((before.protocol_digest || after.protocol_digest) && before.protocol_digest !== after.protocol_digest) return false;
   return ['candidate_digest', 'reference_digest', 'workload_digest'].every(
     (key) => typeof before[key] === 'string' && before[key].length > 0 && before[key] === after[key]);
 }
@@ -1522,7 +1524,7 @@ const KERNEL_LAYER_SCHEMA = obj({
 
 const MEASUREMENT_EVIDENCE_SCHEMA = obj({
   measurement_id: { type: 'string' }, candidate_digest: { type: 'string' },
-  reference_digest: { type: 'string' }, workload_digest: { type: 'string' },
+  reference_digest: { type: 'string' }, workload_digest: { type: 'string' }, protocol_digest: { type: 'string' },
   ref_summary: { type: 'string' }, cand_summary: { type: 'string' },
   ref_replicas: { type: 'number' }, cand_replicas: { type: 'number' },
   fresh_pair: { type: 'boolean' }, configs_matched: { type: 'boolean' }, workload_matched: { type: 'boolean' },

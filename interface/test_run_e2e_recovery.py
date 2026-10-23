@@ -306,6 +306,23 @@ def test_issue522_recovery_uses_full_module_coverage(tmp_path):
     assert estimate["source"] == "coverage_uniform_estimate"
 
 
+def test_profile_and_measurement_share_workload_identity_digest():
+    # #524 feedback: a different bench protocol must not hide coverage of the same workload.
+    ir = {"pct_gpu_time": 6.49, "isolated_speedup": 1.7746,
+          "measurement_evidence": _measurement("original", protocol_digest="inferencex-warm-40x8"),
+          "affected_gpu_time": {
+              "candidate_digest": "candidate-content",
+              "profile_path": "/profile/h0.json", "reference_digest": "h0-content", "workload_digest": "workload",
+              "kernels": [{"id": name, "pct_gpu_time": pct} for name, pct in
+                          (("e01", 6.49), ("router_gemv", 2.84), ("sort", 2.84))],
+          }}
+    estimate = rx._speedup_estimate(ir)
+    assert estimate["source"] == "coverage_uniform_estimate"
+    assert estimate["pct_gpu_time"] == pytest.approx(12.17)
+    assert estimate["estimate_pct"] == pytest.approx(5.61, abs=0.01)
+    assert not rx._speedup_needs_review(ir, 6.2, estimate["estimate_pct"])
+
+
 def test_per_path_coverage_counts_removed_reduce_once(tmp_path):
     rows = [{"id": "gemm", "pct_gpu_time": 7.18, "isolated_speedup": 1.28},
             {"id": "reduce", "pct_gpu_time": 2.65, "removed": True},
@@ -338,7 +355,7 @@ def test_confirmed_speedup_is_recovered_above_the_head_estimate(tmp_path):
 
 @pytest.mark.parametrize("changed", [
     {"candidate_digest": "new-patch"}, {"reference_digest": "new-stack"}, {"workload_digest": "new-workload"},
-    {"measurement_id": "original"}, {"ref_summary": "/bench/original/ref.json"},
+    {"protocol_digest": "different-bench-protocol"}, {"measurement_id": "original"}, {"ref_summary": "/bench/original/ref.json"},
     {"ref_replicas": 1}, {"cand_replicas": 1}, {"ref_replicas": "2"}, {"cand_replicas": 2.5},
     {"fresh_pair": False}, {"configs_matched": False}, {"workload_matched": False},
 ])

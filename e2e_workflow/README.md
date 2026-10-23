@@ -455,7 +455,9 @@ correctness rewrite. The existing `implausible_speedup_margin` option remains su
 `1.0`, review above twice the estimate; the runner forwards `GEAK_IMPLAUSIBLE_SPEEDUP_MARGIN`). A
 confirmation uses fresh reference/candidate servers, at least two timed replicas per leg, and the
 same correctness and engagement gates. If the gain reproduces, it is accepted even above the estimate.
-Already confirmed evidence is reused only for the same candidate, reference and workload identities.
+Already confirmed evidence is reused only for the same candidate, reference, workload and measurement
+protocol identities. The workload identity covers only what decides the served requests, so a profile
+and an A/B of the same workload share it; bench/protocol details go in the separate protocol digest.
 Missing provenance, a timeout or repeated old A/B artifacts leaves the candidate unconfirmed without
 starting another kernel rewrite. Final Validate still performs the normal combined-stack check.
 

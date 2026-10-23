@@ -6020,6 +6020,10 @@ def _confirmation_evidence_matches(ir: dict) -> bool:
         if (type(value) not in (int, float) or not math.isfinite(value)
                 or value < 2 or value != int(value)):
             return False
+    # protocol_digest is newer than the other identities: older evidence may omit it on both sides.
+    if ((before.get("protocol_digest") or after.get("protocol_digest"))
+            and before.get("protocol_digest") != after.get("protocol_digest")):
+        return False
     return all(isinstance(before.get(key), str) and before[key] and before[key] == after.get(key)
                for key in ("candidate_digest", "reference_digest", "workload_digest"))
 

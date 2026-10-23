@@ -71,6 +71,30 @@ test('#522 whole-module coverage includes the second shape and prefill without c
   assert.equal(h.calls[0].inputs.PROFILE_TOPN_JSON, '/profile/h0.json');
 });
 
+test('#524 feedback: profile and A/B of the same workload share one workload identity digest', () => {
+  // Qwen3.5 run: the role used to ask for a profile-manifest digest (with profile/trace file hashes)
+  // in coverage and a bench-protocol digest in the measurement, so coverage could never match.
+  const role = fs.readFileSync(path.join(__dirname, '..', 'roles', 'e2e_integrator.md'), 'utf8');
+  assert.doesNotMatch(role, /profile workload manifest/);
+  assert.match(role, /reuse the SAME\s+value in `measurement_evidence` and `affected_gpu_time`/);
+  const sha = (o) => require('node:crypto').createHash('sha256').update(JSON.stringify(o)).digest('hex');
+  const identity = { dataset: 'random', seed: 0, isl: 8192, osl: 1024, random_range_ratio: 0.8, conc: 4 };
+  const workload = sha(identity);
+  const evidence = measurement('original', { workload_digest: workload, protocol_digest: sha({
+    bench_client: 'inferencex', measurement_mode: 'warm_server', num_prompts: 40, num_warmups: 8,
+    metric_basis: 'aggregate_output_tok_s' }) });
+  const c = candidate({ pct_gpu_time: 6.49, isolated_speedup: 1.7746, e2e_delta_pct: 6.2,
+    measurement_evidence: evidence, affected_gpu_time: { ...coverage([6.49, 2.84, 2.84]), workload_digest: workload } });
+  const h = harness();
+  const estimate = h.speedupEstimate(6.49, 1.7746, c);
+  assert.equal(estimate.source, 'coverage_uniform_estimate');
+  assert.ok(Math.abs(estimate.pct_gpu_time - 12.17) < 1e-9);
+  assert.ok(Math.abs(estimate.estimate_pct - 5.61) < 0.01);
+  assert.equal(h.speedupNeedsReview(6.49, 1.7746, c), false, '+6.2% is within twice the coverage estimate');
+  const headOnly = { ...c, affected_gpu_time: undefined };
+  assert.equal(h.speedupNeedsReview(6.49, 1.7746, headOnly), true, 'the head-only estimate would review');
+});
+
 test('per-path estimate includes a removed reduce and uses measured speedups, including a slowdown', () => {
   const h = harness();
   const rows = [
@@ -139,7 +163,7 @@ test('equal performance numbers from independent artifacts confirm; repeating th
 test('changed candidate/baseline/workload, reused legs and insufficient samples cannot confirm', async () => {
   for (const extra of [
     { candidate_digest: 'new-patch' }, { reference_digest: 'new-stack' }, { workload_digest: 'other' },
-    { ref_summary: '/bench/original/ref.json' }, { cand_summary: '/bench/original/cand.json' },
+    { protocol_digest: 'different-bench-protocol' }, { ref_summary: '/bench/original/ref.json' }, { cand_summary: '/bench/original/cand.json' },
     { fresh_pair: false }, { configs_matched: false }, { workload_matched: false },
     { ref_replicas: 1 }, { cand_replicas: 1 }, { ref_replicas: '2' }, { cand_replicas: 2.5 },
   ]) {

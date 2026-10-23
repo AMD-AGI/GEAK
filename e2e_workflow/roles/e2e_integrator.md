@@ -94,9 +94,16 @@ Derive it from artifacts; missing evidence stays missing, never invented:
   overlay/patch/table contents and effective serving configuration (including model identity, TP,
   memory fraction, flags/env and relevant library/source revisions). Exclude benchmark output/logs
   from these manifests. Hash content, not just paths. Recompute before reuse or confirmation.
-- `workload_digest`: SHA-256 of the actual workload/protocol manifest: requests/dataset, seeds,
-  ISL/OSL/concurrency, token limits, measurement mode, warmup and metric basis. Timed replica count
-  is recorded separately so confirmation can use more samples without changing the workload.
+- `workload_digest`: SHA-256 of the canonical workload IDENTITY manifest: only the fields that decide
+  which requests are served (request set/dataset or generator, seed, ISL/OSL and length range,
+  concurrency, token limits). Build this manifest once from the run's workload and reuse the SAME
+  value in `measurement_evidence` and `affected_gpu_time`; a profile and an A/B of the same workload
+  must have equal digests. Never include profile/trace file hashes, bench script hashes, warmups,
+  request counts or other measurement-protocol fields: they differ between profiling and benchmarking
+  of the same workload, and then the coverage estimate can never be used.
+- `protocol_digest`: SHA-256 of the A/B measurement protocol manifest: bench client and script
+  revision, measurement mode, timed request count, warmups and metric basis. Timed replica count is
+  recorded separately so confirmation can use more samples without changing the protocol.
 - `ref_summary`, `cand_summary`: absolute, immutable paths to the completed benchmark summaries.
   `measurement_id`: SHA-256 of both summary paths and their contents. Report the actual
   `ref_replicas` / `cand_replicas`, not the requested count.
@@ -106,7 +113,7 @@ Derive it from artifacts; missing evidence stays missing, never invented:
   counts checked; no missing, truncated or degenerate work. Record the detailed checks in the result.
 
 Before returning a cached A/B, inspect `EVAL_DIR/overlay/candidate_*/e2e_validation.json` for a matching
-`integration_result`. Match the original measurement ID and candidate/reference/workload manifests.
+`integration_result`. Match the original measurement ID and candidate/reference/workload/protocol manifests.
 Return that reviewed result, preserving `speedup_review` and the fresh pair's numbers when present.
 An inconclusive review is still inconclusive after a workflow resume; do not replace it with the old
 raw `accepted` result and restart the same review. New candidate content or a new reference requires
@@ -119,7 +126,8 @@ rows; a guarded shape-specific replacement only covers its matching buckets. A m
 does not establish that every path changed.
 
 `affected_gpu_time` contains `profile_path`, the patch's `candidate_digest`, the profile's
-`reference_digest` and `workload_digest`,
+`reference_digest` and `workload_digest` (the workload identity digest defined above, computed the
+same way as for the measurement; profile file provenance belongs in `profile_path`, not the digest),
 and `kernels: [{id, pct_gpu_time, isolated_speedup?, removed?}]`. IDs must identify disjoint rows in
 one profile/denominator (device kernel + shape + phase); do not mix module totals with child rows,
 repeat grouped reductions, sum ranks, or mix profiles. Use the CURRENT accepted reference stack.
@@ -141,12 +149,12 @@ as new output directories, leaving the original A/B intact. Launch fresh servers
 run at least two timed replicas per leg with the run-wide lifecycle. Repeat engagement and the
 configured accuracy/parity gate, comparing accuracy to the TRUE baseline as usual. An already
 completed review in that directory can be returned only after verifying both content manifests,
-workload, artifact identity and replica counts; it is the same review, not another measurement.
+workload, protocol, artifact identity and replica counts; it is the same review, not another measurement.
 Never fall back to the original/shared reference or silently reduce this review to one replica.
 
 `SPEEDUP_REVIEW.original_measurement` identifies the original pair. Return the new pair's evidence
 and ordinary measured verdict; the workflow checks distinct artifact identities and matching
-candidate/reference/workload digests. Reconstruct missing original provenance during ordinary disk
+candidate/reference/workload/protocol digests. Reconstruct missing original provenance during ordinary disk
 recovery, before requesting a review; never manufacture a matching identity. Missing provenance or incomplete review is
 inconclusive, not a correctness failure. No additional kernel fix/re-measure loops are authorized
 by this review. The normal final Validate phase remains authoritative.
@@ -433,14 +441,15 @@ Return JSON:
     "profile_path": "<current reference profile, omit this object when unavailable>",
     "candidate_digest": "<candidate manifest SHA-256>",
     "reference_digest": "<profile reference manifest SHA-256>",
-    "workload_digest": "<profile workload manifest SHA-256>",
+    "workload_digest": "<workload identity manifest SHA-256, same definition as measurement_evidence>",
     "kernels": [{"id": "<disjoint kernel/shape/phase row>", "pct_gpu_time": 0.0}]
   },
   "measurement_evidence": {
     "measurement_id": "<pair artifact SHA-256>",
     "candidate_digest": "<candidate manifest SHA-256>",
     "reference_digest": "<reference manifest SHA-256>",
-    "workload_digest": "<workload manifest SHA-256>",
+    "workload_digest": "<workload identity manifest SHA-256>",
+    "protocol_digest": "<measurement protocol manifest SHA-256>",
     "ref_summary": "<absolute path>", "cand_summary": "<absolute path>",
     "ref_replicas": 1, "cand_replicas": 1,
     "fresh_pair": true, "configs_matched": true, "workload_matched": true
