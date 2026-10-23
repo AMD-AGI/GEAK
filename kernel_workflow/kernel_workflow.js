@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-workflow',
-  description: 'Single ENTRY POINT for kernel optimization on AMD GPUs: Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201). The worker validates on-box identity via structured rocminfo data; generic gfx1201 is not a product identity. Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
-  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool), args.gpus_per_job / args.job_gpu_ids (optional: a task whose test runs on several GPUs is detected at Setup; pass these only to override; optimize/author only; gpu_ids must hold enough GPUs).',
+  description: 'Single ENTRY POINT for kernel optimization on AMD GPUs: Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201). The worker validates on-box identity via structured rocminfo data; generic gfx1201 is not a product identity. Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); mega -> delegate to the kernel_mega worker (multi-rank whole-kernel candidate search); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
+  whenToUse: 'Optimize a kernel. Four modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). mode=mega optimizes a multi-rank operator (e.g. an EP MoE layer whose every run needs args.gpus_per_job GPUs) as independent whole-kernel candidates, each verified on-card against the frozen baseline. Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool), args.gpus_per_job / args.job_gpu_ids (optional: a task whose test runs on several GPUs is detected at Setup; pass these only to override; optimize/author only; gpu_ids must hold enough GPUs).',
   phases: [
     { title: 'Freeze',   detail: 'oracle_freezer: freeze the input kernel -> immutable oracle + baseline_src/ (the ONE denominator) [bakeoff only]' },
     { title: 'Discover', detail: 'op_benchmarker: per-language existing-impl probe + measure + OFFLINE env tune (aiter/CK, shapes from the frozen oracle) -> author_plan, best_known_ms [bakeoff only]' },
@@ -26,6 +26,8 @@ if (!WORKFLOW_DIR) {
 }
 // The single-language worker lane (unchanged behavior). Same dir as this dispatcher.
 const WORKER = String(A.kernel_lane_script || `${WORKFLOW_DIR}/kernel_lane.js`);
+// mode=mega worker: multi-rank whole-kernel candidate search. Same dir as this dispatcher.
+const MEGA_WORKER = String(A.kernel_mega_script || `${WORKFLOW_DIR}/kernel_mega.js`);
 const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() || 'optimize';
 
 // ---- Live execution tracker (read-only observer; see interface/geak_trace_collector.py) ----
@@ -78,11 +80,13 @@ const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() |
 // SINGLE-LANGUAGE PASS-THROUGH (mode=optimize | author) — byte-compatible with
 // the pre-dispatcher behavior. Forward EVERY arg to the worker unchanged (the
 // worker ignores dispatcher-only args like `backends`). One nesting level.
+// mode=mega forwards the same way to kernel_mega.js.
 // ===========================================================================
-if (MODE === 'optimize' || MODE === 'author') {
+if (MODE === 'optimize' || MODE === 'author' || MODE === 'mega') {
   phase('Bakeoff');            // reuse a declared phase slot for the single passthrough lane
-  log(`mode=${MODE}: single-language pass-through -> ${WORKER}`);
-  const r = await workflow({ scriptPath: WORKER }, { ...A, workflow_dir: WORKFLOW_DIR });
+  const script = MODE === 'mega' ? MEGA_WORKER : WORKER;
+  log(`mode=${MODE}: pass-through -> ${script}`);
+  const r = await workflow({ scriptPath: script }, { ...A, workflow_dir: WORKFLOW_DIR });
   // Final step: render the run report (token/time/cost ledger -> clickable role-execution-tree
   // HTML + MD twin) from the lane's OWN timeline. In passthrough the dispatcher makes no agent calls
   // itself, so the lane result carries the timeline (`llm_timeline`) + its `eval_dir`. This is the
@@ -122,7 +126,7 @@ if (MODE === 'optimize' || MODE === 'author') {
 // args.backends to pick the languages, or leave it empty to auto-discover.
 // ===========================================================================
 if (MODE !== 'bakeoff') {
-  throw new Error(`unknown mode='${MODE}'. Use optimize | author | bakeoff.`);
+  throw new Error(`unknown mode='${MODE}'. Use optimize | author | bakeoff | mega.`);
 }
 // Bake-off lanes each take a slice of gpu_ids, so multi-GPU jobs are only supported by the
 // single-language modes for now.

@@ -330,6 +330,93 @@ skills:
   constraint_validation_status: ''
   auto_apply: false
   explicit_pin_modes: []
+- id: megamoe_ep_mega_fusion
+  file: skills/megamoe_ep_mega_fusion/skill.md
+  scope: kernel
+  revision: ''
+  playbook_file: skills/megamoe_ep_mega_fusion/skill.md
+  planner_extension_file: skills/megamoe_ep_mega_fusion/planner_extension.yaml
+  contract_file: skills/megamoe_ep_mega_fusion/contract.yaml
+  validation_file: skills/megamoe_ep_mega_fusion/validation.yaml
+  validation_schema: ''
+  runtime_validation_file: skills/megamoe_ep_mega_fusion/runtime_validation.py
+  embedded_components: []
+  match:
+    operator: moe_dispatch_combine
+    arch_class:
+    - '*'
+    gens:
+    - gfx950
+    dtypes:
+    - mxfp8_e4m3
+    - mxfp4
+    regimes:
+    - prefill
+    - decode
+    from_backend: ''
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: mega_moe|dispatch_combine|p2p_scatter
+      min_pct_gpu: 20.0
+    config:
+      framework: MegaMoE_v2
+      parallel: EP8
+      arch: gfx950
+      precision: a8w4
+  expects:
+    isolated_speedup_min: 1.03
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: experimental
+  reference_evidence_status: measured
+  constraint_validation_status: static_validated
+  auto_apply: false
+  explicit_pin_modes:
+  - authoring
+  - candidate_validation
+- id: megamoe_small_mtpr_fusion
+  file: skills/megamoe_small_mtpr_fusion/skill.md
+  scope: kernel
+  revision: ''
+  playbook_file: skills/megamoe_small_mtpr_fusion/skill.md
+  planner_extension_file: skills/megamoe_small_mtpr_fusion/planner_extension.yaml
+  contract_file: skills/megamoe_small_mtpr_fusion/contract.yaml
+  validation_file: skills/megamoe_small_mtpr_fusion/validation.yaml
+  validation_schema: ''
+  runtime_validation_file: skills/megamoe_small_mtpr_fusion/runtime_validation.py
+  embedded_components: []
+  match:
+    operator: moe_dispatch_combine
+    arch_class:
+    - '*'
+    gens:
+    - gfx950
+    dtypes:
+    - mxfp8_e4m3
+    - mxfp4
+    regimes:
+    - decode
+    from_backend: ''
+    to_backend: flydsl
+    profile_signature:
+      op_name_regex: mega_moe|dispatch_combine|p2p_scatter
+      min_pct_gpu: 20.0
+    config:
+      framework: MegaMoE_v2
+      parallel: EP8
+      arch: gfx950
+      precision: a8w4
+  expects:
+    isolated_speedup_min: 1.1
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: experimental
+  reference_evidence_status: measured
+  constraint_validation_status: static_validated
+  auto_apply: false
+  explicit_pin_modes:
+  - authoring
+  - candidate_validation
 - id: mla_tilelang_to_triton
   file: skills/mla_tilelang_to_triton/skill.md
   scope: kernel
