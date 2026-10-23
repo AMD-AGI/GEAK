@@ -49,6 +49,53 @@ adapter_launch() {
 
 adapter_health() { curl -sf "${BASE_URL}/health" >/dev/null 2>&1; }
 
+# ---- multi-node (read by adapters/launchers/multinode.sh) ----
+# per_rank: one server process per node, each told which rank it is.
+adapter_dist_mode() { echo per_rank; }
+# adapter_dist_args RANK NNODES MASTER DIST_PORT
+adapter_dist_args() { echo "--nnodes $2 --node-rank $1 --dist-init-addr $3:$4"; }
+
+# pd_roles: one complete TP-closed server per role; no rank/world triple.
+adapter_pd_mode() { echo pd_roles; }
+
+# adapter_pd_args ROLE BOOTSTRAP_PORT TRANSFER_BACKEND [IB_DEVICE]
+adapter_pd_args() {
+  local role="$1" boot="$2" backend="${3:-mooncake_tcp}" ib="${4:-}"
+  local out="--disaggregation-mode $role --disaggregation-transfer-backend $backend"
+  # The bootstrap registry is prefill-side; decode gets it per request from the LB.
+  [ "$role" = "prefill" ] && out="$out --disaggregation-bootstrap-port $boot"
+  # Empty for tcp transports: a device with no verbs provider cannot transfer.
+  [ -n "$ib" ] && out="$out --disaggregation-ib-device $ib"
+  echo "$out"
+}
+
+# adapter_pd_lb_launch HOST PORT PREFILL_URLS BOOTSTRAP_PORT DECODE_URLS
+# The URL lists are space-separated (xPyD: one URL per engine replica).
+# Rust router by default; LB_EXTRA_ARGS=--mini-lb selects the FastAPI mini-LB.
+adapter_pd_lb_launch() {
+  local host="$1" port="$2" boot="$4" u
+  local workers=()
+  for u in $3; do
+    workers+=(--prefill "$u")
+    [ -n "$boot" ] && [ "$boot" != "none" ] && workers+=("$boot")
+  done
+  for u in $5; do workers+=(--decode "$u"); done
+  # shellcheck disable=SC2086
+  ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
+    PYTHONPATH="${_SGL_PP:+$_SGL_PP:}${PYTHONPATH:-}" \
+    python -m sglang_router.launch_router \
+      --pd-disaggregation \
+      "${workers[@]}" \
+      --host "$host" --port "$port" \
+      --model-path "$MODEL" \
+      --policy "${PD_LB_POLICY:-round_robin}" \
+      --worker-startup-timeout-secs "${PD_LB_STARTUP_TIMEOUT_S:-2400}" \
+      --request-timeout-secs "${PD_LB_REQUEST_TIMEOUT_S:-3600}" \
+      ${LB_EXTRA_ARGS:-} \
+      > "$LOG" 2>&1 &
+  SERVER_PID=$!
+}
+
 # adapter_bench NUM_PROMPTS MAX_CONC PROFILE_FLAG
 adapter_bench() {
   local NUMP="$1" MAXC="$2" PROF="${3:-0}"
@@ -60,13 +107,15 @@ adapter_bench() {
   # Optional request-rate (req/s) to STAGGER arrivals so sequences sit at different prefill/decode
   # phases — used by the steady-state profiling path. Empty => inf (max_concurrency still caps).
   [ -n "${REQUEST_RATE:-}" ] && extra+=(--request-rate "$REQUEST_RATE")
-  PYTHONPATH="${_SGL_PP:+$_SGL_PP:}${PYTHONPATH:-}" \
+  # From /: `python -m` puts the cwd first on sys.path, so a task directory's unittest.py
+  # (or any stdlib-named file) would shadow the module the client imports.
+  (cd / && PYTHONPATH="${_SGL_PP:+$_SGL_PP:}${PYTHONPATH:-}" \
   python -m sglang.bench_serving \
     --backend sglang --base-url "$BASE_URL" --model "$MODEL" \
     --dataset-name random --random-input-len "$ISL" --random-output-len "$OSL" --random-range-ratio 1.0 \
     --num-prompts "$NUMP" --max-concurrency "$MAXC" \
     --seed "$SEED" \
-    --output-file "$RESULT_JSONL" "${extra[@]}"
+    --output-file "$RESULT_JSONL" "${extra[@]}")
   # sglang.bench_serving appends a result json line (output_throughput, median_ttft_ms, median_tpot_ms)
   # to --output-file, which is exactly the dispatcher's canonical schema. Nothing else to do.
 }

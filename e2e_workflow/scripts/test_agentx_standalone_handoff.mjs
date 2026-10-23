@@ -176,6 +176,7 @@ test('all optimization dispatch sites reuse UTs and fail locally without authori
         MODEL_PATH: '/model', GPU_LIST: ['0'], gpu: '0', WORKLOAD: {}, profile: {},
         curOverlay: '', curFlags: '', curEnv: '', CONC: 32, EXTRACT_SCHEMA: {}, EXTRACT_OP_SCHEMA: {},
         h: {...queued}, c: {...queued}, headQueue: [queued, pending], gemmSynthFor: () => false,
+        engineWorkload: () => ({}), engineRegimes: () => ({}),
         safeAgent: () => { throw new Error('downstream authoring is forbidden'); }};
       return new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env;
         ${helper}\n${body}\nreturn {ext, headQueue};`)(env);
@@ -217,7 +218,8 @@ test('a forged or degraded envelope is refused at intake, not taken on trust', a
   const cut = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
   const reader = cut('function preparedUtDefect(', '\n// Hand an optimization lane')
     + cut('function readAgentXPreparation(', '\nasync function prepareAgentXKernels(');
-  const read = new Function(`${reader}\nreturn readAgentXPreparation;`)();
+  const read = new Function('SERVING_TOPOLOGY', 'PD_ROLES',
+    `${reader}\nreturn readAgentXPreparation;`)('', ['prefill', 'decode']);
   const reply = {delivery_path: '/eval/delivery.json', prepared: good};
   assert.equal(read(structuredClone(reply)).kernel_candidates.length, 1, 'the real envelope passes');
   const mutate = (fn) => { const r = structuredClone(reply); fn(r.prepared.kernel_candidates[0]); return r; };
@@ -243,6 +245,21 @@ test('whole-op metadata routes attention aliases to head and preserves the consu
   assert.equal(queues.head_candidates[0].op_kind, 'attn');
   await f.write('run/RETURN.json', {...f.result, smoke: 'pass', op_kind: 'moe'});
   await assert.rejects(f.pack(), /op_kind differs/);
+});
+
+test('a PD delivery names each task\'s engine, and the engine reaches the candidate', async t => {
+  const f = await delivered(t);
+  const engines = ['prefill', 'decode'];
+  await f.pack();
+  const untagged = await readPreparedKernels(f.evalDir, 'delivery.json', {engines});
+  assert.equal(untagged.kernel_candidates.length, 0);
+  assert.match(untagged.failed_tasks.at(-1).reason, /engine must name the engine it was traced on/);
+  assert.equal((await readPreparedKernels(f.evalDir, 'delivery.json')).kernel_candidates.length, 1,
+    'one host or tp_span: no engine to name');
+  await f.write('run/requested_kernel.json', {...f.kernel, engine: 'decode'});
+  await f.pack();
+  const tagged = await readPreparedKernels(f.evalDir, 'delivery.json', {engines});
+  assert.equal(tagged.kernel_candidates[0].engine, 'decode');
 });
 
 test('completed multi-rank UTs retain evidence but do not enter single-GPU optimization lanes', async t => {

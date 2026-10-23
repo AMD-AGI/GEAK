@@ -111,7 +111,8 @@ def identity_of(a) -> dict:
     return kbid.e2e_identity(a.model, a.gfx, a.framework, a.framework_version, a.precision,
                              tp=a.tp, ep=getattr(a, "ep", None),
                              isl=a.isl, osl=a.osl, conc=a.conc,
-                             workload_kind=getattr(a, "workload_kind", ""))
+                             workload_kind=getattr(a, "workload_kind", ""),
+                             topology=getattr(a, "topology", ""))
 
 
 def ladder_of(a):
@@ -169,8 +170,9 @@ def legacy_preep_ladder(a, *, full_version=False):
     their measured ISL/OSL happen to match; AgentX reads only its namespace or explicit old tag.
     """
     identity = identity_of(a)
-    # An unmarked legacy page cannot establish that its measurements came from AgentX.
-    if identity["workload_kind"] == kbid.WORKLOAD_KIND_AGENTX:
+    # An unmarked legacy page cannot establish that its measurements came from AgentX, nor
+    # that it was served across machines: every pre-EP page is one host's.
+    if identity["workload_kind"] == kbid.WORKLOAD_KIND_AGENTX or identity["topology"]:
         return []
     cids = kbid.e2e_canonical_ids(identity)
     if full_version:
@@ -377,6 +379,7 @@ def cmd_resolve(a) -> dict:
                                     "precision": str(a.precision or ""),
                                     "rocm-version": str(a.rocm_version or ""),
                                     "tp": a.tp, "ep": getattr(a, "ep", None),
+                                    "topology": str(getattr(a, "topology", "") or ""),
                                     "isl": a.isl, "osl": a.osl, "conc": a.conc,
                                     "workload-kind": str(getattr(a, "workload_kind", "") or "")},
                            "store": str(getattr(a, "store", "") or ""),
@@ -750,8 +753,10 @@ def _addressed_workload(a) -> dict:
     see `_observed_shape` — just outside the digest.
     """
     keys = ("tp", "ep", "conc") if _is_agentx(a) else ("tp", "ep", "isl", "osl", "conc")
-    return {k: _int_or_none(getattr(a, k, None)) for k in keys
-            if _int_or_none(getattr(a, k, None)) is not None}
+    addressed = {k: _int_or_none(getattr(a, k, None)) for k in keys
+                 if _int_or_none(getattr(a, k, None)) is not None}
+    topology = kbid.segment(getattr(a, "topology", ""), "")
+    return {**addressed, "topology": topology} if topology else addressed
 
 
 def _observed_shape(a, result: dict) -> dict:
@@ -1850,7 +1855,8 @@ def _session_ladder(a, session_id):
                 kbid.WORKLOAD_KIND_AGENTX if offset == 3 or "wl_agentx" in parts or
                 value.get("observed_shape") or value.get("workload_spec") else "")
             ident = kbid.e2e_identity(*parts[offset:offset+5], workload_kind=kind,
-                                     **{k: workload.get(k) for k in ("tp", "ep", "isl", "osl", "conc")})
+                                     **{k: workload.get(k) for k in ("tp", "ep", "isl", "osl", "conc")},
+                                     topology=workload.get("topology") or "")
             # The stored page may predate release-version normalization.
             ident["framework_version"] = parts[offset+3]
             cids = (kbid.legacy_agentx_canonical_ids(ident)
@@ -2095,6 +2101,8 @@ def _identity_args(p):
                    help="ROCm of the container, used to address the accepted kernels' own records")
     p.add_argument("--tp", default=None, help="tensor parallel degree")
     p.add_argument("--ep", default=None, help="expert parallel degree, as the baseline was launched")
+    p.add_argument("--topology", default="",
+                   help="how the deployment spans machines (tpspan_n2, pd_p8x1_d8x2); empty on one host")
     p.add_argument("--isl", default=None, help="input sequence length")
     p.add_argument("--osl", default=None, help="output sequence length")
     p.add_argument("--conc", default=None, help="concurrency")

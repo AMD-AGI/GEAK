@@ -1431,6 +1431,37 @@ class TestAnnotateCli(_TmpMixin, unittest.TestCase):
         self.assertIn("unresolved=1", stderr)
         self.assertEqual(json.loads(stdout)["entity_kind_counts"]["unresolved"], 1)
 
+    def test_several_traces_are_one_union_of_evidence(self):
+        """A PD run's merged Top-N names kernels of both engines; each trace backs its own rows,
+        and a dispatcher seen in one trace still expands into the kernels it launched there."""
+        prefill = self._trace_file([
+            {"cat": "kernel", "name": "prefill_attn_kernel", "ts": 10, "dur": 80},
+        ])
+        decode = self._trace_file([
+            {"cat": "cpu_op", "name": "sglang::moe", "pid": 1, "tid": 2,
+             "ts": 100, "dur": 100, "args": {"External id": 5}},
+            {"cat": "kernel", "name": "decode_moe_kernel", "pid": 1, "tid": 7,
+             "ts": 110, "dur": 80, "args": {"External id": 5}},
+        ])
+        doc = self._doc([{"name": "prefill_attn_kernel", "pct_gpu_time": 30.0},
+                         {"name": "sglang::moe", "pct_gpu_time": 20.0},
+                         {"name": "nowhere_kernel", "pct_gpu_time": 5.0}])
+        code, _, _ = self._main(["--torch-trace", prefill, "--torch-trace", decode,
+                                 "--annotate", doc])
+
+        self.assertEqual(code, 1)
+        with open(doc) as fh:
+            kinds = {r["name"]: r["entity_kind"] for r in json.load(fh)["top_kernels"]}
+        self.assertEqual(kinds, {"prefill_attn_kernel": "gpu_kernel",
+                                 "decode_moe_kernel": "gpu_kernel",
+                                 "nowhere_kernel": "unresolved"})
+
+    def test_several_traces_without_annotate_is_a_usage_error(self):
+        trace = self._trace_file()
+        code, _, err = self._main(["--torch-trace", trace, "--torch-trace", trace])
+        self.assertEqual(code, 2)
+        self.assertIn("go with --annotate", err)
+
     def test_a_host_only_row_is_labelled_a_dispatcher_rather_than_reported_missing(self):
         """A dispatcher that launched nothing this trace can attribute is still IDENTIFIED, which is
         a successful classification -- the exit code marks rows with no evidence at all. Refusing a

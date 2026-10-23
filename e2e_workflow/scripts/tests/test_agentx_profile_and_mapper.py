@@ -276,7 +276,7 @@ class VendoredMapperTest(unittest.TestCase):
         order = [
             text.index("${ix_root:+${ix_root}/benchmarks/map_aiperf.py}"),
             text.index("${ix_root:+${ix_root}/assets/agentx/map_aiperf.py}"),
-            text.index('"${BASH_SOURCE[0]%/*}/map_aiperf.py"'),
+            text.index('"${_AGENTX_ADAPTER_DIR}/map_aiperf.py"'),
         ]
         self.assertEqual(order, sorted(order),
                          "the vendored copy must be tried last")

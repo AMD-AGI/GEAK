@@ -25,7 +25,7 @@ Then launch the server with PYTHONPATH=<overlay>:$PYTHONPATH and run a short ben
 Anti-cheating: the oracle is captured from the UNMODIFIED baseline kernel. The optimizer later must
 match it. The unittest + this file's outputs must not be edited during optimization.
 """
-import atexit, functools, importlib, json, os, re, shutil, sys, threading
+import atexit, functools, importlib, json, os, re, shutil, socket, sys, threading
 
 # Issue #429: process-local MXFP4 MoE oracles can retain multi-GiB tensors per rank/retry until the
 # workspace is evicted. Defaults bound heavy oracle persistence; set CAPTURE_BYTE_BUDGET=0 for unlimited.
@@ -90,9 +90,24 @@ _STATE = {
 
 
 def _rank():
-    return next((str(os.environ[key]) for key in
-                 ("RANK", "LOCAL_RANK", "TP_RANK", "SLURM_PROCID")
-                 if key in os.environ), "unknown")
+    """The env's rank, else torch.distributed's once initialised (sglang sets no rank env).
+    Not cached: a worker installs the hook before it joins its process group."""
+    for key in ("RANK", "LOCAL_RANK", "TP_RANK", "SLURM_PROCID"):
+        if key in os.environ:
+            return str(os.environ[key])
+    try:
+        import torch.distributed as dist
+        if dist.is_available() and dist.is_initialized():
+            return str(dist.get_rank())
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _records_oracle():
+    """Only rank 0 (or a process with no rank) saves the heavy I/O: every rank of a TP group
+    runs the same shapes, and per-rank copies multiply the oracle by the world size."""
+    return _rank() in ("0", "unknown")
 
 
 def _process_out_dir(out_dir):
@@ -101,8 +116,13 @@ def _process_out_dir(out_dir):
               or bool(os.environ.get("GEAK_SELECTION_TRACE")))
     if not unique:
         return out_dir
+    # Host after pid: ranks on two machines can share a pid, and both write to the shared mount.
     return os.path.join(
-        out_dir, f"capture.pid-{os.getpid()}.rank-{_rank()}")
+        out_dir, f"capture.pid-{os.getpid()}.host-{_host()}.rank-{_rank()}")
+
+
+def _host():
+    return socket.gethostname().split(".")[0]
 
 
 def parse_byte_budget(value):
@@ -395,6 +415,7 @@ def _write_capture_manifest(out_dir, extra=None):
     payload = {
         "target": s.get("target"),
         "process_id": os.getpid(),
+        "host": _host(),
         "rank": _rank(),
         "byte_budget": s.get("byte_budget", 0),
         "oracle_bytes_est": s.get("oracle_bytes_est", 0),
@@ -723,7 +744,8 @@ def _wrapper(*args, **kwargs):
             # oracle never freezes on a single regime (the "single-case oracle" bug).
             regime = _lead_regime(args, kwargs)
             need_regime = regime not in s["regime_seen"]
-            if sig not in s["seen"] and not in_graph and (len(s["records"]) < s["max_cases"] or need_regime):
+            if (sig not in s["seen"] and not in_graph and (len(s["records"]) < s["max_cases"] or need_regime)
+                    and _records_oracle()):
                 call_bytes = _estimate_call_bytes(args, kwargs, out)
                 budget = int(s.get("byte_budget") or 0)
                 case_limit = int(s.get("case_byte_limit") or 0)
@@ -933,6 +955,7 @@ def _flush(write_oracle=True):
     meta = {
         "target": s["target"],
         "process_id": os.getpid(),
+        "host": _host(),
         "rank": _rank(),
         "module": s["mod"].__name__ if s["mod"] else None,
         "attr": s["attr"],

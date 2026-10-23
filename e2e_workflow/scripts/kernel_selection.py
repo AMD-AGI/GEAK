@@ -137,6 +137,14 @@ def _truncated_prefix(needle, haystack):
     return len(needle) >= SHORT_NAME_LIMIT and haystack.startswith(needle)
 
 
+def _specialized_from(base, name):
+    """True when ``name`` is Triton's specialization of ``base``: ``base`` + ``_`` + its constexpr
+    suffix (``_GROUP_K_128_..._GRID_MN_348_cache_modifier_CG``, which varies with M). A digit-only
+    segment marks that suffix; ``base_v2`` is another kernel."""
+    rest = name[len(base) + 1:] if name.startswith(base + "_") else ""
+    return any(segment.isdigit() for segment in rest.split("_"))
+
+
 def _template_arguments(value):
     """``(arguments, closed)`` for the symbol's first ``<...>``.
 
@@ -166,7 +174,8 @@ def kernel_matches(expected, observed):
     got = canonical_kernel_name(observed)
     if not want or not got:
         return False
-    if want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want):
+    if (want != got and not _truncated_prefix(want, got) and not _truncated_prefix(got, want)
+            and not _specialized_from(want, got) and not _specialized_from(got, want)):
         return False
     # The base token deliberately drops template arguments so a bare declared name can match its
     # decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
@@ -512,16 +521,19 @@ def main(argv=None):
 
     trace_paths = list(args.torch_trace)
     attempts = []
+    metas = {}
     for meta_path in args.capture_meta:
         with open(meta_path) as fh:
             meta = json.load(fh)
+        metas[meta_path] = meta
         capture_pid = str(meta.get("process_id") or "")
         matching_traces = trace_paths
         if capture_pid:
+            # A meta that names its host pairs only with that host's traces: pids repeat across machines.
+            process = re.escape(capture_pid) + (rf"\.host-{re.escape(str(meta['host']))}" if meta.get("host") else "")
             matching_traces = [
                 path for path in trace_paths
-                if re.search(rf"\.pid-{re.escape(capture_pid)}(?:\.|$)",
-                             os.path.basename(path))
+                if re.search(rf"\.pid-{process}(?:\.|$)", os.path.basename(path))
             ]
         if not matching_traces:
             verdict = (verify_chain(args.target, args.device_kernel, args.required_device_kernel,
@@ -620,6 +632,10 @@ def main(argv=None):
     ]
     all_paths = [path for _, paths, _ in attempts for path in paths]
     verdict["best_process_meta_file"] = best_process_meta_file
+    # Only rank 0 saves the heavy I/O (capture_shapes._records_oracle): promote the process that has it.
+    oracle_meta_file = next((path for path in [best_process_meta_file, *metas]
+                             if metas[path].get("reference_io_sha256")), best_process_meta_file)
+    verdict["oracle_meta_file"] = oracle_meta_file
     verdict["trace_file"] = all_paths[0] if len(all_paths) == 1 else ""
     verdict["trace_files"] = all_paths
     verdict["trace_files_considered"] = trace_paths
@@ -637,7 +653,7 @@ def main(argv=None):
                 import capture_shapes as _cs
             telemetry = _cs.promote_and_reclaim(
                 task_dir,
-                keep_meta_path=best_process_meta_file if verdict["ok"] else None,
+                keep_meta_path=oracle_meta_file if verdict["ok"] else None,
                 promote=bool(verdict["ok"]),
             )
             verdict["capture_storage"] = telemetry

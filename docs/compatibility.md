@@ -65,7 +65,7 @@ The serving stack is not baked in; `args.backend` selects `scripts/adapters/<bac
 
 | Bench client | Notes |
 |---|---|
-| Backend-native (`bench_e2e.sh`) | Default dispatcher. |
+| Backend-native (`bench_e2e.sh`) | Default dispatcher; on a multinode run it runs on rank0. |
 | inferencex | Opt-in using `BENCH_CLIENT=inferencex` (Hyperloom or Magpie parity); needs `$INFERENCEX_PATH`. |
 
 ## Kernel languages (kernel_workflow)

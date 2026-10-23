@@ -751,7 +751,8 @@ The serving stack is launched through the selected backend adapter
 selected independently by `BENCH_CLIENT`:
 
 * `native` (default standalone) — each backend's built-in bench
-  (SGLang, vLLM, or ATOM). Small cross-harness差异 may remain.
+  (SGLang, vLLM, or ATOM). Small cross-harness差异 may remain. On a multinode run
+  it is the one client that runs on rank0 rather than the driver.
 * `inferencex` — `adapters/clients/inferencex.sh` redefines `adapter_bench` to
   call **Hyperloom/Magpie's own** `InferenceX/utils/bench_serving/benchmark_serving.py`
   (`--backend vllm --dataset-name random --request-rate inf --ignore-eos
@@ -762,8 +763,10 @@ selected independently by `BENCH_CLIENT`:
 `run_e2e.py` resolves `handoff.bench_client` (`auto` → `inferencex` when an
 InferenceX checkout is discoverable via `INFERENCEX_PATH`, else `native`) and
 exports `BENCH_CLIENT` + `INFERENCEX_PATH` so every `bench_e2e.sh` the agents run
-inherits it. The profile round (server-side trace) always delegates back to the
-backend's native bench. The chosen client is echoed in `result.bench_client`, and
+inherits it. On one host the profile-round fallback (`PROF=1`) delegates back to the
+backend's native bench; on a multinode run it is a fresh load under the launcher's
+window. The chosen client is echoed in `result.bench_client` (where it ran in
+`result.bench_client_host`: `driver` | `rank0`), and
 the sweep reuse path carries it forward so sweep points use the same client.
 
 ### Server-LAUNCHER adapter (closes the launch-recipe residual)
@@ -822,3 +825,21 @@ the ambient process `PATH` stands. GEAK's own CI entrypoint
 and pins the same value into the patched handoff, so a shipped
 `baseline_config.with_envs.yaml` cannot silently flip the CI server start path
 to magpie.
+
+### Multi-node serving (`MULTI_NODE_STATE`)
+
+When the environment variable `MULTI_NODE_STATE` names a `node_state.json`, the run
+serves one instance on the pods it lists instead of on this host, and the launcher is
+`multinode` regardless of `handoff.bench_launcher`. The file's `backend` must equal
+`handoff.framework`, `service_url` must point at the router pod (or the first engine
+pod without one), and every pod needs `podIP` and `launch_command`; anything else
+stops the run with a `!!! MULTI_NODE_STATE ...` message before a Workflow is
+started. `handoff.multinode`, the previous way in, is refused rather than ignored.
+
+Before Setup, `run_e2e.py` runs `e2e_workflow/scripts/multi_node/mn.py check` on the
+block: it probes every node over ssh, writes the pin under `shared_fs/pins/`, and
+exports `GEAK_MN_STATE` so every later `bench_e2e.sh` serves from it. A refused check
+returns `error_class: multinode_check_refused` with the problems listed. GPU identity
+is read from the nodes, not the driver. The full contract, the environment reference
+and the failure table are in
+[`e2e_workflow/docs/multi_node.md`](../e2e_workflow/docs/multi_node.md).

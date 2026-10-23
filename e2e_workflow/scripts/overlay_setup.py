@@ -60,13 +60,25 @@ _EMPTY = {"modules": [], "rebinds": [], "markers": [], "captures": []}
 # recursive process spawn that wedges the whole node (observed: 13.7k processes, load 590, every
 # subsequent vLLM launch failing torch.distributed rendezvous with "2/8 clients joined").
 # The overlay has no business running inside an arch probe, so no-op there.
+# realpath: /opt/rocm is a symlink to /opt/rocm-<version>.
 _ARGV0 = (sys.argv[0] if sys.argv else "") or ""
 _PROBES = {"rocm_agent_enumerator", "rocminfo", "offload-arch", "amdgpu-arch", "hipconfig", "hipcc",
            "hipinfo", "rocm-smi", "rocm_smi.py"}
-if os.path.basename(_ARGV0) in _PROBES or os.path.abspath(_ARGV0 or ".").startswith(
-        ("/opt/rocm", "/usr/local/rocm")):
+_SKIP = ""
+if os.path.basename(_ARGV0) in _PROBES or os.path.realpath(_ARGV0 or ".").startswith(
+        ("/opt/rocm", "/usr/local/rocm", "/usr/lib/llvm")):
+    _SKIP = "toolchain helper (%s)" % _ARGV0
+# Reentrancy, only WHILE the overlay is applied; cleared at the bottom so the server's TP
+# workers, spawned later, still get it (covers aiter imported lazily, after this flag cleared).
+elif os.environ.get("GEAK_OVERLAY_APPLYING") == "1":
+    _SKIP = "reentrant: an ancestor is mid-overlay"
+
+if _SKIP:
     _m = dict(_EMPTY)
+    if os.environ.get("GEAK_OVERLAY_TRACE") == "1":
+        sys.stderr.write("[overlay] SKIP %s\n" % _SKIP)
 else:
+    os.environ["GEAK_OVERLAY_APPLYING"] = "1"
     try:
         with open(_MAN) as _fh:
             _m = json.load(_fh)
@@ -155,6 +167,10 @@ for _e in _m.get("markers", []):
         seam_trace.install(_e["target"])
     except Exception as _ex:
         sys.stderr.write("[overlay] seam marker install FAILED %r: %r\n" % (_e, _ex))
+
+# Only the process that set the flag clears it.
+if not _SKIP:
+    os.environ.pop("GEAK_OVERLAY_APPLYING", None)
 '''
 
 
