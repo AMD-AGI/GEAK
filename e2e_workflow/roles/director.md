@@ -83,7 +83,11 @@ Steps:
    not a script). Confirm the chosen `BACKEND` stack imports/launches, `MODEL` resolves, the GPU(s)
    are visible; detect gfx, trace sources (rocprofv3?), available op backends (aiter / flydsl via
    `aiter.ops.flydsl.is_flydsl_available()` — NOT `import flydsl` / ckProfiler /
-   hipblaslt-bench?), and the model's **arch class** from its `config.json`.    Degrade gracefully
+   hipblaslt-bench?), and the model's **arch class** from its `config.json`.
+   On a multinode run (your prompt gives an `mn.py exec` line) this machine sees no GPU and the nodes
+   have no GEAK code: copy `gpu_identity.py` into `$EVAL_DIR`, and run that copy and every GPU / stack
+   probe of this step (including `env_info.txt` below) on the master, prefixed with
+   `<that mn.py exec> --target master --`. Degrade gracefully
    (a missing OPTIONAL tool → record a limitation, don't abort); hard-stop ONLY on a true blocker
    (no MODEL / stack / GPU) with an actionable remedy. Write `EVAL_DIR/env_report.{md,json}`
    (downstream phases read it). **For every OPTIONAL backend that is NOT available, also write an
@@ -139,6 +143,13 @@ Steps:
    this model/box has produced before.
    Only when the run asked for several samples (`REPLICAS>1`, or `isolated_server`) does spread mean
    anything: > ~5% then, re-run — a noisy baseline poisons every later comparison.
+   **A baseline with `usable_for_acceptance=false` or `hollow_rounds > 0` is not a baseline.** A hollow
+   round is one whose requests came back empty (retokenized output far below the credited length, or
+   TTFT and ITL exactly 0) — the client still credits the full output length, so it reads as an
+   impossibly high tok/s. On a disaggregated pair this is a dead KV handoff (`KVTransferError` /
+   `transfer failed` in either engine's `server.log`). Re-run the baseline on a fresh server (up to 2
+   more attempts), report the failure and its log line in `notes`, and never return a hollow number as
+   `baseline_throughput_tok_s`.
    Set `noise_band_pct = 0.5` (the default accept threshold): the Integrator gates with same-lifecycle
    reference/candidate legs, non-overlap, and engagement proof. Only widen it (e.g. to 1–2%) if a
    multi-sample measurement showed the spread is genuinely large on this box and can't be tightened.
@@ -223,6 +234,9 @@ your own. It is one of:
    PROFILE=0 ISL=<isl> OSL=<osl> CONC=<conc> \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee -a "$EVAL_DIR/logs/validation_bench.log"
    # final block (full overlay + flags + env), SAME TP=SERVING_TP GPU=SERVING_GPU
+   # PD: also export GEAK_MN_PD_SWEEP_ARGS_* / GEAK_MN_PD_SWEEP_ENV_* / GEAK_MN_PD_OVERLAY_* from
+   # Inputs (FINAL_FLAGS.overlay_by_role holds the overlays). Those are per-engine;
+   # EXTRA_SERVER_ARGS / OVERLAY_PYTHONPATH are the shared layer and must not absorb them.
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/validation/final" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
    OVERLAY_PYTHONPATH="$FINAL_OVERLAY" EXTRA_SERVER_ARGS="<final flags>" EXTRA_ENV="<final env>" \
    GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=validation REPLICAS="${REPLICAS:-1}" \

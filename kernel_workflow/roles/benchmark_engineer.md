@@ -90,6 +90,14 @@ warmup), `--full-benchmark` (100 iters/10 warmup). Use CUDA events for timing. P
   so the parser can compute the time-weighted metric. Exclude empty-`dims` cases (say so in `notes`).
 - No WORKLOAD_SPEC → cover small/medium/large + parameter variations (unweighted, as before).
 
+**`meta.candidate_bind` present → the candidate is that overlay entry, timed against the live stack in
+the same run.** Time the same call in fresh subprocesses under two PYTHONPATHs: `baseline_overlay/`
+and the `_cand_overlay` that the vendored `h.build_candidate_overlay(WORKSPACE, meta)` rebuilds from
+`kernel_src/` on every invocation; check `h.assert_legs_differ` once. With a `cases.py` in the task,
+`h.measure_legs(WORKSPACE, meta)` does all of this. The editable file is the bind's `file` (e.g.
+`kernel_src/candidate.py`); to re-tune the live kernel, start it from `baseline_ref/*.orig`. Never time
+"whatever the installed library holds now" against frozen baseline numbers.
+
 **Baseline (perf reference) — use the ORIGINAL implementation, never an LLM naive reimplementation.**
 The speedup denominator must be the real workload code, otherwise "2× over naive torch" can be slower
 than production. In order of preference: (a) **author mode: the frozen REAL ONLINE kernel in
@@ -196,7 +204,10 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
     gate and the final result use. If the baseline is the flagged naive fallback, say so here.
 - `MODIFIABLE FILES` and the rules (never modify harness/COMMANDMENT/files outside the workspace;
   always run correctness before benchmark; always invoke via gpu_lock from the workspace; benchmark
-  output is the source of truth).
+  output is the source of truth). MODIFIABLE FILES are workspace paths (normally under `kernel_src/`),
+  **never an installed package** (`site-packages`, `/sgl-workspace/...`): another machine measures from
+  its own install under multinode, and both legs load an in-place edit on any machine. `gpu_lock.sh`
+  rejects (exit 86) every command while the COMMANDMENT lists a path outside the task directory.
 
 ### 5. Record baseline + check reliability
 Run the FULL benchmark **3 times** via gpu_lock. Confirm per-case results are within ~5% across
