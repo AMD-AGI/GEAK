@@ -25,6 +25,39 @@ set -euo pipefail
 # defaultable, so it names no ids.
 GPU_SPEC="${1:?Usage: gpu_lock.sh <gpu_id|pool> <command...>   (pool = comma list of the GPUs THIS run was allocated)}"
 shift
+# Multinode: the pin of the run on this machine (mn.py active-pin), its shared card leases and
+# the run directory's copy of these tools. The pointer test only skips the python start on a
+# machine no multinode run has used. On a node (GEAK_MN_HOP) there is no mn.py: the driver's
+# copy forwarded the command here and handed over the lease directory.
+_MN_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../e2e_workflow/scripts/multi_node/mn.py"
+_MN_PIN="" _MN_LEASE_DIR="" _MN_TOOLS=""
+if [ -n "${GEAK_MN_HOP:-}" ]; then
+    _MN_LEASE_DIR="${GEAK_MN_LEASE_DIR:-}"
+elif [ -f "$_MN_PY" ] && { [ -n "${GEAK_MN_STATE:-}" ] || [ -f /tmp/geak_mn/state_path ]; }; then
+    IFS=$'\t' read -r _MN_PIN _MN_LEASE_DIR _MN_TOOLS < <(python3 "$_MN_PY" active-pin --lease-dir 2>/dev/null) || true
+fi
+# The driver of a multinode run sees no GPU: every command runs on a pinned node, "<engine>:<ids>"
+# (e.g. decode:3) on that engine's machine and bare ids on the master. Forwarded before anything
+# runs here, to the run directory's copy with bare ids: the sources are checked once, there.
+# GEAK_MN_STATE is explicit: here the pin may come from the pointer.
+if [ -n "$_MN_PIN" ]; then
+    if [ -z "$_MN_TOOLS" ]; then
+        echo "ERROR: gpu_lock.sh: the multinode pin $_MN_PIN has no tools_dir; re-run mn.py check with a work_dir." >&2
+        exit 2
+    fi
+    case "$GPU_SPEC" in
+        *:*) _MN_TARGET="${GPU_SPEC%%:*}" GPU_SPEC="${GPU_SPEC#*:}" ;;
+        *)   _MN_TARGET=master ;;
+    esac
+    exec env GEAK_MN_STATE="$_MN_PIN" GEAK_MN_LEASE_DIR="$_MN_LEASE_DIR" python3 "$_MN_PY" exec --env \
+        --target "$_MN_TARGET" -- bash "$_MN_TOOLS/gpu_lock.sh" "$GPU_SPEC" "$@"
+fi
+case "$GPU_SPEC" in
+    *:*)
+        echo "ERROR: gpu_lock.sh: '$GPU_SPEC' names an engine, but no multinode run owns this machine." >&2
+        exit 2
+        ;;
+esac
 
 # Source provenance is checked before executing any command and again on exit:
 # generated builders can recreate a stale overlay during the command itself.
@@ -50,6 +83,19 @@ _check_sources_on_exit() {
 trap _check_sources_on_exit EXIT
 
 LOCK_DIR="${KERNEL_EXTRACT_LOCK_DIR:-/tmp/team_gpu_locks}"
+LOCK_PREFIX="gpu_"
+_PIN_WAIT=1200
+# Multinode: lock the shared-mount card leases that serving legs and `mn.py exec --gpu` hold, so a
+# kernel command never lands on a card GEAK is serving from. A serving leg holds every card of its
+# machines for the whole leg (often over 20 min): wait it out.
+if [ -n "$_MN_LEASE_DIR" ]; then
+    _host="$(hostname)"
+    LOCK_DIR="$_MN_LEASE_DIR"
+    # Must name the same file as mn.py's lease_file (<short hostname>.gpu<N>.lock); a test pins it.
+    LOCK_PREFIX="${_host%%.*}.gpu"
+    _PIN_WAIT=86400
+    : "${GEAK_GPU_POOL_WAIT:=86400}"
+fi
 mkdir -p "$LOCK_DIR"
 
 # ---- Allocation fence ---------------------------------------------------------------------------
@@ -131,7 +177,7 @@ case "$GPU_SPEC" in
     while [ -z "$GPU_ID" ]; do
         for _g in $POOL; do
             # (1) flock: exclusive lane. Held until this process exits.
-            exec {_fd}>"${LOCK_DIR}/gpu_${_g}.lock"
+            exec {_fd}>"${LOCK_DIR}/${LOCK_PREFIX}${_g}.lock"
             if flock -n -x "$_fd"; then
                 # We hold the lane. Only now check idleness -- checking before locking would race.
                 if [ "${GEAK_GPU_REQUIRE_IDLE:-1}" = "1" ] \
@@ -169,7 +215,7 @@ case "$GPU_SPEC" in
     ;;
 esac
 
-LOCK_FILE="${LOCK_DIR}/gpu_${GPU_ID}.lock"
+LOCK_FILE="${LOCK_DIR}/${LOCK_PREFIX}${GPU_ID}.lock"
 
 # (0) Reap ORPHANED hung rocm_agent_enumerator procs before running. aiter's import spawns one such
 # subprocess per Python process for gfx detection; under GPU/KFD contention they HANG instead of
@@ -244,7 +290,7 @@ else
     _wait_t0=$SECONDS
     (
         # (1) flock this GPU (exclusive for the duration of the command).
-        flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
+        flock -x -w "$_PIN_WAIT" 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after ${_PIN_WAIT}s"; exit 1; }
         # Default 1, matching pool mode above. It was 0 here, so a PINNED engineer skipped the
         # foreign-work check entirely -- not "sampled it once", never ran it. That is how two
         # measurement cells ended up timed on a GPU another tenant was executing on. Both paths ask
