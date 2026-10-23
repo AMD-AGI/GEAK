@@ -318,10 +318,11 @@ def scaffold(task, tdir, man, force):
            "--manifest", mpath, "--phase-regimes", rpath]
     if task.get("target_callable"):
         cmd += ["--target", task["target_callable"]]
+    # scaffold_ut parses non-strings as JSON: a bool must arrive as `true`, not `True`
     for k, v in (task.get("axes") or {}).items():
-        cmd += ["--axis", "%s=%s" % (k, v)]
+        cmd += ["--axis", "%s=%s" % (k, v if isinstance(v, str) else json.dumps(v))]
     for k, v in (task.get("attrs") or {}).items():
-        cmd += ["--attr", "%s=%s" % (k, v)]
+        cmd += ["--attr", "%s=%s" % (k, v if isinstance(v, str) else json.dumps(v))]
     if force:
         cmd.append("--force")
     p = subprocess.run(cmd, capture_output=True, text=True)

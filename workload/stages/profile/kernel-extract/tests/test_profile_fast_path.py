@@ -119,15 +119,25 @@ def prefill_events(toks, steps=3):
     return ev
 
 
+def _lcp(a, b):
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
 class FakeServer:
     """sglang's probe surface. Decode requests stay resident until aborted; the realtime
     decode counter advances while they are; prefill traces carry the tokens actually
-    extended (measured prompt tokens minus the prefixes warmed before the arm)."""
+    extended: a radix cache by content, so each request extends past its longest prefix
+    shared with any earlier request."""
 
     def __init__(self, graph=False, reject_shapes=False, replay=False):
         self.graph, self.reject_shapes, self.replay = graph, reject_shapes, replay
         self.active, self.out_dir, self.armed = {}, None, False
-        self.requests, self.profile_bodies = [], []
+        self.requests, self.profile_bodies, self.seen = [], [], []
         self.decode_total, self.prefill_total, self.t_last = 0.0, 0.0, time.time()
         self.lock = threading.Lock()
         fake = self
@@ -160,8 +170,12 @@ class FakeServer:
                 ln = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(ln) or b"{}")
                 if self.path == "/generate":
-                    n = len(body["input_ids"])
-                    fake.requests.append({"tokens": n, "armed": fake.armed,
+                    ids = list(body["input_ids"])
+                    n = len(ids)
+                    with fake.lock:
+                        hit = max([0] + [_lcp(ids, seen) for seen in fake.seen])
+                        fake.seen.append(ids)
+                    fake.requests.append({"tokens": n, "armed": fake.armed, "extend": n - hit,
                                           "max_new": body["sampling_params"]["max_new_tokens"]})
                     fake.prefill_total += n
                     if body["sampling_params"]["max_new_tokens"] > 1:
@@ -190,13 +204,8 @@ class FakeServer:
                     self._send("Start profiling.\n", "text/plain")
                 elif self.path == "/stop_profile":
                     if not fake.active and fake.out_dir:
-                        before = fake.requests[:fake.req0]
                         after = fake.requests[fake.req0:]
-                        warmed = sum(r["tokens"] for r in before if r["max_new"] == 1
-                                     and not r.get("counted"))
-                        for r in fake.requests:
-                            r["counted"] = True
-                        fake.dump("prefill", sum(r["tokens"] for r in after) - warmed)
+                        fake.dump("prefill", sum(r["extend"] for r in after))
                     fake.out_dir, fake.armed = None, False
                     self._send("Stop profiling.\n", "text/plain")
                 else:

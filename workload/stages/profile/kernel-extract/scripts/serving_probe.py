@@ -451,6 +451,21 @@ def warm_prefixes(base, prefixes, args, journal):
     journal.append({"event": "prefix_warmed", "sequences": [len(p) for p in prefixes]})
 
 
+def warm_shape(base, prefixes, news, args, journal):
+    """Run the point's exact extend once before the window: the same cached prefix and a
+    different suffix of the same length, so the forward has the measured token count and
+    context. Triton autotuning and first-use JIT key on those shapes and otherwise land
+    inside the window: on a cold sglang 0.5.20 image four GLM-5.2 prefill points censused
+    at 11-126 s per instance against 0.3-0.7 s on a warm one, and the prefill phase total
+    read 14x its warm value, which re-ranked every kernel."""
+    salt = 104729 + sum(len(n) for n in news)
+    with ThreadPoolExecutor(max_workers=len(news)) as ex:
+        for i, (pre, new) in enumerate(zip(prefixes, news)):
+            ex.submit(generate, base, list(pre) + rand_ids(len(new), salt + i), 1, journal,
+                      "shape_warm%d" % i, args.request_timeout)
+    journal.append({"event": "shape_warmed", "per_sequence_new": [len(n) for n in news]})
+
+
 def drive_prefill(base, prefixes, news, args, journal):
     """Send the measured batch: each sequence's cached prefix plus its new tokens.
     max_new_tokens=1 keeps the request in prefill."""
@@ -516,6 +531,11 @@ def main():
     ap.add_argument("--no-record-shapes", action="store_true",
                     help="arm without record_shapes/with_stack (smaller traces, but no "
                          "kernel_shapes.py / source_map.py evidence)")
+    ap.add_argument("--arm-settle", type=float, default=0.0,
+                    help="prefill: seconds between arming and sending (traces grow with it)")
+    ap.add_argument("--no-shape-warmup", action="store_true",
+                    help="prefill: do not run the point's shape once before arming (cold "
+                         "autotune/JIT then lands in the window)")
     ap.add_argument("--request-timeout", type=float, default=1800)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--out", required=True, help="journal JSON for this point")
@@ -572,8 +592,18 @@ def main():
                             "per_sequence_new": [len(n) for n in news],
                             "per_sequence_cached": [len(p) for p in prefixes]})
             warm_prefixes(args.base_url, prefixes, args, journal)
+            if not args.no_shape_warmup:
+                warm_shape(args.base_url, prefixes, news, args, journal)
             start_profile(args.base_url, server_dir, num_steps, journal, args.arm_timeout,
                           not args.no_record_shapes)
+            # /start_profile can return before every TP rank has armed; a prefill sent at
+            # once then runs on a rank that is not recording (seen once in ~150 GLM-5.2 TP8
+            # points: rank 7's trace lacked the extend). Waiting is not free -- with
+            # record_shapes/with_stack the idle scheduler loop is recorded too, and 2 s
+            # grew each trace 10x (1 GB a point) and the point from 20 s to 118 s -- so it
+            # is off by default; point_census rejects a point whose ranks disagree.
+            if args.arm_settle > 0:
+                time.sleep(args.arm_settle)
             drive_prefill(args.base_url, prefixes, news, args, journal)
         ok = True
     except Exception as exc:
