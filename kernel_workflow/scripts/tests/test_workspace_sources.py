@@ -428,3 +428,53 @@ def test_prepared_ut_resources_survive_lane_setup_and_next_copy(tmp_path, mode):
             assert golden.is_symlink()
             assert golden.resolve() == parent / f"captures/{phase}/reference_io.pt"
     assert (parent / "kernel_src/original.py").read_text() == "VALUE = 1\n"
+
+
+# dsv4pd1p1d_r3: Setup froze the live install as the candidate. The engineer edited the driver's copy
+# and the node measured its own (1.0x), then edited the node's live tree (both legs carried it).
+INSTALL_COMMANDMENT = """\
+## MODIFIABLE FILES (the live aiter triton source the candidate edits in place)
+- `/sgl-workspace/aiter/aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a8w8_blockscale.py`
+- `/sgl-workspace/aiter/aiter/ops/triton/configs/gemm/gfx942-GEMM-A8W8_BLOCKSCALE.json`
+
+RULES:
+- NEVER modify anything outside the workspace other than the MODIFIABLE FILES above.
+"""
+
+
+def eval_dir(tmp_path, commandment):
+    root = tmp_path / "eval"
+    workspace = root / "round_1" / "engineer_0" / "workspace"
+    workspace.mkdir(parents=True)
+    (root / "COMMANDMENT.md").write_text(commandment)
+    return root, workspace
+
+
+def check(workspace):
+    return run(sys.executable, GUARD, "check", "--workspace", workspace)
+
+
+def test_a_commandment_naming_an_installed_package_invalidates_every_command(tmp_path):
+    root, workspace = eval_dir(tmp_path, INSTALL_COMMANDMENT)
+    for ws in (workspace, root):
+        result = check(ws)
+        assert result.returncode == 86, result.stderr
+        assert "GEAK_SOURCE_INVALID" in result.stderr
+        assert "/sgl-workspace/aiter/aiter/ops/triton/_triton_kernels" in result.stderr
+        assert "kernel_src/" in result.stderr
+    assert (workspace / ".geak/invalid_measurements.jsonl").exists()
+
+
+def test_modifiable_files_inside_the_task_directory_pass(tmp_path):
+    root = tmp_path / "eval"
+    commandment = (
+        "## MODIFIABLE FILES\n"
+        "- `kernel_src/candidate.py`\n"
+        f"- `{root}/workspace/kernel_src/candidate.py`\n"
+        "- `<EVAL_DIR>/workspace/kernel_src/candidate.py`\n"
+        "\n"
+        "RULES: /sgl-workspace is never edited.\n"
+    )
+    _, workspace = eval_dir(tmp_path, commandment)
+    assert check(workspace).returncode == 0
+    assert check(tmp_path).returncode == 0  # no COMMANDMENT above it

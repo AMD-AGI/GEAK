@@ -380,6 +380,14 @@ class TestMapArgs(_RunE2ECase):
         with self.assertRaisesRegex(RuntimeError, "returned invalid JSON"):
             rx._expected_gpu_identity({})
 
+
+    def test_config_tune_is_opt_in_from_the_handoff(self):
+        """A cold bring-up has no upstream EXPLORE, so it may ask for the sweep."""
+        on = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_on"), config_tune=True))
+        self.assertEqual(on["config_tune"], "true")
+        off = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_off"), config_tune="false"))
+        self.assertEqual(off["config_tune"], "false")
+
     def test_budget_omitted_when_unknown(self):
         """No timeout => the workflow stays budget-unaware (byte-identical to a
         direct, non-interface invocation)."""
@@ -638,6 +646,15 @@ class TestBenchClient(_RunE2ECase):
         os.environ.pop("INFERENCEX_PATH", None)
         self.assertEqual(rx.apply_bench_client({}), "native")
         self.assertEqual(os.environ["BENCH_CLIENT"], "native")
+
+    def test_the_client_runs_on_the_driver_unless_native_serves_multinode(self):
+        for client, launcher, host in (("inferencex", "multinode", "driver"),
+                                       ("agentx", "multinode", "driver"),
+                                       ("native", "native", "driver"),
+                                       ("native", "multinode", "rank0")):
+            with self.subTest(client=client, launcher=launcher):
+                os.environ["BENCH_CLIENT"], os.environ["BENCH_LAUNCHER"] = client, launcher
+                self.assertEqual(rx.bench_client_host(), host)
 
     def test_auto_honours_the_ambient_env_checkout(self):
         os.environ["INFERENCEX_PATH"] = "/env/inferencex"

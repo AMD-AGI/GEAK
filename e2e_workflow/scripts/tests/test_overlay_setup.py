@@ -248,6 +248,150 @@ class TestEnsureOverlay(_OverlayCase):
 
 
 # --------------------------------------------------------------------------- #
+# The shim's process guard -- only observable by actually executing the shim
+# --------------------------------------------------------------------------- #
+class TestShimProcessGuard(_OverlayCase):
+    """Why this class executes the shim instead of asserting on its text.
+
+    PYTHONPATH is inherited by every descendant, so the shim runs in EVERY python the box starts
+    while an overlay is bound. Applying an overlay imports its target package, and on ROCm
+    importing aiter execs /opt/rocm/bin/rocm_agent_enumerator to detect the GPU arch -- itself a
+    python script, which loads the shim, imports aiter, execs another enumerator, without end.
+    Observed once as 6512 runaway processes and load 6277 on a 192-core host: nothing crashed, the
+    decode engine's TP workers simply never got enough CPU to finish init, so the leg sat in
+    "Waiting for server health" until its backstop with an empty shapes/dump. A text assertion
+    cannot tell a guard that works from one that skips the TP workers too (which would silently
+    measure unpatched code), so every test here runs the real shim source.
+    """
+
+    TARGET = "ovguard_target"
+    IMPL = "ovguard_impl"
+
+    def setUp(self):
+        super().setUp()
+        root = self._import_dir()
+        self._write(os.path.join("importable", self.TARGET + ".py"), "def f():\n    return 'orig'\n")
+        # The impl records the flag AS SEEN AT ITS OWN IMPORT, which is the moment inside the
+        # apply window when aiter would exec the enumerator. That is the only way to observe the
+        # window from outside the shim.
+        self._write(os.path.join("importable", self.IMPL + ".py"),
+                    "import os\n"
+                    "FLAG_AT_IMPORT = os.environ.get('GEAK_OVERLAY_APPLYING')\n"
+                    "def g():\n    return 'patched'\n")
+        self._forget(self.TARGET, self.IMPL)
+        self.root = root
+
+        ov._ensure_overlay(self.overlay)
+        ov._save_man(os.path.join(self.overlay, "_overlay_manifest.json"),
+                     {"modules": [], "rebinds": [{"target": self.TARGET + ":f",
+                                                  "impl_module": self.IMPL,
+                                                  "impl_attr": "g"}],
+                      "markers": [], "captures": []})
+
+    def _exec_shim(self, argv0, env_extra=None):
+        """Runs the real shim source and reports what it did. Observations are taken INSIDE the
+        env patch, because the shim's last act is to clear its own flag."""
+        ns = {"__file__": os.path.join(self.overlay, "sitecustomize.py"),
+              "__name__": "sitecustomize"}
+        sys.modules.pop(self.TARGET, None)
+        sys.modules.pop(self.IMPL, None)
+        stderr = io.StringIO()
+        with mock.patch.object(sys, "argv", [argv0]), \
+             mock.patch.dict(os.environ, env_extra or {}), \
+             contextlib.redirect_stderr(stderr):
+            exec(compile(ov.SITECUSTOMIZE, "sitecustomize.py", "exec"), ns)
+            flag_after = os.environ.get("GEAK_OVERLAY_APPLYING")
+        target = sys.modules.get(self.TARGET)
+        impl = sys.modules.get(self.IMPL)
+        return types.SimpleNamespace(
+            skip=ns.get("_SKIP"),
+            applied=bool(target) and getattr(target, "f")() == "patched",
+            flag_at_impl_import=getattr(impl, "FLAG_AT_IMPORT", None) if impl else None,
+            flag_after=flag_after,
+            stderr=stderr.getvalue(),
+        )
+
+    def _workload_argv0(self):
+        return os.path.join(self.tmp, "venv", "lib", "sglang", "launch_server.py")
+
+    # -- the workload must still be patched ---------------------------------- #
+    def test_a_workload_process_still_applies_the_overlay(self):
+        got = self._exec_shim(self._workload_argv0())
+        self.assertEqual(got.skip, "")
+        self.assertTrue(got.applied, "the guard blocked the process the overlay exists for")
+
+    def test_argv0_of_python_dash_c_is_not_mistaken_for_a_toolchain_path(self):
+        # sglang's TP workers are spawned as `python -c "from multiprocessing.spawn import ..."`,
+        # so their sys.argv[0] is the literal "-c". realpath turns that into <cwd>/-c; if that ever
+        # matched a toolchain prefix the workers would run UNPATCHED and the run would report a
+        # speedup for code it never executed.
+        got = self._exec_shim("-c")
+        self.assertEqual(got.skip, "")
+        self.assertTrue(got.applied)
+
+    # -- brake (2): the reentrancy window ------------------------------------ #
+    def test_the_flag_is_set_while_applying_so_anything_exec_d_then_skips(self):
+        got = self._exec_shim(self._workload_argv0())
+        self.assertEqual(got.flag_at_impl_import, "1",
+                         "a helper exec'd during the import would not see the guard")
+
+    def test_the_flag_is_cleared_afterwards_so_tp_workers_are_still_patched(self):
+        got = self._exec_shim(self._workload_argv0())
+        self.assertIsNone(got.flag_after,
+                          "a leaked flag would disable the overlay in every TP worker")
+
+    def test_a_reentrant_process_declines_to_overlay(self):
+        got = self._exec_shim(self._workload_argv0(),
+                              {"GEAK_OVERLAY_APPLYING": "1"})
+        self.assertEqual(got.skip, "reentrant: an ancestor is mid-overlay")
+        self.assertFalse(got.applied)
+
+    def test_a_skipping_process_keeps_the_flag_for_its_own_children(self):
+        # It never set the flag, so clearing it would be clearing an ancestor's -- handing the
+        # recursion straight back to anything this process spawns.
+        got = self._exec_shim(self._workload_argv0(),
+                              {"GEAK_OVERLAY_APPLYING": "1"})
+        self.assertEqual(got.flag_after, "1")
+
+    # -- brake (1): toolchain helpers ---------------------------------------- #
+    def test_a_rocm_helper_declines_to_overlay_even_with_no_flag_set(self):
+        # The lazy-import case: the workload imports aiter long after the window closed, so only
+        # the path brake is left to stop the exec'd enumerator from recursing.
+        got = self._exec_shim("/opt/rocm/bin/rocm_agent_enumerator")
+        self.assertIn("toolchain helper", got.skip)
+        self.assertFalse(got.applied)
+
+    def test_a_versioned_rocm_install_is_also_recognised(self):
+        # /opt/rocm is a symlink to /opt/rocm-<version>; the shim realpaths argv[0] first, so the
+        # prefix has to match the resolved form too.
+        got = self._exec_shim("/opt/rocm-7.2.0/bin/rocm_agent_enumerator")
+        self.assertIn("toolchain helper", got.skip)
+        self.assertFalse(got.applied)
+
+    def test_an_llvm_helper_declines_to_overlay(self):
+        got = self._exec_shim("/usr/lib/llvm-17/bin/some-helper.py")
+        self.assertIn("toolchain helper", got.skip)
+        self.assertFalse(got.applied)
+
+    # -- a skip is inert, never fatal ---------------------------------------- #
+    def test_skipping_leaves_the_process_startable_and_silent(self):
+        # This file runs at interpreter startup for thousands of unrelated processes. A skip must
+        # cost nothing and say nothing, or the guard becomes its own denial of service.
+        got = self._exec_shim("/opt/rocm/bin/rocm_agent_enumerator")
+        self.assertEqual(got.stderr, "")
+
+    def test_a_skip_is_explainable_on_demand(self):
+        got = self._exec_shim("/opt/rocm/bin/rocm_agent_enumerator",
+                              {"GEAK_OVERLAY_TRACE": "1"})
+        self.assertIn("[overlay] SKIP toolchain helper", got.stderr)
+
+    def test_the_target_module_is_left_importable_and_unpatched_when_skipping(self):
+        self._exec_shim("/opt/rocm/bin/rocm_agent_enumerator")
+        self._forget(self.TARGET)
+        self.assertEqual(importlib.import_module(self.TARGET).f(), "orig")
+
+
+# --------------------------------------------------------------------------- #
 # _load_man / _save_man
 # --------------------------------------------------------------------------- #
 class TestManifestIO(_OverlayCase):
