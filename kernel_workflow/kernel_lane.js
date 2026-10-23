@@ -866,7 +866,7 @@ function expertSkillsBlock(role) {
     `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits this op (operator/dtype/regime, and ` +
     `from_backend->to_backend for migration skills), whose \`scope\` is \`kernel\` (\`tuning\` entries ` +
     `belong to the e2e tuning phase and match every operator), and whose validation_status is ` +
-    `\`validated\`, and ` +
+    `\`validated\` and \`auto_apply\` is true, and ` +
     `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }

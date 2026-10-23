@@ -1625,7 +1625,8 @@ function expertSkillsBlock(role) {
   return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
     `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits the current bottleneck/op and whose ` +
-    `validation_status is \`validated\`, and treat each as a HIGH-PRIOR candidate to reproduce — advisory ` +
+    `validation_status is \`validated\` and \`auto_apply\` is true, and treat each as a HIGH-PRIOR ` +
+    `candidate to reproduce — advisory ` +
     `only, never overriding your on-box A/B, never reducing a result below the measured baseline.`;
 }
 

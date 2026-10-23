@@ -27,7 +27,8 @@ the measurement wins (note it so the skill is later marked `stale`).
      plan fits that source→target
    - `match.profile_signature` (if present): the Top-N op name matches `op_name_regex` and its
      `pct_gpu_time ≥ min_pct_gpu`
-   - `validation_status == validated` (ignore `draft`/`failed`; treat `stale` as a plain reference only)
+   - `validation_status == validated && auto_apply == true` (ignore
+     `draft`/`experimental`/`failed`; treat `stale` as a plain reference only)
 3. **For each matched skill**, Read its file and treat its `Procedure` as a **high-prior candidate**:
    - In routing (System Architect): list it in the head/kernel `author_plan` BEFORE generic backends,
      annotated `source: expert_skill:<id> (advisory)`.
