@@ -6,10 +6,7 @@ must not inherit these numbers — several SKUs share that ISA.
 
 Peaks are **dense, no-sparsity, datasheet-ceiling** figures. Memory bandwidth is the
 *theoretical pin* rate. `target_eff` in `SKILL.md` is a generic op-class
-implementation prior, not a measured product-specific bandwidth derate. Record
-an on-box streaming measurement before claiming a product efficiency factor;
-the measured R9700 streaming override is documented separately in `SKILL.md`
-and selected by `target_eff_for`. Do
+implementation prior, the same for every product. Do
 not pre-derate the numbers here. Do not put sparse (2:4)
 rates in the yaml `flops` map.
 
