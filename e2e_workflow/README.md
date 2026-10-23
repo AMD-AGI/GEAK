@@ -71,6 +71,15 @@ ATOM profiling is configured through `--torch-profiler-dir` at server launch and
 finalize and writes `atom_profile_manifest.json`. A missing or incomplete manifest is a failed ATOM
 profile rather than permission to continue with a partial rank-0 trace.
 
+Who starts the server is a separate, orthogonal choice: `BENCH_LAUNCHER=native` (the adapter's own
+`adapter_launch`), or `magpie` / `multinode`, which source `scripts/adapters/launchers/<launcher>.sh`
+over the adapter. `multinode` serves one instance
+on the machines `MULTI_NODE_STATE` names (a TP group spanning nodes, or a prefill/decode pair),
+with the same adapter, bench client and acceptance contract as one host; only where the server
+starts and where the client runs change. `scripts/multi_node/mn.py check` probes the machines and
+writes a pin before Setup, and every later leg serves from that pin. See
+[`docs/multi_node.md`](docs/multi_node.md).
+
 ## The three backend dimensions (per spec)
 A kernel's backend can be changed from three places, in increasing cost (knob names are backend-
 specific — see `perf_knowledge/backends/<backend>/` + `perf_knowledge/reference/env_vars.md`, as
