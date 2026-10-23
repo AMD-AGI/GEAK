@@ -18,6 +18,11 @@ serving.json declares the deployment and nothing else is guessed:
   env                              the deployment's environment
   pythonpath_prepend               e.g. the editable sglang checkout in the image
   launcher                         default ["python3", "-m", "sglang.launch_server"]
+  compile_watch                    default true: record every Triton compile variant and the
+                                   call that built it, from process start (warmup included),
+                                   into <run-dir>/compile_variants.json (shared/compile_watch.py)
+  compile_watch_frames             non-Triton frames whose arguments are kept per new variant
+                                   (default 12; 0 = identity and stack only)
   decode_capture                   how decode kernels are made visible to the profiler:
      "profile_cuda_graph" (default)  keep the CUDA graph and add --enable-profile-cuda-graph,
                                      so decode runs as deployed and the profiler sees the
@@ -31,6 +36,11 @@ If the server rejects --enable-profile-cuda-graph, `run` restarts it eagerly. If
 command is run_points.py and a decode point comes back graph_hidden, `run` restarts
 eagerly and runs the command again; run_points.py resumes and recaptures only what is
 missing. probe_server.json records the mode that was actually used.
+
+The first server started is the deployment's; its compile variants are also written to
+<eval-dir>/evidence/compile_variants.json when the command names an --eval-dir. Variants of
+an eager restart are kept beside it (compile_variants.<n>.eager.json) but are not the
+deployment's: eager decode compiles kernels a graph-deployed server never launches eagerly.
 
 GPU_ARCHS is pinned (detected once with rocminfo) unless serving.json sets it: an unset
 GPU_ARCHS lets aiter's JIT enumerate every arch and storm the node with compiler processes.
@@ -46,6 +56,11 @@ import sys
 import time
 import urllib.request
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.join(os.path.dirname(HERE), "shared")
+sys.path.insert(0, SHARED)
+import compile_watch  # noqa: E402
+
 TEMPLATE = {
     "model": "/path/to/model",
     "tp": 8,
@@ -58,10 +73,27 @@ TEMPLATE = {
     "env": {},
     "pythonpath_prepend": "",
     "decode_capture": "profile_cuda_graph",
+    "compile_watch": True,
     "_note": "args/env: copy the deployment's flags and environment exactly (baseline "
              "environment.json / launch script). The probe adds only the profiler "
              "directory, --enable-profile-cuda-graph or --disable-cuda-graph.",
 }
+# Chains to the next sitecustomize on sys.path: only the first one is imported, and the
+# deployment may ship its own (an accepted-kernel overlay in pythonpath_prepend).
+WATCH_SITECUSTOMIZE = r'''# compile_watch overlay written by probe_server.py; drop this dir from PYTHONPATH to revert.
+import importlib.machinery, importlib.util, os, sys
+_here = os.path.dirname(os.path.abspath(__file__))
+try:
+    import compile_watch
+    compile_watch.install()
+except Exception as _e:
+    sys.stderr.write("[compile_watch] install failed: %r\n" % (_e,))
+_rest = [p for p in sys.path if os.path.abspath(p or ".") != _here]
+_spec = importlib.machinery.PathFinder.find_spec("sitecustomize", _rest)
+if _spec is not None and _spec.loader is not None:
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+'''
 REJECTED = re.compile(r"unrecognized arguments:.*--enable-profile-cuda-graph|"
                       r"no such option: --enable-profile-cuda-graph")
 
@@ -79,7 +111,19 @@ def gpu_arch():
     return m.group(0) if m else None
 
 
-def command(cfg, mode, trace_root):
+def watch_overlay(run_dir):
+    """<run-dir>/compile_watch_overlay: compile_watch.py and the chaining sitecustomize."""
+    ov = os.path.join(run_dir, "compile_watch_overlay")
+    os.makedirs(ov, exist_ok=True)
+    with open(os.path.join(SHARED, "compile_watch.py")) as src, \
+            open(os.path.join(ov, "compile_watch.py"), "w") as dst:
+        dst.write(src.read())
+    with open(os.path.join(ov, "sitecustomize.py"), "w") as fh:
+        fh.write(WATCH_SITECUSTOMIZE)
+    return ov
+
+
+def command(cfg, mode, trace_root, watch_dir=None):
     cmd = list(cfg.get("launcher") or TEMPLATE["launcher"])
     cmd += ["--model-path", cfg["model"], "--host", cfg.get("host", "127.0.0.1"),
             "--port", str(cfg["port"]), "--tp-size", str(cfg["tp"])]
@@ -101,6 +145,11 @@ def command(cfg, mode, trace_root):
     if cfg.get("pythonpath_prepend"):
         env["PYTHONPATH"] = cfg["pythonpath_prepend"] + (":" + env["PYTHONPATH"]
                                                         if env.get("PYTHONPATH") else "")
+    if watch_dir:
+        env["PYTHONPATH"] = watch_overlay(os.path.dirname(os.path.dirname(watch_dir))) + (
+            ":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["COMPILE_WATCH_DIR"] = watch_dir
+        env["COMPILE_WATCH_FRAMES"] = str(cfg.get("compile_watch_frames", 12))
     return cmd, env
 
 
@@ -122,10 +171,17 @@ class Server:
         self.trace_root = os.path.join(self.run_dir, "traces")
         self.state_path = os.path.join(self.run_dir, "probe_server.json")
         self.proc = None
+        self.starts = []        # [watch_dir, mode, ready_epoch] per started server
+        self.primary = None     # the first server that came up: the deployment's variants
         os.makedirs(self.trace_root, exist_ok=True)
 
     def start(self, mode, ready_timeout):
-        cmd, env = command(self.cfg, mode, self.trace_root)
+        watch = None
+        if self.cfg.get("compile_watch", True):
+            watch = os.path.join(self.run_dir, "compile_watch", "%d.%s" % (len(self.starts), mode))
+            os.makedirs(watch, exist_ok=True)
+        self.starts.append([watch, mode, None])
+        cmd, env = command(self.cfg, mode, self.trace_root, watch)
         logp = os.path.join(self.run_dir, "server.%s.log" % mode)
         t0 = time.time()
         log("starting (%s): %s" % (mode, " ".join(cmd)))
@@ -151,7 +207,11 @@ class Server:
             pass
         if info is not None:
             json.dump(info, open(os.path.join(self.run_dir, "server_info.json"), "w"), indent=1)
+        self.starts[-1][2] = time.time()
+        if self.primary is None:
+            self.primary = len(self.starts) - 1
         state = {"base_url": url, "pid": self.proc.pid, "pgid": os.getpgid(self.proc.pid),
+                 "compile_watch_dir": watch,
                  "decode_capture": mode, "decode_eager": mode == "eager",
                  "trace_root": self.trace_root, "expect_files": int(self.cfg["tp"]),
                  "log": logp, "command": cmd, "startup_s": round(time.time() - t0, 1),
@@ -160,6 +220,30 @@ class Server:
         json.dump(state, open(self.state_path, "w"), indent=1)
         log("ready in %.0fs at %s (decode_capture=%s)" % (state["startup_s"], url, mode))
         return {"ok": True, "log": logp, "state": state}
+
+    def collect_variants(self, eval_dir=None):
+        """Merge each started server's compile events; the primary's is the deployment's."""
+        out = None
+        for i, (watch, mode, ready) in enumerate(self.starts):
+            if not watch or ready is None:
+                continue
+            doc = compile_watch.collect(watch, ready, mode)
+            doc["deployment"] = i == self.primary
+            path = os.path.join(self.run_dir, "compile_variants.json" if i == self.primary
+                                else "compile_variants.%d.%s.json" % (i, mode))
+            json.dump(doc, open(path, "w"), indent=1)
+            log("compile variants: %d from %d process(es) -> %s"
+                % (len(doc["variants"]), doc["processes"], path))
+            if i == self.primary:
+                out = path
+                if not doc["variants"]:
+                    log("WARNING: the server compiled no Triton kernel the watch saw; if it "
+                        "uses Triton, another jit_cache_hook replaced ours")
+                if eval_dir:
+                    os.makedirs(os.path.join(eval_dir, "evidence"), exist_ok=True)
+                    json.dump(doc, open(os.path.join(eval_dir, "evidence", "compile_variants.json"),
+                                        "w"), indent=1)
+        return out
 
     def stop(self, wait=120):
         if self.proc is None or self.proc.poll() is not None:
@@ -259,6 +343,11 @@ def cmd_run(a, cfg):
             rc = subprocess.call(a.command + ["--evidence-capture"])
     finally:
         srv.stop()
+        ev = a.command[a.command.index("--eval-dir") + 1] if "--eval-dir" in a.command else None
+        try:
+            srv.collect_variants(ev)
+        except Exception as e:      # evidence, not the run: report and keep the exit code
+            log("compile variant collection failed: %r" % (e,))
     return rc
 
 
@@ -306,6 +395,11 @@ def main():
     except ProcessLookupError:
         pass
     log("stopped process group %s" % state["pgid"])
+    if state.get("compile_watch_dir"):
+        doc = compile_watch.collect(state["compile_watch_dir"], None, state.get("decode_capture"))
+        json.dump(doc, open(os.path.join(a.run_dir, "compile_variants.json"), "w"), indent=1)
+        log("compile variants: %d -> %s" % (len(doc["variants"]),
+                                            os.path.join(a.run_dir, "compile_variants.json")))
     return 0
 
 

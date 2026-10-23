@@ -15,10 +15,20 @@ or a denominator:
                                  stages/profile/finalize.py reads
   tasks/<label>/run/requested_kernel.json   the declaration a UT lane works from
   tasks/<label>/run/ut_case_plan.json       plan_ut_cases.py's cases for the task
+  tasks/<label>/run/server_variants.json   the Triton compile variants the probe server
+                                 built for the task's kernels (evidence/compile_variants.json,
+                                 from process start: warmup and graph capture included)
+  tasks/<label>/run/server_calls.json      the entry calls that built them, with their
+                                 metadata tensors under run/server_calls/ -- replayed by the
+                                 UT's server_calls gate; meta.server_evidence points at both
   tasks/<label>/...              `ut_contracts/scaffold_ut.py new` with the family, target,
                                  const axes/attrs, phase regimes and the case manifest
                                  (when the family is not `custom` and case_axes is set;
                                  an existing unittest.py is never overwritten without --force)
+
+meta.server_preimports (decls `server_preimports`, default by framework: sglang ->
+sglang.srt.utils.common) are imported by both UT legs before the task's cases, so the kernel
+compiles in the import environment the server has.
 
 Lint (also `--check` alone, no writes): every selected identity owned exactly once by a
 task, an exclusion or a blocker; only selected identities as task kernels (others are
@@ -31,22 +41,30 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "shared"))
+import compile_watch  # noqa: E402
 from plan_ut_cases import plan as plan_cases  # noqa: E402
 
 SKILL = os.path.dirname(HERE)
 SCAFFOLD = os.path.join(SKILL, "ut_contracts", "scaffold_ut.py")
 FAMILIES = os.path.join(SKILL, "ut_contracts", "families")
 LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# Modules the serving process has imported before any kernel compiles, whose import-time
+# rebinding of library functions the UT must reproduce (sglang.srt.utils.common replaces
+# triton.next_power_of_2). Light on purpose: every timing bucket is a fresh process.
+SERVER_PREIMPORTS = {"sglang": ["sglang.srt.utils.common"]}
 
 
 def load(path, default=None):
     try:
-        return json.load(open(path))
+        with open(path) as f:
+            return json.load(f)
     except (OSError, ValueError):
         return default
 
@@ -196,6 +214,91 @@ def joint_ut(t, rank):
     return ({"phases": rows} if rows else None), single, None
 
 
+def frameworks(task, cv):
+    """Serving frameworks on the task's launch paths (its entry or any server stack)."""
+    mods = [(task.get("target_callable") or "").split(".")[0]]
+    for r in (cv or {}).get("variants", []):
+        mods += [f.split(".")[0] for f in r.get("stack") or []]
+    return sorted({m for m in mods if m in SERVER_PREIMPORTS})
+
+
+def server_evidence(eval_dir, task, tdir):
+    """The task's slice of evidence/compile_variants.json -> run/server_variants.json and
+    run/server_calls.json (+ run/server_calls/<variant>.pt). Returns the meta block."""
+    cv = load(os.path.join(eval_dir, "evidence", "compile_variants.json"))
+    pre = task.get("server_preimports")
+    if pre is None:
+        pre = [m for f in frameworks(task, cv) for m in SERVER_PREIMPORTS[f]]
+    if not cv:
+        return {"server_preimports": pre, "server_evidence": None,
+                "why": "no evidence/compile_variants.json (probe server ran without compile_watch)"}
+    names = set(task.get("kernels") or []) | {c.get("kernel") for c in task.get("companions") or []}
+    target = task.get("target_callable")
+    recs = [r for r in cv["variants"] if compile_watch.belongs(r, names, target)]
+    slim = [{k: v for k, v in r.items() if k not in ("frames", "tensors")} for r in recs]
+    run = os.path.join(tdir, "run")
+    shutil.copy2(compile_watch.__file__, os.path.join(tdir, "compile_watch.py"))
+    json.dump({"contract": "kernel_extract/server_variants/v1",
+               "source": os.path.join(eval_dir, "evidence", "compile_variants.json"),
+               "server_mode": cv.get("server_mode"), "env": cv.get("env") or {},
+               "kernels": sorted(names), "target_callable": target, "variants": slim},
+              open(os.path.join(run, "server_variants.json"), "w"), indent=1)
+    calls, unmatched, seen = [], [], set()
+    shutil.rmtree(os.path.join(run, "server_calls"), ignore_errors=True)
+    for r in recs:
+        fr = compile_watch.frame_for(r, target) if target else None
+        if fr is None:
+            if r.get("frames"):
+                unmatched.append({"variant": r["id"], "kernel": r["name"],
+                                  "frames": [f["callable"] for f in r["frames"]]})
+            continue
+        key = json.dumps(fr["args"], sort_keys=True, default=str)
+        if key in seen:
+            for c in calls:
+                if c["_key"] == key:
+                    c["variants"].append(r["id"])
+            continue
+        seen.add(key)
+        rel = None
+        if r.get("tensors"):
+            src = os.path.join(cv["watch_dir"], r["tensors"])
+            if os.path.exists(src):
+                os.makedirs(os.path.join(run, "server_calls"), exist_ok=True)
+                rel = os.path.join("run", "server_calls", r["id"] + ".pt")
+                shutil.copy2(src, os.path.join(tdir, rel))
+        calls.append({"_key": key, "id": r["id"], "variants": [r["id"]], "kernel": r["name"],
+                      "callable": fr["callable"], "file": fr.get("file"), "line": fr.get("line"),
+                      "positional": fr["positional"], "args": fr["args"], "tensors": rel,
+                      "in_graph_capture": bool(r.get("in_graph_capture") and not r.get("eager")),
+                      "before_ready": r.get("before_ready")})
+    for c in calls:
+        c.pop("_key")
+    json.dump({"contract": "kernel_extract/server_calls/v1", "target_callable": target,
+               "calls": calls, "unmatched_variants": unmatched},
+              open(os.path.join(run, "server_calls.json"), "w"), indent=1)
+    return {"server_preimports": pre,
+            "server_evidence": {"compile_variants": "run/server_variants.json",
+                                "server_calls": "run/server_calls.json",
+                                "server_mode": cv.get("server_mode"),
+                                "variants": len(slim), "calls": len(calls),
+                                "variants_without_entry_frame": len(unmatched)}}
+
+
+def stamp_meta(tdir, ev, waivers):
+    """Write the server evidence into an existing meta.json (scaffolded now or before)."""
+    path = os.path.join(tdir, "meta.json")
+    meta = load(path)
+    if meta is None:
+        return False
+    meta["server_preimports"] = ev["server_preimports"]
+    if ev.get("server_evidence"):
+        meta["server_evidence"] = ev["server_evidence"]
+    if waivers is not None:
+        meta.setdefault("ut_contract", {})["compile_variant_waivers"] = waivers
+    json.dump(meta, open(path, "w"), indent=2)
+    return True
+
+
 def scaffold(task, tdir, man, force):
     if task.get("ut_family") in (None, "custom"):
         return {"status": "skipped", "why": "custom family: write a contract (--family-file)"}
@@ -283,8 +386,13 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
         }
         json.dump(req, open(os.path.join(tdir, "run", "requested_kernel.json"), "w"), indent=1)
         json.dump(tc, open(os.path.join(tdir, "run", "ut_case_plan.json"), "w"), indent=1)
+        se = server_evidence(eval_dir, t, tdir)
         sc = {"status": "skipped", "why": "--no-scaffold"} if no_scaffold else \
             scaffold(t, tdir, manifest(t, tc["cases"]), force)
+        stamp_meta(tdir, se, t.get("compile_variant_waivers"))
+        req["server_preimports"] = se["server_preimports"]
+        req["server_evidence"] = se.get("server_evidence") or {"missing": se.get("why")}
+        json.dump(req, open(os.path.join(tdir, "run", "requested_kernel.json"), "w"), indent=1)
         kinds = {}
         for c in tc["cases"]:
             kinds[c["kind"]] = kinds.get(c["kind"], 0) + 1
@@ -297,7 +405,12 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
                       "proxy_mass_outside_every_case_pct": tc.get("proxy_mass_outside_every_case_pct"),
                       "selection_pct_gpu_time": req["selection_pct_gpu_time"],
                       "requested_kernel": os.path.join(tdir, "run", "requested_kernel.json"),
+                      "server_evidence": req["server_evidence"],
                       "scaffold": sc})
+    if any("missing" in (t["server_evidence"] or {}) for t in tasks):
+        warns.append("no evidence/compile_variants.json: the UTs get no server_calls or "
+                     "compile_variants gate (run the probe through probe_server.py, which "
+                     "records them by default)")
     blocked = []
     for kind in ("excluded", "blocked"):
         for x in decls.get(kind, []):

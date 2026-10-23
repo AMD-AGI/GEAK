@@ -291,6 +291,11 @@ def dtype_of(spec, sym):
 
 
 # ----------------------------------------------------------------------------- lint (CPU only)
+# Frameworks whose entries need meta.server_preimports, with the module known to rebind
+# library functions at import (None: not yet established for that framework).
+SERVING_FRAMEWORKS = {"sglang": "sglang.srt.utils.common", "vllm": None}
+
+
 def lint_task(task_dir):
     """Check a task directory against its frozen contract without importing torch.
 
@@ -409,6 +414,24 @@ def lint_task(task_dir):
                               % (leaf, n))
             if not (c.get("expect") or "").strip():
                 errors.append("negative control on %s states no expected deviation" % leaf)
+
+    # The server compiles the kernel after its framework has been imported; a framework can
+    # rebind library functions at import (sglang: triton.next_power_of_2), so a leg that never
+    # imports it compiles different code.
+    top = str(meta.get("target_callable") or "").split(".")[0]
+    if top in SERVING_FRAMEWORKS and not meta.get("server_preimports"):
+        errors.append("meta.server_preimports is empty but the entry lives in %s: list the modules "
+                      "the server imports before the kernel compiles%s"
+                      % (top, " (%s)" % SERVING_FRAMEWORKS[top] if SERVING_FRAMEWORKS[top] else ""))
+    ev = meta.get("server_evidence") or {}
+    for key in ("compile_variants", "server_calls"):
+        if ev.get(key) and not os.path.exists(os.path.join(task_dir, ev[key])):
+            errors.append("meta.server_evidence.%s points at a missing file %s" % (key, ev[key]))
+    if ev and not os.path.exists(os.path.join(task_dir, "compile_watch.py")):
+        errors.append("meta.server_evidence is set but compile_watch.py is not in the task")
+    for w in mc.get("compile_variant_waivers") or []:
+        if not (w.get("id") and (w.get("why") or "").strip()):
+            errors.append("compile_variant_waivers entries need id and why: %r" % (w,))
 
     for o in (doc.get("task") or {}).get("overrides", []):
         warnings.append("override %s: %s" % (o["path"], o["why"]))

@@ -21,7 +21,8 @@ but leaves GPU validation explicitly incomplete.
 
 Use the completed measured baseline logs, benchmark exports, effective model
 and serving configuration, workload specification and compatible raw traces.
-Exclude warmup/discarded legs; record exact files, interval, rank/stream scope,
+Exclude warmup/discarded legs from cost and weight measurement (the compile evidence
+of §2 keeps them: warmup is where a server first compiles); record exact files, interval, rank/stream scope,
 image/packages, graph modes and accepted overlays in `environment.json`.
 Resolve the actual installed sources in that serving environment, not an
 assumed host checkout. Source trees and build resources may live inside its container.
@@ -70,6 +71,12 @@ with, and spent most of the hour doing it.
    `evidence/{shapes,source_map.json,adjacency.json}` and a draft `task_decls.json`. It
    resumes: rerunning it recaptures only points without a census (`--redo` forces one).
    One recapture per failed point, then the gap is reported, as the skill requires.
+   The probe server also records, from process start, every Triton compile variant it
+   builds and the entry call that built it (`shared/compile_watch.py`, on by default) into
+   `evidence/compile_variants.json`. This covers what the timed windows skip -- startup,
+   warmup and graph capture -- and what M coverage cannot see: a variant is selected by
+   argument dtypes, None-ness, integer specialization (an int equal to 1 is a constexpr),
+   constexprs and the autotune config, not by M.
 4. Write `kernel_workload.json` from those artifacts (coverage, phase split, sampling
    plan, approximations). Distinguish stage share, share within the callable and share
    the extracted source can affect; nested scopes, not additive. Collectives,
@@ -115,6 +122,9 @@ branches). Every decision carries its basis and a `needs_review` note. Review it
   each task's `run/requested_kernel.json` and `run/ut_case_plan.json` (point cases plus
   bucket cases for the bands no point covers, without double-weighting), and scaffolds
   the UT from its family. An existing `unittest.py` is never overwritten without `--force`.
+  It also slices the compile evidence per task into `run/server_variants.json` and
+  `run/server_calls.json` (+ `run/server_calls/*.pt`) and sets `meta.server_preimports`
+  (decls `server_preimports`; sglang defaults to `sglang.srt.utils.common`).
 
 The source map's frames prove a call reached a file on this deployment; they do not prove
 a binding. Verify the live callable with `$SHARED_TOOLS/seam_trace.py` and
@@ -164,6 +174,25 @@ refresh, each editable leaf's numerical negative control, restored-source
 integrity, and both timing legs for every positive-mass signature. Compilation
 failure is not a successful numerical negative control. Report missing cases
 and mass; do not renormalize survivors into full coverage.
+
+The UT must also cover what the server compiled, in the server's import environment:
+
+- **server_preimports.** Both legs import `meta.server_preimports` before the cases. A
+  serving framework can rebind library functions at import (sglang replaces
+  `triton.next_power_of_2`, a constexpr function, with a plain one); a kernel calling it
+  in a jit body is green in a bare UT and fails in the server. The lint rejects an
+  sglang/vLLM entry without preimports.
+- **server_calls gate.** Every recorded entry call is replayed in both legs: integer and
+  small operands (sequence bookkeeping, page tables, scales) exactly as the server passed
+  them, bulk payloads from a seed. The candidate must run every call the baseline runs and
+  match it. This is where a branch only warmup reaches (one token, no cache) is tested.
+- **compile_variants gate.** Each Triton variant the server built for the task's kernels
+  must also be built by the baseline legs, and the legs' Triton/torch namespaces must match
+  the server's. A missing variant is reported with the fields that differ from the nearest
+  UT variant; fix it with a case (the server call is in `run/server_calls.json`) or waive it
+  in `meta.ut_contract.compile_variant_waivers` with a reason. Optional arguments in
+  generated cases (descale, sinks, None-ness, index dtypes) come from these server calls,
+  not from defaults.
 
 Before reporting a verdict, verify deterministic input construction, baseline
 self-noise and that numerical bad-source controls actually fail. For generated

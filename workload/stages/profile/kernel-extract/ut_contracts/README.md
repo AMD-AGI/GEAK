@@ -127,6 +127,8 @@ baseline leg, the candidate leg and the driver rebuild identical operands.
 | `correctness` | baseline + candidate oracle legs (fresh processes, deployment compile mode applied) | any random case/draw violates its output bound; with `bitwise` determinism, two candidate runs differ |
 | `isolation` | candidate | `call()` modified an input, or two calls share an output buffer |
 | `replay` | baseline eager refs, candidate graph replay | a graph phase lacks a bundle (exit 3), capture fails, or a replayed case violates its bound |
+| `server_calls` | baseline + candidate replay of `run/server_calls.json` (server evidence only) | the candidate raises or differs from the baseline (beyond `server_call_tol`, default `replay_tol`) on a call the baseline replays; calls the baseline cannot rebuild are listed, and their variants fall to `compile_variants` |
+| `compile_variants` | the baseline legs above, under `compile_watch` | a Triton variant in `run/server_variants.json` is built by no baseline leg and not waived (`compile_variant_waivers: [{id, why}]`), or the legs' Triton/torch namespaces differ from the server's (`server_preimports`) |
 | `negative_controls` | candidate oracle per mutation | a mutation passes the compare, fails by < `min_control_margin` (default 10x the bound), or does not run at all; the source is restored and re-hashed either way |
 | `restore` | driver | any `kernel_src` byte differs from the start of the run |
 | `timing` | `harness_lib.measure_legs` | no measurable weighted speedup |

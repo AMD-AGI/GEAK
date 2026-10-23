@@ -9,6 +9,14 @@ hand-written UT used to re-implement (500+ lines per task) lives here once:
   binding            harness_lib.build_candidate_overlay + assert_legs_differ
   correctness        baseline and candidate oracle legs in fresh processes, compared per output
                      under the contract's bound, against a float64 reference where one exists
+  server_calls       (server evidence) the entry calls the probe server recorded when it first
+                     compiled each of the task's Triton variants -- warmup and startup included --
+                     replayed in both legs; the candidate must run every call the baseline runs
+                     and match it (meta.ut_contract.server_call_tol, default replay_tol)
+  compile_variants   (server evidence) every Triton variant the server compiled for the task's
+                     kernels must also be compiled by the baseline legs above, and the legs'
+                     Triton/torch namespaces must match the server's (meta.server_preimports);
+                     a missing variant names the fields that differ from the nearest UT variant
   isolation          (candidate process) call() leaves its inputs unchanged; outputs are fresh
   replay             (graph-deployed phases) baseline eager refs vs candidate graph replay over
                      the task's >= 2 boundary shapes; missing bundle = UT_HARNESS_INCOMPLETE
@@ -39,8 +47,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # This file sits beside a file named unittest.py: drop the task dir before torch is imported.
 sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != HERE]
 
-GATES = ("contract", "inputs", "binding", "correctness", "isolation", "replay",
-         "negative_controls", "restore", "timing")
+GATES = ("contract", "inputs", "binding", "correctness", "server_calls", "compile_variants",
+         "isolation", "replay", "negative_controls", "restore", "timing")
 SENTINEL = "UT_HARNESS_INCOMPLETE"
 DEFAULT_REPLAY_TOL = 0.02
 DEFAULT_CONTROL_MARGIN = 10.0
@@ -227,11 +235,31 @@ def compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob=None, only_dr
     return ok, rows
 
 
+class _Watch:
+    """COMPILE_WATCH_OUT for the legs started inside the block (baseline legs only)."""
+
+    def __init__(self, T, state, name):
+        self.path = (os.path.join(state["scratch"], "variants_%s.json" % name)
+                     if (T.meta.get("server_evidence") or {}).get("compile_variants") else None)
+        self.state = state
+
+    def __enter__(self):
+        if self.path:
+            os.environ["COMPILE_WATCH_OUT"] = self.path
+        return self
+
+    def __exit__(self, *exc):
+        os.environ.pop("COMPILE_WATCH_OUT", None)
+        if self.path and os.path.exists(self.path):
+            self.state.setdefault("watch_files", []).append(self.path)
+
+
 def gate_correctness(T, a, state):
     base, cand = T.h.build_candidate_overlay(T.dir, T.meta)
     seed, draws = a.seed, a.draws
     sd = state["scratch"]
-    base_blob = _oracle(T, base, os.path.join(sd, "base.pt"), seed, draws)
+    with _Watch(T, state, "oracle"):
+        base_blob = _oracle(T, base, os.path.join(sd, "base.pt"), seed, draws)
     noise_blob = _oracle(T, base, os.path.join(sd, "base2.pt"), seed, draws) if _needs_noise(T) else None
     cand_blob = _oracle(T, cand, os.path.join(sd, "cand.pt"), seed, draws)
     state["base_blob"], state["noise_blob"] = base_blob, noise_blob
@@ -245,6 +273,104 @@ def gate_correctness(T, a, state):
     out["cases"] = rows
     good = ok and out.get("bitwise_repeat", {}).get("ok", True)
     return {"status": "pass" if good else "fail", "seed": seed, "draws": draws, **out}
+
+
+def _server_calls_leg(T, overlay, out):
+    """One server_calls leg; a crash is attributed to the call it was running."""
+    try:
+        T.h._run_leg(T.dir, overlay, "server_calls", out=out, seed=0, timeout=7200)
+    except Exception as e:
+        cid = None
+        if os.path.exists(out + ".progress"):
+            with open(out + ".progress") as f:
+                cid = f.read().strip()
+        return None, "%s crashed%s: %s" % (os.path.basename(overlay),
+                                          " on call %s" % cid if cid else "", str(e)[-1500:])
+    return T.U._torch().load(out, map_location="cpu"), None
+
+
+def gate_server_calls(T, a, state):
+    ev = T.meta.get("server_evidence") or {}
+    if not ev.get("server_calls"):
+        return {"status": "not_required", "why": "no server evidence (meta.server_evidence)"}
+    with open(os.path.join(T.dir, ev["server_calls"])) as f:
+        doc = json.load(f)
+    if not doc.get("calls"):
+        return {"status": "not_required", "why": "the server recorded no call of %s that compiled a "
+                "variant of this task's kernels" % doc.get("target_callable"),
+                "variants_without_entry_frame": doc.get("unmatched_variants")}
+    base, cand = T.h.build_candidate_overlay(T.dir, T.meta)
+    sd = state["scratch"]
+    with _Watch(T, state, "server_calls"):
+        b, why = _server_calls_leg(T, base, os.path.join(sd, "calls_base.pt"))
+    if b is None:
+        return {"status": "fail", "why": "baseline " + why}
+    c, why = _server_calls_leg(T, cand, os.path.join(sd, "calls_cand.pt"))
+    if c is None:
+        return {"status": "fail", "why": "candidate " + why}
+    tol = float(T.mc.get("server_call_tol", T.mc.get("replay_tol", DEFAULT_REPLAY_TOL)))
+    ignore = T.mc.get("server_call_ignore") or []
+    cw = _load("compile_watch", os.path.join(T.dir, "compile_watch.py"))
+    rows, ok = [], True
+    for call in doc["calls"]:
+        rb, rc = b.get(call["id"], {}), c.get(call["id"], {})
+        row = {"id": call["id"], "kernel": call.get("kernel"), "callable": call.get("callable"),
+               "before_ready": call.get("before_ready"), "baseline": rb.get("status"),
+               "candidate": rc.get("status")}
+        if rb.get("status") != "ok":
+            # Not the candidate's fault; the variant it would have compiled is then checked by
+            # compile_variants, which fails unless another case builds it.
+            row.update(ok=True, note="baseline did not replay it: %s" % rb.get("why"))
+        elif rc.get("status") != "ok":
+            row.update(ok=False, why="candidate: %s" % (rc.get("why") or rc.get("status")))
+        else:
+            good, outs = cw.compare_call_outputs(rb["outputs"], rc["outputs"], tol, ignore)
+            row.update(ok=good, outputs=[o for o in outs if not o["ok"]] or len(outs))
+        ok = ok and row["ok"]
+        rows.append(row)
+    replayed = sum(r["baseline"] == "ok" for r in rows)
+    return {"status": "pass" if ok else "fail", "tol": tol, "calls": len(rows),
+            "replayed_by_baseline": replayed, "rows": rows}
+
+
+def gate_compile_variants(T, a, state):
+    ev = T.meta.get("server_evidence") or {}
+    if not ev.get("compile_variants"):
+        return {"status": "not_required", "why": "no server evidence (meta.server_evidence)"}
+    with open(os.path.join(T.dir, ev["compile_variants"])) as f:
+        srv = json.load(f)
+    if not srv.get("variants"):
+        return {"status": "not_required",
+                "why": "the server compiled no Triton variant on this task's launch paths"}
+    if not state.get("watch_files"):
+        with _Watch(T, state, "oracle_only"):
+            _oracle(T, T.overlays()[0], os.path.join(state["scratch"], "base_cv.pt"), a.seed, 1)
+    cw = _load("compile_watch", os.path.join(T.dir, "compile_watch.py"))
+    ut_events = []
+    for p in state.get("watch_files") or []:
+        with open(p) as f:
+            ut_events += json.load(f).get("events") or []
+    cov = cw.coverage(srv["variants"], ut_events, T.mc.get("compile_variant_waivers"))
+    ut_env = next((e["env"] for e in ut_events if e.get("env")), {})
+    env = cw.env_diff(srv.get("env"), ut_env)
+    advisory = srv.get("server_mode") == "eager" and any(
+        T.h.deployment_graph_mode(r or {}) for r in T.phase_regimes().values())
+    bad = bool(cov["missing"] or env)
+    out = {"server_variants": cov["server_variants"], "covered": cov["covered"],
+           "missing": cov["missing"], "waived": cov["waived"], "env_differs": env,
+           "ut_variants": len({e["id"] for e in ut_events})}
+    if env:
+        out["fix_env"] = ("the server's Triton/torch namespaces differ from the UT legs'; add the "
+                          "module that rebinds them to meta.server_preimports")
+    if cov["missing"]:
+        out["fix_missing"] = ("add a case that builds each missing variant (the server call that "
+                              "built it is in run/server_calls.json, if one was recorded) or waive "
+                              "it in meta.ut_contract.compile_variant_waivers [{id, why}]")
+    if bad and advisory:
+        out["note"] = ("server evidence came from an eager fallback server, whose decode variants "
+                       "a graph deployment does not build eagerly: advisory only")
+        return {"status": "pass", **out}
+    return {"status": "fail" if bad else "pass", **out}
 
 
 def _inproc(T, overlay, mode, extra=(), timeout=3600):
@@ -571,6 +697,8 @@ def main(task=None, argv=None):
         ap.error("--task is required")
     T = Task(a.task)
     if a.inproc:
+        for mod in T.meta.get("server_preimports") or []:
+            importlib.import_module(mod)
         fn = {"isolation": inproc_isolation, "replay-ref": inproc_replay_ref,
               "replay": inproc_replay}[a.inproc]
         print(json.dumps(fn(T, a), default=str))

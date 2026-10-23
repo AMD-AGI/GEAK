@@ -9,8 +9,14 @@
 Both legs execute THIS file and the task's OWN cases.py, so `speedup = baseline_ms / candidate_ms` is
 always measured against the live path, whatever LANGUAGE the candidate is written in.
 
-Modes: list (bucket sigs) | resolve (leg identity, for the direction assert) | time | oracle.
-Driven by harness_lib.measure_legs — a unittest.py should not invoke it directly.
+Modes: list (bucket sigs) | resolve (leg identity, for the direction assert) | time | oracle |
+server_calls (replay the entry calls the probe server recorded, run/server_calls.json).
+Driven by harness_lib.measure_legs and ut_driver.py — a unittest.py should not invoke it directly.
+
+Before anything else a leg imports meta.server_preimports, so the kernel compiles in the import
+environment the server gives it (sglang rebinds triton.next_power_of_2 at import). With
+COMPILE_WATCH_OUT set, the leg records every Triton variant it compiles (compile_watch.py) and
+writes them there on exit; ut_driver compares the baseline's set with the server's.
 """
 import argparse
 import importlib
@@ -88,7 +94,8 @@ def _snapshot(out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True)
-    ap.add_argument("--mode", required=True, choices=("list", "resolve", "time", "oracle"))
+    ap.add_argument("--mode", required=True,
+                    choices=("list", "resolve", "time", "oracle", "server_calls"))
     ap.add_argument("--bucket", default="")
     ap.add_argument("--out", default="")
     ap.add_argument("--seed", type=int, default=0)
@@ -99,12 +106,75 @@ def main():
     task = os.path.abspath(a.task)
     with open(os.path.join(task, "meta.json")) as fh:
         meta = json.load(fh)
+    watch_out = os.environ.get("COMPILE_WATCH_OUT")
+    cw = None
+    if watch_out:
+        cw = _load("compile_watch", os.path.join(task, "compile_watch.py"))
+        cw.install(out_dir="", frames=0)
+    for mod in meta.get("server_preimports") or []:
+        try:
+            importlib.import_module(mod)
+        except Exception as exc:
+            raise SystemExit(f"server_preimports: import {mod} failed: {type(exc).__name__}: {exc}")
+    try:
+        _run(a, task, meta)
+    finally:
+        if cw is not None:
+            cw.dump(watch_out)
 
+
+def _server_calls(a, task, meta):
+    """Replay every recorded entry call; per call: outputs (return value + every operand the
+    call wrote) or the error. Progress goes to <out>.progress so a crash names its call."""
+    cw = sys.modules.get("compile_watch") or _load("compile_watch",
+                                                   os.path.join(task, "compile_watch.py"))
+    torch = importlib.import_module("torch")
+    ev = meta.get("server_evidence") or {}
+    with open(os.path.join(task, ev["server_calls"])) as fh:
+        doc = json.load(fh)
+    entry = _resolve(meta["target_callable"])
+    budget = float((meta.get("ut_contract") or {}).get("server_call_budget_gib", 16)) * 2**30
+    results = {}
+    for k, call in enumerate(doc["calls"]):
+        with open(a.out + ".progress", "w") as fh:
+            fh.write(call["id"])
+        row = {"id": call["id"], "kernel": call.get("kernel")}
+        data = torch.load(os.path.join(task, call["tensors"])) if call.get("tensors") else []
+        try:
+            args, kwargs, named, notes = cw.materialize_call(call, data, seed=int(a.seed) + k,
+                                                             budget=budget)
+        except cw.Unreplayable as exc:
+            results[call["id"]] = dict(row, status="unreplayable", why=str(exc))
+            continue
+        before = {n: cw.storage_fingerprint(t) for n, t in named.items()}
+        try:
+            ret = entry(*args, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except Exception as exc:
+            results[call["id"]] = dict(row, status="error", notes=notes,
+                                       why=f"{type(exc).__name__}: {str(exc)[-1500:]}")
+            continue
+        mutated = {n: cw.snapshot_output(t) for n, t in named.items()
+                   if cw.storage_fingerprint(t) != before[n]}
+        results[call["id"]] = dict(row, status="ok", notes=notes,
+                                   outputs={"return": cw.snapshot_output(ret), "mutated": mutated})
+        del args, kwargs, named, ret
+    torch.save(results, a.out)
+    print(json.dumps({"out": a.out, "n": len(results),
+                      "status": {s: sum(r["status"] == s for r in results.values())
+                                 for s in ("ok", "error", "unreplayable")}}))
+
+
+def _run(a, task, meta):
+    if a.mode == "server_calls":
+        _server_calls(a, task, meta)
+        return
     if a.mode == "resolve":
         print(json.dumps(_identity(a.target_callable or meta["target_callable"])))
         return
     if a.target_callable:
-        ap.error("--target-callable is only valid with --mode resolve")
+        raise SystemExit("--target-callable is only valid with --mode resolve")
 
     h = _load("harness_lib", os.path.join(task, "harness_lib.py"))
     cases = _load("cases", os.path.join(task, "cases.py"))

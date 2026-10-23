@@ -10,7 +10,8 @@
     "references/workflow-handoff.md (GEAK e2e invocation) replaced by references/pipeline-handoff.md (this pipeline's profile slot).",
     "ut_contracts/ (added on this branch): per-operator UT contract families, the contract library and float64 references, the generic gate driver and the task scaffold; SKILL.md \u00a73/\u00a74 and references/task-authoring.md point task authoring at them.",
     "Profile fast path (added on this branch): run_points.py drives every sampling point through one probe server with background per-point censuses (point_census.py, generalized from the per-run census scripts of two GLM-5.2 runs), then coverage_ledger -> build_ranking.py -> select_targets; trace_scan.py replaces json.load for traces; serving_probe.py verifies one rank, closes on settled trace files, aborts and drains its requests and fails graph-hidden decode windows; coverage_ledger divides per_rank censuses by instances; parse_profile knows sglang 0.5.20's VERIFY/DRAFT_EXTEND step names.",
-    "Profile template (added on this branch): the agent writes only serving.json (probe_server.py owns the server, keeps decode under --enable-profile-cuda-graph with an eager fallback) and reviews task_decls.json (drafted by draft_task_decls.py from kernel_shapes/source_map/adjacency evidence). relabel_points, plan_ut_cases and build_task_plan.py (lint + task_plan.json + requested_kernel + scaffold_ut) are generalized from the per-run scripts of the 2026-10-20 GLM-5.2 run; families gained `match` patterns; serving_probe arms record_shapes/with_stack, reads realtime_tokens_total for steady state and splits/warms prefill batches before arming (GEAK e82bb297)."
+    "Profile template (added on this branch): the agent writes only serving.json (probe_server.py owns the server, keeps decode under --enable-profile-cuda-graph with an eager fallback) and reviews task_decls.json (drafted by draft_task_decls.py from kernel_shapes/source_map/adjacency evidence). relabel_points, plan_ut_cases and build_task_plan.py (lint + task_plan.json + requested_kernel + scaffold_ut) are generalized from the per-run scripts of the 2026-10-20 GLM-5.2 run; families gained `match` patterns; serving_probe arms record_shapes/with_stack, reads realtime_tokens_total for steady state and splits/warms prefill batches before arming (GEAK e82bb297).",
+    "Server evidence (added on this branch): probe_server.py records every Triton compile variant and the entry call that built it from process start, warmup and graph capture included (shared/compile_watch.py via a chaining sitecustomize overlay); build_task_plan.py slices it per task; leg_runner.py imports meta.server_preimports first, can record the variants it compiles and replays the recorded calls (--mode server_calls); ut_driver.py adds the server_calls and compile_variants gates. Prompted by Muse Spark attention_2d_prefill/2d_decode passing their UTs and failing in the server (a warmup-only max_seqlen_q=1 variant; sglang's triton.next_power_of_2 rebinding)."
   ],
   "files": [
     {
@@ -196,7 +197,7 @@
       "file": "shared/leg_runner.py",
       "source": "e2e_workflow/scripts/leg_runner.py",
       "source_sha256": "7666e8ec6cba04eb65436e5b277ed2b67312dfc2c1328f6d61ab2b9383c29e28",
-      "modified": false
+      "modified": true
     },
     {
       "file": "shared/overlay_setup.py",
@@ -487,6 +488,21 @@
     },
     {
       "file": "scripts/build_task_plan.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "shared/compile_watch.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "shared/tests/test_compile_watch.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "ut_contracts/tests/test_server_evidence.py",
       "source": null,
       "added_here": true
     }

@@ -32,7 +32,7 @@ import ut_contract as U  # noqa: E402
 
 SKILL_ROOT = os.path.dirname(HERE)
 SHARED_TOOLS = os.environ.get("SHARED_TOOLS") or os.path.join(SKILL_ROOT, "shared")
-SHARED_HELPERS = ("harness_lib.py", "leg_runner.py", "overlay_setup.py")
+SHARED_HELPERS = ("harness_lib.py", "leg_runner.py", "overlay_setup.py", "compile_watch.py")
 CONTRACT_HELPERS = ("ut_contract.py", "reference_f64.py", "ut_driver.py")
 
 
