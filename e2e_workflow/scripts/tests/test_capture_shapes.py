@@ -437,6 +437,32 @@ class TestWrapperRecording(_RecorderTestCase):
         self.assertEqual(len(s["records"]), 1)
         self.assertEqual(s["seen"], {"T(4, 8):torch.float16"})
 
+    def test_only_rank0_saves_the_heavy_oracle_while_every_rank_counts_shapes(self):
+        mod, _ = self._hook()
+        with _env(RANK="1"), _stderr():
+            mod.op(FakeTensor((4, 8)))
+        s = cs._STATE
+        self.assertEqual(s["shape_counts"], {"T(4, 8):torch.float16": 1})
+        self.assertEqual(s["records"], [])
+        with _env(RANK="0"), _stderr():
+            mod.op(FakeTensor((4, 8)))
+        self.assertEqual(len(s["records"]), 1)
+
+    def test_the_rank_comes_from_torch_distributed_when_no_env_names_it(self):
+        dist = types.ModuleType("torch.distributed")
+        dist.is_available, dist.is_initialized, dist.get_rank = (lambda: True), (lambda: True), (lambda: 3)
+        self.torch.distributed = dist
+        prev = sys.modules.get("torch.distributed", _MISSING)
+        sys.modules["torch.distributed"] = dist
+        self.addCleanup(lambda: sys.modules.pop("torch.distributed", None) if prev is _MISSING
+                        else sys.modules.__setitem__("torch.distributed", prev))
+        with _env(RANK=None, LOCAL_RANK=None, TP_RANK=None, SLURM_PROCID=None):
+            self.assertEqual(cs._rank(), "3")
+            self.assertFalse(cs._records_oracle())
+            dist.is_initialized = lambda: False
+            self.assertEqual(cs._rank(), "unknown")
+            self.assertTrue(cs._records_oracle())
+
     def test_distinct_shapes_each_get_their_own_histogram_entry(self):
         mod, _ = self._hook()
         with _stderr():
@@ -938,9 +964,10 @@ class TestInstall(_RecorderTestCase):
         with _env(GEAK_SELECTION_TRACE=os.path.join(self.out_dir, "selection.json")):
             with _stderr():
                 cs.install("fake_serving_layer:op", self.out_dir)
+        # The host follows the pid: two machines' ranks can share a pid on the shared mount.
         expected_prefix = os.path.join(
-            self.out_dir, f"capture.pid-{os.getpid()}.rank-")
-        self.assertTrue(cs._STATE["out_dir"].startswith(expected_prefix))
+            self.out_dir, f"capture.pid-{os.getpid()}.host-{cs._host()}.rank-")
+        self.assertTrue(cs._STATE["out_dir"].startswith(expected_prefix), cs._STATE["out_dir"])
 
 
 # --------------------------------------------------------------------------- #
