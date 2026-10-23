@@ -48,6 +48,36 @@ the 64 MB Infinity Cache can report effective bandwidth above 640 GB/s; do not c
 that impossible GDDR bandwidth. Measure the external-memory roof with a streaming
 working set larger than the cache.
 
+## r9600d — Radeon AI PRO R9600D (gfx1201, 48 CU)
+```yaml
+product: r9600d
+gfx: gfx1201
+cu: 48                         # physical CUs from rocminfo; PyTorch reports 24 WGPs
+hbm_bw_bytes_s: 6.37e11        # measured: max(read 534.5, write 637.3) GB/s
+flops:                         # MEASURED achievable matrix-core rates, FLOP/s; not a datasheet
+  bf16: 6.5e13
+  fp16: 6.4e13
+  fp8:  1.25e14
+  int8: 1.08e14
+```
+
+These are **measured**, not datasheet, numbers: the TraceLens `microbench`
+(matrix GEMM and streaming read/write bandwidth) on one board, one run, with an
+8192^3 PyTorch bf16 GEMM agreeing at 63.2 TFLOPS. The ISA facts and memory
+hierarchy match R9700 (wave32, WMMA, 64 KiB LDS per workgroup, 8 MiB L2, 64 MiB
+Infinity Cache, about 32 GB GDDR6). What differs is the CU count (48 against
+64) and the matrix rate: the measured FP16/BF16 rate is about a third of the
+R9700 datasheet figure, so the BF16 ridge is about **102 FLOP/byte**
+(`6.5e13 / 6.37e11`) against about 298 on R9700. A kernel between those
+intensities is compute-bound here and memory-bound there; never carry R9700
+peaks over. There is no `fp32` key because the vector FP32 microbenchmark
+(about 8 TFLOPS from a Triton FMA chain) is not a trustworthy ceiling on
+RDNA4, and no `fp4` key because the part has no block-scaled path. Treat every
+value here as a lower bound from a single run, not a ceiling: a later model-mode
+run saw an LM-head GEMM sustain about 620 GB/s, above the 534.5 GB/s read
+figure, and a Stage-A prefill estimate about 10% above the BF16 value. Replace
+these with datasheet values when AMD publishes them.
+
 ## gfx950 — CDNA4, MI350X / MI355X class
 ```yaml
 gfx: gfx950
