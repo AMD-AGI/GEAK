@@ -1526,6 +1526,18 @@ PY
 
 GATE = os.path.join(SCRIPTS_DIR, "multi_node", "mn.py")
 
+
+def run_mn(argv):
+    """`mn.py <argv>` in this process, so coverage sees it; shaped like subprocess.run's result."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            rc = mn.main(list(argv))
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else 1
+    return subprocess.CompletedProcess(["mn.py", *argv], rc, out.getvalue(), err.getvalue())
+
+
 COMPUTE = "Cijk_Alik_Bljk_HHS_BH_MT128x128x16"
 
 
@@ -1559,9 +1571,8 @@ def full_set(directory, ranks=range(16), gpus_per_node=8, **kwargs):
 def run_gate(directory, *args):
     if "--nodes" not in args:
         args = ("--nodes", "2", *args)
-    proc = subprocess.run(
-        [sys.executable, GATE, "trace-gate", "--profile-dir", directory, *args],
-        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = run_mn(
+        ["trace-gate", "--profile-dir", directory, *args])
     report = {}
     for candidate in (os.path.join(directory, "ranks", "mn_trace_report.json"),
                       os.path.join(directory, "mn_trace_report.json")):
@@ -1845,10 +1856,9 @@ class PdTopnMergeTest(unittest.TestCase):
 
     def merge(self, *roles):
         out = os.path.join(self.tmp, "profile_topN")
-        proc = subprocess.run(
-            [sys.executable, GATE, "topn-merge", "--out", out,
-             *[a for r in roles for a in ("--engine", r)]],
-            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        proc = run_mn(
+            ["topn-merge", "--out", out,
+             *[a for r in roles for a in ("--engine", r)]])
         doc = {}
         if os.path.isfile(out + ".json"):
             with open(out + ".json", encoding="utf-8") as handle:
@@ -1888,11 +1898,10 @@ class PdTopnMergeTest(unittest.TestCase):
 
     def merge_with_bench(self, bench, osl, *roles):
         out = os.path.join(self.tmp, "profile_topN")
-        proc = subprocess.run(
-            [sys.executable, GATE, "topn-merge", "--out", out,
+        proc = run_mn(
+            ["topn-merge", "--out", out,
              "--bench-summary", bench, "--osl", str(osl),
-             *[a for r in roles for a in ("--engine", r)]],
-            capture_output=True, text=True, encoding="utf-8", errors="replace")
+             *[a for r in roles for a in ("--engine", r)]])
         with open(out + ".json", encoding="utf-8") as handle:
             return proc, json.load(handle)
 
@@ -1952,12 +1961,11 @@ class PdTopnMergeTest(unittest.TestCase):
             "#transfer-req: 13, #retracted-req: 0, cuda graph: True, "
             "gen throughput (token/s): 86.13, #queue-req: 0"])
         out = os.path.join(self.tmp, "profile_topN")
-        proc = subprocess.run(
-            [sys.executable, GATE, "topn-merge", "--out", out,
+        proc = run_mn(
+            ["topn-merge", "--out", out,
              "--engine", self.topn("prefill", 100.0, [("ar_p", 60.0)]),
              "--engine", self.topn("decode", 100.0, [("gemm_d", 40.0)]),
-             "--engine-log", f"prefill={pre}", "--engine-log", f"decode={dec}"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace")
+             "--engine-log", f"prefill={pre}", "--engine-log", f"decode={dec}"])
         self.assertEqual(proc.returncode, 0, proc.stderr)
         with open(out + ".json", encoding="utf-8") as handle:
             kv = json.load(handle)["kv_handoff"]
@@ -2011,12 +2019,11 @@ class PdTopnMergeTest(unittest.TestCase):
     def test_logs_without_batch_lines_leave_no_handoff_block(self):
         empty = self.engine_log("server.log", ["[x] loading weights"])
         out = os.path.join(self.tmp, "profile_topN")
-        proc = subprocess.run(
-            [sys.executable, GATE, "topn-merge", "--out", out,
+        proc = run_mn(
+            ["topn-merge", "--out", out,
              "--engine", self.topn("prefill", 100.0, [("ar_p", 60.0)]),
              "--engine-log", f"prefill={empty}",
-             "--engine-log", f"decode={os.path.join(self.tmp, 'missing.log')}"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace")
+             "--engine-log", f"decode={os.path.join(self.tmp, 'missing.log')}"])
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("no kv_handoff block", proc.stderr)
         with open(out + ".json", encoding="utf-8") as handle:
@@ -3070,6 +3077,385 @@ class PidFileTest(unittest.TestCase):
             with open(os.path.join(tmp, "rank0.pid"), "w") as f:
                 f.write(f"{os.getpid()} 1\n")   # a live pid, but not the process that was recorded
             self.assertIn("serve=0 pid=gone", run(mn.serve_alive(0)))
+
+
+def completed(stdout="", rc=0, stderr=""):
+    return subprocess.CompletedProcess([], rc, stdout, stderr)
+
+
+SHOWUSE = "GPU[0]\t\t: GPU use (%): 3\nGPU[1]\t\t: GPU use (%): 40\n"
+MEMINFO = ("device,VRAM Total Memory (B),VRAM Total Used Memory (B)\n"
+           "card0,206158430208,1073741824\ncard1,206158430208,2147483648\n")
+IP_ADDR = ("1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n"
+           "2: ens51np0    inet 10.10.0.166/24 brd 10.10.0.255 scope global ens51np0\n")
+
+
+class NodeProbeTest(unittest.TestCase):
+    """mn.py probe, as it runs on a node: every number comes from rocm-smi, ss, pgrep and ip."""
+
+    def setUp(self):
+        mn.local_addrs.cache_clear()
+        self.addCleanup(mn.local_addrs.cache_clear)
+
+    def fake_run(self, argv, **_kw):
+        if argv[0] == "ip":
+            return completed(IP_ADDR)
+        cmd = argv[-1]
+        for needle, out in (("--showuse", SHOWUSE), ("--showmeminfo", MEMINFO),
+                            ("--showpids", SHOWPIDS_REAL_CO_TENANT), ("sport = :30000", "LISTEN 0 4096 *:30000\n"),
+                            ("sport = :", ""), ("wc -l", "2\n"), ("pgrep -c", "1\n")):
+            if needle in cmd:
+                return completed(out)
+        raise AssertionError(f"unexpected command {cmd!r}")
+
+    def test_the_probe_reports_the_tightest_card_busy_ports_and_our_processes(self):
+        with mock.patch.object(mn.subprocess, "run", self.fake_run), \
+                mock.patch.dict(os.environ, {"MN_GPU_IDENTITY": 'noise\n{"gfx": "gfx942"}'}):
+            p = mn.probe_node([30000, 30001])
+        self.assertEqual((p["ngpu"], p["max_use"]), (2, 40.0))
+        self.assertEqual(p["card_total_mib"], [196608, 196608])
+        self.assertEqual(p["free_vram_mib"], 196608 - 2048)
+        self.assertEqual(p["busy_ports"], [30000])
+        self.assertEqual((p["gpu_pids"], p["parked_gpu_pids"]), (1, 1))
+        self.assertEqual((p["serve_procs"], p["worker_procs"]), (1, 2))
+        self.assertEqual(p["addrs"], [["lo", "127.0.0.1", 8], ["ens51np0", "10.10.0.166", 24]])
+        self.assertEqual(p["gpu"], {"gfx": "gfx942"})
+        self.assertIsInstance(p["sw"], dict)
+
+    def test_a_machine_without_ip_has_no_addresses(self):
+        with mock.patch.object(mn.subprocess, "run", side_effect=OSError("no ip")):
+            self.assertEqual(mn.local_addrs(), ())
+
+    def test_a_silent_identity_probe_is_an_error_not_an_identity(self):
+        with mock.patch.dict(os.environ, {"MN_GPU_IDENTITY": ""}):
+            self.assertIn("printed nothing", mn.gpu_identity()["error"])
+
+    def test_visible_gpus_counts_gfx_agents_and_is_zero_without_rocm(self):
+        agents = "  Name:                    gfx942\n  Name:                    gfx942\n  Name:   AMD EPYC\n"
+        with mock.patch.object(mn.subprocess, "run", return_value=completed(agents)):
+            self.assertEqual(mn.visible_gpus(), 2)
+        with mock.patch.object(mn.subprocess, "run", side_effect=OSError("no rocminfo")):
+            self.assertEqual(mn.visible_gpus(), 0)
+
+
+class SharedFsProofTest(unittest.TestCase):
+    def test_a_node_that_cannot_read_or_write_the_mount_breaks_the_proof(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        nodes = [{"rank": 0, "hostname": "node-a"}, {"rank": 1, "hostname": "node-b"}]
+
+        def ssh_run(_state, node, script, _timeout):
+            token = re.search(r"from_bench_(\w+)", script).group(1)
+            if node["rank"] == 0:
+                with open(os.path.join(tmp, ".mn_probe", f"from_rank0_{token}"), "w") as f:
+                    f.write(token)
+                return {"out": f"READ_OK={token}\nWRITE_OK"}
+            return {"out": "READ_FAIL\nWRITE_FAIL"}
+
+        with mock.patch.object(mn, "ssh_run", ssh_run):
+            res = mn.prove_shared({"shared_fs": tmp}, nodes)
+        self.assertFalse(res["shared"])
+        self.assertEqual([n["ok"] for n in res["per_node"]], [True, False])
+        self.assertEqual(os.listdir(os.path.join(tmp, ".mn_probe")), [], "markers are cleaned up")
+
+
+def healthy(rank, **kw):
+    return {"rank": rank, "host": f"node{rank}", "serve": 1, "pid": "1", "schedulers": 1, "zombies": 0, **kw}
+
+
+class SupervisorTest(unittest.TestCase):
+    real_teardown = staticmethod(mn.teardown)
+    STATE = {"topology": "tp_span", "nodes": [{"rank": 0, "hostname": "node0", "ip": "10.0.0.1"},
+                                              {"rank": 1, "hostname": "node1", "ip": "10.0.0.2"}]}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.torn = []
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(mn, "_out_dir", self.tmp))
+        stack.enter_context(mock.patch.object(mn, "_stopping", False))
+        stack.enter_context(mock.patch.object(mn, "_state", None))
+        stack.enter_context(mock.patch.object(mn, "load_state", lambda: dict(self.STATE)))
+        stack.enter_context(mock.patch.object(mn, "time", mock.Mock(time=time.time, sleep=lambda _s: None)))
+        stack.enter_context(mock.patch.object(mn.signal, "signal", lambda *_a: None))
+        stack.enter_context(mock.patch.object(mn.signal, "getsignal", lambda _s: mn.on_term))
+        stack.enter_context(mock.patch.object(mn, "teardown", lambda s, **k: self.torn.append(s) or [{}]))
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+
+    def verdict(self):
+        with open(os.path.join(self.tmp, "mn_supervisor.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_a_rank_with_zombie_workers_for_two_polls_is_dead(self):
+        polls = iter([[healthy(0), healthy(1)], [healthy(0), healthy(1, zombies=2)],
+                      [healthy(0), healthy(1, zombies=2)]])
+        with mock.patch.object(mn, "engine_health", lambda _s: next(polls)):
+            self.assertEqual(mn.cmd_supervise([]), 1)
+        doc = self.verdict()
+        self.assertEqual(doc["verdict"], "rank_died")
+        self.assertEqual(doc["dead_ranks"], ["rank1@node1"])
+        self.assertIn("zombie worker", doc["why"])
+        self.assertEqual(len(self.torn), 1, "survivors are reaped")
+
+    def test_ranks_that_stay_unobservable_end_the_watch(self):
+        with mock.patch.object(mn, "engine_health", side_effect=RuntimeError("ssh down")):
+            self.assertEqual(mn.cmd_supervise([]), 1)
+        self.assertEqual(self.verdict()["verdict"], "unobservable")
+        self.assertEqual(self.verdict()["consecutive_failures"], mn.ERR_MISSES)
+
+    def test_a_lost_sigterm_handler_refuses_to_watch(self):
+        with mock.patch.object(mn.signal, "getsignal", lambda _s: None):
+            self.assertEqual(mn.cmd_supervise([]), 1)
+        self.assertEqual(self.verdict()["verdict"], "handler_lost")
+
+    def test_term_reaps_the_ranks_once_and_exits_clean(self):
+        mn._state = dict(self.STATE)
+        with self.assertRaises(SystemExit) as stop:
+            mn.on_term(signal.SIGTERM, None)
+        self.assertEqual(stop.exception.code, 0)
+        self.assertEqual((self.verdict()["verdict"], self.verdict()["cleared"]), ("torn_down", True))
+        self.assertIsNone(mn.on_term(signal.SIGTERM, None), "a second signal is ignored")
+        self.assertEqual(len(self.torn), 1)
+
+    def test_a_teardown_that_raises_is_recorded(self):
+        mn._state = dict(self.STATE)
+        with mock.patch.object(mn, "teardown", side_effect=RuntimeError("ssh down")), \
+                self.assertRaises(SystemExit):
+            mn.on_term(signal.SIGTERM, None)
+        self.assertEqual(self.verdict()["error"], "ssh down")
+
+    def test_a_dead_load_balancer_is_named(self):
+        self.assertIn("load balancer is gone", mn._death_reason(healthy(0, lb=0)))
+        self.assertEqual(mn._death_reason(healthy(0, serve=0)), "no serve process")
+
+    def test_a_post_mortem_teardown_that_raises_still_reports_the_death(self):
+        polls = iter([[healthy(0, serve=0), healthy(1)]] * 2)
+        with mock.patch.object(mn, "engine_health", lambda _s: next(polls)), \
+                mock.patch.object(mn, "teardown", side_effect=RuntimeError("ssh down")):
+            self.assertEqual(mn.cmd_supervise([]), 1)
+        self.assertEqual(self.verdict()["verdict"], "rank_died")
+
+    def test_an_unwritable_out_dir_does_not_stop_the_record(self):
+        blocker = os.path.join(self.tmp, "file")
+        open(blocker, "w").close()
+        out = io.StringIO()
+        with mock.patch.object(mn, "_out_dir", blocker), contextlib.redirect_stdout(out):
+            mn.record("watching", {})
+        self.assertIn("could not write mn_supervisor.json", out.getvalue())
+
+    def test_a_teardown_that_never_clears_gives_up_and_names_the_co_tenant(self):
+        busy = dict(probe("node0.x", serve_procs=1), foreign_gpu_pids=1, gpu_pids=2, max_use=90)
+        clock = iter(range(0, 10000, 100))
+        lines = []
+        with mock.patch.object(mn, "resolve", lambda s: s["nodes"]), \
+                mock.patch.object(mn, "ssh_each", lambda *a, **k: []), \
+                mock.patch.object(mn, "probe_all", lambda s, nodes: [busy]), \
+                mock.patch.object(mn, "time", mock.Mock(time=lambda: next(clock), sleep=lambda _s: None)):
+            self.assertIsNone(self.real_teardown(self.STATE, wait_idle_s=150, verbose=lines.append))
+        self.assertIn("waiting on node0(use=90 pids=2 of which 1 from another container", lines[0])
+        self.assertIn("node0 has a co-tenant we cannot reap", lines[-1])
+
+    def test_an_unknown_command_prints_the_usage(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(mn.main(["nope"]), 2)
+        self.assertIn("usage: mn.py {check|launch", err.getvalue())
+
+    def test_abandoning_a_launch_survives_a_teardown_that_raises(self):
+        err = io.StringIO()
+        with mock.patch.object(mn, "teardown", side_effect=RuntimeError("boom")), contextlib.redirect_stderr(err):
+            self.assertEqual(mn.abandon_launch(self.STATE), 1)
+        self.assertIn("reaping the failed launch raised: boom", err.getvalue())
+
+    def test_stop_reports_whether_the_cards_cleared(self):
+        self.assertEqual(mn.cmd_stop([self.tmp]), 0)
+        with mock.patch.object(mn, "teardown", lambda s, **k: None):
+            self.assertEqual(mn.cmd_stop([self.tmp]), 1)
+
+    def test_serve_counts_read_each_rank(self):
+        with mock.patch.object(mn, "resolve", lambda s: s["nodes"]), \
+                mock.patch.object(mn, "ssh_each", lambda s, jobs: [{"out": "serve=2 pid=7"}, {"out": ""}]):
+            self.assertEqual(mn.serve_counts(self.STATE), [2, 0])
+
+
+class ClientPreflightTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        os.makedirs(os.path.join(self.tmp, "utils", "bench_serving"))
+        open(os.path.join(self.tmp, "utils", "bench_serving", "benchmark_serving.py"), "w").close()
+        env = mock.patch.dict(os.environ, {"INFERENCEX_PATH": self.tmp, "PYTHON_BIN": "py-x",
+                                           "INFERENCEX_BENCH_SERVING": ""})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_a_python_that_does_not_start_is_named(self):
+        with mock.patch.object(mn.subprocess, "run", side_effect=OSError("not found")):
+            self.assertIn("py-x does not start here", mn.inferencex_client_error("m"))
+
+    def test_missing_packages_are_named(self):
+        with mock.patch.object(mn.subprocess, "run", return_value=completed(rc=1, stderr="No module named aiohttp")):
+            self.assertIn("No module named aiohttp", mn.inferencex_client_error("m"))
+
+    def test_a_model_path_this_machine_cannot_read_is_named(self):
+        with mock.patch.object(mn.subprocess, "run", return_value=completed()):
+            self.assertIn("no tokenizer_config.json", mn.inferencex_client_error("/no/such/model"))
+            self.assertEqual(mn.inferencex_client_error("org/model"), "")
+
+    def test_a_native_client_for_an_unknown_backend_is_refused(self):
+        problems = mn.client_problems({"bench_client": "native", "nodes": [{}]}, {"backend": "trt"})
+        self.assertIn("no native client known for backend 'trt'", problems[0])
+
+
+class ReachTest(unittest.TestCase):
+    def test_a_port_that_cannot_be_opened_is_a_problem(self):
+        node = {"rank": 0, "hostname": "node0", "ip": "10.0.0.1"}
+        with mock.patch.object(mn, "ssh_run", lambda *a: {"out": "nothing listening"}):
+            problems = mn.reach_problems({}, [(node, 30531, [None], "dist-init")])
+        self.assertIn("could not listen on the dist-init port 30531", problems[0])
+
+    def test_dials_here_tells_an_open_port_from_a_closed_one(self):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        self.assertTrue(mn.dials_here("127.0.0.1", port))
+        srv.close()
+        self.assertFalse(mn.dials_here("127.0.0.1", port))
+
+
+class ActivePinCliTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.pointer = os.path.join(self.tmp, "state_path")
+        patch = mock.patch.object(mn, "ACTIVE_PIN", self.pointer)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_release_drops_only_the_callers_own_pointer(self):
+        with open(self.pointer, "w") as f:
+            json.dump({"pid": os.getppid() + 1}, f)
+        self.assertEqual(mn.cmd_active_pin(["--release"]), 0)
+        self.assertTrue(os.path.exists(self.pointer))
+        with open(self.pointer, "w") as f:
+            json.dump({"pid": os.getppid()}, f)
+        self.assertEqual(mn.cmd_active_pin(["--release"]), 0)
+        self.assertFalse(os.path.exists(self.pointer))
+        self.assertEqual(mn.cmd_active_pin(["--release"]), 0, "no pointer: nothing to drop")
+
+    def test_no_pin_or_a_missing_pin_file_stops_with_a_reason(self):
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": ""}):
+            with self.assertRaisesRegex(SystemExit, "no pin: GEAK_MN_STATE is unset"):
+                mn.load_state()
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": os.path.join(self.tmp, "gone.json")}):
+            with self.assertRaisesRegex(SystemExit, "no pinned node set at"):
+                mn.load_state()
+
+    def test_leg_env_refuses_a_pin_without_a_serving_address(self):
+        pin = os.path.join(self.tmp, "mn_state.json")
+        with open(pin, "w") as f:
+            json.dump({"nodes": []}, f)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": pin}), contextlib.redirect_stderr(err):
+            self.assertEqual(mn.cmd_leg_env([]), 3)
+        self.assertIn("has no master_ip/serve_port", err.getvalue())
+
+    def test_probe_and_digest_print_their_one_line(self):
+        out = io.StringIO()
+        with mock.patch.object(mn, "probe_node", lambda ports: {"ports": ports}), contextlib.redirect_stdout(out):
+            self.assertEqual(mn.main(["probe", "30000"]), 0)
+            self.assertEqual(mn.main(["digest", self.tmp]), 0)
+        first, second = out.getvalue().splitlines()
+        self.assertEqual(first, mn.PROBE_TAG + '{"ports": [30000]}')
+        self.assertEqual(second, mn.tree_digest(self.tmp))
+
+    def test_the_active_pin_is_printed(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": "/shared/pins/a.json"}), contextlib.redirect_stdout(out):
+            self.assertEqual(mn.cmd_active_pin([]), 0)
+        self.assertEqual(out.getvalue().strip(), "/shared/pins/a.json")
+
+    def test_lease_dir_prints_the_pins_lease_dir_or_fails_on_an_unreadable_pin(self):
+        pin = os.path.join(self.tmp, "mn_state.json")
+        with open(pin, "w") as f:
+            json.dump({"shared_fs": self.tmp, "tools_dir": "/t"}, f)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": pin}), contextlib.redirect_stdout(out):
+            self.assertEqual(mn.cmd_active_pin(["--lease-dir"]), 0)
+        self.assertEqual(out.getvalue().strip(), f"{pin}\t{os.path.join(self.tmp, '.mn_lease')}\t/t")
+        with open(pin, "w") as f:
+            f.write("{")
+        with mock.patch.dict(os.environ, {"GEAK_MN_STATE": pin}), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(mn.cmd_active_pin(["--lease-dir"]), 1)
+
+
+class GpuLeaseTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "fcntl")
+    def test_a_card_leased_by_another_task_is_waited_for(self):
+        import fcntl
+        import threading
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        state, node = {"shared_fs": tmp}, {"hostname": "node0.cluster.local"}
+        other = open(mn.lease_file(state, node, 3), "w")
+        fcntl.flock(other, fcntl.LOCK_EX)
+        threading.Timer(0.3, other.close).start()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), mn.gpu_lease(state, node, "3") as ids:
+            self.assertEqual(ids, "3")
+        self.assertIn("waiting for node0 gpu3", err.getvalue())
+
+
+class TraceEdgeTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def path(self, name, doc):
+        p = os.path.join(self.tmp, name)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(doc if isinstance(doc, str) else json.dumps(doc))
+        return p
+
+    def test_a_trace_without_a_rank_or_kernels_is_reported(self):
+        full_set(self.tmp, ranks=range(2), gpus_per_node=1)
+        write_trace(self.tmp, 2, 0, collectives=0, kernels=0)
+        with gzip.open(os.path.join(self.tmp, "host.trace.json.gz"), "wt") as f:
+            f.write("{}")
+        proc, report = run_gate(self.tmp, "--expect-ranks", "3", "--nodes", "1")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual([u["file"] for u in report["unranked_files"]], ["host.trace.json.gz"])
+        self.assertIn("zero kernel events", " ".join(report["problems"]))
+
+    def test_pd_lanes_skip_replicas_and_an_unreadable_launch(self):
+        launch = self.path("mn_launch.json", {"pd": {"engine_tp_by_role": {"prefill": 8}, "engines": [
+            {"role": "prefill", "rank": 0}, {"role": "prefill", "rank": 1, "replica": 1}]}})
+        self.assertEqual(mn_traces.pd_lanes(launch), [("prefill", 0, 8, [0])])
+        self.assertEqual(mn_traces.pd_lanes(self.path("bad.json", "{")), [])
+
+    def test_a_bench_without_usable_latencies_gives_no_split(self):
+        self.assertEqual(mn_traces.latency_split(self.path("b.json", "{"), 32), {})
+        self.assertEqual(mn_traces.latency_split(self.path("z.json", {"ttft_ms_median": 0, "tpot_ms_median": 0}), 1), {})
+
+    def test_topn_merge_refuses_what_it_cannot_merge(self):
+        self.assertEqual(run_mn(["topn-merge", "--engine", "prefill"]).returncode, 2)
+        gone = run_mn(["topn-merge", "--engine", f"prefill={os.path.join(self.tmp, 'nope.json')}"])
+        self.assertEqual(gone.returncode, 2)
+        self.assertIn("no engine Top-N could be read", gone.stderr)
+        idle = self.path("idle.json", {"total_gpu_time_ms": 0, "top_kernels": []})
+        self.assertIn("zero GPU time", run_mn(["topn-merge", "--engine", f"decode={idle}"]).stderr)
+
+    def test_topn_merge_without_out_prints_the_table(self):
+        topn = self.path("t.json", {"total_gpu_time_ms": 10.0, "num_kernel_launches": 3, "num_distinct_kernels": 1,
+                                    "top_kernels": [{"short_name": "gemm", "pct_gpu_time": 100.0, "classification": "gemm",
+                                                     "backend_guess": "hipblaslt", "editable": False, "calls": 3,
+                                                     "total_ms": 10.0, "avg_us": 3333.3, "opt_hint": "tune"}]})
+        proc = run_mn(["topn-merge", "--engine", f"decode={topn}"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("| 1 | decode | `gemm` |", proc.stdout)
 
 
 if __name__ == "__main__":

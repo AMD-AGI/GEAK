@@ -375,3 +375,105 @@ def test_map_args_forwards_the_trace_list(tmp_path, node_state) -> None:
     tl = rx.map_args(_handoff(exp_root=str(exp / "geak")), timeout_s=3600)["tracelens"]
     assert tl["trace_file"] == str(root) and len(tl["trace_files"]) == 4
     assert tl["analysis_md"].endswith("analysis.md")
+
+
+def test_a_pd_profile_keeps_only_dirs_with_a_rank0_and_a_steady_trace_from_elsewhere(tmp_path, capsys) -> None:
+    root = tmp_path / "torch_trace"
+    rank0 = _profile_tree(root, [(_PREFILL[0], "prefill"), (_DECODE[0], "decode")])
+    (root / "README").write_text("not a pod", encoding="utf-8")
+    (root / f"{_PREFILL[1]}_prefill").mkdir()
+    steady = tmp_path / "steady.pt.trace.json.gz"
+    steady.write_bytes(b"x")
+    tl = rx._node_state_tracelens(_doc(profile_trace=str(root), steady_state_trace=str(steady)), dict(_GLOBBED))
+    assert tl["trace_files"][0] == str(steady)
+    assert sorted(tl["trace_files"][1:]) == sorted(rank0["prefill"] + rank0["decode"])
+    assert "has no rank0 trace at its top level" in capsys.readouterr().err
+
+
+def test_a_tp_span_profile_is_the_trace_dir_alone(tmp_path) -> None:
+    root = tmp_path / "torch_trace"
+    root.mkdir()
+    tl = rx._node_state_tracelens(_doc(profile_trace=str(root), pd_mode="none"), dict(_GLOBBED))
+    assert tl == {"analysis_md": _GLOBBED["analysis_md"], "trace_file": str(root)}
+
+
+def test_a_node_state_that_is_not_an_object_is_refused(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "node_state.json"
+    path.write_text("[]", encoding="utf-8")
+    monkeypatch.setenv("MULTI_NODE_STATE", str(path))
+    rx._read_node_state.cache_clear()
+    with pytest.raises(SystemExit, match="not a JSON object"):
+        _block(_handoff())
+
+
+def _pods(edit):
+    doc = _doc()
+    edit(doc["pods"])
+    return doc
+
+
+@pytest.mark.parametrize("doc, why", [
+    (_doc(pods={"router": _ROUTER}), "pods must be a list of objects"),
+    (_pods(lambda pods: pods.insert(0, dict(pods[0]))), "at most one router pod"),
+    (_pods(lambda pods: pods[1].pop("launch_command")), "names no launch_command"),
+])
+def test_a_malformed_pod_list_is_refused(node_state, doc, why) -> None:
+    if isinstance(doc["pods"], list) and len(doc["pods"]) == 6:
+        doc["nodes"] = 6
+    node_state(doc)
+    with pytest.raises(SystemExit, match=why):
+        _block(_handoff())
+
+
+def test_the_carried_state_block_serves_when_args_have_none() -> None:
+    carried = {"nodes": [{"host": "10.0.0.1"}]}
+    assert rx._multinode_block({"state": {"multinode": carried}}) == carried
+    assert rx._multinode_block({"multinode": {"nodes": []}, "state": {}}) == {}
+
+
+def _check(monkeypatch, tmp_path, run):
+    monkeypatch.setattr(rx.subprocess, "run", run)
+    return rx._multinode_check({"multinode": {"nodes": [{"host": "10.0.0.1"}]}, "tp": 8,
+                                "eval_dir": str(tmp_path)})
+
+
+def test_the_check_hands_back_mn_pys_verdict(monkeypatch, tmp_path) -> None:
+    tag = rx._mn_module().CHECK_TAG
+    seen = {}
+
+    def run(argv, env=None, **_kw):
+        seen["spec"] = json.loads(env["GEAK_MN_SPEC"])
+        return rx.subprocess.CompletedProcess(argv, 0, f"probing\n{tag}" + json.dumps({"verdict": "ok", "spec": {}}), "")
+
+    assert _check(monkeypatch, tmp_path, run) == {"verdict": "ok", "spec": {}}
+    assert (seen["spec"]["tp"], seen["spec"]["work_dir"]) == (8, str(tmp_path))
+
+
+def test_a_refused_or_silent_or_hung_check_is_refused(monkeypatch, tmp_path) -> None:
+    tag = rx._mn_module().CHECK_TAG
+    refused = json.dumps({"verdict": "refused", "problems": ["no free VRAM"], "at": "t"})
+    v = _check(monkeypatch, tmp_path, lambda argv, **k: rx.subprocess.CompletedProcess(argv, 2, tag + refused, ""))
+    assert v == {"verdict": "refused", "problems": ["no free VRAM"], "at": "t"}
+    v = _check(monkeypatch, tmp_path, lambda argv, **k: rx.subprocess.CompletedProcess(argv, 1, f"{tag}{{", "Traceback"))
+    assert v["verdict"] == "refused" and "exited 1 without a verdict: Traceback" in v["problems"][0]
+
+    def hang(argv, **k):
+        raise rx.subprocess.TimeoutExpired(argv, 1800)
+
+    assert "timed out" in _check(monkeypatch, tmp_path, hang)["problems"][0]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="main() publishes process groups")
+def test_a_refused_check_ends_the_run_with_its_reasons(monkeypatch, tmp_path, node_state) -> None:
+    node_state()
+    exp = tmp_path / "geak"
+    handoff, result = tmp_path / "handoff.json", tmp_path / "result.json"
+    handoff.write_text(json.dumps(_handoff(exp_root=str(exp))), encoding="utf-8")
+    monkeypatch.setattr(rx, "_multinode_check",
+                        lambda ps_args: {"verdict": "refused", "problems": ["rank1 has no free VRAM"]})
+    monkeypatch.setattr(rx, "invoke_workflow", lambda *a, **k: pytest.fail("the workflow was started"))
+    assert rx.main([str(handoff), str(result)]) == 1
+    out = json.loads(result.read_text(encoding="utf-8"))
+    assert (out["status"], out["error_class"]) == ("error", "multinode_check_refused")
+    assert out["error"] == "mn.py check refused the machines: rank1 has no free VRAM"
+    assert out["multinode_check"]["problems"] == ["rank1 has no free VRAM"]
