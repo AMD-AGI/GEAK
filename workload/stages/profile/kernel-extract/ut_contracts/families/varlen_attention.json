@@ -3,6 +3,7 @@
   "family": "varlen_attention",
   "op_kind": "attn",
   "description": "Prefill / extend attention over packed variable-length sequences with GQA, causal bottom-right aligned (query i of an Lq chunk over Lk keys sees keys < Lk - Lq + i + 1). aiter flash_attn_varlen / mha_varlen_fwd, sglang extend attention, dense MLA prefill (MHA form).",
+  "match": {"kernel": ["varlen|fmha|flash_attn|mha_fwd|extend_attention|prefill_attention"], "op": ["varlen|mha_fwd|flash_attn"]},
   "reference": "varlen_attention",
   "reference_rows": 64,
   "axes": {

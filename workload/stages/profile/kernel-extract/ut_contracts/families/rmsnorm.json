@@ -3,6 +3,7 @@
   "family": "rmsnorm",
   "op_kind": "norm",
   "description": "RMSNorm, optionally fused with the residual add: x' = x + residual; out = x' * rsqrt(mean(x'^2) + eps) * weight; residual_out = x'. aiter rmsnorm2d / add_rmsnorm, sglang fused_add_rmsnorm, Triton variants.",
+  "match": {"kernel": ["^(?!.*(quant|allreduce|all_reduce|local_device)).*(rmsnorm|rms_norm)"], "op": ["^(?!.*quant).*rmsnorm"]},
   "reference": "rmsnorm",
   "reference_rows": 1024,
   "axes": {

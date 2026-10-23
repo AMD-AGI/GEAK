@@ -3,6 +3,7 @@
   "family": "moe_grouped_topk",
   "op_kind": "moe",
   "description": "Biased grouped top-k router (DeepSeek/GLM/Kimi style): sigmoid (or softmax) scores, keep the best topk_group groups by their top-2 sum of biased scores, pick topk experts inside them, weights are the unbiased scores renormalized times routed_scaling_factor. aiter biased_grouped_topk / sglang grouped_topk.",
+  "match": {"kernel": ["grouped_topk"], "op": ["grouped_topk"]},
   "sikl_contract": "biased_grouped_topk@1.0",
   "reference": "moe_grouped_topk",
   "reference_rows": 512,

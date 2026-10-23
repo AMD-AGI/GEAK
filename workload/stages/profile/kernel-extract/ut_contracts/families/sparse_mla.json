@@ -3,6 +3,7 @@
   "family": "sparse_mla",
   "op_kind": "attn",
   "description": "Sparse MLA attention: each token attends to the KV-pool slots its top-k indices name (-1 skipped); scores q . kv * sm_scale with q = [q_nope, q_rope], values the first d_v features. sglang triton_sparse_mla_fwd / flash_mla_sparse / aiter sparse MLA, decode and prefill (DSA models).",
+  "match": {"kernel": ["sparse_mla|flash_mla_sparse|mla_sparse"], "op": ["sparse_mla"]},
   "sikl_contract": "flash_mla_with_kvcache@1.0 (sparse branch)",
   "reference": "sparse_mla",
   "reference_rows": 32,

@@ -3,6 +3,7 @@
   "family": "paged_attention_decode",
   "op_kind": "attn",
   "description": "Decode attention (one query token per sequence, or a few for MTP verify when q_len > 1 is a separate case) over a paged KV cache with GQA: aiter paged_attention / pa_fwd, vLLM/sglang paged decode, MLA decode over a dense latent cache.",
+  "match": {"kernel": ["paged_attention|pa_fwd|pa_decode|decode_attention|mla_decode|flash_decode"], "op": ["paged_attention|pa_fwd|mla_decode"]},
   "reference": "paged_attention_decode",
   "reference_rows": 16,
   "axes": {

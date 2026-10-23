@@ -3,6 +3,7 @@
   "family": "gemm_a8w8_blockscale",
   "op_kind": "gemm",
   "description": "FP8 GEMM dequantized per block: a fp32 scale per 1 x 128 of a (K-major or MN-major) and per 128 x 128 of b. aiter gemm_a8w8_blockscale (CK / asm / bpreshuffle), DeepSeek-style FP8 checkpoints.",
+  "match": {"kernel": ["blockscale|block_scale|w8a8_block"], "op": ["gemm_a8w8_blockscale|block_scale"]},
   "sikl_contract": "gemm_a8w8_blockwise_scaled@1.0",
   "reference": "gemm_a8w8_blockscale",
   "reference_rows": 256,

@@ -3,6 +3,7 @@
   "family": "topk",
   "op_kind": "topk",
   "description": "Row-wise top-k selection among each row's first lengths[r] candidates, writing positions (or page-table slots) padded with -1. sglang topk_transform / fast_topk_v2, aiter top-k kernels, the selection half of a DSA indexer when it is a separate launch.",
+  "match": {"kernel": ["^(?!.*grouped).*(topk|top_k)"], "op": ["^(?!.*grouped).*topk"]},
   "sikl_contract": "topk_transform_paged@1.0",
   "reference": "topk",
   "reference_rows": 256,

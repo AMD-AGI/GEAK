@@ -3,6 +3,7 @@
   "family": "all_reduce",
   "op_kind": "collective",
   "description": "Tensor-parallel all-reduce (sum), optionally fused with the following residual add + RMSNorm: aiter custom all-reduce, quick all-reduce, RCCL. Needs the multi-rank harness of collective-ut.md; the single-process leg runner cannot test it.",
+  "match": {"kernel": ["cross_device_reduce|allreduce|all_reduce|quickreduce|ncclDevKernel|reduce_scatter_cross_device|allgather_vec"], "op": ["all_reduce|custom_ar|quick_ar"]},
   "reference": "all_reduce",
   "reference_rows": 1024,
   "reference_rows_axis": false,

@@ -158,6 +158,12 @@ def load_census(path, phase=None):
     inst = inst_override or d.get("instances") or d.get("step_instances") or 1
     if inst and inst != 1:
         pk = {k: v / inst for k, v in pk.items()}
+        # main() rebuilds the census from per_rank when it is present, so it has to be
+        # reduced to one instance as well; otherwise a window total is multiplied by the
+        # observed instance count as if it were one instance's cost.
+        if per_rank:
+            per_rank = {r: {k: _us(v) / inst for k, v in kv.items()}
+                        for r, kv in per_rank.items()}
     return pk, per_rank, d
 
 
@@ -186,7 +192,11 @@ def split_collectives(per_rank):
         else:
             out[name] = mean
     if wait > 0:
-        out[WAIT_KERNEL] = wait
+        # Add, never assign: a census that already split its collectives per launch
+        # (point_census.py) carries its own __collective_wait__ row, which reaches this
+        # point as an ordinary rank mean. Its rows are identical across ranks, so the
+        # residual here is float noise, and assigning it erased the census's wait.
+        out[WAIT_KERNEL] = out.get(WAIT_KERNEL, 0.0) + wait
     return out
 
 
@@ -285,6 +295,7 @@ def main():
             "instances_represented": e["instances"],
             "total_mass_us": round(total, 1),
             "kernels": kernels,
+            "points": e["points"],
             "uncovered_points": [p for p in e["points"] if not p["ut_covered"]],
         }
         if single:

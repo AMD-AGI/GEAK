@@ -3,6 +3,7 @@
   "family": "gemm",
   "op_kind": "gemm",
   "description": "16-bit dense GEMM: out = a @ b.T + bias (b is (n, k) when trans_b, else (k, n)). Covers aiter tuned_gemm / gemm_a16w16, hipBLASLt and Triton dense projections.",
+  "match": {"kernel": ["^Cijk_|^hgemm_bf16|gemm_a16w16|bf16_gemm"], "op": ["^aten::(mm|addmm|linear|matmul)$|tuned_gemm|gemm_a16w16"]},
   "sikl_contract": "gemm@1.0",
   "reference": "gemm",
   "reference_rows": 256,

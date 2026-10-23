@@ -3,6 +3,7 @@
   "family": "rmsnorm_quant",
   "op_kind": "norm",
   "description": "RMSNorm (optionally with residual add) fused with activation quantization of its output: FP8 per-token / per-1x128-group, or MXFP4 per-1x32 with e8m0 scales. aiter add_rmsnorm_quant / fused_rms_fp8_group_quant / rmsnorm + dynamic_mxfp4_quant fusions.",
+  "match": {"kernel": ["(rmsnorm|rms_norm).*quant|rms.*fp8_group"], "op": ["rmsnorm.*quant|rms.*fp8"]},
   "reference": "rmsnorm",
   "reference_rows": 1024,
   "axes": {

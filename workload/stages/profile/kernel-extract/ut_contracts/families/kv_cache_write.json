@@ -3,6 +3,7 @@
   "family": "kv_cache_write",
   "op_kind": "cache",
   "description": "Scatter this step's keys/values (or MLA latent + rope) into the paged KV pool at slot_mapping, optionally quantizing to the cache dtype. reshape_and_cache(_flash), set_mla_kv_buffer, concat_and_cache_mla, fused rope+cache writers.",
+  "match": {"kernel": ["reshape_and_cache|set_mla_kv|concat_and_cache|store_kvcache|cat_and_cache"], "op": ["reshape_and_cache|set_mla_kv|concat_and_cache"]},
   "reference": null,
   "axes": {
     "n_tokens": {"var": true, "lo": 1, "hi": 1048576},

@@ -3,6 +3,7 @@
   "family": "rope",
   "op_kind": "elementwise",
   "description": "Rotary position embedding on the first rot_dim features of every head of query and key, from a (max_pos, rot_dim) cos|sin cache indexed by positions; neox (rotate halves) or gptj (interleaved pairs). sglang/vLLM rotary_embedding, aiter rope_cached, MLA q_rope/k_rope paths.",
+  "match": {"kernel": ["rope|rotary"], "op": ["rope|rotary"]},
   "reference": "rope",
   "reference_rows": 1024,
   "axes": {

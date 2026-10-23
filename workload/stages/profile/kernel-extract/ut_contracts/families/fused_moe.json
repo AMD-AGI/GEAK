@@ -3,6 +3,7 @@
   "family": "fused_moe",
   "op_kind": "moe",
   "description": "Whole fused MoE: route each token to its top-k experts, run gate/up and down projections, combine with the routing weights. Covers aiter fused_moe (CK/asm/FlyDSL 2-stage, including the sorting and quant kernels it launches) for bf16, FP8 block-scaled and MXFP4 weights.",
+  "match": {"kernel": ["moe_sort|^gemm[12]_a4w4|moe_reduction|mfma_moe|fused_moe|append_shared_experts|moe_align|_ne\\d+_"], "op": ["fused_moe"]},
   "sikl_contract": "fused_moe@1.0",
   "reference": "fused_moe",
   "reference_rows": 128,

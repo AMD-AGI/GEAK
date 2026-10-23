@@ -67,6 +67,7 @@ any drift between them.
 
 | Field | Meaning |
 |---|---|
+| `match` | `{kernel: [regex], op: [regex]}`: device-kernel names and launching ops this family covers; `scripts/draft_task_decls.py` proposes the family whose patterns fit most of a task's kernels |
 | `axes` | `{lo, hi, multiple_of}`; `var: true` marks an axis that varies by case (tokens, context), others are pinned per task with `--axis`; `expr` derives one (`"ceil_div(k, 128)"`) |
 | `attrs` | variant selectors with their legal `values` (dtype, layout, activation...); pinned per task with `--attr`, default = first value |
 | `constraints` | expressions every case must satisfy (`"topk <= n_experts"`) |

@@ -3,6 +3,7 @@
   "family": "gemm_a4w4_mxfp4",
   "op_kind": "gemm",
   "description": "MXFP4 GEMM: (a * a_scale) @ (b * b_scale).T, e2m1 values packed two per byte, one e8m0 scale per 1 x 32. aiter gemm_a4w4 (asm / CK / FlyDSL), MXFP4 checkpoints (GLM-5.x MXFP4, Kimi).",
+  "match": {"kernel": ["^(?!.*(moe|_ne\\d+)).*(a4w4|afp4wfp4|f4gemm)"], "op": ["gemm_a4w4|gemm_afp4wfp4"]},
   "sikl_contract": "gemm_a4w4_mxfp4@1.0",
   "reference": "gemm_a4w4_mxfp4",
   "reference_rows": 256,

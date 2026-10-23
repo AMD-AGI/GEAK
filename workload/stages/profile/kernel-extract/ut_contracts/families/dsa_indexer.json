@@ -3,6 +3,7 @@
   "family": "dsa_indexer",
   "op_kind": "attn",
   "description": "DeepSeek sparse-attention lightning indexer as one boundary: score[t, s] = sum_h weights[t, h] * relu(q[t, h] . k[s]) (x k_scale[s]) over keys ks[t] <= s < ke[t], then top-k positions. The joint score+top-k task of joint-indexer-ut.md (GLM-5.x DSA, DeepSeek-V3.2/V4); both the decode (paged, per-request) and prefill (ragged) branches.",
+  "match": {"kernel": ["mqa_logits|indexer|logits_hist|topk_main_kernel|topk_transform"], "op": ["indexer|mqa_logits"]},
   "reference": "dsa_indexer",
   "reference_rows": 64,
   "axes": {

@@ -35,81 +35,96 @@ for the next dependent step while continuing independent inspection.
 ## 2. Measure the workload and select targets
 
 Read [workload measurement](references/dynamic-workloads.md) and
-[selection coverage](references/selection-coverage.md).
-Logs determine case distributions and sampling points; runtime traces determine
-actual kernels and costs. Census every material phase and live dispatch family.
-Keep request, token, call and device-time mass distinct. Sample common cases,
-dispatch boundaries and tails. Target at least 90% of device-time mass per
-material phase and disclose achieved coverage, approximations and missing mass.
-Coverage targets do not authorize unbounded capture.
+[selection coverage](references/selection-coverage.md). Logs determine case distributions
+and sampling points; runtime traces determine actual kernels and costs. Keep request,
+token, call and device-time mass distinct; target at least 90% of device-time mass per
+material phase and disclose achieved coverage, approximations and missing mass. Counts
+come from the serving log, never from a parametric ISL/OSL model
+(`parse_profile.analytic_regime_calls` only when no log exists at all, and say so).
 
-Given a completed baseline's **serving log and config**, the path from that log to a
-small set of profile points is executable: `observed_workload.py` → `plan_sampling_points.py`
-→ `serving_probe.py` (once per point) → `coverage_ledger.py`. Run them in that order with
-the commands in [workload measurement](references/dynamic-workloads.md); using them rather
-than your own is what makes two runs against one deployment comparable.
+This stage is a fixed template. **The only inputs you write are `serving.json` (step 1)
+and the review of `task_decls.json` (§3).** Everything else is produced by the scripts
+below; do not hand-write census, rank-merge, ranking, shape-manifest, source-map or
+task-plan scripts -- every run that did produced numbers no other run could compare
+with, and spent most of the hour doing it.
 
-These counts come from the log, never from a parametric ISL/OSL model.
-`parse_profile.analytic_regime_calls` assumes uniform request lengths and cannot see
-prefix-cache hits, accept length or the batch distribution; on an agentic replay it is
-wrong by whole multiples. Use it only when no serving log exists at all, and say which
-of the two you used.
+1. **Declare the deployment.** `python3 "$SKILL_ROOT/scripts/probe_server.py" init --out
+   "$EVAL_DIR/serving.json"`, then copy model, TP, GPUs, flags and environment from the
+   baseline's launch exactly. Leave `decode_capture` at `profile_cuda_graph`.
+2. **Observed workload and points.**
+   `observed_workload.py` → `plan_sampling_points.py` (commands in the reference).
+3. **Capture, census, rank, select, collect evidence** -- one command, one server:
 
-Use existing traces first. If needed, design bounded probes with explicit
-request/time/byte limits using the user's actual serving launcher; follow
-[capture procedure](references/capture.md). A probe's synthetic load does not
-replace the original baseline weights. Preserve failed evidence; allow one
-recapture per failed point before reporting the gap and continuing elsewhere.
+   ```bash
+   python3 "$SKILL_ROOT/scripts/probe_server.py" run --serving "$EVAL_DIR/serving.json" \
+       --run-dir "$EVAL_DIR/probe" -- \
+     python3 "$SKILL_ROOT/scripts/run_points.py" --server-state "$EVAL_DIR/probe/probe_server.json" \
+       --points "$EVAL_DIR/sampling_points.json" \
+       --observed "$EVAL_DIR/evidence/observed_workload.json" --eval-dir "$EVAL_DIR"
+   ```
 
-Write `kernel_workload.json` and `kernel_ranking.json`. Distinguish stage share,
-share within the callable and share the extracted source can affect; these are
-nested scopes, not additive. Keep collectives, unattributed work and unsupported
-kernels in the denominator and inventory. Window percentages alone are not
-whole-workload percentages: `coverage_ledger.py` converts them using the observed
-instance counts, under the constraints listed in the reference.
+   It starts the server once (falling back to an eager server, and recapturing only the
+   decode points, if graph replay hides decode kernels), captures every point back to
+   back, censuses each in the background, relabels points to their achieved shapes, and
+   writes `coverage.json`, `kernel_ranking.json`, `selection_targets.json`,
+   `evidence/{shapes,source_map.json,adjacency.json}` and a draft `task_decls.json`. It
+   resumes: rerunning it recaptures only points without a census (`--redo` forces one).
+   One recapture per failed point, then the gap is reported, as the skill requires.
+4. Write `kernel_workload.json` from those artifacts (coverage, phase split, sampling
+   plan, approximations). Distinguish stage share, share within the callable and share
+   the extracted source can affect; nested scopes, not additive. Collectives,
+   unattributed work and unsupported kernels stay in the denominator and inventory.
 
-Default selection is **per-phase Top 5 AND overall GPU-time share strictly >3%**.
-Rank PREFILL and DECODE separately before filtering; union by live identity,
-without backfilling rank 6. Apply the same rule to other material phases in scope.
-Explicit user scope overrides this default. Run:
-
-```bash
-python3 "$SKILL_ROOT/scripts/select_targets.py" \
-  "$EVAL_DIR/kernel_ranking.json" --output "$EVAL_DIR/selection_targets.json"
-```
-
-Every selected identity needs a task or explicit blocker. Execution limits may
-defer tasks but cannot turn a partial batch into completed extraction.
+Default selection is **per-phase Top 5 AND overall GPU-time share strictly >3%**: ranked
+per phase before filtering, unioned by live identity, no backfilling of rank 6. Explicit
+user scope overrides it (`run_points.py --select-arg`). Every selected identity needs a
+task or explicit blocker; execution limits may defer tasks but cannot turn a partial
+batch into completed extraction.
 
 ## 3. Declare complete task boundaries
 
-Read [delivery contract](references/delivery-contract.md) before authoring.
-Save `task_plan.json` with one owner per complete math boundary. For each task,
-save the original declaration as `run/requested_kernel.json` (called `KERNEL`
-in the delivery contract), including exact selected identities, callable
-candidates, phases and `source_delivery_required=true`. Name each task's UT
-contract family in `task_plan.json` (`tasks[].ut_family`; `python3
-"$SKILL_ROOT/ut_contracts/scaffold_ut.py" list`), or `custom` with the reason no
-family fits.
+Read [delivery contract](references/delivery-contract.md). `task_decls.json` is drafted
+from the evidence: selected kernels joined by consecutive launches that share a frame
+narrower than the layer become one task; its `target_callable` is their innermost common
+frame; its `ut_family` is the family whose `match` patterns fit; collectives and device
+copies are excluded with a stated reason; each phase gets one `joint_phases` row per
+distinct set of the task's kernels launched together (two rows in one phase are dispatch
+branches). Every decision carries its basis and a `needs_review` note. Review it:
 
-Keep required companions even when below the selection threshold. Use
-`joint_ut.phases` for mandatory chains, including split-K plus reduce; use
-`dispatch_ut.phases` for mutually exclusive selected branches of one whole op.
-Never demand mutually exclusive kernels in every invocation. Whole fused MoE
-tasks preserve routing and the complete operation, not a synthetic dense GEMM.
+- **Boundary.** One owner per complete math boundary. Keep required companions (a
+  dispatch-branch sibling or a mandatory chain member below the threshold) under
+  `companions` with a reason. Mandatory chains, including split-K plus reduce, are one
+  task; mutually exclusive branches are separate `joint_phases` rows, never demanded in
+  every invocation. Whole fused MoE keeps routing and the complete operation.
+- Selected indexer score/top-k is one task covering both served prefill and decode
+  branches ([joint indexer UT](references/joint-indexer-ut.md)); collectives follow
+  [multi-rank UT](references/collective-ut.md). The [GLM example](references/glm-agentx-example.md)
+  only for matching features; it supplies no default shapes or identities.
+- **Family and axes.** Confirm `ut_family` (or `custom` with `ut_family_why`), pin the
+  family's const `axes`/`attrs` and write `case_axes` per phase from the host-op dims in
+  `evidence/shapes` (expressions in `shape` and `context`). `build_task_plan.py --check`
+  lists exactly what is still missing.
+- Empty each `needs_review`, then:
 
-For selected indexer score/top-k, deliver one unified task covering both served
-prefill and decode branches. Read [joint indexer UT](references/joint-indexer-ut.md).
-For collectives read [multi-rank UT](references/collective-ut.md). Consult the
-[GLM example](references/glm-agentx-example.md) only for matching features;
-it supplies no default shapes, layer multipliers or kernel identities.
+  ```bash
+  python3 "$SKILL_ROOT/scripts/build_task_plan.py" --eval-dir "$EVAL_DIR"
+  ```
 
-Trace live callable candidates using `$SHARED_TOOLS/seam_trace.py` and run
-`python3 "$SHARED_TOOLS/kernel_selection.py" --strict-launch --help` for the verifier. Preserve complete raw
-verdicts and deeper-candidate evidence. Names alone cannot prove a binding or
-that the requested whole chain executes. If the declared boundary is wrong,
-repair the saved task plan with evidence before extracting; do not edit a
-failed verdict into a pass or rerun an unchanged UT to repair JSON fields.
+  It lints the declaration (every selected identity owned once, joint rows consistent
+  with where kernels launched, nothing left unreviewed) and writes `task_plan.json`,
+  each task's `run/requested_kernel.json` and `run/ut_case_plan.json` (point cases plus
+  bucket cases for the bands no point covers, without double-weighting), and scaffolds
+  the UT from its family. An existing `unittest.py` is never overwritten without `--force`.
+
+The source map's frames prove a call reached a file on this deployment; they do not prove
+a binding. Verify the live callable with `$SHARED_TOOLS/seam_trace.py` and
+`python3 "$SHARED_TOOLS/kernel_selection.py" --strict-launch` (`--help` for its inputs),
+keeping complete raw verdicts. If the declared boundary is wrong, fix `task_decls.json`
+with the evidence and rebuild; do not edit a failed verdict into a pass.
+
+Stop the probe server as soon as the evidence is collected. The CPU half of §3–§4
+(declaration review, source resolution inside the serving container, scaffold, case
+manifest, CPU lint) needs no GPU; run GPU gates only once the server's devices drained.
 
 ## 4. Extract source and build the standalone UT
 

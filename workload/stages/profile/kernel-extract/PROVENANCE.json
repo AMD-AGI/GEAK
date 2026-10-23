@@ -8,7 +8,9 @@
     "delivery_contract.mjs is the five-block extraction of e2e_workflow.js that loadContract() performs, frozen; loadContract(path) still re-extracts from a given checkout.",
     "Tests that drive the GEAK workflow runtime or agentx_kernel_preparation.mjs are dropped; the remaining tests resolve the bundled layout.",
     "references/workflow-handoff.md (GEAK e2e invocation) replaced by references/pipeline-handoff.md (this pipeline's profile slot).",
-    "ut_contracts/ (added on this branch): per-operator UT contract families, the contract library and float64 references, the generic gate driver and the task scaffold; SKILL.md \u00a73/\u00a74 and references/task-authoring.md point task authoring at them."
+    "ut_contracts/ (added on this branch): per-operator UT contract families, the contract library and float64 references, the generic gate driver and the task scaffold; SKILL.md \u00a73/\u00a74 and references/task-authoring.md point task authoring at them.",
+    "Profile fast path (added on this branch): run_points.py drives every sampling point through one probe server with background per-point censuses (point_census.py, generalized from the per-run census scripts of two GLM-5.2 runs), then coverage_ledger -> build_ranking.py -> select_targets; trace_scan.py replaces json.load for traces; serving_probe.py verifies one rank, closes on settled trace files, aborts and drains its requests and fails graph-hidden decode windows; coverage_ledger divides per_rank censuses by instances; parse_profile knows sglang 0.5.20's VERIFY/DRAFT_EXTEND step names.",
+    "Profile template (added on this branch): the agent writes only serving.json (probe_server.py owns the server, keeps decode under --enable-profile-cuda-graph with an eager fallback) and reviews task_decls.json (drafted by draft_task_decls.py from kernel_shapes/source_map/adjacency evidence). relabel_points, plan_ut_cases and build_task_plan.py (lint + task_plan.json + requested_kernel + scaffold_ut) are generalized from the per-run scripts of the 2026-10-20 GLM-5.2 run; families gained `match` patterns; serving_probe arms record_shapes/with_stack, reads realtime_tokens_total for steady state and splits/warms prefill batches before arming (GEAK e82bb297)."
   ],
   "files": [
     {
@@ -21,7 +23,7 @@
       "file": "references/capture.md",
       "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/capture.md",
       "source_sha256": "ee1c1459418afc5dd2a1817c8a8a87b955fdced5625c65652d9d036780c8cb84",
-      "modified": false
+      "modified": true
     },
     {
       "file": "references/collective-ut.md",
@@ -39,7 +41,7 @@
       "file": "references/dynamic-workloads.md",
       "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/references/dynamic-workloads.md",
       "source_sha256": "c5474c5fdc65d8a7e0b2974b45dfbefc7c9c4a16678a5ea5bc92a29ebacf3baa",
-      "modified": false
+      "modified": true
     },
     {
       "file": "references/glm-agentx-example.md",
@@ -92,7 +94,7 @@
       "file": "scripts/coverage_ledger.py",
       "source": "e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/scripts/coverage_ledger.py",
       "source_sha256": "0f43d2a826f7da1c2e3c831c07ebcfd2c5a50524c599f33ca4d61b926ed10d09",
-      "modified": false
+      "modified": true
     },
     {
       "file": "scripts/kernel_self_noise.py",
@@ -206,7 +208,7 @@
       "file": "shared/parse_profile.py",
       "source": "e2e_workflow/scripts/parse_profile.py",
       "source_sha256": "5571f0fcad5e85443b6208131b7dfa642c97abca40b9e41fcdf3cee89a7ae75e",
-      "modified": false
+      "modified": true
     },
     {
       "file": "shared/schema.mjs",
@@ -420,6 +422,71 @@
     },
     {
       "file": "ut_contracts/ut_driver.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/trace_scan.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/point_census.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/build_ranking.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/run_points.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "tests/test_profile_fast_path.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/probe_server.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/relabel_points.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/kernel_shapes.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/source_map.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/adjacency.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/plan_ut_cases.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/draft_task_decls.py",
+      "source": null,
+      "added_here": true
+    },
+    {
+      "file": "scripts/build_task_plan.py",
       "source": null,
       "added_here": true
     }

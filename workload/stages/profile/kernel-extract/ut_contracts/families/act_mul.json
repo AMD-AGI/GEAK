@@ -3,6 +3,7 @@
   "family": "act_mul",
   "op_kind": "elementwise",
   "description": "Gated activation: out = act(x[..., :d]) * x[..., d:] with d = width // 2 (silu_and_mul, gelu_and_mul, gelu_tanh_and_mul). For a fused quantized output use rmsnorm_quant's output bounds as an override.",
+  "match": {"kernel": ["act_and_mul|silu_and_mul|gelu_and_mul|silu_mul_kernel|act_mul"], "op": ["silu_and_mul|gelu_and_mul|gelu_tanh_and_mul|act_and_mul"]},
   "reference": "act_mul",
   "reference_rows": 1024,
   "axes": {

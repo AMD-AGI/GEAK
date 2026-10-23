@@ -29,7 +29,7 @@ The slot's `finalize.py` maps `$OUT` to `result.json`. It requires these names:
 |---|---|
 | `kernel_workload.json`, `kernel_ranking.json` | §2 census; the denominator for every share |
 | `selection_targets.json` | §2, `scripts/select_targets.py`; the roofline stage ranks on `targets[].overall_pct` |
-| `task_plan.json` | §3; every selected identity owned by a task or listed in `blocked_identities` with a blocker |
+| `task_plan.json` | §3, `build_task_plan.py` from the reviewed `task_decls.json`; every selected identity owned by a task or listed in `blocked_identities` with a blocker |
 | `tasks/<name>/` | §4; each holds `unittest.py`, `meta.json`, `cases.py`, `kernel_src/` and is run by the optimize stage one GPU per task |
 | `REPORT.md`, `results.json` | §5 |
 

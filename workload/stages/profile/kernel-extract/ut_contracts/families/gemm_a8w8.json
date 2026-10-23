@@ -3,6 +3,7 @@
   "family": "gemm_a8w8",
   "op_kind": "gemm",
   "description": "Per-token 8-bit GEMM: out = (a * a_scale) @ (b * b_scale).T + bias with a_scale per row of a and b_scale per output column; int8 or fp8 operands. aiter gemm_a8w8 / gemm_a8w8_bpreshuffle, hipBLASLt scaled GEMM, Triton per-token FP8.",
+  "match": {"kernel": ["^(?!.*(blockscale|moe)).*(a8w8|w8a8|fp8_gemm)"], "op": ["gemm_a8w8(?!_blockscale)"]},
   "sikl_contract": "gemm_a8w8@1.0",
   "reference": "gemm_a8w8",
   "reference_rows": 256,
