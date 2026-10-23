@@ -57,13 +57,22 @@ What `rank.py` does:
    domain, sum numerator and denominator separately, divide once, normalize weights
    within a regime — and `mean(roofline_pct)` is not it. So this is a `subprocess` call to
    `$SKILL_ROOT/scripts/fold.py`; swap the implementation and it calls that one instead.
-2. Distributes each kernel's overall share across regimes by their `measured_us` in
-   `rows.json`, computes expected gain per regime, and sums.
+2. Maps task-keyed or leaf-keyed rows to the declared task boundary and its selected
+   whole-workload share. It checks that every positive-mass task case has an analysis
+   row before distributing the share across regimes by measured time. Incomplete model
+   coverage, explicit inadmissibility and suspect rows leave whole-task bounds unknown;
+   native subset folds remain diagnostics only.
 3. Writes `roofline.json` (all kernels, descending by `expected_e2e_gain_pct`) and
    `result.json`.
 
 Artifacts: `roofline.json`, `folded.json` (raw `fold.py` output) and `fold.log` (its
 table, with coverage and suspect markers).
+
+Every delivered task remains in the output. Completed analysis with an explicitly
+unsupported model may finish with unknown bounds; missing cases, stale qualification
+or unexplained absent models block the stage. Tasks with unknown expected gain retain
+`task_plan.json` order for execution, clearly labelled as a fallback rather than a
+predicted performance ranking. A partial ranked subset cannot imply a known total gain.
 
 ## Three rules that must not be broken
 

@@ -34,6 +34,8 @@ REF_KEY="$(p reference_key output_tok_per_s)"
 TAG_PREFIX="$(p run_tag_prefix wl_geakx_ab)"
 REPEATS="$(p repeats 2)"
 DURATION="$(p duration_s 3600)"
+CACHE_ROOT="$(p cache_root '')"
+STOCK_TAG="$(p stock_run_tag "${TAG_PREFIX}_stock")"
 
 [ -f "$OPTIMIZED" ] || blocked "missing $OPTIMIZED — run the optimize stage first"
 for f in "$HARNESS/$HCMD" "$HARNESS/$CASE_FILE" "$REF_RUN"; do
@@ -41,6 +43,10 @@ for f in "$HARNESS/$HCMD" "$HARNESS/$CASE_FILE" "$REF_RUN"; do
 Without it the candidate leg cannot be measured the same way as the reference, and a
 throughput number measured any other way would not be an A/B."
 done
+[ -n "$CACHE_ROOT" ] || blocked "cache_root is required: stock and candidate arms need the same per-run fresh compile-cache policy"
+python3 "$SKILL_ROOT/summarize.py" --settings "$PARAMS" --preflight \
+    > "$OUT/contract_preflight.json" 2>&1 \
+    || blocked "reference-replay contract is incomplete; configure actual native validity, overlay receipt and serving-rank proof paths. See contract_preflight.json"
 
 # The serving stack takes the node. Refuse rather than measure against someone else's load.
 if curl -fsS --max-time 3 "http://localhost:$(p port 8899)/health" >/dev/null 2>&1; then
@@ -49,11 +55,33 @@ and the overlay must be loaded by a freshly started server (reusing a running on
 an unpatched stack)"
 fi
 
-# --- 1. Build the overlay, and check it shadows **here**, inside the serving container.
+# --- 1. Build/import in the configured analysis environment (host python3 by default).
 OVERLAY="$OUT/overlay"
-python3 "$SLOT/build_overlay.py" --optimized "$OPTIMIZED" --tasks-dir "$TASKS_DIR" \
-    --overlay "$OVERLAY" --manifest "$OUT/applied.json" 2>&1 | tee "$OUT/overlay.log"
+python3 - "$PARAMS" "$SLOT/build_overlay.py" --optimized "$OPTIMIZED" --tasks-dir "$TASKS_DIR" \
+    --overlay "$OVERLAY" --manifest "$OUT/applied.json" --settings "$PARAMS" \
+    --geak-root "$GEAK_ROOT" <<'BUILD_PY' 2>&1 | tee "$OUT/overlay.log"
+import json, os, subprocess, sys
+settings, builder, *arguments = sys.argv[1:]
+params = json.load(open(settings)) if os.path.isfile(settings) else {}
+prefix = params.get("overlay_build_command", ["python3"])
+if (not isinstance(prefix, list) or not prefix or not isinstance(prefix[0], str)
+        or not prefix[0] or any(not isinstance(arg, str) or "\0" in arg for arg in prefix)):
+    print("overlay_build_command must be a nonempty argv list", file=sys.stderr)
+    raise SystemExit(78)
+try:
+    # Prefix arguments stay literal; a remote/container launcher is just another argv.
+    process = subprocess.run(prefix + [builder] + arguments)
+except OSError as exc:
+    print("overlay build command unavailable: %s" % exc, file=sys.stderr)
+    raise SystemExit(78)
+raise SystemExit(process.returncode if process.returncode >= 0 else 128 - process.returncode)
+BUILD_PY
 BRC=${PIPESTATUS[0]}
+if [ "$BRC" = 78 ]; then
+  python3 "$SCRIPTS/emit_result.py" --status blocked \
+    --notes "overlay build command is unavailable or reported an unmet precondition (exit 78); see overlay.log"
+  exit 78
+fi
 if [ "$BRC" = 3 ]; then
   python3 "$SCRIPTS/emit_result.py" --status blocked \
     --notes "there is no kernel to apply back (nothing from the optimize stage passed cold
@@ -61,48 +89,78 @@ re-verification). Every stage ran; the conclusion is that no usable optimization
   exit 0
 fi
 [ "$BRC" = 0 ] || { python3 "$SCRIPTS/emit_result.py" --status fail \
-    --notes "building the overlay failed; see overlay.log"; exit 0; }
+    --notes "building the overlay failed (exit $BRC); see overlay.log"; exit "$BRC"; }
 
-# --- 2. Register it as a case of the reference harness. The launcher requires the overlay
-#        to live inside its own root, so the overlay is copied there; $OUT keeps the
-#        original, and removing the case entry restores the harness exactly.
-python3 "$SKILL_ROOT/register_case.py" --harness "$HARNESS" --case-file "$CASE_FILE" \
-    --case "$CASE_NAME" --base-case "$BASE_CASE" --overlay "$OVERLAY" \
-    --overlay-subdir "$OVL_SUB" --out "$OUT/case_registration.json" 2>&1 | tee -a "$OUT/overlay.log"
-[ "${PIPESTATUS[0]}" = 0 ] || { python3 "$SCRIPTS/emit_result.py" --status fail \
-    --notes "could not register the overlay as a case of the reference harness; see overlay.log"; exit 0; }
-
-# --- 3. Re-run the reference harness, once per repeat, unchanged.
+# --- 2. Re-run the reference harness with independent source/cache roots per arm.
 mkdir -p "$OUT/e2e"
 STOP="$(p stop_cmd '')"
+run_arm() {
+  local ARM_CASE="$1" TAG="$2" DIR="$HARNESS/runs/$2"
+  if [ -f "$DIR/$TAG.json" ]; then
+    echo "[applyback] $TAG already has a result; validating retained evidence"
+    return 0
+  fi
+  local CACHE="$CACHE_ROOT/$TAG"
+  if [ -e "$CACHE" ]; then
+    echo "[applyback] $CACHE already exists without a completed arm; preserve it and use a fresh run tag" >&2
+    return 78
+  fi
+  mkdir -p "$CACHE/triton" "$CACHE/xdg" "$CACHE/inductor" "$CACHE/torch_ext" || return 78
+  ( cd "$HARNESS" && env TRITON_CACHE_DIR="$CACHE/triton" XDG_CACHE_HOME="$CACHE/xdg" \
+      TORCHINDUCTOR_CACHE_DIR="$CACHE/inductor" \
+      TORCH_EXTENSIONS_DIR="$CACHE/torch_ext" \
+      GEAK_SERVING_SOURCE_PROOF_RUN_DIR="$DIR" \
+      bash "$HCMD" "$ARM_CASE" "$TAG" "$DURATION" ) \
+      > "$OUT/e2e/${TAG}.log" 2>&1
+  local RC=$?
+  echo "[applyback] $TAG exited $RC"
+  if [ -n "$STOP" ] && [ -f "$DIR/server_pid.json" ]; then
+    ( cd "$HARNESS" && python3 "$STOP" "$DIR" ) >> "$OUT/e2e/${TAG}.log" 2>&1 || return 1
+  fi
+  return "$RC"
+}
+
+# The historical baseline remains a drift reference. A fresh unchanged control
+# is the A/B denominator after a long optimization campaign.
+run_arm "$BASE_CASE" "$STOCK_TAG"
+RC=$?
+[ "$RC" = 78 ] && blocked "fresh stock control needs a new run tag/cache path; existing evidence was preserved"
+[ "$RC" = 0 ] || { python3 "$SCRIPTS/emit_result.py" --status fail --notes "fresh stock control failed; see e2e/${STOCK_TAG}.log"; exit 0; }
+STOCK_RUN="$HARNESS/runs/$STOCK_TAG/$STOCK_TAG.json"
+python3 "$SKILL_ROOT/summarize.py" --settings "$PARAMS" --validate-run "$HARNESS/runs/$STOCK_TAG" \
+    --stock --duration-s "$DURATION" > "$OUT/e2e/${STOCK_TAG}.validation.json" 2>&1 \
+    || { python3 "$SCRIPTS/emit_result.py" --status fail --notes "fresh stock control failed native validity/duration gates"; exit 0; }
 RUN_DIRS=()
 for i in $(seq 1 "$REPEATS"); do
   TAG="${TAG_PREFIX}_$(printf '%02d' "$i")"
   DIR="$HARNESS/runs/$TAG"
+  ARM_CASE="${CASE_NAME}_${TAG}"
+  ARM_SUBDIR="${OVL_SUB%/}/$TAG"
   RUN_DIRS+=("$DIR")
-  # Resumable by result, not by directory: a leg that already produced its result file is
-  # a finished measurement and is reused. The harness refuses to overwrite an existing run
-  # directory, so without this a stage that lost one leg could never be re-run.
-  if [ -f "$DIR/$TAG.json" ]; then
-    echo "[applyback] leg $i/$REPEATS: $TAG already has a result; reusing it"
-    continue
+  if [ ! -f "$DIR/$TAG.json" ]; then
+    # Real copies matter: native builders resolve __file__ and may write beside
+    # their source. A symlink or one shared overlay would share those outputs.
+    python3 "$SKILL_ROOT/register_case.py" --harness "$HARNESS" --case-file "$CASE_FILE" \
+        --case "$ARM_CASE" --base-case "$BASE_CASE" --overlay "$OVERLAY" \
+        --overlay-subdir "$ARM_SUBDIR" --out "$OUT/e2e/${TAG}.case_registration.json" \
+        >> "$OUT/overlay.log" 2>&1 \
+        || { python3 "$SCRIPTS/emit_result.py" --status blocked --notes "candidate arm requires a fresh per-arm source path; previous overlay/build evidence was preserved"; exit 0; }
   fi
-  echo "[applyback] leg $i/$REPEATS: $HCMD $CASE_NAME $TAG $DURATION"
-  ( cd "$HARNESS" && bash "$HCMD" "$CASE_NAME" "$TAG" "$DURATION" ) \
-      > "$OUT/e2e/${TAG}.log" 2>&1
-  echo "[applyback] leg $i exited $?"
-  # Stop the server this leg owns. The harness launches one and leaves it running, and it
-  # refuses to start another while one is up -- so without a teardown every leg after the
-  # first dies in a second with "Stop the owned previous server". Leaving it up would be
-  # worse than that: the next leg would measure a server that had already served an hour.
-  if [ -n "$STOP" ] && [ -f "$DIR/server_pid.json" ]; then
-    ( cd "$HARNESS" && python3 "$STOP" "$DIR" ) >> "$OUT/e2e/${TAG}.log" 2>&1 \
-      || echo "[applyback] teardown of leg $i reported a problem; see ${TAG}.log"
-  fi
+  echo "[applyback] leg $i/$REPEATS: $HCMD $ARM_CASE $TAG $DURATION"
+  run_arm "$ARM_CASE" "$TAG"
+  RC=$?
+  [ "$RC" = 78 ] && blocked "candidate arm needs a new run tag/cache path; existing evidence was preserved"
+  [ "$RC" = 0 ] || { python3 "$SCRIPTS/emit_result.py" --status fail --notes "candidate arm failed; see e2e/${TAG}.log"; exit 0; }
+  python3 "$SKILL_ROOT/summarize.py" --settings "$PARAMS" --validate-run "$DIR" \
+      --duration-s "$DURATION" --overlay "$OVERLAY" --applied "$OUT/applied.json" \
+      > "$OUT/e2e/${TAG}.validation.json" 2>&1 \
+      || { python3 "$SCRIPTS/emit_result.py" --status fail --notes "candidate arm lacks native validity or actual post-lazy-load serving-rank source proof; see e2e/${TAG}.validation.json"; exit 0; }
 done
 
 # --- 4. Summarize + verify the server really loaded the overlay, then the slot adapter.
-python3 "$SKILL_ROOT/summarize.py" --overlay "$OVERLAY" --reference-run "$REF_RUN" \
+python3 "$SKILL_ROOT/summarize.py" --settings "$PARAMS" --overlay "$OVERLAY" --applied "$OUT/applied.json" \
+    --reference-run "$STOCK_RUN" --historical-reference "$REF_RUN" \
+    --expected-repeats "$REPEATS" --duration-s "$DURATION" \
     --reference-key "$REF_KEY" --out-reference "$OUT/reference.json" \
     --out-summary "$OUT/e2e/bench_summary.json" --runs "${RUN_DIRS[@]}" \
     2>&1 | tee "$OUT/summarize.log"

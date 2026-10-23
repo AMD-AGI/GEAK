@@ -25,7 +25,10 @@ def task_fixture(tmp_path, form='object'):
     for directory in ('kernel_src', 'baseline_ref'):
         write(task / directory / LEAF, 'VALUE = 1\n')
         write(task / directory / TOP, '# immutable dispatcher\n')
-    leaf = {'source_file': 'kernel_src/' + LEAF} if form == 'object' else 'kernel_src/' + LEAF
+    if form in ('object', 'file_object'):
+        leaf = {('source_file' if form == 'object' else 'file'): 'kernel_src/' + LEAF}
+    else:
+        leaf = 'kernel_src/' + LEAF
     write(task / 'meta.json', json.dumps({'kernel_extraction': {'editable_leaves': [leaf]},
                                         'candidate_bind': {'file': 'kernel_src/' + TOP}}))
     write(task / 'unittest.py', '# frozen test entry\n')
@@ -36,7 +39,7 @@ def run_source_tree(*argv):
                           + [str(a) for a in argv], capture_output=True, text=True)
 
 
-@pytest.mark.parametrize('form', ['object', 'string'])
+@pytest.mark.parametrize('form', ['object', 'file_object', 'string'])
 @pytest.mark.parametrize('outcome', ['keep', 'reject', 'forbidden', 'frozen', 'measurement_mutates'])
 def test_worker_tracks_nested_computation(tmp_path, form, outcome):
     task = task_fixture(tmp_path, form)
@@ -192,3 +195,47 @@ def test_worker_default_measure_accepts_fresh_file_only_receipt(tmp_path):
     assert (work / 'runs/nested/best_kernel_src' / LEAF).read_text() == 'VALUE = 2\n'
     status = json.loads((work / 'state/nested.status.json').read_text())
     assert status['best_speedup'] == 2
+
+
+def test_full_budget_runs_a_last_scored_attempt_instead_of_early_done(tmp_path):
+    task = task_fixture(tmp_path)
+    work, skill, bins = tmp_path / 'work', tmp_path / 'skill', tmp_path / 'bin'
+    clock = tmp_path / 'clock'
+    clock.write_text('1000')
+    write(bins / 'date', '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$TEST_CLOCK"; else exec /bin/date "$@"; fi\n')
+    (bins / 'date').chmod(0o755)
+    write(skill / 'prompt.sh', 'echo optimize > "$PROMPT_OUT"\n')
+    write(skill / 'measure.sh', 'echo measured >> "$RUN_DIR/measured_attempts"\necho "STATUS=1 SPEEDUP=1.8"\n')
+    runner = tmp_path / 'runner.sh'
+    write(runner, 'echo "VALUE = $(cat "$TEST_CLOCK")" > "$TASK_DIR/kernel_src/' + LEAF + '"\n'
+          'echo $(( $(cat "$TEST_CLOCK") + 6 )) > "$TEST_CLOCK"\n')
+    env = dict(os.environ, WORK_ROOT=str(work), TASK_DIR=str(task), SKILL_ROOT=str(skill),
+               RUNNER=str(runner), TARGET='10', ATTEMPT_CAP='10', ATTEMPT_MIN='2',
+               MEASURE_TIMEOUT='4', REQUIRE_FULL_BUDGET='1', TEST_CLOCK=str(clock),
+               PATH=str(bins) + ':' + os.environ['PATH'])
+    with (tmp_path / 'worker.log').open('w') as log:
+        result = subprocess.run(['bash', str(SCRIPTS / 'worker.sh'), 'nested', 'cpu'],
+                                env=env, stdout=log, stderr=subprocess.STDOUT, timeout=15)
+    assert result.returncode == 0
+    status = json.loads((work / 'state/nested.status.json').read_text())
+    assert status['credited_seconds'] == 12 and status['attempts'] == 2
+    assert (work / 'runs/nested/measured_attempts').read_text().splitlines() == ['measured', 'measured']
+
+
+def test_worker_resumes_from_newer_committed_credit(tmp_path):
+    task = task_fixture(tmp_path)
+    work, skill = tmp_path / 'work', tmp_path / 'skill'
+    write(work / 'state/nested.credit', '10')
+    write(work / 'state/nested.status.json', '{"status":"done","credited_seconds":20}')
+    write(skill / 'prompt.sh', 'exit 99\n')
+    runner = tmp_path / 'runner.sh'
+    write(runner, 'exit 99\n')
+    env = dict(os.environ, WORK_ROOT=str(work), TASK_DIR=str(task), SKILL_ROOT=str(skill),
+               RUNNER=str(runner), TARGET='20', REQUIRE_FULL_BUDGET='1')
+    with (tmp_path / 'worker.log').open('w') as log:
+        result = subprocess.run(['bash', str(SCRIPTS / 'worker.sh'), 'nested', 'cpu'],
+                                env=env, stdout=log, stderr=subprocess.STDOUT, timeout=15)
+    assert result.returncode == 0
+    status = json.loads((work / 'state/nested.status.json').read_text())
+    assert status['credited_seconds'] >= 20
+    assert not list((work / 'runs/nested').glob('attempt_*'))

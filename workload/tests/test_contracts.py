@@ -288,45 +288,61 @@ def test_a_check_that_could_not_run_is_unproven_not_ok(tmp_path):
 # goes wrong silently: an agent session that produces nothing being recorded as a pass,
 # and a missing precondition being retried until the budget is gone.
 
+STUB_SKILL = {"profile": "agentx-kernel-extraction-standalone",
+              "optimize": "subagent-raw"}
+# The dispatch tests below run the `optimize` slot, which has no `finalize.py`: what they
+# check is the session loop -- attempts, continuation, repair, resume -- and a slot that
+# re-judges the delivery afterwards would answer for the session instead. That the profile
+# slot's finalize does exactly that, and overrides a session's own `ok`, is a separate
+# claim with its own test.
+AGENT_STAGE = "optimize"
+
+
 def _stub_cfg(tmp_path, stage="profile", **params):
     cfg = {"run_root": str(tmp_path / "run"), "runner": "stub",
-           "order": ["profile"], "target": {"model": None, "enforce": False,
-                                            "_note_enforce": "stub"},
-           "stages": {"profile": {"skill": "agentx-kernel-extraction-standalone",
-                                  "params": params}}}
+           "order": [stage], "target": {"model": None, "enforce": False,
+                                        "_note_enforce": "stub"},
+           "stages": {stage: {"skill": STUB_SKILL[stage], "params": params}}}
     p = tmp_path / "cfg.json"
     p.write_text(json.dumps(cfg))
     return p
 
 
+def _stub_delivery(tmp_path, status="ok", name="work.sh"):
+    """A session that writes one artifact and reports it, as the contract requires."""
+    script = tmp_path / name
+    script.write_text('echo "{}" > "$OUT/optimized.json"\n'
+                      'python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status %s '
+                      '--artifact optimized=optimized.json\n' % status)
+    return script
+
+
 def test_an_agent_stage_runs_itself_through_the_runner(tmp_path):
     """Agent mode used to stop and ask for a human. The judgement is still the agent's;
     dispatching it is not judgement, and the runner contract already abstracts it."""
-    script = tmp_path / "work.sh"
-    script.write_text('echo "{}" > "$OUT/kernel_ranking.json"\n'
-                      'python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok '
-                      '--artifact ranking=kernel_ranking.json '
-                      '--metric kernels_censused=3\n')
-    cfg = _stub_cfg(tmp_path, agent_budget_sec=120)
+    script = _stub_delivery(tmp_path)
+    cfg = _stub_cfg(tmp_path, AGENT_STAGE, agent_budget_sec=120)
     r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
-             "run", "profile"],
+             "run", AGENT_STAGE],
             env_extra={"STUB_SCRIPT": str(script)})
     assert r.returncode == 0, r.stdout + r.stderr
     assert "agent mode via stub.sh" in r.stdout
     # and the prompt it was handed carried the contract, not a vague instruction
-    prompt = (tmp_path / "run" / "profile" / "out" / "agent_prompt.1.txt").read_text()
+    prompt = (tmp_path / "run" / AGENT_STAGE / "out" / "agent_prompt.1.txt").read_text()
     assert "result.json" in prompt and "$OUT" in prompt
     assert "Never report `ok` for work that was not done" in prompt
+    # including which of the two sources of truth wins when they disagree
+    assert "$PARAMS wins" in prompt
 
 
 def test_a_session_that_wrote_nothing_is_a_failed_stage(tmp_path):
     """An agent that talked and produced no artifacts has not done the stage. The only
     thing that decides the verdict is result.json."""
-    cfg = _stub_cfg(tmp_path, agent_budget_sec=120, agent_attempts=2)
+    cfg = _stub_cfg(tmp_path, AGENT_STAGE, agent_budget_sec=120, agent_attempts=2)
     r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
-             "run", "profile"], env_extra={"STUB_RC": "0"})
+             "run", AGENT_STAGE], env_extra={"STUB_RC": "0"})
     assert r.returncode != 0
-    doc = json.load(open(tmp_path / "run" / "profile" / "out" / "result.json"))
+    doc = json.load(open(tmp_path / "run" / AGENT_STAGE / "out" / "result.json"))
     assert doc["status"] == "fail"
     assert "attempts" in doc["notes"]
 
@@ -334,23 +350,23 @@ def test_a_session_that_wrote_nothing_is_a_failed_stage(tmp_path):
 def test_a_continuation_names_what_is_already_on_disk(tmp_path):
     """Restarting from zero throws away hours of profiling already written to $OUT."""
     script = tmp_path / "work.sh"
-    script.write_text('echo partial > "$OUT/kernel_ranking.json"\n')
-    cfg = _stub_cfg(tmp_path, agent_budget_sec=120, agent_attempts=2)
+    script.write_text('echo partial > "$OUT/optimized.json"\n')
+    cfg = _stub_cfg(tmp_path, AGENT_STAGE, agent_budget_sec=120, agent_attempts=2)
     run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
-         "run", "profile"], env_extra={"STUB_SCRIPT": str(script)})
-    second = (tmp_path / "run" / "profile" / "out" / "agent_prompt.2.txt").read_text()
+         "run", AGENT_STAGE], env_extra={"STUB_SCRIPT": str(script)})
+    second = (tmp_path / "run" / AGENT_STAGE / "out" / "agent_prompt.2.txt").read_text()
     assert "CONTINUATION" in second and "Do not start over" in second
-    assert "kernel_ranking.json" in second
+    assert "optimized.json" in second
 
 
 def test_an_unmet_precondition_is_not_retried(tmp_path):
     """78 means the binary or the credentials are missing. Retrying produces the same
     result; the contract says stop, and `blocked` is the honest verdict."""
-    cfg = _stub_cfg(tmp_path, agent_budget_sec=120, agent_attempts=5)
+    cfg = _stub_cfg(tmp_path, AGENT_STAGE, agent_budget_sec=120, agent_attempts=5)
     r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
-             "run", "profile"], env_extra={"STUB_RC": "78"})
+             "run", AGENT_STAGE], env_extra={"STUB_RC": "78"})
     assert r.returncode != 0
-    out = tmp_path / "run" / "profile" / "out"
+    out = tmp_path / "run" / AGENT_STAGE / "out"
     doc = json.load(open(out / "result.json"))
     assert doc["status"] == "blocked"
     assert not (out / "agent_prompt.2.txt").exists(), "78 must not be retried"
@@ -366,14 +382,14 @@ def test_blocked_gets_one_repair_session(tmp_path):
                       '  python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status blocked '
                       '--notes "the reference harness is missing: run_tp8.sh"\n'
                       'else\n'
-                      '  echo "{}" > "$OUT/kernel_ranking.json"\n'
+                      '  echo "{}" > "$OUT/optimized.json"\n'
                       '  python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok '
-                      '--artifact ranking=kernel_ranking.json\n'
+                      '--artifact optimized=optimized.json\n'
                       'fi\n')
-    cfg = _stub_cfg(tmp_path, agent_budget_sec=900, agent_attempts=3)
+    cfg = _stub_cfg(tmp_path, AGENT_STAGE, agent_budget_sec=900, agent_attempts=3)
     r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
-             "run", "profile"], env_extra={"STUB_SCRIPT": str(script)})
-    out = tmp_path / "run" / "profile" / "out"
+             "run", AGENT_STAGE], env_extra={"STUB_SCRIPT": str(script)})
+    out = tmp_path / "run" / AGENT_STAGE / "out"
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.load(open(out / "result.json"))["status"] == "ok"
     # the diagnosis is kept rather than overwritten, and the repair session was told it
@@ -390,10 +406,10 @@ def test_a_second_blocked_is_the_stage_s_answer(tmp_path):
     script = tmp_path / "work.sh"
     script.write_text('python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status blocked '
                       '--notes "no GPU is visible in this container"\n')
-    cfg = _stub_cfg(tmp_path, agent_budget_sec=900, agent_attempts=4)
+    cfg = _stub_cfg(tmp_path, AGENT_STAGE, agent_budget_sec=900, agent_attempts=4)
     r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
-             "run", "profile"], env_extra={"STUB_SCRIPT": str(script)})
-    out = tmp_path / "run" / "profile" / "out"
+             "run", AGENT_STAGE], env_extra={"STUB_SCRIPT": str(script)})
+    out = tmp_path / "run" / AGENT_STAGE / "out"
     assert r.returncode != 0
     doc = json.load(open(out / "result.json"))
     assert doc["status"] == "blocked"
@@ -401,14 +417,82 @@ def test_a_second_blocked_is_the_stage_s_answer(tmp_path):
     assert not (out / "agent_prompt.3.txt").exists(), "one repair session, not a loop"
 
 
-def test_all_skips_what_is_already_done(tmp_path):
-    """Resume is the default, not a mode: re-issuing the same command after any
-    interruption continues instead of re-running finished stages."""
+def test_the_slot_finalize_overrides_the_session_s_own_verdict(tmp_path):
+    """A session grading its own work is the one judgement the slot cannot delegate.
+
+    A profile session once reported `ok` with four delivered tasks against a
+    configuration that asked for a scope the run never used, and the stage recorded the
+    success. The slot's `finalize.py` now runs after every session and writes the
+    `result.json` that counts; the repair session is handed its notes, not the agent's."""
     script = tmp_path / "work.sh"
     script.write_text('echo "{}" > "$OUT/kernel_ranking.json"\n'
                       'python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok '
-                      '--artifact ranking=kernel_ranking.json\n')
-    cfg = _stub_cfg(tmp_path, agent_budget_sec=120)
+                      '--artifact ranking=kernel_ranking.json '
+                      '--metric tasks_delivered=4\n')
+    cfg = _stub_cfg(tmp_path, "profile", agent_budget_sec=900, agent_attempts=2)
+    r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg),
+             "run", "profile"], env_extra={"STUB_SCRIPT": str(script)})
+    out = tmp_path / "run" / "profile" / "out"
+    assert r.returncode != 0
+    doc = json.load(open(out / "result.json"))
+    assert doc["status"] == "fail" and "selection_targets.json" in doc["notes"]
+    assert doc["metrics"] == {} or "tasks_delivered" not in doc["metrics"]
+    assert "the slot's finalize has the last word" in r.stdout
+
+
+@pytest.mark.parametrize("finalizer, expected", [
+    ('raise RuntimeError("finalizer crashed")\n', "fail"),
+    ('raise SystemExit(0)\n', "fail"),
+    ('raise SystemExit(2)\n', "blocked"),
+    ('receipt["status"] = "blocked"\nreceipt["notes"] = "source missing"\n'
+     'write_receipt()\nraise SystemExit(1)\n', "blocked"),
+    ('write_receipt()\n', "ok"),
+    ('write_receipt()\nraise RuntimeError("crashed after writing ok")\n', "fail"),
+])
+def test_a_slot_needs_its_own_fresh_successful_receipt(tmp_path, finalizer, expected):
+    """Exercise the real runner/dispatch boundary with an agent that always says ok."""
+    import agent_stage
+    import stage
+
+    out = tmp_path / "out"
+    out.mkdir()
+    slot = tmp_path / "stages/profile"
+    slot.mkdir(parents=True)
+    skill = slot / "SKILL.md"
+    skill.write_text("Write the evidence and let the slot judge it.\n")
+    receipt = {"stage": "profile", "skill": "test-profile", "status": "ok",
+               "artifacts": {"evidence": "evidence.json"}, "metrics": {}}
+    setup = ('import json, os\nfrom pathlib import Path\n'
+             'out = Path(os.environ["OUT"])\nreceipt = %r\n'
+             'def write_receipt():\n'
+             '    (out / "result.json").write_text(json.dumps(receipt))\n' % receipt)
+    (slot / "finalize.py").write_text(setup + finalizer)
+    agent = tmp_path / "agent.py"
+    agent.write_text(setup + '(out / "evidence.json").write_text("{}")\nwrite_receipt()\n')
+    stub = tmp_path / "work.sh"
+    stub.write_text('python3 "$TEST_AGENT_SCRIPT"\n')
+    env = {**os.environ, "OUT": str(out), "WORKLOAD_ROOT": str(tmp_path),
+           "GEAK_ROOT": GEAK, "STAGE": "profile", "STAGE_SKILL": "test-profile",
+           "RUNNER": os.path.join(WORKLOAD, "runners/stub.sh"),
+           "STUB_SCRIPT": str(stub), "TEST_AGENT_SCRIPT": str(agent)}
+    lay = {"out": str(out), "stage": "profile", "skill": "test-profile",
+           "skill_md": str(skill), "params": {"agent_budget_sec": 120, "agent_attempts": 1}}
+    rc, _ = agent_stage.dispatch({}, lay, env)
+    result, errors = stage.validate_result(lay)
+    assert rc == 0 and not errors
+    assert result["status"] == expected
+    archived = list(out.glob("result.before-finalize.*.json"))
+    assert len(archived) == 1 and json.loads(archived[0].read_text()) == receipt
+    assert (out / "evidence.json").read_text() == "{}"
+    if expected == "fail":
+        assert "finalizer" in result["notes"]
+
+
+def test_all_skips_what_is_already_done(tmp_path):
+    """Resume is the default, not a mode: re-issuing the same command after any
+    interruption continues instead of re-running finished stages."""
+    script = _stub_delivery(tmp_path)
+    cfg = _stub_cfg(tmp_path, AGENT_STAGE, agent_budget_sec=120)
     for _ in range(1):
         r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg), "all"],
                 env_extra={"STUB_SCRIPT": str(script)})
@@ -840,11 +924,8 @@ def test_a_tick_reports_the_results_stages_have_already_produced(tmp_path, monke
 def test_reporting_is_on_by_default_and_can_be_turned_off(tmp_path):
     """One command still means one command: `all` reports on a cadence without being
     asked, and the off switch is explicit."""
-    script = tmp_path / "work.sh"
-    script.write_text('echo "{}" > "$OUT/kernel_ranking.json"\n'
-                      'python3 "$WORKLOAD_ROOT/scripts/emit_result.py" --status ok '
-                      '--artifact ranking=kernel_ranking.json\n')
-    cfg = _stub_cfg(tmp_path, agent_budget_sec=120)
+    script = _stub_delivery(tmp_path)
+    cfg = _stub_cfg(tmp_path, AGENT_STAGE, agent_budget_sec=120)
     r = run([sys.executable, "workload/scripts/stage.py", "--config", str(cfg), "all"],
             env_extra={"STUB_SCRIPT": str(script)})
     assert r.returncode == 0, r.stdout + r.stderr

@@ -43,7 +43,11 @@ did. Work until the stage is finished or genuinely blocked.
 THE CONTRACT (stages/CONTRACT.md), which is the whole of what this stage owes anybody:
 
   1. Read $IN (the previous stage's output directory) and $PARAMS (this stage's
-     parameters). Neither is advisory.
+     parameters). Neither is advisory. Where $PARAMS and the skill's SKILL.md disagree --
+     a selection cutoff, a count, a threshold -- $PARAMS wins: it is this run's executable
+     policy and the value in SKILL.md is the default it replaces. The slot checks
+     afterwards that what ran is what was configured, so a stage that quietly used the
+     skill's default fails even if everything it did was otherwise correct.
   2. Do the work described in the skill's SKILL.md, below. It is the procedure; follow it
      rather than improvising an equivalent.
   3. Write every artifact into $OUT.
@@ -63,6 +67,12 @@ status means exactly this:
 Never report `ok` for work that was not done, and never report a number that was not
 measured. A stage that reports a plausible figure nobody computed is the one outcome this
 pipeline cannot recover from: everything downstream inherits it and nothing says so.
+
+Write result.json even so -- but know that where the slot has a `finalize.py`, it runs
+after this session, reads $OUT itself and has the last word. It is not a second opinion to
+argue with: it is the stage's acceptance criterion, and it is in
+$WORKLOAD_ROOT/stages/<stage>/finalize.py and README.md where you can read exactly what it
+will require before you decide you are finished.
 """
 
 
@@ -128,9 +138,8 @@ def build_prompt(env, lay, params, attempt, why=None, repair=None):
                       "Do not reinterpret the stage to get around the blocker, and do not "
                       "start over -- what is already in $OUT was expensive:", ""]
         else:
-            lines += ["THIS IS A CONTINUATION (attempt %d). The previous session ended "
-                      "without a valid %s/result.json%s." % (attempt, out,
-                                                             (": " + why) if why else ""),
+            lines += ["THIS IS A CONTINUATION (attempt %d). The previous session did not "
+                      "finish this stage%s." % (attempt, (": " + why) if why else ""),
                       "",
                       "Do not start over. These artifacts are already on disk and were "
                       "expensive to produce; read them, work out which step of SKILL.md "
@@ -161,6 +170,62 @@ def build_prompt(env, lay, params, attempt, why=None, repair=None):
                    "holds.)",
                   "=" * 78, "", read(slot, "")]
     return "\n".join(lines)
+
+
+def finalize(env, log_cb=print):
+    """Let the slot judge the session. Returns True when slot finalization is required.
+
+    The skill is an external archive that knows nothing about `result.json`, so the
+    mapping -- and the acceptance criterion with it -- lives in the slot (PRINCIPLES R6).
+    Running it here is what makes that true in practice: left to write its own verdict, a
+    profile session once reported `ok` for a delivery of four tasks out of six declared,
+    with single-task fields in `metrics`, and nothing downstream could tell.
+
+    `stages/<stage>/finalize.py` reads `$OUT` and overwrites `result.json` last. A stage
+    whose slot has no finalize keeps the agent's own result, unchanged -- this is the
+    contract's "is the file there", not a plugin system.
+    """
+    script = os.path.join(env.get("WORKLOAD_ROOT", ""), "stages", env.get("STAGE", ""),
+                          "finalize.py")
+    if not os.path.exists(script):
+        return False
+    from emit_result import emit, read_json
+
+    result_path = os.path.join(env["OUT"], "result.json")
+
+    def archive(label):
+        if os.path.lexists(result_path):
+            os.replace(result_path, os.path.join(
+                env["OUT"], "result.%s.%d.json" % (label, time.time_ns())))
+
+    # The slot must produce its own receipt. Merely comparing mtimes can bless an
+    # agent's old `ok` when a finalizer crashes before replacing it, especially on NFS.
+    archive("before-finalize")
+    log_cb("[agent] the slot's finalize has the last word: %s" % script)
+    status, problem = "fail", None
+    try:
+        rc = subprocess.call([sys.executable, script], env=env)
+    except OSError as exc:
+        status, problem = "blocked", "the slot finalizer could not run: %s" % exc
+    else:
+        log_cb("[agent] finalize exited %d" % rc)
+        receipt = read_json(result_path)
+        if rc == 2:
+            # emit_result reserves 2 for a missing environment or unusable receipt.
+            status, problem = "blocked", "the slot finalizer refused to judge (exit 2)"
+        elif rc not in (0, 1):
+            problem = "the slot finalizer failed with exit %d" % rc
+        elif not os.path.exists(result_path):
+            problem = "the slot finalizer exited %d without a fresh result.json" % rc
+        elif rc != 0 and isinstance(receipt, dict) and receipt.get("status") == "ok":
+            problem = "the slot finalizer reported ok but failed with exit %d" % rc
+    if problem:
+        archive("rejected-finalize")
+        if emit(status, notes=problem + "; repair the finalizer and resume this stage. "
+                "Earlier session receipts are preserved.", out=env["OUT"],
+                stage=env.get("STAGE"), skill=env.get("STAGE_SKILL")) == 2:
+            raise RuntimeError(problem + "; no valid stage environment to record it")
+    return True
 
 
 def dispatch(cfg, lay, env, log_cb=print):
@@ -211,12 +276,28 @@ def dispatch(cfg, lay, env, log_cb=print):
             return 78, ("the runner reported an unmet precondition (78), which the "
                         "contract says must not be retried: %s" % tail.strip())
 
+        # Whether the agent itself reported, before the slot overwrites the file.
+        reported = (os.path.exists(result_path)
+                    and os.path.getmtime(result_path) >= started)
+        judged = finalize(env, log_cb)
+
         res, errs = stage_mod.validate_result(lay)
         if not errs:
             status = (res or {}).get("status")
             if (status == "ok" or repairs <= 0 or attempt == attempts
                     or int(deadline - time.time()) <= 300):
                 return 0, None
+            if judged and not reported:
+                # The session died mid-work and the slot graded what it left behind. That
+                # is an interrupted stage, not one that was weighed and found wanting, so
+                # it resumes on the normal attempt budget instead of spending the single
+                # repair session -- the long stages legitimately outlive one window.
+                repair = None
+                why = ("it ended without reporting, and the slot's finalize says: %s"
+                       % (str(res.get("notes") or "").strip() or status))
+                log_cb("[agent] session did not report; finalize says %s, continuing"
+                       % status)
+                continue
             # A precondition the agent could satisfy itself is not a reason to stop the
             # campaign and wait for a person. Keep the diagnosis, then spend one session
             # on it; a second `blocked` is the stage's answer and the order stops there.
@@ -236,8 +317,13 @@ def dispatch(cfg, lay, env, log_cb=print):
         # An agent that exhausted its own window mid-work is the normal case for the long
         # stages; the next attempt resumes from the artifacts it left behind.
 
-    if recorded:
+    _, errs = stage_mod.validate_result(lay)
+    if errs and recorded:
+        # A repair session that produced nothing must not erase the diagnosis it was
+        # given. A repair session that produced a *verdict* keeps it: that one is newer.
         shutil.copy(recorded, result_path)
+        _, errs = stage_mod.validate_result(lay)
+    if not errs:
         return 0, None
     return 1, ("%d agent attempts ended without a valid result.json; last problem: %s"
                % (attempts, why))

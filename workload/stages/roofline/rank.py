@@ -13,6 +13,7 @@ Usage (inside the environment prepared by stage.py prepare):
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -20,6 +21,22 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))          # stages/roofline
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "scripts"))
 from emit_result import emit, read_json  # noqa: E402
+from task_plan import task_records  # noqa: E402
+
+
+def positive(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+def case_weight(row):
+    value = row.get("case_weight")
+    if value is None:
+        return 1.0
+    if (not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(value) or value < 0):
+        return None
+    return value
 
 
 def regime_weights(rows):
@@ -28,10 +45,11 @@ def regime_weights(rows):
     for r in rows:
         k, g = r.get("kernel"), r.get("regime")
         us = r.get("measured_us")
-        if k is None or g is None or not isinstance(us, (int, float)):
+        if k is None or g is None or not positive(us):
             continue
-        w = r.get("case_weight")
-        w = w if isinstance(w, (int, float)) and w > 0 else 1.0
+        w = case_weight(r)
+        if w is None or w == 0:
+            continue
         per.setdefault(k, {}).setdefault(g, 0.0)
         per[k][g] += w * us
     out = {}
@@ -48,11 +66,12 @@ def bound_by_time(rows):
     for r in rows:
         b = r.get("bound")
         us = r.get("measured_us")
-        if not b or not isinstance(us, (int, float)):
+        w = case_weight(r)
+        if not b or not positive(us) or w is None or w == 0:
             continue
         key = (r.get("kernel"), r.get("regime"))
         acc.setdefault(key, {}).setdefault(b, 0.0)
-        acc[key][b] += us
+        acc[key][b] += w * us
     return {k: max(v.items(), key=lambda kv: kv[1])[0] for k, v in acc.items()}
 
 
@@ -62,11 +81,10 @@ def task_dir_index(plan):
     Empty when the upstream skill declared no plan, which leaves the caller on its
     name-matching fallback."""
     idx = {}
-    for t in (plan or {}).get("tasks") or []:
-        name = t.get("name") or t.get("id")
+    for name, identities in task_records(plan):
         if not name:
             continue
-        for k in t.get("selected_identities") or []:
+        for k in identities:
             idx.setdefault(k, name)
     return idx
 
@@ -80,6 +98,58 @@ def target_index(sel):
             if key:
                 idx.setdefault(key, t)
     return idx
+
+
+def task_analysis(task, rows, roof_key="roofline_us"):
+    """Separate completed unsupported modeling from missing task/case inputs."""
+    meta = read_json(os.path.join(task, "meta.json"), {})
+    workload = meta.get("workload") or {}
+    cases = workload.get("cases") if isinstance(workload, dict) else None
+    problems = []
+    if not os.path.isdir(os.path.join(task, "kernel_src")) or not isinstance(cases, list) or not cases:
+        problems.append("task source or workload case inventory is missing")
+    cases = cases if isinstance(cases, list) else []
+    expected = {c.get("sig") for c in cases or [] if positive(c.get("effective_calls"))}
+    present = {r.get("case") for r in rows if positive(case_weight(r))}
+    missing = sorted(expected - present)
+    if missing:
+        problems.append("positive-mass cases have no analysis row: " + ", ".join(missing))
+    if not rows:
+        problems.append("task has no analysis rows")
+    active = [r for r in rows if case_weight(r) is None or case_weight(r) > 0]
+    unsupported = []
+    inadmissible = []
+    suspect = []
+    for r in active:
+        label = str(r.get("case"))
+        if case_weight(r) is None:
+            problems.append("invalid case weight: " + label)
+        provenance = r.get("provenance") or {}
+        if provenance.get("qualification_refresh_required") is True:
+            problems.append("task qualification needs refresh: " + label)
+        modeled = positive(r.get("measured_us")) and positive(r.get(roof_key))
+        if not modeled:
+            unsupported.append(label)
+            if (not positive(r.get(roof_key)) and not r.get("reason")
+                    and r.get("status") not in ("unsupported", "native_local_bytes_only")):
+                problems.append("case has neither a model result nor an unsupported explanation: " + label)
+        coverage = r.get("coverage")
+        suspect_case = r.get("suspect") is True or (modeled and r[roof_key] > r["measured_us"])
+        if suspect_case:
+            suspect.append(label)
+        if (r.get("ranking_admissible") is False or not modeled or suspect_case
+                or (coverage is not None and (not positive(coverage) or coverage != 1))):
+            inadmissible.append(label)
+    complete = not problems
+    admissible = complete and bool(active) and not inadmissible
+    return {"processed": complete,
+            "ranking_admissible": admissible,
+            "status": ("incomplete_inputs" if not complete else
+                       "completed" if admissible else "completed_unsupported"),
+            "expected_positive_cases": len(expected), "missing_positive_cases": missing,
+            "unsupported_positive_rows": unsupported, "inadmissible_positive_rows": inadmissible,
+            "suspect_positive_rows": suspect,
+            "problems": problems}
 
 
 def main(argv=None):
@@ -130,7 +200,9 @@ def main(argv=None):
     bounds = bound_by_time(rows)
 
     sel = read_json(os.path.join(inp or "", "selection_targets.json"))
-    plan_idx = task_dir_index(read_json(os.path.join(inp or "", "task_plan.json"), {}))
+    plan = read_json(os.path.join(inp or "", "task_plan.json"), {})
+    plan_idx = task_dir_index(plan)
+    members = {name: identities for name, identities in task_records(plan) if name}
     idx = target_index(sel)
     if not idx:
         return emit(status="fail", artifacts={},
@@ -138,41 +210,59 @@ def main(argv=None):
                           "no GPU share to read and no expected e2e gain to rank by." % inp)
 
     tasks_root = os.path.join(inp or "", "tasks")
+    task_order = list(members)
+    if os.path.isdir(tasks_root):
+        task_order += [name for name in sorted(os.listdir(tasks_root))
+                       if name not in task_order and os.path.isdir(os.path.join(tasks_root, name, "kernel_src"))]
+
+    def owner(kernel):
+        target = idx.get(kernel) or {}
+        candidates = [plan_idx.get(kernel), plan_idx.get(target.get("id"))]
+        candidates += [kernel, target.get("id"), target.get("name")]
+        return next((name for name in candidates if name in task_order), None)
+
+    rows_by_task = {name: [] for name in task_order}
+    for row in rows:
+        name = owner(row.get("kernel"))
+        if name:
+            rows_by_task[name].append(row)
+    analyses = {name: task_analysis(os.path.join(tasks_root, name), group, roof_key)
+                for name, group in rows_by_task.items()}
+
+    def target(kernel):
+        if kernel in idx:
+            return idx[kernel]
+        # Task-keyed rows model the declared complete boundary. Read its owned
+        # selected identities once; never multiply a whole-task fold across leaves.
+        targets = {(idx[k].get("id") or idx[k].get("name") or k): idx[k]
+                   for k in members.get(kernel, []) if k in idx}
+        shares = [t.get("overall_pct") for t in targets.values()]
+        if targets and all(positive(value) for value in shares):
+            return {"id": kernel, "overall_pct": sum(shares)}
+        return None
+
+    def new_record(kernel):
+        t, name = target(kernel), owner(kernel)
+        return {"kernel": kernel, "id": (t or {}).get("id", kernel),
+                "pct_gpu_time": (t or {}).get("overall_pct"), "in_selection": t is not None,
+                "task": name,
+                "task_dir": os.path.join("tasks", name) if name and os.path.isdir(os.path.join(tasks_root, name)) else None,
+                "analysis": analyses.get(name, {"processed": False, "ranking_admissible": False,
+                                                 "status": "incomplete_inputs", "problems": ["no task owner"]}),
+                "regimes": [], "expected_e2e_gain_pct": 0.0, "_any_scored": False}
+
     per_kernel = {}
     for key, agg in folded.items():
         kernel, _, regime = key.rpartition("/")   # a kernel name may contain /, a regime never does
-        t = idx.get(kernel)
-        rec = per_kernel.setdefault(kernel, {
-            "kernel": kernel,
-            "id": (t or {}).get("id", kernel),
-            "pct_gpu_time": (t or {}).get("overall_pct"),
-            "in_selection": t is not None,
-            "task_dir": None,
-            "regimes": [],
-            "expected_e2e_gain_pct": 0.0,
-            "_any_scored": False,
-        })
-        if rec["task_dir"] is None:
-            # The declared owner first: a task directory is named after the math boundary it
-            # covers, which is only incidentally a kernel name.
-            cands = [plan_idx.get(kernel)]
-            if t:
-                cands += [t.get("id"), t.get("name")]
-            cands.append(kernel)
-            for cand in cands:
-                if cand and os.path.isdir(os.path.join(tasks_root, cand)):
-                    rec["task_dir"] = os.path.join("tasks", cand)
-                    break
+        rec = per_kernel.setdefault(kernel, new_record(kernel))
 
         suspect = bool(agg.get("suspect"))
         sp = agg.get("speedup")
-        frac = weights.get(kernel, {}).get(regime)
-        if frac is None:
-            frac = 1.0 / max(1, len([k for k in folded if k.startswith(kernel + "/")]))
+        frac = weights[kernel].get(regime, 0.0) if kernel in weights else None
         pct = rec["pct_gpu_time"]
         gain = None
-        if (not suspect and isinstance(sp, (int, float)) and sp > 0
-                and isinstance(pct, (int, float))):
+        admissible = rec["analysis"]["ranking_admissible"] and not suspect
+        if admissible and positive(sp) and positive(pct) and frac is not None:
             # Expected e2e gain: Amdahl. Spread the overall share across regimes by time,
             # then score each regime.
             gain = pct * frac * (1.0 - 1.0 / sp)
@@ -181,15 +271,21 @@ def main(argv=None):
 
         rec["regimes"].append({
             "regime": regime,
-            "roofline_pct": agg.get("pct"),
-            "attainable_speedup": None if suspect else sp,
-            "bound_type": bounds.get((kernel, regime)),
+            "roofline_pct": agg.get("pct") if admissible else None,
+            "attainable_speedup": sp if admissible else None,
+            "bound_type": bounds.get((kernel, regime)) if admissible else None,
             "suspect": suspect,
             "coverage": agg.get("coverage"),
             "cases": agg.get("n"),
-            "time_share_within_kernel": round(frac, 6),
+            "time_share_within_kernel": round(frac, 6) if frac is not None else None,
             "expected_e2e_gain_pct": None if gain is None else round(gain, 6),
+            "fold_scope": "complete_positive_mass" if admissible else "supported_subset_diagnostic",
         })
+
+    represented = {r["task"] for r in per_kernel.values()}
+    for name in task_order:
+        if name not in represented:
+            per_kernel[name] = new_record(name)
 
     kernels = []
     for rec in per_kernel.values():
@@ -199,19 +295,23 @@ def main(argv=None):
             rec["expected_e2e_gain_pct"] = round(rec["expected_e2e_gain_pct"], 6)
         # A single value for the top-level view: the regime holding the most time. The
         # breakdown always stays in regimes.
-        top = max(rec["regimes"], key=lambda r: r["time_share_within_kernel"])
-        rec["roofline_pct"] = top["roofline_pct"]
-        rec["attainable_speedup"] = top["attainable_speedup"]
-        rec["bound_type"] = top["bound_type"]
-        rec["suspect"] = any(r["suspect"] for r in rec["regimes"])
+        top = max(rec["regimes"], key=lambda r: r["time_share_within_kernel"] or 0.0, default={})
+        rec["roofline_pct"] = top.get("roofline_pct")
+        rec["attainable_speedup"] = top.get("attainable_speedup")
+        rec["bound_type"] = top.get("bound_type")
+        rec["suspect"] = (any(r["suspect"] for r in rec["regimes"])
+                          or bool(rec["analysis"].get("suspect_positive_rows")))
         kernels.append(rec)
 
     kernels.sort(key=lambda r: (r["expected_e2e_gain_pct"] is None,
-                                -(r["expected_e2e_gain_pct"] or 0.0), r["kernel"]))
+                                -(r["expected_e2e_gain_pct"] or 0.0),
+                                task_order.index(r["task"]) if r["task"] in task_order else len(task_order),
+                                r["kernel"]))
     ranked = [k for k in kernels if k["expected_e2e_gain_pct"] is not None]
 
     doc = {
         "rank_key": "expected_e2e_gain_pct",
+        "fallback_execution_order": "profile task_plan order, then remaining task directories; not predicted gain",
         "formula": "pct_gpu_time * time_share_within_kernel * (1 - 1/attainable_speedup), summed over regimes",
         "roofline_mode": params.get("roofline_mode", "unknown"),
         "roof_key": roof_key,
@@ -223,8 +323,10 @@ def main(argv=None):
             "The expected gain here is an upper bound. An operator win with no e2e movement has already happened twice in this scenario; only applyback may claim an e2e gain.",
         ],
         "kernel_count": len(kernels),
+        "task_count": len(task_order),
         "ranked_count": len(ranked),
-        "sum_expected_e2e_gain_pct": round(sum(k["expected_e2e_gain_pct"] for k in ranked), 4),
+        "sum_expected_e2e_gain_pct": (round(sum(k["expected_e2e_gain_pct"] for k in ranked), 4)
+                                      if len(ranked) == len(kernels) else None),
         "kernels": kernels,
     }
     with open(os.path.join(out, "roofline.json"), "w") as f:
@@ -238,15 +340,18 @@ def main(argv=None):
         notes.append("no expected gain could be computed for these kernels (suspect, or "
                      "attainable missing); they are listed but not ranked: %s"
                      % ", ".join(unscored))
-    missing_task = [k["kernel"] for k in ranked if not k["task_dir"]]
+    missing_task = [k["kernel"] for k in kernels if not k["task_dir"]]
     if missing_task:
         status = "blocked"
-        notes.append("these kernels are ranked but have no matching UT directory under the "
+        notes.append("these analysis entries have no matching UT directory under the "
                      "upstream tasks/, so the optimize stage cannot claim them: %s. Fill in "
                      "the profile stage's task directories first." % ", ".join(missing_task))
-    if not ranked:
+    incomplete = [name for name, analysis in analyses.items() if not analysis["processed"]]
+    if incomplete or not kernels:
         status = "blocked"
-        notes.append("no kernel produced an expected gain, so no optimization order can be derived.")
+        notes.append("missing or unprocessed task inputs: " + ", ".join(incomplete))
+    elif not ranked:
+        notes.append("all task analyses completed with unsupported whole-task bounds; retained execution order follows task_plan, not predicted gain")
 
     return emit(status=status,
                 artifacts={"roofline": "roofline.json", "folded": "folded.json",

@@ -13,7 +13,7 @@ Two deliberate choices:
 * The original case table is backed up and the registration recorded, so removing the
   entry and the copied directory returns the harness to its exact prior state.
 """
-import argparse, hashlib, json, os, shutil
+import argparse, copy, hashlib, json, os, shutil
 
 
 def sha256(path):
@@ -37,33 +37,44 @@ def main():
 
     harness = os.path.abspath(a.harness)
     cf = os.path.join(harness, a.case_file)
-    cases = json.load(open(cf))
+    document = json.load(open(cf))
+    if not isinstance(document, dict):
+        raise SystemExit("the case table must be a JSON object")
+    nested = "cases" in document
+    cases = document.get("cases") if nested else document
+    if not isinstance(cases, dict):
+        raise SystemExit("the nested cases field must be a JSON object")
     if a.base_case not in cases:
         raise SystemExit("the harness has no case %r to copy the reference leg's server "
                          "arguments from" % a.base_case)
 
     dest = os.path.join(harness, a.overlay_subdir.strip("/"))
-    shutil.rmtree(dest, ignore_errors=True)
+    if os.path.commonpath([harness, os.path.abspath(dest)]) != harness or os.path.abspath(dest) == harness:
+        raise SystemExit('the per-arm overlay must be inside the reference harness')
+    if os.path.lexists(dest):
+        raise SystemExit("overlay destination already exists; preserve it and use a fresh per-arm path")
     shutil.copytree(a.overlay, dest)
     files = {os.path.relpath(os.path.join(r, n), dest): sha256(os.path.join(r, n))
              for r, _, ns in os.walk(dest) for n in ns}
 
     base = cases[a.base_case]
-    entry = {"server_args": dict(base.get("server_args") or {}),
-             "environment": dict(base.get("environment") or {}),
-             "python_overlay": os.path.relpath(dest, harness),
+    if not isinstance(base, dict):
+        raise SystemExit("the base case must be a JSON object")
+    entry = copy.deepcopy(base)
+    entry.update({"python_overlay": os.path.relpath(dest, harness),
              "hypothesis": "GEAK workload applyback: the reference leg's server, with the "
                            "cold-re-verified kernels layered in through a reversible "
-                           "sitecustomize overlay and nothing else changed"}
+                           "sitecustomize overlay and nothing else changed"})
     backup = cf + ".before_" + a.case
     if not os.path.exists(backup):
         shutil.copyfile(cf, backup)
     cases[a.case] = entry
     with open(cf, "w") as f:
-        json.dump(cases, f, indent=2)
+        json.dump(document, f, indent=2)
 
     rec = {"harness": harness, "case_file": cf, "case": a.case, "base_case": a.base_case,
-           "entry": entry, "overlay_copied_to": dest, "overlay_files": files,
+           "entry": entry, "case_table_path": "cases" if nested else "",
+           "overlay_copied_to": dest, "overlay_files": files,
            "case_file_backup": backup,
            "how_to_revert": "delete the %r entry from %s (or restore %s) and remove %s"
                             % (a.case, cf, backup, dest)}

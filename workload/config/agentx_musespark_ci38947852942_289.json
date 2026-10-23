@@ -1,0 +1,438 @@
+{
+  "_comment": "Muse rerun on node 289. Broader upstream selection, at most eight independent UTs, full twelve-hour per-task optimization and same-node native E2E. No allocation mutations.",
+  "run_root": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021",
+  "runner": "claude",
+  "target": {
+    "model": "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
+    "image": "lmsysorg/sglang-rocm:muse-spark-open@sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4",
+    "commits": {
+      "inferencex": "59ec4f61e00386f9f45ee977d5c1753fad88ec02",
+      "sglang": "c722c0a160981f21c81cffaab7bbcc117089a2a6",
+      "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
+      "tilelang": "a55a82302bf7f3c5af635b5c9146f728185cc900"
+    },
+    "name_tokens": [
+      "musespark"
+    ],
+    "enforce": true
+  },
+  "runner_env": {
+    "env_file": "/shared_nfs/zihao/c_host/.workload-secrets/musespark-025.env",
+    "state_dir_base": "/dev/shm/wl_musespark289_agent_state"
+  },
+  "machine_policy": {
+    "node": "crsuse2-m2m-289",
+    "existing_job_id": "226837",
+    "preserve_allocation": true,
+    "scheduler_mutations_allowed": false,
+    "job_end_time_utc": "2026-10-24T02:10:27Z",
+    "owned_container_prefix": "wl_musespark289_",
+    "authorized_time_limit_extension": {
+      "total_hours": 72,
+      "job_id": "226837",
+      "user_authorized": true,
+      "applied": true,
+      "observed_end_time_utc": "2026-10-24T02:10:27Z",
+      "note": "Enforcing leader007 readback72h; replica005 may be stale because Spur0.13.0 does not WAL-replicate TimeLimit updates. Existing coordinator guard reapplies only this user-authorized same-job extension if required. See control/allocation_guard.latest.json.",
+      "attempts": [
+        {
+          "requested_time_limit": "3-00:00:00",
+          "cli_reply": "job 226837 updated",
+          "readback_time_limit": "1-00:00:00",
+          "readback_end_time": "2026-10-22T02:10:27Z"
+        },
+        {
+          "requested_time_limit": "4320",
+          "cli_reply": "job 226837 updated",
+          "readback_time_limit": "1-00:00:00",
+          "readback_end_time": "2026-10-22T02:10:27Z"
+        },
+        {
+          "requested_time_limit": "72:00:00",
+          "cli_reply": "job 226837 updated",
+          "readback_time_limit": "1-00:00:00",
+          "readback_end_time": "2026-10-22T02:10:27Z"
+        }
+      ]
+    }
+  },
+  "reuse_inputs": {
+    "prior_campaign": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020",
+    "scope": "Read-only deployment pins, source, compatible captures and qualified original task evidence. No old throughput is a node-289 baseline and no old task credit counts toward the new twelve hours."
+  },
+  "storage": {
+    "node_local": "/mnt/m2m_nobackup/zihao_musespark_38947852942_289",
+    "reason": "Model/corpus staging and runtime compile caches remain on node-local storage; completed evidence is persisted on shared storage."
+  },
+  "native_baseline": {
+    "harness_dir": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021/harness",
+    "command": [
+      "bash",
+      "tools/run_tp8_c8.sh",
+      "baseline",
+      "musespark_38947852942_289_stock_20261021",
+      "3600"
+    ],
+    "receipt": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021/harness/runs/musespark_38947852942_289_stock_20261021/musespark_38947852942_289_stock_20261021.json",
+    "measurement_required_before_adoption": true
+  },
+  "stages": {
+    "baseline": {
+      "skill": "adopt-measured-receipt",
+      "mode": "script",
+      "params": {
+        "receipt": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021/harness/runs/musespark_38947852942_289_stock_20261021/musespark_38947852942_289_stock_20261021.json",
+        "throughput_key": "request_metrics.throughput.output.tokens_per_second",
+        "require_valid": true,
+        "node": "crsuse2-m2m-289",
+        "metric": "output_token_throughput",
+        "unit": "tok/s",
+        "noise_band": 1.045,
+        "config": {
+          "tp": 8,
+          "ep": 8,
+          "gpus": 8,
+          "concurrency": 8
+        }
+      }
+    },
+    "profile": {
+      "skill": "agentx-kernel-extraction-standalone",
+      "mode": "agent",
+      "params": {
+        "selection": "Explicit broader scope: phase Top 10 and whole-workload share >0.5%, followed by evidence-based complete task planning up to eight UTs. Retain all candidates and explain every deferral.",
+        "selection_top_k": 10,
+        "selection_overall_pct_gt": 0.5,
+        "selection_phases": [
+          "PREFILL",
+          "DECODE_DRAFT",
+          "DECODE_VERIFY"
+        ],
+        "agent_budget_sec": 1800,
+        "agent_attempts": 2,
+        "prior_campaign": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_025_20261020",
+        "agent_brief": "AUTHORITATIVE INTEGRATION-ONLY CONTINUATION. All8tasks are now fully current-source GPU-qualified and accepted. Read control/CURRENT_STATE.md, control/parallel-task-ownership.json and all control/current_qualification_receipts/*.coordinator_review.json. Do NOT run a GPU UT, recapture, remeasure the baseline, edit/refreeze a task, or operate on allocations. Your sole work is global profile integration using accepted evidence, preserving old reports before replacing them. Every task owner is ready; no owner waits remain.\n\nAR full native23:01UTC passed8gates/two negative controls/all ranks/both timing legs; snapshot3d0b4a60149c32304d72a01a5e14385f84ad394e176adea53e95291b4ba68f8b, native1423.9s. See control/reweight_preparation/custom_allreduce/qualification-complete.json and final_receipts. QR final snapshot61316a2fc0d7fb47304d7ab8f048925c5b7c7247d2fb15304512ffc0941aa46d,420.7s,11gates. Its RETURN now references immutable run/qualification-20261021T221822.907397Z/ut_result.json; annotation of canonical result no longer invalidates the receipt. Updated tools/make_delivery.py hasSHA7fd3a45c89d38d80ee9d55fe60f20cc5bc4462ee8b856cfdccf279b1181a202e. Never rewrite native verdicts.\n\nRefresh task_plan.json, results.json, REPORT.md and result.json consistently for8qualified tasks. Diagnose/fix campaign integration helpers if they misread native gate aliases; native gates and bundled delivery checks own verdicts. Preserve all8tasks and the same task-plan orderMoE,Attention,AR,norm,QR,draft,routing,KV. All270census rows and14selected identities remain;11available-source identities map to8tasks covering58.73082% whole-workload GPUtime. Three library-source blockers cover5.74934%; keep them visible as source-blocked identities rather than a pending9thUT. Report exact recalculated shares from current inputs. Qualification ratios are unchanged-source controls, never optimization gains. Match actual task source and receipt hashes, preserve every historical failed run, and call the unchanged profile-slot finalize adapter before validating output. Keep source-stack identity/pins evidence from the accepted baseline rather than inventing new observation.\n\nThe caller runs ONLY profile for this continuation. Root owns main mechanisms/configuration and will start the remaining standard stages after final preflight. No optimization credit has begun. Vendored extraction/roofline bytes unchanged. Follow workload/PRINCIPLES.md and the profile slot README.",
+        "_resume_budget_note": "Explicit integration-only continuation1800s after original qualification deadline. All8nativeGPUqualifications already accepted; no UT reruns. Earlier authoring/control time remains archived and is not optimization credit."
+      }
+    },
+    "roofline": {
+      "skill": "kernel-roofline",
+      "mode": "agent",
+      "params": {
+        "roofline_mode": "tl-only",
+        "agent_budget_sec": 1800,
+        "agent_brief": "Use the current skill and slot README; this is CPU-only tl-only integration of already-prepared native records. All8profiletasks are now qualified. Read control/roofline-preparation/tooling/HANDOFF.md and model_rows/HANDOFF.md. Reuse the pinned TraceLens0.1.0.dev20261020+ga59a9c1 environment inside wl_musespark289_controller; no download/install/GPUwork needed. Preserve earlier prepared outputs. Refresh AR36timing/provenance rows only after checking its current native/delivery/snapshot3d0b4a60...; compare every other input hash with final qualified delivery, including QR's immutable native receipt. Reuse compatible native models, do not reuse025GPUtimings or old folds. Keep all165cases/current rawweights and every missing/unsupported mass. MuseA16W4 usesBF16MFMA, notFP4peak. Native collective models are local-byte-only; no fabricated network ceiling. Use the unchanged vendor fold and current slot rank.py. Only3Attention representative shapes have native roofs and all8whole-task bounds are unknown; conditional subset diagnostics must not become whole-task attainable/E2Egain. The repaired rank adapter retains all8tasks and accepts explicitly completed unsupported analysis while blocking actually missing inputs. Keep task-plan fallback orderMoE,Attention,AR,norm,QR,draft,routing,KV. Never edit tasks, vendor files or allocation; no recapture, UT rerun or optimization here. Finish normal roofline artifacts/result.json with honestunknowns, then let the standard pipeline continue."
+      }
+    },
+    "optimize": {
+      "skill": "geak-kernel-gpu-groups",
+      "mode": "agent",
+      "params": {
+        "time_budget_sec": 43200,
+        "require_full_budget": true,
+        "task_limit": 8,
+        "max_tasks": null,
+        "exclude_tasks": [],
+        "attempt_cap_sec": 1500,
+        "attempt_min_sec": 600,
+        "budget": 4,
+        "min_improve": 0.05,
+        "gpus": "0,1,2,3,4,5,6,7",
+        "nodes": [
+          "crsuse2-m2m-289"
+        ],
+        "image": "lmsysorg/sglang-rocm:muse-spark-open@sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4",
+        "task_name_prefix": "musespark289_",
+        "single_gpu_method": "native-frozen",
+        "deadline_utc": "2026-10-24T02:10:27Z",
+        "reserve_after_optimization_sec": 37800,
+        "reserve_e2e_sec": 23400,
+        "verify_wall_sec": 7200,
+        "wall_overhead_factor": 1.5,
+        "measure_timeout_sec": 3600,
+        "agent_budget_sec": 172800,
+        "agent_attempts": 4,
+        "agent_brief": "AUTHORITATIVE SEARCH ADMISSION: All preparation is complete. Read control/source_proof_preflight_v2/coordinator_review.json (accepted:true,64actualrank/targetrecords, allobserversremoved, ownedserver/containercleanedup,3idlechecks of8actualdevices). Its nativeexit1isintentionalafterproof, notanoptimizationblocker. V1failedproofandtheCPUreadbackenumerationerrorareretainevidence, notcurrentblockers. Nooptimizationworkerhasstartedandallcreditsmustbeginfromzero forthis289campaign. Proceedwiththestandarddispatchofall8tasksnow, thenfullcoldverificationandE2E; keepalltargetsat43200.\n\nUse only crsuse2-m2m-289 and existing allocation 226837. Preserve all existing allocations, containers and unrelated processes. Never submit, cancel, requeue, renew, resize or change an allocation. Only campaign-owned containers use wl_musespark289_ and task directories use musespark289_. Read workload/PRINCIPLES.md and this campaign AGENTS.md. Use the pinned CI image, model revisions, workload and native InferenceX aggregate. The requested kernel budget is 43200 credited seconds per task; do not shorten it to fit the lease or call partial work complete. Reserve cold verification and E2E separately. Run every extracted task, with disjoint single-GPU tasks concurrent and collectives on their true full device set. Verify twice from cold with independent tasks in parallel, separate receipts and intact frozen harnesses. Read the slot README for judgement; never revive an alternate verifier. Keep all unsuccessful attempts in cost accounting. Preserve worker credit and checkpoints after any interruption. All8 tasks and delivery/source contracts are now qualified. Native whole-task qualification durations and evidence are in control/current_qualification_receipts and the current profile report. Roofline165cases are complete with unknown whole-task bounds; order never filters tasks. A real plan-only check at control/optimization-admission/20261021T234302 verified6single-GPU slots first, then2eight-GPUcollectives with one slot. The nominal search critical path is36hours (12h singles+12h AR+12h QR), summed targets96task-hours and264GPU-slot-hours before bounded tails. checkpoint_window=true reflects the conservative1.5 wall cap versus the current window; it does not reduce43200-secondtargets or excuse skipping dispatch. Actual completed work may fit; keep the full37800-second cold/E2E reserve, record actual overlap and remaining credit. Main retention now archives pre-search evidence and every scoring sweep; never overwrite or delete those archives. Use the actual configured runner through its contract, and the native-frozen method already selected for CLI tools. The source-proof preflight has a deliberately nonzero native exit after its preparation hook; use the coordinator review, not that exit alone, to determine readiness. Root starts this stage only after that preparation and owned server cleanup complete.",
+        "container_runtime_file": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021/control/optimization-runtime.json",
+        "task_gpu_requirements": {
+          "musespark289_aiter_unified_attention": 1,
+          "musespark289_muse_moe_flydsl_fused": 1,
+          "musespark289_aiter_custom_allreduce": 8,
+          "musespark289_fused_norm_residual": 1,
+          "musespark289_quickreduce_twoshot_q8": 8,
+          "musespark289_draft_triton_attention": 1,
+          "musespark289_muse_spark_routing_topk8": 1,
+          "musespark289_kv_indices_triton": 1
+        },
+        "checkpoint_reserve_sec": 37800,
+        "_checkpoint_reserve_note": "Full cold+E2E reservation retained in checkpoint mode:7200seconds singleGPUcoldgroup+7200collectivecoldgroup+23400E2E. E2E basis4*4078.592657 nativewall+4*600 boundedprimer+3*120 proofbarrier+4*180 idle+4*120 cleanup=20274.37; remaining3125.63s is explicitly uncalibrated operational slack. Timeouts are failure ceilings, not predicted successful duration. No change to43200creditedseconds/task. E2E also includes one900second inner overlay-build cap, leaving2225.63seconds uncalibrated slack; build lease/cache copies and30second kill grace consume that slack."
+      }
+    },
+    "applyback": {
+      "skill": "reference-replay-ab",
+      "mode": "agent",
+      "params": {
+        "exclusive_node": true,
+        "harness_dir": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021/harness",
+        "harness_cmd": "../control/run_applyback_arm.sh",
+        "case_file": "cases.json",
+        "case_name": "musespark289_geak_applyback_v1",
+        "base_case": "baseline",
+        "overlay_subdir": "overlays/musespark289_geak_applyback_v1",
+        "reference_run": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021/harness/runs/musespark_38947852942_289_stock_20261021/musespark_38947852942_289_stock_20261021.json",
+        "reference_key": "request_metrics.throughput.output.tokens_per_second",
+        "run_tag_prefix": "musespark_38947852942_289_ab_v1",
+        "repeats": 3,
+        "duration_s": 3600,
+        "port": 8000,
+        "agent_budget_sec": 28800,
+        "agent_brief": "Use only crsuse2-m2m-289 and existing allocation 226837. Preserve all existing allocations, containers and unrelated processes. Never submit, cancel, requeue, renew, resize or change an allocation. Only campaign-owned containers use wl_musespark289_ and task directories use musespark289_. Read workload/PRINCIPLES.md and this campaign AGENTS.md. Use the pinned CI image, model revisions, workload and native InferenceX aggregate. The requested kernel budget is 43200 credited seconds per task; do not shorten it to fit the lease or call partial work complete. Reserve cold verification and E2E separately. First run a fresh stock control, then three complete candidate arms with unique IDs and fresh servers/caches. Prove optimized source hashes in every actual serving rank after lazy modules load, and remove one-shot observers. Keep the baseline and candidate cache placement equal; check native submission_valid and profiling error records. Report candidate median and all valid runs, stock drift and TTFT/ITL tradeoffs. Do not claim operator gains as E2E gains. Runtime wiring is now explicit in these params. Use the reviewed run_overlay_build.py prefix in the node job shell, with source_env for both Draft and QuickReduce. Use run_applyback_arm.sh; it creates fresh pinned native containers and forwards the identical fixed primer/proof barrier. Before actual measured arms read the original-source preparation receipt under control/source_proof_preflight_v2; it is not an optimization result. Every actual survivor still requires cold verification and fresh per-arm source hashes. No full-replay result can be inferred from a proof-only run. Preserve original and failed receipts.",
+        "serving_env": null,
+        "smoke_required": true,
+        "stock_run_tag": "musespark_38947852942_289_ab_v1_stock",
+        "cache_root": "/mnt/m2m_nobackup/zihao_musespark_38947852942_289/applyback_outer_cache",
+        "overlay_build_command": [
+          "python3",
+          "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021/control/run_overlay_build.py"
+        ],
+        "overlay_build_timeout_sec": 900,
+        "binding_options": {
+          "musespark289_draft_triton_attention": {
+            "source_env": {
+              "GEAK_DRAFT_KERNEL_SRC": "{kernel_src}"
+            }
+          },
+          "musespark289_quickreduce_twoshot_q8": {
+            "source_env": {
+              "GEAK_QUICKREDUCE_KERNEL_SRC": "{kernel_src}"
+            }
+          }
+        },
+        "overlay_receipt": {
+          "file": "run_identity.json",
+          "hashes_path": "server.python_overlay_files",
+          "root_path": "server.python_overlay"
+        },
+        "native_validation": {
+          "file": "aiperf_artifacts/profile_export_aiperf.json",
+          "required_values": {
+            "metadata.submission_valid": true,
+            "was_cancelled": false,
+            "error_summary": []
+          },
+          "aggregate_required_values": {
+            "request_accounting.records_error_dropped": 0
+          },
+          "completion_receipt": {
+            "file": "run_identity.json",
+            "required_values": {
+              "client_exit_code": 0
+            }
+          },
+          "duration_coverage": {
+            "path": "metadata.metric_duration_coverage",
+            "phase": "profiling",
+            "phase_field": "phase_name",
+            "duration_field": "expected_duration_seconds",
+            "threshold_field": "required_ratio",
+            "ratio_fields": [
+              "ttft_ratio",
+              "inter_token_latency_ratio"
+            ]
+          }
+        },
+        "serving_source_proof": {
+          "file": "serving_source_proof.json",
+          "world_size": 8,
+          "producer_file": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021/control/applyback-observer/serving_source_producer.py",
+          "producer_sha256": "769728a03ad4876269e30aae6069f90213d891ab240b835a5e7068d757375944"
+        },
+        "_runtime_review": "Accepted actual original8-source v2preflight: control/source_proof_preflight_v2/coordinator_review.json. All64rank/targetrecords, nativeprovenance, observerremoval, intendedstopandcleanupverified. V1remainsfailed. ThisisnotoptimizationorE2E."
+      }
+    }
+  },
+  "runtime": {
+    "binds": [
+      "/shared_nfs:/shared_nfs",
+      "/mnt/m2m_nobackup:/mnt/m2m_nobackup",
+      "/home/zihaoan2:/home/zihaoan2"
+    ],
+    "supplemental_groups": [
+      "video",
+      "992"
+    ],
+    "user_name": "zihaoan2",
+    "home": "/home/zihaoan2",
+    "jit_source": "/sgl-workspace/aiter/aiter/jit",
+    "reason": "Ordinary user-mode serving containers on the existing allocation, using the same allowed mounts and image-supplied JIT assets as the previous qualified deployment.",
+    "serving_env": {
+      "PYTHONNOUSERSITE": "1",
+      "SGLANG_TIMEOUT_KEEP_ALIVE": "900",
+      "SGLANG_USE_AITER": "1",
+      "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+      "MUSE_MOE_BACKEND": "flydsl",
+      "HF_HUB_OFFLINE": "1",
+      "SGLANG_SIMULATE_ACC_LEN": "4.05",
+      "SGLANG_SIMULATE_ACC_METHOD": "match-expected",
+      "SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token",
+      "SGLANG_SET_CPU_AFFINITY": "1",
+      "NCCL_MIN_NCHANNELS": "112",
+      "UV_CONSTRAINT": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021/control/client-requirements.lock",
+      "HF_XET_CACHE": "/mnt/m2m_nobackup/zihao_musespark_38947852942_289/hf_hub_cache/xet"
+    },
+    "aiter_configs_source": "/tmp/aiter_configs",
+    "physical_cpus": [
+      0,
+      2,
+      4,
+      6,
+      8,
+      10,
+      12,
+      14,
+      16,
+      18,
+      20,
+      22,
+      24,
+      26,
+      28,
+      30,
+      32,
+      34,
+      36,
+      38,
+      40,
+      42,
+      44,
+      46,
+      48,
+      50,
+      52,
+      54,
+      56,
+      58,
+      60,
+      62,
+      64,
+      66,
+      68,
+      70,
+      72,
+      74,
+      76,
+      78,
+      80,
+      82,
+      84,
+      86,
+      88,
+      90,
+      92,
+      94,
+      96,
+      98,
+      100,
+      102,
+      104,
+      106,
+      108,
+      110,
+      112,
+      114,
+      116,
+      118,
+      120,
+      122,
+      124,
+      126,
+      128,
+      130,
+      132,
+      134,
+      136,
+      138,
+      140,
+      142,
+      144,
+      146,
+      148,
+      150,
+      152,
+      154,
+      156,
+      158,
+      160,
+      162,
+      164,
+      166,
+      168,
+      170,
+      172,
+      174,
+      176,
+      178,
+      180,
+      182,
+      184,
+      186,
+      188,
+      190,
+      192,
+      194,
+      196,
+      198,
+      200,
+      202,
+      204,
+      206,
+      208,
+      210,
+      212,
+      214,
+      216,
+      218,
+      220,
+      222,
+      224,
+      226,
+      228,
+      230,
+      232,
+      234
+    ],
+    "leg_timeout_sec": 7200,
+    "leg_min_wall_sec": 5400,
+    "gpu_idle_samples": 3,
+    "gpu_idle_interval_sec": 2,
+    "gpu_idle_timeout_sec": 180,
+    "gpu_idle_max_vram_bytes": 2147483648,
+    "gpu_lock_dir": "/dev/shm/team_gpu_locks",
+    "_note_launch_windows": "The 4400-second minimum covers the unchanged 3600-second measurement plus startup/drain observed in the prior native runs. Idle samples address the previously observed teardown handoff refusal; the 180-second bound and 2GiB fence are conservative operational allowances, not performance thresholds.",
+    "tool_bin_dirs": [
+      "/shared_nfs/zihao/bin"
+    ],
+    "_tool_bin_dirs_note": "Append existing shared Node tools after the image PATH for the unchanged canonical snapshot helper used by collective UTs. Nodev20.18.1 was checked in the pinned image; no Python/compiler override. See control/driver-fixes/collective-node-runtime/node-availability.json."
+  },
+  "provision": {
+    "repositories": [
+      {
+        "repo_id": "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
+        "revision": "c7bc74fd64371315a091bc15f9723882eead0dc1",
+        "repo_type": "model"
+      },
+      {
+        "repo_id": "RadixArk/Muse-Spark-Open-DFlash2",
+        "revision": "46c90f412549c472941a68382d91a99e5e6372a0",
+        "repo_type": "model"
+      },
+      {
+        "repo_id": "semianalysisai/cc-traces-weka-062126-256k",
+        "revision": "8fecd2fc56694469f758f0afbbb6335ad3043740",
+        "repo_type": "dataset"
+      }
+    ],
+    "max_download_workers": 8
+  },
+  "code_root": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021/control/code_snapshot"
+}

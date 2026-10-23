@@ -54,6 +54,19 @@ separate) does not need rewriting.
 4. **The overlay must be loaded by a freshly started server** (`REUSE_SERVER=0`).
    Reusing an already-running server measures an unpatched stack.
 
+For modules loaded lazily, verify the source path and hash in the actual serving workers
+after a warmup request exercises that path. A parent-process import or a pre-warmup check
+does not establish what each serving rank loaded. If a temporary loader observer is
+needed, remove it after the real load and record that restoration; do not change the
+kernel or leave instrumentation in steady-state timing.
+
+Use the same cache placement and freshness policy on both sides of A/B. When a long
+optimization run separates the candidate from its original reference, a fresh unchanged
+control can expose environment drift. Record its drift from the original reference and
+report throughput together with relevant TTFT/ITL tradeoffs. Keep valid slow repeats in
+the reported statistic. Report invalid runs with their receipts and reasons rather than
+deleting or reusing their benchmark IDs.
+
 ## Two environment constraints
 
 - **Exclusive node**: end-to-end measurement needs all 8 GPUs at TP8/conc10 and cannot

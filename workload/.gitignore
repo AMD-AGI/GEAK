@@ -10,3 +10,5 @@ __pycache__/
 # filled-in copy never is.
 *.env
 !runners/*.env.example
+# These upstream validation logs are part of the frozen skill manifest.
+!stages/profile/agentx-kernel-extraction-standalone/validation/*.log

@@ -30,7 +30,7 @@ Usage:
                          --runner <runners/x.sh> [--gpus 0,1,...] [--target 172800]
     python3 scheduler.py --work-root <dir> status
 """
-import argparse, json, os, subprocess, sys, time
+import argparse, fcntl, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER = os.path.join(HERE, "worker.sh")
@@ -106,7 +106,7 @@ def discover_tasks(tasks_dir, order_file=None, max_tasks=None, exclude=()):
             score, seen = {}, []
             for r in rows or []:
                 if isinstance(r, dict):
-                    name = r.get("task") or r.get("kernel") or r.get("case_id")
+                    name = r.get("task") or r.get("task_dir") or r.get("kernel") or r.get("case_id")
                     gain = r.get("expected_e2e_gain_pct")
                 else:
                     name, gain = r, None
@@ -160,10 +160,17 @@ def state_path(work_root, kernel, suffix):
 
 
 def read_credit(work_root, kernel):
+    values = [0]
     try:
-        return int(open(state_path(work_root, kernel, "credit")).read().strip() or 0)
+        values.append(int(open(state_path(work_root, kernel, "credit")).read().strip() or 0))
     except (OSError, ValueError):
-        return 0
+        pass
+    try:
+        with open(state_path(work_root, kernel, "status.json")) as f:
+            values.append(int(json.load(f).get("credited_seconds", 0)))
+    except (OSError, ValueError, TypeError):
+        pass
+    return max(values)
 
 
 def read_hb(work_root, kernel):
@@ -173,7 +180,14 @@ def read_hb(work_root, kernel):
         return 0
 
 
-def is_done(work_root, kernel, target):
+def is_done(work_root, kernel, target, require_full_budget=False):
+    if require_full_budget:
+        try:
+            with open(state_path(work_root, kernel, "status.json")) as f:
+                status = json.load(f)
+            return status.get("status") == "done" and status.get("credited_seconds", 0) >= target
+        except (OSError, ValueError, TypeError):
+            return False
     if os.path.exists(state_path(work_root, kernel, "done")):
         return True
     return read_credit(work_root, kernel) >= target
@@ -311,6 +325,7 @@ class DockerBackend(Backend):
         logical_ids = ",".join(str(i) for i in range(len(gpus)))
         render_nodes = ",".join("renderD%d" % (128 + 8 * gpu) for gpu in sorted(gpus))
         cmd += ["-e", "GPU_IDS=" + logical_ids,
+                "-e", "HIP_VISIBLE_DEVICES=" + logical_ids,
                 "-e", "GEAK_GPU_ALLOWED=" + logical_ids,
                 "-e", "GEAK_GPU_RENDER_DEVICES=" + render_nodes, self.image,
                 *entry_prefix, "bash", WORKER, kernel, slot_label(gpus)]
@@ -339,12 +354,26 @@ def measuring_since(work_root, kernel):
 def tick(args, backend, tasks, assign, bad):
     now = int(time.time())
     target = args.target
+    full = getattr(args, "require_full_budget", False)
+
+    # Recover live workers after a supervisor restart before considering new work.
+    # A heartbeat alone is not a worker: confirm the container/process still exists.
+    if not getattr(args, "reconciled_workers", False):
+        for gpus in args.slots:
+            label = slot_label(gpus)
+            if label not in assign:
+                for kernel in tasks:
+                    if backend.alive(kernel, gpus):
+                        assign[label] = kernel
+                        args.started_at[(label, kernel)] = now
+                        break
+        args.reconciled_workers = True
 
     # 1) Check reality: which slots still carry a live worker.
     for label in list(assign):
         kernel = assign[label]
         gpus = args.slot_of[label]
-        if is_done(args.work_root, kernel, target):
+        if is_done(args.work_root, kernel, target, full):
             # Exhaustion is a between-attempts decision. If the worker is inside a sweep,
             # the agent's time is already spent and only the verdict is outstanding; let
             # it land. The mark ages out on its own, so a worker that died mid-sweep
@@ -391,7 +420,7 @@ def tick(args, backend, tasks, assign, bad):
     busy = set(assign.values())
     pending = [t for t in tasks
                if t not in busy
-               and not is_done(args.work_root, t, target)
+               and not is_done(args.work_root, t, target, full)
                and not is_blocked(args.work_root, t)]
 
     for gpus in args.slots:
@@ -419,7 +448,7 @@ def tick(args, backend, tasks, assign, bad):
                 log(args.work_root, "%s failed to start %d times in a row; blacklisted"
                     % (label, bad[label]))
 
-    remaining = [t for t in tasks if not is_done(args.work_root, t, target)
+    remaining = [t for t in tasks if not is_done(args.work_root, t, target, full)
                  and not is_blocked(args.work_root, t)]
     return assign, bad, remaining
 
@@ -464,6 +493,8 @@ def main():
     ap.add_argument("--exclude", default="",
                     help="comma-separated task directory names to leave out of this run")
     ap.add_argument("--target", type=int, default=172800)
+    ap.add_argument("--require-full-budget", action="store_true",
+                    help="keep the requested per-task budget and finish the final bounded attempt")
     ap.add_argument("--attempt-cap", type=int, default=1500)
     ap.add_argument("--measure-timeout", type=int, default=1800,
                     help="ceiling on the worker's own post-attempt measurement. This is "
@@ -510,6 +541,16 @@ def main():
     for d in ("state", "logs", "runs"):
         os.makedirs(os.path.join(args.work_root, d), exist_ok=True)
 
+    # A live orphaned scheduler after coordinator SIGKILL still owns its workers.
+    # Keep this descriptor alive until main returns; a peer must not replace them.
+    scheduler_lock = open(os.path.join(args.work_root, "scheduler.lock"), "a")
+    try:
+        fcntl.flock(scheduler_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        scheduler_lock.close()
+        print("another scheduler owns this work root", file=sys.stderr)
+        return 78
+
     args.slots, short = make_slots(args.gpus, args.gpus_per_task)
     args.slot_of = {slot_label(g): g for g in args.slots}
     if short:
@@ -552,6 +593,7 @@ def main():
         "SKILL_ROOT": args.skill_root,
         "RUNNER": args.runner,
         "TARGET": str(args.target),
+        "REQUIRE_FULL_BUDGET": "1" if args.require_full_budget else "0",
         "ATTEMPT_CAP": str(args.attempt_cap),
         "MEASURE_TIMEOUT": str(args.measure_timeout),
         "ATTEMPT_MIN": str(min(args.attempt_min, args.attempt_cap)),

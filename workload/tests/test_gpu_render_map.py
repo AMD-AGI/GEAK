@@ -1,5 +1,6 @@
 """CPU checks for logical GPU ids in containers with host sysfs node names."""
 import os
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -12,7 +13,9 @@ sys.path.insert(0, str(GEAK / 'workload/scripts'))
 import scheduler
 
 
-@pytest.mark.parametrize('gpus, renders', [([1], 'renderD136'), ([0, 2, 7], 'renderD128,renderD144,renderD184')])
+@pytest.mark.parametrize('gpus, renders', [([1], 'renderD136'), ([3], 'renderD152'),
+                                          ([3, 5], 'renderD152,renderD168'),
+                                          ([0, 2, 7], 'renderD128,renderD144,renderD184')])
 def test_docker_launch_records_logical_to_physical_mapping(tmp_path, monkeypatch, gpus, renders):
     commands = []
     def fake_sh(argv, **kw):
@@ -26,8 +29,50 @@ def test_docker_launch_records_logical_to_physical_mapping(tmp_path, monkeypatch
     launch = commands[-1]
     logical = ','.join(map(str, range(len(gpus))))
     assert 'GPU_IDS=' + logical in launch
+    assert 'HIP_VISIBLE_DEVICES=' + logical in launch
     assert 'GEAK_GPU_ALLOWED=' + logical in launch
     assert 'GEAK_GPU_RENDER_DEVICES=' + renders in launch
+    devices = [launch[i + 1] for i, arg in enumerate(launch[:-1]) if arg == '--device']
+    assert devices == ['/dev/kfd'] + ['/dev/dri/' + name for name in renders.split(',')]
+
+
+@pytest.mark.parametrize('gpus, logical', [([3], '0'), ([3, 5], '0,1')])
+def test_docker_logical_mask_overrides_wrong_runtime_and_worker_env(tmp_path, monkeypatch, gpus, logical):
+    profile = tmp_path / 'runtime.json'
+    profile.write_text(json.dumps({'docker_args': ['-e', 'HIP_VISIBLE_DEVICES=7', '-e', 'GPU_IDS=7']}))
+    monkeypatch.setenv('WORKLOAD_DOCKER_RUNTIME', str(profile))
+    commands = []
+    monkeypatch.setattr(scheduler, 'sh', lambda argv, **kw: (commands.append(argv) or (0, 'cpu-stub')))
+    monkeypatch.setattr(scheduler.os.path, 'exists', lambda path: True)
+    wrong = {'HIP_VISIBLE_DEVICES': '3,5,7', 'GPU_IDS': '3,5,7',
+             'GEAK_GPU_ALLOWED': '3,5,7', 'GEAK_GPU_RENDER_DEVICES': 'renderD184'}
+    original = dict(wrong)
+    assert scheduler.DockerBackend(str(tmp_path), 'pinned:test').start('fixture', gpus, wrong)
+    launch = commands[-1]
+    # Docker uses the last assignment; assert the actual launch boundary, not mere presence.
+    actual = dict(launch[i + 1].split('=', 1) for i, arg in enumerate(launch[:-1]) if arg == '-e')
+    assert actual['HIP_VISIBLE_DEVICES'] == actual['GPU_IDS'] == actual['GEAK_GPU_ALLOWED'] == logical
+    assert actual['GEAK_GPU_RENDER_DEVICES'] == ','.join('renderD%d' % (128 + 8 * gpu) for gpu in gpus)
+    assert wrong == original
+
+
+@pytest.mark.parametrize('gpus, physical', [([3], '3'), ([3, 5], '3,5')])
+def test_local_backend_keeps_explicit_physical_masks(tmp_path, monkeypatch, gpus, physical):
+    seen = {}
+
+    class Process:
+        pid = 12345
+
+    def fake_popen(argv, **kwargs):
+        seen.update(kwargs['env'])
+        kwargs['stdout'].close()
+        return Process()
+
+    monkeypatch.setattr(scheduler.subprocess, 'Popen', fake_popen)
+    assert scheduler.LocalBackend(str(tmp_path), 'unused').start(
+        'fixture', gpus, {'HIP_VISIBLE_DEVICES': 'wrong', 'ROCR_VISIBLE_DEVICES': 'wrong'})
+    assert seen['HIP_VISIBLE_DEVICES'] == seen['ROCR_VISIBLE_DEVICES'] == physical
+    assert seen['GPU_IDS'] == ','.join(map(str, range(len(gpus))))
 
 
 @pytest.mark.parametrize('gpu, mapping, expected', [

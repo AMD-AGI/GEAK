@@ -1,0 +1,470 @@
+{
+  "contract": "kernel_selection",
+  "ok": false,
+  "target_callable": "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "device_kernel": "kernel_paged_attention_2d",
+  "capture_target": "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "total_calls_observed": 7,
+  "target_marker": "GEAK_TARGET::vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "target_marker_calls": 0,
+  "matched_kernel_calls": 0,
+  "matched_kernel_names": [],
+  "correlated_external_ids": 0,
+  "correlated_launch_correlations": 0,
+  "candidate_targets_tested": [],
+  "live_candidate_targets": [],
+  "deeper_live_candidates": [],
+  "missing_candidate_markers": [
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "installed_but_never_live_candidates": [],
+  "deepest_verified": false,
+  "evidence": "installed+live_nested_candidate_markers+torch_profiler_external_id_or_launch_correlation",
+  "failed": [
+    "candidate_marker_not_installed",
+    "capture_process_trace_missing",
+    "device_kernel_not_under_target",
+    "target_marker_missing"
+  ],
+  "process_verdicts": [
+    {
+      "capture_meta_file": "/tmp/tmp3k0s6oq0/capture.pid-111.rank-0/meta.json",
+      "trace_files": [],
+      "ok": false,
+      "failed": [
+        "candidate_marker_not_installed",
+        "target_marker_missing",
+        "device_kernel_not_under_target",
+        "capture_process_trace_missing"
+      ],
+      "live_candidate_targets": [],
+      "deeper_live_candidates": []
+    }
+  ],
+  "best_process_meta_file": "/tmp/tmp3k0s6oq0/capture.pid-111.rank-0/meta.json",
+  "trace_file": "",
+  "trace_files": [],
+  "trace_files_considered": [
+    "/tmp/tmp3k0s6oq0/selection.pid-999.rank-0.json"
+  ],
+  "capture_storage": {
+    "task_dir": "/tmp/tmp3k0s6oq0",
+    "bytes_reclaimed": 4339,
+    "bytes_promoted": 0,
+    "bytes_before": 4339,
+    "bytes_after": 0,
+    "capture_dirs_seen": [
+      "/tmp/tmp3k0s6oq0/capture.pid-111.rank-0"
+    ],
+    "removed_paths": [
+      "/tmp/tmp3k0s6oq0/capture.pid-111.rank-0"
+    ],
+    "promoted": false,
+    "keep_meta_path": null,
+    "errors": [],
+    "capture_dirs_remaining": [],
+    "authoritative_oracle_bytes": 0,
+    "authoritative_oracle_present": false
+  }
+}
+{
+  "contract": "kernel_selection",
+  "ok": true,
+  "target_callable": "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "device_kernel": "kernel_paged_attention_2d",
+  "capture_target": "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "total_calls_observed": 7,
+  "target_marker": "GEAK_TARGET::vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "target_marker_calls": 1,
+  "matched_kernel_calls": 1,
+  "matched_kernel_names": [
+    "void vllm::kernel_paged_attention_2d<bf16>(int)"
+  ],
+  "correlated_external_ids": 1,
+  "correlated_launch_correlations": 0,
+  "candidate_targets_tested": [
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "live_candidate_targets": [
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "deeper_live_candidates": [],
+  "missing_candidate_markers": [],
+  "installed_but_never_live_candidates": [],
+  "deepest_verified": true,
+  "evidence": "installed+live_nested_candidate_markers+torch_profiler_external_id_or_launch_correlation",
+  "failed": [],
+  "process_verdicts": [
+    {
+      "capture_meta_file": "/tmp/tmplji4fivl/capture.pid-111.rank-0/meta.json",
+      "trace_files": [
+        "/tmp/tmplji4fivl/selection.pid-111.rank-0.call-1.json"
+      ],
+      "ok": true,
+      "failed": [],
+      "live_candidate_targets": [
+        "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+      ],
+      "deeper_live_candidates": []
+    }
+  ],
+  "best_process_meta_file": "/tmp/tmplji4fivl/capture.pid-111.rank-0/meta.json",
+  "trace_file": "/tmp/tmplji4fivl/selection.pid-111.rank-0.call-1.json",
+  "trace_files": [
+    "/tmp/tmplji4fivl/selection.pid-111.rank-0.call-1.json"
+  ],
+  "trace_files_considered": [
+    "/tmp/tmplji4fivl/selection.pid-111.rank-0.call-1.json"
+  ],
+  "capture_storage": {
+    "task_dir": "/tmp/tmplji4fivl",
+    "errors": [
+      "reclaim exploded"
+    ]
+  }
+}
+{
+  "contract": "kernel_selection",
+  "ok": true,
+  "target_callable": "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "device_kernel": "kernel_paged_attention_2d",
+  "capture_target": "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "total_calls_observed": 14,
+  "target_marker": "GEAK_TARGET::vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "target_marker_calls": 2,
+  "matched_kernel_calls": 2,
+  "matched_kernel_names": [
+    "void vllm::kernel_paged_attention_2d<bf16>(int)"
+  ],
+  "correlated_external_ids": 2,
+  "correlated_launch_correlations": 0,
+  "candidate_targets_tested": [
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "live_candidate_targets": [
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "deeper_live_candidates": [],
+  "missing_candidate_markers": [],
+  "installed_but_never_live_candidates": [],
+  "deepest_verified": true,
+  "evidence": "installed+live_nested_candidate_markers+torch_profiler_external_id_or_launch_correlation",
+  "failed": [],
+  "process_verdicts": [
+    {
+      "capture_meta_file": "/tmp/tmpjr0ddrfd/capture.pid-111.rank-0/meta.json",
+      "trace_files": [
+        "/tmp/tmpjr0ddrfd/selection.pid-111.rank-0.call-1.json"
+      ],
+      "ok": true,
+      "failed": [],
+      "live_candidate_targets": [
+        "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+      ],
+      "deeper_live_candidates": []
+    },
+    {
+      "capture_meta_file": "/tmp/tmpjr0ddrfd/capture.pid-222.rank-0/meta.json",
+      "trace_files": [
+        "/tmp/tmpjr0ddrfd/selection.pid-222.rank-0.call-1.json"
+      ],
+      "ok": true,
+      "failed": [],
+      "live_candidate_targets": [
+        "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+      ],
+      "deeper_live_candidates": []
+    }
+  ],
+  "best_process_meta_file": "/tmp/tmpjr0ddrfd/capture.pid-111.rank-0/meta.json",
+  "trace_file": "",
+  "trace_files": [
+    "/tmp/tmpjr0ddrfd/selection.pid-111.rank-0.call-1.json",
+    "/tmp/tmpjr0ddrfd/selection.pid-222.rank-0.call-1.json"
+  ],
+  "trace_files_considered": [
+    "/tmp/tmpjr0ddrfd/selection.pid-111.rank-0.call-1.json",
+    "/tmp/tmpjr0ddrfd/selection.pid-222.rank-0.call-1.json"
+  ],
+  "capture_storage": {
+    "task_dir": "/tmp/tmpjr0ddrfd",
+    "bytes_reclaimed": 517,
+    "bytes_promoted": 14,
+    "bytes_before": 531,
+    "bytes_after": 0,
+    "capture_dirs_seen": [
+      "/tmp/tmpjr0ddrfd/_selcap/capture.pid-333.rank-0",
+      "/tmp/tmpjr0ddrfd/capture.pid-111.rank-0",
+      "/tmp/tmpjr0ddrfd/capture.pid-222.rank-0"
+    ],
+    "removed_paths": [
+      "/tmp/tmpjr0ddrfd/_selcap/capture.pid-333.rank-0",
+      "/tmp/tmpjr0ddrfd/capture.pid-111.rank-0",
+      "/tmp/tmpjr0ddrfd/capture.pid-222.rank-0"
+    ],
+    "promoted": true,
+    "keep_meta_path": "/tmp/tmpjr0ddrfd/capture.pid-111.rank-0/meta.json",
+    "errors": [],
+    "promote": {
+      "promoted_meta": true,
+      "promoted_oracle": true,
+      "bytes_promoted": 14,
+      "oracle_path": "/tmp/tmpjr0ddrfd/reference_io.pt",
+      "meta_path": "/tmp/tmpjr0ddrfd/meta.json"
+    },
+    "capture_dirs_remaining": [],
+    "authoritative_oracle_bytes": 14,
+    "authoritative_oracle_present": true
+  }
+}
+{
+  "contract": "kernel_selection",
+  "ok": false,
+  "target_callable": "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "device_kernel": "kernel_paged_attention_2d",
+  "capture_target": "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "total_calls_observed": 7,
+  "target_marker": "GEAK_TARGET::vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "target_marker_calls": 0,
+  "matched_kernel_calls": 0,
+  "matched_kernel_names": [],
+  "correlated_external_ids": 0,
+  "correlated_launch_correlations": 0,
+  "candidate_targets_tested": [],
+  "live_candidate_targets": [],
+  "deeper_live_candidates": [],
+  "missing_candidate_markers": [
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "installed_but_never_live_candidates": [],
+  "deepest_verified": false,
+  "evidence": "installed+live_nested_candidate_markers+torch_profiler_external_id_or_launch_correlation",
+  "failed": [
+    "candidate_marker_not_installed",
+    "capture_process_trace_missing",
+    "device_kernel_not_under_target",
+    "target_marker_missing"
+  ],
+  "process_verdicts": [
+    {
+      "capture_meta_file": "/tmp/tmpawbe37at/capture.pid-111.rank-0/meta.json",
+      "trace_files": [],
+      "ok": false,
+      "failed": [
+        "candidate_marker_not_installed",
+        "target_marker_missing",
+        "device_kernel_not_under_target",
+        "capture_process_trace_missing"
+      ],
+      "live_candidate_targets": [],
+      "deeper_live_candidates": []
+    }
+  ],
+  "best_process_meta_file": "/tmp/tmpawbe37at/capture.pid-111.rank-0/meta.json",
+  "trace_file": "",
+  "trace_files": [],
+  "trace_files_considered": [
+    "/tmp/tmpawbe37at/selection.pid-999.rank-0.json"
+  ]
+}
+{
+  "contract": "kernel_selection",
+  "ok": false,
+  "target_callable": "vllm.attention:mid",
+  "device_kernel": "kernel_paged_attention_2d",
+  "capture_target": "vllm.attention:mid",
+  "total_calls_observed": 7,
+  "target_marker": "GEAK_TARGET::vllm.attention:mid",
+  "target_marker_calls": 2,
+  "matched_kernel_calls": 2,
+  "matched_kernel_names": [
+    "kernel_paged_attention_2d"
+  ],
+  "correlated_external_ids": 2,
+  "correlated_launch_correlations": 0,
+  "candidate_targets_tested": [
+    "vllm.attention:mid",
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "live_candidate_targets": [
+    "vllm.attention:mid",
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "deeper_live_candidates": [
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "missing_candidate_markers": [],
+  "installed_but_never_live_candidates": [],
+  "deepest_verified": false,
+  "evidence": "installed+live_nested_candidate_markers+torch_profiler_external_id_or_launch_correlation",
+  "failed": [
+    "deeper_live_candidate_exists"
+  ],
+  "process_verdicts": [
+    {
+      "capture_meta_file": "/tmp/tmp10cpdnt1/capture.pid-111.rank-0/meta.json",
+      "trace_files": [
+        "/tmp/tmp10cpdnt1/selection.pid-111.rank-0.call-1.json",
+        "/tmp/tmp10cpdnt1/selection.pid-111.rank-0.call-2.json"
+      ],
+      "ok": false,
+      "failed": [
+        "deeper_live_candidate_exists"
+      ],
+      "live_candidate_targets": [
+        "vllm.attention:mid",
+        "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+      ],
+      "deeper_live_candidates": [
+        "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+      ]
+    }
+  ],
+  "best_process_meta_file": "/tmp/tmp10cpdnt1/capture.pid-111.rank-0/meta.json",
+  "trace_file": "",
+  "trace_files": [
+    "/tmp/tmp10cpdnt1/selection.pid-111.rank-0.call-1.json",
+    "/tmp/tmp10cpdnt1/selection.pid-111.rank-0.call-2.json"
+  ],
+  "trace_files_considered": [
+    "/tmp/tmp10cpdnt1/selection.pid-111.rank-0.call-1.json",
+    "/tmp/tmp10cpdnt1/selection.pid-111.rank-0.call-2.json"
+  ]
+}
+{
+  "contract": "kernel_selection",
+  "ok": false,
+  "target_callable": "vllm.attention:mid",
+  "device_kernel": "kernel_paged_attention_2d",
+  "capture_target": "vllm.attention:mid",
+  "total_calls_observed": 14,
+  "target_marker": "GEAK_TARGET::vllm.attention:mid",
+  "target_marker_calls": 2,
+  "matched_kernel_calls": 2,
+  "matched_kernel_names": [
+    "kernel_paged_attention_2d"
+  ],
+  "correlated_external_ids": 2,
+  "correlated_launch_correlations": 0,
+  "candidate_targets_tested": [
+    "vllm.attention:mid",
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "live_candidate_targets": [
+    "vllm.attention:mid",
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "deeper_live_candidates": [
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "missing_candidate_markers": [],
+  "installed_but_never_live_candidates": [],
+  "deepest_verified": false,
+  "evidence": "installed+live_nested_candidate_markers+torch_profiler_external_id_or_launch_correlation",
+  "failed": [
+    "deeper_live_candidate_exists"
+  ],
+  "process_verdicts": [
+    {
+      "capture_meta_file": "/tmp/tmpcs8z0xz8/capture.pid-111.rank-0/meta.json",
+      "trace_files": [
+        "/tmp/tmpcs8z0xz8/selection.pid-111.rank-0.call-1.json"
+      ],
+      "ok": true,
+      "failed": [],
+      "live_candidate_targets": [
+        "vllm.attention:mid"
+      ],
+      "deeper_live_candidates": []
+    },
+    {
+      "capture_meta_file": "/tmp/tmpcs8z0xz8/capture.pid-222.rank-0/meta.json",
+      "trace_files": [
+        "/tmp/tmpcs8z0xz8/selection.pid-222.rank-0.call-1.json"
+      ],
+      "ok": false,
+      "failed": [
+        "deeper_live_candidate_exists"
+      ],
+      "live_candidate_targets": [
+        "vllm.attention:mid",
+        "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+      ],
+      "deeper_live_candidates": [
+        "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+      ]
+    }
+  ],
+  "best_process_meta_file": "/tmp/tmpcs8z0xz8/capture.pid-111.rank-0/meta.json",
+  "trace_file": "",
+  "trace_files": [
+    "/tmp/tmpcs8z0xz8/selection.pid-111.rank-0.call-1.json",
+    "/tmp/tmpcs8z0xz8/selection.pid-222.rank-0.call-1.json"
+  ],
+  "trace_files_considered": [
+    "/tmp/tmpcs8z0xz8/selection.pid-111.rank-0.call-1.json",
+    "/tmp/tmpcs8z0xz8/selection.pid-222.rank-0.call-1.json"
+  ]
+}
+{
+  "contract": "kernel_selection",
+  "ok": true,
+  "target_callable": "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "device_kernel": "kernel_paged_attention_2d",
+  "capture_target": "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "total_calls_observed": 7,
+  "target_marker": "GEAK_TARGET::vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode",
+  "target_marker_calls": 1,
+  "matched_kernel_calls": 1,
+  "matched_kernel_names": [
+    "void vllm::kernel_paged_attention_2d<bf16>(int)"
+  ],
+  "correlated_external_ids": 1,
+  "correlated_launch_correlations": 0,
+  "candidate_targets_tested": [
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "live_candidate_targets": [
+    "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+  ],
+  "deeper_live_candidates": [],
+  "missing_candidate_markers": [],
+  "installed_but_never_live_candidates": [],
+  "deepest_verified": true,
+  "evidence": "installed+live_nested_candidate_markers+torch_profiler_external_id_or_launch_correlation",
+  "failed": [],
+  "process_verdicts": [
+    {
+      "capture_meta_file": "/tmp/tmpdac1r6jg/meta.json",
+      "trace_files": [
+        "/tmp/tmpdac1r6jg/trace.json"
+      ],
+      "ok": true,
+      "failed": [],
+      "live_candidate_targets": [
+        "vllm.v1.attention.ops.chunked_prefill_paged_decode:chunked_prefill_paged_decode"
+      ],
+      "deeper_live_candidates": []
+    }
+  ],
+  "best_process_meta_file": "/tmp/tmpdac1r6jg/meta.json",
+  "trace_file": "/tmp/tmpdac1r6jg/trace.json",
+  "trace_files": [
+    "/tmp/tmpdac1r6jg/trace.json"
+  ],
+  "trace_files_considered": [
+    "/tmp/tmpdac1r6jg/trace.json"
+  ]
+}
+
+......................................./tmp/agentx standalone relocated vzdh07ck/agentx-kernel-extraction-standalone/tests/test_kernel_selection.py:476: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmppirob248/t0.json' mode='w' encoding='UTF-8'>
+  json.dump(doc, open(p, "w"))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/tmp/agentx standalone relocated vzdh07ck/agentx-kernel-extraction-standalone/tests/test_kernel_selection.py:476: ResourceWarning: unclosed file <_io.TextIOWrapper name='/tmp/tmppirob248/t1.json' mode='w' encoding='UTF-8'>
+  json.dump(doc, open(p, "w"))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+....................
+----------------------------------------------------------------------
+Ran 59 tests in 0.026s
+
+OK

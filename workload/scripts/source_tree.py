@@ -69,7 +69,17 @@ def editable_sources(task):
         leaves = (sorted(n for n in names if n.endswith(".py")) or names)[:1]
     result = []
     for leaf in leaves:
-        value = leaf.get("source_file") if isinstance(leaf, dict) else leaf
+        if isinstance(leaf, dict):
+            # Extraction contracts use both spellings for the same source path.
+            # Reject ambiguous aliases instead of silently widening editable scope.
+            value = leaf.get("source_file", leaf.get("file"))
+            if "source_file" in leaf and "file" in leaf and (
+                not isinstance(value, str) or not isinstance(leaf["file"], str)
+                or value.removeprefix("kernel_src/") != leaf["file"].removeprefix("kernel_src/")
+            ):
+                raise ValueError(f"conflicting editable source paths: {leaf!r}")
+        else:
+            value = leaf
         if not isinstance(value, str) or not value or any(c.isspace() for c in value):
             raise ValueError(f"invalid editable source declaration: {leaf!r}")
         path = PurePosixPath(value)

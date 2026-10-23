@@ -5,14 +5,14 @@ description: Run GEAK kernel optimization when frozen tasks require different GP
 
 # Optimize tasks with different GPU requirements
 
-This implements the workload optimize slot. It reuses the existing GEAK task scheduler,
-cold verifier and finalizer. Single-GPU tasks can use the standard kernel-workflow prompts
+This implements the workload optimize slot. It reuses the existing GEAK task scheduler;
+cold-test judgement and final reporting stay in the slot's README. Single-GPU tasks use the standard kernel-workflow prompts
 or the [native task prompt](native-task/prompt.sh) for a standalone coding CLI without the
 Workflow tool. Multi-GPU tasks use the [collective prompt](collective-method/prompt.sh), which directs
 one worker to optimize against the frozen multi-rank entry with its whole device set.
 The inner kernel workflow uses a pool lock that selects one GPU, so running it on a
-collective would silently reduce an eight-device task to one device. Groups execute
-separately, with time reserved for verification and end-to-end measurement.
+collective would silently reduce an eight-device task to one device. Groups with disjoint
+GPU pools execute concurrently, with time reserved for verification and end-to-end measurement.
 
 Read the standard environment from the [stage contract](../../CONTRACT.md), then follow
 [the slot's README](../README.md). This implementation is **step 1 only**: run
@@ -21,8 +21,21 @@ rerunning each task's unit test from cold and writing `optimized.json` and `resu
 are identical for every optimize implementation and are described there.
 Use `--plan-only` to write `group_plan.json` without starting containers.
 
+Before dispatch, follow the slot's readiness checks. Choose the method from the runner's
+actual capabilities: GEAK's Workflow tool is the default when available; a CLI without
+that tool uses `single_gpu_method=native-frozen`. Changing the runner remains a config
+choice and never changes scheduling code.
+
 Additional `$PARAMS` inputs:
 
+- `task_limit`: how many extracted tasks this campaign holds in flight at once, default 8.
+  It bounds dispatch, not extraction: the head of the roofline order fills the wave and
+  every task beyond it is reported as `capacity_deferred` with its rank and reason. Every
+  directory must therefore appear in dispatch or in that deferral list, and in final
+  reporting. `max_tasks`/`exclude_tasks` are refused when they would omit any delivered
+  task; group-local scheduler exclusions only partition the complete set across disjoint
+  pools. A task with a missing source directory is a visible delivery defect, not an
+  absent task.
 - `task_gpu_requirements`: a map from task directory name to positive GPU count, or
   `task_gpu_requirements_file`: a JSON file containing that map. Without an explicit
   entry, the task's `meta.json.required_gpus` is used. Missing requirements are blocked;
@@ -43,14 +56,24 @@ Additional `$PARAMS` inputs:
   `wall_overhead_factor` defaults to 1.5.
 - `max_wall_sec`: optional additional wall-clock ceiling for all optimization groups.
 
-The usual optimize parameters retain their meaning. GPU groups execute sequentially;
-tasks within a group use the existing scheduler's parallel slots. Each group receives a
-separate work root. Worker source, credit and attempt history remain there; the canonical
-`work/` references those artifacts and `dispatch.json` records each group's scheduler exit
-code.
+The usual optimize parameters retain their meaning. `group_plan.json` records each
+group's `batch`, physical `gpus`, slots and task waves. Groups in the same batch launch
+together on disjoint pools; each existing scheduler fills its own parallel slots. Groups
+that cannot each fit a whole slot share no batch. For example, two single-GPU tasks and a
+four-GPU collective can run together on eight GPUs; an eight-GPU collective must follow
+the single-GPU tasks on that node. Fixed partitions last for the batch; this helper does
+not migrate running workers or allocate more machines.
+
+Each GPU-count group keeps a stable work root for resume. Worker source, credit and
+attempt history remain there; the canonical `work/` references those artifacts.
+`dispatch.json` links a timestamped `dispatch_attempts/` receipt with scheduler start/end
+times, elapsed seconds, physical pools and exit codes. Preserve previous attempts when
+resuming, and use these receipts to distinguish wall time from summed worker time in
+progress reports. A work-root lock refuses a second live dispatcher.
 
 Before launch, conflicting Docker names owned by another work root are refused. On a
-wall-clock cutoff, only workers whose `WORK_ROOT` matches the current group are stopped,
+wall-clock cutoff, only workers whose `WORK_ROOT` matches a started group are stopped.
 No scheduler allocation is created, cancelled or changed. Each group reserves
-`verify_wall_sec` so that step 2's cold reruns still fit inside the deadline. KEEP
+`verify_wall_sec`; the full cold-test and A/B reservation remains protected through the
+last search batch, because step 2 has not run yet. KEEP
 classification belongs to step 3; only applyback can claim an end-to-end improvement.

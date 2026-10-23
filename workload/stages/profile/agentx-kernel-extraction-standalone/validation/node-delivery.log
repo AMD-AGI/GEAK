@@ -1,0 +1,91 @@
+TAP version 13
+# Subtest: original inline returns and hashed raw verdicts use the same bundled gate
+ok 1 - original inline returns and hashed raw verdicts use the same bundled gate
+  ---
+  duration_ms: 88.204417
+  ...
+# Subtest: reproduce abbreviated indexer phase return; raw file transport repairs delivery only
+ok 2 - reproduce abbreviated indexer phase return; raw file transport repairs delivery only
+  ---
+  duration_ms: 6.490507
+  ...
+# Subtest: file references do not conceal failed or incomplete execution evidence
+ok 3 - file references do not conceal failed or incomplete execution evidence
+  ---
+  duration_ms: 186.308098
+  ...
+# Subtest: missing joint input declaration remains a selector error, not auto-repaired from return
+ok 4 - missing joint input declaration remains a selector error, not auto-repaired from return
+  ---
+  duration_ms: 4.457192
+  ...
+# Subtest: alternative dispatch branches verify one whole-op entry without simultaneous membership
+ok 5 - alternative dispatch branches verify one whole-op entry without simultaneous membership
+  ---
+  duration_ms: 3.503269
+  ...
+# Subtest: file integrity errors fail closed and cannot fall back to inline PASS
+ok 6 - file integrity errors fail closed and cannot fall back to inline PASS
+  ---
+  duration_ms: 5.920025
+  ...
+# Subtest: a verdict symlink outside the task is rejected
+ok 7 - a verdict symlink outside the task is rejected
+  ---
+  duration_ms: 4.764091
+  ...
+# Subtest: schema, baseline declaration and UT status still apply after selection succeeds
+ok 8 - schema, baseline declaration and UT status still apply after selection succeeds
+  ---
+  duration_ms: 86.220255
+  ...
+# Subtest: source delivery covers all selected implementations and remains opt-in for legacy calls
+ok 9 - source delivery covers all selected implementations and remains opt-in for legacy calls
+  ---
+  duration_ms: 99.437111
+  ...
+# Subtest: an entry change cannot inherit an older UT verdict
+ok 10 - an entry change cannot inherit an older UT verdict
+  ---
+  duration_ms: 185.482715
+  ...
+# Subtest: changing or adding source, cases or UT after a pass invalidates the recorded snapshot
+ok 11 - changing or adding source, cases or UT after a pass invalidates the recorded snapshot
+  ---
+  duration_ms: 99.269441
+  ...
+# Subtest: compile-only failure is not a numerical negative control
+ok 12 - compile-only failure is not a numerical negative control
+  ---
+  duration_ms: 12.056114
+  ...
+# Subtest: tampered logs and source symlinks outside the task cannot certify execution
+ok 13 - tampered logs and source symlinks outside the task cannot certify execution
+  ---
+  duration_ms: 84.235653
+  ...
+# Subtest: standalone CLI accepts consistent local source/selection records without a runner
+ok 14 - standalone CLI accepts consistent local source/selection records without a runner
+  ---
+  duration_ms: 299.645655
+  ...
+# Subtest: CLI source declaration and records cannot be omitted
+ok 15 - CLI source declaration and records cannot be omitted
+  ---
+  duration_ms: 245.927811
+  ...
+# Subtest: changed source rejects stale evidence without overwriting accepted return
+ok 16 - changed source rejects stale evidence without overwriting accepted return
+  ---
+  duration_ms: 175.838011
+  ...
+1..16
+# tests 16
+# suites 0
+# pass 16
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 862.092336
+

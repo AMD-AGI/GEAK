@@ -23,6 +23,8 @@ is imported, so the shim can silently disable the overlay and measure the baseli
 
 Usage: python3 run_task_entry.py <task_dir> [entry.py] [args...]
 """
+from contextlib import nullcontext
+import importlib.util
 import json
 import os
 import time
@@ -81,11 +83,27 @@ def main(argv):
     sys.path.insert(0, task_dir)
     sys.argv = [path] + rest
     started = time.time()
+    context, archive_failure = nullcontext(), ()
+    work = os.environ.get("WORK_ROOT")
+    pending = (os.path.join(work, "runs", os.path.basename(os.path.realpath(task_dir)),
+                            ".evidence_pending") if work else None)
     try:
-        runpy.run_path(path, run_name="__main__")
-    except SystemExit as exc:
-        if exc.code not in (None, 0):
-            raise
+        if os.environ.get("WORKLOAD_ORACLE_ARCHIVE_DIR") or (pending and os.path.lexists(pending)):
+            helper = os.path.join(os.path.dirname(__file__), "generated_oracle_archive.py")
+            spec = importlib.util.spec_from_file_location("_workload_oracle_archive", helper)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            archive_failure = module.OracleArchiveFailure
+            context = module.entry_context(task_dir)
+        with context:
+            try:
+                runpy.run_path(path, run_name="__main__")
+            except SystemExit as exc:
+                if exc.code not in (None, 0):
+                    raise
+    except archive_failure as exc:
+        print("[oracle-archive] " + str(exc), file=sys.stderr)
+        return 78
     emit_fresh_sidecar(task_dir, started)
     return 0
 

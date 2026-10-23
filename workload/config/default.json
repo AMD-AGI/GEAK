@@ -58,6 +58,8 @@
       "params": {
         "time_budget_sec": 172800,
         "require_full_budget": false,
+        "checkpoint_reserve_sec": 600,
+        "_note_full_budget": "When a fixed target does not fit the current allocation, require_full_budget keeps the per-task target unchanged and checkpoints remaining work. The 600-second cleanup margin is a conservative operational allowance for owned-container shutdown and state writes, not a performance threshold. Cold/E2E are admitted only after search targets are complete and their window is available.",
         "attempt_cap_sec": 1500,
         "attempt_min_sec": 600,
         "budget": 4,
@@ -70,7 +72,7 @@
         "bad_node_limit": 2,
         "keep_threshold": 1.045,
         "apply_to_original": true,
-        "_note_task_limit": "Capacity policy requested for an eight-GPU campaign, not a performance threshold: plan at most eight independent optimization tasks in profile, then optimize every delivered task. A whole-node collective still needs its real GPU group. Over-limit deliveries must be replanned, never silently truncated by max_tasks or exclusions.",
+        "_note_task_limit": "This stage's in-flight capacity for an eight-GPU campaign, not a performance threshold and not a cap on extraction: optimize the first eight tasks in roofline order and carry the rest in optimized.json as capacity_deferred, each with its rank and reason, for a later wave. A whole-node collective still needs its real GPU group. Profile extracts as far as the evidence goes -- the same skill run by hand delivered ten complete tasks -- so a surplus is scheduling, not a defect, and is never silently truncated by max_tasks or exclusions.",
         "task_limit": 8,
         "max_tasks": null
       }

@@ -98,8 +98,19 @@ fi
 # (e.g. deliberately co-tenanted screening runs). The default is 1 on BOTH paths: pool mode steps to
 # another GPU when one is busy, single-GPU mode has nowhere to step and so fails loudly instead.
 _gpu_is_idle() {
-    local id="$1" dev busy vram
-    dev="$(readlink -f "/sys/class/drm/renderD$((128 + 8 * id))/device" 2>/dev/null)" || return 0
+    local id="$1" dev busy vram render
+    local -a mapped_renders
+    if [ -n "${GEAK_GPU_RENDER_DEVICES:-}" ]; then
+        # A Docker worker addresses its visible GPUs as 0..N-1, while sysfs retains
+        # host render node names. The launcher supplies that exact logical mapping.
+        [[ "$id" =~ ^[0-9]+$ ]] || return 1
+        IFS=',' read -r -a mapped_renders <<< "$GEAK_GPU_RENDER_DEVICES"
+        render="${mapped_renders[$id]:-}"
+        [[ "$render" =~ ^renderD[0-9]+$ ]] || return 1
+    else
+        render="renderD$((128 + 8 * id))"
+    fi
+    dev="$(readlink -f "/sys/class/drm/$render/device" 2>/dev/null)" || return 0
     [ -r "$dev/gpu_busy_percent" ] || return 0   # cannot tell -> do not block the run
     busy="$(cat "$dev/gpu_busy_percent" 2>/dev/null || echo 0)"
     vram="$(( $(cat "$dev/mem_info_vram_used" 2>/dev/null || echo 0) / 1048576 ))"

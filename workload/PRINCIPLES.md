@@ -80,19 +80,32 @@ stage — in `finalize.py`/`rank.py` where it is mechanism, and in `stages/<stag
 where it is judgement. Replacing an implementation must never require rewriting the
 mapping.
 
+**R7 — The criterion includes whether the configuration actually took effect.**
+A slot that passes its parameters down and then grades only the output is grading a run it
+never pinned down. Every configured knob that changes *what gets delivered* — a selection
+cutoff, a phase list, a count, a threshold — must be checked after the fact against the
+receipt the implementation wrote, and the two numbers printed side by side when they
+differ. `$PARAMS` is this run's executable policy and a skill's own documented default
+never overrides it; the vendored skill is not edited to agree (R5), the slot verifies.
+A profile run configured for phase Top 10 and overall share >0.5% was finalized `ok` while
+its `selection_targets.json` recorded the skill's SKILL.md default of Top 5 and >3%: it
+selected 8 targets and delivered 4 tasks, where the same skill driven by hand at the
+configured scope selected 20 identities worth 61% of GPU time and delivered 10. Nothing
+was broken and nothing was reported.
+
 ### Honesty of numbers
 
 These rules are not caution for its own sake. Each one is here because the failure it
 prevents has already happened on this workload.
 
-**R7 — An operator win is not a system win. Only `applyback` may claim e2e.**
+**R8 — An operator win is not a system win. Only `applyback` may claim e2e.**
 A kernel that is unambiguously faster in isolation routinely leaves the serving number
 flat or slightly worse, and on agentic traffic that is the normal outcome, not the
 exception. Kernels are therefore ranked by expected end-to-end gain —
 `pct_gpu_time × (1 − 1/attainable_speedup)` — not by achievable speedup. Operator and
 end-to-end numbers are written side by side so that neither can stand in for the other.
 
-**R8 — No speedup counts until it survives a cold rerun.**
+**R9 — No speedup counts until it survives a cold rerun.**
 Every keep is re-measured from a fresh process and scored on the **minimum** of N runs.
 Hot measurement is not enough: the unit-test leg allocates from a virgin allocator, so an
 output that is never written reads back as zeros and compares equal — a kernel can pass
@@ -100,14 +113,14 @@ every correctness check while hot and fail from cold. The rerun is the task's ow
 test; the slot reads its verdict and does not re-derive one. A wrapper that re-implements
 the judgement eventually disagrees with the test it wraps, and then wins the disagreement.
 
-**R9 — Refuse to publish rather than publish something unfounded.**
+**R10 — Refuse to publish rather than publish something unfounded.**
 Every stage separates `blocked` (a missing precondition — no GPU, no benchmark client, no
 receipt) from `fail` (attempted, did not succeed), and says what was missing. `applyback`
 declines to report an A/B at all if the overlay did not demonstrably shadow its targets,
 or if the two sides used different metric bases: overlay injection fails open, so "no
 gain" is otherwise indistinguishable from "the patch never loaded".
 
-**R10 — A run must be able to say what it optimizes.**
+**R11 — A run must be able to say what it optimizes.**
 Every scenario config declares a `target` block — model, image, component commits. The
 config filename and `run_root` must carry a recognisable token of the declared model,
 checked before a GPU hour is spent, and the declaration is cross-checked at every
@@ -117,7 +130,7 @@ label was wrong, which is the harder error, because a wrong number invites doubt
 wrong name invites confidence.
 *Enforced by:* `scripts/target.py`.
 
-**R11 — Thresholds are calibrated, not assumed.**
+**R12 — Thresholds are calibrated, not assumed.**
 The keep threshold, the attempt cap, the noise band, the re-verification repeat count:
 each is a knob in `config/default.json` with the measurement that produced it recorded
 next to it. The noise band is `1.045` because four kernels whose source md5 was identical
@@ -126,14 +139,14 @@ Adding a new threshold means adding the measurement, or saying plainly that it i
 
 ### Robustness
 
-**R12 — Unattended means repairing and continuing, not stopping.**
+**R13 — Unattended means repairing and continuing, not stopping.**
 The pipeline is expected to run for days without a human. A node that dies, a container
 that will not start, a stalled attempt: each costs the current attempt and nothing more.
 Credit and adoption state live on disk, so a restart resumes rather than re-dispatches,
 and the same kernel is never handed to two workers. A supervisor restart must not be able
 to reset a counter that a deliverable is read from.
 
-**R12a — Unattended also means reporting on a cadence, by default.**
+**R13a — Unattended also means reporting on a cadence, by default.**
 A run nobody hears from until it finishes is a run nobody can act on, and one killed
 before its last stage leaves nothing at all. `stage.py all` therefore starts the periodic
 reporter unless the caller opts out (`--no-report`, `report.enabled: false`): every
@@ -143,18 +156,18 @@ eventually disagree with the real one. Reporting is not intervening: acting on w
 monitor sees is a different, off-by-default setting, because a monitor that describes is
 safe for every run and a monitor that kills is only as safe as its stall test.
 
-**R13 — Never delete measurement data.**
+**R14 — Never delete measurement data.**
 Run artifacts, receipts, traces and campaign evidence are inputs to conclusions that have
 not been drawn yet. Move them, archive them, gitignore them — `runs/` and `campaigns/`
 already are — but do not remove them to reclaim space.
 
 ### Hygiene
 
-**R14 — Repo prose is English.**
+**R15 — Repo prose is English.**
 Docs, comments and commit messages. Comments explain *why*, next to the code the reason
 applies to; a comment restating what the line does is noise.
 
-**R15 — The self-check is CPU-only and targets silent fakery.**
+**R16 — The self-check is CPU-only and targets silent fakery.**
 `python3 -m pytest workload/tests -q` must pass with no GPU, no tokens and no network, and
 it covers the places where a mistake silently produces a plausible wrong number — config
 merging and `--set`, `result.json` validation, the ranking formula, scheduler dedup and
