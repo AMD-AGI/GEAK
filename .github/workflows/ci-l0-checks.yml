@@ -148,6 +148,7 @@ jobs:
             kernel_workflow/scripts/tests/test_workspace_sources.py \
             kernel_workflow/scripts/tests/test_gpu_lease.py \
             kernel_workflow/scripts/tests/test_detect_gpu_requirement.py \
+            kernel_workflow/tests \
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
             kb/tests/test_identity.py \
@@ -169,7 +170,9 @@ jobs:
           for skill in \
             flydsl_decode_moe_stage1_blkmap \
             flydsl_prefill_moe_stage2_fp8partial \
-            flydsl_fp8_blockscale_gemm
+            flydsl_fp8_blockscale_gemm \
+            megamoe_ep_mega_fusion \
+            megamoe_small_mtpr_fusion
           do
             python perf_knowledge/expert_skills/_contribute/validate_skill.py "$skill" --static
           done
@@ -344,6 +347,10 @@ jobs:
         run: node kernel_workflow/scripts/test_mode_dispatch.js
       - name: kernel_workflow multi-GPU job resolution
         run: node kernel_workflow/scripts/test_gpu_request.js
+      - name: kernel_workflow mode=mega regression tests
+        run: |
+          set -e
+          for t in kernel_workflow/tests/test_*.js; do node "$t"; done
       # Extraction smoke must be exactly "pass"/"fail": a prose "PASS (exit 0) ..." once read as a
       # failed extraction and silently dropped heads whose unittest had passed.
       - name: extraction smoke status contract

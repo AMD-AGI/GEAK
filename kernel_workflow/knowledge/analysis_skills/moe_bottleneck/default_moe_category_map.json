@@ -1,0 +1,7 @@
+{
+  "stage1_dispatch_gemm1": "stage1|dispatch|gemm1",
+  "stage2": "stage2|gemm2",
+  "combine": "combine|scatter|p2p",
+  "pre_dispatch_quant": "quant",
+  "__support__": "FillFunctor|ncclDevKernel"
+}

@@ -161,7 +161,7 @@ budget-controlled, each patch independently verified.
 | `exp_root` | sibling `exp/` | Output root. |
 | `eval_dir` | — | Isolated evaluation directory. |
 | `apply_to_original` | `false` | Emit apply bundle vs edit-in-place. |
-| `mode` | `optimize` | `optimize` \| `author`. |
+| `mode` | `optimize` | `optimize` \| `author` \| `bakeoff` \| `mega` (multi-rank whole-kernel candidates, run by `kernel_mega.js`; see `kernel_workflow/README.md` "Mega mode"). |
 | `target_language` | `triton` | Author-mode language: `triton` \| `flydsl` \| `hip` \| `ck`. |
 | `op_spec` | `{}` | Op specification (author mode). |
 | `perf_knowledge_dir` | sibling `perf_knowledge/` | Knowledge base. |
