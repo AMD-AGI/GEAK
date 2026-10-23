@@ -251,6 +251,7 @@ const TRACELENS_INPUTS = {
   TRACELENS_KERNEL_CANDIDATES_JSON: String(TL.kernel_candidates_json || ''),
   TRACELENS_REPORT_JSON: String(TL.tracelens_report_json || ''),
   TRACELENS_TRACE_FILE: String(TL.trace_file || ''),
+  TRACELENS_TRACE_FILES: Array.isArray(TL.trace_files) ? TL.trace_files.join(' ') : '',
 };
 if (TL && Object.keys(TL).length) log(`TraceLens prior present: ${Object.keys(TL).filter(k => TL[k]).join(', ') || '(none non-null)'}.`);
 
@@ -286,8 +287,26 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // TP=1 on GPU_LIST[0] (backward compatible). args.tp (or args.serving_tp) sets TP; args.serving_gpu
 // overrides the GPU set (default = first TP ids of GPU_LIST, comma-joined).
 const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
+const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
+// ---- MULTI-NODE (opt-in): args.multinode is handoff.multinode, see docs/multi_node.md. mn.py check
+// parses it and writes the pin before Setup: run_e2e.py passes args.multinode_check, else an agent runs it.
+const MN_ARG = A.multinode || (A.state && A.state.multinode) || null;
+const MN = (MN_ARG && typeof MN_ARG === 'object' && Array.isArray(MN_ARG.nodes)
+  && MN_ARG.nodes.length > 0) ? MN_ARG : null;
+const SERVING_TOPOLOGY = MN ? String(MN.topology || 'tp_span').trim() : '';
+const MN_PY = `${WORKFLOW_DIR}/scripts/multi_node/mn.py`;
+let MN_SPEC = null, MN_STATE = '';
+let MN_SERVING_ENV = '', MN_GPU_EXEC = '';
+function useMnSpec(spec) {
+  MN_SPEC = spec;
+  MN_STATE = spec.state;
+  MN_SERVING_ENV = `BENCH_LAUNCHER=multinode GEAK_MN_STATE=${MN_STATE}`;
+  MN_GPU_EXEC = `GEAK_MN_STATE=${MN_STATE} python3 ${MN_PY} exec`;
+}
+// Multi-node: each rank's cards come from the pin; GPU names rank0's local ids only.
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
-  : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
+  : MN ? GPU_IDS
+    : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
 // Expert-parallel degree AS THE BASELINE WAS LAUNCHED, resolved upstream (run_e2e._resolve_ep) and
 // passed down rather than re-derived from flags here. It is a KB addressing dimension beside TP:
 // the same model on the same stack with the experts sharded differently is a different deployment.
@@ -1332,6 +1351,7 @@ if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
 const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
 const arrStr = { type: 'array', items: { type: 'string' } };
+const roleStrs = { type: 'object', additionalProperties: { type: 'string' } };   // {prefill, decode}
 
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, model_name: { type: 'string' },
@@ -1350,7 +1370,6 @@ const SETUP_SCHEMA = obj({
   precision: { type: 'string' },
   framework_version: { type: 'string' }, rocm_version: { type: 'string' },
 }, ['eval_dir', 'baseline_throughput_tok_s', 'gfx', 'device_target', 'physical_cu_count']);
-
 // admitHeads adopts entity_kind from these rows, so a row without it silently refuses every head.
 // device_kernel is required on gpu_kernel rows too; admitHeads checks that (no conditional schema here).
 const PROFILE_ROW_SCHEMA = obj({
@@ -1361,13 +1380,14 @@ const PROFILE_ROW_SCHEMA = obj({
 const PROFILE_SCHEMA = obj({
   round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
   profile_workload_json: { type: 'string' }, // per-(shape,dtype) weighted workload model (optional)
+  profile_topN_by_role: { type: 'object' }, profile_workload_by_role: { type: 'object' },
   source: { type: 'string' }, total_gpu_time_ms: { type: 'number' },
   top_kernels: { type: 'array', items: PROFILE_ROW_SCHEMA },
   shift_note: { type: 'string' }, notes: { type: 'string' },
 }, ['profile_topN_json', 'top_kernels']);
 
 const STRATEGY_SCHEMA = obj({
-  regime_summary: { type: 'string' }, config_directions: arrObj,
+  regime_summary: { type: 'string' }, config_directions: arrObj, tuning_directions: arrObj,
   head_candidates: { type: 'array', items: obj({
     short_name: { type: 'string' }, entity_kind: { type: 'string' }, device_kernel: { type: 'string' },
   }, ['short_name', 'entity_kind', 'device_kernel']) },
@@ -1401,6 +1421,7 @@ const FLYDSL_GATE_SCHEMA = obj({
 
 const SWEEP_SCHEMA = obj({
   trials: arrObj, accepted_flags: { type: 'string' }, accepted_env: { type: 'string' },
+  accepted_flags_by_role: roleStrs, accepted_env_by_role: roleStrs,
   best_throughput_tok_s: { type: 'number' }, throughput_speedup_vs_baseline: { type: 'number' },
   summary: { type: 'string' },
   // Only the warm-start repair pass fills this, and it stays OUT of `required` so every ordinary
@@ -1464,6 +1485,7 @@ const TUNING_SCHEMA = obj({
   // head env-winner's routing patch: never as a live-tree .py edit, which cannot be varied per A/B leg.
   apply_overlay: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' },
+  apply_overlay_by_role: roleStrs, apply_env_by_role: roleStrs, apply_flags_by_role: roleStrs,
   correctness_gate: { type: 'string' }, accuracy_note: { type: 'string' },
   engagement_verified: { type: 'boolean' }, engagement_evidence: { type: 'string' },
   pre_tune_throughput_tok_s: { type: 'number' }, post_tune_throughput_tok_s: { type: 'number' },
@@ -1512,6 +1534,7 @@ const EXTRACT_OP_SCHEMA = obj({
   device_kernel: { type: 'string' },
   seam_candidates: arrObj,
   selection_validation: { type: 'object', additionalProperties: true },
+  capture_engine: { type: 'string' },
   smoke: SMOKE_STATUS, smoke_detail: { type: 'string' }, notes: { type: 'string' },
 }, ['op_kind', 'task_dir', 'smoke']);
 
@@ -1756,19 +1779,19 @@ function noteKernelKB(r, label) {
   return r;
 }
 
-const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
-
 // The ONE place e2e KB identity argv is formatted — called by both the reader (Module A) and the
 // writer (Module B). kb/identity.py's own header names the failure this prevents: a reader and a
 // writer that disagree by a single segment do not raise, they address two different pages, and the
 // only symptom is that history quietly stops existing. Two call sites formatting the same flags
 // independently is exactly how that drift starts.
+
 function kbIdentityFlags() {
   if (!KB_DIMS) return '';
+  const spread = (MN_SPEC && MN_SPEC.kb_topology) || '';   // mn.py normalize_spec; '' on one host
   return [`--model ${shq(KB_DIMS.model)}`, `--gfx ${shq(KB_DIMS.gfx)}`,
     `--framework ${shq(BACKEND)}`, `--framework-version ${shq(KB_DIMS.framework_version)}`,
     `--precision ${shq(KB_DIMS.precision)}`, `--rocm-version ${shq(KB_DIMS.rocm_version)}`,
-    `--tp ${SERVING_TP}`, `--ep ${SERVING_EP}`,
+    `--tp ${SERVING_TP}`, `--ep ${SERVING_EP}`, ...(spread ? [`--topology ${spread}`] : []),
     // The DECLARATION (A.workload_kind / workload_spec.kind), never the shape PROVENANCE: the
     // provenance values include agentx_pending_baseline and synthetic_fallback_on_agentx, which
     // would mis-file precisely the degraded AgentX runs that most need a stable address.
@@ -1900,6 +1923,11 @@ measurement duration. Consequences you must respect:
 `;
 }
 
+function pdFragmentBlock(role) {
+  if (SERVING_TOPOLOGY !== 'pd_disagg' || role !== 'tuning_specialist') return '';
+  return `\n\nThis run is PD-disaggregated: also Read ${WORKFLOW_DIR}/roles/_fragments/tuning_pd.md and follow it.`;
+}
+
 function correctnessEnvBlock(role) {
   if (!CORRECTNESS_UNSET_ENV.length || !CORRECTNESS_PROBE_ROLES.has(role)) return '';
   const unset = CORRECTNESS_UNSET_ENV.map((v) => `-u ${v}`).join(' ');
@@ -1926,18 +1954,99 @@ function kernelExtractBlock(role) {
     `Declared workload kind: ${WORKLOAD_KIND}; specification: ${JSON.stringify(WORKLOAD_SPEC)}`;
 }
 
+const PD_ROLES = ['prefill', 'decode'];
+const PD_KINDS = ['flags', 'env', 'overlay'];
+const pdValue = (byRole, r) => String((byRole && typeof byRole === 'object' && byRole[r]) || '').trim();
+function pdLayers(byKind = {}) {
+  return Object.fromEntries(PD_ROLES.map((r) => [r, Object.fromEntries(PD_KINDS.map((k) => [k, pdValue(byKind[k], r)]))]));
+}
+function setPd(kind, byRole) {
+  if (!byRole || typeof byRole !== 'object') return;
+  for (const r of PD_ROLES) curPd[r][kind] = pdValue(byRole, r);
+}
+
+const pdVar = (kind, role) =>
+  `GEAK_MN_PD_${{ flags: 'SWEEP_ARGS', env: 'SWEEP_ENV', overlay: 'OVERLAY' }[kind]}_${role.toUpperCase()}`;
+function pdVars(pd = curPd) {
+  const out = {};
+  for (const r of PD_ROLES) for (const k of PD_KINDS) if (pd[r][k]) out[pdVar(k, r)] = pd[r][k];
+  return out;
+}
+
+// PD: a head belongs to the engine its `engine` names; '' = shared.
+function pdRole(h) {
+  const role = SERVING_TOPOLOGY === 'pd_disagg' ? String((h && h.engine) || '') : '';
+  return PD_ROLES.includes(role) ? role : '';
+}
+// gpu_lock.sh / mn.py exec send `<engine>:<id>` to that engine's machine.
+function engineGpu(h, id) { const role = pdRole(h); return role ? `${role}:${id}` : id; }
+
+function foldAccept(h, { overlay, env, flags } = {}) {
+  const role = pdRole(h);
+  const L = role ? curPd[role] : { overlay: curOverlay, env: curEnv, flags: curFlags };
+  const cat = (a, b) => (b ? (a ? a + ' ' : '') + b : a);
+  Object.assign(L, { overlay: overlay || L.overlay, env: cat(L.env, env), flags: cat(L.flags, flags) });
+  if (!role) ({ overlay: curOverlay, env: curEnv, flags: curFlags } = L);
+  return role;
+}
+
+// CURRENT_OVERLAY is the engine's own layer; the shared one reaches it anyway.
+function engineIntegrateInputs(h) {
+  const role = pdRole(h);
+  if (!role) return {};
+  return {
+    SERVING_ENGINE: role,
+    CURRENT_OVERLAY: curPd[role].overlay,
+    SHARED_OVERLAY: curOverlay,
+    ENGINE_OVERLAY_VAR: pdVar('overlay', role), ENGINE_ENV_VAR: pdVar('env', role),
+    ENGINE_ARGS_VAR: pdVar('flags', role),
+    ENGINE_LOG: `the ${role} engine's "log" in mn_launch.json pd.engines`,
+  };
+}
+
+// The merged table ranks by DEPLOYMENT share, so the smaller engine can fall out of it entirely.
+function profileByRoleInputs() {
+  const byRole = profile && profile.profile_topN_by_role;
+  return byRole && typeof byRole === 'object' && Object.keys(byRole).length ? { PROFILE_TOPN_BY_ROLE: byRole } : {};
+}
+
+function applyPdDirectionGuard(strat, stage) {
+  if (SERVING_TOPOLOGY !== 'pd_disagg' || !strat) return [];
+  const dirs = strat.config_directions || [];
+  for (const d of dirs) {
+    if (!d || typeof d !== 'object') continue;
+    const e = String(d.engine || '').trim().toLowerCase();
+    d.engine = PD_ROLES.includes(e) ? e : '';
+  }
+  const byRole = (profile && profile.profile_topN_by_role) || {};
+  const uncovered = PD_ROLES.filter((r) => byRole[r] && !dirs.some((d) => d && d.engine === r));
+  if (uncovered.length)
+    log(`[pd-directions] ${stage}: profiled but no config direction: ${uncovered.join(' + ')}`);
+  return uncovered;
+}
+
+function pdConfigFields() {
+  const out = {};
+  for (const k of PD_KINDS)
+    if (curPd.prefill[k] || curPd.decode[k]) out[`${k}_by_role`] = { prefill: curPd.prefill[k], decode: curPd.decode[k] };
+  return out;
+}
+
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
   const standaloneExtraction = KERNEL_EXTRACT_ON && role === 'kernel_extractor';
+  // pdVars before the caller's inputs: a trial overrides one engine and keeps the other.
   const inall = {
     BACKEND, SERVING_TP, SERVING_GPU,
+    ...(SERVING_TOPOLOGY ? { SERVING_TOPOLOGY } : {}),
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
     EFFECTIVE_CONFIG_DIGEST,
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
     // Only surfaced on a trace replay; a synthetic run's Inputs block is unchanged.
     ...(IS_AGENTX ? { WORKLOAD_KIND } : {}),
     ...(correctnessEnvBlock(role) ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
+    ...pdVars(),
     ...inputs,
     ...(standaloneExtraction ? {
       SKILL_ROOT: KERNEL_EXTRACT_DIR, SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
@@ -1961,11 +2070,25 @@ Every e2e SERVING benchmark in this run (baseline, config sweep, integrate ref/c
 profiler trace) MUST use the SAME serving config: tensor-parallel TP=${SERVING_TP} on the GPU set
 GPU=${SERVING_GPU}. Whenever you invoke bench_e2e.sh for a SERVING throughput/profile measurement, pass
 exactly these in its env:
-    BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}
+    BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}${MN ? ` ${MN_SERVING_ENV}` : ''}
 NEVER change TP or the GPU set between the baseline, a candidate, and validation — a TP/GPU mismatch
 makes every delta meaningless. (If SERVING_TP=1, GPU=${SERVING_GPU} is a single id; if SERVING_TP>1 it
-is a comma-separated set spanning exactly TP GPUs.)
-GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY for single-GPU isolated
+is a comma-separated set. Use it VERBATIM, never re-derived from TP: multi-node, it names ONE host's ids.)
+${MN ? `This run serves ONE instance on ${MN_SPEC.nodes.length} machine(s) (${SERVING_TOPOLOGY}), pinned in ${MN_STATE}.
+bench_e2e.sh adds the BENCH_LAUNCHER / GEAK_MN_STATE above itself and refuses any other launcher here.
+Each machine's TP and cards come from the pin${MN_SPEC.tp_by_role ? ` (prefill TP ${MN_SPEC.tp_by_role.prefill}, decode TP ${MN_SPEC.tp_by_role.decode})` : ''}.
+You and every Bash command you run are on the driver: it sees NO GPU and the nodes have no GEAK code.
+Keep files on the shared fs (${MN_SPEC.shared_fs}, same path on the nodes), not /tmp: a node sees only that
+and its own image. gpu_lock.sh and profile_kernel.sh run on a node (the master for a bare id, that
+engine's machine for <engine>:<id>, e.g. decode:3). Anything else needing a GPU or a node (rocm-smi):
+    ${MN_GPU_EXEC} --target <master|rank<N>|prefill|decode|host> [--gpu <id>] -- <command>
+(or \`--script <file>\`). --gpu exports HIP_VISIBLE_DEVICES/GPU_ID and holds the card's lock.
+An isolated server is
+    ${MN_GPU_EXEC} --target <T> --gpu <id> -- env BACKEND=${BACKEND} BENCH_LAUNCHER=native GPU=<id> TP=1 ... bash <eval_dir>/bench_e2e.sh
+` : ''}${SERVING_TOPOLOGY === 'pd_disagg' ? `PD: pass each GEAK_MN_PD_* Input (one engine's accepted config) VERBATIM in the env of every
+SERVING bench_e2e.sh on the current config (a true-baseline leg omits them). EXTRA_SERVER_ARGS /
+EXTRA_ENV / OVERLAY_PYTHONPATH reach BOTH engines: never copy a GEAK_MN_PD_* value into them.
+` : ''}GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY for single-GPU isolated
 work (op_bench bake-offs, shape-capture, the recursive kernel layer), where each task pins ONE id from
 the pool via GPU_ID. Do NOT use the serving TP/GPU set for that isolated work, and do NOT use a single
 optimization-pool id for a serving launch — keep the two separate.
@@ -1974,7 +2097,7 @@ ${workloadIdentityBlock()}
 ${cfg(inall)}
 
 Return ONLY the structured JSON the ${standaloneExtraction ? 'workflow handoff reference' : 'role file'} specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role) + warmStartBlock(role) + kernelExtractBlock(role) + correctnessEnvBlock(role);
+  return base + expertSkillsBlock(role) + warmStartBlock(role) + kernelExtractBlock(role) + pdFragmentBlock(role) + correctnessEnvBlock(role);
 }
 
 // Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
@@ -2344,6 +2467,10 @@ function canonicalDeviceKernel(s) {
 // the full symbol, and which is which is not fixed.
 const truncatedPrefix = (needle, haystack) =>
   needle.length >= SHORT_NAME_LIMIT && haystack.startsWith(needle);
+// Triton specialization: base + '_' + a suffix with a digit-only segment (`base_v2` is another
+// kernel). Same rule as kernel_selection.py _specialized_from.
+const specializedFrom = (base, name) =>
+  name.startsWith(`${base}_`) && name.slice(base.length + 1).split('_').some((s) => /^\d+$/.test(s));
 // [arguments, closed] for the symbol's first `<...>`. Reading only what follows the `<` keeps this
 // independent of the return type and namespace, which one side routinely spells and the other does
 // not. `closed` is false when the symbol was cut off inside the template -- profile artifacts elide
@@ -2364,7 +2491,8 @@ function templateArguments(value) {
 function kernelIdentitiesMatch(a, b) {
   const x = canonicalDeviceKernel(a), y = canonicalDeviceKernel(b);
   if (!x || !y) return false;
-  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)) return false;
+  if (x !== y && !truncatedPrefix(x, y) && !truncatedPrefix(y, x)
+    && !specializedFrom(x, y) && !specializedFrom(y, x)) return false;
   // The base token deliberately drops template arguments so a bare declared name can match its
   // decorated spelling. When BOTH sides carry them the information is present on both, and ignoring
   // it certifies the wrong kernel: one capture here held 20 distinct kernels named
@@ -2384,7 +2512,7 @@ function requiredDeviceKernel(h) {
     h.short_name || h.name || '').trim();
 }
 const candidateSpec = (c) =>
-  String((c && (c.target_callable || c.callable || c.spec)) || '').trim();
+  String((c && (c.target_callable || c.callable || c.spec || c.target)) || '').trim();
 // A declared depth is a STRUCTURAL claim about the call chain. It orders candidates before any
 // runtime evidence exists, so a value that is absent or not a finite number is unusable: `Number()`
 // turns it into NaN, every comparison against it is silently false, and a genuinely deeper candidate
@@ -2396,6 +2524,13 @@ const candidateDepth = (c) => {
 function selectionCandidatesForHead(h, ext) {
   const required = requiredDeviceKernel(h);
   const fused = !!(h && (h.is_fused_kernel === true || h.op_kind === 'moe'));
+  // No device_kernels: the runtime verdict (its marker fired around that kernel) still ties it.
+  const verdict = ext && ext.selection_validation;
+  const verdictLive = new Set(((verdict && verdict.live_candidate_targets) || [])
+    .map((value) => String(value || '').trim()));
+  const verdictKernel = String((verdict && verdict.device_kernel) || '').trim();
+  const verdictTiesToRequired = !!(required && verdictKernel &&
+    kernelIdentitiesMatch(required, verdictKernel) && Number((verdict && verdict.matched_kernel_calls) || 0) > 0);
   const bySpec = new Map();
   for (const candidate of [
     ...((h && h.seam_candidates) || []),
@@ -2412,7 +2547,9 @@ function selectionCandidatesForHead(h, ext) {
     if (role === 'kernel_entry') return false; // native/JIT object identity is unsafe to monkeypatch
     if (candidateDepth(candidate) === null) return false;
     const kernels = Array.isArray(candidate.device_kernels) ? candidate.device_kernels : [];
-    if (required && !kernels.some((kernel) => kernelIdentitiesMatch(required, kernel))) return false;
+    if (required && !kernels.some((kernel) => kernelIdentitiesMatch(required, kernel)) &&
+        !(kernels.length === 0 && verdictTiesToRequired && verdictLive.has(candidateSpec(candidate))))
+      return false;
     return (fused
       ? ['outer_wrapper', 'dispatcher', 'op_seam']
       : ['outer_wrapper', 'dispatcher', 'op_seam', 'inner_launcher']).includes(role);
@@ -2679,6 +2816,34 @@ const hasFrozenBaseline = (ext) =>
 const extractFailWhy = (e) => !e ? 'none'
   : [e.smoke_detail, e.notes].filter(Boolean).join(' | ') || e.smoke || e.unittest_smoke || 'none';
 
+// kernel_selection.py's verdict file beats the agent's (possibly abridged) copy; an unreadable file
+// fails. A reader agent projects it (the sandbox has no fs; the whole file runs to hundreds of KB).
+const SELECTION_FIELDS = ['contract', 'ok', 'failed', 'target_callable', 'device_kernel',
+  'total_calls_observed', 'target_marker_calls', 'matched_kernel_calls', 'candidate_targets_tested',
+  'deeper_live_candidates', 'live_candidate_targets', 'deepest_verified'];
+async function agentRun(cmd, phase, label, note = '') {
+  const read = await safeAgent(`You run one command. Run exactly this, change nothing, run nothing else${note}:\n\n` +
+    '```bash\n' + cmd + '\n```\n\nReturn its standard output verbatim (stderr appended if it failed) as stdout.',
+    { phase, label, schema: obj({ stdout: { type: 'string' } }, ['stdout']) }, 2);
+  return String((read && read.stdout) || '').trim();
+}
+async function withDiskSelection(ext, opts) {
+  if (!ext || !ext.task_dir) return ext;
+  const path = `${ext.task_dir}/selection_validation.json`;
+  const out = await agentRun(`python3 -c 'import json, os, sys; p = sys.argv[1]; ` +
+    `print(json.dumps({k: v for k, v in json.load(open(p)).items() if k in ${JSON.stringify(SELECTION_FIELDS)}}, ` +
+    `sort_keys=True) if os.path.isfile(p) else "ABSENT")' "${path}"`,
+    (opts && opts.phase) || 'Extract', `read-selection:${ext.task_dir.split('/').pop()}`);
+  if (out === 'ABSENT') return ext;
+  try {
+    return { ...ext, selection_validation: JSON.parse(out) };
+  } catch (e) {
+    log(`  ${path} is unreadable (${out.slice(0, 300) || 'the reader returned nothing'})`);
+    return { ...ext, selection_validation: { contract: 'kernel_selection', ok: false,
+      failed: ['selection_validation.json unreadable'] } };
+  }
+}
+
 // What the SHIPPED envelope must still prove, re-asserted in pure JS on this side of the handoff.
 //
 // scripts/agentx_kernel_preparation.mjs ran the full gate (schema, frozen baseline, UT status,
@@ -2750,15 +2915,17 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
   if (typeof KERNEL_EXTRACT_ON !== 'undefined' && KERNEL_EXTRACT_ON) return reusePreparedUT(head);
   const captureIntro = `${intro} CAPTURE STORAGE BOUNDS (issue #429): every capture EXTRA_ENV MUST include ` +
     `\`${CAPTURE_STORAGE_ENV}\`. Use kernel_selection.py with --task-dir "$TASK" so the selected oracle is ` +
-    `promoted and all capture.pid-* dirs are reclaimed. Unittests for large MoE oracles MUST use ` +
+    `promoted and all capture.pid-* dirs are reclaimed. ` +
+    'Write its verdict with --out "$TASK/selection_validation.json": GEAK gates on that file, not on your copy. ' +
+    `Unittests for large MoE oracles MUST use ` +
     `h.iter_eager_cases_from_oracle / h.check_correct_multi_lazy.`;
-  let ext = await safeAgent(roleAgent(role, phase, captureIntro, {
+  let ext = await withDiskSelection(await safeAgent(roleAgent(role, phase, captureIntro, {
     ...(inputs || {}),
     CAPTURE_STORAGE_ENV,
     CAPTURE_BYTE_BUDGET,
     CAPTURE_CASE_BYTE_LIMIT,
     CAPTURE_PERSIST_POLICY,
-  }), opts);
+  }), opts), opts);
   ext = guardUnhydratedVerdicts(ext);
   let tries = 0;
   const attemptedTargets = [];
@@ -2778,7 +2945,8 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
       '(issue #429 — never accumulate capture.pid-* oracles across retries). ' +
       'Install safe markers for every relevant candidate, never native/JIT kernel_entry objects. Run ' +
       'kernel_selection.py over every process-local capture and all root-call traces with --task-dir "$TASK". ' +
-      'Return its JSON verbatim as selection_validation. Select the deepest live inner_launcher/op_seam across all ' +
+      'Write its verdict with --out "$TASK/selection_validation.json": GEAK gates on that file, not on your copy. ' +
+      'Select the deepest live inner_launcher/op_seam across all ' +
       'calls/ranks; a fused head must select the whole-op op_seam. Rejecting the previous outer wrapper ' +
       'is not success. Do not return any ATTEMPTED_TARGET_CALLABLES value again.';
     const baselineCorrective = needBaseline ?
@@ -2804,7 +2972,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
         log(`  ${(opts && opts.label) || role}: capture reclaim skipped (${cleanupErr && cleanupErr.message ? cleanupErr.message : cleanupErr})`);
       }
     }
-    ext = await safeAgent(
+    ext = await withDiskSelection(await safeAgent(
       roleAgent(role, phase, captureIntro + selectionCorrective + baselineCorrective, {
         ...(inputs || {}),
         CAPTURE_STORAGE_ENV,
@@ -2815,7 +2983,7 @@ async function extractWithBaseline(role, phase, intro, inputs, opts) {
         PRIOR_SELECTION_VALIDATION: (ext && ext.selection_validation) || {},
         ATTEMPTED_TARGET_CALLABLES: attemptedTargets.slice(),
       }),
-      opts);
+      opts), opts);
     ext = guardUnhydratedVerdicts(ext);
   }
   const finalSelection = kernelSelectionVerified(head, ext);
@@ -2879,8 +3047,10 @@ const krOf = (inputs) => (inputs && inputs.KERNEL_RESULT) || {};
 // FIXED patch and the gated one is the broken kernel.
 const bankAccepted = (list, e, kr) => {
   const k = kr || {};
+  const { engine, ...rest } = e;
   list.push({
-    ...e,
+    ...rest,
+    ...(engine ? { engine } : {}),
     name: e.short_name || '',
     language: e.backend || '',
     isolated_speedup: Number(e.isolated) || 0,
@@ -3142,7 +3312,7 @@ async function tryCorrectiveReauthor(spec) {
           // A corrective must KEEP the isolated win; adopting a stored patch over it would be exactly the
           // re-discovery the task forbids. History is still readable, just never auto-applied.
           ...KB_ARGS, warm_start: WARM_START_OFF ? KB_ARGS.warm_start : 'reference',
-          budget: KERNEL_BUDGET, gpu_ids: spec.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+          budget: KERNEL_BUDGET, gpu_ids: engineGpu(spec, spec.gpu_id), exp_root: `${EVAL_DIR}/kernels/_exp`,
           task: `CORRECTIVE FIX — do NOT re-discover the algorithm; KEEP the ${(spec.isolated || 0).toFixed(2)}x isolated win. ` +
             `This kernel PASSED the isolated oracle and ENGAGED on all live workers but was REJECTED at the e2e serving gate ` +
             `for: "${reason}". ` + (fixClass === 'correctness' ? CORRECTNESS_FIX_TASK : INTEGRATION_FIX_TASK) +
@@ -3171,6 +3341,8 @@ async function tryCorrectiveReauthor(spec) {
     if (spec.cur) {
       fixInputs.CURRENT_OVERLAY = spec.cur.overlay; fixInputs.CURRENT_FLAGS = spec.cur.flags;
       fixInputs.CURRENT_ENV = spec.cur.env; fixInputs.CURRENT_THROUGHPUT = spec.cur.tput;
+      // PD: a one-engine head re-gates on that engine's latest layer, not the shared overlay.
+      Object.assign(fixInputs, engineIntegrateInputs({ engine: base.SERVING_ENGINE }));
     }
     const integ2 = await runIntegrateBothLegs(
       'Apply the CORRECTIVELY-FIXED kernel winner; gate on e2e throughput.', fixInputs,
@@ -3562,6 +3734,38 @@ let KB_REF_INPUTS = {};
 
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
 
+let curPd = pdLayers({ flags: A.initial_extra_server_args_by_role, env: A.initial_extra_env_by_role,
+  overlay: A.initial_overlay_by_role });
+let pdDirectionGaps = (ST.pd_direction_gaps || []).slice();
+// Prompt entry: no caller ran the check, so an agent does; the pin lives while this process does.
+async function agentMnCheck() {
+  const spec = { ...MN, tp: SERVING_TP, work_dir: ST.eval_dir || EVAL_DIR_OVERRIDE || EXP_ROOT };
+  const out = await agentRun(`GEAK_MN_SPEC=${shq(JSON.stringify(spec))} python3 ${MN_PY} check --owner claude ` +
+    `| grep '^MN_CHECK=' | tail -n 1`, 'Setup', 'mn-check',
+    ', with a 600000 ms Bash timeout (it probes every machine)');
+  try {
+    return JSON.parse(out.slice(out.indexOf('MN_CHECK=') + 'MN_CHECK='.length));
+  } catch (e) {
+    return { verdict: 'refused', problems: [
+      `mn.py check printed no verdict line: ${out.slice(0, 500) || 'the agent returned nothing'}`] };
+  }
+}
+if (MN) {
+  let verdict = A.multinode_check || await agentMnCheck();
+  const hosts = (ns) => (Array.isArray(ns) ? ns : []).map((n) =>
+    String((n && typeof n === 'object') ? (n.host || n.ip || '') : n).trim()).sort().join(', ');
+  if (!A.multinode_check && verdict && verdict.verdict === 'ok' && hosts(verdict.spec && verdict.spec.nodes) !== hosts(MN.nodes))
+    verdict = { verdict: 'refused', problems: [`the relayed verdict names other machines than args.multinode (${hosts(MN.nodes)})`] };
+  if (!verdict || verdict.verdict !== 'ok' || !verdict.spec) {
+    const problems = (verdict && verdict.problems && verdict.problems.length) ? verdict.problems
+      : ['mn.py check returned no verdict'];
+    log(`[multinode] check refused: ${problems.join('; ')}`);
+    return { status: 'error', error: `mn.py check rejected args.multinode: ${problems.join('; ')}`,
+      multinode_check: { verdict: 'refused', problems, ...(verdict && verdict.at ? { at: verdict.at } : {}) } };
+  }
+  useMnSpec(verdict.spec);
+  log(`[multinode] check passed on ${MN_SPEC.nodes.map((n) => n.host).join(', ')}; pin at ${MN_STATE}`);
+}
 // The envelope arrives in the reply, not from the file: agentx_kernel_preparation.mjs computed it
 // while packing (and refused the packing if any completed task had invalid evidence), and this
 // script cannot read EVAL_DIR itself -- see RUNTIME SANDBOX CONTRACT. Throwing here is how the
@@ -3580,9 +3784,13 @@ function readAgentXPreparation(reply) {
   // repair_delivery retry is the recovery, and a silently shortened queue would read as
   // "nothing left to optimize" and end the run looking successful.
   const defects = [];
+  const pdEngine = SERVING_TOPOLOGY === 'pd_disagg';
   for (const c of [...prepared.head_candidates, ...prepared.kernel_candidates]) {
     const why = !c || !c.prepared_ut ? 'carries no prepared_ut'
-      : preparedUtDefect(c, c.prepared_ut.result, c.prepared_ut.phase);
+      : preparedUtDefect(c, c.prepared_ut.result, c.prepared_ut.phase) ||
+        (pdEngine && !PD_ROLES.includes(c.engine)
+          ? `engine must name the engine it was traced on (${PD_ROLES.join(' | ')}), got ${JSON.stringify(c.engine)}`
+          : '');
     if (why) defects.push(`${(c && c.short_name) || '(unnamed)'}: ${why}`);
   }
   if (defects.length)
@@ -3597,7 +3805,12 @@ function readAgentXPreparation(reply) {
 
 async function prepareAgentXKernels(round, throughput) {
   phase('KernelExtract');
+  const pd = SERVING_TOPOLOGY === 'pd_disagg';
+  const mnRules = MN ? ` MULTINODE: also Read ${WORKFLOW_DIR}/roles/_fragments/agentx_multinode.md and follow it.` : '';
+  const packEngines = pd ? ` --engines ${PD_ROLES.join(',')}` : '';
   const inputs = {
+    ...(MN ? { CAPTURE_BY_ENGINE: pd ? { prefill: captureShard('prefill'), decode: captureShard('decode') }
+      : { tp_span: captureShard('') } } : {}),
     EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, TASK, ROUND: round,
     BASELINE_LOG: `${EVAL_DIR}/baseline/server.log`, BASELINE_BENCH_DIR: `${EVAL_DIR}/baseline`,
     BASELINE_SUMMARY: `${EVAL_DIR}/baseline_summary.md`,
@@ -3624,16 +3837,23 @@ async function prepareAgentXKernels(round, throughput) {
     'Prove that edits to each opt GPU leaf affect candidate correctness while the frozen baseline passes; ' +
     'restore the clean source and rerun the UT. Keep failures and budget-deferred tasks in the delivery. ' +
     'Read references/workflow-handoff.md in the skill. Pack with ' +
-    '`agentx_kernel_preparation.mjs --emit-prepared` and return ONLY {delivery_path, prepared}: ' +
+    `\`agentx_kernel_preparation.mjs --emit-prepared${packEngines}\` and return ONLY {delivery_path, prepared}: ` +
     'delivery_path names that file under EVAL_DIR, and prepared is that command\'s stdout envelope ' +
     'VERBATIM — the workflow cannot open the file, so an envelope you summarise or rebuild by hand ' +
     'is a corrupted handoff. Return it after all scheduled UT work is finished. Do not optimize or ' +
-    'integrate.', inputs),
+    'integrate.' + mnRules, inputs),
     { phase: 'KernelExtract', label: `kernel_extractor:prepare ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
   for (let attempt = 0; ; attempt++) {
     try {
       if (!reply?.delivery_path) throw new Error('completed skill did not return delivery_path');
       const prepared = await readAgentXPreparation(reply);
+      // Interactivity is decode's inter-token latency: under PD its kernels are tried first.
+      if (pd && AGENTX_METRIC_BASIS === 'p90_intvty_inferencex') {
+        for (const queue of ['head_candidates', 'kernel_candidates']) {
+          prepared[queue] = prepared[queue].slice()
+            .sort((a, b) => (b.engine === 'decode') - (a.engine === 'decode'));
+        }
+      }
       log(`Kernel extraction ready: ${prepared.head_candidates.length + prepared.kernel_candidates.length} validated UTs, ` +
         `${prepared.failed_tasks.length} failed, ${prepared.deferred_tasks.length} deferred.`);
       return prepared;
@@ -3642,14 +3862,13 @@ async function prepareAgentXKernels(round, throughput) {
       reply = await safeAgent(roleAgent('kernel_extractor', 'repair_delivery',
         'Repair only the completed-stage handoff using saved files. Do not repeat selection, captures or ' +
         'passing GPU tests. Preserve every real failure and all task results. The reader failed with: ' +
-        error.message + '. Re-pack with `agentx_kernel_preparation.mjs --emit-prepared` and return ' +
+        error.message + `. Re-pack with \`agentx_kernel_preparation.mjs --emit-prepared${packEngines}\` and return ` +
         '{delivery_path, prepared} for the repaired file, prepared being that stdout verbatim.',
         { ...inputs, PREVIOUS_DELIVERY_PATH: reply?.delivery_path || '' }),
         { phase: 'KernelExtract', label: `kernel_extractor:repair delivery ${round}`, schema: AGENTX_PREPARATION_SCHEMA });
     }
   }
 }
-
 if (want('setup')) {
   phase('Setup');
   const setup = await safeAgent(
@@ -3983,7 +4202,13 @@ print(json.dumps(res))
         const stored = (c.accepted_config && typeof c.accepted_config === 'object') ? c.accepted_config : {};
         const storedFlags = String(stored.flags || '');
         const storedEnv = String(stored.env || '');
-        if (!storedFlags && !storedEnv) {
+        const storedPdVars = pdVars(pdLayers({ flags: stored.flags_by_role, env: stored.env_by_role }));
+        const replayPd = Object.keys(storedPdVars).length > 0 && SERVING_TOPOLOGY === 'pd_disagg';
+        if (Object.keys(storedPdVars).length && !replayPd) {
+          log(`[kb] ${c.session_id || '?'}: not pd_disagg, so only the record's shared config is tested.`);
+        }
+        const pdReplayInputs = replayPd ? storedPdVars : {};
+        if (!storedFlags && !storedEnv && !replayPd) {
           verdicts.push({ ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a',
             outcome: 'skipped', why: 'the record carries no config to apply' });
           continue;
@@ -4002,7 +4227,7 @@ print(json.dumps(res))
         // run's baseline already IS the recorded configuration, so a bench would compare the
         // baseline with itself and file the ~0% result as a loss. Left un-attested on purpose —
         // `recalls` counts attempts on hardware, and this one never reached any.
-        if (mf.merged === renderFlagItems(parseFlagString(curFlags)) &&
+        if (!replayPd && mf.merged === renderFlagItems(parseFlagString(curFlags)) &&
             me.merged === renderEnvItems(parseEnvString(curEnv))) {
           verdicts.push({ ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a',
             outcome: 'skipped',
@@ -4037,6 +4262,7 @@ print(json.dumps(res))
               CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
               MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
               SKILL_DIR: WORKFLOW_DIR,
+              ...pdReplayInputs,
             }),
           { phase: 'WarmStart', label, schema: SWEEP_SCHEMA });
 
@@ -4126,6 +4352,8 @@ print(json.dumps(res))
         if (accept) {
           curFlags = sweep.accepted_flags || mf.merged || curFlags;
           curEnv = sweep.accepted_env || me.merged || curEnv;
+          if (replayPd) { setPd('flags', stored.flags_by_role); setPd('env', stored.env_by_role); }
+          setPd('flags', sweep.accepted_flags_by_role); setPd('env', sweep.accepted_env_by_role);
           kbSeedTput = measured;
           await requireE2EValidationCheckpoint('config/e2e_validation.json', {
             phase: 'WarmStart', validation_level: 'config_sweep', gate: 'accepted',
@@ -4133,7 +4361,7 @@ print(json.dumps(res))
             baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: measured,
             throughput_speedup: BASELINE_TPUT ? measured / BASELINE_TPUT : 1,
             baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-            accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+            accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields(), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
             accepted_kernels: [], accepted_heads: [], final_patch: [],
             final_overlay: { path: curOverlay },
             final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
@@ -4674,7 +4902,8 @@ print(json.dumps(res))
       phase('Strategize');
       strategy = await safeAgent(
         roleAgent('system_architect', 'strategize', 'Route the Top-N into config/kernel/host tracks by Amdahl.', {
-          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: BASELINE_TPUT,
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', ...profileByRoleInputs(),
+          BASELINE_THROUGHPUT: BASELINE_TPUT,
           WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED, SKILL_DIR: WORKFLOW_DIR,
           ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
         }),
@@ -4683,6 +4912,7 @@ print(json.dumps(res))
     kernelQueue = (strategy && strategy.kernel_candidates) ? strategy.kernel_candidates.slice() : [];
     headQueue = (strategy && strategy.head_candidates) ? strategy.head_candidates.slice() : [];
     headQueue = applyOpIdentityGuard(headQueue, 'strategize');
+    pdDirectionGaps.push(...applyPdDirectionGuard(strategy, 'strategize'));
     log(`Strategy: ${headQueue.length} head candidates, ${kernelQueue.length} kernel candidates, ${(strategy && strategy.config_directions || []).length} config directions.`);
     // strategize decided the backends -> if any candidate routed flydsl, provision it now (blocking).
     await ensureFlydslGate();
@@ -4696,15 +4926,22 @@ print(json.dumps(res))
   NOISE_BAND = gateNoiseBand(ST.noise_band_pct);
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
+  curPd = pdLayers({ flags: ST.flags_by_role, env: ST.env_by_role, overlay: ST.overlay_by_role });
   curOverlay = ST.overlay || INIT_BASE_OVERLAY;
-  profile = { profile_topN_json: ST.profile_topn_json || '',
+  profile = {
+    profile_topN_json: ST.profile_topn_json || '',
+    ...(ST.profile_topn_by_role ? { profile_topN_by_role: ST.profile_topn_by_role } : {}),
+    ...(ST.profile_workload_by_role ? { profile_workload_by_role: ST.profile_workload_by_role } : {}),
     ...(KERNEL_EXTRACT_ON ? { profile_workload_json: ST.profile_workload_json || '',
       kernel_ranking_json: ST.kernel_ranking_json || '',
       kernel_extraction_delivery_json: ST.kernel_extraction_delivery_json || '',
       failed_tasks: ST.kernel_extraction_summary?.failed_tasks || [],
       deferred_tasks: ST.kernel_extraction_summary?.deferred_tasks || [],
-      coverage_summary: ST.kernel_extraction_summary?.coverage_summary || {} } : {}) };
-  strategy = { config_directions: ST.config_directions || [] };
+      coverage_summary: ST.kernel_extraction_summary?.coverage_summary || {} } : {}),
+  };
+  strategy = { config_directions: ST.config_directions || [],
+    tuning_directions: ST.tuning_directions || [] };
+  applyPdDirectionGuard(strategy, 'resume');
   kernelQueue = ST.kernelQueue || [];
   headQueue = admitHeads(ST.headQueue || [], 'resume');
   // Dispatch replays prepared_ut.result and cannot read it off disk, so a candidate carrying only
@@ -4738,6 +4975,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
     roleAgent('config_tuner', 'sweep', 'Sweep the ranked config axes one at a time; keep wins.', {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, BASELINE_THROUGHPUT: BASELINE_TPUT,
       NOISE_BAND_PCT: NOISE_BAND, CONFIG_DIRECTIONS: strategy.config_directions,
+      ...profileByRoleInputs(),
       CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
       MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
       SKILL_DIR: WORKFLOW_DIR, ...KB_REF_INPUTS,
@@ -4746,6 +4984,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
   if (sweep && sweep.best_throughput_tok_s > curTput) {
     curFlags = sweep.accepted_flags || curFlags;
     curEnv = sweep.accepted_env || curEnv;
+    setPd('flags', sweep.accepted_flags_by_role); setPd('env', sweep.accepted_env_by_role);
     curTput = sweep.best_throughput_tok_s;
     await requireE2EValidationCheckpoint('config/e2e_validation.json', {
       phase: 'ConfigSweep', validation_level: 'config_sweep', gate: 'accepted',
@@ -4753,7 +4992,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: curTput,
       throughput_speedup: BASELINE_TPUT ? curTput / BASELINE_TPUT : 1,
       baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-      accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields(), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
       accepted_kernels: [], accepted_heads: [], final_patch: [], final_overlay: { path: curOverlay },
       final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
       bench_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
@@ -4777,7 +5016,8 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       // Re-strategize the kernel queue against the new profile.
       const restrat = await safeAgent(
         roleAgent('system_architect', 'strategize', 'Re-route after config changed the landscape.', {
-          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', ...profileByRoleInputs(),
+          BASELINE_THROUGHPUT: curTput,
           WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
           ...ANALYSIS_SKILL_INPUTS,
         }),
@@ -4817,6 +5057,42 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 // never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
 
+function engineWorkload(h) {
+  const role = pdRole(h);
+  const byRole = (profile && profile.profile_workload_by_role) || null;
+  const path = (role && byRole && byRole[role]) || (profile && profile.profile_workload_json) || '';
+  return { ...(path ? { PROFILE_WORKLOAD_JSON: path } : {}), ...(role ? { SERVING_ENGINE: role } : {}),
+    ...captureShard(role) };
+}
+
+// Capture is a SERVING leg on the pinned machines: a one-card server has unsharded N/K and may not
+// fit the model. PD hooks one engine, tp_span the shared overlay.
+function captureShard(role) {
+  const pd = SERVING_TOPOLOGY === 'pd_disagg' && (role === 'prefill' || role === 'decode');
+  if (!pd && SERVING_TOPOLOGY !== 'tp_span') return {};
+  return {
+    CAPTURE_ON_ENGINE: pd ? role : 'tp_span',
+    CAPTURE_ENGINE_OVERLAY_VAR: pd ? pdVar('overlay', role) : 'OVERLAY_PYTHONPATH',
+    CAPTURE_ENGINE_BASE_OVERLAY: pd ? curPd[role].overlay : curOverlay,
+    CAPTURE_SHARED_OVERLAY: pd ? curOverlay : '',
+    CAPTURE_ENGINE_LOG: pd ? `the ${role} engine's "log" in mn_launch.json pd.engines` : 'server.log',
+    CAPTURE_TP: ((MN_SPEC && MN_SPEC.tp_by_role) || {})[role] || SERVING_TP, CAPTURE_GPU: SERVING_GPU,
+  };
+}
+
+// Colocated, one kernel serves both regimes; under PD the other regime runs on the other machine.
+function engineRegimes(h) {
+  const role = pdRole(h);
+  if (role === 'prefill') {
+    return { REQUIRE_DECODE_BUCKET: false,
+      PREFILL_M_NOTE: 'PD: PREFILL engine ONLY. Cases are the CAPTURE_ON_ENGINE capture (meta.shape_counts), '
+        + 'not chunk/ISL; no decode M bucket.' };
+  }
+  return { REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
+    PREFILL_M_NOTE: role === 'decode'
+      ? 'PD: DECODE engine ONLY; no large prefill M bucket.'
+      : 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)' };
+}
 // ===========================================================================
 // PHASE: TuningSkillset — the VENDORED tuning skillset, run WHOLE and STANDALONE, BEFORE HeadKernel.
 //
@@ -4850,7 +5126,8 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
       MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
       NOISE_BAND_PCT: NOISE_BAND, ACCURACY_GATE, ...ACCURACY_INPUTS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '',
-      TUNING_TARGETS: (strategy && strategy.head_candidates) || headQueue || [],
+      TUNING_TARGETS: ((strategy && strategy.tuning_directions) || [])
+        .concat((strategy && strategy.head_candidates) || headQueue || []),
       TUNING_SKILLSET_DIR, TUNING_KB_ENABLED, SKILL_DIR: WORKFLOW_DIR,
       // The always-fires channel, same as the Architect's and the config_tuner's. The prompt BLOCK
       // above can be empty (no candidates, or the read never ran); these Inputs entries are how the
@@ -4982,6 +5259,11 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
     // the code half of a tuning win is silently dropped at the phase boundary and the data half is left
     // bound to nothing — the failure the skillset spends its longest section on.
     if (tuning.apply_overlay) curOverlay = tuning.apply_overlay;
+    const tuned = pdLayers({ overlay: tuning.apply_overlay_by_role, env: tuning.apply_env_by_role,
+      flags: tuning.apply_flags_by_role });
+    const tunedOn = PD_ROLES.filter((r) => (tuned[r].overlay || tuned[r].env || tuned[r].flags) &&
+      foldAccept({ engine: r }, tuned[r]));
+    if (tunedOn.length) log(`Tuning skillset: per-engine deploy on ${tunedOn.join(' + ')} only.`);
     curTput = tuning.post_tune_throughput_tok_s;
     log(`Tuning skillset ACCEPTED: ${tuning.pre_tune_throughput_tok_s} -> ${curTput} tok/s ` +
       `(+${(tuning.tuning_delta_pct || 0).toFixed(2)}% attributable to tuning; ` +
@@ -5135,7 +5417,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
       throughput_speedup: tuning.tuning_speedup ||
         (tuning.post_tune_throughput_tok_s / tuning.pre_tune_throughput_tok_s),
       baseline_config: tuningBaselineConfig,
-      accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields(), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
       accepted_kernels: tunedOps.map((o) => ({
         kernel_id: o.kernel_id || o.op || o.short_name || '',
         kernel_slot: o.kernel_slot || o.target_callable || o.target_file || o.op || o.short_name || '',
@@ -5174,7 +5456,8 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
         { phase: 'Profile', label: 'profiler:post-tuning', schema: PROFILE_SCHEMA });
       const retune = await safeAgent(
         roleAgent('system_architect', 'strategize', 'Re-route after tuning changed the landscape.', {
-          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', BASELINE_THROUGHPUT: curTput,
+          EVAL_DIR, PROFILE_TOPN: profile ? profile.profile_topN_json : '', ...profileByRoleInputs(),
+          BASELINE_THROUGHPUT: curTput,
           WORKLOAD, BUDGET, HEAD_THRESHOLD_PCT, CONFIG_TUNE_ENABLED: false, SKILL_DIR: WORKFLOW_DIR,
           ...ANALYSIS_SKILL_INPUTS,
         }),
@@ -5289,10 +5572,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       const ext = await extractWithBaseline(
         'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
           EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-          ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+          ...engineWorkload(h),
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-          REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
-          PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
+          ...engineRegimes(h),
         },
         { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
       const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
@@ -5466,6 +5748,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             verified_isolated_speedup: c.best, pct_gpu_time: c.head.pct_gpu_time, parity_note: 'expected_close',
           },
           CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+          ...engineIntegrateInputs(c.head),
           CURRENT_THROUGHPUT: curTput,
           MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
           SKILL_DIR: WORKFLOW_DIR, DEEP_FEEDBACK: true,
@@ -5479,8 +5762,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           log(`  [deep] ${c.uid}: REJECTED — output_parity=fail vs true baseline.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'dead_end', lesson: 'parity fail vs true baseline' });
         } else if (integAccepted(integ, c.head.pct_gpu_time, c.best) && integ.e2e_throughput_tok_s > curTput) {
-          curOverlay = integ.accepted_overlay || curOverlay; curTput = integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
-          bankAccepted(acceptedHeads, { short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', ...e2eFrom(integ), isolated: c.best }, krOf(deepInputs));
+          const engine = foldAccept(c.head, { overlay: integ.accepted_overlay }); curTput = integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
+          bankAccepted(acceptedHeads, { short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', engine, ...e2eFrom(integ), isolated: c.best }, krOf(deepInputs));
           log(`  [deep] ${c.uid}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%); target ${Math.round(BASELINE_TPUT * DEEP_E2E_TARGET)} tok/s.`);
           history.ledger.push({ direction: c.uid, isolated_speedup: c.best, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
         } else {
@@ -5489,7 +5772,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           const dreason = gateRejectReason(integ, c.head.pct_gpu_time, c.best);
           const dcorr = await tryCorrectiveReauthor({
             short_name: c.head.short_name, op_kind: c.ext.op_kind, shapes: c.ext.shapes, dtype: c.ext.dtype, regime: c.head.regime,
-            gpu_id: SERVING_GPU, kernel_eval_dir: c.lastEval, task_dir: c.ext.task_dir, language: c.lang,
+            gpu_id: SERVING_GPU, engine: pdRole(c.head), kernel_eval_dir: c.lastEval, task_dir: c.ext.task_dir, language: c.lang,
             isolated: c.best, reason: dreason, fix_class: rejectClass(dreason), pct_gpu_time: c.head.pct_gpu_time,
             base_inputs: {
               EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
@@ -5500,13 +5783,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
                 authored_language: c.lang, authored_kernel_eval_dir: c.lastEval, apply_env: '', apply_flags: '',
                 code_patch: c.patch || '', tuning_artifact: '', verified_isolated_speedup: c.best,
                 pct_gpu_time: c.head.pct_gpu_time, parity_note: 'expected_close' },
-              SKILL_DIR: WORKFLOW_DIR, ...ACCURACY_INPUTS,
+              SKILL_DIR: WORKFLOW_DIR, ...ACCURACY_INPUTS, ...engineIntegrateInputs(c.head),
             },
             cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
           });
           if (dcorr.banked) {
-            curOverlay = dcorr.integ.accepted_overlay || curOverlay; curTput = dcorr.integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
-            bankAccepted(acceptedHeads, { short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', ...e2eFrom(dcorr.integ), isolated: dcorr.isolated, corrective: true, patch: dcorr.patch || '' }, krOf(deepInputs));
+            const engine = foldAccept(c.head, { overlay: dcorr.integ.accepted_overlay }); curTput = dcorr.integ.e2e_throughput_tok_s; bankedHeads.add(c.head.short_name);
+            bankAccepted(acceptedHeads, { short_name: c.head.short_name, op_kind: c.ext.op_kind, backend: c.lang, lane: c.key, kind: 'patch', engine, ...e2eFrom(dcorr.integ), isolated: dcorr.isolated, corrective: true, patch: dcorr.patch || '' }, krOf(deepInputs));
             log(`  [deep] ${c.uid}: ACCEPTED after corrective re-author. e2e now ${curTput} tok/s (+${dcorr.integ.e2e_delta_pct}%).`);
             history.ledger.push({ direction: c.uid, isolated_speedup: dcorr.isolated, e2e_delta_pct: dcorr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${dreason}` });
           } else {
@@ -5609,7 +5892,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           kernel_path: l.ext.task_dir, workflow_dir: KERNEL_WF_DIR, mode: l.mode, target_language: l.lang, op_spec: l.opSpec,
           perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR, use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
           ...KB_ARGS,
-          budget: DEEP_WAVE_BUDGET, max_no_improve: DEEP_WAVE_BUDGET, gpu_ids: g[0],
+          budget: DEEP_WAVE_BUDGET, max_no_improve: DEEP_WAVE_BUDGET, gpu_ids: engineGpu(l.head, g[0]),
           state_dir: l.state_dir, shared_kb: l.sharedKb, global_kb: GLOBAL_KB,
           incremental_analyze: l.ran > 1 ? 'true' : 'false',   // P2: 2nd+ burst of a lane = continuation -> skip cold re-analysis
           ...(gateFeedbackPath ? { e2e_feedback: gateFeedbackPath } : {}),
@@ -5666,10 +5949,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const ext = await extractWithBaseline(
           'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
             EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-            ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+            ...engineWorkload(h),
             CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-            REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
-            PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
+            ...engineRegimes(h),
           },
           { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
         if (!ext || ext.smoke !== 'pass' || !ext.task_dir) return { h, gpu, ext, dead: 'extract' };
@@ -5741,7 +6023,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
             ...KB_ARGS,
-            budget: KERNEL_BUDGET, gpu_ids: g[0], exp_root: `${EVAL_DIR}/kernels/_exp`,
+            budget: KERNEL_BUDGET, gpu_ids: engineGpu(j.h, g[0]), exp_root: `${EVAL_DIR}/kernels/_exp`,
             task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${j.best_known_ms || '?'} ms). ` +
               `This kernel will be overlaid onto the LIVE decode path (CUDA-graph captured): its STEADY-STATE hot path MUST be ` +
               `host-sync-free (NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize(), no Python branch on a GPU scalar). ` +
@@ -5805,6 +6087,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           live_call_seam: h.live_call_seam || '', engagement_check: h.engagement_check || '',
           parity_note: cand.parity_note || 'expected_close' },
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+        ...engineIntegrateInputs(h),
         CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
         ENGAGEMENT_CHECK: h.engagement_check || '',
       };
@@ -5812,11 +6095,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         'Apply the head-op winner; gate on e2e throughput.', headWinnerInputs,
         `integrate ${h.short_name}`, 'HeadKernel');
       if (integAccepted(integ, h.pct_gpu_time, cand.isolated) && integ.e2e_throughput_tok_s > curTput) {
-        curOverlay = integ.accepted_overlay || curOverlay;
-        if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
-        if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
+        const engine = foldAccept(h, {
+          overlay: integ.accepted_overlay,
+          env: cand.winner_kind === 'env' ? cand.apply_env : '',
+          flags: cand.winner_kind === 'flag' ? cand.apply_flags : '',
+        });
         curTput = integ.e2e_throughput_tok_s;
-        bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: st.ext.op_kind, backend: cand.source, kind: cand.winner_kind, ...e2eFrom(integ), isolated: cand.isolated }, krOf(headWinnerInputs));
+        bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: st.ext.op_kind, backend: cand.source, kind: cand.winner_kind, engine, ...e2eFrom(integ), isolated: cand.isolated }, krOf(headWinnerInputs));
         log(`  ${h.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
       } else {
@@ -5825,7 +6110,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const corr = (cand.kind === 'authored' && rejectClass(reason) !== '')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: st.ext.op_kind, shapes: st.ext.shapes, dtype: st.ext.dtype, regime: h.regime,
-              gpu_id: SERVING_GPU, kernel_eval_dir: cand.kernel_eval_dir, task_dir: st.ext.task_dir, language: cand.language,
+              gpu_id: SERVING_GPU, engine: pdRole(h), kernel_eval_dir: cand.kernel_eval_dir, task_dir: st.ext.task_dir, language: cand.language,
               isolated: cand.isolated, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time, phase_name: 'HeadKernel',
               base_inputs: {
                 EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: NOISE_BAND,
@@ -5836,14 +6121,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
                   apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
                   code_patch: cand.code_patch || cand.final_patch || '', tuning_artifact: cand.tuning_artifact || '',
                   verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time, parity_note: 'expected_close' },
-                SKILL_DIR: WORKFLOW_DIR,
+                SKILL_DIR: WORKFLOW_DIR, ...engineIntegrateInputs(h),
               },
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
             })
           : { banked: false };
         if (corr.banked) {
-          curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
-          bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: st.ext.op_kind, backend: cand.source, kind: 'authored', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(headWinnerInputs));
+          const engine = foldAccept(h, { overlay: corr.integ.accepted_overlay }); curTput = corr.integ.e2e_throughput_tok_s;
+          bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: st.ext.op_kind, backend: cand.source, kind: 'authored', engine, ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(headWinnerInputs));
           log(`  ${h.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
         } else {
@@ -5871,15 +6156,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     const ext = await extractWithBaseline(
       'kernel_extractor', 'extract_op', 'Build a standalone op unittest for a head kernel.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: h.gpu_id, WORKLOAD, KERNEL: h, GEMM_SYNTH: gemmSynthFor(h),
-        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+        ...engineWorkload(h),
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        // The unittest MUST span BOTH regimes. Steady-state serving is decode/TPOT-bound, so a
-        // head GEMM tuned only on GPU-time-dominant prefill M regresses decode and loses e2e.
-        // Pass the decode M explicitly (= running batch ≈ conc) so it is never dropped, plus a
-        // per-step M=1. See kernel_extractor.md "Shapes must span BOTH regimes".
-        REQUIRE_DECODE_BUCKET: true,
-        DECODE_M_BUCKETS: [1, CONC],
-        PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)',
+        ...engineRegimes(h),
       },
       { phase: 'HeadKernel', label: `extract_op ${h.short_name}`, schema: EXTRACT_OP_SCHEMA });
     const isDominant = (h.pct_gpu_time || 0) >= HEAD_PROTECT_PCT;
@@ -6008,7 +6287,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
             ...KB_ARGS,
-            budget: KERNEL_BUDGET, gpu_ids: h.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+            budget: KERNEL_BUDGET, gpu_ids: engineGpu(h, h.gpu_id), exp_root: `${EVAL_DIR}/kernels/_exp`,
             task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` +
               `This kernel will be overlaid onto the LIVE sglang decode path, which is CUDA-graph captured: its STEADY-STATE hot ` +
               `path (2nd call onward) MUST be host-sync-free — NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize() ` +
@@ -6077,6 +6356,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         verified_isolated_speedup: cand.isolated || 0, pct_gpu_time: h.pct_gpu_time,
         parity_note: cand.parity_note || 'expected_close' },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      ...engineIntegrateInputs(h),
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
       CAND_TAG: `c${ci}_${cand.source}`,
       ...(sharedRefMed != null ? { REUSE_REF: true, SHARED_REF_MED: sharedRefMed } : {}),
@@ -6114,11 +6394,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       // Best MEASURED e2e among all candidates that cleared the gate. A head winner may be carried as an
       // overlay (authored/patch) AND/OR config (env/flag) — capture both.
       const cand = bestPick.cand, integ = bestPick.integ;
-      curOverlay = integ.accepted_overlay || curOverlay;
-      if (cand.winner_kind === 'env' && cand.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + cand.apply_env;
-      if (cand.winner_kind === 'flag' && cand.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + cand.apply_flags;
+      const engine = foldAccept(h, {
+        overlay: integ.accepted_overlay,
+        env: cand.winner_kind === 'env' ? cand.apply_env : '',
+        flags: cand.winner_kind === 'flag' ? cand.apply_flags : '',
+      });
       curTput = integ.e2e_throughput_tok_s;
-      bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: cand.winner_kind, ...e2eFrom(integ), isolated: cand.isolated }, krOf(bestPick.inputs));
+      bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: cand.winner_kind, engine, ...e2eFrom(integ), isolated: cand.isolated }, krOf(bestPick.inputs));
       log(`  ${h.short_name}: ACCEPTED best candidate=${cand.source} (${(cand.isolated || 0).toFixed(2)}x iso). e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
       history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
     } else {
@@ -6134,21 +6416,21 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const corr = (cand.kind === 'authored' && FIXABLE_REJECT_RX.test(reason))
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
-              gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
+              gpu_id: h.gpu_id, engine: pdRole(h), kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason,
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
             })
           : { banked: false };
         if (corr.banked) {
-          curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
-          bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: 'authored', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(headIntegrateInputs));
+          const engine = foldAccept(h, { overlay: corr.integ.accepted_overlay }); curTput = corr.integ.e2e_throughput_tok_s;
+          bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: 'authored', engine, ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(headIntegrateInputs));
           log(`  ${h.short_name}: ACCEPTED after corrective re-author (was crash/incomplete: ${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed crash: ${reason}` });
         } else {
           pendingIntegrations.push({ track: 'head', short_name: h.short_name, isolated: cand.isolated || 0,
             pct_gpu_time: h.pct_gpu_time, inputs: headIntegrateInputs,
             winner_kind: cand.winner_kind, apply_env: cand.apply_env || '', apply_flags: cand.apply_flags || '',
-            op_kind: ext.op_kind, backend: cand.source,
+            op_kind: ext.op_kind, backend: cand.source, engine: pdRole(h),
             partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
           log(`  ${h.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
           history.ledger.push({ direction: h.short_name, isolated_speedup: cand.isolated, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
@@ -6160,14 +6442,14 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         const corr = (cand.kind === 'authored')
           ? await tryCorrectiveReauthor({
               short_name: h.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: h.regime,
-              gpu_id: h.gpu_id, kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
+              gpu_id: h.gpu_id, engine: pdRole(h), kernel_eval_dir: cand.kernel_eval_dir, task_dir: ext.task_dir, language: cand.language,
               isolated: cand.isolated, base_inputs: headIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: h.pct_gpu_time,
               cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
             })
           : { banked: false };
         if (corr.banked) {
-          curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
-          bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: 'authored', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(headIntegrateInputs));
+          const engine = foldAccept(h, { overlay: corr.integ.accepted_overlay }); curTput = corr.integ.e2e_throughput_tok_s;
+          bankAccepted(acceptedHeads, { short_name: h.short_name, op_kind: ext.op_kind, backend: cand.source, kind: 'authored', engine, ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(headIntegrateInputs));
           log(`  ${h.short_name}: ACCEPTED after corrective re-author. e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
           history.ledger.push({ direction: h.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
         } else {
@@ -6266,7 +6548,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       'kernel_extractor', 'extract', 'Capture shapes + oracle; emit an immutable unittest task dir.', {
         EVAL_DIR, MODEL_PATH, GPU_ID: c.gpu_id, WORKLOAD, KERNEL: c,
         CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, SKILL_DIR: WORKFLOW_DIR,
-        ...(profile && profile.profile_workload_json ? { PROFILE_WORKLOAD_JSON: profile.profile_workload_json } : {}),
+        ...engineWorkload(c),
       },
       { phase: 'Milestone', label: `extract ${c.short_name}`, schema: EXTRACT_SCHEMA });
     if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir) {
@@ -6279,7 +6561,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         ...KB_ARGS,
-        budget: KERNEL_BUDGET, gpu_ids: c.gpu_id, exp_root: `${EVAL_DIR}/kernels/_exp`,
+        budget: KERNEL_BUDGET, gpu_ids: engineGpu(c, c.gpu_id), exp_root: `${EVAL_DIR}/kernels/_exp`,
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
@@ -6320,6 +6602,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         source_path_in_sglang: ext.source_path_in_sglang, target_callable: ext.target_callable,
         final_patch: kl.final_patch, verified_isolated_speedup: kl.isolated_speedup, pct_gpu_time: c.pct_gpu_time },
       CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv,
+      ...engineIntegrateInputs(c),
       CURRENT_THROUGHPUT: curTput, SKILL_DIR: WORKFLOW_DIR,
     };
     const integ = await runIntegrateBothLegs(
@@ -6331,9 +6614,9 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // flag => not done; a legacy return without ab_complete behaves as before.
     const abDone = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
     if (abDone && integAccepted(integ, c.pct_gpu_time, kl.isolated_speedup) && integ.e2e_throughput_tok_s > curTput) {
-      curOverlay = integ.accepted_overlay || curOverlay;
+      const engine = foldAccept(c, { overlay: integ.accepted_overlay });
       curTput = integ.e2e_throughput_tok_s;
-      bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(integ), isolated: kl.isolated_speedup }, krOf(mileIntegrateInputs));
+      bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', engine, ...e2eFrom(integ), isolated: kl.isolated_speedup }, krOf(mileIntegrateInputs));
       milestoneImproved = true;
       log(`  ${c.short_name}: ACCEPTED. e2e now ${curTput} tok/s (+${integ.e2e_delta_pct}%).`);
       history.ledger.push({ direction: c.short_name, isolated_speedup: kl.isolated_speedup, e2e_delta_pct: integ.e2e_delta_pct, verdict: 'confirmed', lesson: integ.reason || '' });
@@ -6346,20 +6629,20 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
       const corr = (rejectClass(reason) !== '')
         ? await tryCorrectiveReauthor({
             short_name: c.short_name, op_kind: ext.op_kind, shapes: ext.shapes, dtype: ext.dtype, regime: c.regime,
-            gpu_id: c.gpu_id, kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
+            gpu_id: c.gpu_id, engine: pdRole(c), kernel_eval_dir: kl.kernel_eval_dir, task_dir: ext.task_dir, language: kl.language || '',
             isolated: kl.isolated_speedup, base_inputs: mileIntegrateInputs, reason, fix_class: rejectClass(reason), pct_gpu_time: c.pct_gpu_time, phase_name: 'Milestone',
             cur: { overlay: curOverlay, flags: curFlags, env: curEnv, tput: curTput },
           })
         : { banked: false };
       if (corr.banked) {
-        curOverlay = corr.integ.accepted_overlay || curOverlay; curTput = corr.integ.e2e_throughput_tok_s;
-        bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(mileIntegrateInputs));
+        const engine = foldAccept(c, { overlay: corr.integ.accepted_overlay }); curTput = corr.integ.e2e_throughput_tok_s;
+        bankAccepted(acceptedKernels, { short_name: c.short_name, backend: kl.note || '', kind: 'patch', engine, ...e2eFrom(corr.integ), isolated: corr.isolated, corrective: true, patch: corr.patch || '' }, krOf(mileIntegrateInputs));
         milestoneImproved = true;
         log(`  ${c.short_name}: ACCEPTED after corrective re-author (${reason}). e2e now ${curTput} tok/s (+${corr.integ.e2e_delta_pct}%).`);
         history.ledger.push({ direction: c.short_name, isolated_speedup: corr.isolated, e2e_delta_pct: corr.integ.e2e_delta_pct, verdict: 'confirmed_corrective', lesson: `fixed: ${reason}` });
       } else if (!abDone) {
         pendingIntegrations.push({ track: 'milestone', short_name: c.short_name, isolated: kl.isolated_speedup,
-          pct_gpu_time: c.pct_gpu_time, inputs: mileIntegrateInputs, backend: kl.note || '',
+          pct_gpu_time: c.pct_gpu_time, inputs: mileIntegrateInputs, backend: kl.note || '', engine: pdRole(c),
           partial: integ ? { gate: integ.gate, ref_med: integ.ref_med, cand_med: integ.cand_med, reason: integ.reason } : null });
         log(`  ${c.short_name}: INTEGRATE INCOMPLETE — A/B not finished (${integ ? integ.reason || integ.gate : 'null/timeout'}); kept as PENDING (not a rejection).`);
         history.ledger.push({ direction: c.short_name, isolated_speedup: kl.isolated_speedup, verdict: 'incomplete', lesson: integ ? integ.reason || 'A/B not finished' : 'integrate timed out/null before A/B completed' });
@@ -6412,7 +6695,6 @@ let allAccepted = acceptedHeads.concat(acceptedKernels);
 let finalize = null, report = null, validation = null;
 let finalTput = curTput, finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
 let validatedOk = false;   // did the independent Validate produce a usable (positive) number?
-
 // --- Fix C: EVERY incomplete A/B must be finished (both legs) before final ----
 // Completeness guarantee (general, not per-kernel): an A/B that measured only the
 // reference leg (gate:'incomplete' / ab_complete:false) is NOT a result. Before
@@ -6529,16 +6811,20 @@ if (want('final')) {
       'completion, then return accepted/stack/rejected with ab_complete:true.',
       // Pin the CURRENT carried overlay/flags/env/throughput so the A/B is
       // measured against the latest accepted baseline.
-      { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput },
+      { ...p.inputs, CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_THROUGHPUT: curTput,
+        ...engineIntegrateInputs({ engine: p.engine }) },
       `finish-integrate ${p.short_name}`, FINALIZE_GATE_PHASE);
     if (abDone(integ) && integAccepted(integ, p.pct_gpu_time, p.isolated) && integ.e2e_throughput_tok_s > curTput) {
-      curOverlay = integ.accepted_overlay || curOverlay;
-      if (p.track === 'head') {
-        if (p.winner_kind === 'env' && p.apply_env) curEnv = (curEnv ? curEnv + ' ' : '') + p.apply_env;
-        if (p.winner_kind === 'flag' && p.apply_flags) curFlags = (curFlags ? curFlags + ' ' : '') + p.apply_flags;
-        bankAccepted(acceptedHeads, { short_name: p.short_name, op_kind: p.op_kind, backend: p.backend, kind: p.winner_kind, ...e2eFrom(integ), isolated: p.isolated, pct_gpu_time: p.pct_gpu_time }, krOf(p.inputs));
+      const isHead = p.track === 'head';
+      const engine = foldAccept({ engine: p.engine }, {
+        overlay: integ.accepted_overlay,
+        env: isHead && p.winner_kind === 'env' ? p.apply_env : '',
+        flags: isHead && p.winner_kind === 'flag' ? p.apply_flags : '',
+      });
+      if (isHead) {
+        bankAccepted(acceptedHeads, { short_name: p.short_name, op_kind: p.op_kind, backend: p.backend, kind: p.winner_kind, engine, ...e2eFrom(integ), isolated: p.isolated, pct_gpu_time: p.pct_gpu_time }, krOf(p.inputs));
       } else {
-        bankAccepted(acceptedKernels, { short_name: p.short_name, backend: p.backend || '', kind: 'patch', ...e2eFrom(integ), isolated: p.isolated, pct_gpu_time: p.pct_gpu_time }, krOf(p.inputs));
+        bankAccepted(acceptedKernels, { short_name: p.short_name, backend: p.backend || '', kind: 'patch', engine, ...e2eFrom(integ), isolated: p.isolated, pct_gpu_time: p.pct_gpu_time }, krOf(p.inputs));
       }
       curTput = integ.e2e_throughput_tok_s;
       finalTput = curTput; finalSpeedup = BASELINE_TPUT ? curTput / BASELINE_TPUT : 1.0;
@@ -6565,7 +6851,7 @@ if (allAccepted.length) {
     baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: curTput,
     throughput_speedup: BASELINE_TPUT ? curTput / BASELINE_TPUT : 1,
     baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-    accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+    accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields(), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
     accepted_kernels: acceptedKernels, accepted_heads: acceptedHeads, final_patch: [],
     final_overlay: { path: curOverlay },
     final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
@@ -6624,6 +6910,7 @@ if (want('final')) {
   finalize = await safeAgent(
     roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {
       EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv,
+      ...pdConfigFields(),
       ACCEPTED_KERNELS: allAccepted, BASELINE_THROUGHPUT: BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
       ...TUNING_FINALIZE_INPUTS,
     }),
@@ -6636,7 +6923,7 @@ if (want('final')) {
       baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: finalTput,
       throughput_speedup: BASELINE_TPUT ? finalTput / BASELINE_TPUT : 1,
       baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-      accepted_config: { flags: curFlags, env: curEnv, effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields(), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
       accepted_kernels: acceptedKernels, accepted_heads: acceptedHeads,
       final_patch: [finalize.final_patch].filter(Boolean),
       final_overlay: { path: finalize.final_overlay || curOverlay },
@@ -6668,7 +6955,7 @@ if (want('final')) {
       'same_direction_collapsed/below_min_speedup, and its own read_plane) with both floors.', {
       EVAL_DIR, HISTORY: history, BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: finalTput,
       KB_RECALL,
-      ACCEPTED_CONFIG: { flags: curFlags, env: curEnv }, ACCEPTED_KERNELS: allAccepted,
+      ACCEPTED_CONFIG: { flags: curFlags, env: curEnv, ...pdConfigFields() }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
       ...ANALYSIS_SKILL_INPUTS, ...TUNING_REPORT_INPUTS,
@@ -6686,7 +6973,7 @@ if (want('final')) {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       BASELINE_OVERLAY: INIT_BASE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
-      FINAL_FLAGS: { flags: curFlags, env: curEnv },
+      FINAL_FLAGS: { flags: curFlags, env: curEnv, ...pdConfigFields() },
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL,
       MEASUREMENT_MODE: VALIDATION_MEASUREMENT_MODE,
       MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_SAMPLES,
@@ -6751,6 +7038,7 @@ if (want('final')) {
 // State to carry into the NEXT phase invocation (args.state) when driving phase-by-phase.
 const carryState = {
   backend: BACKEND,
+  ...(MN_SPEC ? { multinode: MN_SPEC } : {}),
   ...(KERNEL_EXTRACT_ON
     ? { workload_spec: { ...WORKLOAD_SPEC, kind: WORKLOAD_KIND },
         profile_workload_json: profile ? profile.profile_workload_json || '' : '',
@@ -6761,9 +7049,15 @@ const carryState = {
           coverage_summary: profile?.coverage_summary || {},
         } } : {}),
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
-  noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv, overlay: curOverlay, throughput: curTput,
+  noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv,
+  ...pdConfigFields(),
+  overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
+  profile_topn_by_role: (profile && profile.profile_topN_by_role) || null,
+  profile_workload_by_role: (profile && profile.profile_workload_by_role) || null,
   config_directions: (strategy && strategy.config_directions) || [],
+  tuning_directions: (strategy && strategy.tuning_directions) || [],
+  pd_direction_gaps: pdDirectionGaps,
   // AgentX candidates carry prepared_ut.result (the validated RETURN.json) through state as well:
   // dispatch needs it and cannot re-read it from disk, and an undispatched task surviving a resume
   // without re-running preparation is the contract in references/workflow-handoff.md. Bounded by
@@ -6876,7 +7170,7 @@ const wfReturn = {
     : (validation ? `${validation.validation_status || 'flagged'}_no_number_used_carried_ab`
        : (want('final') ? 'unknown' : 'phase_partial')),
   output_parity: validation ? validation.output_parity : 'unknown',
-  accepted_config: { flags: curFlags, env: curEnv },
+  accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields() },
   accepted_kernels: acceptedKernels,
   accepted_heads: acceptedHeads,
   // Standalone tuning-skillset phase: its own measured pre/post legs plus the share of the run's TOTAL
@@ -6896,6 +7190,7 @@ const wfReturn = {
     pct_gpu_time: p.pct_gpu_time, partial: p.partial || null,
   })),
   flagged_heads: flaggedHeads,   // dominant heads surfaced but not optimized (harness/extract/no-candidate) — never silently dropped
+  ...(pdDirectionGaps.length ? { pd_direction_gaps: pdDirectionGaps } : {}),
   config_tune_enabled: CONFIG_TUNE_ENABLED,
   head_budget: HEAD_BUDGET,
   head_used: headDispatched,
@@ -6942,9 +7237,10 @@ const wfReturn = {
 // disk recovery (director_e2e_validation.json -> accepted intermediate win ->
 // measured-baseline no_gain). So correctness never DEPENDS on this single write —
 // it is the preferred fast path, not the only path.
-if (EVAL_DIR) {
+async function persistWorkflowReturn(ret) {
+  if (!EVAL_DIR) return;
   try {
-    const json = JSON.stringify(wfReturn, null, 2);
+    const json = JSON.stringify(ret, null, 2);
     await safeAgent(
       `You are a file writer. Use the Write tool to create the file ` +
       `"${EVAL_DIR}/workflow_return.json" with EXACTLY the content below, verbatim. ` +
@@ -6959,6 +7255,7 @@ if (EVAL_DIR) {
     log(`persist workflow_return.json failed (NON-FATAL — run_e2e.py will recover from disk): ${String(e)}`);
   }
 }
+await persistWorkflowReturn(wfReturn);
 
 // ===========================================================================
 // MODULE B — record this run in the deployment knowledge base.

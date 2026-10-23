@@ -159,6 +159,22 @@ recovery, before requesting a review; never manufacture a matching identity. Mis
 inconclusive, not a correctness failure. No additional kernel fix/re-measure loops are authorized
 by this review. The normal final Validate phase remains authoritative.
 
+**PD disaggregation: the change goes to ONE engine (only if `SERVING_ENGINE` is in your inputs).**
+The kernel was extracted and measured on `SERVING_ENGINE`'s shapes only; the other engine runs the
+same function at a different M that nobody measured. So:
+- `CURRENT_OVERLAY` is already THAT engine's own overlay (possibly empty), not the shared one. Seed the
+  candidate from it exactly as below. `SHARED_OVERLAY` is the layer both engines get — pass it as
+  `OVERLAY_PYTHONPATH` on BOTH legs, unchanged, and never copy it into the candidate.
+- Reference leg: `<ENGINE_OVERLAY_VAR>="$CURRENT_OVERLAY"` (omit when empty). Candidate leg:
+  `<ENGINE_OVERLAY_VAR>="$CAND"`. The launcher renders it ahead of the shared overlay on that engine
+  only; the other engine is identical in both legs, so the delta is this engine's change alone.
+- An `env` / `flag` winner goes in `<ENGINE_ENV_VAR>` / `<ENGINE_ARGS_VAR>` on the candidate leg, merged
+  key by key with the value already in your inputs — not in `EXTRA_ENV` / `EXTRA_SERVER_ARGS`.
+- Engagement is proven in this engine's front-end log: the `log` of its entry in the leg's
+  `mn_launch.json` `pd.engines` (`ENGINE_LOG` in your inputs says which). Absence
+  of the marker in the OTHER engine's log is expected; presence there means the overlay leaked.
+- `accepted_overlay` is the candidate dir (`$CAND`), i.e. the new overlay for this engine only.
+
 **ACCURACY GATE (only if `ACCURACY_GATE=gsm8k` is in your inputs; else use the normal parity gate).**
 For a QUANTIZED kernel, byte-exact greedy parity is the WRONG bar (a within-tolerance kernel rounds
 differently → flips borderline argmaxes → over-rejects valid kernels). Instead, score TASK ACCURACY:
@@ -192,7 +208,8 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    > That is the exact overlay entry the isolated unittest measured its win with (`kind:"module"` →
    > `add-module --module <module> --patched-file <task>/<file>`; `kind:"rebind"` → `add-rebind --target
    > <target> --impl-module/--impl-attr`), always seeded `--from "$CURRENT_OVERLAY"`. The branches below
-   > are for tasks that carry no `candidate_bind`.
+   > are for tasks that carry no `candidate_bind`, and for a bake-off winner (env / config / backend
+   > swap) of an op task whose bind is only there for the kernel layer's authored candidate.
    - **env** (TunableOp CSV, `HIPBLASLT_TUNING_FILE`, …): candidate env = `CURRENT_ENV +
      KERNEL_RESULT.apply_env`. Keep the tuning artifact under `$EVAL_DIR/config/` so it's reproducible.
      **Backend-engagement prerequisite:** a tuning artifact only binds if the backend that consumes it is
@@ -480,6 +497,11 @@ win**: `TUNING_DEPLOY_BUNDLE`, `TUNING_APPLY_ENV`, `TUNING_CACHE_INVALIDATION`, 
    `final_patch.diff` (all accepted kernel patches), and a `final_launch.sh` that reproduces the
    optimized server (sets `BACKEND=<backend>`, `PYTHONPATH=<overlay>`, the accepted flags/env, and runs
    the bench via bench_e2e.sh + its adapter). This is the spec deliverable: "complete patch + launch/benchmark script".
+   When Inputs contain `GEAK_MN_PD_SWEEP_ARGS_PREFILL` / `_DECODE`, the matching `GEAK_MN_PD_SWEEP_ENV_*`
+   or `GEAK_MN_PD_OVERLAY_*`, `final_launch.sh` exports those beside `EXTRA_SERVER_ARGS` /
+   `OVERLAY_PYTHONPATH`. They were accepted for one engine only. Do not fold them into the shared
+   variables — those are applied to both engines. `final_patch.diff` lists each engine's patches under
+   its own heading, so a reader can tell which machine a patch runs on.
 
 1b. **Fold in the tuning deploy bundle** (only when `TUNING_DEPLOY_BUNDLE` is present).
 
