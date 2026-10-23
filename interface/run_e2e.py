@@ -81,8 +81,8 @@ E2E_CHECKPOINT_LEVELS = {
 # ratio was computed against a different pair than the one we report.
 SPEEDUP_SELF_CONSISTENCY_TOL = 1e-3
 
-# Headroom over an op's theoretical Amdahl ceiling before a measured e2e delta
-# is treated as corruption rather than a win. Mirrors
+# Headroom over an Amdahl estimate before an accuracy-gated win needs an
+# independent measurement review. Exceeding it is not a correctness failure. Mirrors
 # IMPLAUSIBLE_SPEEDUP_MARGIN in e2e_workflow.js (1.0 => must exceed 2x the
 # ceiling); both sides MUST agree or the recovery path banks what the live path
 # refuses, so this is the SINGLE source of truth: map_args() forwards it to the
@@ -6196,7 +6196,7 @@ def _ir_float(ir: dict, *keys: str) -> float:
 
 
 def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
-    """Largest e2e gain an op can produce, from its GPU-time share and isolated speedup.
+    """Advisory e2e estimate from a GPU-time share and isolated speedup.
 
     Port of ``amdahlCeilingPct`` in e2e_workflow.js. ``inf`` when either input is
     missing, so an unknown profile never flags anything (fail-open).
@@ -6209,18 +6209,8 @@ def _amdahl_ceiling_pct(pct_gpu_time: float, isolated: float) -> float:
 
 
 def _parity_is_soft(ir: dict) -> bool:
-    """Whether the candidate's acceptance rests on a SAMPLED accuracy probe.
-
-    Byte-exact parity is a hard correctness guarantee, so a speedup above the
-    Amdahl ceiling is believed. A sampled accuracy gate can be squeaked past by
-    degenerate output, so an impossible speedup there is treated as corruption.
-
-    Diverges from ``parityIsSoft`` in e2e_workflow.js in one place: the JS falls
-    back to the run's ``accuracy_gate`` arg when the label is absent or
-    unrecognized, and that arg is not in any on-disk artifact. An unlabelled
-    candidate is therefore treated as soft — the guard still needs the delta to
-    exceed twice the ceiling before it fires, and a missing profile makes the
-    ceiling infinite, so this cannot drop a win on schema grounds alone.
+    """Accuracy-gated results can need review. Legacy unlabelled disk results
+    are treated as soft because the workflow's accuracy_gate arg is unavailable.
     """
     kind = str(_ir_get(ir, "parity_kind") or "").strip().lower()
     if kind in ("byte_exact", "none"):
@@ -6228,8 +6218,95 @@ def _parity_is_soft(ir: dict) -> bool:
     return True
 
 
-def _is_implausible_speedup(ir: dict, delta_pct: float, ceiling_pct: float) -> bool:
-    """A gain so far past the op's ceiling that it reads as corruption, not a win."""
+def _speedup_estimate(ir: dict) -> dict:
+    """Mirror speedupEstimate: disjoint current-reference coverage, else head fallback."""
+    isolated = _ir_float(ir, "isolated_speedup")
+    pct = _ir_float(ir, "pct_gpu_time")
+    fallback = {"pct_gpu_time": pct, "estimate_pct": _amdahl_ceiling_pct(pct, isolated),
+                "source": "head_estimate"}
+    coverage = ir.get("affected_gpu_time") or {}
+    measured = ir.get("measurement_evidence") or {}
+    if not isinstance(coverage, dict) or not isinstance(measured, dict):
+        return fallback
+    rows = coverage.get("kernels")
+    if (not coverage.get("profile_path") or not measured.get("candidate_digest")
+            or coverage.get("candidate_digest") != measured["candidate_digest"]
+            or not measured.get("reference_digest")
+            or not measured.get("workload_digest")
+            or coverage.get("reference_digest") != measured["reference_digest"]
+            or coverage.get("workload_digest") != measured["workload_digest"]
+            or not isinstance(rows, list) or not rows):
+        return fallback
+    seen = {}
+    pct, saved, uniform = 0.0, 0.0, False
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            return fallback
+        share = row.get("pct_gpu_time")
+        if (type(share) not in (int, float) or not math.isfinite(share)
+                or not 0 <= share <= 100):
+            return fallback
+        signature = (share, row.get("isolated_speedup"), row.get("removed") is True)
+        if row["id"] in seen:
+            if seen[row["id"]] != signature:
+                return fallback
+            continue
+        seen[row["id"]] = signature
+        pct += share
+        if row.get("removed") is True:
+            saved += share / 100
+        else:
+            speedup = row.get("isolated_speedup")
+            if type(speedup) not in (int, float) or not math.isfinite(speedup) or speedup <= 0:
+                speedup, uniform = isolated, True
+            if not math.isfinite(speedup) or speedup <= 0:
+                return fallback
+            saved += share / 100 * (1 - 1 / speedup)
+    if not 0 < pct <= 100 + 1e-9:
+        return fallback
+    return {"pct_gpu_time": pct,
+            "estimate_pct": math.inf if saved >= 1 else (1 / (1 - saved) - 1) * 100,
+            "source": "coverage_uniform_estimate" if uniform else "coverage_per_path"}
+
+
+def _confirmation_evidence_matches(ir: dict) -> bool:
+    """A distinct pair with the same candidate, baseline and workload confirms a win."""
+    review = ir.get("speedup_review") or {}
+    if not isinstance(review, dict) or review.get("status") != "confirmed":
+        return False
+    before = review.get("original_measurement") or {}
+    after = ir.get("measurement_evidence") or {}
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    paths = [before.get("ref_summary"), before.get("cand_summary"),
+             after.get("ref_summary"), after.get("cand_summary")]
+    if (not before.get("measurement_id") or not after.get("measurement_id")
+            or before["measurement_id"] == after["measurement_id"]
+            or not all(isinstance(p, str) and p for p in paths) or len(set(paths)) != 4
+            or after.get("fresh_pair") is not True or after.get("configs_matched") is not True
+            or after.get("workload_matched") is not True):
+        return False
+    for key in ("ref_replicas", "cand_replicas"):
+        value = after.get(key)
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or value < 2 or value != int(value)):
+            return False
+    # protocol_digest is newer than the other identities: older evidence may omit it on both sides.
+    if ((before.get("protocol_digest") or after.get("protocol_digest"))
+            and before.get("protocol_digest") != after.get("protocol_digest")):
+        return False
+    return all(isinstance(before.get(key), str) and before[key] and before[key] == after.get(key)
+               for key in ("candidate_digest", "reference_digest", "workload_digest"))
+
+
+def _confirmed_speedup(ir: dict) -> bool:
+    return (ir.get("gate") == "accepted" and ir.get("ab_complete") is True
+            and ir.get("output_parity") == "pass" and ir.get("parity_kind") in ("accuracy", "byte_exact")
+            and _confirmation_evidence_matches(ir))
+
+
+def _speedup_needs_review(ir: dict, delta_pct: float, ceiling_pct: float) -> bool:
+    """Review trigger only; independently confirmed gains can exceed it."""
     if not _parity_is_soft(ir) or not math.isfinite(ceiling_pct):
         return False
     return delta_pct > ceiling_pct * (1.0 + IMPLAUSIBLE_SPEEDUP_MARGIN) + 1e-9
@@ -6254,19 +6331,43 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
     for base in (eval_dir / "overlay", eval_dir / "final" / "overlay"):
         if not base.is_dir():
             continue
+        # The workflow checkpoint records the final reviewed result, after the agent's raw A/B.
+        # Match the immutable original measurement ID before applying it to a disk candidate.
+        reviewed = {}
+        for checkpoint in sorted(base.glob("candidate_*/e2e_validation.json")):
+            result = (_read_json(checkpoint) or {}).get("integration_result") or {}
+            if not isinstance(result, dict):
+                continue
+            review = result.get("speedup_review") or {}
+            if not isinstance(review, dict):
+                continue
+            original = review.get("original_measurement") or {}
+            if isinstance(original, dict) and isinstance(original.get("measurement_id"), str):
+                reviewed[original["measurement_id"]] = result
         for cand in sorted(base.glob("cand_*")):
             if cand.name in seen:
                 continue
             ir = _read_json(cand / "integrate_result.json")
             if not ir:
                 continue
+            original = ir.get("measurement_evidence") or {}
+            if not isinstance(original, dict):
+                original = {}
+            result = reviewed.get(original.get("measurement_id"))
+            if result and (result["speedup_review"].get("original_measurement") == original):
+                ir = {**ir, **result}
             seen.add(cand.name)
             gate = str(ir.get("gate") or "")
             delta_pct = _ir_float(ir, "e2e_delta_pct", "delta_pct")
-            ceiling_pct = _amdahl_ceiling_pct(
-                _ir_float(ir, "pct_gpu_time"), _ir_float(ir, "isolated_speedup")
-            )
-            implausible = _is_implausible_speedup(ir, delta_pct, ceiling_pct)
+            estimate = _speedup_estimate(ir)
+            ceiling_pct = estimate["estimate_pct"]
+            needs_review = _speedup_needs_review(ir, delta_pct, ceiling_pct)
+            review = ir.get("speedup_review") or {}
+            if not isinstance(review, dict):
+                review = {}
+            review_pending = (review.get("status") in
+                              ("pending", "inconclusive", "rejected")
+                              or (needs_review and not _confirmed_speedup(ir)))
             parity = str(ir.get("output_parity") or "")
             separated = ir.get("separated")
             if separated is None:
@@ -6285,7 +6386,9 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                 "amdahl_ceiling_pct": (
                     round(ceiling_pct, 3) if math.isfinite(ceiling_pct) else None
                 ),
-                "implausible": implausible,
+                "speedup_estimate": {**estimate, "estimate_pct": (
+                    ceiling_pct if math.isfinite(ceiling_pct) else None)},
+                "speedup_review_pending": review_pending,
                 "output_parity": parity or None,
                 "separated": separated,
                 # winner_kind in {"env","config","flags"} => config-only.
@@ -6295,7 +6398,7 @@ def _integrate_candidates(eval_dir: Path) -> list[dict]:
                     and delta_pct > 0.0
                     and parity != "fail"
                     and ir.get("ab_complete") is not False
-                    and not implausible
+                    and not review_pending
                 ),
             })
     return records
@@ -6586,8 +6689,9 @@ def _recover_best_intermediate_win(eval_dir: Path) -> dict | None:
             ),
             "distributions_separated": best["separated"],
             "stack_only": stack_only or None,
-            "excluded_as_implausible": [
-                c["short_name"] for c in candidates if c["implausible"]
+            "speedup_estimate": best["speedup_estimate"],
+            "awaiting_speedup_review": [
+                c["short_name"] for c in candidates if c["speedup_review_pending"]
             ] or None,
         },
     }
