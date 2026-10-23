@@ -56,6 +56,9 @@ PRODUCT_TARGET_EFF = {
     # 1 GiB source + 1 GiB destination, 30 event-timed copies on R9700:
     # median 485.8 GB/s read+write against the 640 GB/s datasheet pin rate.
     "r9700": {"moe": 0.76, "elementwise": 0.76},
+    # Same copy on R9600D: median 538.9 GB/s against the 637 GB/s measured
+    # ceiling in peaks.md.
+    "r9600d": {"moe": 0.85, "elementwise": 0.85},
 }
 
 

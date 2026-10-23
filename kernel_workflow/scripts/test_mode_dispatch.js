@@ -313,6 +313,47 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
   }
   {
     const { run, trace } = build({
+      ...BASE, mode: 'bakeoff', expected_gfx: 'gfx1201', expected_target: 'r9600d',
+      backends: ['hip'], gpu_ids: '0', use_expert_skills: 'true',
+    }, { agent: healthy('hip', [], {
+      device_gfx: 'gfx1201', device_target: 'r9600d',
+      device_name: 'AMD Radeon AI PRO R9600D', physical_cu_count: 48,
+    }) });
+    await run();
+    const lane = trace.workflowCalls[0];
+    ok(lane && lane.args.expected_target === 'r9600d',
+      'R9600D is forwarded as its own product');
+    ok(lane && lane.args.warm_start === 'off',
+      'R9600D isolates from CDNA warm-start');
+    ok(lane && lane.args.perf_knowledge_dir === '',
+      'R9600D isolates from CDNA performance knowledge');
+  }
+  {
+    const { run, trace } = build({
+      ...BASE, mode: 'bakeoff', expected_gfx: 'gfx950', expected_target: 'r9600d',
+    }, { agent: healthy('hip', []) });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(/expected_target=r9600d requires expected_gfx=gfx1201/.test(msg),
+      'R9600D on a non-gfx1201 ISA is rejected', msg || 'no throw');
+    ok(trace.agentLabels.length === 0, 'rejected R9600D spawns no agent',
+      JSON.stringify(trace.agentLabels));
+  }
+  {
+    const { run } = build({
+      ...BASE, mode: 'bakeoff', expected_gfx: 'gfx1201', expected_target: 'r9600d',
+      backends: ['hip'], gpu_ids: '0',
+    }, { agent: healthy('hip', [], {
+      device_gfx: 'gfx1201', device_target: 'unknown',
+      device_name: 'Another gfx1201 Product', physical_cu_count: 64,
+    }) });
+    let msg = '';
+    try { await run(); } catch (e) { msg = e.message; }
+    ok(/GPU product mismatch: expected r9600d, detected unknown/.test(msg),
+      'expected R9600D vs detected unknown product is rejected', msg || 'no throw');
+  }
+  {
+    const { run, trace } = build({
       kernel_path: '/tmp/k', workflow_dir: WF_DIR, mode: 'bakeoff',
       backends: ['hip'], gpu_ids: '0', use_expert_skills: 'true',
     }, { agent: healthy('hip', [], {

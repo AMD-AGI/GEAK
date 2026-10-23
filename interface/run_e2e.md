@@ -188,6 +188,19 @@ example:
 export GEAK_GPU_IDENTITY_JSON='{"gfx":"gfx1201","target":"r9700","marketing_name":"AMD Radeon AI PRO R9700","physical_cu_count":64}'
 ```
 
+Exact `AMD Radeon AI PRO R9600D` detection produces `r9600d` and preserves
+the observed CU count (48 on the recorded board). Like `r9700`, this target
+requires `gfx1201` in explicit and detected identity pairs. The interface
+preserves the product, ISA, device name and CU count in the workflow handoff.
+
+Product identity selects product data, not separate logic. `r9700` and
+`r9600d` share the gfx1201 ISA path (vLLM-only serving, CDNA knowledge
+isolation) and differ only in the `product:` block of
+`e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`; the R9600D block
+holds measured peaks, not R9700's. The default backend is `vllm` for both.
+Unknown gfx1201 products remain `unknown` and keep their existing refusal
+behavior.
+
 `--dry-run` is host-only: when neither explicit nor environment identity is
 provided it skips rocminfo and reports `gpu_identity_status:
 unavailable_dry_run`. A real run never uses that placeholder and still fails

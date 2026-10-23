@@ -351,6 +351,19 @@ class TestMapArgs(_RunE2ECase):
         os.environ["GEAK_GPU_IDENTITY_JSON"] = json.dumps(expected)
         self.assertEqual(rx._expected_gpu_identity({}), expected)
 
+    def test_r9600d_defaults_to_vllm_like_r9700(self):
+        for target, name, cus in (
+            ("r9700", "AMD Radeon AI PRO R9700", 64),
+            ("r9600d", "AMD Radeon AI PRO R9600D", 48),
+        ):
+            with self.subTest(target=target):
+                mapped = rx.map_args(self._handoff(
+                    eval_dir=str(self.tmp / f"e2e_{target}_default"),
+                    expected_gfx="gfx1201", expected_target=target,
+                    expected_device_name=name, expected_physical_cu_count=cus,
+                ))
+                self.assertEqual(mapped["backend"], "vllm")
+
     def test_r9600d_identity_rejects_wrong_isa(self):
         with self.assertRaisesRegex(ValueError, "r9600d requires expected_gfx=gfx1201"):
             rx._expected_gpu_identity({
