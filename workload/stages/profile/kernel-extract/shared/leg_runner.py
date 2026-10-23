@@ -100,6 +100,9 @@ def main():
     ap.add_argument("--out", default="")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--draws", type=int, default=0)
+    ap.add_argument("--sigs", default=None,
+                    help="oracle: comma list of random-case sigs to run (a shard); "
+                         "server_calls: call ids to replay")
     ap.add_argument("--target-callable", default="", help="identity probe only; defaults to meta target")
     a = ap.parse_args()
 
@@ -135,7 +138,10 @@ def _server_calls(a, task, meta):
     entry = _resolve(meta["target_callable"])
     budget = float((meta.get("ut_contract") or {}).get("server_call_budget_gib", 16)) * 2**30
     results = {}
+    only = set(a.sigs.split(",")) if a.sigs is not None else None
     for k, call in enumerate(doc["calls"]):
+        if only is not None and call["id"] not in only:
+            continue
         with open(a.out + ".progress", "w") as fh:
             fh.write(call["id"])
         row = {"id": call["id"], "kernel": call.get("kernel")}
@@ -222,7 +228,10 @@ def _run(a, task, meta):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     draws = a.draws or int(meta.get("random_draws", 3))
     blob = {}
+    only = set(a.sigs.split(",")) if a.sigs is not None else None
     for shape in cases.random_shapes(h, meta):
+        if only is not None and shape["sig"] not in only:
+            continue
         case_call, _ = case_execution(shape)
         for i in range(max(1, draws)):
             rng = torch.Generator(device=device).manual_seed(int(a.seed) + i)

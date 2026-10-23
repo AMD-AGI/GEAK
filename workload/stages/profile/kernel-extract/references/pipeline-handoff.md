@@ -12,7 +12,8 @@ authoring and validation; the pipeline supplies inputs and consumes `$OUT`.
 | `OUT` | `EVAL_DIR`. Everything this skill writes goes here, never under `SKILL_ROOT` |
 | `IN` / `$RUN_ROOT/baseline/out/baseline.json` | the completed measured baseline: `throughput`, `noise_band`, `config` (TP/EP/GPUs/concurrency) and `provenance` (receipt, logs, node). Use its logs and exports; do not re-measure |
 | `PARAMS` | `selection` (default rule, stated for audit), `max_targets`, `trace_dir`, `serving_env`; any `agent_brief` facts about this campaign |
-| `CONFIG` | `target` (model, image, framework commits) the stage must agree with |
+| `CONFIG` | `target` (model, image, framework commits) the stage must agree with; `target.image` is the `--image` of the UT wave |
+| `RUNNER` | the runner script (`runners/CONTRACT.md`) the UT wave starts one lane session with per task: `ut_wave.py start --runner "$RUNNER"`. Its credential pointers (`WORKLOAD_AGENT_*`) are already in the environment and are passed to every lane |
 
 `baseline.json` with `measured=false` is not a baseline; report `blocked`. When
 `trace_dir` is null and no compatible trace exists under the baseline's provenance,

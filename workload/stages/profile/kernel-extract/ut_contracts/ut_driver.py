@@ -25,6 +25,12 @@ hand-written UT used to re-implement (500+ lines per task) lives here once:
   restore            kernel_src bytes are identical before and after the run
   timing             harness_lib.measure_legs + serving_weighted_speedup -> GEAK_WEIGHTED_SPEEDUP
 
+With several GPUs (--gpus, else $UT_GPUS / $GPU_IDS) the oracle legs are sharded by case and
+run concurrently, the two server_calls legs run side by side, and timing spreads its buckets
+(each bucket's B,C pairs stay on one device). --quick runs every gate except timing on the
+boundary cases of each phase, for fix iterations; --reuse keeps gates that already passed
+on an unchanged task (reuse key over helpers, contract, cases, evidence and kernel_src).
+
 Exit status: 0 every required gate passed; 1 a gate failed or could not run (incomplete);
 3 the UT itself is incomplete (UT_HARNESS_INCOMPLETE printed) — regenerate the UT, do not
 blame the candidate. The task's cases.py supplies only operand construction (via the contract),
@@ -77,6 +83,9 @@ class Task:
             self.manifest = json.load(f)
         self.mc = self.meta.get("ut_contract") or {}
         self._h = self._cases = self._R = None
+        self.gpus = None          # logical GPU indices the gates may spread legs over
+        self.sig_filter = None    # --quick: the random cases kept
+        self.call_filter = None   # --quick: the server calls kept
 
     @property
     def h(self):
@@ -103,7 +112,8 @@ class Task:
         raise KeyError(sig)
 
     def random_specs(self):
-        return [c for c in self.manifest["cases"] if c.get("random")]
+        return [c for c in self.manifest["cases"] if c.get("random")
+                and (self.sig_filter is None or c["sig"] in self.sig_filter)]
 
     def overlays(self):
         return (os.path.join(self.dir, "baseline_overlay"), os.path.join(self.dir, "_cand_overlay"))
@@ -199,9 +209,84 @@ def gate_binding(T, a):
     return {"status": "pass", "baseline": bi, "candidate": ci}
 
 
-def _oracle(T, overlay, path, seed, draws):
-    T.h._run_leg(T.dir, overlay, "oracle", out=path, seed=seed, draws=draws)
-    return T.U._torch().load(path, map_location="cpu")
+def _watch_env(T, state, name):
+    """COMPILE_WATCH_OUT for one baseline leg (server evidence only); registered for
+    compile_variants once the leg has written it."""
+    if not name or not (T.meta.get("server_evidence") or {}).get("compile_variants"):
+        return {}, None
+    path = os.path.join(state["scratch"], "variants_%s.json" % name)
+    return {"COMPILE_WATCH_OUT": path}, path
+
+
+def _register_watch(state, path):
+    if path and os.path.exists(path):
+        state.setdefault("watch_files", []).append(path)
+
+
+def _parallel(items, gpus, fn):
+    """Run fn(item, gpu) for every item, at most one item per GPU at a time; re-raise the
+    first failure only after every item has finished, so no leg is left running."""
+    if len(gpus) <= 1 or len(items) <= 1:
+        return [fn(it, gpus[0] if gpus else None) for it in items]
+    import queue
+    import threading
+    free, out, errs = queue.Queue(), [None] * len(items), []
+    for g in gpus:
+        free.put(g)
+
+    def run(i, it):
+        g = free.get()
+        try:
+            out[i] = fn(it, g)
+        except BaseException as e:  # noqa: B902 -- re-raised below
+            errs.append(e)
+        finally:
+            free.put(g)
+    threads = [threading.Thread(target=run, args=(i, it)) for i, it in enumerate(items)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errs:
+        raise errs[0]
+    return out
+
+
+def _oracles(T, state, jobs):
+    """Oracle legs -> one blob per job. A job is {overlay, path, seed, draws, watch}.
+
+    With several GPUs (--gpus / GPU_IDS) every job is split into one shard of random cases
+    per GPU and all shards of all jobs run concurrently. Draws are seeded per case, so a
+    sharded blob is the unsharded blob."""
+    torch = T.U._torch()
+    sigs = [c["sig"] for c in T.random_specs()]
+    gpus = T.gpus or [None]
+    k = max(1, min(len(gpus), len(sigs)))
+    shards = [sigs[i::k] for i in range(k)]
+    items = [(j, i) for j in range(len(jobs)) for i in range(k)]
+
+    def leg(item, gpu):
+        j, i = item
+        job = jobs[j]
+        env, wpath = _watch_env(T, state, job.get("watch") and "%s.s%d" % (job["watch"], i))
+        env.update(T.h.gpu_env(gpu))
+        out = "%s.s%d" % (job["path"], i)
+        T.h._run_leg(T.dir, job["overlay"], "oracle", out=out, seed=job["seed"],
+                     draws=job["draws"], env_extra=env,
+                     sigs=shards[i] if (k > 1 or T.sig_filter is not None) else None)
+        _register_watch(state, wpath)
+        return out
+    paths = _parallel(items, gpus, leg)
+    blobs = [{} for _ in jobs]
+    for (j, _), path in zip(items, paths):
+        blobs[j].update(torch.load(path, map_location="cpu"))
+    return blobs
+
+
+def _oracle(T, overlay, path, seed, draws, state=None, watch=None):
+    state = state if state is not None else {"scratch": os.path.dirname(path)}
+    return _oracles(T, state, [{"overlay": overlay, "path": path, "seed": seed, "draws": draws,
+                                "watch": watch}])[0]
 
 
 def _needs_noise(T):
@@ -235,33 +320,19 @@ def compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob=None, only_dr
     return ok, rows
 
 
-class _Watch:
-    """COMPILE_WATCH_OUT for the legs started inside the block (baseline legs only)."""
-
-    def __init__(self, T, state, name):
-        self.path = (os.path.join(state["scratch"], "variants_%s.json" % name)
-                     if (T.meta.get("server_evidence") or {}).get("compile_variants") else None)
-        self.state = state
-
-    def __enter__(self):
-        if self.path:
-            os.environ["COMPILE_WATCH_OUT"] = self.path
-        return self
-
-    def __exit__(self, *exc):
-        os.environ.pop("COMPILE_WATCH_OUT", None)
-        if self.path and os.path.exists(self.path):
-            self.state.setdefault("watch_files", []).append(self.path)
-
-
 def gate_correctness(T, a, state):
     base, cand = T.h.build_candidate_overlay(T.dir, T.meta)
     seed, draws = a.seed, a.draws
     sd = state["scratch"]
-    with _Watch(T, state, "oracle"):
-        base_blob = _oracle(T, base, os.path.join(sd, "base.pt"), seed, draws)
-    noise_blob = _oracle(T, base, os.path.join(sd, "base2.pt"), seed, draws) if _needs_noise(T) else None
-    cand_blob = _oracle(T, cand, os.path.join(sd, "cand.pt"), seed, draws)
+    jobs = [{"overlay": base, "path": os.path.join(sd, "base.pt"), "seed": seed, "draws": draws,
+             "watch": "oracle"},
+            {"overlay": cand, "path": os.path.join(sd, "cand.pt"), "seed": seed, "draws": draws}]
+    if _needs_noise(T):
+        jobs.append({"overlay": base, "path": os.path.join(sd, "base2.pt"), "seed": seed,
+                     "draws": draws})
+    blobs = _oracles(T, state, jobs)
+    base_blob, cand_blob = blobs[0], blobs[1]
+    noise_blob = blobs[2] if _needs_noise(T) else None
     state["base_blob"], state["noise_blob"] = base_blob, noise_blob
     out = {}
     if T.doc["compare"].get("determinism") == "bitwise":
@@ -275,10 +346,11 @@ def gate_correctness(T, a, state):
     return {"status": "pass" if good else "fail", "seed": seed, "draws": draws, **out}
 
 
-def _server_calls_leg(T, overlay, out):
+def _server_calls_leg(T, overlay, out, env=None):
     """One server_calls leg; a crash is attributed to the call it was running."""
     try:
-        T.h._run_leg(T.dir, overlay, "server_calls", out=out, seed=0, timeout=7200)
+        T.h._run_leg(T.dir, overlay, "server_calls", out=out, seed=0, timeout=7200, env_extra=env,
+                 sigs=T.call_filter)
     except Exception as e:
         cid = None
         if os.path.exists(out + ".progress"):
@@ -301,18 +373,24 @@ def gate_server_calls(T, a, state):
                 "variants_without_entry_frame": doc.get("unmatched_variants")}
     base, cand = T.h.build_candidate_overlay(T.dir, T.meta)
     sd = state["scratch"]
-    with _Watch(T, state, "server_calls"):
-        b, why = _server_calls_leg(T, base, os.path.join(sd, "calls_base.pt"))
+    wenv, wpath = _watch_env(T, state, "server_calls")
+    legs = [(base, os.path.join(sd, "calls_base.pt"), wenv),
+            (cand, os.path.join(sd, "calls_cand.pt"), {})]
+    (b, bwhy), (c, cwhy) = _parallel(legs, T.gpus or [None],
+                                     lambda leg, g: _server_calls_leg(T, leg[0], leg[1],
+                                                                      dict(leg[2], **T.h.gpu_env(g))))
+    _register_watch(state, wpath)
     if b is None:
-        return {"status": "fail", "why": "baseline " + why}
-    c, why = _server_calls_leg(T, cand, os.path.join(sd, "calls_cand.pt"))
+        return {"status": "fail", "why": "baseline " + bwhy}
     if c is None:
-        return {"status": "fail", "why": "candidate " + why}
+        return {"status": "fail", "why": "candidate " + cwhy}
     tol = float(T.mc.get("server_call_tol", T.mc.get("replay_tol", DEFAULT_REPLAY_TOL)))
     ignore = T.mc.get("server_call_ignore") or []
     cw = _load("compile_watch", os.path.join(T.dir, "compile_watch.py"))
     rows, ok = [], True
     for call in doc["calls"]:
+        if T.call_filter is not None and call["id"] not in T.call_filter:
+            continue
         rb, rc = b.get(call["id"], {}), c.get(call["id"], {})
         row = {"id": call["id"], "kernel": call.get("kernel"), "callable": call.get("callable"),
                "before_ready": call.get("before_ready"), "baseline": rb.get("status"),
@@ -343,8 +421,8 @@ def gate_compile_variants(T, a, state):
         return {"status": "not_required",
                 "why": "the server compiled no Triton variant on this task's launch paths"}
     if not state.get("watch_files"):
-        with _Watch(T, state, "oracle_only"):
-            _oracle(T, T.overlays()[0], os.path.join(state["scratch"], "base_cv.pt"), a.seed, 1)
+        _oracle(T, T.overlays()[0], os.path.join(state["scratch"], "base_cv.pt"), a.seed, 1,
+                state, watch="oracle_only")
     cw = _load("compile_watch", os.path.join(T.dir, "compile_watch.py"))
     ut_events = []
     for p in state.get("watch_files") or []:
@@ -485,7 +563,7 @@ def gate_restore(T, a, state):
 
 
 def gate_timing(T, a, state):
-    per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps)
+    per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps, gpus=T.gpus)
     w = T.h.serving_weighted_speedup(per, T.meta)
     early = [c["sig"] for c in per if c.get("reps", 0) < a.max_reps]
     if w.get("primary") is not None:
@@ -629,12 +707,18 @@ def run_gates(T, a):
     wanted = [g for g in GATES if g in a.gates]
     report = {"task": T.dir, "family": T.doc["family"],
               "contract_sha256": T.U.contract_sha256(T.doc), "started": time.time(), "gates": {}}
+    report["reuse_key"] = state["reuse_key"] = _reuse_key(T)
+    prev = _reusable(T, a, state["reuse_key"])
     stop = None
     incomplete = False
     try:
         for g in wanted:
             if stop and not a.keep_going and g not in ("restore",):
                 report["gates"][g] = {"status": "skipped", "why": "after %s" % stop}
+                continue
+            if g in prev:
+                report["gates"][g] = dict(prev[g], reused=True)
+                print("UT_GATE %-18s %s (reused)" % (g, prev[g]["status"]), flush=True)
                 continue
             t0 = time.time()
             fn = globals()["gate_" + g]
@@ -657,6 +741,8 @@ def run_gates(T, a):
     statuses = [r["status"] for r in report["gates"].values()]
     if incomplete:
         verdict, code = "harness_incomplete", 3
+    elif a.quick:
+        verdict, code = "quick", 1        # a subset of cases: an iteration aid, never a pass
     elif all(s in ("pass", "not_required") for s in statuses) and set(wanted) == set(GATES):
         verdict, code = "pass", 0
     elif all(s in ("pass", "not_required") for s in statuses):
@@ -665,6 +751,70 @@ def run_gates(T, a):
         verdict, code = "fail", 1
     report.update(verdict=verdict, exit_code=code, seconds=round(time.time() - report["started"], 1))
     return report, code
+
+
+def _reuse_key(T):
+    """Everything a gate's verdict depends on inside the task: helpers, contract, cases,
+    server evidence and kernel_src. A gate may be reused only under the same key."""
+    h = hashlib.sha256()
+    rels = sorted(f for f in os.listdir(T.dir) if f.endswith((".py", ".json")))
+    run = os.path.join(T.dir, "run")
+    rels += sorted("run/" + f for f in os.listdir(run) if f in ("ut_cases.json", "ut_contract.json")
+                   or f.startswith("server_")) if os.path.isdir(run) else []
+    calls = os.path.join(run, "server_calls")
+    rels += sorted("run/server_calls/" + f for f in os.listdir(calls)) if os.path.isdir(calls) else []
+    rels += sorted(_tree_hashes(T))
+    for rel in rels:
+        p = os.path.join(T.dir, rel)
+        if os.path.isfile(p):
+            h.update(rel.encode())
+            h.update(_sha(p).encode())
+    return h.hexdigest()
+
+
+def _reusable(T, a, key):
+    """--reuse: gates that passed in the last full report under the same reuse key."""
+    if not a.reuse or a.quick:
+        return {}
+    try:
+        with open(os.path.join(T.dir, "run", "ut_report.json")) as f:
+            prev = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if prev.get("reuse_key") != key or prev.get("quick"):
+        return {}
+    return {g: r for g, r in (prev.get("gates") or {}).items()
+            if r.get("status") in ("pass", "not_required") and g != "restore"}
+
+
+def _quick_subset(T, per_phase=3, calls=8):
+    """The smallest, middle and largest random case of every phase, and a few server calls
+    (startup ones first, one per kernel before repeats): what a fix iteration needs to see."""
+    by_phase = {}
+    for c in T.manifest["cases"]:
+        if c.get("random"):
+            by_phase.setdefault(c.get("regime"), []).append(c)
+    keep = set()
+    for rows in by_phase.values():
+        rows.sort(key=lambda c: (c.get("m") if c.get("m") is not None else 0, c["sig"]))
+        idx = sorted({0, len(rows) // 2, len(rows) - 1})[:per_phase]
+        keep.update(rows[i]["sig"] for i in idx)
+    T.sig_filter = keep
+    ev = T.meta.get("server_evidence") or {}
+    if ev.get("server_calls"):
+        try:
+            with open(os.path.join(T.dir, ev["server_calls"])) as f:
+                doc = json.load(f)
+        except (OSError, ValueError):
+            return
+        order = sorted(doc.get("calls") or [], key=lambda c: (not c.get("before_ready"),))
+        picked, kernels = [], set()
+        for c in order:
+            if c.get("kernel") not in kernels:
+                picked.append(c["id"])
+                kernels.add(c.get("kernel"))
+        picked += [c["id"] for c in order if c["id"] not in picked]
+        T.call_filter = picked[:calls]
 
 
 def _snapshot(T):
@@ -689,6 +839,16 @@ def main(task=None, argv=None):
     ap.add_argument("--max-reps", type=int, default=3)
     ap.add_argument("--keep-going", action="store_true")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--gpus", default=None,
+                    help="logical GPU indices to spread legs over (default: $UT_GPUS, then "
+                         "$GPU_IDS); correctness shards cases, timing spreads buckets")
+    ap.add_argument("--quick", action="store_true",
+                    help="boundary cases of every phase, one draw, a few server calls, no "
+                         "timing: for fix iterations. Writes run/ut_report.quick.json; never a "
+                         "pass and never a receipt")
+    ap.add_argument("--reuse", action="store_true",
+                    help="reuse gates that passed in run/ut_report.json when nothing they "
+                         "depend on changed (e.g. rerun only timing)")
     ap.add_argument("--inproc", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--phase", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--refs", default=None, help=argparse.SUPPRESS)
@@ -696,6 +856,8 @@ def main(task=None, argv=None):
     if not a.task:
         ap.error("--task is required")
     T = Task(a.task)
+    spec = a.gpus if a.gpus is not None else (os.environ.get("UT_GPUS") or os.environ.get("GPU_IDS"))
+    T.gpus = [g.strip() for g in str(spec).split(",") if g.strip()] if spec else None
     if a.inproc:
         for mod in T.meta.get("server_preimports") or []:
             importlib.import_module(mod)
@@ -705,15 +867,25 @@ def main(task=None, argv=None):
         return 0
     a.draws = a.draws or int(T.meta.get("random_draws", 3))
     skip = {g for g in a.skip.split(",") if g}
+    if a.quick:
+        a.draws = 1
+        skip.add("timing")
+        _quick_subset(T)
     a.gates = [g for g in a.gates.split(",") if g and g not in skip]
     report, code = run_gates(T, a)
     report["snapshot_sha256"] = _snapshot(T)
     report["target_callable"] = T.meta.get("target_callable")
-    out = a.out or os.path.join(T.dir, "run", "ut_report.json")
+    report["gpus"] = T.gpus
+    if a.quick:
+        report["quick"] = {"cases": sorted(T.sig_filter or []), "server_calls": T.call_filter}
+    out = a.out or os.path.join(T.dir, "run", "ut_report%s.json" % (".quick" if a.quick else ""))
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w") as f:
         json.dump(report, f, indent=2, default=str)
         f.write("\n")
+    if a.quick:
+        print("UT_VERDICT quick (exit 1) -> %s" % out, flush=True)
+        return code
     # run/ut_result.json is the receipt the optimize stage reads (scripts/run_task_entry.py,
     # scripts/worker.sh): `started`, `ok`, `exit_code`, a dict per gate with `ok`, and the
     # timing aggregate under gates.timing.aggregate.primary.
@@ -722,6 +894,7 @@ def main(task=None, argv=None):
     summary["ok"] = code == 0
     summary["gates"] = {g: {"ok": r["status"] in ("pass", "not_required"), "status": r["status"]}
                         for g, r in report["gates"].items()}
+    summary["reused_gates"] = sorted(g for g, r in report["gates"].items() if r.get("reused"))
     timing = report["gates"].get("timing") or {}
     if "aggregate" in timing:
         summary["gates"]["timing"].update(aggregate=timing["aggregate"], per_case=timing["per_case"])

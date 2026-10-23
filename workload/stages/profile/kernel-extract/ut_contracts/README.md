@@ -39,6 +39,13 @@ python3 "$EVAL_DIR/tasks/<name>/ut_contract.py" "$EVAL_DIR/tasks/<name>"     # C
 cd "$EVAL_DIR/tasks/<name>" && bash "$SHARED_TOOLS/gpu_lock.sh" "$GPU_ID" python3 unittest.py
 ```
 
+With several GPUs visible (`--gpus`, else `$UT_GPUS`, then `$GPU_IDS`) the driver shards
+its correctness legs by case and spreads timing buckets over them. `--quick` runs every gate
+but timing on the smallest, middle and largest case of each phase (one draw, a few server
+calls) and writes `run/ut_report.quick.json` -- an iteration aid, never a pass or a receipt.
+`--reuse` keeps the gates that passed in `run/ut_report.json` when nothing they read changed,
+e.g. `--skip timing` in a lane, then `--reuse` alone to time it.
+
 The lint needs no GPU and no torch; run it before every GPU session. `unittest.py` writes
 `run/ut_report.json` (every gate's measures) and `run/ut_result.json` (verdict, exit code,
 snapshot hash, gate statuses), prints `UT_GATE <gate> <status>` lines and, when timing ran,

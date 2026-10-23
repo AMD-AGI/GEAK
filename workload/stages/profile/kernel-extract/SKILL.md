@@ -136,6 +136,27 @@ Stop the probe server as soon as the evidence is collected. The CPU half of §3�
 (declaration review, source resolution inside the serving container, scaffold, case
 manifest, CPU lint) needs no GPU; run GPU gates only once the server's devices drained.
 
+**Then write the UTs in parallel, not one after another.** Once `build_task_plan.py` has
+written the tasks, hand them to the UT wave; do not author them yourself in this session:
+
+```bash
+python3 "$SKILL_ROOT/scripts/ut_wave.py" plan  --eval-dir "$EVAL_DIR"        # lanes and GPUs
+python3 "$SKILL_ROOT/scripts/ut_wave.py" start --eval-dir "$EVAL_DIR" --runner "$RUNNER" \
+    --backend docker --image <the serving image>
+python3 "$SKILL_ROOT/scripts/ut_wave.py" wait  --eval-dir "$EVAL_DIR" --timeout 540   # repeat
+```
+
+One agent lane per task, each writing, validating and fixing its own task directory
+([UT lane](references/ut-lane.md)) on its own GPU(s). The lanes are the deployment's GPUs
+(`serving.json` `gpus`, free again once the probe server stopped): the most expensive task
+starts first, GPUs left over when there are fewer tasks than GPUs go to the most expensive
+tasks (the UT spreads its legs over every GPU it holds), and a task needing several GPUs at
+once runs after the single-GPU ones. Timing is not run in the lanes: each task is timed
+alone afterwards over all GPUs (`unittest.py --reuse` keeps the gates the lane passed).
+`wait` returns 0 when every task is `passed`, `blocked` or `failed`; read `ut_wave/summary.json`
+and the lane logs it names, fix nothing in a task yourself, and carry blocked and failed
+tasks into the report with their reasons. `start` again resumes an interrupted wave.
+
 ## 4. Extract source and build the standalone UT
 
 Read [source extraction](references/source-extraction.md) and
@@ -166,7 +187,8 @@ routing semantics, cache/page state and complete outputs.
 
 Run every GPU command from its task directory under the lease tools in
 [setup](references/setup.md) — `gpu_lock.sh` for one device, `gpu_lock_set.py` for the
-whole allocated set. Never run a GPU command outside a lease.
+whole allocated set. Never run a GPU command outside a lease. (A UT-wave lane holds its
+GPUs through its container; inside it, `GPU_IDS` is the lease.)
 
 The UT must cover baseline/candidate binding, frozen-oracle and random-value
 correctness at served shapes, phase-specific graph/compile behavior and input

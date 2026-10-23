@@ -69,6 +69,11 @@ def load(path, default=None):
         return default
 
 
+def dump(obj, path, indent=1):
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=indent)
+
+
 def launched_at(shapes_dir):
     out = {}
     if os.path.isdir(shapes_dir):
@@ -238,11 +243,11 @@ def server_evidence(eval_dir, task, tdir):
     slim = [{k: v for k, v in r.items() if k not in ("frames", "tensors")} for r in recs]
     run = os.path.join(tdir, "run")
     shutil.copy2(compile_watch.__file__, os.path.join(tdir, "compile_watch.py"))
-    json.dump({"contract": "kernel_extract/server_variants/v1",
+    dump({"contract": "kernel_extract/server_variants/v1",
                "source": os.path.join(eval_dir, "evidence", "compile_variants.json"),
                "server_mode": cv.get("server_mode"), "env": cv.get("env") or {},
                "kernels": sorted(names), "target_callable": target, "variants": slim},
-              open(os.path.join(run, "server_variants.json"), "w"), indent=1)
+         os.path.join(run, "server_variants.json"))
     calls, unmatched, seen = [], [], set()
     shutil.rmtree(os.path.join(run, "server_calls"), ignore_errors=True)
     for r in recs:
@@ -273,9 +278,8 @@ def server_evidence(eval_dir, task, tdir):
                       "before_ready": r.get("before_ready")})
     for c in calls:
         c.pop("_key")
-    json.dump({"contract": "kernel_extract/server_calls/v1", "target_callable": target,
-               "calls": calls, "unmatched_variants": unmatched},
-              open(os.path.join(run, "server_calls.json"), "w"), indent=1)
+    dump({"contract": "kernel_extract/server_calls/v1", "target_callable": target,
+          "calls": calls, "unmatched_variants": unmatched}, os.path.join(run, "server_calls.json"))
     return {"server_preimports": pre,
             "server_evidence": {"compile_variants": "run/server_variants.json",
                                 "server_calls": "run/server_calls.json",
@@ -295,7 +299,7 @@ def stamp_meta(tdir, ev, waivers):
         meta["server_evidence"] = ev["server_evidence"]
     if waivers is not None:
         meta.setdefault("ut_contract", {})["compile_variant_waivers"] = waivers
-    json.dump(meta, open(path, "w"), indent=2)
+    dump(meta, path, indent=2)
     return True
 
 
