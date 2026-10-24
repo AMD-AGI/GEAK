@@ -3,12 +3,26 @@
 //   { rounds, dispatched, cumulativeSpeedup, bestPerCase, finalWinner, roundsCommitted, history,
 //     citations, profileSummary, stopReason, forcedReplans, kbCapBound }
 // The greedy loop body keeps its original indentation so its prompts stay byte-identical.
-async function greedyOptimize(start) {
+async function greedyOptimize(start, evo = null) {
+const planSchema = evo ? {
+  ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
+    ...PLAN_SCHEMA.properties.directions, items: {
+      ...PLAN_SCHEMA.properties.directions.items, properties: {
+        ...PLAN_SCHEMA.properties.directions.items.properties,
+        parent_id: {type: 'string'}, donor_ids: {type: 'array', items: {type: 'string'}},
+        approach: {type: 'string'},
+      },
+    },
+  }},
+} : PLAN_SCHEMA;
 let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
+if (evo) history.evolution_archive = evo.path;
 const citations = [];
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
+await captureCanonicalSelection(history, setup.resumed || A.canonical_selection_resume === true
+  ? 'resume_unknown' : 'initial', 0, finalWinner);
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
@@ -31,6 +45,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
+    ...(evo ? {...evo.planInputs(), DEEP_COST} : {}),
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...KB_INPUTS,
@@ -70,9 +85,11 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   });
 
   let plan = await agentT(
-    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).',
+    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).' +
+      (evo ? ` Read ${WORKFLOW_DIR}/roles/evolution.md and select sources from the retained archive.` : ''),
       planInputs(false)),
-    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
+    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: planSchema });
+  if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
   // on the reasoning that a role repeating "stop" has run out of ideas. Measured at a 2h budget that
@@ -88,7 +105,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     plan = await agentT(
       roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.',
         planInputs(true)),
-      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: PLAN_SCHEMA });
+      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: planSchema });
     left = await secondsLeft(`replan-r${round}`);
   }
 
@@ -106,7 +123,10 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   }
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
-    if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
+    if (PROCESS_BOUNDED && left <= 7) {
+      deadlineHit = true; // No agent may start inside its seven-second cleanup reserve.
+      log(`Round ${round}: the search process cutoff was reached while planning.`);
+    } else if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
       log(`Round ${round}: harness stopped after all directions were filtered because calibrated peaks are unknown.`);
     } else {
       log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
@@ -125,7 +145,18 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // round (its broad ground-up rewrite touches many files and can't be merged with specialist patches),
   // and charge DEEP_COST against the budget. Otherwise each specialist direction costs 1.
   const deepDir = directions.find(d => d.specialty === 'deep_explore');
-  if (deepDir) directions = [deepDir];
+  if (deepDir && !evo) directions = [deepDir];
+  if (evo) {
+    let allocated = 0;
+    directions = directions.filter(d => {
+      const cost = d.specialty === 'deep_explore' ? DEEP_COST : 1;
+      if (allocated + cost > remaining) return false;
+      allocated += cost;
+      return true;
+    });
+    if (!directions.length) { plannerStopReason = 'budget'; break; }
+    directions = await evo.prepare(directions, round);
+  }
   const roundCost = directions.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
   dispatched += roundCost;
   log(`Round ${round}: ${directions.length} direction(s) [${directions.map(d => d.specialty).join(', ')}], cost ${roundCost}, budget ${dispatched}/${BUDGET}`);
@@ -133,7 +164,15 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (b,c) Optimize -> Verify, pipelined per direction ----------------
   const results = await pipeline(
     directions,
-    (d) => {
+    async (d) => {
+      if (evo) {
+        try { await evo.prepareWorkspace(d); }
+        catch (error) {
+          log(`[evolution] ${d.id}: parent initialization failed: ${String(error)}`);
+          await evo.record(d, {status: 'failed', notes: 'parent initialization failed'}, null, null);
+          return {d, eng: null, initialization_failed: true};
+        }
+      }
       const isDeep = d.specialty === 'deep_explore';
       // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
       const readLine = isDeep
@@ -146,9 +185,9 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
           `loop and push to the TARGET; keep the best correct version.`
         : `Then Read ${WORKFLOW_DIR}/roles/engineer.md and ${WORKFLOW_DIR}/knowledge/self_monitoring.md and the ` +
           `knowledge files for your specialty, and follow them.`;
-      return agentT(
-      `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
-First create YOUR private workspace, then optimize.
+      const workspaceInstruction = evo
+        ? `Your private workspace at ${d.out_dir}/workspace has already been initialized from the selected parent by the workflow. Begin engineering there. Do not recreate it or reset its Git baseline.\n`
+        : `First create YOUR private workspace, then optimize.
 \`\`\`bash
 set -e
 # Use the materializer to exclude build artifacts and preserve symlinks.
@@ -161,20 +200,25 @@ git -C ${d.out_dir}/workspace init -q
 git -C ${d.out_dir}/workspace add -A
 git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost commit -qm 'Candidate baseline'
 \`\`\`
-${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
+`;
+      return agentT(
+      `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
+${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
-(facts/how-to only; measure everything; never go below baseline).
-Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when COMMANDMENT's primary speedup exceeds ${CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. Before saving, include any new editable source files with \`git add -N -- <new-source-files>\`; exclude logs, measurements and build artifacts.
+(facts/how-to only; measure everything; ${evo ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
+Save best_patch.diff via \`cd <KERNEL_PATH> && git diff${evo ? " " + d.evolution_context.workspace_base_commit : ""} > ${d.out_dir}/best_patch.diff\` ${evo ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. Before saving, include any new editable source files with \`git add -N -- <new-source-files>\`; exclude logs, measurements and build artifacts.
 
 ## Inputs
 ${cfg({
+        ...(TASK ? { TASK } : {}),
         SPECIALTY: d.specialty,
+        ...(evo ? {EVOLUTION: evo.engineerContext(d), EVOLUTION_ARCHIVE: evo.path} : {}),
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: (d.expected_speedup ? `Investigate the proposed ${d.expected_speedup}x speedup. ` : '') +
           'Improve the measured primary metric within the assigned budget. Use roofline estimates only with supported work counts and product-specific limits; they are not required attainment targets.' } : {}),
         KERNEL_PATH: `${d.out_dir}/workspace`,
         OUTPUT_DIR: d.out_dir,
-        CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
+        CANONICAL: evo ? evo.base : CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
         baseline_per_case: BASELINE_PER_CASE,
@@ -187,20 +231,26 @@ ${cfg({
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
-      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
+      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + EXTERNAL_METRIC_INSTRUCTIONS,
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
-    ).then((eng) => ({ d, eng }));
+    ).then(async (eng) => {
+      eng = await checkedExternalMeasurement(eng, `${d.out_dir}/workspace`);
+      if (evo) await evo.record(d, eng, null, `${d.out_dir}/best_patch.diff`);
+      return {d, eng};
+    });
     },
 
     (prev) => {
       const { d, eng } = prev;
+      if (prev.initialization_failed) return {...prev, ver: null, patch: null};
       const patch = `${d.out_dir}/best_patch.diff`;
       // A failed or missing response can still leave a valid patch. Skip verification
       // only after a valid measurement at or below the floor. Verify checks whether
       // the patch exists, applies cleanly, and passes the oracle.
       const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR) &&
-        eng.status !== 'invalid_measurement' && eng.measurement_valid === true;
-      if (trustworthyBelowBaseline) {
+        eng.status !== 'invalid_measurement' && eng.measurement_valid === true &&
+        (!EXTERNAL_OBJECTIVE || (eng.external_measurement_valid === true && Number.isFinite(primSpeedup(eng))));
+      if (trustworthyBelowBaseline && !evo) {
         return { d, eng, ver: null };
       }
       const recovered = !eng || eng.status === 'failed';
@@ -208,20 +258,40 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         `sending best_patch.diff to verify anyway (oracle decides).`);
       return agentT(
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
-          CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
+          CANONICAL: evo ? evo.base : CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
           ENGINEER_WORKSPACE: `${d.out_dir}/workspace`,
           EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then((ver) => ({ d, eng, ver, patch }));
+      ).then(async (ver) => {
+        ver = await checkedExternalMeasurement(ver, evo ? evo.base : CANONICAL, patch);
+        if (evo) {
+          const retained = await evo.record(d, eng, ver, patch);
+          if (retained.retention_error || retained.last_record_error) ver = null;
+        }
+        return {d, eng, ver, patch};
+      });
     }
   );
 
   const clean = results.filter(Boolean);
-  const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
-    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR);
+  if (evo && PROCESS_BOUNDED && await secondsLeft(`archive-r${round}`) <= 7) {
+    // The pipeline has settled. Use the existing finalization allowance only to
+    // retain completed work; no new engineer or GPU evaluation starts here.
+    setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+    for (const r of clean) {
+      await evo.record(r.d, r.eng, r.ver, r.patch || `${r.d.out_dir}/best_patch.diff`);
+    }
+    history.rounds.push({round, status: 'deadline', improved: false, cumulative,
+      directions: clean.map(r => ({id: r.d.id, parent_id: r.d.parent_id}))});
+    deadlineHit = true;
+    break;
+  }
+  const verified = clean.filter(r => r.ver &&
+    (says(r.ver.status, 'verified') || (evo && says(r.ver.status, 'regression'))) &&
+    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > (evo ? 0 : CANDIDATE_FLOOR));
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
@@ -233,6 +303,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
+    ...externalFields(r.ver),
   }));
 
   let integrate = null;
@@ -240,16 +311,19 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     phase('Merge');
     integrate = await agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
-        CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
+        CANONICAL: evo ? evo.base : CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
+          ...externalFields(r.ver),
           files: r.d.focus_files || [], patch: r.patch })),
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
-    const integPrim = integrate && integrate.best ? primSpeedup({
+    if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
+      integrate.best, evo ? evo.base : CANONICAL, integrate.best.patch_file);
+    const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
     if (integrate && integrate.conclusion === 'improved' && integrate.best &&
@@ -260,13 +334,25 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        ...externalFields(integrate.best),
       });
     }
   }
 
+  if (evo && integrate && integrate.best && candidates.some(c => c.id === `r${round}_integrated`)) {
+    const retained = await evo.record({id: `r${round}_integrated`, parent_id: 'ORIGINAL',
+      donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate'}, null,
+      {...integrate.best, status: 'verified', correctness: 'pass',
+        verified_geomean: integrate.best.geomean, verified_weighted: integrate.best.weighted},
+      integrate.best.patch_file);
+    if (retained.retention_error || retained.last_record_error) {
+      candidates = candidates.filter(c => c.id !== `r${round}_integrated`);
+    }
+  }
   candidates.sort((a, b) => b.geomean - a.geomean);
-  const winner = candidates[0] || null;
-  const improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  let winner = candidates[0] || null;
+  let improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  let failedCommitRecovery = null;
   // Separate question from `improved`: is the SEARCH advancing, not did it beat the incumbent. The
   // `bestSeen > 0` guard keeps round 1 deciding on `improved` alone; from then on bestSeen >= cumulative
   // at the default floor, so at the default PROGRESS_DELTA this implies `improved` and changes nothing.
@@ -274,8 +360,48 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   const madeProgress = !!(winner && bestSeen > 0 && winner.geomean > bestSeen * (1 + PROGRESS_DELTA));
 
   // --- (e) Commit the winner into the canonical workspace ---------------
+  if (improved && evo) {
+    let promotion = null;
+    try { promotion = await evolutionPromotionPatch(evo, winner, round); }
+    catch (error) { log(`Round ${round}: could not prepare promotion: ${String(error)}`); }
+    if (!promotion) {
+      log(`Round ${round}: promotion patch failed; retaining the previous validated source.`);
+      improved = false;
+    } else {
+      winner = {...winner, archive_patch: winner.patch, patch: promotion.patch, source_tree: promotion.tree};
+    }
+  }
   if (improved) {
-    await agentT(
+    await captureCanonicalSelection(history, 'before_commit', round, finalWinner);
+    let commitBase = null, priorUntracked = [], commitResult = null, commitDeadline = false;
+    try {
+      if (PROCESS_BOUNDED || evo) {
+        const top = ((await git(CANONICAL, 'rev-parse', '--show-toplevel')) || '').trim();
+        if (top !== CANONICAL.replace(/\/+$/, '')) {
+          throw new Error('bounded commit requires an isolated canonical repository');
+        }
+        const untracked = await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z');
+        commitBase = ((await git(CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}')) || '').trim();
+        if (untracked === null || !/^[0-9a-f]{40,64}$/.test(commitBase)) {
+          throw new Error('could not pin the previous committed canonical source');
+        }
+        priorUntracked = untracked.split('\0').filter(Boolean);
+        const status = await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no');
+        if (status === null) throw new Error('could not inspect the canonical source before commit');
+        if (status !== '') {
+          const dirty = await git(CANONICAL, 'diff', '--binary', commitBase, '--', '.');
+          const dirtyPath = `${EVAL_DIR}/precommit_round_${round}.diff`;
+          if (dirty === null
+              || await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', dirtyPath], {input: dirty}) === null
+              || await git(CANONICAL, 'restore', '--source', commitBase, '--staged', '--worktree', '--', '.') === null
+              || ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim() !== commitBase
+              || await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no') !== '') {
+            throw new Error('could not retain and restore tracked changes before commit');
+          }
+          log(`Round ${round}: retained tracked changes in ${dirtyPath} before restoring the committed source.`);
+        }
+      }
+      commitResult = await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -296,18 +422,54 @@ check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only re
 it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
 re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
-    cumulative = winner.geomean;
-    bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
-    finalWinner = winner;
-    roundsCommitted += 1;
+    } catch (error) {
+      if (!evo && (!PROCESS_BOUNDED || error.code !== 'GEAK_PROCESS_DEADLINE')) throw error;
+      commitDeadline = error.code === 'GEAK_PROCESS_DEADLINE';
+      if (evo) log(`Round ${round}: commit attempt failed; retaining the previous validated source.`);
+    }
+    if (evo && commitResult && commitResult.committed === true
+        && await git(CANONICAL, 'diff', '--exit-code', winner.source_tree, 'HEAD', '--', '.') !== '') {
+      commitResult = null;
+    }
+    if ((PROCESS_BOUNDED || evo) && (!commitResult || commitResult.committed !== true)) {
+      let atDeadline = commitDeadline || await secondsLeft(`uncommitted-r${round}`) <= 7;
+      // Search has settled. Only host recovery may use the existing Report allowance.
+      if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+      const recovery = commitBase ? await restoreUncommittedRound(commitBase, priorUntracked, round) : null;
+      await captureCanonicalSelection(history, 'after_restore', round, finalWinner);
+      if (!atDeadline && PROCESS_BOUNDED) {
+        setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
+        atDeadline = await secondsLeft(`restored-r${round}`) <= 7;
+      }
+      const status = atDeadline ? 'deadline_uncommitted' : 'commit_failed';
+      if (atDeadline) {
+        history.rounds.push({round, status, cumulative, improved: false,
+          directions: directions.map(d => ({id: d.id, title: d.title, specialty: d.specialty})),
+          winner: {source: winner.source, geomean: winner.geomean, patch: winner.patch}, recovery});
+        plannerStopReason = status;
+        log(`Round ${round}: commit did not finish at the cutoff; retained the previous winner for Report/Validate.`);
+        break;
+      }
+      log(`Round ${round}: commit failed; retained the previous winner and continuing search.`);
+      improved = false;
+      failedCommitRecovery = recovery;
+    }
+    if (improved) {
+      await captureCanonicalSelection(history, 'after_commit', round, winner);
+      cumulative = winner.geomean;
+      bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
+      finalWinner = winner;
+      roundsCommitted += 1;
+      if (evo) await evo.selectBest(winner.id);
 
-    // --- (f) Re-profile the new best ------------------------------------
-    profileSummary = await agentT(
-      roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
-        COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-      }),
-      { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+      // --- (f) Re-profile the new best ------------------------------------
+      profileSummary = await agentT(
+        roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
+          WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
+          COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+        }),
+        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+    }
   }
 
   if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;
@@ -321,6 +483,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         expected: r.d.expected_speedup, claimed: r.eng ? r.eng.speedup_geomean : 0,
         verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
         notes: r.eng ? r.eng.notes : '' })),
+      ...(EXTERNAL_OBJECTIVE ? { EXTERNAL_RESULTS: clean.map(r => ({id: r.d.id,
+        engineer: externalFields(r.eng), verified: externalFields(r.ver)})) } : {}),
       INTEGRATE: integrate, WINNER: winner ? { source: winner.source, geomean: winner.geomean } : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
       PRIOR_HISTORY: history,
@@ -370,8 +534,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         card: cardRef, round, direction: r.d.id, specialty: r.d.specialty,
         // null, NOT 0, when the verifier produced nothing. `kb.py` scores <=1.0 as a real loss, so
         // encoding "no evidence" as 0 charged a card for a verifier that crashed or timed out.
-        cited_then_verified: r.ver && Number.isFinite(r.ver.verified_geomean)
-          ? r.ver.verified_geomean : null,
+        cited_then_verified: EXTERNAL_OBJECTIVE ? primSpeedup(r.ver)
+          : (r.ver && Number.isFinite(r.ver.verified_geomean) ? r.ver.verified_geomean : null),
         // `winner` is only the best candidate OF THIS ROUND; `improved` is whether it beat the
         // incumbent by MIN_IMPROVE. Crediting on `winner` alone let a 1.5x round winner confirm a
         // card while the committed best already sat at 2x — a confirmation for advancing nothing,
@@ -382,10 +546,12 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
   }
   history.rounds.push({
     round,
+    ...(failedCommitRecovery ? {status: 'commit_failed', recovery: failedCommitRecovery} : {}),
     directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
       learned_refs: d.learned_refs || [] })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
-      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none') })),
+      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
+      ...(EXTERNAL_OBJECTIVE ? {engineer_external: externalFields(r.eng), verified_external: externalFields(r.ver)} : {}) })),
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, cumulative,
@@ -419,11 +585,69 @@ return {
   rounds: round, dispatched, cumulativeSpeedup: cumulative, bestPerCase, finalWinner, roundsCommitted,
   history, citations, profileSummary, forcedReplans, kbCapBound,
   // Which condition actually ended the loop (see `stopped_by` in the return value).
-  stopReason: deadlineHit ? 'deadline'
+  stopReason: plannerStopReason === 'deadline_uncommitted' ? plannerStopReason : deadlineHit ? 'deadline'
     : (dispatched >= BUDGET) ? 'budget'
     : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
     : (plannerStopReason || 'tech_lead_stop'),
 };
+}
+
+// Every retained evolutionary patch is relative to one run base. Build the exact
+// proposed tree in a private Git index, then diff it against the current winner.
+// This avoids applying an old parent's patch to a different canonical source.
+async function evolutionPromotionPatch(evo, winner, round) {
+  const index = `${EVAL_DIR}/evolution/promotion-${round}.index`;
+  const indexed = (...args) => hostRun('env', [`GIT_INDEX_FILE=${index}`, 'git', '-C', CANONICAL, ...args]);
+  const source = evo.entries.find(row => row.id === winner.id)?.patch_ref;
+  const sourceMatches = async () => source &&
+    ((await hostRun('sha256sum', ['--', source.path])) || '').split(/\s/)[0] === source.sha256;
+  if (!await sourceMatches()) return null;
+  if (await indexed('read-tree', evo.baseCommit) === null
+      || await indexed('apply', '--cached', '--', source.path) === null || !await sourceMatches()) return null;
+  const tree = ((await indexed('write-tree')) || '').trim();
+  if (!/^[0-9a-f]{40,64}$/.test(tree)) return null;
+  const diff = await indexed('diff', '--cached', '--binary', 'HEAD', '--', '.');
+  const patch = `${EVAL_DIR}/evolution/promotion-${round}.diff`;
+  if (diff === null || await writeFile(patch, diff) === null) return null;
+  return {tree, patch};
+}
+
+async function restoreUncommittedRound(previous, priorUntracked, round) {
+  const unfinished = ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim();
+  const retainedRef = `refs/geak/incomplete-round-${round}`;
+  const diffPath = `${EVAL_DIR}/uncommitted_round_${round}.diff`;
+  const pending = await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z');
+  if (pending === null) throw new Error('could not inspect unfinished canonical files');
+  const newFiles = pending.split('\0').filter(name => name && !priorUntracked.includes(name));
+  // Include newly created source bytes in the retained diff before removing them.
+  if (newFiles.length && await git(CANONICAL, '--literal-pathspecs', 'add', '--intent-to-add', '--', ...newFiles) === null) {
+    throw new Error('could not retain new unfinished canonical files');
+  }
+  const partial = await git(CANONICAL, 'diff', '--binary', previous, '--', '.');
+  if (!/^[0-9a-f]{40,64}$/.test(unfinished) || partial === null
+      || await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', diffPath], {input: partial}) === null
+      || await git(CANONICAL, 'update-ref', retainedRef, unfinished, '') === null
+      // Mixed reset preserves untracked files, including files staged by an unfinished add -A.
+      || await git(CANONICAL, 'reset', '--mixed', previous) === null
+      || await git(CANONICAL, 'restore', '--source', previous, '--worktree', '--', '.') === null) {
+    throw new Error('could not retain and restore the unfinished canonical commit');
+  }
+  const untracked = await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z');
+  if (untracked === null) throw new Error('could not inspect unfinished canonical files');
+  const added = untracked.split('\0').filter(name => name && !priorUntracked.includes(name));
+  if (added.length && await git(CANONICAL, '--literal-pathspecs', 'clean', '-f', '--', ...added) === null) {
+    throw new Error('could not remove unfinished canonical files');
+  }
+  const baseline = ((await git(CANONICAL, 'rev-list', '--max-parents=0', previous)) || '').trim();
+  const patch = /^[0-9a-f]{40,64}$/.test(baseline)
+    ? await git(CANONICAL, 'diff', '--binary', baseline, previous, '--', '.') : null;
+  if (patch === null || await writeFile(`${EVAL_DIR}/current_best.diff`, patch) === null
+      || ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim() !== previous
+      || await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no') !== '') {
+    throw new Error('restored canonical source differs from the previous committed winner');
+  }
+  return {previous_commit: previous, unfinished_commit: unfinished, retained_ref: retainedRef,
+    partial_patch: diffPath};
 }
 
 // Set the variables the Report/Validate postlude reads from one OptimizeResult.
@@ -439,8 +663,7 @@ function applyOptimizeResult(r) {
   citations.push(...r.citations);
   profileSummary = r.profileSummary;
   stopReason = r.stopReason;
-  deadlineHit = r.stopReason === 'deadline';
+  deadlineHit = r.stopReason === 'deadline' || r.stopReason === 'deadline_uncommitted';
   forcedReplans = r.forcedReplans;
   kbCapBound = r.kbCapBound;
 }
-

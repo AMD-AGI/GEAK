@@ -27,7 +27,7 @@ dev = ["pytest", "pytest-cov>=5.0", "coverage>=7.0"]
 Homepage = "https://github.com/AMD-AGI/GEAK"
 
 [tool.setuptools]
-packages = ["geak"]
+packages = ["geak", "geak.native"]
 
 # NOTE: metadata + deps live here (PEP 621). setup.py stays only because a
 # [project] table can't express the build-time bootstrap hook (clone repo +

@@ -56,6 +56,15 @@ if (['mi350x', 'mi355x'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx950')
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
+const OPTIMIZER = String(A.optimizer || 'greedy');
+if (!['greedy', 'evo'].includes(OPTIMIZER)) {
+  throw new Error(`unknown optimizer: ${OPTIMIZER}; use greedy or evo`);
+}
+const retiredOptimizerArg = ['optimizer_command', 'optimizer_task_ref', 'optimizer_reserve_s']
+  .find(key => Object.prototype.hasOwnProperty.call(A, key));
+if (retiredOptimizerArg) {
+  throw new Error(`${retiredOptimizerArg} is retired; use optimizer=greedy or optimizer=evo`);
+}
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
@@ -149,10 +158,220 @@ const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
 const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
   (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
   (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
+const EXTERNAL_OBJECTIVE = A.objective && A.objective.kind === 'external_primary' ? A.objective : null;
+if (EXTERNAL_OBJECTIVE && (Object.keys(EXTERNAL_OBJECTIVE).sort().join(',') !== 'kind,primary_regime'
+    || typeof EXTERNAL_OBJECTIVE.primary_regime !== 'string' || !EXTERNAL_OBJECTIVE.primary_regime.trim())) {
+  throw new Error('external_primary requires exactly kind and primary_regime');
+}
+const externalArgv = (value) => Array.isArray(value) && value.length
+  && value.every(v => typeof v === 'string' && v) ? value : null;
+if (EXTERNAL_OBJECTIVE && (!externalArgv(A.external_result_command)
+    || !externalArgv(A.external_measurement_command) || typeof runProcess !== 'function')) {
+  throw new Error('external_primary requires the existing owner measurement and result-reader argv plus runProcess');
+}
+const EXTERNAL_FINAL_COMMANDS = A.external_final_measurement_command != null
+  || A.external_final_result_command != null;
+if (EXTERNAL_OBJECTIVE && EXTERNAL_FINAL_COMMANDS
+    && (!externalArgv(A.external_final_measurement_command)
+        || !externalArgv(A.external_final_result_command))) {
+  throw new Error('final external measurements require both admitted command prefixes');
+}
+let frozenFinalEvaluation = null;
+let frozenFinalPatch = null;
+const finalMeasurementArgv = () => [
+  ...(EXTERNAL_FINAL_COMMANDS ? A.external_final_measurement_command : A.external_measurement_command),
+  ...(frozenFinalEvaluation ? ['--candidate-id', frozenFinalEvaluation.candidate_id,
+    '--evaluation-id', frozenFinalEvaluation.evaluation_id] : []),
+];
+const externalMetricInstructions = (final = false) => EXTERNAL_OBJECTIVE ? `
+External measurement contract: ${JSON.stringify(EXTERNAL_OBJECTIVE)}.
+${final ? `The workflow host has launched the final evaluation using ${JSON.stringify(finalMeasurementArgv())}.
+Review its retained evidence for ${JSON.stringify(frozenFinalEvaluation)}; do not launch another evaluation.
+Preserve any explicit validation objection in validation_status and explain it.`
+  : `Use the existing admitted owner command ${JSON.stringify(A.external_measurement_command)}
+from the candidate workspace according to COMMANDMENT.`} One evaluation runs the
+unchanged full UT in three fresh processes with native min_runs=2. The measurement
+command owns GPU serialization: invoke it directly, without wrapping it
+in gpu_lock.sh again. Use the stock GPU lock for separate profiling/diagnostics.
+This operation replaces the role's separate correctness/benchmark repetitions and any
+extra numerical or graph coverage; preserve the copied UT exactly. Do not invoke
+the UT directly except for unscored diagnostics within TASK's admitted scope.
+During search, such diagnostics use a separate private workspace and the declared
+stock GPU lock; never run them in the canonical workspace or treat their outputs
+as correctness or performance scores.
+Do not rebuild the UT's case folds, require gain for ORIGINAL qualification, or
+repeat valid no-gain results as failures. Retain both native phase folds.
+Return the operation's exact IDs as external_evaluation:{candidate_id,evaluation_id}
+(under best for an integrated candidate). The workflow's trusted owner reader
+checks source, settlement and raw results. A scalar or OBSERVATIONS.json relayed
+by a model is not accepted as measurement. Report missing/failed operations and
+preserve artifacts. GEAK development and final reports use the checked native
+primary for the declared primary_regime; existing improvement thresholds and
+stopping rules apply. Patch export also requires the native reproducible-gain gate.
+Keep the checked unweighted geomean of all per-case speedups as a secondary
+diagnostic, not the ranking objective. The reader retains it under the historical
+field development_geomean_speedup; legacy geomean fields may be omitted.
+` : '';
+const EXTERNAL_METRIC_INSTRUCTIONS = externalMetricInstructions();
+const externalFields = (o) => EXTERNAL_OBJECTIVE && o ? Object.fromEntries(
+  ['objective', 'primary_regime', 'primary_speedup', 'native_reproducible_gain',
+   'native_reproducible_regression', 'phase_speedups', 'external_evaluation',
+   'external_measurement_valid', 'receipt_ref', 'timing_basis', 'development_geomean_speedup',
+   'final_failure', 'director_review_status', 'director_reported_evaluation', 'patch_sha256',
+  ].map(k => [k, o[k]])) : {};
+const nativeGainEligible = (o) => !EXTERNAL_OBJECTIVE || !!(o && o.external_measurement_valid === true
+  && o.native_reproducible_gain === true && o.native_reproducible_regression === false);
+
+async function captureFinalEvaluation(workspace) {
+  if (!EXTERNAL_OBJECTIVE) return;
+  const argv = EXTERNAL_FINAL_COMMANDS ? A.external_final_measurement_command : A.external_measurement_command;
+  const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+    '--workspace', workspace, '--capture-only'], timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+  if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+      || !result.group_cleared || result.stdio_held) throw new Error('final source capture failed');
+  const captured = JSON.parse(result.stdout);
+  if (captured.schema !== 'geak-native-measurement-identity-v1' || captured.capture_only !== true
+      || ![captured.candidate_id, captured.source_id].every(v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v))
+      || !Array.isArray(captured.source_paths) || !captured.source_paths.length
+      || !captured.source_paths.every(v => typeof v === 'string' && v)
+      || typeof captured.evaluation_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/.test(captured.evaluation_id)) {
+    throw new Error('invalid final source capture');
+  }
+  // Diff exactly the captured contract sources, including uncommitted changes,
+  // from the initial ORIGINAL commit. The final reader checks this against the
+  // immutable ORIGINAL files and the captured source identity.
+  const baseline = ((await git(workspace, 'rev-list', '--max-parents=0', 'HEAD')) || '').trim();
+  frozenFinalPatch = /^[0-9a-f]{40,64}$/.test(baseline)
+    ? await git(workspace, '--literal-pathspecs', 'diff', '--binary', '--no-color', '--no-ext-diff',
+      '--src-prefix=a/', '--dst-prefix=b/', baseline, '--', ...captured.source_paths) : null;
+  await writeFrozenFinalPatch();
+  frozenFinalEvaluation = Object.freeze(captured);
+}
+
+async function writeFrozenFinalPatch() {
+  const path = `${EVAL_DIR}/host_final_patch.diff`;
+  if (frozenFinalPatch === null || await writeFile(path, frozenFinalPatch) === null) {
+    throw new Error('could not write the captured final source patch');
+  }
+  return path;
+}
+
+async function measureFinalEvaluation(workspace) {
+  if (!EXTERNAL_OBJECTIVE) return null;
+  try {
+    const argv = finalMeasurementArgv();
+    const result = await runProcess({cmd: argv[0], args: [...argv.slice(1), '--workspace', workspace],
+      timeoutMs: AGENT_TIMEOUT_MS > 0 ? AGENT_TIMEOUT_MS : 3600000, graceMs: 2000, settleMs: 5000});
+    if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+        || !result.group_cleared || result.stdio_held) throw new Error('final evaluator did not complete cleanly');
+    return null;
+  } catch (error) {
+    log(`Final measurement failed: ${String(error)}`);
+    return {class: 'final_measurement_failed', reason: String(error)};
+  }
+}
+
+// Optional prospective source history. Keep exact nanosecond values in the
+// existing Store evidence bytes; JavaScript numbers must not round them.
+const CAPTURE_CANONICAL_SELECTIONS = A.capture_canonical_selections === true;
+if (CAPTURE_CANONICAL_SELECTIONS && (!EXTERNAL_OBJECTIVE || String(A.optimizer || 'greedy') !== 'greedy')) {
+  throw new Error('canonical selection capture requires the external_primary GEAK lane');
+}
+async function captureCanonicalSelection(history, kind, round, winner = null, stoppedBy = null) {
+  if (!CAPTURE_CANONICAL_SELECTIONS) return;
+  const row = {kind, round, stopped_by: stoppedBy, status: 'unresolved'};
+  if (!history.canonical_selections) history.canonical_selections = [];
+  const previous = [...history.canonical_selections].reverse().find(item => item.capture_ref);
+  const transition = {kind, round, stopped_by: stoppedBy,
+    sequence: history.canonical_selections.length + 1,
+    previous_capture_ref: previous ? previous.capture_ref || null : null};
+  Object.assign(row, transition);
+  history.canonical_selections.push(row);
+  try {
+    const argv = A.external_measurement_command;
+    const selected = winner && winner.external_evaluation;
+    const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+      '--workspace', CANONICAL, '--capture-selection', '--selection-kind', kind,
+      '--selection-round', String(round), '--selection-sequence', String(transition.sequence),
+      ...(transition.previous_capture_ref ? ['--previous-selection', transition.previous_capture_ref.evidence_id] : []),
+      ...(stoppedBy ? ['--selection-stop-reason', stoppedBy] : []), ...(selected ? [
+        '--selected-candidate-id', selected.candidate_id, '--selected-evaluation-id', selected.evaluation_id] : [])],
+      timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+    if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+        || !result.group_cleared || result.stdio_held) throw new Error('canonical source capture failed');
+    const capture = JSON.parse(result.stdout);
+    const returned = capture.transition;
+    const prior = returned && returned.previous_capture_ref;
+    const expectedPrior = transition.previous_capture_ref;
+    if (capture.schema !== 'geak-canonical-source-capture-v2'
+        || !returned || !['kind', 'round', 'sequence', 'stopped_by'].every(key => returned[key] === transition[key])
+        || (expectedPrior ? !prior || prior.evidence_id !== expectedPrior.evidence_id
+          || prior.artifact !== expectedPrior.artifact : prior !== null)
+        || ![capture.candidate_id, capture.source_id, capture.capture_ref && capture.capture_ref.evidence_id]
+          .every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))
+        || capture.capture_ref.artifact !== 'canonical-selection.json') throw new Error('invalid canonical capture');
+    Object.assign(row, {capture_ref: capture.capture_ref, candidate_id: capture.candidate_id,
+      source_id: capture.source_id, clock_ref: capture.clock_ref,
+      development_status: capture.development_evidence.status});
+    if (capture.canonical_commit.status !== 'committed') throw new Error('canonical Git state is unresolved');
+    Object.assign(row, {status: 'captured', git_commit: capture.canonical_commit.git_commit});
+  } catch (error) {
+    row.reason = String(error);
+  }
+  // This is observational. Failure cannot stop authentic GEAK search. Attempted
+  // sequence numbers still advance, so a gap cannot become a complete chain.
+}
+
+async function checkedExternalMeasurement(value, workspace, patch = null, final = false) {
+  if (!EXTERNAL_OBJECTIVE || (!value && !final)) return value;
+  const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
+    status: 'invalid_measurement', correctness: 'not_checked', validation_status: 'invalid_measurement',
+    native_reproducible_gain: false, native_reproducible_regression: false,
+    development_geomean_speedup: null };
+  const ref = value && value.external_evaluation;
+  if (final && (!ref || !frozenFinalEvaluation || ref.candidate_id !== frozenFinalEvaluation.candidate_id
+      || ref.evaluation_id !== frozenFinalEvaluation.evaluation_id)) {
+    return {...invalid, final_failure: {class: 'final_identity_mismatch',
+      expected: frozenFinalEvaluation, returned: ref || null}};
+  }
+  if (!ref || typeof ref.candidate_id !== 'string' || typeof ref.evaluation_id !== 'string') return invalid;
+  try {
+    const argv = final && EXTERNAL_FINAL_COMMANDS
+      ? A.external_final_result_command : A.external_result_command;
+    const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+      '--candidate-id', ref.candidate_id, '--evaluation-id', ref.evaluation_id,
+      '--workspace', workspace, ...(patch ? ['--patch', patch] : [])],
+      timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+    if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+        || !result.group_cleared || result.stdio_held) return invalid;
+    const read = JSON.parse(result.stdout);
+    if (read.external_measurement_valid !== true || !read.objective
+        || read.objective.kind !== 'external_primary'
+        || read.primary_regime !== EXTERNAL_OBJECTIVE.primary_regime
+        || read.objective.primary_regime !== EXTERNAL_OBJECTIVE.primary_regime
+        || !Number.isFinite(read.primary_speedup) || read.primary_speedup <= 0
+        || !Number.isFinite(read.development_geomean_speedup) || read.development_geomean_speedup <= 0
+        || read.external_evaluation.candidate_id !== ref.candidate_id
+        || read.external_evaluation.evaluation_id !== ref.evaluation_id) return invalid;
+    return { ...value, ...read };
+  } catch (error) {
+    log(`External measurement reader failed: ${String(error)}`);
+    return invalid;
+  }
+}
+// Checked external fields only; invalid or foreign-regime readings score null.
+const checkedExternal = (o, key) => o && o.external_measurement_valid === true
+  && o.primary_regime === EXTERNAL_OBJECTIVE.primary_regime
+  && Number.isFinite(o[key]) ? o[key] : null;
+// The declared native primary is shared by external development and report/export.
+const nativePrimary = (o) => EXTERNAL_OBJECTIVE ? checkedExternal(o, 'primary_speedup') : primSpeedup(o);
 // PRIMARY-metric selector: prefer the time-weighted number when a workload spec is in play and the
 // agent reported one; otherwise fall back to the geomean (unweighted runs => unchanged behavior).
+// External mode uses the checked task primary, matching its declared final objective.
+// The checked all-case geomean remains a secondary diagnostic.
 const primSpeedup = (o) => {
-  if (!o) return 0;
+  if (!o) return EXTERNAL_OBJECTIVE ? null : 0;
+  if (EXTERNAL_OBJECTIVE) return checkedExternal(o, 'primary_speedup');
   const w = o.verified_weighted != null ? o.verified_weighted
           : (o.speedup_weighted != null ? o.speedup_weighted : null);
   if (HAS_WORKLOAD && Number.isFinite(w)) return w;
@@ -199,7 +418,6 @@ const DRA_MAX_BLINDSPOTS = (() => {
   const v = parseInt(A.dra_max_blindspots != null ? A.dra_max_blindspots : 4, 10);
   return Number.isFinite(v) && v >= 1 ? v : 4;
 })();
-
 // ---------------------------------------------------------------------------
 // LEARNED-KNOWLEDGE SINK. Derived from WORKFLOW_DIR and nothing else, so a lane spawned by
 // e2e_workflow still curates into kernel_workflow/knowledge/learned/ — e2e's learned/ is a
@@ -397,6 +615,10 @@ const perCase = {
   },
 };
 
+const externalEvaluation = obj({ candidate_id: { type: 'string' }, evaluation_id: { type: 'string' } },
+  ['candidate_id', 'evaluation_id']);
+const metricRequired = (fields) => EXTERNAL_OBJECTIVE ? fields.filter(k => !k.includes('geomean')) : fields;
+
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, workspace: { type: 'string' }, baseline_dir: { type: 'string' },
   kernel_name: { type: 'string' },
@@ -440,6 +662,7 @@ const ANALYZE_SCHEMA = obj({
 }, ['kernel_type', 'roadmap_summary']);
 
 const BENCH_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   commandment_path: { type: 'string' }, correctness_cmd: { type: 'string' },
   benchmark_cmd: { type: 'string' }, profile_cmd: { type: 'string' }, parse_hint: { type: 'string' },
   baseline_per_case: { type: 'array', items: { type: 'object', additionalProperties: true } },
@@ -451,7 +674,7 @@ const BENCH_SCHEMA = obj({
   baseline_weighted_total_ms: { type: 'number' },
   weights_provenance: { type: 'string' }, // e.g. "trace" | "regime" | "regime_floor" | "prior" | "caller" | "mixed"
   reliable: { type: 'boolean' }, notes: { type: 'string' },
-}, ['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']);
+}, metricRequired(['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']));
 
 const PROFILE_SCHEMA = obj({
   bottleneck: { type: 'string' }, profiler_used: { type: 'string' }, dispatch_count: { type: 'number' },
@@ -543,6 +766,7 @@ const PLAN_SCHEMA = obj({
 }, ['stop', 'directions']);
 
 const ENG_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   engineer_id: { type: 'string' }, specialty: { type: 'string' }, task: { type: 'string' },
   strategy: { type: 'string' }, speedup_geomean: { type: 'number' }, speedup_arithmetic: { type: 'number' },
   // Time-weighted ratio-of-sums vs the TRUE baseline (PRIMARY metric when workload_aligned).
@@ -551,15 +775,16 @@ const ENG_SCHEMA = obj({
   per_case: perCase, status: { type: 'string' }, patch_file: { type: 'string' },
   measurement_valid: { type: 'boolean' },
   strategies_tried: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
-}, ['status', 'speedup_geomean', 'measurement_valid']);
+}, metricRequired(['status', 'speedup_geomean', 'measurement_valid']));
 
 const VERIFY_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   status: { type: 'string' }, correctness: { type: 'string' },
   verified_geomean: { type: 'number' }, verified_arithmetic: { type: 'number' },
   verified_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   per_case: perCase, variance_note: { type: 'string' }, notes: { type: 'string' },
   graph_safe: { type: 'string' },
-}, ['status', 'verified_geomean']);
+}, metricRequired(['status', 'verified_geomean']));
 
 const INTEGRATE_SCHEMA = obj({
   attempted: { type: 'boolean' },
@@ -584,8 +809,7 @@ const REPORT_SCHEMA = obj({
   final_speedup_weighted: { type: 'number' }, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
   rounds: { type: 'number' }, budget_used: { type: 'number' },
   report_path: { type: 'string' }, final_patch: { type: 'string' }, per_case: perCase,
-}, ['final_speedup_geomean', 'report_path', 'final_patch']);
-
+}, metricRequired(['final_speedup_geomean', 'report_path', 'final_patch']));
 const UPDATE_EXPERIENCE_SCHEMA = obj({
   action: { type: 'string' },      // created | merged | skipped
   card_path: { type: 'string' },   // path under knowledge/learned/, or "" if nothing distilled
@@ -593,6 +817,7 @@ const UPDATE_EXPERIENCE_SCHEMA = obj({
 }, []);
 
 const VALIDATE_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   kernel_name: { type: 'string' },
   director_verified_speedup_geomean: { type: 'number' },
   director_verified_speedup_arithmetic: { type: 'number' },
@@ -604,7 +829,7 @@ const VALIDATE_SCHEMA = obj({
   timing_basis: { type: 'string' },
   per_case: perCase, applied_to_original: { type: 'string' },
   arbitration_note: { type: 'string' }, final_patch: { type: 'string' },
-}, ['director_verified_speedup_geomean', 'validation_status']);
+}, metricRequired(['director_verified_speedup_geomean', 'validation_status']));
 
 // Warm-start resolver output = experience_store.py `resolve` JSON, verbatim.
 const WARMSTART_RESOLVE_SCHEMA = obj({
@@ -655,7 +880,6 @@ const WARMSTART_WRITE_SCHEMA = obj({
     session_id: { type: 'string' }, champion: { type: 'boolean' }, replaced: { type: 'boolean' },
   }),
 }, ['written']);
-
 // ---------------------------------------------------------------------------
 // Prompt helpers. Every agent reads its role file from WORKFLOW_DIR and the
 // relevant knowledge files itself; the script only passes paths + JSON inputs.
@@ -725,10 +949,13 @@ Read any knowledge files it points you to under ${dir}/knowledge/.
 Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
 
 ## Inputs
-${cfg(inputs)}
+${cfg({ ...(typeof TASK === 'string' && TASK ? { TASK } : {}), ...inputs })}
 
 Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role);
+  return base + expertSkillsBlock(role)
+    + (typeof externalMetricInstructions === 'function'
+      ? externalMetricInstructions(role === 'director' && phase === 'validate')
+      : typeof EXTERNAL_METRIC_INSTRUCTIONS === 'string' ? EXTERNAL_METRIC_INSTRUCTIONS : '');
 }
 // This workflow's own roles live under WORKFLOW_DIR/roles/.
 function roleAgent(role, phase, intro, inputs) {
@@ -740,8 +967,11 @@ async function agentT(p, o) {
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
-        const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
+      // The standalone runtime's bounded mode terminates and settles the actual
+      // subprocess. Never race it with a Promise that abandons a live role.
+      if (agent.processDeadlineActive || typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const opts = agent.processDeadlineActive ? { ...o, processTimeoutMs: AGENT_TIMEOUT_MS } : o;
+        const r0 = await agent(p, opts); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
       const guard = new Promise((resolve) => {
@@ -758,6 +988,11 @@ async function agentT(p, o) {
       if (ev && r) ev.ok = true;
       return r;
     } catch (e) {
+      if (agent.processDeadlineActive && e
+          && (e.code === 'GEAK_PROCESS_DEADLINE' || e.code === 'GEAK_AGENT_TIMEOUT')) {
+        log(`  [deadline] ${label} stopped (${e.code}); no retry after its process cutoff.`);
+        return null;
+      }
       const msg = String(e && e.message ? e.message : e).slice(0, 200);
       if (attempt < AGENT_RETRIES) {
         log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} hit an API/agent error (${msg}) — retrying so a transient outage doesn't kill the run.`);
@@ -786,6 +1021,22 @@ const DEADLINE_EPOCH = (() => {
   const v = parseInt(A.deadline_epoch != null ? A.deadline_epoch : 0, 10);
   return Number.isFinite(v) && v > 0 ? v : 0;
 })();
+// Opt-in process cutoffs retain the original deadline and reserve later stages.
+const SEARCH_RESERVE_S = A.search_reserve_s == null ? 0 : Number(A.search_reserve_s);
+const FINAL_VALIDATION_RESERVE_S = Number(A.final_validation_reserve_s || 0);
+const FINAL_CLEANUP_RESERVE_S = Number(A.final_cleanup_reserve_s || 0);
+const PROCESS_BOUNDED = A.search_reserve_s != null;
+if (PROCESS_BOUNDED) {
+  if (!DEADLINE_EPOCH || !Number.isFinite(SEARCH_RESERVE_S) || SEARCH_RESERVE_S <= 0
+      || !Number.isFinite(FINAL_VALIDATION_RESERVE_S) || FINAL_VALIDATION_RESERVE_S < 0
+      || !Number.isFinite(FINAL_CLEANUP_RESERVE_S) || FINAL_CLEANUP_RESERVE_S < 0
+      || FINAL_CLEANUP_RESERVE_S > FINAL_VALIDATION_RESERVE_S
+      || FINAL_VALIDATION_RESERVE_S > SEARCH_RESERVE_S
+      || typeof setProcessDeadline !== 'function' || !agent.processDeadlineActive) {
+    throw new Error('search reserve requires the process-bounded runtime and ordered final reserves');
+  }
+  setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
+}
 const NO_STOP_S = Math.max(0, parseInt(A.no_stop_s != null ? A.no_stop_s : 900, 10));
 // Run-level cap on how many TechLead stops may be refused (forcedReplans is not reset per round).
 // Not 1: the refusal must scale with the window, or a long budget is handed back early.
@@ -797,6 +1048,7 @@ let deadlineHit = false;
 let forcedReplans = 0;
 
 async function secondsLeft(tag) {
+  if (PROCESS_BOUNDED) return setProcessDeadline.secondsLeft();
   if (!DEADLINE_EPOCH) return Infinity;
   const r = await agentT(
     `Run EXACTLY this command and nothing else:
@@ -827,10 +1079,31 @@ function expertSkillsBlock(role) {
     `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
-
 // ===========================================================================
 // PHASE: Setup
 // ===========================================================================
+// An operational owner may supply a captured identity when this process has no
+// direct GPU access. The owner authenticates its observation/device provenance;
+// the Director verifies these exact bytes with the shared offline parser.
+const GPU_IDENTITY_CAPTURE_REF = A.gpu_identity_capture_ref;
+if (GPU_IDENTITY_CAPTURE_REF !== undefined) {
+  const ref = GPU_IDENTITY_CAPTURE_REF;
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref)
+      || Object.keys(ref).sort().join(',') !== 'path,sha256'
+      || typeof ref.path !== 'string' || !ref.path.startsWith('/')
+      || /[\0\r\n]/.test(ref.path)
+      || !ref.path.slice(1).split('/').every(part => part && part !== '.' && part !== '..')
+      || typeof ref.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(ref.sha256)) {
+    throw new Error('invalid GPU identity capture reference');
+  }
+  if (typeof A.expected_gfx !== 'string' || !/^gfx[0-9a-f]+$/.test(EXPECTED_GFX)
+      || typeof A.expected_target !== 'string'
+      || !['r9700', 'mi350x', 'mi355x', 'unknown'].includes(EXPECTED_TARGET)
+      || typeof A.expected_device_name !== 'string' || !EXPECTED_DEVICE_NAME
+      || !Number.isSafeInteger(A.expected_physical_cu_count) || A.expected_physical_cu_count <= 0) {
+    throw new Error('captured GPU identity requires complete expected identity');
+  }
+}
 phase('Setup');
 const setup = await agentT(
   roleAgent('director', 'setup', 'Build the isolated evaluation environment.', {
@@ -838,6 +1111,7 @@ const setup = await agentT(
     WORKFLOW_DIR, SKILL_DIR: WORKFLOW_DIR,
     MODE, TARGET_LANGUAGE, OP_SPEC, EXPECTED_GFX, EXPECTED_TARGET,
     EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
+    ...(GPU_IDENTITY_CAPTURE_REF !== undefined ? { GPU_IDENTITY_CAPTURE_REF } : {}),
     ...(STATE_DIR ? { STATE_DIR } : {}),
   }),
   { phase: 'Setup', label: 'director:setup', schema: SETUP_SCHEMA });
@@ -857,6 +1131,14 @@ if (!DEVICE_TARGET) {
 if (!Number.isFinite(SETUP_PHYSICAL_CU_COUNT) || SETUP_PHYSICAL_CU_COUNT <= 0) {
   throw new Error('Setup failed: director did not return a positive physical_cu_count');
 }
+const normalizeDeviceName = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+if (GPU_IDENTITY_CAPTURE_REF !== undefined
+    && (GFX !== EXPECTED_GFX || DEVICE_TARGET !== EXPECTED_TARGET
+      || normalizeDeviceName(SETUP_DEVICE_NAME) !== normalizeDeviceName(EXPECTED_DEVICE_NAME)
+      || !Number.isSafeInteger(setup.physical_cu_count)
+      || SETUP_PHYSICAL_CU_COUNT !== EXPECTED_PHYSICAL_CU_COUNT)) {
+  throw new Error('captured GPU identity differs from expected identity');
+}
 if (GFX === 'gfx1200') {
   throw new Error('Detected gfx1200, which is not validated by this workflow; refusing R9700 guidance');
 }
@@ -866,7 +1148,6 @@ if (EXPECTED_GFX && GFX !== EXPECTED_GFX) {
 if (EXPECTED_TARGET && EXPECTED_TARGET !== 'unknown' && DEVICE_TARGET !== EXPECTED_TARGET) {
   throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${DEVICE_TARGET || 'unknown'}`);
 }
-const normalizeDeviceName = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
 if (EXPECTED_DEVICE_NAME &&
     normalizeDeviceName(SETUP_DEVICE_NAME) !== normalizeDeviceName(EXPECTED_DEVICE_NAME)) {
   log(`Setup identity telemetry differs from the deterministic probe: device_name expected ` +
@@ -982,7 +1263,7 @@ const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs
 // PHASE: Benchmark setup (Benchmark Engineer)
 // ===========================================================================
 phase('Benchmark');
-const bench = await agentT(
+let bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     ANALYSIS: analysis,
@@ -991,6 +1272,12 @@ const bench = await agentT(
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
   }),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
+if (EXTERNAL_OBJECTIVE) {
+  bench = await checkedExternalMeasurement(bench, CANONICAL);
+  if (!bench || !bench.external_measurement_valid) throw new Error('Original external evaluation is missing or invalid');
+  bench.baseline_per_case = bench.per_case;
+  bench.baseline_geomean_ms = null;
+}
 if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
@@ -1008,7 +1295,6 @@ let profileSummary = await agentT(
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
 log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
-
 // ===========================================================================
 // PHASE: Research (Deep Research Agent — OPT-IN via args.dra_enabled)
 // Runs AFTER Profile / BEFORE the optimize loop: profile + COMMANDMENT + analysis exist by now, so
@@ -1267,7 +1553,7 @@ ${resolveScript}
       for (const c of cands) {                              // already rank-ordered (fastest first)
         const rec = warm_start.candidates.find(x => x.rank === c.rank);
         const remapOut = `${EVAL_DIR}/warm_start/cand_${c.rank}/remapped.diff`;
-        const ver = await agentT(
+        let ver = await agentT(
           roleAgent('verify_engineer', 'verify',
             'Validate a HISTORICAL warm-start patch — the SAME gate as any round candidate. The patch was ' +
             'won in the workspace that produced it, whose paths need not exist here, so FIRST run EXACTLY:\n' +
@@ -1292,7 +1578,20 @@ ${resolveScript}
             ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
           }),
           { phase: 'WarmStart', label: `warm_start:verify c${c.rank}`, schema: VERIFY_SCHEMA });
+        let checkedWarmPatch = c.patch_path;
+        if (EXTERNAL_OBJECTIVE) {
+          // Match the adoption command's exact -f choice; the model does not
+          // choose a different patch for checking than the one later applied.
+          const exists = await runProcess({cmd: '/usr/bin/test', args: ['-f', remapOut],
+            timeoutMs: 5000, graceMs: 1000, settleMs: 1000});
+          if (exists.status !== 'completed' || ![0, 1].includes(exists.code)
+              || exists.strays_killed || !exists.group_cleared || exists.stdio_held) {
+            ver = null;
+          } else if (exists.code === 0) checkedWarmPatch = remapOut;
+        }
+        ver = await checkedExternalMeasurement(ver, CANONICAL, checkedWarmPatch);
         const sp = primSpeedup(ver);
+        const spReported = nativePrimary(ver);   // reported/attested score; sp ranks and gates
         if (ver && says(ver.status, 'verified') && says(ver.correctness, 'pass') && sp > 1.0) {
           const adopt = await agentT(
             `You are the TechLead adopting a validated warm-start patch into the canonical workspace.
@@ -1316,16 +1615,17 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             cumulative = sp;
             bestPerCase = (ver.per_case && ver.per_case.length) ? ver.per_case : bestPerCase;
             finalWinner = { source: `warm_start:${c.slug}`, geomean: sp,
-              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path };
+              arithmetic: ver.verified_arithmetic || sp, per_case: bestPerCase, patch: c.patch_path,
+              ...externalFields(ver) };
             if (bestSeen < sp) bestSeen = sp;
             warm_start.adopted = true;
-            warm_start.adopted_speedup = sp;
+            warm_start.adopted_primary = spReported;
             warm_start.slug = c.slug;
             // Carried into the write-back: the idea this run started from, and the entry it
             // descends from — lineage a later curation pass cannot recover from the diff alone.
             warm_start.direction = c.direction || '';
             warm_start.exp_dir = c.exp_dir || '';
-            if (rec) { rec.status = 'adopted'; rec.outcome = 'validated'; rec.verified_speedup = sp; }
+            if (rec) { rec.status = 'adopted'; rec.outcome = 'validated'; rec.verified_speedup = spReported; }
             log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
             profileSummary = await agentT(
               roleAgent('profile_engineer', 'reprofile',
@@ -1342,7 +1642,7 @@ correctness check; only report committed=true if it still passes. Return JSON {c
         if (rec && rec.status !== 'adopted') {
           rec.status = (ver && ver.status) ? `rejected:${ver.status}` : 'rejected:apply_failed';
           rec.outcome = kbVerdict(ver, sp);
-          rec.verified_speedup = sp || 0;
+          rec.verified_speedup = spReported || 0;
         }
         log(`[kb] warm-start candidate c${c.rank} ${rec ? rec.status : 'rejected'} (${sp ? sp.toFixed(2) + 'x' : 'no measure'}).`);
       }
@@ -1376,18 +1676,31 @@ correctness check; only report committed=true if it still passes. Return JSON {c
     }
   }
 }
-
 // The Optimize phase. An optimizer starts from the state Setup/resume/WarmStart left behind and
 // returns an OptimizeResult; applyOptimizeResult() hands it to the Report/Validate postlude:
 //   { rounds, dispatched, cumulativeSpeedup, bestPerCase, finalWinner, roundsCommitted, history,
 //     citations, profileSummary, stopReason, forcedReplans, kbCapBound }
 // The greedy loop body keeps its original indentation so its prompts stay byte-identical.
-async function greedyOptimize(start) {
+async function greedyOptimize(start, evo = null) {
+const planSchema = evo ? {
+  ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
+    ...PLAN_SCHEMA.properties.directions, items: {
+      ...PLAN_SCHEMA.properties.directions.items, properties: {
+        ...PLAN_SCHEMA.properties.directions.items.properties,
+        parent_id: {type: 'string'}, donor_ids: {type: 'array', items: {type: 'string'}},
+        approach: {type: 'string'},
+      },
+    },
+  }},
+} : PLAN_SCHEMA;
 let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
+if (evo) history.evolution_archive = evo.path;
 const citations = [];
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
+await captureCanonicalSelection(history, setup.resumed || A.canonical_selection_resume === true
+  ? 'resume_unknown' : 'initial', 0, finalWinner);
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
@@ -1410,6 +1723,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
+    ...(evo ? {...evo.planInputs(), DEEP_COST} : {}),
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
     ...KB_INPUTS,
@@ -1449,9 +1763,11 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   });
 
   let plan = await agentT(
-    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).',
+    roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).' +
+      (evo ? ` Read ${WORKFLOW_DIR}/roles/evolution.md and select sources from the retained archive.` : ''),
       planInputs(false)),
-    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: PLAN_SCHEMA });
+    { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: planSchema });
+  if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
 
   // NO EARLY STOP: keep refusing while the window is materially unspent. This used to refuse ONCE,
   // on the reasoning that a role repeating "stop" has run out of ideas. Measured at a 2h budget that
@@ -1467,7 +1783,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     plan = await agentT(
       roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.',
         planInputs(true)),
-      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: PLAN_SCHEMA });
+      { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: planSchema });
     left = await secondsLeft(`replan-r${round}`);
   }
 
@@ -1485,7 +1801,10 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   }
 
   if (!plan || plan.stop || !plan.directions || plan.directions.length === 0) {
-    if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
+    if (PROCESS_BOUNDED && left <= 7) {
+      deadlineHit = true; // No agent may start inside its seven-second cleanup reserve.
+      log(`Round ${round}: the search process cutoff was reached while planning.`);
+    } else if (plannerStopReason === 'all_directions_filtered_unknown_peaks') {
       log(`Round ${round}: harness stopped after all directions were filtered because calibrated peaks are unknown.`);
     } else {
       log(`Round ${round}: TechLead chose to stop. ${plan ? plan.reasoning || '' : ''}`);
@@ -1504,7 +1823,18 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // round (its broad ground-up rewrite touches many files and can't be merged with specialist patches),
   // and charge DEEP_COST against the budget. Otherwise each specialist direction costs 1.
   const deepDir = directions.find(d => d.specialty === 'deep_explore');
-  if (deepDir) directions = [deepDir];
+  if (deepDir && !evo) directions = [deepDir];
+  if (evo) {
+    let allocated = 0;
+    directions = directions.filter(d => {
+      const cost = d.specialty === 'deep_explore' ? DEEP_COST : 1;
+      if (allocated + cost > remaining) return false;
+      allocated += cost;
+      return true;
+    });
+    if (!directions.length) { plannerStopReason = 'budget'; break; }
+    directions = await evo.prepare(directions, round);
+  }
   const roundCost = directions.reduce((s, d) => s + (d.specialty === 'deep_explore' ? DEEP_COST : 1), 0);
   dispatched += roundCost;
   log(`Round ${round}: ${directions.length} direction(s) [${directions.map(d => d.specialty).join(', ')}], cost ${roundCost}, budget ${dispatched}/${BUDGET}`);
@@ -1512,7 +1842,15 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (b,c) Optimize -> Verify, pipelined per direction ----------------
   const results = await pipeline(
     directions,
-    (d) => {
+    async (d) => {
+      if (evo) {
+        try { await evo.prepareWorkspace(d); }
+        catch (error) {
+          log(`[evolution] ${d.id}: parent initialization failed: ${String(error)}`);
+          await evo.record(d, {status: 'failed', notes: 'parent initialization failed'}, null, null);
+          return {d, eng: null, initialization_failed: true};
+        }
+      }
       const isDeep = d.specialty === 'deep_explore';
       // deep_explore reads its own role (broad authority + own iteration loop); specialists read engineer.md.
       const readLine = isDeep
@@ -1525,9 +1863,9 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
           `loop and push to the TARGET; keep the best correct version.`
         : `Then Read ${WORKFLOW_DIR}/roles/engineer.md and ${WORKFLOW_DIR}/knowledge/self_monitoring.md and the ` +
           `knowledge files for your specialty, and follow them.`;
-      return agentT(
-      `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
-First create YOUR private workspace, then optimize.
+      const workspaceInstruction = evo
+        ? `Your private workspace at ${d.out_dir}/workspace has already been initialized from the selected parent by the workflow. Begin engineering there. Do not recreate it or reset its Git baseline.\n`
+        : `First create YOUR private workspace, then optimize.
 \`\`\`bash
 set -e
 # Use the materializer to exclude build artifacts and preserve symlinks.
@@ -1540,20 +1878,25 @@ git -C ${d.out_dir}/workspace init -q
 git -C ${d.out_dir}/workspace add -A
 git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost commit -qm 'Candidate baseline'
 \`\`\`
-${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
+`;
+      return agentT(
+      `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
+${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
-(facts/how-to only; measure everything; never go below baseline).
-Save best_patch.diff via \`cd <KERNEL_PATH> && git diff > ${d.out_dir}/best_patch.diff\` when COMMANDMENT's primary speedup exceeds ${CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. Before saving, include any new editable source files with \`git add -N -- <new-source-files>\`; exclude logs, measurements and build artifacts.
+(facts/how-to only; measure everything; ${evo ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
+Save best_patch.diff via \`cd <KERNEL_PATH> && git diff${evo ? " " + d.evolution_context.workspace_base_commit : ""} > ${d.out_dir}/best_patch.diff\` ${evo ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. Before saving, include any new editable source files with \`git add -N -- <new-source-files>\`; exclude logs, measurements and build artifacts.
 
 ## Inputs
 ${cfg({
+        ...(TASK ? { TASK } : {}),
         SPECIALTY: d.specialty,
+        ...(evo ? {EVOLUTION: evo.engineerContext(d), EVOLUTION_ARCHIVE: evo.path} : {}),
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: (d.expected_speedup ? `Investigate the proposed ${d.expected_speedup}x speedup. ` : '') +
           'Improve the measured primary metric within the assigned budget. Use roofline estimates only with supported work counts and product-specific limits; they are not required attainment targets.' } : {}),
         KERNEL_PATH: `${d.out_dir}/workspace`,
         OUTPUT_DIR: d.out_dir,
-        CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
+        CANONICAL: evo ? evo.base : CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
         baseline_per_case: BASELINE_PER_CASE,
@@ -1566,20 +1909,26 @@ ${cfg({
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
-      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer'),
+      expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + EXTERNAL_METRIC_INSTRUCTIONS,
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
-    ).then((eng) => ({ d, eng }));
+    ).then(async (eng) => {
+      eng = await checkedExternalMeasurement(eng, `${d.out_dir}/workspace`);
+      if (evo) await evo.record(d, eng, null, `${d.out_dir}/best_patch.diff`);
+      return {d, eng};
+    });
     },
 
     (prev) => {
       const { d, eng } = prev;
+      if (prev.initialization_failed) return {...prev, ver: null, patch: null};
       const patch = `${d.out_dir}/best_patch.diff`;
       // A failed or missing response can still leave a valid patch. Skip verification
       // only after a valid measurement at or below the floor. Verify checks whether
       // the patch exists, applies cleanly, and passes the oracle.
       const trustworthyBelowBaseline = eng && eng.status !== 'failed' && !(primSpeedup(eng) > CANDIDATE_FLOOR) &&
-        eng.status !== 'invalid_measurement' && eng.measurement_valid === true;
-      if (trustworthyBelowBaseline) {
+        eng.status !== 'invalid_measurement' && eng.measurement_valid === true &&
+        (!EXTERNAL_OBJECTIVE || (eng.external_measurement_valid === true && Number.isFinite(primSpeedup(eng))));
+      if (trustworthyBelowBaseline && !evo) {
         return { d, eng, ver: null };
       }
       const recovered = !eng || eng.status === 'failed';
@@ -1587,20 +1936,40 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         `sending best_patch.diff to verify anyway (oracle decides).`);
       return agentT(
         roleAgent('verify_engineer', 'verify', 'Independently re-measure this candidate patch.', {
-          CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
+          CANONICAL: evo ? evo.base : CANONICAL, PATCH: patch, VERIFY_DIR: `${d.out_dir}/verify`,
           ENGINEER_WORKSPACE: `${d.out_dir}/workspace`,
           EVAL_DIR, WORKFLOW_DIR, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
           ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
         { phase: 'Verify', label: `verify ${d.id}${recovered ? ' (recovered)' : ''}`, schema: VERIFY_SCHEMA }
-      ).then((ver) => ({ d, eng, ver, patch }));
+      ).then(async (ver) => {
+        ver = await checkedExternalMeasurement(ver, evo ? evo.base : CANONICAL, patch);
+        if (evo) {
+          const retained = await evo.record(d, eng, ver, patch);
+          if (retained.retention_error || retained.last_record_error) ver = null;
+        }
+        return {d, eng, ver, patch};
+      });
     }
   );
 
   const clean = results.filter(Boolean);
-  const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
-    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR);
+  if (evo && PROCESS_BOUNDED && await secondsLeft(`archive-r${round}`) <= 7) {
+    // The pipeline has settled. Use the existing finalization allowance only to
+    // retain completed work; no new engineer or GPU evaluation starts here.
+    setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+    for (const r of clean) {
+      await evo.record(r.d, r.eng, r.ver, r.patch || `${r.d.out_dir}/best_patch.diff`);
+    }
+    history.rounds.push({round, status: 'deadline', improved: false, cumulative,
+      directions: clean.map(r => ({id: r.d.id, parent_id: r.d.parent_id}))});
+    deadlineHit = true;
+    break;
+  }
+  const verified = clean.filter(r => r.ver &&
+    (says(r.ver.status, 'verified') || (evo && says(r.ver.status, 'regression'))) &&
+    says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > (evo ? 0 : CANDIDATE_FLOOR));
 
   // --- (d) Build candidate list; integrate if >=2 verified --------------
   // `geomean` here is the PRIMARY metric used for sorting/gating/cumulative: the time-weighted
@@ -1612,6 +1981,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     weighted: r.ver.verified_weighted != null ? r.ver.verified_weighted : null,
     arithmetic: r.ver.verified_arithmetic || r.ver.verified_geomean,
     per_case: r.ver.per_case || [], patch: r.patch,
+    ...externalFields(r.ver),
   }));
 
   let integrate = null;
@@ -1619,16 +1989,19 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     phase('Merge');
     integrate = await agentT(
       roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
-        CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
+        CANONICAL: evo ? evo.base : CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
+          ...externalFields(r.ver),
           files: r.d.focus_files || [], patch: r.patch })),
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
-    const integPrim = integrate && integrate.best ? primSpeedup({
+    if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
+      integrate.best, evo ? evo.base : CANONICAL, integrate.best.patch_file);
+    const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
     if (integrate && integrate.conclusion === 'improved' && integrate.best &&
@@ -1639,13 +2012,25 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         weighted: integrate.best.weighted != null ? integrate.best.weighted : null,
         arithmetic: integrate.best.arithmetic || integrate.best.geomean,
         per_case: integrate.best.per_case || [], patch: integrate.best.patch_file,
+        ...externalFields(integrate.best),
       });
     }
   }
 
+  if (evo && integrate && integrate.best && candidates.some(c => c.id === `r${round}_integrated`)) {
+    const retained = await evo.record({id: `r${round}_integrated`, parent_id: 'ORIGINAL',
+      donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate'}, null,
+      {...integrate.best, status: 'verified', correctness: 'pass',
+        verified_geomean: integrate.best.geomean, verified_weighted: integrate.best.weighted},
+      integrate.best.patch_file);
+    if (retained.retention_error || retained.last_record_error) {
+      candidates = candidates.filter(c => c.id !== `r${round}_integrated`);
+    }
+  }
   candidates.sort((a, b) => b.geomean - a.geomean);
-  const winner = candidates[0] || null;
-  const improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  let winner = candidates[0] || null;
+  let improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  let failedCommitRecovery = null;
   // Separate question from `improved`: is the SEARCH advancing, not did it beat the incumbent. The
   // `bestSeen > 0` guard keeps round 1 deciding on `improved` alone; from then on bestSeen >= cumulative
   // at the default floor, so at the default PROGRESS_DELTA this implies `improved` and changes nothing.
@@ -1653,8 +2038,48 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   const madeProgress = !!(winner && bestSeen > 0 && winner.geomean > bestSeen * (1 + PROGRESS_DELTA));
 
   // --- (e) Commit the winner into the canonical workspace ---------------
+  if (improved && evo) {
+    let promotion = null;
+    try { promotion = await evolutionPromotionPatch(evo, winner, round); }
+    catch (error) { log(`Round ${round}: could not prepare promotion: ${String(error)}`); }
+    if (!promotion) {
+      log(`Round ${round}: promotion patch failed; retaining the previous validated source.`);
+      improved = false;
+    } else {
+      winner = {...winner, archive_patch: winner.patch, patch: promotion.patch, source_tree: promotion.tree};
+    }
+  }
   if (improved) {
-    await agentT(
+    await captureCanonicalSelection(history, 'before_commit', round, finalWinner);
+    let commitBase = null, priorUntracked = [], commitResult = null, commitDeadline = false;
+    try {
+      if (PROCESS_BOUNDED || evo) {
+        const top = ((await git(CANONICAL, 'rev-parse', '--show-toplevel')) || '').trim();
+        if (top !== CANONICAL.replace(/\/+$/, '')) {
+          throw new Error('bounded commit requires an isolated canonical repository');
+        }
+        const untracked = await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z');
+        commitBase = ((await git(CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}')) || '').trim();
+        if (untracked === null || !/^[0-9a-f]{40,64}$/.test(commitBase)) {
+          throw new Error('could not pin the previous committed canonical source');
+        }
+        priorUntracked = untracked.split('\0').filter(Boolean);
+        const status = await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no');
+        if (status === null) throw new Error('could not inspect the canonical source before commit');
+        if (status !== '') {
+          const dirty = await git(CANONICAL, 'diff', '--binary', commitBase, '--', '.');
+          const dirtyPath = `${EVAL_DIR}/precommit_round_${round}.diff`;
+          if (dirty === null
+              || await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', dirtyPath], {input: dirty}) === null
+              || await git(CANONICAL, 'restore', '--source', commitBase, '--staged', '--worktree', '--', '.') === null
+              || ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim() !== commitBase
+              || await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no') !== '') {
+            throw new Error('could not retain and restore tracked changes before commit');
+          }
+          log(`Round ${round}: retained tracked changes in ${dirtyPath} before restoring the committed source.`);
+        }
+      }
+      commitResult = await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -1675,18 +2100,54 @@ check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only re
 it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
 re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
-    cumulative = winner.geomean;
-    bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
-    finalWinner = winner;
-    roundsCommitted += 1;
+    } catch (error) {
+      if (!evo && (!PROCESS_BOUNDED || error.code !== 'GEAK_PROCESS_DEADLINE')) throw error;
+      commitDeadline = error.code === 'GEAK_PROCESS_DEADLINE';
+      if (evo) log(`Round ${round}: commit attempt failed; retaining the previous validated source.`);
+    }
+    if (evo && commitResult && commitResult.committed === true
+        && await git(CANONICAL, 'diff', '--exit-code', winner.source_tree, 'HEAD', '--', '.') !== '') {
+      commitResult = null;
+    }
+    if ((PROCESS_BOUNDED || evo) && (!commitResult || commitResult.committed !== true)) {
+      let atDeadline = commitDeadline || await secondsLeft(`uncommitted-r${round}`) <= 7;
+      // Search has settled. Only host recovery may use the existing Report allowance.
+      if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+      const recovery = commitBase ? await restoreUncommittedRound(commitBase, priorUntracked, round) : null;
+      await captureCanonicalSelection(history, 'after_restore', round, finalWinner);
+      if (!atDeadline && PROCESS_BOUNDED) {
+        setProcessDeadline(DEADLINE_EPOCH - SEARCH_RESERVE_S);
+        atDeadline = await secondsLeft(`restored-r${round}`) <= 7;
+      }
+      const status = atDeadline ? 'deadline_uncommitted' : 'commit_failed';
+      if (atDeadline) {
+        history.rounds.push({round, status, cumulative, improved: false,
+          directions: directions.map(d => ({id: d.id, title: d.title, specialty: d.specialty})),
+          winner: {source: winner.source, geomean: winner.geomean, patch: winner.patch}, recovery});
+        plannerStopReason = status;
+        log(`Round ${round}: commit did not finish at the cutoff; retained the previous winner for Report/Validate.`);
+        break;
+      }
+      log(`Round ${round}: commit failed; retained the previous winner and continuing search.`);
+      improved = false;
+      failedCommitRecovery = recovery;
+    }
+    if (improved) {
+      await captureCanonicalSelection(history, 'after_commit', round, winner);
+      cumulative = winner.geomean;
+      bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
+      finalWinner = winner;
+      roundsCommitted += 1;
+      if (evo) await evo.selectBest(winner.id);
 
-    // --- (f) Re-profile the new best ------------------------------------
-    profileSummary = await agentT(
-      roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-        WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
-        COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-      }),
-      { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+      // --- (f) Re-profile the new best ------------------------------------
+      profileSummary = await agentT(
+        roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
+          WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
+          COMMANDMENT, PREVIOUS_METRICS: profileSummary,
+        }),
+        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+    }
   }
 
   if (winner && winner.geomean > bestSeen) bestSeen = winner.geomean;
@@ -1700,6 +2161,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         expected: r.d.expected_speedup, claimed: r.eng ? r.eng.speedup_geomean : 0,
         verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
         notes: r.eng ? r.eng.notes : '' })),
+      ...(EXTERNAL_OBJECTIVE ? { EXTERNAL_RESULTS: clean.map(r => ({id: r.d.id,
+        engineer: externalFields(r.eng), verified: externalFields(r.ver)})) } : {}),
       INTEGRATE: integrate, WINNER: winner ? { source: winner.source, geomean: winner.geomean } : null,
       IMPROVED: improved, REPROFILE_SHIFT: profileSummary ? profileSummary.shift_note : '',
       PRIOR_HISTORY: history,
@@ -1749,8 +2212,8 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
         card: cardRef, round, direction: r.d.id, specialty: r.d.specialty,
         // null, NOT 0, when the verifier produced nothing. `kb.py` scores <=1.0 as a real loss, so
         // encoding "no evidence" as 0 charged a card for a verifier that crashed or timed out.
-        cited_then_verified: r.ver && Number.isFinite(r.ver.verified_geomean)
-          ? r.ver.verified_geomean : null,
+        cited_then_verified: EXTERNAL_OBJECTIVE ? primSpeedup(r.ver)
+          : (r.ver && Number.isFinite(r.ver.verified_geomean) ? r.ver.verified_geomean : null),
         // `winner` is only the best candidate OF THIS ROUND; `improved` is whether it beat the
         // incumbent by MIN_IMPROVE. Crediting on `winner` alone let a 1.5x round winner confirm a
         // card while the committed best already sat at 2x — a confirmation for advancing nothing,
@@ -1761,10 +2224,12 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
   }
   history.rounds.push({
     round,
+    ...(failedCommitRecovery ? {status: 'commit_failed', recovery: failedCommitRecovery} : {}),
     directions: directions.map(d => ({ id: d.id, title: d.title, specialty: d.specialty,
       learned_refs: d.learned_refs || [] })),
     results: clean.map(r => ({ id: r.d.id, claimed: r.eng ? r.eng.speedup_geomean : 0,
-      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none') })),
+      verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
+      ...(EXTERNAL_OBJECTIVE ? {engineer_external: externalFields(r.eng), verified_external: externalFields(r.ver)} : {}) })),
     integrate: integrate ? { conclusion: integrate.conclusion, geomean: integrate.best ? integrate.best.geomean : 0 } : null,
     winner: winner ? { source: winner.source, geomean: winner.geomean } : null,
     improved, cumulative,
@@ -1798,11 +2263,69 @@ return {
   rounds: round, dispatched, cumulativeSpeedup: cumulative, bestPerCase, finalWinner, roundsCommitted,
   history, citations, profileSummary, forcedReplans, kbCapBound,
   // Which condition actually ended the loop (see `stopped_by` in the return value).
-  stopReason: deadlineHit ? 'deadline'
+  stopReason: plannerStopReason === 'deadline_uncommitted' ? plannerStopReason : deadlineHit ? 'deadline'
     : (dispatched >= BUDGET) ? 'budget'
     : (noImprove >= MAX_NO_IMPROVE) ? 'no_improve'
     : (plannerStopReason || 'tech_lead_stop'),
 };
+}
+
+// Every retained evolutionary patch is relative to one run base. Build the exact
+// proposed tree in a private Git index, then diff it against the current winner.
+// This avoids applying an old parent's patch to a different canonical source.
+async function evolutionPromotionPatch(evo, winner, round) {
+  const index = `${EVAL_DIR}/evolution/promotion-${round}.index`;
+  const indexed = (...args) => hostRun('env', [`GIT_INDEX_FILE=${index}`, 'git', '-C', CANONICAL, ...args]);
+  const source = evo.entries.find(row => row.id === winner.id)?.patch_ref;
+  const sourceMatches = async () => source &&
+    ((await hostRun('sha256sum', ['--', source.path])) || '').split(/\s/)[0] === source.sha256;
+  if (!await sourceMatches()) return null;
+  if (await indexed('read-tree', evo.baseCommit) === null
+      || await indexed('apply', '--cached', '--', source.path) === null || !await sourceMatches()) return null;
+  const tree = ((await indexed('write-tree')) || '').trim();
+  if (!/^[0-9a-f]{40,64}$/.test(tree)) return null;
+  const diff = await indexed('diff', '--cached', '--binary', 'HEAD', '--', '.');
+  const patch = `${EVAL_DIR}/evolution/promotion-${round}.diff`;
+  if (diff === null || await writeFile(patch, diff) === null) return null;
+  return {tree, patch};
+}
+
+async function restoreUncommittedRound(previous, priorUntracked, round) {
+  const unfinished = ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim();
+  const retainedRef = `refs/geak/incomplete-round-${round}`;
+  const diffPath = `${EVAL_DIR}/uncommitted_round_${round}.diff`;
+  const pending = await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z');
+  if (pending === null) throw new Error('could not inspect unfinished canonical files');
+  const newFiles = pending.split('\0').filter(name => name && !priorUntracked.includes(name));
+  // Include newly created source bytes in the retained diff before removing them.
+  if (newFiles.length && await git(CANONICAL, '--literal-pathspecs', 'add', '--intent-to-add', '--', ...newFiles) === null) {
+    throw new Error('could not retain new unfinished canonical files');
+  }
+  const partial = await git(CANONICAL, 'diff', '--binary', previous, '--', '.');
+  if (!/^[0-9a-f]{40,64}$/.test(unfinished) || partial === null
+      || await hostRun('sh', ['-c', 'set -C; cat > "$1"', 'sh', diffPath], {input: partial}) === null
+      || await git(CANONICAL, 'update-ref', retainedRef, unfinished, '') === null
+      // Mixed reset preserves untracked files, including files staged by an unfinished add -A.
+      || await git(CANONICAL, 'reset', '--mixed', previous) === null
+      || await git(CANONICAL, 'restore', '--source', previous, '--worktree', '--', '.') === null) {
+    throw new Error('could not retain and restore the unfinished canonical commit');
+  }
+  const untracked = await git(CANONICAL, 'ls-files', '--others', '--exclude-standard', '-z');
+  if (untracked === null) throw new Error('could not inspect unfinished canonical files');
+  const added = untracked.split('\0').filter(name => name && !priorUntracked.includes(name));
+  if (added.length && await git(CANONICAL, '--literal-pathspecs', 'clean', '-f', '--', ...added) === null) {
+    throw new Error('could not remove unfinished canonical files');
+  }
+  const baseline = ((await git(CANONICAL, 'rev-list', '--max-parents=0', previous)) || '').trim();
+  const patch = /^[0-9a-f]{40,64}$/.test(baseline)
+    ? await git(CANONICAL, 'diff', '--binary', baseline, previous, '--', '.') : null;
+  if (patch === null || await writeFile(`${EVAL_DIR}/current_best.diff`, patch) === null
+      || ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim() !== previous
+      || await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no') !== '') {
+    throw new Error('restored canonical source differs from the previous committed winner');
+  }
+  return {previous_commit: previous, unfinished_commit: unfinished, retained_ref: retainedRef,
+    partial_patch: diffPath};
 }
 
 // Set the variables the Report/Validate postlude reads from one OptimizeResult.
@@ -1818,50 +2341,230 @@ function applyOptimizeResult(r) {
   citations.push(...r.citations);
   profileSummary = r.profileSummary;
   stopReason = r.stopReason;
-  deadlineHit = r.stopReason === 'deadline';
+  deadlineHit = r.stopReason === 'deadline' || r.stopReason === 'deadline_uncommitted';
   forcedReplans = r.forcedReplans;
   kbCapBound = r.kbCapBound;
 }
+// Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
-// An external optimizer (args.optimizer other than 'greedy', e.g. GEAK-EVO) replaces the greedy
-// loop above and nothing else: Setup, the cases, the commands, the baseline and Report/Validate stay
-// the same. It is one supplied command, run by the runtime's runProcess() -- no agent in the path:
-//
-//   <args.optimizer_command...> --task <dir>/task.json --out <dir>/result.json
-//
-// It works in its own clone of the workspace (task.workspace, at base_commit, at the same path inside
-// the repository) and leaves its winner committed there. The lane's workspace changes only after a
-// clean finish, by a fast-forward to best.commit; on every other outcome it keeps the baseline.
-//
-// PROVISIONAL: task.json/result.json keep the v2 field shapes until the GEAK-EVO entry command and
-// its result exporter are bound. The objective is the greedy loop's: the time-weighted ratio of sums
-// Σw/Σ(w/speedup) over the cases' workload weights when a workload spec is active, else the geomean
-// of the per-case speedups. task.objective states which (with the weights and the workload spec as
-// given), best.speedup must be that number, and a winner must beat the incumbent by MIN_IMPROVE as
-// in the greedy loop. A workload-aligned run whose cases carry no weights is refused. Each speedup comes
-// from the matching pair the optimizer reports for that case ({baseline_ms, optimized_ms}), never
-// from the lane's baseline divided by a time taken in another session. How the pair was timed
-// (interleaved or not) and its provenance are the optimizer's to check; Validate re-measures.
-//
-// args.optimizer_task_ref ({path, sha256}, optional) names an already admitted task. The lane copies
-// it into task.json as task_ref without reading it; the command checks it against what it runs.
-const OPTIMIZER = String(A.optimizer || 'greedy');
-// The optimizer must finish this long before the lane deadline, leaving time for Report/Validate.
-const OPTIMIZER_RESERVE_S = Math.max(0, parseInt(A.optimizer_reserve_s != null ? A.optimizer_reserve_s : 600, 10));
-// How long the optimizer's process group gets between SIGTERM and SIGKILL, and how long after that
-// runProcess may still wait for pipes and group to clear.
-const OPTIMIZER_GRACE_MS = 30000;
-const OPTIMIZER_SETTLE_MS = 5000;
-// When the optimizer gets SIGTERM (epoch seconds, null without a deadline): early enough that it is
-// stopped and settled before the reserve begins. task.budget.deadline_epoch is this instant.
-const OPTIMIZER_STOP_EPOCH = DEADLINE_EPOCH
-  ? DEADLINE_EPOCH - OPTIMIZER_RESERVE_S - (OPTIMIZER_GRACE_MS + OPTIMIZER_SETTLE_MS) / 1000 : null;
-// Milliseconds left until then (Infinity without a deadline). Read again right before the run.
-const optimizerMsLeft = () => (OPTIMIZER_STOP_EPOCH ? OPTIMIZER_STOP_EPOCH * 1000 - Date.now() : Infinity);
+// Retained population for the stock GEAK loop. No model calls or separate runner.
+async function createEvolution(start) {
+  const path = `${EVAL_DIR}/evolution`, base = `${path}/base`, archive = `${path}/archive.json`;
+  const entries = [];
+  let baseCommit, bestId = 'ORIGINAL', queue = Promise.resolve();
+  let baseline = {id: 'ORIGINAL', source: base, speedup: start.cumulative, origin: 'optimize_start'};
+  const run = async (cmd, args, opts) => {
+    const result = await hostRun(cmd, args, opts);
+    if (result === null) throw new Error(`evolution ${cmd} failed`);
+    return result;
+  };
+  const serial = (work) => {
+    const pending = queue.then(work);
+    queue = pending.catch(() => {});
+    return pending;
+  };
+  const snapshot = (rows, best) => ({schema: 'geak.evolution/1', base, base_commit: baseCommit,
+    baseline, best_id: best, entries: rows});
+  const save = async (rows, best = bestId) => {
+    await run('sh', ['-c',
+      'set -e; tmp=$(mktemp "$1/.archive.XXXXXX"); trap \'rm -f -- "$tmp"\' EXIT; cat > "$tmp"; mv -f -- "$tmp" "$2"',
+      'sh', path, archive], {input: JSON.stringify(snapshot(rows, best), null, 2) + '\n'});
+    entries.splice(0, entries.length, ...rows);
+    bestId = best;
+  };
+  // Each run starts fresh. Atomic directory creation refuses reuse without a
+  // separate resume protocol or any mutation of an earlier archive.
+  await run('mkdir', [path]);
+  await run('mkdir', [`${path}/patches`]);
+  baseCommit = (await run('git', ['-C', CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}'])).trim();
+  if (!/^[0-9a-f]{40,64}$/.test(baseCommit)
+      || (await run('git', ['-C', CANONICAL, 'status', '--porcelain', '--untracked-files=no'])).trim()) {
+    throw new Error('evolution base requires the exact clean canonical Git commit');
+  }
+  await run('mkdir', [base]);
+  await run('bash', [`${WORKFLOW_DIR}/scripts/materialize_workspace.sh`, '--src', CANONICAL,
+    '--dst', base, '--shared-root', `${EVAL_DIR}/_shared`, '--link-aiter']);
+  await save([], 'ORIGINAL');
+  const retained = (id) => entries.find(row => row.id === id && row.patch_ref && !row.retention_error);
+  const defaultParent = () => retained(bestId)?.verified ? bestId : 'ORIGINAL';
+  const evidence = (value) => {
+    if (!value) return null;
+    const keys = ['status', 'correctness', 'strategy', 'measurement_valid', 'external_measurement_valid',
+      'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
+      'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
+      'per_case', 'native_reproducible_gain', 'native_reproducible_regression', 'notes'];
+    return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
+  };
+  const digest = async (file) => {
+    const hash = (await run('sha256sum', ['--', file])).match(/^[0-9a-f]{64}/);
+    if (!hash) throw new Error('retained patch has no source hash');
+    return hash[0];
+  };
+  return {
+    base, baseCommit, path: archive, entries,
+    engineerContext(direction) {
+      const context = direction.evolution_context;
+      if (A.evolution_evidence_handoff !== true) return context;
+      const selected = (id) => {
+        const row = entries.find(entry => entry.id === id);
+        return {id, patch_ref: row?.patch_ref || null, status: row?.status || null,
+          verified: row?.verified ?? null, retention_error: row?.retention_error ?? null,
+          last_record_error: row?.last_record_error ?? null,
+          engineer: row?.engineer || null, verifier: row?.verifier || null};
+      };
+      // Prompt-only view: never retain an expanded context inside archive rows.
+      const selectedEvidence = {
+        parent: selected(direction.parent_id),
+        donors: (direction.donor_ids || []).map(selected)};
+      let bytes = 0;
+      for (const char of JSON.stringify(selectedEvidence)) {
+        const point = char.codePointAt(0);
+        bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      }
+      return bytes > 16384
+        ? {...context, selected_evidence_omitted: 'over_16384_utf8_bytes'}
+        : {...context, selected_evidence: selectedEvidence};
+    },
+    planInputs() {
+      const summary = entries.slice(-12);
+      const best = entries.find(row => row.id === bestId);
+      if (best && !summary.includes(best)) summary.unshift(best);
+      return {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
+        EVOLUTION_BEST_ID: bestId, EVOLUTION_ENTRY_COUNT: entries.length,
+        EVOLUTION_ENTRIES: summary.map(row => ({id: row.id,
+          title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
+          status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
+          retention_error: row.retention_error, last_record_error: row.last_record_error || null,
+          strategy: row.engineer && row.engineer.strategy}))};
+    },
+    prepare(directions, round) {
+      if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');
+      return directions.map((direction, index) => {
+        const errors = [], requested = direction.parent_id;
+        let parent = requested, resolution = 'explicit';
+        if (!parent || (parent !== 'ORIGINAL' && !retained(parent))) {
+          if (parent) errors.push(`unknown or unavailable parent_id: ${String(parent)}`);
+          parent = defaultParent();
+          resolution = `${requested ? 'invalid_reference_' : ''}default_${parent === 'ORIGINAL' ? 'original' : 'best_verified'}`;
+        }
+        const donors = [];
+        if (direction.donor_ids != null && !Array.isArray(direction.donor_ids)) errors.push('donor_ids must be an array');
+        for (const donor of Array.isArray(direction.donor_ids) ? direction.donor_ids : []) {
+          if (donor !== 'ORIGINAL' && !retained(donor)) errors.push(`unknown or unavailable donor_id: ${String(donor)}`);
+          else if (!donors.includes(donor)) donors.push(donor);
+        }
+        return {...direction, id: `r${round}_d${index}`, requested_id: direction.id || null,
+          parent_id: parent, donor_ids: donors, evolution_context: {requested_parent_id: requested || null,
+            parent_id: parent,
+            parent_resolution: resolution, reference_errors: errors,
+            donors: donors.map(id => ({id, patch_ref: id === 'ORIGINAL' ? null : retained(id).patch_ref}))}};
+      });
+    },
+    async prepareWorkspace(direction) {
+      const workspace = `${direction.out_dir}/workspace`;
+      const parent = direction.parent_id === 'ORIGINAL' ? null : retained(direction.parent_id);
+      if (direction.parent_id !== 'ORIGINAL' && !parent) throw new Error('selected evolution parent is unavailable');
+      const parentRef = parent ? {...parent.patch_ref} : null;
+      if (parentRef && await digest(parentRef.path) !== parentRef.sha256) throw new Error('selected parent patch changed');
+      await run('bash', [`${WORKFLOW_DIR}/scripts/materialize_workspace.sh`, '--src', base,
+        '--dst', workspace, '--shared-root', `${EVAL_DIR}/_shared`, '--link-aiter']);
+      await run('git', ['-C', workspace, 'init', '-q']);
+      await run('git', ['-C', workspace, 'add', '-A']);
+      await run('git', ['-C', workspace, 'commit', '-qm', 'Candidate baseline']);
+      const workspaceBase = (await run('git', ['-C', workspace, 'rev-parse', 'HEAD'])).trim();
+      if (parentRef) {
+        await run('git', ['-C', workspace, 'apply', '--', parentRef.path]);
+        if (await digest(parentRef.path) !== parentRef.sha256) throw new Error('selected parent patch changed during preparation');
+      }
+      await run('git', ['-C', workspace, 'add', '-A']);
+      const initialTree = (await run('git', ['-C', workspace, 'write-tree'])).trim();
+      if (parentRef) await run('git', ['-C', workspace, 'commit', '--allow-empty', '-qm', 'Selected evolution parent']);
+      const initialCommit = (await run('git', ['-C', workspace, 'rev-parse', 'HEAD'])).trim();
+      direction.evolution_context = {...direction.evolution_context,
+        workspace_base_commit: workspaceBase,
+        initialization: {status: 'ready', workspace, base_commit: baseCommit,
+          workspace_base_commit: workspaceBase, initial_tree: initialTree, initial_commit: initialCommit,
+          parent_id: direction.parent_id, parent_patch_ref: parentRef}};
+      return direction.evolution_context.initialization;
+    },
+    record(direction, eng, ver, patch) {
+      return serial(async () => {
+        const previous = entries.find(row => row.id === direction?.id);
+        const failure = (reason) => {
+          log(`[evolution] ${direction?.id}: ${reason}`);
+          return {id: direction?.id || null, status: 'unverified', verified: false, speedup: null,
+            patch_ref: null, ...previous, retention_error: reason, last_record_error: reason};
+        };
+        if (!/^r[1-9][0-9]*_(?:d[0-9]+|integrated)$/.test(direction?.id)) {
+          return failure(`invalid evolution id: ${direction?.id}`);
+        }
+        if (previous && (previous.parent_id !== direction.parent_id
+            || JSON.stringify(previous.donor_ids) !== JSON.stringify(direction.donor_ids || []))) {
+          return failure(`evolution lineage changed for ${direction.id}`);
+        }
+        const speedup = primSpeedup(ver);
+        const verified = !!(ver && (says(ver.status, 'verified') || says(ver.status, 'regression'))
+          && says(ver.correctness, 'pass') && Number.isFinite(speedup) && speedup > 0
+          && (!EXTERNAL_OBJECTIVE || ver.external_measurement_valid === true));
+        const row = {id: direction.id, parent_id: direction.parent_id, donor_ids: direction.donor_ids || [],
+          title: direction.title || '', approach: direction.approach || null, specialty: direction.specialty || '',
+          base_commit: baseCommit, patch_ref: null, original_patch: patch || null,
+          verified, speedup: verified ? speedup : null,
+          status: verified ? (speedup <= 1 ? 'slower' : 'correct')
+            : ver && says(ver.correctness, 'fail') ? 'incorrect' : 'unverified',
+          engineer: evidence(eng) || previous?.engineer || null, verifier: evidence(ver),
+          evolution_context: direction.evolution_context || null, retention_error: null};
+        try {
+          if (typeof patch !== 'string' || !patch) throw new Error('no patch path supplied');
+          const target = `${path}/patches/${direction.id}.diff`, hash = await digest(patch);
+          if (previous?.patch_ref && previous.patch_ref.sha256 !== hash) {
+            throw Object.assign(new Error('retained patch changed before evidence update'), {sourceChanged: true});
+          }
+          if (!previous?.patch_ref) await run('cp', ['--no-clobber', '--', patch, target]);
+          if (await digest(target) !== hash) throw new Error('existing retained patch differs');
+          row.patch_ref = {path: target, sha256: hash, base_commit: baseCommit};
+        } catch (error) {
+          if (error.sourceChanged) return failure(String(error));
+          row.retention_error = `patch retention failed: ${String(error)}`;
+          if (previous?.patch_ref) {
+            const failure = row.retention_error;
+            Object.assign(row, previous, {last_record_error: failure});
+          }
+        }
+        const next = previous ? entries.map(entry => entry.id === row.id ? row : entry) : [...entries, row];
+        try { await save(next); }
+        catch (error) {
+          row.retention_error = `${row.retention_error ? row.retention_error + '; ' : ''}archive checkpoint failed: ${String(error)}`;
+        }
+        if (row.retention_error || row.last_record_error) {
+          log(`[evolution] ${row.id}: ${row.retention_error || row.last_record_error}`);
+        }
+        return row;
+      });
+    },
+    selectBest(id) {
+      return serial(async () => {
+        const selected = retained(id);
+        if (id !== 'ORIGINAL' && (!selected || !selected.verified)) {
+          log(`[evolution] best checkpoint unchanged: ${id} has no retained verified source`); return false;
+        }
+        try { await save([...entries], id); return true; }
+        catch (error) { log(`[evolution] best checkpoint failed: ${String(error)}`); return false; }
+      });
+    },
+  };
+}
+// Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
 
+// Host helpers shared by native measurement and the evolution workspace policy.
 // One host command; null when it did not run cleanly to exit 0.
 async function hostRun(cmd, args, opts = {}) {
   const r = await runProcess({ cmd, args, timeoutMs: 300000, graceMs: 2000, ...opts });
+  if (PROCESS_BOUNDED && r.status === 'timeout') {
+    throw Object.assign(new Error('external host command timed out'), { code: 'GEAK_HOST_TIMEOUT' });
+  }
   return processClean(r) && r.code === 0 ? r.stdout : null;
 }
 // Finished by itself, and nothing it started can still be running.
@@ -1869,221 +2572,23 @@ const processClean = (r) => r.status === 'completed' && !r.strays_killed && r.gr
 const git = (dir, ...args) => hostRun('git', ['-C', dir, ...args]);
 const writeFile = (path, text) => hostRun('sh', ['-c', 'cat > "$1"', 'sh', path], { input: text });
 
-async function externalOptimize(name, start) {
-  if (skipLoop || !(BUDGET > 0)) return greedyOptimize(start);   // nothing to optimize: same no-op result
-  const noWinner = (why, stopReason = 'optimizer_error') => {
-    log(`[${name}] no winner, the workspace keeps the baseline: ${why}`);
-    return {
-      rounds: 0, dispatched: 0, cumulativeSpeedup: start.cumulative, bestPerCase: start.bestPerCase,
-      finalWinner: start.finalWinner, roundsCommitted: 0, history: start.history, citations: [],
-      profileSummary: start.profileSummary, stopReason, forcedReplans: 0, kbCapBound: 0,
-    };
-  };
-  if (typeof runProcess !== 'function') return noWinner('this runtime provides no runProcess()');
-  const weighted = HAS_WORKLOAD;
-  if (weighted && !BASELINE_PER_CASE.every(c => Number.isFinite(c.weight) && c.weight > 0)) {
-    return noWinner('the run is workload-aligned but its cases carry no workload weights');
-  }
-  const taskRef = A.optimizer_task_ref;
-  if (taskRef != null && !(taskRef && typeof taskRef.path === 'string' && taskRef.path
-      && /^[0-9a-f]{64}$/.test(String(taskRef.sha256)))) {
-    return noWinner('args.optimizer_task_ref must be {path, sha256}');
-  }
-  let argv = A.optimizer_command;
-  try { if (typeof argv === 'string') argv = JSON.parse(argv); } catch (_) { argv = null; }
-  if (!Array.isArray(argv) || !argv.length || !argv.every(a => typeof a === 'string' && a)) {
-    return noWinner('args.optimizer_command must be a non-empty argv array of strings');
-  }
-  const editable = (analysis && analysis.modifiable_files) || [];
-  if (!editable.length || !bench.correctness_cmd || !bench.benchmark_cmd) {
-    return noWinner('the analysis has no editable files or the benchmark has no correctness/benchmark command');
-  }
-  // A command naming the lane workspace would act on it, not on the optimizer's clone.
-  const commands = [bench.correctness_cmd, bench.benchmark_cmd, bench.profile_cmd].filter(Boolean);
-  if (commands.some(c => c.includes(CANONICAL))) {
-    return noWinner(`a benchmark command names the lane workspace ${CANONICAL}; it would not run in the optimizer's copy`);
-  }
-  const top = ((await git(CANONICAL, 'rev-parse', '--show-toplevel')) || '').trim();
-  const prefix = ((await git(CANONICAL, 'rev-parse', '--show-prefix')) || '').trim();   // '' or 'sub/dir/'
-  const base = ((await git(CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}')) || '').trim();
-  if (!top || !base) return noWinner('could not read the workspace HEAD');
-  // Editable paths relative to the lane workspace (the task's view) and to the repository (git's).
-  const editableRel = editable.map(p => wsRelPath(p));
-  if (editableRel.some(p => p === null)) return noWinner('an editable path lies outside the lane workspace');
-  if (optimizerMsLeft() <= 0) return noWinner('the lane deadline leaves no time to optimize', 'deadline');
-
-  const dir = `${EVAL_DIR}/optimizer/${name}-${base.slice(0, 12)}-${Date.now()}`;
-  const clone = `${dir}/repo`;
-  const owned = prefix ? `${clone}/${prefix.replace(/\/+$/, '')}` : clone;
-  if ((await hostRun('mkdir', ['-p', dir])) === null
-      || (await hostRun('git', ['clone', '-q', '--no-checkout', top, clone])) === null
-      || (await git(clone, 'checkout', '-q', '--detach', base)) === null) {
-    return noWinner(`could not create the optimizer's workspace ${owned}`);
-  }
-  const taskPath = `${dir}/task.json`;
-  const resultPath = `${dir}/result.json`;
-  const task = {
-    schema_version: 1, eval_dir: dir, workspace: owned, base_commit: base,
-    ...(taskRef != null ? { task_ref: taskRef } : {}),
-    editable_paths: editableRel,
-    kernel_name: KERNEL_NAME, language: TARGET_LANGUAGE,
-    commands: { correctness: bench.correctness_cmd, benchmark: bench.benchmark_cmd,
-      ...(bench.profile_cmd ? { profile: bench.profile_cmd } : {}) },
-    baseline: { per_case: Object.fromEntries(BASELINE_PER_CASE.map(c => [c.name, c.baseline_ms])),
-      geomean_ms: BASELINE_GEOMEAN_MS },
-    objective: weighted
-      ? { kind: 'time_weighted', weights: Object.fromEntries(BASELINE_PER_CASE.map(c => [c.name, c.weight])),
-          ...(WORKLOAD_SPEC_PATH ? { workload_spec_path: WORKLOAD_SPEC_PATH } : {}),
-          ...(WORKLOAD_SPEC ? { workload: WORKLOAD_SPEC } : {}) }
-      : { kind: 'geomean' },
-    incumbent_speedup: start.cumulative, min_improvement: MIN_IMPROVE,
-    ...(start.profileSummary ? { profile_summary: start.profileSummary } : {}),
-    device: { arch: GFX, gpus: GPU_LIST },
-    // null = no limit. The command gets SIGTERM at deadline_epoch and SIGKILL 30 s later.
-    budget: { max_rounds: BUDGET, deadline_epoch: OPTIMIZER_STOP_EPOCH,
-      agent_timeout_s: AGENT_TIMEOUT_MS > 0 ? AGENT_TIMEOUT_MS / 1000 : null, min_improvement: MIN_IMPROVE },
-  };
-  if ((await writeFile(taskPath, JSON.stringify(task, null, 2) + '\n')) === null) {
-    return noWinner(`could not write ${taskPath}`);
-  }
-
-  // Never retried. The run is bounded by the deadline, and runProcess reports whether anything it
-  // started could still be running when it returned.
-  const runMs = optimizerMsLeft();
-  if (runMs <= 0) return noWinner('setup used up the time left to optimize', 'deadline');
-  const ran = await runProcess({
-    cmd: argv[0], args: [...argv.slice(1), '--task', taskPath, '--out', resultPath], cwd: owned,
-    timeoutMs: Number.isFinite(runMs) ? Math.round(runMs) : 0, graceMs: OPTIMIZER_GRACE_MS,
-    settleMs: OPTIMIZER_SETTLE_MS,
-  });
-  await writeFile(`${dir}/stdout.txt`, ran.stdout);
-  await writeFile(`${dir}/stderr.txt`, ran.stderr);
-  log(`[${name}] ${ran.status} exit=${ran.code} signal=${ran.signal} after ${Math.round(ran.duration_ms / 1000)}s` +
-    `${ran.strays_killed ? ', stray processes killed' : ''}${ran.group_cleared ? '' : ', PROCESS GROUP NOT CLEARED'}` +
-    `${ran.stdio_held ? ', AN ESCAPED PROCESS HELD ITS OUTPUT' : ''}`);
-  // A failed or timed-out run's own notes are logged as diagnostics; nothing else of its result is used.
-  const notes = async () => {
-    try {
-      const n = (JSON.parse((await hostRun('cat', [resultPath])) || 'null') || {}).notes;
-      return typeof n === 'string' && n ? `: ${n.slice(0, 500)}` : '';
-    } catch (_) { return ''; }
-  };
-  if (ran.status === 'timeout') return noWinner(`the optimizer ran past the lane deadline${await notes()}`, 'deadline');
-  if (ran.status !== 'completed' || ran.code !== 0) {
-    return noWinner(`the optimizer did not exit 0 (${ran.error || ran.code})${await notes()}`);
-  }
-  // A process left behind may have been writing; its result is not trusted.
-  if (!processClean(ran)) return noWinner('the optimizer left processes running');
-
-  let r = null;
-  try { r = JSON.parse((await hostRun('cat', [resultPath])) || 'null'); } catch (_) { r = null; }
-  const STOP = { deadline: 'deadline', budget: 'budget', no_improvement: 'no_improve', planner_stop: 'tech_lead_stop' };
-  if (!r || r.schema_version !== 1) return noWinner('missing result or unknown schema_version');
-  if (r.status === 'error') return noWinner(`the optimizer reported an error: ${r.notes || ''}`);
-  if (!['improved', 'no_improvement'].includes(r.status) || !STOP[r.stop_reason]
-      || !(Number.isInteger(r.rounds) && r.rounds >= 0)) {
-    return noWinner(`invalid result (status=${r.status}, stop_reason=${r.stop_reason})`);
-  }
-  const best = r.best;
-  if ((r.status === 'improved') !== !!best) return noWinner('status and best disagree');
-  const positive = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0;
-  if (best && !(positive(best.speedup) && /^[0-9a-f]{40,64}$/.test(String(best.commit || ''))
-      && best.per_case && typeof best.per_case === 'object')) {
-    return noWinner('invalid best');
-  }
-  // best.per_case is {case: {baseline_ms, optimized_ms}}, one pair per case of the lane.
-  const perCase = best && BASELINE_PER_CASE.map(c => {
-    const m = best.per_case[c.name] || {};
-    return { name: c.name, baseline_ms: m.baseline_ms, optimized_ms: m.optimized_ms,
-      speedup: m.baseline_ms / m.optimized_ms, ...(weighted ? { weight: c.weight } : {}) };
-  });
-  if (perCase && !perCase.every(c => positive(c.baseline_ms) && positive(c.optimized_ms) && positive(c.speedup))) {
-    return noWinner('best.per_case does not give a positive baseline/optimized pair for every case');
-  }
-  // best.speedup must be the lane's objective computed from those pairs, and beat the incumbent.
-  const geomean = perCase && Math.exp(perCase.reduce((a, c) => a + Math.log(c.speedup), 0) / perCase.length);
-  const arithmetic = perCase && perCase.reduce((a, c) => a + c.speedup, 0) / perCase.length;
-  const timeWeighted = perCase && weighted
-    ? perCase.reduce((a, c) => a + c.weight, 0) / perCase.reduce((a, c) => a + c.weight / c.speedup, 0) : null;
-  const primary = weighted ? timeWeighted : geomean;
-  if (perCase && Math.abs(primary / best.speedup - 1) > 1e-6) {
-    return noWinner(`best.speedup ${best.speedup} is not the ${weighted ? 'time-weighted' : 'geomean'} ` +
-      `speedup of its per-case pairs (${primary})`);
-  }
-  if (perCase && !(primary > start.cumulative * (1 + MIN_IMPROVE))) {
-    return noWinner(`best ${primary.toFixed(3)}x does not beat the incumbent ${start.cumulative}x by ${MIN_IMPROVE}`,
-      STOP[r.stop_reason]);
-  }
-  if (best) {
-    const refused = await fastForward(clone, base, best.commit, editableRel.map(p => prefix + p));
-    if (refused) return noWinner(`winner not applied: ${refused}`);
-    const root = ((await git(CANONICAL, 'rev-list', '--max-parents=0', 'HEAD')) || '').trim().split('\n')[0];
-    const diff = root && await git(CANONICAL, '--no-pager', 'diff', `${root}..HEAD`);
-    if (diff === null || (await writeFile(`${EVAL_DIR}/current_best.diff`, diff)) === null) {
-      log(`[${name}] WARNING: could not write ${EVAL_DIR}/current_best.diff`);
-    }
-  }
-  return {
-    rounds: r.rounds, dispatched: r.rounds,
-    cumulativeSpeedup: best ? primary : start.cumulative,
-    bestPerCase: perCase || start.bestPerCase,
-    // geomean is the PRIMARY metric, as in the greedy loop's candidates; the raw one is kept apart.
-    finalWinner: best ? { source: name, geomean: primary, geomean_unweighted: geomean,
-      weighted: timeWeighted, arithmetic, per_case: perCase,
-      patch: `${EVAL_DIR}/current_best.diff`, commit: best.commit } : start.finalWinner,
-    roundsCommitted: best ? 1 : 0,
-    history: { ...start.history, ...(r.history_path ? { history_path: r.history_path } : {}) },
-    citations: [], profileSummary: start.profileSummary,
-    stopReason: STOP[r.stop_reason], forcedReplans: 0, kbCapBound: 0,
-  };
-}
-
-// An editable path from the analysis, relative to the lane workspace; null if it lies outside it.
-function wsRelPath(p) {
-  const s = String(p).replace(/\/+$/, '');
-  const ws = CANONICAL.replace(/\/+$/, '') + '/';
-  if (s.startsWith(ws)) return s.slice(ws.length) || null;
-  if (!s || s.startsWith('/') || s.split('/').includes('..')) return null;
-  return s.replace(/^(\.\/)+/, '');
-}
-
-// Move the lane workspace from `base` to the optimizer's `commit` by a fast-forward. Returns null on
-// success, else why it refused; a refusal leaves the workspace as it was.
-async function fastForward(owned, base, commit, editable) {
-  const head = ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim();
-  if (head !== base) return `the workspace HEAD moved during the run (${head || '?'} != ${base})`;
-  if ((await git(CANONICAL, 'status', '--porcelain', '--untracked-files=no')) !== '') {
-    return 'the workspace has uncommitted changes';
-  }
-  if ((await git(owned, 'update-ref', 'refs/geak/winner', commit)) === null) {
-    return `${commit} is not a commit in the optimizer's workspace`;
-  }
-  if ((await git(CANONICAL, 'fetch', '-q', '--no-tags', owned, 'refs/geak/winner')) === null) {
-    return 'could not fetch the winner';
-  }
-  const fetched = ((await git(CANONICAL, 'rev-parse', 'FETCH_HEAD')) || '').trim();
-  if (fetched !== commit) return `fetched ${fetched || '?'} instead of ${commit}`;
-  if ((await git(CANONICAL, 'merge-base', '--is-ancestor', base, commit)) === null) {
-    return `${commit} does not descend from ${base}`;
-  }
-  // --no-renames: a rename lists both its source and its destination.
-  const changed = await git(CANONICAL, 'diff', '--no-renames', '--name-only', '-z', base, commit);
-  if (changed === null) return 'could not list the changed files';
-  const outside = changed.split('\0').filter(Boolean)
-    .filter(f => !editable.some(e => f === e || f.startsWith(e + '/')));
-  if (outside.length) return `it changes files outside the editable set: ${outside.slice(0, 5).join(', ')}`;
-  if ((await git(CANONICAL, 'merge', '-q', '--ff-only', commit)) === null) return 'the fast-forward failed';
-  const now = ((await git(CANONICAL, 'rev-parse', 'HEAD')) || '').trim();
-  return now === commit ? null : `HEAD is ${now || '?'} after the fast-forward, not ${commit}`;
-}
-
 const optimizeStart = { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary, history };
-applyOptimizeResult(OPTIMIZER === 'greedy'
-  ? await greedyOptimize(optimizeStart)
-  : await externalOptimize(OPTIMIZER, optimizeStart));
+applyOptimizeResult(OPTIMIZER === 'evo'
+  ? await greedyOptimize(optimizeStart, await createEvolution(optimizeStart))
+  : await greedyOptimize(optimizeStart));
 // ===========================================================================
 // PHASE: Final report (TechLead)
 // ===========================================================================
+if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_VALIDATION_RESERVE_S);
+await captureCanonicalSelection(history, 'terminal', round, finalWinner, stopReason);
+try {
+  await captureFinalEvaluation(CANONICAL);
+} catch (cause) {
+  const error = new Error(`final_capture_failed: ${String(cause)}`);
+  error.code = 'final_capture_failed';
+  throw error;
+}
+if (EXTERNAL_OBJECTIVE) history.final_selection = frozenFinalEvaluation;
 phase('Report');
 const report = await agentT(
   roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.', {
@@ -2092,32 +2597,60 @@ const report = await agentT(
     BASELINE_GEOMEAN_MS, CUMULATIVE_SPEEDUP: cumulative,
   }),
   { phase: 'Report', label: 'tech_lead:report', schema: REPORT_SCHEMA });
+const finalPatch = EXTERNAL_OBJECTIVE ? await writeFrozenFinalPatch()
+  : (report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`);
 
 // ===========================================================================
 // PHASE: Director validation + arbitration
 // ===========================================================================
+if (PROCESS_BOUNDED) setProcessDeadline(DEADLINE_EPOCH - FINAL_CLEANUP_RESERVE_S);
 phase('Validate');
-const validation = await agentT(
+const finalMeasurementFailure = await measureFinalEvaluation(CANONICAL);
+let validation = await agentT(
   roleAgent('director', 'validate', 'Independently validate the final patch vs the TRUE baseline.', {
     KERNEL_PATH_ORIG, EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     APPLY_TO_ORIGINAL, COMMANDMENT, FROZEN_ORACLE: FROZEN_ORACLE ? 'true' : 'false',
-    FINAL_PATCH: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+    FINAL_PATCH: finalPatch,
     TECH_LEAD_REPORTED_GEOMEAN: report ? report.final_speedup_geomean : cumulative,
     ...(HAS_WORKLOAD && report && report.final_speedup_weighted != null
         ? { TECH_LEAD_REPORTED_WEIGHTED: report.final_speedup_weighted } : {}),
     BASELINE_TIMING: BASELINE_PER_CASE,
   }),
   { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
+const directorValidationStatus = validation && validation.validation_status;
+if (EXTERNAL_OBJECTIVE) {
+  // A report or review may write files, but cannot replace the captured patch.
+  await writeFrozenFinalPatch();
+  validation = {...validation,
+    director_review_status: validation ? 'returned' : 'unavailable',
+    validation_status: validation ? validation.validation_status : 'accepted',
+    director_reported_evaluation: validation && validation.external_evaluation || null,
+    external_evaluation: frozenFinalEvaluation};
+}
+validation = finalMeasurementFailure ? {...validation,
+  primary_speedup: null, external_measurement_valid: false, validation_status: 'invalid_measurement',
+  native_reproducible_gain: false, native_reproducible_regression: false,
+  development_geomean_speedup: null, final_failure: finalMeasurementFailure}
+  : await checkedExternalMeasurement(validation, KERNEL_PATH_ORIG, finalPatch, true);
+if (EXTERNAL_OBJECTIVE && validation && validation.external_measurement_valid) {
+  if (directorValidationStatus && !says(directorValidationStatus, 'accepted')) {
+    validation.validation_status = directorValidationStatus;
+  } else if (!nativeGainEligible(validation)) {
+    validation.validation_status = 'no_improvement';
+  }
+}
+const externalPromotion = !EXTERNAL_OBJECTIVE || !!(nativeGainEligible(validation)
+  && validation && says(validation.validation_status, 'accepted'));
 
-const finalGeomean = validation ? validation.director_verified_speedup_geomean : cumulative;
+const finalGeomean = EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_geomean : cumulative);
 // PRIMARY headline: the time-weighted speedup when workload-aligned, else the geomean (unchanged).
-const finalWeighted = validation && validation.director_verified_speedup_weighted != null
+const finalWeighted = !EXTERNAL_OBJECTIVE && validation && validation.director_verified_speedup_weighted != null
   ? validation.director_verified_speedup_weighted : null;
-const finalPrimary = HAS_WORKLOAD && Number.isFinite(finalWeighted) ? finalWeighted : finalGeomean;
-log(`COMPLETE. ${KERNEL_NAME}: verified ${HAS_WORKLOAD ? 'time-weighted' : 'geomean'} ${finalPrimary ? finalPrimary.toFixed(2) : '?'}x` +
+const finalPrimary = EXTERNAL_OBJECTIVE ? (validation ? nativePrimary(validation) : null)
+  : (HAS_WORKLOAD && Number.isFinite(finalWeighted) ? finalWeighted : finalGeomean);
+log(`COMPLETE. ${KERNEL_NAME}: verified ${EXTERNAL_OBJECTIVE ? 'external primary' : HAS_WORKLOAD ? 'time-weighted' : 'geomean'} ${finalPrimary ? finalPrimary.toFixed(2) : '?'}x` +
     `${HAS_WORKLOAD && Number.isFinite(finalGeomean) ? ` (unweighted geomean ${finalGeomean.toFixed(2)}x)` : ''}` +
     ` (status ${validation ? validation.validation_status : '?'}). Results in ${EVAL_DIR}`);
-
 // ===========================================================================
 // PHASE: UpdateExperience — distill ONE reusable card into this workflow's knowledge/learned/
 // (see knowledge/learned/README.md). Runs ONCE, at the very end: never per round, because only
@@ -2141,7 +2674,7 @@ if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
 // no-op, correctness fail, contended box), and curating from it teaches the next run a lesson this
 // run did not earn. Reported in review of #411.
 const kbAccepted = String((validation && validation.validation_status) || '').toLowerCase() === 'accepted';
-if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && nativeGainEligible(validation) && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   try {
     learned_card = await agentT(
       roleAgent('update_experience', 'Validate',
@@ -2211,7 +2744,6 @@ Return {"filed": <the "citations" number the command printed, or 0>}.`,
     log(`[kb] citation ledger NOT filed: ${e && e.message ? e.message : e}`);
   }
 }
-
 // ===========================================================================
 // Write this run's outcome back — the producer half of the loop. One call files all three: the
 // kb_artifacts/ tree (which the remote payload is derived FROM, and which a curation pass edits),
@@ -2220,16 +2752,15 @@ Return {"filed": <the "citations" number the command printed, or 0>}.`,
 // pre-check just avoids spending an agent on a run that cannot pass the gate anyway.
 // ===========================================================================
 let kb_written = null;
-if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+if (KB_WRITE_OK && GFX && externalPromotion && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   const kernelClass = (analysis && analysis.kernel_type) || 'unknown';
-  const finalPatch = report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`;
   const reportPath = report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`;
   // What the store cannot infer from a diff but needs to curate this entry later. `direction` is the
   // IDEA, and only a warm start supplies a real one: a round title is free-form per run, so kebabbing
   // it would mint a unique label every time and group nothing. Unlabeled is honest — resolve treats
   // such an entry as its own direction, and a curation pass assigns the shared label later.
   const winnerDirection = kebab(warm_start.direction || '');
-  const metricKind = HAS_WORKLOAD ? 'time_weighted' : 'geomean';
+  const metricKind = EXTERNAL_OBJECTIVE ? 'external_primary' : HAS_WORKLOAD ? 'time_weighted' : 'geomean';
   // Commas separate the list, so a case name may not contain one.
   const caseNames = (bestPerCase || []).map(c => c && String(c.name || '').replace(/,/g, ';'))
     .filter(Boolean).join(',');
@@ -2258,7 +2789,7 @@ if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
 ${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE_STORE)} ${writeCmd} --root ${JSON.stringify(KB_ARTIFACTS_DIR)} \\
   --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\
   --gfx ${GFX} --kernel-class ${JSON.stringify(kernelClass)} \\
-  --speedup ${finalPrimary} --baseline-wall-ms ${BASELINE_GEOMEAN_MS} \\
+  --speedup ${finalPrimary}${EXTERNAL_OBJECTIVE ? '' : ` --baseline-wall-ms ${BASELINE_GEOMEAN_MS}`} \\
   --patch ${JSON.stringify(finalPatch)} --eval-dir ${JSON.stringify(EVAL_DIR)} \\
   --report ${JSON.stringify(reportPath)} --metric-kind ${metricKind} \\
   --direction ${JSON.stringify(winnerDirection)} --case-names ${JSON.stringify(caseNames)}\
@@ -2293,9 +2824,10 @@ ${warm_start.exp_dir ? ` \\\n  --parent ${JSON.stringify(warm_start.exp_dir)}` :
 // bench noise (~2% on this box; `_gemm_a16_w16_kernel` reported 0.98 and read as a regression).
 // Report 1.0 and say why, rather than dressing the noise up as a delta.
 const noRoundsAfterAdopt = !!(warm_start.adopted && roundsCommitted === 0);
-const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
+// Both terms are the reported metric (finalPrimary's), never the development scalar.
+const incrementalSpeedup = warm_start.adopted && warm_start.adopted_primary
   ? (noRoundsAfterAdopt ? 1.0
-     : Number.isFinite(finalPrimary) ? finalPrimary / warm_start.adopted_speedup : null)
+     : Number.isFinite(finalPrimary) ? finalPrimary / warm_start.adopted_primary : null)
   : finalPrimary;
 
 return {
@@ -2307,11 +2839,16 @@ return {
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
   kernel_name: KERNEL_NAME,
-  workload_aligned: HAS_WORKLOAD,
+  workload_aligned: !EXTERNAL_OBJECTIVE && HAS_WORKLOAD,
   final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
+  ...(EXTERNAL_OBJECTIVE ? externalFields(validation || {objective: EXTERNAL_OBJECTIVE}) : {}),
+  ...(EXTERNAL_OBJECTIVE ? {final_selection: frozenFinalEvaluation} : {}),
+  ...(CAPTURE_CANONICAL_SELECTIONS ? {canonical_selections: history.canonical_selections || []} : {}),
+  ...(EXTERNAL_OBJECTIVE ? {outcome: !validation || !validation.external_measurement_valid
+    ? 'invalid_measurement' : externalPromotion ? 'improved' : 'no_improvement'} : {}),
   final_weighted: finalWeighted,
   final_geomean: finalGeomean,
-  final_arithmetic: validation ? validation.director_verified_speedup_arithmetic : null,
+  final_arithmetic: EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_arithmetic : null),
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,
   validation_status: validation ? validation.validation_status : 'unknown',
   // What KIND of number `final_speedup` is, so bake-off ranking and campaign summaries don't read a
@@ -2322,7 +2859,9 @@ return {
   budget_used: dispatched,
   budget_total: BUDGET,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
-  final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+  final_patch: EXTERNAL_OBJECTIVE && !externalPromotion ? ''
+    : finalPatch,
+  ...(EXTERNAL_OBJECTIVE ? {final_patch_sha256: externalPromotion ? validation.patch_sha256 : null} : {}),
   // null when the step was off, or the run earned nothing worth a card.
   // Which condition actually ended the loop. RECORDED, not inferred: on the previous campaign this
   // existed only in the driver's return value, which the caller sees after ALL its kernels finish —
@@ -2361,7 +2900,7 @@ return {
     // name/language mismatch that only looks like an empty KB.
     match_tier: warm_start.match_tier || '',
     filtered: warm_start.filtered || null,
-    adopted_speedup: warm_start.adopted ? warm_start.adopted_speedup : null,
+    adopted_speedup: warm_start.adopted ? warm_start.adopted_primary : null,
     total_speedup: Number.isFinite(finalPrimary) ? finalPrimary : null,
     incremental_speedup: incrementalSpeedup,
     // true = the run adopted a stored patch and never improved on it; incremental is 1.0 by

@@ -23,7 +23,8 @@
     "kernel_workflow/src/kernel_lane/12_optimize_state.js",
     "kernel_workflow/src/kernel_lane/13_warm_start.js",
     "kernel_workflow/src/kernel_lane/14_optimize_loop.js",
-    "kernel_workflow/src/kernel_lane/14b_optimize_external.js",
+    "kernel_workflow/src/kernel_lane/14a_evolution.js",
+    "kernel_workflow/src/kernel_lane/14b_optimize_dispatch.js",
     "kernel_workflow/src/kernel_lane/15_report_validate.js",
     "kernel_workflow/src/kernel_lane/16_update_experience.js",
     "kernel_workflow/src/kernel_lane/17_writeback_return.js"

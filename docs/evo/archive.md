@@ -1,92 +1,63 @@
-# Save programs, ideas and results
+# Inspect retained candidates
 
-Use the existing `ResearchStore`. It keeps exact source files in `objects/` and
-appends checked history in `records/`. The index is a cache and can be rebuilt.
-Do not maintain a second best-program log by hand.
-
-## What to save
-
-The native host snapshots source before evaluation. At engineer settlement, the
-collector supplies its retained trials, including slower, failed and unfinished
-implementations. Missing snapshots stay explicit errors. An unfinished episode
-may not yet have a complete trial index.
-
-| Record | Required meaning |
-| --- | --- |
-| Source | SHA-256 identity of exact files, declared absences, layout and executable bits |
-| Candidate | Source plus task, measurement context, assigned parent and donors |
-| Attempt | Host-assigned engineer and operation; do not infer authorship from prose |
-| Idea | Stable idea ID, intended change and question; separate from implementation success |
-| Evaluation | Exact source, cases, raw evidence, correctness and measured results or failure |
-| Hardware claim | Existing `ClaimLog` reference with quantities, units, assumptions and evidence |
-| Next test | Smallest useful change or observation needed to continue the idea |
-
-Engineer notes should answer five short questions: what changes, why it might
-help, what hardware observation would support it, what the test actually showed,
-and what to try next. Link existing evidence instead of copying logs. Record
-unknowns explicitly. A slow implementation does not by itself refute an idea.
-Keep the original question separate from the implementation report. Parent and
-donor links describe source ancestry; they do not prove a useful contribution.
-
-## Browse a saved store
-
-From the repository root, export to a new directory:
-
-```sh
-python3 -m geak_evo.archive.export --store /path/to/store --out /path/to/view
-```
-
-If idea cards reference compiler or diagnostic records, also pass
-`--frozen-cases cases.json`: the host's `{job_id: [case_id, ...]}` registry.
-Missing required case bindings fail clearly; they are not inferred from a claim.
+GEAK-EVO keeps its population under `<eval_dir>/evolution/`:
 
 ```text
-view/
-  index.csv, index.json       programs and their recorded status
-  programs/<order>-<id>/      program/source manifests and exact source/
-  ideas/                     idea cards and revisions
-  attempts/                  engineer, parent and saved implemented-strategy fields
-  directions/                current saved review and next test for each direction
-  claims/, claims.json       exact committed claims and corrections, with their chain head
-  measurements.csv           one row per evaluation/trial; per-case times inside
-  observations/              exact saved measurements and their task/source inputs
-  trials.json                all supplied trials, including retention errors
-  timeline.json              changes to the host's selected program
-  lineage.json               parent and donor links
-  RESUME.json                saved directions and restoration limits
-  EXPORT.json                journal identity and exported file hashes/modes
+evolution/
+  archive.json           candidate metadata and selected evidence
+  base/                  fixed source at the start of the optimize loop
+  patches/<id>.diff      cumulative candidate patches against that base
 ```
 
-Start with `index.csv`, then open a program's `program.json`. Its `research_files`
-links lead to the investigation, current direction review and program-specific
-claims. Use `measurements.csv` and `observations/` for the measured results.
-Check the program/source IDs: a direction review describes its current tip, and
-an investigation's strategy need not describe every intermediate trial.
+Open the JSON directly with a text editor or a standard JSON viewer:
 
-Missing explanations stay null. Long strategies have a marked 4,096-character
-preview plus the full exact UTF-8 text in `attempts/<hash>.strategy.txt`, its
-SHA-256, and the original artifact/field reference. Claims and corrections come
-from the saved campaign head. Strategies, direction reviews, claims and
-corrections are attributed statements, not validation; blinded reviewers must
-exclude all of them as required by their study's review policy.
-Conversations and bulk reports are not copied.
+```sh
+python3 -m json.tool /absolute/path/evaluation/evolution/archive.json
+```
 
-Export one campaign at a time to a new directory for each journal snapshot.
-The same snapshot produces identical files and modes; stale or changed output
-is rejected. Current direction revisions must retain `archive_card_ref` for the
-current idea link; older cards remain in the store.
+The archive schema is `geak.evolution/1`. Its top-level `base` and `base_commit`
+identify the fixed starting source. `baseline` describes the optimize-loop
+starting point, including any prior warm start; the ID `ORIGINAL` refers to that
+run base. `best_id` identifies the selected validated candidate, or `ORIGINAL`
+when no retained candidate has been selected.
 
-Journal timestamps record saving, not discovery or measurement. `timeline.json`
-shows host choices, not a newly calculated best-speedup curve. Mixed test outcomes
-remain separate; failed or incomparable measurements do not become improvements.
+## Entry fields
 
-## Continue an idea
+| Field | Meaning |
+| --- | --- |
+| `id` | Workflow-assigned direction ID, such as `r2_d0`. |
+| `parent_id`, `donor_ids` | Selected starting candidate and declared donor references. |
+| `title`, `approach`, `specialty` | Planner descriptions; `approach` is an agent-supplied label. |
+| `base_commit`, `patch_ref` | Base identity and retained patch path, SHA-256, and base commit. |
+| `verified`, `speedup`, `status` | Verification state and primary metric when available. |
+| `engineer`, `verifier` | Selected structured evidence from the existing role outputs. |
+| `evolution_context` | Parent resolution, reference errors, and starting-workspace provenance. |
+| `retention_error`, `last_record_error` | Source retention or later recording failure, when present. |
 
-Restore the candidate's exact source and read its linked research and trials.
-A reviewed intermediate trial can start a fresh direction through the host's
-parent checks. Retention alone does not promote it to a verified best result.
+A `correct` or `slower` entry has passed verification with a positive, finite
+speedup. `slower` means its speedup is at most 1 against the task comparator;
+`correct` does not imply that it improved the current best enough for promotion.
+`incorrect` records failed correctness; `unverified` lacks accepted verification.
+An unavailable measurement is represented by a null speedup.
 
-The export is portable research material, not a complete live-run backup. Keep
-the original store and pinned task, harness, runtime and evidence files. Full
-resume needs those dependencies and compatible host services; never rewrite
-historical pins to make a changed runtime appear equivalent.
+Follow `patch_ref` for the retained source and the original round outputs for
+full reports and raw measurements. Patches include inherited parent changes
+against the fixed base. Check retention errors before treating a patch as an
+available parent. Keep the evaluation directory and referenced evidence together.
+
+## How agents use the archive
+
+The planner receives the latest twelve entries plus the best entry, with a path
+to the complete archive. It can inspect older entries and their evidence before
+choosing a parent. The workflow materializes the parent's patch into a private
+workspace; donor patches are references for the engineer to inspect.
+
+With `evolution_evidence_handoff: true`, the engineer prompt also includes a
+compact view of the selected parent and donors: their patch references, status,
+verification state, recording errors, and stored engineer/verifier evidence.
+The view is omitted if its JSON exceeds 16,384 UTF-8 bytes. This option defaults
+to false and does not change stored archive rows or promotion rules.
+
+The archive is a per-run record, without a separate exporter, semantic diversity
+index, or cross-run resume protocol. An ancestry link records a selection; useful
+contribution survival and later improvement require inspection and measurement.

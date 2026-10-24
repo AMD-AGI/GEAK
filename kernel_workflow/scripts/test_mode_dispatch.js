@@ -130,15 +130,17 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
 
   // -------------------------------------------------------------------------
   console.log('\n# C. pass-through forwards every arg to the worker unchanged');
-  {
-    const a = { ...BASE, mode: 'author', target_language: 'triton', budget: 3,
-                gpu_ids: '2,3', task: 'make it fast', backends: ['hip', 'ck'] };
+  for (const mode of ['optimize', 'author']) for (const handoff of [undefined, false, true, 'true']) {
+    const a = { ...BASE, mode, target_language: 'triton', budget: 3,
+                gpu_ids: '2,3', task: 'make it fast', backends: ['hip', 'ck'],
+                ...(handoff !== undefined ? {evolution_evidence_handoff: handoff} : {}) };
     const { run, trace } = build(a, {});
     await run();
     const c = trace.workflowCalls[0];
     ok(trace.workflowCalls.length === 1, 'exactly one workflow() call', `n=${trace.workflowCalls.length}`);
     ok(String(c.scriptPath).endsWith(path.sep + 'kernel_lane.js'), 'scriptPath = kernel_lane.js', c.scriptPath);
-    for (const k of ['mode', 'target_language', 'budget', 'gpu_ids', 'task', 'kernel_path']) {
+    for (const k of ['mode', 'target_language', 'budget', 'gpu_ids', 'task', 'kernel_path',
+      'evolution_evidence_handoff']) {
       ok(JSON.stringify(c.args[k]) === JSON.stringify(a[k]), `forwards ${k}`, JSON.stringify(c.args[k]));
     }
     ok(trace.agentLabels.length === 0, 'no agent spawned on pass-through', `n=${trace.agentLabels.length}`);

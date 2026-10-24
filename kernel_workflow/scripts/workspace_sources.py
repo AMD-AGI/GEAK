@@ -104,9 +104,26 @@ def relocate(src: Path, dst: Path):
 
 def check(workspace: Path):
     ancestors = [Path(p) for p in read_state(workspace)["ancestors"]]
-    if not ancestors:
+    shared = {}
+    options = [os.environ.get("GEAK_SHARED_INPUT_" + key, "")
+               for key in ("MANIFEST", "SHA256", "ROOT")]
+    if not ancestors and not any(options):
         return
+    if any(options):
+        if not all(options):
+            raise ValueError("shared-input manifest, SHA256 and root must be supplied together")
+        # Keep an explicitly selected native package ahead of the workflow fallback.
+        sys.path.append(str(Path(__file__).resolve().parents[2]))
+        from geak.native.external_runner import shared_input_digest
+        from kernel_workflow.scripts.task_shared_inputs import load_shared_inputs
+        shared_root = Path(options[2])
+        shared = load_shared_inputs(options[0], options[1], shared_root)["shared_files"]
     for link in links(workspace):
+        name = link.relative_to(workspace).as_posix()
+        if name in shared:
+            if shared_input_digest(workspace, name, shared_root) != shared[name]:
+                raise ValueError("shared input changed: " + name)
+            continue
         raw = Path(os.readlink(link))
         target = lexical(raw if raw.is_absolute() else link.parent / raw)
         resolved = link.resolve()

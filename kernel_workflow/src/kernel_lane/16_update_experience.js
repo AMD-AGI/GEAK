@@ -21,7 +21,7 @@ if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
 // no-op, correctness fail, contended box), and curating from it teaches the next run a lesson this
 // run did not earn. Reported in review of #411.
 const kbAccepted = String((validation && validation.validation_status) || '').toLowerCase() === 'accepted';
-if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && nativeGainEligible(validation) && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   try {
     learned_card = await agentT(
       roleAgent('update_experience', 'Validate',
@@ -91,4 +91,3 @@ Return {"filed": <the "citations" number the command printed, or 0>}.`,
     log(`[kb] citation ledger NOT filed: ${e && e.message ? e.message : e}`);
   }
 }
-

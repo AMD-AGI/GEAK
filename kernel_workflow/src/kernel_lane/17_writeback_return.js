@@ -6,16 +6,15 @@
 // pre-check just avoids spending an agent on a run that cannot pass the gate anyway.
 // ===========================================================================
 let kb_written = null;
-if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
+if (KB_WRITE_OK && GFX && externalPromotion && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
   const kernelClass = (analysis && analysis.kernel_type) || 'unknown';
-  const finalPatch = report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`;
   const reportPath = report && report.report_path ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`;
   // What the store cannot infer from a diff but needs to curate this entry later. `direction` is the
   // IDEA, and only a warm start supplies a real one: a round title is free-form per run, so kebabbing
   // it would mint a unique label every time and group nothing. Unlabeled is honest — resolve treats
   // such an entry as its own direction, and a curation pass assigns the shared label later.
   const winnerDirection = kebab(warm_start.direction || '');
-  const metricKind = HAS_WORKLOAD ? 'time_weighted' : 'geomean';
+  const metricKind = EXTERNAL_OBJECTIVE ? 'external_primary' : HAS_WORKLOAD ? 'time_weighted' : 'geomean';
   // Commas separate the list, so a case name may not contain one.
   const caseNames = (bestPerCase || []).map(c => c && String(c.name || '').replace(/,/g, ';'))
     .filter(Boolean).join(',');
@@ -44,7 +43,7 @@ if (KB_WRITE_OK && GFX && Number.isFinite(finalPrimary) && finalPrimary > 1.0) {
 ${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE_STORE)} ${writeCmd} --root ${JSON.stringify(KB_ARTIFACTS_DIR)} \\
   --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${JSON.stringify(TARGET_LANGUAGE)} \\
   --gfx ${GFX} --kernel-class ${JSON.stringify(kernelClass)} \\
-  --speedup ${finalPrimary} --baseline-wall-ms ${BASELINE_GEOMEAN_MS} \\
+  --speedup ${finalPrimary}${EXTERNAL_OBJECTIVE ? '' : ` --baseline-wall-ms ${BASELINE_GEOMEAN_MS}`} \\
   --patch ${JSON.stringify(finalPatch)} --eval-dir ${JSON.stringify(EVAL_DIR)} \\
   --report ${JSON.stringify(reportPath)} --metric-kind ${metricKind} \\
   --direction ${JSON.stringify(winnerDirection)} --case-names ${JSON.stringify(caseNames)}\
@@ -79,9 +78,10 @@ ${warm_start.exp_dir ? ` \\\n  --parent ${JSON.stringify(warm_start.exp_dir)}` :
 // bench noise (~2% on this box; `_gemm_a16_w16_kernel` reported 0.98 and read as a regression).
 // Report 1.0 and say why, rather than dressing the noise up as a delta.
 const noRoundsAfterAdopt = !!(warm_start.adopted && roundsCommitted === 0);
-const incrementalSpeedup = warm_start.adopted && warm_start.adopted_speedup
+// Both terms are the reported metric (finalPrimary's), never the development scalar.
+const incrementalSpeedup = warm_start.adopted && warm_start.adopted_primary
   ? (noRoundsAfterAdopt ? 1.0
-     : Number.isFinite(finalPrimary) ? finalPrimary / warm_start.adopted_speedup : null)
+     : Number.isFinite(finalPrimary) ? finalPrimary / warm_start.adopted_primary : null)
   : finalPrimary;
 
 return {
@@ -93,11 +93,16 @@ return {
   authored: MODE === 'author' ? true : undefined,
   eval_dir: EVAL_DIR,
   kernel_name: KERNEL_NAME,
-  workload_aligned: HAS_WORKLOAD,
+  workload_aligned: !EXTERNAL_OBJECTIVE && HAS_WORKLOAD,
   final_speedup: finalPrimary,                 // PRIMARY metric (weighted when workload-aligned)
+  ...(EXTERNAL_OBJECTIVE ? externalFields(validation || {objective: EXTERNAL_OBJECTIVE}) : {}),
+  ...(EXTERNAL_OBJECTIVE ? {final_selection: frozenFinalEvaluation} : {}),
+  ...(CAPTURE_CANONICAL_SELECTIONS ? {canonical_selections: history.canonical_selections || []} : {}),
+  ...(EXTERNAL_OBJECTIVE ? {outcome: !validation || !validation.external_measurement_valid
+    ? 'invalid_measurement' : externalPromotion ? 'improved' : 'no_improvement'} : {}),
   final_weighted: finalWeighted,
   final_geomean: finalGeomean,
-  final_arithmetic: validation ? validation.director_verified_speedup_arithmetic : null,
+  final_arithmetic: EXTERNAL_OBJECTIVE ? null : (validation ? validation.director_verified_speedup_arithmetic : null),
   tech_lead_reported_geomean: report ? report.final_speedup_geomean : cumulative,
   validation_status: validation ? validation.validation_status : 'unknown',
   // What KIND of number `final_speedup` is, so bake-off ranking and campaign summaries don't read a
@@ -108,7 +113,9 @@ return {
   budget_used: dispatched,
   budget_total: BUDGET,
   report_path: report ? report.report_path : `${EVAL_DIR}/tech_lead_report.md`,
-  final_patch: report ? report.final_patch : `${EVAL_DIR}/final_patch.diff`,
+  final_patch: EXTERNAL_OBJECTIVE && !externalPromotion ? ''
+    : finalPatch,
+  ...(EXTERNAL_OBJECTIVE ? {final_patch_sha256: externalPromotion ? validation.patch_sha256 : null} : {}),
   // null when the step was off, or the run earned nothing worth a card.
   // Which condition actually ended the loop. RECORDED, not inferred: on the previous campaign this
   // existed only in the driver's return value, which the caller sees after ALL its kernels finish —
@@ -147,7 +154,7 @@ return {
     // name/language mismatch that only looks like an empty KB.
     match_tier: warm_start.match_tier || '',
     filtered: warm_start.filtered || null,
-    adopted_speedup: warm_start.adopted ? warm_start.adopted_speedup : null,
+    adopted_speedup: warm_start.adopted ? warm_start.adopted_primary : null,
     total_speedup: Number.isFinite(finalPrimary) ? finalPrimary : null,
     incremental_speedup: incrementalSpeedup,
     // true = the run adopted a stored patch and never improved on it; incremental is 1.0 by

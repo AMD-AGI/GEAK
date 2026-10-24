@@ -104,6 +104,22 @@ export function createRuntime({
 } = {}) {
   const SCHEMA_RETRIES = schemaRetries;
   const sem = new Semaphore(concurrency);
+  // Anchor epoch cutoffs once. Later wall-clock adjustments cannot extend them.
+  const epochStartedMs = Date.now();
+  const monotonicStarted = process.hrtime.bigint();
+  const elapsedMs = () => Number(process.hrtime.bigint() - monotonicStarted) / 1e6;
+  const msUntil = (epoch) => epoch * 1000 - epochStartedMs - elapsedMs();
+  const deadlineError = () => Object.assign(new Error('workflow process deadline reached'),
+    { code: 'GEAK_PROCESS_DEADLINE' });
+  const roleTimeoutError = () => Object.assign(new Error('workflow role timeout reached'),
+    { code: 'GEAK_AGENT_TIMEOUT' });
+  const boundedTimeout = (epoch, requested, cleanupMs) => {
+    if (!Number.isFinite(epoch) || epoch <= 0) throw new Error('positive process deadline required');
+    const remaining = Math.floor(msUntil(epoch) - cleanupMs);
+    // runProcess interprets zero as unlimited, so never pass an expired bound.
+    if (remaining <= 0) throw deadlineError();
+    return requested > 0 ? Math.min(requested, remaining) : remaining;
+  };
   // Metrics (no token/cost by design): agent-call count + structured-output
   // parse failures. The experiment runner aggregates these across combos.
   const state = { spawned: 0, schemaFails: 0 };
@@ -121,6 +137,9 @@ export function createRuntime({
     const label = agentOpts.label || 'agent';
     const ph = agentOpts.phase || currentPhase;
     const schema = agentOpts.schema;
+    // A role's existing hang limit covers queueing and all schema attempts.
+    const roleStopMs = agentOpts.processDeadlineEpoch != null && agentOpts.processTimeoutMs > 0
+      ? elapsedMs() + Number(agentOpts.processTimeoutMs) : Infinity;
 
     if (++state.spawned > MAX_TOTAL_AGENTS) {
       throw new Error(`agent cap ${MAX_TOTAL_AGENTS} exceeded (runaway-loop backstop)`);
@@ -138,14 +157,34 @@ export function createRuntime({
       let lastErr;
       const attempts = schema ? SCHEMA_RETRIES + 1 : 1;
       for (let i = 0; i < attempts; i++) {
-        const { text } = await backend.runAgent({
-          prompt: fullPrompt,
-          label,
-          cwd: agentOpts.cwd,
-          env: agentOpts.env,
-          model: agentOpts.model,
-          timeoutMs: agentTimeoutMs,
-        });
+        let timeoutMs = agentTimeoutMs;
+        if (agentOpts.processDeadlineEpoch != null) {
+          const roleRemaining = Math.floor(roleStopMs - elapsedMs());
+          if (roleRemaining <= 0) throw roleTimeoutError();
+          const requested = timeoutMs > 0 ? Math.min(timeoutMs, roleRemaining) : roleRemaining;
+          // Recompute after the semaphore wait and before every schema retry.
+          timeoutMs = boundedTimeout(agentOpts.processDeadlineEpoch, requested, 7000);
+        }
+        // Describe this attempt's existing bound after queue/phase/retry clipping.
+        const timeGuidance = timeoutMs > 0
+          ? `\n\nBackend call allowance at dispatch: ${timeoutMs} ms. Backend cutoff (UTC): ` +
+            `${new Date(epochStartedMs + elapsedMs() + timeoutMs).toISOString()}. ` +
+            `This includes startup, tool work and your final response. Finish tool work early enough to return ` +
+            `the requested result within this bound and any earlier workflow deadline; report incomplete work if needed.`
+          : '';
+        let text;
+        try {
+          ({ text } = await backend.runAgent({
+            prompt: fullPrompt + timeGuidance, label, cwd: agentOpts.cwd, env: agentOpts.env,
+            model: agentOpts.model, timeoutMs,
+          }));
+        } catch (error) {
+          if (agentOpts.processDeadlineEpoch != null && msUntil(agentOpts.processDeadlineEpoch) <= 7000) {
+            throw deadlineError();
+          }
+          if (elapsedMs() >= roleStopMs - 1) throw roleTimeoutError();
+          throw error;
+        }
         if (!schema) return text;
         try {
           const obj = extractJson(text);
@@ -214,12 +253,65 @@ export function createRuntime({
     try {
       fn = new AsyncFunction(
         'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget', 'runProcess',
+        'setTimeout', 'clearTimeout', 'setProcessDeadline',
         body
       );
     } catch (e) {
       throw new Error(`failed to compile workflow ${absScriptPath}: ${e.message}`);
     }
-    return fn(agent, parallel, pipeline, phase, log, makeWorkflow(depth), scriptArgs, budget, runProcess);
+    // Deadline flags may outlive an early return or failure. Keep them active
+    // while this script runs, then clear only timers created by this invocation.
+    const timers = new Set();
+    let closed = false;
+    const scriptSetTimeout = (...args) => {
+      const timer = setTimeout(...args);
+      // Late continuations must not keep the process alive after script return.
+      if (closed) timer.unref();
+      else timers.add(timer);
+      return timer;
+    };
+    const scriptClearTimeout = (timer) => {
+      timers.delete(timer);
+      clearTimeout(timer);
+    };
+    let processDeadlineEpoch = null;
+    let maximumDeadlineEpoch = null;
+    if (scriptArgs.search_reserve_s != null) {
+      const total = Number(scriptArgs.deadline_epoch);
+      const reserve = Number(scriptArgs.search_reserve_s);
+      const cleanup = Number(scriptArgs.final_cleanup_reserve_s || 0);
+      if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(reserve) || reserve <= 0
+          || !Number.isFinite(cleanup) || cleanup < 0 || cleanup >= reserve) {
+        throw new Error('process-bounded workflow requires a deadline and positive search reserve');
+      }
+      maximumDeadlineEpoch = total - cleanup;
+      processDeadlineEpoch = maximumDeadlineEpoch;
+    }
+    const setProcessDeadline = (epoch) => {
+      if (maximumDeadlineEpoch == null || !Number.isFinite(epoch) || epoch <= 0
+          || epoch > maximumDeadlineEpoch) throw new Error('process deadline exceeds original workflow allowance');
+      processDeadlineEpoch = epoch;
+    };
+    setProcessDeadline.secondsLeft = () => processDeadlineEpoch == null ? Infinity : msUntil(processDeadlineEpoch) / 1000;
+    const scriptAgent = (prompt, options = {}) => agent(prompt, processDeadlineEpoch == null ? options : {
+      ...options, processDeadlineEpoch,
+      processTimeoutMs: options.processTimeoutMs ?? Number(scriptArgs.agent_timeout_ms || 0),
+    });
+    Object.defineProperty(scriptAgent, 'processDeadlineActive', { get: () => processDeadlineEpoch != null });
+    const scriptRunProcess = (options) => {
+      if (processDeadlineEpoch == null) return runProcess(options);
+      const cleanupMs = (options.graceMs ?? 5000) + (options.settleMs ?? 2000);
+      return runProcess({ ...options,
+        timeoutMs: boundedTimeout(processDeadlineEpoch, options.timeoutMs || 0, cleanupMs) });
+    };
+    try {
+      return await fn(scriptAgent, parallel, pipeline, phase, log, makeWorkflow(depth), scriptArgs, budget,
+        scriptRunProcess, scriptSetTimeout, scriptClearTimeout, setProcessDeadline);
+    } finally {
+      closed = true;
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+    }
   }
 
   return { agent, parallel, pipeline, phase, log, budget, makeWorkflow, runScript, state };

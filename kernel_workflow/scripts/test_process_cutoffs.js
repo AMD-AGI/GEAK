@@ -1,0 +1,244 @@
+#!/usr/bin/env node
+// Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+'use strict';
+// Exercise the actual lane with inert agents and temporary Git repositories; no model/GPU work.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const {execFileSync, spawnSync} = require('node:child_process');
+const root = path.resolve(__dirname, '../..');
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'scripts/build_workflows.json'), 'utf8'));
+const body = manifest['kernel_workflow/kernel_lane.js']
+  .map(file => fs.readFileSync(path.join(root, file), 'utf8')).join('\n')
+  .replace(/^export const meta/m, 'const meta');
+const total = 2000000000;
+const cutoffs = {search: total - 5100, report: total - 1800, validate: total - 300};
+const perCase = [{name: 'c1', baseline_ms: 8, optimized_ms: 4, speedup: 2}];
+
+async function lane({bounded, commitResult = {committed: true}, planExpired = false,
+    successfulRounds = 0, commitAdvanced = false, pinExpired = false, commitAtDeadline = true,
+    failThenSucceed = false, dirtyBeforeCommit = false, repeatedFailures = false}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-cutoff-'));
+  try {
+  const canonical = path.join(temp, 'canonical'), evalDir = path.join(temp, 'eval');
+  fs.mkdirSync(canonical); fs.mkdirSync(evalDir);
+  const git = (...args) => execFileSync('git', ['-C', canonical, ...args], {encoding: 'utf8'}).trim();
+  git('init', '-q');
+  fs.writeFileSync(path.join(canonical, 'k.py'), 'baseline\n');
+  fs.writeFileSync(path.join(canonical, '.gitignore'), 'cache/\n');
+  git('add', '.');
+  git('-c', 'user.name=fixture', '-c', 'user.email=fixture@localhost', 'commit', '-qm', 'baseline');
+  fs.writeFileSync(path.join(canonical, 'retained.txt'), 'pre-existing untracked input\n');
+  fs.mkdirSync(path.join(canonical, 'cache'));
+  fs.writeFileSync(path.join(canonical, 'cache/result'), 'retained ignored cache\n');
+  let previousHead = git('rev-parse', 'HEAD'), unfinishedHead = previousHead;
+  const deadlines = [], calls = [], reports = [];
+  let activeDeadline = null;
+  let currentEpoch = total - 7200, reportedSpeedup, roundNumber = 0;
+  const setProcessDeadline = epoch => {activeDeadline = epoch; deadlines.push(epoch);};
+  setProcessDeadline.secondsLeft = () => activeDeadline - currentEpoch;
+  const g = {
+    args: {kernel_path: '/original', workflow_dir: '/workflow', budget: repeatedFailures ? 5 : failThenSucceed ? 2 : successfulRounds + 1,
+      max_no_improve: 2,
+      agent_timeout_ms: 45000, agent_retries: 1,
+      warm_start: 'off', update_experience: 'off', llm_stats: 'false',
+      ...(bounded ? {deadline_epoch: total, search_reserve_s: 5100,
+        final_validation_reserve_s: 1800, final_cleanup_reserve_s: 300} : {})},
+    phase: () => {}, log: () => {}, setProcessDeadline,
+    workflow: async () => {throw new Error('unexpected nested workflow');},
+    budget: {total: null, spent: () => 0, remaining: () => Infinity},
+    parallel: async ts => Promise.all(ts.map(t => t())),
+    pipeline: async (items, ...stages) => Promise.all(items.map(async item => {
+      for (const stage of stages) item = await stage(item);
+      return item;
+    })),
+    runProcess: async options => {
+      if (pinExpired && activeDeadline === cutoffs.search) {
+        currentEpoch = activeDeadline;
+        throw Object.assign(new Error('expired before read-only git command'), {code: 'GEAK_PROCESS_DEADLINE'});
+      }
+      assert.ok(currentEpoch < activeDeadline, 'host recovery must run inside its reserved process window');
+      assert.ok(options.timeoutMs > 0, 'host operations remain finite');
+      const r = spawnSync(options.cmd, options.args, {input: options.input, encoding: 'utf8', timeout: 5000});
+      if (r.error) throw r.error;
+      return {status: 'completed', code: r.status, stdout: r.stdout, stderr: r.stderr,
+        strays_killed: false, group_cleared: true, stdio_held: false};
+    },
+    agent: async (prompt, options) => {
+      const label = options.label;
+      calls.push({label, cutoff: activeDeadline, timeout: options.processTimeoutMs});
+      if (label === 'director:setup') return {eval_dir: evalDir, workspace: canonical,
+        kernel_name: 'fixture', device_gfx: 'gfx950', device_target: 'unknown',
+        physical_cu_count: 256, baseline_frozen: true, source_files: ['k.py']};
+      if (label === 'tech_lead:analyze') return {kernel_type: 'gemm', modifiable_files: ['k.py']};
+      if (label === 'benchmark_engineer') return {baseline_per_case: perCase,
+        baseline_geomean_ms: 8, commandment_path: '/eval/COMMANDMENT.md',
+        correctness_cmd: 'fixture-correctness', benchmark_cmd: 'fixture-benchmark'};
+      if (label.includes('profile')) return {bottleneck: 'memory', top_opportunities: []};
+      if (label.startsWith('tech_lead:plan')) {
+        if (planExpired) {currentEpoch = activeDeadline - 6; return null;}
+        roundNumber++;
+        if (failThenSucceed && roundNumber === 2) {
+          assert.equal(activeDeadline, cutoffs.search, 'ordinary commit failure restores the search cutoff');
+          assert.equal(git('rev-parse', 'HEAD'), previousHead, 'next round starts from the retained commit');
+          assert.equal(fs.readFileSync(path.join(canonical, 'k.py'), 'utf8'), 'baseline\n');
+          assert.match(prompt, /- CUMULATIVE_SPEEDUP: 1(?:\n|$)/, 'failed commit does not promote its score');
+          assert.equal(git('status', '--porcelain', '--untracked-files=no'), '');
+          assert.equal(fs.existsSync(path.join(canonical, 'new.py')), false);
+          assert.match(fs.readFileSync(path.join(evalDir, 'uncommitted_round_1.diff'), 'utf8'), /candidate 1/);
+        }
+        return {stop: false, directions: [{id: 'a', title: 'a', specialty: 'memory', prompt: 'a'}]};
+      }
+      if (label.startsWith('eng ')) return {status: 'ok', measurement_valid: true, speedup_geomean: 2};
+      if (label.startsWith('verify ')) {
+        if (dirtyBeforeCommit) {
+          fs.writeFileSync(path.join(canonical, 'k.py'), 'dirty tracked bytes\n');
+          fs.writeFileSync(path.join(canonical, 'dirty_added.py'), 'dirty staged new source\n');
+          git('add', 'k.py', 'dirty_added.py');
+        }
+        return {status: 'verified', correctness: 'pass', verified_geomean: repeatedFailures ? 2 : roundNumber + 1, per_case: perCase};
+      }
+      if (label.startsWith('commit ')) {
+        const result = roundNumber <= successfulRounds || (failThenSucceed && roundNumber === 2)
+          ? {committed: true} : commitResult;
+        const completed = result && result.committed === true;
+        if (bounded) {
+          if (dirtyBeforeCommit) {
+            assert.equal(fs.readFileSync(path.join(canonical, 'k.py'), 'utf8'), 'baseline\n');
+            assert.equal(fs.existsSync(path.join(canonical, 'dirty_added.py')), false);
+            assert.equal(git('status', '--porcelain', '--untracked-files=no'), '');
+            const dirty = fs.readFileSync(path.join(evalDir, `precommit_round_${roundNumber}.diff`), 'utf8');
+            assert.match(dirty, /dirty tracked bytes/);
+            assert.match(dirty, /dirty staged new source/);
+          }
+          previousHead = git('rev-parse', 'HEAD');
+          fs.writeFileSync(path.join(canonical, 'k.py'), `candidate ${roundNumber}\n`);
+          fs.writeFileSync(path.join(evalDir, 'current_best.diff'), 'unfinished diff\n');
+          if (!completed) {
+            fs.writeFileSync(path.join(canonical, 'new.py'), 'unfinished new source\n');
+            fs.writeFileSync(path.join(canonical, '*'), 'unfinished wildcard source\n');
+          }
+          if (completed || commitAdvanced) {
+            git('add', '-A');
+            git('-c', 'user.name=fixture', '-c', 'user.email=fixture@localhost', 'commit', '-qm', `round ${roundNumber}`);
+            unfinishedHead = git('rev-parse', 'HEAD');
+          } else {
+            git('add', 'k.py'); // Interrupted after staging, with a new untracked source still present.
+          }
+          if (!completed && commitAtDeadline) currentEpoch = cutoffs.search;
+        }
+        return result;
+      }
+      if (label.startsWith('tech_lead:memory')) {
+        if (repeatedFailures) assert.match(prompt, /- IMPROVED: false(?:\n|$)/);
+        return {insights: [], ledger: []};
+      }
+      if (label.startsWith('storage:') || label.startsWith('kb:')) return {};
+      if (label === 'tech_lead:report') {
+        reports.push(prompt);
+        reportedSpeedup = Number(prompt.match(/- CUMULATIVE_SPEEDUP: (\S+)/)[1]);
+        return {final_speedup_geomean: reportedSpeedup, final_patch: '/final.diff', report_path: '/report', rounds: 1};
+      }
+      if (label === 'director:validate') return {validation_status: 'accepted',
+        director_verified_speedup_geomean: reportedSpeedup};
+      throw new Error('unhandled agent ' + label);
+    },
+  };
+  g.agent.processDeadlineActive = bounded;
+  const run = () => new Function(...Object.keys(g), `return (async () => {${body}})();`)(...Object.values(g));
+  const value = await run();
+  if (bounded) assert.equal(g.args.deadline_epoch, total, 'the original deadline remains unchanged');
+  const expired = planExpired;
+  const failedCommit = bounded && (pinExpired || !commitResult || commitResult.committed !== true);
+  const uncommitted = failedCommit && !failThenSucceed;
+  const deadlineFailure = uncommitted && (pinExpired || commitAtDeadline);
+  const expectedSpeedup = failThenSucceed ? 3 : expired || (uncommitted && !successfulRounds) ? 1 : 2;
+  assert.equal(value.final_speedup, expectedSpeedup);
+  assert.equal(value.warm_start.rounds_committed, expired ? 0 : uncommitted ? successfulRounds : 1);
+  assert.equal(value.stopped_by, deadlineFailure ? 'deadline_uncommitted' : expired ? 'deadline' : repeatedFailures ? 'no_improve' : 'budget');
+  assert.equal(value.deadline_hit, deadlineFailure || expired);
+  assert.equal(reports.length, 1);
+  assert.match(reports[0], new RegExp(`- CUMULATIVE_SPEEDUP: ${expectedSpeedup}(?:\\n|$)`));
+  assert.equal(calls.filter(c => c.label === 'director:validate').length, 1);
+  assert.deepEqual(deadlines, bounded
+    ? [cutoffs.search,
+      ...(failedCommit ? Array.from({length: repeatedFailures ? 2 : 1}, () =>
+        [cutoffs.report, ...(!deadlineFailure ? [cutoffs.search] : [])]).flat() : []),
+      cutoffs.report, cutoffs.validate] : []);
+  if (repeatedFailures) {
+    assert.equal(roundNumber, 2, 'repeated failed commits count toward plateau stopping');
+    assert.equal(calls.filter(c => c.label.startsWith('tech_lead:memory')).length, 2);
+    assert.equal((reports[0].match(/"status":"commit_failed"/g) || []).length, 2,
+      'one complete history record is retained per failed round');
+  }
+  if (failThenSucceed) {
+    assert.equal(calls.filter(c => c.label.startsWith('commit ')).length, 2);
+    assert.equal(fs.readFileSync(path.join(canonical, 'k.py'), 'utf8'), 'candidate 2\n');
+    assert.match(reports[0], /commit_failed/);
+    assert.doesNotMatch(reports[0], /deadline_uncommitted/);
+  }
+  if (uncommitted) {
+    assert.equal(git('rev-parse', 'HEAD'), previousHead, 'Report receives the exact pre-commit winner');
+    assert.equal(fs.readFileSync(path.join(canonical, 'k.py'), 'utf8'),
+      successfulRounds ? 'candidate 1\n' : 'baseline\n');
+    assert.equal(fs.existsSync(path.join(canonical, 'new.py')), false);
+    assert.equal(fs.existsSync(path.join(canonical, '*')), false);
+    assert.equal(fs.readFileSync(path.join(canonical, 'retained.txt'), 'utf8'), 'pre-existing untracked input\n');
+    assert.equal(fs.readFileSync(path.join(canonical, 'cache/result'), 'utf8'), 'retained ignored cache\n');
+    assert.equal(git('status', '--porcelain', '--untracked-files=no'), '');
+    assert.match(reports[0], deadlineFailure ? /deadline_uncommitted/ : /commit_failed/);
+    if (!pinExpired) {
+      assert.equal(git('rev-parse', `refs/geak/incomplete-round-${roundNumber}`), unfinishedHead,
+        'an advanced unfinished commit remains reachable');
+      assert.match(fs.readFileSync(path.join(evalDir, `uncommitted_round_${roundNumber}.diff`), 'utf8'),
+        new RegExp(`candidate ${roundNumber}`));
+      assert.match(fs.readFileSync(path.join(evalDir, `uncommitted_round_${roundNumber}.diff`), 'utf8'),
+        /unfinished new source/, 'new source bytes survive cleanup in the retained partial diff');
+      assert.match(fs.readFileSync(path.join(evalDir, `uncommitted_round_${roundNumber}.diff`), 'utf8'),
+        /unfinished wildcard source/, 'enumerated new paths are literal');
+      const baseline = git('rev-list', '--max-parents=0', previousHead);
+      assert.equal(fs.readFileSync(path.join(evalDir, 'current_best.diff'), 'utf8').trim(),
+        git('diff', '--binary', baseline, previousHead, '--', '.'));
+    }
+    assert.equal(calls.some(c => c.label === `reprofile r${successfulRounds + 1}`), false);
+  }
+  let expected = cutoffs.search;
+  for (const call of calls) {
+    if (call.label === 'tech_lead:report') expected = cutoffs.report;
+    if (call.label === 'director:validate') expected = cutoffs.validate;
+    assert.equal(call.cutoff, bounded ? expected : null, call.label);
+    assert.equal(call.timeout, bounded ? 45000 : undefined, call.label);
+  }
+  } finally {
+    fs.rmSync(temp, {recursive: true, force: true});
+  }
+}
+
+(async () => {
+  await lane({bounded: false});
+  await lane({bounded: true});
+  await lane({bounded: true, commitResult: null});
+  await lane({bounded: true, commitResult: {committed: false}});
+  await lane({bounded: true, successfulRounds: 1, commitResult: null});
+  await lane({bounded: true, successfulRounds: 1, commitResult: {committed: false}, commitAdvanced: true});
+  await lane({bounded: true, commitResult: null, commitAtDeadline: false});
+  await lane({bounded: true, commitResult: {committed: false}, commitAtDeadline: false,
+    failThenSucceed: true, commitAdvanced: true});
+  await lane({bounded: true, commitResult: null, commitAtDeadline: false, failThenSucceed: true});
+  await lane({bounded: true, commitResult: {committed: false}, commitAtDeadline: false, repeatedFailures: true});
+  await lane({bounded: true, dirtyBeforeCommit: true});
+  await lane({bounded: true, pinExpired: true});
+  await lane({bounded: true, planExpired: true});
+  const deadline = fs.readFileSync(path.join(root, 'kernel_workflow/src/kernel_lane/07_deadline.js'), 'utf8');
+  const guard = new Function('A', 'agent', 'setProcessDeadline', deadline);
+  const args = {deadline_epoch: total, search_reserve_s: 5700, final_validation_reserve_s: 2100,
+    final_cleanup_reserve_s: 300};
+  // Both policies share the ordinary loop and its process reserves.
+  for (const optimizer of ['greedy', 'evo']) {
+    guard({...args, optimizer}, {processDeadlineActive: true}, () => {});
+  }
+  console.log('process cutoffs: prior winners survive unfinished commits; final reserves remain ordered');
+})().catch(error => {console.error(error); process.exitCode = 1;});

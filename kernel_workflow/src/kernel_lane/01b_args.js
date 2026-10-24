@@ -1,3 +1,12 @@
+const OPTIMIZER = String(A.optimizer || 'greedy');
+if (!['greedy', 'evo'].includes(OPTIMIZER)) {
+  throw new Error(`unknown optimizer: ${OPTIMIZER}; use greedy or evo`);
+}
+const retiredOptimizerArg = ['optimizer_command', 'optimizer_task_ref', 'optimizer_reserve_s']
+  .find(key => Object.prototype.hasOwnProperty.call(A, key));
+if (retiredOptimizerArg) {
+  throw new Error(`${retiredOptimizerArg} is retired; use optimizer=greedy or optimizer=evo`);
+}
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
@@ -91,10 +100,220 @@ const WORKLOAD_SPEC = (OP_SPEC && OP_SPEC.workload) || A.workload || null;
 const HAS_WORKLOAD = !!(WORKLOAD_SPEC_PATH ||
   (Array.isArray(WORKLOAD_SPEC) && WORKLOAD_SPEC.length) ||
   (WORKLOAD_SPEC && Array.isArray(WORKLOAD_SPEC.kernels) && WORKLOAD_SPEC.kernels.length));
+const EXTERNAL_OBJECTIVE = A.objective && A.objective.kind === 'external_primary' ? A.objective : null;
+if (EXTERNAL_OBJECTIVE && (Object.keys(EXTERNAL_OBJECTIVE).sort().join(',') !== 'kind,primary_regime'
+    || typeof EXTERNAL_OBJECTIVE.primary_regime !== 'string' || !EXTERNAL_OBJECTIVE.primary_regime.trim())) {
+  throw new Error('external_primary requires exactly kind and primary_regime');
+}
+const externalArgv = (value) => Array.isArray(value) && value.length
+  && value.every(v => typeof v === 'string' && v) ? value : null;
+if (EXTERNAL_OBJECTIVE && (!externalArgv(A.external_result_command)
+    || !externalArgv(A.external_measurement_command) || typeof runProcess !== 'function')) {
+  throw new Error('external_primary requires the existing owner measurement and result-reader argv plus runProcess');
+}
+const EXTERNAL_FINAL_COMMANDS = A.external_final_measurement_command != null
+  || A.external_final_result_command != null;
+if (EXTERNAL_OBJECTIVE && EXTERNAL_FINAL_COMMANDS
+    && (!externalArgv(A.external_final_measurement_command)
+        || !externalArgv(A.external_final_result_command))) {
+  throw new Error('final external measurements require both admitted command prefixes');
+}
+let frozenFinalEvaluation = null;
+let frozenFinalPatch = null;
+const finalMeasurementArgv = () => [
+  ...(EXTERNAL_FINAL_COMMANDS ? A.external_final_measurement_command : A.external_measurement_command),
+  ...(frozenFinalEvaluation ? ['--candidate-id', frozenFinalEvaluation.candidate_id,
+    '--evaluation-id', frozenFinalEvaluation.evaluation_id] : []),
+];
+const externalMetricInstructions = (final = false) => EXTERNAL_OBJECTIVE ? `
+External measurement contract: ${JSON.stringify(EXTERNAL_OBJECTIVE)}.
+${final ? `The workflow host has launched the final evaluation using ${JSON.stringify(finalMeasurementArgv())}.
+Review its retained evidence for ${JSON.stringify(frozenFinalEvaluation)}; do not launch another evaluation.
+Preserve any explicit validation objection in validation_status and explain it.`
+  : `Use the existing admitted owner command ${JSON.stringify(A.external_measurement_command)}
+from the candidate workspace according to COMMANDMENT.`} One evaluation runs the
+unchanged full UT in three fresh processes with native min_runs=2. The measurement
+command owns GPU serialization: invoke it directly, without wrapping it
+in gpu_lock.sh again. Use the stock GPU lock for separate profiling/diagnostics.
+This operation replaces the role's separate correctness/benchmark repetitions and any
+extra numerical or graph coverage; preserve the copied UT exactly. Do not invoke
+the UT directly except for unscored diagnostics within TASK's admitted scope.
+During search, such diagnostics use a separate private workspace and the declared
+stock GPU lock; never run them in the canonical workspace or treat their outputs
+as correctness or performance scores.
+Do not rebuild the UT's case folds, require gain for ORIGINAL qualification, or
+repeat valid no-gain results as failures. Retain both native phase folds.
+Return the operation's exact IDs as external_evaluation:{candidate_id,evaluation_id}
+(under best for an integrated candidate). The workflow's trusted owner reader
+checks source, settlement and raw results. A scalar or OBSERVATIONS.json relayed
+by a model is not accepted as measurement. Report missing/failed operations and
+preserve artifacts. GEAK development and final reports use the checked native
+primary for the declared primary_regime; existing improvement thresholds and
+stopping rules apply. Patch export also requires the native reproducible-gain gate.
+Keep the checked unweighted geomean of all per-case speedups as a secondary
+diagnostic, not the ranking objective. The reader retains it under the historical
+field development_geomean_speedup; legacy geomean fields may be omitted.
+` : '';
+const EXTERNAL_METRIC_INSTRUCTIONS = externalMetricInstructions();
+const externalFields = (o) => EXTERNAL_OBJECTIVE && o ? Object.fromEntries(
+  ['objective', 'primary_regime', 'primary_speedup', 'native_reproducible_gain',
+   'native_reproducible_regression', 'phase_speedups', 'external_evaluation',
+   'external_measurement_valid', 'receipt_ref', 'timing_basis', 'development_geomean_speedup',
+   'final_failure', 'director_review_status', 'director_reported_evaluation', 'patch_sha256',
+  ].map(k => [k, o[k]])) : {};
+const nativeGainEligible = (o) => !EXTERNAL_OBJECTIVE || !!(o && o.external_measurement_valid === true
+  && o.native_reproducible_gain === true && o.native_reproducible_regression === false);
+
+async function captureFinalEvaluation(workspace) {
+  if (!EXTERNAL_OBJECTIVE) return;
+  const argv = EXTERNAL_FINAL_COMMANDS ? A.external_final_measurement_command : A.external_measurement_command;
+  const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+    '--workspace', workspace, '--capture-only'], timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+  if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+      || !result.group_cleared || result.stdio_held) throw new Error('final source capture failed');
+  const captured = JSON.parse(result.stdout);
+  if (captured.schema !== 'geak-native-measurement-identity-v1' || captured.capture_only !== true
+      || ![captured.candidate_id, captured.source_id].every(v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v))
+      || !Array.isArray(captured.source_paths) || !captured.source_paths.length
+      || !captured.source_paths.every(v => typeof v === 'string' && v)
+      || typeof captured.evaluation_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/.test(captured.evaluation_id)) {
+    throw new Error('invalid final source capture');
+  }
+  // Diff exactly the captured contract sources, including uncommitted changes,
+  // from the initial ORIGINAL commit. The final reader checks this against the
+  // immutable ORIGINAL files and the captured source identity.
+  const baseline = ((await git(workspace, 'rev-list', '--max-parents=0', 'HEAD')) || '').trim();
+  frozenFinalPatch = /^[0-9a-f]{40,64}$/.test(baseline)
+    ? await git(workspace, '--literal-pathspecs', 'diff', '--binary', '--no-color', '--no-ext-diff',
+      '--src-prefix=a/', '--dst-prefix=b/', baseline, '--', ...captured.source_paths) : null;
+  await writeFrozenFinalPatch();
+  frozenFinalEvaluation = Object.freeze(captured);
+}
+
+async function writeFrozenFinalPatch() {
+  const path = `${EVAL_DIR}/host_final_patch.diff`;
+  if (frozenFinalPatch === null || await writeFile(path, frozenFinalPatch) === null) {
+    throw new Error('could not write the captured final source patch');
+  }
+  return path;
+}
+
+async function measureFinalEvaluation(workspace) {
+  if (!EXTERNAL_OBJECTIVE) return null;
+  try {
+    const argv = finalMeasurementArgv();
+    const result = await runProcess({cmd: argv[0], args: [...argv.slice(1), '--workspace', workspace],
+      timeoutMs: AGENT_TIMEOUT_MS > 0 ? AGENT_TIMEOUT_MS : 3600000, graceMs: 2000, settleMs: 5000});
+    if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+        || !result.group_cleared || result.stdio_held) throw new Error('final evaluator did not complete cleanly');
+    return null;
+  } catch (error) {
+    log(`Final measurement failed: ${String(error)}`);
+    return {class: 'final_measurement_failed', reason: String(error)};
+  }
+}
+
+// Optional prospective source history. Keep exact nanosecond values in the
+// existing Store evidence bytes; JavaScript numbers must not round them.
+const CAPTURE_CANONICAL_SELECTIONS = A.capture_canonical_selections === true;
+if (CAPTURE_CANONICAL_SELECTIONS && (!EXTERNAL_OBJECTIVE || String(A.optimizer || 'greedy') !== 'greedy')) {
+  throw new Error('canonical selection capture requires the external_primary GEAK lane');
+}
+async function captureCanonicalSelection(history, kind, round, winner = null, stoppedBy = null) {
+  if (!CAPTURE_CANONICAL_SELECTIONS) return;
+  const row = {kind, round, stopped_by: stoppedBy, status: 'unresolved'};
+  if (!history.canonical_selections) history.canonical_selections = [];
+  const previous = [...history.canonical_selections].reverse().find(item => item.capture_ref);
+  const transition = {kind, round, stopped_by: stoppedBy,
+    sequence: history.canonical_selections.length + 1,
+    previous_capture_ref: previous ? previous.capture_ref || null : null};
+  Object.assign(row, transition);
+  history.canonical_selections.push(row);
+  try {
+    const argv = A.external_measurement_command;
+    const selected = winner && winner.external_evaluation;
+    const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+      '--workspace', CANONICAL, '--capture-selection', '--selection-kind', kind,
+      '--selection-round', String(round), '--selection-sequence', String(transition.sequence),
+      ...(transition.previous_capture_ref ? ['--previous-selection', transition.previous_capture_ref.evidence_id] : []),
+      ...(stoppedBy ? ['--selection-stop-reason', stoppedBy] : []), ...(selected ? [
+        '--selected-candidate-id', selected.candidate_id, '--selected-evaluation-id', selected.evaluation_id] : [])],
+      timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+    if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+        || !result.group_cleared || result.stdio_held) throw new Error('canonical source capture failed');
+    const capture = JSON.parse(result.stdout);
+    const returned = capture.transition;
+    const prior = returned && returned.previous_capture_ref;
+    const expectedPrior = transition.previous_capture_ref;
+    if (capture.schema !== 'geak-canonical-source-capture-v2'
+        || !returned || !['kind', 'round', 'sequence', 'stopped_by'].every(key => returned[key] === transition[key])
+        || (expectedPrior ? !prior || prior.evidence_id !== expectedPrior.evidence_id
+          || prior.artifact !== expectedPrior.artifact : prior !== null)
+        || ![capture.candidate_id, capture.source_id, capture.capture_ref && capture.capture_ref.evidence_id]
+          .every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))
+        || capture.capture_ref.artifact !== 'canonical-selection.json') throw new Error('invalid canonical capture');
+    Object.assign(row, {capture_ref: capture.capture_ref, candidate_id: capture.candidate_id,
+      source_id: capture.source_id, clock_ref: capture.clock_ref,
+      development_status: capture.development_evidence.status});
+    if (capture.canonical_commit.status !== 'committed') throw new Error('canonical Git state is unresolved');
+    Object.assign(row, {status: 'captured', git_commit: capture.canonical_commit.git_commit});
+  } catch (error) {
+    row.reason = String(error);
+  }
+  // This is observational. Failure cannot stop authentic GEAK search. Attempted
+  // sequence numbers still advance, so a gap cannot become a complete chain.
+}
+
+async function checkedExternalMeasurement(value, workspace, patch = null, final = false) {
+  if (!EXTERNAL_OBJECTIVE || (!value && !final)) return value;
+  const invalid = { ...value, primary_speedup: null, external_measurement_valid: false,
+    status: 'invalid_measurement', correctness: 'not_checked', validation_status: 'invalid_measurement',
+    native_reproducible_gain: false, native_reproducible_regression: false,
+    development_geomean_speedup: null };
+  const ref = value && value.external_evaluation;
+  if (final && (!ref || !frozenFinalEvaluation || ref.candidate_id !== frozenFinalEvaluation.candidate_id
+      || ref.evaluation_id !== frozenFinalEvaluation.evaluation_id)) {
+    return {...invalid, final_failure: {class: 'final_identity_mismatch',
+      expected: frozenFinalEvaluation, returned: ref || null}};
+  }
+  if (!ref || typeof ref.candidate_id !== 'string' || typeof ref.evaluation_id !== 'string') return invalid;
+  try {
+    const argv = final && EXTERNAL_FINAL_COMMANDS
+      ? A.external_final_result_command : A.external_result_command;
+    const result = await runProcess({cmd: argv[0], args: [...argv.slice(1),
+      '--candidate-id', ref.candidate_id, '--evaluation-id', ref.evaluation_id,
+      '--workspace', workspace, ...(patch ? ['--patch', patch] : [])],
+      timeoutMs: 30000, graceMs: 2000, settleMs: 5000});
+    if (result.status !== 'completed' || result.code !== 0 || result.strays_killed
+        || !result.group_cleared || result.stdio_held) return invalid;
+    const read = JSON.parse(result.stdout);
+    if (read.external_measurement_valid !== true || !read.objective
+        || read.objective.kind !== 'external_primary'
+        || read.primary_regime !== EXTERNAL_OBJECTIVE.primary_regime
+        || read.objective.primary_regime !== EXTERNAL_OBJECTIVE.primary_regime
+        || !Number.isFinite(read.primary_speedup) || read.primary_speedup <= 0
+        || !Number.isFinite(read.development_geomean_speedup) || read.development_geomean_speedup <= 0
+        || read.external_evaluation.candidate_id !== ref.candidate_id
+        || read.external_evaluation.evaluation_id !== ref.evaluation_id) return invalid;
+    return { ...value, ...read };
+  } catch (error) {
+    log(`External measurement reader failed: ${String(error)}`);
+    return invalid;
+  }
+}
+// Checked external fields only; invalid or foreign-regime readings score null.
+const checkedExternal = (o, key) => o && o.external_measurement_valid === true
+  && o.primary_regime === EXTERNAL_OBJECTIVE.primary_regime
+  && Number.isFinite(o[key]) ? o[key] : null;
+// The declared native primary is shared by external development and report/export.
+const nativePrimary = (o) => EXTERNAL_OBJECTIVE ? checkedExternal(o, 'primary_speedup') : primSpeedup(o);
 // PRIMARY-metric selector: prefer the time-weighted number when a workload spec is in play and the
 // agent reported one; otherwise fall back to the geomean (unweighted runs => unchanged behavior).
+// External mode uses the checked task primary, matching its declared final objective.
+// The checked all-case geomean remains a secondary diagnostic.
 const primSpeedup = (o) => {
-  if (!o) return 0;
+  if (!o) return EXTERNAL_OBJECTIVE ? null : 0;
+  if (EXTERNAL_OBJECTIVE) return checkedExternal(o, 'primary_speedup');
   const w = o.verified_weighted != null ? o.verified_weighted
           : (o.speedup_weighted != null ? o.speedup_weighted : null);
   if (HAS_WORKLOAD && Number.isFinite(w)) return w;
@@ -141,4 +360,3 @@ const DRA_MAX_BLINDSPOTS = (() => {
   const v = parseInt(A.dra_max_blindspots != null ? A.dra_max_blindspots : 4, 10);
   return Number.isFinite(v) && v >= 1 ? v : 4;
 })();
-

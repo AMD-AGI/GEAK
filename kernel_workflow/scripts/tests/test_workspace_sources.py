@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from test_materialize_shared_inputs import readonly_env, task
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 MATERIALIZE = SCRIPTS / "materialize_workspace.sh"
@@ -209,7 +210,7 @@ def test_source_root_alias(parent, tmp_path):
     assert (child / "aliased.cu").resolve() == child / "quant_kernels.cu"
 
 
-def gpu_run(workspace, code):
+def gpu_run(workspace, code, extra_env=None):
     # Exercise the real wrapper without using a GPU or running ROCm discovery.
     env = dict(
         os.environ,
@@ -219,6 +220,7 @@ def gpu_run(workspace, code):
         GEAK_GPU_ALLOWED="9876",
         TORCH_EXTENSIONS_DIR=str(workspace / ".torch_ext"),
     )
+    env.update(extra_env or {})
     return run(
         "bash",
         SCRIPTS / "gpu_lock.sh",
@@ -229,6 +231,85 @@ def gpu_run(workspace, code):
         cwd=workspace,
         env=env,
     )
+
+
+@pytest.fixture
+def shared_workspace(task, tmp_path, readonly_env):
+    root, contract, manifest, manifest_path, pin = task
+    workspace = tmp_path / "shared workspace"
+    shutil.copytree(root, workspace)
+    (workspace / ".geak").mkdir()
+    (workspace / ".geak/workspace.json").write_text(json.dumps({"ancestors": [str(root)]}))
+    for name in manifest["shared_files"]:
+        (workspace / name).unlink()
+        (workspace / name).symlink_to(root / name)
+    env = dict(readonly_env, GEAK_SHARED_INPUT_MANIFEST=str(manifest_path),
+               GEAK_SHARED_INPUT_SHA256=pin, GEAK_SHARED_INPUT_ROOT=str(root))
+    return workspace, root, contract, manifest, env
+
+
+def test_profile_wrapper_accepts_exact_manifest_links_without_dropping_ancestry(shared_workspace):
+    workspace, root, _, _, env = shared_workspace
+    assert gpu_run(workspace, "print('PROFILE_RAN')").returncode == 86
+    result = gpu_run(workspace, "print('PROFILE_RAN')", env)
+    assert result.returncode == 0, result.stderr
+    assert "PROFILE_RAN" in result.stdout
+    assert json.loads((workspace / ".geak/workspace.json").read_text())["ancestors"] == [str(root)]
+
+
+@pytest.mark.parametrize("changed", ["source", "build", "target", "parent", "manifest"])
+def test_profile_wrapper_keeps_source_build_and_exact_fixture_checks(shared_workspace, tmp_path, changed):
+    workspace, root, contract, manifest, env = shared_workspace
+    name = "captures[1]/input?.bin"
+    leaf = workspace / name
+    if changed == "source":
+        leaf = workspace / contract["source_paths"][0]
+        leaf.unlink()
+        leaf.symlink_to(root / contract["source_paths"][0])
+    elif changed == "build":
+        mirror(root / contract["source_paths"][0], workspace / OVERLAY)
+    elif changed == "target":
+        alternate = tmp_path / "same fixture bytes.bin"
+        alternate.write_bytes((root / name).read_bytes())
+        leaf.unlink()
+        leaf.symlink_to(alternate)
+    elif changed == "parent":
+        leaf.unlink()
+        leaf.parent.rmdir()
+        leaf.parent.symlink_to(root / leaf.parent.relative_to(workspace), target_is_directory=True)
+    else:
+        env = dict(env, GEAK_SHARED_INPUT_SHA256="0" * 64)
+    result = gpu_run(workspace, "print('PROFILE_RAN')", env)
+    assert result.returncode == 86, result.stderr
+    assert "GEAK_SOURCE_INVALID" in result.stderr
+    assert "PROFILE_RAN" not in result.stdout
+
+
+def test_profile_wrapper_rechecks_fixture_link_after_command(shared_workspace, tmp_path):
+    workspace, root, _, _, env = shared_workspace
+    name = "captures[1]/input?.bin"
+    alternate = tmp_path / "same fixture bytes.bin"
+    alternate.write_bytes((root / name).read_bytes())
+    code = (f"from pathlib import Path; p=Path({name!r}); p.unlink(); "
+            f"p.symlink_to({str(alternate)!r}); print('PROFILE_RAN')")
+    result = gpu_run(workspace, code, env)
+    assert result.returncode == 86, result.stderr
+    assert "PROFILE_RAN" in result.stdout
+    assert "shared input link changed" in result.stderr
+
+
+def test_configured_shared_links_are_checked_without_ancestor_state(shared_workspace, tmp_path):
+    workspace, root, _, _, env = shared_workspace
+    (workspace / ".geak/workspace.json").unlink()
+    assert gpu_run(workspace, "print('PROFILE_RAN')", env).returncode == 0
+    name = "captures[1]/input?.bin"
+    alternate = tmp_path / "same fixture bytes.bin"
+    alternate.write_bytes((root / name).read_bytes())
+    (workspace / name).unlink()
+    (workspace / name).symlink_to(alternate)
+    result = gpu_run(workspace, "print('PROFILE_RAN')", env)
+    assert result.returncode == 86
+    assert "PROFILE_RAN" not in result.stdout
 
 
 @pytest.mark.parametrize("when", ["before", "during"])

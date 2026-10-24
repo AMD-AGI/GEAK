@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 'use strict';
 
+const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
@@ -35,6 +36,8 @@ async function run(deviceGfx, expectedGfx = '', extras = {}) {
       expected_target: expectedTarget,
       expected_device_name: expectedDeviceName,
       expected_physical_cu_count: expectedPhysicalCuCount,
+      ...(Object.prototype.hasOwnProperty.call(extras, 'gpuIdentityCaptureRef')
+        ? { gpu_identity_capture_ref: extras.gpuIdentityCaptureRef } : {}),
       use_expert_skills: 'true',
       use_learned_kb: 'true',
     },
@@ -203,6 +206,8 @@ function mustInclude(hay, needle, msg) {
   if (identityDrift.logs.filter((line) => /identity telemetry differs/.test(line)).length !== 2) {
     throw new Error(`Director name/CU drift was not logged as telemetry: ${identityDrift.logs.join(' | ')}`);
   }
+  assert(!identityDrift.prompts.some((entry) => entry.prompt.includes('GPU_IDENTITY_CAPTURE_REF')),
+    'live identity path unexpectedly received a capture reference');
   await run('gfx1201', 'gfx1201', {
     deviceTarget: 'r9700', physicalCuCount: 0, expectedTarget: 'r9700',
   }).then(
@@ -211,6 +216,72 @@ function mustInclude(hay, needle, msg) {
       if (!/positive physical_cu_count/.test(String(error.message))) throw error;
     },
   );
+
+  const captureRef = { path: '/tmp/captured-gpu-identity.json', sha256: 'ab'.repeat(32) };
+  const captureIdentity = {
+    deviceTarget: 'mi350x', deviceName: 'AMD Instinct MI350X', physicalCuCount: 256,
+    expectedTarget: 'mi350x', expectedDeviceName: 'AMD Instinct MI350X',
+    expectedPhysicalCuCount: 256, gpuIdentityCaptureRef: captureRef,
+  };
+  const captured = await run('gfx950', 'gfx950', {
+    ...captureIdentity, deviceName: '  amd  Instinct MI350X  ',
+  });
+  const capturedSetup = captured.prompts.find((entry) => entry.label === 'director:setup').prompt;
+  mustInclude(capturedSetup, `- GPU_IDENTITY_CAPTURE_REF: ${JSON.stringify(captureRef)}`);
+  assert(!captured.logs.some((line) => /identity telemetry differs/.test(line)),
+    'equivalent captured identity was treated as drift');
+  for (const entry of captured.prompts.filter((item) => item.label !== 'director:setup')) {
+    for (const value of ['GPU_IDENTITY_CAPTURE_REF', captureRef.path, captureRef.sha256]) {
+      assert(!entry.prompt.includes(value), `capture reference leaked into ${entry.label}`);
+    }
+  }
+  for (const invalidRef of [
+    null, [], captureRef.path, {},
+    { path: captureRef.path }, { sha256: captureRef.sha256 },
+    { ...captureRef, extra: true },
+    { ...captureRef, path: 'captured-gpu-identity.json' },
+    { ...captureRef, path: '/tmp/../captured-gpu-identity.json' },
+    { ...captureRef, path: '/tmp//captured-gpu-identity.json' },
+    { ...captureRef, path: '/tmp/./captured-gpu-identity.json' },
+    { ...captureRef, sha256: captureRef.sha256.toUpperCase() },
+    { ...captureRef, sha256: 'ab'.repeat(31) },
+    { ...captureRef, sha256: 'z'.repeat(64) },
+  ]) {
+    await assert.rejects(run('gfx950', 'gfx950', {
+      ...captureIdentity, gpuIdentityCaptureRef: invalidRef,
+    }), /^Error: invalid GPU identity capture reference/,
+    `malformed capture reference was accepted: ${JSON.stringify(invalidRef)}`);
+  }
+  for (const [expectedGfx, incompleteIdentity] of [
+    ['', { expectedTarget: 'unknown' }],
+    ['not-a-gfx', { expectedTarget: 'unknown' }],
+    ['gfx950', { expectedTarget: '' }],
+    ['gfx950', { expectedTarget: 'not-a-target' }],
+    ['gfx950', { expectedDeviceName: '  ' }],
+    ['gfx950', { expectedPhysicalCuCount: 0 }],
+    ['gfx950', { expectedPhysicalCuCount: 1.5 }],
+    ['gfx950', { expectedPhysicalCuCount: '256' }],
+    ['gfx950', { expectedPhysicalCuCount: Number.MAX_SAFE_INTEGER + 1 }],
+  ]) {
+    await assert.rejects(run('gfx950', expectedGfx, {
+      ...captureIdentity, ...incompleteIdentity,
+    }), /^Error: captured GPU identity requires complete expected identity/);
+  }
+  for (const [actualGfx, differentIdentity] of [
+    ['gfx942', {}],
+    ['gfx950', { deviceTarget: 'mi355x' }],
+    ['gfx950', { deviceTarget: 'mi350x', expectedTarget: 'unknown' }],
+    ['gfx950', { deviceName: 'AMD Instinct MI355X' }],
+    ['gfx950', { physicalCuCount: 128 }],
+    ['gfx950', { physicalCuCount: '256' }],
+  ]) {
+    await assert.rejects(run(actualGfx, 'gfx950', {
+      ...captureIdentity, ...differentIdentity,
+    }), /^Error: captured GPU identity differs from expected identity/);
+  }
+  await assert.rejects(run('gfx950', 'gfx950', {
+    ...captureIdentity, physicalCuCount: 0,
+  }), /positive physical_cu_count/);
 
   const allFiltered = await run('gfx1201', 'gfx1201', {
     deviceTarget: 'unknown',

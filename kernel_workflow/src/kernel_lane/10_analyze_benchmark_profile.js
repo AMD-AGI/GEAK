@@ -22,7 +22,7 @@ const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs
 // PHASE: Benchmark setup (Benchmark Engineer)
 // ===========================================================================
 phase('Benchmark');
-const bench = await agentT(
+let bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
     ANALYSIS: analysis,
@@ -31,6 +31,12 @@ const bench = await agentT(
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
   }),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
+if (EXTERNAL_OBJECTIVE) {
+  bench = await checkedExternalMeasurement(bench, CANONICAL);
+  if (!bench || !bench.external_measurement_valid) throw new Error('Original external evaluation is missing or invalid');
+  bench.baseline_per_case = bench.per_case;
+  bench.baseline_geomean_ms = null;
+}
 if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
@@ -48,4 +54,3 @@ let profileSummary = await agentT(
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
 log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
-

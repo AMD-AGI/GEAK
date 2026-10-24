@@ -1,4 +1,5 @@
 const VALIDATE_SCHEMA = obj({
+  ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
   kernel_name: { type: 'string' },
   director_verified_speedup_geomean: { type: 'number' },
   director_verified_speedup_arithmetic: { type: 'number' },
@@ -10,7 +11,7 @@ const VALIDATE_SCHEMA = obj({
   timing_basis: { type: 'string' },
   per_case: perCase, applied_to_original: { type: 'string' },
   arbitration_note: { type: 'string' }, final_patch: { type: 'string' },
-}, ['director_verified_speedup_geomean', 'validation_status']);
+}, metricRequired(['director_verified_speedup_geomean', 'validation_status']));
 
 // Warm-start resolver output = experience_store.py `resolve` JSON, verbatim.
 const WARMSTART_RESOLVE_SCHEMA = obj({
@@ -61,4 +62,3 @@ const WARMSTART_WRITE_SCHEMA = obj({
     session_id: { type: 'string' }, champion: { type: 'boolean' }, replaced: { type: 'boolean' },
   }),
 }, ['written']);
-

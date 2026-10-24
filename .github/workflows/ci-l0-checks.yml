@@ -5,9 +5,9 @@ name: CI L0 — checks
 # no secrets. The expensive GPU e2e lives in the self-hosted L1 workflow.
 
 on:
-  # The v4 line now lives on `main` (the default branch), so CI gates main.
+  # Gate the default branch and the thin evolutionary workflow branch.
   push:
-    branches: ["main", "ci/**"]
+    branches: ["main", "evo", "ci/**"]
   pull_request:
     # NOTE: ci/** is TEMPORARY (self-test via a PR whose base is a ci/** branch).
     # Revert to just ["main"] before real use.
@@ -139,6 +139,7 @@ jobs:
             kernel_workflow/scripts/tests/test_experience_store.py \
             kernel_workflow/scripts/tests/test_eval_storage_reclaim.py \
             kernel_workflow/scripts/tests/test_workspace_sources.py \
+            kernel_workflow/scripts/tests/test_materialize_shared_inputs.py \
             kb/tests/test_store_local.py \
             kb/tests/test_attest.py \
             kb/tests/test_identity.py \
@@ -153,6 +154,10 @@ jobs:
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             e2e_workflow/scripts/tests/test_profile_env_shim.py \
             scripts/tests/test_gpu_identity.py \
+            tests/native/test_external.py \
+            tests/native/test_external_runner.py \
+            scripts/native_runtime/test_direct_external_command.py \
+            scripts/native_runtime/test_direct_shared_inputs.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation
@@ -283,7 +288,7 @@ jobs:
           /tmp/gitleaks dir . --no-banner --redact --config .gitleaks.toml
 
   node-regression:
-    name: Node regression (expert_skills, kernel canonicalization, tuning phase, time budget, workload declaration)
+    name: Node regression (workflows, native evaluation, time budget)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -321,6 +326,18 @@ jobs:
         run: node e2e_workflow/scripts/test_pinned_eval_dir.js
       - name: kernel_workflow mode dispatch / R9700 bakeoff isolation
         run: node kernel_workflow/scripts/test_mode_dispatch.js
+      - name: greedy workflow parity
+        run: node kernel_workflow/scripts/test_greedy_parity.js
+      - name: thin evolutionary workflow
+        run: node kernel_workflow/scripts/test_simple_evolution.js
+      - name: external native primary measurement
+        run: node kernel_workflow/scripts/test_external_primary.js
+      - name: task context reaches planning and engineering
+        run: node kernel_workflow/scripts/test_task_context.js
+      - name: workflow budget cutoffs and recovery
+        run: node kernel_workflow/scripts/test_process_cutoffs.js
+      - name: runtime process deadlines and workflow timers
+        run: node --test interface/runtime/engine/test_process_deadlines.mjs interface/runtime/engine/test_workflow_timers.mjs
       # Extraction smoke must be exactly "pass"/"fail": a prose "PASS (exit 0) ..." once read as a
       # failed extraction and silently dropped heads whose unittest had passed.
       - name: extraction smoke status contract

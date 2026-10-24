@@ -10,6 +10,10 @@ The card is detected on-box (`rocminfo`), not assumed. On gfx1201, agents must f
 budget loop, round fan-out, and verification are **JS control flow**, while every judgement call is made
 by an agent returning **structured JSON**.
 
+GEAK-EVO uses this same workflow with `optimizer: "evo"` to retain and develop
+earlier candidates. See [Run GEAK-EVO](../docs/evo/stock-workflow.md) for options
+and [architecture](../docs/evo/architecture.md) for its current scope.
+
 ## Key properties
 1. **Deterministic orchestration** — the budget loop / parallelism / verification live in
    `kernel_workflow.js`, not in LLM-interpreted prose. The TechLead returns structured decisions.

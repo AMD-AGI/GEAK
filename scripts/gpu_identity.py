@@ -10,6 +10,7 @@ when the same GPU agent's ISA and exact marketing name match a supported product
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -151,10 +152,18 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--input", help="read captured rocminfo output from this file")
     source.add_argument("--rocminfo-bin", help="execute this rocminfo binary")
     source.add_argument("--stdin", action="store_true", help="read rocminfo output from stdin")
+    parser.add_argument("--input-sha256", help="verify captured raw bytes before parsing; requires --input")
     args = parser.parse_args(argv)
+    if args.input_sha256 is not None and (
+        not args.input or not re.fullmatch(r"[a-f0-9]{64}", args.input_sha256)
+    ):
+        parser.error("--input-sha256 requires --input and a lowercase 64-digit SHA-256")
     try:
         if args.input:
-            text = Path(args.input).read_text(encoding="utf-8")
+            raw = Path(args.input).read_bytes()
+            if args.input_sha256 is not None and hashlib.sha256(raw).hexdigest() != args.input_sha256:
+                raise IdentityError("captured rocminfo SHA-256 differs")
+            text = raw.decode("utf-8")
         elif args.stdin:
             text = sys.stdin.read()
         else:
