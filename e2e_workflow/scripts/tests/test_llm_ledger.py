@@ -23,9 +23,8 @@ quotes. So the tests pin the four places it could quietly lie:
                                  with a stated reason, never an exception -- this runs at the end of
                                  a multi-hour GPU run.
 
-Plus a structural guard on the three instrumented workflow JS files: there is no node/deno on the
-CI runner, so bracket balance is the one machine-checkable property of that edit, and it is exactly
-the class of mistake that wrapping a call in a helper introduces.
+Plus a syntax guard on the three instrumented workflow JS files, using Node's parser in the
+workflow's async-function context. Bracket balance is a fallback when Node is unavailable.
 
 Stdlib only, no GPU, no network -- everything is driven from synthetic transcripts in tempdirs.
 """
@@ -847,9 +846,8 @@ class TestOutputs(LedgerTestBase):
 
 
 # --------------------------------------------------------------------------- #
-# Structural guard on the instrumented JS. There is no node/deno on the CI
-# runner, so this is the one property of that edit a machine can check here --
-# and an unbalanced paren is exactly what wrapping a call in a helper risks.
+# Syntax guard on the instrumented JS. Use the same async-function context as
+# the workflow engine; bracket balance is only the fallback without Node.
 # --------------------------------------------------------------------------- #
 # A '/' starts a regex only where a value cannot already stand -- i.e. right after an
 # operator, an opener, a separator, or nothing at all. After a name, ')' , ']' or a
@@ -857,7 +855,7 @@ class TestOutputs(LedgerTestBase):
 _REGEX_OK = set("([{,;=:!?&|+-*%^~<>") | {None}
 # ...and after a keyword that expects a value, e.g. `return /re/`, the char before '/' is a
 # letter yet it is still a regex. This lookbehind is why the fallback handles the common
-# keyword-context case; it is NOT a general parser (node --check is the authority above).
+# keyword-context case; it is NOT a general parser (Node's parser is the authority).
 _VALUE_KEYWORDS = frozenset((
     "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
     "do", "else", "yield", "await", "case", "throw"))
@@ -882,6 +880,22 @@ def _find_node():
     cands = sorted(_glob.glob(os.path.expanduser(
         "~/.cursor-server/bin/linux-x64/*/node")), reverse=True)
     return cands[0] if cands else None
+
+
+# Match run_workflow.mjs's toRunnableBody and injected parameters. Constructing
+# the function checks syntax, including parameter collisions, without running it.
+_WORKFLOW_SYNTAX_CHECK = r"""
+const src = require('node:fs').readFileSync(process.argv[1], 'utf8');
+const body = src
+  .replace(/^\uFEFF/, '')
+  .replace(/^[ \t]*export\s+(?=(const|let|var|function|class|async|default)\b)/gm, '');
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+new AsyncFunction(
+  'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget', 'runProcess',
+  'setTimeout', 'clearTimeout', 'setProcessDeadline',
+  body
+);
+"""
 
 
 def js_balanced(src):
@@ -986,9 +1000,11 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
             if not os.path.isfile(path):
                 self.skipTest("%s not present" % rel)
             if node:
-                # node --check is the syntax AUTHORITY wherever a runtime exists; js_balanced
-                # is only the no-node fallback (its known limits are pinned separately below).
-                r = subprocess.run([node, "--check", path], capture_output=True, text=True)
+                # Workflows allow top-level await/return after declaration exports
+                # are stripped; check the engine's function body, not a JS module.
+                r = subprocess.run(
+                    [node, "--input-type=commonjs", "-e", _WORKFLOW_SYNTAX_CHECK, path],
+                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, "%s: %s" % (rel, r.stderr.strip()))
             else:
                 with open(path, encoding="utf-8") as fh:
@@ -1147,7 +1163,7 @@ class TestInstanceDedup(LedgerTestBase):
 
 
 class TestJsBalancedFallbackLimits(unittest.TestCase):
-    """js_balanced is a heuristic used ONLY when no node runtime is discoverable (node --check
+    """js_balanced is a heuristic used ONLY when no node runtime is discoverable (Node's parser
     is the authority in test_brackets_balance). These fixtures pin what the fallback does and does
     NOT handle, so nobody mistakes it for a sound JavaScript parser and over-trusts a green run."""
 
@@ -1165,8 +1181,8 @@ class TestJsBalancedFallbackLimits(unittest.TestCase):
     def test_documented_limitation_not_every_context_is_covered(self):
         # The lookbehind covers keyword contexts, not the full grammar. A regex opened right
         # after a `)` that closes an `if (...)` head is valid JS but the heuristic reads the
-        # '/' as division -- documented here so the limit is explicit, not a surprise. node
-        # --check (preferred whenever available) does not share this blind spot.
+        # '/' as division -- documented here so the limit is explicit, not a surprise.
+        # Node's parser (preferred whenever available) does not share this blind spot.
         ok, _ = js_balanced("if (x) /[)]/.test(y);")
         self.assertFalse(ok)
 
