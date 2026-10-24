@@ -882,19 +882,17 @@ def _find_node():
     return cands[0] if cands else None
 
 
-# Match run_workflow.mjs's toRunnableBody and injected parameters. Constructing
-# the function checks syntax, including parameter collisions, without running it.
+# Compile through the engine without executing a workflow or selecting a backend.
 _WORKFLOW_SYNTAX_CHECK = r"""
-const src = require('node:fs').readFileSync(process.argv[1], 'utf8');
-const body = src
-  .replace(/^\uFEFF/, '')
-  .replace(/^[ \t]*export\s+(?=(const|let|var|function|class|async|default)\b)/gm, '');
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-new AsyncFunction(
-  'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget', 'runProcess',
-  'setTimeout', 'clearTimeout', 'setProcessDeadline',
-  body
-);
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const { compileWorkflowBody } = await import(pathToFileURL(process.argv[2]).href);
+assert.equal(typeof compileWorkflowBody(
+  '\uFEFFexport const meta = {}; await 0; throw new Error("must not execute"); return {};'
+), 'function');
+assert.throws(() => compileWorkflowBody('const broken = ;'), SyntaxError);
+compileWorkflowBody(readFileSync(process.argv[1], 'utf8'));
 """
 
 
@@ -1003,7 +1001,8 @@ class TestInstrumentedWorkflowsAreWellFormed(unittest.TestCase):
                 # Workflows allow top-level await/return after declaration exports
                 # are stripped; check the engine's function body, not a JS module.
                 r = subprocess.run(
-                    [node, "--input-type=commonjs", "-e", _WORKFLOW_SYNTAX_CHECK, path],
+                    [node, "--input-type=module", "-e", _WORKFLOW_SYNTAX_CHECK, path,
+                     os.path.join(GEAK_ROOT, "interface/runtime/engine/run_workflow.mjs")],
                     capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, "%s: %s" % (rel, r.stderr.strip()))
             else:

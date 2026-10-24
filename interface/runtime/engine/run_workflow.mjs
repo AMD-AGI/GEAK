@@ -68,6 +68,14 @@ function toRunnableBody(src) {
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
+export function compileWorkflowBody(src) {
+  return new AsyncFunction(
+    'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget', 'runProcess',
+    'setTimeout', 'clearTimeout', 'setProcessDeadline',
+    toRunnableBody(src)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
@@ -248,14 +256,9 @@ export function createRuntime({
 
   async function runScript(absScriptPath, scriptArgs, depth) {
     const src = await readFile(absScriptPath, 'utf8');
-    const body = toRunnableBody(src);
     let fn;
     try {
-      fn = new AsyncFunction(
-        'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', 'args', 'budget', 'runProcess',
-        'setTimeout', 'clearTimeout', 'setProcessDeadline',
-        body
-      );
+      fn = compileWorkflowBody(src);
     } catch (e) {
       throw new Error(`failed to compile workflow ${absScriptPath}: ${e.message}`);
     }
