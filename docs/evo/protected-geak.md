@@ -178,7 +178,15 @@ interface. Warm-start bases require equality or normalization to the common
 ORIGINAL before import. No new shared mutable archive or scheduler is supplied.
 
 The CPU composer tests use real child processes and existing native source/report
-helpers with synthetic workflow results and timing evidence. They check one-member
-invocation preservation, selection, veto/failure retention and the new bindings.
-They do not establish complete stock workflow equivalence, native qualification,
-actual reserved service, peer import use or a performance benefit.
+helpers with synthetic timing evidence. Adapter cases use prepared workflow
+results; joined one-member cases execute the actual dispatcher and lane through
+`createRuntime`, comparing complete raw direct/composed child records through the
+postlude. The three joined endings are source improvement, bounded stop refusal
+followed by self-stop, and search cutoff followed by a Director veto. They use an
+empty local warm-start store, enabled learned reads/writeback, scripted backend
+and file effects, and a child-only logical clock with real outer watchdogs.
+They establish parity only for those declared mocked cases. They do not qualify
+the provider CLI, nonempty warm-start/citation behavior, concurrent directions,
+in-flight interruption, native hardware, actual reserved service, peer import use
+or a performance benefit. The composer's extra common evaluation is checked
+separately from the child's unchanged result.

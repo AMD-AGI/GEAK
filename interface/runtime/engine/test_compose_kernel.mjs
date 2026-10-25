@@ -4,9 +4,9 @@
 // Real child processes, source staging and native request/report readers. The
 // full-runtime child and UT timing evidence are synthetic; no model or GPU runs.
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, symlink, mkdir, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { runProcess } from './backends/base.mjs';
@@ -38,7 +38,7 @@ await event('finish');
 // measurement only run_native is replaced; the existing adapter still captures
 // source, creates operation IDs, acquires its lock and checks raw reports.
 const nativeFixture = String.raw`
-import difflib, hashlib, json, os, re, shutil, sys
+import difflib, hashlib, json, os, re, shutil, sys, uuid
 from pathlib import Path
 from geak.native._util import canonical_json
 from geak.native.external import _gate
@@ -128,13 +128,28 @@ if sys.argv[1] == '--setup':
         (lane/'terminal.json').write_bytes(canonical_json(result))
     print(hashlib.sha256((task/'task.json').read_bytes()).hexdigest())
 else:
+    # Joined CPU parity uses an explicit deterministic opaque-ID fixture. The
+    # adapter still derives and verifies every source/candidate/receipt binding.
+    if os.environ.get('TEST_NATIVE_ID_COUNTER'):
+        counter = Path(os.environ['TEST_NATIVE_ID_COUNTER'])
+        def next_uuid():
+            n = int(counter.read_text()) if counter.exists() else 0
+            counter.write_text(str(n + 1))
+            return uuid.UUID(hex=hashlib.sha256(('joined-parity-'+str(n)).encode()).hexdigest()[:32])
+        adapter.uuid.uuid4 = next_uuid
     adapter.run_native = write_evidence
     sys.exit(adapter.main(sys.argv[1:]))
 `;
 
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'geak-compose-test-'));
-  t.after(() => rm(root, {recursive: true, force: true}));
+  t.after(async () => {
+    if (options.joined_record_name && process.env.GEAK_JOINED_PARITY_ARTIFACT_DIR) {
+      await cp(root, join(process.env.GEAK_JOINED_PARITY_ARTIFACT_DIR,
+        options.joined_record_name + '-' + basename(root)), {recursive: true});
+    }
+    await rm(root, {recursive: true, force: true});
+  });
   const runtime = join(root, 'fake_runtime.mjs'), native = join(root, 'fake_native.py');
   await writeFile(runtime, fakeRuntime);
   await writeFile(native, `import sys\nsys.path.insert(0, ${JSON.stringify(REPO)})\n` + nativeFixture);
@@ -480,4 +495,279 @@ test('a dangling symlink ancestor is rejected before it can alias a fresh privat
   }
   await assert.rejects(composeKernel(f.manifest), /unresolved symbolic link/);
   await assert.rejects(readFile(join(f.root, 'events.jsonl')), {code: 'ENOENT'});
+});
+
+// Test-only complete-workflow child. The production dispatcher, lane, runtime,
+// deadline primitives, source capture and native readers execute unchanged.
+const joinedRuntime = String.raw`
+import assert from 'node:assert/strict';
+import { readFile, writeFile, mkdir, cp } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const argv = process.argv.slice(2), value = key => argv[argv.indexOf(key) + 1];
+const args = JSON.parse(await readFile(value('--args-file'), 'utf8'));
+const scenario = process.env.TEST_JOINED_ENDING;
+const raw = { scenario, args, calls: [], tools: [], logs: [], clock: [], effects: [] };
+const originalSpawn = childProcess.spawn;
+// Observe actual host commands without changing arguments, streams or timers.
+childProcess.spawn = function(cmd, commandArgs, options) {
+  const row = {cmd, args: commandArgs, cwd: options.cwd, stdin: '', stdout: '', stderr: '', code: null, signal: null};
+  raw.tools.push(row);
+  const child = originalSpawn.call(this, cmd, commandArgs, options);
+  const write = child.stdin.write.bind(child.stdin), end = child.stdin.end.bind(child.stdin);
+  let insideEnd = false;
+  child.stdin.write = (input, ...rest) => {
+    if (!insideEnd) row.stdin += input.toString();
+    return write(input, ...rest);
+  };
+  child.stdin.end = (input, ...rest) => {
+    if (typeof input === 'string' || ArrayBuffer.isView(input)) row.stdin += input.toString();
+    insideEnd = true;
+    try { return end(input, ...rest); }
+    finally { insideEnd = false; }
+  };
+  child.stdout.on('data', data => { row.stdout += data.toString(); });
+  child.stderr.on('data', data => { row.stderr += data.toString(); });
+  child.on('close', (code, signal) => { row.code = code; row.signal = signal; });
+  return child;
+};
+syncBuiltinESMExports();
+const { createRuntime } = await import(process.env.TEST_RUNTIME_MODULE);
+const { runProcess } = await import(process.env.TEST_PROCESS_MODULE);
+const realNow = Date.now, realHrtime = process.hrtime.bigint;
+const wallStart = realNow(), epoch = (args.deadline_epoch - 600) * 1000;
+let logicalMs = 0;
+Date.now = () => epoch + logicalMs;
+process.hrtime.bigint = () => BigInt(logicalMs) * 1000000n;
+const advance = (label, next = logicalMs + 25) => {
+  assert.ok(next >= logicalMs);
+  raw.clock.push({label, from_ms: logicalMs, to_ms: next}); logicalMs = next;
+};
+// This watchdog and all runtime process/grace timers retain ordinary real time.
+const watchdog = setTimeout(() => process.exit(98), 20000);
+const hash = value => createHash('sha256').update(value).digest('hex');
+const field = (prompt, key) => {
+  const line = prompt.split('\n').find(line => line.startsWith('- ' + key + ': '));
+  assert.ok(line, 'missing fixture input ' + key);
+  const value = line.slice(key.length + 4);
+  try { return JSON.parse(value); } catch { return value; }
+};
+const E = args.eval_dir, W = join(E, 'workspace');
+const gitEnv = {GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z'};
+const tool = async (cmd, commandArgs, extra = {}) => {
+  const result = await runProcess({cmd, args: commandArgs, timeoutMs: 10000, ...extra});
+  assert.equal(result.status, 'completed'); assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.group_cleared, true); assert.equal(result.strays_killed, false);
+  return result.stdout;
+};
+const git = (path, ...commandArgs) => tool('git', ['-C', path, ...commandArgs], {env: gitEnv});
+const write = async (path, text) => {
+  await mkdir(dirname(path), {recursive: true}); await writeFile(path, text);
+  raw.effects.push({kind: 'write', path, sha256: hash(text)});
+};
+const native = async workspace => {
+  const cmd = args.external_measurement_command;
+  const text = await tool(cmd[0], [...cmd.slice(1), '--workspace', workspace]);
+  return JSON.parse(text.trim().split('\n').at(-1));
+};
+const stop = {stop: true, directions: [], reasoning: 'fixture accepted stop'};
+const profile = {bottleneck: 'memory', top_opportunities: [], summary_path: join(E, 'profile.json')};
+const expected = ['director:setup', 'tech_lead:analyze', 'benchmark_engineer', 'profile_engineer:baseline',
+  'warm_start:resolve', 'tech_lead:plan r1',
+  ...(scenario === 'improve' ? ['eng r1_d1:memory', 'verify r1_d1', 'commit r1', 'reprofile r1',
+    'tech_lead:memory r1', 'storage:reclaim r1'] : scenario === 'self_stop'
+    ? ['tech_lead:replan r1#1', 'tech_lead:replan r1#2'] : []),
+  'tech_lead:report', 'director:validate',
+  ...(scenario === 'improve' ? ['update_experience', 'kb:write'] : []), 'file_writer:persist_llm_stats'];
+const failures = [];
+let rt;
+try {
+  rt = createRuntime({concurrency: Number(value('--concurrency')), agentTimeoutMs: Number(value('--agent-timeout-ms')),
+    schemaRetries: 0, backendEventsFile: value('--backend-events-file'), log: message => raw.logs.push(message),
+    backend: {name: 'joined-fixture', async runAgent(options) {
+      const row = {options, returned: null}; raw.calls.push(row);
+      try {
+        assert.equal(options.label, expected[raw.calls.length - 1], 'unexpected or missing response step');
+        assert.ok(!options.label.startsWith('clock '), 'process-bounded mode must use the runtime clock');
+        const {label, prompt} = options;
+        let result;
+        if (label === 'director:setup') {
+          await cp(args.kernel_path, W, {recursive: true});
+          await git(W, 'init', '-q'); await git(W, 'add', '.'); await git(W, 'commit', '-q', '-m', 'ORIGINAL');
+          raw.initial_commit = (await git(W, 'rev-parse', 'HEAD')).trim();
+          result = {eval_dir: E, workspace: W, kernel_name: 'fixture', device_gfx: 'gfx950',
+            device_target: 'mi355x', physical_cu_count: 256, baseline_frozen: true, source_files: ['kernel_src/module.py']};
+        } else if (label === 'tech_lead:analyze') {
+          result = {kernel_type: 'gemm', roadmap_summary: 'fixture question', modifiable_files: ['kernel_src/module.py']};
+        } else if (label === 'benchmark_engineer') {
+          const measured = await native(W);
+          await write(join(E, 'COMMANDMENT.md'), 'Synthetic full-task native contract.\n');
+          result = {commandment_path: join(E, 'COMMANDMENT.md'), baseline_per_case: measured.per_case,
+            external_evaluation: measured.external_evaluation, reliable: true};
+        } else if (label === 'profile_engineer:baseline' || label === 'reprofile r1') {
+          await write(profile.summary_path, JSON.stringify(profile)); result = profile;
+        } else if (label === 'warm_start:resolve') {
+          const path = join(args.kb_store_dir, 'initial.json');
+          const bytes = await readFile(path); raw.effects.push({kind: 'read', path, sha256: hash(bytes)});
+          result = JSON.parse(bytes);
+        } else if (label === 'tech_lead:plan r1') {
+          const path = join(args.workflow_dir, 'knowledge/learned/INDEX.md');
+          const bytes = await readFile(path); raw.effects.push({kind: 'read', path, sha256: hash(bytes)});
+          assert.equal(field(prompt, 'LEARNED_KB'), 'on');
+          result = scenario === 'improve' ? {stop: false, directions: [{id: 'r1_d1', title: 'fixture source change',
+            specialty: 'memory', focus_files: ['kernel_src/module.py'], prompt: 'synthetic test mutation', learned_refs: []}]} : stop;
+        } else if (label.startsWith('tech_lead:replan ')) result = stop;
+        else if (label === 'eng r1_d1:memory') {
+          const workspace = field(prompt, 'KERNEL_PATH'), output = field(prompt, 'OUTPUT_DIR');
+          await cp(W, workspace, {recursive: true});
+          await write(join(workspace, 'kernel_src/module.py'), '# synthetic geak factor=1.4\n');
+          const patch = await git(workspace, 'diff', '--binary');
+          await write(join(output, 'best_patch.diff'), patch);
+          const measured = await native(workspace);
+          result = {status: 'ok', measurement_valid: true, external_evaluation: measured.external_evaluation};
+        } else if (label === 'verify r1_d1') {
+          const workspace = join(field(prompt, 'VERIFY_DIR'), 'workspace');
+          await cp(W, workspace, {recursive: true}); await git(workspace, 'apply', field(prompt, 'PATCH'));
+          const measured = await native(workspace);
+          result = {status: 'verified', correctness: 'pass', external_evaluation: measured.external_evaluation};
+        } else if (label === 'commit r1') {
+          await git(W, 'apply', join(E, 'round_1/engineer_0/best_patch.diff'));
+          await git(W, 'add', '.'); await git(W, 'commit', '-q', '-m', 'fixture accepted round');
+          await write(join(E, 'current_best.diff'), await git(W, 'diff', 'HEAD~1', 'HEAD'));
+          result = {committed: true, current_best_diff: join(E, 'current_best.diff')};
+        } else if (label === 'tech_lead:memory r1') {
+          result = {insights: ['fixture source was measured'], ledger: [{question: 'fixture', outcome: 'measured'}]};
+          await write(join(E, 'memory.json'), JSON.stringify(result));
+        } else if (label === 'storage:reclaim r1') result = {ok: true, note: 'no heavy fixture artifacts'};
+        else if (label === 'tech_lead:report') {
+          const history = field(prompt, 'HISTORY');
+          result = {report_path: join(E, 'report.json'), final_patch: join(E, 'host_final_patch.diff'), rounds: history.rounds.length};
+          await write(result.report_path, JSON.stringify({history, result}));
+        } else if (label === 'director:validate') {
+          result = {validation_status: scenario === 'cutoff_veto' ? 'flagged' : 'accepted',
+            correctness: 'pass', timing_basis: 'synthetic'};
+        } else if (label === 'update_experience') {
+          const path = join(field(prompt, 'LEARNED_DIR'), 'fixture-card.md');
+          await write(path, 'Synthetic qualified source evidence.\n'); result = {action: 'created', card_path: path};
+        } else if (label === 'kb:write') {
+          const path = join(args.kb_store_dir, 'written.json');
+          await write(path, JSON.stringify({source_commit: (await git(W, 'rev-parse', 'HEAD')).trim()}));
+          result = {written: true, slug: 'fixture', dir: args.kb_store_dir};
+        } else if (label === 'file_writer:persist_llm_stats') {
+          await write(join(E, 'accounting-prompt.txt'), prompt); result = {written: true, ok: true, path: E};
+        } else throw new Error('unhandled fixture step ' + label);
+        row.returned = result;
+        advance(label, label === 'tech_lead:plan r1' && scenario === 'cutoff_veto' ? 420000 : undefined);
+        return {text: JSON.stringify(result)};
+      } catch (error) { failures.push(String(error.stack || error)); throw error; }
+    }},
+  });
+  raw.result = await rt.runScript(argv[0], args, 0);
+  raw.runtime_state = rt.state;
+  raw.final_commit = (await git(W, 'rev-parse', 'HEAD')).trim();
+  raw.final_patch = await readFile(join(E, 'host_final_patch.diff'), 'utf8');
+  raw.recorder = (await readFile(value('--backend-events-file'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(failures, []);
+  assert.deepEqual(raw.calls.map(row => row.options.label), expected);
+  assert.equal(rt.state.schemaFails, 0);
+  assert.equal(rt.state.backendTrace.open_calls, 0); assert.equal(rt.state.backendTrace.write_error, null);
+  assert.equal(raw.recorder.length, 2 * expected.length);
+  await writeFile(value('--result-file'), JSON.stringify(raw.result));
+  await writeFile(value('--metrics-file'), JSON.stringify({ok: true, ...rt.state}));
+} catch (error) { raw.error = String(error.stack || error); process.exitCode = 1; }
+finally {
+  raw.fixture_failures = failures;
+  await writeFile(join(args.exp_root, 'child_trace.json'), JSON.stringify(raw, null, 2));
+  Date.now = realNow; process.hrtime.bigint = realHrtime;
+  clearTimeout(watchdog);
+  await writeFile(join(args.exp_root, 'real_wall.json'), JSON.stringify({elapsed_ms: realNow() - wallStart}));
+}
+`;
+
+test('joined one-member parity executes the real process-bounded workflow through its postlude', async t => {
+  for (const ending of ['improve', 'self_stop', 'cutoff_veto']) await t.test(ending, async t => {
+    const f = await fixture(t, {joined_record_name: ending});
+    const lane = f.lanes[0], privateRoot = join(f.root, 'geak');
+    f.manifest.lanes = [lane]; lane.id = 'reference';
+    const runtime = join(f.root, 'joined_runtime.mjs'); await writeFile(runtime, joinedRuntime);
+    lane.runtime_command = [process.execPath, runtime];
+    lane.runtime_options = {concurrency: 2, agent_timeout_ms: 600000,
+      backend_events_file: join(privateRoot, 'backend_calls.jsonl')};
+    lane.timeout_ms = 660000;
+    const args = {...await json(lane.args_file), workflow_dir: join(privateRoot, 'kernel_workflow'),
+      deadline_epoch: Math.floor(Date.now() / 1000) + 600, search_reserve_s: 180,
+      final_validation_reserve_s: 120, final_cleanup_reserve_s: 60,
+      agent_timeout_ms: 600000, agent_retries: 1, budget: ending === 'improve' ? 1 : 6,
+      max_forced_replans: 2, no_stop_s: 10, warm_start: 'on', use_learned_kb: 'true',
+      kb_remote: 'off', kb_store_dir: join(privateRoot, 'kb_store'), kb_artifacts_dir: join(privateRoot, 'kb_artifacts')};
+    f.manifest.deadline_epoch = args.deadline_epoch;
+    lane.env = {...lane.env, TEST_JOINED_ENDING: ending, GEAK_LIVE_TRACE: '0',
+      TEST_RUNTIME_MODULE: new URL('./run_workflow.mjs', import.meta.url).href,
+      TEST_PROCESS_MODULE: new URL('./backends/base.mjs', import.meta.url).href,
+      TEST_NATIVE_ID_COUNTER: join(privateRoot, 'native_counter')};
+    const reset = async () => {
+      await rm(privateRoot, {recursive: true, force: true});
+      await mkdir(args.exp_root, {recursive: true});
+      await mkdir(join(args.workflow_dir, 'knowledge/learned'), {recursive: true});
+      await cp(join(REPO, 'kernel_workflow/kernel_lane.js'), join(args.workflow_dir, 'kernel_lane.js'));
+      await writeFile(join(args.workflow_dir, 'knowledge/learned/INDEX.md'), 'Synthetic empty learned index.\n');
+      await mkdir(args.kb_store_dir, {recursive: true});
+      await writeFile(join(args.kb_store_dir, 'initial.json'), JSON.stringify({read_reason: 'empty', candidates: []}));
+      await writeFile(lane.args_file, JSON.stringify(args));
+    };
+    await reset();
+    const direct = await runProcess({cmd: process.execPath, args: [runtime, join(REPO, 'kernel_workflow/kernel_workflow.js'),
+      ...Object.entries(lane.runtime_options).flatMap(([key, value]) => ['--' + key.replaceAll('_', '-'), String(value)]),
+      '--args-file', lane.args_file, '--result-file', join(privateRoot, 'direct_result.json'),
+      '--metrics-file', join(privateRoot, 'direct_metrics.json')], cwd: lane.cwd, env: lane.env, timeoutMs: 25000});
+    await writeFile(join(f.root, 'direct_process.json'), JSON.stringify(direct));
+    const first = await json(join(args.exp_root, 'child_trace.json'));
+    assert.equal(direct.code, 0, first.error || direct.stderr);
+    await cp(privateRoot, join(f.root, 'direct_saved'), {recursive: true});
+    await reset();
+    const result = await composeKernel(f.manifest);
+    const second = await json(join(args.exp_root, 'child_trace.json'));
+    // Same absolute private paths and deterministic opaque IDs: no field scrub.
+    assert.deepEqual(second, first);
+    assert.equal(result.children.length, 1);
+    assert.deepEqual(await json(result.children[0].result_file), first.result);
+    assert.equal(first.result.forced_replans, ending === 'self_stop' ? 2 : 0);
+    assert.equal(first.result.stopped_by, ending === 'improve' ? 'budget' : ending === 'self_stop' ? 'tech_lead_stop' : 'deadline');
+    assert.equal(first.result.deadline_hit, ending === 'cutoff_veto');
+    assert.equal(first.final_commit === first.initial_commit, ending !== 'improve');
+    assert.equal(first.final_patch.length > 0, ending === 'improve');
+    if (ending === 'improve') {
+      const patchWrites = first.tools.filter(row => row.cmd === 'sh' && row.args[1] === 'cat > "$1"'
+        && row.args.at(-1) === join(args.eval_dir, 'host_final_patch.diff'));
+      assert.ok(patchWrites.length > 0, 'the postlude writes the retained final patch through host stdin');
+      for (const row of patchWrites) assert.equal(row.stdin, first.final_patch);
+    }
+    assert.equal(first.result.warm_start.read_reason, 'empty');
+    assert.equal(first.result.warm_start.adopted, false);
+    assert.equal(!!first.result.kb_written && !!first.result.learned_card, ending === 'improve');
+    assert.equal(first.recorder.filter(row => row.event === 'start').length, first.calls.length);
+    const call = label => first.calls.find(row => row.options.label === label).options;
+    if (ending === 'cutoff_veto') {
+      assert.equal(call('tech_lead:report').timeoutMs, 53000, 'Report uses its original reserved cutoff');
+      assert.equal(call('director:validate').timeoutMs, 112975, 'validation uses its original reserved cutoff');
+    }
+    assert.ok(first.calls.some(row => row.options.label === 'file_writer:persist_llm_stats'));
+    if (ending === 'cutoff_veto') {
+      assert.equal(result.required_finalist.qualified, false);
+      assert.equal(result.children[0].status, 'failed');
+      assert.equal(result.children[0].common_evidence, undefined, 'Director veto cannot enter common selection');
+    } else {
+      const child = result.children[0];
+      assert.equal(result.required_finalist.qualified, true);
+      assert.equal(child.common_selection.source_id, first.result.final_selection.source_id);
+      assert.notEqual(child.common_selection.candidate_id, first.result.final_selection.candidate_id);
+      assert.notEqual(child.common_selection.evaluation_id, first.result.final_selection.evaluation_id);
+      assert.equal(child.status, ending === 'improve' ? 'qualified' : 'no_improvement');
+    }
+    await writeFile(join(f.root, 'joined_parity_result.json'), JSON.stringify({ending, raw_child_equal: true,
+      role_calls: first.calls.length, host_commands: first.tools.length, source_commit: first.final_commit,
+      child_final_selection: first.result.final_selection, composed: result}, null, 2));
+  });
 });
