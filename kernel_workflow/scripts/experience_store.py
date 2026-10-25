@@ -2020,10 +2020,11 @@ def _store_ladder(a, gfx: str):
     """
     if a.canonical_id:
         return [(a.canonical_id, "exact")]
-    meta = {"kernel_name": a.kernel_name, "language": a.language,
-            "verified_stack": detect_stack(a.language)}
+    # Lookup needs only ROCm metadata; an explicit version needs no stack inspection.
+    version = str(getattr(a, "framework_version", "") or "").strip() or _rocm_version()
+    meta = {"kernel_name": a.kernel_name, "language": a.language}
     identity = remote_identity(meta, a.producer, remote_gpu(gfx, getattr(a, "gpu", "")),
-                               getattr(a, "framework_version", ""))
+                               version)
     return list(zip(remote_canonical_ids(identity), ("exact", "any_version")))
 
 
@@ -2037,10 +2038,10 @@ def _legacy_name_ladder(a, gfx: str):
     """
     if a.canonical_id:
         return []
-    meta = {"kernel_name": a.kernel_name, "language": a.language,
-            "verified_stack": detect_stack(a.language)}
+    version = str(getattr(a, "framework_version", "") or "").strip() or _rocm_version()
+    meta = {"kernel_name": a.kernel_name, "language": a.language}
     identity = remote_identity(meta, a.producer, remote_gpu(gfx, getattr(a, "gpu", "")),
-                               getattr(a, "framework_version", ""))
+                               version)
     identity["kernel_name"] += "_task"      # the fold is idempotent, so appending re-spells it
     return list(zip(remote_canonical_ids(identity), ("legacy_name", "legacy_name_any_version")))
 

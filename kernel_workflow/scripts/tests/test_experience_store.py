@@ -13,6 +13,8 @@ import json
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -892,6 +894,64 @@ def test_a_store_root_that_is_not_there_is_a_miss_not_an_empty_store(tmp_path):
     """A typo'd path must not read as 'no experience' and silently cold-start a warm run."""
     out = resolve_remote(str(tmp_path / "nope"), str(tmp_path / "refs"))
     assert out["candidates"] == [] and "no_such_store" in out["reason"]
+
+
+@pytest.mark.parametrize("version,expected", [
+    ("7.2.0-98765", "7.2"),
+    (" 6.4.3 ", "6.4"),
+    ("unspecified", "unspecified"),
+    ("unknown", "unknown"),
+])
+def test_lookup_with_explicit_version_needs_no_stack_detection(monkeypatch, version, expected):
+    es = _store_module()
+    detect = Mock(side_effect=AssertionError("lookup must not inspect the measured stack"))
+    rocm = Mock(side_effect=AssertionError("the supplied version must win without detection"))
+    monkeypatch.setattr(es, "detect_stack", detect)
+    monkeypatch.setattr(es, "_rocm_version", rocm)
+    args = SimpleNamespace(canonical_id="", kernel_name="fused_moe_kernel_task",
+                           language="triton", producer="geak", framework_version=version)
+    base = "geak:kernel:gfx950:fused_moe_kernel:triton:rocm"
+    legacy = "geak:kernel:gfx950:fused_moe_kernel_task:triton:rocm"
+    assert es._store_ladder(args, "gfx950") + es._legacy_name_ladder(args, "gfx950") == [
+        (base + ":" + expected, "exact"), (base, "any_version"),
+        (legacy + ":" + expected, "legacy_name"), (legacy, "legacy_name_any_version"),
+    ]
+    detect.assert_not_called()
+    rocm.assert_not_called()
+
+
+@pytest.mark.parametrize("version,observed,expected", [
+    ("", "7.2.0-98765", "7.2"),
+    ("  ", "6.4.3", "6.4"),
+    (None, "", "unspecified"),
+])
+def test_lookup_without_version_uses_only_rocm_metadata(monkeypatch, version, observed, expected):
+    es = _store_module()
+    detect = Mock(side_effect=AssertionError("lookup must not import Torch or Triton"))
+    rocm = Mock(return_value=observed)
+    monkeypatch.setattr(es, "detect_stack", detect)
+    monkeypatch.setattr(es, "_rocm_version", rocm)
+    args = SimpleNamespace(canonical_id="", kernel_name="fused_moe_kernel_task",
+                           language="triton", producer="geak", framework_version=version)
+    base = "geak:kernel:gfx950:fused_moe_kernel:triton:rocm"
+    legacy = "geak:kernel:gfx950:fused_moe_kernel_task:triton:rocm"
+    assert es._store_ladder(args, "gfx950") + es._legacy_name_ladder(args, "gfx950") == [
+        (base + ":" + expected, "exact"), (base, "any_version"),
+        (legacy + ":" + expected, "legacy_name"), (legacy, "legacy_name_any_version"),
+    ]
+    detect.assert_not_called()
+    rocm.assert_called()
+
+
+def test_explicit_lookup_identity_bypasses_version_detection(monkeypatch):
+    es = _store_module()
+    detect = Mock(side_effect=AssertionError("an explicit identity requires no detection"))
+    monkeypatch.setattr(es, "detect_stack", detect)
+    monkeypatch.setattr(es, "_rocm_version", detect)
+    args = SimpleNamespace(canonical_id="geak:kernel:gfx942:k:hip:rocm:6.4")
+    assert es._store_ladder(args, "gfx950") == [(args.canonical_id, "exact")]
+    assert es._legacy_name_ladder(args, "gfx950") == []
+    detect.assert_not_called()
 
 
 def test_a_key_that_differs_only_in_stack_version_is_reported_not_silently_used(tmp_path):
