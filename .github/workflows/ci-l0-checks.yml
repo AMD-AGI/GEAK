@@ -336,8 +336,8 @@ jobs:
         run: node kernel_workflow/scripts/test_task_context.js
       - name: workflow budget cutoffs and recovery
         run: node kernel_workflow/scripts/test_process_cutoffs.js
-      - name: runtime process deadlines and workflow timers
-        run: node --test interface/runtime/engine/test_process_deadlines.mjs interface/runtime/engine/test_workflow_timers.mjs
+      - name: runtime process deadlines, workflow timers and protected composition
+        run: node --test interface/runtime/engine/test_process_deadlines.mjs interface/runtime/engine/test_workflow_timers.mjs interface/runtime/engine/test_compose_kernel.mjs
       # Extraction smoke must be exactly "pass"/"fail": a prose "PASS (exit 0) ..." once read as a
       # failed extraction and silently dropped heads whose unittest had passed.
       - name: extraction smoke status contract
