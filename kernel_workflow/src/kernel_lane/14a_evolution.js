@@ -43,7 +43,7 @@ async function createEvolution(start) {
   const defaultParent = () => retained(bestId)?.verified ? bestId : 'ORIGINAL';
   const evidence = (value) => {
     if (!value) return null;
-    const keys = ['status', 'correctness', 'strategy', 'measurement_valid', 'external_measurement_valid',
+    const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid', 'external_measurement_valid',
       'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
       'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
       'per_case', 'native_reproducible_gain', 'native_reproducible_regression', 'notes'];
@@ -90,6 +90,16 @@ async function createEvolution(start) {
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
           retention_error: row.retention_error, last_record_error: row.last_record_error || null,
           strategy: row.engineer && row.engineer.strategy}))};
+    },
+    memoryInputs(directions) {
+      return {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
+        const row = entries.find(entry => entry.id === direction.id);
+        return {id: direction.id, parent_id: direction.parent_id, donor_ids: direction.donor_ids || [],
+          approach: direction.approach || null, patch_ref: row?.patch_ref || null,
+          status: row?.status || null, verified: row?.verified ?? null,
+          retention_error: row?.retention_error || null, last_record_error: row?.last_record_error || null,
+          report_path: `${direction.out_dir}/report.md`};
+      })};
     },
     prepare(directions, round) {
       if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');

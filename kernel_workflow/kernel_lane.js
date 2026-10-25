@@ -1696,6 +1696,8 @@ const planSchema = evo ? {
 let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
 if (evo) history.evolution_archive = evo.path;
+const evolutionInstructions = evo
+  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : '';
 const citations = [];
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
@@ -1764,7 +1766,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
 
   let plan = await agentT(
     roleAgent('tech_lead', 'plan_round', 'Decide this round\'s orthogonal directions (or stop).' +
-      (evo ? ` Read ${WORKFLOW_DIR}/roles/evolution.md and select sources from the retained archive.` : ''),
+      evolutionInstructions,
       planInputs(false)),
     { phase: 'Optimize', label: `tech_lead:plan r${round}`, schema: planSchema });
   if (PROCESS_BOUNDED) left = await secondsLeft(`planned-r${round}`);
@@ -1781,7 +1783,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     forcedReplans++;
     log(`Round ${round}: stop=true with ${(left / 60).toFixed(0)} min left — refusing (#${forcedReplans}), re-planning.`);
     plan = await agentT(
-      roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.',
+      roleAgent('tech_lead', 'plan_round', 'Your stop was refused: plan at least one direction.' + evolutionInstructions,
         planInputs(true)),
       { phase: 'Optimize', label: `tech_lead:replan r${round}#${forcedReplans}`, schema: planSchema });
     left = await secondsLeft(`replan-r${round}`);
@@ -2155,8 +2157,9 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
   const mem = await agentT(
-    roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.', {
+    roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.' + evolutionInstructions, {
       EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR,
+      ...(evo ? evo.memoryInputs(clean.map(r => r.d)) : {}),
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,
         expected: r.d.expected_speedup, claimed: r.eng ? r.eng.speedup_geomean : 0,
         verified: r.ver ? r.ver.verified_geomean : 0, status: r.ver ? r.ver.status : (r.eng ? r.eng.status : 'none'),
@@ -2390,7 +2393,7 @@ async function createEvolution(start) {
   const defaultParent = () => retained(bestId)?.verified ? bestId : 'ORIGINAL';
   const evidence = (value) => {
     if (!value) return null;
-    const keys = ['status', 'correctness', 'strategy', 'measurement_valid', 'external_measurement_valid',
+    const keys = ['status', 'correctness', 'strategy', 'strategies_tried', 'measurement_valid', 'external_measurement_valid',
       'external_evaluation', 'primary_regime', 'primary_speedup', 'development_geomean_speedup',
       'verified_geomean', 'verified_weighted', 'verified_arithmetic', 'speedup_geomean',
       'per_case', 'native_reproducible_gain', 'native_reproducible_regression', 'notes'];
@@ -2437,6 +2440,16 @@ async function createEvolution(start) {
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
           retention_error: row.retention_error, last_record_error: row.last_record_error || null,
           strategy: row.engineer && row.engineer.strategy}))};
+    },
+    memoryInputs(directions) {
+      return {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
+        const row = entries.find(entry => entry.id === direction.id);
+        return {id: direction.id, parent_id: direction.parent_id, donor_ids: direction.donor_ids || [],
+          approach: direction.approach || null, patch_ref: row?.patch_ref || null,
+          status: row?.status || null, verified: row?.verified ?? null,
+          retention_error: row?.retention_error || null, last_record_error: row?.last_record_error || null,
+          report_path: `${direction.out_dir}/report.md`};
+      })};
     },
     prepare(directions, round) {
       if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');

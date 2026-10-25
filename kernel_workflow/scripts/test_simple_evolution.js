@@ -203,11 +203,13 @@ async function runCase(sc) {
       if (label === 'benchmark_engineer') return {...fallback(label, prompt),
         commandment_path: path.join(evalDir, 'COMMANDMENT.md'),
         ...(sc.external ? {external_evaluation: registerExternal('original', canonical, 1, 1)} : {})};
-      if (label.startsWith('tech_lead:plan ')) {
+      if (label.startsWith('tech_lead:plan ') || label.startsWith('tech_lead:replan ')) {
         const round = label.split(' ')[1];
         if (sc.expireAfterPlan === round) now = deadline;
+        if (sc.inspectPlan) sc.inspectPlan({label, prompt, h});
         return fallback(label, prompt);
       }
+      if (label.startsWith('tech_lead:memory ') && sc.memory) return sc.memory({label, prompt, h});
       if (label.startsWith('eng ') || label.startsWith('deep ')) {
         const id = label.split(' ')[1].split(':')[0], spec = sc.candidates[id];
         assert.ok(spec, `unexpected engineer ${id}`);
@@ -383,6 +385,59 @@ const direction = (id, extra = {}) => ({id, title: id, specialty: 'memory', prom
 const plan = (...directions) => ({stop: false, directions});
 const slow = source(1, 0, {'inherited.py': 'P = 1\n'}), fast = source(0, 2);
 const child = source(1, 1, {'inherited.py': 'P = 1\n'});
+const approachMemoryCase =
+  {name: 'approach evidence reaches memory, forced replanning and the next planner',
+    args: {budget: 3, deadline_epoch: 100000}, clock: () => 1000,
+    best: 1.8, bestId: 'r2_d0', expected: child,
+    plans: {r1: {stop: true, directions: []},
+      'r1#1': plan(direction('a', {approach: 'approach-a'}), direction('b', {approach: 'approach-b'})),
+      r2: plan(direction('continue-a', {parent_id: 'r1_d0', donor_ids: ['r1_d1'], approach: 'approach-a',
+        prompt: 'Resolve question-a using the retained source and report.'}))},
+    candidates: {
+      r1_d0: {files: slow, speed: 0.8, engineer: {status: 'ok', measurement_valid: true,
+        speedup_geomean: 0.8, strategies_tried: ['realized-a', 'unresolved-a']}},
+      r1_d1: {files: fast, speed: 1.4},
+      r2_d0: {files: child, inherited: slow, speed: 1.8, inspect: ({h, prompt}) => {
+        assert.match(h.field(prompt, 'DIRECTION').prompt, /question-a/,
+          'the planner carries the continuation question in the existing engineer assignment');
+      }},
+    },
+    memory: ({label, prompt, h}) => {
+      const saved = JSON.parse(fs.readFileSync(h.field(prompt, 'EVOLUTION_ARCHIVE'), 'utf8'));
+      const attempted = h.field(prompt, 'EVOLUTION_ROUND');
+      const round = Number(label.match(/r(\d+)$/)[1]);
+      assert.deepEqual(attempted.map(row => row.id), round === 1 ? ['r1_d0', 'r1_d1'] : ['r2_d0']);
+      for (const item of attempted) {
+        const retained = saved.entries.find(row => row.id === item.id);
+        for (const key of ['parent_id', 'donor_ids', 'approach', 'patch_ref', 'status', 'verified',
+          'retention_error']) assert.deepEqual(item[key], retained[key]);
+        assert.equal(item.last_record_error, retained.last_record_error || null);
+        assert.equal(item.report_path, path.join(h.field(prompt, 'EVAL_DIR'),
+          `round_${round}`, `engineer_${item.id.split('_d')[1]}`, 'report.md'));
+      }
+      if (round !== 1) return {insights: [], ledger: []};
+      assert.deepEqual(saved.entries[0].engineer.strategies_tried, ['realized-a', 'unresolved-a']);
+      return {insights: ['question-a remains open'], ledger: [{approach: 'approach-a',
+        direction: 'r1_d0', patch_ref: attempted[0].patch_ref, report_path: attempted[0].report_path,
+        next_question: 'question-a', verdict: 'partial'}]};
+    },
+    inspectPlan: ({label, prompt, h}) => {
+      if (label !== 'tech_lead:plan r2') return;
+      const ledger = h.field(prompt, 'HISTORY').ledger;
+      assert.equal(ledger.length, 1, 'existing memory ledger reaches the next planning call');
+      assert.equal(ledger[0].approach, 'approach-a');
+      assert.equal(ledger[0].next_question, 'question-a');
+      assert.equal(hash(fs.readFileSync(ledger[0].patch_ref.path)), ledger[0].patch_ref.sha256);
+      assert.deepEqual(h.field(prompt, 'HISTORY').insights, ['question-a remains open']);
+    },
+    check: ({events, archive}) => {
+      assert.ok(events.some(event => event.label === 'tech_lead:replan r1#1'));
+      for (const event of events.filter(event => /^tech_lead:(?:plan|replan|memory) /.test(event.label))) {
+        assert.ok(event.prompt.includes(`Read ${path.join(ROOT, 'kernel_workflow/roles/evolution.md')} for the retained-approach policy.`),
+          `${event.label} receives the same EVO policy`);
+      }
+      assert.equal(archive.entries.find(row => row.id === 'r2_d0').parent_id, 'r1_d0');
+    }};
 const cases = [
   {name: 'slower-parent, donor identity, failures, cumulative new-file patch and retained source',
     args: {budget: 6, max_no_improve: 6}, best: 1.8, bestId: 'r4_d0', expected: child,
@@ -439,6 +494,13 @@ const cases = [
       assert.ok(events.some(e => e.label === 'verify r1_d0'), 'below-floor source independently verified');
       const lastPlan = events.find(e => e.label === 'tech_lead:plan r4');
       assert.ok(h.field(lastPlan.prompt, 'EVOLUTION_ENTRIES').some(row => row.id === 'r1_d0'));
+      const missing = h.field(events.find(e => e.label === 'tech_lead:memory r2').prompt, 'EVOLUTION_ROUND')[0];
+      assert.equal(missing.patch_ref, null, 'memory must not imply that a missing patch was retained');
+      assert.equal(missing.verified, false);
+      assert.ok(missing.retention_error);
+      const unverified = h.field(events.find(e => e.label === 'tech_lead:memory r3').prompt, 'EVOLUTION_ROUND')[0];
+      assert.ok(unverified.patch_ref, 'retained source remains available despite invalid measurement');
+      assert.equal(unverified.verified, false, 'retention is not verification');
     }},
   {name: 'false successful commit preserves prior best bytes, patch and measurements',
     args: {budget: 2}, best: 1.4, bestId: 'r1_d0', expected: fast, badCommit: 'r2',
@@ -574,6 +636,7 @@ const cases = [
     }},
 ];
 const externalLineage = cases[cases.length - 1];
+cases.push(approachMemoryCase);
 cases.push(...[true, false, 'true'].map(evolution_evidence_handoff => ({...cases[0],
   name: `selected evidence handoff with ${JSON.stringify(evolution_evidence_handoff)}`,
   args: {...cases[0].args, evolution_evidence_handoff}})));

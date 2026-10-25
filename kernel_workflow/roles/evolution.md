@@ -4,14 +4,22 @@ Use the same mathematical contract, editable boundary, tools, correctness tests
 and full-call measurement as the rest of this workflow. The archive changes what
 you can develop next; it does not change what counts as a measured improvement.
 
-When planning, inspect EVOLUTION_ARCHIVE and the evidence for relevant entries.
+When planning, inspect EVOLUTION_ARCHIVE, the existing HISTORY.ledger and the
+evidence for relevant entries. Treat the ledger's latest revision of an approach
+as a continuation of that approach, not evidence of a distinct approach.
 Choose a retained `parent_id` for each direction and optional `donor_ids` whose
 ideas or source are useful. Distinguish the best validated program from promising
 alternatives and unfinished attempts. Continue strong exploitation of the best
-while giving distinct approaches a finite, purposeful opportunity to develop.
+and develop alternatives when their unresolved question warrants the work.
 Provide an `approach` label describing the computational organization; a label
-is a proposed grouping, not proof that two implementations are different. When
-useful alternatives exist, include development of one alongside refining the best.
+is a proposed grouping, not proof that two implementations are different. Keep
+that label stable while the organization is unchanged. In each DIRECTION.prompt,
+carry the relevant source/evidence references, the unresolved question, and the
+next experiment whose outcomes would change the decision. Explain whether it
+continues an approach, reformulates it, or opens a distinct one. Select the source
+that implements the needed starting point; parent rank alone does not decide.
+The current-best profile may describe different source than the selected parent;
+check its applicability before carrying bottleneck conclusions into a direction.
 The prompt contains only recent archive entries and the best entry. Search the
 full archive file and its referenced evidence for older approaches when planning.
 Deep engineers may run alongside other directions in this mode. Keep their total
@@ -20,6 +28,17 @@ Use the remaining budget to answer concrete engineering questions. Do not abando
 a potentially useful formulation solely because its first implementation is slow.
 For exploratory retention, these instructions replace the stock role's rule to
 save only above-baseline patches. Correctness and promotion requirements still apply.
+
+When updating memory, use EVOLUTION_ROUND, ROUND_RESULTS, INTEGRATE and
+PRIOR_HISTORY with the available reports and archive evidence. Add revisions to
+the existing ledger and insight_log.md: approach, attempted candidate and retained
+source references, what the evidence supports, the remaining question, and a
+discriminating next experiment. Distinguish an unrealized intervention, incorrect
+source, a correct but slower realization, and missing or inconclusive measurement.
+Do not close an entire approach because one implementation failed. Mark useful
+contributions already incorporated elsewhere as subsumed; reopen a conclusion
+when its premise or applicability changes. Reports may be absent, and references
+or author explanations do not establish verified execution or measured benefit.
 
 Each engineer receives a private copy of the run base with its selected parent's
 patch applied. That parent is the starting implementation. Do not reset it to the
