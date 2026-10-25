@@ -223,13 +223,22 @@ export function createRuntime({
         const timeGuidance = timeoutMs > 0
           ? `\n\nBackend call allowance at dispatch: ${timeoutMs} ms. Backend cutoff (UTC): ` +
             `${new Date(epochStartedMs + elapsedMs() + timeoutMs).toISOString()}. ` +
+            `This cutoff applies only to this call; never record it as a workflow deadline in COMMANDMENT or other files. ` +
             `This includes startup, tool work and your final response. Finish tool work early enough to return ` +
             `the requested result within this bound and any earlier workflow deadline; report incomplete work if needed.`
+          : '';
+        // Shared backend boundary covers role prompts and inline engineer prompts alike.
+        const workflowGuidance = agentOpts.workflowTiming
+          ? `\n\nWORKFLOW_TIMING (authoritative Unix seconds UTC):\n` +
+            JSON.stringify({...agentOpts.workflowTiming, current_process_cutoff_epoch: agentOpts.processDeadlineEpoch}) +
+            `\nPreserve these workflow cutoffs when recording or reviewing timing in COMMANDMENT. ` +
+            `Search, report and final validation have their own cutoffs; the full deadline includes cleanup. ` +
+            `Use the applicable cutoff without relaxing correctness, source or measurement requirements.`
           : '';
         let text;
         try {
           ({ text } = await callBackend({
-            prompt: fullPrompt + timeGuidance, label, cwd: agentOpts.cwd, env: agentOpts.env,
+            prompt: fullPrompt + timeGuidance + workflowGuidance, label, cwd: agentOpts.cwd, env: agentOpts.env,
             model: agentOpts.model, timeoutMs,
           }, agentCallId, i + 1, ph));
         } catch (error) {
@@ -325,6 +334,7 @@ export function createRuntime({
     };
     let processDeadlineEpoch = null;
     let maximumDeadlineEpoch = null;
+    let workflowTiming = null;
     if (scriptArgs.search_reserve_s != null) {
       const total = Number(scriptArgs.deadline_epoch);
       const reserve = Number(scriptArgs.search_reserve_s);
@@ -335,6 +345,16 @@ export function createRuntime({
       }
       maximumDeadlineEpoch = total - cleanup;
       processDeadlineEpoch = maximumDeadlineEpoch;
+      const validation = Number(scriptArgs.final_validation_reserve_s || 0);
+      workflowTiming = {
+        full_deadline_epoch: total,
+        search_cutoff_epoch: total - reserve,
+        // The kernel lane validates this optional reserve before its first role.
+        // Other scripts must not receive a fabricated report cutoff.
+        ...(Number.isFinite(validation) && cleanup <= validation && validation <= reserve
+          ? {report_cutoff_epoch: total - validation} : {}),
+        validation_cutoff_epoch: maximumDeadlineEpoch,
+      };
     }
     const setProcessDeadline = (epoch) => {
       if (maximumDeadlineEpoch == null || !Number.isFinite(epoch) || epoch <= 0
@@ -343,7 +363,7 @@ export function createRuntime({
     };
     setProcessDeadline.secondsLeft = () => processDeadlineEpoch == null ? Infinity : msUntil(processDeadlineEpoch) / 1000;
     const scriptAgent = (prompt, options = {}) => agent(prompt, processDeadlineEpoch == null ? options : {
-      ...options, processDeadlineEpoch,
+      ...options, processDeadlineEpoch, workflowTiming,
       processTimeoutMs: options.processTimeoutMs ?? Number(scriptArgs.agent_timeout_ms || 0),
     });
     Object.defineProperty(scriptAgent, 'processDeadlineActive', { get: () => processDeadlineEpoch != null });

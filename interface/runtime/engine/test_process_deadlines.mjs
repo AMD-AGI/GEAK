@@ -12,6 +12,7 @@ import { runProcess } from './backends/base.mjs';
 import { schemaInstruction } from './schema.mjs';
 
 const guard = await readFile(new URL('../../../kernel_workflow/src/shared/agent_guard.js', import.meta.url), 'utf8');
+const rolePrompts = await readFile(new URL('../../../kernel_workflow/src/shared/role_agent.js', import.meta.url), 'utf8');
 const boundedArgs = () => ({
   deadline_epoch: Date.now() / 1000 + 30,
   search_reserve_s: 10,
@@ -185,12 +186,64 @@ test('scoped allowances retain the original ceiling and ignore later wall-clock 
 test('without cutoff arguments the runtime preserves the configured agent timeout', async () => {
   const timeouts = [];
   const rt = createRuntime({ ...quiet, agentTimeoutMs: 12345, backend: {
-    name: 'test', async runAgent({ timeoutMs }) { timeouts.push(timeoutMs); return { text: 'done' }; },
+    name: 'test', async runAgent({ prompt, timeoutMs }) {
+      assert.doesNotMatch(prompt, /WORKFLOW_TIMING|full_deadline_epoch/,
+        'legacy deadline-only mode does not define a bounded full-workflow deadline');
+      assert.match(prompt, /This cutoff applies only to this call/);
+      timeouts.push(timeoutMs); return { text: 'done' };
+    },
   } });
   await fixture(`return {active: agent.processDeadlineActive, result: await agent('default')};`, async path => {
-    assert.deepEqual(await rt.runScript(path, {}, 0), { active: false, result: 'done' });
-    assert.deepEqual(timeouts, [12345]);
+    for (const args of [{}, {deadline_epoch: Date.now() / 1000 + 60}]) {
+      assert.deepEqual(await rt.runScript(path, args, 0), { active: false, result: 'done' });
+    }
+    assert.deepEqual(timeouts, [12345, 12345]);
   });
+});
+
+test('bounded role and inline prompts share authoritative workflow cutoffs across stages', async () => {
+  const seen = [];
+  const rt = createRuntime({ ...quiet, agentTimeoutMs: 1000, backend: {
+    name: 'test', async runAgent({ label, prompt, timeoutMs }) {
+      const match = prompt.match(/WORKFLOW_TIMING \(authoritative Unix seconds UTC\):\n([^\n]+)/);
+      assert.ok(match, `${label} is missing the workflow timing contract`);
+      const timing = JSON.parse(match[1]);
+      const callCutoff = Date.parse(prompt.match(/Backend cutoff \(UTC\): (\S+)\./)[1]);
+      assert.equal(timeoutMs, 1000, 'timing context does not change the backend allowance');
+      assert.ok(callCutoff < timing.search_cutoff_epoch * 1000,
+        'a shorter call cutoff must remain distinct from the search cutoff');
+      assert.match(prompt, /never record it as a workflow deadline in COMMANDMENT/);
+      seen.push({label, prompt, timing});
+      return {text: 'done'};
+    },
+  } });
+  const args = {deadline_epoch: Date.now() / 1000 + 120, search_reserve_s: 40,
+    final_validation_reserve_s: 20, final_cleanup_reserve_s: 10};
+  await fixture(`
+    const TASK = 'fixture', WORKFLOW_DIR = '/fixture';
+    const cfg = JSON.stringify, expertSkillsBlock = () => '';
+    ${rolePrompts}
+    setProcessDeadline(args.deadline_epoch - args.search_reserve_s);
+    await agent(roleAgent('director', 'setup', 'Set up.', {}), {label: 'setup'});
+    await agent(roleAgent('benchmark_engineer', 'setup', 'Build COMMANDMENT.', {}), {label: 'benchmark'});
+    await agent('You are Engineer fixture. Optimize your workspace.', {label: 'engineer'});
+    setProcessDeadline(args.deadline_epoch - args.final_validation_reserve_s);
+    await agent(roleAgent('tech_lead', 'report', 'Report.', {}), {label: 'report'});
+    setProcessDeadline(args.deadline_epoch - args.final_cleanup_reserve_s);
+    await agent(roleAgent('director', 'validate', 'Validate.', {}), {label: 'validate'});
+  `, path => rt.runScript(path, args, 0));
+  assert.deepEqual(seen.map(row => row.label), ['setup', 'benchmark', 'engineer', 'report', 'validate']);
+  assert.match(seen[0].prompt, /^You are the director\. PHASE=setup/);
+  assert.match(seen[2].prompt, /^You are Engineer fixture/);
+  for (const [index, {timing}] of seen.entries()) {
+    assert.deepEqual(timing, {
+      full_deadline_epoch: args.deadline_epoch,
+      search_cutoff_epoch: args.deadline_epoch - 40,
+      report_cutoff_epoch: args.deadline_epoch - 20,
+      validation_cutoff_epoch: args.deadline_epoch - 10,
+      current_process_cutoff_epoch: args.deadline_epoch - (index < 3 ? 40 : index === 3 ? 20 : 10),
+    });
+  }
 });
 
 test('budget guidance matches the bound after queue, schema retry and phase clipping', async () => {
