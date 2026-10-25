@@ -1,175 +1,181 @@
-# Include a complete GEAK run
+# Compose complete workflow lineages
 
-`interface/runtime/engine/compose_kernel.mjs` is an opt-in standalone composition:
-one complete GEAK run, one or more complete extra runs, and a fresh common
-native evaluation of their returned finalists. Extras normally use GEAK-EVO;
-independent GEAK controls are also supported. It does not change the meaning of
-`optimizer=greedy` or `optimizer=evo` in existing workflows or frozen studies.
+`interface/runtime/engine/compose_kernel.mjs` runs one complete existing workflow
+per lineage, then measures its eligible finalist with one common native evaluator.
+A population can have one member. Every member may use `optimizer=greedy` or
+`optimizer=evo`; names have no policy meaning. The workflow, its optimizer, prompts,
+argument bytes, stopping rules and finalization stages are unchanged.
 
-The GEAK child keeps its full arguments, prompts, model settings, search budget,
-stopping policy, knowledge settings and finalization stages. Extra runs receive
-additional execution contexts and resources. The composer selects from actual
-final programs; it does not merge search histories or inject EVO findings into
-GEAK. This first version compares eligible **workflow finals**, not every program
-in an EVO archive. End-to-end scheduling and deployment are not part of this CLI.
+This is the process and finalist boundary of a prospective population. It does
+not implement peer publication/import, archive-wide selection, or an evolutionary
+advantage. A lineage keeps its private loop and archive in its own workflow
+process. Stock early-stop refusals remain in that workflow; an accepted self-stop
+finishes its postlude. The composer calls each workflow once, waits for all members,
+and neither retires a member because a peer is faster nor restarts a stopped member.
 
-## Prepare the execution contexts
+## Declared policies and owned contexts
 
-The existing operational owner must supply isolated worker contexts and an
-available common final-evaluation context. The composer does not create
-containers, assign GPUs or attest isolation. Distinct names in a JSON file are
-not evidence that mounts or physical devices are isolated.
+Schema `geak.kernel-composition/2` requires two policy fields per lineage:
 
-- Keep GEAK's original agent capacity, physical GPU grant, CPU service and full
-  clock allowance. Give the extra runs separate grants. Two processes sharing a
-  GPU lock are measurement-safe but do not preserve GEAK's former GPU service.
-- Expose only each worker's own writable task copy, experiment/state directories,
-  runtime sessions, caches, local KB and learned-card writes. Common immutable
-  inputs may be mounted read-only. Do not let extra workers modify knowledge or
-  feedback that GEAK can read, including shared/remote KB writes.
-- Keep both existing GEAK and EVO argument files complete. In particular, bind
-  `exp_root`, `eval_dir`, optional `state_dir`, writable KB roots, evaluator result
-  roots and GPU locks to the correct private context. Preserve GEAK's settings;
-  do not disable its KB or shorten its budget for the composition.
-- Paths used for arguments, exports, the immutable original task and final native
-  evidence must be visible to the composer at the same absolute paths. Optional
-  per-lane `output_dir` supports mounting a private export root into each worker.
-  The common evaluator may read both retained exports; worker agents must not.
-- Worker launch commands must retain ownership until the full runtime and its
-  children settle. A remote/container client whose exit leaves work running is
-  insufficient. The existing process-bounded worker deadlines remain required.
-- Reserve a common final-evaluation service/device after the searches. All
-  returned finalists use the same command prefix and execute sequentially there.
-  Preserve device/image/measurement provenance in the existing owner configuration
-  and native evidence; matching task bytes alone does not establish a common device.
+- `finalist: "required"` gives one member first common measurement, tie preference,
+  retained-program fallback if its common measurement fails, and a nonzero CLI
+  exit when that member cannot be qualified. Exactly one member is required.
+- `finalist: "eligible"` admits every other member through the same validation and
+  measurement rules. A failed member cannot cancel its peers.
+- `imports: "none"` is the only supported import policy. Other values are rejected.
+  There is no live peer archive or publication path in this version.
 
-## Configuration
+The required policy is generic: it does not imply that the member uses stock
+GEAK. A claim about containing stock GEAK needs an actual included unchanged
+`greedy` workflow with the intended stock inputs, context and service allowance.
 
-Use the native task and command protocol in [Native measurements](direct-external-command.md).
-The supported schema is `geak-arena-external-task-v1`, using `glm-weight-lib-v2`.
-The composer validates the actual task artifacts through the existing native
-validator, checks the exact `task.json` SHA256, and binds candidate identities to
-the resulting task digest, measurement epoch and source digest.
+The operational owner supplies isolated execution contexts and reserves their
+service through the declared deadline. Concurrency and device grants describe
+that allowance; the composer does not provision containers, reserve host capacity,
+attest mounts, or prove continuous utilization. Unused allowance is not reassigned
+by the composer. External provider limits remain in force.
 
-Run:
+The composer checks these identities before any workflow starts:
 
-```sh
-node /workspace/GEAK/interface/runtime/engine/compose_kernel.mjs /operator/composition.json
-```
+- distinct context IDs, argument realpaths and physical device grants;
+- an explicit absolute `exp_root` and `eval_dir` for every member, optional
+  `state_dir`, all declared native command state roots, output directories and
+  recorder paths; these cannot overlap another member's corresponding paths or
+  the common evaluator's state root, including through existing symlink parents;
+- `resources.gpu_ids`, in positional correspondence with physical `device_ids`,
+  matches the workflow's comma-separated `args.gpu_ids`; local device numbers may
+  repeat across isolated contexts, but physical grants must be disjoint;
+- each workflow's `deadline_epoch` equals the manifest's common absolute deadline,
+  and each outer timeout covers that deadline plus seven seconds of cleanup;
+- pinned native task/objective identity and existing optimize-mode handoff rules.
 
-The following example uses already owned contexts. Replace every illustrative
-path, container name, physical device identity, SHA256 and model with the
-operator's actual bindings. Both contexts need the same checkout at
-`/workspace/GEAK`; the composer invokes its existing `kernel_workflow.js`.
+These are declared path and mapping checks, not proof of isolation in a remote
+namespace. The owner must ensure that those same paths identify the intended
+private storage in each execution context, including the Director's working tree,
+runtime sessions, caches, local knowledge stores and learned-card writes. The
+returned `eval_dir` is checked against its declaration before retention; that check
+cannot prevent a misconfigured child from writing elsewhere during its run.
+
+Shared KB/service writes and warm-start base compatibility are not qualified by
+these checks. Preserve the intended stock settings by supplying private copies or
+namespaces; do not silently disable stock knowledge to obtain an isolation claim.
+Common immutable inputs may be read-only. Peer contexts must not see or mutate
+one another's writable state. These remain owner obligations before native use.
+
+## Manifest
+
+Use the task and command protocol in [Native measurements](direct-external-command.md).
+The current composer supports `geak-arena-external-task-v1` with
+`glm-weight-lib-v2` and the external primary objective. Its native validator checks
+task artifacts and binds candidates to task, epoch and source digests.
+
+A manifest has this shape; replace all illustrative paths, device identities,
+timeouts, deadline, model and task hash with actual owner bindings:
 
 ```json
 {
-  "schema": "geak.kernel-composition/1",
+  "schema": "geak.kernel-composition/2",
   "task_root": "/inputs/task",
-  "task_sha256": "<SHA256 of the exact task.json bytes>",
+  "task_sha256": "<exact task.json SHA256>",
   "out_dir": "/exports/comparison-001",
+  "deadline_epoch": 1800000000,
   "evaluation": {
-    "measurement_command": ["python3", "-B", "/workspace/GEAK/scripts/native_runtime/direct_external_command.py", "--task-root", "/inputs/task", "--state-root", "/exports/common-native", "--gpu-lock-file", "/tmp/team_gpu_locks/gpu_2.lock", "--epoch", "comparison-001", "measure"],
-    "result_command": ["python3", "-B", "/workspace/GEAK/scripts/native_runtime/direct_external_command.py", "--task-root", "/inputs/task", "--state-root", "/exports/common-native", "--gpu-lock-file", "/tmp/team_gpu_locks/gpu_2.lock", "--epoch", "comparison-001", "read"],
+    "measurement_command": ["python3", "/workspace/GEAK/scripts/native_runtime/direct_external_command.py", "--task-root", "/inputs/task", "--state-root", "/exports/common-native", "--gpu-lock-file", "/locks/common.lock", "--epoch", "comparison-001", "measure"],
+    "result_command": ["python3", "/workspace/GEAK/scripts/native_runtime/direct_external_command.py", "--task-root", "/inputs/task", "--state-root", "/exports/common-native", "--gpu-lock-file", "/locks/common.lock", "--epoch", "comparison-001", "read"],
     "timeout_ms": 3600000
   },
-  "lanes": [
-    {
-      "id": "geak",
-      "args_file": "/operator/geak-args.json",
-      "output_dir": "/exports/geak/comparison-001",
-      "runtime_command": ["docker", "exec", "owned-geak", "node", "/workspace/GEAK/interface/runtime/engine/run_workflow.mjs"],
-      "runtime_options": {"agent": "codex", "model": "<model>", "concurrency": 4, "agent_timeout_ms": 3600000},
-      "timeout_ms": 32400000,
-      "resources": {"context_id": "owned-geak", "device_ids": ["<GEAK physical device identity>"]}
-    },
-    {
-      "id": "evo",
-      "args_file": "/operator/evo-args.json",
-      "output_dir": "/exports/evo/comparison-001",
-      "runtime_command": ["docker", "exec", "owned-evo", "node", "/workspace/GEAK/interface/runtime/engine/run_workflow.mjs"],
-      "runtime_options": {"agent": "codex", "model": "<model>", "concurrency": 4, "agent_timeout_ms": 3600000},
-      "timeout_ms": 32400000,
-      "resources": {"context_id": "owned-evo", "device_ids": ["<additional physical device identity>"]}
-    }
-  ]
+  "lanes": [{
+    "id": "reference",
+    "policy": {"finalist": "required", "imports": "none"},
+    "args_file": "/operator/reference-args.json",
+    "runtime_command": ["docker", "exec", "owned-reference", "node", "/workspace/GEAK/interface/runtime/engine/run_workflow.mjs"],
+    "runtime_options": {"agent": "codex", "model": "<model>", "concurrency": 4, "agent_timeout_ms": 3600000, "backend_events_file": "/exports/comparison-001/reference/backend_calls.jsonl"},
+    "timeout_ms": 32400000,
+    "resources": {"context_id": "owned-reference", "device_ids": ["<physical device identity>"], "gpu_ids": ["0"]}
+  }]
 }
 ```
 
-Exactly one lane must be named `geak`, with `optimizer="greedy"` in its argument
-file. Additional lanes may use `optimizer="evo"` or `optimizer="greedy"`. An extra
-independent GEAK control makes it possible to compare additional GEAK capacity
-with additional GEAK-EVO capacity using the same composition and measurement
-rule. Each full argument file must
-use `mode="optimize"` (or omit it), `apply_to_original=false`, the pinned native
-objective, and existing `deadline_epoch`/`search_reserve_s` settings. Final native
-reader commands must explicitly include `--task-root`, `--state-root`,
-`--gpu-lock-file` and `--epoch`, ending in `read`. Existing measurement commands
-end in `measure`. Supply options as separate argv entries, not shell strings.
+Add members with `finalist: "eligible"`, separate private paths and distinct
+physical grants. The sole required member can be an independent greedy search or
+an evolutionary search; the code does not branch on either its name or optimizer.
 
-`runtime_options` supports `agent`, `profile`, `model`, `registry`, `concurrency`
-and `agent_timeout_ms`. Optional lane `cwd`/`env` configure the existing process
-launcher. Optional evaluation `cwd`/`env` apply consistently to capture,
-measurement and reading. Keep credentials in private owner configuration, not
-public manifests. Each runtime has its own concurrency semaphore and call budget.
-This does not remove external provider rate limits.
+Complete argument files must explicitly bind `exp_root`, `eval_dir`, `gpu_ids`,
+`deadline_epoch`, positive `search_reserve_s`, the pinned objective and native
+commands. Use `mode=optimize` (or omit it), `apply_to_original=false` and an existing
+`greedy` or `evo` optimizer. Existing per-workflow reserves remain unchanged:
+equality of the final absolute deadline alone does not make search exposure equal.
+Native argv uses separate option/value entries and explicit `--task-root`,
+`--state-root`, `--gpu-lock-file` and `--epoch`, ending in `measure` or `read`.
 
-The output directory and optional lane output directories must be fresh, with
-their parent directories already present. Arguments are copied byte-for-byte to
-each lane's output before launch. Without `output_dir`, a lane writes under
-`out_dir/<id>`. Grant each worker access only to its own exports.
+Runtime options are `agent`, `profile`, `model`, `registry`, `concurrency`,
+`agent_timeout_ms` and `backend_events_file`. The last forwards the existing
+[backend-call recorder](../../interface/runtime/engine/README.md#optional-backend-call-intervals)
+unchanged; its file must be fresh and its parent directory must exist when the
+runtime starts. Optional member and evaluation `cwd`/`env` use the existing process
+launcher. Keep credentials in private configuration.
 
-The lane `timeout_ms` must encompass its full absolute deadline plus at least
-seven seconds of process cleanup; it is not a replacement search budget.
-Common evaluation begins after all worker processes settle. Its `timeout_ms`
-applies separately to capture, measurement and reading for each finalist, so the
-owner must allow the sum of these calls, staging and final publication. The
-composer does not shorten GEAK to make room for comparison.
+Run `node /workspace/GEAK/interface/runtime/engine/compose_kernel.mjs /operator/composition.json`.
+Output directories must be fresh and their parents must exist. Without
+`output_dir`, a member writes to `out_dir/<id>`. The composer copies argument bytes
+before launch. Runtime launch commands must retain ownership through full child
+settlement; a detached remote client is insufficient.
 
-## Selection and retained evidence
+## Selection and evidence
 
-Each lane preserves its runtime result, metrics, stdout/stderr, immutable argument
-snapshot and copied final patch. Its native final reader verifies the patch
-against the actual original source and retained child evaluation. A director
-rejection is preserved. A missing or invalid child is recorded explicitly and
-does not cancel another child.
+Every member keeps its original result, metrics, output logs, argument snapshot
+and an exclusively written finalist patch. The existing native reader checks the
+patch and source-bound child evidence. A Director veto or invalid result remains
+ineligible. Common measurement starts only after all workflows have settled;
+each eligible finalist uses a fresh ORIGINAL-plus-patch workspace and the same
+capture/measure/read command prefix. The owner reserves that common service and
+allows its full measurement time separately from the search deadlines.
 
-The composer then uses the stock workspace materializer and native source/patch
-helpers to stage a fresh ORIGINAL plus each saved patch. It captures new native
-IDs, measures the complete task, and re-reads the checked native reports. Among
-returned finalists with a fresh native reproducible gain and no reproducible
-regression, the largest common `primary_speedup` decides the winner; ties prefer
-the included GEAK. The GEAK fallback below takes precedence if its common replay
-fails. The development geomean and child-reported scalar are not comparison
-scores.
+The largest common `primary_speedup` among finalists with a native reproducible
+gain and no reproducible regression wins. Ties retain the required member. This
+preserves the actual included stock finalist when it qualifies under that same
+measurement; it is not a guarantee against a separately sampled stock run, timing
+noise, or unvalidated archive entries. Valid no-gain evidence remains explicit.
 
-`result.json` contains all child records, `protected_geak`, `comparison_complete`,
-`selection_basis` and the selected patch/source/evaluation identities. Per-lane
-`candidate.json` is written when its final patch is retained and updated after
-common qualification. The original child results are never overwritten by a
-comparison scalar.
+`result.json` uses `geak.kernel-composition-result/2` and includes
+`required_finalist` (with its ID), `comparison_complete`, `selection_basis`, winner
+identities and all child records. The required member's valid child gain is
+retained if its common replay fails: `comparison_incomplete_required_retained`,
+`retained_required_fallback`, `primary_speedup: null` and
+`comparison_unavailable: true`. An earlier child score is never substituted for
+a common score. If the required child itself is invalid, another member may win,
+but the required qualification is false and the CLI exits nonzero. Without a
+qualified gain or eligible fallback, the original is retained and `winner` is null.
 
-- If an extra fails, GEAK's valid result remains available.
-- If GEAK produced an eligible retained program but its common replay fails,
-  that GEAK program is the fallback even if an extra qualifies. The result says
-  `comparison_incomplete_geak_retained`, with `primary_speedup: null`; its earlier
-  child score remains separately recorded under `child_evidence`.
-- If GEAK itself is missing/invalid, an extra may still supply a usable result,
-  but `protected_geak.qualified=false` and the CLI exits nonzero. This is not
-  reported as successful GEAK containment.
-- Valid no-gain measurements are `no_improvement`; missing measurements are
-  failures/unavailable, not measured zero speedup. Without a common qualified
-  gain or an eligible retained GEAK fallback, `winner` is `null` and
-  `selection_basis` is `original_retained`. A valid no-gain GEAK final may retain
-  the existing `host_final_patch.diff` even though the workflow suppresses patch
-  export.
+Child records include declared policy/resources/deadline, process start and
+settlement timestamps, remaining allowance at settlement and the workflow's
+returned stop reason, rounds and budget counts where available. Settlement occurs
+after postlude and cleanup; it is not the search-stop timestamp or GPU utilization.
+The metrics and optional recorder retain their existing call accounting. Exact
+search-stop time, evaluation counts and reserved-service delivery require their
+own runtime/evaluator evidence; missing values are not inferred from wall time.
 
-When the included GEAK finalist has a qualified gain in the fresh common native
-measurement, the selected score is the maximum over the eligible returned
-workflow finalists and is at least GEAK's score in that comparison. Equality is
-allowed. This guarantee covers the actual included run and the common
-measurement; it excludes unevaluated archive candidates and separately sampled
-stochastic GEAK runs.
-Selecting a maximum from noisy scores can overstate repeatable gain, even after
-the native reproducibility checks. The selected score does not establish the
-lowest true latency or an end-to-end throughput gain.
+## Migration and remaining import seam
+
+Schema /1 is rejected explicitly. To migrate, add the common deadline, private
+paths and local device mappings, and replace the formerly reserved name with an
+explicit `required` policy. Result consumers must replace `protected_geak` with
+`required_finalist` and the two GEAK-specific fallback labels with the generic
+labels above. There is no implicit name-based compatibility branch. Existing
+workflow behavior and frozen sources do not change.
+
+Selected immutable publication/import is still missing. The small integration
+seam is the existing canonical-selection capture in `01b_args.js` for stock and
+retained patch records in `14a_evolution.js` for EVO, followed by the existing
+`createEvolution` parent/donor selection and workspace preparation. A publication
+must bind lineage, original/base source, immutable content hash and evidence;
+only explicitly selected compatible sources may enter another private archive.
+Run-local candidate IDs and mutable whole-archive snapshots cannot serve as that
+interface. Warm-start bases require equality or normalization to the common
+ORIGINAL before import. No new shared mutable archive or scheduler is supplied.
+
+The CPU composer tests use real child processes and existing native source/report
+helpers with synthetic workflow results and timing evidence. They check one-member
+invocation preservation, selection, veto/failure retention and the new bindings.
+They do not establish complete stock workflow equivalence, native qualification,
+actual reserved service, peer import use or a performance benefit.

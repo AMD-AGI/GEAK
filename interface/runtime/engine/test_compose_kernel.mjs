@@ -4,7 +4,7 @@
 // Real child processes, source staging and native request/report readers. The
 // full-runtime child and UT timing evidence are synthetic; no model or GPU runs.
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -146,25 +146,28 @@ async function fixture(t, options = {}) {
   const prefix = (state, epoch) => ['--task-root', task, '--state-root', state,
     '--gpu-lock-file', join(root, 'native.lock'), '--epoch', epoch];
   const lanes = [];
+  const deadline = Date.now() / 1000 + 30;
   for (const id of ['geak', 'evo']) {
     const args = {optimizer: id === 'geak' ? 'greedy' : 'evo', kernel_path: task,
-      workflow_dir: join(REPO, 'kernel_workflow'), eval_dir: join(root, id, 'eval'),
+      workflow_dir: join(REPO, 'kernel_workflow'), exp_root: join(root, id, 'exp'), eval_dir: join(root, id, 'eval'),
+      gpu_ids: id === 'geak' ? '0' : '1',
       budget: id === 'geak' ? 6 : 12, task: 'Synthetic exact callable contract',
       objective: {kind: 'external_primary', primary_regime: 'extend'},
-      deadline_epoch: Date.now() / 1000 + 3, search_reserve_s: 1,
+      deadline_epoch: deadline, search_reserve_s: 1,
       final_validation_reserve_s: 0.5, final_cleanup_reserve_s: 0.1,
       external_measurement_command: [PYTHON, native, ...prefix(join(root, id, 'state'), 'child'), 'measure'],
       external_result_command: [PYTHON, direct, ...prefix(join(root, id, 'state'), 'child'), 'read'],
       apply_to_original: 'false', warm_start: 'off', use_learned_kb: 'false'};
     const args_file = join(root, id, 'args.json');
     await writeFile(args_file, JSON.stringify(args));
-    lanes.push({id, args_file, runtime_command: [process.execPath, runtime],
+    lanes.push({id, policy: {finalist: id === 'geak' ? 'required' : 'eligible', imports: 'none'}, args_file, runtime_command: [process.execPath, runtime],
       runtime_options: {profile: 'synthetic', concurrency: id === 'geak' ? 2 : 4},
       cwd: join(root, id), env: {PYTHONPATH: REPO, TEST_CONTEXT: id,
         TEST_TEMPLATE: join(root, id, 'terminal.json'), TEST_EVENTS: join(root, 'events.jsonl')},
-      timeout_ms: 15000, resources: {context_id: id, device_ids: [id === 'geak' ? '0' : '1']}});
+      timeout_ms: 60000, resources: {context_id: id, device_ids: [id === 'geak' ? 'physical-A' : 'physical-B'],
+        gpu_ids: [id === 'geak' ? '0' : '1']}});
   }
-  const manifest = {schema: 'geak.kernel-composition/1', task_root: task,
+  const manifest = {schema: 'geak.kernel-composition/2', task_root: task, deadline_epoch: deadline,
     task_sha256: setup.stdout.trim(), out_dir: join(root, 'composed'),
     evaluation: {measurement_command: [PYTHON, native, ...prefix(join(root, 'common'), 'common'), 'measure'],
       result_command: [PYTHON, native, ...prefix(join(root, 'common'), 'common'), 'read'], timeout_ms: 10000}, lanes};
@@ -182,7 +185,7 @@ test('separate full runtime launches preserve args and select fresh common nativ
   await f.terminal('geak', result => { result.final_speedup = 900; });
   const result = await composeKernel(f.manifest);
   assert.equal(result.winner?.id, 'evo');
-  assert.equal(result.protected_geak.retained, true);
+  assert.equal(result.required_finalist.retained, true);
   assert.equal(result.children.length, 2);
   assert.ok(result.children.every(child => child.status === 'qualified'));
   assert.notEqual(result.winner.final_selection.evaluation_id, old.final_selection.evaluation_id);
@@ -216,7 +219,7 @@ test('an additional complete greedy control can win without changing the protect
   const result = await composeKernel(f.manifest);
   assert.equal(result.winner?.id, 'control');
   assert.equal(result.selection_basis, 'common_native_measurement');
-  assert.equal(result.protected_geak.qualified, true);
+  assert.equal(result.required_finalist.qualified, true);
   assert.equal(result.comparison_complete, true);
   const events = (await readFile(join(f.root, 'events.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
   const geak = events.find(event => event.kind === 'start' && event.context === 'geak');
@@ -251,7 +254,7 @@ test('failed, vetoed or changed-source extras cannot replace completed GEAK', as
     if (fault === 'patch') await writeFile(join(f.root, 'evo/final.diff'), 'changed after terminal capture');
     const result = await composeKernel(f.manifest);
     assert.equal(result.winner?.id, 'geak');
-    assert.equal(result.protected_geak.retained, true);
+    assert.equal(result.required_finalist.retained, true);
     assert.equal(result.children.find(child => child.id === 'evo').status, 'failed');
     assert.equal((await json(join(f.manifest.out_dir, 'geak/candidate.json'))).status, 'qualified');
   });
@@ -262,8 +265,8 @@ test('missing GEAK remains explicit even when an extra qualifies', async t => {
   f.lanes[0].env.TEST_FAIL = '1';
   const result = await composeKernel(f.manifest);
   assert.equal(result.winner?.id, 'evo');
-  assert.equal(result.protected_geak.retained, false);
-  assert.equal(result.protected_geak.status, 'failed');
+  assert.equal(result.required_finalist.retained, false);
+  assert.equal(result.required_finalist.status, 'failed');
   assert.equal(result.children.find(child => child.id === 'geak').process.code, 7);
 });
 
@@ -271,7 +274,7 @@ test('foreign task, objective and shared resource grants fail before worker laun
   for (const fault of ['task', 'regime', 'device']) await t.test(fault, async t => {
     const f = await fixture(t);
     if (fault === 'task') f.manifest.task_sha256 = 'd'.repeat(64);
-    if (fault === 'device') f.lanes[1].resources.device_ids = ['0'];
+    if (fault === 'device') f.lanes[1].resources.device_ids = ['physical-A'];
     if (fault === 'regime') {
       const args = await json(f.lanes[1].args_file);
       args.objective.primary_regime = 'foreign';
@@ -309,15 +312,15 @@ test('common measurement failures preserve artifacts and distinguish unqualified
     f.manifest.evaluation.env = {TEST_COMMON_FAIL: failed};
     const result = await composeKernel(f.manifest);
     assert.equal(result.winner?.id, 'geak');
-    assert.equal(result.protected_geak.retained, true, 'a failed replay must not erase GEAK source/evidence');
-    assert.equal(result.protected_geak.qualified, failed === 'evo');
+    assert.equal(result.required_finalist.retained, true, 'a failed replay must not erase GEAK source/evidence');
+    assert.equal(result.required_finalist.qualified, failed === 'evo');
     for (const child of result.children) {
       assert.equal(await readFile(child.patch, 'utf8'), await readFile(join(f.root, child.id, 'final.diff'), 'utf8'));
       if (failed === child.id || failed === '*') assert.equal(child.status, 'qualification_failed');
     }
     if (failed !== 'evo') {
-      assert.equal(result.selection_basis, 'retained_geak_fallback');
-      assert.equal(result.outcome, 'comparison_incomplete_geak_retained');
+      assert.equal(result.selection_basis, 'retained_required_fallback');
+      assert.equal(result.outcome, 'comparison_incomplete_required_retained');
       assert.equal(result.winner.primary_speedup, null, 'retention must not invent a fresh score');
       assert.equal(result.winner.comparison_unavailable, true);
       assert.ok(result.winner.child_evidence.primary_speedup > 1, 'old evidence stays explicitly separate');
@@ -336,12 +339,12 @@ test('a reserved staging collision preserves exported evidence and the GEAK fall
   assert.match(geak.qualification_error, /EEXIST/);
   assert.equal(extra.status, 'qualified');
   assert.equal(extra.directory, extraDirectory);
-  assert.equal(result.protected_geak.retained, true);
-  assert.equal(result.protected_geak.qualified, false);
+  assert.equal(result.required_finalist.retained, true);
+  assert.equal(result.required_finalist.qualified, false);
   assert.equal(result.comparison_complete, false);
   assert.equal(result.winner?.id, 'geak');
-  assert.equal(result.selection_basis, 'retained_geak_fallback');
-  assert.equal(result.outcome, 'comparison_incomplete_geak_retained');
+  assert.equal(result.selection_basis, 'retained_required_fallback');
+  assert.equal(result.outcome, 'comparison_incomplete_required_retained');
   assert.equal(result.winner.primary_speedup, null);
   assert.equal(result.winner.final_patch, geak.patch);
   for (const child of result.children) {
@@ -356,9 +359,9 @@ test('valid ORIGINAL/no-gain GEAK is retained and freshly qualified as no improv
   const f = await fixture(t, {geak_original: true, evo_factor: 0.1});
   const result = await composeKernel(f.manifest);
   assert.equal(result.winner, null);
-  assert.equal(result.protected_geak.retained, true);
-  assert.equal(result.protected_geak.qualified, true);
-  assert.equal(result.protected_geak.status, 'no_improvement');
+  assert.equal(result.required_finalist.retained, true);
+  assert.equal(result.required_finalist.qualified, true);
+  assert.equal(result.required_finalist.status, 'no_improvement');
   const geak = result.children.find(child => child.id === 'geak');
   assert.equal(await readFile(geak.patch, 'utf8'), '');
   assert.equal(geak.common_evidence.primary_speedup, 1);
@@ -377,9 +380,91 @@ test('child launch uses captured args even if the caller file changes afterward'
     return runProcess(command);
   };
   const result = await composeKernel(f.manifest, {run});
-  assert.equal(result.protected_geak.qualified, true);
+  assert.equal(result.required_finalist.qualified, true);
   const events = (await readFile(join(f.root, 'events.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
   const geak = events.find(event => event.kind === 'start' && event.context === 'geak');
   assert.deepEqual(geak.args, original);
   assert.equal((await json(f.lanes[0].args_file)).budget, 999, 'fixture really changed the caller file');
+});
+
+test('one arbitrarily named lineage preserves the direct child invocation and accepted stop', async t => {
+  const f = await fixture(t);
+  f.manifest.lanes = [f.lanes[0]];
+  const lane = f.manifest.lanes[0];
+  lane.id = 'reference';
+  lane.runtime_options.backend_events_file = join(f.root, 'geak/backend_calls.jsonl');
+  const originalArgs = await json(lane.args_file);
+  originalArgs.max_no_improve = 7;
+  originalArgs.max_forced_replans = 3;
+  await writeFile(lane.args_file, JSON.stringify(originalArgs));
+  await f.terminal('geak', result => { result.stopped_by = 'no_improve'; result.rounds = 4; });
+  const directResult = join(f.root, 'direct_result.json'), directMetrics = join(f.root, 'direct_metrics.json');
+  const direct = await runProcess({cmd: lane.runtime_command[0], args: [...lane.runtime_command.slice(1),
+    join(REPO, 'kernel_workflow/kernel_workflow.js'),
+    ...Object.entries(lane.runtime_options).flatMap(([key, value]) => ['--' + key.replaceAll('_', '-'), String(value)]),
+    '--args-file', lane.args_file, '--result-file', directResult, '--metrics-file', directMetrics],
+    cwd: lane.cwd, env: lane.env, timeoutMs: lane.timeout_ms});
+  assert.equal(direct.code, 0);
+  const result = await composeKernel(f.manifest);
+  const child = result.children[0];
+  assert.equal(result.winner.id, 'reference');
+  assert.equal(result.required_finalist.id, 'reference');
+  assert.deepEqual(await json(child.result_file), await json(directResult));
+  assert.deepEqual(await json(child.metrics_file), await json(directMetrics));
+  assert.equal(child.workflow_summary.stopped_by, 'no_improve');
+  assert.ok(child.process.remaining_allowance_at_settlement_s > 0, 'accepted early stop leaves allowance unused');
+  const events = (await readFile(join(f.root, 'events.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.map(event => event.kind), ['start', 'finish', 'start', 'finish'], 'one workflow call, no wrapper restart');
+  const starts = events.filter(event => event.kind === 'start');
+  assert.deepEqual(starts[0].args, starts[1].args);
+  assert.deepEqual(starts[1].args, originalArgs);
+  // Only each invocation's input snapshot and output destinations differ.
+  const withoutPaths = argv => argv.slice(0, argv.indexOf('--args-file'));
+  assert.deepEqual(withoutPaths(starts[0].argv), withoutPaths(starts[1].argv));
+  assert.ok(starts[1].argv.includes('--backend-events-file'));
+});
+
+test('required finalist policy is independent of name and optimizer', async t => {
+  const f = await fixture(t, {geak_factor: 1.2, evo_factor: 1.2});
+  f.lanes[0].policy.finalist = 'eligible';
+  f.lanes[1].policy.finalist = 'required';
+  f.lanes[1].id = 'reference';
+  const result = await composeKernel(f.manifest);
+  assert.equal(result.required_finalist.id, 'reference');
+  assert.equal(result.winner.id, 'reference', 'tie retains the declared required member, even with evo optimizer');
+});
+
+test('inconsistent policies, clocks, private paths and local grants fail before any child', async t => {
+  for (const fault of ['policy', 'import', 'deadline', 'eval', 'exp', 'root', 'symlink', 'state', 'native', 'gpu', 'recorder']) {
+    await t.test(fault, async t => {
+      const f = await fixture(t);
+      const args = await json(f.lanes[1].args_file);
+      const first = await json(f.lanes[0].args_file);
+      if (fault === 'policy') f.lanes[1].policy.finalist = 'required';
+      if (fault === 'import') f.lanes[1].policy.imports = 'selected';
+      if (fault === 'deadline') args.deadline_epoch += 1;
+      if (fault === 'eval') args.eval_dir = first.eval_dir;
+      if (fault === 'exp') args.exp_root = join(first.eval_dir, 'nested');
+      if (fault === 'root') args.exp_root = '/';
+      if (fault === 'symlink') {
+        await symlink(first.eval_dir, join(f.root, 'alias'));
+        args.exp_root = join(f.root, 'alias', 'fresh');
+      }
+      if (fault === 'state') args.state_dir = first.eval_dir;
+      if (fault === 'native') args.external_measurement_command = first.external_measurement_command;
+      if (fault === 'gpu') args.gpu_ids = '0';
+      if (fault === 'recorder') f.lanes[1].runtime_options.backend_events_file = join(first.eval_dir, 'calls.jsonl');
+      await writeFile(f.lanes[1].args_file, JSON.stringify(args));
+      await assert.rejects(composeKernel(f.manifest), /policy|deadline|private path|gpu_ids/);
+      await assert.rejects(readFile(join(f.root, 'events.jsonl')), {code: 'ENOENT'});
+    });
+  }
+});
+
+test('a child returning another evaluation directory is ineligible', async t => {
+  const f = await fixture(t);
+  await f.terminal('evo', result => { result.eval_dir = join(f.root, 'geak/eval'); });
+  const result = await composeKernel(f.manifest);
+  assert.equal(result.winner.id, 'geak');
+  assert.match(result.children[1].error, /different private evaluation directory/);
 });
