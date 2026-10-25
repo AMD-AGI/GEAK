@@ -325,25 +325,38 @@ test('common measurement failures preserve artifacts and distinguish unqualified
   for (const failed of ['evo', 'geak', '*']) await t.test(failed, async t => {
     const f = await fixture(t);
     f.manifest.evaluation.env = {TEST_COMMON_FAIL: failed};
-    const result = await composeKernel(f.manifest);
-    assert.equal(result.winner?.id, 'geak');
+    let result;
+    if (failed === 'geak') {
+      const manifest = join(f.root, 'composition.json');
+      await writeFile(manifest, JSON.stringify(f.manifest));
+      const cli = await runProcess({cmd: process.execPath,
+        args: [join(REPO, 'interface/runtime/engine/compose_kernel.mjs'), manifest], timeoutMs: 10000});
+      assert.equal(cli.code, 1, 'failed required qualification keeps a nonzero CLI exit');
+      result = JSON.parse(cli.stdout);
+    } else result = await composeKernel(f.manifest);
+    assert.equal(result.winner?.id, failed === 'geak' ? 'evo' : 'geak');
+    assert.equal(result.comparison_complete, false);
     assert.equal(result.required_finalist.retained, true, 'a failed replay must not erase GEAK source/evidence');
     assert.equal(result.required_finalist.qualified, failed === 'evo');
     for (const child of result.children) {
       assert.equal(await readFile(child.patch, 'utf8'), await readFile(join(f.root, child.id, 'final.diff'), 'utf8'));
       if (failed === child.id || failed === '*') assert.equal(child.status, 'qualification_failed');
     }
-    if (failed !== 'evo') {
+    if (failed === '*') {
       assert.equal(result.selection_basis, 'retained_required_fallback');
       assert.equal(result.outcome, 'comparison_incomplete_required_retained');
       assert.equal(result.winner.primary_speedup, null, 'retention must not invent a fresh score');
       assert.equal(result.winner.comparison_unavailable, true);
       assert.ok(result.winner.child_evidence.primary_speedup > 1, 'old evidence stays explicitly separate');
+    } else {
+      assert.equal(result.selection_basis, 'common_native_measurement');
+      assert.equal(result.outcome, 'improved');
+      assert.ok(result.winner.primary_speedup > 1);
     }
   });
 });
 
-test('a reserved staging collision preserves exported evidence and the GEAK fallback', async t => {
+test('a reserved staging collision preserves failed required evidence and the common winner', async t => {
   const f = await fixture(t);
   const extraDirectory = join(f.manifest.out_dir, 'geak_final_workspace');
   f.lanes[1].output_dir = extraDirectory;
@@ -357,11 +370,11 @@ test('a reserved staging collision preserves exported evidence and the GEAK fall
   assert.equal(result.required_finalist.retained, true);
   assert.equal(result.required_finalist.qualified, false);
   assert.equal(result.comparison_complete, false);
-  assert.equal(result.winner?.id, 'geak');
-  assert.equal(result.selection_basis, 'retained_required_fallback');
-  assert.equal(result.outcome, 'comparison_incomplete_required_retained');
-  assert.equal(result.winner.primary_speedup, null);
-  assert.equal(result.winner.final_patch, geak.patch);
+  assert.equal(result.winner?.id, 'evo');
+  assert.equal(result.selection_basis, 'common_native_measurement');
+  assert.equal(result.outcome, 'improved');
+  assert.ok(result.winner.primary_speedup > 1);
+  assert.equal(result.winner.final_patch, extra.patch);
   for (const child of result.children) {
     assert.equal(await readFile(child.patch, 'utf8'), await readFile(join(f.root, child.id, 'final.diff'), 'utf8'));
     assert.deepEqual(await json(child.result_file), await json(join(f.root, child.id, 'terminal.json')));

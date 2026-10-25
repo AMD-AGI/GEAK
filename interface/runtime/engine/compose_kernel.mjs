@@ -289,8 +289,8 @@ export async function composeKernel(manifest, { run = runProcess } = {}) {
     && (!winner || child.common_evidence.primary_speedup > winner.common_evidence.primary_speedup)) winner = child;
   const required = children.find(child => child.id === requiredId);
   const comparisonComplete = children.every(child => ['qualified', 'no_improvement'].includes(child.status));
-  // Unavailable common evidence cannot silently replace the required finalist.
-  const fallback = required.status === 'qualification_failed' && required.child_evidence?.native_reproducible_gain === true
+  // Retain earlier required evidence only when no common-qualified gain exists.
+  const fallback = !winner && required.status === 'qualification_failed' && required.child_evidence?.native_reproducible_gain === true
     && required.child_evidence.native_reproducible_regression === false ? required : null;
   const anyMeasured = children.some(child => ['qualified', 'no_improvement'].includes(child.status));
   const result = { schema: 'geak.kernel-composition-result/2', binding, objective, deadline_epoch: deadline,

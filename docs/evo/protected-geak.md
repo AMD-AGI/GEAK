@@ -21,7 +21,8 @@ persistence switch.
 Schema `geak.kernel-composition/2` requires two policy fields per lineage:
 
 - `finalist: "required"` gives one member first common measurement, tie preference,
-  retained-program fallback if its common measurement fails, and a nonzero CLI
+  retained-program fallback if its common measurement fails and no common winner
+  exists, and a nonzero CLI
   exit when that member cannot be qualified. Exactly one member is required.
 - `finalist: "eligible"` admits every other member through the same validation and
   measurement rules. A failed member cannot cancel its peers.
@@ -143,11 +144,14 @@ noise, or unvalidated archive entries. Valid no-gain evidence remains explicit.
 `result.json` uses `geak.kernel-composition-result/2` and includes
 `required_finalist` (with its ID), `comparison_complete`, `selection_basis`, winner
 identities and all child records. The required member's valid child gain is
-retained if its common replay fails: `comparison_incomplete_required_retained`,
+retained as fallback if its common replay fails and no common-qualified winner
+exists: `comparison_incomplete_required_retained`,
 `retained_required_fallback`, `primary_speedup: null` and
 `comparison_unavailable: true`. An earlier child score is never substituted for
-a common score. If the required child itself is invalid, another member may win,
-but the required qualification is false and the CLI exits nonzero. Without a
+a common score. A common-qualified winner takes precedence over that fallback.
+If the required child or its common replay is invalid, another member may win,
+but the required qualification stays false, the comparison stays incomplete,
+and the CLI exits nonzero. Without a
 qualified gain or eligible fallback, the original is retained and `winner` is null.
 
 Child records include declared policy/resources/deadline, process start and
