@@ -32,7 +32,10 @@ const source = fs.readFileSync(path.join(ROOT, 'kernel_workflow/src/kernel_lane/
       hostRun: async (cmd, args, options = {}) => {
         calls.push([cmd, ...args]);
         const result = spawnSync(cmd, args, {input: options.input, encoding: 'utf8', timeout: 30000,
-          env: {...process.env, PYTHONDONTWRITEBYTECODE: '1'}});
+          // Materialized workspaces have no local Git identity; isolate fixture commits from runner configuration.
+          env: {...process.env, PYTHONDONTWRITEBYTECODE: '1',
+            GIT_AUTHOR_NAME: 'Saptarshi Majumder', GIT_AUTHOR_EMAIL: '32464366+iraj465@users.noreply.github.com',
+            GIT_COMMITTER_NAME: 'Saptarshi Majumder', GIT_COMMITTER_EMAIL: '32464366+iraj465@users.noreply.github.com'}});
         return result.status === 0 ? result.stdout : null;
       },
     };
