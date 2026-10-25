@@ -625,7 +625,11 @@ const field = (prompt, key) => {
   try { return JSON.parse(value); } catch { return value; }
 };
 const E = args.eval_dir, W = join(E, 'workspace');
-const gitEnv = {GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z'};
+const gitEnv = {
+  GIT_AUTHOR_NAME: 'GEAK fixture', GIT_AUTHOR_EMAIL: 'fixture@example.com',
+  GIT_COMMITTER_NAME: 'GEAK fixture', GIT_COMMITTER_EMAIL: 'fixture@example.com',
+  GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z',
+};
 const tool = async (cmd, commandArgs, extra = {}) => {
   const result = await runProcess({cmd, args: commandArgs, timeoutMs: 10000, ...extra});
   assert.equal(result.status, 'completed'); assert.equal(result.code, 0, result.stderr);
