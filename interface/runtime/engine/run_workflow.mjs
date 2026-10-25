@@ -351,7 +351,8 @@ export function createRuntime({
         search_cutoff_epoch: total - reserve,
         // The kernel lane validates this optional reserve before its first role.
         // Other scripts must not receive a fabricated report cutoff.
-        ...(Number.isFinite(validation) && cleanup <= validation && validation <= reserve
+        ...(scriptArgs.final_validation_reserve_s != null && Number.isFinite(validation)
+          && cleanup <= validation && validation <= reserve
           ? {report_cutoff_epoch: total - validation} : {}),
         validation_cutoff_epoch: maximumDeadlineEpoch,
       };

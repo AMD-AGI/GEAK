@@ -246,6 +246,27 @@ test('bounded role and inline prompts share authoritative workflow cutoffs acros
   }
 });
 
+test('bounded scripts without a validation reserve do not invent a report cutoff', async () => {
+  const seen = [];
+  const rt = createRuntime({ ...quiet, agentTimeoutMs: 1000, backend: {
+    name: 'test', async runAgent({ prompt }) {
+      const match = prompt.match(/WORKFLOW_TIMING \(authoritative Unix seconds UTC\):\n([^\n]+)/);
+      assert.ok(match);
+      seen.push(JSON.parse(match[1]));
+      return {text: 'done'};
+    },
+  } });
+  const args = {deadline_epoch: Date.now() / 1000 + 60, search_reserve_s: 20,
+    final_cleanup_reserve_s: 0};
+  await fixture(`return await agent('bounded script');`, path => rt.runScript(path, args, 0));
+  assert.deepEqual(seen, [{
+    full_deadline_epoch: args.deadline_epoch,
+    search_cutoff_epoch: args.deadline_epoch - 20,
+    validation_cutoff_epoch: args.deadline_epoch,
+    current_process_cutoff_epoch: args.deadline_epoch,
+  }]);
+});
+
 test('budget guidance matches the bound after queue, schema retry and phase clipping', async () => {
   const seen = [];
   const schema = { type: 'object' };
