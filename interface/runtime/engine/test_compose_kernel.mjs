@@ -172,7 +172,9 @@ async function fixture(t, options = {}) {
       final_validation_reserve_s: 0.5, final_cleanup_reserve_s: 0.1,
       external_measurement_command: [PYTHON, native, ...prefix(join(root, id, 'state'), 'child'), 'measure'],
       external_result_command: [PYTHON, direct, ...prefix(join(root, id, 'state'), 'child'), 'read'],
-      apply_to_original: 'false', warm_start: 'off', use_learned_kb: 'false'};
+      apply_to_original: 'false', warm_start: 'off', use_learned_kb: 'false',
+      learned_dir: join(root, id, 'learned'), kb_artifacts_dir: join(root, id, 'kb_artifacts'),
+      kb_store_dir: join(root, id, 'kb_store'), kb_remote: 'off'};
     const args_file = join(root, id, 'args.json');
     await writeFile(args_file, JSON.stringify(args));
     lanes.push({id, policy: {finalist: id === 'geak' ? 'required' : 'eligible', imports: 'none'}, args_file, runtime_command: [process.execPath, runtime],
@@ -497,6 +499,61 @@ test('a child returning another evaluation directory is ineligible', async t => 
   assert.match(result.children[1].error, /different private evaluation directory/);
 });
 
+test('every lineage requires explicit nonempty local knowledge roots', async t => {
+  for (const index of [0, 1]) for (const key of ['learned_dir', 'kb_artifacts_dir', 'kb_store_dir']) {
+    for (const value of [undefined, '']) await t.test(`${index}:${key}:${value === '' ? 'empty' : 'missing'}`, async t => {
+      const f = await fixture(t), lane = f.lanes[index], args = await json(lane.args_file);
+      args[key] = value;
+      await writeFile(lane.args_file, JSON.stringify(args));
+      await assert.rejects(composeKernel(f.manifest), /private paths must be absolute/);
+      await assert.rejects(readFile(join(f.root, 'events.jsonl')), {code: 'ENOENT'});
+    });
+  }
+});
+
+test('knowledge roots and optional memory hooks cannot alias another lineage', async t => {
+  for (const key of ['learned_dir', 'kb_artifacts_dir', 'kb_store_dir', 'shared_kb', 'global_kb']) {
+    for (const alias of [false, true]) await t.test(`${key}:${alias ? 'symlink' : 'equal'}`, async t => {
+      const f = await fixture(t), [first, second] = await Promise.all(f.lanes.map(lane => json(lane.args_file)));
+      const owned = first[key] || join(f.root, 'geak', key);
+      await mkdir(owned, {recursive: true});
+      first[key] = owned;
+      if (alias) await symlink(owned, join(f.root, 'alias'));
+      second[key] = alias ? join(f.root, 'alias') : owned;
+      for (const [i, args] of [first, second].entries()) await writeFile(f.lanes[i].args_file, JSON.stringify(args));
+      await assert.rejects(composeKernel(f.manifest), /overlaps another owner's private path/);
+      await assert.rejects(readFile(join(f.root, 'events.jsonl')), {code: 'ENOENT'});
+    });
+  }
+});
+
+test('remote knowledge defaults are rejected and explicit private roots share workflow code', async t => {
+  for (const remote of [undefined, '', 'auto']) await t.test(String(remote), async t => {
+    const f = await fixture(t), lane = f.lanes[0], args = await json(lane.args_file);
+    args.kb_remote = remote;
+    await writeFile(lane.args_file, JSON.stringify(args));
+    await assert.rejects(composeKernel(f.manifest), /requires kb_remote=off/);
+    await assert.rejects(readFile(join(f.root, 'events.jsonl')), {code: 'ENOENT'});
+  });
+  await t.test('private nested roots and normalized off', async t => {
+    const f = await fixture(t);
+    for (const lane of f.lanes) {
+      const args = await json(lane.args_file);
+      for (const key of ['learned_dir', 'kb_artifacts_dir', 'kb_store_dir', 'shared_kb', 'global_kb'])
+        args[key] = join(args.exp_root, key);
+      args.kb_remote = ' OFF ';
+      await writeFile(lane.args_file, JSON.stringify(args));
+    }
+    const result = await composeKernel(f.manifest);
+    assert.equal(result.comparison_complete, true);
+    const records = await Promise.all(result.children.map(child => json(join(child.directory, 'args.json'))));
+    assert.equal(records[0].workflow_dir, records[1].workflow_dir, 'workflow source remains shared');
+    const binding = await json(join(f.manifest.out_dir, 'binding.json'));
+    for (const lane of f.lanes) for (const key of ['learned_dir', 'kb_artifacts_dir', 'kb_store_dir', 'shared_kb', 'global_kb'])
+      assert.ok(binding.private_paths.some(path => path.owner === lane.id && path.label === key));
+  });
+});
+
 test('a dangling symlink ancestor is rejected before it can alias a fresh private directory', async t => {
   const f = await fixture(t);
   const fresh = join(f.root, 'fresh'), alias = join(f.root, 'alias');
@@ -662,7 +719,12 @@ try {
           result = {validation_status: scenario === 'cutoff_veto' ? 'flagged' : 'accepted',
             correctness: 'pass', timing_basis: 'synthetic'};
         } else if (label === 'update_experience') {
-          const path = join(field(prompt, 'LEARNED_DIR'), 'fixture-card.md');
+          const learned = field(prompt, 'LEARNED_DIR');
+          for (const name of ['README.md', 'INDEX.md']) {
+            const path = join(learned, name), bytes = await readFile(path);
+            raw.effects.push({kind: 'read', path, sha256: hash(bytes)});
+          }
+          const path = join(learned, 'fixture-card.md');
           await write(path, 'Synthetic qualified source evidence.\n'); result = {action: 'created', card_path: path};
         } else if (label === 'kb:write') {
           const path = join(args.kb_store_dir, 'written.json');
@@ -726,6 +788,9 @@ test('joined one-member parity executes the real process-bounded workflow throug
       await mkdir(join(args.workflow_dir, 'knowledge/learned'), {recursive: true});
       await cp(join(REPO, 'kernel_workflow/kernel_lane.js'), join(args.workflow_dir, 'kernel_lane.js'));
       await writeFile(join(args.workflow_dir, 'knowledge/learned/INDEX.md'), 'Synthetic empty learned index.\n');
+      await mkdir(args.learned_dir, {recursive: true});
+      await cp(join(args.workflow_dir, 'knowledge/learned/INDEX.md'), join(args.learned_dir, 'INDEX.md'));
+      await writeFile(join(args.learned_dir, 'README.md'), 'Synthetic private learned baseline.\n');
       await mkdir(args.kb_store_dir, {recursive: true});
       await writeFile(join(args.kb_store_dir, 'initial.json'), JSON.stringify({read_reason: 'empty', candidates: []}));
       await writeFile(lane.args_file, JSON.stringify(args));
@@ -756,6 +821,9 @@ test('joined one-member parity executes the real process-bounded workflow throug
         && row.args.at(-1) === join(args.eval_dir, 'host_final_patch.diff'));
       assert.ok(patchWrites.length > 0, 'the postlude writes the retained final patch through host stdin');
       for (const row of patchWrites) assert.equal(row.stdin, first.final_patch);
+      assert.equal(first.result.learned_card.card_path, join(args.learned_dir, 'fixture-card.md'));
+      for (const name of ['README.md', 'INDEX.md'])
+        assert.ok(first.effects.some(row => row.kind === 'read' && row.path === join(args.learned_dir, name)));
     }
     assert.equal(first.result.warm_start.read_reason, 'empty');
     assert.equal(first.result.warm_start.adopted, false);

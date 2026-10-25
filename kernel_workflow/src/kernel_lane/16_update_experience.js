@@ -73,10 +73,12 @@ if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && nativeGainEligible(validati
 // place for the schema to drift.
 if (citations.length && !HELD_OUT) {
   try {
+    const learnedArg = /^[A-Za-z0-9_./-]+$/.test(LEARNED_DIR) ? LEARNED_DIR
+      : "'" + LEARNED_DIR.replace(/'/g, "'\\''") + "'";
     await agentT(
       `Run EXACTLY this command and nothing else. Do NOT edit any file.
 \`\`\`bash
-cat <<'CITEJSON' | python3 ${WORKFLOW_DIR}/scripts/kb.py --kb-dir ${LEARNED_DIR} cite \\
+cat <<'CITEJSON' | python3 ${WORKFLOW_DIR}/scripts/kb.py --kb-dir ${learnedArg} cite \\
 --run-id ${JSON.stringify(KERNEL_NAME)} \\
 --kernel ${JSON.stringify(KERNEL_NAME)} --citations -
 ${JSON.stringify(citations)}

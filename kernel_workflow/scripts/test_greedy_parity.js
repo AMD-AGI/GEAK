@@ -21,6 +21,7 @@
 //   (f) citations_kb_cap           learned-card citations, KB cap strip + forced cold direction, kb:cite
 //
 // Run:            node kernel_workflow/scripts/test_greedy_parity.js [--lane <kernel_lane.js>]
+// Learned sink:   node kernel_workflow/scripts/test_greedy_parity.js --learned-sink-only
 // Review candidate: node kernel_workflow/scripts/test_greedy_parity.js --lane <reviewed kernel_lane.js> --write-golden
 // Candidates and observed mismatch records go to a temporary directory; tracked goldens are never overwritten.
 'use strict';
@@ -28,6 +29,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const assert = require('assert/strict');
+const { spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..'); // .../GEAK
 const GOLDEN = path.join(__dirname, 'test_greedy_parity.golden.json');
@@ -56,7 +59,7 @@ function instrument(src) {
     .replace(REPORT_LINE, () => probe('after_loop') + REPORT_LINE);
 }
 
-function build(body, argsObj, answer) {
+function build(body, argsObj, answer, observeCall) {
   const rec = { calls: [], phases: [], logs: [], loop_entry: null, after_loop: null };
   const g = {
     args: argsObj,
@@ -66,6 +69,7 @@ function build(body, argsObj, answer) {
     agent: async (p, o) => {
       const label = (o && o.label) || '';
       rec.calls.push({ label, phase: (o && o.phase) || '', prompt_sha256: sha(p), opts_sha256: sha(JSON.stringify(o)) });
+      if (observeCall) observeCall(label, String(p), clone(o));
       return clone(answer(label, String(p)));
     },
     parallel: async (thunks) => Promise.all(thunks.map((t) => t().catch(() => null))),
@@ -223,8 +227,8 @@ const SCENARIOS = [
     verify: { a1: 1.4, b1: 1.2, b2: 1.3, a3: 1.5 } },
 ];
 
-async function runScenario(body, sc) {
-  const { run, rec } = build(body, { ...BASE_ARGS, ...sc.args }, answers(sc));
+async function runScenario(body, sc, observeCall) {
+  const { run, rec } = build(body, { ...BASE_ARGS, ...sc.args }, answers(sc), observeCall);
   const ret = await run();
   if (!rec.loop_entry || !rec.after_loop) throw new Error(`${sc.name}: a probe was not reached`);
   const result = { ...ret, llm_timeline: ret.llm_timeline ? sha(JSON.stringify(ret.llm_timeline)) : null };
@@ -232,10 +236,64 @@ async function runScenario(body, sc) {
   return { stop_reason: ret.stopped_by, globals_changed_by_loop: changed, ...rec, result };
 }
 
+// Reuse the citation scenario without changing its golden record. These are prompt-contract checks:
+// agent replies remain scripted, and neither kb.py nor the proposal role is executed here.
+async function checkLearnedSinks(body) {
+  const sc = SCENARIOS.find((s) => s.name === 'f_citations_kb_cap');
+  const defaultSink = `${BASE_ARGS.workflow_dir}/knowledge/learned`;
+  const privateSink = "/cpu-fixture/member's learned/$((2+3));cards";
+  const observations = [];
+  for (const [name, extra, sink] of [
+    ['default', {}, defaultSink], ['override', { learned_dir: privateSink }, privateSink],
+  ]) {
+    const calls = [];
+    const record = await runScenario(body, { ...sc, args: { ...sc.args, ...extra } },
+      (label, prompt, opts) => calls.push({ label, prompt, opts }));
+    const only = (label) => {
+      const matches = calls.filter((c) => c.label === label);
+      assert.equal(matches.length, 1, `${name}: exactly one ${label} call`);
+      return matches[0].prompt;
+    };
+    const proposal = only('update_experience');
+    assert.equal(field(proposal, 'LEARNED_DIR'), sink, `${name}: proposal sink`);
+    assert.equal(field(proposal, 'SKILL_DIR'), BASE_ARGS.workflow_dir, `${name}: shared helper directory`);
+    assert.ok(proposal.includes(`First Read ${BASE_ARGS.workflow_dir}/roles/update_experience.md`),
+      `${name}: proposal role remains under workflow_dir`);
+    const citation = only('kb:cite');
+    const command = citation.match(/^cat <<'CITEJSON' \| python3 (.+) \\\n/m);
+    assert.ok(command, `${name}: citation command found`);
+    // Parse the emitted arguments with the real shell using only set/printf builtins; do not run kb.py.
+    const parsed = spawnSync('/bin/sh', ['-c', `set -- ${command[1]}\nprintf '%s\\0' "$@"`],
+      { encoding: 'utf8', env: {}, timeout: 1000 });
+    assert.equal(parsed.status, 0, `${name}: shell argument parsing failed: ${parsed.error || parsed.stderr}`);
+    assert.deepEqual(parsed.stdout.split('\0'),
+      [`${BASE_ARGS.workflow_dir}/scripts/kb.py`, '--kb-dir', sink, 'cite', ''],
+      `${name}: citation helper stays shared and shell preserves the selected sink as one argument`);
+    assert.ok(record.after_loop.citations.length > 0, `${name}: fixture must produce nonempty citation rows`);
+    assert.ok(citation.includes(`--citations -\n${JSON.stringify(record.after_loop.citations)}\nCITEJSON`),
+      `${name}: citation command carries the loop's full ledger`);
+    observations.push({ calls, record });
+  }
+  const [base, overridden] = observations;
+  assert.equal(sha(JSON.stringify(base.record)), JSON.parse(fs.readFileSync(GOLDEN, 'utf8')).scenarios[sc.name],
+    'default learned sink retains the reviewed full-record digest');
+  assert.deepEqual(overridden.calls.map(({ label, opts }) => ({ label, opts })),
+    base.calls.map(({ label, opts }) => ({ label, opts })), 'override preserves dispatch order and options');
+  assert.deepEqual(overridden.calls.filter((c, i) => c.prompt !== base.calls[i].prompt).map((c) => c.label),
+    ['update_experience', 'kb:cite'], 'only proposal and citation prompts change');
+  assert.deepEqual(overridden.record.after_loop, base.record.after_loop, 'override preserves search state');
+  assert.deepEqual(overridden.record.result, base.record.result, 'override preserves the scripted lane result');
+  console.log('  ok: learned sink default + override: proposal and citation route to the selected sink; helpers stay shared');
+}
+
 (async () => {
   const src = fs.readFileSync(LANE, 'utf8');
   const body = instrument(src);
   console.log(`lane: ${LANE} (sha256 ${sha(src).slice(0, 16)})`);
+  if (argv.includes('--learned-sink-only')) {
+    await checkLearnedSinks(body);
+    return;
+  }
   const got = {};
   for (const sc of SCENARIOS) got[sc.name] = await runScenario(body, sc);
 
@@ -267,6 +325,7 @@ async function runScenario(body, sc) {
     console.error(`  FAIL: ${name}: expected ${golden[name] || '(no golden)'}, observed ${digests[name] || '(scenario missing)'}`);
     if (r) console.error(`    Full observed record: ${save(name + '.json', r)}`);
   }
+  await checkLearnedSinks(body);
   console.log(failures === 0 ? '\nPASS: greedy loop matches the reviewed workflow snapshots.'
     : `\nFAILED: ${failures} scenario(s) differ from the golden.`);
   process.exit(failures === 0 ? 0 : 1);

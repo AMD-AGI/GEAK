@@ -419,13 +419,13 @@ const DRA_MAX_BLINDSPOTS = (() => {
   return Number.isFinite(v) && v >= 1 ? v : 4;
 })();
 // ---------------------------------------------------------------------------
-// LEARNED-KNOWLEDGE SINK. Derived from WORKFLOW_DIR and nothing else, so a lane spawned by
-// e2e_workflow still curates into kernel_workflow/knowledge/learned/ — e2e's learned/ is a
-// separate memory owned by its own system_architect step.
+// LEARNED-KNOWLEDGE SINK. A caller may supply private data without copying workflow code.
+// The default remains kernel_workflow/knowledge/learned/, including when e2e spawns the lane.
+// e2e's learned/ is separate memory owned by its system_architect step.
 //   update_experience = on (default) | off | false | none
 // The bake-off dispatcher passes `off` and curates once centrally instead (N parallel lanes would
 // file N near-duplicate cards for one op).
-const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
+const LEARNED_DIR = String(A.learned_dir || `${WORKFLOW_DIR}/knowledge/learned`);
 // How much of ONE round the learned KB may steer. Measured, not guessed: an arm whose planner was
 // handed at most 3 matched cards and could KB-seed at most one direction reached 4.45x geomean on 16
 // kernels; the same 16 under a planner that reads the whole 84-line index and picks freely reached
@@ -2739,10 +2739,12 @@ if (!kbGate && UPDATE_EXPERIENCE_ON && kbAccepted && nativeGainEligible(validati
 // place for the schema to drift.
 if (citations.length && !HELD_OUT) {
   try {
+    const learnedArg = /^[A-Za-z0-9_./-]+$/.test(LEARNED_DIR) ? LEARNED_DIR
+      : "'" + LEARNED_DIR.replace(/'/g, "'\\''") + "'";
     await agentT(
       `Run EXACTLY this command and nothing else. Do NOT edit any file.
 \`\`\`bash
-cat <<'CITEJSON' | python3 ${WORKFLOW_DIR}/scripts/kb.py --kb-dir ${LEARNED_DIR} cite \\
+cat <<'CITEJSON' | python3 ${WORKFLOW_DIR}/scripts/kb.py --kb-dir ${learnedArg} cite \\
 --run-id ${JSON.stringify(KERNEL_NAME)} \\
 --kernel ${JSON.stringify(KERNEL_NAME)} --citations -
 ${JSON.stringify(citations)}

@@ -1,11 +1,11 @@
 // ---------------------------------------------------------------------------
-// LEARNED-KNOWLEDGE SINK. Derived from WORKFLOW_DIR and nothing else, so a lane spawned by
-// e2e_workflow still curates into kernel_workflow/knowledge/learned/ — e2e's learned/ is a
-// separate memory owned by its own system_architect step.
+// LEARNED-KNOWLEDGE SINK. A caller may supply private data without copying workflow code.
+// The default remains kernel_workflow/knowledge/learned/, including when e2e spawns the lane.
+// e2e's learned/ is separate memory owned by its system_architect step.
 //   update_experience = on (default) | off | false | none
 // The bake-off dispatcher passes `off` and curates once centrally instead (N parallel lanes would
 // file N near-duplicate cards for one op).
-const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
+const LEARNED_DIR = String(A.learned_dir || `${WORKFLOW_DIR}/knowledge/learned`);
 // How much of ONE round the learned KB may steer. Measured, not guessed: an arm whose planner was
 // handed at most 3 matched cards and could KB-seed at most one direction reached 4.45x geomean on 16
 // kernels; the same 16 under a planner that reads the whole 84-line index and picks freely reached

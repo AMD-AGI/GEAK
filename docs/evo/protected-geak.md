@@ -42,8 +42,9 @@ by the composer. External provider limits remain in force.
 The composer checks these identities before any workflow starts:
 
 - distinct context IDs, argument realpaths and physical device grants;
-- an explicit absolute `exp_root` and `eval_dir` for every member, optional
-  `state_dir`, all declared native command state roots, output directories and
+- explicit absolute `exp_root`, `eval_dir`, `learned_dir`, `kb_artifacts_dir` and
+  `kb_store_dir` for every member, optional `state_dir`, `shared_kb` and `global_kb`,
+  all declared native command state roots, output directories and
   recorder paths; these cannot overlap another member's corresponding paths or
   the common evaluator's state root, including through existing symlink parents;
 - `resources.gpu_ids`, in positional correspondence with physical `device_ids`,
@@ -52,6 +53,7 @@ The composer checks these identities before any workflow starts:
 - each workflow's `deadline_epoch` equals the manifest's common absolute deadline,
   and each outer timeout covers that deadline plus seven seconds of cleanup;
 - pinned native task/objective identity and existing optimize-mode handoff rules.
+- `kb_remote=off` after trimming and case normalization; omitted or `auto` is rejected.
 
 These are declared path and mapping checks, not proof of isolation in a remote
 namespace. The owner must ensure that those same paths identify the intended
@@ -60,11 +62,23 @@ runtime sessions, caches, local knowledge stores and learned-card writes. The
 returned `eval_dir` is checked against its declaration before retention; that check
 cannot prevent a misconfigured child from writing elsewhere during its run.
 
-Shared KB/service writes and warm-start base compatibility are not qualified by
-these checks. Preserve the intended stock settings by supplying private copies or
-namespaces; do not silently disable stock knowledge to obtain an isolation claim.
-Common immutable inputs may be read-only. Peer contexts must not see or mutate
-one another's writable state. These remain owner obligations before native use.
+The single-language lane accepts an optional `learned_dir` sink; standalone calls
+keep the default `workflow_dir/knowledge/learned`. `workflow_dir` remains the shared
+code, role and helper root. The override passes through optimize/author calls;
+the bakeoff interface is unchanged. Compositions require all three explicit knowledge roots
+even when warm start or curation is disabled, because independent citation and
+writeback paths can still write. `global_kb` is conservatively owned as a memory
+hook; these checks do not assert that an active writer uses it.
+
+The caller seeds each private learned sink with the intended common baseline,
+including its README, index and cards; an empty replacement changes curation
+context. Planner and engineer prior reads remain under shared read-only workflow
+knowledge; the override routes curation and citation writes, not those reads.
+Do not repurpose `state_dir`: it controls resume behavior and
+suppresses ordinary warm start. Private scratch, HOME, caches and logs, immutable
+shared inputs, effective container path mappings and deliberate GPU coordination
+locks remain caller obligations. These declared path checks do not establish
+mount isolation or warm-start compatibility.
 
 ## Manifest
 
@@ -104,7 +118,8 @@ Add members with `finalist: "eligible"`, separate private paths and distinct
 physical grants. The sole required member can be an independent greedy search or
 an evolutionary search; the code does not branch on either its name or optimizer.
 
-Complete argument files must explicitly bind `exp_root`, `eval_dir`, `gpu_ids`,
+Complete argument files must explicitly bind `exp_root`, `eval_dir`, `learned_dir`,
+`kb_artifacts_dir`, `kb_store_dir`, `kb_remote=off`, `gpu_ids`,
 `deadline_epoch`, positive `search_reserve_s`, the pinned objective and native
 commands. Use `mode=optimize` (or omit it), `apply_to_original=false` and an existing
 `greedy` or `evo` optimizer. Existing per-workflow reserves remain unchanged:

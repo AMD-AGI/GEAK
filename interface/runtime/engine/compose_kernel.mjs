@@ -160,8 +160,14 @@ export async function composeKernel(manifest, { run = runProcess } = {}) {
       'each physical device needs one distinct local GPU ID');
     need(args.gpu_ids != null && JSON.stringify(String(args.gpu_ids).split(',').map(id => id.trim())) === JSON.stringify(gpuIds),
       'workflow gpu_ids differ from the declared local-to-physical grant');
-    for (const key of ['exp_root', 'eval_dir']) await ownPath(lane.id, key, args[key]);
+    for (const key of ['exp_root', 'eval_dir', 'learned_dir', 'kb_artifacts_dir', 'kb_store_dir'])
+      await ownPath(lane.id, key, args[key]);
     if (args.state_dir) await ownPath(lane.id, 'state_dir', args.state_dir);
+    for (const key of ['shared_kb', 'global_kb']) {
+      const path = String(args[key] || '').trim();
+      if (path) await ownPath(lane.id, key, path);
+    }
+    need(String(args.kb_remote || 'auto').trim().toLowerCase() === 'off', 'composition requires kb_remote=off');
     need((args.mode || 'optimize') === 'optimize' && String(args.apply_to_original ?? 'false') === 'false',
       'composition requires optimize-mode result handoffs without applying to the original');
     need(args.objective?.kind === objective.kind && args.objective.primary_regime === objective.primary_regime,
