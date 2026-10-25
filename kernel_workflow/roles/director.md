@@ -167,9 +167,13 @@ Use that exact patch path; an empty patch represents the unchanged original.
 Read COMMANDMENT's exact correctness/full-benchmark commands. Source-binding failures
 (`GEAK_SOURCE_INVALID`, exit 86, `invalid_measurement`) are invalid experiments, not no-wins.
 Inspect affected `.geak/invalid_measurements.jsonl`, even if the final patch is empty. An unresolved
-candidate that was never validly remeasured requires `validation_status:"flagged"`,
-`correctness:"not_checked"`, and the defect in `arbitration_note`; timing the reverted original does
-not validate it.
+defect requires `validation_status:"flagged"` only when it applies to the selected final source,
+state, runtime or timing/benchmark contract; identify that applicability in `arbitration_note`.
+Use `correctness:"not_checked"` for applicable unresolved source-binding failures. Later evidence resolves
+only the defect it directly answers; a passing UT or different source ID alone does not resolve
+inherited correctness or benchmark-contract issues. Keep resolved or inapplicable objections in
+history without flagging the final result. Preserve invalid attempts; timing a reverted original
+does not validate an abandoned candidate.
 
 Rebuild from the true original and apply the cumulative patch:
 ```bash
@@ -232,9 +236,9 @@ other historical mode verbatim and flag it. Never relabel modes or combine diffe
 into one speedup. Carry `timing_basis` in every summary quoting the result.
 
 Compare the independent primary metric with the claim: within 10%, or Director higher, is accepted;
-Director lower by over 10% is flagged with the measured value as official. Prior correctness,
-source-binding and receipt flags take precedence. A reproducible lower result can still be reported;
-recommend a corrective round only for failed correctness or patch application.
+Director lower by over 10% is flagged with the measured value as official. Applicable unresolved
+correctness, source-binding and receipt flags take precedence. A reproducible lower result can
+still be reported; recommend a corrective round only for failed correctness or patch application.
 
 Only if `APPLY_TO_ORIGINAL=true` and status is accepted, apply the patch to the original:
 ```bash

@@ -9,7 +9,8 @@
 //     roundsCommitted, history, citations, profileSummary, deadlineHit, forcedReplans, kbCapBound)
 // and compares its SHA256 digest with test_greedy_parity.golden.json, derived from records produced by
 // the ordinary loop at the `evo` base (3619cd04). Reviewed instruction and product-status
-// changes update prompt hashes only; calls, options, state and results remain checked.
+// changes update prompt hashes; reviewed schema changes update option hashes. Calls, state and
+// results remain checked.
 // The two captures are a read-only __probe() call
 // inserted before the loop's `while` line and before `phase('Report');`; nothing else is changed.
 //

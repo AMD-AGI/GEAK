@@ -187,7 +187,8 @@ const externalMetricInstructions = (final = false) => EXTERNAL_OBJECTIVE ? `
 External measurement contract: ${JSON.stringify(EXTERNAL_OBJECTIVE)}.
 ${final ? `The workflow host has launched the final evaluation using ${JSON.stringify(finalMeasurementArgv())}.
 Review its retained evidence for ${JSON.stringify(frozenFinalEvaluation)}; do not launch another evaluation.
-Preserve any explicit validation objection in validation_status and explain it.`
+Preserve applicable unresolved validation objections in validation_status and explain how
+the remaining defect applies to this final result.`
   : `Use the existing admitted owner command ${JSON.stringify(A.external_measurement_command)}
 from the candidate workspace according to COMMANDMENT.`} One evaluation runs the
 unchanged full UT in three fresh processes with native min_runs=2. The measurement
@@ -789,7 +790,10 @@ const VERIFY_SCHEMA = obj({
 const INTEGRATE_SCHEMA = obj({
   attempted: { type: 'boolean' },
   combos_tried: { type: 'array', items: { type: 'object', additionalProperties: true } },
-  best: { type: 'object', additionalProperties: true },
+  best: obj({
+    patch_file: { type: 'string' },
+    ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
+  }, EXTERNAL_OBJECTIVE ? ['patch_file', 'external_evaluation'] : ['patch_file']),
   improved_over_best_individual: { type: 'boolean' },
   conclusion: { type: 'string' }, notes: { type: 'string' },
 }, ['attempted', 'conclusion']);

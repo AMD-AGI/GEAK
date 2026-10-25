@@ -198,7 +198,10 @@ const VERIFY_SCHEMA = obj({
 const INTEGRATE_SCHEMA = obj({
   attempted: { type: 'boolean' },
   combos_tried: { type: 'array', items: { type: 'object', additionalProperties: true } },
-  best: { type: 'object', additionalProperties: true },
+  best: obj({
+    patch_file: { type: 'string' },
+    ...(EXTERNAL_OBJECTIVE ? {external_evaluation: externalEvaluation} : {}),
+  }, EXTERNAL_OBJECTIVE ? ['patch_file', 'external_evaluation'] : ['patch_file']),
   improved_over_best_individual: { type: 'boolean' },
   conclusion: { type: 'string' }, notes: { type: 'string' },
 }, ['attempted', 'conclusion']);

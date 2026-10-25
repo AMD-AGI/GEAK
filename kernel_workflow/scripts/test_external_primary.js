@@ -66,6 +66,7 @@ const make = (A, hasWorkload = true) => new Function('A', 'HAS_WORKLOAD', 'runPr
   assert.equal(mode.nativePrimary(bad), null);
   assert.equal(bad.validation_status, 'invalid_measurement');
   await fullLane();
+  await fullLane({retainedIntegration: true});
   await fullLane({finalNoGain: true});
   await fullLane({warm: true});
   await fullLane({staged: true});
@@ -92,7 +93,7 @@ const make = (A, hasWorkload = true) => new Function('A', 'HAS_WORKLOAD', 'runPr
 async function fullLane({finalNoGain = false, warm = false, staged = false, invalidFinal = null,
   captureSelections = false, failBefore = false, bounded = false, director = 'accepted',
   finalHostFailure = false, finalReaderReject = false, report = 'normal', emptyPatch = false,
-  overwriteHostPatch = false, originalFinal = false} = {}) {
+  overwriteHostPatch = false, originalFinal = false, retainedIntegration = false} = {}) {
   const body = laneSource.replace(/^export const meta/m, 'const meta');
   const selectedCandidate = 'b'.repeat(64);
   const rootCommit = 'a'.repeat(40), hostPatchPath = '/eval/host_final_patch.diff';
@@ -107,6 +108,8 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
   let cumulative, commits = 0, captured = false, finalReads = 0, canonicalCaptures = 0;
   let finalMeasurements = 0, directorCalls = 0, activePhase = '', deadline;
   let rootReads = 0, patchReads = 0, hostPatchWrites = 0, hostPatch = null, kbWrites = 0;
+  let integrationReads = 0;
+  const retainedPatch = '/eval/round_1/engineer_1/best_patch.diff';
   const finalEvents = [], deadlines = [], fixtureErrors = [];
   const setProcessDeadline = epoch => { deadline = epoch; deadlines.push(epoch); };
   setProcessDeadline.secondsLeft = () => deadline - 1000;
@@ -206,6 +209,12 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
           stdout: 'Final evaluator completed; the trusted reader supplies the result.'};
       }
       const id = opts.args[3], [score, gain, dev] = records[id];
+      if (retainedIntegration && activePhase === 'Merge') {
+        integrationReads++;
+        assert.deepEqual(opts.args, ['--candidate-id', 'b', '--evaluation-id', 'b',
+          '--workspace', '/canonical', '--patch', retainedPatch],
+        'a retained best is checked against the supplied integration base with its patch');
+      }
       if (id === 'final') {
         finalReads++;
         finalEvents.push('read');
@@ -264,15 +273,38 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
         speedup_geomean: 999, external_evaluation: ids(label.split(' ')[1].split(':')[0])};
       if (label.startsWith('verify ')) return {status: 'verified', correctness: 'pass',
         verified_geomean: 999, external_evaluation: ids(label.split(' ')[1])};
-      if (label.startsWith('integrate ')) return {attempted: true, conclusion: 'improved',
-        best: {geomean: 999, patch_file: '/integrated.diff', external_evaluation: ids('integrated')}};
+      if (label.startsWith('integrate ')) {
+        if (!retainedIntegration) return {attempted: true, conclusion: 'improved',
+          best: {geomean: 999, patch_file: '/integrated.diff', external_evaluation: ids('integrated')}};
+        const result = {attempted: true, conclusion: 'no_improvement',
+          best: {geomean: 999, patch_file: retainedPatch, external_evaluation: ids('b')}};
+        const {validate} = await import('../../interface/runtime/engine/schema.mjs');
+        assert.equal(validate(result, options.schema).ok, true);
+        assert.equal(validate({attempted: true, conclusion: 'no_improvement'}, options.schema).ok, true);
+        const {patch_file, ...unbound} = result.best;
+        for (const conclusion of ['no_improvement', 'improved']) {
+          assert.deepEqual(validate({...result, conclusion, best: unbound}, options.schema).errors,
+            ['$.best.patch_file: missing required field']);
+        }
+        assert.deepEqual(validate({...result, best: {patch_file}}, options.schema).errors,
+          ['$.best.external_evaluation: missing required field']);
+        return result;
+      }
       if (label.startsWith('commit ')) {
         assert.ok(prompt.includes('winner: engineer b (1.60x)'),
           'commit the native-primary winner even when another candidate has higher geomean');
         if (captureSelections) assert.equal(canonicalCaptures, 2, 'source is captured before canonical mutation');
         commits++; return {committed: true};
       }
-      if (label.startsWith('tech_lead:memory')) return {insights: [], ledger: []};
+      if (label.startsWith('tech_lead:memory')) {
+        if (retainedIntegration) {
+          const integrate = JSON.parse(prompt.split('\n').find(x => x.startsWith('- INTEGRATE: ')).slice(13));
+          assert.equal(integrate.conclusion, 'no_improvement');
+          assert.equal(integrate.best.external_measurement_valid, true);
+          assert.equal(integrate.best.primary_speedup, 1.6, 'retain the checked score, not the model scalar');
+        }
+        return {insights: [], ledger: []};
+      }
       if (label === 'kb:write') {
         kbWrites++;
         assert.ok(prompt.includes('--patch ' + JSON.stringify(hostPatchPath)));
@@ -334,6 +366,7 @@ async function fullLane({finalNoGain = false, warm = false, staged = false, inva
   // Integrated 1.5 does not beat b; native no-gain does not prevent development.
   assert.equal(cumulative, bounded ? 1 : 1.6);
   assert.equal(commits, bounded ? 0 : 1);
+  assert.equal(integrationReads, retainedIntegration ? 1 : 0);
   assert.equal(finalMeasurements, 1, 'one host final evaluation, independent of model claims');
   assert.equal(directorCalls, 1);
   assert.equal(rootReads, 1);

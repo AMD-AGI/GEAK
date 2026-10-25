@@ -36,14 +36,18 @@ diagnostic. Use complete matching cases and supplied weights, never count instea
 Preserve the oracle's GEAK_WEIGHTED_SPEEDUP or audited aggregation when supplied;
 recompute from static weights only when that is the declared metric. Before saving,
 mark any new editable source files with git add -N so the diff includes them; do
-not include generated artifacts. Only when the combination beats BEST_INDIVIDUAL
-in the primary metric, save:
+not include generated artifacts. If returning `best`, its `patch_file` must
+reconstruct the exact measured source from the supplied CANONICAL. Save the full
+diff against that base, or reuse a retained individual patch only if it has the
+same base and reproduces that source:
 ```bash
 cd "$WS" && git diff > "$INTEGRATE_DIR/integrated_patch.diff"
 ```
-Return measured combinations and the following JSON. If none improves, use
-conclusion:"no_improvement" and omit patch_file; use all_failed when appropriate.
-Missing/invalid measurements do not establish a gain.
+Return measured combinations and the following JSON. If none beats BEST_INDIVIDUAL,
+use conclusion:"no_improvement"; a retained `best` still requires its patch_file.
+If no measured source can be reconstructed, omit `best` and keep diagnostics in
+combos_tried/notes; use all_failed when appropriate. Missing/invalid measurements
+do not establish a gain.
 
 ```json
 {
