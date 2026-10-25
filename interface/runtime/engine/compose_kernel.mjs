@@ -5,7 +5,7 @@
 // Opt-in composition of complete existing native GEAK/EVO runs. The caller owns
 // isolated execution contexts and device grants; this is not a resource scheduler.
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile, rename, realpath } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, realpath, lstat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runProcess } from './backends/base.mjs';
@@ -30,6 +30,13 @@ async function resolvedPath(path) {
   try { return await realpath(path); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
+    // A fresh component is allowed; an existing link to a missing target is not
+    // a distinct lexical path and could alias another owner once created.
+    const entry = await lstat(path).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+      return null;
+    });
+    need(!entry?.isSymbolicLink(), 'private path has an unresolved symbolic link');
     return join(await resolvedPath(dirname(path)), basename(path));
   }
 }

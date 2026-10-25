@@ -12,6 +12,9 @@ advantage. A lineage keeps its private loop and archive in its own workflow
 process. Stock early-stop refusals remain in that workflow; an accepted self-stop
 finishes its postlude. The composer calls each workflow once, waits for all members,
 and neither retires a member because a peer is faster nor restarts a stopped member.
+Every lineage has the same persistence contract: the owner retains its declared
+allowance through the deadline; the composer has no retirement mechanism or
+persistence switch.
 
 ## Declared policies and owned contexts
 

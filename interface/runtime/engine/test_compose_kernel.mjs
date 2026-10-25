@@ -468,3 +468,16 @@ test('a child returning another evaluation directory is ineligible', async t => 
   assert.equal(result.winner.id, 'geak');
   assert.match(result.children[1].error, /different private evaluation directory/);
 });
+
+test('a dangling symlink ancestor is rejected before it can alias a fresh private directory', async t => {
+  const f = await fixture(t);
+  const fresh = join(f.root, 'fresh'), alias = join(f.root, 'alias');
+  await symlink(fresh, alias);
+  for (const [i, lane] of f.lanes.entries()) {
+    const args = await json(lane.args_file);
+    args.state_dir = join(i === 0 ? fresh : alias, 'state');
+    await writeFile(lane.args_file, JSON.stringify(args));
+  }
+  await assert.rejects(composeKernel(f.manifest), /unresolved symbolic link/);
+  await assert.rejects(readFile(join(f.root, 'events.jsonl')), {code: 'ENOENT'});
+});
