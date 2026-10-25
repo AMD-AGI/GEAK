@@ -26,10 +26,24 @@ async function createEvolution(start) {
     entries.splice(0, entries.length, ...rows);
     bestId = best;
   };
-  // Each run starts fresh. Atomic directory creation refuses reuse without a
-  // separate resume protocol or any mutation of an earlier archive.
-  await run('mkdir', [path]);
-  await run('mkdir', [`${path}/patches`]);
+  // The owner may allocate an empty mountpoint before starting the workflow.
+  // Reject earlier contents; exclusive patches creation claims initialization.
+  // A failed initialization keeps its claim and is never cleared or resumed.
+  await run('sh', ['-c', `set -eu
+root=$1
+[ "$(realpath -m -- "$root")" = "$root" ] && [ ! -L "$root" ] || {
+  echo 'evolution root must be a canonical directory, not a symlink' >&2; exit 1;
+}
+if [ -e "$root" ]; then
+  [ -d "$root" ] || { echo 'evolution root must be a directory' >&2; exit 1; }
+  contents=$(find "$root" -mindepth 1 -maxdepth 1 -print -quit)
+  [ -z "$contents" ] || {
+    echo 'evolution root must be empty before initialization' >&2; exit 1;
+  }
+else
+  mkdir -- "$root"
+fi
+mkdir -- "$root/patches"`, 'sh', path]);
   baseCommit = (await run('git', ['-C', CANONICAL, 'rev-parse', '--verify', 'HEAD^{commit}'])).trim();
   if (!/^[0-9a-f]{40,64}$/.test(baseCommit)
       || (await run('git', ['-C', CANONICAL, 'status', '--porcelain', '--untracked-files=no'])).trim()) {
@@ -54,8 +68,36 @@ async function createEvolution(start) {
     if (!hash) throw new Error('retained patch has no source hash');
     return hash[0];
   };
+  let peerSnapshot = null;
+  const peerSource = async (action, value) => JSON.parse(await run('python3',
+    [`${WORKFLOW_DIR}/scripts/peer_sources.py`, action], {input: JSON.stringify(value)}));
+  const isPeer = id => EVOLUTION_PEERS.length > 0 && typeof id === 'string' && id.startsWith('peer_');
+  const importPeer = id => serial(async () => {
+    if (retained(id)) {
+      const ref = retained(id).patch_ref;
+      if (await digest(ref.path) !== ref.sha256) throw new Error('private imported peer patch changed');
+      return;
+    }
+    if (!peerSnapshot?.path) throw new Error('peer snapshot unavailable');
+    const command = A.external_result_command || [], taskIndex = command.indexOf('--task-root');
+    if (!EXTERNAL_OBJECTIVE || taskIndex < 0) throw new Error('peer sources require the native task reader');
+    const row = await peerSource('import', {id,
+      snapshot: {path: peerSnapshot.path, sha256: peerSnapshot.sha256},
+      task_root: command[taskIndex + 1], base, base_commit: baseCommit, archive_root: path});
+    await save([...entries, row]);
+  });
   return {
     base, baseCommit, path: archive, entries,
+    async snapshotPeers(round) {
+      if (!EVOLUTION_PEERS.length) return;
+      try {
+        peerSnapshot = await peerSource('snapshot', {peers: EVOLUTION_PEERS,
+          directory: `${EVAL_DIR}/round_${round}`});
+      } catch (error) {
+        peerSnapshot = {offers: [], errors: [{error: String(error)}]};
+      }
+      for (const error of peerSnapshot.errors) log(`[evolution] peer snapshot: ${JSON.stringify(error)}`);
+    },
     engineerContext(direction) {
       const context = direction.evolution_context;
       if (A.evolution_evidence_handoff !== true) return context;
@@ -85,6 +127,9 @@ async function createEvolution(start) {
       if (best && !summary.includes(best)) summary.unshift(best);
       return {EVOLUTION_ARCHIVE: archive, EVOLUTION_BASE: base, EVOLUTION_BASE_COMMIT: baseCommit,
         EVOLUTION_BEST_ID: bestId, EVOLUTION_ENTRY_COUNT: entries.length,
+        ...(peerSnapshot ? {EVOLUTION_PEER_SNAPSHOT: peerSnapshot.path || null,
+          EVOLUTION_PEER_SNAPSHOT_SHA256: peerSnapshot.sha256 || null,
+          EVOLUTION_PEER_OFFERS: peerSnapshot.offers, EVOLUTION_PEER_ERRORS: peerSnapshot.errors} : {}),
         EVOLUTION_ENTRIES: summary.map(row => ({id: row.id,
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
@@ -101,15 +146,26 @@ async function createEvolution(start) {
           report_path: `${direction.out_dir}/report.md`};
       })};
     },
-    prepare(directions, round) {
+    async prepare(directions, round) {
       if (!Number.isSafeInteger(round) || round < 1) throw new Error('positive evolution round required');
+      const peerErrors = new Map();
+      for (const id of new Set(directions.flatMap(d => [d.parent_id,
+        ...(Array.isArray(d.donor_ids) ? d.donor_ids : [])]).filter(isPeer))) {
+        try { await importPeer(id); }
+        catch (error) { peerErrors.set(id, `selected peer source ${id}: ${String(error)}`); }
+      }
       return directions.map((direction, index) => {
         const errors = [], requested = direction.parent_id;
+        const peerFailures = [requested, ...(Array.isArray(direction.donor_ids) ? direction.donor_ids : [])]
+          .map(id => peerErrors.get(id)).filter(Boolean);
         let parent = requested, resolution = 'explicit';
         if (!parent || (parent !== 'ORIGINAL' && !retained(parent))) {
           if (parent) errors.push(`unknown or unavailable parent_id: ${String(parent)}`);
-          parent = defaultParent();
-          resolution = `${requested ? 'invalid_reference_' : ''}default_${parent === 'ORIGINAL' ? 'original' : 'best_verified'}`;
+          if (isPeer(parent)) resolution = 'invalid_peer_reference';
+          else {
+            parent = defaultParent();
+            resolution = `${requested ? 'invalid_reference_' : ''}default_${parent === 'ORIGINAL' ? 'original' : 'best_verified'}`;
+          }
         }
         const donors = [];
         if (direction.donor_ids != null && !Array.isArray(direction.donor_ids)) errors.push('donor_ids must be an array');
@@ -119,12 +175,14 @@ async function createEvolution(start) {
         }
         return {...direction, id: `r${round}_d${index}`, requested_id: direction.id || null,
           parent_id: parent, donor_ids: donors, evolution_context: {requested_parent_id: requested || null,
+            ...(peerFailures.length ? {peer_source_error: peerFailures.join('; ')} : {}),
             parent_id: parent,
             parent_resolution: resolution, reference_errors: errors,
             donors: donors.map(id => ({id, patch_ref: id === 'ORIGINAL' ? null : retained(id).patch_ref}))}};
       });
     },
     async prepareWorkspace(direction) {
+      if (direction.evolution_context.peer_source_error) throw new Error(direction.evolution_context.peer_source_error);
       const workspace = `${direction.out_dir}/workspace`;
       const parent = direction.parent_id === 'ORIGINAL' ? null : retained(direction.parent_id);
       if (direction.parent_id !== 'ORIGINAL' && !parent) throw new Error('selected evolution parent is unavailable');

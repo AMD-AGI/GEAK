@@ -491,6 +491,31 @@ test('inconsistent policies, clocks, private paths and local grants fail before 
   }
 });
 
+test('one-member composition forwards declared external peer sources without changing clocks', async t => {
+  const f = await fixture(t), lane = f.lanes[0], args = await json(lane.args_file);
+  f.manifest.lanes = [lane];
+  args.optimizer = 'evo';
+  lane.policy.imports = 'selected';
+  const root = join(f.root, 'external-peer-archive');
+  await mkdir(root); // Mount isolation belongs to the caller, outside this fixture.
+  args.evolution_peers = [{id: 'peer', root, native_epoch: 'peer-native'}];
+  await writeFile(lane.args_file, JSON.stringify(args));
+  const result = await composeKernel(f.manifest);
+  assert.equal(result.deadline_epoch, f.manifest.deadline_epoch);
+  assert.deepEqual((await json(join(f.manifest.out_dir, lane.id, 'args.json'))).evolution_peers, args.evolution_peers);
+});
+
+test('one-member composition rejects a peer overlapping its own writable state before launch', async t => {
+  const f = await fixture(t), lane = f.lanes[0], args = await json(lane.args_file);
+  f.manifest.lanes = [lane];
+  args.optimizer = 'evo';
+  lane.policy.imports = 'selected';
+  args.evolution_peers = [{id: 'peer', root: join(args.eval_dir, 'evolution'), native_epoch: 'peer-native'}];
+  await writeFile(lane.args_file, JSON.stringify(args));
+  await assert.rejects(composeKernel(f.manifest), /peer root overlaps recipient writable state/);
+  await assert.rejects(readFile(join(f.root, 'events.jsonl')), {code: 'ENOENT'});
+});
+
 test('a child returning another evaluation directory is ineligible', async t => {
   const f = await fixture(t);
   await f.terminal('evo', result => { result.eval_dir = join(f.root, 'geak/eval'); });

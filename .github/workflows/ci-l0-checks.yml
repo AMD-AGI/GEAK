@@ -158,6 +158,7 @@ jobs:
             tests/native/test_external_runner.py \
             scripts/native_runtime/test_direct_external_command.py \
             scripts/native_runtime/test_direct_shared_inputs.py \
+            kernel_workflow/scripts/test_peer_sources.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation
@@ -330,6 +331,8 @@ jobs:
         run: node kernel_workflow/scripts/test_greedy_parity.js
       - name: thin evolutionary workflow
         run: node kernel_workflow/scripts/test_simple_evolution.js
+      - name: selected peer source reuse
+        run: node kernel_workflow/scripts/test_peer_evolution.js
       - name: external native primary measurement
         run: node kernel_workflow/scripts/test_external_primary.js
       - name: task context reaches planning and engineering

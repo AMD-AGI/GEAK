@@ -2,6 +2,14 @@ const OPTIMIZER = String(A.optimizer || 'greedy');
 if (!['greedy', 'evo'].includes(OPTIMIZER)) {
   throw new Error(`unknown optimizer: ${OPTIMIZER}; use greedy or evo`);
 }
+const EVOLUTION_PEERS = A.evolution_peers ?? [];
+if (!Array.isArray(EVOLUTION_PEERS) || (OPTIMIZER !== 'evo' && EVOLUTION_PEERS.length)
+    || EVOLUTION_PEERS.some(peer => !peer || Object.keys(peer).sort().join(',') !== 'id,native_epoch,root'
+      || !/^[a-z][a-z0-9_-]{0,47}$/.test(peer.id || '') || typeof peer.root !== 'string'
+      || !peer.root.startsWith('/') || typeof peer.native_epoch !== 'string' || !peer.native_epoch.trim())
+    || new Set(EVOLUTION_PEERS.map(peer => peer.id)).size !== EVOLUTION_PEERS.length) {
+  throw new Error('evolution_peers requires distinct {id, root, native_epoch} read-only peers for EVO; GEAK uses []');
+}
 const retiredOptimizerArg = ['optimizer_command', 'optimizer_task_ref', 'optimizer_reserve_s']
   .find(key => Object.prototype.hasOwnProperty.call(A, key));
 if (retiredOptimizerArg) {

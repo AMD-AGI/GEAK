@@ -61,3 +61,32 @@ to false and does not change stored archive rows or promotion rules.
 The archive is a per-run record, without a separate exporter, semantic diversity
 index, or cross-run resume protocol. An ancestry link records a selection; useful
 contribution survival and later improvement require inspection and measurement.
+
+## Optional peer sources
+
+EVO accepts `evolution_peers: [{id, root, native_epoch}]`; the default is `[]`,
+as required for GEAK and exchange OFF. The existing owner mounts each peer's
+ordinary evolution directory read-only at the declared absolute `root` and
+supplies its native measurement epoch. Composed recipients also declare
+`policy.imports: "selected"`. Declared peer sources are independent of the
+composition's finalist members, so a one-member composition can use an external
+EVO archive. The owner enforces read-only mounts and private execution contexts;
+path checks do not establish that isolation. The owner may preallocate an empty
+evolution directory for the mount. The workflow initializes it in place and
+refuses prior contents. This adds no publisher or GPU service.
+
+Each planning round saves exact peer `archive.json` bytes and their hashes in
+that round's artifacts. Replans reuse this snapshot. If parsing a peer fails, it
+contributes no offers; other peers remain available. Eligibility uses the archive's existing
+`verified` verdict, a retained patch and a native evaluation reference, without
+reinterpreting copied verdict fields. Peer import currently requires an external
+native objective; other runs supply no eligible native source offers. Only selected parent/donor
+patches are reconstructed and copied. Both actual run bases must match the same
+task's protected ORIGINAL, including executable modes; Git commit labels may
+differ. Imported rows keep publisher identity, ancestry, snapshot and foreign
+measurement references under `origin`, with `verified: false` and `speedup: null`.
+Recipient native verification is required before a descendant can be promoted.
+Missing snapshots leave local search available with visible errors; a bad
+selected source fails its direction. Archive snapshots include existing notes,
+even with inline evidence handoff off: this is source reuse with archive-context
+access, not an experiment isolating source bytes from context.

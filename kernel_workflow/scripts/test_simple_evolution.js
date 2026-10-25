@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const {spawnSync} = require('child_process');
+const {execFile, spawnSync} = require('child_process');
 const ROOT = path.resolve(__dirname, '../..');
 const lanePath = process.argv.includes('--lane')
   ? path.resolve(process.argv[process.argv.indexOf('--lane') + 1])
@@ -41,6 +41,110 @@ function initRepo(dir) {
   git(dir, 'config', 'user.email', '32464366+iraj465@users.noreply.github.com');
   git(dir, 'add', '-A');
   git(dir, 'commit', '-qm', 'CPU fixture baseline');
+}
+
+async function initializationCases() {
+  const start = laneSource.indexOf('async function createEvolution(start) {');
+  const end = laneSource.indexOf('// Host helpers shared', start);
+  assert.ok(start >= 0 && end > start, 'compiled archive initialization must be present');
+  const load = new Function('EVAL_DIR', 'CANONICAL', 'WORKFLOW_DIR', 'hostRun',
+    `${laneSource.slice(start, end)}\nreturn createEvolution;`);
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-evolution-init-'));
+  const task = path.join(temp, 'task');
+  writeSources(task, original);
+  initRepo(task);
+  const hostEnv = {...process.env};
+  for (const key of ['GEAK_SHARED_INPUT_MANIFEST', 'GEAK_SHARED_INPUT_SHA256', 'GEAK_SHARED_INPUT_ROOT']) {
+    delete hostEnv[key]; // This synthetic task has no shared-input manifest.
+  }
+  const hostRun = (cmd, args, opts = {}) => new Promise(resolve => {
+    const child = execFile(cmd, args, {encoding: 'utf8', timeout: 10000, env: hostEnv},
+      (error, stdout) => resolve(error ? null : stdout));
+    child.stdin.on('error', () => {});
+    child.stdin.end(opts.input);
+  });
+  const fixture = name => {
+    const evalDir = path.join(temp, name), root = path.join(evalDir, 'evolution');
+    fs.mkdirSync(evalDir);
+    return {root, initialize: load(evalDir, task, path.join(ROOT, 'kernel_workflow'), hostRun)};
+  };
+  // Do not follow links: rejection must preserve both the root and any external target.
+  const snapshot = root => {
+    const stat = fs.lstatSync(root);
+    return {dev: stat.dev, ino: stat.ino, mode: stat.mode,
+      ...(stat.isSymbolicLink() ? {link: fs.readlinkSync(root)}
+        : stat.isDirectory() ? {entries: Object.fromEntries(fs.readdirSync(root).sort()
+          .map(name => [name, snapshot(path.join(root, name))]))}
+          : {bytes: fs.readFileSync(root).toString('base64')})};
+  };
+  const checkArchive = root => {
+    const archive = JSON.parse(fs.readFileSync(path.join(root, 'archive.json'), 'utf8'));
+    assert.equal(archive.best_id, 'ORIGINAL');
+    assert.deepEqual(archive.entries, []);
+    assert.equal(archive.base, path.join(root, 'base'));
+    assert.equal(archive.base_commit, git(task, 'rev-parse', 'HEAD').trim());
+    assert.deepEqual(readSources(archive.base), original, 'initial archive freezes actual ORIGINAL');
+    assert.deepEqual(fs.readdirSync(path.join(root, 'patches')), []);
+  };
+  let passed = false;
+  try {
+    for (const preallocated of [false, true]) {
+      const f = fixture(preallocated ? 'empty' : 'absent');
+      if (preallocated) fs.mkdirSync(f.root);
+      const identity = preallocated ? fs.statSync(f.root) : null;
+      await f.initialize({cumulative: 1});
+      checkArchive(f.root);
+      if (preallocated) {
+        const after = fs.statSync(f.root);
+        assert.deepEqual([after.dev, after.ino], [identity.dev, identity.ino],
+          'initialization preserves the preallocated directory used by peer mounts');
+      }
+      console.log(`  ok: archive initializes in ${preallocated ? 'an existing empty' : 'an absent'} root`);
+    }
+
+    for (const kind of ['archive', 'base-only', 'dotfile', 'symlink']) {
+      const f = fixture(`reject-${kind}`), target = path.join(temp, `target-${kind}`);
+      if (kind === 'symlink') {
+        fs.mkdirSync(target);
+        fs.symlinkSync(target, f.root);
+      } else {
+        fs.mkdirSync(f.root);
+        if (kind === 'base-only') fs.mkdirSync(path.join(f.root, 'base'));
+        else fs.writeFileSync(path.join(f.root, kind === 'dotfile' ? '.evidence' : 'archive.json'),
+          'retained evidence must not change\n');
+        if (kind === 'archive') writeSources(path.join(f.root, 'base'), source(9, 9));
+      }
+      const before = snapshot(f.root), targetBefore = kind === 'symlink' ? snapshot(target) : null;
+      await assert.rejects(f.initialize({cumulative: 1}));
+      assert.deepEqual(snapshot(f.root), before, `${kind} rejection changes no prior evidence`);
+      if (targetBefore) assert.deepEqual(snapshot(target), targetBefore, 'symlink target remains untouched');
+      console.log(`  ok: ${kind} root rejects initialization without mutation`);
+    }
+
+    const competing = fixture('competing');
+    fs.mkdirSync(competing.root);
+    const attempts = await Promise.allSettled([
+      competing.initialize({cumulative: 1}), competing.initialize({cumulative: 1})]);
+    assert.equal(attempts.filter(result => result.status === 'fulfilled').length, 1,
+      'two concurrent real initializers have exactly one successful claimant');
+    checkArchive(competing.root);
+    console.log('  ok: competing initializers admit exactly one archive owner');
+
+    const failed = fixture('failed-after-claim');
+    fs.mkdirSync(failed.root);
+    writeSources(task, source(1, 0));
+    await assert.rejects(failed.initialize({cumulative: 1}), /exact clean canonical Git commit/);
+    assert.deepEqual(fs.readdirSync(failed.root), ['patches'], 'failure preserves the initialization claim');
+    const claimed = snapshot(failed.root);
+    git(task, 'restore', '--', 'k.py');
+    await assert.rejects(failed.initialize({cumulative: 1}));
+    assert.deepEqual(snapshot(failed.root), claimed, 'a claimed partial archive cannot silently resume');
+    console.log('  ok: failed initialization retains its claim and rejects reuse');
+    passed = true;
+  } finally {
+    if (passed) fs.rmSync(temp, {recursive: true, force: true});
+    else console.error(`initialization fixture retained: ${temp}`);
+  }
 }
 
 // Reuse the existing greedy harness without editing it or its golden. Inject only
@@ -665,6 +769,7 @@ cases.push(...['null', 'missing', 'stale', 'wrong'].map(report => ({...externalL
 
 (async () => {
   console.log(`lane: ${lanePath} (sha256 ${hash(laneSource)})`);
+  await initializationCases();
   const h = harness({});
   const invalidArgs = [
     [{optimizer: 'external'}, /unknown optimizer: external; use greedy or evo/],

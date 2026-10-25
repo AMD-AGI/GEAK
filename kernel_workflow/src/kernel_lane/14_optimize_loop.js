@@ -19,7 +19,8 @@ let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
 if (evo) history.evolution_archive = evo.path;
 const evolutionInstructions = evo
-  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : '';
+  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.`
+    + (EVOLUTION_PEERS.length ? ` Read ${WORKFLOW_DIR}/roles/evolution_peers.md for peer source reuse.` : '') : '';
 const citations = [];
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
@@ -43,6 +44,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   phase('Optimize');
 
   // --- (a) Plan the round (TechLead) ------------------------------------
+  if (evo) await evo.snapshotPeers(round);
   const planInputs = (forbidStop) => ({
     EVAL_DIR, ROUND: round, BUDGET_REMAINING: remaining, CUMULATIVE_SPEEDUP: cumulative,
     BASELINE_GEOMEAN_MS, SKILL_DIR: WORKFLOW_DIR, PROFILE_SUMMARY: profileSummary,

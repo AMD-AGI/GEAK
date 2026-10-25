@@ -6,9 +6,11 @@ A population can have one member. Every member may use `optimizer=greedy` or
 `optimizer=evo`; names have no policy meaning. The workflow, its optimizer, prompts,
 argument bytes, stopping rules and finalization stages are unchanged.
 
-This is the process and finalist boundary of a prospective population. It does
-not implement peer publication/import, archive-wide selection, or an evolutionary
-advantage. A lineage keeps its private loop and archive in its own workflow
+This is the process and finalist boundary of a prospective population. EVO
+members can select explicitly declared [peer sources](archive.md#optional-peer-sources)
+through their existing archives. Final selection covers workflow finalists;
+it does not rerank the archives or establish an evolutionary advantage.
+A lineage keeps its private loop and archive in its own workflow
 process. Stock early-stop refusals remain in that workflow; an accepted self-stop
 finishes its postlude. The composer calls each workflow once, waits for all members,
 and neither retires a member because a peer is faster nor restarts a stopped member.
@@ -26,8 +28,11 @@ Schema `geak.kernel-composition/2` requires two policy fields per lineage:
   exit when that member cannot be qualified. Exactly one member is required.
 - `finalist: "eligible"` admits every other member through the same validation and
   measurement rules. A failed member cannot cancel its peers.
-- `imports: "none"` is the only supported import policy. Other values are rejected.
-  There is no live peer archive or publication path in this version.
+- `imports: "none"` requires an empty peer list and applies to all greedy members.
+- `imports: "selected"` permits an EVO member's nonempty declared peer list.
+  Peers need not be members of this composition. The caller mounts their ordinary
+  evolution directories read-only; the workflow imports only selected compatible
+  sources and requires local verification. See [peer sources](archive.md#optional-peer-sources).
 
 The required policy is generic: it does not imply that the member uses stock
 GEAK. A claim about containing stock GEAK needs an actual included unchanged

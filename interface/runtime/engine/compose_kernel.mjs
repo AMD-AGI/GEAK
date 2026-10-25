@@ -100,8 +100,8 @@ export async function composeKernel(manifest, { run = runProcess } = {}) {
   need(Array.isArray(lanes) && lanes.length >= 1, 'at least one lineage required');
   need(lanes.every(l => /^[a-z][a-z0-9_-]*$/.test(l.id)) && new Set(lanes.map(l => l.id)).size === lanes.length,
     'distinct safe lane IDs required');
-  need(lanes.every(l => l.policy?.imports === 'none' && ['required', 'eligible'].includes(l.policy.finalist)
-    && Object.keys(l.policy).sort().join(',') === 'finalist,imports'), 'supported lineage policy requires finalist=required|eligible and imports=none');
+  need(lanes.every(l => ['none', 'selected'].includes(l.policy?.imports) && ['required', 'eligible'].includes(l.policy.finalist)
+    && Object.keys(l.policy).sort().join(',') === 'finalist,imports'), 'supported lineage policy requires finalist=required|eligible and imports=none|selected');
   need(lanes.filter(l => l.policy.finalist === 'required').length === 1, 'exactly one required finalist policy required');
   const requiredId = lanes.find(l => l.policy.finalist === 'required').id;
   need(positive(deadline), 'one common absolute deadline required');
@@ -154,6 +154,9 @@ export async function composeKernel(manifest, { run = runProcess } = {}) {
     argsFiles.add(argsPath);
     const bytes = await readFile(argsPath), args = JSON.parse(bytes);
     need(['greedy', 'evo'].includes(args.optimizer), 'lineages must use the existing greedy or evo workflow');
+    const peers = args.evolution_peers ?? [];
+    need(Array.isArray(peers) && (lane.policy.imports === 'none' ? peers.length === 0
+      : args.optimizer === 'evo' && peers.length > 0), 'selected import policy requires EVO peer roots; imports=none and GEAK use []');
     const gpuIds = lane.resources.gpu_ids;
     need(Array.isArray(gpuIds) && gpuIds.length === lane.resources.device_ids.length
       && gpuIds.every(id => typeof id === 'string' && /^\d+$/.test(id)) && new Set(gpuIds).size === gpuIds.length,
@@ -193,6 +196,11 @@ export async function composeKernel(manifest, { run = runProcess } = {}) {
       need(typeof value === 'string' || typeof value === 'number', 'runtime options must be scalar');
       if (key === 'backend_events_file') await ownPath(lane.id, key, value);
       options.push('--' + key.replaceAll('_', '-'), String(value));
+    }
+    for (const peer of peers) {
+      const root = await resolvedPath(peer.root);
+      need(!privatePaths.some(other => other.owner === lane.id && overlaps(root, other.path)),
+        'read-only peer root overlaps recipient writable state');
     }
     prepared.push({ lane, directory, args, argsBytes: bytes, argsHash: sha(bytes), reader, options });
   }
