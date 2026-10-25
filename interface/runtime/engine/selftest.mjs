@@ -6,7 +6,7 @@
 //
 // Exits non-zero on the first failed assertion.
 
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRuntime } from './run_workflow.mjs';
@@ -116,6 +116,65 @@ async function testSchemaAgent() {
   try { await rt.agent('FAKE_BADJSON', { schema: sch }); } catch { threw = true; }
   ok(threw, 'agent schema throws after retries exhausted');
   eq(b.calls - before, 3, 'schema retried schemaRetries+1 = 3 times');
+}
+
+async function testBackendEvents() {
+  const dir = await mkdtemp(join(tmpdir(), 'geak-backend-events-'));
+  try {
+    const path = join(dir, 'calls.jsonl');
+    const b = makeFakeBackend();
+    const rt = createRuntime({ backend: b, concurrency: 2, schemaRetries: 2,
+      backendEventsFile: path, log: silent });
+    eq(await rt.parallel(['FAKE_TEXT:private-output', 'FAKE_THROW', 'FAKE_TEXT:last'].map((prompt, i) =>
+      () => rt.agent(prompt, { phase: 'Optimize', label: `eng r1_d${i}:memory` }))),
+    ['private-output', null, 'last'], 'recording preserves overlapping backend results and failure');
+    const rows = async () => (await readFile(path, 'utf8')).trim().split('\n').map(JSON.parse);
+    const events = await rows();
+    const active = new Set(); let peak = 0;
+    for (const e of events) {
+      if (e.event === 'start') { active.add(e.backend_call_id); peak = Math.max(peak, active.size); }
+      else { ok(active.delete(e.backend_call_id), 'backend end matches an active start'); }
+      ok(e.schema === 'geak.backend-call/1' && e.phase === 'Optimize'
+        && e.label.startsWith('eng r1_') && Number.isFinite(Date.parse(e.timestamp_utc))
+        && Number.isFinite(e.elapsed_ms), 'backend event has timing and existing role attribution');
+    }
+    eq(events.length, 6, 'three admitted backend calls have three start/end pairs');
+    eq([peak, active.size], [b.maxInFlight, 0], 'interval overlap matches actual backend concurrency');
+    eq(events.filter(e => e.outcome === 'threw').map(e => [e.error_name, e.error_code]),
+      [['Error', null]], 'backend failure records type without message');
+    ok(!(await readFile(path, 'utf8')).includes('private-output'), 'trace excludes backend content');
+    const schema = {type: 'object', required: ['ok']};
+    try { await rt.agent('FAKE_BADJSON', {schema}); } catch { /* expected after retries */ }
+    const retries = (await rows()).slice(6);
+    eq(retries.length, 6, 'each of three schema attempts has its own interval');
+    eq(new Set(retries.map(e => e.backend_call_id)).size, 3, 'schema attempts have distinct backend identities');
+    eq(new Set(retries.map(e => e.agent_call_id)).size, 1, 'schema attempts retain one agent identity');
+    eq(retries.filter(e => e.event === 'end').map(e => [e.schema_attempt, e.outcome]),
+      [[1, 'returned'], [2, 'returned'], [3, 'returned']], 'invalid JSON is a returned backend call');
+    eq([rt.state.backendTrace.open_calls, rt.state.backendTrace.write_error], [0, null], 'settled trace is complete');
+
+    const existing = createRuntime({backend: makeFakeBackend(), backendEventsFile: path, log: silent});
+    eq(await existing.agent('FAKE_TEXT:unchanged'), 'unchanged', 'trace open failure does not change backend outcome');
+    eq(existing.state.backendTrace.write_error, 'EEXIST', 'existing trace is explicitly rejected');
+    eq((await rows()).length, 12, 'existing trace was neither replaced nor appended to');
+    const disabled = createRuntime({backend: makeFakeBackend(), log: silent});
+    ok(!Object.hasOwn(disabled.state, 'backendTrace'), 'recording is absent by default');
+    const expiredPath = join(dir, 'expired.jsonl');
+    const expiredBackend = makeFakeBackend();
+    const expired = createRuntime({backend: expiredBackend, backendEventsFile: expiredPath, log: silent});
+    try { await expired.agent('unadmitted', {processDeadlineEpoch: Date.now() / 1000 - 1}); } catch { /* expected */ }
+    eq([expiredBackend.calls, await readFile(expiredPath, 'utf8')], [0, ''], 'expired admission creates no backend interval');
+
+    const brokenPath = join(dir, 'broken.jsonl');
+    const broken = createRuntime({backendEventsFile: brokenPath, log: silent, backend: {
+      name: 'fake', async runAgent() {
+        await rm(brokenPath); await mkdir(brokenPath);
+        return {text: 'survives write failure'};
+      },
+    }});
+    eq(await broken.agent('private'), 'survives write failure', 'end append failure preserves backend result');
+    eq(broken.state.backendTrace.write_error, 'EISDIR', 'end append failure marks trace incomplete');
+  } finally { await rm(dir, {recursive: true, force: true}); }
 }
 
 async function testRunScriptAndNesting() {
@@ -499,10 +558,13 @@ async function testRunProcess() {
     return { a, b };`);
   r = await runProcess({ cmd: process.execPath, timeoutMs: 20000, args: [
     new URL('./run_workflow.mjs', import.meta.url).pathname, join(dir, 'escape.js'),
-    '--result-file', join(dir, 'result.json'), '--metrics-file', join(dir, 'metrics.json')] });
+    '--result-file', join(dir, 'result.json'), '--metrics-file', join(dir, 'metrics.json'),
+    '--backend-events-file', join(dir, 'backend_calls.jsonl')] });
   const read = async (f) => { try { return JSON.parse(await readFile(join(dir, f), 'utf8')); } catch { return {}; } };
   const { a = {}, b = {} } = await read('result.json');
   const metrics = await read('metrics.json');
+  eq([metrics.backend_call_trace?.complete_at_workflow_return, metrics.backend_call_trace?.events_written],
+    [true, 0], 'CLI reports an empty complete trace when no backend calls ran');
   await rm(dir, { recursive: true, force: true });
   eq([a.status, a.code, a.group_cleared, a.stdio_held], ['completed', 0, true, true], 'runProcess: escaped process holding the pipes is reported');
   ok(a.duration_ms < 2000, `runProcess: an escaped process does not hold settlement (${a.duration_ms} ms)`);
@@ -523,6 +585,7 @@ async function main() {
   await testConcurrencyCap();
   await testPipeline();
   await testSchemaAgent();
+  await testBackendEvents();
   await testRunScriptAndNesting();
   await testAgentCap();
   await testRunProcess();

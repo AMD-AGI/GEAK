@@ -19,7 +19,7 @@
 //   node run_workflow.mjs <script.js> [--args '<json>'] [--args-file <path>]
 //        [--profile name | --agent name --model name] [--registry path]
 //        [--result-file <path>] [--metrics-file <path>] [--concurrency N]
-//        [--agent-timeout-ms N]
+//        [--agent-timeout-ms N] [--backend-events-file path]
 //   Selection also from env: GEAK_AGENT_PROFILE / GEAK_AGENT_BACKEND (=agent) /
 //   GEAK_MODEL. Agents/models/profiles are defined in registry.json.
 //   The final workflow return value is written to --result-file (if given) and
@@ -27,6 +27,7 @@
 //   "WORKFLOW_METRICS <json>" and to --metrics-file.
 
 import { readFile, writeFile } from 'node:fs/promises';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { cpus } from 'node:os';
 import { extractJson, validate, schemaInstruction } from './schema.mjs';
@@ -108,6 +109,7 @@ export function createRuntime({
   concurrency = 8,
   agentTimeoutMs = DEFAULT_AGENT_TIMEOUT_MS,
   schemaRetries = 2,
+  backendEventsFile,
   log = (msg) => process.stderr.write(`[${nowStamp()}] ${msg}\n`),
 } = {}) {
   const SCHEMA_RETRIES = schemaRetries;
@@ -131,6 +133,49 @@ export function createRuntime({
   // Metrics (no token/cost by design): agent-call count + structured-output
   // parse failures. The experiment runner aggregates these across combos.
   const state = { spawned: 0, schemaFails: 0 };
+  // Opt-in backend-call intervals, independent of role outputs and model content.
+  // Tiny synchronous appends need no timer/flush queue and still work if a backend
+  // settles after a workflow's unbounded Promise.race has already returned.
+  let backendCallSeq = 0;
+  if (backendEventsFile != null) {
+    state.backendTrace = { path: typeof backendEventsFile === 'string' ? resolvePath(backendEventsFile) : null,
+      events_written: 0, open_calls: 0, write_error: null };
+    try {
+      if (!state.backendTrace.path) throw Object.assign(new Error(), {code: 'INVALID_TRACE_PATH'});
+      writeFileSync(state.backendTrace.path, '', { flag: 'wx', mode: 0o600 });
+    } catch (error) { state.backendTrace.write_error = error.code || 'TRACE_OPEN_FAILED'; }
+  }
+  function backendEvent(event, call, extra = {}) {
+    const trace = state.backendTrace;
+    if (!trace || trace.write_error) return;
+    try {
+      const elapsed = elapsedMs();
+      const row = { schema: 'geak.backend-call/1', event, ...call,
+        timestamp_utc: new Date(epochStartedMs + elapsed).toISOString(), elapsed_ms: elapsed, ...extra };
+      appendFileSync(trace.path, JSON.stringify(row) + '\n');
+      trace.events_written++;
+    } catch (error) { trace.write_error = error.code || 'TRACE_WRITE_FAILED'; }
+  }
+  async function callBackend(options, agentCallId, schemaAttempt, ph) {
+    if (!state.backendTrace) return backend.runAgent(options);
+    const call = { backend_call_id: ++backendCallSeq, agent_call_id: agentCallId,
+      schema_attempt: schemaAttempt, backend: backend.name, phase: ph, label: options.label };
+    state.backendTrace.open_calls++;
+    backendEvent('start', call);
+    let outcome = 'returned', error_name = null, error_code = null;
+    try {
+      return await backend.runAgent(options);
+    } catch (error) {
+      outcome = 'threw';
+      // Backend messages can contain output or credentials; retain only short codes.
+      const code = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(value) ? value : null;
+      try { error_name = code(error?.name); error_code = code(error?.code); } catch { /* metadata only */ }
+      throw error;
+    } finally {
+      backendEvent('end', call, { outcome, error_name, error_code });
+      state.backendTrace.open_calls--;
+    }
+  }
 
   let currentPhase = '';
   const phase = (title) => { currentPhase = title; log(`=== PHASE: ${title} ===`); };
@@ -149,7 +194,8 @@ export function createRuntime({
     const roleStopMs = agentOpts.processDeadlineEpoch != null && agentOpts.processTimeoutMs > 0
       ? elapsedMs() + Number(agentOpts.processTimeoutMs) : Infinity;
 
-    if (++state.spawned > MAX_TOTAL_AGENTS) {
+    const agentCallId = ++state.spawned;
+    if (agentCallId > MAX_TOTAL_AGENTS) {
       throw new Error(`agent cap ${MAX_TOTAL_AGENTS} exceeded (runaway-loop backstop)`);
     }
 
@@ -182,10 +228,10 @@ export function createRuntime({
           : '';
         let text;
         try {
-          ({ text } = await backend.runAgent({
+          ({ text } = await callBackend({
             prompt: fullPrompt + timeGuidance, label, cwd: agentOpts.cwd, env: agentOpts.env,
             model: agentOpts.model, timeoutMs,
-          }));
+          }, agentCallId, i + 1, ph));
         } catch (error) {
           if (agentOpts.processDeadlineEpoch != null && msUntil(agentOpts.processDeadlineEpoch) <= 7000) {
             throw deadlineError();
@@ -359,7 +405,7 @@ async function main() {
   if (!scriptPath) {
     console.error('usage: run_workflow.mjs <script.js> [--args json] [--args-file path] ' +
       '[--profile name | --agent name --model name] [--result-file path] ' +
-      '[--metrics-file path] [--concurrency N]');
+      '[--metrics-file path] [--concurrency N] [--backend-events-file path]');
     process.exit(2);
   }
 
@@ -386,7 +432,8 @@ async function main() {
   // "model retries on mismatch"); the script's agentT adds an OUTER retry layer.
   const schemaRetries = parseInt(process.env.GEAK_SCHEMA_RETRIES || '2', 10);
 
-  const rt = createRuntime({ backend, concurrency, agentTimeoutMs, schemaRetries });
+  const rt = createRuntime({ backend, concurrency, agentTimeoutMs, schemaRetries,
+    backendEventsFile: opts['backend-events-file'] });
 
   const startedMs = Date.now();
   const combo = `${backend.resolved.agentName}${backend.resolved.modelName ? '/' + backend.resolved.modelName : ''}`;
@@ -402,6 +449,8 @@ async function main() {
     errMsg = String(e && e.message || e);
     rt.log(`runtime ERROR: ${errMsg}`);
   }
+  const backendTraceAtReturn = rt.state.backendTrace ? { ...rt.state.backendTrace,
+    complete_at_workflow_return: !rt.state.backendTrace.write_error && rt.state.backendTrace.open_calls === 0 } : null;
   // Agent failures degrade to null inside the workflow; this one must still fail the run.
   const fault = runtimeFault();
   if (fault) {
@@ -427,6 +476,7 @@ async function main() {
     agents_spawned: rt.state.spawned,
     schema_failures: rt.state.schemaFails,
     script: scriptPath,
+    ...(backendTraceAtReturn ? { backend_call_trace: backendTraceAtReturn } : {}),
   };
   if (opts['metrics-file'] && opts['metrics-file'] !== true) {
     await writeFile(opts['metrics-file'], JSON.stringify(metrics, null, 2));

@@ -11,11 +11,13 @@ import test from 'node:test';
 const runtime = new URL('./run_workflow.mjs', import.meta.url).href;
 const child = `
   import assert from 'node:assert/strict';
-  const [runtime, failure, waiting, late, scenario] = process.argv.slice(1);
+  import { readFileSync } from 'node:fs';
+  const [runtime, failure, waiting, late, scenario, tracePath] = process.argv.slice(1);
   const { createRuntime } = await import(runtime);
   let started;
   const ready = new Promise(resolve => { started = resolve; });
   const rt = createRuntime({
+    backendEventsFile: tracePath,
     backend: {
       name: 'test',
       async runAgent({ label }) {
@@ -45,6 +47,11 @@ const child = `
     }
     await failed;
   }
+  const events = readFileSync(tracePath, 'utf8').trim().split('\\n').map(JSON.parse);
+  assert.equal(events.filter(e => e.event === 'end').length, 1);
+  assert.equal(rt.state.backendTrace.open_calls, scenario === 'deadline' ? 1 : 0);
+  if (scenario === 'deadline') assert.ok(!events.some(e => e.label === 'unresolved' && e.event === 'end'));
+  if (scenario === 'late') assert.equal(events.at(-1).outcome, 'returned');
   console.log(scenario);
 `;
 
@@ -78,7 +85,8 @@ test('settled workflows release timers without disabling a live workflow deadlin
     for (const scenario of ['failure', 'deadline', 'late']) {
       // No process.exit in the child: an abandoned timer must fail this bound.
       const result = spawnSync(process.execPath,
-        ['--input-type=module', '-e', child, runtime, failure, waiting, late, scenario],
+        ['--input-type=module', '-e', child, runtime, failure, waiting, late, scenario,
+          join(dir, scenario + '.jsonl')],
         { encoding: 'utf8', timeout: 5_000 });
       assert.ifError(result.error);
       assert.equal(result.status, 0, result.stderr);
