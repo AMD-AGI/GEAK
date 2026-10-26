@@ -60,6 +60,10 @@ const OPTIMIZER = String(A.optimizer || 'greedy');
 if (!['greedy', 'evo'].includes(OPTIMIZER)) {
   throw new Error(`unknown optimizer: ${OPTIMIZER}; use greedy or evo`);
 }
+const DESIGN_GENOME_MODE = A.design_genome_mode == null ? 'off' : A.design_genome_mode;
+if (!['off', 'record', 'handoff'].includes(DESIGN_GENOME_MODE)) {
+  throw new Error('design_genome_mode must be off, record, or handoff');
+}
 const retiredOptimizerArg = ['optimizer_command', 'optimizer_task_ref', 'optimizer_reserve_s']
   .find(key => Object.prototype.hasOwnProperty.call(A, key));
 if (retiredOptimizerArg) {
@@ -1710,11 +1714,22 @@ const planSchema = evo ? {
     },
   }},
 } : PLAN_SCHEMA;
+const designGenomeInstructions = evo && evo.designGenomeEnabled
+  ? ` Read ${WORKFLOW_DIR}/roles/design_genome.md for optional source-bound author narrative; these claims do not change fitness or budget.` : '';
+const engineerSchema = designGenomeInstructions ? {
+  ...ENG_SCHEMA, properties: {...ENG_SCHEMA.properties, design_genome: {}},
+} : ENG_SCHEMA;
+const integrateSchema = designGenomeInstructions ? {
+  ...INTEGRATE_SCHEMA, properties: {...INTEGRATE_SCHEMA.properties, best: {
+    ...INTEGRATE_SCHEMA.properties.best,
+    properties: {...INTEGRATE_SCHEMA.properties.best.properties, design_genome: {}},
+  }},
+} : INTEGRATE_SCHEMA;
 let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
 if (evo) history.evolution_archive = evo.path;
 const evolutionInstructions = evo
-  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : '';
+  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` + designGenomeInstructions : '';
 const citations = [];
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
@@ -1906,7 +1921,7 @@ git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost com
 `;
       return agentT(
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
-${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
+${workspaceInstruction}${readLine}${designGenomeInstructions} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; ${evo ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
 Save best_patch.diff via \`cd <KERNEL_PATH> && git diff${evo ? " " + d.evolution_context.workspace_base_commit : ""} > ${d.out_dir}/best_patch.diff\` ${evo ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. Before saving, include any new editable source files with \`git add -N -- <new-source-files>\`; exclude logs, measurements and build artifacts.
@@ -1936,7 +1951,7 @@ ${cfg({
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
       expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + EXTERNAL_METRIC_INSTRUCTIONS,
-      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
+      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: engineerSchema }
     ).then(async (eng) => {
       eng = await checkedExternalMeasurement(eng, `${d.out_dir}/workspace`);
       if (evo) await evo.record(d, eng, null, `${d.out_dir}/best_patch.diff`);
@@ -2014,17 +2029,20 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   if (verified.length >= 2) {
     phase('Merge');
     integrate = await agentT(
-      roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
+      roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.'
+        + designGenomeInstructions + (designGenomeInstructions
+          ? ' Author any optional best.design_genome for your own integrated patch; do not copy a donor narrative.' : ''), {
         CANONICAL: evo ? evo.base : CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
           ...externalFields(r.ver),
+          ...(evo && evo.designGenomeEnabled ? {design_genome: evo.designGenomeFor(r.d.id)} : {}),
           files: r.d.focus_files || [], patch: r.patch })),
         INSIGHTS: history.insights,
       }),
-      { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
+      { phase: 'Merge', label: `integrate r${round}`, schema: integrateSchema });
     if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
       integrate.best, evo ? evo.base : CANONICAL, integrate.best.patch_file);
     const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
@@ -2045,7 +2063,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   if (evo && integrate && integrate.best && candidates.some(c => c.id === `r${round}_integrated`)) {
     const retained = await evo.record({id: `r${round}_integrated`, parent_id: 'ORIGINAL',
-      donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate'}, null,
+      donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate'},
+      designGenomeInstructions ? integrate.best : null,
       {...integrate.best, status: 'verified', correctness: 'pass',
         verified_geomean: integrate.best.geomean, verified_weighted: integrate.best.weighted},
       integrate.best.patch_file);
@@ -2381,6 +2400,8 @@ function applyOptimizeResult(r) {
 async function createEvolution(start) {
   const path = `${EVAL_DIR}/evolution`, base = `${path}/base`, archive = `${path}/archive.json`;
   const population = A.population_lineage || null;
+  const designGenomeMode = OPTIMIZER === 'evo' ? DESIGN_GENOME_MODE : 'off';
+  const designGenomeEnabled = designGenomeMode !== 'off';
   if (population && (typeof population.root !== 'string' || !population.root.startsWith('/')
       || /[\0\r\n]/.test(population.root) || population.root.split('/').includes('..')
       || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(population.id)
@@ -2460,6 +2481,61 @@ async function createEvolution(start) {
     if (!hash) throw new Error('retained patch has no source hash');
     return hash[0];
   };
+  const utf8Bytes = (value) => {
+    let bytes = 0;
+    for (const char of value) {
+      const point = char.codePointAt(0);
+      bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+    }
+    return bytes;
+  };
+  const nativeSource = (value) => EXTERNAL_OBJECTIVE && value?.external_measurement_valid === true
+    && typeof value.source_id === 'string' && /^[0-9a-f]{64}$/.test(value.source_id) ? value.source_id : null;
+  const nativeAssociation = (value) => ({source_id: nativeSource(value),
+    external_evaluation: {candidate_id: value.external_evaluation.candidate_id,
+      evaluation_id: value.external_evaluation.evaluation_id}});
+  // The raw optional field has no schema restrictions. Normalize it only after
+  // normal source retention, without changing qualification or retrying a role.
+  const candidateGenome = (author, checked, ref) => {
+    const raw = author?.design_genome;
+    if (raw === undefined) return {};
+    const omitted = (reason) => ({design_genome_omitted: reason});
+    try {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+          || typeof raw.text !== 'string' || !raw.text.trim()
+          || utf8Bytes(raw.text) > 4096 || raw.patch_sha256 !== ref.sha256) {
+        return omitted('invalid_shape_text_or_patch_binding');
+      }
+      const authorSource = nativeSource(author), checkedSource = nativeSource(checked);
+      // The engineer reader checks its workspace; the verifier checks the saved
+      // patch. A narrative about workspace A must not acquire source B's proof.
+      if (checkedSource && (checked.patch_sha256 !== ref.sha256
+          || (authorSource && authorSource !== checkedSource))) {
+        return omitted('checked_source_mismatch');
+      }
+      return {design_genome: {kind: 'author_claims', text: raw.text,
+        base_commit: baseCommit, patch_sha256: ref.sha256,
+        ...(checkedSource ? nativeAssociation(checked) : {})}};
+    } catch (_) { return omitted('unreadable_optional_metadata'); }
+  };
+  const checkpointGenome = (winner, checked, hash) => {
+    if (!designGenomeEnabled) return {};
+    try {
+      const genome = retained(winner?.id)?.design_genome;
+      if (!genome) return {};
+      const source = nativeSource(checked);
+      if (genome.source_id && genome.source_id !== source) return {};
+      const exactPatch = genome.base_commit === baseCommit && genome.patch_sha256 === hash;
+      // A cumulative publication can encode the same source with different diff
+      // bytes. Only an already checked native source identity permits rebinding.
+      if (!exactPatch && !(source && genome.source_id === source)) return {};
+      return {design_genome: {kind: 'author_claims', text: genome.text,
+        base_commit: baseCommit, patch_sha256: hash,
+        ...(source ? nativeAssociation(checked) : {})}};
+    } catch (_) { return {}; }
+  };
+  const visibleGenome = (row) => designGenomeEnabled
+    && (!row?.peer_checkpoint || designGenomeMode === 'handoff') ? row?.design_genome : null;
   const metric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
   const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
     'sh', file], {input: contents});
@@ -2530,6 +2606,7 @@ async function createEvolution(start) {
         delivery_patch_ref: deliveryRef,
         metric, speedup, verified: true, qualification: EXTERNAL_OBJECTIVE ? 'native_source_bound' : 'legacy_verifier',
         external_evaluation: checked?.external_evaluation || null,
+        ...checkpointGenome(winner, checked, hash),
         evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : {
           status: 'verified', correctness: 'pass', verified_geomean: checked?.geomean_unweighted ?? speedup,
           verified_weighted: checked?.weighted ?? null, per_case: checked?.per_case || BASELINE_PER_CASE}};
@@ -2575,6 +2652,9 @@ async function createEvolution(start) {
           patch_ref: {path: target, sha256: peer.patch_ref.sha256, base_commit: baseCommit, base_tree: baseTree},
           verified: true, speedup, status: speedup <= 1 ? 'slower' : 'correct',
           engineer: null, verifier: evidence(verified), retention_error: null,
+          // Keep the donor's own base/source association and checkpoint provenance.
+          // query_population has sanitized this optional field independently.
+          ...(designGenomeMode === 'handoff' && item.design_genome ? {design_genome: item.design_genome} : {}),
           peer_checkpoint: {lineage_id: peer.lineage_id, round: peer.round,
             path: item.checkpoint_path, sha256: item.checkpoint_sha256, source_tree: peer.source_tree}});
       }
@@ -2583,9 +2663,11 @@ async function createEvolution(start) {
   });
   return {
     base, baseCommit, path: archive, entries, checkpointTree, publishCheckpoint, refreshPeers,
+    designGenomeMode, designGenomeEnabled,
+    designGenomeFor(id) { return visibleGenome(entries.find(row => row.id === id)) || null; },
     engineerContext(direction) {
       const context = direction.evolution_context;
-      if (A.evolution_evidence_handoff !== true) return context;
+      if (A.evolution_evidence_handoff !== true && !designGenomeEnabled) return context;
       const selected = (id) => {
         const row = entries.find(entry => entry.id === id);
         return {id, patch_ref: row?.patch_ref || null, status: row?.status || null,
@@ -2594,17 +2676,29 @@ async function createEvolution(start) {
           engineer: row?.engineer || null, verifier: row?.verifier || null};
       };
       // Prompt-only view: never retain an expanded context inside archive rows.
-      const selectedEvidence = {
-        parent: selected(direction.parent_id),
-        donors: (direction.donor_ids || []).map(selected)};
-      let bytes = 0;
-      for (const char of JSON.stringify(selectedEvidence)) {
-        const point = char.codePointAt(0);
-        bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      const extra = {};
+      if (A.evolution_evidence_handoff === true) {
+        const selectedEvidence = {
+          parent: selected(direction.parent_id), donors: (direction.donor_ids || []).map(selected)};
+        if (utf8Bytes(JSON.stringify(selectedEvidence)) > 16384) extra.selected_evidence_omitted = 'over_16384_utf8_bytes';
+        else extra.selected_evidence = selectedEvidence;
       }
-      return bytes > 16384
-        ? {...context, selected_evidence_omitted: 'over_16384_utf8_bytes'}
-        : {...context, selected_evidence: selectedEvidence};
+      if (designGenomeEnabled) {
+        const claims = (id) => {
+          const row = entries.find(entry => entry.id === id);
+          const genome = visibleGenome(row);
+          return genome ? {id, design_genome: genome,
+            ...(row?.peer_checkpoint ? {peer_checkpoint: row.peer_checkpoint} : {})} : null;
+        };
+        const packet = {parent: claims(direction.parent_id) || null,
+          donors: (direction.donor_ids || []).map(claims).filter(Boolean)};
+        if (packet.parent || packet.donors.length) {
+          if (utf8Bytes(JSON.stringify({...extra, selected_design_genomes: packet})) > 16384) {
+            extra.selected_design_genomes_omitted = 'over_16384_utf8_bytes';
+          } else extra.selected_design_genomes = packet;
+        }
+      }
+      return {...context, ...extra};
     },
     planInputs() {
       const summary = entries.slice(-12);
@@ -2616,7 +2710,9 @@ async function createEvolution(start) {
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
           retention_error: row.retention_error, last_record_error: row.last_record_error || null,
-          strategy: row.engineer && row.engineer.strategy}))};
+          strategy: row.engineer && row.engineer.strategy,
+          ...(visibleGenome(row) ? {design_genome: row.design_genome,
+            ...(row.peer_checkpoint ? {peer_checkpoint: row.peer_checkpoint} : {})} : {})}))};
     },
     memoryInputs(directions) {
       return {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
@@ -2722,6 +2818,10 @@ async function createEvolution(start) {
             Object.assign(row, previous, {last_record_error: failure});
           }
         }
+        if (designGenomeEnabled && row.patch_ref && !row.retention_error && !row.last_record_error) {
+          // Never use the previous-engineer fallback for a new author record.
+          Object.assign(row, candidateGenome(eng, ver, row.patch_ref));
+        }
         const next = previous ? entries.map(entry => entry.id === row.id ? row : entry) : [...entries, row];
         try { await save(next); }
         catch (error) {
@@ -2784,7 +2884,9 @@ try {
 if (EXTERNAL_OBJECTIVE) history.final_selection = frozenFinalEvaluation;
 phase('Report');
 const report = await agentT(
-  roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.', {
+  roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.'
+    + (OPTIMIZER === 'evo' && DESIGN_GENOME_MODE !== 'off'
+      ? ` Read ${WORKFLOW_DIR}/roles/design_genome.md when summarizing retained author claims and implementation gaps.` : ''), {
     EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR,
     HISTORY: history, FINAL_WINNER: finalWinner, BASELINE_PER_CASE,
     BASELINE_GEOMEAN_MS, CUMULATIVE_SPEEDUP: cumulative,

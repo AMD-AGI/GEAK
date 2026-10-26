@@ -20,6 +20,7 @@ const laneSource = fs.readFileSync(lanePath, 'utf8');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const original = {'k.py': 'A = 0\nB = 0\n'};
 const source = (a, b, extra = {}) => ({'k.py': `A = ${a}\nB = ${b}\n`, ...extra});
+let validateSchema;
 
 function command(cmd, args, options = {}) {
   const r = spawnSync(cmd, args, {encoding: 'utf8', timeout: 10000, ...options});
@@ -86,7 +87,7 @@ async function runCase(sc) {
   let now = 1000, deadline = Infinity;
   const cutoff = epoch => { deadline = epoch; };
   cutoff.secondsLeft = () => deadline - now;
-  const hostCalls = [], events = [], errors = [];
+  const hostCalls = [], events = [], errors = [], schemas = new Map(), authoredGenomes = new Map();
   const externalRecords = new Map(), externalReads = [];
   const objective = {kind: 'external_primary', primary_regime: 'cpu_fixture'};
   const sourceIdentity = files => hash(JSON.stringify(Object.entries(files).sort()));
@@ -259,16 +260,26 @@ async function runCase(sc) {
           assert.notEqual(git(workspace, 'rev-parse', 'HEAD').trim(), anchor);
         }
         writeSources(workspace, spec.files);
+        const patch = path.join(h.field(prompt, 'OUTPUT_DIR'), 'best_patch.diff');
         if (!spec.noPatch) {
           // The ordinary engineer's save instruction includes new editable sources.
           git(workspace, 'add', '-N', '--', ...Object.keys(spec.files));
-          fs.writeFileSync(path.join(h.field(prompt, 'OUTPUT_DIR'), 'best_patch.diff'),
-            git(workspace, 'diff', '--binary', anchor, '--', '.'));
+          fs.writeFileSync(patch, git(workspace, 'diff', '--binary',
+            ...(spec.patchOptions || []), anchor, '--', '.'));
         }
+        if (spec.engineerObservationFiles) writeSources(workspace, spec.engineerObservationFiles);
         if (sc.expireAfterEngineer === id) now = deadline;
-        return spec.engineer || {status: 'ok', measurement_valid: true, speedup_geomean: spec.speed,
+        const author = spec.engineer || {status: 'ok', measurement_valid: true, speedup_geomean: spec.speed,
           ...(sc.external ? {external_evaluation: registerExternal(`eng-${id}`, workspace,
             spec.speed, spec.development)} : {})};
+        if (!Object.hasOwn(spec, 'genome')) return author;
+        const designGenome = typeof spec.genome === 'function'
+          ? spec.genome({id, patch, workspace, anchor, h, prompt, temp, authoredGenomes}) : spec.genome;
+        authoredGenomes.set(id, designGenome);
+        const response = {...author, design_genome: designGenome};
+        assert.deepEqual(validateSchema(response, schemas.get(label)), {ok: true, errors: []},
+          'optional author JSON passes the actual runtime schema validator');
+        return response;
       }
       if (label.startsWith('verify ')) {
         const id = label.split(' ')[1], spec = sc.candidates[id];
@@ -311,9 +322,18 @@ async function runCase(sc) {
         git(workspace, 'add', '-N', '--', ...Object.keys(sc.integration.files));
         const patch = path.join(h.field(prompt, 'INTEGRATE_DIR'), 'best.diff');
         fs.writeFileSync(patch, git(workspace, 'diff', '--binary'));
-        return {attempted: true, conclusion: 'improved', best: {
+        const designGenome = typeof sc.integration.genome === 'function'
+          ? sc.integration.genome({patch, workspace, h, prompt, temp, authoredGenomes}) : sc.integration.genome;
+        if (Object.hasOwn(sc.integration, 'genome')) authoredGenomes.set('integrated', designGenome);
+        const response = {attempted: true, conclusion: 'improved', best: {
           geomean: sc.integration.speed, arithmetic: sc.integration.speed,
-          per_case: h.perCase(sc.integration.speed), patch_file: patch}};
+          per_case: h.perCase(sc.integration.speed), patch_file: patch,
+          ...(sc.external ? {external_evaluation: registerExternal(label, workspace,
+            sc.integration.speed, sc.integration.development)} : {}),
+          ...(Object.hasOwn(sc.integration, 'genome') ? {design_genome: designGenome} : {})}};
+        assert.deepEqual(validateSchema(response, schemas.get(label)), {ok: true, errors: []},
+          'integrated optional author JSON passes the actual runtime schema validator');
+        return response;
       }
       if (label.startsWith('storage:reclaim')) {
         const keep = Number(label.match(/r(\d+)$/)[1]);
@@ -363,7 +383,9 @@ async function runCase(sc) {
         external_result_command: ['/cpu-fixture/external-read']} : {}),
       ...(sc.bounded ? {deadline_epoch: 10000, search_reserve_s: 200,
         final_validation_reserve_s: 100, final_cleanup_reserve_s: 0} : {})};
-    const {run, rec} = h.build(body, args, answer);
+    const {run, rec} = h.build(body, args, answer, (label, prompt, options) => {
+      schemas.set(label, options.schema);
+    });
     observed = rec;
     let result;
     try { result = await run(); } catch (error) { throw errors[0] || error; }
@@ -390,11 +412,13 @@ async function runCase(sc) {
       assert.equal(row.patch_ref.base_commit, originalCommit, 'all patches share immutable commit');
     }
     assert.ok(archive.entries.every(row => !row.evolution_context ||
-      !Object.keys(row.evolution_context).some(key => key.startsWith('selected_evidence'))),
+      !Object.keys(row.evolution_context).some(key => key.startsWith('selected_evidence')
+        || key.startsWith('selected_design_genomes'))),
       'prompt evidence never becomes recursive archive context');
     assert.ok(events.filter(e => e.label.startsWith('tech_lead:plan '))
       .every(e => !e.prompt.includes('"selected_evidence"')), 'planner inputs remain unchanged');
-    sc.check({archive, result, rec, events, hostCalls, h, temp, externalReads, finalMeasured, scenario: sc});
+    sc.check({archive, result, rec, events, hostCalls, h, temp, externalReads, finalMeasured,
+      schemas, authoredGenomes, scenario: sc});
     passed = true;
     console.log(`  ok: ${sc.name}`);
   } finally {
@@ -687,7 +711,8 @@ cases.push(...['null', 'missing', 'stale', 'wrong'].map(report => ({...externalL
 
 // Publish a peer through the same on-disk contract the real query verifies.
 // Git commit timestamps may differ; the shared source tree is the compatibility key.
-function peerCheckpoint({temp, populationRoot}, id, files, speed, {differentBase = false, tamper = false} = {}) {
+function peerCheckpoint({temp, populationRoot}, id, files, speed,
+  {differentBase = false, tamper = false, genome} = {}) {
   const evalDir = path.join(temp, id, 'eval'), base = path.join(evalDir, 'evolution/base');
   const initial = differentBase ? source(77, 77) : original;
   const initialDir = path.join(evalDir, 'initial');
@@ -714,6 +739,8 @@ function peerCheckpoint({temp, populationRoot}, id, files, speed, {differentBase
     delivery_patch_ref: differentBase ? null : {path: patch, sha256: hash(fs.readFileSync(patch)), base: 'ORIGINAL'},
     metric: {kind: 'geomean'}, speedup: speed, verified: true, qualification: 'legacy_verifier',
     external_evaluation: null, evidence: {status: 'verified', correctness: 'pass', verified_geomean: speed}};
+  if (genome !== undefined) checkpoint.design_genome = typeof genome === 'function'
+    ? genome({patch, baseCommit, checkpoint}) : genome;
   const checkpointPath = path.join(directory, 'r1.json');
   fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint));
   fs.writeFileSync(path.join(directory, 'latest.json'), JSON.stringify({schema: 'geak.population.pointer/1',
@@ -788,7 +815,276 @@ cases.push({...externalLineage, name: 'declared native lineage publishes exact c
       assert.equal(archive.entries.find(row => row.id === 'r2_d1').parent_id, 'r1_d0');
     }});
 
+// Narratives are optional author claims. All cases below still exercise actual
+// source retention, verification, promotion and (where enabled) publication.
+const authorGenome = text => ({patch}) => ({patch_sha256: hash(fs.readFileSync(patch)), text});
+const claimText = 'Hypothesis: combine adjacent loads. Realization: partial. '
+  + 'Observed: the oracle passed; this does not establish the mechanism. '
+  + 'Gap: redundant address work remains. Rival: register pressure. Next repair: inspect the loop.';
+function assertGenome(row, text, native = false) {
+  assert.equal(row.design_genome.kind, 'author_claims');
+  assert.equal(row.design_genome.text, text);
+  assert.equal(row.design_genome.base_commit, row.patch_ref.base_commit);
+  assert.equal(row.design_genome.patch_sha256, row.patch_ref.sha256);
+  assert.equal(Object.hasOwn(row.design_genome, 'source_id'), native);
+  assert.equal(Object.hasOwn(row.design_genome, 'external_evaluation'), native);
+}
+function assertGenomeCalls({events, schemas}, enabled) {
+  const writer = /^(?:eng |deep |integrate |tech_lead:(?:plan|replan|memory) )/;
+  for (const event of events.filter(item => writer.test(item.label))) {
+    assert.equal(event.prompt.includes('/roles/design_genome.md'), enabled,
+      `${event.label} optional writer guidance follows the effective EVO mode`);
+    const schema = schemas.get(event.label);
+    const properties = /^(?:eng |deep )/.test(event.label) ? schema.properties
+      : event.label.startsWith('integrate ') ? schema.properties.best.properties : null;
+    if (!properties) continue;
+    assert.equal(Object.hasOwn(properties, 'design_genome'), enabled);
+    if (enabled) assert.deepEqual(properties.design_genome, {},
+      'arbitrary optional JSON reaches host normalization without invalidating the worker return');
+    const required = event.label.startsWith('integrate ') ? schema.properties.best.required : schema.required;
+    assert.ok(!required.includes('design_genome'), 'the narrative is never required');
+  }
+}
+const genomeModeObservations = new Map();
+const genomeModeContracts = new Map();
+const genomeModes = [undefined, 'off', 'record', 'handoff'];
+for (const mode of genomeModes) cases.push({
+  name: `design genome ${mode === undefined ? 'absent' : mode}: writer parity and selective handoff`,
+  args: {budget: 3, ...(mode === undefined ? {} : {design_genome_mode: mode})},
+  best: 1.8, bestId: 'r1_integrated', expected: source(1, 2),
+  plans: {r1: plan(direction('a'), direction('b')),
+    r2: plan(direction('child', {parent_id: 'r1_d0', donor_ids: ['r1_d1']}))},
+  integration: {files: source(1, 2), speed: 1.8},
+  candidates: {
+    r1_d0: {files: source(1, 0), speed: 1.2, genome: authorGenome(claimText)},
+    r1_d1: {files: fast, speed: 1.4, genome: authorGenome('A distinct donor hypothesis, with unknown realization.')},
+    r2_d0: {files: source(1, 3), inherited: source(1, 0), speed: 1.6},
+  },
+  check(info) {
+    const {archive, events, h, rec, result} = info;
+    const enabled = mode === 'record' || mode === 'handoff';
+    assertGenomeCalls(info, enabled);
+    const parent = archive.entries.find(row => row.id === 'r1_d0');
+    if (enabled) assertGenome(parent, claimText);
+    else assert.ok(archive.entries.every(row => !Object.hasOwn(row, 'design_genome')));
+    for (const id of ['r1_integrated', 'r2_d0']) {
+      assert.ok(!Object.hasOwn(archive.entries.find(row => row.id === id), 'design_genome'),
+        'new children and integrated candidates cannot inherit contributor narratives');
+    }
+    const planned = h.field(events.find(event => event.label === 'tech_lead:plan r2').prompt, 'EVOLUTION_ENTRIES');
+    assert.equal(Object.hasOwn(planned.find(row => row.id === parent.id), 'design_genome'), enabled);
+    const patches = h.field(events.find(event => event.label === 'integrate r1').prompt, 'PATCHES');
+    for (const patch of patches) {
+      assert.equal(Object.hasOwn(patch, 'design_genome'), enabled);
+      if (enabled) assert.deepEqual(patch.design_genome,
+        archive.entries.find(row => row.id === patch.id).design_genome);
+    }
+    for (const event of events.filter(event => event.label.startsWith('eng '))) {
+      const context = h.field(event.prompt, 'EVOLUTION');
+      const hasParentGenome = !event.label.includes('r1_');
+      assert.equal(Object.hasOwn(context, 'selected_design_genomes'), enabled && hasParentGenome);
+      if (!enabled || !hasParentGenome) continue;
+      const selected = context.selected_design_genomes;
+      assert.deepEqual(selected.parent, {id: parent.id, design_genome: parent.design_genome});
+      assert.deepEqual(selected.donors, [{id: 'r1_d1',
+        design_genome: archive.entries.find(row => row.id === 'r1_d1').design_genome}]);
+    }
+    const observation = {calls: events.map(event => event.label), phases: rec.phases,
+      budget: result.budget_used, best: archive.best_id};
+    genomeModeObservations.set(mode, observation);
+    assert.deepEqual(observation, genomeModeObservations.get(undefined),
+      'the mode changes no calls, phases, budget or selected source');
+    if (enabled) {
+      const contract = {schemas: [...info.schemas], guidance: events.map(event => ({label: event.label,
+        instruction: event.prompt.match(/Read \S+\/roles\/design_genome\.md[^.]*\./)?.[0] || null}))};
+      genomeModeContracts.set(mode, contract);
+      if (mode === 'handoff') assert.deepEqual(contract, genomeModeContracts.get('record'),
+        'record and handoff use the same writer guidance and complete call schemas');
+    }
+  },
+});
+
+const greedyGenomeBase = cases.find(sc => sc.optimizer === 'greedy');
+for (const mode of ['record', 'handoff']) cases.push({...greedyGenomeBase,
+  name: `greedy ignores design genome mode ${mode}`,
+  args: {...greedyGenomeBase.args, design_genome_mode: mode},
+  candidates: Object.fromEntries(Object.entries(greedyGenomeBase.candidates).map(([id, spec]) =>
+    [id, {...spec, genome: authorGenome(claimText)}])),
+  check(info) { greedyGenomeBase.check(info); assertGenomeCalls(info, false); },
+});
+
+const unicodeGenome = '😀'.repeat(1024); // Exactly 4096 UTF-8 bytes.
+const malformedGenomes = [null, 'raw prose', [], {text: 5, patch_sha256: '0'.repeat(64)},
+  {text: claimText, patch_sha256: '0'.repeat(64)}, authorGenome('   '),
+  authorGenome(`${unicodeGenome}a`), ({authoredGenomes}) => authoredGenomes.get('r1_d0')];
+cases.push({name: 'malformed, oversized and swapped genomes never disqualify valid source',
+  args: {budget: malformedGenomes.length + 3, design_genome_mode: 'handoff'},
+  best: 1.8, bestId: `r2_d${malformedGenomes.length + 1}`, expected: source(44, 44),
+  plans: {r1: plan(direction('parent')),
+    r2: plan(...Array.from({length: malformedGenomes.length + 2}, (_, i) => direction(`attempt-${i}`)))},
+  candidates: {
+    r1_d0: {files: fast, speed: 1.4, genome: authorGenome(claimText)},
+    ...Object.fromEntries(malformedGenomes.map((genome, i) => [`r2_d${i}`,
+      {files: source(i + 10, i + 10), inherited: fast, speed: 1.5, genome}])),
+    [`r2_d${malformedGenomes.length}`]: {files: source(43, 43), inherited: fast, speed: 50,
+      genome: authorGenome('Unverified implementation; realization unknown.'),
+      verifier: {status: 'invalid_measurement', correctness: 'pass', verified_geomean: 50}},
+    [`r2_d${malformedGenomes.length + 1}`]: {files: source(44, 44), inherited: fast, speed: 1.8,
+      genome: authorGenome(unicodeGenome)},
+  },
+  check({archive}) {
+    for (let i = 0; i < malformedGenomes.length; i++) {
+      const row = archive.entries.find(entry => entry.id === `r2_d${i}`);
+      assert.equal(row.verified, true);
+      assert.equal(row.speedup, 1.5);
+      assert.equal(row.retention_error, null, 'bad optional prose cannot become a retention failure');
+      assert.ok(!Object.hasOwn(row, 'design_genome'));
+    }
+    const unverified = archive.entries.find(row => row.id === `r2_d${malformedGenomes.length}`);
+    assert.equal(unverified.verified, false);
+    assertGenome(unverified, 'Unverified implementation; realization unknown.');
+    assertGenome(archive.entries.find(row => row.id === archive.best_id), unicodeGenome);
+  },
+});
+
+cases.push({name: 'design genome and evidence handoff obey the combined UTF-8 packet budget',
+  args: {budget: 3, design_genome_mode: 'handoff', evolution_evidence_handoff: true},
+  best: 1.8, bestId: 'r2_d0', expected: child,
+  plans: {r1: plan(direction('a'), direction('b')),
+    r2: plan(direction('continued', {parent_id: 'r1_d0', donor_ids: ['r1_d1']}))},
+  candidates: {
+    r1_d0: {files: slow, speed: 0.8, genome: authorGenome(unicodeGenome),
+      engineer: {status: 'ok', measurement_valid: true, speedup_geomean: 0.8, notes: 'E'.repeat(8000)}},
+    r1_d1: {files: fast, speed: 1.4, genome: authorGenome(unicodeGenome)},
+    r2_d0: {files: child, inherited: slow, speed: 1.8, inspect({h, prompt}) {
+      const context = h.field(prompt, 'EVOLUTION');
+      assert.ok(context.selected_evidence, 'existing evidence fits its own limit');
+      assert.equal(context.selected_design_genomes_omitted, 'over_16384_utf8_bytes');
+      assert.ok(!Object.hasOwn(context, 'selected_design_genomes'));
+    }},
+  },
+  check({archive}) { assertGenome(archive.entries[0], unicodeGenome); },
+});
+
+const integratedGenomeBase = cases.find(sc => sc.name.startsWith('integrated candidate'));
+cases.push({...integratedGenomeBase, name: 'integrator retains only its own freshly bound author genome',
+  args: {...integratedGenomeBase.args, design_genome_mode: 'handoff'},
+  integration: {...integratedGenomeBase.integration, genome: authorGenome(claimText)},
+  candidates: {...integratedGenomeBase.candidates,
+    r1_d0: {...integratedGenomeBase.candidates.r1_d0, genome: authorGenome('Donor A hypothesis.')},
+    r1_d1: {...integratedGenomeBase.candidates.r1_d1, genome: authorGenome('Donor B hypothesis.')}},
+  check(info) {
+    integratedGenomeBase.check(info);
+    const integrated = info.archive.entries.find(row => row.id === 'r1_integrated');
+    assertGenome(integrated, claimText);
+    const context = info.h.field(info.events.find(event => event.label.startsWith('eng r2_d0')).prompt, 'EVOLUTION');
+    assert.deepEqual(context.selected_design_genomes.parent, {id: integrated.id, design_genome: integrated.design_genome});
+    assert.ok(!Object.hasOwn(info.archive.entries.find(row => row.id === 'r2_d0'), 'design_genome'));
+  },
+});
+cases.push({...integratedGenomeBase, name: 'integrator cannot relabel a donor genome as its own measured source',
+  args: {...integratedGenomeBase.args, design_genome_mode: 'record'},
+  integration: {...integratedGenomeBase.integration,
+    genome: ({authoredGenomes}) => authoredGenomes.get('r1_d0')},
+  candidates: {...integratedGenomeBase.candidates,
+    r1_d0: {...integratedGenomeBase.candidates.r1_d0, genome: authorGenome(claimText)}},
+  check(info) {
+    integratedGenomeBase.check(info);
+    const integrated = info.archive.entries.find(row => row.id === 'r1_integrated');
+    assert.equal(integrated.retention_error, null);
+    assert.ok(!Object.hasOwn(integrated, 'design_genome'));
+    assert.equal(info.archive.best_id, integrated.id, 'valid integrated fitness survives invalid optional prose');
+  },
+});
+
+const nativeGenomeBase = cases.find(sc => sc.name.startsWith('declared native lineage'));
+for (const mismatch of [false, true]) cases.push({...nativeGenomeBase,
+  name: mismatch ? 'checked engineer source A cannot attach claims to checked verifier source B'
+    : 'native author genome persists through cumulative checkpoint publication',
+  args: {...nativeGenomeBase.args, design_genome_mode: 'handoff'},
+  candidates: Object.fromEntries(Object.entries(nativeGenomeBase.candidates).map(([id, spec]) => [id,
+    {...spec, genome: authorGenome(claimText), ...(!mismatch ? {patchOptions: ['--full-index']} : {}),
+      ...(mismatch && id === 'r2_d0'
+      ? {engineerObservationFiles: source(88, 88)} : {})}])),
+  check(info) {
+    nativeGenomeBase.check(info);
+    const parent = info.archive.entries.find(row => row.id === 'r1_d0');
+    const selected = info.archive.entries.find(row => row.id === 'r2_d0');
+    assertGenome(parent, claimText, true);
+    assert.equal(parent.design_genome.external_evaluation.evaluation_id, 'verify-r1_d0');
+    const pointer = JSON.parse(fs.readFileSync(path.join(info.temp, 'population/native/latest.json')));
+    const checkpoint = JSON.parse(fs.readFileSync(pointer.checkpoint));
+    if (mismatch) {
+      assert.equal(selected.verified, true, 'independently verified B remains eligible');
+      assert.equal(selected.retention_error, null);
+      assert.ok(!Object.hasOwn(selected, 'design_genome'));
+      assert.ok(!Object.hasOwn(checkpoint, 'design_genome'));
+      const authorRead = info.externalReads.find(row => row.id === 'eng-r2_d0');
+      const verifierRead = info.externalReads.find(row => row.id === 'verify-r2_d0');
+      assert.notEqual(authorRead.source_id, verifierRead.source_id, 'both independent readers checked different sources');
+    } else {
+      assertGenome(selected, claimText, true);
+      assertGenome(checkpoint, claimText, true);
+      assert.notEqual(checkpoint.design_genome.patch_sha256, selected.design_genome.patch_sha256,
+        'native publication rebinds an equivalent diff representation only after source identity is checked');
+      assert.equal(checkpoint.design_genome.source_id, selected.design_genome.source_id);
+      assert.deepEqual(checkpoint.design_genome.external_evaluation, checkpoint.external_evaluation);
+    }
+  },
+});
+cases.push({name: 'legacy publication omits claims when equivalent diff bytes change',
+  population: {id: 'legacy', imports: []}, args: {budget: 1, design_genome_mode: 'record'},
+  best: 1.4, bestId: 'r1_d0', expected: fast, plans: {r1: plan(direction('legacy'))},
+  candidates: {r1_d0: {files: fast, speed: 1.4, genome: authorGenome(claimText), patchOptions: ['--full-index']}},
+  check({archive, temp}) {
+    assertGenome(archive.entries[0], claimText);
+    const pointer = JSON.parse(fs.readFileSync(path.join(temp, 'population/legacy/latest.json')));
+    const checkpoint = JSON.parse(fs.readFileSync(pointer.checkpoint));
+    assert.equal(checkpoint.verified, true);
+    assert.equal(checkpoint.speedup, 1.4);
+    assert.notEqual(checkpoint.patch_ref.sha256, archive.entries[0].patch_ref.sha256);
+    assert.ok(!Object.hasOwn(checkpoint, 'design_genome'),
+      'legacy evidence cannot independently rebind narrative to a different patch representation');
+  },
+});
+
+const peerGenomeBase = cases.find(sc => sc.name.startsWith('explicit peer import'));
+for (const mode of ['record', 'handoff']) cases.push({...peerGenomeBase,
+  name: `peer import in ${mode} controls automatic peer narrative retention and exposure`,
+  args: {...peerGenomeBase.args, design_genome_mode: mode},
+  inspectPlan(info) {
+    if (info.label.endsWith('r1')) {
+      peerCheckpoint(info, 'peer', slow, 2, {genome: ({patch, baseCommit}) => ({
+        kind: 'author_claims', text: claimText, base_commit: baseCommit,
+        patch_sha256: hash(fs.readFileSync(patch))})});
+      peerCheckpoint(info, 'different', slow, 3, {differentBase: true});
+      peerCheckpoint(info, 'tampered', slow, 4, {tamper: true});
+    } else peerGenomeBase.inspectPlan(info);
+  },
+  check(info) {
+    peerGenomeBase.check(info);
+    const peer = info.archive.entries.find(row => row.id === 'peer_peer_r1');
+    const checkpoint = JSON.parse(fs.readFileSync(peer.peer_checkpoint.path));
+    assert.equal(checkpoint.design_genome.text, claimText, 'published peer artifact retains its narrative in both modes');
+    if (mode === 'handoff') assert.deepEqual(peer.design_genome, checkpoint.design_genome,
+      'peer narrative retains its own original binding');
+    else assert.ok(!Object.hasOwn(peer, 'design_genome'), 'record does not import peer narrative into the local archive');
+    const planned = info.h.field(info.events.find(event => event.label === 'tech_lead:plan r2').prompt, 'EVOLUTION_ENTRIES');
+    assert.equal(Object.hasOwn(planned.find(row => row.id === peer.id), 'design_genome'), mode === 'handoff');
+    const context = info.h.field(info.events.find(event => event.label.startsWith('eng r2_d0')).prompt, 'EVOLUTION');
+    if (mode === 'handoff') assert.deepEqual(context.selected_design_genomes.parent,
+      {id: peer.id, design_genome: peer.design_genome, peer_checkpoint: peer.peer_checkpoint});
+    else {
+      assert.ok(!Object.hasOwn(context, 'selected_design_genomes'));
+      assert.ok(info.events.every(event => !event.prompt.includes(claimText)),
+        'record does not automatically expose the published peer narrative through another prompt');
+    }
+    assert.ok(!Object.hasOwn(info.archive.entries.find(row => row.id === 'r2_d0'), 'design_genome'));
+  },
+});
+
 (async () => {
+  ({validate: validateSchema} = await import(path.join(ROOT, 'interface/runtime/engine/schema.mjs')));
   console.log(`lane: ${lanePath} (sha256 ${hash(laneSource)})`);
   const h = harness({});
   const invalidArgs = [

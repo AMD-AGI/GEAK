@@ -41,6 +41,7 @@ paths and GPU ID are placeholders for the caller's environment.
 | `max_no_improve` | `2` | Consecutive rounds without qualifying progress before stopping. |
 | `min_improve` | `0.02` | Required relative improvement over the current best for promotion. |
 | `evolution_evidence_handoff` | `false` | Boolean `true` adds selected parent/donor evidence to engineer prompts. |
+| `design_genome_mode` | `"off"` | `"record"` retains compact author claims and supplies own-lineage claims to later roles; `"handoff"` also supplies imported peer claims automatically. Applies only to EVO. |
 
 GEAK-EVO can verify and retain slower candidates without promoting them. It also
 allows parallel deep engineers. Account for these choices when comparing search
@@ -48,6 +49,27 @@ costs. Use the same task, model, numerical contract, objective, and measurement
 rules for a GEAK comparison. For a timed search, configure the existing deadline
 and finalization reserves, and choose `max_no_improve` for the intended stopping
 policy in both runs; a large direction budget alone does not prevent early stops.
+
+The optional Design Genome uses the existing engineer, integrator, report and
+archive path. In `record` and `handoff`, writers receive the same guidance and
+may return a short account of the intended idea, claimed realization, evidence,
+implementation gaps, rival explanations and next experiments. Both modes retain
+their own accepted metadata identically, available through ordinary archive
+tools. `record` includes own-lineage claims in planner summaries, selected
+parent/donor engineer context and the integrator's candidate inputs. `handoff`
+also adds peer claims to imported archive rows and those inputs. Published peer
+checkpoints remain available for deliberate tool retrieval in both modes. `off`
+preserves the ordinary prompts and return schemas; a greedy population member
+receives no treatment guidance even when the population sets this option.
+
+These are author claims, not verified explanations of a performance result.
+Missing or unusable prose does not change source eligibility, measurement,
+ranking, promotion or budget, and does not cause a retry. Comparing `record`
+with `handoff` tests automatic peer exposure with common writing guidance,
+retention and local memory; comparing `off` with `record` changes authoring and
+local memory together, and `off` with `handoff` changes that whole package. No
+comparison has a measured benefit implied by enabling the option. See the
+[carrier and source-association rules](archive.md#optional-design-genome).
 
 ## Outputs and limits
 

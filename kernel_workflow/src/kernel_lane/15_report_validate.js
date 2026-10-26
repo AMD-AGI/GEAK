@@ -13,7 +13,9 @@ try {
 if (EXTERNAL_OBJECTIVE) history.final_selection = frozenFinalEvaluation;
 phase('Report');
 const report = await agentT(
-  roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.', {
+  roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.'
+    + (OPTIMIZER === 'evo' && DESIGN_GENOME_MODE !== 'off'
+      ? ` Read ${WORKFLOW_DIR}/roles/design_genome.md when summarizing retained author claims and implementation gaps.` : ''), {
     EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR,
     HISTORY: history, FINAL_WINNER: finalWinner, BASELINE_PER_CASE,
     BASELINE_GEOMEAN_MS, CUMULATIVE_SPEEDUP: cumulative,

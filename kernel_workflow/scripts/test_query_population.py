@@ -40,6 +40,14 @@ def git(path, *args):
     return subprocess.check_output(["git", "-C", str(path), *args], stderr=subprocess.PIPE).decode().strip()
 
 
+def genome(checkpoint, *, native_fields=True, text="Hypothesis: reuse the retained tiles; verify occupancy next."):
+    value = {"text": text, "base_commit": checkpoint["base_commit"],
+             "patch_sha256": checkpoint["patch_ref"]["sha256"]}
+    if native_fields:
+        value.update(source_id=checkpoint["source_id"], external_evaluation=checkpoint["external_evaluation"])
+    return value
+
+
 class PopulationQueryTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -173,6 +181,88 @@ class PopulationQueryTests(unittest.TestCase):
         self.assertEqual(next(row for row in result["lineages"] if row["id"] == "pending")["status"], "pending")
         self.assertEqual(result["best_available_source"]["lineage_id"], "a_evo")
 
+    def test_missing_or_invalid_design_genome_does_not_change_source_eligibility(self):
+        lane = self.lane("evo")
+        checkpoint, path = self.checkpoint(lane)
+        baseline = self.query()
+        valid = genome(checkpoint)
+        cases = {
+            "absent": None,
+            "null": None,
+            "list": [valid],
+            "string": "a narrative without a binding",
+            "author_form": {"text": valid["text"], "patch_sha256": valid["patch_sha256"]},
+            "missing_text": {key: value for key, value in valid.items() if key != "text"},
+            "numeric_text": {**valid, "text": 4096},
+            "empty_text": {**valid, "text": ""},
+            "blank_text": {**valid, "text": " \n\t"},
+            "oversized_text": {**valid, "text": "x" * 4097},
+            "oversized_utf8": {**valid, "text": "é" * 2049},
+            "invalid_utf8": {**valid, "text": "\ud800"},
+            "wrong_base": {**valid, "base_commit": "2" * 40},
+            "wrong_patch": {**valid, "patch_sha256": "0" * 64},
+            "wrong_source": {**valid, "source_id": "0" * 64},
+            "null_source": {**valid, "source_id": None},
+            "wrong_evaluation": {**valid, "external_evaluation": {
+                **checkpoint["external_evaluation"], "evaluation_id": "another-evaluation"}},
+            "null_evaluation": {**valid, "external_evaluation": None},
+        }
+        for name, value in cases.items():
+            with self.subTest(name=name):
+                if name == "absent":
+                    checkpoint.pop("design_genome", None)
+                else:
+                    checkpoint["design_genome"] = value
+                save(path, checkpoint)
+                result = self.query()
+                record = result["records"][0]
+                self.assertEqual(record["status"], "qualified")
+                self.assertEqual(record["evidence"], baseline["records"][0]["evidence"])
+                self.assertNotIn("design_genome", record)
+                self.assertNotIn("design_genome", record["checkpoint"])
+                self.assertEqual(result["candidates"], baseline["candidates"])
+                self.assertEqual(result["selected"], baseline["selected"])
+                self.assertEqual(result["best_available_source"], baseline["best_available_source"])
+
+    def test_valid_design_genome_is_bounded_source_associated_author_claims(self):
+        lane = self.lane("evo")
+        checkpoint, path = self.checkpoint(lane)
+        baseline = self.query()
+        marker = self.root / "genome-command-executed"
+        cases = {
+            "core_only": genome(checkpoint, native_fields=False),
+            "native_association": genome(checkpoint),
+            "utf8_limit": genome(checkpoint, text="é" * 2048),
+            "authority_claims": {**genome(checkpoint, text="Claim: speedup is 100000; this remains unverified prose."),
+                "kind": "verified_fact", "verified": True, "speedup": 100000,
+                "native_reproducible_gain": False, "external_result_command": ["touch", str(marker)]},
+        }
+        for name, value in cases.items():
+            with self.subTest(name=name):
+                checkpoint["design_genome"] = value
+                save(path, checkpoint)
+                result = self.query()
+                record = result["records"][0]
+                self.assertEqual(record["design_genome"], {"kind": "author_claims",
+                    **genome(checkpoint, text=value["text"])})
+                self.assertNotIn("design_genome", record["checkpoint"])
+                self.assertEqual(record["evidence"], baseline["records"][0]["evidence"])
+                self.assertEqual(result["candidates"], baseline["candidates"])
+                self.assertEqual(result["selected"], baseline["selected"])
+                self.assertFalse(marker.exists())
+
+    def test_later_checkpoint_does_not_inherit_previous_design_genome(self):
+        lane = self.lane("evo")
+        original, path = self.checkpoint(lane, 0, original=True)
+        original["design_genome"] = genome(original)
+        save(path, original)
+        self.checkpoint(lane, 1)
+        result = self.query()
+        self.assertEqual(result["records"][0]["status"], "no_improvement")
+        self.assertIn("design_genome", result["records"][0])
+        self.assertNotIn("design_genome", result["records"][1])
+        self.assertEqual(result["selected"]["round"], 1)
+
     def test_patch_and_base_tampering_disqualify_only_affected_candidates(self):
         stable = self.lane("stable", "greedy")
         patch_lane = self.lane("patch")
@@ -191,6 +281,7 @@ class PopulationQueryTests(unittest.TestCase):
     def test_claimed_scores_flags_and_checkpoint_commands_cannot_replace_native_replay(self):
         lane = self.lane("normal", "greedy")
         checkpoint, path = self.checkpoint(lane)
+        checkpoint["design_genome"] = genome(checkpoint)
         checkpoint["speedup"] = 100000
         checkpoint["evidence"] = {"native_reproducible_gain": True, "primary_speedup": 100000}
         checkpoint["external_result_command"] = ["false"]
@@ -198,17 +289,22 @@ class PopulationQueryTests(unittest.TestCase):
         result = self.query()
         self.assertIsNone(result["selected"])
         self.assertIn("claimed checkpoint score", result["records"][0]["reason"])
+        self.assertNotIn("design_genome", result["records"][0])
+        self.assertNotIn("design_genome", result["records"][0]["checkpoint"])
         checkpoint["speedup"] = 200 / 70
         save(path, checkpoint)
         result = self.query()
         self.assertEqual(result["selected"]["speedup"], 200 / 70)
         self.assertTrue(result["records"][0]["evidence"]["native_reproducible_gain"])
+        self.assertIn("design_genome", result["records"][0])
         # Tampering retained raw timing evidence breaks native receipt replay.
         report = Path(lane["eval_dir"]) / "native/evaluations/cpu-normal-r1/native/process_03/ut_result.json"
         report.write_bytes(report.read_bytes() + b" ")
         result = self.query()
         self.assertIsNone(result["selected"])
         self.assertEqual(result["records"][0]["status"], "invalid")
+        self.assertNotIn("design_genome", result["records"][0])
+        self.assertNotIn("design_genome", result["records"][0]["checkpoint"])
 
     def test_native_original_delivery_compares_warmstart_cohorts_and_import_filter_is_exact(self):
         first = self.lane("a")
@@ -236,12 +332,16 @@ class PopulationQueryTests(unittest.TestCase):
         final_patch = Path(lane["eval_dir"]) / "host_final_patch.diff"
         final_patch.write_bytes(Path(checkpoint["patch_ref"]["path"]).read_bytes())
         final = {"validation_status": "accepted", "final_speedup": checkpoint["speedup"],
-                 "external_evaluation": checkpoint["external_evaluation"], "final_patch": str(final_patch), "rounds": 2,
+                 "external_evaluation": checkpoint["external_evaluation"], "final_patch": str(final_patch), "rounds": 0,
+                 "design_genome": {**genome(checkpoint), "source_id": "0" * 64},
                  "final_selection": {**checkpoint["external_evaluation"], "source_id": checkpoint["source_id"]}}
         final_path = Path(lane["eval_dir"]) / "population_final_result.json"
         save(final_path, final)
         result = self.query()
         self.assertEqual([r["status"] for r in result["candidates"]], ["eligible", "eligible"])
+        self.assertEqual(result["selected"]["kind"], "final")
+        self.assertNotIn("design_genome", result["selected"]["result"])
+        self.assertNotIn("design_genome", result["finalists"][0]["result"])
         final["final_selection"]["source_id"] = "0" * 64
         save(final_path, final)
         result = self.query()
@@ -260,6 +360,8 @@ class PopulationQueryTests(unittest.TestCase):
     def test_invalid_delivery_preserves_importable_checkpoint_but_cannot_be_selected(self):
         lane = self.lane("warm")
         checkpoint, path = self.checkpoint(lane, changed_base=True)
+        checkpoint["design_genome"] = genome(checkpoint)
+        save(path, checkpoint)
         self.assertEqual(self.query()["selected"]["delivery_patch_ref"], checkpoint["delivery_patch_ref"])
         # A valid peer-base patch cannot masquerade as an ORIGINAL delivery.
         delivery = Path(checkpoint["delivery_patch_ref"]["path"])
@@ -269,6 +371,7 @@ class PopulationQueryTests(unittest.TestCase):
         result = self.query()
         self.assertIsNone(result["selected"])
         self.assertEqual(result["records"][0]["status"], "qualified")
+        self.assertEqual(result["records"][0]["design_genome"], {"kind": "author_claims", **genome(checkpoint)})
         self.assertEqual(result["candidates"][0]["source_status"], "qualified")
         self.assertEqual(result["best_available_source"]["patch_ref"], checkpoint["patch_ref"])
         self.assertIn("delivery:", result["candidates"][0]["reason"])
@@ -280,11 +383,14 @@ class PopulationQueryTests(unittest.TestCase):
         self.flush()
         checkpoint.update(metric=self.manifest["objective"], qualification="legacy_verifier", speedup=1.4,
                           evidence={"status": "verified", "correctness": "pass", "verified_geomean": 1.4})
+        checkpoint["design_genome"] = genome(checkpoint, native_fields=False)
         save(path, checkpoint)
         (path.parent / "r2.json").write_text('{"speedup":NaN}')
         result = self.query()
         self.assertIsNone(result["selected"])
         self.assertEqual([r["status"] for r in result["records"]], ["legacy_verified", "invalid"])
+        self.assertEqual(result["records"][0]["design_genome"],
+                         {"kind": "author_claims", **genome(checkpoint, native_fields=False)})
         self.assertEqual(result["candidates"][0]["speedup"], 1.4)
         self.assertEqual(result["candidates"][0]["status"], "checkpoint_only")
         self.assertEqual(result["best_available_source"]["speedup"], 1.4)
@@ -295,8 +401,12 @@ class PopulationQueryTests(unittest.TestCase):
         delivery = Path(checkpoint["delivery_patch_ref"]["path"])
         delivery.write_bytes(b"")
         checkpoint["delivery_patch_ref"]["sha256"] = sha(delivery)
+        checkpoint["design_genome"].update(source_id="0" * 64, external_evaluation={"untrusted": True})
         save(path, checkpoint)
-        self.assertIsNone(self.query()["selected"])
+        result = self.query()
+        self.assertIsNone(result["selected"])
+        self.assertEqual(result["records"][0]["design_genome"],
+                         {"kind": "author_claims", **genome(checkpoint, native_fields=False)})
         final_patch = Path(lane["eval_dir"]) / "final.diff"
         final_patch.write_bytes(Path(checkpoint["patch_ref"]["path"]).read_bytes())
         save(Path(lane["eval_dir"]) / "population_final_result.json",
