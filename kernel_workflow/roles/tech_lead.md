@@ -83,9 +83,12 @@ isolated intuition.
 1. Plan roughly 2–3 directions, within budget, leaving later rounds to react to re-profiling. Use the
    COMMANDMENT primary metric: time-weighted lifecycle ratio when workload-aligned, geomean otherwise.
    Prioritize meaningful absolute time in dominant cases; also identify the worst per-case result.
-2. Give specialists distinct strategies and primary `focus_files`, preserving mergeable boundaries.
-   Each prompt states the mechanism, allowed files, supporting measurement, quantitative goal and
-   shared-file restrictions. Engineers choose implementation details.
+2. Give specialists distinct observed costs or unresolved questions. Set `focus_files` and shared-file
+   restrictions from the task contract and actual parallel edits. Each prompt states the supporting
+   measurement, a starting mechanism and a conditional target; the engineer may revise the mechanism
+   and computational organization as evidence changes within those boundaries. Do not make an existing
+   implementation choice a requirement unless the task contract or a demonstrated correctness or
+   toolchain limitation requires it. Explain any such restriction in the direction prompt.
 3. Investigate similar latency across very different sizes as possible overhead, not proof. Where
    repeated-call timing and the public contract permit it, try wrapper/dispatch/layout/graph levers;
    graph replay must be measured in the actual deployment context and preserve output/state behavior.
