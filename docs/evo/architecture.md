@@ -46,7 +46,12 @@ The planner receives the latest twelve archive entries plus the best entry, and
 can inspect the full archive. Engineers receive the selected starting source,
 donor references, and archive path. The optional `evolution_evidence_handoff`
 flag also puts selected parent and donor evidence into the engineer prompt;
-it is off by default. See [archive fields](archive.md).
+it is off by default. The separate `design_genome_mode` defaults to `off`;
+`record` adds optional source-associated author prose through existing role
+returns and archives, and exposes own-lineage prose to later planners, selected
+parent/donor engineers and integrators. `handoff` also exposes imported peer
+prose automatically. Neither changes source qualification or fitness.
+See [archive fields](archive.md).
 
 ## Scope
 

@@ -168,6 +168,30 @@ def legacy_score(evidence, objective):
     return score
 
 
+def optional_design_genome(value, checkpoint, evidence, *, native):
+    """Associate bounded author claims with checked source, without scoring them."""
+    try:
+        need(isinstance(value, dict), "design genome is not an object")
+        text = value.get("text")
+        need(isinstance(text, str) and text.strip() and len(text.encode("utf-8")) <= 4096,
+             "design genome text is empty or oversized")
+        base_commit = value.get("base_commit")
+        need(isinstance(base_commit, str) and TREE.fullmatch(base_commit)
+             and base_commit == checkpoint.get("base_commit"), "design genome base differs")
+        need(value.get("patch_sha256") == checkpoint["patch_ref"]["sha256"], "design genome patch differs")
+        result = {"kind": "author_claims", "text": text, "base_commit": base_commit,
+                  "patch_sha256": checkpoint["patch_ref"]["sha256"]}
+        if native:
+            for key in ("source_id", "external_evaluation"):
+                need(key not in value or value[key] == evidence[key], "design genome " + key + " differs")
+                result[key] = evidence[key]
+        return result
+    except (KeyError, TypeError, ValueError, UnicodeError):
+        # Optional narrative can be unavailable without weakening source proof
+        # or disqualifying an otherwise importable committed checkpoint.
+        return None
+
+
 def result_for_checkpoint(checkpoint, lane, evidence, score, gain):
     delivery = checkpoint["delivery_patch_ref"]
     result = {"mode": "optimize", "final_speedup": score, "primary_speedup": score,
@@ -192,7 +216,8 @@ def check_checkpoint(path, root, lane, manifest, trees, expected_base, expected_
     try:
         need(contained(path, root / lane["id"]), "checkpoint file is outside lineage publication directory")
         checkpoint, raw = read_json(path)
-        record.update(checkpoint=checkpoint, checkpoint_sha256=digest(raw))
+        record.update(checkpoint={key: value for key, value in checkpoint.items() if key != "design_genome"},
+                      checkpoint_sha256=digest(raw))
         need(checkpoint.get("schema") == "geak.population.checkpoint/1", "unknown checkpoint schema")
         need(checkpoint.get("lineage_id") == lane["id"] and checkpoint.get("optimizer") == lane["optimizer"],
              "checkpoint lineage or optimizer differs from manifest")
@@ -250,6 +275,9 @@ def check_checkpoint(path, root, lane, manifest, trees, expected_base, expected_
         record.update(status="invalid", evidence=None, reason=str(error))
         candidate["reason"] = str(error)
         return record, candidate
+    genome = optional_design_genome(checkpoint.get("design_genome"), checkpoint, evidence, native=native)
+    if genome is not None:
+        record["design_genome"] = genome
     if not native:
         # A legacy verifier's statement is retained with its exact base+patch.
         # It cannot authenticate an independent ORIGINAL-relative delivery.
@@ -321,6 +349,9 @@ def check_final(path, lane, manifest, timeout):
                  "final patch hash differs")
             patch_ref = {"path": str(patch), "sha256": patch_hash}
         need(path.read_bytes() == raw, "final result changed during query")
+        # Final-result narratives have no supported association contract. Do
+        # not let arbitrary fields bypass the checkpoint-only sanitizer.
+        result.pop("design_genome", None)
         candidate.update(status="eligible" if gain else "no_gain", qualification=qualification,
                          speedup=score, patch_ref=patch_ref,
                          delivery_patch_ref={**patch_ref, "base": "ORIGINAL"} if patch_ref else None,

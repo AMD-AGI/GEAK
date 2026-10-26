@@ -15,11 +15,22 @@ const planSchema = evo ? {
     },
   }},
 } : PLAN_SCHEMA;
+const designGenomeInstructions = evo && evo.designGenomeEnabled
+  ? ` Read ${WORKFLOW_DIR}/roles/design_genome.md for optional source-bound author narrative; these claims do not change fitness or budget.` : '';
+const engineerSchema = designGenomeInstructions ? {
+  ...ENG_SCHEMA, properties: {...ENG_SCHEMA.properties, design_genome: {}},
+} : ENG_SCHEMA;
+const integrateSchema = designGenomeInstructions ? {
+  ...INTEGRATE_SCHEMA, properties: {...INTEGRATE_SCHEMA.properties, best: {
+    ...INTEGRATE_SCHEMA.properties.best,
+    properties: {...INTEGRATE_SCHEMA.properties.best.properties, design_genome: {}},
+  }},
+} : INTEGRATE_SCHEMA;
 let { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary } = start;
 const history = start.history;   // extended in place, as before
 if (evo) history.evolution_archive = evo.path;
 const evolutionInstructions = evo
-  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` : '';
+  ? ` Read ${WORKFLOW_DIR}/roles/evolution.md for the retained-approach policy.` + designGenomeInstructions : '';
 const citations = [];
 let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
@@ -211,7 +222,7 @@ git -C ${d.out_dir}/workspace -c user.name=GEAK -c user.email=geak@localhost com
 `;
       return agentT(
       `You are Engineer ${d.id} (specialty=${d.specialty}) for round ${round}.
-${workspaceInstruction}${readLine} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
+${workspaceInstruction}${readLine}${designGenomeInstructions} If KK_OPERATOR is non-empty, also consult the operator/language SOTA cards under
 KERNEL_KNOWLEDGE_DIR per your role's "operator/language SOTA knowledge (REFERENCE ONLY)" section
 (facts/how-to only; measure everything; ${evo ? 'retain useful slower approaches; only verified improvements replace the best' : 'never go below baseline'}).
 Save best_patch.diff via \`cd <KERNEL_PATH> && git diff${evo ? " " + d.evolution_context.workspace_base_commit : ""} > ${d.out_dir}/best_patch.diff\` ${evo ? 'after each useful change, including a correct but slower implementation; retain an unfinished attempt separately with its limitations. The patch must include the inherited parent changes against the initial baseline commit. Read ' + WORKFLOW_DIR + '/roles/evolution.md' : "when COMMANDMENT's primary speedup exceeds " + CANDIDATE_FLOOR_TXT}. Use its audited oracle aggregation. Before saving, include any new editable source files with \`git add -N -- <new-source-files>\`; exclude logs, measurements and build artifacts.
@@ -241,7 +252,7 @@ ${cfg({
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
       expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') + EXTERNAL_METRIC_INSTRUCTIONS,
-      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }
+      { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: engineerSchema }
     ).then(async (eng) => {
       eng = await checkedExternalMeasurement(eng, `${d.out_dir}/workspace`);
       if (evo) await evo.record(d, eng, null, `${d.out_dir}/best_patch.diff`);
@@ -319,17 +330,20 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   if (verified.length >= 2) {
     phase('Merge');
     integrate = await agentT(
-      roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.', {
+      roleAgent('integrator', 'integrate', 'Combine this round\'s verified patches into one best implementation.'
+        + designGenomeInstructions + (designGenomeInstructions
+          ? ' Author any optional best.design_genome for your own integrated patch; do not copy a donor narrative.' : ''), {
         CANONICAL: evo ? evo.base : CANONICAL, INTEGRATE_DIR: `${EVAL_DIR}/round_${round}/integrate`,
         EVAL_DIR, WORKFLOW_DIR, GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
         BEST_INDIVIDUAL: Math.max(...candidates.map(c => c.geomean)),
         PATCHES: verified.map(r => ({ id: r.d.id, specialty: r.d.specialty, title: r.d.title,
           strategy: r.eng ? r.eng.strategy : '', verified_geomean: r.ver.verified_geomean,
           ...externalFields(r.ver),
+          ...(evo && evo.designGenomeEnabled ? {design_genome: evo.designGenomeFor(r.d.id)} : {}),
           files: r.d.focus_files || [], patch: r.patch })),
         INSIGHTS: history.insights,
       }),
-      { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
+      { phase: 'Merge', label: `integrate r${round}`, schema: integrateSchema });
     if (integrate && integrate.best) integrate.best = await checkedExternalMeasurement(
       integrate.best, evo ? evo.base : CANONICAL, integrate.best.patch_file);
     const integPrim = integrate && integrate.best ? primSpeedup(EXTERNAL_OBJECTIVE ? integrate.best : {
@@ -350,7 +364,8 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   if (evo && integrate && integrate.best && candidates.some(c => c.id === `r${round}_integrated`)) {
     const retained = await evo.record({id: `r${round}_integrated`, parent_id: 'ORIGINAL',
-      donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate'}, null,
+      donor_ids: verified.map(r => r.d.id), title: 'integrated', specialty: 'integrate'},
+      designGenomeInstructions ? integrate.best : null,
       {...integrate.best, status: 'verified', correctness: 'pass',
         verified_geomean: integrate.best.geomean, verified_weighted: integrate.best.weighted},
       integrate.best.patch_file);

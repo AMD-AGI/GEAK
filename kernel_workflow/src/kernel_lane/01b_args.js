@@ -2,6 +2,10 @@ const OPTIMIZER = String(A.optimizer || 'greedy');
 if (!['greedy', 'evo'].includes(OPTIMIZER)) {
   throw new Error(`unknown optimizer: ${OPTIMIZER}; use greedy or evo`);
 }
+const DESIGN_GENOME_MODE = A.design_genome_mode == null ? 'off' : A.design_genome_mode;
+if (!['off', 'record', 'handoff'].includes(DESIGN_GENOME_MODE)) {
+  throw new Error('design_genome_mode must be off, record, or handoff');
+}
 const retiredOptimizerArg = ['optimizer_command', 'optimizer_task_ref', 'optimizer_reserve_s']
   .find(key => Object.prototype.hasOwnProperty.call(A, key));
 if (retiredOptimizerArg) {

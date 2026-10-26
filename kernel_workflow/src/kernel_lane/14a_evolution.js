@@ -5,6 +5,8 @@
 async function createEvolution(start) {
   const path = `${EVAL_DIR}/evolution`, base = `${path}/base`, archive = `${path}/archive.json`;
   const population = A.population_lineage || null;
+  const designGenomeMode = OPTIMIZER === 'evo' ? DESIGN_GENOME_MODE : 'off';
+  const designGenomeEnabled = designGenomeMode !== 'off';
   if (population && (typeof population.root !== 'string' || !population.root.startsWith('/')
       || /[\0\r\n]/.test(population.root) || population.root.split('/').includes('..')
       || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(population.id)
@@ -84,6 +86,61 @@ async function createEvolution(start) {
     if (!hash) throw new Error('retained patch has no source hash');
     return hash[0];
   };
+  const utf8Bytes = (value) => {
+    let bytes = 0;
+    for (const char of value) {
+      const point = char.codePointAt(0);
+      bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+    }
+    return bytes;
+  };
+  const nativeSource = (value) => EXTERNAL_OBJECTIVE && value?.external_measurement_valid === true
+    && typeof value.source_id === 'string' && /^[0-9a-f]{64}$/.test(value.source_id) ? value.source_id : null;
+  const nativeAssociation = (value) => ({source_id: nativeSource(value),
+    external_evaluation: {candidate_id: value.external_evaluation.candidate_id,
+      evaluation_id: value.external_evaluation.evaluation_id}});
+  // The raw optional field has no schema restrictions. Normalize it only after
+  // normal source retention, without changing qualification or retrying a role.
+  const candidateGenome = (author, checked, ref) => {
+    const raw = author?.design_genome;
+    if (raw === undefined) return {};
+    const omitted = (reason) => ({design_genome_omitted: reason});
+    try {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+          || typeof raw.text !== 'string' || !raw.text.trim()
+          || utf8Bytes(raw.text) > 4096 || raw.patch_sha256 !== ref.sha256) {
+        return omitted('invalid_shape_text_or_patch_binding');
+      }
+      const authorSource = nativeSource(author), checkedSource = nativeSource(checked);
+      // The engineer reader checks its workspace; the verifier checks the saved
+      // patch. A narrative about workspace A must not acquire source B's proof.
+      if (checkedSource && (checked.patch_sha256 !== ref.sha256
+          || (authorSource && authorSource !== checkedSource))) {
+        return omitted('checked_source_mismatch');
+      }
+      return {design_genome: {kind: 'author_claims', text: raw.text,
+        base_commit: baseCommit, patch_sha256: ref.sha256,
+        ...(checkedSource ? nativeAssociation(checked) : {})}};
+    } catch (_) { return omitted('unreadable_optional_metadata'); }
+  };
+  const checkpointGenome = (winner, checked, hash) => {
+    if (!designGenomeEnabled) return {};
+    try {
+      const genome = retained(winner?.id)?.design_genome;
+      if (!genome) return {};
+      const source = nativeSource(checked);
+      if (genome.source_id && genome.source_id !== source) return {};
+      const exactPatch = genome.base_commit === baseCommit && genome.patch_sha256 === hash;
+      // A cumulative publication can encode the same source with different diff
+      // bytes. Only an already checked native source identity permits rebinding.
+      if (!exactPatch && !(source && genome.source_id === source)) return {};
+      return {design_genome: {kind: 'author_claims', text: genome.text,
+        base_commit: baseCommit, patch_sha256: hash,
+        ...(source ? nativeAssociation(checked) : {})}};
+    } catch (_) { return {}; }
+  };
+  const visibleGenome = (row) => designGenomeEnabled
+    && (!row?.peer_checkpoint || designGenomeMode === 'handoff') ? row?.design_genome : null;
   const metric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
   const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
     'sh', file], {input: contents});
@@ -154,6 +211,7 @@ async function createEvolution(start) {
         delivery_patch_ref: deliveryRef,
         metric, speedup, verified: true, qualification: EXTERNAL_OBJECTIVE ? 'native_source_bound' : 'legacy_verifier',
         external_evaluation: checked?.external_evaluation || null,
+        ...checkpointGenome(winner, checked, hash),
         evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : {
           status: 'verified', correctness: 'pass', verified_geomean: checked?.geomean_unweighted ?? speedup,
           verified_weighted: checked?.weighted ?? null, per_case: checked?.per_case || BASELINE_PER_CASE}};
@@ -199,6 +257,9 @@ async function createEvolution(start) {
           patch_ref: {path: target, sha256: peer.patch_ref.sha256, base_commit: baseCommit, base_tree: baseTree},
           verified: true, speedup, status: speedup <= 1 ? 'slower' : 'correct',
           engineer: null, verifier: evidence(verified), retention_error: null,
+          // Keep the donor's own base/source association and checkpoint provenance.
+          // query_population has sanitized this optional field independently.
+          ...(designGenomeMode === 'handoff' && item.design_genome ? {design_genome: item.design_genome} : {}),
           peer_checkpoint: {lineage_id: peer.lineage_id, round: peer.round,
             path: item.checkpoint_path, sha256: item.checkpoint_sha256, source_tree: peer.source_tree}});
       }
@@ -207,9 +268,11 @@ async function createEvolution(start) {
   });
   return {
     base, baseCommit, path: archive, entries, checkpointTree, publishCheckpoint, refreshPeers,
+    designGenomeMode, designGenomeEnabled,
+    designGenomeFor(id) { return visibleGenome(entries.find(row => row.id === id)) || null; },
     engineerContext(direction) {
       const context = direction.evolution_context;
-      if (A.evolution_evidence_handoff !== true) return context;
+      if (A.evolution_evidence_handoff !== true && !designGenomeEnabled) return context;
       const selected = (id) => {
         const row = entries.find(entry => entry.id === id);
         return {id, patch_ref: row?.patch_ref || null, status: row?.status || null,
@@ -218,17 +281,29 @@ async function createEvolution(start) {
           engineer: row?.engineer || null, verifier: row?.verifier || null};
       };
       // Prompt-only view: never retain an expanded context inside archive rows.
-      const selectedEvidence = {
-        parent: selected(direction.parent_id),
-        donors: (direction.donor_ids || []).map(selected)};
-      let bytes = 0;
-      for (const char of JSON.stringify(selectedEvidence)) {
-        const point = char.codePointAt(0);
-        bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      const extra = {};
+      if (A.evolution_evidence_handoff === true) {
+        const selectedEvidence = {
+          parent: selected(direction.parent_id), donors: (direction.donor_ids || []).map(selected)};
+        if (utf8Bytes(JSON.stringify(selectedEvidence)) > 16384) extra.selected_evidence_omitted = 'over_16384_utf8_bytes';
+        else extra.selected_evidence = selectedEvidence;
       }
-      return bytes > 16384
-        ? {...context, selected_evidence_omitted: 'over_16384_utf8_bytes'}
-        : {...context, selected_evidence: selectedEvidence};
+      if (designGenomeEnabled) {
+        const claims = (id) => {
+          const row = entries.find(entry => entry.id === id);
+          const genome = visibleGenome(row);
+          return genome ? {id, design_genome: genome,
+            ...(row?.peer_checkpoint ? {peer_checkpoint: row.peer_checkpoint} : {})} : null;
+        };
+        const packet = {parent: claims(direction.parent_id) || null,
+          donors: (direction.donor_ids || []).map(claims).filter(Boolean)};
+        if (packet.parent || packet.donors.length) {
+          if (utf8Bytes(JSON.stringify({...extra, selected_design_genomes: packet})) > 16384) {
+            extra.selected_design_genomes_omitted = 'over_16384_utf8_bytes';
+          } else extra.selected_design_genomes = packet;
+        }
+      }
+      return {...context, ...extra};
     },
     planInputs() {
       const summary = entries.slice(-12);
@@ -240,7 +315,9 @@ async function createEvolution(start) {
           title: row.title, approach: row.approach, specialty: row.specialty, parent_id: row.parent_id, donor_ids: row.donor_ids,
           status: row.status, speedup: row.speedup, patch_ref: row.patch_ref,
           retention_error: row.retention_error, last_record_error: row.last_record_error || null,
-          strategy: row.engineer && row.engineer.strategy}))};
+          strategy: row.engineer && row.engineer.strategy,
+          ...(visibleGenome(row) ? {design_genome: row.design_genome,
+            ...(row.peer_checkpoint ? {peer_checkpoint: row.peer_checkpoint} : {})} : {})}))};
     },
     memoryInputs(directions) {
       return {EVOLUTION_ARCHIVE: archive, EVOLUTION_ROUND: directions.map(direction => {
@@ -345,6 +422,10 @@ async function createEvolution(start) {
             const failure = row.retention_error;
             Object.assign(row, previous, {last_record_error: failure});
           }
+        }
+        if (designGenomeEnabled && row.patch_ref && !row.retention_error && !row.last_record_error) {
+          // Never use the previous-engineer fallback for a new author record.
+          Object.assign(row, candidateGenome(eng, ver, row.patch_ref));
         }
         const next = previous ? entries.map(entry => entry.id === row.id ? row : entry) : [...entries, row];
         try { await save(next); }
