@@ -40,7 +40,8 @@ so the same server serves both phases.
 Order: PREFILL points (ascending tokens), then DECODE (ascending batch). Decode request
 i uses the same prompt at every point, so moving to a larger batch only prefills the
 requests that are new. A point whose capture fails gets one recapture (<point>_r2), as
-the skill allows, and is then reported and skipped.
+the skill allows, and is then reported and skipped. If the server stops answering, the
+captures stop at once and nothing is ranked; a rerun resumes.
 
 Stdlib only.
 """
@@ -90,7 +91,9 @@ def main():
     ap.add_argument("--point-id", nargs="*", default=None, help="subset; default all")
     ap.add_argument("--server-state", default=None,
                     help="probe_server.py's probe_server.json: supplies --base-url, "
-                         "--trace-root, --expect-files and --decode-eager")
+                         "--trace-root, --expect-files, --decode-eager and --vocab-size")
+    ap.add_argument("--vocab-size", type=int, default=None,
+                    help="the model's vocab_size: serving_probe.py keeps prompt ids below it")
     ap.add_argument("--base-url", default=None)
     ap.add_argument("--trace-root", default=None,
                     help="host-visible profiler output directory; one subdir per point")
@@ -130,8 +133,14 @@ def main():
         a.trace_root = a.trace_root or st["trace_root"]
         a.expect_files = a.expect_files or st["expect_files"]
         a.decode_eager = a.decode_eager or bool(st.get("decode_eager"))
+        a.vocab_size = a.vocab_size or st.get("vocab_size")
     if not (a.base_url and a.trace_root and a.expect_files):
         ap.error("--base-url, --trace-root and --expect-files (or --server-state) are required")
+    if a.vocab_size:
+        a.probe_arg = ["--vocab-size", str(a.vocab_size)] + a.probe_arg
+    else:
+        print("run_points: vocab size unknown; serving_probe.py keeps prompt ids small",
+              flush=True)
 
     ev = os.path.abspath(a.eval_dir)
     probe_dir = os.path.join(ev, "evidence", "probe")
@@ -169,8 +178,11 @@ def main():
         eager_evidence(a, ev, plan, py, log, timeline)
 
     futures, censuses = {}, {}
+    down = False
     with ThreadPoolExecutor(max_workers=1) as census_pool:
         for pt in points:
+            if down:
+                break
             pid = pt["point_id"]
             done = os.path.join(census_dir, pid + ".json")
             if os.path.exists(done) and pid not in a.redo:
@@ -209,6 +221,12 @@ def main():
                 if res.get("status") in ("ok", "partial"):
                     futures[pid] = census_pool.submit(census_job, pt, trace_dir)
                     break
+                if res.get("server_down"):
+                    # Every later point would fail the same way; a rerun resumes from here.
+                    print("[%s]   the server is down; stopping the captures (its log says "
+                          "why)" % now(), flush=True)
+                    down = True
+                    break
                 if hidden:
                     # Recapturing on the same graph-mode server would fail the same way.
                     print("[%s]   graph-hidden decode; needs an eager server "
@@ -233,6 +251,12 @@ def main():
                                                    - set(censuses))
         json.dump(timeline, open(run_path, "w"), indent=1)
 
+    if down:
+        # A ranking over the points captured before the crash would misweight the phases.
+        finish("server down")
+        print("run_points: the server went down after %d/%d point(s) censused; fix the cause "
+              "and rerun -- censused points are kept" % (len(censuses), len(points)))
+        return 1
     if not censuses:
         finish("no point produced a census")
         print("run_points: no point produced a census; nothing to rank")

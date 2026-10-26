@@ -65,7 +65,8 @@ python3 "$SKILL_ROOT/scripts/probe_server.py" run --serving "$EVAL_DIR/serving.j
 # the same steps one at a time, for a single point or a re-run:
 python3 "$SKILL_ROOT/scripts/serving_probe.py" --points "$EVAL_DIR/sampling_points.json" \
     --point-id de_5 --base-url http://127.0.0.1:PORT --trace-dir <dir>/de_5 \
-    --expect-files 8 --out "$EVAL_DIR/evidence/probe/de_5.json"
+    --expect-files 8 --vocab-size <config.json vocab_size> \
+    --out "$EVAL_DIR/evidence/probe/de_5.json"
 python3 "$SKILL_ROOT/scripts/point_census.py" --trace-dir <dir>/de_5 --phase DECODE \
     --point-id de_5 --out "$EVAL_DIR/evidence/census/de_5.json"
 python3 "$SKILL_ROOT/scripts/coverage_ledger.py" --points "$EVAL_DIR/sampling_points.json" \

@@ -18,6 +18,9 @@ serving.json declares the deployment and nothing else is guessed:
   env                              the deployment's environment
   pythonpath_prepend               e.g. the editable sglang checkout in the image
   launcher                         default ["python3", "-m", "sglang.launch_server"]
+  vocab_size                       optional; default read from the model's config.json.
+                                   Probe prompts are random ids below it (an id past the
+                                   embedding table faults the GPU)
   compile_watch                    default true: record every Triton compile variant and the
                                    call that built it, from process start (warmup included),
                                    into <run-dir>/compile_variants.json (shared/compile_watch.py)
@@ -204,6 +207,40 @@ def base_url(cfg):
     return "http://%s:%s" % (cfg.get("host", "127.0.0.1"), cfg["port"])
 
 
+def model_config(cfg, env):
+    """The served model's config.json: a local model directory, or the HF cache snapshot
+    the server resolves (HF_HUB_CACHE / HF_HOME from the deployment's env, --revision or
+    refs/main). None if it cannot be found."""
+    model = cfg["model"]
+    if os.path.isdir(model):
+        path = os.path.join(model, "config.json")
+    else:
+        hub = env.get("HF_HUB_CACHE") or os.path.join(
+            env.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface"), "hub")
+        repo = os.path.join(hub, "models--" + model.replace("/", "--"))
+        args = list(cfg.get("args") or [])
+        rev = args[args.index("--revision") + 1] if "--revision" in args[:-1] else None
+        try:
+            rev = rev or open(os.path.join(repo, "refs", "main")).read().strip()
+        except OSError:
+            return None
+        path = os.path.join(repo, "snapshots", rev, "config.json")
+    try:
+        return json.load(open(path))
+    except (OSError, ValueError):
+        return None
+
+
+def vocab_size(cfg, env):
+    """Prompt ids the probe may send: serving.json's vocab_size, else the model config's
+    (text_config's for a multimodal wrapper)."""
+    if cfg.get("vocab_size"):
+        return int(cfg["vocab_size"])
+    mc = model_config(cfg, env) or {}
+    v = mc.get("vocab_size") or (mc.get("text_config") or {}).get("vocab_size")
+    return int(v) if v else None
+
+
 def healthy(url):
     try:
         with urllib.request.urlopen(url + "/health", timeout=10) as fh:
@@ -257,8 +294,12 @@ class Server:
         self.starts[-1][2] = time.time()
         if self.primary is None:
             self.primary = len(self.starts) - 1
+        vocab = vocab_size(self.cfg, env)
+        if not vocab:
+            log("vocab_size not found for %s (set \"vocab_size\" in serving.json); the probe "
+                "keeps prompt ids small" % self.cfg["model"])
         state = {"base_url": url, "pid": self.proc.pid, "pgid": os.getpgid(self.proc.pid),
-                 "compile_watch_dir": watch,
+                 "compile_watch_dir": watch, "vocab_size": vocab,
                  "decode_capture": mode, "decode_eager": mode == "eager",
                  "trace_root": self.trace_root, "expect_files": int(self.cfg["tp"]),
                  "log": logp, "command": cmd, "startup_s": round(time.time() - t0, 1),

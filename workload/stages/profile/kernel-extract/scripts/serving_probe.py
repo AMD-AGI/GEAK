@@ -127,9 +127,25 @@ def scrape_metrics(base, timeout=30):
     return out, None
 
 
+# Highest prompt token id. An id past the embedding table is an out-of-bounds gather:
+# DeepSeek-V4 (vocab 129280) took a GPU memory access fault on every rank at the first
+# 16k-token prefill with ids up to 150000. main() sets it to min(150000, vocab_size - 1),
+# so a vocabulary larger than 150000 draws the same ids as before.
+ID_HI = 150000
+UNKNOWN_VOCAB_HI = 31999    # every tokenizer this targets has at least 32000 ids
+
+
 def rand_ids(n, seed):
     rnd = random.Random(seed)
-    return [rnd.randint(1000, 150000) for _ in range(n)]
+    return [rnd.randint(1000, ID_HI) for _ in range(n)]
+
+
+def server_up(base):
+    try:
+        with urllib.request.urlopen(base + "/health", timeout=10) as fh:
+            return fh.status == 200
+    except Exception:
+        return False
 
 
 def generate(base, ids, max_new_tokens, journal, label, timeout=1800, rid=None):
@@ -251,6 +267,16 @@ def stop_profile(base, journal, timeout=1800):
         txt = post(base, "/stop_profile", {}, timeout=timeout)
         journal.append({"event": "stopped", "response": txt[:200]})
         return True
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        if "not in progress" in body:
+            # The scheduler closed the window after num_steps (sglang 0.5.22 answers 500).
+            journal.append({"event": "already_stopped", "response": body[-200:]})
+            return True
+        journal.append({"event": "stop_FAILED", "error": "%s: %s" % (exc, body[-200:]),
+                        "consequence": "the window may still be open and will attribute "
+                                       "subsequent work to this point. Stop it by hand."})
+        return False
     except Exception as exc:
         journal.append({"event": "stop_FAILED", "error": str(exc),
                         "consequence": "the window may still be open and will attribute "
@@ -336,6 +362,7 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
 
     rec = pick_verify_file(paths)
     found, cpu_only, kernels, method = {}, {}, 0, None
+    anchors, partly_hidden = None, False
     if rec is not None:
         t0 = time.time()
         s = scan(rec["path"])
@@ -354,6 +381,20 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
             book = found if cat == "gpu_user_annotation" else cpu_only
             book.setdefault(phase, {}).setdefault(shape, 0)
             book[phase][shape] += 1
+        if want_phase == "DECODE":
+            # Count the census's own anchors (point_census.py): a draft step on the GPU
+            # timeline does not make the target forward visible. sglang 0.5.22 + DSPARK
+            # under --enable-profile-cuda-graph traced all 8 DRAFT steps but 1 of 8 VERIFY
+            # replays; the census refused all 18 decode points of a run this passed.
+            from point_census import step_spans, DECODE_ANCHOR_MODES
+            gpu, cpu = step_spans(s.events)
+            mode = next((m for m in DECODE_ANCHOR_MODES if any(x[3] == m for x in gpu + cpu)),
+                        None)
+            if mode:
+                anchors = {"mode": mode, "gpu": sum(x[3] == mode for x in gpu),
+                           "cpu": sum(x[3] == mode for x in cpu)}
+                partly_hidden = anchors["cpu"] >= 2 and (
+                    anchors["gpu"] < 2 or anchors["gpu"] < anchors["cpu"] - 1)
         scan_s = round(time.time() - t0, 1)
 
     res = {"file_scanned": rec["path"] if rec else None, "scan_method": method,
@@ -361,6 +402,7 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
            "step_spans_by_phase_shape": {k: dict(sorted(v.items())) for k, v in found.items()},
            "cpu_step_spans_by_phase_shape": {k: dict(sorted(v.items()))
                                              for k, v in cpu_only.items()},
+           "decode_anchors": anchors,
            "want": {"phase": want_phase, want_shape_key: want_shape}}
     got = found.get(want_phase, {})
     res["phase_present"] = bool(got)
@@ -381,6 +423,14 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
                          "traced, so a census of it is an incomplete inventory. Restart the "
                          "probe server with --disable-cuda-graph and recapture."
                          % want_phase)
+    elif partly_hidden:
+        res["verified"] = False
+        res["graph_hidden"] = True
+        res["reason"] = ("step[%s] is on the GPU timeline %d time(s) against %d on the CPU "
+                         "timeline: the other replays of the decode CUDA graph are not "
+                         "traced, so a census of it is an incomplete inventory. Restart the "
+                         "probe server with --disable-cuda-graph and recapture."
+                         % (anchors["mode"], anchors["gpu"], anchors["cpu"]))
     elif not got:
         res["verified"] = False
         res["reason"] = "no %s step spans in the trace; the window captured another phase" % want_phase
@@ -538,8 +588,13 @@ def main():
                          "autotune/JIT then lands in the window)")
     ap.add_argument("--request-timeout", type=float, default=1800)
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--vocab-size", type=int, default=None,
+                    help="the model's vocab_size (probe_server.json has it): prompt ids stay "
+                         "below it. Unknown: ids stay below %d" % (UNKNOWN_VOCAB_HI + 1))
     ap.add_argument("--out", required=True, help="journal JSON for this point")
     args = ap.parse_args()
+    global ID_HI
+    ID_HI = min(ID_HI, args.vocab_size - 1) if args.vocab_size else UNKNOWN_VOCAB_HI
 
     plan = json.load(open(args.points))
     pts = [p for p in plan["points"] if p["point_id"] == args.point_id]
@@ -551,6 +606,7 @@ def main():
     phase = point["phase"]
 
     journal = [{"event": "begin", "point": point, "base_url": args.base_url,
+                "vocab_size": args.vocab_size, "max_token_id": ID_HI,
                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]
     t_start = time.time()
     server_dir = args.server_trace_dir or args.trace_dir
@@ -558,6 +614,7 @@ def main():
     ok = False
     verify = {}
     ex, rids = None, []
+    down = False
 
     try:
         if phase == "DECODE":
@@ -616,16 +673,26 @@ def main():
             abort_requests(args.base_url, rids, journal)
         if ex is not None:
             ex.shutdown(wait=False)
-        wait_drained(args.base_url, journal, args.drain_timeout)
+        # A dead server neither drains nor writes traces: waiting out both timeouts cost
+        # ~20 min per attempt, every remaining point, after the server had crashed.
+        down = not server_up(args.base_url)
+        if down:
+            journal.append({"event": "server_DOWN", "consequence": "no drain or trace wait; "
+                            "the caller stops capturing"})
+        else:
+            wait_drained(args.base_url, journal, args.drain_timeout)
 
-    if phase != "DECODE":
+    if phase != "DECODE" and not down:
         wait_traces_settled(args.trace_dir, t_start, journal, args.window_timeout,
                             args.expect_files, args.settle_poll)
     written = traces_written(args.trace_dir, t_start)
     journal.append({"event": "traces_written", "count": len(written),
                     "total_bytes": sum(w["bytes"] for w in written),
                     "files": written[:12]})
-    if written:
+    if down:
+        verify = {"verified": False, "reason": "the server stopped answering /health "
+                  "during this point; see the server log"}
+    elif written:
         verify = verify_trace(
             written, phase,
             "new_tokens" if phase == "PREFILL" else "batch_size",
@@ -643,6 +710,7 @@ def main():
                   "partial" if (ok and verify.get("verified") == "partial") else "failed",
         "trace_verified": verify.get("verified"),
         "verify_reason": verify.get("reason"),
+        "server_down": down,
         "wall_s": round(time.time() - t_start, 1),
         "traces": written[:12],
         "journal": journal,
