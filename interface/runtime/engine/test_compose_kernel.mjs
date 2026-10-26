@@ -4,7 +4,7 @@
 // Real child processes, source staging and native request/report readers. The
 // full-runtime child and UT timing evidence are synthetic; no model or GPU runs.
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile, symlink, mkdir, cp } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, symlink, mkdir, cp, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +99,9 @@ if sys.argv[1] == '--setup':
     task = root/'task'
     contract = fixture(task)
     (task/'task.json').write_bytes(canonical_json(contract))
+    if options.get('hardlinked_original'):
+        (task/'kernel_src/module.py').unlink()
+        os.link(task/'baseline_src/module.py', task/'kernel_src/module.py')
     for name, factor in [('geak', options.get('geak_factor', 1.2)), ('evo', options.get('evo_factor', 1.4))]:
         lane = root/name
         workspace = lane/'workspace'
@@ -223,6 +226,26 @@ test('separate full runtime launches preserve args and select fresh common nativ
     assert.equal(event.argv[event.argv.indexOf('--profile') + 1], 'synthetic');
   }
   assert.deepEqual(await json(join(f.manifest.out_dir, 'result.json')), result);
+});
+
+test('hard-linked task sources cannot overwrite protected ORIGINAL during final materialization', async t => {
+  const f = await fixture(t, {hardlinked_original: true});
+  const original = await readFile(join(f.root, 'task/baseline_src/module.py'), 'utf8');
+  assert.equal((await stat(join(f.root, 'task/kernel_src/module.py'))).ino,
+    (await stat(join(f.root, 'task/baseline_src/module.py'))).ino);
+  const result = await composeKernel(f.manifest);
+  assert.equal(result.comparison_complete, true);
+  assert.ok(result.children.every(child => child.status === 'qualified'));
+  for (const id of ['geak', 'evo']) {
+    const workspace = join(f.manifest.out_dir, `${id}_final_workspace`);
+    const source = join(workspace, 'kernel_src/module.py');
+    const baseline = join(workspace, 'baseline_src/module.py');
+    assert.equal(await readFile(baseline, 'utf8'), original);
+    assert.match(await readFile(source, 'utf8'), new RegExp(`synthetic ${id} factor=`));
+    assert.notEqual((await stat(source)).ino, (await stat(baseline)).ino);
+  }
+  assert.equal(await readFile(join(f.root, 'task/kernel_src/module.py'), 'utf8'), original);
+  assert.equal(await readFile(join(f.root, 'task/baseline_src/module.py'), 'utf8'), original);
 });
 
 test('an additional complete greedy control can win without changing the protected GEAK lane', async t => {

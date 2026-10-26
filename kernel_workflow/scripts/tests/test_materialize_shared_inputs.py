@@ -102,6 +102,8 @@ def test_exact_links_and_private_source_across_generations(task, tmp_path, reado
     root, contract, manifest, _, _ = task
     source = contract["source_paths"][0]
     original = (root / source).read_bytes()
+    (root / source).unlink()
+    os.link(root / "baseline_src/module.py", root / source)
     ordinary = tmp_path / "ordinary"
     result = copy(root, ordinary)
     assert result.returncode == 0, result.stderr
@@ -138,6 +140,8 @@ def test_exact_links_and_private_source_across_generations(task, tmp_path, reado
         assert candidate.read_bytes() == prior_bytes
         candidate.write_bytes(prior_bytes + b"# private edit\n")
         assert (prior / source).read_bytes() == prior_bytes
+        assert (workspace / "baseline_src/module.py").read_bytes() == original
+        assert candidate.stat().st_ino != (workspace / "baseline_src/module.py").stat().st_ino
         assert not (workspace / ".geak/previous-evaluation").exists()
         (workspace / ".geak/previous-evaluation").write_text("must not copy")
         prior = workspace

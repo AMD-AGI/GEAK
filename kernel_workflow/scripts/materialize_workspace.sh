@@ -12,6 +12,7 @@
 #   - Optionally symlink immutable trees (aiter/) onto a shared physical copy.
 #   - With a pinned shared-input manifest, link its exact files to the read-only task root.
 #   - Copied files/directories are owner-writable; symlink targets remain unchanged.
+#   - Regular-file paths have independent storage, including source/ORIGINAL aliases.
 #
 # Usage:
 #   materialize_workspace.sh --src <dir> --dst <dir> [--shared-root <dir>] [--link-aiter]
@@ -102,8 +103,9 @@ fi
 # No `rm -rf` of DST itself — unique out_dirs are required by the lane protocol.
 find "$DST" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
 
-# Critical: do NOT pass -h/--dereference. Symlinks must be preserved as symlinks.
-( cd "$SRC" && tar --mode=u+w "${TAR_EXCLUDES[@]}" -cf - . ) | ( cd "$DST" && tar -xf - )
+# Break regular-file hardlinks so editing a candidate cannot also change its
+# protected ORIGINAL. Do NOT pass -h/--dereference: symlinks stay shared links.
+( cd "$SRC" && tar --hard-dereference --mode=u+w "${TAR_EXCLUDES[@]}" -cf - . ) | ( cd "$DST" && tar -xf - )
 
 # Share the immutable golden when present on SRC (or as a dangling absolute link target).
 if [[ -z "$SHARED_INPUT_MANIFEST" && ( -e "$SRC/reference_io.pt" || -L "$SRC/reference_io.pt" ) ]]; then
