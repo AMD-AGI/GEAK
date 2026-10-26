@@ -25,10 +25,14 @@
 #                     for every purpose, i.e. Hyperloom's warmup_round/measure_round protocol:
 #                     two client passes, the second is the number.  Spread, if any, is WITHIN-server
 #                     (client noise), not boot-to-boot.  1 boot per leg.
+#                     A trace replay (BENCH_CLIENT=agentx) runs no outer round: each replay warms
+#                     itself per lane before its window opens, which is how Hyperloom measures
+#                     AgentX (see "trace-replay warmup" below).
 #   isolated_server   one FRESH server per timed replica (bench_replica.sh), median across
 #                     replicas; spread bounds boot-to-boot variance.  N replicas = N cold boots,
 #                     serialized behind the serving-GPU lock.
-#   legacy            one server, short warmup, $REPEATS timed rounds, median.
+#   legacy            one server, short warmup (none for a trace replay), $REPEATS timed rounds,
+#                     median.
 # All three emit the same acceptance contract.
 #
 # The adapter contract (each scripts/adapters/<BACKEND>.sh must define):
@@ -183,6 +187,21 @@ _resolve_samples() {   # _resolve_samples VALIDATION_DEFAULT NOUN MODE -> sets _
   esac
 }
 
+# ---- trace-replay warmup ----
+# A trace replay warms itself: every aiperf pass replays AGENTX_WARMUP_REQUESTS_PER_LANE requests per
+# lane (inside AGENTX_WARMUP_GRACE_PERIOD) before its measured window opens, and Hyperloom's AgentX
+# baseline and rebench are exactly that -- a fresh server and ONE pass.  The client ignores the prompt
+# count, so an outer round in front of it is one more full window (3600s on a parity or validation
+# leg), and on GLM-5.2 it moved the timed pass by only -1.3%..+2.7%.  So a trace replay with a timed
+# round to follow runs none.  It is kept where it is the only traffic (REPEATS=0 shape capture), for
+# ATOM (whose readiness check is defined to run after it), and when GEAK_AGENTX_OUTER_WARMUP=1.
+_agentx_self_warm() {   # _agentx_self_warm TIMED_ROUNDS -> rc 0 when the replay is its own warmup
+  [ "${BENCH_CLIENT:-native}" = "agentx" ] || return 1
+  [ "${BACKEND:-sglang}" != "atom" ] || return 1
+  [ "${GEAK_AGENTX_OUTER_WARMUP:-0}" != "1" ] || return 1
+  case "${1:-}" in ''|*[!0-9]*|0) return 1 ;; esac
+}
+
 # ---- warm-server measurement protocol (Hyperloom-aligned) ----
 # ONE server per leg: a full untimed round populates the prefix cache, then $ROUNDS timed rounds on
 # that same hot server (median).  Byte-for-byte baseline.py's warmup_round/measure_round, so both
@@ -196,16 +215,26 @@ if [ "${GEAK_REPEAT_MODE:-legacy}" = "warm_server" ]; then
   _resolve_samples 1 "timed round" warm-server
   _rounds="$_samples"
   REPEATS="$_rounds"
-  BENCH_OUTER_WARMUP_FULL_ROUND=1   # round 1 is a FULL round, and it is discarded
+  if _agentx_self_warm "$_rounds"; then
+    BENCH_OUTER_WARMUP_FULL_ROUND=0 # the replay's own per-lane warmup is the whole warmup
+  else
+    BENCH_OUTER_WARMUP_FULL_ROUND=1 # round 1 is a FULL round, and it is discarded
+  fi
   BENCH_COLD_FINAL=0                # a cold round would defeat the point of warming
-  GEAK_ISOLATED_REPLICA=0           # not a replica: the outer warmup MUST run
+  GEAK_ISOLATED_REPLICA=0           # not a replica: a replica's warmup skip must not apply
   WARM_SERVER_ROUNDS="$_rounds"
   MEASUREMENT_PURPOSE="$_purpose"
   export REPEATS BENCH_OUTER_WARMUP_FULL_ROUND BENCH_COLD_FINAL \
          GEAK_ISOLATED_REPLICA WARM_SERVER_ROUNDS MEASUREMENT_PURPOSE
-  echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=$_rounds" \
-       "(Hyperloom lifecycle: 1 server, round 1 = full warmup discarded," \
-       "$([ "$_rounds" = 1 ] && echo "round 2 = the reported number)" || echo "median of the $_rounds timed rounds)")"
+  if [ "$BENCH_OUTER_WARMUP_FULL_ROUND" = 1 ]; then
+    echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=$_rounds" \
+         "(Hyperloom lifecycle: 1 server, round 1 = full warmup discarded," \
+         "$([ "$_rounds" = 1 ] && echo "round 2 = the reported number)" || echo "median of the $_rounds timed rounds)")"
+  else
+    echo "Measurement: warm_server  purpose=$_purpose  timed_rounds=$_rounds" \
+         "(Hyperloom AgentX lifecycle: 1 server, no outer round -- the replay warms itself per lane," \
+         "$([ "$_rounds" = 1 ] && echo "then its window is the reported number)" || echo "median of the $_rounds timed rounds)")"
+  fi
   GEAK_REPEAT_MODE=legacy
 fi
 # ---- isolated-server measurement protocol ----
@@ -810,11 +839,21 @@ fi
 # ---- optional outer warmup (never timed) ----
 # Cache-cold isolated replicas skip it (the client still warms itself internally; the
 # timed prompt set just is not pre-replayed). Legacy keeps the short CONC-prompt warmup;
-# warm_server sets BENCH_OUTER_WARMUP_FULL_ROUND=1 for the full discarded round.
+# warm_server sets BENCH_OUTER_WARMUP_FULL_ROUND=1 for the full discarded round. A trace
+# replay with a timed round to follow skips it (see "trace-replay warmup").
+# BENCH_WARMUP_PROTOCOL tells bench_summarize.py which warmup a trace replay's number had.
+unset BENCH_WARMUP_PROTOCOL
 if [ "${GEAK_ISOLATED_REPLICA:-0}" = "1" ] \
    && [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" != "1" ]; then
   echo ">>> Skipping outer warmup (compute-warm/cache-cold isolated replica) ..."
+elif [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" != "1" ] && _agentx_self_warm "$REPEATS"; then
+  echo ">>> Skipping outer warmup: the trace replay warms itself per lane before its measured" \
+       "window (Hyperloom's AgentX protocol) ..."
+  BENCH_WARMUP_PROTOCOL=replay_per_lane; export BENCH_WARMUP_PROTOCOL
 else
+  if [ "$BENCH_CLIENT" = "agentx" ]; then
+    BENCH_WARMUP_PROTOCOL=outer_round; export BENCH_WARMUP_PROTOCOL
+  fi
   _warmup_prompts="$CONC"
   if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
     _warmup_prompts="$NUM_PROMPTS"

@@ -223,7 +223,7 @@ async function run(body, overrides = {}, reply = selection()) {
       history: {ledger: []}, acceptedKernels: [], log: () => {}, noteKernelKB: () => {},
       laneArgs: a => a, parallel: jobs => Promise.all(jobs.map(f => f())),
       extractWithBaseline: async () => ({unittest_smoke: 'pass', task_dir: '/task', target_callable: 'pkg:leaf'}),
-      workflow: async () => ({final_patch: '/patch', final_geomean: geomean, final_weighted: weighted}),
+      reserveBoundedWorkflow: async () => ({final_patch: '/patch', final_geomean: geomean, final_weighted: weighted}),
       runIntegrateBothLegs: async (_intro, inputs) => {
         integrated.push(inputs);
         return {e2e_throughput_tok_s: 110};

@@ -57,7 +57,7 @@ check("RDNA4 matrix-core guidance is WMMA, not hard-coded MFMA",
 
 # Every lane invocation must go through it. Two shapes exist: the bounded wrappers, which inject
 # internally, and raw `workflow(...)` calls, which must wrap their args explicitly.
-WRAPPERS = ("fastBoundedWorkflow", "deepBoundedWorkflow")
+WRAPPERS = ("fastBoundedWorkflow", "deepBoundedWorkflow", "reserveBoundedWorkflow")
 for w in WRAPPERS:
     body = s[s.index(f"function {w}("):][:600]
     check(f"{w} injects the lane defaults",

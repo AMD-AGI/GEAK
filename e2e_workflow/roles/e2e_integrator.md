@@ -339,7 +339,9 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    round(s) on that same hot server. With the default `REPLICAS=1` that is exactly two client passes
    per leg and the second one is the number — the same measurement the orchestrator's
    `warmup_round`/`measure_round` takes, and the same one this run's baseline and final validation
-   take, so every number in the run is comparable.
+   take, so every number in the run is comparable. A trace replay (`BENCH_CLIENT=agentx`) skips the
+   discarded round: the replay warms every lane before its window opens, so each leg is ONE pass,
+   which is how Hyperloom measures AgentX.
    Under `isolated_server` (opt-in) each of the `REPLICAS` samples instead launches its own fresh
    server, retains the client's internal kernel/graph warmups, skips the outer full-round replay,
    records one cache-cold measured request set, and tears down — there, never use multiple timed

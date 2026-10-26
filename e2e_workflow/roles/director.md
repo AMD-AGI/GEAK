@@ -103,7 +103,9 @@ Steps:
    against, so it MUST be taken exactly the way the sweep, integrate and validate legs will be.
    The default `warm_server` boots ONE server, runs a full untimed round that populates the prefix
    cache and is discarded, then runs `REPLICAS` timed round(s) on that hot server — Hyperloom's own
-   `warmup_round`/`measure_round`. Under `isolated_server` each replica is a fresh server and
+   `warmup_round`/`measure_round`. A trace replay (`BENCH_CLIENT=agentx`) has no discarded round: the
+   replay warms every lane before its window opens, so the leg is ONE pass — Hyperloom's AgentX
+   baseline and rebench. Under `isolated_server` each replica is a fresh server and
    InferenceX's internal kernel/graph warmups run but no outer full-round replay does.
    **Serving is TP=`SERVING_TP`
    on the GPU set `SERVING_GPU`** (both passed in your inputs / the SERVING CONFIG INVARIANT block of
@@ -201,6 +203,8 @@ your own. It is one of:
   two client passes per leg with the second one reported — precisely how Hyperloom measures its own
   baseline and variants (`warmup_round` discarded → `measure_round` on the re-attached hot server), so
   your number and the orchestrator's rebench are the same measurement. It costs 2 server boots total.
+  A trace replay (`BENCH_CLIENT=agentx`) skips the discarded round: the replay warms every lane itself
+  before its window opens, so each leg is ONE pass, which is how Hyperloom measures AgentX.
   The spread across those rounds bounds CLIENT noise, not boot-to-boot noise — see step 1's caveat,
   and at `REPLICAS=1` there is no spread at all.
 - **`isolated_server`** (opt-in): `REPLICAS` FRESH servers per leg. Every replica retains the client's

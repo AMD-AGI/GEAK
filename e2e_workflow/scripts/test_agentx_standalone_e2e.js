@@ -211,10 +211,12 @@ try {
   const s = base.summary || {};
   const calls = aiperfCalls(base);
   ok(launches(base) === 1, 'one server for the whole leg');
-  ok(calls.length === 2, 'one discarded full replay to warm the cache, then the timed replay');
+  ok(calls.length === 1,
+    "no outer round: the replay warms itself per lane, then its window is the number (Hyperloom's AgentX protocol)");
+  ok(s.warmup_protocol === 'replay_per_lane', `and the summary says how it was warmed (${s.warmup_protocol})`);
   ok(s.metric_basis === wf.AGENTX_METRIC_BASIS, `the summary is on the declared axis (${s.metric_basis})`);
-  ok(near(s.throughput_tok_s_median, p90For(2)),
-    `the graded number is 1000 / P90 ITL of the TIMED replay (${s.throughput_tok_s_median}), not the warmup's`);
+  ok(near(s.throughput_tok_s_median, p90For(1)),
+    `the graded number is 1000 / P90 ITL of that replay (${s.throughput_tok_s_median})`);
   ok(near(s.guard_aggregate_output_tok_s_median, OUT_TPUT), 'output tok/s rides beside it as the guard');
   ok(!('guard_total_tok_s_median' in s) && !('guard_basis' in s),
     'the removed total-throughput guard fields stay absent');
@@ -226,11 +228,13 @@ try {
       && flag(c.argv, '--num-dataset-entries') === '393', `replay ${c.call} replays the canonical corpus`);
     ok(flag(c.argv, '--failed-request-threshold') === '0.01', `replay ${c.call} tolerates no crashed tail`);
     ok(!c.argv.includes('--unsafe-override'), `replay ${c.call} needs no override`);
+    ok(Number(flag(c.argv, '--warmup-requests-per-lane')) > 0 && Number(flag(c.argv, '--warmup-grace-period')) > 0,
+      `replay ${c.call} warms every lane before its window opens -- the warmup the leg relies on`);
   }
   const baseRow = rows(path.join(base.out, 'bench_runs.jsonl'));
   ok(baseRow.length === 1 && baseRow[0].submission_valid === true
     && baseRow[0].submission_invalid_reasons.length === 0,
-  'only the timed row is kept, and a canonical replay stays submittable');
+  'one timed row, and a canonical replay stays submittable');
 
   // ── 4. Setup's own check accepts it and installs the served shape ─────────────────────────────
   console.log("\n# the workflow's Setup check, run against what the baseline wrote");
@@ -246,9 +250,9 @@ try {
     { MEASUREMENT_PURPOSE: 'search', OUT_DIR: path.join(EVAL_DIR, 'search_leg') });
   ok(search.proc.status === 0, `the search leg exits 0 (${search.proc.status === 0 ? 'ok' : why(search)})`);
   const sc = aiperfCalls(search);
-  ok(sc.length === 2 && sc.every((c) => flag(c.argv, '--benchmark-duration') === '900'
+  ok(sc.length === 1 && sc.every((c) => flag(c.argv, '--benchmark-duration') === '900'
     && c.argv.includes('--unsafe-override') && flag(c.argv, '--failed-request-threshold') === '0.10'),
-  'it replays the 900s floor, which needs the override, at the exploring tolerance');
+  'it replays the 900s floor once, which needs the override, at the exploring tolerance');
   const searchRow = rows(path.join(search.out, 'bench_runs.jsonl'))[0] || {};
   ok(searchRow.submission_valid === false
     && (searchRow.submission_invalid_reasons || []).some((r) => /duration=900s\(canonical 3600s\)/.test(r)),
@@ -292,10 +296,10 @@ try {
     OUT_DIR: path.join(EVAL_DIR, `legacy_${Object.keys(extra || {}).join('_') || 'default'}`),
   }, extra || {}));
   const leg = legacyLeg();
-  ok(leg.proc.status === 0 && aiperfCalls(leg).length === 2 && (leg.summary || {}).runs === 1,
-    'the replay gets its short warmup and ONE timed round, not three');
+  ok(leg.proc.status === 0 && aiperfCalls(leg).length === 1 && (leg.summary || {}).runs === 1,
+    'the replay is its own warmup and gets ONE timed round, not three');
   const leg2 = legacyLeg({ REPEATS: '2' });
-  ok(leg2.proc.status === 0 && aiperfCalls(leg2).length === 3 && (leg2.summary || {}).runs === 2,
+  ok(leg2.proc.status === 0 && aiperfCalls(leg2).length === 2 && (leg2.summary || {}).runs === 2,
     'an explicit REPEATS is still honoured');
   const SYN_DIR = stage('eval_synthetic', '');
   const syn = bench(SYN_DIR, { isl: 1024, osl: 1024, conc: 64 },
@@ -303,6 +307,26 @@ try {
   ok(syn.proc.status === 0 && aiperfCalls(syn).length === 0
     && syn.events.filter((e) => e.event === 'native_bench').length === 4 && (syn.summary || {}).runs === 3,
   'with no bench_env.sh the synthetic client keeps its warmup + three rounds');
+  const synWarm = bench(SYN_DIR, { isl: 1024, osl: 1024, conc: 64 },
+    { OUT_DIR: path.join(SYN_DIR, 'warm_server_leg') });
+  ok(synWarm.proc.status === 0 && synWarm.events.filter((e) => e.event === 'native_bench').length === 2
+    && synWarm.summary && !('warmup_protocol' in synWarm.summary),
+  'and its warm_server leg keeps the discarded full round, with its summary fields unchanged');
+
+  // ── 7b. The outer round stays where the timed replay is not the whole protocol ────────────────
+  console.log('\n# where the outer round stays');
+  const optIn = bench(EVAL_DIR, wf.WORKLOAD,
+    { GEAK_AGENTX_OUTER_WARMUP: '1', OUT_DIR: path.join(EVAL_DIR, 'outer_opt_in') });
+  ok(optIn.proc.status === 0 && aiperfCalls(optIn).length === 2
+    && (optIn.summary || {}).warmup_protocol === 'outer_round'
+    && near((optIn.summary || {}).throughput_tok_s_median, p90For(2)),
+  'GEAK_AGENTX_OUTER_WARMUP=1 restores the discarded full replay, and the timed one is still the number');
+  const atom = bench(EVAL_DIR, wf.WORKLOAD, { BACKEND: 'atom', OUT_DIR: path.join(EVAL_DIR, 'atom_leg') });
+  ok(atom.proc.status === 0 && aiperfCalls(atom).length === 2
+    && (atom.summary || {}).warmup_protocol === 'outer_round',
+  "ATOM keeps it: its measurement-ready check is defined to run after a warmup");
+  const shape = legacyLeg({ REPEATS: '0', OUT_DIR: path.join(EVAL_DIR, 'legacy_shape_capture') });
+  ok(aiperfCalls(shape).length === 1, 'a REPEATS=0 shape capture keeps it: it is the only traffic');
 
   // ── 8. A baseline on the wrong axis is stopped at Setup, not discovered at the end ────────────
   console.log('\n# what Setup refuses');

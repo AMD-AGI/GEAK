@@ -3057,6 +3057,7 @@ class TestMain(_RunE2ECase):
         self.patch_rx("invoke_workflow", lambda *a, **k: {})
         knobs = {
             "GEAK_FINAL_RESERVE_CAP_FRAC": "final_reserve_cap_frac",
+            "GEAK_AGENTX_LEG_OVERHEAD_S": "agentx_leg_overhead_s",
             "GEAK_AGENT_TIMEOUT_MS": "agent_timeout_ms",
             "GEAK_AGENT_TIMEOUT_RETRY": "agent_timeout_retry",
             "GEAK_E2E_ACCURACY_GATE": "accuracy_gate",
@@ -3065,15 +3066,17 @@ class TestMain(_RunE2ECase):
         }
         cases = (
             ({}, {}),
-            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "0.4", "GEAK_AGENT_TIMEOUT_MS": "18000000",
+            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "0.4", "GEAK_AGENTX_LEG_OVERHEAD_S": "1800",
+              "GEAK_AGENT_TIMEOUT_MS": "18000000",
               "GEAK_AGENT_TIMEOUT_RETRY": "0", "GEAK_E2E_ACCURACY_GATE": "GSM8K",
               "GEAK_E2E_ACCURACY_LIMIT": "400", "GEAK_E2E_ACCURACY_TOL": "0.02"},
-             {"final_reserve_cap_frac": 0.4, "agent_timeout_ms": 18000000,
+             {"final_reserve_cap_frac": 0.4, "agentx_leg_overhead_s": 1800,
+              "agent_timeout_ms": 18000000,
               "agent_timeout_retry": "false", "accuracy_gate": "gsm8k",
               "accuracy_limit": 400, "accuracy_tol": 0.02}),
             ({"GEAK_AGENT_TIMEOUT_RETRY": "yes"}, {"agent_timeout_retry": "true"}),
-            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "lots", "GEAK_E2E_ACCURACY_GATE": "mmlu",
-              "GEAK_E2E_ACCURACY_TOL": "-1"}, {}),
+            ({"GEAK_FINAL_RESERVE_CAP_FRAC": "lots", "GEAK_AGENTX_LEG_OVERHEAD_S": "slow",
+              "GEAK_E2E_ACCURACY_GATE": "mmlu", "GEAK_E2E_ACCURACY_TOL": "-1"}, {}),
         )
         for env, expected in cases:
             with self.subTest(env=env):

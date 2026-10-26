@@ -25,7 +25,7 @@ SUMMARIZE = os.path.join(SCRIPTS_DIR, "bench_summarize.py")
 #: Env this module reads. Scrubbed before every call so a caller's shell cannot change
 #: what a test measures; `env=` re-adds the ones a test is actually about.
 _LIFECYCLE_ENV = ("E2E_METRIC", "WARM_SERVER_ROUNDS", "GEAK_ISOLATED_REPLICA",
-                  "MEASUREMENT_PURPOSE", "EFFECTIVE_CONFIG_DIGEST")
+                  "MEASUREMENT_PURPOSE", "EFFECTIVE_CONFIG_DIGEST", "BENCH_WARMUP_PROTOCOL")
 
 
 def _load_summarize():
@@ -335,6 +335,16 @@ class FromRunsTest(unittest.TestCase):
         for k in ("status", "usable_for_acceptance", "requested_rounds", "observed_median"):
             self.assertNotIn(k, s)
         self.assertNotIn("status=", line)
+
+    def test_only_a_trace_replay_records_its_warmup(self):
+        """bench_e2e.sh exports BENCH_WARMUP_PROTOCOL for a trace replay alone, so a number taken
+        on the replay's own per-lane warmup says so, and every other client keeps its field set."""
+        s, _ = self.summarize([100.0], env={"WARM_SERVER_ROUNDS": "1",
+                                            "BENCH_WARMUP_PROTOCOL": "replay_per_lane"})
+        self.assertEqual(s["warmup_protocol"], "replay_per_lane")
+        self.assertEqual(s["status"], "complete")
+        s, _ = self.summarize([100.0], env={"WARM_SERVER_ROUNDS": "1"})
+        self.assertNotIn("warmup_protocol", s)
 
 
 class FromReplicasTest(unittest.TestCase):

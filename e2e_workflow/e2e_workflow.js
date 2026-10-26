@@ -352,13 +352,42 @@ const remainingMin = () => (TIME_BUDGET_MS == null ? Infinity : Math.round(remai
 // / p90 77 / max 86min), and the tail is the case this exists for: big models spend the final phase
 // waiting on server boots. A longer tail still ships the reports (Report writes them before Validate; only
 // the re-measure is at risk and run_e2e falls back). The 20% cap binds below a 5h budget.
-// Env override: GEAK_FINAL_RESERVE_S. The cap is GEAK_FINAL_RESERVE_CAP_FRAC (clamped to 5-50%): a trace
-// replay's paired validation is two ~70min legs plus their boots, which 20% of most budgets cannot hold.
+// Env override: GEAK_FINAL_RESERVE_S. The cap is GEAK_FINAL_RESERVE_CAP_FRAC (clamped to 5-50%).
 const FINAL_RESERVE_CAP_FRAC = Math.min(0.5, Math.max(0.05,
   parseFloat(A.final_reserve_cap_frac != null ? A.final_reserve_cap_frac : 0.2) || 0.2));
+// A trace replay's final phase is set by its windows, not by the budget: Finalize benches one search
+// window, and Validate measures the stock and the final stack on the canonical window -- one leg each
+// under warm_server, validation_replicas fresh servers each under isolated_server. Every leg also pays
+// a boot plus the replay's own warmup and drain (agentx_leg_overhead_s; GLM-5.2's legs took 7-13min of
+// the 20min default), and Report, the parity check and the agents' own work get 40min. That sum is an
+// AgentX run's floor: it outranks a smaller reserve and the cap, up to half the budget, so the search
+// cannot spend the time Validate needs to return a measured gain. Read from the raw args because the
+// workload declaration below is evaluated later; it must resolve AgentX exactly as IS_AGENTX does.
+const RESERVE_WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object'
+  ? A.workload_spec
+  : ((!A.workload_kind || A.workload_kind === 'agentx_trace_replay') &&
+      A.state?.workload_spec?.kind === 'agentx_trace_replay'
+    ? A.state.workload_spec : {});
+const RESERVE_IS_AGENTX =
+  String(A.workload_kind || RESERVE_WORKLOAD_SPEC.kind || 'synthetic') === 'agentx_trace_replay';
+const AGENTX_LEG_OVERHEAD_S = Math.max(0,
+  parseInt(A.agentx_leg_overhead_s != null ? A.agentx_leg_overhead_s : 1200, 10) || 0);
+const agentxLegS = (windowS) => windowS + AGENTX_LEG_OVERHEAD_S;
+const _declaredWindowS = (v, dflt) => (Number(v) > 0 ? Number(v) : dflt);
+const AGENTX_VALIDATION_LEGS = 2 * (String(A.validation_measurement_mode || 'warm_server') === 'warm_server'
+  ? 1 : Math.max(1, parseInt(A.validation_replicas != null ? A.validation_replicas : 3, 10) || 1));
+const AGENTX_FINAL_PHASE_MS = !RESERVE_IS_AGENTX ? 0 : 1000 * (2400
+  + agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.geak_loop_duration_s, 900))
+  + AGENTX_VALIDATION_LEGS * agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600)));
 const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
-  ? Math.min(parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
-             Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC))
+  ? (() => {
+    const configured = Math.min(
+      parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
+      Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC));
+    return RESERVE_IS_AGENTX
+      ? Math.max(configured, Math.min(AGENTX_FINAL_PHASE_MS, Math.floor(TIME_BUDGET_MS * 0.5)))
+      : configured;
+  })()
   : null;
 // Effective budget = budget minus the reserve: one definition of time available to optimize.
 const TIME_BUDGET_EFFECTIVE_MS = TIME_BUDGET_MS != null
@@ -372,6 +401,14 @@ const TIME_TAIL_CAP_MS = parseInt(A.time_tail_cap_s != null ? A.time_tail_cap_s 
 // because deep mode references it far earlier; TIME_DEADLINE_HIT is armed on it below.
 const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
   ? Math.max(Math.floor(TIME_BUDGET_EFFECTIVE_MS * 0.6), TIME_BUDGET_EFFECTIVE_MS - TIME_TAIL_CAP_MS) : null;
+if (RESERVE_IS_AGENTX && TIME_BUDGET_MS != null) {
+  log(`[time-budget] trace replay: Finalize's search leg, Report and Validate's ${AGENTX_VALIDATION_LEGS} ` +
+    `canonical legs need ~${Math.round(AGENTX_FINAL_PHASE_MS / 60000)}min; reserving ` +
+    `${Math.round(FINAL_RESERVE_MS / 60000)}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget.` +
+    (FINAL_RESERVE_MS < AGENTX_FINAL_PHASE_MS
+      ? ' WARNING: half the budget cannot hold it, so Validate may not finish both legs — raise time_budget_s.'
+      : ''));
+}
 // ---- FAST MODE (opt-in, default OFF) ----------------------------------------------------------------
 // A time-boxed run that takes ALL its optimization from the HeadKernel track: it SKIPS ConfigSweep AND
 // the editable-kernel Milestone loop, and completes within a wall-clock budget (default 5h). It exists
@@ -1196,7 +1233,8 @@ const EFFECTIVE_CONFIG_DIGEST = String(A.effective_config_digest || '');
 // One lifecycle for EVERY throughput number (baseline, search A/B, parity, validation), because
 // a cache-cold search number and a cache-warm validation number are not comparable and the gains
 // carried between phases used to mix the two. warm_server = Hyperloom's protocol: one server per
-// leg, round 1 a full warmup that is discarded, round 2 IS the number.
+// leg, round 1 a full warmup that is discarded, round 2 IS the number. A trace replay has no outer
+// round: each replay warms itself per lane before its window, which is how Hyperloom measures AgentX.
 // isolated_server (REPLICAS fresh servers per leg) stays available when boot-to-boot variance is
 // what must be gated on. The bench dispatcher owns retry/degraded aggregation in both modes.
 const MEASUREMENT_MODE = String(A.measurement_mode || 'warm_server');
@@ -2897,13 +2935,15 @@ const bankAccepted = (list, e, kr) => {
 // An integrator abandoned at the reserve boundary is still measuring, and is usually minutes from its
 // verdict. No FINISH retry may start inside the reserve, so that return is the only verdict this A/B
 // can still get: wait for it, but only through the first LATE_VERDICT_RESERVE_FRAC of the reserve, so
-// Finalize/Report/Validate keep the rest.
+// Finalize/Report/Validate keep the rest. On a trace replay the wait also never reaches into what the
+// final phase itself costs (AGENTX_FINAL_PHASE_MS): Validate's second canonical leg is the one it would cut.
 const LATE_VERDICT_RESERVE_FRAC = 0.25;
 async function adoptAbandonedVerdict(integ, label) {
   const run = ABANDONED_RUNS.get(label);
   ABANDONED_RUNS.delete(label);
   if (integ || !run || !atReserveFloor() || typeof setTimeout !== 'function') return integ;
-  const waitMs = remainingMs() - Math.ceil(FINAL_RESERVE_MS * (1 - LATE_VERDICT_RESERVE_FRAC));
+  const waitMs = remainingMs() - Math.max(Math.ceil(FINAL_RESERVE_MS * (1 - LATE_VERDICT_RESERVE_FRAC)),
+    AGENTX_FINAL_PHASE_MS);
   if (!(waitMs > 0)) return integ;
   log(`  ${label}: abandoned at the reserve boundary — waiting up to ${Math.round(waitMs / 60000)}min ` +
     'for its own verdict instead of starting a FINISH retry.');
@@ -2981,6 +3021,11 @@ async function reviewSpeedup(integ, inputs, label, phaseName) {
   return result;
 }
 async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
+  // Deferred is incomplete, so every caller keeps it PENDING rather than calling it a rejection.
+  if (abWindowShort(abLegs(inputs), label)) {
+    return { gate: 'incomplete', ab_complete: false,
+      reason: 'deferred: the trace-replay A/B cannot finish before the final reserve' };
+  }
   // Caller inputs win; the accuracy gate and the tuning carve-out only ever ADD keys (each is {} when
   // off / when no tuning was banked).
   const withTuning = {
@@ -2994,6 +3039,7 @@ async function runIntegrateBothLegs(intro, inputs, label, phaseName) {
   let tries = 0;
   while (!abDone(integ) && tries < AB_FINISH_RETRIES) {
     if (searchClosed(`${label}: FINISH retry`)) break;
+    if (abWindowShort(1, `${label}: FINISH retry`)) break;
     tries++;
     log(`  ${label}: A/B incomplete (${integ ? (integ.reason || integ.gate) : 'null/timeout'}); ` +
       `re-invoking integrator to FINISH the missing leg (retry ${tries}/${AB_FINISH_RETRIES}).`);
@@ -3214,32 +3260,53 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
     log(`[fast-mode] head-dispatch deadline (${Math.round(FAST_HEAD_DEADLINE_MS / 60000)}min) reached — no NEW head ops will start; finishing the in-flight head then proceeding to Finalize/Validate within the ${Math.round(FAST_BUDGET_MS / 60000)}min budget.`);
   }, FAST_HEAD_DEADLINE_MS);
 }
-// Run a nested kernel workflow with a fast-mode time cap. When FAST_MODE is off it returns the raw
-// workflow() promise (identical to a direct call); on cap-expiry it resolves null so the caller's
-// existing null-guards treat it as "no kernel" and continue.
+// Run a nested kernel workflow with a fast-mode time cap. When FAST_MODE is off it resolves to the raw
+// workflow() result (identical to a direct call), unless a trace replay's reserve bound applies (see
+// laneWindowShort); on cap-expiry it resolves null so the caller's existing null-guards treat it as
+// "no kernel" and continue.
 // GEAK-ABLATION-ARMS-v2: the head loop publishes the REMAINING implementation cap here
 // before each nested author. A budget the parent cannot enforce on in-flight work is not
 // a budget, so B4's cap races the nested workflow exactly as fast-mode's does. null means
 // no ablation cap, and then this function behaves exactly as it did pre-patch.
 let ABL_NESTED_CAP_MS = null;
-function fastBoundedWorkflow(ref, wfArgs, label) {
+async function fastBoundedWorkflow(ref, wfArgs, label) {
+  if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'HeadKernel')) };
   // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   const ablCap = ABL('B4') && ABL_NESTED_CAP_MS != null ? ABL_NESTED_CAP_MS : null;
   const fastCap = FAST_MODE && FAST_HEAD_WF_MS > 0 ? FAST_HEAD_WF_MS : null;
-  const capMs = ablCap != null && fastCap != null ? Math.min(ablCap, fastCap) : (ablCap != null ? ablCap : fastCap);
+  const resCap = laneReserveCapMs();
+  const capMs = [ablCap, fastCap, resCap].reduce((m, c) => (c != null && (m == null || c < m) ? c : m), null);
   if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
+  return raceLaneCap(p, capMs, () => {
+    if (capMs === resCap) return logLaneAtReserve(label);
+    log(`  [${ablCap != null && capMs === ablCap ? ABLATION_ARM : 'fast-mode'}] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
+    if (ablCap != null && capMs === ablCap) {
+      ablEvent({ event: 'nested_cap', label: label || '', cap_ms: capMs, action: 'abandon' });
+    }
+  });
+}
+// The Milestone track's lanes: the trace-replay reserve bound alone (the fast-mode and B4 caps above
+// belong to the head track).
+async function reserveBoundedWorkflow(ref, wfArgs, label) {
+  if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'Milestone')) };
+  const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
+  const capMs = laneReserveCapMs();
+  if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
+  return raceLaneCap(p, capMs, () => logLaneAtReserve(label));
+}
+function raceLaneCap(p, capMs, onCap) {
   let to;
   const guard = new Promise((resolve) => {
-    to = setTimeout(() => {
-      log(`  [${ablCap != null && capMs === ablCap ? ABLATION_ARM : 'fast-mode'}] nested kernel workflow ${label || ''} exceeded ${Math.round(capMs / 60000)}min — abandoning (null) to stay on budget.`);
-      if (ablCap != null && capMs === ablCap) {
-        ablEvent({ event: 'nested_cap', label: label || '', cap_ms: capMs, action: 'abandon' });
-      }
-      resolve(null);
-    }, capMs);
+    to = setTimeout(() => { onCap(); resolve(null); }, capMs);
   });
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
+}
+function logLaneAtReserve(label) {
+  log(`  [time-budget] nested kernel workflow ${label || ''} still running at the final reserve — abandoning ` +
+    '(null) so Finalize/Report/Validate start on time; the final-phase fence stops what it left on the GPUs.');
 }
 
 // --- DEEP-MODE wall-clock control (no-op unless DEEP_MODE) -------------------------------------------
@@ -3315,6 +3382,76 @@ function deepBoundedWorkflow(ref, wfArgs, label) {
   });
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
 }
+// --- TRACE-REPLAY SEARCH vs THE RESERVE ---------------------------------------------------------------
+// The checks above stop new work at the boundary, but on a trace replay the work already running is
+// long: a kernel lane runs for hours and a search A/B for over an hour, so either one started late runs
+// on past the boundary while Finalize and Validate wait for it. These start each one only when what it
+// costs still fits before the boundary. Inert unless IS_AGENTX and time_budget_s (and in the final phase).
+const AGENTX_AB_OVERHEAD_S = 600;    // the integrator's own build, parity and bookkeeping around the legs
+const AGENTX_LANE_ROUND_S = 3600;    // one lane round still in flight at its stop, plus the lane's report
+const agentxGuardsOn = () => IS_AGENTX && TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED;
+const searchWindowMs = () => remainingMs() - FINAL_RESERVE_MS;
+// A reference leg already on disk (or shared by this head's earlier candidate) is not run again.
+const abLegs = (inputs) => (inputs && (inputs.REUSE_REF || inputs.RESUME_AB) ? 1 : 2);
+const agentxAbMs = (legs) =>
+  1000 * (legs * agentxLegS(_declaredWindowS(AGENTX.geak_loop_duration_s, 900)) + AGENTX_AB_OVERHEAD_S);
+const agentxLaneTailMs = () => agentxAbMs(2) + AGENTX_LANE_ROUND_S * 1000;
+// An A/B started with less than its cost left is abandoned at the boundary with its legs still running
+// into Finalize and Validate, so it is deferred instead: incomplete, pending, surfaced to the caller.
+function abWindowShort(legs, what) {
+  if (!agentxGuardsOn()) return false;
+  const windowMs = searchWindowMs(), needMs = agentxAbMs(legs);
+  if (windowMs >= needMs) return false;
+  log(`[time-budget] ${what} DEFERRED — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
+    `final reserve, under the ~${Math.round(needMs / 60000)}min a ${legs}-leg trace-replay A/B takes.`);
+  return true;
+}
+// A lane must get one round of work before its stop (laneDeadlineArgs) and still leave the A/B for what
+// it found; with less than that left it is not started.
+function laneWindowShort(what) {
+  if (!agentxGuardsOn()) return false;
+  const windowMs = searchWindowMs(), needMs = agentxLaneTailMs() + AGENTX_LANE_ROUND_S * 1000;
+  if (windowMs >= needMs) return false;
+  log(`[time-budget] ${what} NOT STARTED — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
+    `final reserve, under the ~${Math.round(needMs / 60000)}min a kernel lane needs to run a round and ` +
+    'still have its A/B measured before Finalize and Validate.');
+  return true;
+}
+// kernel_lane.js stops STARTING rounds at deadline_epoch and finishes the one in flight, so the stop is
+// a lane tail ahead of the boundary. no_stop_s past the whole window keeps the TechLead free to end the
+// lane early, exactly as without a deadline: the lane's refusal to stop early is for fixed-window
+// measurements. The script has no clock (Date.now() breaks resume), so ONE `date +%s` read is anchored
+// to ELAPSED_MS for the run; while it cannot be read the lane runs without a deadline and only the
+// boundary backstop below bounds it.
+const CLOCK_SCHEMA = obj({ epoch: { type: 'number' } }, ['epoch']);
+let EPOCH_AT_T0 = null;
+async function epochNow(phaseName) {
+  if (EPOCH_AT_T0 == null) {
+    EPOCH_AT_T0 = safeAgent('Run EXACTLY this command and nothing else:\n```bash\ndate +%s\n```\n' +
+      'Return {"epoch": <the integer it printed>}. Do NOT modify any file and do NOT run anything else.',
+      { phase: phaseName, label: 'clock', effort: 'low', schema: CLOCK_SCHEMA }, 1, () => 5 * 60000)
+      .then((r) => (r && Number.isFinite(r.epoch) ? Math.floor(r.epoch) - Math.floor(ELAPSED_MS / 1000) : null));
+  }
+  const t0 = await EPOCH_AT_T0;
+  if (t0 == null) EPOCH_AT_T0 = null;
+  return t0 == null ? null : t0 + Math.floor(ELAPSED_MS / 1000);
+}
+async function laneDeadlineArgs(label, phaseName) {
+  if (!agentxGuardsOn()) return {};
+  const stopInS = Math.floor((searchWindowMs() - agentxLaneTailMs()) / 1000);
+  if (!(stopInS > 0)) return {};
+  const now = await epochNow(phaseName);
+  if (now == null) {
+    log(`  [time-budget] ${label}: wall clock unreadable — the lane runs without a round deadline.`);
+    return {};
+  }
+  log(`  [time-budget] ${label}: the lane starts no round after ~${Math.round(stopInS / 60)}min ` +
+    `(${Math.round(agentxLaneTailMs() / 60000)}min ahead of the final reserve, for its last round and its A/B).`);
+  return { deadline_epoch: now + stopInS, no_stop_s: stopInS + 86400 };
+}
+// Backstop: never wait for a lane past the boundary. Abandoned, its agents run on, and the final-phase
+// fence stops what they left on the GPUs.
+const laneReserveCapMs = () => (agentxGuardsOn() ? Math.max(AGENT_TIMEOUT_FLOOR_MS, searchWindowMs()) : null);
 
 // GPU semaphore (FAST MODE only — the default path never constructs one). Hands out EXCLUSIVE leases of
 // physical card ids from a pool so two concurrent isolated jobs never share a GPU -> their op-bench /
@@ -5993,6 +6130,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         ABL_NESTED_CAP_MS = Math.max(60000, ablImplCap - implMs);
       }
       const lang = ap.language || 'triton';
+      if (laneWindowShort(`author lane ${h.short_name}:${lang}`)) {
+        history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'paused',
+          lesson: 'time-budget: too close to the final reserve for a kernel lane plus its A/B' });
+        break;
+      }
       let al;
       // Retry the nested author on a TRANSIENT/early failure (threw, or returned with no real
       // optimization: no final_geomean) — a transient nested-workflow death must NOT silently drop a
@@ -6275,7 +6417,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     // RECURSIVE kernel layer on the IMMUTABLE task dir (one allowed nesting level via workflow()).
     let kl;
     try {
-      const r = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, laneArgs({
+      const r = await reserveBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
         kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
         use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
         ...KB_ARGS,
@@ -6283,8 +6425,10 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
         task: 'Compare candidate backends ' + JSON.stringify(c.candidate_backends || []) +
           ' for this kernel; pick the fastest that passes the immutable unittest. ' + GRAPH_REQ + (TASK || ''),
         apply_to_original: 'false',
-      }));
-      noteKernelKB(r, String(c.short_name || ext.op_kind || 'milestone'));
+      }, String(c.short_name || ext.op_kind || 'milestone'));
+      if (r == null && IS_AGENTX) {
+        return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
+      }
       kl = { ran: true, kernel_eval_dir: r.eval_dir, final_patch: r.final_patch,
         final_geomean: r.final_geomean,
         isolated_speedup: KERNEL_EXTRACT_ON ? (r.final_weighted ?? r.final_speedup ?? 0) : r.final_geomean,
@@ -6303,7 +6447,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
     const c = o.c;
     if (o.skip) {
       log(`  ${c.short_name}: ${o.reason}; skipping.`);
-      history.ledger.push({ direction: c.short_name, verdict: 'dead_end', lesson: o.reason });
+      history.ledger.push({ direction: c.short_name, verdict: o.paused ? 'paused' : 'dead_end', lesson: o.reason });
       continue;
     }
     const { ext, kl } = o;
@@ -6521,6 +6665,13 @@ if (want('final')) {
         `Finalize/Report/Validate must run. Deferred, not discarded: they are surfaced in pending_integrations.`);
       break;
     }
+    if (abWindowShort(abLegs(pendingIntegrations[0].inputs), `Finalize-gate: ${pendingIntegrations[0].short_name}`)) {
+      log(`Finalize-gate: STOPPING with ${pendingIntegrations.length} A/B(s) unfinished ` +
+        `(${pendingIntegrations.map((q) => q.short_name).join(', ')}) — the next one cannot finish before the ` +
+        'final reserve, which Finalize/Report/Validate need whole. Deferred, not discarded: they are surfaced ' +
+        'in pending_integrations.');
+      break;
+    }
     const p = pendingIntegrations.shift();   // pop one per iteration => guaranteed termination
     log(`Finalize-gate: finishing pending A/B (${p.short_name}, ${(p.isolated || 0).toFixed(2)}x isolated); ` +
       `${pendingIntegrations.length} more queued.`);
@@ -6676,7 +6827,9 @@ if (want('final')) {
     { phase: 'Report', label: 'architect:report', schema: REPORT_SCHEMA });
 
   // Validate is sized into FINAL_RESERVE_MS, so there should be room for it here; it is not time-GATED
-  // (attempting it beats skipping when the clock has drifted). If the hard kill lands mid-bench the loss is
+  // (attempting it beats skipping when the clock has drifted). On a trace replay the reserve holds
+  // AGENTX_FINAL_PHASE_MS and the search is held to end at its boundary (TRACE-REPLAY SEARCH vs THE
+  // RESERVE), so both canonical legs fit. If the hard kill lands mid-bench the loss is
   // bounded — Report already wrote architect_report.md + final_report.md, and run_e2e.py falls back
   // (director_e2e_validation.json → best overlay's integrate_result.json), so a real win still reaches the caller.
   phase('Validate');

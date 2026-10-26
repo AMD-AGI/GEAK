@@ -741,8 +741,9 @@ def map_args(
         "search_replicas": 1,
         "validation_replicas": 3,
         # warm_server IS Hyperloom's protocol, not a truncation of a longer one: two client passes
-        # on one server, report the second.  A 3-round median would be a different statistic from
-        # the one it rebenches against, so the round count is not a knob here.
+        # on one server, report the second (one pass for an AgentX replay, which warms itself per
+        # lane, as Hyperloom's AgentX rebench does).  A 3-round median would be a different
+        # statistic from the one it rebenches against, so the round count is not a knob here.
         "validation_measurement_mode": "warm_server",
         # Hyperloom already did config/param search in EXPLORE; do not double-run.
         "config_tune": "false",
@@ -780,19 +781,25 @@ def map_args(
     # budget-unaware (byte-identical to a direct, non-interface invocation).
     if timeout_s is not None and timeout_s > 0:
         ps_args["time_budget_s"] = int(timeout_s)
-    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget);
-    # this lets an operator widen it per run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
+    # Final-phase reserve. Default lives in the JS (60min, capped at 20% of the budget; a trace
+    # replay floors it at what its own final phase costs); this lets an operator widen it per
+    # run -- e.g. GEAK_FINAL_RESERVE_S=5400 for 90min.
     # Optional: unset means the JS default, so no caller (Hyperloom included) has to set it.
     final_reserve_s = _int_or_none(os.environ.get("GEAK_FINAL_RESERVE_S"), "GEAK_FINAL_RESERVE_S")
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
-    # ...and the cap on it, as a fraction of the budget (JS default 0.2). The reserve has to hold the
-    # Director's paired base/final validation, which on a trace replay is two ~70min legs plus their
-    # boots -- past 20% of most budgets. Optional in the same way as the reserve itself.
+    # ...and the cap on it, as a fraction of the budget (JS default 0.2). A trace replay's floor is
+    # not bound by it (only by half the budget). Optional in the same way as the reserve itself.
     reserve_cap = _float_or_none(
         os.environ.get("GEAK_FINAL_RESERVE_CAP_FRAC"), "GEAK_FINAL_RESERVE_CAP_FRAC")
     if reserve_cap is not None:
         ps_args["final_reserve_cap_frac"] = reserve_cap
+    # ...and the boot + replay warmup + drain that floor adds to each trace-replay leg's window
+    # (JS default 1200s). Raise it for a model whose server boots slower.
+    leg_overhead = _int_or_none(
+        os.environ.get("GEAK_AGENTX_LEG_OVERHEAD_S"), "GEAK_AGENTX_LEG_OVERHEAD_S")
+    if leg_overhead is not None:
+        ps_args["agentx_leg_overhead_s"] = leg_overhead
     # Hung-agent guard (JS default 120min, then up to two retries). A serving agent on a trace replay
     # can legitimately outlive 120min, and the guard cannot stop the attempt it gives up on, so a
     # retry runs beside a still-live original on the same GPUs. GEAK_AGENT_TIMEOUT_RETRY=0 degrades
@@ -2125,6 +2132,8 @@ def apply_bench_protocol(h: dict) -> dict:
         # Warm-server parity -- one server per leg, a discarded full warmup round, then the
         # timed round(s) on that hot server (Hyperloom's warmup_round/measure_round
         # lifecycle) -- is about the SERVER lifecycle, so it holds for either workload kind.
+        # An AgentX replay gets no discarded round: bench_e2e.sh lets the replay warm itself per
+        # lane, which is exactly Hyperloom's AgentX baseline and rebench.
         aligned = {
             "GEAK_REPEAT_MODE": "warm_server",
             # Pinned as env too (bench_e2e.sh honours it for MEASUREMENT_PURPOSE=validation only)
