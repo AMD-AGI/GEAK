@@ -110,15 +110,19 @@ if (Object.prototype.hasOwnProperty.call(A, 'lineages')) {
   need(Array.isArray(A.lineages) && A.lineages.length > 0, 'lineages must be a nonempty array');
   const members = A.lineages.map(value => {
     need(value && typeof value === 'object' && !Array.isArray(value)
-      && Object.keys(value).every(key => ['id', 'optimizer', 'imports'].includes(key)),
-    'each lineage supports only id, optimizer and imports');
+      && Object.keys(value).every(key => ['id', 'optimizer', 'imports', 'focus'].includes(key)),
+    'each lineage supports only id, optimizer, imports and focus');
     need(typeof value.id === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(value.id), 'lineage IDs must be safe lowercase names');
     need(['greedy', 'evo'].includes(value.optimizer), 'each lineage requires optimizer=greedy or evo');
+    const hasFocus = Object.prototype.hasOwnProperty.call(value, 'focus');
+    need(!hasFocus || (typeof value.focus === 'string' && value.focus.trim()),
+      'lineage focus must be a nonempty string when provided');
     const imports = value.imports === undefined ? [] : value.imports;
     need(Array.isArray(imports) && imports.every(id => typeof id === 'string')
       && new Set(imports).size === imports.length, 'lineage imports must be distinct peer IDs');
     need(value.optimizer === 'evo' || imports.length === 0, 'greedy lineages require imports=[]');
-    return { id: value.id, optimizer: value.optimizer, imports: [...imports] };
+    return { id: value.id, optimizer: value.optimizer, imports: [...imports],
+      ...(hasFocus ? { focus: value.focus } : {}) };
   });
   const ids = new Set(members.map(member => member.id));
   need(ids.size === members.length, 'lineage IDs must be distinct');
@@ -207,6 +211,13 @@ if (Object.prototype.hasOwnProperty.call(A, 'lineages')) {
     };
     delete child.lineages;
     delete child.continuing_lineage;
+    // TASK already reaches initial analysis, round planning and both engineer
+    // policies. Leave the inherited task untouched when no focus was supplied.
+    if (member.focus !== undefined) child.task = `${A.task == null ? '' : A.task}\n\nInitial exploration focus for this lineage:\n${member.focus}\n\n`
+      + 'Use this focus in the initial Analysis and subsequent round directions to develop a distinct computational organization beyond tile-size tuning. '
+      + 'Treat it as a revisable hypothesis: change direction when analysis or measurements invalidate its premise. '
+      + 'Preserve the full original task contract, allowed source boundaries, correctness requirements, evaluator, and primary objective across every required case and regime. '
+      + "Scenario priorities guide exploration only; selection and export remain governed by the full task's unchanged objective.";
     if (finalReserve) {
       child.deadline_epoch = Number(A.deadline_epoch) - finalReserve;
       child.search_reserve_s = Number(A.search_reserve_s) - finalReserve;
@@ -226,6 +237,7 @@ if (Object.prototype.hasOwnProperty.call(A, 'lineages')) {
     ...(A.search_reserve_s != null ? {search_cutoff_epoch: Number(A.deadline_epoch) - Number(A.search_reserve_s)} : {}),
     lineages: prepared.map(member => ({ id: member.id, optimizer: member.optimizer,
       imports: member.imports, eval_dir: member.args.eval_dir,
+      ...(member.focus !== undefined ? { focus: member.focus } : {}),
       ...Object.fromEntries(['deadline_epoch', 'search_reserve_s', 'final_validation_reserve_s',
         'final_cleanup_reserve_s', 'budget'].filter(key => member.args[key] != null).map(key => [key, member.args[key]])),
       ...Object.fromEntries(commandKeys.filter(key => member.args[key]).map(key => [key, member.args[key]])),
@@ -291,6 +303,7 @@ with p.open('x') as stream: stream.write(sys.stdin.read()+'\\n')
 print(json.dumps({'written':str(p)}))`;
   const settled = await parallel(prepared.map(member => async () => {
     const record = { id: member.id, optimizer: member.optimizer, imports: member.imports,
+      ...(member.focus !== undefined ? { focus: member.focus } : {}),
       eval_dir: member.args.eval_dir, status: 'failed', result: null };
     try {
       const result = await workflow({ scriptPath: WORKER }, member.args);
@@ -307,6 +320,7 @@ print(json.dumps({'written':str(p)}))`;
   }));
   const lineages = prepared.map((member, index) => settled[index] || {
     id: member.id, optimizer: member.optimizer, imports: member.imports,
+    ...(member.focus !== undefined ? { focus: member.focus } : {}),
     eval_dir: member.args.eval_dir, status: 'failed', result: null, error: 'workflow returned no disposition',
   });
   const query = await processJson('python3', [`${WORKFLOW_DIR}/scripts/query_population.py`, '--root', root], 300000);

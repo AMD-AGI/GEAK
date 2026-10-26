@@ -62,6 +62,21 @@ change the member's incumbent automatically. Greedy members require no imports
 and retain the ordinary planning policy. With no `lineages` argument, the
 existing single-workflow behavior is unchanged.
 
+A member may also supply a nonempty `focus` string. The dispatcher appends it to
+that member's existing task text as a revisable research question. The initial
+analysis, round planner and engineers receive it through the existing task
+prompt. It asks for a concrete computational organization, beyond parameter
+tuning alone, while preserving the full task, editable boundary and evaluator.
+It does not select a subset of cases or create a MAP-Elites cell.
+
+Choose task-grounded charters before launch and retain their exact text in the
+run configuration. For a matched comparison, give the same charters to the same
+members in both populations; `focus` supports either optimizer. Leave the
+ordinary reference member without a focus to preserve its task prompt. Members
+without `focus` receive the original task text unchanged. Focus text appears in
+the population manifest and member results; distinct text alone does not prove
+that the resulting implementations explore distinct approaches.
+
 Mutable evaluation state, local knowledge writes and compiler caches are
 isolated. Members start with copies of the configured knowledge/state seeds;
 remote knowledge reads retain their configured policy and remote writes are
@@ -72,7 +87,8 @@ replace a pinned measurement lock with the common `--gpu-pool` argument.
 The runtime's model concurrency and the number of lineages are separate limits.
 Each lineage may have several engineers and inherits its own copy of the declared
 search budget; the dispatcher does not divide that budget among members. They
-share the runtime's model semaphore and total-call limit. Configure actual
+share the runtime's model semaphore and its current 1,000-agent-call lifetime
+limit. A large direction budget does not remove that limit. Configure actual
 allowances explicitly; 24 lineages can demand substantially more than 24 active
 engineers. Shared service does not reproduce a separate GEAK run's resources or
 stochastic trajectory.

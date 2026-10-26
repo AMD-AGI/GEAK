@@ -10,8 +10,9 @@
 //        overrides auto-discovery, and the winner is picked by speedup on the one frozen baseline.
 //   L-M) bake-off IDENTITY — expected/detected identity reaches every lane, gfx1201 isolates CDNA
 //        knowledge, and an unvalidated ISA (gfx1200) is refused before Discover.
-//   N-Q) optional POPULATION — independent workflows share command-level GPUs, keep private paths,
-//        preserve native argv identities, and select through the source/evidence query.
+//   N-S) optional POPULATION — independent workflows share command-level GPUs, keep private paths,
+//        preserve native argv identities, select through the source/evidence query, and can receive
+//        a revisable exploration focus through the inherited task without changing the objective.
 //
 // The Workflow runtime globals (args/phase/log/workflow/agent/parallel/pipeline/budget) are stubbed, so
 // model calls are stubbed; population path checks use local CPU Python processes in a temporary tree.
@@ -437,6 +438,7 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
       'failed member disposition is retained');
     for (const call of trace.workflowCalls) {
       const a = call.args, id = a.population_lineage.id;
+      ok(!Object.prototype.hasOwnProperty.call(a, 'task'), `${id} without focus preserves an absent task`);
       ok(a.gpu_ids === '0,2' && a.gpu_mode === 'pool', `${id} receives the same normalized GPU pool`);
       ok(a.budget === 9 && a.apply_to_original === 'false' && !('lineages' in a),
         `${id} keeps its own budget and isolated worker invocation`);
@@ -467,6 +469,7 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     nativeArgs.external_result_command = nativeCommand('/tmp/development-state', 'read');
     nativeArgs.external_final_measurement_command = nativeCommand('/tmp/final-state', 'measure');
     nativeArgs.external_final_result_command = nativeCommand('/tmp/final-state', 'read');
+    nativeArgs.lineages[1].focus = 'Explore parallel reductions while retaining the full native task.';
     Object.assign(nativeArgs, { deadline_epoch: 2000000000, search_reserve_s: 300,
       final_validation_reserve_s: 60, final_cleanup_reserve_s: 10, population_final_reserve_s: 100 });
     const nativeBuild = build(nativeArgs, {
@@ -477,6 +480,8 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     const optionValue = (argv, option) => argv[argv.indexOf(option) + 1];
     for (const call of nativeBuild.trace.workflowCalls) {
       const a = call.args;
+      ok(a.objective === nativeArgs.objective,
+        `${a.population_lineage.id}: focus leaves the full native primary objective unchanged`);
       ok(a.deadline_epoch === nativeArgs.deadline_epoch - 100
         && a.deadline_epoch - a.search_reserve_s === nativeArgs.deadline_epoch - nativeArgs.search_reserve_s,
         `${a.population_lineage.id}: common final reserve preserves the declared search cutoff`);
@@ -514,15 +519,23 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
       ['duplicate IDs', { lineages: [{ id: 'a', optimizer: 'greedy' }, { id: 'a', optimizer: 'evo' }] }],
       ['foreign import', { lineages: [{ id: 'a', optimizer: 'evo', imports: ['missing'] }] }],
       ['greedy import', { lineages: [{ id: 'a', optimizer: 'greedy', imports: ['b'] }, { id: 'b', optimizer: 'evo' }] }],
+      ['unknown member key', { lineages: [{ id: 'a', optimizer: 'greedy', focus: 'Explore staging.', niche: 'cell' }] }],
       ['invalid GPU pool', { gpu_ids: '0,0' }],
       ['combined state flag', { external_result_command: ['reader', '--state-root=/tmp/state', '--gpu-pool', '0', 'read'] }],
       ['duplicate state flag', { external_result_command: ['reader', '--state-root', '/tmp/a', '--state-root', '/tmp/b', '--gpu-pool', '0', 'read'] }],
     ];
+    for (const focus of [undefined, null, false, 0, [], {}, '', ' \n\t\u2003']) {
+      invalid.push([`invalid focus (${String(focus)})`, {
+        lineages: [{ id: 'a', optimizer: 'greedy', focus }],
+      }]);
+    }
     for (const [name, override] of invalid) {
       const trial = build({ ...populationArgs('invalid'), ...override }, { runProcess: hostWithQuery(() => null) });
       let error = null;
       try { await trial.run(); } catch (e) { error = e; }
       ok(!!error && trial.trace.workflowCalls.length === 0, `${name} fails before launching a lineage`);
+      if (name.startsWith('invalid focus')) ok(error && /focus must be a nonempty string/.test(error.message)
+        && trial.trace.processCalls.length === 0, `${name} is rejected before any host mutation`);
     }
     const stale = build(args, { runProcess: hostWithQuery(() => null) });
     let reused = null;
@@ -671,6 +684,56 @@ raise SystemExit(native.main(argv))
           && r.final_patch === `${a.eval_dir}/population/explorer/common_final_patch.diff`,
           'completed confirmation is persisted before the later cutoff and remains a valid public patch');
       }
+    }
+
+    console.log('\n# S. optional focus reaches either optimizer and preserves unfocused task arguments');
+    const shortFocus = '  Explore producer/consumer staging.\nKeep intermediate reuse local: \u03bb, `code`, $values, $(literal).  ';
+    const taskCases = [
+      ['absent', {}], ['undefined', { task: undefined }], ['empty', { task: '' }],
+      ['verbatim', { task: '  Optimize the full task.\r\nPreserve literal `code`, $values and trailing whitespace.\n\t' }],
+      ['large_focus', { task: 'Optimize the full task.' }],
+    ];
+    for (const [name, taskFields] of taskCases) {
+      const focus = name === 'large_focus' ? shortFocus.repeat(1000) : shortFocus;
+      const a = { ...populationArgs(`focus_${name}`), ...taskFields,
+        lineages: [{ id: 'a', optimizer: 'greedy', imports: [] },
+          { id: 'b', optimizer: 'greedy', imports: [], focus },
+          { id: 'c', optimizer: 'evo', imports: ['a', 'b'], focus }],
+      };
+      const before = JSON.stringify(a);
+      const focused = build(a, {
+        workflow: async child => {
+          if (child.population_lineage.id === 'c') throw new Error('focused member failed');
+          return { eval_dir: child.eval_dir, validation_status: 'invalid_measurement' };
+        },
+        runProcess: hostWithQuery(() => ({ schema: 'geak.population.query/1', selected: null, candidates: [] })),
+      });
+      const r = await focused.run();
+      ok(focused.trace.workflowCalls.length === 3 && focused.trace.agentLabels.length === 0,
+        `${name}: focus launches one existing worker per member without new planner calls`);
+      const children = Object.fromEntries(focused.trace.workflowCalls.map(call => [call.args.population_lineage.id, call.args]));
+      ok(children.a.task === a.task
+        && Object.prototype.hasOwnProperty.call(children.a, 'task') === Object.prototype.hasOwnProperty.call(a, 'task'),
+        `${name}: unfocused ordinary member preserves the original task value and property presence`);
+      for (const id of ['b', 'c']) {
+        const child = children[id];
+        ok(typeof child.task === 'string' && child.task.startsWith(a.task || '') && child.task.includes(focus),
+          `${name}: ${child.optimizer} receives the verbatim task prefix and focus through task`);
+      }
+      ok(children.b.task === children.c.task, `${name}: a matching focus produces matching task steering across optimizers`);
+      ok(children.b.continuing_lineage === undefined && children.c.continuing_lineage === true,
+        `${name}: focus preserves each optimizer's continuation policy`);
+      const m = JSON.parse(fs.readFileSync(`${a.eval_dir}/population/manifest.json`, 'utf8'));
+      const persisted = JSON.parse(fs.readFileSync(`${a.eval_dir}/population/result.json`, 'utf8'));
+      for (const [label, rows] of [['manifest', m.lineages], ['returned result', r.population.lineages],
+        ['persisted result', persisted.population.lineages]]) {
+        ok(!Object.prototype.hasOwnProperty.call(rows.find(row => row.id === 'a'), 'focus')
+          && rows.filter(row => row.id !== 'a').every(row => row.focus === focus),
+          `${name}: ${label} records only explicitly supplied focus strings without trimming`);
+      }
+      ok(r.population.lineages.find(row => row.id === 'c').status === 'failed',
+        `${name}: failed focused member retains its metadata and disposition`);
+      ok(JSON.stringify(a) === before, `${name}: population leaves caller arguments unchanged`);
     }
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
