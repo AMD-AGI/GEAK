@@ -78,6 +78,38 @@ SGLANG_DECODE_RE = re.compile(
 )
 
 
+# sglang 0.5.22 with a hybrid SWA/full KV pool (DeepSeek-V4, context-parallel attention):
+# the rank prefix carries the attention-CP rank before the TP rank, and token usage is
+# reported per pool.  is the decode batch's full-attention KV tokens, the
+# quantity the older dialect logs as .
+#   [.. ATTN_CP0 TP0] Prefill batch, #new-seq: 1, #new-token: 6, #cached-token: 0,
+#       full token usage: 0.00, swa token usage: 0.03, #running-req: 0, ...
+#   [.. ATTN_CP0 TP0] Decode batch, #running-req: 1, #full token: 50688, full token
+#       usage: 0.00, #swa token: 512, swa token usage: 0.06, accept len: 3.70, ...
+SGLANG_SWA_PREFILL_RE = re.compile(
+    r"^\[(?P<ts>[\d\-]+ [\d:]+(?:\.\d+)?) (?:ATTN_CP\d+ )?(?:TP|DP)(?P<rank>\d+)[^\]]*\] "
+    r"Prefill batch[,.] "
+    r"#new-seq: (?P<new_seq>\d+), #new-token: (?P<new_token>\d+), "
+    r"#cached-token: (?P<cached_token>\d+), "
+    r"full token usage: (?P<usage>[\d.]+), swa token usage: (?P<swa_usage>[\d.]+), "
+    r"#running-req: (?P<running>\d+), #queue-req: (?P<queue>\d+)"
+    r"(?:, #pending-token: (?P<pending>\d+))?"
+    r"(?:, cuda graph: (?P<graph>\w+))?"
+)
+
+SGLANG_SWA_DECODE_RE = re.compile(
+    r"^\[(?P<ts>[\d\-]+ [\d:]+(?:\.\d+)?) (?:ATTN_CP\d+ )?(?:TP|DP)(?P<rank>\d+)[^\]]*\] "
+    r"Decode batch[,.] "
+    r"#running-req: (?P<running>\d+), #full token: (?P<token>\d+), "
+    r"full token usage: (?P<usage>[\d.]+), #swa token: (?P<swa_token>\d+), "
+    r"swa token usage: (?P<swa_usage>[\d.]+), "
+    r"(?:accept len: (?P<accept_len>[\d.]+), )?"
+    r"(?:accept rate: (?P<accept_rate>[\d.]+), )?"
+    r"(?:cuda graph: (?P<graph>\w+), )?"
+    r"gen throughput \(token/s\): (?P<gen_tps>[\d.]+), #queue-req: (?P<queue>\d+)"
+)
+
+
 def _ts(s):
     s = s.strip()
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
@@ -92,8 +124,8 @@ def _b(s):
     return str(s).lower() == "true" if s is not None else None
 
 
-def _sglang_prefill(line):
-    m = SGLANG_PREFILL_RE.match(line)
+def _sglang_prefill(line, regex=SGLANG_PREFILL_RE):
+    m = regex.match(line)
     if not m:
         return None
     return dict(kind="prefill", rank=int(m.group("rank")), ts=_ts(m.group("ts")),
@@ -103,8 +135,8 @@ def _sglang_prefill(line):
                 cuda_graph=_b(m.group("graph")))
 
 
-def _sglang_decode(line):
-    m = SGLANG_DECODE_RE.match(line)
+def _sglang_decode(line, regex=SGLANG_DECODE_RE):
+    m = regex.match(line)
     if not m:
         return None
     acc = m.group("accept_len")
@@ -117,6 +149,8 @@ def _sglang_decode(line):
 
 LOG_DIALECTS = [
     ("sglang-scheduler", [_sglang_prefill, _sglang_decode]),
+    ("sglang-scheduler-swa", [lambda l: _sglang_prefill(l, SGLANG_SWA_PREFILL_RE),
+                              lambda l: _sglang_decode(l, SGLANG_SWA_DECODE_RE)]),
 ]
 
 # A line that is plausibly a scheduler batch line. Used only to tell "this log has

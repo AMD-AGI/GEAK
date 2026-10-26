@@ -55,6 +55,20 @@ class SamplingPipelineTest(unittest.TestCase):
             self.assertAlmostEqual(sum(p['represented']['phase_proxy_mass_share_pct']
                                        for p in points), 100, places=2)
 
+    def test_hybrid_swa_dialect_with_cp_rank_prefix(self):
+        """sglang 0.5.22 / DeepSeek-V4 (InferenceX run 39258204219): the attention-CP rank
+        precedes the TP rank and token usage is reported per KV pool."""
+        self.log.write_text(
+            '[2026-10-01 00:00:10 ATTN_CP0 TP0] Prefill batch, #new-seq: 1, #new-token: 32, #cached-token: 96, full token usage: 0.00, swa token usage: 0.03, #running-req: 2, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 0.58\n'
+            '[2026-10-01 00:00:10 ATTN_CP1 TP1] Prefill batch, #new-seq: 1, #new-token: 32, #cached-token: 96, full token usage: 0.00, swa token usage: 0.03, #running-req: 2, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 0.58\n'
+            '[2026-10-01 00:00:13 ATTN_CP0 TP0] Decode batch, #running-req: 2, #full token: 256, full token usage: 0.00, #swa token: 512, swa token usage: 0.06, accept len: 2.00, accept rate: 0.45, cuda graph: True, gen throughput (token/s): 0.29, #queue-req: 0\n')
+        proc = self.observe('--decode-log-interval', '10')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        observed = json.loads((self.root / 'observed.json').read_text())
+        self.assertEqual(observed['counts'], {
+            'prefill_batches': 1, 'decode_rows_logged': 1, 'decode_iterations': 10})
+        self.assertEqual(observed['prefill']['prefix_cache_hit_pct'], 75)
+
     def test_missing_log_interval_cannot_guess_decode_mass(self):
         proc = self.observe()
         self.assertNotEqual(proc.returncode, 0)

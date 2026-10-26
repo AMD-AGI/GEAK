@@ -80,14 +80,58 @@ TEMPLATE = {
 }
 # Chains to the next sitecustomize on sys.path: only the first one is imported, and the
 # deployment may ship its own (an accepted-kernel overlay in pythonpath_prepend).
-WATCH_SITECUSTOMIZE = r'''# compile_watch overlay written by probe_server.py; drop this dir from PYTHONPATH to revert.
-import importlib.machinery, importlib.util, os, sys
+WATCH_SITECUSTOMIZE = r'''# probe overlay written by probe_server.py; drop this dir from PYTHONPATH to revert.
+import importlib.abc, importlib.machinery, importlib.util, os, sys
 _here = os.path.dirname(os.path.abspath(__file__))
-try:
-    import compile_watch
-    compile_watch.install()
-except Exception as _e:
-    sys.stderr.write("[compile_watch] install failed: %r\n" % (_e,))
+if os.environ.get("COMPILE_WATCH_DIR"):
+    try:
+        import compile_watch
+        compile_watch.install()
+    except Exception as _e:
+        sys.stderr.write("[compile_watch] install failed: %r\n" % (_e,))
+
+
+class _GuardSnapshot(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    """--enable-profile-cuda-graph (added by the probe, not the deployment) makes sglang
+    0.5.22 dump a CUDA memory snapshot after graph capture; on ROCm torch fails to parse
+    it (RuntimeError: stoi) and the server dies. The snapshot is a debug file: a failure
+    to write it is logged and ignored. Bound when torch.cuda.memory is first imported, so
+    nothing is imported early (an early torch import broke FlyDSL)."""
+    busy = False
+
+    def find_spec(self, name, path=None, target=None):
+        if name != "torch.cuda.memory" or self.busy:
+            return None
+        self.busy = True
+        try:
+            spec = importlib.util.find_spec(name)
+        finally:
+            self.busy = False
+        if spec is None or spec.loader is None:
+            return None
+        self.real, spec.loader = spec.loader, self
+        return spec
+
+    def create_module(self, spec):
+        return self.real.create_module(spec)
+
+    def exec_module(self, module):
+        module.__spec__.loader = self.real
+        self.real.exec_module(module)
+        orig = getattr(module, "_dump_snapshot", None)
+        if orig is not None:
+            def _dump_snapshot(*a, **k):
+                try:
+                    return orig(*a, **k)
+                except RuntimeError as e:
+                    sys.stderr.write("[probe] torch.cuda.memory._dump_snapshot failed (%r); "
+                                     "debug snapshot skipped\n" % (e,))
+            module._dump_snapshot = _dump_snapshot
+        sys.meta_path[:] = [f for f in sys.meta_path if f is not self]
+
+
+if os.environ.get("PROBE_GUARD_GRAPH_SNAPSHOT"):
+    sys.meta_path.insert(0, _GuardSnapshot())
 _rest = [p for p in sys.path if os.path.abspath(p or ".") != _here]
 _spec = importlib.machinery.PathFinder.find_spec("sitecustomize", _rest)
 if _spec is not None and _spec.loader is not None:
@@ -145,9 +189,12 @@ def command(cfg, mode, trace_root, watch_dir=None):
     if cfg.get("pythonpath_prepend"):
         env["PYTHONPATH"] = cfg["pythonpath_prepend"] + (":" + env["PYTHONPATH"]
                                                         if env.get("PYTHONPATH") else "")
-    if watch_dir:
-        env["PYTHONPATH"] = watch_overlay(os.path.dirname(os.path.dirname(watch_dir))) + (
+    if mode == "profile_cuda_graph":
+        env["PROBE_GUARD_GRAPH_SNAPSHOT"] = "1"
+    if watch_dir or mode == "profile_cuda_graph":
+        env["PYTHONPATH"] = watch_overlay(os.path.dirname(trace_root)) + (
             ":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    if watch_dir:
         env["COMPILE_WATCH_DIR"] = watch_dir
         env["COMPILE_WATCH_FRAMES"] = str(cfg.get("compile_watch_frames", 12))
     return cmd, env
