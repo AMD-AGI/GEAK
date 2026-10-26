@@ -133,7 +133,8 @@ console.log('\n# a trace replay reserves what its own final phase costs');
   const rStart = src.indexOf('const FINAL_RESERVE_CAP_FRAC');
   const rSrc = src.slice(rStart, src.indexOf('const TIME_BUDGET_EFFECTIVE_MS', rStart));
   const reserve = (TIME_BUDGET_MS, A) => new Function('TIME_BUDGET_MS', 'A',
-    `${rSrc}\nreturn { FINAL_RESERVE_MS, AGENTX_FINAL_PHASE_MS, RESERVE_IS_AGENTX };`)(TIME_BUDGET_MS, A);
+    `${rSrc}\nreturn { FINAL_RESERVE_MS, AGENTX_FINAL_PHASE_MS, AGENTX_PRE_FINAL_MIN_MS, AGENTX_MIN_BUDGET_MS,
+      RESERVE_IS_AGENTX };`)(TIME_BUDGET_MS, A);
   const HR = 3600 * 1000, MN = 60000;
   const AX = { workload_kind: 'agentx_trace_replay' };
   const ax12 = reserve(12 * HR, AX);
@@ -141,8 +142,18 @@ console.log('\n# a trace replay reserves what its own final phase costs');
     'a 12h AgentX budget reserves 235min (one 900s and two 3600s legs at +20min each, plus 40min), not 60min');
   ok(reserve(70920 * 1000, { ...AX, final_reserve_s: 28800, final_reserve_cap_frac: 0.45 }).FINAL_RESERVE_MS === 28800 * 1000,
     'a wider reserve the operator configured is kept (GEAK_FINAL_RESERVE_S=28800 on a 19h42m budget)');
-  ok(reserve(6 * HR, AX).FINAL_RESERVE_MS === 3 * HR && /WARNING: half the budget cannot hold it/.test(src),
-    'but never more than half the budget (6h -> 3h), which the startup log warns about');
+  // The run's minimum: Setup's baseline leg (+10min), one A/B on the search window (the KB warm start's)
+  // and the final phase. Any budget that holds it gives the final phase its whole cost.
+  ok(ax12.AGENTX_PRE_FINAL_MIN_MS === (600 + 4800 + 2 * 2100 + 600) * 1000 && ax12.AGENTX_MIN_BUDGET_MS === 405 * MN,
+    "the minimum is Setup's leg (90min), one A/B (80min) and the final phase (235min): 405min, 6h45m");
+  ok(reserve(405 * MN, AX).FINAL_RESERVE_MS === 235 * MN && reserve(7 * HR, AX).FINAL_RESERVE_MS === 235 * MN,
+    'a budget at the minimum, or 7h, still reserves the whole final phase');
+  ok(reserve(6 * HR, AX).FINAL_RESERVE_MS === 190 * MN,
+    'under it, Setup and that A/B keep their 170min and the final phase gets the rest (6h -> 190min)');
+  ok(reserve(3 * HR, AX).FINAL_RESERVE_MS === 36 * MN,
+    'a budget that cannot even hold Setup and one A/B keeps the configured reserve (20% of 3h)');
+  ok(/\(TIME_BUDGET_MS < AGENTX_MIN_BUDGET_MS\s*\? ' WARNING: the budget is under it, so this run may not return a validated gain/.test(src),
+    'the startup log warns on a budget under the minimum');
   ok(reserve(12 * HR, { workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800, geak_loop_duration_s: 600 } })
     .AGENTX_FINAL_PHASE_MS === (2400 + 1800 + 2 * 3000) * 1000, 'it follows the windows the run declares');
   ok(reserve(24 * HR, { ...AX, validation_measurement_mode: 'isolated_server', validation_replicas: 3 })
@@ -170,8 +181,10 @@ console.log('\n# a trace replay reserves what its own final phase costs');
   const disagree = SHAPES.filter((A) => {
     const d = declared(A), r = reserve(12 * HR, A);
     if (d.IS_AGENTX !== r.RESERVE_IS_AGENTX) return true;
-    return d.IS_AGENTX && r.AGENTX_FINAL_PHASE_MS !==
-      1000 * (2400 + (d.AGENTX.geak_loop_duration_s + 1200) + 2 * (d.AGENTX.duration_s + 1200));
+    return d.IS_AGENTX && (r.AGENTX_FINAL_PHASE_MS !==
+      1000 * (2400 + (d.AGENTX.geak_loop_duration_s + 1200) + 2 * (d.AGENTX.duration_s + 1200))
+      || r.AGENTX_PRE_FINAL_MIN_MS !==
+      1000 * (600 + (d.AGENTX.duration_s + 1200) + 2 * (d.AGENTX.geak_loop_duration_s + 1200) + 600));
   });
   ok(disagree.length === 0,
     `the reserve resolves AgentX and its windows exactly as the declaration does (${JSON.stringify(disagree)})`);
@@ -300,7 +313,7 @@ for (const [gateArg, dispatch] of [
   const dispatches = (between.match(/\b(?:safeAgent|runIntegrateBothLegs|runValidation)\(/g) || []).length;
   ok(g !== -1 && d > g && dispatches <= 1 && d - g < 4000, `${dispatch} is gated by searchClosed(${gateArg}...)`);
 }
-ok(/if \(searchClosed\('Profile and Strategize'\)\) \{\s*kernelQueue = \[\];\s*headQueue = \[\];/.test(src),
+ok(/if \(searchClosed\('Profile and Strategize'\) \|\| searchWindowShort\('[^']+'\)\) \{\s*kernelQueue = \[\];\s*headQueue = \[\];/.test(src),
   'skipping Strategize still leaves both queues arrays (they are declared without a value)');
 
 console.log('\n# a trace replay starts no search work that would run into the reserve');
@@ -318,8 +331,8 @@ const guardHarnessSrc = [
   src.slice(src.indexOf('const WORKLOAD_SPEC ='), src.indexOf('\n', src.indexOf('const AGENTX = IS_AGENTX'))),
   src.slice(gStart, gEnd),
   'ELAPSED_MS = TIME_BUDGET_MS == null ? 0 : TIME_BUDGET_MS - FINAL_RESERVE_MS - WINDOW_MS;',
-  'return { abWindowShort, laneWindowShort, laneDeadlineArgs, laneReserveCapMs, agentxAbMs, agentxLaneTailMs,',
-  '  abLegs, advance: (ms) => { ELAPSED_MS += ms; } };',
+  'return { abWindowShort, laneWindowShort, searchWindowShort, laneDeadlineArgs, laneReserveCapMs, agentxAbMs,',
+  '  agentxLaneTailMs, abLegs, advance: (ms) => { ELAPSED_MS += ms; } };',
 ].join('\n');
 const EPOCH = 1800000000;
 const guardsFor = ({ A = { workload_kind: 'agentx_trace_replay' }, budgetMs = 12 * 3600 * 1000, windowMin = 0,
@@ -349,12 +362,21 @@ const guardsFor = ({ A = { workload_kind: 'agentx_trace_replay' }, budgetMs = 12
   ok(late.laneWindowShort('author lane k:triton') && /author lane k:triton NOT STARTED/.test(late.logs.join('\n')),
     'a lane with 199min left is not started: one round plus its A/B tail would not fit');
   ok(!guardsFor({ windowMin: 201 }).laneWindowShort('x'), 'with 201min left it starts');
+  // After the KB warm start: kernel extraction (70min) and one lane (200min) must both still fit, or
+  // the run goes straight to Finalize and Validate.
+  const kbOnly = guardsFor({ windowMin: 269 });
+  ok(kbOnly.searchWindowShort('Profile, kernel extraction and the kernel search')
+    && /kernel search SKIPPED — ~269min left .* ~270min kernel extraction plus one kernel lane/.test(kbOnly.logs.join('\n'))
+    && /Going straight to Finalize and Validate/.test(kbOnly.logs.join('\n')),
+  'with 269min left after the warm start the search is skipped, and the run says it goes straight to Validate');
+  ok(!guardsFor({ windowMin: 271 }).searchWindowShort('x'), 'with 271min left the search runs');
   ok(guardsFor({ windowMin: 300 }).laneReserveCapMs() === 300 * 60000
     && guardsFor({ windowMin: 1 }).laneReserveCapMs() === 120000,
   'a running lane is never waited for past the boundary (floored at the 2min agent floor)');
   const off = [guardsFor({ A: {}, windowMin: 1 }), guardsFor({ budgetMs: null }), guardsFor({ windowMin: 1, finalStarted: true })];
-  ok(off.every((o) => !o.abWindowShort(2, 'x') && !o.laneWindowShort('x') && o.laneReserveCapMs() === null && o.logs.length === 0),
-    'inert, and silent, for a synthetic run, without time_budget_s, and in the final phase');
+  ok(off.every((o) => !o.abWindowShort(2, 'x') && !o.laneWindowShort('x') && !o.searchWindowShort('x')
+    && o.laneReserveCapMs() === null && o.logs.length === 0),
+  'inert, and silent, for a synthetic run, without time_budget_s, and in the final phase');
 }
 
 // Where they are consulted. The integrate entry point covers every A/B site (head, milestone,

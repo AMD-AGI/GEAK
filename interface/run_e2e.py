@@ -789,7 +789,7 @@ def map_args(
     if final_reserve_s is not None:
         ps_args["final_reserve_s"] = final_reserve_s
     # ...and the cap on it, as a fraction of the budget (JS default 0.2). A trace replay's floor is
-    # not bound by it (only by half the budget). Optional in the same way as the reserve itself.
+    # not bound by it. Optional in the same way as the reserve itself.
     reserve_cap = _float_or_none(
         os.environ.get("GEAK_FINAL_RESERVE_CAP_FRAC"), "GEAK_FINAL_RESERVE_CAP_FRAC")
     if reserve_cap is not None:

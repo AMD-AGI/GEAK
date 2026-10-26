@@ -18,7 +18,7 @@ const schemas = between('const obj =', '// Result of the ensure_flydsl');
 const selectionSchema = new Function(`${schemas}\nreturn AGENTX_PREPARATION_SCHEMA;`)();
 const profileSchema = new Function(`${schemas}\nreturn PROFILE_SCHEMA;`)();
 const helper = between('async function prepareAgentXKernels(', "\nif (want('setup'))");
-const initial = between("  if (searchClosed('Profile and Strategize')) {",
+const initial = between("  if (searchClosed('Profile and Strategize')",
   '} else {\n  // Load carried state');
 const resume = between('  // Load carried state', '\n}\n\n// ===');
 const phaseSelector = between('const PHASES =', 'const ST = A.state');
@@ -75,7 +75,7 @@ async function run(body, overrides = {}, reply = selection()) {
     flaggedHeads: [], pendingIntegrations: [], tuning: null, BACKEND: 'sglang',
     MEASUREMENT_MODE: 'isolated_server', VALIDATION_MEASUREMENT_MODE: 'isolated_server',
     VALIDATION_REPLICAS: 1, PLAN_SCHEMA: {},
-    searchClosed: () => false, gateNoiseBand: x => x, remainingMin: () => 120, log: () => {}, phase: p => phases.push(p),
+    searchClosed: () => false, searchWindowShort: () => false, gateNoiseBand: x => x, remainingMin: () => 120, log: () => {}, phase: p => phases.push(p),
     roleAgent: (role, phase, intro, inputs) => ({ role, phase, intro, inputs }),
     safeAgent: async (prompt, opts) => { calls.push({ ...prompt, opts }); return prompt.role === 'kernel_extractor' ? { delivery_path: '/eval/delivery.json', prepared: structuredClone(reply) } : structuredClone(reply); },
     readAgentXPreparation: async () => structuredClone(reply),

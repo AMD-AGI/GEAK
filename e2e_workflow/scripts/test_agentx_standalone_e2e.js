@@ -312,6 +312,12 @@ try {
   ok(synWarm.proc.status === 0 && synWarm.events.filter((e) => e.event === 'native_bench').length === 2
     && synWarm.summary && !('warmup_protocol' in synWarm.summary),
   'and its warm_server leg keeps the discarded full round, with its summary fields unchanged');
+  for (const backend of ['sglang', 'vllm']) {
+    const leg = bench(EVAL_DIR, wf.WORKLOAD, { BACKEND: backend, OUT_DIR: path.join(EVAL_DIR, `${backend}_leg`) });
+    ok(leg.proc.status === 0 && aiperfCalls(leg).length === 1
+      && (leg.summary || {}).warmup_protocol === 'replay_per_lane',
+    `a ${backend} server is measured the same way: one pass on the replay's own warmup`);
+  }
 
   // ── 7b. The outer round stays where the timed replay is not the whole protocol ────────────────
   console.log('\n# where the outer round stays');

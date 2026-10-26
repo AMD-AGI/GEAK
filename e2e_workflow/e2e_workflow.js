@@ -360,9 +360,9 @@ const FINAL_RESERVE_CAP_FRAC = Math.min(0.5, Math.max(0.05,
 // under warm_server, validation_replicas fresh servers each under isolated_server. Every leg also pays
 // a boot plus the replay's own warmup and drain (agentx_leg_overhead_s; GLM-5.2's legs took 7-13min of
 // the 20min default), and Report, the parity check and the agents' own work get 40min. That sum is an
-// AgentX run's floor: it outranks a smaller reserve and the cap, up to half the budget, so the search
-// cannot spend the time Validate needs to return a measured gain. Read from the raw args because the
-// workload declaration below is evaluated later; it must resolve AgentX exactly as IS_AGENTX does.
+// AgentX run's floor: it outranks a smaller reserve and the cap, so the search cannot spend the time
+// Validate needs to return a measured gain. Read from the raw args because the workload declaration
+// below is evaluated later; it must resolve AgentX exactly as IS_AGENTX does.
 const RESERVE_WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object'
   ? A.workload_spec
   : ((!A.workload_kind || A.workload_kind === 'agentx_trace_replay') &&
@@ -379,13 +379,22 @@ const AGENTX_VALIDATION_LEGS = 2 * (String(A.validation_measurement_mode || 'war
 const AGENTX_FINAL_PHASE_MS = !RESERVE_IS_AGENTX ? 0 : 1000 * (2400
   + agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.geak_loop_duration_s, 900))
   + AGENTX_VALIDATION_LEGS * agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600)));
+// The least an AgentX run needs to return a validated gain: Setup's baseline leg (plus ~10min of
+// preflight and bench scripts), one A/B on the search window (the KB warm start's), then that final
+// phase. Above it the final phase gets its whole cost. Below it, Setup and that A/B keep their time,
+// since without them there is nothing to validate, and the final phase gets the rest.
+const AGENTX_AB_OVERHEAD_S = 600;   // the integrator's own build, parity and bookkeeping around an A/B's legs
+const AGENTX_PRE_FINAL_MIN_MS = !RESERVE_IS_AGENTX ? 0 : 1000 * (600
+  + agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.duration_s, 3600))
+  + 2 * agentxLegS(_declaredWindowS(RESERVE_WORKLOAD_SPEC.geak_loop_duration_s, 900)) + AGENTX_AB_OVERHEAD_S);
+const AGENTX_MIN_BUDGET_MS = AGENTX_PRE_FINAL_MIN_MS + AGENTX_FINAL_PHASE_MS;
 const FINAL_RESERVE_MS = TIME_BUDGET_MS != null
   ? (() => {
     const configured = Math.min(
       parseInt(A.final_reserve_s != null ? A.final_reserve_s : 3600, 10) * 1000, // 60min
       Math.floor(TIME_BUDGET_MS * FINAL_RESERVE_CAP_FRAC));
     return RESERVE_IS_AGENTX
-      ? Math.max(configured, Math.min(AGENTX_FINAL_PHASE_MS, Math.floor(TIME_BUDGET_MS * 0.5)))
+      ? Math.max(configured, Math.min(AGENTX_FINAL_PHASE_MS, TIME_BUDGET_MS - AGENTX_PRE_FINAL_MIN_MS))
       : configured;
   })()
   : null;
@@ -404,9 +413,10 @@ const TIME_HEAD_DEADLINE_MS = TIME_BUDGET_EFFECTIVE_MS != null
 if (RESERVE_IS_AGENTX && TIME_BUDGET_MS != null) {
   log(`[time-budget] trace replay: Finalize's search leg, Report and Validate's ${AGENTX_VALIDATION_LEGS} ` +
     `canonical legs need ~${Math.round(AGENTX_FINAL_PHASE_MS / 60000)}min; reserving ` +
-    `${Math.round(FINAL_RESERVE_MS / 60000)}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget.` +
-    (FINAL_RESERVE_MS < AGENTX_FINAL_PHASE_MS
-      ? ' WARNING: half the budget cannot hold it, so Validate may not finish both legs — raise time_budget_s.'
+    `${Math.round(FINAL_RESERVE_MS / 60000)}min of the ${Math.round(TIME_BUDGET_MS / 60000)}min budget. ` +
+    `The run's minimum (Setup's baseline, one A/B, that final phase) is ~${Math.round(AGENTX_MIN_BUDGET_MS / 60000)}min.` +
+    (TIME_BUDGET_MS < AGENTX_MIN_BUDGET_MS
+      ? ' WARNING: the budget is under it, so this run may not return a validated gain — raise time_budget_s.'
       : ''));
 }
 // ---- FAST MODE (opt-in, default OFF) ----------------------------------------------------------------
@@ -3387,8 +3397,8 @@ function deepBoundedWorkflow(ref, wfArgs, label) {
 // long: a kernel lane runs for hours and a search A/B for over an hour, so either one started late runs
 // on past the boundary while Finalize and Validate wait for it. These start each one only when what it
 // costs still fits before the boundary. Inert unless IS_AGENTX and time_budget_s (and in the final phase).
-const AGENTX_AB_OVERHEAD_S = 600;    // the integrator's own build, parity and bookkeeping around the legs
 const AGENTX_LANE_ROUND_S = 3600;    // one lane round still in flight at its stop, plus the lane's report
+const AGENTX_EXTRACT_S = 4200;       // kernel extraction, which opens the search (1h10m on GLM-5.2)
 const agentxGuardsOn = () => IS_AGENTX && TIME_BUDGET_MS != null && !FINAL_PHASE_STARTED;
 const searchWindowMs = () => remainingMs() - FINAL_RESERVE_MS;
 // A reference leg already on disk (or shared by this head's earlier candidate) is not run again.
@@ -3396,6 +3406,7 @@ const abLegs = (inputs) => (inputs && (inputs.REUSE_REF || inputs.RESUME_AB) ? 1
 const agentxAbMs = (legs) =>
   1000 * (legs * agentxLegS(_declaredWindowS(AGENTX.geak_loop_duration_s, 900)) + AGENTX_AB_OVERHEAD_S);
 const agentxLaneTailMs = () => agentxAbMs(2) + AGENTX_LANE_ROUND_S * 1000;
+const agentxLaneStartMs = () => agentxLaneTailMs() + AGENTX_LANE_ROUND_S * 1000;
 // An A/B started with less than its cost left is abandoned at the boundary with its legs still running
 // into Finalize and Validate, so it is deferred instead: incomplete, pending, surfaced to the caller.
 function abWindowShort(legs, what) {
@@ -3410,11 +3421,23 @@ function abWindowShort(legs, what) {
 // it found; with less than that left it is not started.
 function laneWindowShort(what) {
   if (!agentxGuardsOn()) return false;
-  const windowMs = searchWindowMs(), needMs = agentxLaneTailMs() + AGENTX_LANE_ROUND_S * 1000;
+  const windowMs = searchWindowMs(), needMs = agentxLaneStartMs();
   if (windowMs >= needMs) return false;
   log(`[time-budget] ${what} NOT STARTED — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
     `final reserve, under the ~${Math.round(needMs / 60000)}min a kernel lane needs to run a round and ` +
     'still have its A/B measured before Finalize and Validate.');
+  return true;
+}
+// Every search candidate comes out of kernel extraction and needs a lane. With less than both left,
+// nothing the search starts could still be measured, so the run goes from the KB warm start straight
+// to Finalize and Validate and ends early, handing the caller back the time.
+function searchWindowShort(what) {
+  if (!agentxGuardsOn()) return false;
+  const windowMs = searchWindowMs(), needMs = AGENTX_EXTRACT_S * 1000 + agentxLaneStartMs();
+  if (windowMs >= needMs) return false;
+  log(`[time-budget] ${what} SKIPPED — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
+    `final reserve, under the ~${Math.round(needMs / 60000)}min kernel extraction plus one kernel lane and ` +
+    'its A/B need. Going straight to Finalize and Validate.');
   return true;
 }
 // kernel_lane.js stops STARTING rounds at deadline_epoch and finishes the one in flight, so the stop is
@@ -4790,7 +4813,7 @@ print(json.dumps(res))
   // Fold before Profile and ConfigSweep so every downstream measurement sees the active source stack.
   curOverlay = ST.overlay || kbSeedOverlay || curOverlay || '';
 
-  if (searchClosed('Profile and Strategize')) {
+  if (searchClosed('Profile and Strategize') || searchWindowShort('Profile, kernel extraction and the kernel search')) {
     kernelQueue = [];
     headQueue = [];
   } else {
