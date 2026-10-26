@@ -509,11 +509,16 @@ def tail(a):
     row = next(r for r in cfg["rows"] if r["label"] == a.task)
     logf = os.path.join(wave, "logs", "%s.timing.log" % row["label"])
     done = heartbeat(wave, "timing_" + row["label"])
+    cmd = [sys.executable, os.path.join(row["task_dir"], "unittest.py"), "--reuse"]
+    if row.get("need", 1) > 1:
+        # Each leg of a multi-rank harness spans every GPU itself (collective-ut.md's rank
+        # pool); the driver spreading buckets over the GPUs would run up to one pool per GPU
+        # at once on the same devices, and spinning collectives of different pools contend
+        # or wait on each other. One device for the driver: buckets run one at a time.
+        cmd += ["--gpus", "0"]
     try:
         with open(logf, "a") as out:
-            rc = subprocess.call([sys.executable, os.path.join(row["task_dir"], "unittest.py"),
-                                  "--reuse"], cwd=row["task_dir"], stdout=out,
-                                 stderr=subprocess.STDOUT)
+            rc = subprocess.call(cmd, cwd=row["task_dir"], stdout=out, stderr=subprocess.STDOUT)
     finally:
         done.set()
     set_status(wave, row["label"], status="passed" if passed(row["task_dir"]) else "failed",
