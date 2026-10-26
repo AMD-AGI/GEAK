@@ -4,8 +4,17 @@
 // Retained population for the stock GEAK loop. No model calls or separate runner.
 async function createEvolution(start) {
   const path = `${EVAL_DIR}/evolution`, base = `${path}/base`, archive = `${path}/archive.json`;
+  const population = A.population_lineage || null;
+  if (population && (typeof population.root !== 'string' || !population.root.startsWith('/')
+      || /[\0\r\n]/.test(population.root) || population.root.split('/').includes('..')
+      || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(population.id)
+      || !Array.isArray(population.imports)
+      || population.imports.some(id => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id) || id === population.id)
+      || (OPTIMIZER !== 'evo' && population.imports.length))) {
+    throw new Error('invalid population lineage configuration');
+  }
   const entries = [];
-  let baseCommit, bestId = 'ORIGINAL', queue = Promise.resolve();
+  let baseCommit, baseTree, baseSourceId = null, sourcePaths = null, bestId = 'ORIGINAL', queue = Promise.resolve();
   let baseline = {id: 'ORIGINAL', source: base, speedup: start.cumulative, origin: 'optimize_start'};
   const run = async (cmd, args, opts) => {
     const result = await hostRun(cmd, args, opts);
@@ -18,6 +27,7 @@ async function createEvolution(start) {
     return pending;
   };
   const snapshot = (rows, best) => ({schema: 'geak.evolution/1', base, base_commit: baseCommit,
+    ...(population ? {base_tree: baseTree, base_source_id: baseSourceId, lineage_id: population.id} : {}),
     baseline, best_id: best, entries: rows});
   const save = async (rows, best = bestId) => {
     await run('sh', ['-c',
@@ -38,6 +48,26 @@ async function createEvolution(start) {
   await run('mkdir', [base]);
   await run('bash', [`${WORKFLOW_DIR}/scripts/materialize_workspace.sh`, '--src', CANONICAL,
     '--dst', base, '--shared-root', `${EVAL_DIR}/_shared`, '--link-aiter']);
+  if (population) {
+    if (EXTERNAL_OBJECTIVE) {
+      // The owner already hashed the editable source closure. Fixed fixtures
+      // and per-lineage shared-input symlinks are not a parent identity.
+      const initial = await checkedExternalMeasurement(start.finalWinner || bench, base);
+      if (initial?.external_measurement_valid !== true || !/^[0-9a-f]{64}$/.test(initial.source_id)
+          || !Array.isArray(initial.source_paths) || !initial.source_paths.length) {
+        throw new Error('population base requires the native editable-source identity');
+      }
+      baseSourceId = initial.source_id;
+      sourcePaths = initial.source_paths;
+      baseTree = (await run('git', ['-C', CANONICAL, 'rev-parse', `${baseCommit}^{tree}`])).trim();
+    } else {
+      // Legacy tasks retain a private index once; queries reuse its objects.
+      await run('git', ['-C', base, 'init', '-q']);
+      await run('git', ['-C', base, 'add', '-A']);
+      baseTree = (await run('git', ['-C', base, 'write-tree'])).trim();
+    }
+    await run('mkdir', ['-p', `${population.root}/${population.id}`]);
+  }
   await save([], 'ORIGINAL');
   const retained = (id) => entries.find(row => row.id === id && row.patch_ref && !row.retention_error);
   const defaultParent = () => retained(bestId)?.verified ? bestId : 'ORIGINAL';
@@ -54,8 +84,129 @@ async function createEvolution(start) {
     if (!hash) throw new Error('retained patch has no source hash');
     return hash[0];
   };
+  const metric = EXTERNAL_OBJECTIVE || {kind: HAS_WORKLOAD ? 'time_weighted' : 'geomean'};
+  const immutable = (file, contents) => run('sh', ['-c', 'set -Ce; cat > "$1"; chmod a-w -- "$1"',
+    'sh', file], {input: contents});
+  const checkpointTree = async (winner, round) => {
+    if (!population) return null;
+    try {
+      if (winner?.source_tree) return winner.source_tree;
+      if (!winner) return (await run('git', ['-C', CANONICAL, 'rev-parse', 'HEAD^{tree}'])).trim();
+      const hash = await digest(winner.patch);
+      const indexed = (...args) => run('env', [`GIT_INDEX_FILE=${path}/checkpoint-${round}.index`,
+        'git', '-C', CANONICAL, ...args]);
+      await indexed('read-tree', 'HEAD');
+      await indexed('apply', '--cached', '--', winner.patch);
+      const tree = (await indexed('write-tree')).trim();
+      if (await digest(winner.patch) !== hash) throw new Error('winner patch changed');
+      return tree;
+    } catch (error) { log(`[population] checkpoint source unavailable: ${String(error)}`); return null; }
+  };
+  const publishCheckpoint = (round, winner, expectedTree) => serial(async () => {
+    if (!population || !expectedTree) return false;
+    try {
+      const tree = (await run('git', ['-C', CANONICAL, 'rev-parse', 'HEAD^{tree}'])).trim();
+      if (tree !== expectedTree
+          || (await run('git', ['-C', CANONICAL, 'status', '--porcelain', '--untracked-files=no'])).trim()) {
+        throw new Error('committed source differs from the verified winner');
+      }
+      const prefix = `${population.root}/${population.id}/r${round}`;
+      const patch = `${prefix}.diff`;
+      // Ordinary patches are relative to the previous local incumbent. Always
+      // export a cumulative patch from this lineage's fixed initial source.
+      const diff = await run('git', ['-C', CANONICAL, 'diff', '--binary', '--no-color',
+        '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', baseCommit, 'HEAD', '--', ...(sourcePaths || ['.'])]);
+      await immutable(patch, diff);
+      const hash = await digest(patch);
+      const checked = EXTERNAL_OBJECTIVE ? await checkedExternalMeasurement(winner, base, patch) : winner;
+      const speedup = EXTERNAL_OBJECTIVE ? primSpeedup(checked) : round === 0 ? start.cumulative : winner.geomean;
+      if (!Number.isFinite(speedup) || speedup <= 0
+          || (EXTERNAL_OBJECTIVE && (checked?.external_measurement_valid !== true
+            || checked.patch_sha256 !== hash))) throw new Error('committed checkpoint has no exact source-bound evidence');
+      let retainedTree = tree;
+      if (!EXTERNAL_OBJECTIVE) {
+        // Materialization can add an ignore file. Name the exact retained tree
+        // separately from the canonical commit checked above.
+        const indexed = (...args) => run('env', [`GIT_INDEX_FILE=${path}/published-${round}.index`,
+          'git', '-C', base, ...args]);
+        await indexed('read-tree', baseTree);
+        if (diff) await indexed('apply', '--cached', '--', patch);
+        retainedTree = (await indexed('write-tree')).trim();
+      }
+      let deliveryRef = null;
+      try {
+        const originalCommit = (await run('git', ['-C', CANONICAL, 'rev-list', '--max-parents=0', baseCommit])).trim();
+        if (!/^[0-9a-f]{40,64}$/.test(originalCommit)) throw new Error('no unique ORIGINAL commit');
+        const delivery = `${prefix}.delivery.diff`;
+        await immutable(delivery, await run('git', ['-C', CANONICAL, 'diff', '--binary', '--no-color',
+          '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', originalCommit, 'HEAD', '--', ...(sourcePaths || ['.'])]));
+        const deliveryHash = await digest(delivery);
+        const delivered = EXTERNAL_OBJECTIVE ? await checkedExternalMeasurement(winner, KERNEL_PATH_ORIG, delivery) : checked;
+        if (EXTERNAL_OBJECTIVE && (delivered?.external_measurement_valid !== true
+            || delivered.patch_sha256 !== deliveryHash)) throw new Error('delivery patch does not reconstruct measured source from ORIGINAL');
+        deliveryRef = {path: delivery, sha256: deliveryHash, base: 'ORIGINAL'};
+      } catch (error) { log(`[population] checkpoint r${round} retained without an ORIGINAL delivery patch: ${String(error)}`); }
+      const row = {schema: 'geak.population.checkpoint/1', lineage_id: population.id,
+        optimizer: OPTIMIZER, round, base, base_commit: baseCommit, base_tree: baseTree,
+        base_source_id: baseSourceId, source_id: checked?.source_id || null,
+        source_tree: retainedTree, canonical_tree: tree,
+        patch_ref: {path: patch, sha256: hash, base_commit: baseCommit, base_tree: baseTree},
+        delivery_patch_ref: deliveryRef,
+        metric, speedup, verified: true, qualification: EXTERNAL_OBJECTIVE ? 'native_source_bound' : 'legacy_verifier',
+        external_evaluation: checked?.external_evaluation || null,
+        evidence: EXTERNAL_OBJECTIVE ? externalFields(checked) : {
+          status: 'verified', correctness: 'pass', verified_geomean: checked?.geomean_unweighted ?? speedup,
+          verified_weighted: checked?.weighted ?? null, per_case: checked?.per_case || BASELINE_PER_CASE}};
+      await immutable(`${prefix}.json`, JSON.stringify(row, null, 2) + '\n');
+      const pointer = {schema: 'geak.population.pointer/1', lineage_id: population.id,
+        checkpoint: `${prefix}.json`, sha256: await digest(`${prefix}.json`)};
+      await run('sh', ['-c',
+        'set -e; tmp=$(mktemp "$1/.latest.XXXXXX"); trap \'rm -f -- "$tmp"\' EXIT; cat > "$tmp"; mv -f -- "$tmp" "$1/latest.json"',
+        'sh', `${population.root}/${population.id}`], {input: JSON.stringify(pointer) + '\n'});
+      log(`[population] ${population.id} published committed checkpoint r${round} (${speedup.toFixed(3)}x)`);
+      return true;
+    } catch (error) {
+      log(`[population] checkpoint r${round} not published: ${String(error)}`);
+      return false;
+    }
+  });
+  const refreshPeers = () => serial(async () => {
+    if (!population?.imports.length) return;
+    try {
+      const result = JSON.parse(await run('python3', [`${WORKFLOW_DIR}/scripts/query_population.py`,
+        '--root', population.root, '--checkpoints-only',
+        ...(baseSourceId ? ['--base-source-id', baseSourceId] : ['--base-tree', baseTree]),
+        ...population.imports.flatMap(id => ['--lineage', id])]));
+      const next = [...entries];
+      for (const item of result.records || []) {
+        if (!['qualified', 'no_improvement', 'legacy_verified'].includes(item.status)) continue;
+        const peer = item.checkpoint;
+        if (!peer || !population.imports.includes(peer.lineage_id)
+            || (baseSourceId ? peer.base_source_id !== baseSourceId : peer.base_tree !== baseTree)
+            || JSON.stringify(peer.metric) !== JSON.stringify(metric)
+            || !Number.isSafeInteger(peer.round) || peer.round < 1) continue;
+        const id = `peer_${peer.lineage_id}_r${peer.round}`;
+        if (next.some(row => row.id === id)) continue;
+        const target = `${path}/patches/${id}.diff`;
+        if (await digest(peer.patch_ref.path) !== peer.patch_ref.sha256) throw new Error('peer patch changed before copy');
+        await run('cp', ['--no-clobber', '--', peer.patch_ref.path, target]);
+        if (await digest(target) !== peer.patch_ref.sha256) throw new Error('copied peer patch changed');
+        const verified = item.evidence || peer.evidence;
+        const speedup = EXTERNAL_OBJECTIVE ? primSpeedup(verified) : peer.speedup;
+        if (!Number.isFinite(speedup) || speedup <= 0) continue;
+        next.push({id, parent_id: 'ORIGINAL', donor_ids: [], title: `${peer.lineage_id} committed round ${peer.round}`,
+          approach: null, specialty: 'peer_checkpoint', base_commit: baseCommit,
+          patch_ref: {path: target, sha256: peer.patch_ref.sha256, base_commit: baseCommit, base_tree: baseTree},
+          verified: true, speedup, status: speedup <= 1 ? 'slower' : 'correct',
+          engineer: null, verifier: evidence(verified), retention_error: null,
+          peer_checkpoint: {lineage_id: peer.lineage_id, round: peer.round,
+            path: item.checkpoint_path, sha256: item.checkpoint_sha256, source_tree: peer.source_tree}});
+      }
+      if (next.length !== entries.length) await save(next); // Preserve this member's local best ID.
+    } catch (error) { log(`[population] peer refresh failed: ${String(error)}`); }
+  });
   return {
-    base, baseCommit, path: archive, entries,
+    base, baseCommit, path: archive, entries, checkpointTree, publishCheckpoint, refreshPeers,
     engineerContext(direction) {
       const context = direction.evolution_context;
       if (A.evolution_evidence_handoff !== true) return context;

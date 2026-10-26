@@ -1,5 +1,7 @@
 // Hung-agent + API-fault guard around agent(): retries API errors, resolves null on timeout.
 async function agentT(p, o) {
+  // Parallel members share installed dependencies, not mutable compiler caches.
+  if (A.population_lineage) o = { ...o, env: { ...(o && o.env), GEAK_ISOLATE_WORKSPACE_CACHES: '1' } };
   const label = (o && o.label) ? o.label : 'agent';
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves

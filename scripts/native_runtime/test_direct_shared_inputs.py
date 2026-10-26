@@ -56,7 +56,7 @@ class DirectSharedInputTests(unittest.TestCase):
         self.addCleanup(mount.stop)
 
     def fake_native(self, request, workspace, output, **options):
-        return base.DirectExternalCommandTests.fake_native(self, request, workspace, output)
+        return base.DirectExternalCommandTests.fake_native(self, request, workspace, output, **options)
 
     def write_manifest(self, value):
         raw = adapter.canonical_json(value) + b"\n"
@@ -157,6 +157,16 @@ class DirectSharedInputTests(unittest.TestCase):
             code, rows = self.invoke("measure", identity)
         self.assertEqual(code, 0)
         self.assertTrue(rows[-1]["external_measurement_valid"])
+        self.assertEqual(self.runner.call_args.kwargs,
+                         {"protected_root": self.task, "shared_files": self.manifest["shared_files"]})
+
+    def test_captured_measurement_keeps_shared_inputs_outside_source_snapshot(self):
+        identity = self.capture(shared=True)
+        self.candidate.write_bytes(b"# independent successor\n")
+        code, rows = self.invoke("measure", identity, extra=["--captured", *self.shared_options()])
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[-1]["source_id"], identity["source_id"])
+        self.assertFalse((Path(identity["source_workspace"]) / self.shared_name).exists())
         self.assertEqual(self.runner.call_args.kwargs,
                          {"protected_root": self.task, "shared_files": self.manifest["shared_files"]})
 

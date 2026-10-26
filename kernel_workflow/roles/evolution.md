@@ -62,3 +62,23 @@ paths, useful failed alternatives, corrected premises and the next unresolved
 question in the existing engineering outputs. Never edit the archive's base or
 another engineer's workspace. Independent verification decides eligibility for
 promotion; a missing measurement is not zero performance.
+
+## Continuing development
+
+When `CONTINUING_LINEAGE` is true, the ordinary/deep role's iteration, measurement,
+plateau and target-based submission limits are reassessment checkpoints. Supplied
+time/resource limits still bind, including queue waiting. Revise stalled mechanisms;
+continue while a useful next step and time to settle and submit remain. Save the
+current question, best correct source, unfinished alternatives, evidence and next
+decision in the existing `report.md` so a later invocation can resume the work.
+
+For asynchronous evaluation, first freeze the source and keep its candidate ID,
+evaluation ID and process handle together. Continue independent work while queued;
+wait on that evaluation when a decision needs its result. Do not repeatedly poll
+or resubmit because feedback is late. The result describes the captured source;
+newer edits require their own measurement. Before returning, restore the selected
+source and make its cumulative patch and measurement references agree.
+
+Settle agent-owned evaluations or cancel them through their owning tool before
+returning. A saved handle does not make a job survive agent exit. Record incomplete
+work for continuation; pending or cancelled evaluation is not measured performance.

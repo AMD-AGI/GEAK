@@ -24,7 +24,8 @@ if (KB_WRITE_OK && GFX && externalPromotion && Number.isFinite(finalPrimary) && 
   // service. Unlike the read there is no branch on credentials here, because `_open_plane` already
   // makes the right call — a `both` without them degrades to the local planes and reports
   // `remote_unavailable` rather than failing, which is the behaviour we would have written by hand.
-  const remoteWriteOn = KB_REMOTE !== 'off' && !!KB_STORE_DIR;
+  // A population can preserve remote reads while keeping each member's writes local.
+  const remoteWriteOn = KB_REMOTE !== 'off' && A.kb_remote_write !== 'off' && !!KB_STORE_DIR;
   const writeCmd = remoteWriteOn
     ? `write-remote --plane both --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
     : KB_MODE === 'store'

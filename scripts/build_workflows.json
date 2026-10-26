@@ -33,6 +33,7 @@
     "kernel_workflow/src/kernel_workflow/00_meta.js",
     "kernel_workflow/src/kernel_workflow/01_args.js",
     "kernel_workflow/src/shared/persist_llm_stats.js",
+    "kernel_workflow/src/kernel_workflow/01b_population.js",
     "kernel_workflow/src/kernel_workflow/02_single_language_passthrough.js",
     "kernel_workflow/src/kernel_workflow/03_bakeoff_args.js",
     "kernel_workflow/src/shared/helpers.js",

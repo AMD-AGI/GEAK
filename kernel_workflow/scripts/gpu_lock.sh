@@ -81,6 +81,50 @@ if [ -n "${GEAK_GPU_ALLOWED:-}" ]; then
     fi
 fi
 
+# Resolve the owner's observed container ordinals once. A container's GPU 0 need
+# not be host renderD128. Keep the legacy lookup only when no observed map exists.
+declare -A GPU_DEVICE_PATHS=()
+if [ "${GEAK_PHYSICAL_DEVICE_MAP+x}" = "x" ]; then
+    _device_rows="$(python3 - "$GPU_SPEC" <<'PY'
+import json, os, re, sys
+rows = json.loads(os.environ['GEAK_PHYSICAL_DEVICE_MAP'])
+if not isinstance(rows, list):
+    raise ValueError('physical device map must be a list')
+devices, physical_ids = {}, set()
+for row in rows:
+    if not isinstance(row, dict):
+        raise ValueError('physical device mapping must contain objects')
+    ordinal, bdf, physical_id = row.get('local_ordinal'), row.get('bdf'), row.get('physical_id')
+    if (type(ordinal) is not int or ordinal < 0 or ordinal in devices
+            or not isinstance(physical_id, str) or not physical_id or physical_id in physical_ids
+            or not isinstance(bdf, str)
+            or not re.fullmatch(r'[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]', bdf)):
+        raise ValueError('invalid or duplicate physical device mapping')
+    bdf = bdf.lower()
+    if (not re.fullmatch(re.escape(bdf) + r'@[0-9a-f]{16}', physical_id)
+            or int(physical_id.split('@')[1], 16) == 0):
+        raise ValueError('physical identity must match BDF and a nonzero unique ID')
+    devices[ordinal] = bdf
+    physical_ids.add(physical_id)
+if len(set(devices.values())) != len(devices) or any(int(i) not in devices for i in sys.argv[1].split(',')):
+    raise ValueError('GPU pool is not covered by a unique physical device mapping')
+for ordinal, bdf in sorted(devices.items()):
+    print(f'{ordinal}\t/sys/bus/pci/devices/{bdf}')
+PY
+    )" || exit 1
+    while IFS=$'\t' read -r _ordinal _device_path; do
+        GPU_DEVICE_PATHS["$_ordinal"]="$_device_path"
+    done <<< "$_device_rows"
+fi
+_gpu_device_path() {
+    if [ "${GEAK_PHYSICAL_DEVICE_MAP+x}" = "x" ]; then
+        [ -n "${GPU_DEVICE_PATHS[$1]:-}" ] || return 1
+        printf '%s\n' "${GPU_DEVICE_PATHS[$1]}"
+    else
+        readlink -f "/sys/class/drm/renderD$((128 + 8 * $1))/device" 2>/dev/null
+    fi
+}
+
 # ---- GPU selection ------------------------------------------------------------------------------
 # <gpu_spec> is either a single id ("2", the historical contract, unchanged) or a POOL ("0,1,2,3").
 # With a pool we do not pre-assign a GPU: we take the first one that is BOTH unlocked AND idle,
@@ -98,11 +142,14 @@ fi
 # (e.g. deliberately co-tenanted screening runs). The default is 1 on BOTH paths: pool mode steps to
 # another GPU when one is busy, single-GPU mode has nowhere to step and so fails loudly instead.
 _gpu_is_idle() {
-    local id="$1" dev busy vram
-    dev="$(readlink -f "/sys/class/drm/renderD$((128 + 8 * id))/device" 2>/dev/null)" || return 0
-    [ -r "$dev/gpu_busy_percent" ] || return 0   # cannot tell -> do not block the run
-    busy="$(cat "$dev/gpu_busy_percent" 2>/dev/null || echo 0)"
-    vram="$(( $(cat "$dev/mem_info_vram_used" 2>/dev/null || echo 0) / 1048576 ))"
+    local id="$1" dev busy vram used
+    dev="$(_gpu_device_path "$id")" || { [ -z "${GEAK_PHYSICAL_DEVICE_MAP+x}" ]; return; }
+    [ -r "$dev/gpu_busy_percent" ] && [ -r "$dev/mem_info_vram_used" ] \
+        || { [ -z "${GEAK_PHYSICAL_DEVICE_MAP+x}" ]; return; }
+    busy="$(cat "$dev/gpu_busy_percent" 2>/dev/null)" || return 1
+    used="$(cat "$dev/mem_info_vram_used" 2>/dev/null)" || return 1
+    [[ "$busy" =~ ^[0-9]+$ && "$used" =~ ^[0-9]+$ ]] || return 1
+    vram="$(( used / 1048576 ))"
     [ "${busy:-0}" -le "${GEAK_GPU_MAX_BUSY_PCT:-5}" ] && [ "$vram" -le "${GEAK_GPU_MAX_VRAM_MB:-1024}" ]
 }
 
@@ -176,6 +223,14 @@ if [ "${KERNEL_ENV_SKIP_ENUM_REAP:-0}" != "1" ]; then
 fi
 
 # (2) Per-workspace torch extension build cache (default: a hidden dir in the current workspace).
+_isolate_workspace_caches() {
+    [ "${GEAK_ISOLATE_WORKSPACE_CACHES:-0}" = "1" ] || return 0
+    export TORCH_EXTENSIONS_DIR="$PWD/.torch_ext/torch"
+    export TRITON_CACHE_DIR="$PWD/.torch_ext/triton"
+    export XDG_CACHE_HOME="$PWD/.torch_ext/xdg"
+    export AITER_JIT_DIR="$PWD/.torch_ext/aiter"
+}
+_isolate_workspace_caches
 : "${TORCH_EXTENSIONS_DIR:=$PWD/.torch_ext}"
 export TORCH_EXTENSIONS_DIR
 mkdir -p "$TORCH_EXTENSIONS_DIR" 2>/dev/null || true
@@ -232,7 +287,7 @@ else
     _wait_t0=$SECONDS
     (
         # (1) flock this GPU (exclusive for the duration of the command).
-        flock -x -w 1200 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after 1200s"; exit 1; }
+        flock -x -w "${GEAK_GPU_POOL_WAIT:-1200}" 200 || { echo "ERROR: Failed to acquire GPU $GPU_ID lock after ${GEAK_GPU_POOL_WAIT:-1200}s"; exit 1; }
         # Default 1, matching pool mode above. It was 0 here, so a PINNED engineer skipped the
         # foreign-work check entirely -- not "sampled it once", never ran it. That is how two
         # measurement cells ended up timed on a GPU another tenant was executing on. Both paths ask

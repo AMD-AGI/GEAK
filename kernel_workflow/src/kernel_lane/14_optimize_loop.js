@@ -3,7 +3,7 @@
 //   { rounds, dispatched, cumulativeSpeedup, bestPerCase, finalWinner, roundsCommitted, history,
 //     citations, profileSummary, stopReason, forcedReplans, kbCapBound }
 // The greedy loop body keeps its original indentation so its prompts stay byte-identical.
-async function greedyOptimize(start, evo = null) {
+async function greedyOptimize(start, evo = null, population = null) {
 const planSchema = evo ? {
   ...PLAN_SCHEMA, properties: {...PLAN_SCHEMA.properties, directions: {
     ...PLAN_SCHEMA.properties.directions, items: {
@@ -25,6 +25,8 @@ let dispatched = 0, round = 0, noImprove = 0, roundsCommitted = 0;
 let plannerStopReason = '', deadlineHit = false, forcedReplans = 0, kbCapBound = 0;
 await captureCanonicalSelection(history, setup.resumed || A.canonical_selection_resume === true
   ? 'resume_unknown' : 'initial', 0, finalWinner);
+if (population) await population.publishCheckpoint(0, finalWinner || bench,
+  await population.checkpointTree(null, 0));
 while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
@@ -37,6 +39,10 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     break;
   }
   if (DEADLINE_EPOCH) log(`[deadline] ${(left / 60).toFixed(0)} min remain before the hard stop.`);
+
+  // Peers are deliberate planner references. Refreshing never changes this
+  // member's best ID, canonical source, history, or remaining development budget.
+  if (population && evo) await population.refreshPeers();
 
   round++;
   const remaining = BUDGET - dispatched;
@@ -214,7 +220,8 @@ Save best_patch.diff via \`cd <KERNEL_PATH> && git diff${evo ? " " + d.evolution
 ${cfg({
         ...(TASK ? { TASK } : {}),
         SPECIALTY: d.specialty,
-        ...(evo ? {EVOLUTION: evo.engineerContext(d), EVOLUTION_ARCHIVE: evo.path} : {}),
+        ...(evo ? {EVOLUTION: evo.engineerContext(d), EVOLUTION_ARCHIVE: evo.path,
+          ...(A.continuing_lineage === true ? {CONTINUING_LINEAGE: true} : {})} : {}),
         DIRECTION: { id: d.id, title: d.title, focus_files: d.focus_files || [], expected_speedup: d.expected_speedup, prompt: d.prompt },
         ...(isDeep ? { TARGET: (d.expected_speedup ? `Investigate the proposed ${d.expected_speedup}x speedup. ` : '') +
           'Improve the measured primary metric within the assigned budget. Use roofline estimates only with supported work counts and product-specific limits; they are not required attainment targets.' } : {}),
@@ -374,6 +381,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     }
   }
   if (improved) {
+    const checkpointTree = population ? await population.checkpointTree(winner, round) : null;
     await captureCanonicalSelection(history, 'before_commit', round, finalWinner);
     let commitBase = null, priorUntracked = [], commitResult = null, commitDeadline = false;
     try {
@@ -463,6 +471,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       finalWinner = winner;
       roundsCommitted += 1;
       if (evo) await evo.selectBest(winner.id);
+      if (population) await population.publishCheckpoint(round, winner, checkpointTree);
 
       // --- (f) Re-profile the new best ------------------------------------
       profileSummary = await agentT(

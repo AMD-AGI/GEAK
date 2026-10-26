@@ -16,6 +16,9 @@ const git = (dir, ...args) => hostRun('git', ['-C', dir, ...args]);
 const writeFile = (path, text) => hostRun('sh', ['-c', 'cat > "$1"', 'sh', path], { input: text });
 
 const optimizeStart = { cumulative, bestSeen, bestPerCase, finalWinner, profileSummary, history };
+// A population member owns its archive even when it uses the ordinary optimizer.
+// Only EVO receives archive planning inputs; publication cannot change greedy's policy.
+const populationArchive = A.population_lineage ? await createEvolution(optimizeStart) : null;
 applyOptimizeResult(OPTIMIZER === 'evo'
-  ? await greedyOptimize(optimizeStart, await createEvolution(optimizeStart))
-  : await greedyOptimize(optimizeStart));
+  ? await greedyOptimize(optimizeStart, populationArchive || await createEvolution(optimizeStart), populationArchive)
+  : await greedyOptimize(optimizeStart, null, populationArchive));

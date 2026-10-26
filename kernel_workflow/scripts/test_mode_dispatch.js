@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Regression guard for the kernel_workflow.js DISPATCHER (no GPU, no agent, no network).
 //
-// Three invariants under test, all exercised against the REAL kernel_workflow.js source:
+// Invariants under test, all exercised against the REAL kernel_workflow.js source:
 //   A-D) mode dispatch — args.mode routes to the single-language worker (optimize|author) or to the
 //        multi-language bake-off (bakeoff); it normalizes case/whitespace, defaults to optimize, throws
 //        on anything else (never silently downgrades), and forwards every arg to the worker untouched.
@@ -10,19 +10,25 @@
 //        overrides auto-discovery, and the winner is picked by speedup on the one frozen baseline.
 //   L-M) bake-off IDENTITY — expected/detected identity reaches every lane, gfx1201 isolates CDNA
 //        knowledge, and an unvalidated ISA (gfx1200) is refused before Discover.
+//   N-Q) optional POPULATION — independent workflows share command-level GPUs, keep private paths,
+//        preserve native argv identities, and select through the source/evidence query.
 //
 // The Workflow runtime globals (args/phase/log/workflow/agent/parallel/pipeline/budget) are stubbed, so
-// this runs in milliseconds and spawns nothing. The runtime wraps a workflow script body in an async
+// model calls are stubbed; population path checks use local CPU Python processes in a temporary tree.
+// The runtime wraps a workflow script body in an async
 // function — that is why top-level `return` is legal in the script and why we rebuild it the same way.
 //
 // Run:  node kernel_workflow/scripts/test_mode_dispatch.js
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const { spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..'); // .../GEAK
 const WF_DIR = path.join(ROOT, 'kernel_workflow');
-const DISPATCHER = path.join(WF_DIR, 'kernel_workflow.js');
+const dispatcherIndex = process.argv.indexOf('--dispatcher');
+const DISPATCHER = dispatcherIndex < 0 ? path.join(WF_DIR, 'kernel_workflow.js') : process.argv[dispatcherIndex + 1];
 const BODY = fs.readFileSync(DISPATCHER, 'utf8').replace(/^export const meta/m, 'const meta');
 
 let failures = 0;
@@ -35,7 +41,7 @@ const ok = (cond, msg, detail) => {
 // returns; `stubs.lane` maps a lane's target_language to its final_speedup.
 function build(argsObj, stubs) {
   const s = stubs || {};
-  const trace = { phases: [], logs: [], lanes: [], workflowCalls: [], agentLabels: [] };
+  const trace = { phases: [], logs: [], lanes: [], workflowCalls: [], agentLabels: [], processCalls: [] };
   const g = {
     args: argsObj,
     phase: (t) => trace.phases.push(t),
@@ -43,6 +49,7 @@ function build(argsObj, stubs) {
     workflow: async (ref, a) => {
       trace.workflowCalls.push({ scriptPath: ref.scriptPath, args: a });
       trace.lanes.push({ lang: a.target_language, mode: a.mode, gpus: a.gpu_ids });
+      if (s.workflow) return s.workflow(a, ref);
       const sp = s.lane && s.lane[a.target_language] !== undefined ? s.lane[a.target_language] : 1.0;
       return { validation_status: 'accepted', final_speedup: sp };
     },
@@ -58,6 +65,10 @@ function build(argsObj, stubs) {
       return v;
     })),
     budget: { total: null, spent: () => 0, remaining: () => Infinity },
+    runProcess: s.runProcess ? async (options) => {
+      trace.processCalls.push(options);
+      return s.runProcess(options);
+    } : undefined,
   };
   const fn = new Function(...Object.keys(g), `return (async () => { ${BODY} })();`);
   return { run: () => fn(...Object.values(g)), trace };
@@ -370,6 +381,299 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ok(/gfx1200 is not supported/.test(msg), 'expected gfx1200 throws', msg || 'no throw');
     ok(trace.agentLabels.length === 0, 'expected gfx1200 spawns no agent, not even Freeze',
       JSON.stringify(trace.agentLabels));
+  }
+
+  console.log('\n# N. declared population keeps private lineages and a shared command-level GPU pool');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'geak-population-dispatch-'));
+  try {
+    const task = path.join(temp, 'task');
+    const seed = path.join(temp, 'seed');
+    fs.mkdirSync(task); fs.mkdirSync(seed);
+    fs.writeFileSync(path.join(task, 'kernel.py'), 'original source\n');
+    for (const key of ['learned', 'artifacts', 'store']) {
+      fs.mkdirSync(path.join(seed, key));
+      fs.writeFileSync(path.join(seed, key, 'context.txt'), 'shared seed\n');
+    }
+    const populationArgs = (name) => ({ ...BASE, kernel_path: task, mode: 'optimize', optimizer: 'evo',
+      eval_dir: path.join(temp, name), gpu_ids: '0, 2', gpu_mode: 'pin', budget: 9,
+      learned_dir: path.join(seed, 'learned'), kb_artifacts_dir: path.join(seed, 'artifacts'),
+      kb_store_dir: path.join(seed, 'store'), kb_remote: 'auto', llm_stats: 'false',
+      lineages: [{ id: 'ordinary', optimizer: 'greedy', imports: [] },
+        { id: 'explorer', optimizer: 'evo', imports: ['ordinary'] }],
+    });
+    const clean = stdout => ({ status: 'completed', code: 0, group_cleared: true,
+      strays_killed: false, stdio_held: false, stdout, stderr: '' });
+    function hostWithQuery(query) {
+      return async options => {
+        if (query && options.args[0] === `${WF_DIR}/scripts/query_population.py`) return clean(JSON.stringify(query()));
+        const result = spawnSync(options.cmd, options.args, { encoding: 'utf8', timeout: options.timeoutMs, input: options.input });
+        return { ...clean(result.stdout), code: result.status, stderr: result.stderr || String(result.error || '') };
+      };
+    }
+    const returned = {};
+    let active = 0, peak = 0;
+    const args = populationArgs('run');
+    const { run, trace } = build(args, {
+      workflow: async child => {
+        active++; peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, child.optimizer === 'greedy' ? 10 : 1));
+        active--;
+        if (child.optimizer === 'evo') throw new Error('peer failed after search');
+        const result = { mode: 'optimize', eval_dir: child.eval_dir, final_speedup: 1.4,
+          final_patch: `${child.eval_dir}/winner.diff`, validation_status: 'accepted' };
+        returned[child.population_lineage.id] = result;
+        return result;
+      },
+      runProcess: hostWithQuery(() => ({ schema: 'geak.population.query/1', candidates: [],
+        selected: { lineage_id: 'ordinary', kind: 'final', qualification: 'legacy_verifier',
+          speedup: 1.4, result: returned.ordinary } })),
+    });
+    const result = await run();
+    ok(peak === 2, 'all workflows can overlap without a whole-lineage GPU reservation');
+    ok(trace.workflowCalls.length === 2, 'declared lineages each launch one existing worker');
+    ok(result.population.selected.id === 'ordinary' && result.final_speedup === 1.4,
+      'an eligible ordinary member survives a failed peer');
+    ok(result.population.lineages.find(row => row.id === 'explorer').status === 'failed',
+      'failed member disposition is retained');
+    for (const call of trace.workflowCalls) {
+      const a = call.args, id = a.population_lineage.id;
+      ok(a.gpu_ids === '0,2' && a.gpu_mode === 'pool', `${id} receives the same normalized GPU pool`);
+      ok(a.budget === 9 && a.apply_to_original === 'false' && !('lineages' in a),
+        `${id} keeps its own budget and isolated worker invocation`);
+      ok(a.kb_remote === 'auto' && a.kb_remote_write === 'off', `${id} retains remote read policy with private writes`);
+      ok(a.population_lineage.root === `${args.eval_dir}/population`, `${id} has the shared publication root`);
+      ok(a.continuing_lineage === (a.optimizer === 'evo' ? true : undefined), `${id} receives the appropriate continuation policy`);
+      for (const key of ['eval_dir', 'exp_root', 'state_dir', 'learned_dir', 'kb_artifacts_dir', 'kb_store_dir']) {
+        ok(a[key].startsWith(`${args.eval_dir}/lineages/${id}/`), `${id} owns ${key}`);
+      }
+      fs.writeFileSync(path.join(a.learned_dir, 'context.txt'), id);
+    }
+    ok(fs.readFileSync(path.join(seed, 'learned', 'context.txt'), 'utf8') === 'shared seed\n',
+      'private learned writes preserve original read context');
+    ok(fs.readFileSync(path.join(task, 'kernel.py'), 'utf8') === 'original source\n', 'population leaves the original source untouched');
+    const manifest = JSON.parse(fs.readFileSync(`${args.eval_dir}/population/manifest.json`, 'utf8'));
+    ok(manifest.schema === 'geak.population/1' && manifest.objective.kind === 'geomean'
+      && manifest.lineages.length === 2, 'fresh trusted manifest records all lineage identities and objective');
+    ok(fs.existsSync(`${args.eval_dir}/lineages/ordinary/eval/population_final_result.json`),
+      'host preserves returned final results for read-only selection');
+    ok(fs.existsSync(`${args.eval_dir}/population/result.json`), 'population result is persisted');
+
+    console.log('\n# O. native argv rewrite preserves option identities and distinct evaluation state');
+    const nativeArgs = populationArgs('native');
+    nativeArgs.objective = { kind: 'external_primary', primary_regime: 'decode' };
+    const nativeCommand = (state, action) => ['python3', '/native/runner.py', '--task-root', task,
+      '--state-root', state, '--gpu-lock-file', '/tmp/gpu.lock', '--epoch', 'test', action];
+    nativeArgs.external_measurement_command = nativeCommand('/tmp/development-state', 'measure');
+    nativeArgs.external_result_command = nativeCommand('/tmp/development-state', 'read');
+    nativeArgs.external_final_measurement_command = nativeCommand('/tmp/final-state', 'measure');
+    nativeArgs.external_final_result_command = nativeCommand('/tmp/final-state', 'read');
+    Object.assign(nativeArgs, { deadline_epoch: 2000000000, search_reserve_s: 300,
+      final_validation_reserve_s: 60, final_cleanup_reserve_s: 10, population_final_reserve_s: 100 });
+    const nativeBuild = build(nativeArgs, {
+      workflow: async a => ({ eval_dir: a.eval_dir, validation_status: 'invalid_measurement', final_speedup: 99 }),
+      runProcess: hostWithQuery(() => ({ schema: 'geak.population.query/1', selected: null, candidates: [], finalists: [] })),
+    });
+    const nativeResult = await nativeBuild.run();
+    const optionValue = (argv, option) => argv[argv.indexOf(option) + 1];
+    for (const call of nativeBuild.trace.workflowCalls) {
+      const a = call.args;
+      ok(a.deadline_epoch === nativeArgs.deadline_epoch - 100
+        && a.deadline_epoch - a.search_reserve_s === nativeArgs.deadline_epoch - nativeArgs.search_reserve_s,
+        `${a.population_lineage.id}: common final reserve preserves the declared search cutoff`);
+      ok(optionValue(a.external_measurement_command, '--state-root') === optionValue(a.external_result_command, '--state-root'),
+        `${a.population_lineage.id}: measurement and reader share private development state`);
+      ok(optionValue(a.external_result_command, '--state-root') !== optionValue(a.external_final_result_command, '--state-root'),
+        `${a.population_lineage.id}: separate final state stays separate`);
+      ok(optionValue(a.external_result_command, '--gpu-pool') === '0,2'
+        && !a.external_result_command.includes('--gpu-lock-file') && a.external_result_command.at(-1) === 'read',
+        `${a.population_lineage.id}: exact options change without positional guessing`);
+    }
+    ok(nativeArgs.external_result_command.includes('--gpu-lock-file')
+      && optionValue(nativeArgs.external_result_command, '--state-root') === '/tmp/development-state',
+      'native caller argv is unchanged');
+    ok(nativeResult.final_speedup === null && nativeResult.population.selected === null,
+      'unqualified self-reported native scalars never become a population winner');
+    ok(nativeResult.population.common_final.confirmations.length === 2
+      && nativeResult.population.common_final.confirmations.every(row => row.status === 'no_retained_candidate'),
+      'every configured member without a deliverable candidate has an explicit disposition');
+    for (const reserve of [undefined, 0, 250]) {
+      const invalidReserve = build({ ...nativeArgs, population_final_reserve_s: reserve }, {
+        runProcess: hostWithQuery(null),
+      });
+      let error = null;
+      try { await invalidReserve.run(); } catch (e) { error = e; }
+      ok(!!error && invalidReserve.trace.workflowCalls.length === 0,
+        `missing or infeasible common final reserve (${reserve}) fails before search`);
+    }
+
+    console.log('\n# P. invalid population configuration fails before any worker launches');
+    const invalid = [
+      ['wrong mode', { mode: 'author' }], ['wrong optimizer', { optimizer: 'greedy' }],
+      ['original writeback', { apply_to_original: true }],
+      ['relative output', { eval_dir: 'relative' }], ['empty members', { lineages: [] }],
+      ['duplicate IDs', { lineages: [{ id: 'a', optimizer: 'greedy' }, { id: 'a', optimizer: 'evo' }] }],
+      ['foreign import', { lineages: [{ id: 'a', optimizer: 'evo', imports: ['missing'] }] }],
+      ['greedy import', { lineages: [{ id: 'a', optimizer: 'greedy', imports: ['b'] }, { id: 'b', optimizer: 'evo' }] }],
+      ['invalid GPU pool', { gpu_ids: '0,0' }],
+      ['combined state flag', { external_result_command: ['reader', '--state-root=/tmp/state', '--gpu-pool', '0', 'read'] }],
+      ['duplicate state flag', { external_result_command: ['reader', '--state-root', '/tmp/a', '--state-root', '/tmp/b', '--gpu-pool', '0', 'read'] }],
+    ];
+    for (const [name, override] of invalid) {
+      const trial = build({ ...populationArgs('invalid'), ...override }, { runProcess: hostWithQuery(() => null) });
+      let error = null;
+      try { await trial.run(); } catch (e) { error = e; }
+      ok(!!error && trial.trace.workflowCalls.length === 0, `${name} fails before launching a lineage`);
+    }
+    const stale = build(args, { runProcess: hostWithQuery(() => null) });
+    let reused = null;
+    try { await stale.run(); } catch (error) { reused = error; }
+    ok(!!reused && stale.trace.workflowCalls.length === 0, 'reused output roots cannot import stale population evidence');
+
+    console.log('\n# Q. real checkpoint query ranks preserved lineage finals');
+    const realQuery = build(populationArgs('real_query'), {
+      workflow: async a => {
+        fs.mkdirSync(a.eval_dir, { recursive: true });
+        const patch = `${a.eval_dir}/final.diff`;
+        fs.writeFileSync(patch, 'diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-original source\n+better source\n');
+        return { mode: 'optimize', eval_dir: a.eval_dir, final_patch: patch,
+          final_speedup: a.optimizer === 'greedy' ? 1.2 : 9,
+          validation_status: a.optimizer === 'greedy' ? 'accepted' : 'flagged' };
+      },
+      runProcess: hostWithQuery(null),
+    });
+    const queried = await realQuery.run();
+    ok(queried.population.selected.id === 'ordinary' && queried.final_speedup === 1.2,
+      'real query preserves the accepted ordinary member over an unqualified faster claim');
+    ok(queried.population.query.candidates.find(row => row.lineage_id === 'explorer').status === 'disqualified',
+      'real query retains the rejected final disposition');
+    ok(queried.eval_dir === path.join(temp, 'real_query'), 'public result retains the caller eval_dir');
+
+    console.log('\n# R. all members receive a common native final before generic selection');
+    const nativeTask = path.join(temp, 'native_task');
+    const fixture = spawnSync('python3', ['-c',
+      'import json,sys; from pathlib import Path; from tests.native.fixtures import fixture; p=Path(sys.argv[1]); c=fixture(p); (p/"task.json").write_text(json.dumps(c))',
+      nativeTask], { cwd: ROOT, encoding: 'utf8' });
+    if (fixture.status !== 0) throw new Error(fixture.stderr);
+    const synthetic = path.join(temp, 'synthetic_native.py'), audit = path.join(temp, 'native_calls.jsonl');
+    // Native capture and readers are real. Only the UT execution is replaced by
+    // deterministic fixture evidence, so this exercises the handoff without a GPU.
+    fs.writeFileSync(synthetic, `import json,sys\nfrom pathlib import Path\nsys.path.insert(0,${JSON.stringify(ROOT)})\n` + String.raw`from scripts.native_runtime import direct_external_command as native
+from tests.native import fixtures
+argv=sys.argv[1:]; i=argv.index('--audit-file'); audit=Path(argv[i+1]); del argv[i:i+2]
+with audit.open('a') as stream: stream.write(json.dumps(argv)+'\n')
+state=argv[argv.index('--state-root')+1]
+def evidence(request,workspace,out,**options):
+ common='caller_final_' in state
+ explorer=any(b'explorer' in Path(p).read_bytes() for p in request['source_objects'].values())
+ if 'caller_final_failure' in state: return 3
+ if 'caller_final_peer_failure' in state and explorer: return 3
+ original=(not explorer) if not common else ('caller_final_no_gain' in state or ('caller_final_gain' in state and explorer))
+ for name,raw in fixtures.raw_reports(request,original=original).items():
+  target=Path(out)/name; target.parent.mkdir(parents=True,exist_ok=True); target.write_bytes(raw)
+ return 0
+native.run_native=evidence
+i=argv.index('--gpu-pool'); argv[i:i+2]=['--gpu-lock-file',str(audit.parent/'synthetic-gpu.lock')]
+raise SystemExit(native.main(argv))
+`);
+    const cpu = (cmd, commandArgs, cwd) => {
+      const process = spawnSync(cmd, commandArgs, { cwd, encoding: 'utf8', timeout: 30000 });
+      if (process.status !== 0) throw new Error(process.stderr || `command failed: ${cmd}`);
+      return process.stdout;
+    };
+    const invoke = (command, more) => cpu(command[0], [...command.slice(1), ...more], ROOT);
+    for (const finalOutcome of ['gain', 'no_gain', 'failure', 'peer_failure', 'deadline']) {
+      const a = { ...populationArgs(`handoff_${finalOutcome}`), kernel_path: nativeTask,
+        objective: { kind: 'external_primary', primary_regime: 'extend' } };
+      const command = (stage, action) => ['python3', synthetic, '--audit-file', audit, '--task-root', nativeTask,
+        '--state-root', path.join(temp, stage === 'final' ? `caller_final_${finalOutcome}` : `caller_development_${finalOutcome}`),
+        '--gpu-pool', '0,2', '--epoch', stage, action];
+      a.external_measurement_command = command('development', 'measure');
+      a.external_result_command = command('development', 'read');
+      a.external_final_measurement_command = command('final', 'measure');
+      a.external_final_result_command = command('final', 'read');
+      if (finalOutcome === 'peer_failure') a.lineages.push({id: 'missing', optimizer: 'evo', imports: []});
+      const callerState = optionValue(a.external_final_result_command, '--state-root');
+      const host = hostWithQuery(null);
+      let commonAttempts = 0, blocked = false, publicPatchDuringConfirmation = false;
+      const handoff = build(a, {
+        workflow: async child => {
+          if (child.population_lineage.id === 'missing') throw new Error('member exited without a retained candidate');
+          const workspace = `${child.eval_dir}/workspace`;
+          fs.mkdirSync(child.eval_dir, { recursive: true });
+          fs.cpSync(nativeTask, workspace, { recursive: true });
+          cpu('git', ['init', '-q'], workspace); cpu('git', ['add', '-A'], workspace);
+          fs.writeFileSync(`${workspace}/kernel_src/module.py`, `# ${child.population_lineage.id} candidate\n`);
+          const patch = `${child.eval_dir}/host_final_patch.diff`;
+          fs.writeFileSync(patch, cpu('git', ['diff', '--binary'], workspace));
+          const capture = JSON.parse(invoke(child.external_final_measurement_command, ['--workspace', workspace, '--capture-only']));
+          const pair = ['--candidate-id', capture.candidate_id, '--evaluation-id', capture.evaluation_id];
+          invoke(child.external_final_measurement_command, ['--captured', ...pair]);
+          const observed = JSON.parse(invoke(child.external_final_result_command, ['--workspace', nativeTask, '--patch', patch, ...pair]));
+          return { ...observed, mode: 'optimize', eval_dir: child.eval_dir, final_speedup: observed.primary_speedup,
+            final_selection: capture, final_patch: observed.native_reproducible_gain ? patch : '',
+            final_patch_sha256: observed.native_reproducible_gain ? observed.patch_sha256 : null };
+        },
+        runProcess: async options => {
+          const commonMeasurement = optionValue(options.args, '--state-root') === callerState
+            && options.args.includes('--captured') && options.args.includes('measure');
+          if (commonMeasurement) {
+            commonAttempts++;
+            publicPatchDuringConfirmation ||= fs.existsSync(`${a.eval_dir}/host_final_patch.diff`);
+            if (finalOutcome === 'deadline' && commonAttempts === 2) blocked = true;
+          }
+          if (blocked) throw Object.assign(new Error('common final process deadline'), {code: 'GEAK_PROCESS_DEADLINE'});
+          return host(options);
+        },
+      });
+      const r = await handoff.run();
+      const calls = fs.readFileSync(audit, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const measured = calls.filter(argv => optionValue(argv, '--state-root') === callerState
+        && argv.includes('measure') && !argv.includes('--capture-only'));
+      ok(commonAttempts === 2 && measured.length === (finalOutcome === 'deadline' ? 1 : 2)
+        && measured.every(argv => argv.includes('--captured') && optionValue(argv, '--gpu-pool') === '0'),
+        `${finalOutcome}: all retained member sources are attempted on the same single GPU`);
+      ok(!publicPatchDuringConfirmation, `${finalOutcome}: public final patch is created only after common selection`);
+      ok(r.eval_dir === a.eval_dir && r.population.search_selected.lineage_id === 'explorer',
+        `${finalOutcome}: caller output root and earlier search winner remain recorded`);
+      const confirmations = r.population.common_final.confirmations;
+      ok(confirmations.length === a.lineages.length && confirmations.filter(row => row.source).every(row => row.patch_ref
+        && row.process_costs.some(cost => cost.operation === 'measure') && row.duration_ms === null),
+        `${finalOutcome}: every source, confirmation status and available process cost is retained`);
+      if (finalOutcome === 'failure') {
+        ok(r.validation_status === 'invalid_measurement' && r.final_speedup === null && r.final_patch === '',
+          'failed common measurement cannot borrow an earlier scalar or export claim');
+        ok(!r.population.common_final.complete && !fs.existsSync(`${a.eval_dir}/host_final_patch.diff`),
+          'failed comparison has no public winner alias');
+      } else {
+        const winningPatch = r.final_patch || r.population.common_final.patch_ref.path;
+        const read = JSON.parse(invoke(a.external_final_result_command, ['--workspace', nativeTask,
+          '--patch', winningPatch, '--candidate-id', r.final_selection.candidate_id,
+          '--evaluation-id', r.final_selection.evaluation_id]));
+        ok(read.source_id === r.final_selection.source_id && read.primary_speedup === r.final_speedup,
+          `${finalOutcome}: caller original reader resolves exact returned source and IDs`);
+        ok(finalOutcome === 'no_gain' ? r.final_patch === '' && r.outcome === 'no_improvement'
+          : !!r.final_patch && r.outcome === 'improved', `${finalOutcome}: public export follows common native gain qualification`);
+      }
+      if (finalOutcome === 'gain') {
+        ok(r.population.selected.id === 'ordinary' && r.final_speedup > 2 && r.population.common_final.complete,
+          'common rank reversal preserves the included ordinary member and selects its confirmed score');
+      } else if (finalOutcome === 'peer_failure') {
+        ok(r.population.selected.id === 'ordinary' && !r.population.common_final.complete
+          && confirmations.find(row => row.id === 'explorer').status === 'failed'
+          && confirmations.find(row => row.id === 'missing').status === 'no_retained_candidate',
+          'a failed final peer and missing member cannot disqualify the ordinary confirmed winner');
+      } else if (finalOutcome === 'deadline') {
+        ok(r.population.selected.id === 'explorer' && confirmations.find(row => row.id === 'ordinary').status === 'deadline'
+          && !r.population.common_final.complete && !!r.population.common_final.delivery_alias_error
+          && !!r.population.persistence_error && !fs.existsSync(`${a.eval_dir}/host_final_patch.diff`),
+          'late cutoff returns the earlier confirmed winner with explicit alias and persistence failures');
+        ok(fs.existsSync(`${a.eval_dir}/population/explorer/common_final_result.json`)
+          && r.final_patch === `${a.eval_dir}/population/explorer/common_final_patch.diff`,
+          'completed confirmation is persisted before the later cutoff and remains a valid public patch');
+      }
+    }
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
   }
 
   console.log(failures === 0

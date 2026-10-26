@@ -225,11 +225,14 @@ def main(argv=None):
     parser.add_argument("--request", required=True, type=Path)
     parser.add_argument("--task", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--protected-root", type=Path)
+    parser.add_argument("--shared-files-json", help="validated protected input path-to-digest mapping")
     args = parser.parse_args(argv)
     request, began, began_ns = _decode(_read(args.request)), time.monotonic(), time.time_ns()
     fresh = not os.path.lexists(args.out)
     try:
-        return run(request, args.task, args.out)
+        return run(request, args.task, args.out, protected_root=args.protected_root,
+                   shared_files=_decode(args.shared_files_json) if args.shared_files_json is not None else None)
     finally:
         if fresh and os.path.lexists(args.out / "START.json"):
             try:

@@ -43,7 +43,7 @@ class ProtectedRunnerTests(unittest.TestCase):
     def files(root):
         return {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob('*') if path.is_file()}
 
-    def checked_run(self, *, run_name='output', **options):
+    def checked_run(self, *, run_name='output', cli=False, **options):
         output = self.root / ('native' + '-' + run_name)
         raw = raw_reports(self.request)
         calls = []
@@ -70,7 +70,14 @@ class ProtectedRunnerTests(unittest.TestCase):
             kwargs['stderr'].write(b'synthetic stderr\n')
             return subprocess.CompletedProcess(argv, 0)
         with mock.patch.dict(os.environ, {'PATH': '/usr/bin'}, clear=True), mock.patch.object(runner.subprocess, 'run', side_effect=process):
-            self.assertEqual(runner.run(self.request, self.workspace, output, **options), 0)
+            if cli:
+                request_path = self.root / 'request.json'
+                request_path.write_text(json.dumps(self.request))
+                self.assertEqual(runner.main(['--request', str(request_path), '--task', str(self.workspace),
+                    '--out', str(output), '--protected-root', str(options['protected_root']),
+                    '--shared-files-json', json.dumps(options['shared_files'])]), 0)
+            else:
+                self.assertEqual(runner.run(self.request, self.workspace, output, **options), 0)
         self.assertEqual(len(calls), 3)
         self.assertEqual(self.files(self.task), task_before)
         self.assertEqual(self.files(self.workspace), workspace_before)
@@ -120,6 +127,12 @@ class ProtectedRunnerTests(unittest.TestCase):
         copied = self.checked_run(run_name='copied', protected_root=self.task)
         linked = self.checked_run(run_name='linked', protected_root=self.task, shared_files=shared)
         self.assertEqual(linked, copied)
+
+    def test_cli_keeps_protected_inputs_separate_from_retained_editable_source(self):
+        shared = {'captures/input.bin': self.contract['artifacts']['captures/input.bin']}
+        for name in self.protected_names:
+            (self.workspace / name).unlink()
+        self.checked_run(cli=True, protected_root=self.task, shared_files=shared)
 
     def test_shared_map_requires_root_and_exact_registered_protected_pins(self):
         name = 'captures/input.bin'

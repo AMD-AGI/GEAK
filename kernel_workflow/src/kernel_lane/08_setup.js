@@ -37,6 +37,18 @@ const setup = await agentT(
 if (!setup || !setup.eval_dir) throw new Error('Setup failed: director did not return an eval_dir');
 const EVAL_DIR = setup.eval_dir;
 const CANONICAL = setup.workspace;       // canonical current-best workspace (advances each round)
+if (A.population_lineage) {
+  if (EVAL_DIR !== A.eval_dir || CANONICAL !== `${A.eval_dir}/workspace`) {
+    throw new Error('population Setup must use its assigned private eval_dir/workspace');
+  }
+  const isolation = await runProcess({cmd: 'python3', args: ['-c',
+    'import pathlib,subprocess,sys\ne,w,o=map(lambda p:pathlib.Path(p).resolve(strict=True),sys.argv[1:])\n' +
+    'assert w.parent == e and not (w == o or w in o.parents or o in w.parents), "population workspace is not isolated"\n' +
+    'assert pathlib.Path(subprocess.check_output(["git","-C",str(w),"rev-parse","--show-toplevel"],text=True).strip()).resolve() == w, "population workspace needs its own repository"',
+    EVAL_DIR, CANONICAL, KERNEL_PATH_ORIG], timeoutMs: 30000, graceMs: 2000});
+  if (isolation.status !== 'completed' || isolation.code !== 0 || isolation.strays_killed
+      || !isolation.group_cleared || isolation.stdio_held) throw new Error('population Setup failed source isolation checks');
+}
 const GFX = String(setup.device_gfx || '').trim().toLowerCase();
 const DEVICE_TARGET = String(setup.device_target || '').trim().toLowerCase();
 const SETUP_DEVICE_NAME = String(setup.device_name || '').trim();
@@ -124,4 +136,3 @@ if (!hasBaseline) {
     final_geomean: 0, final_patch: '', validation_status: 'no_baseline', reason,
   };
 }
-

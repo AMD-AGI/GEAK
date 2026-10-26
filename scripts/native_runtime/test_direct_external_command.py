@@ -14,6 +14,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import select
 import shutil
 import subprocess
@@ -60,8 +61,17 @@ class DirectExternalCommandTests(unittest.TestCase):
         self.runner = runner_patch.start()
         self.addCleanup(runner_patch.stop)
 
-    def fake_native(self, request, workspace, output):
-        self.assertEqual(workspace, self.workspace)
+    def fake_native(self, request, workspace, output, **options):
+        if workspace != self.workspace:
+            self.assertEqual(workspace, output.parent / "source")
+            self.assertEqual(options["protected_root"], self.task)
+            self.assertFalse((workspace / "ut_main.py").exists())
+        source, source_id, candidate_id = adapter.identities(
+            request["contract"], request["binding"]["measurement_epoch_id"],
+            adapter.snapshot(workspace, request["contract"]["source_paths"]))
+        self.assertEqual(source, request["source"])
+        self.assertEqual(source_id, request["binding"]["candidate_source_id"])
+        self.assertEqual(candidate_id, request["binding"]["candidate_id"])
         output.mkdir(parents=True, exist_ok=False)
         for name, body in fixtures.raw_reports(request, **self.raw_options).items():
             path = output / name
@@ -71,8 +81,11 @@ class DirectExternalCommandTests(unittest.TestCase):
 
     def argv(self, action, identity=None, *, workspace=None, extra=()):
         args = ["--task-root", str(self.task), "--state-root", str(self.state),
-                "--gpu-lock-file", str(self.gpu_lock),
-                action, "--workspace", str(workspace or self.workspace)]
+                action]
+        if "--gpu-pool" not in extra:
+            args.extend(["--gpu-lock-file", str(self.gpu_lock)])
+        if "--captured" not in extra:
+            args.extend(["--workspace", str(workspace or self.workspace)])
         if identity is not None:
             args.extend(["--candidate-id", identity["candidate_id"],
                          "--evaluation-id", identity["evaluation_id"]])
@@ -104,18 +117,248 @@ class DirectExternalCommandTests(unittest.TestCase):
         self.assertEqual(first["source_paths"], self.contract["source_paths"])
         self.assertRegex(first["candidate_id"], r"^[0-9a-f]{64}$")
         self.assertFalse(self.native_root(first).exists())
+        retained = Path(first["source_workspace"]) / "kernel_src/module.py"
+        self.assertEqual(retained.read_bytes(), self.candidate.read_bytes())
+        self.assertEqual(retained.stat().st_mode & 0o222, 0)
 
         code, measured = self.invoke("measure", first)
         self.assertEqual(code, 0)
         self.assertEqual(len(measured), 2)
         expected = {key: first[key] for key in ("candidate_id", "evaluation_id")}
         self.assertEqual(measured[-1]["external_evaluation"], expected)
+        self.assertEqual(measured[-1]["source_id"], first["source_id"])
+        self.assertEqual(measured[-1]["workspace_source_id"], first["source_id"])
+        self.assertEqual(measured[-1]["source_paths"], first["source_paths"])
         self.assertIsNone(measured[-1]["patch_sha256"])
         self.assertAlmostEqual(measured[-1]["primary_speedup"], 200 / 70)
         code, replayed = self.invoke("measure", first)
         self.assertEqual(code, 0)
         self.assertEqual(replayed[-1], measured[-1])
         self.runner.assert_called_once()
+
+    def test_queued_snapshot_survives_live_edits_and_late_result_cannot_label_new_source(self):
+        self.candidate.chmod(0o751)
+        first = self.capture()
+        retained_bytes = self.candidate.read_bytes()
+        waiting = threading.Event()
+        failures, results = [], []
+        acquire = adapter.acquire_gpu_lock
+
+        def announce_wait(lock):
+            waiting.set()
+            return acquire(lock)
+
+        def measure():
+            try:
+                results.append(adapter.main(self.argv("measure", first, extra=["--captured"])))
+            except Exception as error:
+                failures.append(error)
+
+        with self.gpu_lock.open("a+b") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            with mock.patch.object(adapter, "acquire_gpu_lock", side_effect=announce_wait), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                thread = threading.Thread(target=measure, daemon=True)
+                try:
+                    thread.start()
+                    self.assertTrue(waiting.wait(3), "measurement never reached the GPU queue")
+                    self.runner.assert_not_called()
+                    self.candidate.write_bytes(b"# independently developed successor\n")
+                    second = self.capture()
+                    self.assertNotEqual(first["source_id"], second["source_id"])
+                finally:
+                    fcntl.flock(held, fcntl.LOCK_UN)
+                    thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(results, [0])
+        frozen = Path(first["source_workspace"]) / "kernel_src/module.py"
+        self.assertEqual(frozen.read_bytes(), retained_bytes)
+        self.assertEqual(frozen.stat().st_mode & 0o111, 0o111)
+        code, rows = self.invoke("read", first, extra=["--captured"])
+        self.assertEqual(code, 0)
+        self.assertEqual(rows[0]["source_id"], first["source_id"])
+        self.assertEqual(rows[0]["external_evaluation"]["candidate_id"], first["candidate_id"])
+        with self.assertRaisesRegex(ValueError, "patch differs"):
+            self.invoke("read", first)
+        with self.assertRaisesRegex(ValueError, "source capture"):
+            self.invoke("measure", first)
+        with self.assertRaises((OSError, ValueError)):
+            self.invoke("read", second, extra=["--captured"])
+        self.runner.assert_called_once()
+
+    def test_captured_api_requires_exact_pair_and_an_unchanged_retained_source(self):
+        identity = self.capture()
+        for extra in (["--captured"], ["--captured", "--workspace", str(self.workspace)],
+                      ["--captured", "--patch", str(self.root / "unused.diff")]):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.invoke("measure", None if len(extra) == 1 else identity, extra=extra)
+        for action in ("measure", "read"):
+            with self.subTest(action=action), self.assertRaisesRegex(ValueError, "identity"):
+                self.invoke(action, dict(identity, candidate_id="0" * 64), extra=["--captured"])
+        retained = Path(identity["source_workspace"]) / "kernel_src/module.py"
+        retained.chmod(0o644)
+        retained.write_bytes(b"# tampered retained source\n")
+        with self.assertRaisesRegex(ValueError, "source capture"):
+            self.invoke("measure", identity, extra=["--captured"])
+        self.runner.assert_not_called()
+
+    def test_legacy_request_remains_workspace_bound_without_claiming_a_saved_snapshot(self):
+        identity = self.capture()
+        root = self.native_root(identity).parent
+        request_path = root / "request.json"
+        request = json.loads(request_path.read_text())
+        request["source_objects"] = {row["blob_id"]: str(self.workspace / row["path"])
+                                     for row in request["source"]["files"]}
+        request_path.write_text(json.dumps(request))
+        shutil.rmtree(root / "source")
+        code, rows = self.invoke("measure", identity)
+        self.assertEqual(code, 0)
+        self.assertNotIn("source_workspace", rows[0])
+        self.assertEqual(rows[-1]["source_id"], identity["source_id"])
+        with self.assertRaisesRegex(ValueError, "no retained source snapshot"):
+            self.invoke("read", identity, extra=["--captured"])
+        self.runner.assert_called_once()
+
+    def test_read_missing_state_does_not_create_directories(self):
+        identity = {"candidate_id": "0" * 64, "evaluation_id": "absent"}
+        for extra in ([], ["--captured"]):
+            with self.subTest(extra=extra), self.assertRaises(OSError):
+                self.invoke("read", identity, extra=extra)
+            self.assertFalse(self.state.exists())
+        self.runner.assert_not_called()
+
+    def test_pool_uses_free_stock_lock_and_retained_source_with_cpu_runner(self):
+        identity = self.capture()
+        self.candidate.write_bytes(b"# source advanced before pooled dispatch\n")
+        # Reserve synthetic numeric IDs, disable all hardware inspection, and
+        # replace only the UT process with the existing CPU evidence fixture.
+        first = 1000000 + int(hashlib.sha256(str(self.root).encode()).hexdigest()[:8], 16)
+        pool = f"{first},{first + 1}"
+        lock_dir = Path("/tmp/team_gpu_locks")
+        lock_dir.mkdir(exist_ok=True)
+        locks = [lock_dir / f"gpu_{gpu}.lock" for gpu in (first, first + 1)]
+        for path in locks:
+            path.touch(exist_ok=False)
+            self.addCleanup(lambda p=path: p.unlink(missing_ok=True))
+        cpu_runner = self.root / "cpu_runner.py"
+        cpu_runner.write_text("""
+import json, os, subprocess, sys
+from pathlib import Path
+from unittest import mock
+from geak.native import external_runner as runner
+from tests.native.fixtures import raw_reports
+request = json.loads(Path(sys.argv[sys.argv.index('--request') + 1]).read_text())
+reports = raw_reports(request)
+calls = 0
+def task_process(argv, **kwargs):
+    global calls
+    calls += 1
+    work = kwargs['cwd']
+    for name in ('ut_result.json', '_runs_v2.jsonl'):
+        (work / name).write_bytes(reports[f'process_{calls:02d}/' + name])
+    return subprocess.CompletedProcess(argv, 0)
+with mock.patch.object(runner.subprocess, 'run', side_effect=task_process):
+    code = runner.main(sys.argv[1:])
+output = Path(sys.argv[sys.argv.index('--out') + 1])
+(output / 'selected_gpu.txt').write_text(os.environ['HIP_VISIBLE_DEVICES'])
+sys.exit(code)
+""")
+        real_run = subprocess.run
+
+        def cpu_pool(command, **options):
+            self.assertEqual(command[:3], ["bash", str(adapter.GPU_LOCK_SCRIPT), pool])
+            self.assertEqual(command[4:6], ["-m", "geak.native.external_runner"])
+            env = {**options.pop("env"), "KERNEL_ENV_KEEP_ARCH": "1", "KERNEL_ENV_SKIP_ENUM_REAP": "1",
+                   "GEAK_GPU_REQUIRE_IDLE": "0", "GEAK_GPU_ALLOWED": pool, "GEAK_GPU_POOL_WAIT": "2"}
+            return real_run([*command[:4], str(cpu_runner), *command[6:]], env=env, **options)
+
+        with locks[0].open("a+b") as held, mock.patch.object(adapter.subprocess, "run", side_effect=cpu_pool), \
+                mock.patch.dict(os.environ, {"GEAK_ISOLATE_WORKSPACE_CACHES": "1"}):
+            fcntl.flock(held, fcntl.LOCK_EX)
+            code, measured = self.invoke("measure", identity, extra=["--captured", "--gpu-pool", pool])
+        self.assertEqual(code, 0)
+        self.assertEqual((self.native_root(identity) / "selected_gpu.txt").read_text(), str(first + 1))
+        effective = json.loads((self.native_root(identity) / "START.json").read_text())["environment"]
+        for key in ("TORCH_EXTENSIONS_DIR", "TRITON_CACHE_DIR", "XDG_CACHE_HOME", "AITER_JIT_DIR"):
+            self.assertTrue(Path(effective[key]).is_relative_to(self.native_root(identity).parent / "cache"))
+        self.assertEqual(measured[-1]["source_id"], identity["source_id"])
+        self.assertEqual(measured[-1]["external_evaluation"]["candidate_id"], identity["candidate_id"])
+        self.runner.assert_not_called()
+        with mock.patch.object(adapter.subprocess, "run") as dispatch:
+            self.assertEqual(self.invoke("measure", identity, extra=["--captured", "--gpu-pool", pool])[0], 0)
+            dispatch.assert_not_called()
+
+    def test_runtime_timeout_clears_a_pending_pooled_measurement_group(self):
+        identity = self.capture()
+        first = 6000000000 + int(hashlib.sha256(str(self.root).encode()).hexdigest()[:8], 16)
+        pool = f"{first},{first + 1}"
+        lock_dir = Path("/tmp/team_gpu_locks")
+        lock_dir.mkdir(exist_ok=True)
+        locks = [lock_dir / f"gpu_{gpu}.lock" for gpu in (first, first + 1)]
+        for path in locks:
+            path.touch(exist_ok=False)
+            self.addCleanup(lambda p=path: p.unlink(missing_ok=True))
+        options = {"cmd": sys.executable, "args": [str(Path(adapter.__file__)),
+            *self.argv("measure", identity, extra=["--captured", "--gpu-pool", pool])],
+            "timeoutMs": 750, "graceMs": 200, "settleMs": 500,
+            "env": {"KERNEL_ENV_KEEP_ARCH": "1", "KERNEL_ENV_SKIP_ENUM_REAP": "1",
+                    "GEAK_GPU_REQUIRE_IDLE": "0", "GEAK_GPU_ALLOWED": pool,
+                    "PYTHONPATH": str(REPO)}}
+        runtime = (REPO / "interface/runtime/engine/backends/base.mjs").as_uri()
+        program = (f"import {{runProcess}} from {json.dumps(runtime)}; "
+                   "process.stdout.write(JSON.stringify(await runProcess(JSON.parse(process.argv[1]))));")
+        with contextlib.ExitStack() as stack:
+            for path in locks:
+                held = stack.enter_context(path.open("a+b"))
+                fcntl.flock(held, fcntl.LOCK_EX)
+            result = subprocess.run(["node", "--input-type=module", "-e", program, json.dumps(options)],
+                                    capture_output=True, text=True, timeout=10, check=True)
+        settled = json.loads(result.stdout)
+        self.assertEqual(settled["status"], "timeout")
+        self.assertTrue(settled["group_cleared"])
+        self.assertFalse(settled["stdio_held"])
+        self.assertIn(identity["evaluation_id"], settled["stdout"])
+        self.assertFalse(self.native_root(identity).exists())
+        self.runner.assert_not_called()
+
+    def test_pooled_requests_isolate_inherited_build_caches_and_preserve_dependency_device_inputs(self):
+        inherited = self.root / "inherited-cache"
+        inherited.mkdir()
+        sentinel = inherited / "built-source"
+        sentinel.write_text("original shared cache")
+        cache_keys = ("TORCH_EXTENSIONS_DIR", "TRITON_CACHE_DIR", "XDG_CACHE_HOME", "AITER_JIT_DIR")
+        inherited_env = {key: str(inherited) for key in cache_keys}
+        inherited_env.update(AITER_ROOT_DIR=str(self.root / "installed-aiter"),
+                             GEAK_PHYSICAL_DEVICE_MAP="cpu-fixture-device-map", ROCR_VISIBLE_DEVICES="7,9",
+                             GEAK_ISOLATE_WORKSPACE_CACHES="1")
+        identities, launches = [self.capture(), self.capture()], []
+
+        def pool_runner(command, **options):
+            env = options["env"]
+            output = Path(command[command.index("--out") + 1])
+            request = json.loads(Path(command[command.index("--request") + 1]).read_text())
+            for key in cache_keys:
+                cache = Path(env[key])
+                self.assertTrue(cache.is_relative_to(output.parent / "cache"))
+                self.assertTrue(cache.is_dir())
+                self.assertFalse((cache / "built-source").exists())
+                (cache / "built-source").write_text(request["operation_id"])
+            for key in ("AITER_ROOT_DIR", "GEAK_PHYSICAL_DEVICE_MAP", "ROCR_VISIBLE_DEVICES"):
+                self.assertEqual(env[key], inherited_env[key])
+            self.assertEqual(env["GEAK_ISOLATE_WORKSPACE_CACHES"], "0")
+            launches.append({key: env[key] for key in cache_keys})
+            self.fake_native(request, options["cwd"], output, protected_root=self.task, shared_files={})
+            return subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.dict(os.environ, inherited_env), \
+                mock.patch.object(adapter.subprocess, "run", side_effect=pool_runner):
+            for identity in identities:
+                self.assertEqual(self.invoke("measure", identity, extra=["--captured", "--gpu-pool", "0,1"])[0], 0)
+        for key in cache_keys:
+            self.assertNotEqual(launches[0][key], launches[1][key])
+        self.assertEqual(sentinel.read_text(), "original shared cache")
+        self.runner.assert_not_called()
 
     def test_captured_source_bytes_and_modes_must_still_match_before_dispatch(self):
         identity = self.capture()
@@ -176,6 +419,11 @@ class DirectExternalCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(rows[0]["external_evaluation"]["candidate_id"], identity["candidate_id"])
         self.assertEqual(rows[0]["patch_sha256"], hashlib.sha256(patch.read_bytes()).hexdigest())
+        original_source = adapter.identities(self.contract, "direct-native-v1",
+                                            adapter.snapshot(self.task, self.contract["source_paths"]))[1]
+        self.assertEqual(rows[0]["workspace_source_id"], original_source)
+        self.assertEqual(rows[0]["source_id"], identity["source_id"])
+        self.assertNotEqual(rows[0]["workspace_source_id"], rows[0]["source_id"])
         self.assertEqual(original_path.read_bytes(), original)
         with self.assertRaisesRegex(ValueError, "patch differs"):
             self.invoke("read", identity, workspace=self.task)
@@ -252,6 +500,23 @@ class DirectExternalCommandTests(unittest.TestCase):
             self.invoke("measure", identity)
         with self.assertRaises((OSError, ValueError, KeyError)):
             self.invoke("measure", identity)
+        self.runner.assert_called_once()
+
+    def test_captured_incomplete_operation_stays_failed_after_live_source_advances(self):
+        identity = self.capture()
+
+        def interrupted(request, workspace, output, **options):
+            output.mkdir()
+            (output / "START.json").write_bytes(fixtures.raw_reports(request)["START.json"])
+            return 1
+
+        self.runner.side_effect = interrupted
+        with self.assertRaisesRegex(ValueError, "native UT failed"):
+            self.invoke("measure", identity, extra=["--captured"])
+        self.candidate.write_bytes(b"# later source must not revive failed operation\n")
+        for action in ("measure", "read"):
+            with self.subTest(action=action), self.assertRaises((OSError, ValueError, KeyError)):
+                self.invoke(action, identity, extra=["--captured"])
         self.runner.assert_called_once()
 
     def test_valid_no_gain_and_secondary_regression_remain_valid_measurements(self):
