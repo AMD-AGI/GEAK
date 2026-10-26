@@ -11,7 +11,11 @@ Produces, under --eval-dir:
     evidence/census/<point>.json    point_census.py output per verified point
     coverage.json                   coverage_ledger.py
     kernel_ranking.json             build_ranking.py
-    selection_targets.json          select_targets.py
+    selection_targets.json          select_targets.py: by kernel name first, then (after
+                                    the evidence below) by operator, which replaces it
+    attribution_candidates.json     select_targets.py --candidates: kernels whose launch
+                                    stacks are resolved so operators can be ranked
+    evidence/shapes, evidence/source_map.json, evidence/adjacency.json, task_decls.json
     profile_run.json                what ran, in what order, and how long each step took
 
 Why one script
@@ -114,7 +118,10 @@ def main():
     ap.add_argument("--probe-arg", action="append", default=[],
                     help="extra serving_probe.py argument, e.g. --probe-arg=--decode-tokens=20000")
     ap.add_argument("--select-arg", action="append", default=[],
-                    help="extra select_targets.py argument")
+                    help="extra select_targets.py argument (both selections)")
+    ap.add_argument("--select-by-kernel", action="store_true",
+                    help="keep the selection by kernel name: no candidate stacks, no "
+                         "operator aggregation")
     ap.add_argument("--eval-dir", required=True)
     a = ap.parse_args()
     if a.server_state:
@@ -312,9 +319,32 @@ def eager_evidence(a, ev, plan, py, log, timeline):
     print("[%s] eager evidence window %s: rc=%d in %.0fs" % (now(), tag, rc, took), flush=True)
 
 
+def same_targets(shapes_file, targets_file):
+    """A manifest was made for exactly these kernels (it lists what it was asked for)."""
+    try:
+        d = json.load(open(shapes_file))
+        want = {r.get("id") or r.get("name") for r in json.load(open(targets_file))["targets"]}
+    except (OSError, ValueError, KeyError):
+        return False
+    asked = d.get("requested")
+    if asked is None:
+        asked = set(d.get("kernels", {})) | set(d.get("not_launched_here", []))
+    return set(asked) == want
+
+
 def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
-    """After selection: what a task needs that only the traces hold, then the draft."""
+    """After the ranking: launch stacks for the attribution candidates, selection by
+    operator over them, then what a task needs that only the traces hold, and the draft."""
     phase = {p["point_id"]: p["phase"] for p in points}
+    rank = os.path.join(ev, "kernel_ranking.json")
+    cand = sel
+    if not a.select_by_kernel:
+        cand = os.path.join(ev, "attribution_candidates.json")
+        if not run_steps([("attribution_candidates",
+                           [py, os.path.join(HERE, "select_targets.py"), rank, "--candidates",
+                            "--output", cand] + [x for x in a.select_arg
+                                                  if x.split("=")[0] in ("--phases",)])]):
+            return False
     shapes_dir = os.path.join(ev, "evidence", "shapes")
     os.makedirs(shapes_dir, exist_ok=True)
     trace_dirs = {}
@@ -324,10 +354,10 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
     def shape_job(pid):
         out = os.path.join(shapes_dir, pid + ".json")
         if (os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(censuses[pid])
-                and os.path.getmtime(out) >= os.path.getmtime(sel)):
+                and same_targets(out, cand)):
             return pid, (0, 0.0, "kept")      # same census, same targets: nothing to redo
         cmd = [py, os.path.join(HERE, "kernel_shapes.py"), "--trace-dir", trace_dirs[pid],
-               "--phase", phase[pid], "--census", censuses[pid], "--targets", sel,
+               "--phase", phase[pid], "--census", censuses[pid], "--targets", cand,
                "--point-id", pid, "--out", os.path.join(shapes_dir, pid + ".json")]
         if phase[pid] == "PREFILL" and a.draft_shares_name:
             cmd.append("--draft-shares-name")
@@ -345,8 +375,12 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
         if phase[pid] == "DECODE" and os.path.exists(f):
             for k in json.load(open(f)).get("graph_replayed_kernels", []):
                 replayed.setdefault(k, []).append(pid)
-    have = [f for f in os.listdir(shapes_dir) if f.endswith("@eager.json")]
-    if replayed and not have:
+    covered = set()
+    for f in os.listdir(shapes_dir):
+        if f.endswith("@eager.json"):
+            d = json.load(open(os.path.join(shapes_dir, f)))
+            covered |= set(d.get("requested") or d.get("kernels", {}))
+    if set(replayed) - covered:
         dec = sorted((p for p in points if p["phase"] == "DECODE" and p["point_id"] in censuses),
                      key=lambda p: p.get("batch_size") or 0)
         json.dump({"point": dec[0]["point_id"], "kernels": sorted(replayed),
@@ -359,9 +393,13 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
                                          "failed_points": bad}
     print("[%s] kernel_shapes %d point(s) in %.0fs%s" % (now(), len(res), time.time() - t0,
           "; FAILED: %s" % bad if bad else ""), flush=True)
+    smap = os.path.join(ev, "evidence", "source_map.json")
     steps = [("source_map", [py, os.path.join(HERE, "source_map.py"), "--shapes-dir", shapes_dir,
-                             "--out", os.path.join(ev, "evidence", "source_map.json")]),
-             ("adjacency", [py, os.path.join(HERE, "adjacency.py"), "--targets", sel,
+                             "--out", smap])]
+    if not a.select_by_kernel:
+        steps.append(("select_operators", [py, os.path.join(HERE, "select_targets.py"), rank,
+                                           "--source-map", smap, "--output", sel] + a.select_arg))
+    steps += [("adjacency", [py, os.path.join(HERE, "adjacency.py"), "--targets", sel,
                             "--out", os.path.join(ev, "evidence", "adjacency.json")]
               + [x for pid in sorted(trace_dirs) for x in ("--trace-dir", trace_dirs[pid])])]
     decls = os.path.join(ev, "task_decls.json")

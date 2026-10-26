@@ -131,6 +131,7 @@ baseline leg, the candidate leg and the driver rebuild identical operands.
 | `contract` | driver, CPU | the lint finds an error |
 | `inputs` | driver | a case does not rebuild byte-identically from its seed, a layout fact is missing, an integer input leaves its range |
 | `binding` | legs | both legs import the same code, or the baseline resolves inside the task |
+| `launches` | baseline, every case once under `torch.profiler` (`meta.expected_launches` only) | a phase never launches a task kernel the server launched in it -- a stage, a dispatch branch or the other phase the UT does not reach -- unless waived (`launch_waivers: [{kernel, phase, why}]`); `seen` records what it did launch |
 | `correctness` | baseline + candidate oracle legs (fresh processes, deployment compile mode applied) | any random case/draw violates its output bound; with `bitwise` determinism, two candidate runs differ |
 | `isolation` | candidate | `call()` modified an input, or two calls share an output buffer |
 | `replay` | baseline eager refs, candidate graph replay | a graph phase lacks a bundle (exit 3), capture fails, or a replayed case violates its bound |

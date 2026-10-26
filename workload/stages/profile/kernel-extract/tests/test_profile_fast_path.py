@@ -390,7 +390,18 @@ class RunPointsTest(unittest.TestCase):
         attn = groups[("flash_prefill", "sparse_mla_attn")]
         self.assertEqual(attn["ut_family"], "sparse_mla")
         self.assertTrue(all(len(j["required_kernels"]) == 1 for j in attn["joint_phases"]))
-        self.assertIn(COLL, [k for x in decls["excluded"] for k in x["kernels"]])
+        # A collective stays a target: a task on the deployment's world size, not an
+        # exclusion (its lane builds the multi-rank harness).
+        coll = next(t for t in decls["tasks"] if COLL in t["kernels"])
+        self.assertEqual(coll["required_gpu_count"], RANKS)
+        self.assertEqual(coll["ut_family"], "all_reduce")
+        self.assertNotIn(COLL, [k for x in decls["excluded"] for k in x["kernels"]])
+        # Selection ran per operator over resolved stacks: the MoE op carries its sort
+        # kernel as a member, whatever that kernel's own share.
+        self.assertEqual(sel["policy"]["unit"], "operator")
+        moe_op = next(o for o in sel["ops"] if "gemm_a4w4_moe" in o["members"])
+        self.assertIn("moe_sort_kernel", moe_op["members"])
+        self.assertTrue((ev / "attribution_candidates.json").exists())
         # Unreviewed draft is refused; the reviewed one builds the plan and the scaffold.
         p = self.script("build_task_plan.py", "--eval-dir", ev, "--check")
         self.assertNotEqual(p.returncode, 0)
@@ -424,6 +435,12 @@ class RunPointsTest(unittest.TestCase):
         self.assertIsNone(areq["joint_ut"])
         self.assertEqual(sorted(r["device_kernel"] for r in areq["dispatch_ut"]["phases"]),
                          ["flash_prefill", "sparse_mla_attn"])
+        # build_task_plan stamps what each phase must launch, for the UT's launches gate.
+        meta = json.loads((tdir / "meta.json").read_text())
+        self.assertEqual(meta["expected_launches"]["DECODE"], ["gemm_a4w4_moe", "moe_sort_kernel"])
+        ct = next(t for t in plan["tasks"] if t["label"] == coll["label"])
+        self.assertEqual(json.loads(Path(ct["requested_kernel"]).read_text())
+                         ["required_gpu_count"], RANKS)
 
     def test_graph_mode_decode_fails_fast_without_recapture(self):
         server = FakeServer(graph=True)

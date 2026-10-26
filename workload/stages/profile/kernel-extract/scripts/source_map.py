@@ -11,6 +11,14 @@ first, resolves each to an installed file, hashes it and recovers the qualified 
   launcher   the innermost serving-stack frame (what calls the kernel or its op)
   op_seam    for a group of kernels: the innermost frame they ALL pass through, which
              is the smallest boundary that contains the whole chain
+  op         the operator the kernel belongs to, for ranking and grouping by operator:
+             `entry` is the outermost frame of the innermost run of library frames (code
+             outside the model tree, e.g. aiter.fused_moe -> sglang.kernels...:
+             fused_moe_wrapper), or the launcher when the model code launches the kernel
+             itself; `module_class` is the innermost nn.Module around it (FusedMoE,
+             Indexer, RowParallelLinear). key = "<entry callable>@<module_class>", so one
+             library entry called from two kinds of layer stays two operators. A kernel
+             whose samples name several keys keeps the most frequent and lists the rest.
 
     python3 source_map.py --shapes-dir evidence/shapes --out evidence/source_map.json \
         [--stack-package sglang --stack-package aiter ...] [--root /sgl-workspace/sglang/python]
@@ -37,6 +45,12 @@ from collections import defaultdict
 FRAME_RE = re.compile(r"^(?P<path>.+?\.py)\((?P<line>\d+)\): (?P<func>.+)$")
 DEFAULT_PACKAGES = ("sglang", "sgl_kernel", "aiter", "vllm", "flashinfer", "flash_mla")
 # Plumbing between a callable and its launch: never a useful seam.
+# Model code: a frame here is a call site, not an operator entry.
+MODEL_TREE = re.compile(r"^(sglang/srt/|vllm/model_executor/|vllm/v1/|vllm/worker/|"
+                        r"vllm/attention/layer\.py)")
+# Library frames that only dispatch into compiled code: never an operator entry by themselves.
+GENERIC_ENTRY = re.compile(r"(^|/)aiter/jit/core\.py$")
+MODULE_RE = re.compile(r"^nn\.Module: (?P<cls>[A-Za-z_][A-Za-z0-9_]*?)(_\d+)?$")
 PLUMBING = re.compile(r"(^|/)(torch/_ops\.py|torch_guard\.py|triton/runtime/|"
                       r"torch/nn/modules/module\.py|torch/utils/_contextlib\.py|"
                       r"torch/_dynamo/|torch/_library/)")
@@ -132,14 +146,49 @@ def frames_of(kernel_entry, packages):
     return stacks
 
 
+def op_of_sample(py_frames, packages):
+    """(entry frame tuple or None, module class or None) for one sampled launch."""
+    run, entry, cls = [], None, None
+    for f in py_frames or []:
+        mm = MODULE_RE.match(f)
+        if mm:
+            cls = cls or mm.group("cls")
+            continue
+        m = FRAME_RE.match(f)
+        if not m or PLUMBING.search(m.group("path")):
+            continue
+        path = m.group("path").lstrip("/")
+        if path.split("/", 1)[0] not in packages:
+            continue
+        rec = (m.group("path"), int(m.group("line")), m.group("func"))
+        if entry is None:
+            if MODEL_TREE.search(path):
+                # the model code is reached: the library run (if any) ends here
+                entry = next((r for r in reversed(run) if not GENERIC_ENTRY.search(r[0])),
+                             None) or rec
+            else:
+                run.append(rec)
+    if entry is None and run:
+        entry = next((r for r in reversed(run) if not GENERIC_ENTRY.search(r[0])), run[-1])
+    return entry, cls
+
+
 def build(shapes_files, roots, packages):
     res = Resolver(roots, packages)
     files, kernels, ops = {}, {}, defaultdict(set)
     stacks_by_kernel = defaultdict(list)
+    op_votes = defaultdict(lambda: defaultdict(int))      # kernel -> (entry, cls) -> samples
     replayed_only = set()
     for p in shapes_files:
         d = json.load(open(p))
         for name, entry in d["kernels"].items():
+            for v in entry["variants"]:
+                for smp in v["samples"]:
+                    if smp.get("graph_replayed"):
+                        continue
+                    e, cls = op_of_sample(smp.get("py_frames"), packages)
+                    if e:
+                        op_votes[name][(e, cls)] += 1
             for st in frames_of(entry, packages):
                 if st not in stacks_by_kernel[name]:
                     stacks_by_kernel[name].append(st)
@@ -175,9 +224,21 @@ def build(shapes_files, roots, packages):
             "frames": [frame_rec(*f) for f in inner],
             "launcher": frame_rec(*inner[0]) if inner else None,
         }
+        votes = sorted(op_votes.get(name, {}).items(), key=lambda kv: (-kv[1], str(kv[0])))
+        if votes:
+            def op_rec(key):
+                (e, cls) = key
+                fr = frame_rec(*e)
+                return {"key": "%s@%s" % (fr["target_callable"], cls or "-"),
+                        "entry": fr, "module_class": cls}
+            kernels[name]["op"] = op_rec(votes[0][0])
+            if len(votes) > 1:
+                kernels[name]["op_keys_seen"] = [op_rec(k)["key"] for k, _n in votes]
+        else:
+            kernels[name]["op"] = None
     for name in ops:
         kernels.setdefault(name, {"launching_ops": sorted(ops[name]), "stacks_seen": 0,
-                                  "frames": [], "launcher": None})
+                                  "frames": [], "launcher": None, "op": None})
     return {"contract": "kernel_extract/source_map/v1", "packages": list(packages),
             "graph_replayed_only": sorted(replayed_only),
             "kernels": kernels, "files": files,
@@ -218,7 +279,8 @@ def main():
         json.dump(out, fh, indent=1)
     for name, k in sorted(out["kernels"].items()):
         l = k["launcher"]
-        print("  %-50s %s" % (name[:50], l["target_callable"] if l else "(no serving-stack frame)"))
+        print("  %-50s %s" % (name[:50], (k.get("op") or {}).get("key")
+                                    or (l["target_callable"] if l else "(no serving-stack frame)")))
     if out["unresolved_frames"]:
         print("  %d frame(s) not resolved to an installed file (run inside the serving "
               "container, or pass --root)" % len(out["unresolved_frames"]))

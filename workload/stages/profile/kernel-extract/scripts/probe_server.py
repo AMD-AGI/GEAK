@@ -305,8 +305,13 @@ def evidence_requested(cmd):
     req = os.path.join(ev, "evidence", "eager_evidence_request.json")
     if not os.path.exists(req):
         return False
-    pid = json.load(open(req))["point"]
-    return not os.path.exists(os.path.join(ev, "evidence", "shapes", pid + "@eager.json"))
+    r = json.load(open(req))
+    got = os.path.join(ev, "evidence", "shapes", r["point"] + "@eager.json")
+    if not os.path.exists(got):
+        return True
+    # an earlier window may have been taken for fewer kernels (a narrower selection)
+    d = json.load(open(got))
+    return bool(set(r.get("kernels") or []) - set(d.get("requested") or d.get("kernels", {})))
 
 
 def cmd_run(a, cfg):

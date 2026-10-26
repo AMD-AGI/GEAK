@@ -11,8 +11,11 @@ and the source of that scope. A request to audit or fix the skill uses existing
 artifacts as evidence; it does not start another extraction campaign.
 
 The selection rule itself is in [the core skill](../SKILL.md) §2; this file covers how to
-apply it to an inventory. Precisely: `(rank_in_PREFILL <= 5 OR rank_in_DECODE <= 5) AND
-overall_pct > 3`, where within-phase rank uses that phase's device time and `overall_pct`
+apply it to an inventory. Precisely, over operators (kernels summed under their
+`source_map.py` op key; a kernel with no resolved stack is an operator of its own):
+`(rank_in_PREFILL <= 5 OR rank_in_DECODE <= 5) AND overall_pct > 3`, then every member
+kernel of a selected operator and the operator's other phase branch. `--select-by-kernel`
+applies the same formula per kernel name. Within-phase rank uses that phase's device time and `overall_pct`
 uses whole-replay time over total device time across all phases, one consistent rank/stream
 scope, current measured costs rather than historical percentages or expected gain. Exactly
 3% is excluded. A phase with fewer than five observed kernels contributes those available.

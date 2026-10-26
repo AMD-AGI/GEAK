@@ -57,6 +57,12 @@ is an `--override` with a stated reason, recorded by the lint.
 
 ## Reading the gates
 
+- `launches`: the baseline did not launch a kernel the server launched in that phase
+  (`missing`, with `seen` listing what it did launch). The task owns the whole operator --
+  every stage, every dispatch branch, both phases when the server ran both -- so add the
+  cases or the call path that reach it. Waive one in `meta.ut_contract.launch_waivers`
+  `[{kernel, phase, why}]` only when it cannot run from this entry (say why).
+
 - `correctness` failing on an **unmodified** extraction means `call()`, a hook or a layout
   fact differs from the deployed call -- the candidate is the installed code, so the two
   legs should agree to the family bound.
@@ -69,6 +75,15 @@ is an `--override` with a stated reason, recorded by the lint.
 - `negative_controls`: a mutation must fail the compare by >= the margin and must run; a
   mutation that breaks compilation is not a control.
 - `replay`, exit 3 / `UT_HARNESS_INCOMPLETE`: a graph phase needs `replay_bundle()`.
+
+## Collectives
+
+A task with `required_gpu_count` > 1 in `run/requested_kernel.json` is a collective on the
+deployment's world size; the wave gives the lane that many GPUs. The generic driver runs
+one process, so build the multi-rank harness of `references/collective-ut.md` inside the
+task (every rank's output checked, the deployed graph mode, a numerical negative control)
+and keep `unittest.py` as its entry. If it cannot be built here, that is a blocker naming
+what is missing -- the kernel stays a selected target.
 
 ## Blockers
 

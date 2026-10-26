@@ -94,5 +94,54 @@ class ParallelGatesTest(S.ServerEvidenceTest):
         self.assertFalse(any(r.get("reused") for r in again["gates"].values()))
 
 
+@unittest.skipUnless(S.GPU, "needs torch, triton and a GPU")
+class LaunchesGateTest(S.ServerEvidenceTest):
+    """meta.expected_launches (build_task_plan) against what the baseline launches."""
+    test_server_records_the_warmup_variant_and_its_call = None
+    test_without_the_server_call_the_m1_variant_is_reported_missing = None
+    test_a_waiver_with_a_reason_accepts_the_missing_variant = None
+    test_replayed_server_calls_cover_every_variant_and_the_ut_passes = None
+    test_a_candidate_broken_only_on_the_warmup_path_fails_server_calls = None
+    test_without_preimports_the_env_differs_and_with_them_next_pow2_fails = None
+
+    def expect(self, want, waivers=None):
+        path = os.path.join(self.task, "meta.json")
+        with open(path) as f:
+            meta = json.load(f)
+        meta["expected_launches"] = want
+        if waivers is not None:
+            meta.setdefault("ut_contract", {})["launch_waivers"] = waivers
+        with open(path, "w") as f:
+            json.dump(meta, f)
+
+    def gates(self):
+        self.env["UT_GPUS"] = "0"
+        p = self.run_py([os.path.join(self.task, "unittest.py"), "--gates",
+                         "contract,inputs,binding,launches"])
+        with open(os.path.join(self.task, "run", "ut_report.json")) as f:
+            return json.load(f)["gates"]["launches"]
+
+    def test_the_kernels_the_server_launched_are_seen_per_phase(self):
+        self.expect({"PREFILL": ["_gemm_kernel"], "DECODE": ["_gemm_kernel"]})
+        r = self.gates()
+        self.assertEqual(r["status"], "pass", json.dumps(r, default=str)[:2000])
+        self.assertIn("_gemm_kernel", r["seen"]["PREFILL"])
+
+    def test_a_stage_the_ut_never_reaches_fails_and_is_named(self):
+        self.expect({"DECODE": ["_gemm_kernel", "gemm2_stage_the_ut_skips"]})
+        r = self.gates()
+        self.assertEqual(r["status"], "fail")
+        self.assertEqual(r["missing"], {"DECODE": ["gemm2_stage_the_ut_skips"]})
+
+    def test_a_reasoned_waiver_accepts_it(self):
+        self.expect({"DECODE": ["_gemm_kernel", "gemm2_stage_the_ut_skips"]},
+                    [{"kernel": "gemm2_stage_the_ut_skips", "phase": "DECODE",
+                      "why": "launched by the server's warmup only"}])
+        self.assertEqual(self.gates()["status"], "pass")
+
+    def test_without_evidence_the_gate_is_not_required(self):
+        self.assertEqual(self.gates()["status"], "not_required")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

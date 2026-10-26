@@ -192,6 +192,7 @@ def shapes(trace_dir, phase, census, wanted, samples=3, draft_shares_name=False,
         "trace": os.path.abspath(path), "scan_method": s.method,
         "record_shapes": has_shapes, "with_stack": has_stack,
         "kernels": dict(out),
+        "requested": sorted(wanted),
         "not_launched_here": sorted(wanted - set(out)),
         "graph_replayed_kernels": sorted(
             k for k, v in out.items()

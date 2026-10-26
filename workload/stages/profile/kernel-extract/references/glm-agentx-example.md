@@ -21,8 +21,9 @@ implementation, and a draft model need not use the target model's kernels.
 ## Reconciling a supplied GLM UT delivery
 
 Use the core skill's [selection coverage contract](selection-coverage.md).
-The extraction target set is the union of PREFILL/DECODE Top-5 lists after
-filtering each by overall workload share >3%. Prior deliveries are discovery
+The extraction target set is the union of PREFILL/DECODE Top-5 operator lists after
+filtering each by overall workload share >3% (SKILL.md §2: per operator, with members and
+phase branches). Prior deliveries are discovery
 references; their full task lists do not override this rule.
 For deliveries such as GLM-5.2 0917/0922, use the following families as search
 leads only when the supplied artifacts and current model contain them:

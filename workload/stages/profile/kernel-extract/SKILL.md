@@ -82,18 +82,26 @@ with, and spent most of the hour doing it.
    the extracted source can affect; nested scopes, not additive. Collectives,
    unattributed work and unsupported kernels stay in the denominator and inventory.
 
-Default selection is **per-phase Top 5 AND overall GPU-time share strictly >3%**: ranked
-per phase before filtering, unioned by live identity, no backfilling of rank 6. Explicit
-user scope overrides it (`run_points.py --select-arg`). Every selected identity needs a
-task or explicit blocker; execution limits may defer tasks but cannot turn a partial
-batch into completed extraction.
+Default selection is **per-phase Top 5 AND overall GPU-time share strictly >3%, per
+operator**: `run_points.py` resolves the launch stacks of every kernel above 0.1% or in a
+phase's top 30 (`attribution_candidates.json`), sums kernels under their operator (library
+entry @ innermost `nn.Module`, `source_map.py`), and applies the rule to the sums: ranked
+per phase before filtering, no backfilling of rank 6. Every member kernel of a selected
+operator is selected, and so is the operator's other phase branch (same module class and
+family, disjoint phases). By kernel name, GLM-5.2's fused MoE lost its stage-2 and sort
+kernels (6.3%) and the indexer its top-k and prefill score. `--select-by-kernel` restores
+the per-name rule; explicit user scope overrides either (`run_points.py --select-arg`).
+Every selected identity needs a task or explicit blocker; execution limits may defer tasks
+but cannot turn a partial batch into completed extraction.
 
 ## 3. Declare complete task boundaries
 
 Read [delivery contract](references/delivery-contract.md). `task_decls.json` is drafted
-from the evidence: selected kernels joined by consecutive launches that share a frame
-narrower than the layer become one task; its `target_callable` is their innermost common
-frame; its `ut_family` is the family whose `match` patterns fit; collectives and device
+from the evidence: one task per selected operator with all its member kernels and its
+other phase branch; its `target_callable` is the operator's entry (or the branches'
+innermost common frame); its `ut_family` is the family whose `match` patterns fit (the
+module class breaks ties); a collective is a task on the deployment's world size
+(`required_gpu_count` = tp) whose lane builds the multi-rank harness, and only device
 copies are excluded with a stated reason; each phase gets one `joint_phases` row per
 distinct set of the task's kernels launched together (two rows in one phase are dispatch
 branches). Every decision carries its basis and a `needs_review` note. Review it:

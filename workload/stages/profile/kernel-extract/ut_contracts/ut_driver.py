@@ -7,6 +7,11 @@ hand-written UT used to re-implement (500+ lines per task) lives here once:
   contract           ut_contract.lint_task: contract, case manifest and meta agree (CPU only)
   inputs             each random case builds reproducibly, honours its layout facts and ranges
   binding            harness_lib.build_candidate_overlay + assert_legs_differ
+  launches           (meta.expected_launches, stamped by build_task_plan) the baseline runs
+                     every case once under torch.profiler; each phase must launch every
+                     task kernel the server launched in that phase -- a UT that calls the
+                     right callable can still miss a stage, a dispatch branch or the
+                     other phase. The kernels it did launch are recorded per phase
   correctness        baseline and candidate oracle legs in fresh processes, compared per output
                      under the contract's bound, against a float64 reference where one exists
   server_calls       (server evidence) the entry calls the probe server recorded when it first
@@ -53,8 +58,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # This file sits beside a file named unittest.py: drop the task dir before torch is imported.
 sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != HERE]
 
-GATES = ("contract", "inputs", "binding", "correctness", "server_calls", "compile_variants",
-         "isolation", "replay", "negative_controls", "restore", "timing")
+GATES = ("contract", "inputs", "binding", "launches", "correctness", "server_calls",
+         "compile_variants", "isolation", "replay", "negative_controls", "restore", "timing")
 SENTINEL = "UT_HARNESS_INCOMPLETE"
 DEFAULT_REPLAY_TOL = 0.02
 DEFAULT_CONTROL_MARGIN = 10.0
@@ -467,6 +472,68 @@ def _inproc(T, overlay, mode, extra=(), timeout=3600):
     return json.loads(lines[-1])
 
 
+def gate_launches(T, a, state):
+    want = T.meta.get("expected_launches") or {}
+    if not want:
+        return {"status": "not_required", "why": "meta.expected_launches is absent (no "
+                "per-phase launch evidence for this task)"}
+    base, _ = T.h.build_candidate_overlay(T.dir, T.meta)
+    r = _inproc(T, base, "launches", ("--seed", str(a.seed)))
+    if r.get("status") != "ok":
+        return r
+    seen = r["seen"]
+    missing = {ph: [k for k in ks if k not in set(seen.get(ph) or [])]
+               for ph, ks in want.items()}
+    missing = {ph: ks for ph, ks in missing.items() if ks}
+    out = {"expected": want, "seen": seen, "missing": missing,
+           "other_kernels": {ph: sorted(set(ks) - {k for v in want.values() for k in v})
+                             for ph, ks in seen.items()}}
+    if missing and T.sig_filter is not None:
+        out["note"] = "--quick runs a subset of cases: a missing branch is advisory here"
+        return {"status": "pass", **out}
+    if missing:
+        out["fix"] = ("the UT never launches these server kernels in that phase: add the "
+                      "cases or call path that reaches them (a stage of the op, a dispatch "
+                      "branch, the other phase), or justify each in "
+                      "meta.ut_contract.launch_waivers [{kernel, phase, why}]")
+        waived = {(w.get("kernel"), w.get("phase")) for w in
+                  (T.mc.get("launch_waivers") or []) if (w.get("why") or "").strip()}
+        left = {ph: [k for k in ks if (k, ph) not in waived] for ph, ks in missing.items()}
+        if not any(left.values()):
+            return {"status": "pass", "waived": missing, **out}
+        return {"status": "fail", **out}
+    return {"status": "pass", **out}
+
+
+def inproc_launches(T, a):
+    """Baseline overlay: every random case once (after a warm-up call, so compilation and
+    autotuning are outside the window), one profiler session per phase."""
+    torch = T.U._torch()
+    if not torch.cuda.is_available():
+        return {"status": "skipped", "why": "no CUDA"}
+    from torch.profiler import profile, ProfilerActivity
+    device = _device(torch)
+    by_phase = {}
+    for spec in T.random_specs():
+        by_phase.setdefault(spec.get("regime") or "-", []).append(spec)
+    seen = {}
+    for ph, specs in by_phase.items():
+        names = set()
+        for spec in specs:
+            args = T.cases.make_args(spec, gen=_gen(torch, device, a.seed))
+            T.cases.call(args)
+            torch.cuda.synchronize()
+            with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                T.cases.call(args)
+                torch.cuda.synchronize()
+            for e in prof.events():
+                if getattr(e, "device_type", None) is not None and "CUDA" in str(e.device_type):
+                    names.add(e.name)
+            del args
+        seen[ph] = sorted(names)
+    return {"status": "ok", "seen": seen}
+
+
 def gate_isolation(T, a, state):
     _, cand = T.h.build_candidate_overlay(T.dir, T.meta)
     return _inproc(T, cand, "isolation", ("--seed", str(a.seed)))
@@ -862,7 +929,7 @@ def main(task=None, argv=None):
         for mod in T.meta.get("server_preimports") or []:
             importlib.import_module(mod)
         fn = {"isolation": inproc_isolation, "replay-ref": inproc_replay_ref,
-              "replay": inproc_replay}[a.inproc]
+              "replay": inproc_replay, "launches": inproc_launches}[a.inproc]
         print(json.dumps(fn(T, a), default=str))
         return 0
     a.draws = a.draws or int(T.meta.get("random_draws", 3))

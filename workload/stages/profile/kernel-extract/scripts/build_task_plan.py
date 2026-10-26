@@ -288,12 +288,26 @@ def server_evidence(eval_dir, task, tdir):
                                 "variants_without_entry_frame": len(unmatched)}}
 
 
-def stamp_meta(tdir, ev, waivers):
+def expected_launches(task, launched, phase_of):
+    """{phase: kernels} -- every task kernel the server launched at that phase's points.
+    ut_driver's `launches` gate requires the UT's baseline to launch each of them."""
+    names = set(task.get("kernels") or []) | {c.get("kernel") for c in task.get("companions") or []}
+    out = {}
+    for pid, ks in launched.items():
+        ph = phase_of.get(pid.split("@")[0])
+        if ph:
+            out.setdefault(ph, set()).update(ks & names)
+    return {ph: sorted(ks) for ph, ks in sorted(out.items()) if ks}
+
+
+def stamp_meta(tdir, ev, waivers, expected=None):
     """Write the server evidence into an existing meta.json (scaffolded now or before)."""
     path = os.path.join(tdir, "meta.json")
     meta = load(path)
     if meta is None:
         return False
+    if expected is not None:
+        meta["expected_launches"] = expected
     meta["server_preimports"] = ev["server_preimports"]
     if ev.get("server_evidence"):
         meta["server_evidence"] = ev["server_evidence"]
@@ -345,6 +359,7 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
     points = load(ev("sampling_points_final.json"))
     if not points:
         raise SystemExit("build_task_plan: sampling_points_final.json is missing (relabel_points.py)")
+    phase_of = {p["point_id"]: p["phase"] for p in points.get("points", [])}
     cases = plan_cases(points, shapes_dir, decls["tasks"])["tasks"]
     census = [{"point_id": p["point_id"], "phase": p["phase"], "path": p.get("census"),
                "achieved_shape": p.get("achieved_shape"),
@@ -382,7 +397,8 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
             "phase_regimes": t.get("phase_regimes"),
             "selection_pct_gpu_time": round(sum(rank.get(k, {}).get("selection_pct_gpu_time", 0)
                                                 for k in t["kernels"]), 4),
-            "source_delivery_required": True, "required_gpu_count": 1,
+            "source_delivery_required": True,
+            "required_gpu_count": int(t.get("required_gpu_count") or 1),
             "capture_required": False,
             "shared": shared,
             "rules": ["hold one card; start no server, take no capture -- if evidence is "
@@ -394,7 +410,8 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
         se = server_evidence(eval_dir, t, tdir)
         sc = {"status": "skipped", "why": "--no-scaffold"} if no_scaffold else \
             scaffold(t, tdir, manifest(t, tc["cases"]), force)
-        stamp_meta(tdir, se, t.get("compile_variant_waivers"))
+        stamp_meta(tdir, se, t.get("compile_variant_waivers"),
+                   expected_launches(t, launched, phase_of))
         req["server_preimports"] = se["server_preimports"]
         req["server_evidence"] = se.get("server_evidence") or {"missing": se.get("why")}
         json.dump(req, open(os.path.join(tdir, "run", "requested_kernel.json"), "w"), indent=1)
