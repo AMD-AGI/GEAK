@@ -1,8 +1,8 @@
 # Hardware peaks — roofline denominators
 
 Pure data. One section per calibrated product (or per `gfx` when the ISA is the product).
-Client RDNA4 peaks are **R9700-only**. A bare `gfx1201` lookup without `product: r9700`
-must not inherit these numbers — several SKUs share that ISA.
+Client RDNA4 peaks are product-scoped (`r9700`, `r9600d`). A bare `gfx1201` lookup without
+a `product:` must not inherit these numbers — several SKUs share that ISA.
 
 Peaks are **dense, no-sparsity, datasheet-ceiling** figures. Memory bandwidth is the
 *theoretical pin* rate. `target_eff` in `SKILL.md` is a generic op-class
@@ -45,35 +45,30 @@ the 64 MB Infinity Cache can report effective bandwidth above 640 GB/s; do not c
 that impossible GDDR bandwidth. Measure the external-memory roof with a streaming
 working set larger than the cache.
 
-## r9600d — Radeon AI PRO R9600D (gfx1201, 48 CU)
+## r9600d — Radeon AI PRO R9600D (gfx1201, 150 W)
 ```yaml
 product: r9600d
 gfx: gfx1201
-cu: 48                         # physical CUs from rocminfo; PyTorch reports 24 WGPs
-hbm_bw_bytes_s: 6.37e11        # measured: max(read 534.5, write 637.3) GB/s
-flops:                         # MEASURED achievable matrix-core rates, FLOP/s; not a datasheet
-  bf16: 6.5e13
-  fp16: 6.4e13
-  fp8:  1.25e14
-  int8: 1.08e14
+cu: 48                         # physical CUs from rocminfo; not PyTorch WGP count (24)
+hbm_bw_bytes_s: 6.4e11         # 32 GB GDDR6, 256-bit, 640 GB/s
+flops:                         # dense peaks, FLOP/s (or OPS/s for int8)
+  fp32: 2.48e13                # vector FP32 rate, not a matrix-core rate
+  bf16: 9.9e13
+  fp16: 9.9e13
+  fp8:  1.99e14
+  int8: 1.99e14
 ```
 
-These are **measured**, not datasheet, numbers: the TraceLens `microbench`
-(matrix GEMM and streaming read/write bandwidth) on one board, one run, with an
-8192^3 PyTorch bf16 GEMM agreeing at 63.2 TFLOPS. The ISA facts and memory
-hierarchy match R9700 (wave32, WMMA, 64 KiB LDS per workgroup, 8 MiB L2, 64 MiB
-Infinity Cache, about 32 GB GDDR6). What differs is the CU count (48 against
-64) and the matrix rate: the measured FP16/BF16 rate is about a third of the
-R9700 datasheet figure, so the BF16 ridge is about **102 FLOP/byte**
-(`6.5e13 / 6.37e11`) against about 298 on R9700. A kernel between those
-intensities is compute-bound here and memory-bound there; never carry R9700
-peaks over. There is no `fp32` key because the vector FP32 microbenchmark
-(about 8 TFLOPS from a Triton FMA chain) is not a trustworthy ceiling on
-RDNA4, and no `fp4` key because the part has no block-scaled path. Treat every
-value here as a lower bound from a single run, not a ceiling: a later model-mode
-run saw an LM-head GEMM sustain about 620 GB/s, above the 534.5 GB/s read
-figure, and a Stage-A prefill estimate about 10% above the BF16 value. Replace
-these with datasheet values when AMD publishes them.
+Public dense peaks for this SKU (AMD product page): FP32 vector 24.8 TFLOPS; FP16 matrix
+99 TFLOPS (199 sparse 2:4); FP8 matrix 199 TFLOPS (397 sparse); INT8 199 TOPS (397 sparse);
+INT4 397 TOPS (794 sparse). AMD lists FP16 only; BF16 is set equal to it, as for R9700.
+There is **no** `fp4` key: AMD lists no block-scaled MX rate for this SKU. Memory sits
+behind 64 MB Infinity Cache. Clocks: 1080 game / 2020 boost. The ISA and memory hierarchy
+match R9700; what differs is 48 CUs against 64 and the lower boost clock, so every compute
+peak is about half of R9700's. Never carry R9700 numbers over.
+
+The FP16/BF16 ridge is ~155 FLOP/byte (`99e12 / 640e9`) against ~298 on R9700: a kernel
+between those intensities is compute-bound here and memory-bound there.
 
 ## gfx950 — CDNA4, MI350X / MI355X class
 ```yaml

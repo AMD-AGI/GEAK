@@ -273,7 +273,6 @@ One measured product override is available through
 | product / class | `target_eff` | evidence |
 |---|---:|---|
 | R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76** | 30 event-timed 1 GiB→1 GiB copies: median 485.8 GB/s read+write, or 0.759× the 640 GB/s datasheet pin rate |
-| R9600D (`product=r9600d`) MoE weight streaming / elementwise | **0.85** | 30 event-timed 1 GiB→1 GiB copies: median 538.9 GB/s read+write, or 0.846× the 637 GB/s measured ceiling in `peaks.md` |
 
 This override does not change dense-GEMM compute efficiency or paged-attention
 priors. It is product-scoped; do not apply it to an unknown gfx1201 card.

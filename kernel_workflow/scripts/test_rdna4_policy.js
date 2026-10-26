@@ -147,7 +147,7 @@ function mustInclude(hay, needle, msg) {
   mustInclude(r9600dAnalyze, 'calibrated-r9600d',
     'R9600D did not receive its own calibrated roofline status');
   if (r9600dAnalyze.includes('unknown-device-not-r9700')) {
-    throw new Error('R9600D received the unknown-peak gate despite a measured product block');
+    throw new Error('R9600D received the unknown-peak gate despite a published product block');
   }
   if (r9600dAnalyze.includes('calibrated-r9700')) {
     throw new Error('R9600D inherited the calibrated R9700 roofline status');

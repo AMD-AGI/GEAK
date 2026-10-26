@@ -18,7 +18,7 @@ sources:
 > Occupancy numbers live in [occupancy.md](occupancy.md); pitfalls in [pitfalls.md](pitfalls.md).
 > Do **not** duplicate Gluon `hw_constants.json` beyond the cheat sheet — that file is the source.
 > These ISA facts apply to gfx1201 products. GEAK's product validation, serving
-> image, and calibrated peaks exist for **R9700** and **R9600D** (measured, see
+> image, and calibrated peaks exist for **R9700** and **R9600D** (see
 > `roofline/peaks.md`); RX 9070 XT and other gfx1201
 > products remain uncalibrated.
 

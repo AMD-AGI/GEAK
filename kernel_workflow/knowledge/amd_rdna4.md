@@ -134,10 +134,10 @@ for a gfx120x SKU that has no `product:` block there, and do not use CDNA MX/`fp
 
 Report achieved % of **that** ceiling. Size the grid to the **detected** CU/WGP count, not 304.
 
-**Radeon AI PRO R9600D (gfx1201, 48 CU):** same ISA and memory hierarchy as R9700, but the
-matrix-core rate is far lower. The `peaks.md` block holds **measured** achievable rates (no
-datasheet exists yet): about **65 TFLOP/s BF16/FP16**, **~637 GB/s** streaming write (~535 GB/s
-read). The BF16 ridge is about **102 FLOP/byte** (R9700: ~298), so a kernel between those
+**Radeon AI PRO R9600D (gfx1201, 48 CU, 150 W):** same ISA and memory hierarchy as R9700,
+but 48 CUs at a 2020 MHz boost, so the matrix-core rate is about half. Public datasheet
+(see `peaks.md`): **99 TFLOP/s FP16/BF16**, **199 TOPS INT8**, **640 GB/s** GDDR6 pin
+rate. The BF16 ridge is about **155 FLOP/byte** (R9700: ~298), so a kernel between those
 intensities is compute-bound on R9600D and memory-bound on R9700. Never apply the R9700
 FLOP/s ceiling to this board; use the `DEVICE_TARGET` peaks.
 

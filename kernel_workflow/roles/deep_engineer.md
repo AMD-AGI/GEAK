@@ -76,7 +76,7 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    hardware reference — `amd_instinct.md` for `gfx94*`/`gfx95*`, `amd_ryzen.md` for `gfx11*`, `amd_rdna4.md`
    for `gfx1201` — and use ITS peaks below. Never assume a default: peaks differ by integer factors across
    cards, and so do the fp8 format and the matrix ISA. On RDNA4, MFMA/MX peaks do not exist — use a
-   the product's peaks (R9700 datasheet, R9600D measured; see `peaks.md`) only
+   the product's datasheet peaks (see `peaks.md`) only
    when `ROOFLINE_STATUS` is `calibrated-<product>`;
    pair them with measured on-box rates when available.
 1. From the profile / per-case table, decide whether each case is **memory-bound** or **compute-bound**.
@@ -88,7 +88,7 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 3. **Compute-bound ceiling**: `min_time ≈ FLOPs / peak_FLOPS` for the dtype — use the matrix-core peak
    for that precision on THIS card (MFMA on CDNA, WMMA on RDNA3.5 and RDNA4) from its reference.
    RDNA4: the WMMA peak of the calibrated product from `amd_rdna4.md` §4 and
-   `peaks.md` (R9700 datasheet; R9600D measured, so label it as measured). Use
+   `peaks.md` (datasheet). Use
    it only for `calibrated-<product>`; other gfx1201 products have no
    calibrated compute denominator. Achieved % similarly.
 4. Report the achieved % per representative case in your notes. If you are far below the ceiling, the
