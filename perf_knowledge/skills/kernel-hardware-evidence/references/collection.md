@@ -23,6 +23,15 @@ zero differ. Preserve counter units, device/subunit reductions, invocation count
 and replay intervals before deriving rates. Match each counter to the relevant
 call where the capture permits; narrow claims when it does not.
 
+Before attributing event duration, cross-rank waiting or stragglers to a bottleneck,
+check timestamp/clock semantics and the meaning of overlapping recorded intervals,
+including graph replay. Inspect the cross-rank join rule: justify same-operation
+identity and expected participants using per-rank counts/order and available
+group/message metadata. Matching names or ordinals, or uniformly missing fields,
+are insufficient on their own. Index offsets and nearest-time matches can diagnose
+mispairing but do not validate a replacement join. Keep unresolved events for
+exploration and narrow timing or bottleneck claims that depend on them.
+
 ## AMD tool recipes
 
 Check the installed CLI first; documentation for `latest` may describe another
