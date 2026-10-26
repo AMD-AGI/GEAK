@@ -1906,3 +1906,111 @@ class TestLedgerCli(LedgerTestBase):
                 contextlib.redirect_stderr(err):
             self.assertEqual(L.main(["--eval-dir", self.eval_dir, "--quiet"]), 0)
         self.assertIn("run is unaffected", err.getvalue())
+
+
+# --------------------------------------------------------------------------- #
+# STEP 1 (eikos v2 observability): thinking/response output split + attribution
+# --------------------------------------------------------------------------- #
+def _bd_row(model="claude-opus-4-8", out=500_000, think=None, role=None, inp=0,
+            read=0, w5=0, w1h=0):
+    """A fully-formed ledger row for the cost functions (all token fields present)."""
+    row = {"model": model, "input_tokens": inp, "cache_read_input_tokens": read,
+           "cache_creation_input_tokens": w5 + w1h, "cache_write_5m_tokens": w5,
+           "cache_write_1h_tokens": w1h, "output_tokens": out,
+           "output_thinking_tokens": think,
+           "output_response_tokens": (None if think is None else max(0, out - think))}
+    if role is not None:
+        row["role"] = role
+    return row
+
+
+class TestThinkingTokens(unittest.TestCase):
+    def test_absent_details_is_unknown_not_zero(self):
+        self.assertIsNone(L.thinking_tokens({"output_tokens": 100}))
+        self.assertIsNone(L.thinking_tokens({"output_tokens": 100, "output_tokens_details": {}}))
+
+    def test_present_is_clamped_int(self):
+        self.assertEqual(L.thinking_tokens({"output_tokens_details": {"thinking_tokens": 40}}), 40)
+        self.assertEqual(L.thinking_tokens({"output_tokens_details": {"thinking_tokens": -5}}), 0)
+        self.assertEqual(L.thinking_tokens({"output_tokens_details": {"thinking_tokens": "x"}}), None)
+
+
+class TestOutputSplit(unittest.TestCase):
+    def test_known_sub_buckets_sum_to_the_output_bucket(self):
+        row = _bd_row(out=500_000, think=200_000)
+        sp = L.output_split(row, L.DEFAULT_RATES)
+        self.assertTrue(sp["split_known"])
+        self.assertAlmostEqual(sp["output_thinking"] + sp["output_response"],
+                               L.cost_breakdown(row, L.DEFAULT_RATES)["output"], places=12)
+        self.assertEqual(sp["thinking_tokens"] + sp["response_tokens"], 500_000)
+
+    def test_unknown_split_is_none_never_zero(self):
+        sp = L.output_split(_bd_row(out=500_000, think=None), L.DEFAULT_RATES)
+        self.assertFalse(sp["split_known"])
+        self.assertIsNone(sp["output_thinking"])
+        self.assertIsNone(sp["output_response"])
+
+    def test_thinking_over_output_is_clamped(self):
+        sp = L.output_split(_bd_row(out=100, think=999), L.DEFAULT_RATES)
+        self.assertEqual(sp["thinking_tokens"], 100)
+        self.assertEqual(sp["response_tokens"], 0)
+
+    def test_router_role_has_no_work_output(self):
+        sp = L.output_split(_bd_row(out=500_000, think=None, role="route_carrier"), L.DEFAULT_RATES)
+        self.assertEqual(sp["output_thinking"], 0.0)
+        self.assertEqual(sp["output_response"], 0.0)
+        self.assertTrue(sp["split_known"])
+
+    def test_output_bucket_total_is_unchanged_by_the_split(self):
+        # The pinned invariant: cost_breakdown is untouched; 5 buckets still sum to cost_of.
+        row = _bd_row(out=500_000, think=200_000, inp=1_000_000, read=2_000_000, w5=3_000_000)
+        bd = L.cost_breakdown(row, L.DEFAULT_RATES)
+        self.assertAlmostEqual(sum(bd.values()), L.cost_of(row, L.DEFAULT_RATES), places=9)
+        self.assertNotIn("output_thinking", bd)   # sub-buckets live apart from the 5-bucket dict
+
+
+class TestRowBuilderThinking(LedgerTestBase):
+    def test_row_extracts_thinking_and_preserves_output_tokens(self):
+        rec = asst_rec(1, "msg_x", out=100, model="claude-haiku-5-5")
+        rec["message"]["usage"]["output_tokens_details"] = {"thinking_tokens": 30}
+        write_transcript(os.path.join(self.tdir, "a.jsonl"), [
+            user_rec(prompt_for("profiler", "baseline", self.eval_dir), 0), rec])
+        rows, _, _, _ = self.build()
+        r = [x for x in rows if x["message_id"] == "msg_x"][0]
+        self.assertEqual(r["output_tokens"], 100)            # left whole
+        self.assertEqual(r["output_thinking_tokens"], 30)
+        self.assertEqual(r["output_response_tokens"], 70)
+
+    def test_row_without_details_is_unknown(self):
+        write_transcript(os.path.join(self.tdir, "b.jsonl"), [
+            user_rec(prompt_for("profiler", "baseline", self.eval_dir), 0),
+            asst_rec(1, "msg_y", out=100, model="claude-haiku-4-5")])
+        rows, _, _, _ = self.build()
+        r = [x for x in rows if x["message_id"] == "msg_y"][0]
+        self.assertEqual(r["output_tokens"], 100)
+        self.assertIsNone(r["output_thinking_tokens"])
+        self.assertIsNone(r["output_response_tokens"])
+
+
+class TestBucketAttribution(unittest.TestCase):
+    def test_five_buckets_sum_to_total_cost(self):
+        rows = [_bd_row("claude-opus-4-8", out=100, think=40, inp=1000, read=2000, w5=3000),
+                dict(_bd_row("claude-sonnet-5-5", out=200, think=None, read=5000), role="engineer"),
+                dict(_bd_row("claude-sonnet-5-5", out=10, role="route_carrier"))]
+        att = L.bucket_attribution(rows, L.DEFAULT_RATES)
+        total = sum(g["uncached_input"] + g["cache_read"] + g["cache_write"]
+                    + g["output"] + g["router"] for g in att)
+        self.assertAlmostEqual(total, sum(L.cost_of(r, L.DEFAULT_RATES) for r in rows), places=12)
+
+    def test_unknown_split_is_tracked_separately(self):
+        rows = [dict(_bd_row("claude-sonnet-5-5", out=200, think=None), role="engineer")]
+        att = L.bucket_attribution(rows, L.DEFAULT_RATES)
+        g = att[0]
+        self.assertAlmostEqual(g["output_split_unknown"], g["output"], places=12)
+        self.assertEqual(g["output_thinking"], 0.0)
+
+    def test_router_cost_is_isolated_by_role(self):
+        rows = [dict(_bd_row("claude-sonnet-5-5", out=1000, role="route_carrier"))]
+        att = L.bucket_attribution(rows, L.DEFAULT_RATES)
+        self.assertGreater(att[0]["router"], 0.0)
+        self.assertEqual(att[0]["output"], 0.0)

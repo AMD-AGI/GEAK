@@ -662,6 +662,11 @@ def calls_of(group, source):
         key = msg.get("id") or rec.get("requestId") or rec.get("uuid")
         cache = usage.get("cache_creation") or {}
         resp_text, think_text = _content_parts(msg)
+        # Reasoning vs response split of THIS record's output tokens (see thinking_tokens()).
+        # output_tokens is kept whole; the split rides alongside it so nothing double-counts.
+        _out_tok = int(usage.get("output_tokens") or 0)
+        _think_tok = thinking_tokens(usage)
+        _resp_tok = None if _think_tok is None else max(0, _out_tok - _think_tok)
         # Merge content by block identity, independent of the usage-record choice.
         base = rec.get("apiBlockIndex")
         base = 0 if base is None else base
@@ -691,7 +696,9 @@ def calls_of(group, source):
             "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens") or 0),
             "cache_write_5m_tokens": int(cache.get("ephemeral_5m_input_tokens") or 0),
             "cache_write_1h_tokens": int(cache.get("ephemeral_1h_input_tokens") or 0),
-            "output_tokens": int(usage.get("output_tokens") or 0),
+            "output_tokens": _out_tok,
+            "output_thinking_tokens": _think_tok,   # None = unknown (no output_tokens_details)
+            "output_response_tokens": _resp_tok,    # output_tokens - thinking, clamped >= 0
             "output": resp_text,
             "thinking": think_text,
             "role": group["role"],
@@ -731,6 +738,23 @@ def calls_of(group, source):
 def total_input(row):
     return (row["input_tokens"] + row["cache_read_input_tokens"]
             + row["cache_creation_input_tokens"])
+
+
+def thinking_tokens(usage):
+    """Reasoning tokens for one assistant record, read from usage.output_tokens_details.
+
+    Returns an int, or None when the record carries no output_tokens_details (older
+    models / records that never reported the field): 'unknown', never silently zero.
+    Clamped >= 0. output_tokens itself is left untouched by every caller, so the split
+    is additive information and can never double-count into the output bucket.
+    """
+    d = usage.get("output_tokens_details") if isinstance(usage, dict) else None
+    if not isinstance(d, dict) or d.get("thinking_tokens") is None:
+        return None
+    try:
+        return max(0, int(d.get("thinking_tokens")))
+    except (TypeError, ValueError):
+        return None
 
 
 def cost_of(row, rates):
@@ -773,6 +797,68 @@ def cost_breakdown(row, rates):
         "output": row["output_tokens"] * r["output"] / 1e6,
         "router": 0.0,
     }
+
+
+def output_split(row, rates):
+    """Re-express cost_breakdown's single ``output`` bucket as thinking vs response.
+
+    ``output`` bills reasoning and response text at the same rate; the 4-run cost study
+    wants them apart (thinking dominates the controllable Opus bill). The two sub-buckets
+    sum EXACTLY to ``cost_breakdown(row)["output"]`` whenever the split is known. When the
+    record carried no output_tokens_details the split is 'unknown' (None, never silently
+    zero) and the ``output`` total still stands. A router call books no work-output bucket,
+    so both sub-buckets are 0.0. This never mutates ``output_tokens`` and is purely additive.
+    """
+    if row.get("role") in ROUTER_ROLES:
+        return {"output_thinking": 0.0, "output_response": 0.0,
+                "thinking_tokens": 0, "response_tokens": 0, "split_known": True}
+    r = rates_for(row, rates)
+    out_rate = r["output"]
+    total = int(row.get("output_tokens") or 0)
+    th = row.get("output_thinking_tokens")
+    if th is None:
+        return {"output_thinking": None, "output_response": None,
+                "thinking_tokens": None, "response_tokens": None, "split_known": False}
+    th = max(0, min(int(th), total))
+    resp = total - th
+    return {"output_thinking": th * out_rate / 1e6, "output_response": resp * out_rate / 1e6,
+            "thinking_tokens": th, "response_tokens": resp, "split_known": True}
+
+
+def bucket_attribution(rows, rates):
+    """The five cost buckets attributed to (model, role, dispatch), additively.
+
+    ``dispatch`` is the row's routing dispatch id when the audit supplied one
+    (kernel_lane.js issues ``d<N>`` per worker dispatch and the dispatch site carries it
+    through verify); else the agent label; else '(none)'. The thinking/response output
+    sub-buckets ride along, and an unknown split is carried in ``output_split_unknown``
+    so a partial attribution is never reported as complete. Reads rows only; mutates
+    nothing and touches no existing table, so it cannot change any current number.
+    """
+    groups = {}
+    for row in rows:
+        model = row.get("model") or "(unknown)"
+        role = row.get("role") or UNATTRIBUTED
+        dispatch = row.get("dispatch_id") or row.get("label") or "(none)"
+        key = (model, role, dispatch)
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {"model": model, "role": role, "dispatch": dispatch, "calls": 0,
+                               "uncached_input": 0.0, "cache_read": 0.0, "cache_write": 0.0,
+                               "output": 0.0, "router": 0.0, "output_thinking": 0.0,
+                               "output_response": 0.0, "output_split_unknown": 0.0}
+        bd = cost_breakdown(row, rates)
+        for k in ("uncached_input", "cache_read", "cache_write", "output", "router"):
+            g[k] += bd[k]
+        sp = output_split(row, rates)
+        if sp["split_known"]:
+            g["output_thinking"] += sp["output_thinking"]
+            g["output_response"] += sp["output_response"]
+        else:
+            g["output_split_unknown"] += bd["output"]
+        g["calls"] += 1
+    return sorted(groups.values(), key=lambda g: (g["uncached_input"] + g["cache_read"]
+                  + g["cache_write"] + g["output"] + g["router"]), reverse=True)
 
 
 def list_cost_of(row, rates):
