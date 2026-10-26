@@ -1038,6 +1038,12 @@ const ROUTE_EIKOS_MAX_CONSULTS = __routeIntArg('route_eikos_max_consults', 40);
 const ROUTE_EIKOS_CARRIER_MODEL = (typeof A.route_eikos_carrier_model === 'string' && A.route_eikos_carrier_model.trim())
   ? A.route_eikos_carrier_model.trim() : 'claude-sonnet-5-5';
 const ROUTE_EIKOS_CARRIER_TIMEOUT_MS = Math.max(10000, __routeIntArg('route_eikos_carrier_timeout_ms', 180000));
+// Episode-vs-promotion identity (eikos v2). OFF by default == current behavior: a scope's
+// highest *dispatched* lane (effective_rank) stays a persistent floor. ON drops effective_rank
+// as a floor so a corrected estimator can route a scope back down; the FAILURE-earned floor
+// (scope_floor_rank / floor_rank) still pins legitimately climbed scopes.
+const ROUTE_EPISODE_IDENTITY = (A.route_episode_identity === true
+  || A.route_episode_identity === 1 || A.route_episode_identity === '1');
 // Host POLICY rank for floors and escalation: the existing lane numbering (ROUTE_LANES), so a numeric
 // operator floor keeps its meaning. A host policy, not a claim that capability rises with it.
 function __routeRank(m) { return ROUTE_LANES.indexOf(m); }
@@ -1137,6 +1143,7 @@ function __routeHostInput(scope, cls) {
            class_floor_rank: ROUTE_CLASS_FLOOR[cls], operator_floor_rank: __routeOpFloorRank(scope),
            scope_floor_rank: st ? st.floor_rank : ROUTE_CLASS_FLOOR[cls],
            effective_rank: st ? st.effective_rank : -1,
+           episode_identity: ROUTE_EPISODE_IDENTITY,        // eikos v2 knob; default-off == current behavior
            excluded: ROUTE_LANES.filter((m) => (fails[m] || 0) >= ROUTE_CLASS_MAX_FAILS[cls]),
            top_quota_left: ROUTE_MAX_TOP_DISPATCHES == null ? null : Math.max(0, ROUTE_MAX_TOP_DISPATCHES - __routeTopUsed),
            available: ROUTE_LANES.slice() };
@@ -1243,7 +1250,8 @@ It prints one JSON object. Return that object unchanged as StructuredOutput. Do 
 // threshold miss -- and still passes every hard constraint. No I/O, no clock, no shared state.
 function __routeReduce(x) {
   const top = x.policy_rank[x.policy_rank.length - 1];
-  const lo = Math.max(x.class_floor_rank, x.operator_floor_rank, x.scope_floor_rank, x.effective_rank);
+  const lo = Math.max(x.class_floor_rank, x.operator_floor_rank, x.scope_floor_rank,
+                      x.episode_identity ? -1 : x.effective_rank);
   const allowed = x.policy_rank.filter((m, r) => r >= lo && x.excluded.indexOf(m) < 0);
   const filtered = [];
   const feasible = x.price_order.filter((m) => allowed.indexOf(m) >= 0).filter((m) => {
@@ -1324,6 +1332,12 @@ function __routeEikosPick(p, o, scope) {
       // Other scopes may have reserved the top lane while this one waited: reduce on the current inputs.
       const now = __routeHostInput(scope, cls);
       const red = __routeReduce(Object.assign({}, now, { backend: res.status, estimates: res.estimates || null }));
+      // observability only (eikos v2 shadow): what the episode-identity policy WOULD choose; never changes live `red`.
+      const __redShadow = __routeReduce(Object.assign({}, now, { backend: res.status, estimates: res.estimates || null, episode_identity: true }));
+      __routeAudit.push({ event: 'shadow_identity', scope, label,
+                          live_model: red.model, episode_model: __redShadow.model,
+                          differ: red.model !== __redShadow.model,
+                          effective_rank: now.effective_rank, lo_live: red.lower_rank, lo_episode: __redShadow.lower_rank });
       const interventions = [];
       if (res.host_changed) interventions.push('decision reused from a different host input; reduced on the current one');
       if (JSON.stringify(now) !== JSON.stringify(host)) interventions.push('host input changed during the consultation; reduced on the current one');
@@ -2609,7 +2623,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   // --- (e) Commit the winner into the canonical workspace ---------------
   if (improved) {
-    await agentT(
+    const commitRes = await agentT(
       `You are the TechLead committing round ${round}'s winning patch into the canonical workspace.
 \`\`\`bash
 export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
@@ -2630,6 +2644,10 @@ check (cd ${CANONICAL} && the COMMANDMENT CORRECTNESS cmd via gpu_lock); only re
 it still passes. (When a clean \`git apply\`/\`--3way\` succeeds, correctness was already verified and a
 re-check is not required.) Return JSON {committed, current_best_diff, note}.`,
       { phase: 'Merge', label: `commit r${round}`, schema: COMMIT_SCHEMA });
+    // observability only (eikos v2): one terminal outcome per completed commit dispatch, before `cumulative` advances.
+    __routeAudit.push({ event: 'commit_outcome', round, improved: true,
+                        committed: !!(commitRes && commitRes.committed),
+                        geomean: winner.geomean, source: winner.source });
     cumulative = winner.geomean;
     bestPerCase = winner.per_case && winner.per_case.length ? winner.per_case : bestPerCase;
     finalWinner = winner;
