@@ -4,9 +4,9 @@
 A task's manifest spans the served distribution, not one point in it. Three kinds of
 case, each labelled:
 
-  point     one per counted sampling point of a phase the task owns where its kernels
-            launched. effective_calls = launches per instance of the task's kernels at
-            that point (kernel_shapes.py) x the instances the point represents.
+  point     one per counted sampling point of a phase the task owns where its kernels or
+            companions launched. effective_calls = launches per instance of those kernels
+            at that point (kernel_shapes.py) x the instances the point represents.
             coverage_ledger.py credits a point's census mass only through such a case.
   bucket    an unrepresented band from relabel_points.py (observed weight, no point
             within tolerance) whose share of its phase is at least --min-band-share, up
@@ -55,7 +55,12 @@ def plan(points_final, shapes_dir, tasks, min_band_share=0.5, max_buckets=6):
     summary = points_final.get("phase_summary", {})
     out = {}
     for t in tasks:
-        label, kernels = t["label"], t["kernels"]
+        # Companions are the op's other dispatch branches: a point where only a companion
+        # launched (DeepSeek-V4's mHC at prefill >= 8568 tokens runs its large-M branch) is
+        # still the task's, or the UT never reaches the branch it is required to cover.
+        label = t["label"]
+        kernels = list(t["kernels"]) + [c["kernel"] for c in t.get("companions") or []
+                                        if c.get("kernel")]
         phases = t.get("phases") or ["PREFILL", "DECODE"]
         cases, residual = [], {}
         for phase in phases:
