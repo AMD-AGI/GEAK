@@ -64,8 +64,27 @@ def _lds_limit():
     return 64 * 1024
 
 
+def _wave_size():
+    """Wavefront width; a wrong value silently prunes legal tiles."""
+    try:
+        return int(torch.cuda.get_device_properties(
+            torch.cuda.current_device()).warp_size)
+    except Exception:
+        pass
+    try:
+        gfx = torch.cuda.get_device_properties(
+            torch.cuda.current_device()).gcnArchName.split(":")[0].lower()
+        if gfx.startswith("gfx"):
+            return 32 if gfx.startswith("gfx1") else 64
+    except Exception:
+        pass
+    print("WARNING: could not read the wavefront size from torch; assuming 64. "
+          "On an RDNA part (wave32) this silently prunes legal tiles.")
+    return 64
+
+
 LDS_LIMIT = _lds_limit()
-WAVE = 64              # CDNA is wave64, unlike wave32 on RDNA/NVIDIA
+WAVE = _wave_size()
 
 
 def viable(BM, BN, BK, warps, stages, dtype_bytes=2):

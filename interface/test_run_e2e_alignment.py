@@ -27,8 +27,10 @@ Run: python3 -m pytest GEAK/interface/test_run_e2e_alignment.py -v
 """
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -775,3 +777,217 @@ def test_verified_reference_report_has_no_unverified_caveat(
     section = rx._render_baseline_alignment_section(out)
 
     assert "upstream handoff gap" not in section
+
+
+_ATOM_ENGINE_LINE = (
+    "[atom 23:43:23] Engine kwargs: {{'trust_remote_code': True, 'tensor_parallel_size': 8, "
+    "'port': {port}, 'kv_cache_dtype': 'fp8', 'max_num_seqs': {seqs}, 'gpu_memory_utilization': 0.85, "
+    "'torch_profiler_dir': {prof}, "
+    "'online_quant_config': {quant}, 'kv_cache_block_size': {block}, "
+    "'compilation_config': CompilationConfig(level=3, use_cudagraph=True, cudagraph_capture_sizes=[1, 2, 4, 8], "
+    "traced_files=set(), cudagraph_mode=<CUDAGraphMode.FULL: 2>, inductor_compile_config={{}}), "
+    "'speculative_config': {spec}, 'enable_tbo': False}}\n"
+)
+
+
+def _atom_log(path: Path, *, seqs: int = 8, block: int = 64, mtp: bool = True,
+              port: int = 8006, prof: str = "None") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "[atom] starting\n"
+        + _ATOM_ENGINE_LINE.format(
+            port=port, seqs=seqs, block=block, prof=prof,
+            quant="{'global_quant_config': 'ptpc_fp8', 'exclude_layer': ['*.mlp.gate']}" if mtp else "None",
+            spec="SpeculativeConfig(method='mtp', num_spec_tokens=5)" if mtp else "None",
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_atom_engine_kwargs_are_read_as_launch_identity(tmp_path: Path) -> None:
+    observed, _ = rx._read_server_identity_evidence(_atom_log(tmp_path / "server.log"))
+
+    assert observed["backend"] == "atom"
+    args = observed["server_args"]
+    assert args["speculative_method"] == "mtp" and args["num_spec_tokens"] == 5
+    assert args["kv_cache_block_size"] == 64 and args["max_num_seqs"] == 8
+    assert args["online_quant_config"]["global_quant_config"] == "ptpc_fp8"
+    assert args["cudagraph_capture_sizes"] == [1, 2, 4, 8] and args["cudagraph_mode"] == "FULL"
+    # Run-scoped values are not identity: two launches of one config differ there.
+    assert "port" not in args and "torch_profiler_dir" not in args
+
+
+def test_atom_without_speculation_records_it_as_absent(tmp_path: Path) -> None:
+    observed, _ = rx._read_server_identity_evidence(_atom_log(tmp_path / "server.log", mtp=False))
+
+    assert observed["server_args"]["speculative_method"] is None
+    assert observed["server_args"]["online_quant_config"] is None
+
+
+def _atom_handoff(orchestrator_log: Path) -> dict:
+    # The upstream identity is an opaque digest no GEAK log can reproduce.
+    return {
+        "same_config_reference_identity": "sha256:" + "0" * 64,
+        "baseline_env_spec": {
+            "measurement_evidence": {"actual_server_log_path": str(orchestrator_log)},
+        },
+    }
+
+
+def test_opaque_upstream_identity_falls_back_to_the_orchestrator_server_log(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log", port=9000)
+    _atom_log(eval_dir / "profile" / "round_0" / "server.log", prof="'/tmp/prof'")
+    handoff = _atom_handoff(_atom_log(tmp_path / "hl" / "server.log"))
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert identity["status"] == "matched"
+    assert identity["expected_source"] == "orchestrator_server_log"
+    assert [leg["status"] for leg in identity["geak_launched"]] == ["matched"]
+
+
+def test_a_geak_launch_that_dropped_the_recipe_flags_is_a_mismatch(tmp_path: Path) -> None:
+    """The 2026-10-04 GLM case: Setup imported the orchestrator's server, but every server
+    GEAK launched itself ran adapter defaults -- no MTP, block 16, 512 seqs."""
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    _atom_log(eval_dir / "validation" / "base" / "server.log", seqs=512, block=16, mtp=False)
+    handoff = _atom_handoff(_atom_log(tmp_path / "hl" / "server.log"))
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert identity["status"] == "mismatched"
+    leg = identity["geak_launched"][0]
+    assert leg["leg"] == "validation_base" and leg["status"] == "mismatched"
+    differing = {m["key"]: (m["expected"], m["observed"]) for m in leg["mismatches"]}
+    assert differing["speculative_method"] == ("mtp", None)
+    assert differing["kv_cache_block_size"] == (64, 16)
+    assert differing["max_num_seqs"] == (8, 512)
+
+
+def test_no_orchestrator_log_keeps_an_opaque_identity_unverified(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    handoff = _atom_handoff(tmp_path / "missing" / "server.log")
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert identity["status"] == "unverified"
+    assert "geak_launched" not in identity
+
+
+def _rotate_like_hyperloom(live: Path, attempt: int = 0) -> Path:
+    """Hyperloom's slot reuse: gzip the live log into attempts/<NNN>/ and unlink it."""
+    kept = live.parent / "attempts" / f"{attempt:03d}" / "server.log.gz"
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    with live.open("rb") as source, gzip.open(kept, "wb") as target:
+        shutil.copyfileobj(source, target)
+    live.unlink()
+    return kept
+
+
+def test_a_rotated_orchestrator_log_is_still_the_reference(tmp_path: Path) -> None:
+    """2026-10-16 GLM-5.2 run: the handoff named benchmark_atom_*/server.log, but
+    Hyperloom had gzipped it into attempts/000/, so every launch read "unverified"."""
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    _atom_log(eval_dir / "validation" / "base" / "server.log")
+    live = _atom_log(tmp_path / "hl" / "server.log")
+    _rotate_like_hyperloom(live)
+
+    identity = rx._server_identity_alignment(_atom_handoff(live), eval_dir)
+
+    assert identity["status"] == "matched"
+    assert identity["expected_source"] == "orchestrator_server_log"
+    assert [leg["status"] for leg in identity["geak_launched"]] == ["matched"]
+
+
+def test_a_rotated_reference_still_catches_a_dropped_recipe(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    _atom_log(eval_dir / "validation" / "base" / "server.log", seqs=512, block=16, mtp=False)
+    live = _atom_log(tmp_path / "hl" / "server.log")
+    _rotate_like_hyperloom(live)
+
+    identity = rx._server_identity_alignment(_atom_handoff(live), eval_dir)
+
+    assert identity["geak_launched"][0]["status"] == "mismatched"
+
+
+def test_a_matching_opaque_setup_digest_still_checks_geak_launches(tmp_path: Path) -> None:
+    """Setup matched by digest says nothing about what GEAK launched later."""
+    eval_dir = tmp_path / "e2e"
+    (eval_dir / "baseline").mkdir(parents=True)
+    (eval_dir / "baseline" / "magpie_launch.log").write_text(
+        "launch_identity=sha256:" + "0" * 64 + "\n", encoding="utf-8"
+    )
+    _atom_log(eval_dir / "validation" / "base" / "server.log", seqs=512, block=16, mtp=False)
+    handoff = _atom_handoff(_atom_log(tmp_path / "hl" / "server.log"))
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert identity["expected"] == "sha256:" + "0" * 64
+    assert identity["status"] == "mismatched"
+    assert identity["geak_launched_reference"] == "orchestrator_server_log"
+    assert [leg["status"] for leg in identity["geak_launched"]] == ["mismatched"]
+
+
+def test_an_unverified_geak_launch_makes_the_aggregate_unverified(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    (eval_dir / "validation" / "base").mkdir(parents=True)
+    (eval_dir / "validation" / "base" / "server.log").write_text("[atom] booting\n", encoding="utf-8")
+    handoff = _atom_handoff(_atom_log(tmp_path / "hl" / "server.log"))
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert [leg["status"] for leg in identity["geak_launched"]] == ["unverified"]
+    assert identity["status"] == "unverified"
+
+
+def test_an_unknown_speculative_form_is_unparsed_not_absent() -> None:
+    facts = rx._parse_atom_engine_kwargs(
+        "Engine kwargs: {'max_num_seqs': 8, "
+        "'speculative_config': SpeculativeConfig(method=SpecMethod.MTP, num_spec_tokens=5)}"
+    )
+    assert "speculative_method" not in facts
+    assert facts["unparsed"] == ["speculative_config"]
+    assert rx._identity_value_equal({"server_args": facts}, {"server_args": facts}) is None
+
+
+def test_a_malformed_capture_sizes_value_is_unparsed_not_raised() -> None:
+    facts = rx._parse_atom_engine_kwargs(
+        "Engine kwargs: {'compilation_config': CompilationConfig(level=3, cudagraph_capture_sizes=[bad])}"
+    )
+    assert facts["unparsed"] == ["cudagraph_capture_sizes"]
+    assert facts["compilation_level"] == 3
+
+
+def test_rotation_skips_an_incomplete_newest_attempt_and_records_it(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    live = _atom_log(tmp_path / "hl" / "server.log")
+    complete = _rotate_like_hyperloom(live, attempt=9)
+    live.write_text("[atom] relaunch died before engine start\n", encoding="utf-8")
+    _rotate_like_hyperloom(live, attempt=10)
+
+    identity = rx._server_identity_alignment(_atom_handoff(live), eval_dir)
+
+    assert identity["status"] == "matched"
+    assert str(complete) in identity["evidence_paths"]
+
+
+def test_rotated_attempts_that_disagree_are_not_trusted(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    _atom_log(eval_dir / "baseline" / "server.log")
+    live = _atom_log(tmp_path / "hl" / "server.log")
+    _rotate_like_hyperloom(live, attempt=0)
+    _atom_log(live, seqs=16)
+    _rotate_like_hyperloom(live, attempt=1)
+
+    identity = rx._server_identity_alignment(_atom_handoff(live), eval_dir)
+
+    assert identity["status"] == "unverified"
+    assert "disagree" in identity["orchestrator_reference_problem"]

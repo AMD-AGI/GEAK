@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import atexit
 import glob
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -3066,10 +3067,133 @@ def _parse_sglang_server_args(text: str) -> dict[str, Any]:
     return observed
 
 
+# Launch facts ATOM's `Engine kwargs: {...}` startup line records that decide which
+# server was served. Run-scoped values (ports, profiler dir, log cadence) are left
+# out: they legitimately differ between two launches of the same configuration.
+_ATOM_ENGINE_IDENTITY_KEYS = (
+    "trust_remote_code",
+    "tensor_parallel_size",
+    "data_parallel_size",
+    "enforce_eager",
+    "enable_prefix_caching",
+    "kv_cache_dtype",
+    "index_cache_dtype",
+    "max_model_len",
+    "max_num_batched_tokens",
+    "max_num_seqs",
+    "gpu_memory_utilization",
+    "enable_expert_parallel",
+    "enable_dp_attention",
+    "moe_backend",
+    "online_quant_config",
+    "kv_cache_block_size",
+    "enable_tbo",
+    "moe_all2all_backend",
+)
+_ATOM_ENGINE_KWARGS_MARKER = "Engine kwargs: {"
+
+
+def _split_top_level_items(body: str) -> list[str]:
+    """Split ``a: 1, b: X(c=1, d=[2, 3])`` at depth-0 commas, quotes respected."""
+    items: list[str] = []
+    depth, quote, escaped, start = 0, "", False, 0
+    for index, char in enumerate(body):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in ("'", '"'):
+            quote = char
+        elif char in "([{<":
+            depth += 1
+        elif char in ")]}>":
+            depth -= 1
+        elif char == "," and depth == 0:
+            items.append(body[start:index])
+            start = index + 1
+    items.append(body[start:])
+    return [item.strip() for item in items if item.strip()]
+
+
+def _parse_atom_engine_kwargs(text: str) -> dict[str, Any]:
+    """Extract stable launch fields from ATOM's ``Engine kwargs: {...}`` line.
+
+    The record is a Python repr holding config objects (``SpeculativeConfig(...)``,
+    ``<CUDAGraphMode.FULL: 2>``) that no literal parser accepts as a whole, so each
+    top-level item is evaluated on its own and the speculative / compilation objects
+    contribute the few fields that identify a launch. A field present in the record
+    but not in a form this parser knows is listed under ``unparsed`` rather than
+    guessed, so a version-drifted log reads as unverified instead of as a value.
+    """
+    start = text.find(_ATOM_ENGINE_KWARGS_MARKER)
+    if start < 0:
+        return {}
+    body = text[start + len(_ATOM_ENGINE_KWARGS_MARKER):].rstrip()
+    if body.endswith("}"):
+        body = body[:-1]
+    observed: dict[str, Any] = {}
+    unparsed: list[str] = []
+    for item in _split_top_level_items(body):
+        raw_key, sep, raw_value = item.partition(":")
+        if not sep:
+            continue
+        try:
+            key = ast.literal_eval(raw_key.strip())
+        except (ValueError, SyntaxError):
+            continue
+        raw_value = raw_value.strip()
+        if key == "speculative_config":
+            if raw_value == "None":
+                observed["speculative_method"] = None
+                observed["num_spec_tokens"] = 0
+                continue
+            method = re.search(r"\bmethod=['\"]([^'\"]*)['\"]", raw_value)
+            tokens = re.search(r"\bnum_spec(?:ulative)?_tokens=(\d+)", raw_value)
+            if not method or not tokens:
+                unparsed.append("speculative_config")
+                continue
+            observed["speculative_method"] = method.group(1)
+            observed["num_spec_tokens"] = int(tokens.group(1))
+            continue
+        if key == "compilation_config":
+            level = re.search(r"\blevel=(\d+)", raw_value)
+            sizes = re.search(r"\bcudagraph_capture_sizes=(\[[^\]]*\]|None)", raw_value)
+            mode = re.search(r"\bcudagraph_mode=<\w+\.(\w+)", raw_value)
+            if level:
+                observed["compilation_level"] = int(level.group(1))
+            if sizes:
+                try:
+                    observed["cudagraph_capture_sizes"] = ast.literal_eval(sizes.group(1))
+                except (ValueError, SyntaxError):
+                    unparsed.append("cudagraph_capture_sizes")
+            if mode:
+                observed["cudagraph_mode"] = mode.group(1)
+            continue
+        if key not in _ATOM_ENGINE_IDENTITY_KEYS:
+            continue
+        try:
+            observed[key] = ast.literal_eval(raw_value)
+        except (ValueError, SyntaxError):
+            unparsed.append(key)
+    if unparsed:
+        observed["unparsed"] = sorted(set(unparsed))
+    return observed
+
+
+def _open_server_log(log_path: Path):
+    """Open a server log as text; Hyperloom keeps rotated attempts gzipped."""
+    if log_path.suffix == ".gz":
+        return gzip.open(log_path, "rt", encoding="utf-8", errors="ignore")
+    return log_path.open(encoding="utf-8", errors="ignore")
+
+
 def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]:
     """Read direct launch identity evidence without loading an unbounded log."""
     try:
-        with log_path.open(encoding="utf-8", errors="ignore") as handle:
+        with _open_server_log(log_path) as handle:
             lines = iter(handle)
             for line in lines:
                 if "ServerArgs(" not in line:
@@ -3088,10 +3212,22 @@ def _read_server_identity_evidence(log_path: Path) -> tuple[dict[str, Any], str]
     except OSError:
         return {}, ""
 
+    # ATOM logs its resolved engine configuration once, as one line.
+    try:
+        with _open_server_log(log_path) as handle:
+            for line in handle:
+                if _ATOM_ENGINE_KWARGS_MARKER not in line:
+                    continue
+                server_args = _parse_atom_engine_kwargs(line)
+                if server_args:
+                    return {"backend": "atom", "server_args": server_args}, ""
+    except OSError:
+        return {}, ""
+
     # A Magpie recipe can log its immutable identity directly. This is useful
     # for backends other than SGLang and for opaque upstream digest identities.
     try:
-        with log_path.open(encoding="utf-8", errors="ignore") as handle:
+        with _open_server_log(log_path) as handle:
             for line in handle:
                 match = re.search(
                     r"\b(?:observed_)?(?:server_|launch_)?identity\s*[:=]\s*"
@@ -3139,13 +3275,16 @@ def _identity_value_equal(expected: Any, observed: Any) -> bool | None:
     observed_args = observed.get("server_args", observed)
     if not isinstance(expected_args, dict) or not isinstance(observed_args, dict):
         return None
+    # A field one side logged in a form its parser did not know cannot be compared.
+    if expected_args.get("unparsed") or observed_args.get("unparsed"):
+        return None
     # An upstream observation may intentionally include only a subset. Missing
     # observed fields are a verification failure, never silently ignored.
     comparable_keys = [
         key
         for key in expected_args
         if key
-        not in {"backend", "launch_identity", "identity", "source", "evidence_paths"}
+        not in {"backend", "launch_identity", "identity", "source", "evidence_paths", "unparsed"}
     ]
     if not comparable_keys:
         return None
@@ -3161,8 +3300,85 @@ def _identity_value_equal(expected: Any, observed: Any) -> bool | None:
     return not expected_backend or expected_backend == observed_backend
 
 
+def _orchestrator_server_log_identity(handoff: dict) -> tuple[dict[str, Any], str, str]:
+    """Launch facts parsed from the orchestrator's own baseline server log.
+
+    An upstream identity is often an opaque digest no GEAK log can reproduce, which
+    left every non-SGLang run "unverified" -- including runs that served a different
+    configuration. The server log the orchestrator measured is named in the handoff,
+    so read what that server actually came up with and compare like with like.
+
+    Returns ``(facts, path, problem)``: the facts and the exact log they came from, or
+    empty facts and the reason none could be trusted.
+    """
+    spec = handoff.get("baseline_env_spec")
+    evidence = spec.get("measurement_evidence") if isinstance(spec, dict) else None
+    path = str((evidence or {}).get("actual_server_log_path") or "").strip() if isinstance(evidence, dict) else ""
+    if not path:
+        return {}, "", ""
+    parsed: list[tuple[Path, dict[str, Any]]] = []
+    for candidate in _orchestrator_server_log_candidates(Path(path)):
+        observed, _ = _read_server_identity_evidence(candidate)
+        if observed.get("server_args"):
+            parsed.append((candidate, observed))
+    if not parsed:
+        return {}, "", f"no parseable launch record in {path} or its rotated attempts"
+    newest_path, newest = parsed[0]
+    disagree = [str(p) for p, o in parsed[1:] if o["server_args"] != newest["server_args"]]
+    if disagree:
+        return {}, "", f"attempts disagree on the launch: {newest_path} vs {', '.join(disagree)}"
+    return newest, str(newest_path), ""
+
+
+def _orchestrator_server_log_candidates(path: Path) -> list[Path]:
+    """The orchestrator's server logs, newest first.
+
+    Hyperloom reuses a round slot across attempts: before each relaunch it gzips the
+    live ``server.log`` into ``attempts/<NNN>/server.log.gz`` and unlinks it, but the
+    handoff keeps naming the live path. The live file, when present, is the newest
+    attempt; it may also be a relaunch that never reached engine start, so the caller
+    keeps searching older attempts for a complete record.
+    """
+    rotated = [
+        p for p in (path.parent / "attempts").glob(f"*/{path.name}.gz") if p.parent.name.isdigit()
+    ]
+    rotated.sort(key=lambda p: int(p.parent.name), reverse=True)
+    return ([path] if path.is_file() else []) + rotated
+
+
+# Servers GEAK itself launches after Setup. The Setup baseline may be imported from
+# the orchestrator's run, so only these prove what GEAK actually served.
+_GEAK_LAUNCHED_SERVER_LOGS = (
+    ("profile", ("profile", "round_0", "server.log")),
+    ("validation_base", ("validation", "base", "server.log")),
+    ("validation_final", ("validation", "final", "server.log")),
+)
+
+
+def _identity_mismatches(expected: Any, observed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Name each launch fact that differs, so a mismatch is actionable from result.json."""
+    expected_args = expected.get("server_args") if isinstance(expected, dict) else None
+    observed_args = observed.get("server_args")
+    if not isinstance(expected_args, dict) or not isinstance(observed_args, dict):
+        return []
+    return [
+        {"key": key, "expected": value, "observed": observed_args.get(key)}
+        for key, value in expected_args.items()
+        if key in observed_args and observed_args[key] != value
+    ]
+
+
 def _server_identity_alignment(handoff: dict, eval_dir: Path) -> dict[str, Any]:
-    """Compare upstream identity with actual Setup-server launch evidence."""
+    """Compare the Setup server, and every server GEAK launched itself, with upstream.
+
+    Two references are kept apart. ``expected`` is the upstream identity as handed
+    over (an opaque digest or launch facts) and judges the Setup server. The
+    orchestrator's own baseline server log, when named and parseable, gives canonical
+    launch facts: they judge Setup when the upstream identity cannot, and they always
+    judge the servers GEAK launched after Setup, because a matching Setup digest says
+    nothing about those. The aggregate status is the worst of all checks:
+    mismatched > unverified > matched.
+    """
     expected, expected_source = _handoff_observed_identity(handoff)
     candidates = [
         eval_dir / "baseline" / "server.log",
@@ -3175,20 +3391,61 @@ def _server_identity_alignment(handoff: dict, eval_dir: Path) -> dict[str, Any]:
         if observed:
             break
 
+    reference, reference_path, reference_problem = _orchestrator_server_log_identity(handoff)
+    if reference_path:
+        evidence_paths.append(reference_path)
+
+    equal = _identity_value_equal(expected, observed) if expected is not None and observed else None
+    if equal is None and observed.get("server_args") and reference:
+        expected, expected_source = reference, "orchestrator_server_log"
+        equal = _identity_value_equal(expected, observed)
+
     if expected is None:
         status = "unavailable"
     elif not observed:
         status = "unverified"
     else:
-        equal = _identity_value_equal(expected, observed)
         status = "unverified" if equal is None else "matched" if equal else "mismatched"
-    return {
+
+    # Check what GEAK served after Setup: a matched Setup says nothing about a later
+    # launch that dropped the recipe's flags.
+    leg_reference = reference or (expected if isinstance(expected, dict) else None)
+    launched: list[dict[str, Any]] = []
+    if leg_reference:
+        for leg, parts in _GEAK_LAUNCHED_SERVER_LOGS:
+            path = eval_dir.joinpath(*parts)
+            if not path.is_file():
+                continue
+            leg_observed, _ = _read_server_identity_evidence(path)
+            leg_equal = _identity_value_equal(leg_reference, leg_observed) if leg_observed else None
+            launched.append({
+                "leg": leg,
+                "path": str(path),
+                "status": "unverified" if leg_equal is None else "matched" if leg_equal else "mismatched",
+                "mismatches": _identity_mismatches(leg_reference, leg_observed) if leg_equal is False else [],
+            })
+            evidence_paths.append(str(path))
+    leg_statuses = {leg["status"] for leg in launched}
+    if "mismatched" in leg_statuses:
+        status = "mismatched"
+    elif status == "matched" and "unverified" in leg_statuses:
+        status = "unverified"
+
+    out = {
         "expected": expected,
         "expected_source": expected_source or None,
         "observed": observed or None,
         "status": status,
         "evidence_paths": evidence_paths,
     }
+    if equal is False:
+        out["mismatches"] = _identity_mismatches(expected, observed)
+    if launched:
+        out["geak_launched"] = launched
+        out["geak_launched_reference"] = "orchestrator_server_log" if reference else expected_source
+    if reference_problem:
+        out["orchestrator_reference_problem"] = reference_problem
+    return out
 
 
 def _build_handoff_alignment(
@@ -4414,6 +4671,19 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
     identity = alignment.get("server_identity") or result.get("server_identity") or {}
     identity_status = str(identity.get("status") or "unavailable")
     identity_paths = identity.get("evidence_paths") or []
+    # Each server GEAK launched itself, so a failing leg is visible, not only the aggregate.
+    identity_legs = [
+        f"  - `{leg.get('leg')}`: `{leg.get('status')}`"
+        + (
+            " — " + ", ".join(
+                f"`{m.get('key')}` expected `{m.get('expected')}`, observed `{m.get('observed')}`"
+                for m in leg.get("mismatches") or []
+            )
+            if leg.get("mismatches")
+            else ""
+        )
+        for leg in identity.get("geak_launched") or []
+    ]
     stack = result.get("serving_stack") or {}
     launcher = str(stack.get("launcher") or "unknown")
     recipe_aligned = bool(alignment.get("recipe_aligned_with_orchestrator", True))
@@ -4479,6 +4749,7 @@ def _render_baseline_alignment_section(result: dict[str, Any]) -> str:
                     else "unavailable"
                 )
             ),
+            *(["- GEAK-launched servers:", *identity_legs] if identity_legs else []),
             f"- Server launch recipe: `{launcher}`",
             *reference_caveat,
             *recipe_caveat,

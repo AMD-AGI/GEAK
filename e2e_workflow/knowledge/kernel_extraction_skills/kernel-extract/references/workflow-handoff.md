@@ -80,14 +80,19 @@ cost in the saved declaration/ranking; packaging never recomputes them.
 ```bash
 node "$WORKFLOW_DIR/scripts/agentx_kernel_preparation.mjs" \
   --eval-dir "$EVAL_DIR" --manifest "$EVIDENCE_DIR/workflow_tasks.json" \
-  --out "$EVIDENCE_DIR/ut_delivery.json"
+  --out "$EVIDENCE_DIR/ut_delivery.json" --emit-prepared
 ```
 
 The adapter checks the frozen source/UT evidence, then produces the workflow envelope.
 It refuses an invalid purportedly completed task; preserve that task as failed until
 its actual defect is fixed. A packaging error alone does not invalidate GPU evidence.
-Return only `{"delivery_path":"/absolute/eval/path/ut_delivery.json"}` after all
-scheduled work finishes. Keep the skill's full `REPORT.md` and `results.json` as evidence.
+
+`--emit-prepared` makes it print `{"delivery_path": ..., "prepared": {...}}` instead of
+the path alone. Return that object after all scheduled work finishes, with `prepared`
+copied **verbatim** from this command's stdout. The workflow script runs in a sandbox with
+no filesystem, so it cannot open `ut_delivery.json` — this reply is the only way the
+envelope reaches it, and an envelope summarised, trimmed or rebuilt by hand is a corrupted
+handoff. Keep the skill's full `REPORT.md` and `results.json` as evidence.
 
 The generated envelope replaces each manifest task with its original `kernel`
 declaration, `phase` and saved `result_path`. The reader derives missing anchor

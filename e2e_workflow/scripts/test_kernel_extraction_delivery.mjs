@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { loadContract, checkDelivery, attachVerdict } from './kernel_extraction_delivery.mjs';
+import { loadContract, checkDelivery, attachVerdict, hydrateExtractionVerdicts } from './kernel_extraction_delivery.mjs';
 import { createRuntime } from '../../interface/runtime/engine/run_workflow.mjs';
 
 const contract = await loadContract();
@@ -54,7 +54,7 @@ test('original inline returns and hashed raw verdicts use the same production ga
     assert(!packed.selection_validation);
     assert(packed.phase_selection_validations.every(p => p.selection_validation_ref));
     assert.equal((await checkDelivery(f.kernel, packed, phase, contract)).ok, true);
-    const hydrated = await contract.hydrateExtractionVerdicts(packed);
+    const hydrated = await hydrateExtractionVerdicts(packed);
     assert.deepEqual(hydrated.selection_validation, f.result.selection_validation);
     assert.deepEqual(hydrated.phase_selection_validations[0].selection_validation, f.result.selection_validation);
   }
@@ -203,12 +203,15 @@ test('runtime preserves legacy file verdicts and refuses unprepared AgentX dispa
   const result = await attachVerdict({ editable: true, task_dir: f.task, unittest_smoke: 'pass',
     baseline_frozen: true, target_callable: 'pkg:leaf' }, 'leaf.json');
   const workflow = await fs.readFile(new URL('../e2e_workflow.js', import.meta.url), 'utf8');
-  const start = workflow.indexOf('async function extractWithBaseline(');
+  // Start at preparedUtDefect: the AgentX branch of extractWithBaseline reuses the prepared UT
+  // through it, and both are plain functions in the workflow source -- the sandbox has no
+  // filesystem for the dispatcher to import a module from.
+  const start = workflow.indexOf('function preparedUtDefect(');
   const extraction = workflow.slice(start, workflow.indexOf('\n// abDone ==', start));
   const script = path.join(f.task, 'driver.js');
   await fs.writeFile(script, `
     const {loadContract} = await import(${JSON.stringify(new URL('./kernel_extraction_delivery.mjs', import.meta.url).href)});
-    const {hydrateExtractionVerdicts, kernelSelectionVerified, hasFrozenBaseline, EXTRACT_SCHEMA} = await loadContract();
+    const {guardUnhydratedVerdicts, kernelSelectionVerified, hasFrozenBaseline, EXTRACT_SCHEMA} = await loadContract();
     const CAPTURE_STORAGE_ENV = '', CAPTURE_BYTE_BUDGET = 1, CAPTURE_CASE_BYTE_LIMIT = 1;
     const CAPTURE_PERSIST_POLICY = '', BASELINE_EXTRACT_RETRIES = 0, KERNEL_EXTRACT_ON = !!args.agentx;
     const WORKFLOW_DIR = ${JSON.stringify(fileURLToPath(new URL('..', import.meta.url)))};
@@ -219,15 +222,26 @@ test('runtime preserves legacy file verdicts and refuses unprepared AgentX dispa
   `);
   const logs = [];
   let agentCalls = 0;
+  // Hydration is the EXTRACTOR's preflight, not the workflow's: resolving a
+  // selection_validation_ref means reading and hashing a file, and the workflow sandbox has no
+  // filesystem. So the agent returns what kernel_extraction_delivery.mjs would have produced --
+  // recomputed per call, so a verdict file corrupted mid-test is still observed.
   const runtime = createRuntime({ backend: { name: 'fixture',
-    runAgent: async () => { agentCalls++; return { text: JSON.stringify(result) }; } }, log: line => logs.push(line) });
+    runAgent: async () => { agentCalls++;
+      return { text: JSON.stringify(await hydrateExtractionVerdicts(result)) }; } },
+    log: line => logs.push(line) });
   const accepted = await runtime.runScript(script, { kernel }, 0);
   assert.equal(accepted.unittest_smoke, 'pass');
   assert.deepEqual(accepted.selection_validation, verdict);
+  // A head that demands source evidence can only get it from the AgentX preparation stage, where
+  // verifySourceDelivery runs with a filesystem. Demanding it on the legacy path -- which has no
+  // way to produce it, the workflow sandbox having no filesystem -- fails closed rather than
+  // letting the requirement lapse. The REAL verification is covered in test_kernel_source_delivery
+  // and test_agentx_standalone_handoff; this only pins that the requirement is never ignored.
   const missingSource = await runtime.runScript(script, { kernel: { ...kernel, source_delivery_required: true } }, 0);
   assert.equal(missingSource.unittest_smoke, 'fail');
-  assert.equal(missingSource.source_delivery_failed, true,
-    'the actual production wrapper must enforce requested source records');
+  assert.equal(missingSource.source_delivery_failed, true);
+  assert.match(missingSource.smoke_detail, /outside the AgentX preparation stage/);
   await fs.appendFile(path.join(f.task, 'leaf.json'), ' ');
   const rejected = await runtime.runScript(script, { kernel }, 0);
   assert.equal(rejected.unittest_smoke, 'fail');
