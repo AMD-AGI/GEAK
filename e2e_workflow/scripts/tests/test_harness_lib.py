@@ -2827,10 +2827,54 @@ class TestMeasureLegsResolution(_LegTestCase):
             if not is_base:
                 state[sig] += 1                      # a pair completes on the candidate leg
             ms = pair[0] if is_base else pair[1]
-            return _Proc(0, json.dumps({"cases": [{"sig": sig, "ms": ms, "regime": "decode",
-                                                   "m": 64}]}))
+            receipt = ms if isinstance(ms, dict) else {"ms": ms}
+            return _Proc(0, json.dumps({"cases": [{"sig": sig, "regime": "decode", "m": 64,
+                                                   **receipt}]}))
         self._script(handler)
         return order
+
+    def test_timing_receipts_survive_measurement_and_weighted_reporting(self):
+        policy = {"mode": "read-evict", "bytes": 64 << 20, "deployment_calibrated": False}
+        common = {"timer": "cuda_event_graph", "requested_graph": True, "cache_condition": policy,
+                  "host_ms": 2.0, "primed": False}
+        for scenario, expected in (
+            ("fallback", {"timer": "mismatch", "cache_condition": "matched", "primed": "mismatch"}),
+            ("mixed", {"timer": "mismatch", "cache_condition": "matched", "primed": "mismatch"}),
+            ("missing", {"timer": "unknown", "cache_condition": "unknown", "primed": "unknown"}),
+            ("matched", {"timer": "matched", "cache_condition": "matched", "primed": "matched"}),
+        ):
+            with self.subTest(scenario=scenario):
+                pairs = [(dict(common, ms=1.02, wall_ms=1.2), dict(common, ms=1.0, wall_ms=1.1)),
+                         (dict(common, ms=1.06, wall_ms=1.3), dict(common, ms=1.0, wall_ms=1.2))]
+                if scenario == "fallback":
+                    pairs[0][1].update(timer="cuda_event", host_ms=0.5, primed=True)
+                elif scenario == "mixed":
+                    # Both legs change together in rep 2; checking only within each pair misses it.
+                    for receipt in pairs[1]:
+                        receipt.update(timer="cuda_event", host_ms=0.5, primed=True)
+                elif scenario == "missing":
+                    for pair in pairs:
+                        for receipt in pair:
+                            receipt.pop("cache_condition")
+                    pairs[0][0].pop("timer")
+                    pairs[0][1]["primed"] = None
+                self._sequenced({"decode": pairs})
+                row, = hl.measure_legs(self.task, self.meta, max_reps=2)
+                cross_leg = {"timer": [0], "cache_condition": [], "primed": [0]} if scenario == "fallback" else {
+                    "timer": [], "cache_condition": [], "primed": []}
+                self.assertEqual(row["timing_conditions"],
+                                 dict(expected, cross_leg_mismatch_pairs=cross_leg))
+                self.assertEqual(row["reps"], 2)
+                self.assertEqual(row["speedup"], 1.04)
+                for actual, pair in zip(row["timing_pairs"], pairs):
+                    self.assertEqual(actual, {
+                        leg: {"sig": "decode", "regime": "decode", "m": 64, **receipt}
+                        for leg, receipt in zip(("baseline", "candidate"), pair)})
+                report = hl.serving_weighted_speedup([row], self.meta)
+                self.assertEqual(report["included"], 1)
+                self.assertEqual(report["weighted"], 1.04)
+                for key in ("reps", "speedup_spread", "timing_pairs", "timing_conditions"):
+                    self.assertEqual(report["per_case"][0][key], row[key])
 
     def test_a_decisive_bucket_still_costs_exactly_one_pair(self):
         """The common case must not get 3x slower to buy resolution it does not need."""
