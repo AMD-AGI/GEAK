@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Integrity gate for third-party skills vendored in as-is.
 
-`stages/profile/agentx-kernel-extraction-standalone/` and
-`stages/roofline/kernel-roofline/` are vendored verbatim from external archives and must
+`stages/roofline/kernel-roofline/` is vendored verbatim from an external archive and must
 not change by a single byte. This script writes and checks a `MANIFEST.json` for them,
 kept in the **slot directory** rather than inside the skill, so the manifest does not
 itself alter what it is verifying.

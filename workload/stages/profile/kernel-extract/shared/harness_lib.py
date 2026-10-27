@@ -1507,9 +1507,21 @@ def _kill_process_group(proc, grace=5.0):
             continue
 
 
+def gpu_env(gpu):
+    """Pin a leg to one of the GPUs this process may use, by its logical index.
+
+    HIP_VISIBLE_DEVICES indexes into whatever ROCR_VISIBLE_DEVICES (or the container's device
+    mounts) already exposes, so a logical index is right under both pinning schemes."""
+    if gpu is None:
+        return {}
+    g = str(gpu)
+    return {"HIP_VISIBLE_DEVICES": g, "CUDA_VISIBLE_DEVICES": g}
+
+
 def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600,
-             target_callable=""):
+             target_callable="", env_extra=None, sigs=None):
     env = dict(os.environ)
+    env.update(env_extra or {})
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     cmd = [sys.executable, os.path.join(task_dir, "leg_runner.py"),
            "--task", task_dir, "--mode", mode, "--seed", str(int(seed))]
@@ -1519,6 +1531,8 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
         cmd += ["--out", out]
     if draws:
         cmd += ["--draws", str(int(draws))]
+    if sigs is not None:
+        cmd += ["--sigs", ",".join(sigs)]
     if target_callable:
         if mode != "resolve":
             raise ValueError("target_callable override is only valid for identity resolution")
@@ -1604,7 +1618,7 @@ def _median(xs):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
-def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10)):
+def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10), gpus=None):
     """`per_case` for `serving_weighted_speedup`, one bucket per FRESH subprocess per leg.
 
     Fresh-per-bucket is not optional: a warm interpreter shares JIT/autotune state between the legs and
@@ -1630,41 +1644,73 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
 
     `baseline_ms`/`optimized_ms` are the MEDIAN over the pairs actually run, so one unlucky process
     cannot carry the bucket. `reps` and `speedup_spread` (per-pair speedup range / median, 0.0 for a
-    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence."""
+    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence.
+
+    `gpus` (logical indices) spreads BUCKETS over devices; every pair of one bucket stays on one
+    device, so a bucket's ratio never compares two GPUs."""
     task = os.path.abspath(task_dir)
     base, cand = build_candidate_overlay(task, meta)
     assert_legs_differ(task, base, cand, meta)
-    lo, hi = undecided
+    sigs = _run_leg(task, base, "list", timeout=timeout)["sigs"]
+    gpus = list(gpus or [])
+    if len(gpus) > 1 and len(sigs) > 1:
+        import queue
+        import threading
+        free, rows = queue.Queue(), {}
+        for g in gpus:
+            free.put(g)
+
+        def one(sig):
+            g = free.get()
+            try:
+                rows[sig] = _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided,
+                                            gpu_env(g))
+            finally:
+                free.put(g)
+        threads = [threading.Thread(target=one, args=(sig,)) for sig in sigs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return [rows[s] for s in sigs if rows.get(s)]
     per_case = []
-    for sig in _run_leg(task, base, "list", timeout=timeout)["sigs"]:
-        row, bms, oms = None, [], []
-        for _ in range(max(1, int(max_reps))):
-            b = _run_leg(task, base, "time", bucket=sig, timeout=timeout)["cases"]
-            o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout)["cases"]
-            if not b or not o:
-                break
-            if row is None:
-                row = b[0]
-            bms.append(b[0].get("ms"))
-            oms.append(o[0].get("ms"))
-            good_b, good_o = [x for x in bms if x], [y for y in oms if y]
-            if not good_b or not good_o:
-                break                      # nothing timable here; more pairs cannot change that
-            if not (lo <= _median(good_b) / _median(good_o) <= hi):
-                break                      # decisive already — do not buy resolution we do not need
-        if row is None:
-            continue
-        good_b, good_o = [x for x in bms if x], [y for y in oms if y]
-        bm = _median(good_b) if good_b else None
-        om = _median(good_o) if good_o else None
-        pair_sp = [x / y for x, y in zip(bms, oms) if x and y]
-        per_case.append({"sig": sig, "regime": row.get("regime", ""), "m": row.get("m"),
-                         "baseline_ms": bm, "optimized_ms": om,
-                         "speedup": (bm / om) if (bm and om) else None,
-                         "reps": len(bms),
-                         "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
-                                            if len(pair_sp) > 1 else 0.0)})
+    for sig in sigs:
+        row = _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, None)
+        if row:
+            per_case.append(row)
     return per_case
+
+
+def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env_extra):
+    """One bucket's interleaved B,C pairs (see measure_legs); None when nothing was timable."""
+    lo, hi = undecided
+    row, bms, oms = None, [], []
+    for _ in range(max(1, int(max_reps))):
+        b = _run_leg(task, base, "time", bucket=sig, timeout=timeout, env_extra=env_extra)["cases"]
+        o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout, env_extra=env_extra)["cases"]
+        if not b or not o:
+            break
+        if row is None:
+            row = b[0]
+        bms.append(b[0].get("ms"))
+        oms.append(o[0].get("ms"))
+        good_b, good_o = [x for x in bms if x], [y for y in oms if y]
+        if not good_b or not good_o:
+            break                      # nothing timable here; more pairs cannot change that
+        if not (lo <= _median(good_b) / _median(good_o) <= hi):
+            break                      # decisive already — do not buy resolution we do not need
+    if row is None:
+        return None
+    good_b, good_o = [x for x in bms if x], [y for y in oms if y]
+    bm = _median(good_b) if good_b else None
+    om = _median(good_o) if good_o else None
+    pair_sp = [x / y for x, y in zip(bms, oms) if x and y]
+    return {"sig": sig, "regime": row.get("regime", ""), "m": row.get("m"),
+            "baseline_ms": bm, "optimized_ms": om,
+            "speedup": (bm / om) if (bm and om) else None,
+            "reps": len(bms),
+            "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
+                               if len(pair_sp) > 1 else 0.0)}
 
 
 def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):

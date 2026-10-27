@@ -130,7 +130,7 @@ whole gate, and `README.md` for the naming half of it.
 
 ### 3.1 Slot-level adapters
 
-A third-party skill vendored as-is (such as `agentx-kernel-extraction-standalone`) knows
+A third-party skill vendored as-is (such as `kernel-roofline`) knows
 nothing about `result.json`, and **should not** be modified by a single byte in order to
 fit this pipeline. That mapping lives in the **slot directory**, not in the skill:
 

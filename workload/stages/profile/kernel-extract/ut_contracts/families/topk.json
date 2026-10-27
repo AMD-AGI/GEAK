@@ -1,0 +1,40 @@
+{
+  "ut_contract_version": 1,
+  "family": "topk",
+  "op_kind": "topk",
+  "description": "Row-wise top-k selection among each row's first lengths[r] candidates, writing positions (or page-table slots) padded with -1. sglang topk_transform / fast_topk_v2, aiter top-k kernels, the selection half of a DSA indexer when it is a separate launch.",
+  "match": {"kernel": ["^(?!.*grouped).*(topk|top_k)"], "op": ["^(?!.*grouped).*topk"]},
+  "sikl_contract": "topk_transform_paged@1.0",
+  "reference": "topk",
+  "reference_rows": 256,
+  "axes": {
+    "n_rows": {"var": true, "lo": 1, "hi": 1048576},
+    "n_candidates": {"var": true, "lo": 1, "hi": 16777216, "doc": "candidates per row (the context length for an indexer)"},
+    "topk": {"lo": 1, "hi": 4096}
+  },
+  "attrs": {
+    "has_lengths": {"values": [true, false]}
+  },
+  "inputs": {
+    "scores": {"shape": ["n_rows", "n_candidates"], "dtype": "float32", "dist": {"kind": "permutation"}, "lifetime": "per_call"},
+    "lengths": {"shape": ["n_rows"], "dtype": "int32", "dist": {"kind": "int_range", "lo": 0, "hi": "n_candidates"}, "lifetime": "per_call", "present_when": "has_lengths"}
+  },
+  "outputs": {
+    "indices": {"shape": ["n_rows", "topk"], "dtype": "int32", "bound": {"kind": "topk_equivalent", "scores": "scores", "pad": -1}}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "any_in_full_rows"},
+  "layout_facts": [],
+  "hooks": {},
+  "call": "Return the selected positions. If the entry maps positions through a page table, return the positions before the mapping or add the page table as an input and compare mapped slots with exact/multiset_rows.",
+  "timing": {"cache": "scores were just written by the score kernel and are L2-resident for short rows; read-evict is the long-context condition."},
+  "negative_controls": [
+    "select topk-1 and duplicate the last: valid_count/duplicate rejections",
+    "drop the lengths mask: positions beyond the row length appear (out_of_range or different_scores)"
+  ],
+  "pitfalls": [
+    "Compare indices as a selection, not as numbers: a relative tol on int outputs accepts 1000 for 1001, an exact compare rejects a legal tie order. topk_equivalent compares the selected scores.",
+    "A permutation score row has no ties; real scores (e.g. ReLU-clipped indexer logits, many exact zeros) tie heavily. Add a case whose scores carry ties (override dist to a coarse int_range cast to float) so the tie path is exercised.",
+    "Do not gate quality with sum(cand)/sum(ref) of selected scores: on long rows it is ~1.0 for almost any selection; normalize to the achievable range or use topk_equivalent.",
+    "One block per row: a kernel 'flat in batch' is under-occupied, not saturated; a candidate that splits rows changes the dispatch ladder, so cover the small-row decode buckets in replay."
+  ]
+}

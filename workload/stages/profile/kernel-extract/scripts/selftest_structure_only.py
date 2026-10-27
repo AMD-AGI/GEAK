@@ -15,7 +15,7 @@ from pathlib import Path
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "shared"))
 
 import torch  # noqa: E402
 

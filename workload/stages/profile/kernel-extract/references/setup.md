@@ -1,10 +1,10 @@
 # Setup and required inputs
 
-Use the tools from the same repository checkout as this skill:
+Use the tools bundled with this skill:
 
 ```bash
-export SKILL_ROOT=/absolute/path/to/e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract
-export SHARED_TOOLS="$(cd "$SKILL_ROOT/../../../scripts" && pwd)"
+export SKILL_ROOT=/absolute/path/to/workload/stages/profile/kernel-extract
+export SHARED_TOOLS="$SKILL_ROOT/shared"
 export EVAL_DIR=/absolute/path/to/extraction-evidence
 export PARSE_PROFILE_STRICT_PHASES=1 KERNEL_ENV_SKIP_ENUM_REAP=1
 ```
@@ -44,7 +44,7 @@ Run every GPU command from its task directory under a lease:
 
 ```bash
 cd "$TASK_DIR"
-bash "$SHARED_TOOLS/../../kernel_workflow/scripts/gpu_lock.sh" "$GPU_ID" python3 unittest.py
+bash "$SHARED_TOOLS/gpu_lock.sh" "$GPU_ID" python3 unittest.py
 # For actual multi-rank tests or serving captures, lease the whole allocated set:
 python3 "$SHARED_TOOLS/gpu_lock_set.py" "$GPU_SET" -- <foreground-command>
 ```
@@ -62,7 +62,7 @@ the shared directory is inaccessible. Existing
 serving jobs outside that locking scheme must be accounted for by scheduler
 exclusivity or serialization. Never disable idleness checks to bypass contention.
 The wrapper also keeps build caches task-local and checks source provenance
-using `kernel_workflow/scripts/workspace_sources.py`; it requires no external provenance service.
+using `$SHARED_TOOLS/workspace_sources.py`; it requires no external provenance service.
 
 When no accepted overlay exists, create an empty task-local `baseline_overlay/`;
 imports then resolve the installed serving baseline outside the task. If an

@@ -1,0 +1,51 @@
+{
+  "ut_contract_version": 1,
+  "family": "rope",
+  "op_kind": "elementwise",
+  "description": "Rotary position embedding on the first rot_dim features of every head of query and key, from a (max_pos, rot_dim) cos|sin cache indexed by positions; neox (rotate halves) or gptj (interleaved pairs). sglang/vLLM rotary_embedding, aiter rope_cached, MLA q_rope/k_rope paths.",
+  "match": {"kernel": ["rope|rotary"], "op": ["rope|rotary"]},
+  "reference": "rope",
+  "reference_rows": 1024,
+  "axes": {
+    "n_tokens": {"var": true, "lo": 1, "hi": 1048576},
+    "q_heads": {"lo": 1, "hi": 256},
+    "kv_heads": {"lo": 1, "hi": 256},
+    "head_size": {"lo": 16, "hi": 1024, "multiple_of": 2},
+    "rot_dim": {"lo": 2, "hi": 1024, "multiple_of": 2},
+    "max_pos": {"lo": 1, "hi": 4194304},
+    "q_width": {"expr": "q_heads * head_size"},
+    "k_width": {"expr": "kv_heads * head_size"}
+  },
+  "attrs": {
+    "style": {"values": ["neox", "gptj"]},
+    "act_dtype": {"values": ["bfloat16", "float16"]},
+    "cache_dtype": {"values": ["float32", "bfloat16"]}
+  },
+  "constraints": ["rot_dim <= head_size"],
+  "inputs": {
+    "positions": {"shape": ["n_tokens"], "dtype": "int64", "dist": {"kind": "int_range", "lo": 0, "hi": "max_pos - 1"}, "lifetime": "per_call"},
+    "query": {"shape": ["n_tokens", "q_width"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "writable": true},
+    "key": {"shape": ["n_tokens", "k_width"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "writable": true},
+    "cos_sin_cache": {"shape": ["max_pos", "rot_dim"], "dtype": "attr:cache_dtype", "dist": {"kind": "hook", "hook": "cos_sin_cache"}, "lifetime": "weight"}
+  },
+  "outputs": {
+    "query_out": {"shape": ["n_tokens", "q_width"], "dtype": "attr:act_dtype", "bound": {"kind": "tolerance", "atol": 1e-5, "rtol": 0.0078125}},
+    "key_out": {"shape": ["n_tokens", "k_width"], "dtype": "attr:act_dtype", "bound": {"kind": "tolerance", "atol": 1e-5, "rtol": 0.0078125}}
+  },
+  "compare": {"determinism": "bitwise", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [],
+  "hooks": {
+    "cos_sin_cache": "(name, spec, shape, dtype, sym, gen, device) -> (cache, logical): build the cache with the deployment's base/scaling (copy the model's RotaryEmbedding._compute_cos_sin_cache inputs: rope_theta, rope_scaling), cos halves then sin halves. It is deterministic; `gen` is unused."
+  },
+  "call": "The usual entry rotates query and key IN PLACE: clone both inside call(), invoke, and return (query_out, key_out).",
+  "timing": {"cache": "query/key are fresh projection outputs (warm); the cos_sin_cache rows touched are only those of the batch's positions."},
+  "negative_controls": [
+    "use sin for cos on the second half: error ~|x| on rotated features",
+    "index the cache with position + 1: wrong rotation for every token, error grows with rot frequency"
+  ],
+  "pitfalls": [
+    "A random cos/sin table is not a rotation (cos^2 + sin^2 != 1) and can hide a sign error that a real table exposes; use the model's own table.",
+    "neox and gptj differ only in which features pair up: a UT with rot_dim == 2 cannot tell them apart.",
+    "Positions drawn uniformly over max_pos reach high frequencies a short-context trace never hits; keep the observed context range in the case axes (max_pos) for timing cases."
+  ]
+}

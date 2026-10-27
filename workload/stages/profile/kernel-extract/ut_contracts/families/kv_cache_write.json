@@ -1,0 +1,50 @@
+{
+  "ut_contract_version": 1,
+  "family": "kv_cache_write",
+  "op_kind": "cache",
+  "description": "Scatter this step's keys/values (or MLA latent + rope) into the paged KV pool at slot_mapping, optionally quantizing to the cache dtype. reshape_and_cache(_flash), set_mla_kv_buffer, concat_and_cache_mla, fused rope+cache writers.",
+  "match": {"kernel": ["reshape_and_cache|set_mla_kv|concat_and_cache|store_kvcache|cat_and_cache"], "op": ["reshape_and_cache|set_mla_kv|concat_and_cache"]},
+  "reference": null,
+  "axes": {
+    "n_tokens": {"var": true, "lo": 1, "hi": 1048576},
+    "pool_slots": {"lo": 1, "hi": 2147483647, "doc": "num_blocks * block_size"},
+    "kv_heads": {"lo": 1, "hi": 256},
+    "head_size": {"lo": 1, "hi": 4096}
+  },
+  "attrs": {
+    "act_dtype": {"values": ["bfloat16", "float16"]},
+    "cache_dtype": {"values": ["bfloat16", "float16", "float8_e4m3fn", "float8_e4m3fnuz", "uint8"]},
+    "has_value": {"values": [true, false], "doc": "false for an MLA latent cache (one tensor)"}
+  },
+  "constraints": ["n_tokens <= pool_slots"],
+  "inputs": {
+    "key": {"shape": ["n_tokens", "kv_heads", "head_size"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "value": {"shape": ["n_tokens", "kv_heads", "head_size"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "present_when": "has_value"},
+    "slot_mapping": {"shape": ["n_tokens"], "dtype": "int64", "dist": {"kind": "hook", "hook": "slot_mapping"}, "lifetime": "per_call"},
+    "k_cache": {"shape": ["pool_slots", "kv_heads", "head_size"], "dtype": "attr:cache_dtype", "dist": {"kind": "constant", "value": 0}, "lifetime": "state", "writable": true,
+                "layout": {"hook": "cache_layout"}},
+    "v_cache": {"shape": ["pool_slots", "kv_heads", "head_size"], "dtype": "attr:cache_dtype", "dist": {"kind": "constant", "value": 0}, "lifetime": "state", "writable": true, "present_when": "has_value",
+                "layout": {"hook": "cache_layout"}}
+  },
+  "outputs": {
+    "k_cache_out": {"shape": ["pool_slots", "kv_heads", "head_size"], "dtype": "attr:cache_dtype", "bound": {"kind": "bytes_exact"}},
+    "v_cache_out": {"shape": ["pool_slots", "kv_heads", "head_size"], "dtype": "attr:cache_dtype", "present_when": "has_value", "bound": {"kind": "bytes_exact"}}
+  },
+  "compare": {"determinism": "bitwise", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [],
+  "hooks": {
+    "slot_mapping": "(name, spec, shape, dtype, sym, gen, device) -> (slots, logical): distinct slots in [0, pool_slots), scattered the way a long-running server's allocator leaves them (a shuffled pool, not arange), with -1 for padded tokens if the deployment pads.",
+    "cache_layout": "(t, name, sym) -> the cache stored in the layout the kernel writes (paged [num_blocks, block_size, heads, dim], aiter's x-packed key layout, an MLA [slots, 1, 576] latent with packed scales...). Reshape/view only; the contents are zeros."
+  },
+  "call": "Clone k_cache/v_cache inside call(), invoke the writer on the clones and return them (k_cache_out, v_cache_out): the comparison is over the whole pool, so a write to a wrong slot shows up as well as a wrong value.",
+  "timing": {"cache": "writes are scattered over a pool much larger than L2; read-evict is close to serving."},
+  "negative_controls": [
+    "write slot s + 1: the whole pool differs at two rows per token",
+    "skip the fp8 scale on the value path: every written value byte differs"
+  ],
+  "pitfalls": [
+    "Comparing only the written rows misses an out-of-bounds or wrong-slot write; compare the entire pool, which starts identically zeroed in both legs.",
+    "A contiguous slot_mapping (arange) hides stride bugs that a scattered pool exposes and is cheaper to time than served.",
+    "For an fp8 cache the quantization is part of the op: bytes_exact holds because every correct writer computes the same scaled cast; a candidate changing the rounding mode is a different op."
+  ]
+}

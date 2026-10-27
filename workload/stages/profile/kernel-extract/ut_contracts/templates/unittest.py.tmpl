@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""Unit test for task `{task_name}` (UT contract family `{family}`).
+
+Every gate is ut_driver.py's; this task supplies cases.py and its frozen contract. Run from the
+task directory under a GPU lease:  python3 unittest.py [--skip timing] [--keep-going]
+Exit 0 = every gate passed, 1 = a gate failed or could not run, 3 = the UT itself is incomplete.
+"""
+import importlib.util
+import os
+import sys
+
+TASK = os.path.dirname(os.path.abspath(__file__))
+sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != TASK]   # this file shadows stdlib unittest
+_spec = importlib.util.spec_from_file_location("ut_driver", os.path.join(TASK, "ut_driver.py"))
+ut_driver = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ut_driver)
+
+if __name__ == "__main__":
+    sys.exit(ut_driver.main(TASK, sys.argv[1:]))

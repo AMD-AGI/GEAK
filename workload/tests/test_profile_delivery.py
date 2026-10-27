@@ -102,7 +102,7 @@ def finalize(root, out, params=None, task_limit=8):
     write(params_file, dict(CONFIGURED) if params is None else params)
     env = {**os.environ, "OUT": str(out), "CONFIG": str(config),
            "PARAMS": str(params_file), "STAGE": "profile",
-           "STAGE_SKILL": "agentx-kernel-extraction-standalone"}
+           "STAGE_SKILL": "kernel-extract"}
     proc = subprocess.run([sys.executable, str(FINALIZE)], env=env,
                           capture_output=True, text=True)
     result = json.loads((out / "result.json").read_text())

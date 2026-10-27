@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // CPU-only preparation/preflight of extractor returns. The workflow remains the
-// authority: compile its actual schemas, identity gate and evidence-file reader.
+// authority: delivery_contract.mjs is its schemas, identity gate and evidence-file
+// reader, extracted once; pass a GEAK e2e_workflow.js to loadContract() to re-extract.
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { validate } from '../../interface/runtime/engine/schema.mjs';
+import { validate } from './schema.mjs';
 import { verifySourceDelivery } from './kernel_source_delivery.mjs';
 
-const workflowPath = fileURLToPath(new URL('../e2e_workflow.js', import.meta.url));
-export async function loadContract(filename = workflowPath) {
+export async function loadContract(filename = null) {
+  if (!filename) return await import('./delivery_contract.mjs');
   const source = await fs.readFile(filename, 'utf8');
   const block = (start, end) => {
     const a = source.indexOf(start), b = source.indexOf(end, a);

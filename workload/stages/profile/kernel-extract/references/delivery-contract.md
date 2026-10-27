@@ -96,7 +96,7 @@ Both forms also supply `target_callable`, applicable `candidate_bind` and
 `baseline_frozen`, exact `device_kernel`, `seam_candidates`, full selection
 verdict or hashed reference, and `source_delivery_ref`. Keep `notes`,
 `smoke_detail` and `reference_io_sha256` strings. Use `"fail"` for incomplete or
-failed tests. The complete optional-field schemas are in `e2e_workflow.js`.
+failed tests. The complete optional-field schemas are in `$SHARED_TOOLS/delivery_contract.mjs`.
 
 Prefer `selection_validation_ref={"path":"run/selection.json","sha256":"..."}`
 over transcribing large machine verdicts. The referenced JSON must be a complete

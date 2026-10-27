@@ -288,7 +288,7 @@ def test_a_check_that_could_not_run_is_unproven_not_ok(tmp_path):
 # goes wrong silently: an agent session that produces nothing being recorded as a pass,
 # and a missing precondition being retried until the budget is gone.
 
-STUB_SKILL = {"profile": "agentx-kernel-extraction-standalone",
+STUB_SKILL = {"profile": "kernel-extract",
               "optimize": "subagent-raw"}
 # The dispatch tests below run the `optimize` slot, which has no `finalize.py`: what they
 # check is the session loop -- attempts, continuation, repair, resume -- and a slot that
@@ -760,10 +760,26 @@ def test_applyback_refuses_to_compare_across_metric_basis(tmp_path):
     assert ab["basis_comparable"] is False
 
 
+# ----------------------------------------------------------------- profile slot
+
+def test_profile_ut_contract_families_validate():
+    """Every UT contract family the profile skill ships loads and names a declared hook for
+    every hook it uses."""
+    sys.path.insert(0, os.path.join(WORKLOAD, "stages", "profile", "kernel-extract", "ut_contracts"))
+    import ut_contract as U
+    names = [f[:-5] for f in os.listdir(U.FAMILIES_DIR) if f.endswith(".json")]
+    assert len(names) >= 10
+    for n in names:
+        doc = U.load_family(n)
+        for s in doc["inputs"].values():
+            hook = (s.get("dist") or {}).get("hook") or (s.get("layout") or {}).get("hook")
+            assert not hook or hook in doc["hooks"], (n, hook)
+
+
 # ----------------------------------------------------------------- vendored skill integrity
 
 def test_vendored_skills_match_their_manifest():
-    """The two upstream skills are vendored byte-identical; modified, they are no longer
+    """The upstream roofline skill is vendored byte-identical; modified, it is no longer
     the same skill."""
     r = run([sys.executable, "workload/scripts/skill_manifest.py", "verify-all"])
     assert r.returncode == 0, r.stdout + r.stderr

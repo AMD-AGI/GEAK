@@ -7,10 +7,12 @@ state that cannot otherwise be recovered. Numerical test payloads do not require
 serving capture. Runtime launch attribution remains a separate selection check.
 
 Read the user's actual serving launch and request-client commands. Reuse a
-compatible trace/capture before launching another service. If a probe is needed,
-write a task-local capture launcher adapted to that environment. There is no
-universal server-start command in this skill: flags, model configuration,
-health API, tokenizer and client APIs must come from the installed backend.
+compatible trace/capture before launching another service. For the profile stage's
+sampling probes the launcher is `scripts/probe_server.py`: declare the deployment in
+`serving.json` (flags, model configuration and environment copied from the installed
+backend's actual launch, never assumed) and it owns the lifecycle described below. A
+task-local capture launcher is still the route for a capture this template does not
+cover (operand capture through an overlay, a non-sglang backend).
 
 Record request count, concurrency, token/context controls, timeout, capture
 window and case/total byte budgets before launch. Inspect wrappers and warmup

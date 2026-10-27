@@ -1,0 +1,39 @@
+{
+  "ut_contract_version": 1,
+  "family": "all_reduce",
+  "op_kind": "collective",
+  "description": "Tensor-parallel all-reduce (sum), optionally fused with the following residual add + RMSNorm: aiter custom all-reduce, quick all-reduce, RCCL. Needs the multi-rank harness of collective-ut.md; the single-process leg runner cannot test it.",
+  "match": {"kernel": ["cross_device_reduce|allreduce|all_reduce|quickreduce|ncclDevKernel|reduce_scatter_cross_device|allgather_vec"], "op": ["all_reduce|custom_ar|quick_ar"]},
+  "reference": "all_reduce",
+  "reference_rows": 1024,
+  "reference_rows_axis": false,
+  "axes": {
+    "n_tokens": {"var": true, "lo": 1, "hi": 1048576},
+    "hidden": {"lo": 1, "hi": 1048576},
+    "world": {"lo": 2, "hi": 64}
+  },
+  "attrs": {
+    "act_dtype": {"values": ["bfloat16", "float16", "float32"]}
+  },
+  "inputs": {
+    "inputs": {"shape": ["world", "n_tokens", "hidden"], "dtype": "attr:act_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call",
+               "doc": "rank r contributes inputs[r]; the rank harness scatters it"}
+  },
+  "outputs": {
+    "out": {"shape": ["n_tokens", "hidden"], "dtype": "attr:act_dtype", "bound": {"kind": "baseline_relative"}}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [],
+  "hooks": {},
+  "call": "The rank harness (collective-ut.md) runs call on every rank with that rank's slice and returns rank 0's result; every rank's result must be identical — compare all of them, not only rank 0.",
+  "timing": {"cache": "time on the deployment's world size and the exact GPUs it uses (XGMI topology); report per-rank max, not rank 0."},
+  "negative_controls": [
+    "skip the last rank's contribution: error ~|inputs[world-1]|",
+    "reduce in bf16 instead of fp32 for one-shot: a biased error the bias test catches at large world"
+  ],
+  "pitfalls": [
+    "Quick all-reduce variants quantize the payload (fp8/int4) on the wire: their error is the baseline's own and baseline_relative bounds the candidate by it; a tolerance chosen for bf16 would reject the installed kernel.",
+    "Ranks must agree bit for bit with each other even when the reduction order makes them differ from the float64 sum.",
+    "A collective timed on GPUs that are not the deployment's peers measures the wrong links."
+  ]
+}

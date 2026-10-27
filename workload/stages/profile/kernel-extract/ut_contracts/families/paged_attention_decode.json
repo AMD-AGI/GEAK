@@ -1,0 +1,56 @@
+{
+  "ut_contract_version": 1,
+  "family": "paged_attention_decode",
+  "op_kind": "attn",
+  "description": "Decode attention (one query token per sequence, or a few for MTP verify when q_len > 1 is a separate case) over a paged KV cache with GQA: aiter paged_attention / pa_fwd, vLLM/sglang paged decode, MLA decode over a dense latent cache.",
+  "match": {"kernel": ["paged_attention|pa_fwd|pa_decode|decode_attention|mla_decode|flash_decode"], "op": ["paged_attention|pa_fwd|mla_decode"]},
+  "reference": "paged_attention_decode",
+  "reference_rows": 16,
+  "axes": {
+    "batch": {"var": true, "lo": 1, "hi": 65536},
+    "max_context": {"var": true, "lo": 1, "hi": 16777216, "doc": "longest sequence in the case; seq_lens are drawn up to it"},
+    "heads": {"lo": 1, "hi": 256},
+    "kv_heads": {"lo": 1, "hi": 256},
+    "head_size": {"lo": 16, "hi": 1024},
+    "block_size": {"lo": 1, "hi": 1024},
+    "max_blocks": {"expr": "ceil_div(max_context, block_size)"},
+    "num_blocks": {"var": true, "lo": 1, "hi": 2147483647, "doc": "pool blocks allocated in the case (>= batch * max_blocks)"}
+  },
+  "attrs": {
+    "q_dtype": {"values": ["bfloat16", "float16"]},
+    "kv_dtype": {"values": ["bfloat16", "float16", "float8_e4m3fn", "float8_e4m3fnuz"]}
+  },
+  "constraints": [
+    "heads % kv_heads == 0",
+    "num_blocks >= batch * max_blocks"
+  ],
+  "inputs": {
+    "query": {"shape": ["batch", "heads", "head_size"], "dtype": "attr:q_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call"},
+    "k_cache": {"shape": ["num_blocks", "block_size", "kv_heads", "head_size"], "dtype": "attr:kv_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "state",
+                "layout": {"hook": "kv_cache_layout"}},
+    "v_cache": {"shape": ["num_blocks", "block_size", "kv_heads", "head_size"], "dtype": "attr:kv_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "state",
+                "layout": {"hook": "kv_cache_layout"}},
+    "block_table": {"shape": ["batch", "max_blocks"], "dtype": "int32", "dist": {"kind": "page_table", "pool": "num_blocks"}, "lifetime": "per_call"},
+    "seq_lens": {"shape": ["batch"], "dtype": "int32", "dist": {"kind": "seq_lens", "lo": 1, "hi": "max_context"}, "lifetime": "per_call"},
+    "scale": {"kind": "scalar", "value": "head_size ** -0.5"}
+  },
+  "outputs": {
+    "out": {"shape": ["batch", "heads", "head_size"], "dtype": "attr:q_dtype", "bound": {"kind": "baseline_relative"}}
+  },
+  "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"},
+  "layout_facts": [],
+  "hooks": {
+    "kv_cache_layout": "(t, name, sym) -> the cache in the layout the kernel reads (aiter's [blocks, kv_heads, head_size/x, block_size, x] key and [blocks, kv_heads, head_size, block_size] value layouts, vLLM's, or row-major). The logical cache stays [blocks, block_size, kv_heads, head_size]. fp8 caches: apply the deployment's k_scale/v_scale and add them as scalar inputs (override) when the kernel takes them."
+  },
+  "call": "Invoke the decode entry with the deployment's arguments (max_seq_len / partition sizes as the server computes them) and return out.",
+  "timing": {"cache": "the KV pool is long-lived and much larger than L2 at serving context lengths; read-evict matches. Draw seq_lens from the observed per-request contexts (override dist) for timing buckets: uniform lengths up to max_context halve the mean work."},
+  "negative_controls": [
+    "read block_table[b][i + 1] for the last block: the tail of every multi-block sequence attends to wrong keys",
+    "omit the scale multiply: softmax sharpens, error ~|out|"
+  ],
+  "pitfalls": [
+    "The partition (split-K) count depends on max_seq_len and batch; replay sigs must span the partition ladder, and a static graph buffer sized for the largest case must be correct for smaller ones (the OOB-under-replay failure mode).",
+    "A contiguous block_table hides indexing bugs and is faster than a fragmented pool; page_table draws a shuffled pool.",
+    "Allocate num_blocks for the case, not for the largest case: the touched set, not the pool size, sets cache residency."
+  ]
+}

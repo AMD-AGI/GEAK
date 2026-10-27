@@ -1,0 +1,51 @@
+{
+  "ut_contract_version": 1,
+  "family": "moe_grouped_topk",
+  "op_kind": "moe",
+  "description": "Biased grouped top-k router (DeepSeek/GLM/Kimi style): sigmoid (or softmax) scores, keep the best topk_group groups by their top-2 sum of biased scores, pick topk experts inside them, weights are the unbiased scores renormalized times routed_scaling_factor. aiter biased_grouped_topk / sglang grouped_topk.",
+  "match": {"kernel": ["grouped_topk"], "op": ["grouped_topk"]},
+  "sikl_contract": "biased_grouped_topk@1.0",
+  "reference": "moe_grouped_topk",
+  "reference_rows": 512,
+  "axes": {
+    "n_tokens": {"var": true, "lo": 1, "hi": 65536},
+    "n_experts": {"lo": 2, "hi": 1024},
+    "n_group": {"lo": 1, "hi": 64},
+    "topk_group": {"lo": 1, "hi": 64},
+    "topk": {"lo": 1, "hi": 32}
+  },
+  "attrs": {
+    "scoring": {"values": ["sigmoid", "softmax"]},
+    "renormalize": {"values": [true, false]},
+    "has_bias": {"values": [true, false]}
+  },
+  "constraints": [
+    "n_experts % n_group == 0",
+    "topk_group <= n_group",
+    "topk <= topk_group * (n_experts // n_group)"
+  ],
+  "inputs": {
+    "gating_output": {"shape": ["n_tokens", "n_experts"], "dtype": "float32", "dist": {"kind": "permutation"}, "lifetime": "per_call"},
+    "correction_bias": {"shape": ["n_experts"], "dtype": "float32", "dist": {"kind": "normal", "std": 0.05}, "lifetime": "weight", "present_when": "has_bias"},
+    "routed_scaling_factor": {"kind": "scalar", "value": 1.0}
+  },
+  "outputs": {
+    "topk_weights": {"shape": ["n_tokens", "topk"], "dtype": "float32", "sort_by": "topk_ids",
+                     "bound": {"kind": "tolerance", "atol": 1e-6, "rtol": 1e-5, "against": "baseline"}},
+    "topk_ids": {"shape": ["n_tokens", "topk"], "dtype": "int32", "bound": {"kind": "multiset_rows"}}
+  },
+  "compare": {"determinism": "bitwise", "max_violation_fraction": 0.0, "element_order": "any_in_full_rows"},
+  "layout_facts": [],
+  "hooks": {},
+  "call": "Invoke the live router with the deployment's n_group/topk_group/topk/scoring/renormalize and return (topk_weights, topk_ids) in that order (reorder if the entry returns ids first).",
+  "timing": {"cache": "tiny operands; the call is launch-bound in decode. Time it in the deployment graph mode or the number is host dispatch."},
+  "negative_controls": [
+    "select groups by max instead of top-2 sum: different ids on a fraction of rows (multiset_rows rejects)",
+    "rank experts on unbiased scores: ids change wherever the bias matters"
+  ],
+  "pitfalls": [
+    "gating_output is a per-row permutation so no two experts tie; real logits can tie and then any tie order is correct, which multiset_rows on ids alone cannot express. If a task needs tied inputs, add a bound on the selected biased scores instead.",
+    "Weights follow their ids: compare them sorted by id (sort_by), never position by position.",
+    "In decode this kernel is a few microseconds and runs inside the CUDA graph: an eager UT measures host dispatch, which a graph replay erases."
+  ]
+}

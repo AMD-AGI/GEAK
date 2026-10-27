@@ -167,8 +167,11 @@ def _seg(name, tag):
 # step_span_utils.build_detailed_annotation_suffix makes with its c_/g_ prefixes.
 _SGLANG_STEP_RE = re.compile(
     r"step\[(?P<mode>[A-Z_0-9]+) bs=(?P<bs>\d+)(?: toks=(?P<toks>\d+))?\]")
-_SGLANG_MODE_PREFILL = {"EXTEND": True, "DRAFT_EXTEND_V2": True,
-                        "DECODE": False, "TARGET_VERIFY": False}
+# sglang 0.5.20 shortens the target verify to VERIFY. Its bare DRAFT span is the draft
+# model's forward in EITHER phase (after an EXTEND it is the draft extend, between
+# VERIFYs it is the draft loop), so it carries no phase of its own and is left unmapped.
+_SGLANG_MODE_PREFILL = {"EXTEND": True, "DRAFT_EXTEND_V2": True, "DRAFT_EXTEND": True,
+                        "DECODE": False, "TARGET_VERIFY": False, "VERIFY": False}
 
 
 def _parse_sglang_step(name):

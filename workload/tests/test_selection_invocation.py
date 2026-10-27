@@ -9,7 +9,7 @@ import pytest
 
 WORKLOAD = Path(__file__).resolve().parents[1]
 ENTRY = WORKLOAD / "stages/profile/select_candidates.py"
-SKILL = WORKLOAD / "stages/profile/agentx-kernel-extraction-standalone"
+SKILL = WORKLOAD / "stages/profile/kernel-extract"
 spec = importlib.util.spec_from_file_location("selection_invocation", ENTRY)
 selection = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(selection)

@@ -292,7 +292,7 @@
       }
     },
     "profile": {
-      "skill": "agentx-kernel-extraction-standalone",
+      "skill": "kernel-extract",
       "mode": "agent",
       "params": {
         "selection": "Explicit deeper discovery: per-phaseTop10ANDwhole-workloadGPUshare>0.5%; retain all useful nonoverlapping supported tasks, including later queue entries beyond8slots. Reconcile every material phase and live family.",
