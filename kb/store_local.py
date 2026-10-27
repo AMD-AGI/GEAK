@@ -286,7 +286,7 @@ class LocalKBStore(object):
         if not isinstance(candidate, Candidate):
             champion_id = str(self.champion(canonical_id).get("session_id") or "")
             candidate = Candidate(session_id, knowledge,
-                                  finite_speedup(knowledge.get("speedup")),
+                                  finite_speedup(knowledge.get(self.metric)),
                                   session_id == champion_id)
 
         os.makedirs(destination, exist_ok=True)
@@ -303,7 +303,12 @@ class LocalKBStore(object):
             recipe.update({"canonical_id": canonical_id, "session_id": session_id,
                            "is_champion": candidate.is_champion,
                            "champion": candidate.is_champion})
-            recipe.setdefault("speedup", candidate.speedup)
+            # Keyed by self.metric, not by the literal "speedup": Candidate.speedup holds
+            # whatever scalar THIS store ranks on, so on the e2e lane's exact rung (metric
+            # `throughput_tok_s`) the literal writes a tokens/sec number into a bundle field
+            # that every reader takes for a ratio. RemoteKBStore.materialize() already keys it
+            # this way, and the two planes have to produce the same bundle.
+            recipe.setdefault(self.metric, candidate.speedup)
             _write_json(os.path.join(staging, RECIPE_FILENAME), recipe)
             _replace_directory(staging, bundle)
             staging = ""
