@@ -174,6 +174,11 @@ import json, socket, sys
 out, params, run_dir = sys.argv[1:4]
 p = json.load(open(params)); v = json.load(open(out + "/alignment_verified.json"))
 a = json.load(open(out + "/alignment.json")); pins = p.get("pins") or {}; ci = p.get("ci") or {}
+# What ran is the digest the container was started by and verified against, so the image
+# is recorded digest-qualified; the target gate compares it with the declared reference.
+image = pins.get("image")
+if image and pins.get("image_digest") and "@" not in image:
+    image = "%s@%s" % (image, pins["image_digest"])
 doc = {
     "metric": ci.get("metric", "output_token_throughput"),
     "unit": ci.get("unit", "tok/s"),
@@ -188,7 +193,7 @@ doc = {
     "measured": v["throughput"] is not None,
     "provenance": {
         "method": "ci-run-replay",
-        "image": pins.get("image"), "image_digest": pins.get("image_digest"),
+        "image": image, "image_digest": pins.get("image_digest"),
         "model": pins.get("model"), "model_revision": pins.get("model_revision"),
         "seed": pins.get("seed"), "benchmark_id": pins.get("benchmark_id"),
         "cache_bust": pins.get("cache_bust"), "duration_s": pins.get("duration_s"),
