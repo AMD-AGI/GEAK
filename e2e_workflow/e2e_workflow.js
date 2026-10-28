@@ -3009,6 +3009,12 @@ async function reviewSpeedup(integ, inputs, label, phaseName) {
     SPEEDUP_REVIEW: { original_measurement: original, estimate },
   };
   delete reviewInputs.SHARED_REF_MED;
+  // Abandoned at the reserve boundary, a confirmation leaves its servers running into Finalize and
+  // confirms nothing.
+  if (abWindowShort(abLegs(reviewInputs), `${label}: speedup review`, reviewInputs.REPLICAS)) {
+    pending.reason = 'speedup_review_inconclusive: deferred, the confirmation A/B cannot finish before the final reserve';
+    return pending;
+  }
   const fresh = await safeAgent(roleAgent('e2e_integrator', 'integrate',
     'Confirm this surprising speedup with ONE independent A/B. Follow FORCE_FRESH_AB in your role: ' +
     'use separate ref/cand artifact directories, preserve the exact candidate and current reference, ' +
@@ -3403,18 +3409,22 @@ const agentxGuardsOn = () => IS_AGENTX && TIME_BUDGET_MS != null && !FINAL_PHASE
 const searchWindowMs = () => remainingMs() - FINAL_RESERVE_MS;
 // A reference leg already on disk (or shared by this head's earlier candidate) is not run again.
 const abLegs = (inputs) => (inputs && (inputs.REUSE_REF || inputs.RESUME_AB) ? 1 : 2);
-const agentxAbMs = (legs) =>
-  1000 * (legs * agentxLegS(_declaredWindowS(AGENTX.geak_loop_duration_s, 900)) + AGENTX_AB_OVERHEAD_S);
+// A leg timed over several passes (a speedup review's replicas) is costed as that many legs: exact under
+// isolated_server, where each pass is a fresh server, and an upper bound under warm_server, where the
+// passes share one boot.
+const agentxAbMs = (legs, passes = 1) =>
+  1000 * (legs * passes * agentxLegS(_declaredWindowS(AGENTX.geak_loop_duration_s, 900)) + AGENTX_AB_OVERHEAD_S);
 const agentxLaneTailMs = () => agentxAbMs(2) + AGENTX_LANE_ROUND_S * 1000;
 const agentxLaneStartMs = () => agentxLaneTailMs() + AGENTX_LANE_ROUND_S * 1000;
 // An A/B started with less than its cost left is abandoned at the boundary with its legs still running
 // into Finalize and Validate, so it is deferred instead: incomplete, pending, surfaced to the caller.
-function abWindowShort(legs, what) {
+function abWindowShort(legs, what, passes = 1) {
   if (!agentxGuardsOn()) return false;
-  const windowMs = searchWindowMs(), needMs = agentxAbMs(legs);
+  const windowMs = searchWindowMs(), needMs = agentxAbMs(legs, passes);
   if (windowMs >= needMs) return false;
   log(`[time-budget] ${what} DEFERRED — ~${Math.max(0, Math.round(windowMs / 60000))}min left before the ` +
-    `final reserve, under the ~${Math.round(needMs / 60000)}min a ${legs}-leg trace-replay A/B takes.`);
+    `final reserve, under the ~${Math.round(needMs / 60000)}min a ${legs}-leg trace-replay A/B` +
+    `${passes > 1 ? ` with ${passes} timed passes a leg` : ''} takes.`);
   return true;
 }
 // A lane must get one round of work before its stop (laneDeadlineArgs) and still leave the A/B for what

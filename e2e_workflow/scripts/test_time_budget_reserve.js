@@ -358,6 +358,13 @@ const guardsFor = ({ A = { workload_kind: 'agentx_trace_replay' }, budgetMs = 12
   ok(!guardsFor({ windowMin: 81 }).abWindowShort(2, 'x'), 'with 81min left it runs');
   ok(!guardsFor({ windowMin: 50 }).abWindowShort(1, 'x') && guardsFor({ windowMin: 44 }).abWindowShort(1, 'x'),
     'a one-leg A/B needs 45min');
+  ok(g.agentxAbMs(2, 2) === 150 * 60000,
+    "a speedup review's confirmation (two fresh legs of two timed passes) is costed as four legs: 150min");
+  const review = guardsFor({ windowMin: 120 });
+  ok(review.abWindowShort(2, 'h1: speedup review', 2)
+    && /h1: speedup review DEFERRED — ~120min left .* ~150min a 2-leg trace-replay A\/B with 2 timed passes a leg takes/
+      .test(review.logs.join('\n')) && !guardsFor({ windowMin: 120 }).abWindowShort(2, 'x'),
+  'with 120min left an ordinary A/B runs but a confirmation is deferred, and says so by name');
   const late = guardsFor({ windowMin: 199 });
   ok(late.laneWindowShort('author lane k:triton') && /author lane k:triton NOT STARTED/.test(late.logs.join('\n')),
     'a lane with 199min left is not started: one round plus its A/B tail would not fit');
@@ -380,12 +387,18 @@ const guardsFor = ({ A = { workload_kind: 'agentx_trace_replay' }, budgetMs = 12
 }
 
 // Where they are consulted. The integrate entry point covers every A/B site (head, milestone,
-// Finalize-gate, disk-recovered); the lane wrappers cover every lane the search starts.
+// Finalize-gate, disk-recovered) and the speedup review the confirmation it adds; the lane wrappers
+// cover every lane the search starts.
 {
   const ribSrc = src.slice(src.indexOf('async function runIntegrateBothLegs('),
     src.indexOf('if (integ && integ.short_name)', src.indexOf('async function runIntegrateBothLegs(')));
   ok(/^async function runIntegrateBothLegs\([^)]*\) \{\s*\/\/[^\n]*\n\s*if \(abWindowShort\(abLegs\(inputs\), label\)\) \{\s*return \{ gate: 'incomplete', ab_complete: false,/.test(ribSrc),
     'runIntegrateBothLegs defers an A/B that cannot finish before anything is dispatched, as incomplete (kept pending)');
+  const rvSrc = src.slice(src.indexOf('async function reviewSpeedup('), src.indexOf('async function runIntegrateBothLegs('));
+  const rvGate = rvSrc.indexOf('if (abWindowShort(abLegs(reviewInputs), `${label}: speedup review`, reviewInputs.REPLICAS)) {');
+  ok(rvGate > rvSrc.indexOf('REPLICAS: Math.max(2,') && rvGate < rvSrc.indexOf('await safeAgent(')
+    && /^\s*pending\.reason = 'speedup_review_inconclusive: deferred[^']*';\s*return pending;/.test(rvSrc.slice(rvSrc.indexOf('\n', rvGate))),
+  'a speedup review checks its confirmation, counted with its timed passes, before dispatching it');
   const rx = (name) => new Function(`return ${src.match(new RegExp(`const ${name} = (/.*/[a-z]*);`))[1]};`)();
   const reason = (ribSrc.match(/reason: '(deferred: [^']+)'/) || [])[1] || '';
   ok(reason && !rx('FIXABLE_REJECT_RX').test(reason) && !rx('CORRECTNESS_REJECT_RX').test(reason),
