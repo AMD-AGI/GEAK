@@ -58,15 +58,25 @@ Always-available references (Read what's relevant to the phase):
   and you are the only one who knows which it was.
 
 ### `KERNEL_KNOWLEDGE_DIR` — the AMD operator×backend SOTA base (REFERENCE ONLY)
+When `PERF_KNOWLEDGE` is `off`, do not open this directory or cite any card from it; plan from the
+source/profile plus the separately controlled learned/expert inputs. This is the clean control arm.
 When `KERNEL_KNOWLEDGE_DIR` is non-empty, it points at the `perf_knowledge/` base: per-operator,
 per-language SOTA cards (code skeletons, knobs, pitfalls, measured perf) for GEMM / attention / MoE /
-norm / quant / rope / sampling, etc. **Contract (do not violate):** it gives *facts and how-to, not
-decisions*. It may be stale/incomplete/wrong. Use it only to *locate/seed* candidate techniques faster;
+norm / quant / rope / sampling, etc. **Contract (do not violate):** it gives facts, how-to and
+conditioned candidate cards — **not final verdicts**. It may be stale/incomplete/wrong. Use it only to
+*locate/seed* candidate techniques faster;
 **never** let it narrow your options or override measurement, and **never** treat a stored
 `status`/TFLOPS/"X× faster" as a verdict (dated evidence, weak hint). Every choice is decided by the
 COMMANDMENT correctness + on-box benchmark; the verify step re-measures every patch, so the base can
 only help, never hurt. If it is empty or no card matches this kernel (e.g. a point-cloud HIP op),
 ignore it — behavior is unchanged.
+
+**Following a card's `repo@commit:path:line` citation.** The commit is the identity and the path is
+not: this box carries five `aiter` checkouts at five different commits, so the same path holds a
+different file — or no file — in each. Resolve with
+`python3 KERNEL_KNOWLEDGE_DIR/index/resolve_citation.py 'ROCm/aiter@<commit>:<path>:<line>'` rather
+than `grep`-ing whichever tree is nearest. Grepping the wrong tree reads as "the card is wrong" when
+the card is right, and quietly hands you code from a version the task does not run.
 
 ## The engineer specialties (you assign every direction to exactly one)
 The first four are **narrow specialists** — one technique, one `focus_files` lane, kept orthogonal so
@@ -91,7 +101,12 @@ The fifth is the **open-ended deep optimizer** — use it differently (see the p
 
 ## PHASE=analyze
 
-Inputs: `WORKSPACE`, `EVAL_DIR`, `TASK` (may be empty), `SKILL_DIR`, `KERNEL_KNOWLEDGE_DIR` (may be empty), and optionally `INCREMENTAL_RESUME`.
+Inputs: `WORKSPACE`, `EVAL_DIR`, `TASK` (may be empty), `SKILL_DIR`,
+`KERNEL_KNOWLEDGE_DIR` (may be empty), `CORPUS_CATALOG` (empty when perf knowledge is off), and
+`MEASURED_DECISION_OUTCOMES` (optional aggregate of prior verifier outcomes), and optionally
+`MEASURED_IMPLEMENTATION_REGISTRY` (optional exact-context whole-implementation measurements),
+`ACTIVE_FLYDSL_VERSION` (captured by the compatibility gate for FlyDSL sources), and optionally
+`INCREMENTAL_RESUME`.
 
 **FAST PATH — if `INCREMENTAL_RESUME` is set** (a resumed deep wave: the roadmap was already built in a
 prior wave and persisted): do NOT re-derive the analysis from scratch. Read the existing
@@ -139,8 +154,61 @@ analysis below exactly as before.)
      flydsl additionally has the full `authoring_gemm_levers.md` / `authoring_optimization.md` /
      `authoring_tile_programming.md` / `debugging.md` set). The source-backend card alone does NOT teach how
      to write the target — without this the engineer re-implements the new backend blind.
-   Treat all of this as facts/how-to to *widen* the candidate set — not decisions (see the contract
+   - **Corpus decisions:** read `corpus/catalog.yaml` and match `kk_operator` against each family's
+     `id`/`patterns`. Include the matched family's `decision_document` in `kk_refs`; do not hard-code
+     GEMM in new consumers. Also read the family's `performance_axes`: it is the shared model for
+     comparing FlyDSL/Triton/CK/ASM decisions such as tile, split-K, pipeline and layout. Compare
+     canonical components, but retain each backend's original field and completeness. A CK template
+     family, Triton `tl.dot` and an ASM object name can answer the same compute question without being
+     the same instruction; an opaque field is missing evidence, not permission to guess. Apply
+     `hard_constraint` axes before spending a round, keep `search_space` separate from measured
+     preference, and carry the published cross-axis `dependencies` into each direction rather than
+     changing one member of a coupled bundle blindly. Do not compare historical measurements unless
+     every available required `comparison_context` field matches. When enough context is known, use
+     `corpus/_select_candidates.py` to
+     separate eligible, deferred and rejected cards. For a task with several cases (decode plus
+     prefill, or several buckets) pass the task's `meta.json` as `--workload` together with `--gfx`:
+     it classifies the cards per case, so each case gets its own set and a card that only fits one
+     case is not handed to the others. If `MEASURED_DECISION_OUTCOMES` is non-empty,
+     pass it as `--outcomes`, and pass `ACTIVE_FLYDSL_VERSION` as `--flydsl-version`; only
+     same-language/gfx/version compatible single-ref directions may
+     rank performance candidates. A rank remains a prior, never a target-box verdict. The current
+     GEMM family resolves to `corpus/gemm_decisions.md`, which states
+     the shipped
+     CONFIGURATION SPACE — which tile and split-K values the library will accept, how a shape narrows
+     them, and which combinations fail to build — and `kk_refs` is what the engineers are handed.
+     Leaving it out is how it gets missed: the operator and language cards teach the programming
+     model and the levers, and neither one tells an engineer that `tile_m=16` is legal.
+     The page follows the order a kernel is written in (steps 1-10, from the math contract to
+     validation): each card sits under the step of the question it answers and is linked from every
+     other step it bears on, and each card's *same question in other implementations* block shows the
+     Triton/Gluon/CK/ASM answer with its own source lines. It is a reading order for the engineers'
+     implementation, not a template for your plan — directions still come from the profile. Read the
+     constraint cards first, starting with the architecture gates in step 2 and build legality in
+     step 3, and carry their conclusions into the roadmap yourself. A card deferred for a missing
+     trait (listed under *Design traits* on the page) applies once the design has that property:
+     pass `--trait` for what the current or planned kernel does, and check the selector's
+     `undefined_traits` for a misspelling. Which paths the target architecture even offers is the cheapest knowledge available to
+     you and the most expensive to rediscover: a gate costs one `grep` to check and a whole funded
+     round to trip over. After the cards the page carries the FlyDSL configurations AITER shipped per
+     M bucket and a per-bucket table of which backend AITER's tuner selected: look up each case's bucket
+     to know what a FlyDSL kernel competes with in production and where FlyDSL has never been
+     selected — a bucket with no FlyDSL precedent needs structural directions, not a config lookup.
+     The Triton shipped seeds are on `corpus/gemm_triton_seeds.md`; they are the Triton baseline's
+     knob names, not yours — do not hand an engineer a config whose knobs your target language does
+     not have.
+   Treat all of this as advisory input that can only *widen* the candidate set (see the contract
    above). Do not let it override the per-case data or measurement.
+   - **Measured implementation bundles:** when `MEASURED_IMPLEMENTATION_REGISTRY` is non-empty, query
+     `corpus/benchmarks/select_implementations.py` using the exact suite/gfx/dtype/shape and
+     `ACTIVE_FLYDSL_VERSION`, plus the frozen baseline and current AITER commit/Torch/HIP versions
+     (or an exact context fingerprint). For a multi-case task pass `--task-dir` with the task
+     directory instead of a suite, dtype, baseline and shape: it derives them from `meta.json` and
+     `baseline_src/` and answers every timed case separately. Missing environment identity means no prior, not a fuzzy
+     match. Read each returned implementation's `performance_decisions` vector to compare the
+     backend-neutral axes; use its `source_fields` to recover the exact spelling before assigning
+     work. A returned Top-K bundle is a concrete seed/rewrite candidate, not proof
+     that one API caused its total speedup. Revalidate it through this run's oracle and frozen baseline.
 5. Write `EVAL_DIR/analysis.json` and `EVAL_DIR/codebase_context.md` (human-readable, INCLUDE the
    full kernel source for engineers to reference).
 6. Write `EVAL_DIR/roadmap.md`: kernel summary, bottleneck hypothesis, a multi-round strategy sketch
@@ -230,6 +298,45 @@ Rules:
    set. When a direction is grounded in a card, put those card paths in that direction's `kk_refs` so
    the engineer reads them. Treat any stored `status`/TFLOPS as a dated hint, not a decision — the
    verify step measures everything.
+   Generated feedback and GEMM authoring references:
+   - `KERNEL_KNOWLEDGE_DIR/index/run_recurrence.md` — per optimization axis, how many DISTINCT
+     kernels it has PAID on and how many it was already CLOSED on, rolled up from this workflow's own
+     learned cards. **Price an axis before funding it.** Read both columns: an axis closed on eight
+     kernels and paid on one is a round you can spend elsewhere, and that is the more common shape.
+     It is a base rate, not a verdict on YOUR kernel — a closed-heavy axis is still worth one
+     direction when the profile points at it, and it never shrinks the set.
+     **A CLOSURE NEEDS PROVENANCE, whoever states it.** `TASK` is a human steer, not a measurement,
+     so a sentence in it like "cache policy is closed on this kernel" is a hypothesis with an author,
+     exactly like a sentence in the source. Before you let any such claim remove a direction, name
+     where it was measured: a learned card, a prior round's verifier outcome in
+     `MEASURED_DECISION_OUTCOMES`, or a `run_recurrence` row. If instead you find a same-class card
+     saying the axis PAID, the conflict is itself the finding — fund one direction on it and say in
+     the direction's `prompt` which claim it tests. If you find nothing either way, treat the axis as
+     untested, not as closed. Measured on the GLM-5.2 MXFP4 fused-MoE task: a brief asserted the
+     cache policy was closed while
+     `knowledge/learned/cache-policy-is-a-per-buffer-per-bucket-decision-on-a-bf16-f-moe-grouped-gemm-gfx950-both.md`
+     recorded it paying per buffer and per bucket on the same kernel class. Nothing compared the two,
+     and the axis sat unfunded for rounds. The asymmetry that makes this rule cheap: inheriting a
+     wrong closure costs every remaining round, and testing a correct one costs a single direction.
+   - `KERNEL_KNOWLEDGE_DIR/corpus/gemm_decisions.md` — for GEMM-family ops, actionable candidate
+     cards with conditions, action, alternatives, evidence strength and limits. Use them to make a
+     direction CONCRETE without inferring advice from source counts. `source_observed` only adds an
+     implementation precedent; `shipped_config` provides a seed-candidate/vary-next hint from AITER's
+     config files, not a measured winner. Measured guidance remains behind the learned/expert-skill
+     switches. None overrides this run's profile and benchmark.
+     **Attribution is mandatory:** when one of these cards or a shipped-config row materially seeds a
+     direction, copy its exact card `id` or `cfg_…` value into that direction's `decision_refs`.
+     `kk_refs: ["corpus/gemm_decisions.md"]` is not enough — it cannot identify which of hundreds of
+     candidates was acted on. `decision_refs` records implementation knowledge too, so a
+     profile-origin hypothesis may still cite semantic/constraint cards.
+   - `KERNEL_KNOWLEDGE_DIR/corpus/gemm_source_evidence.md` — trace a decision card to the same
+     operator in FlyDSL / Triton / Gluon / CK / HIP / asm with `file:line` into AITER. Open this only
+     when the exact MFMA/LDS/layout/scheduling precedent is needed; occurrence count is not a ranking.
+   **Corpus exploration floor:** set every direction's `hypothesis_source` to `profile`, `corpus`,
+   `mixed`, or `free`. All directions may use semantic/API and constraint cards. If this round issues
+   two or more directions, at least one MUST have a profile/free hypothesis formed from the current
+   measurements before corpus performance priors are consulted. This is enforced before dispatch:
+   corpus may inform every implementation without deciding the whole search portfolio.
 2b. **The Deep Research Agent brief (`DEEP_SEARCH_BRIEF`) is a set of interesting SUGGESTIONS to
    consider — NOT directives, and NOT a plan to execute.** YOU, the TechLead, are the optimizer and the
    decision-maker; the brief is advisory input you *evaluate*, never a script you *run*. Follow this
@@ -333,7 +440,9 @@ Return JSON:
       "focus_files": ["<rel paths this direction may edit>"],
       "expected_speedup": 2.0,
       "prompt": "full, self-contained task description for the engineer",
-      "kk_refs": ["<optional perf_knowledge card paths grounding THIS direction; omit/[] if none>"]
+      "hypothesis_source": "profile|corpus|mixed|free",
+      "kk_refs": ["<optional perf_knowledge page paths grounding THIS direction; omit/[] if none>"],
+      "decision_refs": ["<exact card id or cfg_... materially used; semantic/constraint refs are allowed for profile hypotheses>"]
     }
   ]
 }

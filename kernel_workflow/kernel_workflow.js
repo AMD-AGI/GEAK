@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-workflow',
   description: 'Single ENTRY POINT for kernel optimization on AMD GPUs: Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201). The worker validates on-box identity via structured rocminfo data; generic gfx1201 is not a product identity. Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
-  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool).',
+  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover — leaving it empty also lets Discover decide per-language whether to optimize an existing impl or author a new one). Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool). Set args.use_perf_knowledge=false for the authoring-KB control arm.',
   phases: [
     { title: 'Freeze',   detail: 'oracle_freezer: freeze the input kernel -> immutable oracle + baseline_src/ (the ONE denominator) [bakeoff only]' },
     { title: 'Discover', detail: 'op_benchmarker: per-language existing-impl probe + measure + OFFLINE env tune (aiter/CK, shapes from the frozen oracle) -> author_plan, best_known_ms [bakeoff only]' },
@@ -82,7 +82,9 @@ const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() |
 if (MODE === 'optimize' || MODE === 'author') {
   phase('Bakeoff');            // reuse a declared phase slot for the single passthrough lane
   log(`mode=${MODE}: single-language pass-through -> ${WORKER}`);
-  const r = await workflow({ scriptPath: WORKER }, { ...A, workflow_dir: WORKFLOW_DIR });
+  // `mode` is passed explicitly: MODE carries the default when the caller omitted args.mode,
+  // and the worker must see the same mode the dispatcher resolved.
+  const r = await workflow({ scriptPath: WORKER }, { ...A, mode: MODE, workflow_dir: WORKFLOW_DIR });
   // Final step: render the run report (token/time/cost ledger -> clickable role-execution-tree
   // HTML + MD twin) from the lane's OWN timeline. In passthrough the dispatcher makes no agent calls
   // itself, so the lane result carries the timeline (`llm_timeline`) + its `eval_dir`. This is the
@@ -147,9 +149,16 @@ if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
 let RDNA4_ISOLATE = EXPECTED_GFX === 'gfx1201';
-let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
-if (RDNA4_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
+// Two independent ways to reach the empty (no-authoring-KB) arm: the caller's explicit
+// `use_perf_knowledge=false` control arm, and RDNA4_ISOLATE, which holds on gfx1201 regardless.
+const USE_PERF_KNOWLEDGE =
+  String(A.use_perf_knowledge != null ? A.use_perf_knowledge : 'true') === 'true';
+const DEFAULT_PERF_KNOWLEDGE_DIR =
+  WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge';
+const REQUESTED_PERF_KNOWLEDGE_DIR =
+  A.perf_knowledge_dir != null ? String(A.perf_knowledge_dir) : DEFAULT_PERF_KNOWLEDGE_DIR;
+const KERNEL_KNOWLEDGE_DIR =
+  (USE_PERF_KNOWLEDGE && !RDNA4_ISOLATE ? REQUESTED_PERF_KNOWLEDGE_DIR : '').replace(/\/+$/, '');
 const KERNEL_PATH_ORIG = A.kernel_path;
 const KERNEL_NAME_HINT = String(KERNEL_PATH_ORIG).replace(/\/+$/, '').split('/').pop();
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
@@ -570,9 +579,21 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       mode: l.mode, target_language: l.lang,
       op_spec: oracle.op_spec || OP_SPEC, workload_spec_path: oracle.workload_path || WORKLOAD_SPEC_PATH || '',
       budget: BUDGET, gpu_ids: gpu, gpu_mode: GPU_MODE, task: TASK, apply_to_original: 'false',
+      ...(A.candidate_floor != null ? { candidate_floor: A.candidate_floor } : {}),
+      ...(A.min_improve != null ? { min_improve: A.min_improve } : {}),
+      ...(A.progress_delta != null ? { progress_delta: A.progress_delta } : {}),
+      ...(A.deep_cost != null ? { deep_cost: A.deep_cost } : {}),
+      ...(A.max_no_improve != null ? { max_no_improve: A.max_no_improve } : {}),
       exp_root: `${EVAL_DIR}/bakeoff/${l.key}`,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
+      use_perf_knowledge: USE_PERF_KNOWLEDGE ? 'true' : 'false',
       perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
+      decision_outcomes_path: A.decision_outcomes_path != null
+        ? String(A.decision_outcomes_path) : '',
+      implementation_registry_path: A.implementation_registry_path != null
+        ? String(A.implementation_registry_path) : '',
+      corpus_cold_direction: A.corpus_cold_direction != null
+        ? String(A.corpus_cold_direction) : 'true',
       // Forward the KB switch. This arg object is explicit (the optimize/author path spreads {...A},
       // this one does not), so anything omitted here silently reverts to the lane's default — a
       // caller asking for a KB-off bakeoff would have got eight KB-on lanes and no error.
@@ -609,6 +630,9 @@ const cands = results.map(x => ({
   lang: x.lane.lang, mode: x.lane.mode, kind: 'lane', speedup: x.speedup,
   validation_status: x.r ? x.r.validation_status : 'failed',
   eval_dir: x.r ? x.r.eval_dir : '', patch: x.r ? x.r.final_patch : '', apply_env: '', tuning_artifact: '',
+  decision_refs: x.r && Array.isArray(x.r.final_decision_refs) ? x.r.final_decision_refs : [],
+  decision_citations: x.r && Array.isArray(x.r.decision_citations) ? x.r.decision_citations : [],
+  validation_environment: x.r ? x.r.validation_environment : '',
 }));
 // (b) tuned env backend candidate (only if it beat the frozen baseline)
 const tunedSpeedup = Number(bake.tuned_speedup);
@@ -707,6 +731,8 @@ if (winner && winner.speedup > 1.0) {
           CURATION_ISOLATE: RDNA4_ISOLATE ? 'true' : 'false',
           REQUIRED_PLATFORMS: RDNA4_ISOLATE ? ['gfx1201'] : [],
           WINNER: winner, CANDIDATES: laneRows,
+          DECISION_CITATIONS: laneRows.flatMap(row => row.decision_citations || []),
+          VALIDATION_ENV_PATH: winner.validation_environment || '',
           REPORT_PATH: rep ? rep.report_path : `${EVAL_DIR}/bakeoff_report.md`,
           OP_SPEC,
         }),
@@ -754,12 +780,15 @@ return {
   llm_timeline: LLM_STATS ? { ...LLM_TL, instance: EVAL_DIR } : undefined,
   task_dir: oracle.task_dir,
   eval_dir: EVAL_DIR,
+  perf_knowledge_enabled: USE_PERF_KNOWLEDGE,
   baseline_ms: bake.baseline_ms != null ? bake.baseline_ms : (bake.best_known_ms != null ? bake.best_known_ms : null),
   candidates: laneRows,
   winner: winner && {
     lang: winner.lang, mode: winner.mode, kind: winner.kind, speedup: winner.speedup,
     eval_dir: winner.eval_dir, final_patch: winner.patch,
     apply_env: winner.apply_env, tuning_artifact: winner.tuning_artifact,
+    decision_refs: winner.decision_refs || [],
+    validation_environment: winner.validation_environment || '',
     validation_status: winner.validation_status,
   },
   report_path: rep ? rep.report_path : `${EVAL_DIR}/bakeoff_report.md`,
