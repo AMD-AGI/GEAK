@@ -595,6 +595,21 @@ def test_an_invalid_submission_blocks_even_from_the_sibling(tmp_path):
     assert "submission_valid" in res["notes"]
 
 
+@pytest.mark.parametrize("value,status", [(1, "ok"), (True, "ok"), (0, "blocked"),
+                                          ("true", "blocked")])
+def test_validity_flag_accepts_the_integer_the_result_document_stores(tmp_path, value, status):
+    """InferenceX result documents carry power_valid as the integer 1 next to an empty
+    power_invalid_reasons; reading only a literal True blocked a valid CI reference."""
+    (tmp_path / "r.json").write_text(json.dumps({"output_tokens_per_second": 1183.0}))
+    (tmp_path / "c.json").write_text(json.dumps(
+        {"power_valid": value, "power_invalid_reasons": [],
+         "request_metrics": {"throughput": {"output": {"tokens_per_second": 1208.0}}}}))
+    r, res = _adopt(tmp_path, {"receipt": str(tmp_path / "r.json"),
+                               "reference_receipt": str(tmp_path / "c.json"),
+                               "reference_key": "request_metrics.throughput.output.tokens_per_second"})
+    assert res["status"] == status, r.stdout + r.stderr
+
+
 def test_a_named_key_that_is_absent_is_not_silently_replaced(tmp_path):
     """Naming throughput_key and getting an alias instead would report a different metric
     under the name that was asked for."""

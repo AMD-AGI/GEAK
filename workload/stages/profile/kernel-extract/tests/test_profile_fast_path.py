@@ -6,6 +6,7 @@ No GPU, no sglang: a stdlib HTTP server answers /generate, /metrics, /start_prof
 import gzip
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -441,6 +442,46 @@ class RunPointsTest(unittest.TestCase):
         ct = next(t for t in plan["tasks"] if t["label"] == coll["label"])
         self.assertEqual(json.loads(Path(ct["requested_kernel"]).read_text())
                          ["required_gpu_count"], RANKS)
+        # requested_kernel.json is the delivery gate's KERNEL object (delivery-contract.md):
+        # entity_kind gpu_kernel, and seam candidates the gate keeps -- a numeric depth and
+        # device_kernels naming the kernel each one must launch.
+        for r in (req, areq):
+            self.assertEqual(r["entity_kind"], "gpu_kernel")
+            head = r["seam_candidates"]
+            self.assertEqual(len(head), 1)
+            self.assertIsInstance(head[0]["depth"], int)
+            self.assertIn(r["device_kernel"], head[0]["device_kernels"])
+        for p in areq["dispatch_ut"]["phases"]:
+            self.assertEqual(p["seam_candidates"][0]["device_kernels"], [p["device_kernel"]])
+            self.assertIsInstance(p["seam_candidates"][0]["depth"], int)
+        self.assertGateAcceptsDispatch(areq)
+
+    def assertGateAcceptsDispatch(self, req):
+        """The gate's own kernelSelectionVerified must accept build_task_plan's dispatch
+        branches given a matching raw verdict per branch (the shape kernel_selection.py
+        writes). Before the KERNEL object carried entity_kind and structured seams, every
+        branch failed with 'no relevant structured seam_candidates were returned'."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed; the gate check needs Node.js 18+")
+        target = req["target_callable"]
+        rows = [{"regime": p["regime"], "target_callable": target, "selection_validation": {
+            "contract": "kernel_selection", "ok": True, "target_callable": target,
+            "device_kernel": p["device_kernel"], "total_calls_observed": 1,
+            "target_marker_calls": 1, "matched_kernel_calls": 1,
+            "candidate_targets_tested": [target], "live_candidate_targets": [target],
+            "deeper_live_candidates": [], "deepest_verified": True, "failed": []}}
+            for p in req["dispatch_ut"]["phases"]]
+        ext = {"target_callable": target, "phase_selection_validations": rows}
+        contract = SCRIPTS.parent / "shared" / "delivery_contract.mjs"
+        js = ("const m = await import(process.argv[1]);"
+              "const [h, e] = JSON.parse(process.argv[2]);"
+              "console.log(JSON.stringify(m.kernelSelectionVerified(h, e)));")
+        p = subprocess.run([node, "--input-type=module", "-e", js, contract.as_uri(),
+                            json.dumps([req, ext])], capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        verdict = json.loads(p.stdout.strip().splitlines()[-1])
+        self.assertTrue(verdict["ok"], verdict["why"])
 
     def test_graph_mode_decode_fails_fast_without_recapture(self):
         server = FakeServer(graph=True)

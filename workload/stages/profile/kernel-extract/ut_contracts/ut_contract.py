@@ -42,6 +42,9 @@ DIST_KINDS = ("normal", "lecun_normal", "uniform", "log_uniform", "int_range", "
               "routing", "simplex", "cu_seqlens", "seq_lens", "page_table", "sparse_indices",
               "constant", "fixture", "hook", "produced")
 LIFETIMES = ("weight", "per_call", "state")
+# Weight-model sources the timing gate accepts for an AgentX task; keep in step with
+# harness_lib._observed_workload_cases.
+OBSERVED_WEIGHT_SOURCES = ("observed_workload", "agentx_log_fold")
 DETERMINISM = ("bitwise", "bounded")
 
 # float64 unit roundoff (half an ulp at 1.0) of each output dtype a bound may round to.
@@ -381,6 +384,18 @@ def lint_task(task_dir):
     if wl.get("kind") != "agentx_trace_replay" or wl.get("weighting") != "observed":
         warnings.append("meta.workload should be kind=agentx_trace_replay, weighting=observed "
                         "(SKILL.md §4)")
+    # The timing gate refuses an AgentX task whose weight model is not an observed source
+    # (harness_lib._observed_workload_cases). Without this check a lane passes every other
+    # gate and only learns it at the wave's timing tail, hours later.
+    swm = wl.get("serving_weight_model") or {}
+    if wl.get("kind") == "agentx_trace_replay":
+        if swm.get("source") not in OBSERVED_WEIGHT_SOURCES:
+            errors.append("meta.workload.serving_weight_model.source is %r; the timing gate accepts "
+                          "only %s" % (swm.get("source"), sorted(OBSERVED_WEIGHT_SOURCES)))
+        ep = str(swm.get("evidence_path") or "")
+        if not ep or ep.startswith("FILL"):
+            errors.append("meta.workload.serving_weight_model.evidence_path is unset; point it at "
+                          "the observed workload evidence (evidence/observed_workload.json)")
     # harness_lib.serving_weighted_speedup reads meta.workload.cases; they must be the manifest's
     # timed cases, or the weighting and the timed set silently disagree.
     want = {c["sig"]: (str(c.get("regime", "")).lower(), c.get("effective_calls"), c.get("m"))

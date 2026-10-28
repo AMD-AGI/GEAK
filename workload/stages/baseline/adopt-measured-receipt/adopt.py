@@ -144,7 +144,10 @@ def main():
     if p.get("require_valid", True):
         for src, d in (("the receipt", doc), ("reference_receipt", ref_doc)):
             for flag in VALID_FLAGS:
-                if flag in d and d[flag] is not True:
+                # InferenceX result documents store power_valid as the integer 1. Accept
+                # exactly True or 1; every other value (0, False, "true", null) is invalid.
+                v = d.get(flag)
+                if flag in d and not (v is True or (type(v) is int and v == 1)):
                     problems.append("%s has %s=%r. An invalid submission cannot serve "
                                     "as a baseline; to use it anyway, set "
                                     "params.require_valid to false and state why."

@@ -568,6 +568,24 @@ class EndToEndTest(unittest.TestCase):
         self.run_py([os.path.join(UTC, "scaffold_ut.py"), "sync-meta", "--task", self.task])
         self.assertEqual(self.run_py([os.path.join(self.task, "ut_contract.py"), self.task]).returncode, 0)
 
+    def test_lint_rejects_a_weight_source_the_timing_gate_refuses(self):
+        """A lane once wrote source=ut_case_plan: every other gate passed and the timing
+        tail failed two hours later with harness_incomplete. The lint must say it first."""
+        with open(self.meta_path) as f:
+            meta = json.load(f)
+        if meta.get("workload", {}).get("kind") != "agentx_trace_replay":
+            self.skipTest("fixture task is not an AgentX workload")
+        swm = meta["workload"]["serving_weight_model"]
+        good = dict(swm)
+        swm["source"] = "ut_case_plan"
+        self.write_meta(meta)
+        lint = self.run_py([os.path.join(self.task, "ut_contract.py"), self.task])
+        self.assertEqual(lint.returncode, 1)
+        self.assertIn("serving_weight_model.source", lint.stdout)
+        meta["workload"]["serving_weight_model"] = good
+        self.write_meta(meta)
+        self.assertEqual(self.run_py([os.path.join(self.task, "ut_contract.py"), self.task]).returncode, 0)
+
 
 TOY_RMS_QUANT = textwrap.dedent('''\
     import torch

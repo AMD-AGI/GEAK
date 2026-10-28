@@ -190,13 +190,41 @@ def manifest(task, cases):
     return {"cases": out, "replay_sigs": replay}
 
 
-def joint_ut(t, rank):
+def seam_depth(t, source_map):
+    """Depth of the task's target_callable in the observed launch stacks, counted from the
+    outermost frame (deeper = larger, the order delivery_contract.mjs ranks candidates by).
+    source_map.json lists each kernel's frames innermost first. None when no stack of the
+    task's kernels contains the callable."""
+    target, found = t.get("target_callable"), []
+    kernels = (source_map or {}).get("kernels") or {}
+    for k in t.get("kernels") or []:
+        frames = (kernels.get(k) or {}).get("frames") or []
+        for i, f in enumerate(frames):
+            if f.get("target_callable") == target:
+                found.append(len(frames) - i)
+                break
+    return max(found) if found else None
+
+
+def seam(t, device_kernels, depth):
+    """One delivery-contract seam candidate for the task's whole-op entry: the gate keeps a
+    candidate only with a finite depth and device_kernels naming the kernel it must launch
+    (delivery_contract.mjs selectionCandidatesForHead)."""
+    if not t.get("target_callable"):
+        return []
+    return [{"target_callable": t.get("target_callable"), "path": t.get("target_file"),
+             "sha256": t.get("target_sha256"), "role": "op_seam",
+             "depth": depth if depth is not None else 1,
+             "depth_basis": ("evidence/source_map.json frame position" if depth is not None
+                             else "single candidate; callable not in a recorded stack"),
+             "device_kernels": list(dict.fromkeys(device_kernels)),
+             "evidence": "innermost serving-stack frame common to the task's kernels "
+                         "(evidence/source_map.json)"}]
+
+
+def joint_ut(t, rank, depth=None):
     """task_decls joint_phases -> delivery-contract joint_ut.phases[] rows (anchor = the
     row's heaviest kernel; a row of one kernel is not a chain and is reported apart)."""
-    seam = [{"target_callable": t.get("target_callable"), "path": t.get("target_file"),
-             "sha256": t.get("target_sha256"), "role": "op_seam",
-             "evidence": "innermost serving-stack frame common to the task's kernels "
-                         "(evidence/source_map.json)"}] if t.get("target_callable") else []
     rows, single = [], []
     js = t.get("joint_phases") or []
     branches = {k for j in js for k in j.get("required_kernels") or []}
@@ -206,7 +234,7 @@ def joint_ut(t, rank):
         return None, [], {"phases": [
             {"regime": j["regime"], "device_kernel": j["required_kernels"][0],
              "served_phase": j.get("phase"), "owned_point_ids": j.get("points"),
-             "seam_candidates": seam} for j in js]}
+             "seam_candidates": seam(t, j["required_kernels"], depth)} for j in js]}
     for j in js:
         ks = list(dict.fromkeys(j.get("required_kernels") or []))
         if len(ks) < 2:
@@ -215,7 +243,7 @@ def joint_ut(t, rank):
         rows.append({"regime": j["regime"],
                      "device_kernel": max(ks, key=lambda k: rank.get(k, {}).get("mass_us", 0)),
                      "required_device_kernels": ks, "served_phase": j.get("phase"),
-                     "owned_point_ids": j.get("points"), "seam_candidates": seam})
+                     "owned_point_ids": j.get("points"), "seam_candidates": seam(t, ks, depth)})
     return ({"phases": rows} if rows else None), single, None
 
 
@@ -375,14 +403,23 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
               "census_rule": "grade coverage with exactly these census pairs and this points "
                              "file; a partial list shrinks the denominator"}
     rank = {r["id"]: r for r in load(ev("kernel_ranking.json"), {}).get("ranking", [])}
+    source_map = load(ev("evidence", "source_map.json"), {})
     tasks = []
     for t in decls["tasks"]:
         tdir = ev("tasks", t["label"])
         os.makedirs(os.path.join(tdir, "run"), exist_ok=True)
         tc = cases.get(t["label"], {"cases": []})
         owned = sorted({c["point_id"] for c in tc["cases"] if c.get("point_id")})
+        depth = seam_depth(t, source_map)
+        joint, single, dispatch = joint_ut(t, rank, depth)
+        companions = [c["kernel"] for c in t.get("companions") or [] if c.get("kernel")]
+        # requested_kernel.json is the KERNEL object of references/delivery-contract.md: the
+        # delivery gate (kernel_extraction_delivery.mjs --kernel) refuses anything without
+        # entity_kind gpu_kernel, and keeps only seam candidates with a depth and the kernels
+        # they launch.
         req = {
             "contract": "kernel_extract/requested_kernel/v1",
+            "entity_kind": "gpu_kernel", "short_name": t["label"],
             "label": t["label"], "task_dir": tdir,
             "selected_identities": t["kernels"], "selected_device_kernels": t["kernels"],
             "device_kernel": max(t["kernels"], key=lambda k: rank.get(k, {}).get("mass_us", 0)),
@@ -391,9 +428,10 @@ def build(eval_dir, decls, accept_draft=False, check_only=False, force=False, no
             "ut_family": t["ut_family"], "ut_family_why": t.get("ut_family_why"),
             "target_callable": t.get("target_callable"), "target_file": t.get("target_file"),
             "target_sha256": t.get("target_sha256"), "launching_ops": t.get("launching_ops"),
-            "joint_ut": joint_ut(t, rank)[0],
-            "single_kernel_regimes": joint_ut(t, rank)[1] or None,
-            "dispatch_ut": joint_ut(t, rank)[2],
+            "seam_candidates": seam(t, t["kernels"] + companions, depth),
+            "joint_ut": joint,
+            "single_kernel_regimes": single or None,
+            "dispatch_ut": dispatch,
             "phase_regimes": t.get("phase_regimes"),
             "selection_pct_gpu_time": round(sum(rank.get(k, {}).get("selection_pct_gpu_time", 0)
                                                 for k in t["kernels"]), 4),
