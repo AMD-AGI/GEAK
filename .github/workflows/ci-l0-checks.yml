@@ -81,9 +81,19 @@ jobs:
       # never named is a test file that never runs — the same trap the contract checks
       # below were added to close. They also measure the modules that were dragging the
       # coverage gate down, which is what a suite nothing runs looks like from the outside.
+      # `pytest`, NOT `python -m pytest`: `-m` puts the invocation directory on
+      # sys.path[0], and this repo tracks a root-level `unittest.py` (the task-harness
+      # entry-point convention — the oracle task dirs have one). That shadows stdlib
+      # `unittest`, so anything importing `unittest.mock` — pytest's own startup on some
+      # versions, or torch, which L1 installs — dies with
+      #   ModuleNotFoundError: No module named 'unittest.mock'; 'unittest' is not a package
+      # Reproduced on box 2026-10-13: `python -m pytest` from the repo root fails before
+      # collection; the console script, which does not prepend cwd, passes. This job is
+      # green today only because its pytest build happens not to take that import path
+      # and torch is deliberately not installed here — neither is a property to rely on.
       - name: unit tests (no GPU)
         run: |
-          python -m pytest -q --cov --cov-report=term --cov-fail-under=0 \
+          pytest -q --cov --cov-report=term --cov-fail-under=0 \
             interface/test_run_e2e_recovery.py \
             interface/test_e2e_checkpoint.py \
             interface/test_run_e2e_tuning_result.py \
@@ -160,7 +170,37 @@ jobs:
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             e2e_workflow/scripts/tests/test_profile_env_shim.py \
             scripts/tests/test_gpu_identity.py \
-            geak/test_bootstrap.py
+            e2e_workflow/scripts/tests/test_bench_warm_server_lifecycle.py \
+            kb/tests/test_curate.py \
+            kb/tests/test_plane.py \
+            perf_knowledge/expert_skills/_contribute/test_validation_env.py \
+            perf_knowledge/languages/flydsl/test_version_map.py \
+            perf_knowledge/index/test_run_recurrence.py \
+            perf_knowledge/corpus/test_corpus.py \
+            perf_knowledge/corpus/test_candidate_selection.py \
+            perf_knowledge/corpus/test_decision_outcomes.py \
+            perf_knowledge/corpus/test_workflow_products.py \
+            kernel_workflow/scripts/test_detect_language.py \
+            kernel_workflow/scripts/test_capture_validation_env.py \
+            geak/test_bootstrap.py \
+            kernel_workflow/scripts/test_check_flydsl_compat.py \
+            kernel_workflow/scripts/test_upstream_knobs.py \
+            kb/tests/test_store_env.py \
+            perf_knowledge/corpus/test_benchmark_adapter.py \
+            perf_knowledge/corpus/test_benchmark_registry.py \
+            perf_knowledge/corpus/test_implementation_selection.py \
+            perf_knowledge/corpus/test_performance_decision_normalization.py \
+            ci/test_ci_test_inventory.py \
+            ci/test_standalone_contracts.py
+
+      # Advisory, on the same reasoning as the ruff step: three skills declare `validated` while
+      # pointing at no measurement record, and a record cannot be invented for a run nobody archived.
+      # Blocking on it today would only teach people to delete the check. The three artifacts that DO
+      # exist are held clean by test_validation_env.py in the suite above, so this step exists to keep
+      # the remaining gap visible in the log rather than to gate.
+      - name: validated skills state their measurement environment (advisory)
+        continue-on-error: true
+        run: python3 perf_knowledge/expert_skills/_contribute/check_validation_env.py
 
       - name: expert skill static validation
         run: |
@@ -186,11 +226,37 @@ jobs:
           bash kernel_workflow/scripts/test_profile_fallback.sh
           bash kernel_workflow/scripts/test_detect_gpu_arch.sh
           bash kernel_workflow/scripts/test_gpu_lock_arch.sh
+          # The read half of the knowledge loop. Nothing else checks it: a generated artifact can
+          # pass every --check gate above while no role prompt names it, which is how run_recurrence,
+          # the corpus and version_map were all built, tested, gated — and unreachable by the agent
+          # that plans directions. A doc no role reads is a comment with a CI gate on it.
+          python3 kernel_workflow/scripts/test_knowledge_reachable.py
+          # The two structural promises perf_knowledge/README.md makes about itself. They had been
+          # advertised in its banner and checked by nothing; the first run found 25 content files with
+          # no `## Sources`, so the banner had been wrong for a while with nothing to say so.
+          python3 perf_knowledge/test_docs_contract.py
           python3 e2e_workflow/scripts/tests/test_e2e_lane_defaults.py
+          python3 e2e_workflow/scripts/tests/test_kb_identity_flags.py
           # The kernel KB must lint clean and its generated index must match the cards. `lint --cards`
           # now exits non-zero on failure, so this is a gate rather than a printout.
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned lint --cards
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned index --check
+          # Same rule one level up: the perf_knowledge roll-up of those cards is generated, so a
+          # commit that adds a card and not the regenerated digest is a tree where the curated base
+          # and the cards disagree. Gated rather than advisory because the fix is one command.
+          python3 perf_knowledge/index/_gen_run_recurrence.py --check
+          # And the same rule for both layers of the operator corpus. Note this checks only the
+          # RENDER half: the
+          # extractor needs an aiter checkout, which this runner does not have and should not need.
+          # That split is why extraction and rendering are separate — a doc-versus-evidence
+          # disagreement is the
+          # one that misleads a reader, and it is catchable with no source tree and no GPU. Whether
+          # the evidence still matches AITER is a different question, answered by re-running the extractor
+          # against a named commit, and its answer is recorded in the provenance block.
+          python3 perf_knowledge/corpus/_render_facts.py --check
+          # Decision cards are the semantic layer the workflow reads. This also rejects a card whose
+          # source citation is absent or whose measured validation artifact does not exist.
+          python3 perf_knowledge/corpus/_render_decisions.py --check
 
       # Renders the per-file table + total into the run's Job Summary, which is
       # where the coverage percentage is read from the GitHub web UI. Runs even
