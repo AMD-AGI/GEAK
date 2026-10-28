@@ -7,18 +7,24 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 
 CORPUS_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_AXES = CORPUS_DIR / "performance_axes" / "gemm.yaml"
-NORMALIZER_PATH = CORPUS_DIR / "_normalize_performance_decisions.py"
-NORMALIZER_SPEC = importlib.util.spec_from_file_location(
-    "normalize_performance_decisions", NORMALIZER_PATH,
-)
-NORMALIZER = importlib.util.module_from_spec(NORMALIZER_SPEC)
-NORMALIZER_SPEC.loader.exec_module(NORMALIZER)
+sys.path.insert(0, str(CORPUS_DIR))
+import _corpus_contract as CONTRACT  # noqa: E402
+
+
+# Resolved on use, not at import: the axes file and the normalizer both live in the knowledge
+# repository, and this module must stay importable without one so its own pure helpers --
+# `stable_id`, the merge itself -- remain testable on a bare box.
+def _corpus(family: str = "gemm"):
+    catalog_file, catalog = CONTRACT.load_catalog()
+    entry = CONTRACT.family(catalog, family)
+    axes = catalog_file.parent / entry["performance_axes"]
+    return axes, CONTRACT.load_declared_module(catalog_file, entry, "performance_normalizer")
 
 
 def stable_id(payload: dict[str, Any]) -> str:
@@ -59,7 +65,7 @@ def flatten(path: Path, result: dict[str, Any], axes: dict[str, Any]):
     rows = []
     for raw_implementation in result["implementations"]:
         implementation = dict(raw_implementation)
-        implementation["performance_decisions"] = NORMALIZER.normalize_implementation(
+        implementation["performance_decisions"] = _corpus()[1].normalize_implementation(
             implementation, axes,
         )
         identity = {
@@ -78,9 +84,10 @@ def flatten(path: Path, result: dict[str, Any], axes: dict[str, Any]):
     return rows
 
 
-def merge(paths, axes_path=DEFAULT_AXES):
-    axes = NORMALIZER.load_yaml(Path(axes_path))
-    NORMALIZER.validate_schema(axes)
+def merge(paths, axes_path=None):
+    default_axes, normalizer = _corpus()
+    axes = normalizer.load_yaml(Path(axes_path or default_axes))
+    normalizer.validate_schema(axes)
     records = {}
     errors = []
     for raw in paths:
@@ -115,7 +122,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", action="append", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--axes", type=Path, default=DEFAULT_AXES)
+    parser.add_argument("--axes", type=Path, default=None)
     args = parser.parse_args(argv)
     result = merge(args.input, args.axes)
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -12,23 +12,58 @@ import _select_candidates as SELECT
 HERE = Path(__file__).resolve().parent
 
 
-def test_catalog_paths_exist_and_family_names_are_unique():
-    catalog = yaml.safe_load((HERE / "catalog.yaml").read_text())
+# The keys this consumer will not start without. Absence is a different failure from a
+# dangling path -- a missing key means the family cannot be used at all, and saying so by
+# name beats a KeyError three frames into the selector.
+REQUIRED_FAMILY_FIELDS = (
+    "source_evidence", "tuned_evidence", "decisions", "source_document",
+    "decision_document", "performance_axes", "performance_normalizer",
+)
+
+# Anything the catalog names with one of these suffixes is a file it promises exists.
+FILE_SUFFIXES = (".yaml", ".yml", ".md", ".py", ".json")
+
+
+def _declared_paths(value, trail=()):
+    """Every path-looking string in a family entry, with the key trail that reached it.
+
+    Deliberately NOT a second hardcoded field list. The catalog is the discovery surface and
+    this repo conforms to it, so the knowledge repository is free to add a key -- and it has:
+    `source_scope` arrived there with its own gate on that side and NONE here, while
+    `tuned_db_evidence`, `source_extractor` and the `seed_documents` list were declared,
+    read (`_validate_products` reads the first, `load_declared_module` the second, a role
+    prompt sends the reader to the third) and checked by nothing. Seven of eleven declared
+    paths were verified under a docstring that said every one was. Walking the entry means a
+    key added over there is covered here the day it appears, which is the only version of
+    this check that cannot drift back.
+    """
+    if isinstance(value, str):
+        if value.endswith(FILE_SUFFIXES):
+            yield trail, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _declared_paths(item, (*trail, str(key)))
+    elif isinstance(value, list):
+        for i, item in enumerate(value):
+            yield from _declared_paths(item, (*trail, f"[{i}]"))
+
+
+def test_catalog_paths_exist_and_family_names_are_unique(corpus_catalog):
+    catalog = yaml.safe_load((corpus_catalog).read_text())
     seen = set()
     for family in catalog["families"]:
         names = [family["id"], *(family.get("patterns") or [])]
         assert not (seen & set(names)), f"ambiguous catalog names: {seen & set(names)}"
         seen.update(names)
-        for field in (
-            "source_evidence", "tuned_evidence", "decisions", "source_document",
-            "decision_document", "benchmark_manifest", "performance_axes",
-            "performance_normalizer",
-        ):
-            assert (HERE / family[field]).is_file(), (family["id"], field, family[field])
+        missing = [f for f in REQUIRED_FAMILY_FIELDS if not family.get(f)]
+        assert not missing, (family["id"], "missing catalog field(s)", missing)
+        for trail, declared in _declared_paths(family):
+            assert (corpus_catalog.parent / declared).is_file(), (
+                family["id"], ".".join(trail), declared)
 
 
-def test_gfx_constraint_and_eligible_performance_candidates_are_separate():
-    result = SELECT.select(HERE / "catalog.yaml", {
+def test_gfx_constraint_and_eligible_performance_candidates_are_separate(corpus_catalog):
+    result = SELECT.select(corpus_catalog, {
         "operator_family": "scaled_quant_gemm",
         "target_language": "flydsl",
         "gfx": "gfx942",
@@ -51,7 +86,7 @@ def test_gfx_constraint_and_eligible_performance_candidates_are_separate():
     assert "math_contract" in result["performance_model"]["comparison_context"]["required"]
 
 
-def test_small_m_family_is_rejected_on_gfx942_and_selected_on_gfx950():
+def test_small_m_family_is_rejected_on_gfx942_and_selected_on_gfx950(corpus_catalog):
     base = {
         "operator_family": "gemm",
         "target_language": "flydsl",
@@ -63,8 +98,8 @@ def test_small_m_family_is_rejected_on_gfx942_and_selected_on_gfx950():
         "k": 7168,
         "traits": [],
     }
-    rejected = SELECT.select(HERE / "catalog.yaml", {**base, "gfx": "gfx942"})
-    selected = SELECT.select(HERE / "catalog.yaml", {**base, "gfx": "gfx950"})
+    rejected = SELECT.select(corpus_catalog, {**base, "gfx": "gfx942"})
+    selected = SELECT.select(corpus_catalog, {**base, "gfx": "gfx950"})
     assert "flydsl-small-m-hgemm-family" in {row["id"] for row in rejected["rejected"]}
     assert "flydsl-small-m-hgemm-family" in {row["id"] for row in selected["eligible"]}
 
@@ -104,7 +139,7 @@ def test_dtype_aliases_match(given, stored):
     assert status == "eligible"
 
 
-def test_compatible_single_ref_outcomes_rank_but_bundles_do_not(tmp_path):
+def test_compatible_single_ref_outcomes_rank_but_bundles_do_not(corpus_catalog, tmp_path):
     context = {
         "operator_family": "scaled_quant_gemm",
         "target_language": "flydsl",
@@ -163,7 +198,7 @@ def test_compatible_single_ref_outcomes_rank_but_bundles_do_not(tmp_path):
     path = tmp_path / "outcomes.json"
     path.write_text(json.dumps(outcomes))
 
-    result = SELECT.select(HERE / "catalog.yaml", context, path)
+    result = SELECT.select(corpus_catalog, context, path)
     performance = [
         row for row in result["eligible"] if row["type"] == "performance_candidate"
     ]
@@ -220,7 +255,7 @@ def test_missing_recorded_shape_cannot_match_a_specific_request():
     ) == {}
 
 
-def test_measured_regression_ranks_after_unmeasured_candidate(tmp_path):
+def test_measured_regression_ranks_after_unmeasured_candidate(corpus_catalog, tmp_path):
     context = {
         "operator_family": "scaled_quant_gemm", "target_language": "flydsl",
         "gfx": "gfx942", "flydsl_version": "0.3.0",
@@ -244,7 +279,7 @@ def test_measured_regression_ranks_after_unmeasured_candidate(tmp_path):
             },
         },
     }]}))
-    result = SELECT.select(HERE / "catalog.yaml", context, path)
+    result = SELECT.select(corpus_catalog, context, path)
     performance = [
         row for row in result["eligible"] if row["type"] == "performance_candidate"
     ]
@@ -286,37 +321,37 @@ def test_the_scale_contract_suffix_is_a_different_dtype():
     assert _dtype_status(["fp8_e4m3fnuz_blockscale"], "fp8_e4m3_fnuz_blockscale") == "eligible"
 
 
-def test_every_card_dtype_is_already_canonical():
+def test_every_card_dtype_is_already_canonical(corpus_catalog):
     """A card spelling that canonicalises to something else can never match a request."""
-    cards = yaml.safe_load((HERE / "decisions" / "gemm.yaml").read_text())["cards"]
+    cards = yaml.safe_load((corpus_catalog.parent / "decisions" / "gemm.yaml").read_text())["cards"]
     for card in cards:
         for dtype in card["match"].get("dtypes") or []:
             assert SELECT.normalize_dtype(dtype) == dtype, (card["id"], dtype)
 
 
-def test_an_undefined_trait_is_named_rather_than_silently_deferring():
-    result = SELECT.select(HERE / "catalog.yaml", {
+def test_an_undefined_trait_is_named_rather_than_silently_deferring(corpus_catalog):
+    result = SELECT.select(corpus_catalog, {
         "operator_family": "gemm", "target_language": "flydsl", "gfx": "gfx950", "dtype": "bf16",
         "traits": ["lds_staging", "lds_stageing"],
     })
     assert result["undefined_traits"] == ["lds_stageing"]
 
 
-def test_every_taxonomy_gemm_operator_resolves_to_the_gemm_family():
-    catalog = yaml.safe_load((HERE / "catalog.yaml").read_text())
+def test_every_taxonomy_gemm_operator_resolves_to_the_gemm_family(corpus_catalog):
+    catalog = yaml.safe_load((corpus_catalog).read_text())
     for operator in ("dense_gemm", "scaled_quant_gemm", "batched_gemm", "splitk_streamk_gemm",
                      "skinny_gemv_decode", "gemm_epilogue_fused", "grouped_gemm_moe"):
         assert SELECT.resolve_family(catalog, operator)["id"] == "gemm", operator
 
 
-def test_a_workload_is_classified_case_by_case():
+def test_a_workload_is_classified_case_by_case(corpus_catalog):
     meta = {"dtype": "bf16", "cases": [
         {"sig": "decode_m8", "m": 8, "n": 4096, "k": 4096},
         {"sig": "prefill_m16384", "m": 16384, "n": 4096, "k": 4096},
     ]}
     context = {"operator_family": "dense_gemm", "target_language": "flydsl", "gfx": "gfx950",
                "dtype": "bf16", "regime": None, "traits": []}
-    result = SELECT.select_workload(HERE / "catalog.yaml", context, SELECT.workload_cases(meta))
+    result = SELECT.select_workload(corpus_catalog, context, SELECT.workload_cases(meta))
     by_sig = {case["sig"]: case for case in result["cases"]}
     assert by_sig["decode_m8"]["regime"] == "decode"
     assert "flydsl-small-m-hgemm-family" in by_sig["decode_m8"]["eligible"]
@@ -325,7 +360,7 @@ def test_a_workload_is_classified_case_by_case():
     assert "flydsl-hgemm-config-space" in result["eligible_in_every_case"]
 
 
-def test_a_seam_meta_with_model_dims_and_explicit_regimes_is_a_workload():
+def test_a_seam_meta_with_model_dims_and_explicit_regimes_is_a_workload(corpus_catalog):
     """Seam tasks extracted from a served model keep N/K once in `model_dims`, name each case,
     state its regime, and mark correctness-only edges untimed; `--workload` has to read that."""
     meta = {
@@ -346,7 +381,7 @@ def test_a_seam_meta_with_model_dims_and_explicit_regimes_is_a_workload():
     assert SELECT.workload_dtype(meta) == "bf16"
     context = {"operator_family": "dense_gemm", "target_language": "flydsl", "gfx": "gfx950",
                "dtype": SELECT.workload_dtype(meta), "regime": None, "traits": []}
-    result = SELECT.select_workload(HERE / "catalog.yaml", context, cases)
+    result = SELECT.select_workload(corpus_catalog, context, cases)
     assert [c["timed"] for c in result["cases"]] == [True, True, False]
     assert "flydsl-small-m-hgemm-family" in result["eligible_in_some_cases"]
     # The untimed edge is classified but does not shrink what holds for the timed workload.
@@ -361,7 +396,7 @@ def test_workload_dtype_is_canonical_single_or_absent():
     assert SELECT.workload_dtype({}) is None
 
 
-def test_a_seam_meta_workload_reads_model_dims_regime_and_untimed_edges():
+def test_a_seam_meta_workload_reads_model_dims_regime_and_untimed_edges(corpus_catalog):
     """Seam metas extracted from a served model: `name`/`m`/`regime` per case, N and K once in
     `model_dims`, correctness-only edges `timed: false`, and a dtype stated as a whole contract."""
     meta = {
@@ -382,7 +417,7 @@ def test_a_seam_meta_workload_reads_model_dims_regime_and_untimed_edges():
     assert SELECT.workload_dtype(meta) == "bf16"
     context = {"operator_family": "dense_gemm", "target_language": "flydsl", "gfx": "gfx950",
                "dtype": SELECT.workload_dtype(meta), "regime": None, "traits": []}
-    result = SELECT.select_workload(HERE / "catalog.yaml", context, cases)
+    result = SELECT.select_workload(corpus_catalog, context, cases)
     by_sig = {case["sig"]: case for case in result["cases"]}
     assert by_sig["edge_M1_single_token"]["timed"] is False
     assert "flydsl-small-m-hgemm-family" in by_sig["dec_bs1"]["eligible"]

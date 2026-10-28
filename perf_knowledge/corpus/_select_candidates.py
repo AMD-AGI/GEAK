@@ -19,11 +19,14 @@ from typing import Any
 
 import yaml
 
-import _normalize_performance_decisions as PERFORMANCE
+import _corpus_contract as CONTRACT
 
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_CATALOG = HERE / "catalog.yaml"
+# No bundled catalog constant: the corpus lives in the knowledge repository that
+# `KERNEL_KNOWLEDGE_DIR` points at, and `CONTRACT.load_catalog(None)` resolves it there. A
+# default pointing next to this file would resolve to a vendored copy and recreate the second
+# source of truth the split removed.
 TYPE_ORDER = {"constraint": 0, "performance_candidate": 1, "semantic": 2}
 DTYPE_ALIASES = {
     "float16": "f16",
@@ -332,10 +335,11 @@ def select(
     context: dict[str, Any],
     outcomes_path: Path | None = None,
 ) -> dict[str, Any]:
-    catalog = load_yaml(catalog_path)
-    if catalog.get("schema_version") != 1:
-        raise ValueError(f"{catalog_path}: unsupported catalog schema")
+    catalog_path, catalog = CONTRACT.load_catalog(catalog_path)
     family = resolve_family(catalog, context["operator_family"])
+    # Declared by the catalog, not imported as a sibling: this repo consumes the knowledge
+    # repo's interface, and the normalizer is part of that interface.
+    PERFORMANCE = CONTRACT.load_declared_module(catalog_path, family, "performance_normalizer")
     decisions_path = catalog_path.parent / family["decisions"]
     decision_data = load_yaml(decisions_path)
     axes_path = (
@@ -511,7 +515,7 @@ def select_workload(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    parser.add_argument("--catalog", type=Path, default=None)
     parser.add_argument("--operator-family", required=True)
     parser.add_argument("--target-language", required=True)
     parser.add_argument("--gfx")

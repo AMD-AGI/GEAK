@@ -33,6 +33,40 @@ WF = os.path.dirname(HERE)
 ROOT = os.path.dirname(WF)
 PK = os.path.join(ROOT, "perf_knowledge")
 
+# The corpus (`corpus/`) lives in the knowledge repository, not here, and the role prompts name it
+# as `KERNEL_KNOWLEDGE_DIR/corpus/...` for exactly that reason. So an artifact can be reachable
+# while being absent from this checkout, and resolving every reference against the repo-local tree
+# would report the loop broken on a box that has simply not checked the corpus out.
+#
+# Resolution order matches what the lane does: the configured knowledge dir first, this repo's own
+# perf_knowledge/ second. A reference that resolves in NEITHER is still a failure -- that is the
+# dangling-reference case this file exists to catch, and the split must not be allowed to turn it
+# into a blanket excuse.
+CONFIGURED = os.environ.get("KERNEL_KNOWLEDGE_DIR", "")
+
+# Resolution order matches what the lane does: the configured knowledge dir first, this repo's own
+# perf_knowledge/ second. `corpus/` straddles the two -- the data, the catalog and the generated
+# pages ship in the knowledge repository, the consumer modules a role invokes (`_select_candidates`,
+# `benchmarks/merge_results`, ...) stay here -- so the split is per-file and cannot be decided from
+# the prefix. Hence: resolve against both, and only then ask who should have had it.
+KNOWLEDGE_DIRS = [d for d in (CONFIGURED, PK) if d]
+
+# A path that resolves in NEITHER is normally a dangling reference, which is the failure this file
+# exists to catch. The one exception is a `corpus/` path on a box with no KERNEL_KNOWLEDGE_DIR set:
+# there is nothing to resolve it against, and failing would make the gate permanently red for a
+# reason no edit to this repo can fix -- which is how a gate gets deleted. So it SKIPS, counted and
+# named, on the same terms as the corpus tests: a skip says the seam went unverified on this run,
+# not that it passed. Set the dir -- as CI does -- and a missing path is a hard failure again.
+REMOTE_PREFIXES = ("corpus/",)
+
+
+def pk_exists(relative):
+    return any(os.path.exists(os.path.join(d, relative)) for d in KNOWLEDGE_DIRS)
+
+
+def unverifiable(relative):
+    return not CONFIGURED and relative.startswith(REMOTE_PREFIXES) and not pk_exists(relative)
+
 # BOTH role trees. The e2e side is not decoration here: `_gen_run_recurrence.py` aggregates the e2e
 # learned cards along with the kernel ones, so an e2e run that never reads the digest is contributing
 # to a prior it cannot spend. A first version of this file scanned only kernel_workflow/roles and
@@ -106,8 +140,22 @@ def base_relative_pattern():
     that way, and the prefixed patterns above see neither. Anchoring on `os.listdir(PK)` rather than a
     hardcoded list keeps it from drifting as the base grows, and keeps it tight enough that an English
     sentence containing the word "index" is not mistaken for a path.
+
+    Plus `REMOTE_PREFIXES`: `corpus/` is a top-level dir of the knowledge repository and of nothing
+    here, so anchoring on the local tree alone would stop matching bare `corpus/gemm_decisions.md` —
+    which quietly empties the set direction 2 checks against and turns a real "no role names it"
+    into a pass.
+
+    Deliberately NOT `os.listdir()` over the configured knowledge dir. That repository's other top
+    level dirs — `knowledge/`, `kernels/`, `tests/` — are also directory names in THIS tree, under
+    `kernel_workflow/` and `e2e_workflow/`, and a role naming `knowledge/learned/` means its own
+    workflow's copy. Taking the union made those prose strings parse as knowledge-base paths and
+    then demanded they resolve under a base they were never relative to: nine such references, all
+    fine, reported as dangling the moment KERNEL_KNOWLEDGE_DIR was set — which is to say, only in
+    CI. The set of prefixes that genuinely straddle the split is the one already written down.
     """
-    tops = sorted(d for d in os.listdir(PK) if os.path.isdir(os.path.join(PK, d)))
+    tops = sorted({d for d in os.listdir(PK) if os.path.isdir(os.path.join(PK, d))}
+                  | {p.rstrip("/") for p in REMOTE_PREFIXES})
     # Must END like a path — an extension, a trailing slash, a glob, or a placeholder. Without that,
     # prose collides with the vocabulary: "a stale index/mask from a prior call" and "the
     # reference/synth that raised" both parse as paths under `index/` and `reference/`, and both were
@@ -138,33 +186,39 @@ def referenced_paths():
 
 
 def main():
-    if not os.path.isdir(PK):
+    if not any(os.path.isdir(d) for d in KNOWLEDGE_DIRS):
         print("  skip  no perf_knowledge/ in this checkout")
         return 0
 
     refs = referenced_paths()
-    fails, skipped = [], []
+    fails, skipped, unchecked = [], [], []
 
     # Direction 1: what the prompts name must exist.
     for p, roles in sorted(refs.items()):
+        if unverifiable(p):
+            unchecked.append(p)
+            continue
         if PLACEHOLDER.search(p):
             # Check the fixed prefix only — `operators/<op>/overview.md` at least proves
             # `operators/` is there, which is the part a rename would break.
             prefix = p.split("<")[0].split("{")[0].rstrip("/")
-            if prefix and not os.path.exists(os.path.join(PK, prefix)):
+            if prefix and not pk_exists(prefix):
                 fails.append(f"{p}: fixed prefix `{prefix}` does not exist "
                              f"(named by {', '.join(sorted(roles))})")
             else:
                 skipped.append(p)
             continue
-        if not os.path.exists(os.path.join(PK, p)):
+        if not pk_exists(p):
             fails.append(f"{p}: named by {', '.join(sorted(roles))} but not present in "
                          f"perf_knowledge/ — the role reads nothing and says nothing")
 
     # Direction 2: what exists and matters must be named.
     named = set(refs)
     for p, why in sorted(MUST_BE_READ.items()):
-        if not os.path.exists(os.path.join(PK, p)):
+        if unverifiable(p):
+            unchecked.append(p)
+            continue
+        if not pk_exists(p):
             skipped.append(f"{p} (not generated in this checkout)")
             continue
         if p not in named:
@@ -177,12 +231,18 @@ def main():
               f"in the loop when a role is told to read it.")
         return 1
 
-    reachable = sum(1 for p in MUST_BE_READ if os.path.exists(os.path.join(PK, p)))
-    print(f"  ok    all {len(refs)} knowledge paths named by roles resolve "
-          f"({len(skipped)} per-run placeholder(s) checked to their fixed prefix)")
-    print(f"  ok    all {reachable} loop-critical artifact(s) are named by at least one role")
+    reachable = sum(1 for p in MUST_BE_READ if pk_exists(p))
+    print(f"  ok    all {len(refs) - len(set(unchecked) & set(refs))} knowledge paths named by "
+          f"roles resolve ({len(skipped)} per-run placeholder(s) checked to their fixed prefix)")
+    if unchecked:
+        print(f"  skip  {len(set(unchecked))} reference(s) live in the knowledge repository and "
+              f"went UNVERIFIED: no KERNEL_KNOWLEDGE_DIR is set")
+        for p in sorted(set(unchecked)):
+            print(f"          {p}")
+    print(f"  ok    all {reachable} loop-critical artifact(s) present here are named by at least "
+          f"one role")
     for p in sorted(MUST_BE_READ):
-        if p in refs:
+        if p in refs and pk_exists(p):
             print(f"          {p} <- {', '.join(sorted(refs[p]))}")
     print("\nall green")
     return 0

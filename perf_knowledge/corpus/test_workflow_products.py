@@ -94,7 +94,7 @@ def make_run(root, *, graph=True, citations=None):
     return run
 
 
-def test_a_run_product_is_validated_against_the_corpus(tmp_path):
+def test_a_run_product_is_validated_against_the_corpus(corpus_dir, tmp_path):
     make_run(tmp_path, citations=[
         "gemm-streamed-operand-cache-policy",    # applies to any FlyDSL GEMM
         "flydsl-small-m-hgemm-family",           # M <= 16 only: one timed case of two
@@ -130,7 +130,7 @@ def test_a_run_product_is_validated_against_the_corpus(tmp_path):
     assert result["summary"]["runs_with_ranking_basis"] == 1
 
 
-def test_an_uncaptured_language_is_resolved_from_source_or_reported(tmp_path):
+def test_an_uncaptured_language_is_resolved_from_source_or_reported(corpus_dir, tmp_path):
     run = make_run(tmp_path)
     manifest = yaml.safe_load((run / "validation_environment.yaml").read_text())
     manifest["observed_language"] = "not_captured"
@@ -145,7 +145,7 @@ def test_an_uncaptured_language_is_resolved_from_source_or_reported(tmp_path):
     assert ready["observed_language_basis"] == "assumed_by_operator"
 
 
-def test_a_task_product_is_scanned_whole(tmp_path):
+def test_a_task_product_is_scanned_whole(corpus_dir, tmp_path):
     task = tmp_path / "task"
     (task / "kernel_src").mkdir(parents=True)
     (task / "kernel_src" / "impl.py").write_text(KERNEL, encoding="utf-8")
@@ -166,7 +166,7 @@ def query(**overrides):
 
 
 @pytest.mark.parametrize("graph,status", [(True, "measured"), (False, "not_rankable")])
-def test_ingested_products_rank_per_case_only_when_the_policy_allows(tmp_path, graph, status):
+def test_ingested_products_rank_per_case_only_when_the_policy_allows(corpus_dir, tmp_path, graph, status):
     run = make_run(tmp_path, graph=graph)
     registry = INGEST.ingest([str(tmp_path)], tmp_path / "results",
                              environment_extra={"torch": "2.9.1", "hip": "7.2"})
@@ -185,7 +185,7 @@ def test_ingested_products_rank_per_case_only_when_the_policy_allows(tmp_path, g
         assert first["candidates"] == []
 
 
-def test_a_query_without_environment_identity_returns_no_bundle(tmp_path):
+def test_a_query_without_environment_identity_returns_no_bundle(corpus_dir, tmp_path):
     run = make_run(tmp_path)
     registry = INGEST.ingest([str(tmp_path)], tmp_path / "results",
                              environment_extra={"torch": "2.9.1", "hip": "7.2"})

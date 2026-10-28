@@ -22,6 +22,7 @@ alternative -- parsing the workflow YAML at test time -- makes a green run depen
 shape of a CI file rather than on the checks themselves.
 """
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,24 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def root_conftest():
+    """The repo-root conftest, loaded by path rather than by name.
+
+    A bare `import conftest` is ambiguous in this repo: `perf_knowledge/corpus/conftest.py`
+    carries the same module basename, and neither directory is a package, so in a run that
+    collects both trees whichever file pytest imported last owns `sys.modules["conftest"]`.
+    The two tests below mean the ROOT one specifically -- it is the file whose collection
+    ignore lists they check against the CI inventory -- and they failed with a bare
+    `AttributeError: module 'conftest' has no attribute 'SCRIPT_STYLE'` in exactly the
+    combined run CI performs, while passing when `ci/` was run on its own. Naming the file
+    says which conftest is meant instead of leaving collection order to say it.
+    """
+    spec = importlib.util.spec_from_file_location("_root_conftest", REPO / "conftest.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 # The programs CI runs under "KB and workflow contract checks".
 CONTRACT_CHECKS = [
@@ -95,7 +114,7 @@ def test_script_style_ignores_are_covered_here():
     `conftest.EXAMPLE_TASKS` is deliberately NOT asserted on: those need a GPU and belong
     behind `gpu_lock.sh`, so being ignored and unrun is their correct state.
     """
-    import conftest
+    conftest = root_conftest()
 
     missing = sorted(set(conftest.SCRIPT_STYLE) - set(CONTRACT_CHECKS))
     assert not missing, (
@@ -113,7 +132,7 @@ def test_example_task_ignores_agree_with_the_ci_inventory():
     other would leave either a collection crash or a gate failure for someone else to
     discover.
     """
-    import conftest
+    conftest = root_conftest()
 
     from test_ci_test_inventory import EXEMPT
 

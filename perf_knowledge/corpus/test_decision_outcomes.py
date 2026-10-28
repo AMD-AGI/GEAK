@@ -333,7 +333,7 @@ def test_structured_manifest_fields_take_precedence_and_name_the_metric(tmp_path
     assert context["metric_kind"] == "time_weighted"
 
 
-def test_a_multi_shape_seam_run_informs_each_case_it_measured(tmp_path):
+def test_a_multi_shape_seam_run_informs_each_case_it_measured(corpus_catalog, tmp_path):
     """A seam run lists its timed M values and spells N/K upper-case; a workload query asks per
     case with lower-case keys and a bare regime. The prior must reach exactly the measured cases."""
     run = tmp_path / "seam"
@@ -350,7 +350,7 @@ def test_a_multi_shape_seam_run_informs_each_case_it_measured(tmp_path):
     ]}
     context = {"operator_family": "dense_gemm", "target_language": "flydsl", "gfx": "gfx950",
                "dtype": "bf16", "regime": None, "traits": []}
-    result = SELECT.select_workload(HERE / "catalog.yaml", context, SELECT.workload_cases(meta),
+    result = SELECT.select_workload(corpus_catalog, context, SELECT.workload_cases(meta),
                                     outcomes_path)
     by_sig = {case["sig"]: case for case in result["cases"]}
     assert by_sig["dec_bs1"]["measured_priors"]["flydsl-hgemm-config-space"]["median"] == 1.1
@@ -442,7 +442,7 @@ def test_structured_manifest_fields_take_precedence_and_name_the_metric(tmp_path
     assert context["metric_kind"] == "time_weighted"
 
 
-def test_a_multi_shape_seam_run_primes_the_cases_it_measured(tmp_path):
+def test_a_multi_shape_seam_run_primes_the_cases_it_measured(corpus_catalog, tmp_path):
     """A seam run records N/K upper-case, every timed M as a list and prose after the regime."""
     run = tmp_path / "seam"
     write_yaml(run, [outcome("flydsl-hgemm-config-space")], validation_status="flagged", op_spec={
@@ -461,7 +461,7 @@ def test_a_multi_shape_seam_run_primes_the_cases_it_measured(tmp_path):
     ]}
     context = {"operator_family": "dense_gemm", "target_language": "flydsl", "gfx": "gfx950",
                "dtype": "bf16", "regime": None, "traits": []}
-    result = SELECT.select_workload(HERE / "catalog.yaml", context, SELECT.workload_cases(meta),
+    result = SELECT.select_workload(corpus_catalog, context, SELECT.workload_cases(meta),
                                     outcomes)
     priors = {case["sig"]: case["measured_priors"] for case in result["cases"]}
     assert priors["dec_bs1"]["flydsl-hgemm-config-space"]["median"] == pytest.approx(1.10)

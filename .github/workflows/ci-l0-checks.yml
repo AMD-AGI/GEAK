@@ -52,6 +52,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The performance corpus -- evidence, decision cards, axes -- lives in the knowledge
+      # repository, and this repo holds only the logic that consumes it. The corpus consumer
+      # tests come in two kinds: unit tests over a synthetic corpus in tmp_path, which need
+      # nothing here, and integration tests of the seam, which assert against the real cards.
+      #
+      # Those second ones SKIP when KERNEL_KNOWLEDGE_DIR is unset rather than failing, so
+      # without this step the job would stay green while the seam went unverified. That is the
+      # failure mode worth spending a checkout on: the contract between the two repos --
+      # schema version, the shared authoring-language vocabulary, every catalogued path
+      # resolving -- is only ever exercised with both of them present.
+      #
+      # Unpinned on purpose. A pinned ref would check this repo against a corpus no lane uses, and
+      # the contract's whole job is to notice when the two drift; a knowledge commit that breaks it
+      # SHOULD turn this red, because it has already broken every lane. Pin a ref only to park a
+      # known-bad corpus while it is being fixed, and say so here when you do.
+      - uses: actions/checkout@v4
+        with:
+          repository: yueliu14/KernelWiki
+          path: .knowledge
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -92,6 +111,10 @@ jobs:
       # green today only because its pytest build happens not to take that import path
       # and torch is deliberately not installed here — neither is a property to rely on.
       - name: unit tests (no GPU)
+        env:
+          # The corpus checked out above. Same variable kernel_lane.js resolves, so a lane and
+          # this job agree on which corpus they are talking about.
+          KERNEL_KNOWLEDGE_DIR: ${{ github.workspace }}/.knowledge/perf_knowledge
         run: |
           pytest -q --cov --cov-report=term --cov-fail-under=0 \
             interface/test_run_e2e_recovery.py \
@@ -176,7 +199,6 @@ jobs:
             perf_knowledge/expert_skills/_contribute/test_validation_env.py \
             perf_knowledge/languages/flydsl/test_version_map.py \
             perf_knowledge/index/test_run_recurrence.py \
-            perf_knowledge/corpus/test_corpus.py \
             perf_knowledge/corpus/test_candidate_selection.py \
             perf_knowledge/corpus/test_decision_outcomes.py \
             perf_knowledge/corpus/test_workflow_products.py \
@@ -189,7 +211,6 @@ jobs:
             perf_knowledge/corpus/test_benchmark_adapter.py \
             perf_knowledge/corpus/test_benchmark_registry.py \
             perf_knowledge/corpus/test_implementation_selection.py \
-            perf_knowledge/corpus/test_performance_decision_normalization.py \
             ci/test_ci_test_inventory.py \
             ci/test_standalone_contracts.py
 
@@ -245,18 +266,14 @@ jobs:
           # commit that adds a card and not the regenerated digest is a tree where the curated base
           # and the cards disagree. Gated rather than advisory because the fix is one command.
           python3 perf_knowledge/index/_gen_run_recurrence.py --check
-          # And the same rule for both layers of the operator corpus. Note this checks only the
-          # RENDER half: the
-          # extractor needs an aiter checkout, which this runner does not have and should not need.
-          # That split is why extraction and rendering are separate — a doc-versus-evidence
-          # disagreement is the
-          # one that misleads a reader, and it is catchable with no source tree and no GPU. Whether
-          # the evidence still matches AITER is a different question, answered by re-running the extractor
-          # against a named commit, and its answer is recorded in the provenance block.
-          python3 perf_knowledge/corpus/_render_facts.py --check
-          # Decision cards are the semantic layer the workflow reads. This also rejects a card whose
-          # source citation is absent or whose measured validation artifact does not exist.
-          python3 perf_knowledge/corpus/_render_decisions.py --check
+          # The same rule for the operator corpus is NOT run here any more, and the omission is
+          # deliberate rather than a gap. `_render_facts.py --check` and `_render_decisions.py --check`
+          # assert that a rendered page still matches the evidence it was generated from — a claim
+          # about the knowledge repository's own contents, made true or false only by commits there.
+          # Gating it in this repo would mean a GEAK PR going red for an edit it did not make, and a
+          # knowledge PR going green for one it did. So that gate moved with the artifact, to
+          # KernelWiki's ci-corpus-checks workflow. What stays here is the seam: the unit-test step
+          # above checks the corpus out and runs the consumer's integration tests against it.
 
       # Renders the per-file table + total into the run's Job Summary, which is
       # where the coverage percentage is read from the GitHub web UI. Runs even

@@ -47,7 +47,7 @@ def write(path, payload):
     return path
 
 
-def test_merge_flattens_and_deduplicates_identical_measurements(tmp_path):
+def test_merge_flattens_and_deduplicates_identical_measurements(corpus_dir, tmp_path):
     first = write(tmp_path / "a.json", result())
     second = write(tmp_path / "b.json", result())
     got = MERGE.merge([first, second])
@@ -64,7 +64,7 @@ def test_merge_flattens_and_deduplicates_identical_measurements(tmp_path):
     assert decisions["axes"]["work_partition"]["values"]["split_k"] == 2
 
 
-def test_environment_or_implementation_change_produces_a_new_record(tmp_path):
+def test_environment_or_implementation_change_produces_a_new_record(corpus_dir, tmp_path):
     one = result()
     two = result(implementation_id="impl_b")
     first = write(tmp_path / "a.json", one)
@@ -72,7 +72,7 @@ def test_environment_or_implementation_change_produces_a_new_record(tmp_path):
     assert MERGE.merge([first, second])["records_count"] == 2
 
 
-def test_physical_repeats_are_preserved_and_share_a_context(tmp_path):
+def test_physical_repeats_are_preserved_and_share_a_context(corpus_dir, tmp_path):
     first = write(tmp_path / "a.json", result(run_id="run-a", speedup=1.1))
     second = write(tmp_path / "b.json", result(run_id="run-b", speedup=1.2))
     got = MERGE.merge([first, second])
@@ -81,14 +81,14 @@ def test_physical_repeats_are_preserved_and_share_a_context(tmp_path):
     assert len({row["context_fingerprint"] for row in got["records"]}) == 1
 
 
-def test_baseline_is_part_of_comparable_context(tmp_path):
+def test_baseline_is_part_of_comparable_context(corpus_dir, tmp_path):
     first = write(tmp_path / "a.json", result(run_id="run-a", baseline="triton"))
     second = write(tmp_path / "b.json", result(run_id="run-b", baseline="ck"))
     got = MERGE.merge([first, second])
     assert len({row["context_fingerprint"] for row in got["records"]}) == 2
 
 
-def test_bad_input_is_reported_without_dropping_good_records(tmp_path):
+def test_bad_input_is_reported_without_dropping_good_records(corpus_dir, tmp_path):
     good = write(tmp_path / "good.json", result())
     bad = write(tmp_path / "bad.json", {"schema_version": 9})
     got = MERGE.merge([bad, good])

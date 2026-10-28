@@ -39,7 +39,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import _aggregate_decision_outcomes as AGG  # noqa: E402
-import _extract_impl_facts as EXTRACT  # noqa: E402
+import _corpus_contract as CONTRACT  # noqa: E402
 import _select_candidates as SELECT  # noqa: E402
 
 _DETECT_PATH = HERE.parent.parent / "kernel_workflow" / "scripts" / "detect_language.py"
@@ -47,7 +47,9 @@ _DETECT_SPEC = importlib.util.spec_from_file_location("detect_language_for_produ
 DETECT = importlib.util.module_from_spec(_DETECT_SPEC)
 _DETECT_SPEC.loader.exec_module(DETECT)
 
-CATALOG = HERE / "catalog.yaml"
+# No bundled catalog: resolved from the configured knowledge repository on use. A module-level
+# default would be evaluated at import and bind a path that no longer exists here.
+CATALOG = None
 SCALED_DTYPE = re.compile(r"^(?:fp8|int8|int4|fp4|mxfp)")
 # What a design has to show in its own source before the trait-gated cards apply to it.
 LDS_STAGING_CATEGORIES = frozenset({"lds_alloc", "lds_swizzle", "async_copy"})
@@ -58,9 +60,9 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(handle) or {}
 
 
-def corpus_index(catalog_path: Path = CATALOG, family_id: str = "gemm") -> dict[str, Any]:
+def corpus_index(catalog_path: Path | None = None, family_id: str = "gemm") -> dict[str, Any]:
     """Cards with the categories their evidence cites, the category-to-axis map, known shipped IDs."""
-    catalog = _load_yaml(catalog_path)
+    catalog_path, catalog = CONTRACT.load_catalog(catalog_path)
     family = next(f for f in catalog["families"] if f["id"] == family_id)
     root = catalog_path.parent
     categories = {
@@ -115,6 +117,18 @@ def added_lines(patch_path: Path) -> dict[str, set[int]]:
     return added
 
 
+def _extractor():
+    """The source extractor the catalog names, loaded from the configured knowledge repo.
+
+    `scan_file` is a rule library over source text, and the rules are maintained alongside the
+    evidence they produce. Resolving it per call keeps this module importable -- and its other
+    functions testable -- on a box with no knowledge repository checked out.
+    """
+    catalog_file, catalog = CONTRACT.load_catalog()
+    return CONTRACT.load_declared_module(
+        catalog_file, CONTRACT.family(catalog, "gemm"), "source_extractor")
+
+
 def scan_product(source_dir: Path, language: str, patch: Path | None) -> dict[str, Any]:
     """Rule hits over the product's source, and the subset on lines its patch adds."""
     added = added_lines(patch) if patch and patch.is_file() else None
@@ -122,7 +136,7 @@ def scan_product(source_dir: Path, language: str, patch: Path | None) -> dict[st
     introduced: Counter = Counter()
     examples: dict[str, str] = {}
     for path in sorted(source_dir.glob("*.py")):
-        records = EXTRACT.scan_file(str(path), path.name, language)[0]
+        records = _extractor().scan_file(str(path), path.name, language)[0]
         lines = None if added is None else added.get(path.name, set())
         for record in records:
             every[record["category"]] += 1
@@ -270,7 +284,7 @@ def _first_existing(*paths: Path) -> Path | None:
 
 
 def validate_product(product: dict[str, Any], index: dict[str, Any], gfx: str | None,
-                     family: str | None, catalog_path: Path = CATALOG, declared_language: str = "flydsl",
+                     family: str | None, catalog_path: Path | None = None, declared_language: str = "flydsl",
                      assumed_languages: dict[str, str] | None = None) -> dict[str, Any]:
     meta = json.loads(product["meta"].read_text(encoding="utf-8"))
     dtype = SELECT.workload_dtype(meta)
