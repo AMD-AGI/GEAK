@@ -311,6 +311,10 @@ campaigns, so that "merge if the key exists" is actually implementable.
 That is how this tree was seeded: 20 kernels' worth of finished 16h campaigns distilled in one pass
 instead of 20 runs. Anything the gates refuse is reported with its reason rather than dropped.
 
+`_inbox/` is local working state and is gitignored. A proposal waiting there is a card that has not
+been merged yet, and a `*.json.drained` is one that has -- neither is the record. The card file is,
+and it carries its own `origin_kernels`.
+
 **Budget is per class, not global.** A flat total is set by whichever class was optimized most — one
 ingest put 15 cards in `moe_grouped_gemm` and 2 in `quantize_cast`, and a global cap would have had
 the prolific class evict the sparse ones wholesale, narrowing the KB toward the last campaign. Over
