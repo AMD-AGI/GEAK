@@ -292,6 +292,56 @@ engineering attempts failed to return results. The present records narrow
 the diagnosis; they do not isolate a beneficial or harmful EVO mechanism. The
 architecture remains unchanged while those questions are investigated.
 
+**4b. Candidate-to-finalist audit and the next comparisons**
+
+The [direction-by-direction audit](evidence/r03-candidate-funnel-20261028.md)
+joins all eight timelines with the retained EVO records: 81 observed direction
+identifiers and four integration attempts. These are not 81 distinct programs.
+It keeps initialization, returned results, verification, promotion, later
+development and final admission separate, and marks missing evidence explicitly.
+
+Two hybrid directions with no returned engineer result nevertheless obtained
+valid, gain-eligible verifier results through recovery: C `r2_d2` and D `r1_d0`.
+Missing engineer returns therefore cannot all be counted as lost candidates.
+Conversely, D `r1_d1` has an explicit invalid measurement with correctness not
+checked. Its engineer candidate identity matches ORIGINAL; the record does not
+establish that a changed implementation was lost.
+
+Six distinct retained gain-candidate IDs are absent from the common-final set.
+They remain unconfirmed alternatives, not proven better deliveries. C `r2_d1`
+is excluded from this count because it repeats the selected integrated candidate
+under a different evaluation. Four of the six alternatives had later ready
+children: two children have missing engineer/verifier returns, one has a slower
+recorded result, and one retains a small gain. No retained verified descendant
+above the promotion gate is observed in those four paths. This does not establish
+the outcomes of unrecorded work.
+
+The repair and delivery questions are being prepared as separate comparisons:
+
+- **Repaired search:** handle a hash-verified empty parent delta as the unchanged
+  baseline, preserving parent and evidence identity. Keep the existing search,
+  promotion and final-admission policies. The prepared evo-descendant repair
+  changes only this initialization behavior; it is not the source of historical
+  R03 or a live-run update. Its complete public EVO suite (21 existing scenarios
+  plus the regression), ordinary GEAK parity checks and generated-source checks
+  pass on CPU. These checks establish software behavior, not improved performance.
+- **Alternative finalist admission, proposed:** keep the 2% promotion rule and
+  checkpoint-only peer import. Give each of the four lineages in both arms two
+  fixed slots: the usual finalist and the best distinct eligible alternative,
+  with at most eight sources per population. Use captured full sources and valid
+  measurement evidence available to both methods, deduplicate source identities,
+  disclose eligible pool sizes and missing sources, and fix the evaluation budget
+  before measurement. Common evaluation selects the winner; a separate three-cycle
+  confirmation measures its delivered performance. This protocol is not installed.
+
+Ordinary working directories can be removed by round-end cleanup, so source
+availability must be checked in retained native captures rather than inferred
+from an archive or a surviving patch alone. New repeated search pairs require
+declared capacity for search and final evaluation, including the storage problem
+observed in the newer b08 runs. Every node, source and resource difference from
+R03 must be named; no new result retrospectively replaces R03 or isolates the
+repair's effect by itself.
+
 **5. The evidence-access follow-up is a different comparison**
 
 ```mermaid
