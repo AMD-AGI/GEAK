@@ -1,0 +1,1523 @@
+{
+  "schema": "geak.r03-funnel-b-role-addendum/1",
+  "prepared_utc": "2026-10-28T16:44:39.323997+00:00",
+  "claim_status": "PENDING_ACTUAL_CLAUDE_REVIEW",
+  "scope": "New evidence for11existingE-barchive rows only;85rowcoverage,callcounts,initialization failures,finalscores,and six verifier-gain candidate list unchanged.",
+  "base_published_evo_commit_reported_by_root": "1b2ce66b",
+  "previous_full_extract": {
+    "artifact": "r03_candidate_funnel_audit_20261028/FUNNEL_PUBLIC_01.json",
+    "bytes": 250512,
+    "sha256": "74449562216b22a0f975c09effd3f919f7b520f6362d33ac4263c7cd5770ea75"
+  },
+  "source": {
+    "artifact": "c08_r03_actual_metadata_1519_01/B_ROLE_EVIDENCE_PUBLIC_01.json",
+    "bytes": 70877,
+    "sha256": "7c094fb1c7063b26f8665a5551ca5abb5e1cb5f0d42d16a71d94a66649f7d1a1"
+  },
+  "underlying_archive_binding": {
+    "bytes": 53852,
+    "expected_bytes": 53852,
+    "expected_sha256": "0593f1fd3ed6f5902bcf3f8e3d7dfd025f5001223d75899f095d7ce47e5fcbdd",
+    "sha256": "0593f1fd3ed6f5902bcf3f8e3d7dfd025f5001223d75899f095d7ce47e5fcbdd",
+    "state": "AVAILABLE_PINNED_STABLE"
+  },
+  "statistics": {
+    "valid_verifier_objects": 3,
+    "invalid_measurement_verifier_objects": 4,
+    "null_verifier_objects": 4,
+    "archive_slower": 3,
+    "archive_unverified": 8,
+    "engineer_ORIGINAL_match_rows": [
+      "r1_d0",
+      "r1_d2"
+    ],
+    "engineer_verifier_candidate_id_difference_rows": [
+      "r3_d1",
+      "r4_d0"
+    ]
+  },
+  "rows": [
+    {
+      "row_id": "r1_d0",
+      "pointer": "/projection/entries/0",
+      "archive_status": "unverified",
+      "archive_verified": false,
+      "archive_speedup": null,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "1c34f88707b55e6104c4eb20e71ffa3d33e414b71ef689a15fad0640d0ac58cb",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 8,
+            "value": "verified",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 4,
+            "value": "pass",
+            "value_exported": true
+          },
+          "measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "float",
+            "value": 1.0013977281429247,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "99a29702687e0571dc19295dea08b3d19a762e757c4c5c03f3ed66f33a5e8220",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "9befb93fc09593295428cfe74d6e39a0eedab0350b1e7f38e627400ccc322241",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "475f0b9c4203236de2267506fccab7b271a148b789d3bbbd37553e3d8b2d339c",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-6969f57e3c5c456ea51c2871f45953c4",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "PRESENT",
+          "type": "bool",
+          "value": false,
+          "value_exported": true
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "63a46c5e6083354038d4f3bde707edf374eecb7ffb1200094adddacea8e231c1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 19,
+            "value": "invalid_measurement",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "4fbd3199e7629fa5f728c0d411218ce665c8d109c3ec61084b00eae50cc6c7b1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 11,
+            "value_exported": false
+          },
+          "measurement_valid": {
+            "state": "MISSING"
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": false,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "NoneType",
+            "value": null,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": true,
+      "engineer_verifier_candidate_ids_match": null,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "MISSING"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    },
+    {
+      "row_id": "r1_d1",
+      "pointer": "/projection/entries/1",
+      "archive_status": "unverified",
+      "archive_verified": false,
+      "archive_speedup": null,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "NoneType",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "correctness": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "measurement_valid": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "external_measurement_valid": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "primary_speedup": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "source_id": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "patch_file": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "receipt_ref": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "63a46c5e6083354038d4f3bde707edf374eecb7ffb1200094adddacea8e231c1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 19,
+            "value": "invalid_measurement",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "4fbd3199e7629fa5f728c0d411218ce665c8d109c3ec61084b00eae50cc6c7b1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 11,
+            "value_exported": false
+          },
+          "measurement_valid": {
+            "state": "MISSING"
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": false,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "NoneType",
+            "value": null,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": null,
+      "engineer_verifier_candidate_ids_match": null,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "UNKNOWN_PARENT_NOT_OBJECT"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    },
+    {
+      "row_id": "r1_d2",
+      "pointer": "/projection/entries/2",
+      "archive_status": "unverified",
+      "archive_verified": false,
+      "archive_speedup": null,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "1c34f88707b55e6104c4eb20e71ffa3d33e414b71ef689a15fad0640d0ac58cb",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 8,
+            "value": "verified",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 4,
+            "value": "pass",
+            "value_exported": true
+          },
+          "measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "float",
+            "value": 1.0013977281429247,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "99a29702687e0571dc19295dea08b3d19a762e757c4c5c03f3ed66f33a5e8220",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "9befb93fc09593295428cfe74d6e39a0eedab0350b1e7f38e627400ccc322241",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "475f0b9c4203236de2267506fccab7b271a148b789d3bbbd37553e3d8b2d339c",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-6969f57e3c5c456ea51c2871f45953c4",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "PRESENT",
+          "type": "bool",
+          "value": false,
+          "value_exported": true
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "63a46c5e6083354038d4f3bde707edf374eecb7ffb1200094adddacea8e231c1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 19,
+            "value": "invalid_measurement",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "4fbd3199e7629fa5f728c0d411218ce665c8d109c3ec61084b00eae50cc6c7b1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 11,
+            "value_exported": false
+          },
+          "measurement_valid": {
+            "state": "MISSING"
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": false,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "NoneType",
+            "value": null,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": true,
+      "engineer_verifier_candidate_ids_match": null,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "MISSING"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    },
+    {
+      "row_id": "r2_d1",
+      "pointer": "/projection/entries/3",
+      "archive_status": "unverified",
+      "archive_verified": false,
+      "archive_speedup": null,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "5d28a90f4498a81461efbaf6f628a19d9778390bb5c81a393dd936181cc3d826",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 6,
+            "value": "failed",
+            "value_exported": true
+          },
+          "correctness": {
+            "state": "MISSING"
+          },
+          "measurement_valid": {
+            "state": "MISSING"
+          },
+          "external_measurement_valid": {
+            "state": "MISSING"
+          },
+          "primary_speedup": {
+            "state": "MISSING"
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "NoneType",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "correctness": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "measurement_valid": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "external_measurement_valid": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "primary_speedup": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "source_id": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "patch_file": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "receipt_ref": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": null,
+      "engineer_verifier_candidate_ids_match": null,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "MISSING"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    },
+    {
+      "row_id": "r2_d0",
+      "pointer": "/projection/entries/4",
+      "archive_status": "unverified",
+      "archive_verified": false,
+      "archive_speedup": null,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "5d28a90f4498a81461efbaf6f628a19d9778390bb5c81a393dd936181cc3d826",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 6,
+            "value": "failed",
+            "value_exported": true
+          },
+          "correctness": {
+            "state": "MISSING"
+          },
+          "measurement_valid": {
+            "state": "MISSING"
+          },
+          "external_measurement_valid": {
+            "state": "MISSING"
+          },
+          "primary_speedup": {
+            "state": "MISSING"
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "NoneType",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "correctness": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "measurement_valid": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "external_measurement_valid": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "primary_speedup": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "source_id": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "patch_file": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "receipt_ref": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": null,
+      "engineer_verifier_candidate_ids_match": null,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "MISSING"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    },
+    {
+      "row_id": "r2_d2",
+      "pointer": "/projection/entries/5",
+      "archive_status": "unverified",
+      "archive_verified": false,
+      "archive_speedup": null,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "5d28a90f4498a81461efbaf6f628a19d9778390bb5c81a393dd936181cc3d826",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 6,
+            "value": "failed",
+            "value_exported": true
+          },
+          "correctness": {
+            "state": "MISSING"
+          },
+          "measurement_valid": {
+            "state": "MISSING"
+          },
+          "external_measurement_valid": {
+            "state": "MISSING"
+          },
+          "primary_speedup": {
+            "state": "MISSING"
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "NoneType",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "correctness": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "measurement_valid": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "external_measurement_valid": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "primary_speedup": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "source_id": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "patch_file": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "receipt_ref": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": null,
+      "engineer_verifier_candidate_ids_match": null,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "MISSING"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    },
+    {
+      "row_id": "r3_d0",
+      "pointer": "/projection/entries/6",
+      "archive_status": "slower",
+      "archive_verified": true,
+      "archive_speedup": 0.9490894786247649,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "1c34f88707b55e6104c4eb20e71ffa3d33e414b71ef689a15fad0640d0ac58cb",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 8,
+            "value": "verified",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 4,
+            "value": "pass",
+            "value_exported": true
+          },
+          "measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "float",
+            "value": 0.9535792798563814,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "37900683179ab3077b188b2cad332dc302abe3ef40389884da0bb89fbf854cdf",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "45db02da89b6a53ad0057230512eb2120070d8e2fa89a0ee5d257ac9335a5a94",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "19578a1e9d27c907d991000433c06a8c6b162099d1abbf4254e3c6106376ebaa",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-a4cc2a4c59604b6dae0a90048d411a7e",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "PRESENT",
+          "type": "bool",
+          "value": false,
+          "value_exported": true
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "1c34f88707b55e6104c4eb20e71ffa3d33e414b71ef689a15fad0640d0ac58cb",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 8,
+            "value": "verified",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 4,
+            "value": "pass",
+            "value_exported": true
+          },
+          "measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "float",
+            "value": 0.9490894786247649,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "37900683179ab3077b188b2cad332dc302abe3ef40389884da0bb89fbf854cdf",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "45db02da89b6a53ad0057230512eb2120070d8e2fa89a0ee5d257ac9335a5a94",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "8b0ea9988d28cc721a3b06acbaf4e9d200353e93d4691b2334b1a2cbbb7f9f43",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-5493b8b6ada04ce68b339ab7af613100",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "PRESENT",
+          "type": "bool",
+          "value": false,
+          "value_exported": true
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": false,
+      "engineer_verifier_candidate_ids_match": true,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "MISSING"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    },
+    {
+      "row_id": "r3_d1",
+      "pointer": "/projection/entries/7",
+      "archive_status": "slower",
+      "archive_verified": true,
+      "archive_speedup": 0.99471296433553,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "1c34f88707b55e6104c4eb20e71ffa3d33e414b71ef689a15fad0640d0ac58cb",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 8,
+            "value": "verified",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 4,
+            "value": "pass",
+            "value_exported": true
+          },
+          "measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "float",
+            "value": 0.991630040564651,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "5e96752fae14a37ab658a449241d54a800cb1977e991fc634a3fc34c7ed9454a",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "6e91f9d9344f19ba6fa691bc00b7485dd96eec6412aba3d6d4f84510628d3deb",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "8b80615ede076660d79ece741c0e243dd10c1634405e48ddeccb81bffed7e12e",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-3d8c42463eeb4a2c909173325318c487",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "PRESENT",
+          "type": "bool",
+          "value": false,
+          "value_exported": true
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "1c34f88707b55e6104c4eb20e71ffa3d33e414b71ef689a15fad0640d0ac58cb",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 8,
+            "value": "verified",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 4,
+            "value": "pass",
+            "value_exported": true
+          },
+          "measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "float",
+            "value": 0.99471296433553,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "1148a542e82e6c649950aabab81c764817cc023f9ca0d27889254364e4cf3a6a",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "74e8d855d74ad1c3310d0cc8dd5502dff4f6f0d78d3e07b6d710e5f949001ab3",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "89c33942402a57a385cf397239a2df5fe73ccf99f04897cf6a88e409d6732369",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-019c2d2a96db4f62beaa27109c5940d8",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "PRESENT",
+          "type": "bool",
+          "value": false,
+          "value_exported": true
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": false,
+      "engineer_verifier_candidate_ids_match": false,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "MISSING"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    },
+    {
+      "row_id": "r3_d2",
+      "pointer": "/projection/entries/8",
+      "archive_status": "slower",
+      "archive_verified": true,
+      "archive_speedup": 0.9469592300581633,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "1c34f88707b55e6104c4eb20e71ffa3d33e414b71ef689a15fad0640d0ac58cb",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 8,
+            "value": "verified",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 4,
+            "value": "pass",
+            "value_exported": true
+          },
+          "measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "float",
+            "value": 0.954644430644617,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "0fe316c590e3fd50fb194804a8cd8c7a789db438b1187abd6618f36082b0e538",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "32690f05d63fa1eb70bf88348ef9cfefb72073747fa88355af1067720d24edfb",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "4ea9ce11a1cc49197ec5c6d83b728ca68f85249c53c92a515796da074fb6547a",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-1a63c8961493402abebac9fa32c0dc50",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "PRESENT",
+          "type": "bool",
+          "value": false,
+          "value_exported": true
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "1c34f88707b55e6104c4eb20e71ffa3d33e414b71ef689a15fad0640d0ac58cb",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 8,
+            "value": "verified",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 4,
+            "value": "pass",
+            "value_exported": true
+          },
+          "measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "float",
+            "value": 0.9469592300581633,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "0fe316c590e3fd50fb194804a8cd8c7a789db438b1187abd6618f36082b0e538",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "32690f05d63fa1eb70bf88348ef9cfefb72073747fa88355af1067720d24edfb",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "5613b1a0dc6c4a415a7099dabb698065571b5708050e4d354252d15c4f072dc7",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-f9ce85f142f24489872f4f5b008437b5",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "PRESENT",
+          "type": "bool",
+          "value": false,
+          "value_exported": true
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": false,
+      "engineer_verifier_candidate_ids_match": true,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "MISSING"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    },
+    {
+      "row_id": "r4_d1",
+      "pointer": "/projection/entries/9",
+      "archive_status": "unverified",
+      "archive_verified": false,
+      "archive_speedup": null,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "1c34f88707b55e6104c4eb20e71ffa3d33e414b71ef689a15fad0640d0ac58cb",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 8,
+            "value": "verified",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 4,
+            "value": "pass",
+            "value_exported": true
+          },
+          "measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "float",
+            "value": 1.002717054223547,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "e5d6b26222a8fc3e96bdea80f4fd00ba9e54248a52d9861c842dc982db93a76b",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "789f263b3fde301a57d8a81c6934e54473ed2f344ea39c61f1173fee34fabba4",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "d679cc235a4d1ad4f625302bc2f60a23170ec11acc1425ef21f0a112f2f858cd",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-e6f4c7978e884b198251432b5f5bcc3f",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "PRESENT",
+          "type": "bool",
+          "value": true,
+          "value_exported": true
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "NoneType",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "correctness": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "measurement_valid": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "external_measurement_valid": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "primary_speedup": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "source_id": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "patch_file": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          },
+          "receipt_ref": {
+            "state": "NOT_APPLICABLE_NULL_ROLE"
+          }
+        },
+        "candidate_id": {
+          "state": "UNAVAILABLE"
+        },
+        "evaluation_id": {
+          "state": "UNAVAILABLE"
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": false,
+      "engineer_verifier_candidate_ids_match": null,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "MISSING"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    },
+    {
+      "row_id": "r4_d0",
+      "pointer": "/projection/entries/10",
+      "archive_status": "unverified",
+      "archive_verified": false,
+      "archive_speedup": null,
+      "engineer": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "1c34f88707b55e6104c4eb20e71ffa3d33e414b71ef689a15fad0640d0ac58cb",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 8,
+            "value": "verified",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 4,
+            "value": "pass",
+            "value_exported": true
+          },
+          "measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": true,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "float",
+            "value": 1.0138096874930491,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "bb38f2041b3128d48d0005a0ac6f13406a81819703758700722bfb28040bb939",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "2c4f95ee657e81b6ac1aef9aa63a258de4048138740905842c856d81e09d0beb",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "a541e94ee993a06bf760a1f402c7c0d29e62a42f9d56508ed7520803246516de",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-7d61ae9f34f14179ace78b36ed0b9929",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "PRESENT",
+          "type": "bool",
+          "value": true,
+          "value_exported": true
+        }
+      },
+      "verifier": {
+        "container_state": "PRESENT",
+        "container_type": "dict",
+        "scope": "REDUCED_ARCHIVE_EVIDENCE_NOT_ORIGINAL_ROLE_RETURN",
+        "fields": {
+          "status": {
+            "sha256": "63a46c5e6083354038d4f3bde707edf374eecb7ffb1200094adddacea8e231c1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 19,
+            "value": "invalid_measurement",
+            "value_exported": true
+          },
+          "correctness": {
+            "sha256": "4fbd3199e7629fa5f728c0d411218ce665c8d109c3ec61084b00eae50cc6c7b1",
+            "state": "PRESENT",
+            "type": "str",
+            "utf8_bytes": 11,
+            "value_exported": false
+          },
+          "measurement_valid": {
+            "state": "MISSING"
+          },
+          "external_measurement_valid": {
+            "state": "PRESENT",
+            "type": "bool",
+            "value": false,
+            "value_exported": true
+          },
+          "primary_speedup": {
+            "state": "PRESENT",
+            "type": "NoneType",
+            "value": null,
+            "value_exported": true
+          },
+          "source_id": {
+            "state": "MISSING"
+          },
+          "patch_file": {
+            "state": "MISSING"
+          },
+          "receipt_ref": {
+            "state": "MISSING"
+          }
+        },
+        "candidate_id": {
+          "sha256": "fc468386cf4de7cfeb3ad22d0a1dca3224ff0fedf3a66bf349ca09a39b262518",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 64,
+          "value": "4b13d30ec3db7bee683537dff039ac24a4f891ce1d834823db21fbfd6bc656a4",
+          "value_exported": true
+        },
+        "evaluation_id": {
+          "sha256": "10068e9052b89fee31dac7e936a6fe6d06a85360fffe170cf036a7be4ec8358e",
+          "state": "PRESENT",
+          "type": "str",
+          "utf8_bytes": 38,
+          "value": "arena-4cfc6862c83d4a34bd7d468f7287dee1",
+          "value_exported": true
+        },
+        "gain_eligible": {
+          "state": "UNAVAILABLE"
+        }
+      },
+      "engineer_candidate_matches_ORIGINAL": false,
+      "engineer_verifier_candidate_ids_match": false,
+      "original_return_patch_file": {
+        "archive_field": {
+          "state": "MISSING"
+        },
+        "serializer_omits_patch_file": true,
+        "state": "UNKNOWN_ORIGINAL_ROLE_RETURN_NOT_READ"
+      }
+    }
+  ],
+  "unchanged": [
+    "Four pre-engineer initialization failures",
+    "All eight role-call timelines and85rowunion",
+    "No new verifier-qualified or common-qualified gain",
+    "Six stored verifier-gain candidateIDs absent common-final admission",
+    "GEAK/EVO completed final scores and winner identities"
+  ],
+  "limits": [
+    "Reduced archive objects are not original complete role returns. Full engineer returns and returned patch paths remain unknown for all11rows.",
+    "Four invalid verifier correctness strings are metadata-only; no correctness value is reconstructed.",
+    "B r1_d0 andr1_d2 cite the same candidate and evaluation. They do not establish two independent measurements.",
+    "B r1_d1 engineer candidate remains unknown; an empty retained patch does not identify it.",
+    "Matching ORIGINAL candidate IDs and recorded empty patch digests do not establish no source work was ever performed.",
+    "Different engineer/verifier candidate IDs are preserved without alleging a mismatch cause or treating their scores as same-program repeats.",
+    "Late engineer gain records do not become accepted verifier gains or common-qualified finalists."
+  ],
+  "review": {
+    "reviewer": "/root/r03_history_audit/r03_archive_rows",
+    "status": "INDEPENDENT_NEW_SOURCE_FIELDS_AND_SCOPE_CHECK_AGREED",
+    "actual_claude": false
+  }
+}

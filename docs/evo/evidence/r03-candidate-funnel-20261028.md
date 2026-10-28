@@ -2,6 +2,8 @@
 
 This audit joins already-exported completed R03 records. It identifies where evidence stops for each observed direction; it does not treat every unsuccessful direction as a runtime failure. All eight lineages are represented in the [per-direction CSV](r03-candidate-funnel-directions-20261028.csv) and [evidence JSON](r03-candidate-funnel-20261028.json): **81 observed direction identifiers plus four integration attempts**. This is a timeline/archive union, not a census of all proposed ideas or distinct source programs.
 
+The [lineage B addendum](r03-candidate-funnel-b-update-20261028.md) adds newly recovered role evidence while preserving this original extract.
+
 ## What the funnel establishes
 
 - Four hybrid directions failed during parent initialization before engineer dispatch: B r2_d0/d1/d2 and D r2_d1. Their synthetic failed statuses are not executed engineer failures. All four selected parents have the recorded SHA256 of a zero-byte patch; this is a stored digest comparison, not a fresh file stat.
