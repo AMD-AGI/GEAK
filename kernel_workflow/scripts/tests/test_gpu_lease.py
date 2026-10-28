@@ -1056,8 +1056,12 @@ def test_profile_wrapper_accepts_compact_group_spec(tmp_path):
         "python -c \"import os; from pathlib import Path; "
         f"Path({str(output)!r}).write_text(os.environ['HIP_VISIBLE_DEVICES'])\""
     )
+    # A pinned arch skips the rocminfo identity probe, so this runs on CPU-only CI.
     env = wrapper_env(
-        tmp_path, PROFILER_PRIORITY="definitely-not-a-profiler", WARMUP_RUNS="1"
+        tmp_path,
+        PROFILER_PRIORITY="definitely-not-a-profiler",
+        WARMUP_RUNS="1",
+        PYTORCH_ROCM_ARCH="gfx950",
     )
 
     result = subprocess.run(
