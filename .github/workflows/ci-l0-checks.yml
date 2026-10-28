@@ -114,7 +114,7 @@ jobs:
         env:
           # The corpus checked out above. Same variable kernel_lane.js resolves, so a lane and
           # this job agree on which corpus they are talking about.
-          KERNEL_KNOWLEDGE_DIR: ${{ github.workspace }}/.knowledge/perf_knowledge
+          KERNEL_KNOWLEDGE_DIR: ${{ github.workspace }}/.knowledge
         run: |
           pytest -q --cov --cov-report=term --cov-fail-under=0 \
             interface/test_run_e2e_recovery.py \

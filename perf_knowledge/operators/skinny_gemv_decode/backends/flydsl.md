@@ -25,7 +25,7 @@ source gate names gfx942 only, gfx950 is where the registry is exercised, and ot
 unverified. Reached through the same `aiter.tuned_gemm` flydsl seam as the dense/split-K hgemm. Note that
 AITER's shipped gfx950 bf16 tuned databases select the *generic* HGEMM (tile_m=32 + split_k) for every
 M≤16 FlyDSL row — see `flydsl-small-m-hgemm-family` in
-[`../../../corpus/gemm_decisions.md`](https://github.com/yueliu14/KernelWiki/blob/main/perf_knowledge/corpus/gemm_decisions.md).
+[`../../../corpus/gemm_decisions.md`](https://github.com/yueliu14/KernelWiki/blob/main/corpus/gemm_decisions.md).
 
 ## SOTA implementation
 The registry only emits small-M configs for bf16→bf16 on non-gfx942, within the small-M range. From

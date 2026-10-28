@@ -62,7 +62,7 @@ From the on-box `flydsl_hgemm` signature (`aiter/ops/flydsl/gemm_kernels.py`). A
 | `kernel_family` | HGEMM / SMALL_M | choose the small-M kernel for decode | HGEMM |
 
 The corpus states this space with citations and the rules that narrow it per shape —
-[`flydsl-hgemm-config-space`](https://github.com/yueliu14/KernelWiki/blob/main/perf_knowledge/corpus/gemm_decisions.md) and
+[`flydsl-hgemm-config-space`](https://github.com/yueliu14/KernelWiki/blob/main/corpus/gemm_decisions.md) and
 `flydsl-hgemm-tiling-validity` — plus the FlyDSL configurations AITER actually shipped per M bucket.
 
 ## Numerics / parity
@@ -90,7 +90,7 @@ the dense aiter card (`AITER_CONFIG_GEMM_BF16=<csv>`). No standalone env-overlay
 - Instruction-level control = many more knobs than Triton. When *deploying* the library kernel, fill
   `kernelName` from aiter's per-shape DB / gradlib race rather than by hand. When *authoring* a FlyDSL GEMM,
   generate candidates from the declared space and its legality rules
-  ([`../../../corpus/gemm_decisions.md`](https://github.com/yueliu14/KernelWiki/blob/main/perf_knowledge/corpus/gemm_decisions.md)) and let the benchmark pick —
+  ([`../../../corpus/gemm_decisions.md`](https://github.com/yueliu14/KernelWiki/blob/main/corpus/gemm_decisions.md)) and let the benchmark pick —
   hand-picked values outside the space are what fail to build.
 - hgemm path can't take scales — passing `scale_a/scale_b` raises an assert; use the quant FlyDSL/MoE path.
 - **fp8 block-scale ≠ native scaled-MFMA.** Porting CK `gemm_a8w8_blockscale` onto the E8M0 block-scaled

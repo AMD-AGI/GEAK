@@ -99,15 +99,15 @@ gfx (`..._gfx942`). Key arch behavior baked into aiter's wrappers:
   call form has to be looked up, and the performance number has to be re-measured.
 
 **Answering a design question somebody has already answered:**
-- [`../../corpus/gemm_decisions.md`](https://github.com/yueliu14/KernelWiki/blob/main/perf_knowledge/corpus/gemm_decisions.md) — actionable cards grouped by
+- [`../../corpus/gemm_decisions.md`](https://github.com/yueliu14/KernelWiki/blob/main/corpus/gemm_decisions.md) — actionable cards grouped by
   problem (architecture/legality, compute, data movement, layout/tile, synchronization/scheduling,
   scenario routing): match the conditions, add the stated candidate, retain the alternatives, and
   interpret it according to its `source_observed` / shipped evidence level. Each card's *same question
   in other implementations* block shows the Triton/Gluon/CK/ASM answer with its own source lines. Its
   shipped tables turn AITER's tuned databases into FlyDSL **seed candidate / vary next** rows and a
   per-bucket backend-selection table, without calling them measured winners; Triton's seeds are on
-  [`../../corpus/gemm_triton_seeds.md`](https://github.com/yueliu14/KernelWiki/blob/main/perf_knowledge/corpus/gemm_triton_seeds.md).
-- [`../../corpus/gemm_source_evidence.md`](https://github.com/yueliu14/KernelWiki/blob/main/perf_knowledge/corpus/gemm_source_evidence.md) — the traceability
+  [`../../corpus/gemm_triton_seeds.md`](https://github.com/yueliu14/KernelWiki/blob/main/corpus/gemm_triton_seeds.md).
+- [`../../corpus/gemm_source_evidence.md`](https://github.com/yueliu14/KernelWiki/blob/main/corpus/gemm_source_evidence.md) — the traceability
   layer behind those cards: the same GEMM family in FlyDSL, Triton, Gluon, CK, HIP and asm, with
   reproducible `file:line`. Read it to inspect an implementation precedent, not to infer a ranking.
 

@@ -2,7 +2,7 @@
 
 The corpus itself is not here. Its evidence, its curated decision cards, its performance axes, the
 generators that render them and the gates that keep them self-consistent live in the knowledge
-repository ([KernelWiki](https://github.com/yueliu14/KernelWiki), under `perf_knowledge/corpus/`).
+repository ([KernelWiki](https://github.com/yueliu14/KernelWiki), under `corpus/`).
 What stays in GEAK is the code that *spends* that knowledge during a kernel run.
 
 The cut is the direction of data flow, not the file type:
@@ -50,5 +50,5 @@ A skip here says the seam went unverified on this run — not that it passed. CI
 repository out and sets `KERNEL_KNOWLEDGE_DIR`, so the seam is actually exercised there:
 
 ```sh
-KERNEL_KNOWLEDGE_DIR=/path/to/KernelWiki/perf_knowledge python3 -m pytest perf_knowledge/corpus -q
+KERNEL_KNOWLEDGE_DIR=/path/to/KernelWiki python3 -m pytest perf_knowledge/corpus -q
 ```
