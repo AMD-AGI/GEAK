@@ -31,9 +31,15 @@ NOT_CAPTURED = "not_captured"
 
 
 def run(args, cwd=None):
-    result = subprocess.run(
-        args, cwd=cwd, capture_output=True, text=True, check=False, timeout=15,
-    )
+    # A probe that cannot run is an unknown, not an error: this module also runs on
+    # boxes with no ROCm and no git (CI), where `hipcc` or `git` simply is not there.
+    # Letting OSError out turned "record what the environment was" into a crash.
+    try:
+        result = subprocess.run(
+            args, cwd=cwd, capture_output=True, text=True, check=False, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
     return result.stdout.strip() if result.returncode == 0 else ""
 
 

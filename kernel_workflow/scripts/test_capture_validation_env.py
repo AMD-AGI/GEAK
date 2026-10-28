@@ -123,6 +123,24 @@ def test_decision_registry_resolves_curated_and_config_ids(tmp_path):
     }
 
 
+def test_probes_degrade_to_unknown_on_a_box_without_the_tool(tmp_path, monkeypatch):
+    """No ROCm and no git must read as `not_captured`, not as a crash.
+
+    Regression: `rocm_probe` falls through to `hipcc --version` when the ROCm `.info`
+    files are absent, and `run` let the resulting FileNotFoundError out. Every caller of
+    this module on a CPU-only box -- the L0 CI job included -- died there.
+    """
+    monkeypatch.setenv("ROCM_PATH", str(tmp_path / "no-rocm-here"))
+    assert ENV.rocm_probe() == {
+        "version": ENV.NOT_CAPTURED, "root": ENV.NOT_CAPTURED, "source": ENV.NOT_CAPTURED,
+    }
+    monkeypatch.setattr(ENV.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+        FileNotFoundError(2, "No such file or directory", "git")))
+    assert ENV.git_probe(tmp_path) == {
+        "root": ENV.NOT_CAPTURED, "commit": ENV.NOT_CAPTURED, "dirty": ENV.NOT_CAPTURED,
+    }
+
+
 def test_probe_resolves_against_the_workspace_pinned_stack(tmp_path, monkeypatch):
     """The manifest must describe the stack the benchmark pinned, not the ambient one.
 
