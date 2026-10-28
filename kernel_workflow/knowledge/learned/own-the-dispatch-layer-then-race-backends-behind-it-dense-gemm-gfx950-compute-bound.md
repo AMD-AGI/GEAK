@@ -5,10 +5,10 @@ confidence: ★★
 effect: 4.05x geomean director-verified, paired in-session, non-overlapping (two invocations 4.0448/4.0461); per-case 3.53x at M=2048, 4.36x at M=32768, 4.30x at M=65536
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 1
+losses: 1
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-26
 name: own-the-dispatch-layer-then-race-backends-behind-it-dense-gemm-gfx950-compute-bound
 description: Own the launch/dispatch layer of a frozen bf16 dense GEMM, then race Triton vs hand HIP vs tuned vendor library per shape: 4.05x geomean.
 keywords: ['dense-gemm', 'bf16', 'gfx950', 'dispatch-shim', 'backend-routing', 'vendor-library', 'hipblaslt', 'launch-config', 'argmin-dispatch', 'codegen']
