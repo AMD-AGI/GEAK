@@ -1,7 +1,7 @@
 # GEAK + GEAK-EVO
 
 GEAK improves GPU kernels by inspecting code, testing changes, and measuring the
-complete operation. GEAK-EVO adds a small retained population to that workflow:
+complete operation. GEAK-EVO retains alternative candidates in that workflow:
 the planner can develop an earlier candidate and refer to other candidates when
 combining ideas. Both use the same entry point, agents, tools, and evaluator.
 
@@ -15,6 +15,7 @@ combining ideas. Both use the same entry point, agents, tools, and evaluator.
 | Improve a serving workload | [Serving workflow](e2e_workflow/README.md) |
 | Use GEAK from Hyperloom | [Task and result interface](interface/run_e2e.md) |
 | Understand or change GEAK-EVO | [Architecture](docs/evo/architecture.md) |
+| Compare GEAK and GEAK-EVO lineages, populations, and results | [Diagrams and code comparison](docs/evo/geak-vs-evo.md) |
 | Inspect retained candidates | [Archive guide](docs/evo/archive.md) |
 | Use a supplied native task evaluator | [Native measurements](docs/evo/direct-external-command.md) |
 | Find existing examples and results | [GEAK guide](docs/reference/geak-guide.md) |

@@ -1,0 +1,556 @@
+{
+  "date": "2026-10-28",
+  "scope": "Extracted retained native-final fields plus separate repeated measurements of delivered programs. The extraction does not independently rehash referenced source or patch files. Native scores and repeated scores are separate measurements. ORIGINAL identity uses the recorded source equality and empty patch; ORIGINAL is reported as1.0, not its A/A timing fluctuation. A selected round-0 fallback does not prove that a lineage performed no later work.",
+  "objective": {
+    "kind": "fixed_workload_weighted_kernel_time",
+    "prefill_M8192_calls": 64,
+    "decode_M64_calls": 1024,
+    "end_to_end_serving": false
+  },
+  "blocks": [
+    {
+      "name": "b08 mHC full03",
+      "native_finals": {
+        "four_ordinary": {
+          "projection_file": "B08_IND_PARENT_FINAL_PUBLIC_0412_01.json",
+          "projection_sha256": "54dbcc6bf650bf26250411d0ee03918cd4d08df2d9a16c436493adb3d1167474",
+          "complete": true,
+          "selected_id": "b",
+          "selection_recomputed_matches": true,
+          "members": [
+            {
+              "id": "a",
+              "optimizer": "greedy",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 1.0065382657736186,
+              "source_kind": "final",
+              "source_round": 4,
+              "source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "baseline_source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "b",
+              "optimizer": "greedy",
+              "status": "qualified",
+              "correctness": "pass",
+              "gain_eligible": true,
+              "primary_speedup": 1.025835148684106,
+              "source_kind": "final",
+              "source_round": 2,
+              "source_id": "e6369a102257bae04bd2c48db4c1d432fd13010fa1d1af793cd0d1270c94bf19",
+              "baseline_source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "patch_sha256": "969ead1976f5d7c301e61a0f77927b9246dc9318f247165389d0cecca25e81bc"
+            },
+            {
+              "id": "c",
+              "optimizer": "greedy",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.998227527307606,
+              "source_kind": "checkpoint",
+              "source_round": 0,
+              "source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "baseline_source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "d",
+              "optimizer": "greedy",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 1.0074618755112426,
+              "source_kind": "final",
+              "source_round": 4,
+              "source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "baseline_source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          ]
+        },
+        "one_ordinary_three_evo": {
+          "projection_file": "B08_EVO_PARENT_FINAL_PUBLIC_0414_01.json",
+          "projection_sha256": "46331a4d9231e0aad52c329db7d115d9db7e4dab33fcb89fd57557f84ae1aed3",
+          "complete": true,
+          "selected_id": "a",
+          "selection_recomputed_matches": true,
+          "members": [
+            {
+              "id": "a",
+              "optimizer": "greedy",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 1.0056731837826562,
+              "source_kind": "final",
+              "source_round": 4,
+              "source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "baseline_source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "b",
+              "optimizer": "evo",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.9927195546058913,
+              "source_kind": "final",
+              "source_round": 3,
+              "source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "baseline_source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "c",
+              "optimizer": "evo",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.9920227688580744,
+              "source_kind": "final",
+              "source_round": 2,
+              "source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "baseline_source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "d",
+              "optimizer": "evo",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.9952516993034024,
+              "source_kind": "final",
+              "source_round": 2,
+              "source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "baseline_source_id": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          ]
+        }
+      },
+      "repeated_delivery_measurements": {
+        "readout_file": "B08_COMMON_FINAL_COMPLETED_0438_01/READOUT_PUBLIC_01.json",
+        "readout_sha256": "3799cbc50ceda54eb6004dc837a7aaa3f21de73b868978c002ab69557436e259",
+        "GEAK": {
+          "complete": true,
+          "counts_above_equal_below_1": [
+            3,
+            0,
+            0
+          ],
+          "cycle_ratio_min_max": [
+            1.0114008651917878,
+            1.0183981564122697
+          ],
+          "cycle_ratios": [
+            1.0114008651917878,
+            1.01208429579712,
+            1.0183981564122697
+          ],
+          "observed_required_cycles": "3/3",
+          "per_case_median_ratio": {
+            "decode_m64": 0.9998669824950822,
+            "prefill_m8192": 1.0241858362609033
+          },
+          "primary_S": 1.0161576392795235
+        },
+        "GEAK_EVO": {
+          "complete": true,
+          "counts_above_equal_below_1": [
+            2,
+            0,
+            1
+          ],
+          "cycle_ratio_min_max": [
+            0.9999831771780376,
+            1.0031087439741329
+          ],
+          "cycle_ratios": [
+            0.9999831771780376,
+            1.0018402634498444,
+            1.0031087439741329
+          ],
+          "observed_required_cycles": "3/3",
+          "per_case_median_ratio": {
+            "decode_m64": 0.9968644042975484,
+            "prefill_m8192": 1.0044835677225836
+          },
+          "primary_S": 1.0019958952396097
+        },
+        "reported_GEAK_score": 1.0161576392795235,
+        "reported_GEAK_EVO_score": 1.0,
+        "ORIGINAL_normalized": true
+      }
+    },
+    {
+      "name": "c08 MoE R03",
+      "native_finals": {
+        "four_ordinary": {
+          "projection_file": "FOUR_NATIVE_FINALS_0758_01/MoE_R03_P_ind_FINAL_PUBLIC_01.json",
+          "projection_sha256": "7b08b448475a996da80738ce9099f79583f7aab462fdb81b91998f2b068893fc",
+          "complete": true,
+          "selected_id": "c",
+          "selection_recomputed_matches": true,
+          "members": [
+            {
+              "id": "a",
+              "optimizer": "greedy",
+              "status": "qualified",
+              "correctness": "pass",
+              "gain_eligible": true,
+              "primary_speedup": 1.0192175454518497,
+              "source_kind": "checkpoint",
+              "source_round": 3,
+              "source_id": "651696acef9480e9f24da1ca2b976590dec0c2adb76bd842e0556d87c82e18e4",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "98abab8817b32edfb647afaf96080c30bf85c3062c05a49ec47c4667b5a535e7"
+            },
+            {
+              "id": "b",
+              "optimizer": "greedy",
+              "status": "qualified",
+              "correctness": "pass",
+              "gain_eligible": true,
+              "primary_speedup": 1.0246824082764268,
+              "source_kind": "checkpoint",
+              "source_round": 2,
+              "source_id": "11e95f89d91e65bd77ce5c5880aaf91c60e5bbab24b036eb44dbb53bef21445d",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "ec8075081fa98f6d0cab200fbae63c757bb1849cebc09ab8ec150d14bb4241d4"
+            },
+            {
+              "id": "c",
+              "optimizer": "greedy",
+              "status": "qualified",
+              "correctness": "pass",
+              "gain_eligible": true,
+              "primary_speedup": 1.0399777660727663,
+              "source_kind": "checkpoint",
+              "source_round": 2,
+              "source_id": "d1a617859fbaea2faadb6bb2395129651cd3b5df3b750a9b2182ff3d5444e70f",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "76ee9170a61152ccf25affcd8c388499d146b657e2605847eac1f09b1b370f78"
+            },
+            {
+              "id": "d",
+              "optimizer": "greedy",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.9981970345748162,
+              "source_kind": "checkpoint",
+              "source_round": 0,
+              "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          ]
+        },
+        "one_ordinary_three_evo": {
+          "projection_file": "FOUR_NATIVE_FINALS_0758_01/MoE_R03_P_evo_FINAL_PUBLIC_01.json",
+          "projection_sha256": "4b6d52ce476c3e6ed66721b822f7e253829a1a2506d9dec911d931c3140c6e03",
+          "complete": true,
+          "selected_id": "c",
+          "selection_recomputed_matches": true,
+          "members": [
+            {
+              "id": "a",
+              "optimizer": "greedy",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 1.0004562723079231,
+              "source_kind": "checkpoint",
+              "source_round": 0,
+              "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "b",
+              "optimizer": "evo",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.997849004894001,
+              "source_kind": "checkpoint",
+              "source_round": 0,
+              "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "c",
+              "optimizer": "evo",
+              "status": "qualified",
+              "correctness": "pass",
+              "gain_eligible": true,
+              "primary_speedup": 1.0244516403098773,
+              "source_kind": "checkpoint",
+              "source_round": 1,
+              "source_id": "7ac5b39564752e3e8cb09677a859b0510d18b978a0c2e7800f6d269aff73519f",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e8a9f8cc6fafb1bce751447fde1bac10cc9e083e637c5d83a3864c4a6be37327"
+            },
+            {
+              "id": "d",
+              "optimizer": "evo",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.9996814641417957,
+              "source_kind": "checkpoint",
+              "source_round": 0,
+              "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          ]
+        }
+      },
+      "repeated_delivery_measurements": {
+        "readout_file": "R03_COMMON_ACTUAL_0835_01/READOUT_PUBLIC_01.json",
+        "readout_sha256": "9d2c8ed8b3944ab62291dec07c81899f9a0ce321beedeeb9163d0f4b0be46325",
+        "GEAK": {
+          "individual_scope": "qualified_individual",
+          "primary_S": 1.0394916979784494,
+          "complete": true,
+          "per_case_median_ratio": {
+            "prefill_m8192": 1.0009904066384432,
+            "decode_m64": 1.0545535832929962
+          },
+          "cycle_ratios": [
+            1.0245553903425022,
+            1.043547989216428,
+            1.0382638760638785
+          ],
+          "counts_above_equal_below_1": [
+            3,
+            0,
+            0
+          ],
+          "observed_required_cycles": "3/3",
+          "cycle_ratio_min_max": [
+            1.0245553903425022,
+            1.043547989216428
+          ]
+        },
+        "GEAK_EVO": {
+          "individual_scope": "qualified_individual",
+          "primary_S": 1.0193559615225602,
+          "complete": true,
+          "per_case_median_ratio": {
+            "prefill_m8192": 0.9950580332276933,
+            "decode_m64": 1.0286835187359362
+          },
+          "cycle_ratios": [
+            1.0047994850867186,
+            1.020598837504033,
+            1.0211077680977823
+          ],
+          "counts_above_equal_below_1": [
+            3,
+            0,
+            0
+          ],
+          "observed_required_cycles": "3/3",
+          "cycle_ratio_min_max": [
+            1.0047994850867186,
+            1.0211077680977823
+          ]
+        },
+        "reported_GEAK_score": 1.0394916979784494,
+        "reported_GEAK_EVO_score": 1.0193559615225602,
+        "ORIGINAL_normalized": false
+      }
+    },
+    {
+      "name": "c08 MoE R02 replacement",
+      "native_finals": {
+        "four_ordinary": {
+          "projection_file": "R02R_NATIVE_FINALS_0816_01/MoE_R02_replacement_P_ind_FINAL_PUBLIC_01.json",
+          "projection_sha256": "f55b71ba25b653d724cb283f63bde5ae1a4587812a815d09356fb44b12d3a1fb",
+          "complete": true,
+          "selected_id": "c",
+          "selection_recomputed_matches": true,
+          "members": [
+            {
+              "id": "a",
+              "optimizer": "greedy",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.9998192139924191,
+              "source_kind": "checkpoint",
+              "source_round": 0,
+              "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "b",
+              "optimizer": "greedy",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.9870063492132101,
+              "source_kind": "checkpoint",
+              "source_round": 0,
+              "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "c",
+              "optimizer": "greedy",
+              "status": "qualified",
+              "correctness": "pass",
+              "gain_eligible": true,
+              "primary_speedup": 1.022747443975358,
+              "source_kind": "checkpoint",
+              "source_round": 2,
+              "source_id": "37258a9d9eefc2621c1b91abb6c9b705fa397f5e17812bb10201c3418d7af0c8",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "425c6a3e096c69129c56f0ee8e6ebaa82fa0d1769bb802c6ad44c0c14275c763"
+            },
+            {
+              "id": "d",
+              "optimizer": "greedy",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.995528343010549,
+              "source_kind": "checkpoint",
+              "source_round": 0,
+              "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          ]
+        },
+        "one_ordinary_three_evo": {
+          "projection_file": "R02R_NATIVE_FINALS_0816_01/MoE_R02_replacement_P_evo_FINAL_PUBLIC_01.json",
+          "projection_sha256": "0e61fa000fc0d3e30676d07174e64a2a06e4773e2816fa4be5de70d3110f8b29",
+          "complete": true,
+          "selected_id": "d",
+          "selection_recomputed_matches": true,
+          "members": [
+            {
+              "id": "a",
+              "optimizer": "greedy",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 1.0002995084395139,
+              "source_kind": "checkpoint",
+              "source_round": 0,
+              "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "b",
+              "optimizer": "evo",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 1.0004381493260819,
+              "source_kind": "final",
+              "source_round": 3,
+              "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "c",
+              "optimizer": "evo",
+              "status": "no_improvement",
+              "correctness": "pass",
+              "gain_eligible": false,
+              "primary_speedup": 0.9975414196918259,
+              "source_kind": "final",
+              "source_round": 3,
+              "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "id": "d",
+              "optimizer": "evo",
+              "status": "qualified",
+              "correctness": "pass",
+              "gain_eligible": true,
+              "primary_speedup": 1.0113535417894526,
+              "source_kind": "checkpoint",
+              "source_round": 2,
+              "source_id": "b1f4d9466a6838667b1e045e2a5de0917c5e304a7791061231c521b4f277ceee",
+              "baseline_source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+              "patch_sha256": "775336d527e0e54a85a0273ce664123d3f08f5ad70f761ada8453c09328b59a8"
+            }
+          ]
+        }
+      },
+      "repeated_delivery_measurements": {
+        "readout_file": "R02R_COMMON_ACTUAL_0855_01/READOUT_PUBLIC_01.json",
+        "readout_sha256": "d9f1ecec3c50444273e4820b546ae9314da2a8aa6af2237c4a1d4edce903aeb7",
+        "GEAK": {
+          "individual_scope": "qualified_individual",
+          "primary_S": 1.0236310065128227,
+          "complete": true,
+          "per_case_median_ratio": {
+            "prefill_m8192": 1.090814264584488,
+            "decode_m64": 1.000886892742504
+          },
+          "cycle_ratios": [
+            1.0240136532485156,
+            1.0218796185314503,
+            1.024490537029316
+          ],
+          "counts_above_equal_below_1": [
+            3,
+            0,
+            0
+          ],
+          "observed_required_cycles": "3/3",
+          "cycle_ratio_min_max": [
+            1.0218796185314503,
+            1.024490537029316
+          ]
+        },
+        "GEAK_EVO": {
+          "individual_scope": "qualified_individual",
+          "primary_S": 1.0088163340058331,
+          "complete": true,
+          "per_case_median_ratio": {
+            "prefill_m8192": 0.9881835389808423,
+            "decode_m64": 1.016648193842261
+          },
+          "cycle_ratios": [
+            1.0103591146246693,
+            1.0097498602575625,
+            1.0104251574191114
+          ],
+          "counts_above_equal_below_1": [
+            3,
+            0,
+            0
+          ],
+          "observed_required_cycles": "3/3",
+          "cycle_ratio_min_max": [
+            1.0097498602575625,
+            1.0104251574191114
+          ]
+        },
+        "reported_GEAK_score": 1.0236310065128227,
+        "reported_GEAK_EVO_score": 1.0088163340058331,
+        "ORIGINAL_normalized": false
+      }
+    }
+  ]
+}

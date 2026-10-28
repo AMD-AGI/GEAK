@@ -1,9 +1,15 @@
 # GEAK-EVO architecture
 
-GEAK-EVO is a retained population inside GEAK's kernel workflow. It uses the same
+GEAK-EVO retains alternative candidates inside GEAK's kernel workflow. It uses the same
 setup, planner, engineer roles, tools, verifier, integration step, and final
 validation as GEAK. Select it with `optimizer: "evo"`; see the
 [run guide](stock-workflow.md).
+
+For the distinction between one full GEAK lineage, a population of ordinary
+GEAK lineages, and the hybrid GEAK-EVO population used in v1 experiments, see
+[the updated diagrams, measured comparison, and code links](geak-vs-evo.md).
+That guide distinguishes the code on this branch from the later population
+extension and frozen experiment sources.
 
 ```mermaid
 flowchart LR
