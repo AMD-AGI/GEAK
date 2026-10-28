@@ -5,8 +5,8 @@ lineages that use GEAK's engineering machinery with retention and exchange.
 One lineage contains several engineering directions over many rounds; it is not
 one engineer call.
 
-The three completed GEAK-versus-EVO population comparisons used **four ordinary GEAK lineages**
-with **one ordinary GEAK lineage plus three EVO lineages**. The ordinary member
+The three completed GEAK-versus-EVO population comparisons compared **four ordinary GEAK lineages**
+against **one ordinary GEAK lineage plus three EVO lineages**. The ordinary member
 inside EVO is an independent search. It is not a replay of the external
 population's winning trajectory, so including it does not guarantee beating
 that other population.
@@ -191,7 +191,7 @@ below distinguish the two versions so a reader can inspect what is implemented.
 | Do ordinary GEAK and EVO use the same engineering loop? | [Dispatch on this branch](../../kernel_workflow/src/kernel_lane/14b_optimize_dispatch.js), [shared loop](../../kernel_workflow/src/kernel_lane/14_optimize_loop.js) |
 | Where do selectable parents and retained attempts enter? | [EVO state and source handling](../../kernel_workflow/src/kernel_lane/14a_evolution.js), [EVO instructions](../../kernel_workflow/roles/evolution.md) |
 | How are four full private member workflows launched? | [Published v1 population dispatcher](https://github.com/AMD-AGI/GEAK/blob/42b830278588aefeeb534f67b6e0273e41052258/kernel_workflow/src/kernel_workflow/01b_population.js#L108) |
-| Is ordinary A given the EVO planning treatment? | [Published v1 dispatch: ordinary calls the loop with `evo=null`](https://github.com/AMD-AGI/GEAK/blob/42b830278588aefeeb534f67b6e0273e41052258/kernel_workflow/src/kernel_lane/14b_optimize_dispatch.js#L18) |
+| Is ordinary A given the EVO planning treatment? | [Published v1 dispatch: ordinary calls the loop with `evo=null`](https://github.com/AMD-AGI/GEAK/blob/42b830278588aefeeb534f67b6e0273e41052258/kernel_workflow/src/kernel_lane/14b_optimize_dispatch.js#L24) |
 | How do members publish and import? | [Published v1 checkpoint publication and peer refresh](https://github.com/AMD-AGI/GEAK/blob/42b830278588aefeeb534f67b6e0273e41052258/kernel_workflow/src/kernel_lane/14a_evolution.js#L162) |
 | Does final selection include A? | [Published v1 common final evaluation and selection](https://github.com/AMD-AGI/GEAK/blob/42b830278588aefeeb534f67b6e0273e41052258/kernel_workflow/src/kernel_workflow/01b_population.js#L240), [per-lineage finalist query](https://github.com/AMD-AGI/GEAK/blob/42b830278588aefeeb534f67b6e0273e41052258/kernel_workflow/scripts/query_population.py#L436) |
 | Are model sessions and GPU evaluations separate resources? | [Shared runtime](../../interface/runtime/engine/run_workflow.mjs), [GPU pool locks](../../kernel_workflow/scripts/gpu_lock.sh) |
