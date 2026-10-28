@@ -9,17 +9,13 @@ This mirrors the `KB and workflow contract checks` step in
 `.github/workflows/ci-l0-checks.yml`, which stays the authoritative gate: it invokes each
 program directly, so it still fails loudly if pytest itself cannot start.
 
-This file is nevertheless in CI's pytest allowlist, for two reasons. First,
-`ci/test_ci_test_inventory.py` requires every tracked test file to be wired into a
-workflow or exempt with a reason, and a wrapper that only ever ran locally would be
-neither. Second, `test_script_style_ignores_are_covered_here` guards conftest/wrapper
-drift and has no equivalent in the direct invocations -- without it here, the one check
-that notices a silently-dropped contract check would be the one CI never runs. The six
-subprocesses cost ~5s, which is the price of that guard.
+It is in CI's pytest allowlist anyway, because `test_script_style_ignores_are_covered_here`
+guards conftest/wrapper drift and has no equivalent in the direct invocations -- otherwise
+the one check that notices a silently-dropped contract check is the one CI never runs. The
+six subprocesses cost ~5s.
 
-Keep the two lists in sync by hand. They are short, they change rarely, and the
-alternative -- parsing the workflow YAML at test time -- makes a green run depend on the
-shape of a CI file rather than on the checks themselves.
+The two lists are synced by hand: they are short and rarely change, and parsing the
+workflow YAML instead would make a green run depend on the shape of a CI file.
 """
 
 import importlib.util
@@ -35,14 +31,11 @@ REPO = Path(__file__).resolve().parent.parent
 def root_conftest():
     """The repo-root conftest, loaded by path rather than by name.
 
-    A bare `import conftest` is ambiguous in this repo: `perf_knowledge/corpus/conftest.py`
-    carries the same module basename, and neither directory is a package, so in a run that
-    collects both trees whichever file pytest imported last owns `sys.modules["conftest"]`.
-    The two tests below mean the ROOT one specifically -- it is the file whose collection
-    ignore lists they check against the CI inventory -- and they failed with a bare
-    `AttributeError: module 'conftest' has no attribute 'SCRIPT_STYLE'` in exactly the
-    combined run CI performs, while passing when `ci/` was run on its own. Naming the file
-    says which conftest is meant instead of leaving collection order to say it.
+    `perf_knowledge/corpus/conftest.py` shares the basename and neither directory is a
+    package, so in a run collecting both trees whichever pytest imported last owns
+    `sys.modules["conftest"]`. The tests below mean the ROOT one, and failed with
+    `AttributeError: ... has no attribute 'SCRIPT_STYLE'` in exactly the combined run CI
+    performs while passing when `ci/` ran alone.
     """
     spec = importlib.util.spec_from_file_location("_root_conftest", REPO / "conftest.py")
     module = importlib.util.module_from_spec(spec)

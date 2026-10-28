@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 """test_knowledge_reachable.py — the knowledge loop is closed in BOTH directions.
 
-The return path (run -> card -> digest) has tests and CI gates. The read path had none, and it broke
-silently: `run_recurrence.md`, the GEMM corpus and `languages/flydsl/version_map.md` were all
-generated, tested, gated and linked from three READMEs — and named by no role prompt at all. Every
-`--check` passed. A human browsing the base would find them; the agent that plans directions never
-would. A doc no role reads is a comment with a CI gate on it.
+The return path (run -> card -> digest) has gates. The read path had none, and broke silently:
+`run_recurrence.md`, the GEMM corpus and `languages/flydsl/version_map.md` were generated, tested,
+gated and linked from three READMEs — and named by no role prompt at all, every `--check` passing.
+A doc no role reads is a comment with a CI gate on it.
 
-Two directions, and they fail for different reasons:
+Two directions, failing for different reasons:
 
-1. **Every `KERNEL_KNOWLEDGE_DIR/<path>` a role prompt names must resolve.** A role prompt is not
-   code, so a renamed file leaves the prompt pointing at nothing and the agent silently reads less
-   than it was told to — no error, just a worse plan. Paths with `<placeholder>` segments are
-   resolved as far as their fixed prefix and counted, since `operators/<op>/overview.md` cannot be
-   checked without knowing the op.
+1. **Every `KERNEL_KNOWLEDGE_DIR/<path>` a role prompt names must resolve.** A prompt is not code,
+   so a renamed file leaves it pointing at nothing and the agent silently reads less than it was
+   told to — no error, just a worse plan. A path with `<placeholder>` segments is resolved as far
+   as its fixed prefix, since `operators/<op>/overview.md` cannot be checked without the op.
 
-2. **Every artifact in `MUST_BE_READ` must be named by at least one role prompt.** Deliberately an
-   explicit list rather than "everything marked GENERATED": most generated files here are machine
-   inputs (`evidence/*.yaml`), human navigation (`sota_matrix.md`) or skill internals, so a blanket rule
-   would need an exemption list longer than the rule itself. Being explicit also puts the burden in
-   the right place — adding a knowledge artifact should require saying who reads it, which is the
-   question that went unasked.
+2. **Every artifact in `MUST_BE_READ` must be named by at least one role prompt.** An explicit list
+   rather than "everything marked GENERATED": most generated files here are machine inputs,
+   navigation or skill internals, so a blanket rule would need an exemption list longer than
+   itself. Explicit also puts the burden right — adding an artifact should require saying who
+   reads it, which is the question that went unasked.
 
     python3 kernel_workflow/scripts/test_knowledge_reachable.py
 """
@@ -33,15 +30,10 @@ WF = os.path.dirname(HERE)
 ROOT = os.path.dirname(WF)
 PK = os.path.join(ROOT, "perf_knowledge")
 
-# The corpus (`corpus/`) lives in the knowledge repository, not here, and the role prompts name it
-# as `KERNEL_KNOWLEDGE_DIR/corpus/...` for exactly that reason. So an artifact can be reachable
-# while being absent from this checkout, and resolving every reference against the repo-local tree
-# would report the loop broken on a box that has simply not checked the corpus out.
-#
-# Resolution order matches what the lane does: the configured knowledge dir first, this repo's own
-# perf_knowledge/ second. A reference that resolves in NEITHER is still a failure -- that is the
-# dangling-reference case this file exists to catch, and the split must not be allowed to turn it
-# into a blanket excuse.
+# `corpus/` lives in the knowledge repository, so an artifact can be reachable while absent from
+# this checkout. Resolution order matches the lane: configured knowledge dir first, this repo's
+# perf_knowledge/ second. Resolving in NEITHER is still a failure -- that is the dangling reference
+# this file exists to catch, and the split must not become a blanket excuse for it.
 CONFIGURED = os.environ.get("KERNEL_KNOWLEDGE_DIR", "")
 
 # Resolution order matches what the lane does: the configured knowledge dir first, this repo's own

@@ -48,12 +48,10 @@ OUT = os.path.join(HERE, "run_recurrence.md")
 # list and the Python one as the truthy STRING "[]", so one side dropped every tag while the other
 # reported the header complete, and neither side could see the disagreement.
 #
-# Loaded BY PATH, under a name nothing else uses. `import kb` after a `sys.path.insert` is not
-# safe here: the repo also has a `kb/` PACKAGE at its root, and `sys.path.insert` loses to an
-# already-populated `sys.modules["kb"]`. So in any process that imported the package first --
-# `kb/tests/test_store_env.py` does exactly that, and CI runs it in the same pytest session --
-# this module would silently bind the package and die later on `kb.all_cards`. Import order is
-# not something a generator should depend on.
+# Loaded BY PATH, under a name nothing else uses: the repo also has a root `kb/` PACKAGE, and
+# `sys.path.insert` loses to an already-populated `sys.modules["kb"]`. In any process that imported
+# the package first -- `kb/tests/test_store_env.py` does, in the same pytest session -- this module
+# would bind the package and die later on `kb.all_cards`.
 def _load_card_parser():
     import importlib.util
     path = os.path.join(ROOT, "kernel_workflow", "scripts", "kb.py")
@@ -71,16 +69,11 @@ kb = _load_card_parser()
 # throughput evidence for the same axes, and an axis measured at both levels is a stronger prior
 # than one measured at either. Which tree a card came from is kept and printed per row.
 #
-# `language_gated` is whether that tree's WRITE PATH enforces `language:` on a new card — a property
-# of the tree, recorded here because the digest reports on the field. The kernel tree is written
-# through `kb.py propose`, whose lint refuses a new card without a language, and `kernel_lane.js`
-# supplies it from `detect_language.py` reading the produced source. The e2e tree is hand-maintained
-# markdown: no lint gate, no detection step, so its cards keep arriving without one. Saying "cards
-# written from here on carry a language" across both trees was false for a sixth of the corpus, and
-# false in the direction that reads as a promise.
-#
-# Named rather than a bare tuple because `("kernel", path, True)` does not say what the True is, and
-# a reader of the four unpack sites should not have to come back here to find out.
+# `language_gated` is whether that tree's WRITE PATH enforces `language:` on a new card. The kernel
+# tree goes through `kb.py propose`, whose lint refuses a card without one; the e2e tree is
+# hand-maintained markdown with no such gate, so its cards keep arriving without a language. Saying
+# "cards written from here on carry a language" across both was false for a sixth of the corpus.
+# Named rather than a bare tuple: `("kernel", path, True)` does not say what the True is.
 Tree = collections.namedtuple("Tree", "name root language_gated")
 
 CARD_TREES = (
@@ -88,11 +81,10 @@ CARD_TREES = (
     Tree("e2e", os.path.join(ROOT, "e2e_workflow", "knowledge", "learned"), False),
 )
 
-# Publish threshold, counted in DISTINCT KERNELS, never in cards. One 20-kernel campaign distils into
-# many cards that share a handful of kernel symbols, so a card count answers "how much did we write"
-# when the question is "how many separate things did we measure". Three is the smallest number for
-# which "it keeps happening" is a defensible reading; below it the row still appears, under `pending`,
-# with its count — a reader should be able to see the pipeline rather than guess at it.
+# Publish threshold, counted in DISTINCT KERNELS, never in cards: one campaign distils into many
+# cards sharing a few kernel symbols, so a card count answers "how much did we write" when the
+# question is "how many separate things did we measure". Three is the smallest number for which "it
+# keeps happening" is defensible; below it the row still appears under `pending`, with its count.
 MIN_KERNELS = 3
 # An axis is a cross-operator prior only if it was seen in this many distinct kernel classes.
 # Otherwise it is knowledge about one operator, and it routes there.
@@ -110,13 +102,11 @@ VERDICT = {
 }
 VERDICT_ORDER = ("paid", "closed", "how to measure", "backend choice", "unclassified")
 
-# Keywords that restate a field the card header already carries. They are scope, not axes: every
-# card here is `gfx950`, so an axis whose evidence is "86 cards mention gfx950" is a statement about
-# the box we happen to own. Most of this set is DERIVED from `index/taxonomy.md` and from the header
-# values present in the trees (see `scope_vocabulary`); this table only holds the ones a curator
-# spelled differently from the field they duplicate, and each entry names that field so the reason
-# survives. Kept small on purpose, and `test_run_recurrence.py` asserts every value is a real card
-# field — a growing hand-list here is the same vocabulary drift `learned/README.md` warns about.
+# Keywords that restate a field the card header already carries: scope, not axes. Every card here
+# is `gfx950`, so an axis whose evidence is "86 cards mention gfx950" describes the box we own. Most
+# of the set is DERIVED (see `scope_vocabulary`); this table holds only the ones a curator spelled
+# differently from the field they duplicate, and names that field. `test_run_recurrence.py` asserts
+# every value is a real card field — a growing hand-list here is vocabulary drift.
 HEADER_SYNONYMS = {
     "anti-pattern": "type",       # `type: anti-pattern`
     "closed-axis": "type",        # the curator's other word for the same verdict
@@ -128,10 +118,8 @@ HEADER_SYNONYMS = {
 # kernel_class (learned cards) -> operator id (perf_knowledge taxonomy). A bridge between two
 # vocabularies, so it is explicit and it is checked: every target must exist under `operators/`.
 # Classes deliberately absent map to nothing and are REPORTED as unroutable rather than filed
-# somewhere plausible — `kb.normalize_class` has the story of what silent mis-filing costs (a
-# "linear attention" card filed under "attention", then served to attention kernels; the lookup
-# succeeds and only the content is wrong). `method` and `composable` have no operator by
-# construction: they are about how to measure, not about what.
+# somewhere plausible — see `kb.normalize_class` for what silent mis-filing costs. `method` and
+# `composable` have no operator by construction: they are about how to measure, not what.
 CLASS_TO_OPERATOR = {
     "dense_gemm": "dense_gemm",
     "quantized_gemm": "scaled_quant_gemm",

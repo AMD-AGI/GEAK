@@ -1,19 +1,13 @@
 """Fixtures for the corpus consumer tests.
 
-These tests come in two kinds, and the split between them is the point of this file.
+The split these fixtures create is the point of the file. Most tests build a synthetic
+corpus in `tmp_path` and need nothing checked out. The ones taking `corpus_catalog` assert
+against the *real* corpus instead -- that every catalogued path resolves, that every taxonomy
+GEMM operator reaches the GEMM family -- and cannot be made hermetic without defeating their
+purpose, since a fixture catalog would only prove this repo agrees with itself.
 
-Most of them build a synthetic corpus in `tmp_path` and assert on selection, ranking and
-write-back logic. Those are unit tests of this repo and need nothing checked out.
-
-A minority -- the ones that take `corpus_catalog` -- assert against the *real* corpus: that
-every catalogued path resolves, that every taxonomy GEMM operator reaches the GEMM family, that
-the shipped cards' dtypes are already canonical. Those are integration tests of the seam between
-this repo and the knowledge repository, and they cannot be made hermetic without defeating their
-purpose: a fixture catalog would only prove this repo agrees with itself.
-
-So they resolve the corpus through `KERNEL_KNOWLEDGE_DIR` and skip, loudly and with the reason,
-when it is not set. CI sets it after checking the knowledge repository out. A skip here is a
-statement that the seam went unverified on this run -- not that it passed.
+Those resolve through `KERNEL_KNOWLEDGE_DIR` and skip, with the reason, when it is unset. A
+skip here says the seam went unverified on this run -- not that it passed.
 """
 
 from pathlib import Path

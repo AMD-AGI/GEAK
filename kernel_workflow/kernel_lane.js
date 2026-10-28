@@ -263,12 +263,10 @@ let kbCapBound = 0;      // rounds where the cap actually had to strip something
 // guard is on where the optimization HYPOTHESIS came from: in a multi-direction round at least one
 // hypothesis must originate in the current profile rather than historical performance precedent.
 //
-// This is the SAME promise as KB_COLD_DIRECTION above, so it rides on the same switch rather than a
-// second one. It arrived as `corpus_cold_direction`, and two knobs for one invariant left a hole in
-// the middle: each predicate saw one half of "recorded knowledge" (cards there, corpus decisions
-// here), and a round whose directions were half card-seeded and half corpus-seeded satisfied both
-// while containing no control at all. `a.corpus_cold_direction` is still accepted so existing
-// callers keep working, but it now only narrows the shared switch, never widens it.
+// The SAME promise as KB_COLD_DIRECTION above, so it rides on that switch rather than a second one.
+// Two knobs for one invariant left a hole: each predicate saw one half of "recorded knowledge", so a
+// round half card-seeded and half corpus-seeded satisfied both while containing no control at all.
+// `a.corpus_cold_direction` is still accepted, but now only narrows the shared switch.
 const CORPUS_COLD_DIRECTION =
   KB_COLD_DIRECTION && String(A.corpus_cold_direction != null ? A.corpus_cold_direction : 'true') === 'true';
 let corpusColdViolationRounds = 0;
@@ -360,19 +358,16 @@ const KB_ENV_PRELUDE =
   '/shared_nfs/hyperloom/ca/amd-ca-combined.pem "$HOME/amd-extra-ca-bundle.pem"; do ' +
   '[ -n "$_ca" ] && [ -r "$_ca" ] && { export SSL_CERT_FILE="$_ca" REQUESTS_CA_BUNDLE="$_ca" ' +
   'CURL_CA_BUNDLE="$_ca" NODE_EXTRA_CA_CERTS="$_ca"; break; }; done; fi; ';
-// Two runs must never enter the KB loop, and neither is a failure. A run that shared its GPU measured
-// contention, not the kernel. A run on a HELD-OUT kernel is the instrument for measuring whether the
-// KB helps at all — let it in and the next A/B over that kernel reads back its own answer and looks
-// spectacular. Defaults are permissive, so the CALLER is the one who has to declare a busy box.
+// Two runs must never enter the KB loop, and neither is a failure. A run that shared its GPU
+// measured contention, not the kernel. A run on a HELD-OUT kernel is the instrument for measuring
+// whether the KB helps at all — let it in and the next A/B over that kernel reads back its own
+// answer. Defaults are permissive, so the CALLER declares a busy box.
 //
-// These are declared HERE, beside the other KB gates, and not next to the distillation phase that
-// first needed them. Down there they gated only the learned card, while the kb_artifacts/ write and
-// the warm-start read — the two halves that actually close the loop — ran on KB_ROOT_OK alone. A
-// `held_out: true` lane therefore still deposited its outcome for the next run to warm-start from,
-// and nothing in the result said so: `validation_status` stays `accepted` and `kb_written` reads
-// like a success. Observed on three of three held-out lanes, one of which also passed
-// `warm_start: off` and wrote anyway. An A/B whose treatment silently seeds its own control is not
-// an A/B, so the flag now gates read, write and distil from one place.
+// Declared HERE rather than at the distillation phase that first needed them: down there they gated
+// only the learned card, while the kb_artifacts/ write and the warm-start read ran on KB_ROOT_OK
+// alone, so a `held_out: true` lane still deposited its outcome for the next run to warm-start from
+// with `validation_status: accepted` and nothing saying so. Observed on three of three held-out
+// lanes. One place now gates read, write and distil.
 const BOX_QUIET = String(A.box_quiet != null ? A.box_quiet : 'true') === 'true';
 const HELD_OUT = String(A.held_out != null ? A.held_out : 'false') === 'true';
 const KB_LOOP_OK = BOX_QUIET && !HELD_OUT;
