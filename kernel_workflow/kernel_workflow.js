@@ -157,7 +157,9 @@ const DEFAULT_PERF_KNOWLEDGE_DIR =
   WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge';
 const REQUESTED_PERF_KNOWLEDGE_DIR =
   A.perf_knowledge_dir != null ? String(A.perf_knowledge_dir) : DEFAULT_PERF_KNOWLEDGE_DIR;
-const KERNEL_KNOWLEDGE_DIR =
+// `let`, not `const`: the gfx1201 fail-close below re-clears this once the real gfx is detected
+// after freeze, which is a different moment from the expected-gfx check folded in here.
+let KERNEL_KNOWLEDGE_DIR =
   (USE_PERF_KNOWLEDGE && !RDNA4_ISOLATE ? REQUESTED_PERF_KNOWLEDGE_DIR : '').replace(/\/+$/, '');
 const KERNEL_PATH_ORIG = A.kernel_path;
 const KERNEL_NAME_HINT = String(KERNEL_PATH_ORIG).replace(/\/+$/, '').split('/').pop();
