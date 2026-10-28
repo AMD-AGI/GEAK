@@ -173,8 +173,7 @@ if [ "$(echo "$KERNEL_SRC_ALL" | wc -w)" -gt 1 ]; then
   SPLIT_NOTE="This seam is split across more than one file. **All of these are editable**, and
 they are snapshotted and reverted together, so a change may span them:
   $EDITABLE_LIST
-kernel_path below names the primary one because the workflow takes a single path; make the
-change wherever it belongs and the measurement still sees it."
+Make the change wherever it belongs and the measurement still sees it."
 fi
 # The slot script the prompt tells the agent to call, resolved here so no path is
 # guessed inside the prompt text.
@@ -208,7 +207,8 @@ Run this workflow:
   $WF_JS
 
 Parameters:
-  kernel_path        = $TASK_DIR/kernel_src/$KERNEL_SRC
+  kernel_path        = $TASK_DIR
+  mode               = optimize
   workflow_dir       = $WF_DIR
   eval_dir           = $EVAL_DIR
   exp_root           = $RUN_DIR
@@ -220,6 +220,10 @@ Parameters:
 
 apply_to_original must be "true": changes have to land back in kernel_src/ so that the
 next attempt starts from your result and builds on it.
+
+kernel_path is the whole task directory, not a file under kernel_src/: the workspace must
+carry the profile stage's unittest.py, cases.py and meta.json, and that unittest.py is the
+benchmark. Do not write another harness.
 
 ## Task
 
