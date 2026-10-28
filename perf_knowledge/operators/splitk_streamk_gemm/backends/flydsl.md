@@ -19,11 +19,13 @@ sources:
 
 ## TL;DR
 FlyDSL's split-K hgemm is a **FLIR/ROCDL MLIR-Python DSL** (CuTe-inspired) kernel that partitions the K
-reduction across workgroups, combining partials through a per-stream global signal/semaphore state rather
-than naive atomics. It's the same authoring backend AMD used on Kimi-K2.5; for the dense hgemm path it's
-reached only through `aiter.tuned_gemm` when a tuned CSV row carries `libtype=flydsl` **and**
-`is_flydsl_available()` is true (else aiter silently falls back to CK/asm). Only **split-K** is in this
-source — no separate stream-K kernel.
+reduction across workgroups: split 0 initialises the output tile and raises a per-tile counter, and the
+other splits add their partials atomically once it is set; the per-stream signal ring orders that
+initialisation, and the atomic sum is not bit-reproducible. It's the same authoring backend AMD used on
+Kimi-K2.5; for the dense hgemm path it's reached only through `aiter.tuned_gemm` when a tuned CSV row
+carries `libtype=flydsl` **and** `is_flydsl_available()` is true (else the row is dropped and aiter takes
+its default route: hipblaslt, ASM, the HIP skinny kernel or torch). Only **split-K** is in this source —
+no separate stream-K kernel.
 
 ## SOTA implementation
 The split-K decomposition is driven by `_hgemm_split_k_options`: a candidate `split_k` is kept only when it
@@ -73,11 +75,14 @@ From `flydsl_hgemm` signature + the option tables in `gemm_kernels.py`:
 `split_k` extra-loops window: `HGEMM_EXTRA_BLOCK_K_LOOPS_MIN=2`, `..._MAX=8`.
 
 ## Numerics / parity
-Split-K accumulates partials in **fp32**; the combine is mediated by a 3-state per-stream signal
-(`SPLIT_K_SIGNAL_STATE_COUNT = 3`) advanced only when `split_k > 1`, giving deterministic reduction (not
-free atomics). Regression cases in `test_flydsl_splitk_hgemm.py` use bf16, `atol=rtol=1e-2`, pass ≥99.9%
-close (relaxed to 99.0% + bounded `max_delta` for large split_k=16/8 + b_to_lds cases). Reference is fp32
-`torch.mm`.
+Each split accumulates its partial in **fp32** but rounds it to the output dtype before the combine:
+split 0 initialises C, and the others add packed bf16/fp16 pairs atomically once its per-tile flag is
+set (the 3-state per-stream signal, `SPLIT_K_SIGNAL_STATE_COUNT = 3`, advanced only when `split_k > 1`,
+orders that initialisation). The sum is therefore not bit-reproducible and its error grows with
+`split_k`. AITER's own regression cases gate bf16 at `atol=rtol=1e-2` and ≥99.9% close against an fp32
+`torch.mm` (`test_flydsl_splitk_hgemm.py`) — split_k 8 at M=104 and split_k 4 at M=1 hold that — and
+relax it only for the two M=1 `b_to_lds` split-K cases, to 99.0% close plus a bounded max |Δ| (8 at
+split_k=8 with K=1536, 32 at split_k=16 with K=7168).
 
 ## Integration (rebind seam)
 Reached through `aiter.tuned_gemm`: a CSV row with `libtype=flydsl` + a `kernelName` that

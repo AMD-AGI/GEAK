@@ -49,7 +49,8 @@ flydsl_gemm{stage}_a{dt}_w{dt}_{out}_t{M}x{N}x{K}_split_k{S}_block_m_warp{bmw}_b
   _async_copy{T/F}_b_to_lds{T/F}_b_preshuffle{T/F}_c_to_lds{T/F}[_small_m[_nr{}][_pn{}][_wpe{}][_ur{}]]_{gfx}
 ```
 > The config CSV is **aiter-build-specific** — do not copy a tuned table across ROCm/aiter versions
-> (sourcing rule #2). `is_flydsl_available()` falls back to CK/CKTile if FlyDSL isn't installed.
+> (sourcing rule #2). If `is_flydsl_available()` is false, the `flydsl` row is dropped and dispatch
+> takes its default route instead (hipblaslt, ASM, the HIP skinny kernel or torch — see `tuned_gemm.py`).
 
 ## 3. b_preshuffle (the weight layout that matters)
 `b_preshuffle=True` (the default) expects the weight already laid out for the matrix core:
@@ -66,9 +67,10 @@ shuffle once at load time.
 
 ## 4. Split-K for skinny/decode shapes
 Small M·N, large K → use `split_k` so the K reduction spreads across more CUs (same idea as Triton
-SPLIT_K). aiter's `_hgemm_split_k_options(k, tile_k)` only offers split_k that divide K cleanly and
-leave 2–8 block-K loops. Split-K>1 uses the global semaphore reduction (deep.md §5) and caps output
-tiles at `SPLIT_K_COUNTER_MAX_LEN=128`.
+SPLIT_K). aiter's `_hgemm_split_k_options(k, tile_k)` keeps split_k that divide K with
+`K/split_k` a multiple of `tile_k`; 1, 2, 4, 8, 16 need nothing more, other divisors up to 32 also
+need 2–8 block-K loops per split. With split-K>1, split 0 initialises C and the others add atomically
+after its flag (deep.md §5), which caps output tiles at `SPLIT_K_COUNTER_MAX_LEN=128`.
 ```python
 out = flydsl_hgemm(a, b_sh, tile_m=16, tile_n=128, tile_k=64, split_k=8)   # decode-ish
 ```

@@ -23,7 +23,7 @@ The `flydsl_hgemm` signature is the authoritative knob set. Every name below is 
 | `tile_m` | int | 128 | output tile rows; `tile_m % (block_m_warps·16) == 0` (MFMA warp atom = 16) |
 | `tile_n` | int | 128 | output tile cols; `tile_n % (block_n_warps·16) == 0`; **`N % tile_n == 0`, `N ≥ tile_n`** |
 | `tile_k` | int | 64 | K-block; **`% 32 == 0` and `≥ 32`**; `(K/split_k) % tile_k == 0` |
-| `split_k` | int | 1 | K-reduction parallelism; `K % split_k == 0`; uses global-semaphore reduce; tiles ≤ 128 |
+| `split_k` | int | 1 | K-reduction parallelism; `K % split_k == 0`; split 0 initialises C, the others add atomically after its flag; tiles ≤ 128 |
 | `block_m_warps` | int | 1 | warps along M (×64 lanes) |
 | `block_n_warps` | int | 4 | warps along N; `block_threads = bmw·bnw·64` |
 | `b_preshuffle` | bool | True | expect B pre-shuffled to `(16·pack_n, 16)`; **requires `b_to_lds=False`** |
@@ -37,7 +37,7 @@ The `flydsl_hgemm` signature is the authoritative knob set. Every name below is 
 | `waves_per_eu` | int | 0 | (small-M) occupancy hint, 0 = compiler |
 | `b_to_lds_unroll` | int | 0 | (small-M) unroll factor for B→LDS staging |
 | `auto_shuffle_b` | bool | False | shuffle B inside the call (one-shot) when `b_preshuffle=True` |
-| `bias` | Tensor? | None | 1-D `[N]`, fused only when out dtype == input dtype |
+| `bias` | Tensor? | None | 1-D `[N]`, same dtype and device as the input (`_validate_hgemm_inputs` raises otherwise) |
 
 ## 1. Tiling — the primary lever
 `tile_m × tile_n × tile_k` with `block_m_warps × block_n_warps` warps. Because the MFMA atom is
@@ -50,13 +50,20 @@ Note non-power-of-2 tiles (160, 192, 48, 80, 112) — FLIR layouts make these le
 pow2-biased space. This is a real expressivity advantage for odd N (e.g. N=160 GEMMs).
 
 ## 2. `split_k` — skinny/decode parallelism
-Same role as Triton SPLIT_K but reduced via a **global semaphore + signal-state ring**
-(deterministic, not raw atomic_add). Only split_k that divide K and leave 2–8 block-K loops are
-offered. Capacity guard: `ceil(M/tile_m)·(N/tile_n) ≤ 128` for split_k>1.
+Same role as Triton SPLIT_K, combined in the kernel rather than by a second pass: split 0
+initialises the output tile (zero or bias) and raises a per-tile counter; every other split waits on
+that counter and adds its partial — already rounded to the output dtype — with a packed atomic
+`fadd` (`splitk_hgemm.py`, the `IS_SPLIT_K` store block). The per-stream `3 × 128` counter ring only
+orders that initialisation; the sum itself is atomic, so the result is not bit-reproducible and its
+rounding grows with `split_k`. `split_k` must divide K with `K/split_k` a multiple of `tile_k`;
+1, 2, 4, 8 and 16 need nothing more, and other divisors up to 32 also need 2–8 block-K loops per
+split. Capacity guard: `ceil(M/tile_m)·(N/tile_n) ≤ 128` for split_k>1.
 
 ## 3. `b_preshuffle` vs `b_to_lds`
-- **`b_preshuffle=True`** (default, fastest for serving): weight pre-laid-out to MFMA fragment order
-  `(16·pack_n, 16)` — removes in-kernel relayout. Shuffle once at model load.
+- **`b_preshuffle=True`** (the default): weight pre-laid-out to MFMA fragment order
+  `(16·pack_n, 16)` — removes in-kernel relayout; pays off when one weight is reused across calls
+  and shuffled once at model load. It is not what AITER ships: every FlyDSL bf16 selection in its
+  gfx950 tuned database uses `b_preshuffle=False`, so measure both.
 - **`b_to_lds=True`**: stage B through LDS in-kernel; pay relayout per call but no offline shuffle.
   Adds `stages·tile_n·tile_k·2B` to the LDS budget (`_estimate_hgemm_lds_bytes`).
 Mutually exclusive.
@@ -94,7 +101,7 @@ disk). In aiter, GEMM tuning instead uses an offline sweep that writes the per-s
 - `b_preshuffle=True` without a shuffled B → raises (use `shuffle_weight` or `auto_shuffle_b=True`).
 - `N % tile_n != 0` → unsupported (FlyDSL HGEMM requires N a multiple of tile_n).
 - Passing `async_copy`/`stages`/`c_to_lds` off their arch-fixed values → `ValueError`.
-- Scaling (`scale_a/b/c`) on `flydsl_hgemm` → asserts; use `flydsl_preshuffle_gemm_a8`.
+- `flydsl_hgemm` takes no scale arguments; scaled (fp8/int8) GEMMs go through `flydsl_preshuffle_gemm_a8`.
 - Tuned config CSV is build-specific — re-tune per ROCm/aiter version.
 
 ## Sources
