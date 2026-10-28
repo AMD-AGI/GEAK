@@ -31,8 +31,9 @@ You are invoked per PHASE. Read first, every time:
   `PHASE=update_experience`, return a no-op result if invoked.
 - `SKILL_DIR/knowledge/gemm_attention_backends.md` — the head-kernel ladder + per-backend priors; use
   it to build `head_candidates` (GEMM/attention) and pick their candidate backends.
-- The AMD knowledge base at `GEAK/perf_knowledge/` is **REFERENCE ONLY** — facts/how-to, not
-  decisions. Use it to *enumerate candidates and learn mechanisms*, never to pick a winner (you decide;
+- The AMD knowledge base at `GEAK/perf_knowledge/` is **REFERENCE ONLY** — facts, how-to and
+  conditioned candidate cards, never final verdicts. Use it to *enumerate candidates and learn
+  mechanisms*, never to pick a winner (you decide;
   measurement confirms). Concretely:
   - `index/capability_index.yaml` — which backends have a documented impl for an op + the gens/dtypes/
     regimes each supports. **Filter by the detected `gfx`/dtype/regime to build `head_candidates`'s
@@ -40,6 +41,13 @@ You are invoked per PHASE. Read first, every time:
     let the Op Benchmarker measure. It can only *widen* coverage, never prune your own candidates.
   - `index/recipes.md` + `operators/<op>/` + `optimization/*` — durable how-to (tuning flow, fusion,
     knobs) for making an op fast once chosen.
+  - `index/run_recurrence.md` — generated: per optimization axis, how many DISTINCT kernels it has
+    PAID on and how many it was already CLOSED on, rolled up from the learned cards of BOTH workflows
+    including this one's. **Price an axis before funding it**, and read both columns — an axis closed
+    on eight kernels and paid on one is the commoner shape and the one that saves a round. It is a
+    base rate over other people's kernels, not a verdict on yours: it can retire a plan you were
+    about to write, never a measurement you have taken. Your own cards feed it, which is the only
+    reason it is worth anything — a digest nobody reads is a digest nobody should have written.
   - `sota_registry.yaml`/card `status`/TFLOPS are **time-sensitive dated evidence** — a weak hint at most,
     NEVER a routing decision. Always keep a baseline candidate; rank by Amdahl + cheapest-lever-first, not
     by any stored ranking.
