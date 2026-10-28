@@ -154,6 +154,144 @@ delivered source, or a demonstrated benefit from cross-lineage evidence. The
 three completed outcomes favor the external GEAK populations at their tested
 scope; they do not establish that GEAK is universally superior.
 
+**4a. What the eight R03 histories establish**
+
+The next audit inspected the actual saved arguments, task descriptors, all eight
+lineage-final timelines, and the two winning C checkpoint chains. The task text
+and task configuration match exactly; none of the eight members has a focus
+override. Full descriptors are not identical: 47 fields differ within initial
+action observations (measurements, numerical checks, command wall times,
+invocation IDs and command output), and one differs in the baseline workspace
+path. Both arms
+have `design_genome_mode=off` and `evolution_evidence_handoff=false`. R03 tests
+the continuing-population policy, not the later evidence-access treatment.
+
+In the table, each dispatch column is **attempts / truthy returns**. A truthy
+return means the outer agent call returned a result. It does not establish
+correctness, acceptance of that result, GPU work completed, or provider-call
+usage. Engineer calls are identified by their `eng ` label prefix; the other
+three columns use the recorded role and sub-phase.
+
+| R03 member | Planning | Engineering | Verification | Integration | Committed rounds | Common-final delivery |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| GEAK A | 5 / 4 | 12 / 11 | 7 / 6 | 0 / 0 | 1 | 1.01922× |
+| GEAK B | 4 / 3 | 9 / 7 | 5 / 4 | 0 / 0 | 1 | 1.02468× |
+| GEAK C | 4 / 3 | 9 / 8 | 8 / 8 | 1 / 1 | 1 | **1.03998×** |
+| GEAK D | 6 / 5 | 10 / 8 | 7 / 7 | 0 / 0 | 0 | ORIGINAL |
+| Hybrid A, ordinary | 5 / 4 | 12 / 8 | 12 / 10 | 0 / 0 | 0 | ORIGINAL |
+| Hybrid B, EVO | 4 / 4 | 8 / 7 | 8 / 7 | 1 / 1 | 0 | ORIGINAL |
+| Hybrid C, EVO | 3 / 3 | 9 / 5 | 9 / 5 | 2 / 2 | 1 | **1.02445×** |
+| Hybrid D, EVO | 3 / 3 | 8 / 6 | 8 / 5 | 0 / 0 | 0 | ORIGINAL |
+
+These scores are the native population common-final measurements. The separate
+repeated confirmations in section 4 remain the delivered-program comparison.
+The direct committed-round counters total three for GEAK and one for the hybrid.
+Both winning C lineages committed **once**: GEAK C published `r0` and `r2`, while
+hybrid C published `r0` and `r1`. A checkpoint's round number is not a count of
+successful commits.
+
+Across the populations, GEAK recorded 40 engineer dispatches with 34 truthy
+returns; the hybrid recorded 37 with 26. The hybrid recorded more verification
+dispatches, 37 versus 27, including attempts to recover engineer submissions.
+Ordinary members skip verification of a trustworthy measurement at or below the
+candidate floor; EVO does not apply that skip after workspace initialization.
+Verification dispatches labelled as recovery after a failed or missing engineer
+return number 11 in the hybrid and 6 in GEAK. These counts describe recorded
+workflow activity. They do not measure realized resources or establish the
+cause of the score gap. The timelines have no timestamps and do
+not distinguish all reasons for a missing return. The saved `budget_used` totals
+are 40 and 41 **direction-cost units**, not model calls. All eight finals report
+stopping at their deadline.
+
+Four EVO directions failed **before engineer dispatch**: hybrid B's `r2_d0`,
+`r2_d1`, `r2_d2`, and hybrid D's `r2_d1`. Their retained records have the workflow's
+fixed `parent initialization failed` note and no ready initialization. B's
+timeline consequently has no engineer call for that round. This is a concrete
+loss of planned engineering opportunities. Separately, all four matching shared
+log messages report `evolution git failed`. That identifies a Git-command
+failure class; it does not identify the failed Git operation, its underlying
+cause or time lost. The messages have no lineage attribution, so their
+individual event joins remain unproved. This finding does not show how the
+unexecuted directions would have performed.
+
+An isolated CPU diagnostic identified a reproducible defect matching this
+pattern: **all four failed directions selected a parent whose recorded patch
+digest is the digest of an empty file**. All 14 ORIGINAL-parent directions and
+all 11 directions with nonempty retained-parent patches initialized successfully.
+The frozen initializer applies every retained parent with `git apply -- <patch>`.
+In local Git 2.47.3, the exact command on an empty patch exits 128 with
+`No valid patches in input`; a valid nonempty control succeeds. The empty patch
+leaves the source unchanged. This supports an empty-parent handling defect,
+without uniquely recovering the historical failed Git subcommand or measuring
+its effect on the final score gap. Why those parent attempts retained no source
+change remains a separate question. No historical run or source was changed by
+the diagnostic.
+
+The shared logs also contain 6 agent-timeout and 16 process-deadline messages
+for GEAK, versus 11 and 17 for the hybrid. The hybrid has 6 peer-refresh failure
+messages. These messages lack member attribution and may overlap; they are not
+additive event counts. Neither their counts nor a failed refresh establishes
+how much peer information was actually available or used.
+
+**Retention, promotion and final selection are separate boundaries.** Hybrid D
+retained three rows marked correct, with recorded weighted scores 1.00328×,
+1.00942× and 1.00948×. Their stored verifier fields report valid measurements and
+gain eligibility. D nevertheless recorded zero commits and delivered ORIGINAL.
+The frozen source requires a candidate score to be strictly greater than
+`incumbent_score * (1 + min_improve)` to commit; the default is `min_improve=0.02`,
+and neither arm nor any member overrides it. Retaining a gain below that bar
+does not promote it into the canonical source.
+
+```mermaid
+flowchart LR
+    M[Measured candidate] --> G[Commit gate: more than 2 percent over incumbent]
+    M -. EVO retention .-> A[Archive of attempts and evidence]
+    A -. available for later development .-> M
+    G --> C[Successful commit and source-bound checkpoint publication]
+    C --> Q[Final query: published checkpoints and lineage finals]
+    C -. standard import: checkpoints only .-> P[Other EVO members]
+    L[Final evaluation of retained canonical source] --> Q
+    Q --> F[Common population measurement and qualified selection]
+```
+
+The final query does not automatically enumerate every retained archive row.
+Standard peer import also queries published checkpoints; an unpublished
+alternative is not available through that channel. These are source-level
+boundaries, not measurements of their effect on search.
+Thus the finding that final selection chose the best qualified **finalist** does
+not establish that every measured alternative reached that selection. D's small
+gains have not had separate common confirmation, and their existence does not
+explain the external population's larger winning gain.
+
+Hybrid C's selected `r1_integrated` record names two own same-round donors. A
+later retained row, `r2_d0`, reports 1.02604×, compared with the selected
+checkpoint's 1.02373×. This is a lead for examining the promotion boundary, not a
+confirmed lost improvement: these are stored measurements, and the exact
+then-incumbent value, source realization and common remeasurement matter.
+
+Across the three EVO members, 25 of 29 retained direction rows have `ready`
+initialization records: B has 8 of 11, C has 9 of 9, and D has 8 of 9. The four
+remaining directions are the initialization failures above; C's integration
+record is separate. Ready records carry initial tree/commit identities and a
+parent-patch reference where applicable. For three concrete examples, hybrid D
+loaded `r1_d2` for `r2_d2`, then loaded `r2_d2` for `r3_d2`; hybrid C loaded
+`r2_d0` for `r3_d0`. The source writes this status after checking and applying the
+parent patch and creating the initial workspace tree. This establishes recorded
+implementation reuse within those lineages. D's first parent was unverified;
+its descendants have the small verified gains above. C's later direction
+remained unverified: its third round recorded three engineering and three
+verification dispatches with no truthy returns. These observations establish
+neither beneficial peer evidence transfer nor superiority over continuing GEAK. Other parent and donor
+references still require their own initialization or use evidence.
+
+The [R03 audit extract](evidence/r03-search-audit-20261028.json) records counts,
+input scope, source references and missing evidence. The remaining questions are
+distinct-source generation and correctness, the full parent-selection history,
+historical peer receipt/read/use, per-lineage waiting and model usage, and why
+engineering attempts failed to return results. The present records narrow
+the diagnosis; they do not isolate a beneficial or harmful EVO mechanism. The
+architecture remains unchanged while those questions are investigated.
+
 **5. The evidence-access follow-up is a different comparison**
 
 ```mermaid
@@ -172,8 +310,9 @@ GEAK-versus-EVO comparison. Current declarations use four lineages and a shared
 limit of eight concurrent agent subprocesses per population, with a shared
 10,000-call lifetime cap. The c08 pair has one GPU per population; b08 wave2
 declared four. These are configured limits, not measured utilization, and they
-must not be projected backward onto older experiments. The b08 H arm failed,
-leaving that H/HP contrast unavailable; the c08 comparison is still in progress
+must not be projected backward onto older experiments. Both b08 arms failed
+without canonical final endpoints, leaving that H/HP contrast unavailable;
+the c08 comparison is still in progress
 as of 28 October 2026. Neither supplies a completed positive mechanism result.
 
 **6. Code to compare manually**
