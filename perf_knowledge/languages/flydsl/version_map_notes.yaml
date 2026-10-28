@@ -1,0 +1,72 @@
+# Hand-maintained companion to version_map.md.
+#
+# The generated tables say a symbol is gone and that other symbols are new. They cannot say which
+# new symbol carries the old one's job -- that is a reading of both implementations. Those readings
+# live here.
+#
+# Every entry is re-checked when version_map.md is regenerated:
+#   * each `gone` symbol must actually be absent from `to`   (else the note is stale)
+#   * each `use`  symbol must actually be present in `to`    (else the note points at nothing)
+# A violation fails the run instead of shipping a port instruction that no longer holds.
+#
+# `note` is prose for the porting agent. Say what CHANGED about the call, not just the new name:
+# a rename is cheap, a different input type or an extra step is where a port goes wrong.
+
+replacements:
+  - from: "0.2.4"
+    to: "0.3.0"
+    topic: buffer resource descriptor construction
+    gone: [create_buffer_resource, create_buffer_resource_from_addr, BufferResourceDescriptor]
+    use: [make_buffer_ptr, get_buffer_rsrc]
+    note: >-
+      Not a rename -- one call became two, and the input type changed.
+      0.2.4 `create_buffer_resource(memref_val, stride=0, max_size=True, *, num_records_bytes,
+      base_byte_offset)` took a **memref** and returned the descriptor value directly.
+      0.3.0 splits it: `make_buffer_ptr(ptr: Pointer, num_records_bytes=None)` takes a typed
+      **Pointer that must already be in the global address space** (it raises otherwise) and returns
+      a buffer-descriptor *pointer*; `get_buffer_rsrc(ptr)` then extracts the raw ROCDL
+      `!llvm.ptr<8>` that 0.2.4 handed back in one step. `num_records_bytes=None` reproduces the old
+      `max_size=True` (falls back to 0xFFFFFFFF). `make_buffer_ptr` also sets descriptor flags per
+      architecture (extra reserved bit and OOB_SELECT on RDNA), which the 0.2.4 helper did not do --
+      so a port inherits arch-dependent behaviour it did not have before.
+    evidence:
+      - "0.2.4: flydsl/expr/buffer_ops.py -> def create_buffer_resource(memref_val, ...)"
+      - "0.3.0: flydsl/expr/rocdl/universal.py:176 -> def make_buffer_ptr(ptr: Pointer, num_records_bytes=None)"
+      - "0.3.0: flydsl/expr/rocdl/universal.py:252 -> def get_buffer_rsrc(ptr: Pointer)"
+
+  - from: "0.2.4"
+    to: "0.3.0"
+    topic: pointer arithmetic and LLVM pointer exposure
+    gone: [get_element_ptr, create_llvm_ptr]
+    use: [to_llvm_ptr, add_offset]
+    note: >-
+      0.2.4 `get_element_ptr(base_ptr, byte_offset=None, static_byte_offset=0, elem_type=None,
+      no_wrap_flags=None)` built an LLVM GEP from a base pointer plus byte offsets -- one call did
+      both the offset arithmetic and the drop to LLVM pointer level. In 0.3.0 those are separate:
+      `add_offset(ptr, offset)` does the arithmetic on a `fly.ptr` (it already existed in 0.2.4, so
+      it is not in the "new" table) and `to_llvm_ptr(ptr)` exposes the result as an `!llvm.ptr`,
+      resolving the address space through the active compile backend rather than taking it as an
+      argument. Code that only needed the offset should stop at `add_offset` and never reach LLVM
+      pointer level.
+    evidence:
+      - "0.2.4: flydsl/expr/buffer_ops.py -> def get_element_ptr(base_ptr, byte_offset, ...)"
+      - "0.2.4: flydsl/expr/primitive.py:1183 -> def add_offset(ptr, offset)"
+      - "0.3.0: flydsl/expr/primitive.py:1186 -> def to_llvm_ptr(ptr)"
+      - "0.3.0: flydsl/expr/primitive.py:1199 -> def add_offset(ptr, offset)"
+
+  - from: "0.2.4"
+    to: "0.3.0"
+    topic: buffer load / store
+    gone: [buffer_load, buffer_store]
+    use: [buffer_load_to_lds]
+    note: >-
+      `flydsl.expr.buffer_ops.buffer_load` / `buffer_store` have no single-call successor. 0.3.0
+      keeps `buffer_load_to_lds` in `flydsl.expr.rocdl` for the global-to-LDS path, but a plain
+      buffer load into registers has to be re-expressed through the descriptor pointer built by
+      `make_buffer_ptr` plus the load form the target architecture module offers. Treat this as
+      re-implementing the access, not substituting a name, and re-measure -- the emitted instruction
+      may differ in width and in where the wait lands.
+    evidence:
+      - "0.2.4: flydsl/expr/buffer_ops.py -> def buffer_load(...), def buffer_store(...)"
+      - "0.3.0: flydsl/expr/rocdl/__init__.py:626 -> def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0, **kw)"
+      - "0.3.0: no `buffer_load` or `buffer_store` defined anywhere in the package"

@@ -5,10 +5,10 @@ confidence: ★★
 effect: 0 gain: per-case graph replay 0.92x/0.99x/1.00x and the whole lane ceils at 1.005x; a real shape-independent 25.6% cut in per-call host cost moved the geomean by 1.0009x across all three cases
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 1
+losses: 1
+attempts: 3
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-25
 name: size-the-exposed-host-residue-before-buying-a-launch-overhea-dense-gemm-gfx950-compute-bound
 description: Size exposed host residue first: with kernel time far above per-call host cost, a 25.6% host cut and graph replay each bought 0 on a bf16 dense GEMM.
 keywords: ['dense-gemm', 'gfx950', 'launch-overhead', 'hip-graph', 'host-dispatch', 'anti-pattern', 'dispatch-shim', 'bf16']

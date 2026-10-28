@@ -95,7 +95,11 @@ Inputs: `WORKSPACE` (canonical current-best source), `EVAL_DIR`, `RESEARCH_DIR`
 (`EVAL_DIR/codebase_context.md`), `PROFILING_SUMMARY` (path to `profiling_summary.md`),
 `BOTTLENECK` (the profiler's classification), `BASELINE_PER_CASE`, `MAX_QUESTIONS`, `TASK` (optional
 steer), plus the perf_knowledge pointer `KERNEL_KNOWLEDGE_DIR`/`KK_OPERATOR`/`KK_LANGUAGE`/`KK_REFS`
-(may be empty — REFERENCE ONLY, same contract as the other roles: facts/how-to, never decisions).
+(may be empty — REFERENCE ONLY, same contract as the other roles: facts/how-to/conditioned candidate
+cards, never final verdicts). To open a card's `repo@commit:path:line` citation, run
+`python3 KERNEL_KNOWLEDGE_DIR/index/resolve_citation.py 'ROCm/aiter@<commit>:<path>:<line>'` — five
+`aiter` checkouts at five commits live on this box, so the commit is the identity and the path is
+not; `grep`-ing the nearest tree quietly gives you another version's file.
 
 **Stage 0 — extract facts.** `mkdir -p RESEARCH_DIR`. Read the kernel source under `WORKSPACE`, the
 `CODEBASE_CONTEXT`, `ANALYSIS_JSON`, the `PROFILING_SUMMARY`, and the `COMMANDMENT`. Distill a compact
@@ -105,6 +109,40 @@ behind it, the hot kernels / dispatch count, the correctness constraints, and 2-
 **bottleneck/design hypotheses** (`H1..Hn` with a `prior_weight` summing to ~1.0; each is a one-line
 testable claim + the quantitative basis + what measurement would falsify it). Write
 `RESEARCH_DIR/facts.json`.
+
+**Stage 0b — enumerate the knobs the file does not expose (MANDATORY, before you write any
+question).** Run
+
+```
+python3 SKILL_DIR/scripts/upstream_knobs.py WORKSPACE --json
+```
+
+(add `--upstream DIR` when the task pins no `.geak_pythonpath` — most task dirs pin none, so expect
+to supply it). It lists, per function, the parameters the UPSTREAM same-named function takes and
+this file does not (`narrowed`), and the parameters this file declares and then asserts to a
+constant (`pinned`). Put the result in `facts.vendored_knobs` — `[]` when there is none, never
+omitted — and **raise a question for every `pinned` parameter that upstream varies.**
+
+⚠ **Check `stack_coverage` before you believe an empty report.** Pointing `--upstream` at the wrong
+revision produces few or no findings, which reads exactly like a clean result. The box's ambient
+`PYTHONPATH` is the trap: on the GLM-5.2 task it points at a checkout predating the entire `mxfp4_*`
+family the seam imports, and the scan then reports 2242 upstream functions, 2 findings and **zero
+pins** — versus 7664, 86 and 6 against the stack the kernel was actually written against. So the
+tool prints `N/M imported module(s) present` and warns loudly on stderr when the tree lacks modules
+the candidate hard-imports. A warning there invalidates the run; fix the root and re-run. Do not
+record `vendored_knobs: []` from a run that warned.
+
+Why this is mandatory and not advisory: a task kernel is often a VENDORED CUT of an upstream one,
+and everything the cut dropped is invisible from inside the file. There is no import to follow and
+no `NotImplementedError` — the cut turns the knobs it abandoned into asserts, so the file reads as
+if the axis had been measured and closed. Measured on the GLM-5.2 MXFP4 fused-MoE task: its seam
+carried `assert BN == 256`, three campaign rounds concluded "BN is inert" from inside that file,
+and re-opening BN (256 → 128, which doubles the decode grid) was one of the three mechanisms that
+took the task from 1.1294x to 1.3205x. All three came from axes closed this way. The scan surfaces
+them in its first two lines, in seconds, against the untouched baseline.
+
+A knob upstream has is a thing to TRY, not a thing that works — rank such a question like any
+other. But a `pinned` parameter is not a measured verdict, and must never be passed on as one.
 
 **Stages 1/2 — generate + rank research questions.** Produce up to `MAX_QUESTIONS` questions that
 **span BOTH modes**: grounded bottleneck questions (tied to a profile metric / per-case number) AND
@@ -134,6 +172,10 @@ Return JSON:
        "falsifier_measurement": "...", "prior_weight": 0.5}
     ],
     "hot_kernels": [{"name": "...", "pct_of_total": 0.0}],
+    "vendored_knobs": [
+      {"function": "...", "upstream": "module:line", "narrowed": ["param", "..."],
+       "pinned": [{"param": "BN", "to": 256, "upstream_varies": true}]}
+    ],
     "correctness_constraints": ["..."],
     "likely_targets": ["<rel paths/functions>"],
     "notes": "..."

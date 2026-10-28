@@ -18,7 +18,8 @@ high-level API (the `*_kernels.py` wrapper) and a DSL body under `kernels/`.
 
 ## 1. HGEMM (dense bf16/fp16) — `splitk_hgemm.py`
 - API: `flydsl_hgemm` (gemm_kernels.py); body `kernels/splitk_hgemm.py` (`compile_hgemm_kernel`).
-- 2-stage LDS pipeline, MFMA-16, XOR-swizzled LDS, optional split-K (global-semaphore reduce),
+- 2-stage LDS pipeline, MFMA-16, XOR-swizzled LDS, optional split-K (split 0 initialises C, the
+  other splits add atomically after its per-tile flag),
   `b_preshuffle` or `b_to_lds`. fp32 accumulate.
 - Maps to `act_and_mul`-free dense GEMM (operators: `dense_gemm`, `splitk_streamk_gemm`,
   `skinny_gemv_decode` via split-K). Default tile 128×128×64, warps 1×4.
@@ -65,7 +66,9 @@ high-level API (the `*_kernels.py` wrapper) and a DSL body under `kernels/`.
 
 ## 6. Fused activation+quant — `kernels/silu_and_mul_fq.py`, `kernels/reduce.py`
 - `silu_and_mul_fq`: fused SiLU·mul + fp-quant (operator: `act_and_mul_silu_gelu`,
-  `fused_norm_quant`). `reduce.py`: reduction primitives used by split-K / MoE.
+  `fused_norm_quant`). `reduce.py`: block-reduction helpers (vector max/sum, block reduce)
+  extracted from the softmax / layernorm / rmsnorm kernels; the GEMM and MoE kernels do not import
+  it — split-K combines with atomics.
 
 ## Family → operator map (for the SOTA matrix)
 | FlyDSL family | operators it serves |

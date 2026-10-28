@@ -5,10 +5,10 @@ confidence: ★★
 effect: device-side rewrite won 1.61x profiled kernel time and ~11%->~17% of peak HBM BW, yet the same-session wall A/B read 1.018x on all three decode cases (tokens=2 and tokens=4) - inside run-to-run noise
 confirms_cited: 1
 confirms_blind: 0
-losses: 0
-attempts: 5
+losses: 1
+attempts: 6
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-25
 name: measure-the-launch-floor-before-buying-a-device-side-round-o-dense-gemm-gfx950-decode
 description: When the harness wall floors above device time, a correct roofline rewrite of a tiny decode GEMV scores ~1.00x; measure the launch floor first.
 keywords: ['dispatch-floor', 'launch-overhead', 'decode', 'skinny-m', 'gemv', 'roofline', 'cu-underfill', 'anti-pattern']

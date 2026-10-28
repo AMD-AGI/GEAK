@@ -11,7 +11,7 @@ updated: 2026-06-08
 sources:
   - https://gau-nernst.github.io/amd-a2a/
   - https://github.com/ROCm/mori
-  - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/moe_sorting.py
+  - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/moe_sorting.py
 ---
 
 # moe_dispatch_combine × HIP/C++
@@ -27,7 +27,7 @@ sources:
 |---|---|---|---|---|
 | Reference single-kernel a2a | gau-nernst (GPU MODE AMD challenge) | gfx942, bf16 | **292 µs** (from 93,540 µs ref) @ MI300X, E=256/topk=8/hidden 7168/world=8, 2025 | study/blueprint for a custom intra-node a2a |
 | MoRI-EP HIP kernels | `ROCm/mori` | gfx942/950, fp8/bf16 | 307/330 GB/s (see [mori_rccl.md](mori.md)) | production (consume, don't re-author) |
-| aiter `moe_sorting` (local permute) | `aiter/moe_sorting.py`, `csrc/kernels/moe_align_block_size_kernels.cu` | gfx942/950 | — | single-GPU token permute/scatter |
+| aiter `moe_sorting` (local permute) | `aiter/ops/moe_sorting.py`, `csrc/kernels/moe_align_block_size_kernels.cu` | gfx942/950 | — | single-GPU token permute/scatter |
 
 Recommend: consume MoRI-EP for production EP; author HIP only for a custom fusion or an unsupported topology.
 
@@ -45,7 +45,7 @@ fp8 dispatch quant gate; bf16 combine; unbiased weight; mask static-pad tokens. 
 greedy parity. See [numerics.md](../numerics.md).
 
 ## Integration (rebind seam)
-- aiter: kernels JIT/AOT into `aiter/jit/`; `aiter/moe_sorting.py` for local permute.
+- aiter: kernels JIT/AOT into `aiter/jit/`; `aiter/ops/moe_sorting.py` for local permute.
 - MoRI: `python/mori/ops/dispatch_combine.py` over HIP kernels in `src/`.
 - vLLM/SGLang: `sgl-kernel`/`csrc` permute ops registered as torch ops; rebuild after editing `.cu`.
 
@@ -66,4 +66,4 @@ greedy parity.
 ## Sources
 - 292 µs / grid_size=304 / malloc+memset hoist / P2P ladder: https://gau-nernst.github.io/amd-a2a/
 - MoRI-EP HIP kernels: https://github.com/ROCm/mori
-- aiter local permute: `ROCm/aiter@a6bb49937:aiter/moe_sorting.py`, `csrc/kernels/moe_align_block_size_kernels.cu`.
+- aiter local permute: `ROCm/aiter@a6bb49937:aiter/ops/moe_sorting.py`, `csrc/kernels/moe_align_block_size_kernels.cu`.

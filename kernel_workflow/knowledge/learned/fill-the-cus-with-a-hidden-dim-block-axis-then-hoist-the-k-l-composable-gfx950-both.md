@@ -1,4 +1,13 @@
 ---
+key: multi-dispatch TileLang pre-norm/GEMM/post chain in vLLM, one grid axis over tokens, decode+prefill graded together on gfx950
+type: lever
+confidence: ★★
+effect: 1.88x isolated geomean, director-verified vs frozen baseline, non-overlapping; per case decode 2.25x and 1.96x, prefill 1.76x and 1.69x, all four oracle-gated
+confirms_cited: 0
+confirms_blind: 0
+losses: 0
+attempts: 0
+last_seen: 2026-08-17
 name: fill-the-cus-with-a-hidden-dim-block-axis-then-hoist-the-k-l-composable-gfx950-both
 description: Composable TileLang pre/GEMM/post chain: add a hidden-dim block axis to the token-only grid, hoist the k-loop bounds guard out of the GEMM; 1.88x stacked
 keywords: ['cu-underfill', 'grid-occupancy', 'loop-hoisting', 'tile-geometry', 'kernel-fusion', 'anti-pattern', 'oracle-parity', 'measurement-discipline', 'gfx950']
@@ -6,17 +15,12 @@ kernels: ['mhc_post_tilelang_kernel', 'mhc_pre_big_fuse_tilelang_kernel', 'hc_pr
 platforms: ['gfx950']
 kernel_class: composable
 regime: both
-key: multi-dispatch TileLang pre-norm/GEMM/post chain in vLLM, one grid axis over tokens, decode+prefill graded together on gfx950
 layer: learned
 levers: ['grid.hidden-dim-block-axis', 'compute.guard-hoist']
 cost: L3
 lifecycle: active
-type: lever
-confidence: ★★
-effect: 1.88x isolated geomean, director-verified vs frozen baseline, non-overlapping; per case decode 2.25x and 1.96x, prefill 1.76x and 1.69x, all four oracle-gated
 roofline: decode issue/fill-bound (CTAs below CU count) -> memory-bound; prefill after the win has two of three dispatches at 70-101% of achievable HBM and the GEMM at ~57% of achievable HBM simultaneously with ~48% of vector-fp32 peak
 verified_on: 2026-08-17
-last_seen: 2026-08-17
 ---
 # Fill the CUs with a hidden-dim block axis, then hoist the k-loop guard
 - lever: on a chained pre/GEMM/post op whose elementwise stages are gridded over tokens only, add a second block axis over the hidden dim so small-batch CTA count crosses CU count; independently, hoist the per-iteration bounds guard out of the GEMM k-loop before touching tiles or staging.

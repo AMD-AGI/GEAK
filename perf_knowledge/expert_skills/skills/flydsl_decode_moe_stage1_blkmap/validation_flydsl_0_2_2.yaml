@@ -1,6 +1,11 @@
 skill_id: flydsl_decode_moe_stage1_blkmap
 date: '2026-08-05'
 flydsl_version: 0.2.2
+# Not recorded at measurement time and not recoverable now. Stated rather than omitted so a reader
+# cannot mistake silence for "the same environment as mine": the logic below transfers, the numbers
+# have to be re-measured on whatever ROCm and aiter revision you are on.
+rocm_version: not_captured
+aiter_commit: not_captured
 provider: aiter_vendored_flydsl
 gpu: gfx950 / MI355X
 scope: stage-1 segment = mfma_moe1 + descriptor producer

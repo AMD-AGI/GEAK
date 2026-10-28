@@ -11,6 +11,7 @@ Pure stdlib on a throwaway tmp dir: no GPU, no agent, no repo mutation, no netwo
     python3 kernel_workflow/scripts/test_kb.py
 """
 import importlib.util
+import io
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("kb", os.path.join(HERE, "kb.py"))
@@ -314,6 +316,7 @@ prop = {"run_id": "assert1", "date": "2026-08-18", "kernel_names": ["k"],
                    "description": "a lever on an op: +11% on the large shapes",
                    "keywords": ["tiling"], "kernels": [], "platforms": ["gfx950"],
                    "kernel_class": "dense_gemm", "regime": "decode", "lifecycle": "active",
+                   "language": "triton",
                    "source": "campaign 2026-08-18", "last_seen": "2026-08-18",
                    "lever": "x", "verify": "y"}]}
 pf = os.path.join(dd, "p.json")
@@ -338,6 +341,9 @@ for i, title in enumerate(("First wording of it", "Completely different wording"
                        "description": f"{title}: a lever on an op, +11% on the large shapes",
                        "keywords": ["tiling"], "kernels": [], "platforms": ["gfx950"],
                        "kernel_class": "dense_gemm", "regime": "decode", "lifecycle": "active",
+                       "language": "flydsl",
+                       "decision_refs": (["flydsl-half-mfma-call-forms"] if i == 0
+                                         else ["cfg_0123456789abcdef"]),
                        "source": "campaign 2026-08-19", "last_seen": "2026-08-19",
                        "lever": "x", "verify": "y"}]}
     with open(os.path.join(dd, "_inbox", f"m{i}.json"), "w") as f:
@@ -350,6 +356,9 @@ if len(files) == 1:
     meta = open(os.path.join(dd, files[0])).read()
     check("a merge does not fabricate a confirmation",
           "confirms_cited: 0" in meta and "confirms_blind: 0" in meta, meta.split("---")[1])
+    check("a merge preserves and unions decision attribution",
+          "flydsl-half-mfma-call-forms" in meta and "cfg_0123456789abcdef" in meta,
+          meta.split("---")[1])
 shutil.rmtree(dd)
 
 # A verifier that produced no number is an ATTEMPT, not a loss. Encoding "no evidence" as 0 charged
@@ -417,6 +426,71 @@ check("a backfilled card can now earn a blind confirmation",
       open(os.path.join(dd, "known.md")).read().split("---")[1])
 shutil.rmtree(dd)
 
+# LANGUAGE. Required on a new card, only validated on an old one. Until this field existed the index
+# carried no language at all, so a FlyDSL run could not tell a FlyDSL card from a Triton one, and
+# `toolchain` could not stand in: it is a whole-stack fingerprint that `drain` defaults to "unknown",
+# which is what all 133 cards carrying it say.
+def propose_card(dd, **over):
+    c = {"title": "T", "name": "t-card",
+         "key": "a plainly worded gfx950 situation with an op and a regime",
+         "type": "lever", "confidence": "★★", "effect": "+11% geomean over 4 shapes",
+         "attempts": 3, "confirms_cited": 0, "confirms_blind": 0, "losses": 0,
+         "description": "a lever on an op: +11% on the large shapes",
+         "keywords": ["tiling"], "kernels": [], "platforms": ["gfx950"],
+         "kernel_class": "dense_gemm", "regime": "decode", "lifecycle": "active",
+         "language": "flydsl", "source": "campaign 2026-08-18", "last_seen": "2026-08-18",
+         "lever": "x", "verify": "y"}
+    c.update(over)
+    pf = os.path.join(dd, "p.json")
+    with open(pf, "w") as f:
+        json.dump({"run_id": "lang", "date": "2026-08-18", "kernel_names": ["k"],
+                   "validation_status": "accepted", "box_quiet": True, "held_out": False,
+                   "citations": [], "cards": [c]}, f)
+    return run(dd, "lint", "--file", pf)
+
+
+dd = fresh()
+_, out, _ = propose_card(dd)
+check("a new card naming its language is admitted", out.strip() in ("", "{}") or "language" not in out,
+      out[:300])
+_, out, _ = propose_card(dd, language="")
+check("a new card with no language is refused", "language is required" in out, out[:300])
+_, out, _ = propose_card(dd, language="cuda")
+check("a language outside the taxonomy is refused", "not an authoring-language id" in out, out[:300])
+_, out, _ = propose_card(dd, language="aiter")
+check("a library backend is not accepted as a language", "not an authoring-language id" in out,
+      out[:300])
+_, out, _ = propose_card(
+    dd, decision_refs=["flydsl-half-mfma-call-forms", "cfg_0123456789abcdef"])
+check("source/config decision refs are admitted", "decision_ref" not in out, out[:300])
+_, out, _ = propose_card(dd, decision_refs="flydsl-half-mfma-call-forms")
+check("decision_refs must be a list", "must be a YAML list" in out, out[:300])
+_, out, _ = propose_card(dd, decision_refs=["not valid!"])
+check("a malformed decision_ref is refused", "invalid decision_ref" in out, out[:300])
+shutil.rmtree(dd)
+
+# The 135 cards that predate the field must stay lintable. Requiring it retroactively would force a
+# guess, and a guessed field is how 11 invented kernel symbols got into the corpus.
+dd = fresh()
+write(dd, "old.md", card("old"))
+_, out, _ = run(dd, "lint", "--cards")
+check("a card predating the language field still lints", json.loads(out)["cards_failing"] == 0,
+      json.dumps(json.loads(out)["failures"]))
+shutil.rmtree(dd)
+gate("a bogus language on an existing card is refused", "not an authoring-language id",
+     language="rust")
+
+# Adding the field only helps if the READ path shows it: discovery is "open INDEX.md and judge by
+# meaning", so a language recorded in frontmatter and absent from the index changes nothing.
+dd = fresh()
+write(dd, "fly.md", card("fly", language="flydsl"))
+run(dd, "index")
+with open(os.path.join(dd, "INDEX.md")) as f:
+    idx = f.read()
+check("language reaches the index line", "flydsl" in idx,
+      "\n".join(l for l in idx.splitlines() if "fly.md" in l))
+shutil.rmtree(dd)
+
 # A well-formed card must pass: a gate that rejects everything is not a gate.
 dd = fresh()
 write(dd, "c.md", card("c"))
@@ -424,6 +498,33 @@ _, out, _ = run(dd, "lint", "--cards")
 check("a well-formed card is admitted", json.loads(out)["cards_failing"] == 0,
       json.dumps(json.loads(out)["failures"]))
 shutil.rmtree(dd)
+
+# ---------------------------------------------------------------------------------------------
+# The hand-off to perf_knowledge. `drain` regenerates the run-recurrence digest for the same
+# reason it regenerates INDEX.md: a projection an operator has to remember to refresh is one
+# that will be stale, and a stale roll-up is indistinguishable from a base that learned nothing.
+# ---------------------------------------------------------------------------------------------
+check("the recurrence generator drain points at exists", os.path.exists(kb.RECURRENCE_GEN),
+      kb.RECURRENCE_GEN)
+
+# A missing generator must be a NOTE, not a failure: this tool serves trees that have no
+# perf_knowledge/ beside them, and draining cards must not depend on the curated base being there.
+_saved, kb.RECURRENCE_GEN = kb.RECURRENCE_GEN, "/nonexistent/_gen_run_recurrence.py"
+_buf = io.StringIO()
+with redirect_stdout(_buf):
+    kb.refresh_recurrence()
+kb.RECURRENCE_GEN = _saved
+check("a missing digest generator is reported, not raised", "note:" in _buf.getvalue(),
+      _buf.getvalue())
+
+# And the cards must already be on disk when it runs: the digest is derived from them, so the
+# order is write-then-project. Asserted on the source because the failure it guards against —
+# projecting the pre-drain tree — produces a digest that looks right and is one ingest behind.
+with open(os.path.join(os.path.dirname(os.path.abspath(kb.__file__)), "kb.py")) as f:
+    _src = f.read()
+_body = _src[_src.index("def cmd_drain"):]
+check("the digest is refreshed AFTER the cards and index are written",
+      _body.index("refresh_recurrence()") > _body.index('"INDEX.md"'), "")
 
 print()
 if FAILED:

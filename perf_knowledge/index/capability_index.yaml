@@ -656,7 +656,6 @@ candidates:
     regimes: [training]
     card: ../operators/mla_attention/backends/flydsl.md
     sources:
-      - Attention-Kernels/geak_trans_py2flydsl/fmha_backward/FMHA_BWD_FlyDSL_Skills.md
       - https://arxiv.org/abs/2511.08083
   - operator: mla_attention
     backend: hip
@@ -1392,7 +1391,7 @@ candidates:
     sources:
       - https://gau-nernst.github.io/amd-a2a/
       - https://github.com/ROCm/mori
-      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/moe_sorting.py
+      - ROCm/aiter@a6bb499375849eec45d68c5ccaebc8865fd422c0:aiter/ops/moe_sorting.py
   - operator: moe_dispatch_combine
     backend: mori
     gens: [gfx942, gfx950]

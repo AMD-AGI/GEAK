@@ -1,0 +1,57 @@
+schema_version: 1
+family: gemm
+
+# Registry of upstream executable evidence.  These paths are inputs to a future
+# normalized runner, not mutually-comparable timing records: each upstream
+# script currently owns a different candidate set and accounting convention.
+suites:
+  - id: fp8_a8w8_blockscale
+    pattern: scaled_quant_gemm
+    math_contract: "Y = (X * x_scale) @ (W * w_scale).T; fp32 accumulation; bf16 output; 128x128 scaling"
+    dtype: architecture_selected_fp8_e4m3_blockscale
+    correctness_source: op_tests/test_gemm_a8w8_blockscale.py
+    executable_sources:
+      - path: op_tests/test_gemm_a8w8_blockscale.py
+        languages: [ck, asm]
+        role: correctness_and_benchmark
+      - path: op_tests/op_benchmarks/triton/bench_gemm_a8w8_blockscale.py
+        languages: [triton, gluon]
+        role: benchmark
+      - path: csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_tune.py
+        languages: [ck, asm]
+        role: candidate_tuner
+    normalized_runner: benchmarks/run_fp8_a8w8_blockscale.py
+    normalized_candidates:
+      - triton
+      - triton_preshuffle
+      - gluon
+      - ck
+      - ck_preshuffle
+      - cktile
+      - cktile_preshuffle
+      - asm
+    known_gaps:
+      - "AITER flydsl_preshuffle_gemm_a8 is per-token scaled, not 128x128 block-scaled; custom/generated FlyDSL implementations are measured by kernel_workflow instead of being compared under the wrong contract."
+    required_accounting:
+      - "Generate one shared input set and oracle result for every implementation."
+      - "Separate first-call/JIT/setup cost from steady-state kernel latency."
+      - "State whether preshuffle and output allocation are inside the measured region."
+      - "Use identical warmup, repeats, correctness tolerance and target GPU."
+      - "Persist implementation/config identity, source hash and environment fingerprint."
+
+  - id: bf16_splitk_hgemm
+    pattern: gemm
+    dtype: bf16
+    correctness_source: aiter/ops/flydsl/test_flydsl_splitk_hgemm.py
+    executable_sources:
+      - path: aiter/ops/flydsl/test_flydsl_splitk_hgemm.py
+        languages: [flydsl]
+        role: correctness
+      - path: op_tests/test_gemm_a16w16.py
+        languages: [ck, asm, flydsl]
+        role: correctness_and_benchmark
+    normalized_runner: not_implemented
+    required_accounting:
+      - "Use the same B layout and transpose contract for every implementation."
+      - "Charge or amortize preshuffle consistently with the declared workload regime."
+      - "Persist split-K, tile and wave configuration as one implementation bundle."

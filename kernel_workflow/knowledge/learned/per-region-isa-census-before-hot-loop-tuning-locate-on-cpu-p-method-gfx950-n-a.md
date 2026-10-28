@@ -4,11 +4,11 @@ type: method
 confidence: ★★
 effect: the epilogue returned +6.8% and the prologue +2.75% (uniform across all three per-case shapes) inside a 1.84x stack, after six rounds of hot-loop work had returned ~1.00x; the prologue alone was 36% of static instructions, larger than the epilogue
 confirms_cited: 1
-confirms_blind: 0
+confirms_blind: 1
 losses: 0
-attempts: 1
+attempts: 2
 toolchain: unknown
-last_seen: 2026-08-12
+last_seen: 2026-09-24
 name: per-region-isa-census-before-hot-loop-tuning-locate-on-cpu-p-method-gfx950-n-a
 description: Census the ISA per region (prologue / main loop / epilogue) on CPU before tuning the hot loop: the two unexamined regions carried the wins the loop refused
 keywords: ['isa-census', 'profiling-method', 'prologue', 'epilogue', 'hot-loop', 'cpu-locate-gpu-price', 'serialisation', 'composable-kernel']

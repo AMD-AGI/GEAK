@@ -61,6 +61,39 @@ Each card also opens with the same **discovery header** (`name`, `description`, 
 `platforms`, `kernel_class`, `regime`, `confidence`), so it stays self-describing when opened directly or
 when the index is missing.
 
+### Architecture coverage — read it off `INDEX.md`, never from here
+**Which generations this folder actually covers is a generated line in `INDEX.md`** ("Platform
+coverage"), computed from every active card's `platforms:`. It is deliberately not restated here: a
+hand-written count is a second copy to maintain, and the copy that rots is the one claiming *nothing
+here fits your machine* while a card for it sits in the folder. Read the number there; this section is
+only for what the number does **not** tell you.
+
+**An arch spread is about where campaigns ran, not about what is studied.** It is a property of the
+folder as a whole, so do not read a narrow spread under one `kernel_class` as that class being less
+explored than another — every class reflects the same set of machines.
+
+**On a generation a card was not measured on, the card is a hypothesis, not a number.** Most of these
+levers are ordinary enough that they probably transfer; "probably" is the whole problem. The CDNA
+generations differ in ways that reach straight into what these cards measure — fp8 is FNUZ on gfx942
+and OCP on gfx950, gfx950 alone has FP4/MX block-scale hardware (so an A4W4 card has no gfx942 path at
+all, it falls back), and LDS capacity differs, which moves every tile-geometry and LDS-padding
+conclusion. Same rule as always: try it first, let the frozen-baseline A/B decide, just with the prior
+weakened.
+
+**A generation missing from this layer is not missing from GEAK** — and the other places hold a
+*different kind of claim*, which is the part worth keeping straight:
+
+| where | kind of claim |
+|---|---|
+| here (`kernel_workflow/.../learned/`) | measured by us — **isolated** frozen-baseline kernel A/B |
+| `e2e_workflow/knowledge/learned/` | measured by us — but **e2e** deltas, a serving-level number. Its cards carry no `platforms:`; the arch is in the filename and the `key:` line (e.g. `moe-bf16-tune-gfx942`) |
+| `perf_knowledge/operators/<op>/`, `.../backends/` | **descriptive and source-cited** — what aiter/CK/asm ship per `gens:`, hardware traits, vendor-reported figures |
+
+"AMD reports 3× on DeepSeek-V3 @ MI300X", "an e2e run gained +7.01% on gfx942" and "we measured an
+isolated 1.15x on this box" are three different statements, and only the last is what a card in *this*
+folder means. The vendored tuning skillset keeps its own ledger of the same split in
+`tuning_skillset/docs/coverage_gfx950.md`.
+
 `INDEX.md` is **generated** from those headers by `kernel_workflow/scripts/kb.py ... index`
 (grouped by `kernel_class`, ordered by confidence, plus the keyword vocabulary appendix). The generator is
 sink-agnostic — it takes the folder as an argument, so the same one serves `e2e_workflow`'s `learned/`
@@ -116,6 +149,20 @@ kernels: [<kernel symbol / entry point measured>] # e.g. _gqa_sparse_fwd_kernel,
 platforms: [<gfx>]                          # e.g. [gfx942] — the arch the evidence was measured on
 kernel_class: <kernel_class>                # e.g. dense_gemm | moe_grouped_gemm | attention_decode | method
 regime: decode | prefill | both | n/a       # the shape regime the evidence covers
+language: <authoring language>              # REQUIRED on a new card. The language the finding was
+                                            # MEASURED in: triton | flydsl | hip | ck | asm | tilelang |
+                                            # gluon | rocwmma | hipkittens | mojo | cutlass_port (ids from
+                                            # perf_knowledge/index/taxonomy.md). It joins the index line's
+                                            # scope prefix, so a run can tell at a glance whether a card
+                                            # was measured in the language it is writing. A library
+                                            # backend (aiter, hipblaslt, ...) is NOT a language: "call
+                                            # this library" is not a finding about how a kernel is
+                                            # written. Not backfilled onto cards that predate the field —
+                                            # a guessed language is worse than an absent one.
+decision_refs: [<decision-card id or cfg_…>] # OPTIONAL attribution. Exact IDs from
+                                            # perf_knowledge/corpus/gemm_decisions.md that seeded the
+                                            # landed implementation. Empty/profile-only is valid.
+                                            # This is not a selector and does not increase confidence.
 # --- classification + evidence ---
 key: <one line of plain English identifying WHAT this card is about>
                                             # The human-readable identity + dedupe/merge target. Write it
@@ -264,12 +311,48 @@ campaigns, so that "merge if the key exists" is actually implementable.
 That is how this tree was seeded: 20 kernels' worth of finished 16h campaigns distilled in one pass
 instead of 20 runs. Anything the gates refuse is reported with its reason rather than dropped.
 
+`_inbox/` is local working state and is gitignored. A proposal waiting there is a card that has not
+been merged yet, and a `*.json.drained` is one that has -- neither is the record. The card file is,
+and it carries its own `origin_kernels`.
+
 **Budget is per class, not global.** A flat total is set by whichever class was optimized most — one
 ingest put 15 cards in `moe_grouped_gemm` and 2 in `quantize_cast`, and a global cap would have had
 the prolific class evict the sparse ones wholesale, narrowing the KB toward the last campaign. Over
 cap, the lowest `confidence × freshness × earned-standing` card in THAT class is archived. Standing
 is in that product on purpose: ranking on stars and date alone let a card written this morning that
 nothing had ever tested outrank one cited and confirmed three times.
+
+## Where these cards go NEXT — the roll-up into `perf_knowledge/`
+
+A card is one run's conclusion, and the counters above only measure re-citations of the *same* card.
+That leaves the most common shape of repeated evidence unrecorded: a dozen independent runs on a
+dozen different kernels each concluding, separately, that the dispatch path was already at its floor.
+Twelve cards, no aggregate — and the aggregate is the useful part, because what a planner wants
+before spending a round is the **base rate**.
+
+`drain` therefore ends by regenerating
+[`perf_knowledge/index/run_recurrence.md`](../../../perf_knowledge/index/run_recurrence.md)
+(`perf_knowledge/index/_gen_run_recurrence.py`, CI checks it with `--check`). Per optimization axis it
+reports how many DISTINCT kernels it paid on, how many it was already closed on, and links every card
+behind both numbers — routed to the cross-operator table, to an `operators/<op>/` row, to a language,
+or to an architecture comparison. Distinct kernels rather than cards, because one campaign writes
+several cards over the same few kernels and counting cards would read that as broad measurement.
+
+Two properties are load-bearing, and both are enforced by
+`perf_knowledge/index/test_run_recurrence.py`:
+
+- **It never restates a claim.** Rows are counts and links; the sentences stay in the cards. The
+  generalization is the one thing no run measured, so a generator that paraphrased 135 cards into
+  curated prose would be inventing exactly the part nobody checked. It also makes Content rule 1
+  automatic — no card text is copied, so no absolute number can travel.
+- **Both sides, always.** 56 of the 135 cards here are anti-patterns, and on several axes the closed
+  side is the majority verdict. A digest of only the wins would sell an axis this tree has already
+  measured shut.
+
+Nothing about the card schema changes for this. Write the card; the roll-up is derived. The one thing
+worth knowing is that `keywords` is the axis vocabulary it groups on, which is the third reason to
+reuse a term from the published vocabulary before coining one: a synonym costs relevance in the index
+(above), and it splits a base rate here.
 
 ## How to UPDATE it after a run (write path) — CURATE, never blind-append
 Owner: **TechLead** (holds the global routing view; runs the `update_experience` step after Report).

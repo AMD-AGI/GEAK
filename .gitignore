@@ -5,6 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
+*.o
 
 # Distribution / packaging
 .Python
@@ -263,3 +264,10 @@ perf_knowledge/expert_skills/tuning/**/*.pyo
 # swappable-backend runtime: per-backend experiment output dirs
 # (exp_codex_knn/, exp_cursor_run/, ... — written by engine/experiment.mjs --out)
 exp_*/
+
+# kb.py's proposal inbox (kernel_workflow/knowledge/learned/_inbox/): `propose` writes one JSON per
+# run here and `drain` renames it to `*.json.drained` once the cards are merged. Both halves are
+# local working state, not source -- the merged cards and their `origin_kernels` are what gets
+# committed. Tracking the drained receipts put 438 KB of write-once log in the tree whose only
+# reader, `backfill-origins`, is a finished one-time migration that now reports `backfilled: 0`.
+kernel_workflow/knowledge/learned/_inbox/

@@ -83,7 +83,7 @@ Do this instead of the optimize-mode steps below:
    # Only candidate source is replaced for author mode; retain every UT dependency.
    rm -rf "$EVAL_DIR/workspace/kernel_src"
    mkdir -p "$EVAL_DIR/workspace/kernel_src"
-   chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" 2>/dev/null || true
+   chmod -w "$EVAL_DIR/workspace/unittest.py" "$EVAL_DIR/workspace/meta.json" "$EVAL_DIR/workspace/harness_lib.py" "$EVAL_DIR/workspace/weight_lib.py" 2>/dev/null || true
    for d in baseline_overlay baseline_ref baseline_src; do
      [ -d "$EVAL_DIR/workspace/$d" ] && chmod -R -w "$EVAL_DIR/workspace/$d" 2>/dev/null || true
    done
@@ -240,6 +240,10 @@ Return JSON:
 ```
 (`baseline_frozen`/`baseline_callable` are REQUIRED — the orchestrator aborts the run if `baseline_frozen`
 is false AND `baseline_callable` is empty, to avoid timing the candidate against `kernel_src/`.)
+Also return `"oracle_weighted": true|false`: true when the frozen oracle is itself workload-weighted —
+`meta.json` has a `workload` key, or `unittest.py` prints `GEAK_WEIGHTED_SPEEDUP` (the same test the
+benchmark engineer applies). The orchestrator then scores every candidate, the author seed included, on
+that time-weighted number from the first measurement on, instead of switching metric halfway.
 (DEEP-MODE resume only: also include `"resumed": true` and `"prior_state": {cumulative, insights, ledger,
 bottleneck_now, best_per_case}` when you seeded from `$STATE_DIR/best/`; omit both on a normal/first run.)
 
@@ -248,7 +252,9 @@ bottleneck_now, best_per_case}` when you seeded from `$STATE_DIR/best/`; omit bo
 ## PHASE=validate
 
 Inputs: `KERNEL_PATH_ORIG`, `EVAL_DIR`, `WORKSPACE` (=EVAL_DIR/workspace), `SKILL_DIR`, `GPU_ID`,
-`APPLY_TO_ORIGINAL`, and the COMMANDMENT path `EVAL_DIR/COMMANDMENT.md`, the final patch
+`APPLY_TO_ORIGINAL`, `REQUIRE_SPEEDUP` (`true` for author mode), `EXPECTED_LANGUAGE`,
+`PREVALIDATION_GATE`, and the COMMANDMENT path
+`EVAL_DIR/COMMANDMENT.md`, the final patch
 `EVAL_DIR/final_patch.diff`, the TechLead's claimed numbers, and `BASELINE_TIMING` (the per-case
 baseline latencies recorded at benchmark setup).
 
@@ -300,6 +306,13 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
    per-case latencies.
 5. Compute per-case speedup = `baseline_ms / optimized_ms` using `BASELINE_TIMING`. Compute geomean
    = `exp(mean(log(speedups)))` and arithmetic mean.
+   **An oracle that prints its own weighted PRIMARY line (`GEAK_WEIGHTED_SPEEDUP`, or per phase
+   `GEAK_WEIGHTED_SPEEDUP_<PHASE>` — the one the COMMANDMENT names) has already done this with its own
+   audited weights: `director_verified_speedup_weighted` is that printed value, the median over your fresh
+   runs.** Seam oracles weight each bucket by its own launch count (`meta.cases[].calls`), which
+   `h.serving_weighted_speedup` does not do — its analytic model puts a whole regime's calls on the
+   largest-M bucket, and on a multi-bucket prefill task that gave 1.03 against the oracle's 1.10. The
+   recipe below is for an oracle that prints no such line.
    **PRIMARY metric — recompute the self-weight with the SAME audited function the unittest uses, on YOUR
    measured latencies. Do NOT hand-roll `Σ weight_i / Σ (weight_i/speedup_i)` from `BASELINE_TIMING`'s
    static `weight`/`count` (GEMM cases carry `count:None`, and the profile `weight` is a distrusted prior
@@ -325,6 +338,11 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
    - Within 10%, or Director higher → `accepted`.
    - Director LOWER than claim by >10% → `flagged` (use Director's measured numbers as official).
    - Correctness fail / patch fails to apply → `flagged`.
+   - When `REQUIRE_SPEEDUP=true`, PRIMARY speedup ≤1.0 → `no_speedup`. Preserve the measurement, but
+     do not call the authored replacement accepted and do not apply it to the original.
+   - When `PREVALIDATION_GATE.passed=false`, preserve correctness/performance measurements for the
+     audit trail but return its `status` (`language_mismatch` or `flydsl_incompatible`) and never
+     apply the patch. `EXPECTED_LANGUAGE` names the source language the lane must preserve.
    **TIMING RECEIPT GATE — run this BEFORE the comparisons above.**
    **First check `FROZEN_ORACLE`.** The receipt comes from `oracle_freezer`'s generated `unittest.py`, and
    `oracle_freezer` runs ONLY in the bake-off dispatcher's Freeze phase. A pass-through lane
@@ -398,12 +416,23 @@ Return JSON:
   "timing_basis": "clean|host_bound|unprimed|unknown|not_applicable",
   "timing_receipt": null,
   "correctness": "pass|fail",
-  "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0}],
+  "timing_basis": "primed|host_bound|unprimed|unknown",
+  "flag_reasons": [],
+  "per_case": [{"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0,
+                "timer": "cuda_event_graph|cuda_event|wall"}],
   "applied_to_original": "true|false",
   "arbitration_note": "accept reason, or what to re-task if flagged",
   "final_patch": "<EVAL_DIR>/final_patch.diff"
 }
 ```
+`flag_reasons` names every gate that kept the status from `accepted`, one code each, so a reader does not
+have to parse `arbitration_note`: `timing_receipt_absent`, `timer_unprimed`, `host_bound`,
+`below_claim`, `correctness_fail`, `patch_apply_failed`, `prevalidation_failed`. It is `[]` when
+accepted. `per_case[].timer` is copied from the oracle when it prints how each case was timed (a seam
+oracle prints `graph gate <bucket> ... timer=<timer>`); omit it when the oracle does not say. A result
+flagged only by the timing-receipt codes whose every timed case is `cuda_event_graph` is a lower bound —
+both legs carry the same replay bubble — and the measured-outcome aggregator ranks it as such; an eager
+case carries each implementation's own host dispatch and gets no such allowance.
 
 If status is `flagged` because the result is reproducible-but-lower (not a correctness failure),
 still report the verified numbers — the script may accept the verified result as official. Only

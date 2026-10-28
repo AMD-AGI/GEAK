@@ -24,13 +24,23 @@ from the op task dir). The op's correctness contract is an **IMMUTABLE** unittes
   (plus `reference_io.pt` **if** the dir came from e2e's `kernel_extractor`; a `oracle_freezer` dir has
   none — it re-derives operands from `meta.cases[]` seeds and checks parity against `baseline_src/` live).
 - `GPU_ID`, `SKILL_DIR`, the `COMMANDMENT` path (its CORRECTNESS/BENCHMARK point at the immutable
-  unittest), and `KERNEL_KNOWLEDGE_DIR` (the AMD authoring knowledge base, may be empty).
+  unittest), `KERNEL_KNOWLEDGE_DIR` (the AMD authoring knowledge base, may be empty), and
+  `CORPUS_CATALOG` (its operator/pattern decision catalog, empty when perf knowledge is off).
+  `MEASURED_DECISION_OUTCOMES` is an optional output of
+  `corpus/_aggregate_decision_outcomes.py`; empty means no measured prior is available.
+  `MEASURED_IMPLEMENTATION_REGISTRY` is an optional merged output from
+  `corpus/benchmarks/merge_results.py`.
+  `ACTIVE_FLYDSL_VERSION` is populated by the package preflight for FlyDSL author lanes.
+- `WORKLOAD_ALIGNED`, `WORKLOAD_SPEC_PATH`, `WORKLOAD_SPEC` — when aligned, the seed's PRIMARY metric
+  must be the same time-weighted ratio-of-sums the optimize loop uses, not an unweighted geomean.
 
 ## The knowledge base is REFERENCE ONLY (read this contract first)
+When the `PERF_KNOWLEDGE` input is `off`, do not open `KERNEL_KNOWLEDGE_DIR` or use anything below
+from it; author from the op spec and canonical algorithm. This is the clean control arm.
 `KERNEL_KNOWLEDGE_DIR` is reference material that may be **stale, incomplete, or wrong**. It gives you
-*facts and examples* (API entrypoints, code skeletons, knobs, pitfalls, which backends exist) — **not
-decisions**. Decisions are YOURS; correctness/perf is decided by the **immutable unittest + benchmark**,
-never by the knowledge base. Rules (these guarantee the KB can only help, never hurt):
+facts, examples and **candidate decision cards** (conditions → what to try → alternatives → evidence
+strength) — never a verdict. Final decisions are YOURS; correctness/perf is decided by the
+**immutable unittest + benchmark**, never by the knowledge base. Rules:
 - **Baseline first, always.** Write your own clean *canonical* correct implementation first (textbook
   algorithm or the obvious library call). It is your floor — measured no matter what the KB says.
 - **KB only adds candidates / shows how.** Use it to find options you might miss and implement them
@@ -66,6 +76,57 @@ Read, as reference, before writing:
   fuller language surface, the TTGIR→Gluon transcription toolchain and pipeline re-injection live in the
   `gluon_authoring` expert skill and are only injected when `use_expert_skills` is on. That skill is
   mechanics only — it carries no search strategy, so it does not compete with your own loop.
+- **Conditioned corpus decisions:** read `KERNEL_KNOWLEDGE_DIR/corpus/catalog.yaml`, select the family
+  whose `id`/`patterns` matches the op, then read its `decision_document` and `performance_axes`.
+  The latter aligns backend-specific knobs onto shared questions such as workgroup tile, split-K,
+  pipeline and operand layout, and separately publishes hard constraints, search surfaces, runtime
+  contracts, required comparison context and cross-axis dependencies. Apply constraints before
+  generating candidates and carry coupled decisions together. Use canonical components to transfer
+  intent, then use `source_fields` and the target-language docs to spell the implementation. Never
+  turn a CK template name, Triton compiler op or ASM object name into an exact FlyDSL instruction
+  unless direct evidence resolves it.
+  When enough context is
+  known, run that corpus's `_select_candidates.py` for the target language, gfx, dtype, regime and
+  shape, including `ACTIVE_FLYDSL_VERSION` as `--flydsl-version`; for a multi-case task pass
+  `TASK_DIR/meta.json` as `--workload` so each case gets its own card set. If
+  `MEASURED_DECISION_OUTCOMES` is non-empty, pass it as `--outcomes`; only compatible
+  single-ref results affect ordering, and even those are planner attribution rather than causal proof.
+  Consume `constraint` cards first and use eligible `performance_candidate` cards only as
+  candidates. A deferred card is missing required context, not a recommendation. For GEMM this
+  resolves to `KERNEL_KNOWLEDGE_DIR/corpus/gemm_decisions.md`.
+  Match the card's conditions, add its stated action as a candidate, retain its alternatives, and
+  respect the evidence level: `source_observed` is an implementation precedent only and
+  `shipped_config` is a seed selected in AITER's source tree without a benchmark archive.
+  If `MEASURED_IMPLEMENTATION_REGISTRY` is non-empty, query
+  `corpus/benchmarks/select_implementations.py` with the exact suite/gfx/dtype/shape and active FlyDSL
+  version, plus the frozen baseline name and current AITER commit/Torch/HIP versions (or one exact
+  context fingerprint); for a multi-case task pass `--task-dir TASK_DIR`, which derives the suite,
+  dtype, baseline and every timed case from the task. An incomplete context must return no prior. Use each implementation's
+  `performance_decisions` vector to compare shared axes while retaining backend spelling and
+  completeness. Treat the returned Top-K whole implementations as seed bundles; do not distribute their
+  total speedup over individual APIs, and revalidate every adopted bundle against this task's oracle.
+  The page follows the order you write the kernel in (steps 1-10); each card sits under the step
+  of the question it answers and is linked from the other steps it bears on, so a choice such as
+  split-K in step 3 also shows up where its combine and host state have to be written. Pass
+  `--trait` for what your design does (for example `lds_staging`) so the cards it unlocks are not
+  left deferred. A card's *same question in other
+  implementations* block shows how Triton/Gluon/CK/ASM solve it, which is intent to transfer, not
+  spelling to copy; its evidence cites `file:line-end` where the precedent spans lines — open the
+  whole range. Its FlyDSL tables turn AITER's tuned databases into explicit **seed candidate /
+  vary next** rows per `(gfx, CUs, database, family, dtype, M bucket)` and say which backend AITER's
+  tuner selected per bucket, so you do not have to infer advice from occurrence counts. The Triton
+  seeds are on `corpus/gemm_triton_seeds.md` — Triton knob names, not FlyDSL ones. Measured guidance
+  remains behind the learned/expert-skill switches.
+- **Trace a GEMM card to source:** `KERNEL_KNOWLEDGE_DIR/corpus/gemm_source_evidence.md` — the same
+  operator in FlyDSL, Triton, Gluon, CK, HIP and asm with reproducible `file:line`. Open it when you
+  need the exact MFMA/LDS/layout/scheduling precedent behind a card. It is evidence, not advice; do
+  not turn a frequent source value into a preference.
+- **Porting a recipe across FlyDSL versions:** `KERNEL_KNOWLEDGE_DIR/languages/flydsl/version_map.md`
+  — generated: which symbol moved where, what is gone, and what replaces it across
+  `0.2.0 / 0.2.2 / 0.2.4 / 0.3.0`. Use it when a skeleton or skill was written against another
+  version: the logic ports, the call form has to be looked up rather than guessed, and any number
+  attached to it has to be re-measured. Do not infer an API from a version you are not running —
+  `buffer_ops` and `vector` were removed outright in 0.3.0.
 - **Op + per-backend authoring card:** `KERNEL_KNOWLEDGE_DIR/operators/<op>/overview.md` plus
   `operators/<op>/backends/<lang>.md` (the card for your exact language — code skeleton, knobs, pitfalls).
   Op short→dir: gemm→`dense_gemm`, attention_prefill→`attention_prefill_fmha`,
@@ -133,13 +194,24 @@ Read, as reference, before writing:
 5. **Record the numbers**: once correct, run the unittest's timing once. It prints TWO things: the
    FROZEN-ONLINE `baseline_ms` (the real production kernel reached via `baseline_overlay/` —
    this is the denominator, unchanged by your work) and your seed's own `optimized_ms`/`speedup` vs it.
-   Report your seed's speedup as `seed_speedup` — it is typically **< 1×** (a naive from-scratch impl is
+   Report your seed's PRIMARY speedup as `seed_speedup`, set `seed_metric_kind` to `time_weighted`
+   when `WORKLOAD_ALIGNED=true` (otherwise `geomean`), and preserve the parsed rows as `seed_per_case`
+   (`name`, frozen `baseline_ms`, seed `optimized_ms`, `speedup`, and `weight` when present). It is
+   typically **< 1×** (a naive from-scratch impl is
    slower than the tuned production kernel), and that is FINE: the optimize loop's job is to raise it above
    1×. Do NOT overwrite or re-point `baseline_ms` at your seed; the win is always vs the online kernel.
+   For a workload-aligned seed compute
+   `Σ weight_i / Σ (weight_i / speedup_i)` from the same per-case weights; do not substitute the
+   ordinary geomean. When the oracle is itself weighted (it prints `GEAK_WEIGHTED_SPEEDUP`), that
+   printed value is the seed's time-weighted speedup, and each case's `weight` is the oracle's own
+   launch count times the frozen `baseline_ms`.
 6. **Commit** the seed: `cd $WORKSPACE && git -c user.email=team@workflow -c user.name=team add -A
    && git -c user.email=team@workflow -c user.name=team commit -q -m "author seed (<lang>)"`.
    This makes HEAD the optimize loop's CODE starting point (what it diffs its edits against), while the
    SPEEDUP the loop optimizes remains `baseline_ms(online) / current_ms` — never seed-vs-optimized.
+7. **Attribute knowledge used:** if a card/config from `gemm_decisions.md` materially shaped the seed,
+   return its exact card `id` or `cfg_…` in `decision_refs`. Reading the page without acting on a row
+   earns no citation; a canonical/profile-only seed returns `[]`.
 
 ## Outputs
 Return JSON:
@@ -149,13 +221,21 @@ Return JSON:
   "target_language": "triton|flydsl|hip|ck",
   "correctness": "pass|fail",
   "baseline_ms": 0.0,
+  "seed_speedup": 0.0,
+  "seed_metric_kind": "geomean|time_weighted",
+  "seed_per_case": [
+    {"name": "...", "baseline_ms": 0.0, "optimized_ms": 0.0, "speedup": 0.0}
+  ],
   "kernel_src_path": "<WORKSPACE>/kernel_src/<file>",
   "entry_point": "<module:attr the unittest calls>",
+  "decision_refs": ["<exact card id or cfg_...; [] if none>"],
   "build": false,
   "notes": "algorithm chosen, shape-regime handled, anything the optimize loop should know"
 }
 ```
 If you cannot produce a correct implementation (op too complex for a from-scratch first cut, missing
 toolchain for hip/ck, etc.), return `authored:false`, `correctness:"fail"`, NO commit, and a clear
-`notes` reason — the system will drop this language and not enter the optimize loop for it. That is a
+`notes` reason. Still return `seed_speedup:0`, the expected `seed_metric_kind`, and
+`seed_per_case:[]` so the structured contract remains complete. The system will drop this language
+and not enter the optimize loop for it. That is a
 valid, useful outcome (it tells the e2e layer this language is not viable for this op on this image).

@@ -52,6 +52,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The corpus lives in the knowledge repository; this repo holds only what consumes it. The
+      # seam tests SKIP when KERNEL_KNOWLEDGE_DIR is unset rather than failing, so without this
+      # checkout the job stays green while the contract between the two repos goes unverified.
+      #
+      # Unpinned on purpose: a pinned ref would check this repo against a corpus no lane uses,
+      # and noticing drift is the contract's whole job. Pin only to park a known-bad corpus
+      # while it is being fixed, and say so here when you do.
+      - uses: actions/checkout@v4
+        with:
+          repository: yueliu14/KernelWiki
+          path: .knowledge
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -81,9 +92,17 @@ jobs:
       # never named is a test file that never runs — the same trap the contract checks
       # below were added to close. They also measure the modules that were dragging the
       # coverage gate down, which is what a suite nothing runs looks like from the outside.
+      # `pytest`, NOT `python -m pytest`: `-m` prepends cwd to sys.path, and this repo tracks a
+      # root-level `unittest.py` (the task-harness entry-point convention), which shadows stdlib
+      # `unittest` — anything importing `unittest.mock` then dies with "'unittest' is not a
+      # package". Reproduced on box 2026-10-13. This job is green today only because its pytest
+      # build happens not to take that import path; not a property to rely on.
       - name: unit tests (no GPU)
+        env:
+          # The corpus checked out above; same variable kernel_lane.js resolves.
+          KERNEL_KNOWLEDGE_DIR: ${{ github.workspace }}/.knowledge
         run: |
-          python -m pytest -q --cov --cov-report=term --cov-fail-under=0 \
+          pytest -q --cov --cov-report=term --cov-fail-under=0 \
             interface/test_run_e2e_recovery.py \
             interface/test_e2e_checkpoint.py \
             interface/test_run_e2e_tuning_result.py \
@@ -160,7 +179,34 @@ jobs:
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             e2e_workflow/scripts/tests/test_profile_env_shim.py \
             scripts/tests/test_gpu_identity.py \
-            geak/test_bootstrap.py
+            e2e_workflow/scripts/tests/test_bench_warm_server_lifecycle.py \
+            kb/tests/test_curate.py \
+            kb/tests/test_plane.py \
+            perf_knowledge/expert_skills/_contribute/test_validation_env.py \
+            perf_knowledge/languages/flydsl/test_version_map.py \
+            perf_knowledge/index/test_run_recurrence.py \
+            perf_knowledge/corpus/test_candidate_selection.py \
+            perf_knowledge/corpus/test_decision_outcomes.py \
+            perf_knowledge/corpus/test_workflow_products.py \
+            kernel_workflow/scripts/test_detect_language.py \
+            kernel_workflow/scripts/test_capture_validation_env.py \
+            geak/test_bootstrap.py \
+            kernel_workflow/scripts/test_check_flydsl_compat.py \
+            kernel_workflow/scripts/test_upstream_knobs.py \
+            kb/tests/test_store_env.py \
+            perf_knowledge/corpus/test_benchmark_adapter.py \
+            perf_knowledge/corpus/test_benchmark_registry.py \
+            perf_knowledge/corpus/test_implementation_selection.py \
+            ci/test_ci_test_inventory.py \
+            ci/test_standalone_contracts.py
+
+      # Advisory, like the ruff step: three skills declare `validated` pointing at no measurement
+      # record, and a record cannot be invented for a run nobody archived. Blocking today would
+      # only teach people to delete the check. The records that DO exist are gated by
+      # test_validation_env.py above; this keeps the remaining gap visible in the log.
+      - name: validated skills state their measurement environment (advisory)
+        continue-on-error: true
+        run: python3 perf_knowledge/expert_skills/_contribute/check_validation_env.py
 
       - name: expert skill static validation
         run: |
@@ -186,11 +232,26 @@ jobs:
           bash kernel_workflow/scripts/test_profile_fallback.sh
           bash kernel_workflow/scripts/test_detect_gpu_arch.sh
           bash kernel_workflow/scripts/test_gpu_lock_arch.sh
+          # The read half of the knowledge loop, checked nowhere else: an artifact can pass every
+          # --check above while no role prompt names it, which is how run_recurrence, the corpus
+          # and version_map ended up gated and unreachable at once.
+          python3 kernel_workflow/scripts/test_knowledge_reachable.py
+          # The two structural promises perf_knowledge/README.md makes about itself, advertised in
+          # its banner and checked by nothing — the first run found 25 files with no `## Sources`.
+          python3 perf_knowledge/test_docs_contract.py
           python3 e2e_workflow/scripts/tests/test_e2e_lane_defaults.py
+          python3 e2e_workflow/scripts/tests/test_kb_identity_flags.py
           # The kernel KB must lint clean and its generated index must match the cards. `lint --cards`
           # now exits non-zero on failure, so this is a gate rather than a printout.
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned lint --cards
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned index --check
+          # Same rule one level up: the roll-up of those cards is generated, so a commit adding a
+          # card without the regenerated digest leaves base and cards disagreeing.
+          python3 perf_knowledge/index/_gen_run_recurrence.py --check
+          # The corpus's own render gates are deliberately NOT here. They assert a rendered page
+          # still matches its evidence — a claim about the knowledge repo's contents, so gating it
+          # here would turn a GEAK PR red for an edit it did not make. They moved with the
+          # artifact, to KernelWiki's ci-corpus-checks. What stays is the seam, checked above.
 
       # Renders the per-file table + total into the run's Job Summary, which is
       # where the coverage percentage is read from the GitHub web UI. Runs even
