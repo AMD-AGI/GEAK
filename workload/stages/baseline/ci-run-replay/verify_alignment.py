@@ -155,6 +155,11 @@ def main():
     # --- 3/4/5. the client's own record of id, seed and cache-bust
     docs = run_documents(a.run_dir)
     bid = seed = bust = None
+    # The id is the client's: read it from AIPerf's own export first. A harness may record
+    # a benchmark_id of its own (e.g. its run tag) that names no KV keyspace.
+    for path, d in docs:
+        if os.path.basename(path).startswith("profile_export"):
+            bid = bid or find_key(d, BID_KEYS)
     for _path, d in docs:
         bid = bid or find_key(d, BID_KEYS)
         seed = seed if seed is not None else find_key(d, SEED_KEYS)
@@ -171,6 +176,15 @@ def main():
         bid = want_bid
     if bid is None:
         record("benchmark_id", None, "no benchmark_id in any run document")
+    elif want_bid == "auto":
+        # The client drew its own id (agentx-harness >= 1.0.12 has no way to set one), so
+        # what has to be proven is that the keyspace it drew is new, not that it matches.
+        spent = [u.get("benchmark_id") for u in (rj(a.ledger) or {}).get("used") or []
+                 if isinstance(u, dict)] if a.ledger else []
+        record("benchmark_id", str(bid) not in spent,
+               "client drew %r; %s" % (bid, "already in the ledger" if str(bid) in spent
+                                       else "not in the ledger, so a cold keyspace"))
+        want_bid = str(bid)
     else:
         record("benchmark_id", str(bid) == want_bid,
                "run recorded %r, pinned %r" % (bid, want_bid))

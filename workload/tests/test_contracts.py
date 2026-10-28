@@ -194,6 +194,31 @@ def test_a_reissued_benchmark_id_is_refused(tmp_path):
     assert problems == []
 
 
+@pytest.mark.parametrize("spent,ok", [([], True), (["drawn_1"], False)])
+def test_an_auto_benchmark_id_must_be_a_new_one(tmp_path, spent, ok):
+    """agentx-harness 1.0.12 draws its own id. Under `auto` the proof is that the drawn id
+    is not in the ledger, and it is retired there like a pinned one."""
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"used": [{"benchmark_id": b} for b in spent]}))
+    run = tmp_path / "run"
+    (run / "aiperf_artifacts").mkdir(parents=True)
+    # The harness's own record names its run tag; only AIPerf's export holds the drawn id.
+    (run / "run_identity.json").write_text(json.dumps({"benchmark_id": "run_tag_01"}))
+    (run / "aiperf_artifacts" / "profile_export_aiperf.json").write_text(
+        json.dumps({"benchmark_id": "drawn_1"}))
+    params = tmp_path / "params.json"
+    params.write_text(json.dumps(_params(pins={"benchmark_id": "auto"})))
+    align = tmp_path / "alignment.json"
+    align.write_text("{}")
+    subprocess.run([sys.executable, os.path.join(REPLAY, "verify_alignment.py"),
+                    "--params", str(params), "--alignment", str(align), "--out", str(tmp_path),
+                    "--run-dir", str(run), "--ledger", str(ledger)], capture_output=True)
+    checks = json.loads((tmp_path / "alignment_verified.json").read_text())["checks"]
+    assert [c["status"] for c in checks if c["check"] == "benchmark_id"] == \
+        ["ok" if ok else "FAILED"]
+    assert json.loads(ledger.read_text())["used"][-1]["benchmark_id"] == "drawn_1"
+
+
 def test_a_different_cache_bust_target_is_refused():
     assert any("first_turn_prefix" in x for x in
                _blockers(_params(pins={"cache_bust": "whole_prompt"})))

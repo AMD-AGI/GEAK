@@ -182,7 +182,7 @@ def check_pins(p, problems):
 def check_benchmark_id(pins, ledger_path, problems):
     """An id is spent the moment it is used: its cache-bust marker has warmed a keyspace."""
     bid = str(pins.get("benchmark_id") or "")
-    if not bid:
+    if not bid or bid == "auto":
         return []
     used = []
     if ledger_path and os.path.exists(ledger_path):
