@@ -49,6 +49,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -558,6 +559,19 @@ class TestMapArgs(_RunE2ECase):
         self.assertTrue(prompt.startswith("## PROCESS SAFETY"), prompt[:80])
         for banned in ("pkill -f", "killall", "kill -- -PGID"):
             self.assertIn(banned, prompt)
+
+    def test_role_agent_wait_rule_never_starts_a_command_with_a_long_sleep(self):
+        """With background tasks on, Claude Code 2.1.310+ refuses a Bash call that
+        starts with `sleep N` (N >= 25). A role agent that copies such an example is
+        refused, arms a Monitor, and returns before its leg has finished."""
+        src = rx.E2E_SCRIPT.read_text(encoding="utf-8")
+        start = src.index("const PROCESS_SAFETY = `")
+        safety = src[start:src.index("\n`;", start)]
+        examples = re.findall(r"\\`(.*?)\\`", safety) + re.findall(r"^ {4}(\S.*)$", safety, re.MULTILINE)
+        long_leading = [cmd for cmd in examples
+                        if (m := re.match(r"sleep\s+(\d+)", cmd.strip())) and int(m.group(1)) >= 25]
+        self.assertEqual(long_leading, [])
+        self.assertRegex(safety, re.compile(r"^ {4}timeout \d+ bash -c 'until ", re.MULTILINE))
 
 
 class TestProtectedPgids(_RunE2ECase):
@@ -2022,6 +2036,7 @@ class TestInvokeViaSdk(_RunE2ECase):
         pipeline (rather than the agent 'backgrounding' it) under root."""
         self.patch_rx("CLAUDE_EFFORT", "high")
         self.patch_rx("CLAUDE_BIN", "/opt/claude-2.1.181/claude")
+        os.environ.pop(rx.BACKGROUND_TASKS_ENV, None)
         _anyio, sdk = self._install([ResultMessage(result="done")])
         real_geteuid = os.geteuid
         os.geteuid = lambda: 0
@@ -2036,7 +2051,7 @@ class TestInvokeViaSdk(_RunE2ECase):
         self.assertEqual(kwargs["settings"], rx.WORKFLOW_SETTINGS)
         self.assertEqual(kwargs["cwd"], str(rx.E2E_DIR))
         self.assertEqual(kwargs["extra_args"], {"effort": "high"})
-        self.assertEqual(kwargs["env"], {"IS_SANDBOX": "1"})
+        self.assertEqual(kwargs["env"], {"IS_SANDBOX": "1", rx.BACKGROUND_TASKS_ENV: "1"})
         self.assertEqual(kwargs["cli_path"], "/opt/claude-2.1.181/claude")
 
     def test_public_build_effort_is_not_forwarded(self):
