@@ -1,0 +1,366 @@
+diff --git a/source/decode_sparse.py b/source/decode_sparse.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..84fd0e22015a77b8ad83c0e093b8dba631dfa2e0
+--- /dev/null
++++ b/source/decode_sparse.py
+@@ -0,0 +1,89 @@
++# SPDX-License-Identifier: MIT
++"""Decode-only BM16 expert GEMMs, using native packed weight/scale interfaces."""
++
++from dataclasses import replace
++from functools import partial
++
++from aiter import dtypes
++from aiter.fused_moe import (
++    ActivationType,
++    QuantType,
++    _fused_moe_impl,
++    _flydsl_stage1_wrapper,
++)
++from aiter.ops.opus.moe_stage2_a8w4 import (
++    opus_a8w4_stage2_wrapper,
++    stage2_launch_config,
++)
++
++
++_STAGE1 = "flydsl_moe1_afp8_wfp4_bf16_t16x128x256_w3_gui_fp8"
++_STAGE2 = "opus_moe2_afp8_wfp4_atomic_t16x128x256_sbm16_cache_b3_ws2"
++_STAGE2_ID = 2008
++
++# Unrecognized public options retain upstream dispatch and validation.
++_OPTIONS = frozenset((
++    "activation", "quant_type", "doweight_stage1", "gate_mode",
++    "hidden_pad", "intermediate_pad", "swiglu_limit", "w1_scale", "w2_scale",
++    "a1_scale", "a2_scale", "block_size_M",
++))
++
++
++def supports_decode(hidden_states, w1, w2, topk_weight, topk_ids, options):
++    if not options.keys() <= _OPTIONS:
++        return False
++    return (
++        tuple(hidden_states.shape) == (64, 7168)
++        and tuple(w1.shape) == (384, 768, 3584)
++        and tuple(w2.shape) == (384, 7168, 192)
++        and tuple(topk_ids.shape) == (64, 6)
++        and tuple(topk_weight.shape) == (64, 6)
++        and hidden_states.dtype == dtypes.bf16
++        and w1.dtype == dtypes.fp4x2 and w2.dtype == dtypes.fp4x2
++        and getattr(w1, "is_shuffled", False) is True
++        and getattr(w2, "is_shuffled", False) is True
++        and getattr(w1, "gate_up_interleave", None) in (None, True)
++        and getattr(w2, "gate_up_interleave", None) in (None, False)
++        and options.get("activation") == ActivationType.Silu
++        and options.get("quant_type") == QuantType.per_1x32
++        and options.get("gate_mode") == "interleave"
++        and options.get("swiglu_limit") == 10.0
++        and not options.get("doweight_stage1", False)
++        and options.get("hidden_pad", 0) == 0
++        and options.get("intermediate_pad", 0) == 0
++        and options.get("a1_scale") is None
++        and options.get("a2_scale") is None
++        and options.get("block_size_M") in (None, -1)
++        and options.get("w1_scale") is not None
++        and options.get("w2_scale") is not None
++    )
++
++
++def decode_metadata(metadata):
++    """Return private metadata; never modify a cached upstream partial."""
++    stage1_kw = dict(metadata.stage1.keywords)
++    stage1_kw["kernelName"] = _STAGE1
++    stage2_kw = dict(metadata.stage2.keywords)
++    stage2_kw.update(kernelName=_STAGE2, launch=stage2_launch_config(_STAGE2_ID))
++    # Sorting and both GEMMs agree on BM16. Native A1 and fused A2 quantizers
++    # retain the regular 32-row packed scale layout. Opus selects the proper
++    # 16-row half and handles all 12 logical I/32 groups in 16-column storage.
++    return replace(
++        metadata,
++        block_m=16,
++        stage1=partial(_flydsl_stage1_wrapper, *metadata.stage1.args, **stage1_kw),
++        stage2=partial(opus_a8w4_stage2_wrapper, *metadata.stage2.args, **stage2_kw),
++        fuse_quant="fp8",
++    )
++
++
++def fused_decode(hidden_states, w1, w2, topk_weight, topk_ids, **options):
++    call_options = dict(options)
++    for key in ("activation", "quant_type"):
++        value = call_options[key]
++        call_options[key] = getattr(value, "value", value)
++    return _fused_moe_impl(
++        hidden_states, w1, w2, topk_weight, topk_ids,
++        _metadata_transform=decode_metadata, **call_options
++    )
++
+diff --git a/source/kernel.py b/source/kernel.py
+index 605726b8771fc8ad9b83363a09256b92b14414d3..3ec5abd91eb21c277552fb54dd744cef9cf1d72b 100644
+--- a/source/kernel.py
++++ b/source/kernel.py
+@@ -9,4 +9,17 @@ complete operation. The protected runner owns inputs, oracle and timing.
+ def fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kwargs):
+     from aiter.fused_moe import fused_moe as upstream_fused_moe
+ 
++    if tuple(hidden_states.shape) == (64, 7168):
++        from source.decode_sparse import supports_decode, fused_decode
++
++        if supports_decode(hidden_states, w1, w2, topk_weight, topk_ids, kwargs):
++            from source.moe_prepare import try_prepared_moe
++
++            result = try_prepared_moe(
++                hidden_states, w1, w2, topk_weight, topk_ids, kwargs
++            )
++            if result is not None:
++                return result
++            return fused_decode(hidden_states, w1, w2, topk_weight, topk_ids, **kwargs)
++
+     return upstream_fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kwargs)
+diff --git a/source/moe_prepare.py b/source/moe_prepare.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b046ca10229b4055d24b9eff3379352a3b3a5c8
+--- /dev/null
++++ b/source/moe_prepare.py
+@@ -0,0 +1,243 @@
++# SPDX-License-Identifier: MIT
++"""Per-invocation A1 preparation for the native a8w4 MoE consumers.
++
++Routing remains native.  A1 is quantized once per token, then its E8M0 bytes
++are scattered directly into the native sorted/swizzled scale layout.  No tensor data
++or routing metadata is retained between calls.
++"""
++
++import importlib
++
++import torch
++
++from aiter import dtypes
++import triton
++import triton.language as tl
++
++fm = importlib.import_module("aiter.fused_moe")
++from source.decode_sparse import decode_metadata, supports_decode
++
++
++def prepare_a1(hidden_states, topk_ids, topk_weight, *, num_experts,
++               block_m, output_dtype, accumulate=True):
++    """Return native routing tuple followed by FP8 A1 and swizzled E8M0.
++
++    block_m must equal both GEMM consumers' routing tile.  Native sorting
++    emits packed int32 token/slot IDs, float32 weights, int32 expert-block
++    IDs, valid padded-row/live-token counts and sentinels. It also clears the
++    output buffer when accumulate=True.  FP8 A1 has shape [M,H]; scale has
++    shape [pad32(sorted_capacity),pad8(H/32)] in mx_scale_shuffle_idx order.
++    """
++    routing, a1, scale = sort_and_quantize_a1(
++        hidden_states, topk_ids, topk_weight, num_experts=num_experts,
++        block_m=block_m, accumulate=accumulate,
++    )
++    return (*routing, a1, scale)
++
++
++
++def try_prepared_moe(hidden_states, w1, w2, topk_weight, topk_ids, kwargs):
++    # Restrict the new preparation path to the public family it implements.
++    # Other signatures retain the complete upstream dispatch and semantics.
++    if not supports_decode(hidden_states, w1, w2, topk_weight, topk_ids, kwargs):
++        return None
++    M, H = hidden_states.shape
++    E, _, I = fm.get_inter_dim(w1.shape, w2.shape)
++    topk = topk_ids.shape[1]
++    activation, quant_type = fm.ActivationType.Silu, fm.QuantType.per_1x32
++    gate_mode = fm.GateMode.INTERLEAVE
++    limit = kwargs.get("swiglu_limit")
++    beta, linear_beta, _ = fm._normalize_mxfp4_activation_params(
++        activation, None, None, limit,
++    )
++    metadata = fm.get_2stage_cfgs(
++        fm.get_padded_M(M), H, I, E, topk, hidden_states.dtype,
++        dtypes.fp8, w1.dtype, quant_type, True, activation, False,
++        0, 0, True, gate_mode,
++        situ_beta=beta, situ_linear_beta=linear_beta, swiglu_limit=limit,
++        opus_weights_shuffled=True,
++        gate_up_interleave=getattr(w1, "gate_up_interleave", None),
++        input_dtype=hidden_states.dtype,
++    )
++    if (metadata.full_impl is not None or metadata.run_1stage or metadata.flat
++            or metadata.output_aux or int(metadata.block_m) != 32):
++        return None
++    # Match native routing and both GEMMs at BM16. A1/A2 scale bytes retain
++    # their global 32-row packing; each consumer selects its 16-row half.
++    metadata = decode_metadata(metadata)
++    block_m = int(metadata.block_m)
++    accumulate = not fm._stage2_runtime_uses_route_reduce(metadata.stage2, M, H)
++    ids, weights, experts, valid, out, a1, scale = prepare_a1(
++        hidden_states, topk_ids, topk_weight, num_experts=E,
++        block_m=block_m, output_dtype=hidden_states.dtype,
++        accumulate=accumulate,
++    )
++    return fm.fused_moe_2stages(
++        hidden_states, w1, w2, topk, ids, weights, experts, valid, out,
++        True, block_m, activation=activation, quant_type=quant_type,
++        doweight_stage1=False, q_dtype_a=dtypes.fp8, q_dtype_w=w1.dtype,
++        w1_scale=kwargs.get("w1_scale"), w2_scale=kwargs.get("w2_scale"),
++        topk_ids=topk_ids, topk_weights=topk_weight, swiglu_limit=limit,
++        gate_mode=gate_mode, _metadata_transform=lambda _: metadata,
++        routing_num_experts=E, prequantized_a1=a1, prequantized_a1_scale=scale,
++    )
++
++
++@triton.jit
++def _quant_a1_scatter_scales(
++    X,
++    Reverse,
++    Quant,
++    ScaleBytes,
++    LocalTokens,
++    N: tl.constexpr,
++    TOPK: tl.constexpr,
++    SCALE_N_PAD: tl.constexpr,
++    HAS_LOCAL_TOKENS: tl.constexpr,
++    GROUPS: tl.constexpr,
++):
++    token = tl.program_id(0)
++    group = tl.program_id(1) * GROUPS + tl.arange(0, GROUPS)
++    col = group[:, None] * 32 + tl.arange(0, 32)[None, :]
++    live_token = True
++    if HAS_LOCAL_TOKENS:
++        live_token = token < tl.load(LocalTokens)
++    valid = (col < N) & live_token
++    x = tl.load(X + token * N + col, mask=valid, other=0).to(tl.float32)
++    amax = tl.maximum(tl.max(tl.abs(x), axis=1), 1.0e-10)
++
++    # Mirrors csrc/include/mx_quant_utils.h::fp_f32_to_e8m0_scale
++    # <RoundUp, FP8_E4M3>. Keep multiply rather than approximate log2.
++    raw = (amax * (1.0 / 448.0)).to(tl.uint32, bitcast=True)
++    exponent = (raw >> 23) & 255
++    exponent += ((exponent < 255) & ((raw & 0x7FFFFF) != 0)).to(tl.uint32)
++    scale = (exponent << 23).to(tl.float32, bitcast=True)
++    q = x / scale[:, None]
++    q = tl.minimum(tl.maximum(q, -448.0), 448.0)
++    # Quant is torch.float8_e4m3fn on gfx950; this selects OCP e4m3nv RTNE.
++    tl.store(Quant + token * N + col, q.to(tl.float8e4nv), mask=valid)
++
++    for slot in tl.static_range(TOPK):
++        row = tl.load(Reverse + token * TOPK + slot)
++        offset = (
++            (row // 32 * SCALE_N_PAD) * 32
++            + (group // 8) * 256
++            + (group % 4) * 64
++            + (row % 16) * 4
++            + ((group % 8) // 4) * 2
++            + ((row % 32) // 16)
++        )
++        tl.store(
++            ScaleBytes + offset,
++            exponent.to(tl.uint8),
++            mask=(row >= 0) & (group < N // 32) & live_token,
++        )
++
++
++def sort_and_quantize_a1(
++    hidden_states,
++    topk_ids,
++    topk_weights,
++    *,
++    num_experts,
++    block_m,
++    accumulate,
++    num_local_tokens=None,
++    output=None,
++    groups_per_block=32,
++):
++    """Return ((ids, weights, experts, counts, output), fp8_a1, scale).
++
++    Uses the public native Opus sort, dispatch_policy=0, no expert mask. This is
++    the enrolled EP1 case; an integrating caller should fall back for unsupported
++    public variants. `block_m` must be the selected GEMM sort tile; integrated
++    decode uses 16, while the scale storage keeps native 32-row packing.
++
++    ids: int32 [capacity], low 24 bits token, high 8 bits top-k slot. Within
++      each expert, padding is packed (token=M, slot=topk) and weight=0. Contents
++      at/above counts[0] are unused. Native sorting keeps all current routes.
++    experts: int32 [capacity // block_m], one expert ID per padded sort tile;
++      only indices below counts[0] // block_m are valid.
++    counts: int32 [2], [total padded sorted rows, live token count].
++    output: BF16 [M,N], zeroed inside native sort when accumulate=True. For
++      non-atomic route-output stage2, use the native empty [0,0] placeholder.
++    fp8_a1: OCP FP8 [M,N], per-token row-major activation values.
++    scale: E8M0 [pad32(capacity), pad8(N//32)], physically the native MX scale
++      swizzle, indexed by sorted row. Padded/non-route scale bytes are unused
++      and unwritten, matching the native fused quantizer's live-row behavior.
++
++    The inverse permutation is per-invocation int32 [M,topk], with -1 for
++    absent/masked routes. It is generated by the same native sort call, then
++    consumed by this invocation's quantizer. No data-dependent caching exists.
++    """
++    import aiter
++    from aiter import dtypes
++
++    m, n = hidden_states.shape
++    topk = topk_ids.shape[1]
++    assert hidden_states.dtype == torch.bfloat16 and hidden_states.is_contiguous()
++    assert topk_ids.is_contiguous() and topk_weights.is_contiguous()
++    assert n % 32 == 0 and (block_m == 16 or block_m % 32 == 0)
++    assert groups_per_block > 0 and groups_per_block & (groups_per_block - 1) == 0
++
++    # Same shape-only conservative bound as _moe_sorting_impl; no observed
++    # histogram, active-expert count, or input-data capacity specialization.
++    capacity = triton.cdiv(m * topk + num_experts * block_m - topk, block_m) * block_m
++    device = hidden_states.device
++    sorted_ids = torch.empty(capacity, dtype=torch.int32, device=device)
++    sorted_weights = torch.empty(capacity, dtype=torch.float32, device=device)
++    sorted_experts = torch.empty(capacity // block_m, dtype=torch.int32, device=device)
++    counts = torch.empty(2, dtype=torch.int32, device=device)
++    reverse = torch.empty((m, topk), dtype=torch.int32, device=device)
++    if accumulate:
++        moe_buf = output if output is not None else torch.empty_like(hidden_states)
++    else:
++        moe_buf = torch.empty((0, 0), dtype=hidden_states.dtype, device=device)
++
++    workspace_size = aiter.moe_sorting_opus_get_workspace_size(
++        m, num_experts, topk, 0, topk_ids.get_device()
++    )
++    workspace = (
++        torch.empty(workspace_size, dtype=torch.uint8, device=device)
++        if workspace_size > 0 else None
++    )
++    aiter.moe_sorting_opus_fwd(
++        topk_ids,
++        topk_weights,
++        sorted_ids,
++        sorted_weights,
++        sorted_experts,
++        counts,
++        moe_buf,
++        num_experts,
++        block_m,
++        None,                # local_expert_mask
++        num_local_tokens,
++        workspace,
++        0,                   # dispatch_policy, unchanged native heuristic
++        None,                # local_topk_ids
++        None,                # m_indices is independent and unnecessary
++        reverse,
++    )
++
++    quant = torch.empty((m, n), dtype=dtypes.fp8, device=device)
++    scale_n = triton.cdiv(n // 32, 8) * 8
++    scale = torch.empty(
++        (triton.cdiv(capacity, 32) * 32, scale_n),
++        dtype=dtypes.fp8_e8m0,
++        device=device,
++    )
++    _quant_a1_scatter_scales[(m, triton.cdiv(n // 32, groups_per_block))](
++        hidden_states,
++        reverse,
++        quant,
++        scale.view(torch.uint8),
++        num_local_tokens,
++        N=n,
++        TOPK=topk,
++        SCALE_N_PAD=scale_n,
++        HAS_LOCAL_TOKENS=num_local_tokens is not None,
++        GROUPS=groups_per_block,
++        num_warps=4,
++    )
++    return (sorted_ids, sorted_weights, sorted_experts, counts, moe_buf), quant, scale

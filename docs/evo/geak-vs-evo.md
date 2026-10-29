@@ -5,7 +5,8 @@ lineages that use GEAK's engineering machinery with retention and exchange.
 One lineage contains several engineering directions over many rounds; it is not
 one engineer call.
 
-The three completed GEAK-versus-EVO population comparisons compared **four ordinary GEAK lineages**
+The three earlier completed GEAK-versus-EVO population comparisons and the separately
+repaired MoE R1 comparison below compare **four ordinary GEAK lineages**
 against **one ordinary GEAK lineage plus three EVO lineages**. The ordinary member
 inside EVO is an independent search. It is not a replay of the external
 population's winning trajectory, so including it does not guarantee beating
@@ -115,7 +116,7 @@ idea; evidence inheritance transfers an experiment, constraint or unresolved
 question. A parent reference, a record read, a changed investigation and a
 beneficial outcome are different observations.
 
-**4. Why the observed GEAK population won**
+**4. Why GEAK won the three earlier comparisons**
 
 The endpoint audit establishes **which programs won**, but does not yet isolate
 the cause of the search difference. In all three completed pairs, the embedded
@@ -450,6 +451,80 @@ or truncated arm is retained as such; a fallback score assigned by an evaluation
 rule is not evidence of search inferiority. A useful structural improvement on
 one task does not answer all three questions.
 
+**5b. Repaired MoE R1: one positive comparison for GEAK-EVO**
+
+The separately declared repaired MoE pair completed both searches and its common
+confirmation. Codex and the actual Claude researcher independently checked the
+raw records and obtained identical medians, scores and cycle ratios.
+
+| Delivered program | Weighted full-call time (ms) | Speedup over ORIGINAL |
+| --- | ---: | ---: |
+| ORIGINAL AITER | 263.259410 | 1.000000× |
+| Four-lineage ordinary GEAK population | 258.930215 | **1.016720×** |
+| Hybrid GEAK-EVO population | 245.736094 | **1.071309×** |
+
+**GEAK-EVO/GEAK = 1.053692×:** about 5.37% speedup, or 5.10% less weighted time,
+in this one completed population pair. The three cycle ratios favor EVO:
+1.045830, 1.054520 and 1.056474. These are repeated measurements of one pair,
+not three independent searches. The estimator first takes each case's median
+across cycles, then weights prefill by 64 and decode by 1024. All four prerequisite
+checks and all nine timing actions passed; both changed deliveries qualified,
+so no fallback score was assigned.
+
+Each population used one MI350X, four independent ORIGINAL starts, an eight-hour
+search allowance per lineage, and the same Astra/ultra model setting and repaired
+engine. The hybrid has one ordinary and three EVO members; explicit evidence
+handoff and genome mode were disabled. The actual arm-start lag was about
+59 minutes 38 seconds. Matching configured allowances do not establish matching
+realized model calls, GPU work or opportunity. R2's unchanged comparison and
+reversed start order were agreed before R1's source identities and numbers were
+revealed. This R1 result does not establish general superiority, a causal
+retention or transfer benefit, or serving throughput improvement. The three
+older losing comparisons above remain separate historical results.
+
+**Computational change.** Both researchers froze their source assessments before
+mapping or numeric results were opened. GEAK's selected program leaves prefill
+unchanged; decode uses existing 16-row tiles and replaces per-route activation
+re-quantization with token-once quantization that scatters scale bytes through
+the sorter's reverse index. EVO's preparation shares the token-once idea.
+Both researchers identified a stage-boundary change
+in EVO's decode path: one preparation kernel combines routing, token quantization,
+scale placement and output zeroing. EVO improves the decode case in all three
+common cycles, but it also changes the projection kernels. The case-level gain
+cannot be assigned to preparation alone. A separate same-source dispatch trace
+is still pending, so the source/execution/benefit label is not yet complete.
+
+EVO's combined preparation kernel already appears in round 1 of its selected
+lineage, initialized from ORIGINAL before a retained alternative or peer checkpoint
+was available. Its origin is therefore not evidence of retention or transfer.
+Later retained-parent development is under separate source and record review;
+using a retained parent does not by itself establish that retention was necessary
+to find the final program.
+
+EVO also improves prefill in all three cycles. Its prefill preparation already
+exists in the inspected upstream split path; the initial claim of a preparation
+transformation was withdrawn while preserving the frozen rating. The selected
+program rewrites the route reducer and call path. The raters retain a disagreement
+about some within-stage classifications; no label was changed to favor the winner.
+Correctness means the frozen elementwise-or-global-error rule, which permits
+localized elementwise mismatches, not strict elementwise equivalence.
+GEAK and GEAK-EVO have identical aggregate prefill error statistics in the
+correctness actions; ORIGINAL, GEAK and GEAK-EVO have identical aggregate prefill
+statistics in the performance actions' current-value checks. These observations
+do not establish identical output tensors or identify where errors originate.
+Decode error statistics differ among the programs.
+
+The [reviewable evidence](evidence/completed-moe-r1-20261029.json) retains the
+source identities, operands, all cycle and correctness rows, independent reduction
+hashes, prior failed confirmation attempts and scope limits. For manual code
+comparison, the exact ORIGINAL-relative patches are
+[GEAK's selected round-1 program](evidence/moe-r1-geak-selected-20261029.diff) and
+[GEAK-EVO's selected program](evidence/moe-r1-evo-selected-20261029.diff).
+EVO's final round-4 label refers to the same source retained at round 3; it is
+not evidence of a new round-4 contribution. The patches need the pinned task and
+runtime and are not standalone benchmark packages. The two failed b08 mHC A1
+arms have no native final endpoints and are not counted as another efficacy pair.
+
 **6. Code to compare manually**
 
 This comparison is maintained on the `evo` branch. The code already on `evo`
@@ -475,6 +550,8 @@ frozen source identities are not interchangeable with the public v1 source:
 b08 full03 identifies `473bc7e32d6fc3616c60e0ceab4568e51929e5f1`; the later H
 source identifies `95127660493673553bc7073482975d44bb7fce04`. HP is H plus PE03,
 with tree `98b58347fee4cfabc234c7e0fb033353fc28f2e6` (a tree, not a commit).
+The repaired MoE R1 engine tree is `e4cf1602952073fa5cdb7d0a82d2c42c6005c56c`;
+its source package is `d54d3d4f51ed24d4b702838e574fb42776218d541a497d981282c54b9b682cdf`.
 Those later source IDs are provenance, not purported working GitHub links.
 Use the public links for the specified implementation and the extracted final
 records for the reported outcomes; do not assume a moving branch reproduces a

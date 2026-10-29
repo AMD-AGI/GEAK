@@ -1,0 +1,2066 @@
+diff --git a/source/decode.py b/source/decode.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e12bc54c7b81ef9b207ace6fc58468a66bbf4c59
+--- /dev/null
++++ b/source/decode.py
+@@ -0,0 +1,98 @@
++# SPDX-License-Identifier: MIT
++"""Coherent 16-row A8W4 decode tiles with upstream per-call preparation."""
++
++from dataclasses import replace
++from functools import partial
++
++
++STAGE1 = "candidate_opus_moe1_t16_pair_kw4_m1_stream"
++STAGE2 = "opus_moe2_afp8_wfp4_atomic_t16x128x256_sbm16_cache_b3_ws2"
++BLOCK_M = 16
++
++
++def _decode_metadata(metadata):
++    from aiter.fused_moe import _flydsl_stage1_wrapper
++    from source.decode_stage1 import opus_a8w4_stage1_kw4_wrapper
++    from aiter.ops.opus.moe_stage2_a8w4 import (
++        opus_a8w4_stage2_wrapper,
++        parse_stage2_config,
++    )
++
++    # Four in-CTA K groups cover H7168's 56 K128 steps. Native static
++    # assertions preserve BM16, 32 output columns, stream+sparse epilogue.
++    assert getattr(metadata.stage1, "func", None) is _flydsl_stage1_wrapper
++    assert getattr(metadata.stage2, "func", None) is opus_a8w4_stage2_wrapper
++    assert metadata.fuse_quant == "fp8" and metadata.ksplit in (0, 1)
++    assert not metadata.skip_inter_quant
++    launch = parse_stage2_config({"kernelName2": STAGE2}, BLOCK_M)
++    assert launch.instance.block_m == BLOCK_M and launch.kernel_id == 2008
++    stage1_kwargs = {
++        "kernelName": STAGE1,
++        "activation": metadata.stage1.keywords["activation"],
++        "block_m": BLOCK_M,
++        "inter_dim_pad": 0,
++    }
++    stage2_kwargs = {
++        **metadata.stage2.keywords,
++        "kernelName": STAGE2,
++        "launch": launch,
++    }
++    # Sorting and both consumers share SBM16. The standard shuffled E8M0
++    # scale layout packs 32 rows; both kernels select the proper 16-row half.
++    # Opus handles I384 as three logical K128 steps and respects padded scales.
++    return replace(
++        metadata,
++        stage1=partial(opus_a8w4_stage1_kw4_wrapper, **stage1_kwargs),
++        stage2=partial(opus_a8w4_stage2_wrapper, **stage2_kwargs),
++        block_m=BLOCK_M,
++        route_bucket="",
++        expected_sorted_blocks=None,
++        min_sorted_blocks=None,
++        max_sorted_blocks=None,
++    )
++
++
++def fused_moe_decode(hidden_states, w1, w2, topk_weight, topk_ids, **kwargs):
++    from aiter import ActivationType, QuantType, dtypes
++    from aiter.fused_moe import _fused_moe_impl, fused_moe
++
++    # Only the documented FP8-activation/FP4-weight interleaved family uses
++    # this configuration. Other public options retain upstream validation.
++    if (
++        hidden_states.dtype != dtypes.bf16
++        or w1.dtype != dtypes.fp4x2
++        or kwargs.get("activation", ActivationType.Silu) != ActivationType.Silu
++        or kwargs.get("quant_type", QuantType.No) != QuantType.per_1x32
++        or kwargs.get("gate_mode") != "interleave"
++        or kwargs.get("doweight_stage1", False)
++        or kwargs.get("block_size_M") not in (None, 0)
++        or any(kwargs.get(key) is not None for key in (
++            "expert_mask", "num_local_tokens", "a1_scale", "a2_scale",
++            "bias1", "bias2", "stage2_scatter", "shared_w1", "shared_w2",
++            "shared_w1_scale", "shared_w2_scale", "quant_dtype_a", "quant_dtype_a2",
++        ))
++        or kwargs.get("shared_expert_id", -1) != -1
++        or not kwargs.get("clamp_shared", True)
++        or kwargs.get("hidden_pad", 0) != 0
++        or kwargs.get("intermediate_pad", 0) != 0
++    ):
++        return fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kwargs)
++
++    options = dict(kwargs)
++    # These are public-wrapper options, absent from _fused_moe_impl.
++    for key in (
++        "splitk", "clamp_shared", "shared_expert_id", "shared_w1", "shared_w2",
++        "shared_w1_scale", "shared_w2_scale",
++    ):
++        options.pop(key, None)
++    options["block_size_M"] = BLOCK_M
++    # Upstream forwards this automatically only for its exact built-in
++    # wrapper identities. The local stage must receive the current caller's
++    # clamp as well; it is not inferred from the workload's observed value.
++    options["_stage1_extra_args"] = {"swiglu_limit": kwargs.get("swiglu_limit")}
++    return _fused_moe_impl(
++        hidden_states, w1, w2, topk_weight, topk_ids,
++        _metadata_transform=_decode_metadata,
++        _enforce_metadata_block_size=True,
++        **options,
++    )
+diff --git a/source/decode_stage1.py b/source/decode_stage1.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff8d11680c94f99db69d877b4831864538d37e29
+--- /dev/null
++++ b/source/decode_stage1.py
+@@ -0,0 +1,213 @@
++# SPDX-License-Identifier: MIT
++"""KWave4 paired Opus stage1 with cross-pair staging and external build cache.
++
++The kernel keeps the KWave4 policy and stages the next A/B/scale pair before
++consuming the current pair; MFMA order and the common epilogue stay fixed.
++Compilation is lazy, so the admitted Arena action owns compilation and launches.
++No input-dependent state survives a call. Build outputs stay beside the workspace.
++"""
++
++import ctypes
++from functools import lru_cache
++import hashlib
++import json
++import math
++from pathlib import Path
++import subprocess
++import sys
++
++
++class _Kargs(ctypes.Structure):
++    _fields_ = [
++        (name, ctypes.c_void_p) for name in (
++            "hidden_fp8", "w1_fp4", "hidden_scale_e8m0", "w1_scale_e8m0",
++            "w1_bias", "sorted_token_ids", "sorted_expert_ids", "num_valid_ids",
++            "inter_states_fp8", "inter_states_scale_e8m0",
++        )
++    ] + [
++        (name, ctypes.c_int64) for name in (
++            "stride_hidden_t", "stride_w1_e", "stride_w1_bias_e", "stride_out_t",
++            "stride_out_k", "stride_out_scale_route",
++        )
++    ] + [
++        (name, ctypes.c_int32) for name in (
++            "token_num", "topk", "num_experts", "inter_dim", "hidden_scale_cols",
++            "k_steps", "activation",
++        )
++    ] + [
++        (name, ctypes.c_float) for name in (
++            "swiglu_limit", "situ_beta", "situ_linear_beta",
++        )
++    ] + [
++        (name, ctypes.c_uint32) for name in (
++            "hidden_size_bytes", "w1_size_bytes", "hidden_scale_size_bytes",
++            "w1_scale_size_bytes", "out_size_bytes", "out_scale_size_bytes",
++        )
++    ]
++
++
++def _run_build(argv, build_dir, stem):
++    result = subprocess.run(argv, cwd=build_dir, capture_output=True, text=True)
++    (build_dir / (stem + ".stdout")).write_text(result.stdout)
++    (build_dir / (stem + ".stderr")).write_text(result.stderr)
++    if result.returncode:
++        raise RuntimeError(
++            f"Decode stage1 {stem} failed ({result.returncode}): "
++            f"{result.stderr[-6000:]}"
++        )
++
++
++@lru_cache(maxsize=1)
++def _library():
++    import aiter
++
++    source_dir = Path(__file__).resolve().parent
++    native_source = source_dir / "decode_stage1" / "launch.cu"
++    csrc = Path(aiter.__file__).resolve().parent.parent / "csrc"
++    stage1 = csrc / "opus_moe" / "include" / "gfx950" / "a8w4" / "stage1"
++    flags = [
++        "-shared", "-fPIC", "-O3", "-std=c++20", "--offload-arch=gfx950",
++        "-fgpu-flush-denormals-to-zero", "-fno-offload-uniform-block",
++        "-mllvm", "--amdgpu-kernarg-preload-count=32",
++        "-mllvm", "--lsr-drop-solution=1",
++        "-mllvm", "-amdgpu-early-inline-all=true",
++        "-mllvm", "-amdgpu-function-calls=false",
++        "-mllvm", "--amdgpu-mfma-vgpr-form",
++        "-mllvm", "-enable-post-misched=1",
++        "-D__Float4_e2m1fn_x2", "-DENABLE_CK=0",
++    ]
++    inputs = [
++        Path(__file__).resolve(), native_source,
++        source_dir / "decode_stage1" / "pair_full_prefetch.cuh",
++        source_dir / "decode_stage1" / "pair_pipeline.cuh",
++        csrc / "opus_moe" / "gen_instances.py",
++        csrc / "opus_moe" / "opus_moe_common.py",
++        csrc / "opus_moe" / "include" / "opus_moe_common.cuh",
++        csrc / "include" / "aiter_enum.h", csrc / "include" / "mx_quant_utils.h",
++        stage1 / "opus_moe_stage1_a8w4_traits_gfx950.cuh",
++        stage1 / "opus_moe_stage1_a8w4_pipeline_common_gfx950.cuh",
++        stage1 / "opus_moe_stage1_a8w4_pipeline_pair_kwave_gfx950.cuh",
++    ]
++    inputs.extend(sorted((csrc / "include" / "opus").glob("*.hpp")))
++    key = hashlib.sha256(json.dumps(flags).encode())
++    for path in inputs:
++        key.update(str(path.relative_to(csrc) if path.is_relative_to(csrc) else path.name).encode())
++        key.update(path.read_bytes())
++    build_dir = source_dir.parent.parent / "decode_stage1_build" / key.hexdigest()
++    build_dir.mkdir(parents=True, exist_ok=True)
++    library_path = build_dir / "decode_stage1.so"
++    if not library_path.is_file():
++        # The protected generator only writes metadata/device shards to this
++        # dedicated build directory. Only our one specialization is compiled.
++        generator = [
++            sys.executable, "-B", str(csrc / "opus_moe" / "gen_instances.py"),
++            "--working_path", str(build_dir),
++        ]
++        _run_build(generator, build_dir, "generate")
++        temporary_library = build_dir / "decode_stage1.building.so"
++        command = [
++            "/opt/rocm/bin/hipcc", *flags,
++            "-I" + str(csrc / "include"),
++            "-I" + str(csrc / "opus_moe" / "include"),
++            "-I" + str(csrc / "opus_gemm" / "include"),
++            "-I" + str(build_dir), str(native_source), "-o", str(temporary_library),
++        ]
++        (build_dir / "build_command.json").write_text(json.dumps(command, indent=2))
++        _run_build(command, build_dir, "compile")
++        temporary_library.replace(library_path)
++    lib = ctypes.CDLL(str(library_path))
++    lib.decode_stage1_abi_size.argtypes = []
++    lib.decode_stage1_abi_size.restype = ctypes.c_size_t
++    lib.decode_stage1_abi_offset.argtypes = [ctypes.c_int]
++    lib.decode_stage1_abi_offset.restype = ctypes.c_size_t
++    if lib.decode_stage1_abi_size() != ctypes.sizeof(_Kargs):
++        raise RuntimeError("Decode stage1 native Kargs size mismatch")
++    for index, (name, _) in enumerate(_Kargs._fields_):
++        if lib.decode_stage1_abi_offset(index) != getattr(_Kargs, name).offset:
++            raise RuntimeError(f"Decode stage1 native Kargs offset mismatch: {name}")
++    lib.decode_stage1_launch.argtypes = [ctypes.POINTER(_Kargs), ctypes.c_int, ctypes.c_void_p]
++    lib.decode_stage1_launch.restype = ctypes.c_int
++    return lib
++
++
++def _extent_bytes(tensor):
++    extent = tensor.shape[0] * tensor.stride(0) * tensor.element_size()
++    if not 0 < extent <= 0xFFFFFFFF:
++        raise ValueError("Decode stage1 tensor exceeds native buffer extent")
++    return extent
++
++
++def opus_a8w4_stage1_kw4_wrapper(
++    hidden_states, w1, w2, sorted_token_ids, sorted_expert_ids, num_valid_ids,
++    out, topk, activation, kernelName="", block_m=0, w1_scale=None,
++    a1_scale=None, sorted_weights=None, bias1=None, swiglu_limit=None,
++    situ_beta=4.0, situ_linear_beta=25.0, inter_dim_pad=0,
++    output_sorted=False, **_kwargs,
++):
++    """Common stage1 ABI; caller must forward its current finite SiLU clamp."""
++    import torch
++    from aiter import ActivationType, dtypes
++
++    del w2, kernelName, _kwargs
++    activation_value = int(getattr(activation, "value", activation))
++    if (
++        tuple(hidden_states.shape) != (64, 7168)
++        or hidden_states.dtype != dtypes.fp8
++        or tuple(w1.shape) != (384, 768, 3584)
++        or w1.dtype != dtypes.fp4x2
++        or int(topk) != 6 or int(block_m) != 16 or int(inter_dim_pad) != 0
++        or activation_value != ActivationType.Silu.value
++        or output_sorted or sorted_weights is not None or bias1 is not None
++    ):
++        raise ValueError("KWave4 stage1 requires the bound BM16 A8W4 decode family")
++    limit = float(swiglu_limit) if swiglu_limit else math.inf
++    if not limit > 0:
++        raise ValueError("KWave4 stage1 requires a positive SiLU clamp")
++    if a1_scale is None or w1_scale is None:
++        raise ValueError("KWave4 stage1 requires sorted E8M0 A1/W1 scales")
++    tensors = (hidden_states, w1, a1_scale, w1_scale, sorted_token_ids,
++               sorted_expert_ids, num_valid_ids)
++    for tensor in tensors:
++        if not tensor.is_cuda or tensor.device != hidden_states.device or not tensor.is_contiguous():
++            raise ValueError("KWave4 stage1 requires contiguous tensors on one GPU")
++    if (
++        a1_scale.dtype != dtypes.fp8_e8m0 or a1_scale.ndim != 2
++        or a1_scale.shape[1] != 224
++        or w1_scale.dtype != dtypes.fp8_e8m0
++        or tuple(w1_scale.shape) != (384 * 768, 224)
++        or any(t.dtype != torch.int32 for t in (sorted_token_ids, sorted_expert_ids, num_valid_ids))
++        or sorted_token_ids.ndim != 1 or sorted_expert_ids.ndim != 1
++        or num_valid_ids.numel() < 1
++    ):
++        raise ValueError("KWave4 stage1 scale or routing layout mismatch")
++    sorted_blocks = min(sorted_expert_ids.numel(), 64 * 6)
++    if sorted_blocks <= 0 or sorted_token_ids.numel() < sorted_blocks * 16:
++        raise ValueError("KWave4 stage1 routing capacity is insufficient")
++    if a1_scale.shape[0] < sorted_blocks * 16:
++        raise ValueError("KWave4 stage1 A1 scales do not cover the launch")
++    if out is None:
++        out = torch.empty((64, 6, 384), dtype=dtypes.fp8, device=hidden_states.device)
++    if (tuple(out.shape) != (64, 6, 384) or out.dtype != dtypes.fp8
++            or out.device != hidden_states.device or not out.is_contiguous()):
++        raise ValueError("KWave4 stage1 output layout mismatch")
++    sorted_size = max(sorted_token_ids.numel(), sorted_expert_ids.numel() * 16)
++    out_scale = torch.empty(
++        ((sorted_size + 255) // 256 * 256, 16),
++        dtype=dtypes.fp8_e8m0, device=hidden_states.device,
++    )
++    args = _Kargs(
++        hidden_states.data_ptr(), w1.data_ptr(), a1_scale.data_ptr(), w1_scale.data_ptr(),
++        None, sorted_token_ids.data_ptr(), sorted_expert_ids.data_ptr(), num_valid_ids.data_ptr(),
++        out.data_ptr(), out_scale.data_ptr(),
++        hidden_states.stride(0), w1.stride(0), 0, out.stride(0), out.stride(1), out_scale.stride(0),
++        64, 6, 384, 384, 224, 56, activation_value, limit, float(situ_beta), float(situ_linear_beta),
++        _extent_bytes(hidden_states), _extent_bytes(w1), _extent_bytes(a1_scale),
++        _extent_bytes(w1_scale), _extent_bytes(out), _extent_bytes(out_scale),
++    )
++    status = _library().decode_stage1_launch(
++        ctypes.byref(args), int(sorted_blocks),
++        ctypes.c_void_p(torch.cuda.current_stream(hidden_states.device).cuda_stream),
++    )
++    if status:
++        raise RuntimeError(f"KWave4 stage1 HIP launch failed: {status}")
++    return out, out_scale
+diff --git a/source/decode_stage1/launch.cu b/source/decode_stage1/launch.cu
+new file mode 100644
+index 0000000000000000000000000000000000000000..d23b09a455093b4fe151c9796c2cd3a35e43161a
+--- /dev/null
++++ b/source/decode_stage1/launch.cu
+@@ -0,0 +1,83 @@
++// SPDX-License-Identifier: MIT
++// Candidate-local specialization of the pinned Opus paired A8W4 stage1.
++#include <hip/hip_runtime.h>
++#include <cstddef>
++#include <cstdint>
++#include <type_traits>
++#include "pair_pipeline.cuh"
++
++using namespace opus_moe::stage1_a8w4;
++using Kargs = OpusMoeStage1A8W4Kargs;
++using Policy = OpusMoeStage1A8W4Policy<false, 4, 1, 1, 256, true, false, true>;
++using Shape = OpusMoeStage1A8W4Shape<16, 384, Policy>;
++
++static_assert(Shape::BLOCK_SIZE == 512);
++static_assert(Shape::OUTPUT_COLS_PER_TILE == 32);
++static_assert(Shape::K_WAVE == 4 && Shape::MIN_BLOCKS_PER_CU == 1);
++static_assert(Shape::WEIGHT_LOAD_STREAM && Shape::SPARSE_EPILOGUE);
++static_assert(!Shape::B_K1_LEAD);
++static_assert(Shape::KWAVE_REDUCE_BYTES == 16384);
++static_assert(Shape::SHARED_SCRATCH_BYTES == 20480);
++static_assert(std::is_standard_layout_v<Kargs> && sizeof(Kargs) == 192);
++
++#define ABI_FIELDS(F) \
++    F(hidden_fp8, 0) \
++    F(w1_fp4, 8) \
++    F(hidden_scale_e8m0, 16) \
++    F(w1_scale_e8m0, 24) \
++    F(w1_bias, 32) \
++    F(sorted_token_ids, 40) \
++    F(sorted_expert_ids, 48) \
++    F(num_valid_ids, 56) \
++    F(inter_states_fp8, 64) \
++    F(inter_states_scale_e8m0, 72) \
++    F(stride_hidden_t, 80) \
++    F(stride_w1_e, 88) \
++    F(stride_w1_bias_e, 96) \
++    F(stride_out_t, 104) \
++    F(stride_out_k, 112) \
++    F(stride_out_scale_route, 120) \
++    F(token_num, 128) \
++    F(topk, 132) \
++    F(num_experts, 136) \
++    F(inter_dim, 140) \
++    F(hidden_scale_cols, 144) \
++    F(k_steps, 148) \
++    F(activation, 152) \
++    F(swiglu_limit, 156) \
++    F(situ_beta, 160) \
++    F(situ_linear_beta, 164) \
++    F(hidden_size_bytes, 168) \
++    F(w1_size_bytes, 172) \
++    F(hidden_scale_size_bytes, 176) \
++    F(w1_scale_size_bytes, 180) \
++    F(out_size_bytes, 184) \
++    F(out_scale_size_bytes, 188)
++
++#define CHECK_ABI(name, offset) static_assert(offsetof(Kargs, name) == offset);
++ABI_FIELDS(CHECK_ABI)
++#undef CHECK_ABI
++
++extern "C" size_t decode_stage1_abi_size() { return sizeof(Kargs); }
++extern "C" size_t decode_stage1_abi_offset(int field)
++{
++#define FIELD_OFFSET(name, offset) offsetof(Kargs, name),
++    constexpr size_t offsets[] = {ABI_FIELDS(FIELD_OFFSET)};
++#undef FIELD_OFFSET
++    return field >= 0 && field < 32 ? offsets[field] : size_t(-1);
++}
++
++extern "C" int decode_stage1_launch(const Kargs* args, int sorted_blocks, void* stream)
++{
++    if(args == nullptr || args->token_num != 64 || args->topk != 6 ||
++       args->num_experts != 384 || args->inter_dim != 384 ||
++       args->hidden_scale_cols != 224 || args->k_steps != 56 ||
++       args->activation != ActivationType::Silu || !(args->swiglu_limit > 0) ||
++       sorted_blocks <= 0 || sorted_blocks > 384)
++        return static_cast<int>(hipErrorInvalidValue);
++    const dim3 grid(384 / Shape::OUTPUT_COLS_PER_TILE, sorted_blocks);
++    const dim3 block(Shape::BLOCK_SIZE);
++    pipeline_pair_pipeline::opus_moe_stage1_a8w4_kernel_pair_pipeline_gfx950<Shape>
++        <<<grid, block, 0, reinterpret_cast<hipStream_t>(stream)>>>(*args);
++    return static_cast<int>(hipGetLastError());
++}
+diff --git a/source/decode_stage1/pair_full_prefetch.cuh b/source/decode_stage1/pair_full_prefetch.cuh
+new file mode 100644
+index 0000000000000000000000000000000000000000..e17462bdda0231e1d161a390ee9fd0122175969f
+--- /dev/null
++++ b/source/decode_stage1/pair_full_prefetch.cuh
+@@ -0,0 +1,238 @@
++// SPDX-License-Identifier: MIT
++// Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
++#pragma once
++
++// Derived from the pinned AITER 2cb3d17589b9253ea3b3ef5222fc7f810a8f3ef0
++// paired stage1 pipeline. This copy only prefetches both B K128 substeps
++// before the first MFMA; routing, A loads, reduction and epilogue are unchanged.
++
++#include "gfx950/a8w4/stage1/opus_moe_stage1_a8w4_pipeline_common_gfx950.cuh"
++
++namespace opus_moe
++{
++namespace stage1_a8w4
++{
++namespace pipeline_pair_full_prefetch
++{
++
++#ifdef __HIP_DEVICE_COMPILE__
++
++using namespace pipeline_common;
++
++template<typename T>
++static __device__ void process_tile(
++    const OpusMoeStage1A8W4Kargs& kargs,
++    uint8_t* __restrict__ smem_scratch,
++    int* __restrict__ smem_route)
++{
++    static_assert(!T::GATE_UP_GROUP_SPLIT,
++                  "pair-kwave stage1 pipeline requires pair gate/up K-wave policy");
++    static_assert(T::K_WAVE > 1,
++                  "pair-kwave stage1 pipeline requires K-wave reduction");
++
++    const int route_tile = static_cast<int>(opus::block_id_y());
++    const int col_tile = static_cast<int>(opus::block_id_x());
++    const int tid = static_cast<int>(opus::thread_id_x());
++    const int wave_id =
++        __builtin_amdgcn_readfirstlane(tid / opus::get_warp_size());
++    const int lane_id = tid & (opus::get_warp_size() - 1);
++    const int route_base = route_tile * T::B_M;
++    const int out_col_base = col_tile * T::OUTPUT_COLS_PER_TILE;
++    const int valid_rows = kargs.num_valid_ids[0];
++    const int expert_id = kargs.sorted_expert_ids[route_tile];
++    const int out_half = wave_id % T::KWAVE_BASE_WAVES;
++    const int group_base = 0;
++    const int stride_a = static_cast<int>(kargs.stride_hidden_t);
++    const int k_steps = kargs.k_steps;
++    const int scale_stride_n0 =
++        scale_layout_stride_n0_stage1<T>(kargs.hidden_scale_cols);
++
++    if(route_base >= valid_rows || expert_id < 0 ||
++       expert_id >= kargs.num_experts)
++        return;
++
++    load_routes_stage1<T>(
++        kargs, route_base, valid_rows, tid, smem_route);
++    opus::sync_threads();
++
++    auto g_a = opus::make_gmem(kargs.hidden_fp8, kargs.hidden_size_bytes);
++    auto g_b = opus::make_gmem(kargs.w1_fp4, kargs.w1_size_bytes);
++    auto g_as =
++        opus::make_gmem(kargs.hidden_scale_e8m0, kargs.hidden_scale_size_bytes);
++    auto g_bs = opus::make_gmem(kargs.w1_scale_e8m0, kargs.w1_scale_size_bytes);
++    auto g_out =
++        opus::make_gmem(reinterpret_cast<uint32_t*>(kargs.inter_states_fp8),
++                        kargs.out_size_bytes);
++    auto g_out_scale = opus::make_gmem(kargs.inter_states_scale_e8m0,
++                                       kargs.out_scale_size_bytes);
++
++    auto mma = opus::make_tiled_mma<typename T::D_MFMA_A,
++                                    typename T::D_MFMA_B,
++                                    typename T::D_ACC>(
++        opus::seq<1, 1, 1>{},
++        opus::seq<1, 1, 1>{},
++        opus::seq<T::MMA_M, T::MMA_N, T::MMA_K>{});
++    auto u_ga = make_layout_ga_stage1<T>(
++        mma, lane_id, stride_a);
++    auto u_gb = make_layout_gb_stage1<T>(mma, lane_id);
++    auto u_c_m = make_layout_c_m_stage1<T>(mma, lane_id);
++    auto u_c_n = make_layout_c_n_stage1<T>(mma, lane_id);
++
++    typename decltype(mma)::vtype_c
++        v_c[T::M_MFMA_PER_WAVE][T::ACC_SCALE_GROUPS_PER_TILE]{};
++
++    const Tile tile{
++        tid,
++        wave_id,
++        route_base,
++        out_col_base,
++        out_half,
++        group_base};
++
++    const int b_lane_byte = static_cast<int>(u_gb(0, 0, 0, 0));
++    auto u_sf = make_layout_scale_word_stage1<T>(
++        b_lane_byte, scale_stride_n0);
++
++    bool a_route_valid[T::M_MFMA_PER_WAVE]{};
++    int64_t a_payload_base[T::M_MFMA_PER_WAVE]{};
++    int a_scale_base_word[T::M_SCALE_PACKS]{};
++    #pragma unroll
++    for(int mi = 0; mi < T::M_MFMA_PER_WAVE; ++mi)
++    {
++        const int a_lane_byte = a_lane_byte_stage1<T>(
++            u_ga, mi, stride_a);
++        const int local_m = a_lane_local_m_stage1(
++            a_lane_byte, stride_a);
++        const int k_byte = a_lane_byte - local_m * stride_a;
++        const auto route = route_from_smem(local_m, smem_route);
++        a_route_valid[mi] = route.valid;
++        a_payload_base[mi] =
++            a_payload_base_stage1(kargs, route, k_byte);
++    }
++    bool fragment_active[T::M_MFMA_PER_WAVE];
++    bool fragment_full[T::M_MFMA_PER_WAVE];
++    opus::static_for<T::M_MFMA_PER_WAVE>([&](auto mi_id) {
++        constexpr int mi = mi_id.value;
++        const uint64_t valid_mask =
++            __builtin_amdgcn_ballot_w64(a_route_valid[mi]);
++        fragment_active[mi] = valid_mask != 0ull;
++        if constexpr(T::SPARSE_EPILOGUE)
++            fragment_full[mi] = valid_mask == ~0ull;
++    });
++    #pragma unroll
++    for(int mp = 0; mp < T::M_SCALE_PACKS; ++mp)
++        a_scale_base_word[mp] =
++            a_scale_base_word_stage1<T>(u_sf, route_base, mp);
++
++    int64_t b_group_payload_base[T::B_GROUPS_PER_WAVE]{};
++    int b_scale_base_word[T::B_GROUPS_PER_WAVE]{};
++    #pragma unroll
++    for(int local_group = 0; local_group < T::B_GROUPS_PER_WAVE;
++        ++local_group)
++    {
++        const int w1_n0 = w1_n0_stage1<T>(
++            out_col_base, out_half, group_base, local_group);
++        b_group_payload_base[local_group] =
++            b_payload_base_stage1<T>(
++                kargs, expert_id, w1_n0, b_lane_byte, k_steps);
++        b_scale_base_word[local_group] =
++            b_scale_base_word_stage1<T>(u_sf, kargs, expert_id, w1_n0);
++    }
++
++    using V_A = typename decltype(mma)::mfma_type::vtype_a;
++    using V_B = typename decltype(mma)::mfma_type::vtype_b;
++
++    const int mainloop_wave_k = tile.wave_id / T::KWAVE_BASE_WAVES;
++    const int k_steps_per_wave = k_steps / T::K_WAVE;
++    const int k_begin = mainloop_wave_k * k_steps_per_wave;
++    const int k_end = k_begin + k_steps_per_wave;
++
++    for(int k_pair = k_begin; k_pair < k_end;
++        k_pair += T::SCALE_K_PACK)
++    {
++        int a_scale[T::M_SCALE_PACKS];
++        load_sfa_frag_stage1<T>(
++            g_as, a_scale_base_word, k_pair, a_scale);
++
++        int b_scale[T::B_GROUPS_PER_WAVE];
++        stage1_u32x4_t b_kpair[T::SCALE_K_PACK][T::B_ITEMS_PER_WAVE];
++        load_sfb_frag_stage1<T>(
++            g_bs, b_scale_base_word, k_pair, b_scale);
++        load_b_full_kpair_stage1<T>(
++            g_b, b_group_payload_base, k_pair, k_steps, b_kpair);
++
++        opus::static_for<T::SCALE_K_PACK>([&](auto kk_id) {
++            constexpr int kk = kk_id.value;
++            const int k_step = k_pair + kk;
++
++            V_A ra[T::M_MFMA_PER_WAVE]{};
++            opus::static_for<T::M_MFMA_PER_WAVE>([&](auto mi_id) {
++                constexpr int mi = mi_id.value;
++                if(!a_route_valid[mi])
++                    return;
++
++                ra[mi] = load_a_reg_stage1<V_A, T>(
++                    g_a, a_payload_base[mi], k_step);
++            });
++
++            opus::static_for<T::B_ITEMS_PER_WAVE>([&](auto flat_id) {
++                constexpr int flat_item = flat_id.value;
++                constexpr int local_group =
++                    flat_item / T::B_ITEMS_PER_GROUP;
++                constexpr int item =
++                    flat_item - local_group * T::B_ITEMS_PER_GROUP;
++                const stage1_u32x4_t b_raw = b_kpair[kk][flat_item];
++                const V_B rb = make_b_reg<V_B>(b_raw);
++
++                constexpr int acc_group = item;
++                const int sfb = b_scale[local_group];
++                const auto selector_b_id = selector_b<T, item, kk>();
++
++                opus::static_for<T::M_MFMA_PER_WAVE>([&](auto mi_id) {
++                    constexpr int mi = mi_id.value;
++                    const int sfa =
++                        select_sfa_stage1<T, mi>(
++                            a_route_valid, a_scale);
++
++                    with_selector_a<T, mi, kk>(
++                        route_base, [&](auto selector_a_id) {
++                            v_c[mi][acc_group] = mma(
++                                ra[mi], rb, v_c[mi][acc_group],
++                                sfa, sfb,
++                                selector_a_id, selector_b_id);
++                        });
++                });
++            });
++        });
++    }
++
++    reduce_single_group_kwave<T>(tile.wave_id, lane_id,
++                                 smem_scratch, v_c);
++
++    quant_epilogue<T>(
++        kargs, g_out, g_out_scale, tile, expert_id, u_c_m, u_c_n,
++        v_c, smem_route,
++        reinterpret_cast<float*>(smem_scratch),
++        fragment_active, fragment_full);
++}
++
++#endif // __HIP_DEVICE_COMPILE__
++
++template<typename T>
++__global__ __launch_bounds__(T::BLOCK_SIZE, T::MIN_BLOCKS_PER_CU) void
++opus_moe_stage1_a8w4_kernel_pair_full_prefetch_gfx950(OpusMoeStage1A8W4Kargs kargs)
++{
++#if defined(__HIP_DEVICE_COMPILE__) && defined(__gfx950__)
++    __shared__ __align__(T::BYTES_PER_VEC) uint8_t
++        smem_scratch[T::SHARED_SCRATCH_BYTES];
++    __shared__ int smem_route[T::B_M];
++
++    process_tile<T>(kargs, smem_scratch, smem_route);
++#else
++    (void)kargs;
++#endif
++}
++
++} // namespace pipeline_pair_full_prefetch
++} // namespace stage1_a8w4
++} // namespace opus_moe
+diff --git a/source/decode_stage1/pair_pipeline.cuh b/source/decode_stage1/pair_pipeline.cuh
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7b1ba7f52e37c1a25f9c7771f5c3eef4064516a
+--- /dev/null
++++ b/source/decode_stage1/pair_pipeline.cuh
+@@ -0,0 +1,272 @@
++// SPDX-License-Identifier: MIT
++// Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
++#pragma once
++
++// Derived from the pinned AITER 2cb3d17589b9253ea3b3ef5222fc7f810a8f3ef0
++// paired stage1 pipeline. Two register stages carry complete A/B/scale pairs.
++// A half-pair refill overlaps current consumption while bounding live operands;
++// prologue, six bounded transitions and drain preserve the MFMA order;
++// routing, K-wave reduction and the sparse quantization epilogue are unchanged.
++
++#include "gfx950/a8w4/stage1/opus_moe_stage1_a8w4_pipeline_common_gfx950.cuh"
++
++namespace opus_moe
++{
++namespace stage1_a8w4
++{
++namespace pipeline_pair_pipeline
++{
++
++#ifdef __HIP_DEVICE_COMPILE__
++
++using namespace pipeline_common;
++
++template<typename T>
++static __device__ void process_tile(
++    const OpusMoeStage1A8W4Kargs& kargs,
++    uint8_t* __restrict__ smem_scratch,
++    int* __restrict__ smem_route)
++{
++    static_assert(!T::GATE_UP_GROUP_SPLIT,
++                  "pair-kwave stage1 pipeline requires pair gate/up K-wave policy");
++    static_assert(T::K_WAVE > 1,
++                  "pair-kwave stage1 pipeline requires K-wave reduction");
++
++    const int route_tile = static_cast<int>(opus::block_id_y());
++    const int col_tile = static_cast<int>(opus::block_id_x());
++    const int tid = static_cast<int>(opus::thread_id_x());
++    const int wave_id =
++        __builtin_amdgcn_readfirstlane(tid / opus::get_warp_size());
++    const int lane_id = tid & (opus::get_warp_size() - 1);
++    const int route_base = route_tile * T::B_M;
++    const int out_col_base = col_tile * T::OUTPUT_COLS_PER_TILE;
++    const int valid_rows = kargs.num_valid_ids[0];
++    const int expert_id = kargs.sorted_expert_ids[route_tile];
++    const int out_half = wave_id % T::KWAVE_BASE_WAVES;
++    const int group_base = 0;
++    const int stride_a = static_cast<int>(kargs.stride_hidden_t);
++    const int k_steps = kargs.k_steps;
++    const int scale_stride_n0 =
++        scale_layout_stride_n0_stage1<T>(kargs.hidden_scale_cols);
++
++    if(route_base >= valid_rows || expert_id < 0 ||
++       expert_id >= kargs.num_experts)
++        return;
++
++    load_routes_stage1<T>(
++        kargs, route_base, valid_rows, tid, smem_route);
++    opus::sync_threads();
++
++    auto g_a = opus::make_gmem(kargs.hidden_fp8, kargs.hidden_size_bytes);
++    auto g_b = opus::make_gmem(kargs.w1_fp4, kargs.w1_size_bytes);
++    auto g_as =
++        opus::make_gmem(kargs.hidden_scale_e8m0, kargs.hidden_scale_size_bytes);
++    auto g_bs = opus::make_gmem(kargs.w1_scale_e8m0, kargs.w1_scale_size_bytes);
++    auto g_out =
++        opus::make_gmem(reinterpret_cast<uint32_t*>(kargs.inter_states_fp8),
++                        kargs.out_size_bytes);
++    auto g_out_scale = opus::make_gmem(kargs.inter_states_scale_e8m0,
++                                       kargs.out_scale_size_bytes);
++
++    auto mma = opus::make_tiled_mma<typename T::D_MFMA_A,
++                                    typename T::D_MFMA_B,
++                                    typename T::D_ACC>(
++        opus::seq<1, 1, 1>{},
++        opus::seq<1, 1, 1>{},
++        opus::seq<T::MMA_M, T::MMA_N, T::MMA_K>{});
++    auto u_ga = make_layout_ga_stage1<T>(
++        mma, lane_id, stride_a);
++    auto u_gb = make_layout_gb_stage1<T>(mma, lane_id);
++    auto u_c_m = make_layout_c_m_stage1<T>(mma, lane_id);
++    auto u_c_n = make_layout_c_n_stage1<T>(mma, lane_id);
++
++    typename decltype(mma)::vtype_c
++        v_c[T::M_MFMA_PER_WAVE][T::ACC_SCALE_GROUPS_PER_TILE]{};
++
++    const Tile tile{
++        tid,
++        wave_id,
++        route_base,
++        out_col_base,
++        out_half,
++        group_base};
++
++    const int b_lane_byte = static_cast<int>(u_gb(0, 0, 0, 0));
++    auto u_sf = make_layout_scale_word_stage1<T>(
++        b_lane_byte, scale_stride_n0);
++
++    bool a_route_valid[T::M_MFMA_PER_WAVE]{};
++    int64_t a_payload_base[T::M_MFMA_PER_WAVE]{};
++    int a_scale_base_word[T::M_SCALE_PACKS]{};
++    #pragma unroll
++    for(int mi = 0; mi < T::M_MFMA_PER_WAVE; ++mi)
++    {
++        const int a_lane_byte = a_lane_byte_stage1<T>(
++            u_ga, mi, stride_a);
++        const int local_m = a_lane_local_m_stage1(
++            a_lane_byte, stride_a);
++        const int k_byte = a_lane_byte - local_m * stride_a;
++        const auto route = route_from_smem(local_m, smem_route);
++        a_route_valid[mi] = route.valid;
++        a_payload_base[mi] =
++            a_payload_base_stage1(kargs, route, k_byte);
++    }
++    bool fragment_active[T::M_MFMA_PER_WAVE];
++    bool fragment_full[T::M_MFMA_PER_WAVE];
++    opus::static_for<T::M_MFMA_PER_WAVE>([&](auto mi_id) {
++        constexpr int mi = mi_id.value;
++        const uint64_t valid_mask =
++            __builtin_amdgcn_ballot_w64(a_route_valid[mi]);
++        fragment_active[mi] = valid_mask != 0ull;
++        if constexpr(T::SPARSE_EPILOGUE)
++            fragment_full[mi] = valid_mask == ~0ull;
++    });
++    #pragma unroll
++    for(int mp = 0; mp < T::M_SCALE_PACKS; ++mp)
++        a_scale_base_word[mp] =
++            a_scale_base_word_stage1<T>(u_sf, route_base, mp);
++
++    int64_t b_group_payload_base[T::B_GROUPS_PER_WAVE]{};
++    int b_scale_base_word[T::B_GROUPS_PER_WAVE]{};
++    #pragma unroll
++    for(int local_group = 0; local_group < T::B_GROUPS_PER_WAVE;
++        ++local_group)
++    {
++        const int w1_n0 = w1_n0_stage1<T>(
++            out_col_base, out_half, group_base, local_group);
++        b_group_payload_base[local_group] =
++            b_payload_base_stage1<T>(
++                kargs, expert_id, w1_n0, b_lane_byte, k_steps);
++        b_scale_base_word[local_group] =
++            b_scale_base_word_stage1<T>(u_sf, kargs, expert_id, w1_n0);
++    }
++
++    using V_A = typename decltype(mma)::mfma_type::vtype_a;
++    using V_B = typename decltype(mma)::mfma_type::vtype_b;
++
++    const int mainloop_wave_k = tile.wave_id / T::KWAVE_BASE_WAVES;
++    // The host ABI admits only H7168 (56 K128 steps), split across four
++    // K-wave groups. Every group starts at an even step and owns seven pairs.
++    static_assert(T::K_WAVE == 4 && T::SCALE_K_PACK == 2);
++    constexpr int k_steps_per_wave = 14;
++    static_assert(T::M_MFMA_PER_WAVE == 1);
++    const int k_begin = mainloop_wave_k * k_steps_per_wave;
++
++    struct Pair
++    {
++        V_A a[T::SCALE_K_PACK][T::M_MFMA_PER_WAVE];
++        stage1_u32x4_t b[T::SCALE_K_PACK][T::B_ITEMS_PER_WAVE];
++        int sfa[T::M_SCALE_PACKS];
++        int sfb[T::B_GROUPS_PER_WAVE];
++    };
++
++    auto load_scales = [&](Pair& p, int k_pair) {
++        load_sfa_frag_stage1<T>(
++            g_as, a_scale_base_word, k_pair, p.sfa);
++        load_sfb_frag_stage1<T>(
++            g_bs, b_scale_base_word, k_pair, p.sfb);
++    };
++
++    auto load_half = [&](Pair& p, int k_pair, auto kk_id) {
++        constexpr int kk = kk_id.value;
++        opus::static_for<T::B_ITEMS_PER_WAVE>([&](auto flat_id) {
++            constexpr int flat_item = flat_id.value;
++            constexpr int local_group = flat_item / T::B_ITEMS_PER_GROUP;
++            constexpr int item = flat_item - local_group * T::B_ITEMS_PER_GROUP;
++            p.b[kk][flat_item] = load_b_raw_stage1<T>(
++                g_b, b_group_payload_base[local_group],
++                item, k_pair + kk, k_steps);
++        });
++        opus::static_for<T::M_MFMA_PER_WAVE>([&](auto mi_id) {
++            constexpr int mi = mi_id.value;
++            p.a[kk][mi] = V_A{};
++            if(a_route_valid[mi])
++                p.a[kk][mi] = load_a_reg_stage1<V_A, T>(
++                    g_a, a_payload_base[mi], k_pair + kk);
++        });
++    };
++
++    // Select the native 32-row scale-pack half once for this BM16 route tile.
++    with_selector_a<T, 0, 0>(route_base, [&](auto a_half) {
++        auto consume_half = [&](const Pair& p, auto kk_id) {
++            constexpr int kk = kk_id.value;
++            opus::static_for<T::B_ITEMS_PER_WAVE>([&](auto flat_id) {
++                constexpr int flat_item = flat_id.value;
++                constexpr int local_group =
++                    flat_item / T::B_ITEMS_PER_GROUP;
++                constexpr int item =
++                    flat_item - local_group * T::B_ITEMS_PER_GROUP;
++                const V_B rb = make_b_reg<V_B>(p.b[kk][flat_item]);
++                constexpr int acc_group = item;
++                const auto selector_b_id = selector_b<T, item, kk>();
++                opus::static_for<T::M_MFMA_PER_WAVE>([&](auto mi_id) {
++                    constexpr int mi = mi_id.value;
++                    const int sfa =
++                        select_sfa_stage1<T, mi>(a_route_valid, p.sfa);
++                    constexpr auto selector_a_id =
++                        opus::number<kk * T::SCALE_MN_PACK + a_half.value>{};
++                    v_c[mi][acc_group] = mma(
++                        p.a[kk][mi], rb, v_c[mi][acc_group],
++                        sfa, p.sfb[local_group],
++                        selector_a_id, selector_b_id);
++                });
++            });
++        };
++
++        // Compile-time stage indices eliminate loop-back operand copies.
++        // Scheduling barriers follow consumption, leaving the next half's
++        // loads before that consumption while preventing later refills from
++        // extending operand lifetimes across this boundary. They are compiler
++        // scheduling constraints, not replacements for dependency waits.
++        Pair stages[2]{};
++        load_scales(stages[0], k_begin);
++        load_half(stages[0], k_begin, opus::number<0>{});
++        load_half(stages[0], k_begin, opus::number<1>{});
++        opus::static_for<6>([&](auto pair_id) {
++            constexpr int pair = pair_id.value;
++            constexpr int current = pair & 1;
++            constexpr int next = current ^ 1;
++            const int next_k = k_begin + (pair + 1) * T::SCALE_K_PACK;
++            load_scales(stages[next], next_k);
++            load_half(stages[next], next_k, opus::number<0>{});
++            consume_half(stages[current], opus::number<0>{});
++            __builtin_amdgcn_sched_barrier(0);
++            load_half(stages[next], next_k, opus::number<1>{});
++            consume_half(stages[current], opus::number<1>{});
++            __builtin_amdgcn_sched_barrier(0);
++        });
++        consume_half(stages[0], opus::number<0>{});
++        consume_half(stages[0], opus::number<1>{});
++
++    });
++
++    reduce_single_group_kwave<T>(tile.wave_id, lane_id,
++                                 smem_scratch, v_c);
++
++    quant_epilogue<T>(
++        kargs, g_out, g_out_scale, tile, expert_id, u_c_m, u_c_n,
++        v_c, smem_route,
++        reinterpret_cast<float*>(smem_scratch),
++        fragment_active, fragment_full);
++}
++
++#endif // __HIP_DEVICE_COMPILE__
++
++template<typename T>
++__global__ __launch_bounds__(T::BLOCK_SIZE, T::MIN_BLOCKS_PER_CU) void
++opus_moe_stage1_a8w4_kernel_pair_pipeline_gfx950(OpusMoeStage1A8W4Kargs kargs)
++{
++#if defined(__HIP_DEVICE_COMPILE__) && defined(__gfx950__)
++    __shared__ __align__(T::BYTES_PER_VEC) uint8_t
++        smem_scratch[T::SHARED_SCRATCH_BYTES];
++    __shared__ int smem_route[T::B_M];
++
++    process_tile<T>(kargs, smem_scratch, smem_route);
++#else
++    (void)kargs;
++#endif
++}
++
++} // namespace pipeline_pair_pipeline
++} // namespace stage1_a8w4
++} // namespace opus_moe
+diff --git a/source/kernel.py b/source/kernel.py
+index 605726b8771fc8ad9b83363a09256b92b14414d3..e3df9766c812169d9cadb6c0d5827038257260dc 100644
+--- a/source/kernel.py
++++ b/source/kernel.py
+@@ -1,12 +1,8 @@
+ # SPDX-License-Identifier: MIT
+-"""Starting implementation: the complete pinned upstream AITER public call.
+-
+-Replace this implementation and add helpers under source/ to reorganize the
+-complete operation. The protected runner owns inputs, oracle and timing.
+-"""
++"""Complete MoE call with candidate-local A1 preparation."""
+ 
+ 
+ def fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kwargs):
+-    from aiter.fused_moe import fused_moe as upstream_fused_moe
++    from source.prepare import prepared_fused_moe
+ 
+-    return upstream_fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kwargs)
++    return prepared_fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kwargs)
+diff --git a/source/prefill.py b/source/prefill.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..bad6353cbb5639c3a4c98a2fedbacea08452234a
+--- /dev/null
++++ b/source/prefill.py
+@@ -0,0 +1,50 @@
++# SPDX-License-Identifier: MIT
++"""Prefill-only stage-2 ownership experiments; upstream preparation is retained."""
++
++from aiter.fused_moe import _fused_moe_impl
++from aiter.ops.opus.moe_stage2_a8w4 import opus_moe_stage2_a8w4_decode_fwd
++from .prefill_kernels import reduce_fp8_routes
++from .prefill_native import native_direct_stage2
++
++
++def _route_stage2(*, ordinary_stage2, stage2_args, stage2_kwargs):
++    a2, _w1, w2, sorted_ids, sorted_experts, valid_ids, out, topk = stage2_args
++    assert stage2_kwargs["block_m"] == 64
++    routes = opus_moe_stage2_a8w4_decode_fwd(
++        a2, w2, stage2_kwargs["a2_scale"], stage2_kwargs["w2_scale"],
++        sorted_ids, stage2_kwargs["sorted_weights"], sorted_experts, valid_ids,
++        token_num=out.shape[0], topk=topk, block_m=64, kernel_id=2013,
++        return_per_slot=True, route_out_dtype="fp8",
++        inter_dim_pad=stage2_kwargs.get("inter_dim_pad", 0),
++    )
++    return reduce_fp8_routes(routes, out, topk=topk, block_n=1024, num_warps=4)
++
++
++def _direct_stage2(*, ordinary_stage2, stage2_args, stage2_kwargs):
++    a2, _w1, w2, sorted_ids, sorted_experts, valid_ids, out, topk = stage2_args
++    # A BM64 sorted block is two homogeneous BM32 blocks. Absolute sorted-row
++    # A2 and scale addresses stay unchanged; only the expert-block map expands.
++    assert stage2_kwargs["block_m"] == 64
++    expert_blocks32 = sorted_experts.repeat_interleave(2)
++    # The upstream route-output path does not initialize this destination.
++    # Initialization must precede all six routes' BF16 atomic additions.
++    out.zero_()
++    return opus_moe_stage2_a8w4_decode_fwd(
++        a2, w2, stage2_kwargs["a2_scale"], stage2_kwargs["w2_scale"],
++        sorted_ids, stage2_kwargs["sorted_weights"], expert_blocks32, valid_ids,
++        out=out, token_num=out.shape[0], topk=topk,
++        block_m=32, kernel_id=2005,
++        inter_dim_pad=stage2_kwargs.get("inter_dim_pad", 0),
++    )
++
++
++def prefill_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kwargs):
++    # These are the same enum conversions performed by the public facade.
++    for name in ("activation", "quant_type", "quant_type_a"):
++        value = kwargs.get(name)
++        if value is not None and hasattr(value, "value"):
++            kwargs[name] = value.value
++    return _fused_moe_impl(
++        hidden_states, w1, w2, topk_weight, topk_ids,
++        _stage2_override=native_direct_stage2, **kwargs,
++    )
+diff --git a/source/prefill/native_direct.hip b/source/prefill/native_direct.hip
+new file mode 100644
+index 0000000000000000000000000000000000000000..f66e4af66f8eabc09969a6cc0b040278610fd29e
+--- /dev/null
++++ b/source/prefill/native_direct.hip
+@@ -0,0 +1,143 @@
++// SPDX-License-Identifier: MIT
++// Candidate-local direct-output instantiation of the pinned AITER Opus pipeline.
++#include <hip/hip_runtime.h>
++#include <cstddef>
++#include <type_traits>
++
++#include "gfx950/a8w4/opus_moe_pipeline_stage2_a8w4_decode_main_gfx950.cuh"
++
++// Retain the selected prefill producer's BM64, four-wave, paired-load schedule.
++// Only its output ownership changes from token-slot FP8 to token BF16 atomics.
++struct PrefillDirectTraits
++    : OpusMoeStage2A8W4DecodeShape<64, 256, false, false, 256, 4, 0, 0, 2, 1>
++{
++    static constexpr bool DIRECT_ATOMIC_OUT = true;
++};
++
++#if defined(__HIP_DEVICE_COMPILE__) && defined(__gfx950__)
++// The generic atomic path uses natural block order. Keep the original producer's
++// XCD swizzle so that the experiment isolates the output/combine ownership.
++template<>
++inline __device__ void opus_moe_stage2_a8w4_decode_make_tile<PrefillDirectTraits>(
++    const opus_moe_stage2_a8w4_kargs& kargs,
++    int& sorted_rows,
++    int& route_base,
++    int& col_base)
++{
++    sorted_rows = kargs.num_valid_ids[0];
++    const int num_tiles_n = kargs.model_dim / PrefillDirectTraits::B_N;
++    const int wgid = static_cast<int>(blockIdx.y) * num_tiles_n +
++                     static_cast<int>(blockIdx.x);
++    int tile_m_id;
++    int tile_n_id;
++    opus_moe_stage2_a8w4_decode_tile_ids<PrefillDirectTraits>(
++        wgid, kargs.sorted_blocks, num_tiles_n, tile_m_id, tile_n_id);
++    route_base = tile_m_id * PrefillDirectTraits::ROUTE_M_STRIDE;
++    col_base = tile_n_id * PrefillDirectTraits::B_N;
++}
++#endif
++
++static_assert(sizeof(opus_moe_stage2_a8w4_kargs) == 184,
++              "Python/native stage2 argument layout mismatch");
++static_assert(PrefillDirectTraits::NUM_XCD == 8);
++static_assert(PrefillDirectTraits::SWIZZLE_C == 32);
++
++
++using Kargs = opus_moe_stage2_a8w4_kargs;
++static_assert(std::is_standard_layout_v<Kargs>);
++static_assert(offsetof(Kargs, inter_states_fp8) == 0);
++static_assert(offsetof(Kargs, w2_fp4) == 8);
++static_assert(offsetof(Kargs, a2_scale_e8m0) == 16);
++static_assert(offsetof(Kargs, w2_scale_e8m0) == 24);
++static_assert(offsetof(Kargs, sorted_token_ids) == 32);
++static_assert(offsetof(Kargs, sorted_weights) == 40);
++static_assert(offsetof(Kargs, sorted_expert_ids) == 48);
++static_assert(offsetof(Kargs, num_valid_ids) == 56);
++static_assert(offsetof(Kargs, out_bf16) == 64);
++static_assert(offsetof(Kargs, stride_a_t) == 72);
++static_assert(offsetof(Kargs, stride_a_k) == 80);
++static_assert(offsetof(Kargs, stride_w_e) == 88);
++static_assert(offsetof(Kargs, stride_w_h) == 96);
++static_assert(offsetof(Kargs, stride_a_scale_route) == 104);
++static_assert(offsetof(Kargs, stride_w_scale_row) == 112);
++static_assert(offsetof(Kargs, stride_o_t) == 120);
++static_assert(offsetof(Kargs, token_num) == 128);
++static_assert(offsetof(Kargs, topk) == 132);
++static_assert(offsetof(Kargs, num_experts) == 136);
++static_assert(offsetof(Kargs, model_dim) == 140);
++static_assert(offsetof(Kargs, sorted_blocks) == 144);
++static_assert(offsetof(Kargs, sort_block_m) == 148);
++static_assert(offsetof(Kargs, a_scale_rows) == 152);
++static_assert(offsetof(Kargs, route_out_fp8) == 156);
++static_assert(offsetof(Kargs, k_tiles) == 160);
++static_assert(offsetof(Kargs, a_scale_words_per_row_pack) == 164);
++static_assert(offsetof(Kargs, w_scale_words_per_row_pack) == 168);
++static_assert(offsetof(Kargs, route_out_row_bytes) == 176);
++extern "C" size_t prefill_direct_abi_size() { return sizeof(Kargs); }
++extern "C" size_t prefill_direct_abi_offset(int field)
++{
++    constexpr size_t offsets[] = {
++        offsetof(Kargs, inter_states_fp8),
++        offsetof(Kargs, w2_fp4),
++        offsetof(Kargs, a2_scale_e8m0),
++        offsetof(Kargs, w2_scale_e8m0),
++        offsetof(Kargs, sorted_token_ids),
++        offsetof(Kargs, sorted_weights),
++        offsetof(Kargs, sorted_expert_ids),
++        offsetof(Kargs, num_valid_ids),
++        offsetof(Kargs, out_bf16),
++        offsetof(Kargs, stride_a_t),
++        offsetof(Kargs, stride_a_k),
++        offsetof(Kargs, stride_w_e),
++        offsetof(Kargs, stride_w_h),
++        offsetof(Kargs, stride_a_scale_route),
++        offsetof(Kargs, stride_w_scale_row),
++        offsetof(Kargs, stride_o_t),
++        offsetof(Kargs, token_num),
++        offsetof(Kargs, topk),
++        offsetof(Kargs, num_experts),
++        offsetof(Kargs, model_dim),
++        offsetof(Kargs, sorted_blocks),
++        offsetof(Kargs, sort_block_m),
++        offsetof(Kargs, a_scale_rows),
++        offsetof(Kargs, route_out_fp8),
++        offsetof(Kargs, k_tiles),
++        offsetof(Kargs, a_scale_words_per_row_pack),
++        offsetof(Kargs, w_scale_words_per_row_pack),
++        offsetof(Kargs, route_out_row_bytes),
++    };
++    return field >= 0 && field < 28 ? offsets[field] : size_t(-1);
++}
++
++extern "C" int prefill_direct_launch(const opus_moe_stage2_a8w4_kargs* host_kargs,
++                                     hipStream_t stream)
++{
++    if(host_kargs == nullptr)
++        return static_cast<int>(hipErrorInvalidValue);
++    const auto kargs = *host_kargs;
++    if(kargs.token_num != 8192 || kargs.topk != 6 || kargs.num_experts != 384 ||
++       kargs.model_dim != 7168 || kargs.sort_block_m != 64 || kargs.k_tiles != 3 ||
++       kargs.stride_o_t != kargs.model_dim ||
++       (kargs.stride_a_k != 0 && kargs.stride_a_k != 384) ||
++       kargs.sorted_blocks <= 0)
++        return static_cast<int>(hipErrorInvalidValue);
++
++    // Fresh initialization belongs to this invocation and precedes every route
++    // producer on the same stream. No other stream or cached tensor is involved.
++    const auto output_bytes = static_cast<size_t>(kargs.token_num) *
++                              static_cast<size_t>(kargs.stride_o_t) *
++                              sizeof(hip_bfloat16);
++    const hipError_t init_status = hipMemsetAsync(kargs.out_bf16, 0, output_bytes, stream);
++    if(init_status != hipSuccess)
++        return static_cast<int>(init_status);
++    const dim3 grid(kargs.model_dim / PrefillDirectTraits::B_N, kargs.sorted_blocks);
++    const dim3 block(PrefillDirectTraits::BLOCK_SIZE);
++    opus_moe_stage2_a8w4_decode_kernel_gfx950<PrefillDirectTraits>
++        <<<grid, block, 0, stream>>>(kargs);
++    return static_cast<int>(hipGetLastError());
++}
++
++extern "C" const char* prefill_direct_error_string(int status)
++{
++    return hipGetErrorString(static_cast<hipError_t>(status));
++}
+diff --git a/source/prefill_kernels.py b/source/prefill_kernels.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..423fb3112be321bc9ddfa5e378aa4b6f53ee41be
+--- /dev/null
++++ b/source/prefill_kernels.py
+@@ -0,0 +1,104 @@
++# SPDX-License-Identifier: MIT
++"""Candidate-local combine kernels for the Opus packed FP8 route output."""
++
++import triton
++from triton.experimental import gluon
++from triton.experimental.gluon import language as gl
++
++
++@gluon.jit
++def _reduce_fp8_routes(
++    Route,
++    Out,
++    HIDDEN: gl.constexpr,
++    TOPK: gl.constexpr,
++    ROUTE_STRIDE: gl.constexpr,
++    OUT_STRIDE: gl.constexpr,
++    BLOCK_N: gl.constexpr,
++    SLOT_PAD: gl.constexpr,
++    NUM_WARPS: gl.constexpr,
++    PARALLEL_SLOTS: gl.constexpr,
++):
++    token = gl.program_id(0)
++    col_tile = gl.program_id(1)
++
++    # Eight adjacent columns share an E8M0 scale. Keep them in one lane so
++    # each lane reads a packed FP8 vector and reuses its scale. Distributing
++    # slots over waves makes independent route conversions run concurrently;
++    # the final cross-wave FP32 reduction owns each output element exactly once.
++    if PARALLEL_SLOTS:
++        layout: gl.constexpr = gl.BlockedLayout(
++            size_per_thread=[1, 8],
++            threads_per_warp=[1, 64],
++            warps_per_cta=[NUM_WARPS, 1],
++            order=[1, 0],
++        )
++    else:
++        layout: gl.constexpr = gl.BlockedLayout(
++            size_per_thread=[1, 8],
++            threads_per_warp=[1, 64],
++            warps_per_cta=[1, NUM_WARPS],
++            order=[1, 0],
++        )
++    slots = gl.arange(0, SLOT_PAD, layout=gl.SliceLayout(1, layout))
++    cols = col_tile * BLOCK_N + gl.arange(
++        0, BLOCK_N, layout=gl.SliceLayout(0, layout)
++    )
++    rows = token * TOPK + slots
++    valid = (slots[:, None] < TOPK) & (cols[None, :] < HIDDEN)
++    packed = gl.load(
++        Route + rows[:, None] * ROUTE_STRIDE + cols[None, :],
++        mask=valid,
++        other=0,
++        cache_modifier=".cg",
++    )
++    scales = gl.load(
++        Route + rows[:, None] * ROUTE_STRIDE + HIDDEN + cols[None, :] // 8,
++        mask=valid,
++        other=0,
++        cache_modifier=".cg",
++    )
++    values = packed.to(gl.float8e4nv, bitcast=True).to(gl.float32)
++    # This is the native reducer's exact E8M0 interpretation, including zero.
++    scale_f32 = (scales.to(gl.uint32) << 23).to(gl.float32, bitcast=True)
++    weighted_routes = values * scale_f32
++    combined = gl.sum(weighted_routes, axis=0)
++    gl.store(Out + token * OUT_STRIDE + cols, combined, mask=cols < HIDDEN)
++
++
++def reduce_fp8_routes(
++    route_output,
++    out,
++    *,
++    topk=6,
++    block_n=1024,
++    num_warps=4,
++    parallel_slots=True,
++):
++    """Fold all current packed route rows into the caller's BF16 output.
++
++    Opus has already applied the route weights before quantizing this buffer.
++    The function allocates no intermediate, and the launch fully overwrites
++    ``out`` on the current stream. The FP32 tree sum changes reduction order
++    relative to the native sequential reducer.
++    """
++    hidden = out.shape[1]
++    if route_output.ndim != 2 or route_output.shape != (
++        out.shape[0] * topk,
++        hidden + hidden // 8,
++    ):
++        raise ValueError("Expected Opus packed FP8 token-slot route output")
++    _reduce_fp8_routes[(out.shape[0], triton.cdiv(hidden, block_n))](
++        route_output,
++        out,
++        HIDDEN=hidden,
++        TOPK=topk,
++        ROUTE_STRIDE=route_output.stride(0),
++        OUT_STRIDE=out.stride(0),
++        BLOCK_N=block_n,
++        SLOT_PAD=triton.next_power_of_2(topk),
++        NUM_WARPS=num_warps,
++        PARALLEL_SLOTS=parallel_slots,
++        num_warps=num_warps,
++    )
++    return out
+diff --git a/source/prefill_native.py b/source/prefill_native.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b294b40b8869c7465f10849f0d0d85ccb9061db
+--- /dev/null
++++ b/source/prefill_native.py
+@@ -0,0 +1,200 @@
++# SPDX-License-Identifier: MIT
++"""Lazy native BM64 direct-output stage2 with no cached tensor state."""
++
++import ctypes
++from functools import lru_cache
++import hashlib
++import json
++import sys
++from pathlib import Path
++import subprocess
++
++import torch
++
++from aiter.ops.opus.moe_stage2_a8w4 import (
++    _contiguous,
++    _optional_contiguous,
++    _pad_scale_cols,
++    _pad_scale_rows,
++)
++
++
++class _Stage2Args(ctypes.Structure):
++    _fields_ = [
++        (name, ctypes.c_void_p)
++        for name in (
++            "inter_states_fp8", "w2_fp4", "a2_scale_e8m0", "w2_scale_e8m0",
++            "sorted_token_ids", "sorted_weights", "sorted_expert_ids",
++            "num_valid_ids", "out_bf16",
++        )
++    ] + [
++        (name, ctypes.c_int64)
++        for name in (
++            "stride_a_t", "stride_a_k", "stride_w_e", "stride_w_h",
++            "stride_a_scale_route", "stride_w_scale_row", "stride_o_t",
++        )
++    ] + [
++        (name, ctypes.c_int32)
++        for name in (
++            "token_num", "topk", "num_experts", "model_dim", "sorted_blocks",
++            "sort_block_m", "a_scale_rows", "route_out_fp8", "k_tiles",
++            "a_scale_words_per_row_pack", "w_scale_words_per_row_pack",
++        )
++    ] + [("route_out_row_bytes", ctypes.c_int64)]
++
++
++assert ctypes.sizeof(_Stage2Args) == 184
++def _run_build(argv, build_dir, stem):
++    result = subprocess.run(argv, cwd=build_dir, capture_output=True, text=True)
++    (build_dir / (stem + ".stdout")).write_text(result.stdout)
++    (build_dir / (stem + ".stderr")).write_text(result.stderr)
++    if result.returncode:
++        raise RuntimeError(
++            f"Prefill stage2 {stem} failed ({result.returncode}): {result.stderr[-6000:]}"
++        )
++
++
++@lru_cache(maxsize=1)
++def _native_library():
++    """Compile static code lazily into a content-keyed run-local directory."""
++    import aiter
++
++    source_dir = Path(__file__).resolve().parent
++    native_source = source_dir / "prefill" / "native_direct.hip"
++    csrc = Path(aiter.__file__).resolve().parent.parent / "csrc"
++    flags = [
++        "-x", "hip", "-shared", "-fPIC", "-O3", "-std=c++20", "--offload-arch=gfx950",
++        "-fgpu-flush-denormals-to-zero", "-fno-offload-uniform-block",
++        "-mllvm", "--amdgpu-kernarg-preload-count=32",
++        "-mllvm", "--lsr-drop-solution=1",
++        "-mllvm", "-amdgpu-early-inline-all=true",
++        "-mllvm", "-amdgpu-function-calls=false",
++        "-mllvm", "--amdgpu-mfma-vgpr-form",
++        "-mllvm", "-enable-post-misched=1",
++        "-D__Float4_e2m1fn_x2", "-DENABLE_CK=0",
++    ]
++    inputs = [Path(__file__).resolve(), native_source,
++              csrc / "opus_moe" / "gen_instances.py",
++              csrc / "opus_moe" / "opus_moe_common.py"]
++    for include_dir in (csrc / "include", csrc / "opus_moe" / "include"):
++        inputs.extend(sorted(p for p in include_dir.rglob("*")
++                             if p.is_file() and p.suffix in (".h", ".hpp", ".cuh")))
++    key = hashlib.sha256(json.dumps(flags).encode())
++    for path in inputs:
++        key.update(str(path.relative_to(csrc) if path.is_relative_to(csrc) else path.name).encode())
++        key.update(path.read_bytes())
++    # Matches the admitted decode loader: both local and captured workspaces
++    # place static artifacts beside the workspace, never in candidate source.
++    build_dir = source_dir.parent.parent / "prefill_stage2_build" / key.hexdigest()
++    build_dir.mkdir(parents=True, exist_ok=True)
++    library_path = build_dir / "prefill_stage2.so"
++    if not library_path.is_file():
++        _run_build([sys.executable, "-B", str(csrc / "opus_moe" / "gen_instances.py"),
++                    "--working_path", str(build_dir)], build_dir, "generate")
++        temporary_library = build_dir / "prefill_stage2.building.so"
++        command = ["/opt/rocm/bin/hipcc", *flags,
++                   "-I" + str(csrc / "include"),
++                   "-I" + str(csrc / "opus_moe" / "include"),
++                   "-I" + str(csrc / "opus_gemm" / "include"),
++                   "-I" + str(build_dir), str(native_source), "-o", str(temporary_library)]
++        (build_dir / "build_command.json").write_text(json.dumps(command, indent=2))
++        _run_build(command, build_dir, "compile")
++        temporary_library.replace(library_path)
++    native = ctypes.CDLL(str(library_path))
++    native.prefill_direct_abi_size.argtypes = []
++    native.prefill_direct_abi_size.restype = ctypes.c_size_t
++    native.prefill_direct_abi_offset.argtypes = [ctypes.c_int]
++    native.prefill_direct_abi_offset.restype = ctypes.c_size_t
++    if native.prefill_direct_abi_size() != ctypes.sizeof(_Stage2Args):
++        raise RuntimeError("Prefill stage2 native Kargs size mismatch")
++    for index, (name, _) in enumerate(_Stage2Args._fields_):
++        if native.prefill_direct_abi_offset(index) != getattr(_Stage2Args, name).offset:
++            raise RuntimeError(f"Prefill stage2 native Kargs offset mismatch: {name}")
++    native.prefill_direct_launch.argtypes = [ctypes.POINTER(_Stage2Args), ctypes.c_void_p]
++    native.prefill_direct_launch.restype = ctypes.c_int
++    native.prefill_direct_error_string.argtypes = [ctypes.c_int]
++    native.prefill_direct_error_string.restype = ctypes.c_char_p
++    return native
++
++
++def native_direct_stage2(*, ordinary_stage2, stage2_args, stage2_kwargs):
++    """Stage2 override: current sorted FP8 A2 to zeroed BF16 atomic output."""
++    a2, _w1, w2, sorted_ids, sorted_experts, valid_ids, out, topk = stage2_args
++    if (
++        stage2_kwargs["block_m"] != 64
++        or a2.ndim not in (2, 3)
++        or a2.shape[-1] != 384
++        or tuple(w2.shape) != (384, 7168, 192)
++        or tuple(out.shape) != (8192, 7168)
++        or topk != 6
++        or stage2_kwargs.get("inter_dim_pad", 0) != 0
++        or out.dtype != torch.bfloat16
++        or not out.is_contiguous()
++    ):
++        raise ValueError(
++            f"Native direct stage2 interface mismatch: A2={tuple(a2.shape)}, "
++            f"W2={tuple(w2.shape)}, out={tuple(out.shape)}, topk={topk}, "
++            f"block_m={stage2_kwargs['block_m']}"
++        )
++    if stage2_kwargs.get("bias2") is not None:
++        raise ValueError("Native direct stage2 does not support bias2")
++    if stage2_kwargs.get("expert_mask") is not None or stage2_kwargs.get("topk_ids") is not None:
++        raise ValueError("Native direct stage2 does not support expert masking")
++
++    native = _native_library()
++    # The 384-wide logical K has three 128-wide MFMA steps. Its last scale
++    # group is stored in a padded 16-column scale row, as in the original host
++    # wrapper. Preserve the actual strides after padding rather than using 12.
++    scale_rows = ((sorted_ids.numel() + 31) // 32) * 32
++    a2_scale = _pad_scale_cols(_pad_scale_rows(stage2_kwargs["a2_scale"], scale_rows), 16)
++    w2_scale = _pad_scale_cols(stage2_kwargs["w2_scale"], 16)
++    a2 = _contiguous(a2)
++    w2 = _contiguous(w2)
++    a2_scale = _contiguous(a2_scale)
++    w2_scale = _contiguous(w2_scale)
++    sorted_ids = _contiguous(sorted_ids)
++    sorted_experts = _contiguous(sorted_experts)
++    valid_ids = _contiguous(valid_ids)
++    sorted_weights = _optional_contiguous(stage2_kwargs.get("sorted_weights"))
++    tensors = (a2, w2, a2_scale, w2_scale, sorted_ids, sorted_experts, valid_ids)
++    if any(t.device != out.device for t in tensors):
++        raise ValueError("Native direct stage2 tensors must be on one device")
++    if sorted_weights is not None and sorted_weights.device != out.device:
++        raise ValueError("Native direct stage2 route weights must match the output device")
++
++    args = _Stage2Args()
++    args.inter_states_fp8 = a2.data_ptr()
++    args.w2_fp4 = w2.data_ptr()
++    args.a2_scale_e8m0 = a2_scale.data_ptr()
++    args.w2_scale_e8m0 = w2_scale.data_ptr()
++    args.sorted_token_ids = sorted_ids.data_ptr()
++    args.sorted_weights = None if sorted_weights is None else sorted_weights.data_ptr()
++    args.sorted_expert_ids = sorted_experts.data_ptr()
++    args.num_valid_ids = valid_ids.data_ptr()
++    args.out_bf16 = out.data_ptr()
++    args.stride_a_t = a2.stride(0)
++    args.stride_a_k = 0 if a2.ndim == 2 else a2.stride(1)
++    args.stride_w_e = w2.stride(0)
++    args.stride_w_h = w2.stride(1)
++    args.stride_a_scale_route = a2_scale.stride(0)
++    args.stride_w_scale_row = w2_scale.stride(0)
++    args.stride_o_t = out.stride(0)
++    args.token_num = out.shape[0]
++    args.topk = topk
++    args.num_experts = w2.shape[0]
++    args.model_dim = out.shape[1]
++    args.sorted_blocks = min(sorted_experts.numel(), out.shape[0] * topk)
++    args.sort_block_m = 64
++    args.a_scale_rows = a2_scale.shape[0]
++    args.route_out_fp8 = 0
++    args.k_tiles = 3
++    args.a_scale_words_per_row_pack = a2_scale.stride(0) * 8
++    args.w_scale_words_per_row_pack = w2_scale.stride(0) * 8
++    args.route_out_row_bytes = 0
++    status = native.prefill_direct_launch(
++        ctypes.byref(args), ctypes.c_void_p(torch.cuda.current_stream(out.device).cuda_stream)
++    )
++    if status:
++        detail = native.prefill_direct_error_string(status).decode("utf-8", errors="replace")
++        raise RuntimeError(f"Native BM64 direct stage2 launch failed: {status}: {detail}")
++    return out
+diff --git a/source/prepare.py b/source/prepare.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8dc67946d28d0b29e9d0f40f0150d582beab25f5
+--- /dev/null
++++ b/source/prepare.py
+@@ -0,0 +1,141 @@
++# SPDX-License-Identifier: MIT
++"""Decode combines dynamic routing, group-32 FP8 quantization, E8M0 scale
++placement and atomic-output initialization in one kernel. Each program derives
++its route positions from current IDs without reading another program's writes.
++Prefill uses native sorting, token-once quantization and scale placement.
++Decode uses the candidate paired KWave4 BM16 stage1 and native BM16 stage2.
++Prefill uses the native BM64 FP8 route producer and parallel-slot FP32 reducer.
++
++The native-compatible route interface is parameterized by metadata.block_m:
++BM16 decode / BM64 prefill. Sorted int32 IDs encode (slot << 24) | token;
++BF16 atomic output [M,H] is zeroed before either GEMM executes. num_valid_ids
++is int32[2]: current padded sorted extent and live token count, device derived.
++Scale memory is E8M0[pad32(route capacity), pad8(ceil(H/32))], using the 32x8
++mx_scale_shuffle_idx layout independently of BM. Route capacity uses the native
++ceil((M*topk + E*BM - topk)/BM)*BM bound; no observed route count is baked in.
++Every invocation reads all current hidden states, route IDs and route weights.
++"""
++
++import importlib
++
++import torch
++
++from source.prepare_kernels import quantize_sort_a1
++
++from aiter import dtypes
++from aiter.ops.quant import per_1x32_mx_quant_hip, mxfp4_moe_sort_fwd
++
++_moe = importlib.import_module("aiter.fused_moe")
++
++
++def _supported(hidden_states, w1, w2, topk_ids, kw):
++    """Keep unrelated public-call variants on upstream's complete dispatcher."""
++    return (
++        hidden_states.shape[1] == 7168
++        and hidden_states.shape[0] in (64, 8192)
++        and hidden_states.dtype == dtypes.bf16
++        and hidden_states.is_contiguous()
++        and topk_ids.shape[1] == 6
++        and w1.shape[0] == 384
++        and w1.dtype == dtypes.fp4x2
++        and w2.dtype == dtypes.fp4x2
++        and getattr(w1, "is_shuffled", False)
++        and getattr(w2, "is_shuffled", False)
++        and kw.get("quant_type") == _moe.QuantType.per_1x32
++        and kw.get("activation", _moe.ActivationType.Silu) == _moe.ActivationType.Silu
++        and kw.get("gate_mode") == "interleave"
++        and not kw.get("doweight_stage1", False)
++        and not kw.get("hidden_pad", 0)
++        and not kw.get("intermediate_pad", 0)
++        and all(kw.get(k) is None for k in (
++            "expert_mask", "num_local_tokens", "a1_scale", "a2_scale", "bias1",
++            "bias2", "stage2_scatter", "shared_w1", "shared_w2",
++            "shared_w1_scale", "shared_w2_scale", "quant_type_a", "quant_dtype_a",
++            "quant_dtype_a2", "output",
++        ))
++        and kw.get("shared_expert_id", -1) == -1
++        and kw.get("clamp_shared", True)
++        and kw.get("dtype", hidden_states.dtype) in (None, hidden_states.dtype)
++    )
++
++
++
++def prepared_fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kw):
++    if not _supported(hidden_states, w1, w2, topk_ids, kw):
++        return _moe.fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kw)
++
++    M, topk = topk_ids.shape
++    E, H, I = _moe.get_inter_dim(w1.shape, w2.shape)
++    if (E, H, I) != (384, 7168, 384) or w1.shape[1] != 2 * I:
++        return _moe.fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kw)
++    activation = kw.get("activation", _moe.ActivationType.Silu)
++    quant_type = kw["quant_type"]
++    gate_mode = _moe.GateMode(kw["gate_mode"])
++    beta, linear_beta, _ = _moe._normalize_mxfp4_activation_params(
++        activation, kw.get("beta"), kw.get("linear_beta"), kw.get("swiglu_limit")
++    )
++    metadata = _moe.get_2stage_cfgs(
++        _moe.get_padded_M(M), H, I, E, topk, hidden_states.dtype,
++        dtypes.fp8, w1.dtype, quant_type, True, activation, False, 0, 0,
++        True, gate_mode, is_ep=False, has_stage1_bias=False, has_stage2_bias=False,
++        situ_beta=beta, situ_linear_beta=linear_beta,
++        swiglu_limit=kw.get("swiglu_limit"), opus_weights_shuffled=True,
++        gate_up_interleave=getattr(w1, "gate_up_interleave", None),
++        input_dtype=hidden_states.dtype,
++    )
++    block_m = int(metadata.block_m)
++    if (metadata.run_1stage or metadata.output_aux or metadata.flat
++            or metadata.full_impl is not None
++            or kw.get("block_size_M") not in (None, 0, -1, block_m)):
++        return _moe.fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kw)
++
++    if M == 64:
++        # The preparation and both consumers must agree on the route tile.
++        # Explicit caller overrides keep upstream's public dispatch semantics.
++        if kw.get("block_size_M") not in (None, 0):
++            return _moe.fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, **kw)
++        from source.decode import _decode_metadata
++
++        metadata = _decode_metadata(metadata)
++        block_m = int(metadata.block_m)
++
++    accumulate = not _moe._stage2_runtime_uses_route_reduce(metadata.stage2, M, H)
++    if M == 64:
++        (sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids,
++         moe_out, a1, a1_scales) = quantize_sort_a1(
++            hidden_states, topk_ids, topk_weight, E, block_m, groups_per_program=64,
++        )
++    else:
++        sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_out = (
++            _moe.moe_sorting(
++                topk_ids, topk_weight, E, H, hidden_states.dtype, block_m,
++                dispatch_policy=kw.get("moe_sorting_dispatch_policy", 0),
++                accumulate=accumulate,
++            )
++        )
++        a1, token_scales = per_1x32_mx_quant_hip(
++            hidden_states, scale=None, quant_dtype=dtypes.fp8,
++            scale_type=dtypes.fp8_e8m0, shuffle=False,
++        )
++        a1_scales = mxfp4_moe_sort_fwd(
++            token_scales, sorted_ids, num_valid_ids, M, H,
++        )
++    stage2_override = None
++    if M == 8192:
++        from source.prefill import _route_stage2
++
++        stage2_override = _route_stage2
++    return _moe.fused_moe_2stages(
++        hidden_states, w1, w2, topk, sorted_ids, sorted_weights,
++        sorted_expert_ids, num_valid_ids, moe_out, True, block_m,
++        activation=activation, quant_type=quant_type, doweight_stage1=False,
++        q_dtype_a=dtypes.fp8, q_dtype_w=w1.dtype,
++        w1_scale=kw.get("w1_scale"), w2_scale=kw.get("w2_scale"),
++        topk_ids=topk_ids, topk_weights=topk_weight,
++        swiglu_limit=kw.get("swiglu_limit"), beta=kw.get("beta"),
++        linear_beta=kw.get("linear_beta"), gate_mode=gate_mode,
++        _metadata_transform=lambda _: metadata, routing_num_experts=E,
++        _stage2_override=stage2_override,
++        _stage1_extra_args={"swiglu_limit": kw.get("swiglu_limit")} if M == 64 else None,
++        prequantized_a1=a1, prequantized_a1_scale=a1_scales,
++    )
+diff --git a/source/prepare_kernels.py b/source/prepare_kernels.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ea0abc738ed6ffb75c3232025332fcbb00c892e
+--- /dev/null
++++ b/source/prepare_kernels.py
+@@ -0,0 +1,438 @@
++# SPDX-License-Identifier: MIT
++"""Token-once MXFP8 A1 quantization with native sorted-scale placement.
++
++The native Opus sorter can produce ``reverse_sorted[token * topk + slot]``,
++the row at which that route occurs in its BM-padded sorted output, with -1
++for an excluded route.  The sorter must run before this kernel on the current
++stream.  Each program owns a distinct (token, group-of-32-features) range;
++each quantized activation byte has one writer, and each valid sorted scale
++byte has one writer.  No cross-program synchronization is required.
++
++The scale layout is exactly ``mx_scale_shuffle_idx`` in upstream
++``csrc/include/mx_quant_utils.h``.  Its tile is 32 rows x 8 scale columns,
++independent of the route sorter's BM (currently 32 decode / 64 prefill).
++
++By default only valid route scale bytes are written, matching upstream's
++small-M fused helper: ``ops/quant.py:fused_dynamic_mx_quant_moe_sort`` allocates
++the scale with ``torch.empty`` and ``fused_mx_quant_moe_sort_kernel`` in
++``csrc/kernels/quant_kernels.cu`` breaks before its scale write when a sorted
++token is the padding sentinel.  Padding therefore has no defined native
++value.  For Opus stage1, ``load_routes_stage1`` rejects sentinel token/slot
++indices and the quantizing epilogue returns before writing invalid routes
++(``opus_moe_stage1_a8w4_pipeline_common_gfx950.cuh``).  Its ``select_sfa_stage1``
++also substitutes ``kNoScaleWord`` outside the group-split specialization.
++``initialize_padding=True`` optionally writes neutral E8M0 127 to only
++sentinel/out-of-extent rows and padded columns in the same launch.  These
++writes are disjoint from the reverse-index scatters, so they cannot race.
++
++This module performs no import-time device operation or input preparation.
++"""
++
++import torch
++import triton
++import triton.language as tl
++
++from aiter import dtypes
++
++
++@triton.jit
++def _mx_scale_offset(row, col, SCALE_COLS_PAD: tl.constexpr):
++    return (
++        (row // 32 * SCALE_COLS_PAD) * 32
++        + (col // 8) * 256
++        + (col % 4) * 64
++        + (row % 16) * 4
++        + ((col % 8) // 4) * 2
++        + ((row % 32) // 16)
++    )
++
++
++@triton.jit
++def _token_once_quant_scatter(
++    X,
++    REVERSE,
++    SORTED_IDS,
++    NUM_VALID,
++    A1,
++    SORTED_SCALE,
++    M: tl.constexpr,
++    H: tl.constexpr,
++    TOPK: tl.constexpr,
++    STRIDE_M: tl.constexpr,
++    STRIDE_H: tl.constexpr,
++    SCALE_COLS: tl.constexpr,
++    SCALE_COLS_PAD: tl.constexpr,
++    SORTED_CAPACITY: tl.constexpr,
++    SCALE_ROWS_PAD: tl.constexpr,
++    GROUPS_PER_PROGRAM: tl.constexpr,
++    GROUP_TILES: tl.constexpr,
++    QUANT_PROGRAMS: tl.constexpr,
++    INITIALIZE_PADDING: tl.constexpr,
++    PAD_BLOCK: tl.constexpr,
++):
++    pid = tl.program_id(0)
++    if pid < QUANT_PROGRAMS:
++        token = pid // GROUP_TILES
++        group = (pid % GROUP_TILES) * GROUPS_PER_PROGRAM + tl.arange(
++            0, GROUPS_PER_PROGRAM
++        )
++        feature = group[:, None] * 32 + tl.arange(0, 32)[None, :]
++        x = tl.load(
++            X + token * STRIDE_M + feature * STRIDE_H,
++            mask=feature < H,
++            other=0.0,
++        ).to(tl.float32)
++
++        # Same f32 bit rule as fp_f32_to_e8m0_scale<RoundUp, FP8_E4M3>.
++        # In particular, this is RCEIL(amax / 448), not ceil(amax) / 256.
++        # The native amax reduction starts at the shared floor 1e-10f.
++        amax = tl.maximum(tl.max(tl.abs(x), axis=1), 1.0e-10)
++        ratio_bits = (amax * (1.0 / 448.0)).to(tl.uint32, bitcast=True)
++        exponent = (ratio_bits >> 23) & 255
++        exponent += ((exponent < 255) & ((ratio_bits & 0x7FFFFF) != 0)).to(
++            tl.uint32
++        )
++        dequant_scale = (exponent << 23).to(tl.float32, bitcast=True)
++        # Match scaled_quant_vgpr_impl's v_rcp_f32 rather than introducing a
++        # different division approximation.  Normal power-of-two scales have
++        # exactly representable reciprocals.
++        inverse_scale = tl.inline_asm_elementwise(
++            "v_rcp_f32 $0, $1;",
++            constraints="=v,v",
++            args=[dequant_scale],
++            dtype=tl.float32,
++            is_pure=True,
++            pack=1,
++        )
++        scaled = x * inverse_scale[:, None]
++        scaled = tl.minimum(tl.maximum(scaled, -448.0), 448.0)
++        q = scaled.to(tl.float8e4nv, fp_downcast_rounding="rtne")
++        tl.store(A1 + token * H + feature, q, mask=feature < H)
++
++        extent = tl.load(NUM_VALID)
++        for slot in tl.static_range(TOPK):
++            row = tl.load(REVERSE + token * TOPK + slot)
++            scale_offset = _mx_scale_offset(row, group, SCALE_COLS_PAD)
++            tl.store(
++                SORTED_SCALE + scale_offset,
++                exponent.to(tl.uint8),
++                mask=(row >= 0)
++                & (row < extent)
++                & (row < SORTED_CAPACITY)
++                & (group < SCALE_COLS),
++            )
++    elif INITIALIZE_PADDING:
++        # Invert the physical swizzle to identify only unused bytes.  The
++        # reverse-scatter side writes real token rows and logical columns;
++        # this side writes their complement, even within the same dword.
++        offset = (pid - QUANT_PROGRAMS) * PAD_BLOCK + tl.arange(0, PAD_BLOCK)
++        tile = offset // (32 * SCALE_COLS_PAD)
++        within = offset % (32 * SCALE_COLS_PAD)
++        quad = within % 256
++        row = tile * 32 + ((quad % 64) // 4) + (quad % 2) * 16
++        col = (within // 256) * 8 + quad // 64 + ((quad % 4) // 2) * 4
++        extent = tl.load(NUM_VALID)
++        token_info = tl.load(
++            SORTED_IDS + row,
++            mask=(row < extent) & (row < SORTED_CAPACITY),
++            other=M,
++        )
++        padding = (
++            (row >= extent)
++            | (row >= SORTED_CAPACITY)
++            | ((token_info & 0xFFFFFF) >= M)
++            | (col >= SCALE_COLS)
++        )
++        tl.store(
++            SORTED_SCALE + offset,
++            127,
++            mask=(offset < SCALE_ROWS_PAD * SCALE_COLS_PAD) & padding,
++        )
++
++
++def quantize_a1_scatter(
++    hidden_states,
++    reverse_sorted,
++    sorted_ids,
++    num_valid_ids,
++    topk,
++    block_m,
++    *,
++    groups_per_program=32,
++    initialize_padding=False,
++):
++    """Return token-major FP8 A1 and swizzled sorted E8M0 scales.
++
++    ``reverse_sorted`` must describe this invocation's native sorting result.
++    The caller continues to own all original sorted buffers and output zero
++    initialization; this operation neither changes nor replaces those buffers.
++    All bounds here use tensor metadata, while live route extent is read only
++    by the device kernel.  ``block_m`` describes the preserved GEMM interface;
++    the independent scale-layout tile remains 32x8 for any supported BM.
++    """
++    m, h = hidden_states.shape
++    if hidden_states.dtype != dtypes.bf16 or h % 32:
++        raise ValueError("A1 scatter expects BF16 rows with H divisible by 32")
++    if block_m <= 0 or block_m % 16:
++        raise ValueError("route block_m must be a positive multiple of 16")
++    if groups_per_program <= 0 or groups_per_program & (groups_per_program - 1):
++        raise ValueError("groups_per_program must be a positive power of two")
++    if reverse_sorted.dtype != torch.int32 or reverse_sorted.numel() < m * topk:
++        raise ValueError("reverse_sorted must have int32 storage for every route")
++
++    scale_cols = h // 32
++    scale_cols_pad = triton.cdiv(scale_cols, 8) * 8
++    capacity = sorted_ids.numel()
++    scale_rows_pad = triton.cdiv(capacity, 32) * 32
++    a1 = torch.empty((m, h), dtype=dtypes.fp8, device=hidden_states.device)
++    sorted_scale = torch.empty(
++        (scale_rows_pad, scale_cols_pad),
++        dtype=dtypes.fp8_e8m0,
++        device=hidden_states.device,
++    )
++    group_tiles = triton.cdiv(scale_cols, groups_per_program)
++    quant_programs = m * group_tiles
++    pad_block = 1024
++    pad_programs = (
++        triton.cdiv(scale_rows_pad * scale_cols_pad, pad_block)
++        if initialize_padding
++        else 0
++    )
++    _token_once_quant_scatter[(quant_programs + pad_programs,)](
++        hidden_states,
++        reverse_sorted,
++        sorted_ids,
++        num_valid_ids,
++        a1,
++        sorted_scale.view(torch.uint8),
++        M=m,
++        H=h,
++        TOPK=topk,
++        STRIDE_M=hidden_states.stride(0),
++        STRIDE_H=hidden_states.stride(1),
++        SCALE_COLS=scale_cols,
++        SCALE_COLS_PAD=scale_cols_pad,
++        SORTED_CAPACITY=capacity,
++        SCALE_ROWS_PAD=scale_rows_pad,
++        GROUPS_PER_PROGRAM=groups_per_program,
++        GROUP_TILES=group_tiles,
++        QUANT_PROGRAMS=quant_programs,
++        INITIALIZE_PADDING=initialize_padding,
++        PAD_BLOCK=pad_block,
++        num_warps=4,
++        enable_fp_fusion=False,
++    )
++    return a1, sorted_scale
++
++
++@triton.jit
++def _decode_quant_sort_a1(
++    X,
++    TOPK_IDS,
++    TOPK_WEIGHTS,
++    SORTED_IDS,
++    SORTED_WEIGHTS,
++    SORTED_EXPERTS,
++    NUM_VALID,
++    MOE_OUT,
++    A1,
++    SORTED_SCALE,
++    M: tl.constexpr,
++    H: tl.constexpr,
++    E: tl.constexpr,
++    TOPK: tl.constexpr,
++    BM: tl.constexpr,
++    STRIDE_M: tl.constexpr,
++    STRIDE_H: tl.constexpr,
++    SCALE_COLS: tl.constexpr,
++    SCALE_COLS_PAD: tl.constexpr,
++    GROUPS_PER_PROGRAM: tl.constexpr,
++    GROUP_TILES: tl.constexpr,
++    HIST_BINS: tl.constexpr,
++    ROUTE_BLOCK: tl.constexpr,
++):
++    """Decode-only independently recomputed routes; no inter-CTA dependency."""
++    pid = tl.program_id(0)
++    token = pid // GROUP_TILES
++    group_tile = pid % GROUP_TILES
++    group = group_tile * GROUPS_PER_PROGRAM + tl.arange(0, GROUPS_PER_PROGRAM)
++    feature = group[:, None] * 32 + tl.arange(0, 32)[None, :]
++
++    # Quantize and zero a disjoint feature slice before holding routing state.
++    x = tl.load(
++        X + token * STRIDE_M + feature * STRIDE_H,
++        mask=feature < H,
++        other=0.0,
++    ).to(tl.float32)
++    amax = tl.maximum(tl.max(tl.abs(x), axis=1), 1.0e-10)
++    ratio_bits = (amax * (1.0 / 448.0)).to(tl.uint32, bitcast=True)
++    exponent = (ratio_bits >> 23) & 255
++    exponent += ((exponent < 255) & ((ratio_bits & 0x7FFFFF) != 0)).to(tl.uint32)
++    dequant_scale = (exponent << 23).to(tl.float32, bitcast=True)
++    inverse_scale = tl.inline_asm_elementwise(
++        "v_rcp_f32 $0, $1;",
++        constraints="=v,v",
++        args=[dequant_scale],
++        dtype=tl.float32,
++        is_pure=True,
++        pack=1,
++    )
++    scaled = tl.minimum(tl.maximum(x * inverse_scale[:, None], -448.0), 448.0)
++    tl.store(
++        A1 + token * H + feature,
++        scaled.to(tl.float8e4nv, fp_downcast_rounding="rtne"),
++        mask=feature < H,
++    )
++    tl.store(MOE_OUT + token * H + feature, 0.0, mask=feature < H)
++
++    # Every CTA obtains a private, complete histogram from current IDs.  The
++    # duplicated work avoids reading metadata produced by another workgroup.
++    route_idx = tl.arange(0, ROUTE_BLOCK)
++    route_ids = tl.load(TOPK_IDS + route_idx, mask=route_idx < M * TOPK, other=-1)
++    route_live = (route_idx < M * TOPK) & (route_ids >= 0) & (route_ids < E)
++    histogram_ids = tl.where(route_live, route_ids, HIST_BINS - 1)
++    histogram = tl.histogram(histogram_ids, HIST_BINS)
++    expert_bins = tl.arange(0, HIST_BINS)
++    padded_count = tl.where(expert_bins < E, tl.cdiv(histogram, BM) * BM, 0)
++    expert_begin = tl.cumsum(padded_count, axis=0) - padded_count
++    if pid == 0:
++        tl.store(NUM_VALID, tl.sum(padded_count, axis=0))
++        tl.store(NUM_VALID + 1, M)
++
++    # Gather all six expert prefixes/counts at once instead of reducing each
++    # 512-bin table once per slot.  Rank's route dimension is cooperative;
++    # the slot dimension exposes the six independent comparisons together.
++    slot = tl.arange(0, 8)
++    current_route = token * TOPK + slot
++    expert = tl.load(TOPK_IDS + current_route, mask=slot < TOPK, other=-1)
++    valid_expert = (slot < TOPK) & (expert >= 0) & (expert < E)
++    safe_expert = tl.where(valid_expert, expert, 0)
++    begin = tl.gather(expert_begin, safe_expert, axis=0)
++    count = tl.gather(histogram, safe_expert, axis=0)
++    rank = tl.sum(
++        ((route_idx[None, :] < current_route[:, None])
++         & route_live[None, :]
++         & (route_ids[None, :] == expert[:, None])).to(tl.int32),
++        axis=1,
++    )
++    # Keep vector arithmetic but emit each route with the parent's store
++    # shape.  Only small eight-element vectors need scalar extraction.
++    for route_slot in tl.static_range(TOPK):
++        route_begin = tl.sum(tl.where(slot == route_slot, begin, 0), axis=0)
++        route_count = tl.sum(tl.where(slot == route_slot, count, 0), axis=0)
++        route_rank = tl.sum(tl.where(slot == route_slot, rank, 0), axis=0)
++        route_expert = tl.load(TOPK_IDS + token * TOPK + route_slot)
++        route_valid = (route_expert >= 0) & (route_expert < E)
++        sorted_row = route_begin + route_rank
++        tl.store(
++            SORTED_SCALE + _mx_scale_offset(sorted_row, group, SCALE_COLS_PAD),
++            exponent.to(tl.uint8),
++            mask=route_valid & (group < SCALE_COLS),
++        )
++        if group_tile == 0:
++            route_weight = tl.load(TOPK_WEIGHTS + token * TOPK + route_slot)
++            tl.store(
++                SORTED_IDS + sorted_row,
++                (route_slot << 24) | token,
++                mask=route_valid,
++            )
++            tl.store(SORTED_WEIGHTS + sorted_row, route_weight, mask=route_valid)
++            tl.store(
++                SORTED_EXPERTS + sorted_row // BM,
++                route_expert,
++                mask=route_valid & (route_rank % BM == 0),
++            )
++            pad_lane = tl.arange(0, BM)
++            tail_length = tl.cdiv(route_count, BM) * BM - route_count
++            pad_row = route_begin + route_count + pad_lane
++            tail_owner = route_valid & (route_rank == route_count - 1)
++            pad_mask = tail_owner & (pad_lane < tail_length)
++            tl.store(SORTED_IDS + pad_row, (TOPK << 24) | M, mask=pad_mask)
++            tl.store(SORTED_WEIGHTS + pad_row, 0.0, mask=pad_mask)
++
++
++def quantize_sort_a1(
++    hidden_states,
++    topk_ids,
++    topk_weights,
++    num_experts=384,
++    block_m=32,
++    *,
++    groups_per_program=32,
++):
++    """One preparation launch for the M64 call.
++
++    Returns ``(sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids,
++    moe_out, a1, sorted_scale)`` in the native interface order.  Sorting is
++    stable over flattened (token, route-slot) order.  All current route IDs
++    contribute to every CTA's private histogram, and no CTA consumes another
++    CTA's writes.  Metadata, route tails and output zeroing have unique owners.
++
++    The memory-capacity bound is the same native distribution-independent
++    allocation, rounded to BM.  ``num_valid_ids[0]`` is the device-computed
++    sum of per-expert padded route counts; element 1 is the token count.
++    Sorted scale padding is left untouched, matching native fused small-M
++    preparation as documented at the top of this file.
++
++    This intentionally duplicates histogram/rank work across feature CTAs.
++    Only a complete admitted evaluation can determine whether eliminating
++    native sorting and separate scale preparation outweighs that work.
++    """
++    m, h = hidden_states.shape
++    if m != 64 or topk_ids.shape != (64, 6) or num_experts != 384:
++        raise ValueError("fused preparation is specialized to M64/E384/topk6")
++    if hidden_states.dtype != dtypes.bf16 or h % 32:
++        raise ValueError("fused preparation expects BF16 rows with H divisible by 32")
++    if not topk_ids.is_contiguous() or not topk_weights.is_contiguous():
++        raise ValueError("fused preparation expects contiguous routing tensors")
++    if topk_ids.dtype != torch.int32 or topk_weights.dtype != torch.float32:
++        raise ValueError("routing tensors must be int32 IDs and float32 weights")
++    if block_m < 16 or block_m & (block_m - 1):
++        raise ValueError("block_m must be a power of two at least 16")
++    if groups_per_program <= 0 or groups_per_program & (groups_per_program - 1):
++        raise ValueError("groups_per_program must be a positive power of two")
++
++    topk = topk_ids.shape[1]
++    capacity = triton.cdiv(m * topk + num_experts * block_m - topk, block_m) * block_m
++    scale_cols = h // 32
++    scale_cols_pad = triton.cdiv(scale_cols, 8) * 8
++    scale_rows_pad = triton.cdiv(capacity, 32) * 32
++    device = hidden_states.device
++    sorted_ids = torch.empty((capacity,), dtype=torch.int32, device=device)
++    sorted_weights = torch.empty((capacity,), dtype=torch.float32, device=device)
++    sorted_experts = torch.empty((capacity // block_m,), dtype=torch.int32, device=device)
++    num_valid = torch.empty((2,), dtype=torch.int32, device=device)
++    moe_out = torch.empty((m, h), dtype=hidden_states.dtype, device=device)
++    a1 = torch.empty((m, h), dtype=dtypes.fp8, device=device)
++    sorted_scale = torch.empty(
++        (scale_rows_pad, scale_cols_pad), dtype=dtypes.fp8_e8m0, device=device
++    )
++    group_tiles = triton.cdiv(scale_cols, groups_per_program)
++    _decode_quant_sort_a1[(m * group_tiles,)](
++        hidden_states,
++        topk_ids,
++        topk_weights,
++        sorted_ids,
++        sorted_weights,
++        sorted_experts,
++        num_valid,
++        moe_out,
++        a1,
++        sorted_scale.view(torch.uint8),
++        M=m,
++        H=h,
++        E=num_experts,
++        TOPK=topk,
++        BM=block_m,
++        STRIDE_M=hidden_states.stride(0),
++        STRIDE_H=hidden_states.stride(1),
++        SCALE_COLS=scale_cols,
++        SCALE_COLS_PAD=scale_cols_pad,
++        GROUPS_PER_PROGRAM=groups_per_program,
++        GROUP_TILES=group_tiles,
++        HIST_BINS=512,
++        ROUTE_BLOCK=512,
++        num_warps=4,
++        enable_fp_fusion=False,
++    )
++    return sorted_ids, sorted_weights, sorted_experts, num_valid, moe_out, a1, sorted_scale
