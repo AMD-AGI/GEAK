@@ -11,6 +11,10 @@ GEAK lineages, and the hybrid GEAK-EVO population used in v1 experiments, see
 That guide distinguishes the code on this branch from the later population
 extension and frozen experiment sources.
 
+For the intended role inside Hyperloom and GEAK's end-to-end workflow, see
+[the workload discovery loop and pinned integration code](workload-discovery.md).
+It separates the current kernel evidence from the proposed workload-level system.
+
 ```mermaid
 flowchart LR
     A[Kernel workflow entry] --> B[Setup and baseline]
