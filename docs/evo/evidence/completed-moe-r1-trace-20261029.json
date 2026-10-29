@@ -1,0 +1,279 @@
+{
+  "schema": "geak-evo-completed-moe-r1-execution-evidence/1",
+  "study": "Repaired MoE R1, separate selected-source replay",
+  "authors": [
+    "Codex",
+    "actual Claude"
+  ],
+  "status": "Joint at stated task-local source/execution/benefit scope",
+  "source_order": [
+    "ORIGINAL",
+    "GEAK",
+    "GEAK-EVO"
+  ],
+  "source_order_registration": "R1 ordinal maps to even trace order; numeric index explicitly bound after outcome reveal and before trace.",
+  "original_diagnostic_window_utc": [
+    "2026-10-29T05:39:52.117450Z",
+    "2026-10-29T06:09:52.117450Z"
+  ],
+  "successful_attempt": 2,
+  "prior_attempt": "ORIGINAL and GEAK decode tracing failed on writable cache-parent permissions. EVO trace completed. All partial raw artifacts retained; attempt2 corrected parent ownership without changing task, candidate source, scoring or original deadline.",
+  "raw_manifest_sha256": "076193249adc42696102472d8403408411d19b5a8b9bf5a17729172fea559c22",
+  "raw_file_count": 19,
+  "raw_bytes": 243378546,
+  "codex_reduction_sha256": "0f38e727d6b88bbc6544c88f8688fcf93ad2dd5e4b2155bca7367dacf3bedd2b",
+  "claude_reduction_sha256": "48c2efa58214788f7e8c477c4c2669e497e1b99274e29d198feb4d0de76c8da8",
+  "correctness_and_input_immutability": "All six replay checks pass the unchanged task numerical contract.",
+  "historical_owner_status": "Owner return code2 is preserved; final administrative return code0 and current resource release are separate facts.",
+  "rows": [
+    {
+      "role": "ORIGINAL",
+      "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+      "case": "prefill_m8192",
+      "marked_call_count": 1,
+      "dispatch_count": 9,
+      "crossing_dispatch_count": 0,
+      "dispatches": [
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >, aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs>(aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs)",
+          "duration_us": 3.56
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs)",
+          "duration_us": 4.68
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+          "duration_us": 4.761
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+          "duration_us": 13.6
+        },
+        {
+          "name": "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bDB8_Li32ELi32ELb0ELi64ELb1ELb0ELi0ELb0ELb0ELb0ELb0ELb0EEEvPT0_PfPKT_PKfliilPKii",
+          "duration_us": 40.72
+        },
+        {
+          "name": "void aiter::mxfp4_moe_sort_kernel<256, 32, 32, 32>(unsigned char*, unsigned char*, int const*, int const*, int, int, int, int, int)",
+          "duration_us": 11.481
+        },
+        {
+          "name": "void opus_moe::stage1_a8w4::pipeline_group_split::opus_moe_stage1_a8w4_kernel_group_split_gfx950<opus_moe::stage1_a8w4::OpusMoeStage1A8W4Shape<64, 384, opus_moe::stage1_a8w4::OpusMoeStage1A8W4Policy<true, 1, 1, 3, 256, false, false, false, 0, 64, 1, false, true> > >(opus_moe::stage1_a8w4::OpusMoeStage1A8W4Kargs)",
+          "duration_us": 379.447
+        },
+        {
+          "name": "void opus_moe_stage2_a8w4_decode_kernel_gfx950<OpusMoeStage2A8W4DecodeShape<64, 256, false, false, 256, 4, 0, 0, 2, 1> >(opus_moe_stage2_a8w4_kargs)",
+          "duration_us": 303.966
+        },
+        {
+          "name": "void opus_moe_stage2_reduce_token_slot_route_output_kernel_gfx950<3584, 448, 6, true>(opus_moe_stage2_route_reduce_kargs)",
+          "duration_us": 86.722
+        }
+      ],
+      "range_us": 1152.303,
+      "dispatch_union_us": 848.764,
+      "range_uncovered_by_these_dispatches_us": 303.539
+    },
+    {
+      "role": "ORIGINAL",
+      "source_id": "e0aec3ba1f5724e6bfd052ca900ee420249ccd400db1b127bdffd00b4663fe8c",
+      "case": "decode_m64",
+      "marked_call_count": 1,
+      "dispatch_count": 5,
+      "crossing_dispatch_count": 0,
+      "dispatches": [
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >::Kargs)",
+          "duration_us": 4.64
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >::Kargs)",
+          "duration_us": 5.04
+        },
+        {
+          "name": "_ZN5aiter30fused_mx_quant_moe_sort_kernelIDF16bDB8_Li256ELi32EEEvPT0_PhPKT_PKiS9_PKfiiiiiiiiib",
+          "duration_us": 7.68
+        },
+        {
+          "name": "mfma_moe1_silu_mul_afp8_wfp4_fp8_t32x128x256_pm1_fp8q_sort_async_gui_v33",
+          "duration_us": 113.722
+        },
+        {
+          "name": "void opus_moe_stage2_a8w4_decode_kernel_gfx950<OpusMoeStage2A8W4DecodeShape<32, 128, true, false, 128, 1, 3, 2, 1, 1> >(opus_moe_stage2_a8w4_kargs)",
+          "duration_us": 62.241
+        }
+      ],
+      "range_us": 255.288,
+      "dispatch_union_us": 193.323,
+      "range_uncovered_by_these_dispatches_us": 61.965
+    },
+    {
+      "role": "GEAK",
+      "source_id": "3ebfb74e5ed62cf9cb7b68314bf80bee05bd688b44651d94faf08348a758c041",
+      "case": "prefill_m8192",
+      "marked_call_count": 1,
+      "dispatch_count": 9,
+      "crossing_dispatch_count": 0,
+      "dispatches": [
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >, aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs>(aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs)",
+          "duration_us": 3.48
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs)",
+          "duration_us": 4.56
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+          "duration_us": 4.44
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+          "duration_us": 13.48
+        },
+        {
+          "name": "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bDB8_Li32ELi32ELb0ELi64ELb1ELb0ELi0ELb0ELb0ELb0ELb0ELb0EEEvPT0_PfPKT_PKfliilPKii",
+          "duration_us": 39.881
+        },
+        {
+          "name": "void aiter::mxfp4_moe_sort_kernel<256, 32, 32, 32>(unsigned char*, unsigned char*, int const*, int const*, int, int, int, int, int)",
+          "duration_us": 11.68
+        },
+        {
+          "name": "void opus_moe::stage1_a8w4::pipeline_group_split::opus_moe_stage1_a8w4_kernel_group_split_gfx950<opus_moe::stage1_a8w4::OpusMoeStage1A8W4Shape<64, 384, opus_moe::stage1_a8w4::OpusMoeStage1A8W4Policy<true, 1, 1, 3, 256, false, false, false, 0, 64, 1, false, true> > >(opus_moe::stage1_a8w4::OpusMoeStage1A8W4Kargs)",
+          "duration_us": 371.888
+        },
+        {
+          "name": "void opus_moe_stage2_a8w4_decode_kernel_gfx950<OpusMoeStage2A8W4DecodeShape<64, 256, false, false, 256, 4, 0, 0, 2, 1> >(opus_moe_stage2_a8w4_kargs)",
+          "duration_us": 296.685
+        },
+        {
+          "name": "void opus_moe_stage2_reduce_token_slot_route_output_kernel_gfx950<3584, 448, 6, true>(opus_moe_stage2_route_reduce_kargs)",
+          "duration_us": 87.922
+        }
+      ],
+      "range_us": 1144.47,
+      "dispatch_union_us": 833.769,
+      "range_uncovered_by_these_dispatches_us": 310.701
+    },
+    {
+      "role": "GEAK",
+      "source_id": "3ebfb74e5ed62cf9cb7b68314bf80bee05bd688b44651d94faf08348a758c041",
+      "case": "decode_m64",
+      "marked_call_count": 1,
+      "dispatch_count": 5,
+      "crossing_dispatch_count": 0,
+      "dispatches": [
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P0_v2<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >::Kargs)",
+          "duration_us": 4.32
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, int, 1, false, false, true> >::Kargs)",
+          "duration_us": 5.36
+        },
+        {
+          "name": "_quant_a1_scatter_scales",
+          "duration_us": 5.68
+        },
+        {
+          "name": "mfma_moe1_silu_mul_afp8_wfp4_fp8_t16x128x256_pm1_fp8q_sort_async_gui_v33",
+          "duration_us": 109.842
+        },
+        {
+          "name": "void opus_moe_stage2_a8w4_decode_kernel_gfx950<OpusMoeStage2A8W4DecodeShape<16, 128, true, false, 128, 0, 3, 2, 2, 2> >(opus_moe_stage2_a8w4_kargs)",
+          "duration_us": 61.041
+        }
+      ],
+      "range_us": 249.99,
+      "dispatch_union_us": 186.243,
+      "range_uncovered_by_these_dispatches_us": 63.747
+    },
+    {
+      "role": "GEAK-EVO",
+      "source_id": "89654ef947f59cd232b3cf6857cf95b9b61454bb3fdc3312de38b018a8a89fbe",
+      "case": "prefill_m8192",
+      "marked_call_count": 1,
+      "dispatch_count": 9,
+      "crossing_dispatch_count": 0,
+      "dispatches": [
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >, aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs>(aiter::MoeSortingClearWorkspaceKernel<aiter::MoeSortingClearWorkspaceProblem<false, 1024, 1> >::Kargs)",
+          "duration_us": 3.841
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P0_v1<aiter::MoeSortingProblemMp<int, float, unsigned char, 4, false, false, true> >::Kargs)",
+          "duration_us": 4.48
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P1<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+          "duration_us": 4.6
+        },
+        {
+          "name": "void aiter::opus_moe_sorting_entry<aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >, aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs>(aiter::MoeSortingMultiPhaseKernel_P23<aiter::MoeSortingProblemMp<int, float, unsigned char, 16, false, false, true> >::Kargs)",
+          "duration_us": 13.76
+        },
+        {
+          "name": "_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bDB8_Li32ELi32ELb0ELi64ELb1ELb0ELi0ELb0ELb0ELb0ELb0ELb0EEEvPT0_PfPKT_PKfliilPKii",
+          "duration_us": 36.481
+        },
+        {
+          "name": "void aiter::mxfp4_moe_sort_kernel<256, 32, 32, 32>(unsigned char*, unsigned char*, int const*, int const*, int, int, int, int, int)",
+          "duration_us": 11.44
+        },
+        {
+          "name": "void opus_moe::stage1_a8w4::pipeline_group_split::opus_moe_stage1_a8w4_kernel_group_split_gfx950<opus_moe::stage1_a8w4::OpusMoeStage1A8W4Shape<64, 384, opus_moe::stage1_a8w4::OpusMoeStage1A8W4Policy<true, 1, 1, 3, 256, false, false, false, 0, 64, 1, false, true> > >(opus_moe::stage1_a8w4::OpusMoeStage1A8W4Kargs)",
+          "duration_us": 370.207
+        },
+        {
+          "name": "void opus_moe_stage2_a8w4_decode_kernel_gfx950<OpusMoeStage2A8W4DecodeShape<64, 256, false, false, 256, 4, 0, 0, 2, 1> >(opus_moe_stage2_a8w4_kargs)",
+          "duration_us": 301.046
+        },
+        {
+          "name": "_reduce_fp8_routes",
+          "duration_us": 96.962
+        }
+      ],
+      "range_us": 1100.625,
+      "dispatch_union_us": 842.766,
+      "range_uncovered_by_these_dispatches_us": 257.859
+    },
+    {
+      "role": "GEAK-EVO",
+      "source_id": "89654ef947f59cd232b3cf6857cf95b9b61454bb3fdc3312de38b018a8a89fbe",
+      "case": "decode_m64",
+      "marked_call_count": 1,
+      "dispatch_count": 3,
+      "crossing_dispatch_count": 0,
+      "dispatches": [
+        {
+          "name": "_decode_quant_sort_a1",
+          "duration_us": 15.44
+        },
+        {
+          "name": "void opus_moe::stage1_a8w4::pipeline_pair_pipeline::opus_moe_stage1_a8w4_kernel_pair_pipeline_gfx950<opus_moe::stage1_a8w4::OpusMoeStage1A8W4Shape<16, 384, opus_moe::stage1_a8w4::OpusMoeStage1A8W4Policy<false, 4, 1, 1, 256, true, false, true, 0, 0, 1, false, false> > >(opus_moe::stage1_a8w4::OpusMoeStage1A8W4Kargs)",
+          "duration_us": 105.962
+        },
+        {
+          "name": "void opus_moe_stage2_a8w4_decode_kernel_gfx950<OpusMoeStage2A8W4DecodeShape<16, 128, true, false, 128, 0, 3, 2, 2, 2> >(opus_moe_stage2_a8w4_kargs)",
+          "duration_us": 60.121
+        }
+      ],
+      "range_us": 348.36,
+      "dispatch_union_us": 181.523,
+      "range_uncovered_by_these_dispatches_us": 166.837
+    }
+  ],
+  "finding": "Task-local decode preparation fusion is supported by source inspection, accepted declared correctness, common full-task and all-three-cycle decode improvement, and a separate same-source execution trace. Benefit belongs to the complete case including stage1 and stage2 changes.",
+  "limits": [
+    "One population pair; no general superiority or reliable Level4-system claim.",
+    "Separate instrumented replay, not attestation of the originally scored process.",
+    "Preparation fusion alone has no demonstrated speedup advantage over GEAK; traced preparation GPU durations are approximately15.4us each.",
+    "No global novelty, causal retention/transfer/depth benefit or serving gain.",
+    "Single-call profiled interval differences do not causally explain the unprofiled confirmation endpoint.",
+    "Historical owner/custody flags are preserved separately from current release.",
+    "Durations come from one instrumented call per program/case in separate processes; these are not benchmark scores or a causal decomposition of common confirmation.",
+    "Time outside the listed dispatch intervals includes marker, profiler, host and synchronization overhead; it is not a measurement of device idle time."
+  ]
+}

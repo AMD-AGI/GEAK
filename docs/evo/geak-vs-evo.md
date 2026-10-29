@@ -491,21 +491,36 @@ Both researchers identified a stage-boundary change
 in EVO's decode path: one preparation kernel combines routing, token quantization,
 scale placement and output zeroing. EVO improves the decode case in all three
 common cycles, but it also changes the projection kernels. The case-level gain
-cannot be assigned to preparation alone. A separate same-source dispatch trace
-is still pending, so the source/execution/benefit label is not yet complete.
+cannot be assigned to preparation alone. Both researchers have now independently
+checked the separate same-source dispatch trace. ORIGINAL and GEAK each execute
+five decode launches; EVO executes three, with one combined preparation launch
+followed by its two projection stages. All six marked calls pass the task's
+output and input-immutability checks, with no dispatch crossing a marker boundary.
+This completes the declared task-local source/execution/benefit evidence. It is
+a separate instrumented replay, not attestation of the originally scored process.
+The [trace evidence](evidence/completed-moe-r1-trace-20261029.json) includes exact
+dispatch sequences, independent reductions and the preserved failed first attempt.
+EVO's preparation and GEAK's unfused token-once preparation each take approximately
+15.4 microseconds in that traced call; no isolated fusion speedup is established.
 
 EVO's combined preparation kernel already appears in round 1 of its selected
 lineage, initialized from ORIGINAL before a retained alternative or peer checkpoint
 was available. Its origin is therefore not evidence of retention or transfer.
-Later retained-parent development is under separate source and record review;
-using a retained parent does not by itself establish that retention was necessary
-to find the final program.
+Later rounds explicitly select retained alternatives and continue from a
+non-promoted integration. The prefill reducer file survives unchanged from an
+earlier candidate whose verification score was below ORIGINAL. These are exercised
+retention and source-survival mechanisms; they do not establish that the retained
+component became faster or that retention was necessary to find the final program.
 
 EVO also improves prefill in all three cycles. Its prefill preparation already
 exists in the inspected upstream split path; the initial claim of a preparation
 transformation was withdrawn while preserving the frozen rating. The selected
 program rewrites the route reducer and call path. The raters retain a disagreement
 about some within-stage classifications; no label was changed to favor the winner.
+The trace records nine prefill dispatches for each program. EVO has a shorter
+delay before its first dispatch, while its rewritten reducer takes longer than
+the native reducer in that traced call. These observations support investigating
+call-path overhead; they do not isolate the cause of the unprofiled prefill gain.
 Correctness means the frozen elementwise-or-global-error rule, which permits
 localized elementwise mismatches, not strict elementwise equivalence.
 GEAK and GEAK-EVO have identical aggregate prefill error statistics in the
