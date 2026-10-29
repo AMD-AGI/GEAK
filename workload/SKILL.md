@@ -45,6 +45,21 @@ recomputes.
 `all` stops at the first stage that is not `ok`. That is deliberate: `blocked` means a
 precondition was missing, and carrying on would optimize kernels nobody profiled.
 
+Stage handoffs are part of the work. Use the profile slot's selector adapter to carry
+configured scope and reviewed operator attribution into extraction. Qualify the final
+task directories, then cold-test the exact source snapshot that optimize publishes;
+applyback consumes its recorded path and hashes. Exercise the real serving paths before
+the long A/B and return integration failures to the stage that owns their cause. A source
+fix needs new cold evidence before it can replace the previous candidate. The slot
+READMEs define these boundaries; kernel implementation remains the optimization agent's
+work. Preserve compatible upstream evidence and failed attempts during recovery.
+
+New invocations record their policy and upstream receipts in `inputs.json`. `all`
+revalidates retained results before skipping them, so a changed receipt or missing
+artifact cannot silently become the input of the next stage. This check reads evidence;
+it does not launch a GPU rerun. Inspect and resume the affected stage with matching
+inputs, or use a fresh run root for a changed experiment.
+
 ### While it runs
 
 **The run reports every 30 minutes without being asked.** `all` starts

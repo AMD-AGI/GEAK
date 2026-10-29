@@ -50,6 +50,15 @@ def test_register_preserves_reference_case_and_table_metadata(tmp_path, nested):
         assert 'candidate' not in after
 
 
+def optimized_row(task):
+    source = task / 'kernel_src'
+    return {'kernel': task.name, 'verdict': 'pass', 'verified_speedup': 1.2,
+            'task_meta_sha256': hashlib.sha256((task/'meta.json').read_bytes()).hexdigest(),
+            'best_kernel_src': str(source), 'kernel_src_hashes': {
+                p.relative_to(source).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in source.rglob('*') if p.is_file()}}
+
+
 def make_rebind_tasks(tmp_path, shared_env=False, config_env=False):
     tasks, installed = tmp_path/'tasks', tmp_path/'installed'
     rows, options = [], {}
@@ -85,7 +94,7 @@ def make_rebind_tasks(tmp_path, shared_env=False, config_env=False):
         if shared_env and name == 'second':
             options[name] = {'source_env': {'SHARED_ROOT': '{kernel_src}'}}
         write(task/'meta.json', json.dumps({'candidate_bind': bind, 'target_callable': target}))
-        rows.append({'kernel': name, 'verdict': 'pass', 'verified_speedup': 1.2})
+        rows.append(optimized_row(task))
     write(tmp_path/'optimized.json', json.dumps({'kernels': rows}))
     write(tmp_path/'settings.json', json.dumps({'binding_options': options}))
     return tasks, installed
@@ -156,7 +165,7 @@ def test_module_source_hooks_precede_imports_and_survive_relocation(tmp_path, co
         else:
             bind['requires_env'] = {key: '<task>/kernel_src'}
         write(task/'meta.json', json.dumps({'candidate_bind': bind, 'target_callable': module + ':op'}))
-        rows.append({'kernel': name, 'verdict': 'pass', 'verified_speedup': 1.2})
+        rows.append(optimized_row(task))
     write(tmp_path/'optimized.json', json.dumps({'kernels': rows}))
     write(tmp_path/'settings.json', json.dumps({'binding_options': options}))
     process = run_builder(tmp_path, tasks, installed)
@@ -386,6 +395,9 @@ def test_binding_checks_cannot_contaminate_accepted_source(tmp_path):
     entry = tasks/'first/kernel_src/first_entry.py'
     entry.write_text(entry.read_text() + '\noutput = Path(__file__).parent.parent / "run/native_build/check.txt"\n'
                      'output.parent.mkdir(parents=True, exist_ok=True)\noutput.write_text(str(__file__))\n')
+    report = json.loads((tmp_path/'optimized.json').read_text())
+    report['kernels'][0] = optimized_row(tasks/'first')
+    json_write(tmp_path/'optimized.json', report)
     result = run_builder(tmp_path, tasks, installed)
     assert result.returncode == 0, result.stderr
     applied = json.loads((tmp_path/'applied.json').read_text())

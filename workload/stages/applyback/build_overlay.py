@@ -21,7 +21,51 @@ import argparse, hashlib, json, os, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from source_tree import copy_source_tree, source_files
+from source_tree import copy_source_tree, source_files, source_hashes
+
+
+def verified_source(row, optimized, tasks_dir):
+    """Read the cold verifier's source handoff before touching an existing overlay."""
+    name = row.get('kernel')
+    if not isinstance(name, str) or not name or Path(name).name != name or name in ('.', '..'):
+        raise ValueError('optimized kernel must name one task directory')
+    meta = (Path(tasks_dir) / name / 'meta.json').read_bytes()
+    if hashlib.sha256(meta).hexdigest() != row.get('task_meta_sha256'):
+        raise ValueError(f'{name}: task metadata differs from cold-verified task_meta_sha256')
+    value = row.get('kernel_src') or row.get('best_kernel_src')
+    if not isinstance(value, str) or not value:
+        raise ValueError(f'{name}: missing cold-verified kernel_src snapshot')
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path(optimized).resolve().parent / path
+    expected = row.get('kernel_src_hashes')
+    if not isinstance(expected, dict) or not expected:
+        raise ValueError(f'{name}: missing kernel_src_hashes from cold verification; '
+                         'recover the recorded source identity, not hashes of current WIP')
+    if source_hashes(path) != expected:
+        raise ValueError(f'{name}: selected source differs from cold-verified kernel_src_hashes')
+    return path.resolve()
+
+
+def binding_source(task, kernel_src, named):
+    """Resolve the extraction binding against the selected computation snapshot."""
+    task, kernel_src = Path(task).resolve(), Path(kernel_src)
+    if not isinstance(named, str) or not named:
+        raise ValueError('candidate_bind.file must name the qualified binding entry')
+    relative = Path(named)
+    if relative.is_absolute():
+        relative = relative.relative_to(task)
+    if '..' in relative.parts:
+        raise ValueError('candidate_bind.file must stay inside its task')
+    if relative.parts and relative.parts[0] == 'kernel_src':
+        path = kernel_src.joinpath(*relative.parts[1:])
+    elif (task / relative).is_file():
+        path = task / relative
+    else:
+        path = kernel_src / relative
+    if not path.is_file() or path.is_symlink():
+        raise ValueError('candidate_bind.file is missing from the selected source: ' + named)
+    return path
 
 
 def find_overlay_setup(geak_root, tasks_dir):
@@ -50,20 +94,6 @@ def read_check(out):
     return where, verdict
 
 
-def editable_src(ksrc_dir):
-    """The one editable file in kernel_src/, chosen by what it is.
-
-    Sorting the directory and taking the first entry picks `__pycache__` as soon as one
-    attempt has run -- a directory, which the overlay then installs as the kernel."""
-    if not os.path.isdir(ksrc_dir):
-        return None
-    names = [n for n in sorted(os.listdir(ksrc_dir))
-             if os.path.isfile(os.path.join(ksrc_dir, n)) and not n.startswith("__")]
-    py = [n for n in names if n.endswith(".py")]
-    pick = (py or names or [None])[0]
-    return os.path.join(ksrc_dir, pick) if pick else None
-
-
 def add_entry(tool, overlay, base, bind, src):
     if bind.get("kind") == "rebind":
         args = ["add-rebind", "--target", bind["target"],
@@ -78,16 +108,20 @@ def add_entry(tool, overlay, base, bind, src):
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
-def bundle_module_sources(overlay, task, bind, src, source_env=None):
+def bundle_module_sources(overlay, task, bind, src, source_env=None, kernel_src=None):
     """Keep the bound module beside its complete, task-specific computation tree.
 
     The overlay and reference harness can both be relocated after this step. Relative
     __file__ lookups must stay inside this bundle, never find another task's leaves.
     """
     overlay, task, src = Path(overlay), Path(task), Path(src)
-    relative = src.resolve().relative_to(task.resolve())
+    kernel_src = Path(kernel_src or task / 'kernel_src').resolve()
+    if src.resolve().is_relative_to(kernel_src):
+        relative = Path('kernel_src') / src.resolve().relative_to(kernel_src)
+    else:
+        relative = src.resolve().relative_to(task.resolve())
     bundle = overlay / "_patched" / task.name
-    copy_source_tree(task / "kernel_src", bundle / "kernel_src")
+    copy_source_tree(kernel_src, bundle / "kernel_src")
     delivered = bundle / relative
     if not delivered.exists():
         delivered.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +167,7 @@ def bundle_module_sources(overlay, task, bind, src, source_env=None):
     return delivered.relative_to(overlay).as_posix()
 
 
-def source_environment(task, bind, options):
+def source_environment(task, bind, options, kernel_src=None):
     """Resolve declared source-root hooks into the accepted task bundle."""
     declared = dict(bind.get('requires_env') or {})
     declared.update(options.get('source_env') or {})
@@ -146,7 +180,10 @@ def source_environment(task, bind, options):
         path = Path(relative)
         if path.is_absolute() or '..' in path.parts:
             raise ValueError('source_env must remain inside the accepted task bundle')
-        if not (Path(task) / path).is_dir():
+        source = Path(task) / path
+        if path.parts and path.parts[0] == 'kernel_src' and kernel_src is not None:
+            source = Path(kernel_src).joinpath(*path.parts[1:])
+        if not source.is_dir():
             raise ValueError('source_env directory is missing: ' + value)
         result[key] = (bundle / path).as_posix()
     return result
@@ -318,6 +355,14 @@ def main():
         json.dump(out, open(args.manifest or "/dev/stdout", "w"), indent=1, ensure_ascii=False)
         return 3
 
+    try:
+        sources = {row['kernel']: verified_source(row, args.optimized, args.tasks_dir) for row in kept}
+        if len(sources) != len(kept):
+            raise ValueError('optimized report names a kept task more than once')
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        print('cold source handoff: ' + str(exc), file=sys.stderr)
+        return 2
+
     tool = find_overlay_setup(args.geak_root, args.tasks_dir)
     if not tool:
         print("cannot find overlay_setup.py (neither in the task directories nor under "
@@ -336,7 +381,10 @@ def main():
         k = r["kernel"]
         task = os.path.join(args.tasks_dir, k)
         try:
-            meta = json.load(open(os.path.join(task, "meta.json")))
+            meta_bytes = Path(task, 'meta.json').read_bytes()
+            if hashlib.sha256(meta_bytes).hexdigest() != r['task_meta_sha256']:
+                raise ValueError('task metadata changed after source admission')
+            meta = json.loads(meta_bytes)
         except (OSError, ValueError) as e:
             out["skipped"].append({"kernel": k, "reason": "cannot read meta.json: %s" % e})
             continue
@@ -362,44 +410,43 @@ def main():
         # dispatcher with an identical dispatcher, leaves the image's prebuilt .so serving
         # every token, and still passes the shadow check below. The e2e that follows would
         # be measuring the baseline against itself.
-        ksrc = os.path.join(task, "kernel_src")
+        ksrc = sources[k]
         named = bind.get("file")
-        src, via = None, ""
-        if named:
-            for cand in (os.path.join(task, named), os.path.join(ksrc, named)):
-                if os.path.isfile(cand):
-                    src, via = cand, "candidate_bind.file"
-                    break
-            if not src:
-                out["skipped"].append({"kernel": k, "reason":
-                    "candidate_bind names file %r and it is not in the task directory; "
-                    "installing a different file would bind something the extraction "
-                    "skill did not describe" % named})
-                continue
-        if not src:
-            src, via = editable_src(ksrc), "kernel_src (candidate_bind named no file)"
-        if not src:
-            out["skipped"].append({"kernel": k, "reason": "kernel_src/ holds no editable file"})
+        try:
+            src = binding_source(task, ksrc, named)
+            if not src.resolve().is_relative_to(ksrc):
+                if hashlib.sha256(src.read_bytes()).hexdigest() != r.get('binding_file_sha256'):
+                    raise ValueError('task-local adapter differs from cold-verified binding_file_sha256')
+        except (OSError, ValueError) as exc:
+            out['skipped'].append({'kernel': k, 'reason': str(exc)})
             continue
-        source_env = source_environment(task, bind, binding_options.get(k) or {})
+        via = 'candidate_bind.file'
+        source_env = source_environment(task, bind, binding_options.get(k) or {}, ksrc)
         for key, value in source_env.items():
             if key in used_source_env and used_source_env[key] != value:
                 raise ValueError('conflicting task source environment: ' + key)
             used_source_env[key] = value
-        rc, log = add_entry(tool, args.overlay, base, bind, src)
+        rc, log = add_entry(tool, args.overlay, base, bind, str(src))
         if rc != 0:
             out["skipped"].append({"kernel": k,
                                    "reason": "overlay install failed: %s" % log[-400:]})
             continue
         try:
-            bundled_file = bundle_module_sources(args.overlay, task, bind, src, source_env)
+            bundled_file = bundle_module_sources(args.overlay, task, bind, src, source_env, ksrc)
+            if source_hashes(Path(args.overlay) / '_patched' / k / 'kernel_src') != r['kernel_src_hashes']:
+                raise ValueError('bundled source differs from cold verification')
+            if not src.resolve().is_relative_to(ksrc):
+                if hashlib.sha256((Path(args.overlay) / bundled_file).read_bytes()).hexdigest() != r['binding_file_sha256']:
+                    raise ValueError('bundled binding adapter differs from cold verification')
         except (ValueError, OSError) as exc:
             print("cannot bundle source tree for %s: %s" % (k, exc), file=sys.stderr)
             return 2
         base = args.overlay          # the next kernel seeds from this overlay
         entry = {"kernel": k, "bind_kind": bind.get("kind"),
                  "target": bind.get("target") or bind.get("module"),
-                 "impl_file": src, "impl_file_from": via, "bundled_file": bundled_file,
+                 "impl_file": str(src), "impl_file_from": via, "bundled_file": bundled_file,
+                 "verified_kernel_src": str(ksrc),
+                 "task_meta_sha256": r['task_meta_sha256'],
                  "target_callable": meta.get('target_callable') or identity,
                  "source_env": source_env,
                  "verified_speedup": r.get("verified_speedup")}
@@ -417,14 +464,14 @@ def main():
                 for name, digest in entry['kernel_src_hashes'].items()}
             entry['native_proof_required'] = any(Path(name).suffix.lower() in
                 {'.cu', '.cuh', '.hip', '.cpp', '.cc', '.cxx', '.s'} for name in files)
-            if len(entry["kernel_src_files"]) > 1 and via != "candidate_bind.file":
-                entry["warning"] = (
-                    "kernel_src holds %d files but the overlay installs only %s, and "
-                    "candidate_bind named none. If the optimized edit is in one of the "
-                    "others it is not in this overlay."
-                    % (len(entry["kernel_src_files"]), os.path.basename(src)))
         out["applied"].append(entry)
 
+    if not out['applied']:
+        out.update(all_shadowed=False, checks=[])
+        if args.manifest:
+            Path(args.manifest).write_text(json.dumps(out, indent=2) + '\n')
+        print('no qualified binding could be installed', file=sys.stderr)
+        return 2
     install_source_environment(args.overlay, out['applied'])
     out['proof_producer'] = install_proof_producer(args.overlay, settings, out['applied'])
     out["sitecustomize"] = sanitize_sitecustomize(args.overlay)

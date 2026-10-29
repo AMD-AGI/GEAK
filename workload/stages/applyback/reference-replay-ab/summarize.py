@@ -16,11 +16,13 @@ import sys
 BASIS = 'output_token_throughput'
 CANDIDATE_PATHS = ['request_metrics.throughput.output.tokens_per_second',
                    'output_tok_per_s', 'output_tokens_per_second', BASIS]
+NATIVE_P90_PATH = 'request_metrics.latency.intvty.p90'
 CONTEXT = {
     'duration_seconds': 'request_metrics.throughput.duration_seconds',
     'requests_successful': 'num_requests_successful', 'requests_total': 'num_requests_total',
     'ttft_p50': 'request_metrics.latency.ttft.p50', 'ttft_p90': 'request_metrics.latency.ttft.p90',
     'itl_p50': 'request_metrics.latency.itl.p50', 'itl_p90': 'request_metrics.latency.itl.p90',
+    'native_interactivity_p90': NATIVE_P90_PATH,
     'prefix_cache_hit_rate': 'request_metrics.cache.theoretical_cache_hit_rate',
     'conc': 'conc', 'tp': 'tp',
 }
@@ -48,6 +50,22 @@ def dig(document, paths):
         if number(value):
             return value
     return None
+
+
+def native_interactivity_summary(stock, legs):
+    """Keep the native rate percentile; inverse ITL is a different statistic."""
+    result = {'available': False, 'metric_path': NATIVE_P90_PATH,
+              'unit': 'tok/s/user', 'candidate_statistic': 'median_of_run_native_p90'}
+    if not legs or not stock.get('admissible') or not all(row.get('admissible') for row in legs):
+        return dict(result, reason='all native-valid arms are required')
+    baseline = stock.get('native_interactivity_p90')
+    values = [row.get('native_interactivity_p90') for row in legs]
+    if not all(number(value) and value > 0 for value in [baseline, *values]):
+        return dict(result, reason='native P90 missing; no inverse-ITL fallback')
+    candidate = statistics.median(values)
+    return dict(result, available=True, baseline=baseline, candidate=candidate,
+                candidate_runs=values, ratio=candidate / baseline,
+                delta_pct=(candidate / baseline - 1) * 100)
 
 
 def sha256(path):
@@ -94,6 +112,9 @@ def hash_mapping(value):
 def validate_settings(settings):
     if not isinstance(settings, dict):
         raise ValueError('stage settings must be a JSON object')
+    if ('require_native_interactivity_p90' in settings
+            and type(settings['require_native_interactivity_p90']) is not bool):
+        raise ValueError('require_native_interactivity_p90 must be a boolean')
     receipt = settings.get('overlay_receipt') or {}
     native = settings.get('native_validation') or {}
     proof = settings.get('serving_source_proof') or {}
@@ -281,6 +302,10 @@ def leg(run_dir, want, settings, duration, overlay=None, applied=None, candidate
             if value is not None:
                 record[name] = value
         record['native_validation'] = native_validation(run_dir, aggregate, settings, duration)
+        if settings.get('require_native_interactivity_p90') is True:
+            native_p90 = record.get('native_interactivity_p90')
+            if not number(native_p90) or native_p90 <= 0:
+                raise ValueError('required native P90 interactivity is missing or invalid')
         if candidate:
             receipt_config = settings['overlay_receipt']
             receipt = read_local(run_dir, receipt_config['file'])
@@ -372,6 +397,7 @@ def main():
         summary[BASIS] = statistics.median(values)
         summary['legs_tok_s'] = values
         summary['spread_pct'] = (max(values) / min(values) - 1) * 100
+        summary['native_interactivity_p90'] = native_interactivity_summary(stock, legs)
     else:
         summary['error'] = ('every requested independent, complete native-valid arm and every '
                             'serving-rank proof is required; no duplicate or subset median')

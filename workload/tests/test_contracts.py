@@ -10,6 +10,7 @@ refuse-to-publish gates, and the integrity of the vendored skills.
 """
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -528,6 +529,26 @@ def test_all_skips_what_is_already_done(tmp_path):
     assert "already ok, skipping" in again.stdout
 
 
+def test_new_agent_invocation_preserves_sessions_and_cannot_relabel_old_success(tmp_path):
+    script = _stub_delivery(tmp_path)
+    cfg = _stub_cfg(tmp_path, AGENT_STAGE, agent_budget_sec=120, agent_attempts=1)
+    command = [sys.executable, 'workload/scripts/stage.py', '--config', str(cfg)]
+    first = run(command + ['run', AGENT_STAGE], env_extra={'STUB_SCRIPT': str(script)})
+    assert first.returncode == 0, first.stdout + first.stderr
+    out = Path(json.loads(cfg.read_text())['run_root'])/AGENT_STAGE/'out'
+    original = {name: (out/name).read_bytes() for name in ['result.json', 'agent_prompt.1.txt', 'agent.1.log']}
+    # This session exits normally but produces nothing for the changed policy.
+    second = run(command + ['--set', 'stages.optimize.params.agent_brief=new input', 'run', AGENT_STAGE],
+                 env_extra={'STUB_RC': '0'})
+    assert second.returncode != 0
+    assert json.loads((out/'result.json').read_text())['status'] == 'fail'
+    assert (out/'agent_prompt.1.txt').read_bytes() == original['agent_prompt.1.txt']
+    assert (out/'agent.1.log').read_bytes() == original['agent.1.log']
+    assert 'CONTINUATION' in (out/'agent_prompt.2.txt').read_text()
+    assert 'optimized.json' in (out/'agent_prompt.2.txt').read_text()
+    assert any(p.read_bytes() == original['result.json'] for p in out.glob('result.json.before-run.*'))
+
+
 # ----------------------------------------------------------------- adopting a receipt
 #
 # A receipt is somebody else's format. The temptation when it does not fit is to retype
@@ -754,11 +775,12 @@ def test_optimize_prompt_carries_the_four_hard_constraints(tmp_path, skill):
 
 # ----------------------------------------------------------------- applyback gates
 
-def _ab(tmp_path, shadowed, cand_tp, cand_basis):
+def _ab(tmp_path, shadowed, cand_tp, cand_basis, bench_rc=0, baseline=None):
     out = tmp_path / "out"
     (out / "e2e").mkdir(parents=True, exist_ok=True)
     (out / "overlay").mkdir(exist_ok=True)
     (out / "base.json").write_text(json.dumps(
+        baseline if baseline is not None else
         {"output_token_throughput": 446.87889, "metric_basis": "agentx",
          "noise_band": 1.045}))
     (out / "applied.json").write_text(json.dumps(
@@ -768,11 +790,12 @@ def _ab(tmp_path, shadowed, cand_tp, cand_basis):
     (out / "e2e" / "bench_summary.json").write_text(json.dumps(
         {"throughput_tok_s_median": cand_tp, "metric_basis": cand_basis}))
     r = run([sys.executable, "workload/stages/applyback/finalize.py",
-             "--e2e-dir", str(out / "e2e"), "--baseline", str(out / "base.json")],
+             "--e2e-dir", str(out / "e2e"), "--baseline", str(out / "base.json"),
+             "--bench-rc", str(bench_rc)],
             env_extra={"OUT": str(out), "STAGE": "applyback",
                        "STAGE_SKILL": "overlay-e2e-ab"})
     res = json.loads((out / "result.json").read_text()) if (out / "result.json").exists() else {}
-    ab = json.loads((out / "ab.json").read_text())
+    ab = json.loads((out / "ab.json").read_text()) if (out / "ab.json").exists() else None
     return res, ab
 
 
@@ -791,13 +814,42 @@ def test_applyback_refuses_to_publish_when_overlay_did_not_shadow(tmp_path):
     is no telling what that number measured."""
     res, ab = _ab(tmp_path, False, 500.5, "agentx")
     assert res["status"] == "fail"
+    assert ab is None
 
 
 def test_applyback_refuses_to_compare_across_metric_basis(tmp_path):
     """Two numbers on different bases are not comparable; the A/B is void."""
     res, ab = _ab(tmp_path, True, 500.5, "something_else")
     assert res["status"] == "fail"
-    assert ab["basis_comparable"] is False
+    assert ab is None
+
+
+def test_failed_benchmark_cannot_publish_partial_metrics_or_leave_a_prior_ab_active(tmp_path):
+    _, previous = _ab(tmp_path, True, 500.5, 'agentx')
+    result, current = _ab(tmp_path, True, 999, 'agentx', bench_rc=1)
+    assert result['status'] == 'fail' and current is None
+    assert 'candidate_tok_s' not in result.get('metrics', {})
+    retained = list((tmp_path/'out').glob('ab.before-failed-run.*.json'))
+    assert len(retained) == 1 and json.loads(retained[0].read_text()) == previous
+
+
+@pytest.mark.parametrize('value', [True, 0, -1, float('nan'), float('inf')])
+def test_invalid_throughput_cannot_become_a_gain(tmp_path, value):
+    result, ab = _ab(tmp_path, True, value, 'agentx')
+    assert result['status'] == 'fail' and ab is None
+
+
+def test_canonical_measured_baseline_flows_into_applyback(tmp_path):
+    result, ab = _ab(tmp_path, True, 110, 'output_token_throughput', baseline={
+        'throughput': 100, 'metric': 'output_token_throughput', 'measured': True})
+    assert result['status'] == 'ok' and ab['e2e_delta_pct'] == 10
+
+
+@pytest.mark.parametrize('measured', [False, 'true'])
+def test_unmeasured_baseline_cannot_become_an_ab_denominator(tmp_path, measured):
+    result, ab = _ab(tmp_path, True, 110, 'output_token_throughput', baseline={
+        'output_token_throughput': 100, 'metric_basis': 'output_token_throughput', 'measured': measured})
+    assert result['status'] == 'fail' and ab is None
 
 
 # ----------------------------------------------------------------- profile slot

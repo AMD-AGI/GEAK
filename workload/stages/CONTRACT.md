@@ -99,7 +99,21 @@ external interface.
   mistake available in this pipeline.
 
 The driver (`scripts/stage.py validate`) checks this file and records the outcome in
-`$RUN_ROOT/STATE.json`; stages marked `ok` are skipped on resume.
+`$RUN_ROOT/STATE.json`. Before each invocation it records `inputs.json`: the stage,
+skill, parameters, target and hashes of preceding stages' `result.json` receipts.
+Validation checks that these inputs still match. Resume revalidates retained results
+before skipping them, without rerunning GPU tests. Changed upstream receipts or policy
+require the original inputs or a fresh stage run; old artifacts remain available.
+Older standalone deliveries without `inputs.json` retain envelope validation only.
+A script that exits nonzero cannot publish `ok`, and a fresh script invocation preserves
+the preceding result and log before it starts.
+Declared file artifacts are copied into `$OUT/.previous_runs/<invocation>/` before a
+rerun can overwrite them. Working directories stay in place for continuation; their
+owning stage must keep native run/cache identities separate when producing new evidence.
+Agent session numbering continues across invocations, preserving prompts, logs and
+continuation context. Each attempt needs a fresh session or slot-finalizer result;
+an empty retry cannot inherit an earlier `ok`. Reports honor driver and native-summary rejections even while
+older artifacts remain present.
 
 Write it with `scripts/emit_result.py` (both a library and a CLI), which validates the
 structure before it touches disk:
@@ -156,7 +170,7 @@ implementation must produce files of the same names and structure to plug in.
 | `baseline` | `baseline.json` | `throughput`, `unit`, `metric`, `noise_band`, `provenance` |
 | `profile` | `kernel_workload.json`, `selection_targets.json`, `tasks/<name>/` | per-kernel `pct_gpu_time`, `phase`, plus independently runnable unit-test task directories |
 | `roofline` | `roofline.json` | per-kernel `roofline_pct`, `attainable_speedup`, `bound_type`, `expected_e2e_gain_pct` |
-| `optimize` | `optimized.json` | kernels that survived cold re-verification, each with `speedup` and a `kernel_src` path |
+| `optimize` | `optimized.json` | cold-verified kernels with `verified_speedup`, selected `kernel_src` directory, `kernel_src_hashes` and frozen `task_meta_sha256`; task-local binding adapters also carry `binding_file_sha256` |
 | `applyback` | `ab.json` | `baseline`, `candidate`, `e2e_delta_pct`, `verdict` |
 
 **The ranking key is `expected_e2e_gain_pct = pct_gpu_time × (1 − 1/attainable_speedup)`,

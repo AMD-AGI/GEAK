@@ -31,6 +31,7 @@ Two properties worth stating, because both are failure modes that have cost real
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -138,8 +139,8 @@ def build_prompt(env, lay, params, attempt, why=None, repair=None):
                       "Do not reinterpret the stage to get around the blocker, and do not "
                       "start over -- what is already in $OUT was expensive:", ""]
         else:
-            lines += ["THIS IS A CONTINUATION (attempt %d). The previous session did not "
-                      "finish this stage%s." % (attempt, (": " + why) if why else ""),
+            lines += ["THIS IS A CONTINUATION (attempt %d). Earlier sessions left "
+                      "artifacts%s." % (attempt, (": " + why) if why else ""),
                       "",
                       "Do not start over. These artifacts are already on disk and were "
                       "expensive to produce; read them, work out which step of SKILL.md "
@@ -249,11 +250,23 @@ def dispatch(cfg, lay, env, log_cb=print):
     result_path = os.path.join(out, "result.json")
     deadline = time.time() + budget
     why, repair, recorded = None, None, None
-    for attempt in range(1, attempts + 1):
+    # Session numbers survive a new stage.py invocation, so prompts/logs and the
+    # continuation inventory survive node or controller recovery too.
+    offset = max([int(match.group(1)) for name in os.listdir(out)
+                  if (match := re.fullmatch(r'agent_prompt\.(\d+)\.txt', name))] or [0])
+    for local_attempt in range(1, attempts + 1):
+        attempt = offset + local_attempt
         left = int(deadline - time.time())
         if left <= 60:
             return 1, ("the %ds agent budget is spent after %d attempt(s); last problem: %s"
-                       % (budget, attempt - 1, why or "none recorded"))
+                       % (budget, local_attempt - 1, why or "none recorded"))
+
+        if os.path.lexists(result_path):
+            previous, _ = stage_mod.validate_result(lay)
+            saved = os.path.join(out, 'result.before-session.%d.json' % attempt)
+            os.replace(result_path, saved)
+            if previous and previous.get('status') in ('blocked', 'fail'):
+                recorded = saved
 
         prompt_path = os.path.join(out, "agent_prompt.%d.txt" % attempt)
         with open(prompt_path, "w") as f:
@@ -261,7 +274,7 @@ def dispatch(cfg, lay, env, log_cb=print):
         log = os.path.join(out, "agent.%d.log" % attempt)
 
         log_cb("[agent] attempt %d/%d  budget %ds left  prompt %s"
-               % (attempt, attempts, left, prompt_path))
+               % (attempt, offset + attempts, left, prompt_path))
         log_cb("[agent] log %s" % log)
         started = time.time()
         # The budget is enforced from outside the runner, as the contract requires: a
@@ -277,14 +290,13 @@ def dispatch(cfg, lay, env, log_cb=print):
                         "contract says must not be retried: %s" % tail.strip())
 
         # Whether the agent itself reported, before the slot overwrites the file.
-        reported = (os.path.exists(result_path)
-                    and os.path.getmtime(result_path) >= started)
+        reported = os.path.exists(result_path)
         judged = finalize(env, log_cb)
 
         res, errs = stage_mod.validate_result(lay)
         if not errs:
             status = (res or {}).get("status")
-            if (status == "ok" or repairs <= 0 or attempt == attempts
+            if (status == "ok" or repairs <= 0 or local_attempt == attempts
                     or int(deadline - time.time()) <= 300):
                 return 0, None
             if judged and not reported:

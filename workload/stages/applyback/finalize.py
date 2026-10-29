@@ -15,20 +15,20 @@ stricter than elsewhere:
 * **No conclusion unless the overlay actually shadows.** Otherwise "no gain" may simply
   mean the patch was never loaded.
 """
-import argparse, json, os, sys
+import argparse, json, math, os, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "scripts"))
 from emit_result import emit, read_json  # noqa: E402
 
 THROUGHPUT_KEYS = ("throughput_tok_s_median", "output_token_throughput",
-                   "output_throughput_tok_s", "throughput_tok_s")
+                   "output_throughput_tok_s", "throughput_tok_s", "throughput")
 
 
 def pick_throughput(d):
     for k in THROUGHPUT_KEYS:
         v = d.get(k)
-        if isinstance(v, (int, float)):
+        if not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) and v > 0:
             return v, k
     return None, None
 
@@ -46,25 +46,44 @@ def main():
               file=sys.stderr)
         return 2
 
+    def fail(reason):
+        # Reporters read ab.json directly. Preserve an older A/B without presenting it
+        # as the result of this failed invocation.
+        previous = os.path.join(out, 'ab.json')
+        if os.path.lexists(previous):
+            os.replace(previous, os.path.join(out, 'ab.before-failed-run.%d.json' % time.time_ns()))
+        return emit('fail', notes=reason)
+
+    if args.bench_rc != 0:
+        return fail('benchmark command exited %d; partial metrics are not an admitted A/B. '
+                    'Preserve the failed run and use a fresh arm identity after repair.' % args.bench_rc)
+
     applied = read_json(os.path.join(out, "applied.json"))
+    if applied.get('all_shadowed') is not True:
+        return fail('the overlay did not shadow every target; see applied.json. '
+                    'No end-to-end result is admitted.')
     base = read_json(args.baseline)
+    if 'measured' in base and base['measured'] is not True:
+        return fail('baseline is not a measured receipt; complete the baseline stage before A/B')
     base_tp, base_key = pick_throughput(base)
     if base_tp is None:
-        return emit("fail", notes="baseline.json contains no throughput field (tried %s)"
-                                  % ", ".join(THROUGHPUT_KEYS))
+        return fail("baseline.json contains no finite positive throughput (tried %s)"
+                    % ", ".join(THROUGHPUT_KEYS))
 
     summ = read_json(os.path.join(args.e2e_dir, "bench_summary.json"))
     cand_tp, cand_key = pick_throughput(summ)
     if cand_tp is None:
-        return emit("fail", notes="the overlay e2e run measured no throughput (bench_e2e "
-                                  "rc=%d; see bench.log and %s/bench_summary.json)"
-                                  % (args.bench_rc, args.e2e_dir))
+        return fail("the overlay e2e run measured no finite positive throughput; "
+                    "see bench.log and %s/bench_summary.json" % args.e2e_dir)
 
     # Do not difference numbers on different bases; the same figure is not comparable
     # across two metric bases.
-    basis_a = base.get("metric_basis") or base_key
+    basis_a = base.get("metric_basis") or base.get('metric') or base_key
     basis_b = summ.get("metric_basis") or cand_key
     basis_ok = (basis_a == basis_b)
+    if not basis_ok:
+        return fail('the baseline and candidate have different metric_basis (%s vs %s); '
+                    'the two numbers are not comparable.' % (basis_a, basis_b))
 
     ratio = cand_tp / base_tp
     delta_pct = (ratio - 1.0) * 100.0
@@ -98,6 +117,9 @@ def main():
         "kernels_applied": len(ops),
         "kernels_skipped": applied.get("skipped", []),
     }
+    native_p90 = summ.get("native_interactivity_p90") or {}
+    if native_p90.get("available") is True:
+        ab["native_interactivity_p90"] = native_p90
     with open(os.path.join(out, "ab.json"), "w") as f:
         json.dump(ab, f, indent=1, ensure_ascii=False)
 
@@ -106,32 +128,26 @@ def main():
              "moved %+.4f%% (verdict %s, noise band +/-%.2f%%)."
              % (len(ops), ab["op_speedup_max"], delta_pct, verdict, band_pct)]
     status = "ok"
-    if not applied.get("all_shadowed"):
-        status = "fail"
-        notes.insert(0, "the overlay did not shadow every target module — this e2e number "
-                        "does not count, because 'no gain' may simply mean the patch was "
-                        "never loaded. See the checks in applied.json.")
-    if not basis_ok:
-        status = "fail"
-        notes.insert(0, "the baseline and the candidate have different metric_basis "
-                        "(%s vs %s); the two numbers are not comparable and this A/B is "
-                        "void." % (basis_a, basis_b))
-    if args.bench_rc != 0:
-        notes.append("bench_e2e exited %d; throughput was measured, but check bench.log "
-                     "first to confirm this run was clean." % args.bench_rc)
     if verdict == "no_change":
         notes.append("Inside the noise band means the machine did not move. This is the "
                      "most common outcome in this scenario and must not be dressed up: "
                      "historically MoE sorting measured 1.80x on the microbenchmark for "
                      "+0.2356% whole-machine, and split4 measured 1.342x for -0.0872%.")
 
+    native_metrics = {}
+    if native_p90.get("available") is True:
+        native_metrics = {
+            "native_p90_interactivity_baseline": native_p90["baseline"],
+            "native_p90_interactivity_candidate": native_p90["candidate"],
+            "native_p90_interactivity_delta_pct": native_p90["delta_pct"],
+        }
     return emit(status,
                 artifacts={"ab": "ab.json", "applied": "applied.json",
                            "overlay": "overlay"},
                 metrics={"baseline_tok_s": base_tp, "candidate_tok_s": cand_tp,
                          "e2e_delta_pct": ab["e2e_delta_pct"],
                          "op_speedup_max": ab["op_speedup_max"],
-                         "kernels_applied": len(ops), "verdict": verdict},
+                         "kernels_applied": len(ops), "verdict": verdict, **native_metrics},
                 notes=" ".join(notes))
 
 

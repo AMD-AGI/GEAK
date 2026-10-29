@@ -39,15 +39,26 @@ def x_(v, nd=4):
     return ("%%.%df×" % nd) % v if isinstance(v, (int, float)) else "—"
 
 
+def summary_rejection(summary):
+    """Consume a native producer's rejection, including the window before result.json."""
+    if not isinstance(summary, dict):
+        return None
+    if summary.get('error'):
+        return str(summary['error'])
+    if summary.get('overlay_loaded_by_every_leg') is False:
+        return 'native summary did not verify every serving arm'
+    if summary.get('independent_arms') is False:
+        return 'native summary rejected non-independent arms'
+    return None
+
+
 def stage_rows(root, state=None):
     """One row per stage the run knows about: skill, status, key metrics, notes.
 
     The contract view -- the part that holds for every stage whatever skill implements
-    it -- and the only place that maps a stage's artifacts onto a row. `result.json` wins
-    over STATE.json where both exist, because the stage wrote one and the driver wrote
-    the other, and a stage that has written its result but is not recorded in STATE.json
-    yet still gets a row: mid-run that is the ordinary state of the stage that has just
-    finished, and a reporter that skipped it would describe the run as emptier than it is.
+    it -- and the only place that maps a stage's artifacts onto a row. A stage may report
+    before the driver records it, but a driver rejection remains authoritative until
+    validation succeeds. Retained result.json must not turn that rejection into `ok`.
     """
     state = (rj(root, "STATE.json") or {}) if state is None else state
     stages = state.get("stages") or state
@@ -61,12 +72,23 @@ def stage_rows(root, state=None):
                 continue
             st = {}
         res = res if isinstance(res, dict) else st
-        m = res.get("metrics") or {}
+        status = res.get('status') or st.get('status') or '—'
+        notes = res.get('notes') or ''
+        if st.get('status') in ('blocked', 'fail'):
+            status = st['status']
+            notes = st.get('notes') or '; '.join(st.get('errors') or []) or notes
+        if res.get('status') == 'fail':
+            status = 'fail'
+        if name == 'applyback':
+            rejected = summary_rejection(rj(root, name, 'out', 'e2e', 'bench_summary.json'))
+            if rejected:
+                status, notes = 'fail', 'Latest native summary rejected: ' + rejected
+        m = (res.get("metrics") or {}) if status == 'ok' else {}
         rows.append({"stage": name,
                      "skill": res.get("skill") or st.get("skill") or "—",
-                     "status": res.get("status") or st.get("status") or "—",
+                     "status": status,
                      "metrics": {k: v for k, v in m.items() if not k.startswith("_")},
-                     "notes": res.get("notes") or ""})
+                     "notes": notes})
     return rows
 
 
@@ -112,12 +134,15 @@ def main(argv=None):
 
     # --- The contract view: every stage, whatever its skill.
     rows = stage_rows(root, state)
+    admitted = {row['stage'] for row in rows if row['status'] == 'ok'}
     L.append("## Stages\n")
     L.extend(stage_table(rows))
 
     # --- Baseline.
     b = rj(root, "baseline", "out", "baseline.json")
     pb = rj(root, "profile", "out", "pristine_baseline.json")
+    b = b if 'baseline' in admitted else None
+    pb = pb if 'profile' in admitted else None
     if b or pb:
         L.append("\n## Baseline\n")
         L.append("| Reference | tok/s | Provenance |\n| --- | --- | --- |")
@@ -135,9 +160,9 @@ def main(argv=None):
 
     # --- Optimize: claimed vs cold-verified, per kernel.
     o = rj(root, "optimize", "out", "optimized.json")
-    if o:
+    if o and 'optimize' in admitted:
         L.append("\n## Kernel optimization\n")
-        L.append("Credited %s GPU-h across %s tasks; %s passed cold re-verification.\n"
+        L.append("Credited %s task-h across %s tasks; %s passed cold re-verification.\n"
                  % (o.get("gpu_hours"), o.get("tasks_total"), len(o.get("kept") or [])))
         L.append("| Kernel | Attempts | Credited | Claimed | **Cold-verified** | Verdict |"
                  "\n| --- | --- | --- | --- | --- | --- |")
@@ -159,7 +184,8 @@ def main(argv=None):
     # --- Applyback: the only end-to-end claim in the run.
     ab = rj(root, "applyback", "out", "ab.json")
     summ = rj(root, "applyback", "out", "e2e", "bench_summary.json")
-    if ab:
+    usable_summary = not summary_rejection(summ)
+    if ab and 'applyback' in admitted and usable_summary:
         L.append("\n## End to end\n")
         base, cand = ab.get("baseline") or {}, ab.get("candidate") or {}
         L.append("| | tok/s |\n| --- | --- |")
@@ -178,6 +204,14 @@ def main(argv=None):
                  % (summ or {}).get("overlay_loaded_by_every_leg"))
         if (summ or {}).get("spread_pct") is not None:
             L.append("| spread between legs | %.4f%% |" % summ["spread_pct"])
+        native_p90 = ab.get("native_interactivity_p90") or {}
+        if native_p90.get("available") is True:
+            L.append("\n| Native P90 interactivity | tok/s/user |\n| --- | --- |")
+            L.append("| fresh stock | %s |" % native_p90["baseline"])
+            L.append("| median of candidate runs' native P90 | %s |" % native_p90["candidate"])
+            L.append("| change | %s |" % pct(native_p90["delta_pct"]))
+            L.append("\nSource: `%s`. This is the native rate percentile, without inverse-ITL conversion.\n"
+                     % native_p90["metric_path"])
         L.append("\n| Kernel installed | Operator speedup | Target |\n| --- | --- | --- |")
         for op in ab.get("op_level") or []:
             L.append("| `%s` | %s | `%s` |"
@@ -186,6 +220,10 @@ def main(argv=None):
                  "come apart: an operator win with no system movement is the normal "
                  "outcome, not the exception. A delta inside the band means the machine "
                  "did not move, and is reported as such rather than rounded upward.\n")
+
+    elif ab:
+        L.append('\nA prior A/B artifact is retained, but the current stage or native '
+                 'summary is not admitted; no end-to-end gain is reported.\n')
 
     # --- Whatever each stage flagged about itself.
     said = [(r["stage"], r["notes"]) for r in rows if r["notes"]]

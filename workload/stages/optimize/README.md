@@ -115,7 +115,9 @@ python3 $WORKLOAD_ROOT/scripts/run_task_entry.py $TASKS_DIR/<kernel>
 ```
 
 Use the retained source snapshot for that task, with the same frozen harness that scored
-it. Check the source and harness before and after each invocation. Run independent tasks
+it. Place that selected computation in its final snapshot directory before cold testing;
+the live search working tree may still contain an unaccepted attempt. Check the source
+and harness before and after each invocation. Run independent tasks
 concurrently on disjoint GPU slots using the same physical isolation as search. Keep a
 task's two repeats sequential: its `run/` directory is shared by those invocations.
 Archive the complete receipt, stdout, exit status and source hashes into a separate
@@ -170,10 +172,33 @@ finished that budget. Keep this shape — applyback reads it:
  "kept": [{"kernel": "opus_mla_v4_sparse_prefill", "speedup": 1.1096}],
  "kernels": [{"kernel": "...", "verdict": "pass", "verified_speedup": 1.1096,
               "claimed_speedup": 1.1116, "attempts": 7, "credited_seconds": 7333,
-              "best_kernel_src": "work/runs/<kernel>/best_kernel_src", "notes": []}],
+              "kernel_src": "sources/<kernel>/kernel_src",
+              "task_meta_sha256": "<recorded meta.json SHA-256>",
+              "kernel_src_hashes": {"compute.py": "<recorded SHA-256>"}, "notes": []}],
  "capacity_deferred": [{"kernel": "quant_mx_g32_e8m0", "roofline_rank": 9,
                         "reason": "not admitted before the checkpoint; resume in the next allocation"}]}
 ```
+
+For every passing row, `kernel_src` names the complete source directory measured by
+both cold runs. Relative paths resolve against `optimized.json`; `best_kernel_src`
+remains a supported legacy name for that directory. `kernel_src_hashes` is the complete
+relative-file/SHA-256 map, checked before and after both runs. Obtain it using
+`source_tree.py hashes <selected-directory>` with the same file policy as snapshots.
+Record `task_meta_sha256` from the same frozen `meta.json`, including its callable
+binding, so later metadata edits cannot redirect a verified source to another target.
+If `candidate_bind.file` is a frozen task-local adapter outside `kernel_src`, also record
+its `binding_file_sha256` from those checks. Applyback consumes these exact bytes and
+rejects missing or changed identities before building an overlay. Recover an older
+report's identity from its retained cold evidence; hashing present-day WIP does not
+retroactively verify it.
+
+A serving integration failure goes back to the owning stage with its failing input or
+dispatch, native error and selected source identity. The optimization agent owns kernel
+implementation fixes; a deficient frozen test or source boundary belongs to profile.
+After a source fix, repeat cold qualification for that changed source and publish a new
+snapshot. Prior scores remain attached to their prior source. Compatible extraction and
+unchanged kernels' evidence can be reused; do not restart the entire search or rewrite
+frozen tests merely to get past applyback.
 
 `result.json`: `metrics.kept` counts `verdict == "pass"`, `metrics.best_speedup` is the
 highest among them, `metrics.gpu_hours` sums credited seconds. `status` is `blocked` when
@@ -252,6 +277,11 @@ passes context through the environment and expects the prompt at `$PROMPT_OUT`:
 
 `measure.sh` is optional and must print `STATUS=<0|1> SPEEDUP=<x>`; without it the worker
 runs the task entry as in step 2.
+
+`KEEP_THRESHOLD` is the noise gate against the original baseline, not a requirement to
+multiply the current best by that threshold on every iteration. Give the session the
+configured incremental adoption rule as well; the outer worker owns the KEEP decision.
+Confusing these two tests can discard useful directions before they are measured.
 
 ## Conventions that must not be changed
 

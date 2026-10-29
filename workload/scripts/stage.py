@@ -23,10 +23,12 @@ Common arguments:
 """
 
 import argparse
+import hashlib
 import copy
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -332,12 +334,80 @@ def cmd_prepare(cfg, args):
     return 0
 
 
+def input_snapshot(cfg, lay):
+    """Bind a stage to its policy and upstream receipts, without scanning GPU artifacts."""
+    upstream = {}
+    for stage in cfg['order'][:cfg['order'].index(lay['stage'])]:
+        path = os.path.join(lay['run_root'], stage, 'out', 'result.json')
+        try:
+            with open(path, 'rb') as stream:
+                upstream[stage] = hashlib.sha256(stream.read()).hexdigest()
+        except FileNotFoundError:
+            upstream[stage] = None
+    return {'stage': lay['stage'], 'skill': lay['skill'], 'params': lay['params'],
+            'target': target.declared(cfg), 'upstream_results': upstream}
+
+
+def input_problems(cfg, lay):
+    path = os.path.join(lay['out'], 'inputs.json')
+    if not os.path.exists(path):
+        return []  # Older standalone deliveries predate invocation receipts.
+    try:
+        with open(path) as stream:
+            saved = json.load(stream)
+        current = input_snapshot(cfg, lay)
+        changed = [key for key in current if not isinstance(saved, dict) or saved.get(key) != current[key]]
+        if changed:
+            return ['stage inputs changed (%s); retained results require their original '
+                    'inputs or a fresh stage run' % ', '.join(changed)]
+    except (OSError, ValueError) as exc:
+        return ['cannot validate stage input receipt: %s' % exc]
+    return []
+
+
+def preserve_declared_files(lay, stamp):
+    """Keep prior result payloads while leaving working directories available to resume."""
+    result, _ = validate_result(lay)
+    if not result or not isinstance(result.get('artifacts'), dict):
+        return
+    root = os.path.abspath(lay['out'])
+    archive = os.path.join(root, '.previous_runs', str(stamp))
+    for relative in ['result.json', *result['artifacts'].values()]:
+        if not isinstance(relative, str) or os.path.isabs(relative):
+            continue
+        source = os.path.abspath(os.path.join(root, relative))
+        if os.path.commonpath((root, source)) != root or not os.path.isfile(source):
+            continue
+        destination = os.path.join(archive, relative)
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        shutil.copy2(source, destination)
+
+
 def cmd_run(cfg, args):
     lay = stage_layout(cfg, args.stage)
     rc = cmd_prepare(cfg, argparse.Namespace(stage=args.stage, quiet=True))
     if rc:
         return rc
     env = stage_env(cfg, lay)
+    stamp = time.time_ns()
+    try:
+        preserve_declared_files(lay, stamp)
+    except (OSError, ValueError) as exc:
+        note = 'cannot preserve previous stage payloads; no new work started: %s' % exc
+        state = load_state(cfg)
+        entry = state['stages'].setdefault(lay['stage'], {})
+        entry.update(status='blocked', notes=note, errors=[note], updated=int(time.time()))
+        save_state(cfg, state)
+        print(note, file=sys.stderr)
+        return 1
+    inputs = os.path.join(lay['out'], 'inputs.json')
+    if os.path.lexists(inputs):
+        os.replace(inputs, os.path.join(lay['out'], 'inputs.before-run.%d.json' % stamp))
+    with open(inputs, 'w') as stream:
+        json.dump(input_snapshot(cfg, lay), stream, indent=2)
+    previous_result = os.path.join(lay['out'], 'result.json')
+    if os.path.lexists(previous_result):
+        os.replace(previous_result, os.path.join(lay['out'], 'result.json.before-run.%d' % stamp))
 
     # An agent-mode stage is dispatched through the runner rather than refused. The
     # judgement stays the agent's; only the dispatching is mechanical, and the runner
@@ -362,6 +432,11 @@ def cmd_run(cfg, args):
         return cmd_validate(cfg, args, exec_rc=rc)
 
     log = os.path.join(lay["out"], "stage.log")
+    # A failed new invocation must not inherit an earlier success or erase its log.
+    for name in ('stage.log',):
+        previous = os.path.join(lay['out'], name)
+        if os.path.lexists(previous):
+            os.replace(previous, os.path.join(lay['out'], '%s.before-run.%d' % (name, stamp)))
     started = time.time()
     print("[stage] %s / %s -> %s" % (lay["stage"], lay["skill"], log))
     with open(log, "w") as lf:
@@ -389,6 +464,12 @@ def cmd_validate(cfg, args, exec_rc=None):
     }
     if exec_rc is not None:
         entry["exec_rc"] = exec_rc
+        if exec_rc != 0 and res and res.get('status') == 'ok':
+            errs.append('stage command exited %d despite status=ok' % exec_rc)
+
+    inputs = os.path.join(lay['out'], 'inputs.json')
+    entry['input_receipt_present'] = os.path.exists(inputs)
+    errs += input_problems(cfg, lay)
 
     # The target gate. A stage that ran against a different stack than the config names
     # invalidates the labels on everything downstream, so it fails here rather than
@@ -548,6 +629,13 @@ def run_order(cfg, args, order, state):
     for stage in order:
         done = state["stages"].get(stage, {}).get("status") == "ok"
         if done and not args.force:
+            # This reads receipts only. It never re-runs a GPU test to decide reuse.
+            rc = cmd_validate(cfg, argparse.Namespace(stage=stage),
+                              exec_rc=state['stages'][stage].get('exec_rc'))
+            if rc:
+                print('Retained stage %s is no longer reusable; no downstream stage was run.'
+                      % stage, file=sys.stderr)
+                return rc
             print("\n=== %s: already ok, skipping (--force to re-run)" % stage)
             continue
         print("\n=== %s" % stage)
@@ -588,6 +676,12 @@ def cmd_next(cfg, args):
     state = load_state(cfg)
     for stage in cfg["order"]:
         if state["stages"].get(stage, {}).get("status") != "ok":
+            print(stage)
+            return 0
+        lay = stage_layout(cfg, stage)
+        result, errors = validate_result(lay)
+        errors += input_problems(cfg, lay)
+        if errors or not result or result.get('status') != 'ok':
             print(stage)
             return 0
     print("")

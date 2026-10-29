@@ -32,6 +32,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ranking", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--source-map", type=Path,
+                        help="reviewed operator attribution from kernel-extract")
     args = parser.parse_args()
     try:
         out = Path(os.environ["OUT"])
@@ -46,6 +48,9 @@ def main():
         invocation = {"ranking_sha256": hashlib.sha256(ranking.read_bytes()).hexdigest(),
                       "selector_sha256": hashlib.sha256(selector.read_bytes()).hexdigest(),
                       "arguments": arguments}
+        if args.source_map is not None:
+            invocation['source_map_sha256'] = hashlib.sha256(args.source_map.read_bytes()).hexdigest()
+            arguments += ['--source-map', str(args.source_map.resolve())]
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists():
             previous = json.loads(output.read_text())

@@ -5,6 +5,7 @@ Snapshots contain the complete source tree, excluding interpreter caches. Editab
 metadata controls permissions, not which computation survives KEEP or rollback.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -44,6 +45,12 @@ def source_files(root):
                 raise ValueError(f"non-regular source: {path}")
             files[path.relative_to(root).as_posix()] = path
     return dict(sorted(files.items()))
+
+
+def source_hashes(root):
+    """Identity of the complete computation tree, using the snapshot's file policy."""
+    return {name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for name, path in source_files(root).items()}
 
 
 def editable_sources(task):
@@ -186,13 +193,15 @@ def restore_harness(task, snapshot):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("editable", "copy", "check", "freeze", "check-frozen", "restore-frozen"))
+    parser.add_argument("action", choices=("editable", "hashes", "copy", "check", "freeze", "check-frozen", "restore-frozen"))
     parser.add_argument("paths", nargs="+")
     parser.add_argument("--allowed", default="")
     args = parser.parse_args()
     try:
         if args.action == "editable":
             print(" ".join(editable_sources(args.paths[0])))
+        elif args.action == "hashes":
+            print(json.dumps(source_hashes(args.paths[0]), indent=2))
         elif args.action == "copy":
             copy_source_tree(*args.paths)
         elif args.action == "freeze":

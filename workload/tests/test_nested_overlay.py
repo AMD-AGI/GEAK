@@ -1,4 +1,5 @@
 """Execute relocated, combined overlays whose computation lives beside a dispatcher."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,7 +30,11 @@ def test_combined_overlay_carries_each_nested_source_tree(tmp_path):
             'candidate_bind': {'kind': 'module', 'module': name, 'file': 'kernel_src/dispatcher.py'},
             'kernel_extraction': {'editable_leaves': [{'source_file': 'kernel_src/sub/compute.py'}]},
         }))
-        rows.append({'kernel': name, 'verdict': 'pass', 'verified_speedup': 1.5})
+        rows.append({'kernel': name, 'verdict': 'pass', 'verified_speedup': 1.5,
+                     'task_meta_sha256': hashlib.sha256((task/'meta.json').read_bytes()).hexdigest(),
+                     'kernel_src': str(ksrc), 'kernel_src_hashes': {
+                         p.relative_to(ksrc).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                         for p in ksrc.rglob('*') if p.is_file()}})
     optimized = tmp_path / 'optimized.json'
     optimized.write_text(json.dumps({'kernels': rows}))
     overlay = tmp_path / 'overlay'

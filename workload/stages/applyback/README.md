@@ -12,6 +12,13 @@ end-to-end gain.
 **Output**: `$OUT/overlay/`, `$OUT/applied.json`, `$OUT/e2e/`, `$OUT/ab.json`,
 `$OUT/result.json`.
 
+`optimized.json` supplies the accepted `kernel_src` (or legacy `best_kernel_src`)
+directory, its `kernel_src_hashes` and the frozen `task_meta_sha256`, as defined by the
+optimize slot. Task metadata supplies the binding, not a replacement working source. The builder verifies that
+identity before changing an existing overlay, bundles the complete selected tree, and
+checks the copied bytes again. A separate frozen binding adapter also needs the
+`binding_file_sha256` recorded during cold qualification.
+
 ## Implementations
 
 | Skill | Notes |
@@ -66,6 +73,33 @@ control can expose environment drift. Record its drift from the original referen
 report throughput together with relevant TTFT/ITL tradeoffs. Keep valid slow repeats in
 the reported statistic. Report invalid runs with their receipts and reasons rather than
 deleting or reusing their benchmark IDs.
+
+Exercise representative real serving paths in a bounded, unmeasured preflight before
+the full benchmark: the paths supported by the extracted tasks determine the requests,
+including material dtype, phase and layout variants. Give stock and candidates the same
+conditioning and keep source-observer removal as a premeasurement barrier. A standalone
+UT pass alone cannot establish that the serving caller selected the same branch.
+
+If integration fails, preserve the failed arm and send its counterexample to the owning
+profile or optimization agent. A changed kernel must acquire new cold evidence before
+rebuilding the overlay; use fresh arm/cache identities for the changed bundle. Reuse a
+completed arm only when its source inventory, configuration and native validity still
+match. Keep all valid slow repeats in the configured statistic. Native run cancellation,
+request errors and the harness's end-of-window drain behavior are distinct: preserve
+the native verdict and counts rather than inventing a new admission rule after a run.
+
+For a reference harness that supplies native P90 interactivity, set
+`require_native_interactivity_p90: true` in the applyback parameters when that metric
+is required. Read `request_metrics.latency.intvty.p90` directly and take the median of
+all admitted run values. A missing value blocks that arm; reciprocal rounded ITL is
+not a substitute. The native summary, `ab.json`, `result.json` and final report carry
+the same value alongside total output throughput.
+
+The shared finalizer accepts the baseline slot's canonical `throughput` plus `metric`
+fields as well as native aliases. An explicitly unmeasured baseline, a failed benchmark,
+nonpositive/nonfinite throughput, or a metric-basis mismatch cannot publish an A/B.
+Earlier A/B artifacts are retained for audit, and a failed current stage or native
+summary suppresses their gain from both the report table and detail section.
 
 ## Two environment constraints
 

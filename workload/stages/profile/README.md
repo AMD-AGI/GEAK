@@ -35,7 +35,7 @@ existing selector rather than using its narrower default invocation:
 python3 "$WORKLOAD_ROOT/stages/profile/select_candidates.py"
 ```
 
-The adapter only forwards `selection_top_k`, `selection_overall_pct_gt` and
+The adapter forwards `selection_top_k`, `selection_overall_pct_gt` and
 `selection_phases` from `$PARAMS` to `$SKILL_ROOT/scripts/select_targets.py`. The default
 is phase Top 10 and overall share >0.5%; these are heuristic discovery cutoffs. Numeric
 parameters are the executable policy; `selection` is explanatory prose. The vendored
@@ -43,6 +43,17 @@ selector and its validation remain unchanged. Declare other material phases expl
 in the scenario, such as draft and verify when they are independently measured.
 Another profile implementation uses its own selection procedure with the same configured
 scope and artifact contract; it need not implement this optional selector CLI.
+
+When the extraction skill has produced reviewed operator attribution, retain it:
+
+```bash
+python3 "$WORKLOAD_ROOT/stages/profile/select_candidates.py" --source-map "$OUT/source_map.json"
+```
+
+This uses the same configured cutoffs over complete operators. Dropping the map can
+exclude a fused operator whose individual kernels each fall below the threshold.
+The invocation receipt hashes the map as well as the ranking and selector; a changed
+map requires a fresh output path, while identical inputs reuse the existing selection.
 
 `selection_candidates.json` is the broad inventory, not a promise that every row is a
 separate UT. Reconcile live identities, complete operator boundaries, available source
@@ -129,6 +140,10 @@ evidence disagrees.
   named: "the gates were never run" and "every gate is green" must not produce the same
   `result.json`. The delivery gate is a Node script — on a host without a `node` binary,
   run it in the container that has one and say so rather than skipping it.
+  The bundled skill's standalone pipeline note says no external workflow consumes
+  `RETURN.json`; this slot still requires the local delivery-gate receipt. Run the
+  skill's documented delivery preflight with `--out` before finalizing. Its CPU
+  preflight and the full GPU UT remain separate evidence; neither replaces the other.
 - **Declared coverage and achieved coverage are both reported.** Owning a boundary is not
   timing it: one delivery declared 42.92% of GPU time and timed 22.54%, because a task's
   captured decode operands launched neither kernel it owned. A missing achieved number, or
