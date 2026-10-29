@@ -706,6 +706,8 @@ def map_args(
 ) -> dict:
     if any(str(key).startswith("ablation_") for key in h):
         raise ValueError("ablation_* study controls are retired; use the original revision to replay those studies")
+    if "optimizer" in h and h["optimizer"] not in ("greedy", "evo"):
+        raise ValueError("optimizer must be greedy or evo")
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
     has_explicit_identity = bool(
@@ -822,6 +824,9 @@ def map_args(
         "apply_to_original": "true",
         "exp_root": h["exp_root"],
     }
+    # Select the policy of the same nested kernel worker; omission keeps its default.
+    if "optimizer" in h:
+        ps_args["optimizer"] = h["optimizer"]
     if gpu_identity is not None:
         ps_args.update({
             "expected_gfx": gpu_identity["gfx"],

@@ -14,8 +14,10 @@ file rather than checking a list, and requires each one to route through `laneAr
 
     python3 e2e_workflow/scripts/tests/test_e2e_lane_defaults.py
 """
+import json
 import os
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -75,6 +77,50 @@ for m in re.finditer(r"workflow\(\{ scriptPath: KERNEL_WF_SCRIPT \}, (.{0,12})",
 
 check("every raw lane invocation wraps its args in laneArgs",
       not raw, f"unwrapped `workflow({{scriptPath: KERNEL_WF_SCRIPT}}, ...)` at line(s) {raw}")
+
+# Execute the actual argument boundary without starting a workflow. A dropped
+# selector silently runs ordinary GEAK, so check behavior as well as call routing.
+boundary = s[s.index("const RDNA4_ISA ="):s.index("// EXP_ROOT =")]
+worker_src = os.path.join(os.path.dirname(E2E), "kernel_workflow", "src", "kernel_lane")
+worker_args = open(os.path.join(worker_src, "01b_args.js")).read().split("const BUDGET =")[0]
+dispatch = open(os.path.join(worker_src, "14b_optimize_dispatch.js")).read()
+cases = [{}, {"optimizer": "greedy"}, {"optimizer": "evo"}]
+cases += [{"optimizer": value} for value in (None, "", "population", "EVO", True, 1, [], {})]
+probe = subprocess.run(["node", "-e", """
+const fs = require('node:fs'), vm = require('node:vm');
+const {boundary, worker_args, dispatch, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
+Promise.all(cases.map(async A => {
+  try {
+    const child = vm.runInNewContext(boundary + '\\nlaneArgs({kernel_path: "/task"})', {
+      A, EXPECTED_GFX: '', EXPECTED_TARGET: '', EXPECTED_DEVICE_NAME: '',
+      EXPECTED_PHYSICAL_CU_COUNT: 0,
+    });
+    const calls = [];
+    // Real worker parsing/dispatch, with engineering and evolution creation stubbed.
+    await vm.runInNewContext('(async () => {\\n' + worker_args + dispatch + '\\n})()', {
+      A: child, cumulative: 1, bestSeen: 1, bestPerCase: {}, finalWinner: null,
+      profileSummary: '', history: {},
+      createEvolution: async () => { calls.push('createEvolution'); return 'evolution'; },
+      greedyOptimize: async (_start, evolution) => { calls.push(evolution || 'ordinary'); },
+      applyOptimizeResult: () => {},
+    });
+    return {...child, policy_calls: calls};
+  } catch (error) { return {error: error.message}; }
+})).then(results => console.log(JSON.stringify(results)));
+"""], input=json.dumps({"boundary": boundary, "worker_args": worker_args,
+                        "dispatch": dispatch, "cases": cases}),
+    text=True, capture_output=True, check=True)
+results = json.loads(probe.stdout)
+check("omitted optimizer preserves the worker default", "optimizer" not in results[0])
+for i, optimizer in enumerate(("greedy", "evo"), 1):
+    check(f"{optimizer} reaches the existing nested worker",
+          results[i].get("optimizer") == optimizer and results[i].get("kernel_path") == "/task")
+check("omitted and greedy selectors enter the ordinary worker policy",
+      all(result.get("policy_calls") == ["ordinary"] for result in results[:2]))
+check("evo selector enters the existing evolution policy in the shared loop",
+      results[2].get("policy_calls") == ["createEvolution", "evolution"])
+check("invalid optimizer is rejected before workflow dispatch",
+      all(result.get("error") == "optimizer must be greedy or evo" for result in results[3:]))
 
 # The kernel side must still default ON — this test would otherwise pass just as well on a tree where
 # somebody turned the KB off everywhere.

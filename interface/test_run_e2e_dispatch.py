@@ -286,6 +286,20 @@ class TestMapArgs(_RunE2ECase):
         self.assertEqual(ps["config_tune"], "false")
         self.assertEqual(ps["apply_to_original"], "true")
 
+    def test_kernel_optimizer_is_optional_and_forwarded(self):
+        self.assertNotIn("optimizer", rx.map_args(self._handoff()))
+        for optimizer in ("greedy", "evo"):
+            with self.subTest(optimizer=optimizer):
+                ps = rx.map_args(self._handoff(optimizer=optimizer))
+                self.assertEqual(ps["optimizer"], optimizer)
+
+    def test_invalid_kernel_optimizer_fails_before_gpu_probe(self):
+        self.patch_rx("_expected_gpu_identity", lambda _h: self.fail("unexpected GPU probe"))
+        for optimizer in (None, "", "population", "EVO", True, 1, [], {}):
+            with self.subTest(optimizer=optimizer):
+                with self.assertRaisesRegex(ValueError, "optimizer must be greedy or evo"):
+                    rx.map_args(self._handoff(optimizer=optimizer))
+
     def test_structured_identity_is_forwarded_before_policy(self):
         ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_identity")))
         self.assertEqual(ps["expected_gfx"], "gfx950")

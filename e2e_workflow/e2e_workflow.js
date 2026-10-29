@@ -129,6 +129,10 @@ const MATRIX_CORE_NAME = RDNA4_ISOLATE ? 'WMMA' : 'MFMA';
 // Off is also the conservative default for the layer that has never been measured with it on.
 // Override per run with args.use_learned_kb=true.
 const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb : 'false');
+// Select the policy inside the existing worker, without another workflow level.
+if (A.optimizer !== undefined && !['greedy', 'evo'].includes(A.optimizer)) {
+  throw new Error('optimizer must be greedy or evo');
+}
 
 // EVERY nested lane invocation goes through here. Setting the flag at each call site instead would
 // be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
@@ -140,6 +144,7 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 const laneArgs = (wfArgs) => {
   const out = {
     use_learned_kb: LANE_USE_LEARNED_KB,
+    ...(A.optimizer !== undefined ? { optimizer: A.optimizer } : {}),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
     ...wfArgs,
   };
