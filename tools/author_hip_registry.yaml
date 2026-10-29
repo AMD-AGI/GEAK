@@ -1,0 +1,61 @@
+# Registry of author-able HIP ops for the author-HIP framework.
+#
+# Each row fully declares one op so tools/gen_author_hip_task.py can emit a
+# Python-oracle author task with NO per-op Python plumbing. GEAK (mode=author,
+# target_language=hip) then writes kernel_src/<op>_kernel.hip implementing the
+# frozen `extern "C" <launch_symbol>` declared in `abi_header` — the same ABI the
+# ONNX-Runtime HIP EP calls, so the authored kernel drops into the EP unchanged.
+#
+# Adding an op = one row here + one torch reference in tools/author_hip_refs/<reference>.py
+# (+ a frozen include/<op>_op.h if no selfcheck template already ships one).
+#
+# Fields:
+#   op             task name (examples/tasks/author_<op>_hip)
+#   abi_header     path (relative to tools/) of the FROZEN C-ABI header — source of truth
+#   launch_symbol  the extern "C" entry the authored kernel must define
+#   reference      torch ref module name under tools/author_hip_refs/ (fn name == op)
+#   op_kind        elementwise | gemm | attn | ... (metadata)
+#   shapes_preset  key in gen_author_hip_task.SHAPE_PRESETS
+#   tol            relative tolerance for the parity gate (fp32-appropriate)
+#   arches         supported --arch values
+#   args           the extern-"C" signature IN ORDER. `kind` one of:
+#                    in_tensor  — const float* device buffer (synthesized input)
+#                    out_tensor — float* device buffer (allocated + compared)
+#                    dim        — int; value = case[<name>] (symbolic dim)
+#                    scalar_f32 — float literal (`value`)
+#                    scalar_i32 — int literal (`value`)
+#                  in/out_tensor `shape` dims are symbolic names resolved per case.
+#                  in_tensor `init`: randn (default) | ones_plus_noise | randn_small | uniform
+ops:
+  - op: rmsnorm
+    abi_header: selfcheck_templates/rmsnorm/include/rmsnorm_op.h
+    launch_symbol: rmsnorm_launch
+    reference: rmsnorm
+    op_kind: elementwise
+    shapes_preset: rmsnorm_default
+    tol: 1.0e-3
+    arches: [gfx1151, gfx1150, gfx942, gfx950]
+    args:
+      - {name: d_x,     kind: in_tensor,  shape: [M, N], dtype: float32, init: randn}
+      - {name: d_gamma, kind: in_tensor,  shape: [N],    dtype: float32, init: ones_plus_noise}
+      - {name: d_y,     kind: out_tensor, shape: [M, N], dtype: float32}
+      - {name: M,   kind: dim}
+      - {name: N,   kind: dim}
+      - {name: eps, kind: scalar_f32, value: 1.0e-6}
+
+  - op: layernorm
+    abi_header: selfcheck_templates/layernorm/include/layernorm_op.h
+    launch_symbol: layernorm_launch
+    reference: layernorm
+    op_kind: elementwise
+    shapes_preset: layernorm_default
+    tol: 1.0e-3
+    arches: [gfx1151, gfx1150, gfx942, gfx950]
+    args:
+      - {name: d_x,     kind: in_tensor,  shape: [M, N], dtype: float32, init: randn}
+      - {name: d_gamma, kind: in_tensor,  shape: [N],    dtype: float32, init: ones_plus_noise}
+      - {name: d_beta,  kind: in_tensor,  shape: [N],    dtype: float32, init: randn_small}
+      - {name: d_y,     kind: out_tensor, shape: [M, N], dtype: float32}
+      - {name: M,   kind: dim}
+      - {name: N,   kind: dim}
+      - {name: eps, kind: scalar_f32, value: 1.0e-6}
