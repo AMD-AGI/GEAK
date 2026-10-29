@@ -1,0 +1,193 @@
+{
+  "schema": "completed-h-hp-evidence-extract/1",
+  "as_of_utc": "2026-10-29",
+  "scope": "One completed unrepaired c08 hybrid-versus-hybrid population pair; separate three-cycle confirmation of each selected program.",
+  "review": "The underlying results and stated evidence limits were independently reviewed and explicitly agreed by Codex and actual Claude. This extract is a documentation projection.",
+  "task": {
+    "operation": "mHC complete public callable",
+    "case_weights": {
+      "prefill_m8192": 64,
+      "decode_m64": 1024
+    },
+    "timing": {
+      "prefill_m8192": "eager callable / GPU events",
+      "decode_m64": "graph timing"
+    },
+    "correctness": "four public outputs and changed-state replay"
+  },
+  "estimator": "For each role and case take its median of three action latencies, multiply by case weights and sum; score = ORIGINAL weighted sum / candidate weighted sum.",
+  "arms": {
+    "H": {
+      "source_ids": {
+        "ORIGINAL": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+        "candidate": "2c27b50e18eecddb1275ce5686fb895b2796969d54f93fbae5b98ba0d4399c7b"
+      },
+      "per_case_cycle_ms": {
+        "ORIGINAL": {
+          "prefill_m8192": [
+            0.54618701338768,
+            0.5477469861507416,
+            0.5462270081043243
+          ],
+          "decode_m64": [
+            0.015766517634977373,
+            0.015781263510386147,
+            0.01573423701420165
+          ]
+        },
+        "candidate": {
+          "prefill_m8192": [
+            0.44716599583625793,
+            0.45164600014686584,
+            0.4471859931945801
+          ],
+          "decode_m64": [
+            0.01390110025039086,
+            0.013826421461999416,
+            0.013806124683469534
+          ]
+        }
+      },
+      "weighted_median_total_ms": {
+        "ORIGINAL": 51.103442576893585,
+        "candidate": 42.77815914154053
+      },
+      "confirmed_speedup": 1.194615280377239,
+      "cycle_weighted_ratios": [
+        1.1924594564967188,
+        1.1893065475268396,
+        1.194422878723693
+      ],
+      "compile_correctness_six_performance_actions": "PASS",
+      "performance_order": [
+        [
+          "ORIGINAL",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "ORIGINAL"
+        ],
+        [
+          "ORIGINAL",
+          "candidate"
+        ]
+      ],
+      "archived_numeric_reduction": {
+        "path_relative_to_deepseek_evidence_root": "common_final_confirmation_preparation_01/variable_candidate_confirmation_source_2037_01/CODEX_H_CONFIRMATION_REDUCTION_01.json",
+        "sha256": "25154f625b3baa5e06c6645837988aa45a61e4c33507703da3df1dafdf1b7e22"
+      }
+    },
+    "HP": {
+      "source_ids": {
+        "ORIGINAL": "d1359889710f345335628cc62a54a85c2191156f1be3a52cf63cbb827def7ca1",
+        "candidate": "00d85f3cb162785f4a586a86966dd00af1ef6b6f8b3e080154856bf3af07a1f2"
+      },
+      "per_case_cycle_ms": {
+        "ORIGINAL": {
+          "decode_m64": [
+            0.01576898233932361,
+            0.01576090329571774,
+            0.015780913418736952
+          ],
+          "prefill_m8192": [
+            0.5444470047950745,
+            0.544966995716095,
+            0.5469875037670135
+          ]
+        },
+        "candidate": {
+          "decode_m64": [
+            0.014403364961109465,
+            0.014455031964086717,
+            0.014384064943559708
+          ],
+          "prefill_m8192": [
+            0.4574660062789917,
+            0.4566659927368164,
+            0.4582659900188446
+          ]
+        }
+      },
+      "weighted_median_total_ms": {
+        "ORIGINAL": 51.02532564129746,
+        "candidate": 44.02687012203156
+      },
+      "confirmed_speedup": 1.158958733606725,
+      "cycle_weighted_ratios": [
+        1.1582028447858057,
+        1.1587259236361043,
+        1.1613441456533105
+      ],
+      "compile_correctness_six_performance_actions": "PASS",
+      "performance_order": [
+        [
+          "ORIGINAL",
+          "candidate"
+        ],
+        [
+          "candidate",
+          "ORIGINAL"
+        ],
+        [
+          "ORIGINAL",
+          "candidate"
+        ]
+      ],
+      "archived_numeric_reduction": {
+        "path_relative_to_deepseek_evidence_root": "common_final_confirmation_preparation_01/variable_candidate_confirmation_source_2037_01/hp_singleton_20261028_01/CODEX_HP_CONFIRMATION_REDUCTION_01.json",
+        "sha256": "6de5653651be4dfc0ea7282351730d109f474c5af6f843a56a3c933455eafce0"
+      }
+    }
+  },
+  "claims": {
+    "H": "One task-local computational reorganization with correctness, independent full-call improvement and recorded source contribution survival. Separate same-source tracing observed three prefill and two decode dispatches; it was not the scored confirmation call.",
+    "HP": "One identified round-two planner session received peer records through observable tool results and emitted a plan explicitly citing them. This is observed evidence use; decision change against a no-evidence counterfactual and causal benefit are unproved.",
+    "development": "Native final scores rank the later H and HP delivered programs above their compared cross-lineage sources. Those small point-reading gaps are not independently confirmed incremental benefits. HP donor offers do not establish exact surviving code contribution."
+  },
+  "limitations": [
+    "H and HP each contain one ordinary and three EVO members; this is not an external GEAK-versus-EVO comparison.",
+    "Three timing cycles are measurement repetitions, not independent search replications.",
+    "Baseline ran first twice; position order is not completely balanced.",
+    "HP/H is a ratio of separately confirmed scores, not direct randomized H-versus-HP timing.",
+    "No causal memory benefit, global novelty, general Level4 reliability, below-ORIGINAL maturation, or serving gain is established.",
+    "Related prior solution cards were readable in both packages although automatic injection was disabled; actual exposure is unknown.",
+    "Archived evidence references identify retained artifacts; the complete raw capture is not embedded in this extract.",
+    "H decode retains an FP32 folded numerator where upstream rounds BF16; the declared numerical tolerance passes, not bitwise numerical identity."
+  ],
+  "HP_over_H": 0.9701522763384927,
+  "archived_mechanism_evidence": {
+    "H_source_survival": {
+      "path_relative_to_deepseek_evidence_root": "c08_k4g1_operator_preparation_1019_01/CODEX_H_R1_TO_DELIVERED_FILE_SURVIVAL_01.json",
+      "sha256": "5b928211309b07deeeee5ad1ee8eae6b0b09d5f790e1fe2705739502451dd1c8"
+    },
+    "HP_observable_evidence_use": {
+      "path_relative_to_deepseek_evidence_root": "hp_completed_evidence_use_audit_20261028_01/OBSERVABLE_EVIDENCE_USE_FOLLOWUP_02.json",
+      "sha256": "e453c93e5e2dee9dd01116c9a6217400e240b855854de90167a92bc0f9882254"
+    },
+    "prior_solution_availability": {
+      "path_relative_to_deepseek_evidence_root": "completed_discovery_learned_exposure_20261029_01/BOUNDED_SOURCE_AND_OBSERVABLE_REVIEW_01.json",
+      "sha256": "c631193f3b9760aee86baa0c4055966f3104e5a18bf234eaa006f1bf7c9fbf62"
+    },
+    "native_parent_child_ordering": {
+      "path_relative_to_deepseek_evidence_root": "hp_completed_evidence_use_audit_20261028_01/CODEX_COMPLETED_NATIVE_PARENT_CHILD_ORDERING_01.json",
+      "sha256": "d70bd1ebef77f4a383312c659d7e3e80d9d06e43d644c78bae80cd2ddae7699c"
+    },
+    "H_trace": {
+      "path_relative_to_deepseek_evidence_root": "h_selected_launch_trace_preparation_20261028_01/CODEX_ROOT_H_TRACE_ACCEPTANCE_01.json",
+      "sha256": "939c36d49aedccb7fd538365ab35a62a42d6e8cfb6f664b68147de97c5741306"
+    },
+    "H_source_inspection": {
+      "path_relative_to_deepseek_evidence_root": "c08_k4g1_operator_preparation_1019_01/H_WINNER_FULL_REGION_REVIEW_01.md",
+      "sha256": "fa4fe886d9cb2afa8ac6bb5f51950ad069d09e3f0d22ed9d69b8ba1100abe3ce"
+    },
+    "H_framework_acceptance": {
+      "path_relative_to_deepseek_evidence_root": "common_final_confirmation_preparation_01/variable_candidate_confirmation_source_2037_01/CODEX_H_CONFIRMATION_ACCEPTANCE_01.json",
+      "sha256": "4d9a0c6c8cb4527f0129c31298624170acde7fda30bdd1af020ec2174cb5211f"
+    },
+    "completed_pair_scope": {
+      "path_relative_to_deepseek_evidence_root": "common_final_confirmation_preparation_01/variable_candidate_confirmation_source_2037_01/hp_singleton_20261028_01/H_HP_UNREPAIRED_BLOCK_01.json",
+      "sha256": "7d1e083cd5ec3ba7e7bcb7b06b9098923d6cda7fe59c6fc4a4d1b5a391601d5a"
+    }
+  }
+}

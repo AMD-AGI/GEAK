@@ -362,8 +362,93 @@ limit of eight concurrent agent subprocesses per population, with a shared
 declared four. These are configured limits, not measured utilization, and they
 must not be projected backward onto older experiments. Both b08 arms failed
 without canonical final endpoints, leaving that H/HP contrast unavailable;
-the c08 comparison is still in progress
-as of 28 October 2026. Neither supplies a completed positive mechanism result.
+the original c08 comparison has completed. Its independently confirmed deliveries
+are shown below. Later repaired c08 pairs remain separate experiments.
+
+| Completed original c08 arm | Confirmed speedup over ORIGINAL | Weighted baseline / candidate time, ms | Improving measurement cycles |
+| --- | ---: | ---: | ---: |
+| H: standard handoff | **1.194615×** | 51.103443 / 42.778159 | 3 of 3 |
+| HP: added peer-evidence access | **1.158959×** | 51.025326 / 44.026870 | 3 of 3 |
+
+Both programs passed compilation, four-output correctness and changed-state
+replay. The [evidence extract](evidence/completed-h-hp-20261029.json) includes the
+source identities, all per-case cycle latencies, estimator and archived evidence
+references. Each score uses separate case medians and the same 64/1024 weights.
+The three cycles are measurement repetitions of one selected program, not three
+independent searches. Baseline ran first twice. The ratio HP/H is 0.970152, from
+separate confirmations against ORIGINAL; it is not a direct randomized timing
+comparison of H with HP. This one unrepaired pair favors H's delivered program
+and establishes neither a general nor a causal effect of the added access.
+
+**What this establishes toward computational discovery.** H implements a changed
+organization of the full callable, including per-call packing, a fused prefill
+producer and custom finalizers. Packing remains timed. Decode retains an FP32 folded numerator where upstream
+rounds BF16; it passes the declared tolerance, without a bitwise-identity claim.
+A separate same-source
+trace observed three prefill and two decode dispatches with no range-crossing
+dispatches. That trace was not the scored confirmation call. Source inspection,
+contract correctness, full-call improvement and surviving cross-lineage source
+contributions support one task-local example toward Level 4. They do not establish
+reliable discovery across tasks, superiority over external GEAK, worldwide
+novelty, or serving benefit. Related earlier solution cards were readable in both
+engine packages despite disabled automatic injection; actual exposure is unknown,
+so independent invention is not claimed.
+
+**What this establishes about evidence use.** In one positively identified HP
+round-two planner session, observable tool returns contain peer source and
+experimental evidence, and the emitted plan explicitly cites those records.
+This establishes receipt and use in the plan. It does not establish what would
+have happened without those records, useful changed engineering, or causal
+performance benefit. HP's recorded donor offers also do not by themselves prove
+that the donor's code survived integration. The native final rows rank the later
+H and HP deliveries above their compared cross-lineage sources, but those small
+point-reading gaps are not independently confirmed incremental benefits.
+
+**5a. General design and the remaining experiments**
+
+The general architecture need not reserve an ordinary GEAK lineage inside every
+EVO population. Each member is a complete persistent engineering trajectory;
+ordinary or EVO policy determines how it chooses the next investigation and
+parent. All members use the shared GEAK engineering loop and the same full-task
+contract. Different, revisable hypotheses can guide exploration without creating
+a separate engineering engine for each specialization.
+
+```mermaid
+flowchart TB
+    T[Full computation contract and finite resource budget] --> P[Population: independent persistent trajectories]
+    P --> L[Each trajectory: shared GEAK engineering loop]
+    L --> E[Implement, verify, measure and revise]
+    E --> A[Retain immutable candidates and experimental evidence]
+    A --> N[Policy selects next hypothesis and starting parent]
+    N --> L
+    A -. eligible peer evidence .-> P
+    A --> F[Common evaluation of eligible finalists]
+    O[ORIGINAL fallback under the declared evaluation rule] --> F
+    F --> D[Best qualified deliverable]
+```
+
+This diagram describes the general design. The historical population and its
+actual admission rules remain as documented above. Retention, development,
+canonical promotion and final admission are different decisions. Preserving a
+candidate makes later development possible; it does not allocate that candidate
+a full search budget or make it a finalist. The tested policy must explicitly
+provide and account for the development opportunity.
+
+Three questions therefore remain separate:
+
+- **Search advantage:** do hybrid or all-EVO populations outperform independent
+  ordinary GEAK populations under declared, comparable resources and repeated
+  full searches?
+- **Depth:** does a weaker computational design repay a full development trajectory
+  compared with continuing the stronger design, and does deep allocation beat
+  additional shorter independent searches at the same total budget?
+- **Accumulation:** does inherited evidence or source change a later investigation
+  and improve a separately confirmed outcome?
+
+Fresh repaired comparisons and depth studies address these questions. A failed
+or truncated arm is retained as such; a fallback score assigned by an evaluation
+rule is not evidence of search inferiority. A useful structural improvement on
+one task does not answer all three questions.
 
 **6. Code to compare manually**
 
