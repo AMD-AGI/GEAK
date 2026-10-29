@@ -12,6 +12,11 @@ two task-local computational reorganization examples and one completed MoE
 population comparison favoring GEAK-EVO. They do not establish serving gains,
 general superiority or the benefit of protecting initially weaker approaches.
 
+The [evidence-to-policy record](evidence-to-policy.md) connects those completed
+results to generic behaviors and prospective ablations. The full recipe-level
+controller and its population, transfer and allocation policies remain research
+hypotheses; the first inner-worker integration does not freeze that architecture.
+
 ```mermaid
 flowchart TD
     W[Exact model, requests, precision, TP/EP, hardware and objective]
