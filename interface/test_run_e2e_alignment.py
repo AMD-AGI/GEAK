@@ -965,6 +965,78 @@ def test_a_malformed_capture_sizes_value_is_unparsed_not_raised() -> None:
     assert facts["compilation_level"] == 3
 
 
+def _vllm_log(path: Path, *, seqs: int = 32, port: int = 30001, mtp: bool = True) -> Path:
+    spec = ", 'speculative_config': {'method': 'mtp', 'num_speculative_tokens': 1}" if mtp else ""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "INFO 10-27 08:00:00 [api_server.py:1] vLLM API server version 0.27.1.dev5\n"
+        f"INFO 10-27 08:00:00 [api_utils.py:273] non-default args: {{'model_tag': '/models/Qwen3.5-9B', "
+        f"'host': '0.0.0.0', 'port': {port}, 'model': '/models/Qwen3.5-9B', 'max_num_seqs': {seqs}, "
+        f"'gpu_memory_utilization': 0.9{spec}}}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_vllm_non_default_args_are_read_as_launch_identity(tmp_path: Path) -> None:
+    observed, _ = rx._read_server_identity_evidence(_vllm_log(tmp_path / "server.log"))
+
+    assert observed == {
+        "backend": "vllm",
+        "server_args": {
+            "model": "/models/Qwen3.5-9B",
+            "max_num_seqs": 32,
+            "gpu_memory_utilization": 0.9,
+            "speculative_config": {"method": "mtp", "num_speculative_tokens": 1},
+        },
+    }
+
+
+def test_a_vllm_setup_server_is_judged_against_the_orchestrator_log(tmp_path: Path) -> None:
+    """The 2026-10-27 R9600D run read "unverified" on every vLLM launch, whatever it served."""
+    eval_dir = tmp_path / "e2e"
+    _vllm_log(eval_dir / "baseline" / "server.log", port=8000)
+    _vllm_log(eval_dir / "validation" / "base" / "server.log", seqs=256)
+    handoff = _atom_handoff(_vllm_log(tmp_path / "hl" / "server.log"))
+
+    identity = rx._server_identity_alignment(handoff, eval_dir)
+
+    assert identity["expected_source"] == "orchestrator_server_log"
+    assert identity["observed"]["backend"] == "vllm" and "mismatches" not in identity
+    assert identity["status"] == "mismatched"
+    assert identity["geak_launched"][0]["mismatches"] == [{"key": "max_num_seqs", "expected": 32, "observed": 256}]
+    assert "orchestrator_reference_problem" not in identity
+
+
+def test_a_setup_log_with_no_known_launch_record_says_so(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "e2e"
+    (eval_dir / "baseline").mkdir(parents=True)
+    (eval_dir / "baseline" / "server.log").write_text("INFO server ready\n", encoding="utf-8")
+
+    identity = rx._server_identity_alignment(_atom_handoff(tmp_path / "missing" / "server.log"), eval_dir)
+
+    assert identity["status"] == "unverified"
+    assert "no launch record this parser recognises" in identity["observed_problem"]
+
+
+def test_vllm_config_objects_are_listed_as_unparsed_not_read_as_values(tmp_path: Path) -> None:
+    log = tmp_path / "server.log"
+    log.write_text(
+        "INFO 10-27 08:00:00 [api_utils.py:273] non-default args: {'model': '/models/Qwen3.5-9B', "
+        "'compilation_config': CompilationConfig(level=3, cudagraph_capture_sizes=[1, 2]), "
+        "'speculative_config': SpeculativeConfig(method='mtp', num_speculative_tokens=1), 'max_num_seqs': 32}\n",
+        encoding="utf-8",
+    )
+
+    observed, _ = rx._read_server_identity_evidence(log)
+
+    assert observed["server_args"] == {
+        "model": "/models/Qwen3.5-9B",
+        "max_num_seqs": 32,
+        "unparsed": ["compilation_config", "speculative_config"],
+    }
+
+
 def test_rotation_skips_an_incomplete_newest_attempt_and_records_it(tmp_path: Path) -> None:
     eval_dir = tmp_path / "e2e"
     _atom_log(eval_dir / "baseline" / "server.log")
