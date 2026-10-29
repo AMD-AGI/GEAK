@@ -38,6 +38,7 @@ import tempfile
 import threading
 import types
 import unittest
+from unittest.mock import Mock, patch
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -409,6 +410,21 @@ class TestSnapshot(_RecorderTestCase):
 # _wrapper -- the recording hot path
 # --------------------------------------------------------------------------- #
 class TestWrapperRecording(_RecorderTestCase):
+    def test_compiling_passes_through_without_recording(self):
+        argument, option, result = object(), object(), object()
+        original = Mock(return_value=result)
+        is_compiling = Mock(return_value=True)
+        with patch.dict(cs._STATE, orig=original, is_compiling=is_compiling):
+            self.assertIs(cs._wrapper(argument, option=option), result)
+            original.assert_called_once_with(argument, option=option)
+            is_compiling.assert_called_once_with()
+            self.assertEqual(cs._STATE["calls"], 0)
+            self.assertEqual(cs._STATE["records"], [])
+            self.assertEqual(cs._STATE["shape_counts"], {})
+            self.assertEqual(cs._STATE["sequence"], [])
+            self.assertEqual(self.torch.saved, [])
+            self.assertEqual(os.listdir(self.out_dir), [])
+
     def test_call_is_transparent_and_records_the_shape_key(self):
         mod, _ = self._hook(fn=lambda *a, **k: FakeTensor((4, 8)))
         with _stderr():

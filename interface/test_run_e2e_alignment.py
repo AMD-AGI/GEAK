@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import gzip
 import importlib.util
+import io
 import json
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -976,6 +978,38 @@ def _vllm_log(path: Path, *, seqs: int = 32, port: int = 30001, mtp: bool = True
         encoding="utf-8",
     )
     return path
+
+
+def test_vllm_parser_without_non_default_args_returns_no_fields() -> None:
+    assert rx._parse_vllm_non_default_args("INFO server ready\n") == {}
+
+
+def test_vllm_parser_skips_an_item_without_a_colon() -> None:
+    assert rx._parse_vllm_non_default_args(
+        "non-default args: {'model': '/models/Qwen3.5-9B', malformed, 'max_num_seqs': 32}"
+    ) == {"model": "/models/Qwen3.5-9B", "max_num_seqs": 32}
+
+
+@pytest.mark.parametrize("raw_key", ["model", "'model' +"])
+def test_vllm_parser_skips_a_key_that_is_not_a_literal(raw_key: str) -> None:
+    assert rx._parse_vllm_non_default_args(
+        f"non-default args: {{{raw_key}: '/models/invalid', 'max_num_seqs': 32}}"
+    ) == {"max_num_seqs": 32}
+
+
+def test_vllm_log_read_error_returns_no_identity(tmp_path: Path) -> None:
+    with patch.object(
+        rx,
+        "_open_server_log",
+        side_effect=[
+            io.StringIO("INFO server ready\n"),
+            io.StringIO("INFO server ready\n"),
+            OSError("unreadable log"),
+        ],
+    ) as open_log:
+        assert rx._read_server_identity_evidence(tmp_path / "server.log") == ({}, "")
+
+    assert open_log.call_count == 3
 
 
 def test_vllm_non_default_args_are_read_as_launch_identity(tmp_path: Path) -> None:
