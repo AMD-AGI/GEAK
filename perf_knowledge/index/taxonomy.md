@@ -50,6 +50,10 @@ These ids are authoritative. Use them verbatim in frontmatter and in `sota_regis
 **Library / auto backends (select-an-impl)**:
 `aiter` · `hipblaslt` · `rocblas` · `ck_lib` · `miopen` · `pytorch_inductor` · `mori` · `rccl` ·
 `fa_rocm` (FlashAttention-ROCm)
+**ONNX-Runtime EP backends (external `ROCm/hip-ep` repo; author/optimize a per-op kernel)**:
+`hip_ep` (HIP Execution Provider custom kernels — RDNA3.5 WMMA wave32 on gfx1151/gfx1150 client,
+CDNA MFMA wave64 on gfx942/gfx950 DC; op kernels in `lib/Runtime/Kernels/hip/<op>_kernel.hip`) ·
+`cpu_ep` (CPU Execution Provider reference / secondary target). See `languages/hip_ep/`.
 **Explicitly N/A on AMD** (record as `na` with reason): `flashinfer` (NVIDIA-only), `cutlass` (native),
 `cudnn`, `transformer_engine`.
 
