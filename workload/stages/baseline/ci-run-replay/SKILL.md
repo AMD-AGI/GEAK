@@ -55,10 +55,11 @@ treat a weights cache as a compile cache. Pin `pins.model_revision` instead.
                 "cache_dirs": {"TRITON_CACHE_DIR": {"container": "…/cache/triton"}},
                 "cache_root": null, "ledger": null},
   "env_map": {"benchmark_id": "AIPERF_BENCHMARK_ID", "seed": "AIPERF_RANDOM_SEED"},
+  "config": {"concurrency": 64, "kv_offloading": "dram"},
   "docker": {"volumes": ["/shared_nfs:/shared_nfs"], "extra_args": []},
   "harness": {"dir": "…", "cmd": "tools/run_tp8_c10.sh",
               "args": ["CASE", "RUN_TAG", "DURATION"], "case": "baseline",
-              "run_tag": null, "result_dir": null}
+              "run_tag": null, "result_dir": null, "env_files": ["pins.env"]}
 }
 ```
 
@@ -78,6 +79,13 @@ treat a weights cache as a compile cache. Pin `pins.model_revision` instead.
 - `harness.args`: literal arguments in which the bare tokens `CASE`, `RUN_TAG` and
   `DURATION` are substituted. This skill does not reimplement the client — it drives the
   site's own CI harness, so the thing being reproduced stays the thing being reproduced.
+- `config.kv_offloading` (`none` / `dram`) is checked against the variables the AgentX
+  client reads: KV_OFFLOADING, KV_OFFLOAD_BACKEND, KV_OFFLOAD_BACKEND_METADATA and
+  TOTAL_CPU_DRAM_GB. The client checks the backend at start but the metadata only when it
+  aggregates, after the whole window, so a missing metadata line costs the full hour;
+  preflight applies the stricter rule up front. The variables are read from `env` and from
+  `harness.env_files` (files the harness sources with `set -a`, relative to `harness.dir`;
+  default `pins.env` when present). Copy them from the CI job's benchmark env.
 - `allow_unproven: true` downgrades "could not check" from a failure to a note. Use it only
   with a written reason; the default is that an unproven pin is a failure.
 

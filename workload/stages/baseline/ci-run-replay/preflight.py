@@ -34,6 +34,10 @@ The six things that must be pinned, and what goes wrong when they are not:
    and (verified after the run, not here) must have filled up, which is the only proof the
    environment variable actually reached the server process.
 
+Separately, a KV-offload point must hand the client every KV_OFFLOAD* variable it reads:
+the AgentX client checks some at start and the rest only after the measurement window
+(see check_kv_offload).
+
 Model weights are deliberately **not** in the cold set: re-downloading them changes
 nothing about the measurement and can change the revision underneath you. Pin the
 revision instead.
@@ -46,6 +50,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -56,6 +61,9 @@ COLD_CACHE_VARS = ("TRITON_CACHE_DIR", "XDG_CACHE_HOME", "TORCHINDUCTOR_CACHE_DI
 # Variables that must never be pointed at a fresh empty directory: emptying them either
 # re-downloads tens of gigabytes or silently changes which weights are served.
 NEVER_COLD = ("HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE", "MODEL_PATH")
+# What the AgentX client reads to describe a KV-offload point; see check_kv_offload().
+KV_OFFLOAD_VARS = ("KV_OFFLOADING", "KV_OFFLOAD_BACKEND", "KV_OFFLOAD_BACKEND_METADATA",
+                   "TOTAL_CPU_DRAM_GB")
 
 
 def sh(cmd):
@@ -297,6 +305,109 @@ def check_cpu(p, problems):
     return plan
 
 
+# ---------------------------------------------------------------- kv offload
+
+ASSIGN_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+
+
+def read_env_file(path):
+    """KEY=VALUE assignments from a file the harness sources with `set -a`. Read, never run."""
+    env = {}
+    for line in open(path):
+        m = ASSIGN_RE.match(line.strip())
+        if not m:
+            continue
+        try:
+            words = shlex.split(m.group(2), comments=True)
+        except ValueError:
+            words = [m.group(2)]
+        env[m.group(1)] = " ".join(words)
+    return env
+
+
+def harness_env(p, problems):
+    """The environment the client will see, as far as it can be read without running it.
+
+    `params.env` reaches the container with `-e`; each `harness.env_files` entry (relative
+    to `harness.dir`) is sourced by the harness itself and so wins over it. When
+    `env_files` is not given, the reference harness's `pins.env` is read if it exists.
+    """
+    h = p.get("harness") or {}
+    env, sources = dict((k, str(v)) for k, v in (p.get("env") or {}).items()), ["params.env"]
+    files = h.get("env_files")
+    if files is None:
+        files = ["pins.env"] if h.get("dir") and \
+            os.path.isfile(os.path.join(h["dir"], "pins.env")) else []
+    for f in files:
+        path = f if os.path.isabs(f) else os.path.join(h.get("dir") or "", f)
+        try:
+            env.update(read_env_file(path))
+            sources.append(path)
+        except OSError as e:
+            problems.append("harness.env_files names %s, which cannot be read (%s)." % (path, e))
+    return env, sources
+
+
+def check_kv_offload(p, problems):
+    """The AgentX client checks the KV-offload variables twice, and the second time is late.
+
+    `infx/bench/agentic/run.py` refuses to start when KV_OFFLOADING=dram has no
+    KV_OFFLOAD_BACKEND or TOTAL_CPU_DRAM_GB -- after the server has already spent its
+    startup. `infx/results/agentic` then refuses to aggregate unless
+    KV_OFFLOAD_BACKEND_METADATA also parses and names the same backend -- after the whole
+    measurement window, so the run completes, leaves no throughput, and the hour is gone.
+    Both happened on one hicache baseline (c64, 2026-10-28). The stricter of the two rules
+    is checked here, before any GPU time.
+    """
+    env, sources = harness_env(p, problems)
+    declared = (p.get("config") or {}).get("kv_offloading")
+    seen = env.get("KV_OFFLOADING")
+    where = ", ".join(sources)
+    if declared and seen and seen != declared:
+        problems.append("config.kv_offloading is %r but the client would see KV_OFFLOADING=%r "
+                        "(from %s)." % (declared, seen, where))
+    mode = declared or seen
+    doc = {"mode": mode, "sources": sources,
+           "env": dict((k, env[k]) for k in KV_OFFLOAD_VARS if k in env)}
+    if not mode:
+        return doc
+    backend = env.get("KV_OFFLOAD_BACKEND", "")
+    raw = env.get("KV_OFFLOAD_BACKEND_METADATA")
+    if mode == "none":
+        if backend or raw not in (None, "", "null"):
+            problems.append("KV offload is off but KV_OFFLOAD_BACKEND%s is set (from %s); the "
+                            "AgentX aggregation refuses that combination after the run."
+                            % ("" if backend else "_METADATA", where))
+        return doc
+    missing = [v for v in KV_OFFLOAD_VARS if env.get(v) in (None, "")]
+    if missing:
+        problems.append(
+            "KV offload is %r, and the AgentX client needs %s, which nothing it is given sets "
+            "(looked in %s). run.py stops at client start without KV_OFFLOAD_BACKEND or "
+            "TOTAL_CPU_DRAM_GB; the aggregation stops only after the full window without "
+            "KV_OFFLOAD_BACKEND_METADATA. Copy them from the CI job's benchmark env into "
+            "params.env or a harness.env_files entry." % (mode, ", ".join(missing), where))
+    if backend == "none":
+        problems.append("KV_OFFLOAD_BACKEND is 'none' while KV offload is %r." % mode)
+    if raw not in (None, ""):
+        try:
+            meta = json.loads(raw)
+        except ValueError:
+            meta = None
+        ok = isinstance(meta, dict) and set(meta) in ({"name"}, {"name", "version"}) and \
+            all(isinstance(v, str) and v for v in meta.values())
+        if not ok:
+            problems.append("KV_OFFLOAD_BACKEND_METADATA is %r; the aggregation wants a JSON "
+                            "object with a non-empty 'name' and optional 'version'." % raw)
+        elif backend and meta["name"] != backend:
+            problems.append("KV_OFFLOAD_BACKEND_METADATA names %r but KV_OFFLOAD_BACKEND is %r; "
+                            "the aggregation requires them to match." % (meta["name"], backend))
+    dram = env.get("TOTAL_CPU_DRAM_GB", "")
+    if dram and not (dram.isdigit() and int(dram) > 0):
+        problems.append("TOTAL_CPU_DRAM_GB is %r; run.py wants a positive integer." % dram)
+    return doc
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--params", required=True)
@@ -311,6 +422,7 @@ def main():
     used = check_benchmark_id(pins, a.ledger, problems)
     cache_root, cache_dirs, cache_mounts = check_isolation(p, a.out, problems)
     cpu_plan = check_cpu(p, problems)
+    kv_offload = check_kv_offload(p, problems)
 
     ci = p.get("ci") or {}
     if not ci.get("output_throughput"):
@@ -321,6 +433,7 @@ def main():
         "pins": pins,
         "ci": ci,
         "cpu_plan": cpu_plan,
+        "kv_offload": kv_offload,
         "cache_root": cache_root,
         "cache_vars": cache_dirs,
         "cache_mounts": cache_mounts,

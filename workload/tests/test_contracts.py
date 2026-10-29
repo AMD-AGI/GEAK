@@ -256,6 +256,64 @@ def test_a_warm_compile_cache_is_refused(tmp_path):
     assert any("already holds" in x for x in problems)
 
 
+def _kv_blockers(tmp_path, pins_env, kv="dram", **over):
+    import preflight
+    (tmp_path / "pins.env").write_text(pins_env)
+    p = _params(harness={"dir": str(tmp_path)}, config={"kv_offloading": kv}, **over)
+    problems = []
+    preflight.check_kv_offload(p, problems)
+    return problems
+
+
+@pytest.mark.parametrize("pins_env,refused", [
+    # attempt 1: the client stopped at start, after the server had spent its startup
+    ("KV_OFFLOADING=dram\n", "KV_OFFLOAD_BACKEND,"),
+    # attempt 2: the client ran the full hour; only the aggregation noticed
+    ("KV_OFFLOADING=dram\nKV_OFFLOAD_BACKEND=hicache\nTOTAL_CPU_DRAM_GB=2549\n",
+     "KV_OFFLOAD_BACKEND_METADATA"),
+    # attempt 3: the one that reproduced
+    ("KV_OFFLOADING=dram\nKV_OFFLOAD_BACKEND=hicache\n"
+     "KV_OFFLOAD_BACKEND_METADATA='{\"name\": \"hicache\"}'\nTOTAL_CPU_DRAM_GB=2549\n", None),
+])
+def test_a_kv_offload_point_needs_every_variable_the_agentx_client_reads(tmp_path, pins_env,
+                                                                         refused):
+    """The three attempts of the c64 hicache baseline on 2026-10-28, replayed. The client
+    checks KV_OFFLOAD_BACKEND at start but KV_OFFLOAD_BACKEND_METADATA only when it
+    aggregates, after the whole window; preflight holds both to the stricter rule."""
+    problems = _kv_blockers(tmp_path, pins_env)
+    if refused is None:
+        assert problems == []
+    else:
+        assert any(refused in x for x in problems), problems
+
+
+def test_kv_offload_metadata_must_name_the_backend(tmp_path):
+    problems = _kv_blockers(tmp_path, "KV_OFFLOADING=dram\nKV_OFFLOAD_BACKEND=hicache\n"
+                                      "KV_OFFLOAD_BACKEND_METADATA='{\"name\": \"lmcache\"}'\n"
+                                      "TOTAL_CPU_DRAM_GB=2549\n")
+    assert any("requires them to match" in x for x in problems), problems
+
+
+def test_params_env_counts_and_a_sourced_file_wins_over_it(tmp_path):
+    """`-e` from params.env reaches the client, but the harness sources its env file with
+    `set -a` afterwards, so a value there is the one the client sees."""
+    problems = _kv_blockers(
+        tmp_path, "KV_OFFLOAD_BACKEND=hicache\n",
+        env={"KV_OFFLOADING": "dram", "KV_OFFLOAD_BACKEND": "lmcache",
+             "KV_OFFLOAD_BACKEND_METADATA": '{"name": "hicache"}', "TOTAL_CPU_DRAM_GB": "2549"})
+    assert problems == []
+
+
+@pytest.mark.parametrize("pins_env,kv,clean", [
+    ("", "none", True),
+    ("KV_OFFLOAD_BACKEND=hicache\n", "none", False),
+    ("KV_OFFLOADING=dram\n", "none", False),
+    ("", None, True),
+])
+def test_kv_offload_off_must_leave_the_backend_empty(tmp_path, pins_env, kv, clean):
+    assert (_kv_blockers(tmp_path, pins_env, kv=kv) == []) is clean
+
+
 def test_cache_dirs_shadow_the_path_the_harness_names(tmp_path):
     """`-e TRITON_CACHE_DIR=...` loses to a harness that exports it itself, so the fresh
     directory must be mounted onto the path the harness names — and the harness's own
