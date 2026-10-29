@@ -86,6 +86,8 @@ _STATE = {
     "synth_leaves": 0, "synth_bytes_saved": 0,
     "oracle_bytes_est": 0, "budget_exceeded": False,
     "budget_skip_count": 0, "oracle_save_count": 0, "meta_flush_count": 0,
+    # Resolved by install(), so the wrapper never imports torch on its hot path.
+    "is_compiling": lambda: False,
 }
 
 
@@ -471,6 +473,14 @@ def _torch():
     return torch
 
 
+def _compile_probe():
+    """``torch.compiler.is_compiling``, or a constant False where torch (or that query) is absent."""
+    try:
+        return _torch().compiler.is_compiling
+    except (ImportError, AttributeError):
+        return lambda: False
+
+
 def _snapshot(x):
     """Detach+clone tensors to CPU so later in-place ops can't corrupt the oracle. Pass scalars/None
     through; summarize unsupported objects by repr so the record stays loadable."""
@@ -687,6 +697,9 @@ def _sig(args, kwargs):
 
 def _wrapper(*args, **kwargs):
     s = _STATE
+    # Dynamo folds this to True while tracing a compiled region (vLLM's fullgraph forward), which it cannot trace.
+    if s["is_compiling"]():
+        return s["orig"](*args, **kwargs)
     # This marker is consumed by kernel_selection.py from the capture run's torch trace.  It turns
     # "the hook saw calls" into stronger evidence: the GPU kernel selected from the baseline profile
     # must actually execute while THIS callable is active.  record_function is effectively a no-op
@@ -1078,6 +1091,7 @@ def install(target, out_dir, max_cases=5):
                                  _DEFAULT_STRUCTURAL_OPERANDS).split(",") if k.strip()}
     s.update(target=target, out_dir=out_dir, max_cases=int(max_cases),
              orig=orig, mod=mod, attr=attr, installed=True,
+             is_compiling=_compile_probe(),
              byte_budget=byte_budget, case_byte_limit=case_byte_limit,
              persist_policy=persist_policy, share_min_bytes=share_min_bytes or (16 << 20),
              structural_keys=structural, synth_min_bytes=synth_min_bytes or (64 << 10),
