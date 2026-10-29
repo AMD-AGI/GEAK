@@ -75,10 +75,13 @@ Steps:
      flags in `EVAL_DIR/config/baseline_flags.json`.
 4. **Preflight + pin the environment** — first run
    `python3 "$SKILL_DIR/../scripts/gpu_identity.py"` and use its JSON as the
-   only product/ISA/CU source. `target=r9700` is emitted only for the exact
-   marketing name `AMD Radeon AI PRO R9700`; a different gfx1201 product remains
-   `unknown`. Hard-stop if it disagrees with `EXPECTED_GFX`,
-   `EXPECTED_TARGET=r9700`, or a positive `EXPECTED_PHYSICAL_CU_COUNT`.
+   only product/ISA/CU source. It emits `target=r9700` or `target=r9600d` only
+   for the exact marketing name `AMD Radeon AI PRO R9700` or
+   `AMD Radeon AI PRO R9600D`, respectively; any other gfx1201 product remains
+   `unknown`. Return the probe's `target` unchanged as `device_target`; never
+   infer either product from gfx1201. Hard-stop if it disagrees with
+   `EXPECTED_GFX`, a non-empty `EXPECTED_TARGET`, or a positive
+   `EXPECTED_PHYSICAL_CU_COUNT`.
    Then follow `SKILL_DIR/knowledge/preflight.md` (judgment guide,
    not a script). Confirm the chosen `BACKEND` stack imports/launches, `MODEL` resolves, the GPU(s)
    are visible; detect gfx, trace sources (rocprofv3?), available op backends (aiter / flydsl via
@@ -158,7 +161,7 @@ Return JSON:
   "workload": {"isl": 1024, "osl": 1024, "conc": 64},
   "bench_script": "<EVAL_DIR>/bench_e2e.sh",
   "gfx": "<required gfx target from step 4, e.g. gfx950>",
-  "device_target": "r9700|unknown",
+  "device_target": "r9700|r9600d|unknown",
   "device_name": "<exact Marketing Name from the selected rocminfo agent>",
   "physical_cu_count": 64,
   "precision": "<serving precision, e.g. mxfp8 | fp8 | bf16 — or \"\" if not established>",

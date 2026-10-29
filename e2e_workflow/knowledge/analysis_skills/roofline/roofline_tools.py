@@ -52,6 +52,18 @@ TARGET_EFF = {
     "elementwise": 0.875,
     "attn": 0.50,
 }
+PRODUCT_TARGET_EFF = {
+    # 1 GiB source + 1 GiB destination, 30 event-timed copies on R9700:
+    # median 485.8 GB/s read+write against the 640 GB/s datasheet pin rate.
+    "r9700": {"moe": 0.76, "elementwise": 0.76},
+}
+
+
+def target_eff_for(op_class, product=None):
+    """Return a product override when measured, otherwise the op-class prior."""
+    op = str(op_class or "").strip().lower()
+    prod = str(product or "").strip().lower()
+    return PRODUCT_TARGET_EFF.get(prod, {}).get(op, TARGET_EFF.get(op))
 
 #: Only kernels big enough for a headroom estimate to change a decision are worth analysing.
 #: Below this the Amdahl ceiling is under the noise band anyway, so modelling them adds failure

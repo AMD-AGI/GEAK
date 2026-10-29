@@ -87,9 +87,11 @@ see the disagreement rather than a single blended number that hides it.
    (a kernel too small to matter is not a modelling failure and must not read as one).
 1. Resolve peaks from `peaks.md` via
    `resolve_peaks(gfx, product=env_report.device_target)`.
-   `device_target=unknown` (every non-R9700 card, MI300/MI355 included) is no
+   `device_target=unknown` (every card without a product section, MI300/MI355
+   included) is no
    product constraint: the ISA-keyed tables still resolve. Client RDNA4
-   numeric peaks exist only for product `r9700`. A bare gfx1201 (or any other
+   numeric peaks exist only for the products with a `product:` section
+   (`r9700`, `r9600d`). A bare gfx1201 (or any other
    gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
    unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4
    — it must not use that gate. Other unknown architectures may derive from
@@ -265,7 +267,15 @@ set by **access regularity**, not by how important the kernel is.
 | attention decode (paged) | **0.50** | irregular paged KV access, occupancy-sensitive |
 
 These are **priors, not constants** — §8 corrects them from observed outcomes.
-They are the same for every product.
+One measured product override is available through
+`roofline_tools.target_eff_for(op_class, product)`:
+
+| product / class | `target_eff` | evidence |
+|---|---:|---|
+| R9700 (`product=r9700`) MoE weight streaming / elementwise | **0.76** | 30 event-timed 1 GiB→1 GiB copies: median 485.8 GB/s read+write, or 0.759× the 640 GB/s datasheet pin rate |
+
+This override does not change dense-GEMM compute efficiency or paged-attention
+priors. It is product-scoped; do not apply it to an unknown gfx1201 card.
 
 ### Routing table (the actual point of this skill)
 

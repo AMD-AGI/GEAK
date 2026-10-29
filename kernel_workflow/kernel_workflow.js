@@ -137,11 +137,11 @@ if (!!EXPECTED_GFX !== !!EXPECTED_TARGET) {
   throw new Error('expected_gfx and expected_target must be supplied together');
 }
 if ((EXPECTED_GFX && !/^gfx[0-9a-f]+$/.test(EXPECTED_GFX)) ||
-    (EXPECTED_TARGET && !['r9700', 'unknown'].includes(EXPECTED_TARGET))) {
-  throw new Error('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|unknown');
+    (EXPECTED_TARGET && !['r9700', 'r9600d', 'unknown'].includes(EXPECTED_TARGET))) {
+  throw new Error('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|r9600d|unknown');
 }
-if (EXPECTED_TARGET === 'r9700' && EXPECTED_GFX !== 'gfx1201') {
-  throw new Error('expected_target=r9700 requires expected_gfx=gfx1201');
+if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
+  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
 }
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
@@ -402,8 +402,8 @@ if (DETECTED_GFX === 'gfx1200') {
 if (EXPECTED_GFX && DETECTED_GFX !== EXPECTED_GFX) {
   throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${DETECTED_GFX}`);
 }
-if (EXPECTED_TARGET === 'r9700' && DETECTED_TARGET !== 'r9700') {
-  throw new Error(`GPU product mismatch: expected r9700, detected ${DETECTED_TARGET}`);
+if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && DETECTED_TARGET !== EXPECTED_TARGET) {
+  throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${DETECTED_TARGET}`);
 }
 if (!Number.isFinite(DETECTED_PHYSICAL_CU_COUNT) || DETECTED_PHYSICAL_CU_COUNT <= 0) {
   throw new Error('Freeze failed: oracle_freezer did not return a positive physical_cu_count');
