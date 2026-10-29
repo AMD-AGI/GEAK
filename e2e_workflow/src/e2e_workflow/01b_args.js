@@ -19,6 +19,11 @@ const LANE_USE_LEARNED_KB = String(A.use_learned_kb != null ? A.use_learned_kb :
 if (A.optimizer !== undefined && !['greedy', 'evo'].includes(A.optimizer)) {
   throw new Error('optimizer must be greedy or evo');
 }
+const EXPLICIT_KERNEL_BUDGET = typeof A.kernel_budget === 'string' && /^\+?\d+$/.test(A.kernel_budget.trim())
+  ? Number(A.kernel_budget) : A.kernel_budget;
+if (A.kernel_budget !== undefined && (!Number.isSafeInteger(EXPLICIT_KERNEL_BUDGET) || EXPLICIT_KERNEL_BUDGET < 1)) {
+  throw new Error('kernel_budget must be a positive safe integer');
+}
 
 // EVERY nested lane invocation goes through here. Setting the flag at each call site instead would
 // be the defect this repo keeps re-making — there are seven call sites today, and the eighth would
@@ -285,7 +290,7 @@ const MIN_KERNEL_TASKS = Math.min(parseInt(A.min_kernel_tasks != null ? A.min_ke
 // Configurable via args.milestone_min_pct (default 5). This OVERRIDES the MIN_KERNEL_TASKS floor: if no
 // candidate clears the bar, the milestone stops rather than grinding low-value kernels.
 const MILESTONE_MIN_PCT = parseFloat(A.milestone_min_pct != null ? A.milestone_min_pct : 5);
-const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : (FAST_MODE ? 3 : 6), 10); // budget passed DOWN per kernel (fewer rounds in fast mode)
+const KERNEL_BUDGET = EXPLICIT_KERNEL_BUDGET !== undefined ? EXPLICIT_KERNEL_BUDGET : (FAST_MODE ? 3 : 6); // budget passed DOWN per kernel (fewer rounds in fast mode)
 const CONFIG_TUNE_ENABLED = String(A.config_tune != null ? A.config_tune : 'true') === 'true';
 // ---- TUNING SKILLSET phase (default ON) --------------------------------------------------------------
 // The tuning skillset is vendored WHOLE into this repo (default

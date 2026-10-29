@@ -122,6 +122,32 @@ check("evo selector enters the existing evolution policy in the shared loop",
 check("invalid optimizer is rejected before workflow dispatch",
       all(result.get("error") == "optimizer must be greedy or evo" for result in results[3:]))
 
+budget_declaration = re.search(r"^const KERNEL_BUDGET =.*$", s, re.MULTILINE).group(0)
+budget_cases = [{}, {"kernel_budget": 1}, {"kernel_budget": 12}, {"kernel_budget": "12"}, {"kernel_budget": " +012 "}]
+budget_cases += [{"kernel_budget": value} for value in (None, "12.0", "12x", "1e3", True, False, 0, -1, 1.5, [], {}, 2**53)]
+budget_probe = subprocess.run(["node", "-e", """
+const fs = require('node:fs'), vm = require('node:vm');
+const {boundary, budget_declaration, cases} = JSON.parse(fs.readFileSync(0, 'utf8'));
+const results = [false, true].map(FAST_MODE => cases.map(A => {
+  try {
+    return vm.runInNewContext(boundary + '\\n' + budget_declaration + '\\nlaneArgs({budget: KERNEL_BUDGET})', {
+      A, FAST_MODE, EXPECTED_GFX: '', EXPECTED_TARGET: '', EXPECTED_DEVICE_NAME: '',
+      EXPECTED_PHYSICAL_CU_COUNT: 0,
+    });
+  } catch (error) { return {error: error.message}; }
+}));
+console.log(JSON.stringify(results));
+"""], input=json.dumps({"boundary": boundary, "budget_declaration": budget_declaration, "cases": budget_cases}),
+    text=True, capture_output=True, check=True)
+budgets = json.loads(budget_probe.stdout)
+check("omitted kernel budget keeps full/fast defaults", budgets[0][0].get("budget") == 6 and budgets[1][0].get("budget") == 3)
+check("explicit kernel budgets reach the existing lane unchanged",
+      all(row[1].get("budget") == 1 and row[2].get("budget") == 12 for row in budgets))
+check("direct e2e integer strings remain accepted without truncation",
+      all(row[3].get("budget") == 12 and row[4].get("budget") == 12 for row in budgets))
+check("invalid kernel budgets are rejected without coercion",
+      all(result.get("error") == "kernel_budget must be a positive safe integer" for row in budgets for result in row[5:]))
+
 # The kernel side must still default ON — this test would otherwise pass just as well on a tree where
 # somebody turned the KB off everywhere.
 lane = open(os.path.join(os.path.dirname(E2E), "kernel_workflow", "kernel_lane.js")).read()

@@ -708,6 +708,10 @@ def map_args(
         raise ValueError("ablation_* study controls are retired; use the original revision to replay those studies")
     if "optimizer" in h and h["optimizer"] not in ("greedy", "evo"):
         raise ValueError("optimizer must be greedy or evo")
+    if "kernel_budget" in h and (
+        type(h["kernel_budget"]) is not int or not 1 <= h["kernel_budget"] <= 2**53 - 1
+    ):
+        raise ValueError("kernel_budget must be a positive safe integer")
     workload = h.get("workload") or {}
     tp = int(h.get("tp", 1) or 1)
     has_explicit_identity = bool(
@@ -827,6 +831,8 @@ def map_args(
     # Select the policy of the same nested kernel worker; omission keeps its default.
     if "optimizer" in h:
         ps_args["optimizer"] = h["optimizer"]
+    if "kernel_budget" in h:
+        ps_args["kernel_budget"] = h["kernel_budget"]
     if gpu_identity is not None:
         ps_args.update({
             "expected_gfx": gpu_identity["gfx"],

@@ -300,6 +300,19 @@ class TestMapArgs(_RunE2ECase):
                 with self.assertRaisesRegex(ValueError, "optimizer must be greedy or evo"):
                     rx.map_args(self._handoff(optimizer=optimizer))
 
+    def test_kernel_budget_is_optional_and_forwarded_without_rounding(self):
+        self.assertNotIn("kernel_budget", rx.map_args(self._handoff()))
+        for budget in (1, 6, 12, 2**53 - 1):
+            with self.subTest(budget=budget):
+                self.assertEqual(rx.map_args(self._handoff(kernel_budget=budget))["kernel_budget"], budget)
+
+    def test_invalid_kernel_budget_fails_before_gpu_probe(self):
+        self.patch_rx("_expected_gpu_identity", lambda _h: self.fail("unexpected GPU probe"))
+        for budget in (None, "", "12", "1.5", True, False, 0, -1, 1.0, 1.5, [], {}, 2**53):
+            with self.subTest(budget=budget):
+                with self.assertRaisesRegex(ValueError, "kernel_budget must be a positive safe integer"):
+                    rx.map_args(self._handoff(kernel_budget=budget))
+
     def test_structured_identity_is_forwarded_before_policy(self):
         ps = rx.map_args(self._handoff(eval_dir=str(self.tmp / "e2e_identity")))
         self.assertEqual(ps["expected_gfx"], "gfx950")
