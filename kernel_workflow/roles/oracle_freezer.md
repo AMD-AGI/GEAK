@@ -54,7 +54,7 @@ demand instead of storing them. Downstream lanes must handle both dir shapes.
 Run `python3 "$SKILL_DIR/../scripts/gpu_identity.py"` before any Discover
 policy can be selected. Return its `gfx`, `target`, `marketing_name`, and
 `physical_cu_count` as the structured fields below. Hard-stop on a mismatch
-with non-empty `EXPECTED_GFX` or `EXPECTED_TARGET=r9700`; never infer R9700
+with non-empty `EXPECTED_GFX` or `EXPECTED_TARGET`; never infer R9700 or R9600D
 from gfx1201. Also hard-stop when non-empty `EXPECTED_DEVICE_NAME` or a positive
 `EXPECTED_PHYSICAL_CU_COUNT` disagrees.
 
