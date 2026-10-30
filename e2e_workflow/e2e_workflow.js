@@ -639,25 +639,6 @@ const DEEP_E2E_MAX_INTERVAL_MS = parseInt(A.deep_e2e_max_interval_ms != null ? A
 const DEEP_PLATEAU_STREAK = parseInt(A.deep_plateau_streak != null ? A.deep_plateau_streak : 2, 10); // consecutive non-improving waves before a backend lane is parked (frees its GPU)
 const DEEP_BACKENDS_OVERRIDE = String(A.deep_backends || '').trim(); // optional CSV "triton:optimize,hip:author,..."; default = derive from the bake-off
 // ---- DEEP MODE (the canonical deep orchestrator; runs when deep_mode=true) --------------------------
-// Deep is a DISCIPLINED DELTA on the normal HeadKernel paradigm (same extract→bakeoff→author→gate→overlay
-// role agents), made DEEPER (more kernel_workflow rounds per lane via STATE_DIR + reseed), BROADER (a lane
-// per viable backend), and FASTER (lanes run in parallel on dedicated cards; only timing is serialized).
-// It is a GLOBAL, GPU-elastic, budget-driven orchestrator:
-//   • GLOBAL lane pool — every (head op × backend) lane competes in ONE pool, so multiple KERNELS and
-//     multiple BACKENDS optimize concurrently (no more "head A fully done before head B starts").
-//   • GPU-elastic & N-adaptive — co-opt runs on cards NOT needed by the serving slot; the serial e2e
-//     gate runs on the fixed serving slot CONCURRENTLY (overlap, no idle cards). With exactly TP cards
-//     (no spare) it degrades gracefully to time-slice (gate pauses co-opt). Derived from gpu_ids+TP;
-//     nothing about card count is hard-coded.
-//   • Full-backend roster + ceiling-aware patience + revive — every bake-off backend gets a lane; a
-//     high-ceiling-but-slow-start backend is NOT parked early (patience scales with remaining ceiling
-//     gap); a parked lane can be REVIVED when the curator hands it a fresh cross-backend borrow.
-//   • Budget controller — picks the highest-EV lane next (EV = Amdahl mass × remaining-ceiling gap ×
-//     recent improvement rate); re-profiles to chase the moving bottleneck; kills dead directions fast.
-//   • Cross-pollination — per-op SHARED_KB (cross-backend) PLUS a run-global GLOBAL_KB (cross-KERNEL,
-//     same-backend technique transfer).
-// Everything here is gated by DEEP (≡ DEEP_MODE). DEEP_MODE off → default/fast are byte-identical
-// (this whole block is dead code). No model/kernel/backend specifics are hard-coded.
 const DEEP = DEEP_MODE;   // deep_mode=true runs the global cross-kernel×backend orchestrator (the canonical deep mode)
 const DEEP_E2E_TARGET = parseFloat(A.deep_e2e_target != null ? A.deep_e2e_target : 1.5); // stretch goal: +50% e2e vs the TRUE baseline (keep pushing toward it within budget)
 const DEEP_PLATEAU_STREAK_HIGH = parseInt(A.deep_plateau_streak_high != null ? A.deep_plateau_streak_high : 4, 10); // patience for HIGH-ceiling lanes (still far from their potential) before parking
@@ -728,22 +709,6 @@ const KB_ARGS = {
 const WARM_START_OFF = ['off', 'false', 'none'].includes(KB_ARGS.warm_start.trim().toLowerCase());
 
 // ---------------------------------------------------------------------------
-// E2E-LEVEL WARM START — the DEPLOYMENT knowledge base.
-//
-// KB_ARGS above forwards the KERNEL layer's warm start (per-kernel patches, resolved by the nested
-// lane). This block is the layer above it: "has anyone already tuned THIS deployment — this (model,
-// gfx, framework, framework_version, precision, tp, isl/osl/conc)?" That question was rediscovered
-// from scratch on every run, at a cost of hours of server launches, because nothing here ever asked
-// it. Two new modules answer it: Module A reads the store and VALIDATES what it gets on this box
-// before believing any of it, and Module B records this run at the end. Everything between them —
-// the entire original optimization flow — is untouched.
-//
-// One knob governs both layers (A.warm_start, already defaulted to 'on' by KB_ARGS), with the same
-// vocabulary the kernel lane accepts, so an `off` run is off everywhere:
-//   on (default)      | read the ladder, validate the top candidate on this box, ADOPT if it wins.
-//   reference         | read only; never bench, never adopt — the offer is prose for later agents.
-//   return_after_read | resolve + validate, then return before the optimization flow runs.
-//   off/false/none    | nothing: no phase, no agent, no log, and every role prompt byte-identical.
 const E2E_WARM_START = KB_ARGS.warm_start.trim().toLowerCase() || 'on';
 const E2E_WARM_START_ON = !WARM_START_OFF;
 // Fast mode's premise is that all optimization comes from the head track within a wall-clock budget
@@ -1253,20 +1218,6 @@ const GRAPH_REQ = CUDA_GRAPH_DEPLOY ? (
   'and prep/compile ONCE (cache by data_ptr) so the captured region only LAUNCHES the kernel. VERIFY your ' +
   'speedup holds when the op is replayed under a CUDA graph, not just in eager timing.'
 ) : '';
-// Acceptance noise band (%). Isolated-server ref/candidate measurements, non-overlap, and engagement
-// proof (see e2e_integrator) make a 0.5% default trustworthy for a fixed-shape workload, where a
-// replica is a fixed amount of identical work. Prompt-tunable.
-//
-// A trace replay is not that workload. It is client-paced over trajectories of wildly unequal size
-// (ISL p50 83k, p99 491k) against a prefix cache running 85-96% hits, so a replica completes a
-// whole number of trajectories and the throughput it reports quantises on which ones it got
-// through. The 20260912 validation measured that directly: two surviving replicas of the
-// BASELINE, same config, same box, spread 3.43% on total tok/s (24054.0 / 23255.9) and 3.86% on
-// InferenceX P90 interactivity (29.52 / 28.40 tok/s/user), the default axis. A 0.5% band against
-// that is 7-8x too permissive -- it would call a pure-noise difference a win -- so this workload
-// carries its own floor. The TTFT-inclusive axis moved 17% on the same pair; a run graded on it
-// needs an explicit noise_band_pct. Hardcoding the floor is a placeholder for deriving it from
-// the replica spread Setup already measures; until then it is at least the measured one.
 const NOISE_BAND_AGENTX = 4.0;
 const NOISE_BAND_DEFAULT = parseFloat(
   A.noise_band_pct != null ? A.noise_band_pct : (IS_AGENTX ? NOISE_BAND_AGENTX : 0.5));
@@ -2088,22 +2039,6 @@ Return ONLY the structured JSON the ${standaloneExtraction ? 'workflow handoff r
   return base + expertSkillsBlock(role) + warmStartBlock(role) + kernelExtractBlock(role) + pdFragmentBlock(role) + correctnessEnvBlock(role);
 }
 
-// Resilient agent wrapper: a single agent failure (transient API 502 / didn't emit StructuredOutput)
-// must NOT kill a multi-hour run. Retry a few times, then DEGRADE to null so the caller's existing
-// null-guards skip/continue gracefully (critical phases like setup re-throw on null themselves).
-// Bound each attempt: an agent LLM call that HANGS (no response, no terminal error) would block this
-// await forever — the harness resolves terminal errors to null but not an indefinite hang. Race the
-// call against a VERY generous timeout that resolves null, which the loop below treats as a failed
-// attempt (retry, then degrade). A true hang never returns, so a generous bound still catches it while
-// NEVER killing a legitimately-long agent. The OUTER e2e agents orchestrate the serving stack (Director
-// launches sglang + runs the baseline bench ~30min; ConfigTuner does multiple server-launch+bench
-// cycles; the head e2e gate overlays + launches + A/B benches) — these run far longer than a kernel
-// agent, so the bound must be large (default 120min). Too-short a bound here causes the long setup
-// agent to be killed and retried, spawning duplicate exp dirs. args.agent_timeout_ms=0 disables;
-// falls back to raw agent() if setTimeout is unavailable.
-// Default 120min (generous — outer e2e agents launch servers + run ~30min benches). Fast mode tightens
-// it to 45min so a single hung/slow agent can't blow the wall-clock budget (still ample for the director
-// baseline + the head e2e A/B). Default mode keeps 120min → unchanged.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : (FAST_MODE ? 2700000 : 7200000), 10);
 // The guard abandons the PROMISE, not the agent: a timed-out attempt keeps running its servers and legs,
 // so a retry runs beside it on the same GPUs and files. agent_timeout_retry=false degrades to null instead.
@@ -2155,19 +2090,6 @@ function withProcessSafety(prompt) {
   return typeof prompt === 'string' ? PROCESS_SAFETY + prompt : prompt;
 }
 
-// Option A (Hyperloom #1202): near the deadline, tighten each OPTIMIZATION agent's hung-guard so no
-// in-flight step finishes later than (budget − reserve). The loop-tops stop STARTING new work at
-// TIME_HEAD_DEADLINE_MS, but one iteration is a SEQUENCE of agents (extract → bakeoff → author → verify)
-// each armed with the full AGENT_TIMEOUT_MS, and that sequence could overrun the reserve and starve
-// Finalize/Report/Validate (the #1202 stall was a 62min extract_op running into the SIGKILL). Final-phase
-// agents are EXEMPT — they run INSIDE the reserve by design. The 2min floor lets a deadline-killed agent's
-// retries self-limit instead of burning the reserve. Inert when time_budget_s is absent (byte-identical).
-//
-// Exemption is by POSITION, not by a caller-supplied label. Keying it on opts.phase ∈ ['Finalize',
-// 'Report','Validate'] failed OPEN: the Finalize-GATE runs before phase('Finalize') yet tagged its
-// integrator agents 'Finalize', so optimization work claimed unlimited time. FINAL_PHASE_STARTED is set
-// once, at the phase('Finalize') call site. Agents in flight when it flips keep the cap they were armed
-// with — work started before the final phase stays bounded.
 let FINAL_PHASE_STARTED = false;
 const FINALIZE_GATE_PHASE = 'Finalize-gate';   // display grouping only — not load-bearing for the cap
 const AGENT_TIMEOUT_FLOOR_MS = 120000;
@@ -3553,23 +3475,6 @@ function applyOpIdentityGuard(queue, stage) {
 // ===========================================================================
 // MERGING A RECOVERED CONFIGURATION INTO THE ONE THIS RUN WAS HANDED
 // ===========================================================================
-// A stored e2e record holds a WHOLE launch configuration, not a delta — the only form replayable on
-// a box whose baseline nobody recorded. Replaying it means combining it with the baseline THIS run
-// was handed, which under Hyperloom it does not own (interface/run_e2e.py seeds
-// `initial_extra_server_args` from EXPLORE and sets `config_tune: "false"`, so no later sweep
-// corrects anything either).
-//
-// That combination used to be a string concatenation performed by an agent, and it was wrong in a
-// way nothing could see. `adapters/sglang.sh` expands `$EXTRA_SERVER_ARGS`/`$EXTRA_ENV` straight
-// into argparse and `env`, both last-wins. So when the baseline and the record each pin
-// `--context-length`, which one applies is decided by the order the agent happened to write them
-// in. Lose that coin flip and the server runs the baseline twice: ~0% delta, no complaint in any
-// log — the flag WAS honoured, just not with the recorded value — and a record that wins is filed
-// as `rejected`, the one outcome the whole warm start exists to avoid.
-//
-// So the merge is arithmetic, done here, and it reports what it did — the same rule the launcher
-// already applies to one flag by hand (`adapters/sglang.sh` and `--watchdog-timeout`), generalized
-// and moved to where the string is built. The output names every key once, so last-wins never votes.
 
 // Flags that legitimately appear more than once. Deliberately tiny: `--lora-path` is a list and
 // deduping it would silently drop adapters, while everything else in these configs is a scalar
@@ -4588,24 +4493,6 @@ print(json.dumps(res))
       // INPUTS entry lands in `## Inputs` unconditionally and is the one that always fires.
       // ---------------------------------------------------------------------
       // ---------------------------------------------------------------------
-      // Tell the STORE what happened. Until now this loop's verdicts died with the run: the next
-      // box to resolve this identity saw the same optimistic record, benched it, and failed the
-      // same way, forever. `e2e_store.py attest` counts the attempt onto the record itself, at
-      // every rung, so a later reader can see how often it has been tried here and how it went.
-      // It moves no score and no champion: one box's failure is evidence, never a verdict. What it
-      // adds up to is decided elsewhere — KB_ATTEST_OUTCOME for the buckets, and
-      // kb/attest.py:should_retire for the threshold a separate `curate` pass acts on.
-      //
-      // Only candidates that were actually PUT ON THIS BOX are counted. A record listed in the
-      // offer and never benched (`skipped`, or below benchN) has learned nothing about itself, and
-      // counting it would put an attempt that never happened into the ledger.
-      //
-      // Config verdicts only. A replayed kernel that failed is evidence against the KERNEL lane's
-      // record, not against the e2e run that once used it, and the two have separate ledgers —
-      // `experience_store.py attest` is where that verdict belongs.
-      //
-      // A record's headline number covers its WHOLE bundle. When that includes kernels this lane
-      // benched only the config half, so every place printing both has to say which half ran.
       const configHalfOnly = v => Array.isArray(v.accepted_kernels) && v.accepted_kernels.length > 0;
       const attestable = verdicts.filter(v => v.session_id && kbCanAttestMetric(v) &&
         ['adopted', 'rejected', 'not_reproduced', 'inapplicable'].includes(v.outcome));
@@ -5082,22 +4969,6 @@ function engineRegimes(h) {
 }
 // ===========================================================================
 // PHASE: TuningSkillset — the VENDORED tuning skillset, run WHOLE and STANDALONE, BEFORE HeadKernel.
-//
-// The skillset lives at TUNING_SKILLSET_DIR as one intact, hash-pinned tree (it is validated standalone,
-// so GEAK must run the copy that was validated — see e2e_workflow/scripts/tuning_skillset_sync.py). It is
-// NOT decomposed into knowledge/ files and NOT injected as an advisory fragment into other roles: ONE role
-// (tuning_specialist) runs its complete six-step loop as ONE phase.
-//
-// Position is deliberate — after ConfigSweep, before HeadKernel:
-//   * BEFORE HeadKernel, because tuning is the cheap lever that reshapes which kernels dominate. Running
-//     it first means the head track spends its (expensive) budget on the ops that are still hot AFTER
-//     tuning, and every head A/B measures against a reference leg that already contains the tuning.
-//   * STANDALONE, because a tuning loop folded into the head bake-off never runs to completion (it
-//     collapses into "one more candidate config") and its contribution becomes unattributable. With its
-//     own in-session pre/post isolated-server A/B, the final report can state tuning's share of the gain.
-//
-// An accept is folded into curFlags/curEnv (the deploy's required env IS the engagement mechanism), then
-// the profile is re-taken exactly as it is after a config win, because tuning changes the landscape too.
 // ===========================================================================
 if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') && !tuningWindowShort()) {
   phase('TuningSkillset');
