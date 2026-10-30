@@ -126,6 +126,9 @@ BENCH_SCRIPT = E2E_DIR / "scripts" / "bench_e2e.sh"
 # Products with a `product:` section in roofline/peaks.md; keep in sync with it
 # and with RDNA4_SERVING_PRODUCTS in e2e_workflow/e2e_workflow.js.
 RDNA4_SERVING_PRODUCTS = frozenset({"r9700", "r9600d"})
+# KernelFusion stage (e2e_workflow/kernel_fusion), run before the main workflow unless switched off.
+sys.path.insert(0, str(E2E_DIR / "kernel_fusion"))
+import kf_stage  # noqa: E402
 GPU_IDENTITY_SCRIPT = GEAK_ROOT / "scripts" / "gpu_identity.py"
 RUN_REAPER_SCRIPT = E2E_DIR / "scripts" / "run_reaper.py"
 # run_reaper.MARK_ENV: every process this run starts inherits it, which is how the run's exit finds them.
@@ -7825,7 +7828,7 @@ def main(argv: list[str]) -> int:
     if len(args) < 2:
         sys.stderr.write(
             "usage: run_e2e.py <handoff.json> <result.json> "
-            "[--timeout-s N] [--dry-run]\n"
+            "[--timeout-s N] [--dry-run] [--kernel-fusion|--no-kernel-fusion]\n"
         )
         return 2
     handoff_path, result_path = Path(args[0]), Path(args[1])
@@ -7888,6 +7891,7 @@ def main(argv: list[str]) -> int:
                           "agent_backend": runtime_combo_label(),
                           "runtime_selection": _runtime_selection_args() if USE_RUNTIME else None,
                           "runtime_script": str(RUNTIME_SCRIPT) if USE_RUNTIME else None,
+                          "kernel_fusion": kf_stage.dry_run_info(h, ps_args, timeout_s, flags),
                           "prompt": prompt, "e2e_script": str(E2E_SCRIPT)}, indent=2))
         return 0
 
@@ -8108,8 +8112,16 @@ def main(argv: list[str]) -> int:
     wf: dict | None = None
     err: object = None
     err_class: str | None = None
+    kf: dict | None = None
     run = _mark_run(eval_dir_hint)
     try:
+        # KernelFusion first (on unless switched off); the main workflow then starts from its
+        # accepted overlay. Inside the try (and the run mark) so a SIGTERM or the run's exit
+        # cleanup covers it like the main workflow.
+        kf = kf_stage.run_stage(h, ps_args, timeout_s, globals(), flags)
+        if kf:
+            timeout_s = kf["main_timeout_s"]
+            prompt = build_prompt(ps_args)
         wf = invoke_workflow(prompt, timeout_s, ps_args["eval_dir"], ps_args=ps_args)
     except Exception as e:  # scrape/crash/timeout/SIGTERM: recover from disk.
         err = e
@@ -8127,6 +8139,8 @@ def main(argv: list[str]) -> int:
             sys.stderr.write(f"GEAK e2e failed [{err_class}]: {e}\n")
     finally:
         out = _emit(wf=wf, error=err, error_class=err_class)
+        if kf:
+            out = kf_stage.attach(result_path, out, kf)
         _stop_run_processes(run, eval_dir_hint)
 
     print(json.dumps({"status": out.get("status"),
