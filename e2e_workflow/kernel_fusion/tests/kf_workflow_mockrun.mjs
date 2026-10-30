@@ -23,7 +23,17 @@ const ISO = { c1: scenario === 'fallback' ? 0.97 : 1.4, c2: 0.95, c1s: 1.6 };
 const won = (gate, d) => ({ gate, ab_complete: true, e2e_throughput_tok_s: 100 + d, ref_med: 100, cand_med: 100 + d,
   e2e_delta_pct: d, accepted_overlay: `${KF}/overlay/cand_${gate}` });
 
+const AGX = scenario.startsWith('agentx');
+const prepared = (id, ok = true) => ({ short_name: id, op_kind: 'fusion', pct_gpu_time: 3,
+  prepared_ut: { phase: 'extract', result: { task_dir: `${KF}/tasks/${id}`, editable: true, unittest_smoke: ok ? 'pass' : 'fail',
+    baseline_frozen: true, target_callable: `pkg.${id}:f` } } });
 const answers = {
+  'kf:kernel-extract trace': () => (scenario === 'agentx_no_trace' ? { trace_dir: '', workload_json: '', points: [] }
+    : { trace_dir: `${KF}/kernel_extraction/round_kf/capture/traces`, workload_json: `${KF}/kernel_workload.json`,
+        ranking_json: `${KF}/kernel_ranking.json`, points: [{ point_id: 'de_1', phase: 'DECODE', verified: true }] }),
+  'kf:kernel-extract trace (retry)': () => ({ trace_dir: '', workload_json: '', points: [] }),
+  'kf:kernel-extract prepare': () => ({ delivery_path: `${KF}/delivery.json`,
+    prepared: { head_candidates: [], kernel_candidates: [prepared('c1'), prepared('c1s'), prepared('c2', false)] } }),
   'kf:director:setup': () => (scenario === 'setup_fail' ? null : { eval_dir: KF, baseline_throughput_tok_s: 100, noise_band_pct: 0.5 }),
   'kf:profiler': () => (scenario === 'no_trace' || scenario === 'trace_retry'
     ? { profile_topN_json: '', top_kernels: [], notes: 'capture still running' }
@@ -33,7 +43,7 @@ const answers = {
   'kf:analyst': () => ({ topk_json: `${KF}/analysis/topk.json`, report_path: `${KF}/analysis/report.md`,
     candidates: CANDS, recommended: ['c1', 'c2'], report_md: '# report', model_notes_md: '# notes' }),
   'kf:integrate c1': () => ({
-    accept: won('accepted', 3), stack: won('stack', 0.2),
+    accept: won('accepted', 3), agentx: won('accepted', 3), stack: won('stack', 0.2),
     retry: { gate: 'incomplete', ab_complete: false, e2e_throughput_tok_s: 0, ref_med: 100 },
   }[scenario] || { gate: 'rejected', e2e_throughput_tok_s: 99, reason: 'parity_regression' }),
   'kf:integrate c1 (finish 1)': () => won('accepted', 2),
@@ -66,6 +76,7 @@ const phase = () => {};
 const log = () => {};
 
 const args = { workflow_dir: WF_DIR, kf_dir: KF, model_path: '/models/M', gpu_ids: '0,1', tp: 2,
+  ...(AGX ? { workload_spec: { kind: 'agentx_trace_replay', concurrency: 4 } } : {}),
   kf_prompt: '/prompts/p.txt,/prompts/deploy.txt', agent_timeout_ms: 0, kf_task: 'Do not read /answers.',
   initial_extra_env: 'SGLANG_USE_AITER=1 SGLANG_SIMULATE_ACC_LEN=4.05 SGLANG_SIMULATE_ACC_METHOD=match-expected HF_HUB_OFFLINE=1',
   correctness_unset_env: 'SGLANG_SIMULATE_ACC_LEN,SGLANG_SIMULATE_ACC_METHOD' };

@@ -4,9 +4,9 @@ export const meta = {
   whenToUse: 'Started by interface/run_e2e.py before the e2e workflow unless switched off (handoff "kernel_fusion": false, GEAK_KERNEL_FUSION=0 or --no-kernel-fusion). Takes the same args as e2e_workflow.js plus kf_dir, kf_prompt and the optional kf_* knobs documented in kernel_fusion/README.md.',
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the KF eval dir + baseline throughput (roles/director.md PHASE=setup)' },
-    { title: 'Trace', detail: 'Profiler captures a warm serving trace (roles/profiler.md), or kf_trace_dir supplies one' },
+    { title: 'Trace', detail: 'AgentX: kernel-extract skill sampling capture (points from the baseline log, one probe each); else roles/profiler.md; or kf_trace_dir' },
     { title: 'TopK', detail: 'fusion analyst: kf_trace_digest.py + the user prompt -> ranked Top-K fusion candidates (topk.json)' },
-    { title: 'Author', detail: 'per recommended candidate + its fallback: kernel_extractor builds the region unittest, kernel_lane.js mode=author writes the fused kernel' },
+    { title: 'Author', detail: 'per recommended candidate + its fallback: region UT (AgentX: kernel-extract skill prepare; else roles/kernel_extractor.md), then kernel_lane.js mode=author' },
     { title: 'ApplyBack', detail: 'per slot, serially: e2e_integrator A/B (primary, else its fallback), accepted/stack overlays compound; director validate confirms the whole stack' },
   ],
 };
@@ -76,6 +76,14 @@ const STEPS = new Set(String(A.kf_steps || 'trace,topk,author,apply').split(',')
 const want = (s) => STEPS.has(s);
 const VALIDATION_MODE = String(A.kf_validation_mode || 'isolated_server');   // fresh servers: boot-to-boot noise
 const VALIDATION_REPLICAS = parseInt(A.kf_validation_replicas != null ? A.kf_validation_replicas : 2, 10);
+// AgentX trace replays use the kernel-extract skill for both trace capture and UT preparation, as
+// e2e_workflow.js does (its KERNEL_EXTRACT_ON); other workloads keep the profiler / kernel_extractor roles.
+const WORKLOAD_SPEC = A.workload_spec && typeof A.workload_spec === 'object' ? A.workload_spec : {};
+const IS_AGENTX = String(A.workload_kind || WORKLOAD_SPEC.kind || '') === 'agentx_trace_replay';
+const KERNEL_EXTRACT_DIR = `${WORKFLOW_DIR}/knowledge/kernel_extraction_skills/kernel-extract`;
+const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy || 'structure_only');
+const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${A.capture_byte_budget || '8GiB'} ` +
+  `CAPTURE_CASE_BYTE_LIMIT=${A.capture_case_byte_limit || '2GiB'} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY}`;
 const AUTHOR_K = parseInt(A.kf_author_k != null ? A.kf_author_k : 3, 10);
 const KERNEL_BUDGET = parseInt(A.kf_kernel_budget != null ? A.kf_kernel_budget : 4, 10);
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 7200000, 10);
@@ -157,6 +165,26 @@ ${KF_TASK ? `\n## Operator constraints\n${KF_TASK}\n` : ''}
 Return ONLY the structured JSON the role file specifies.` + correctnessEnvBlock(role);
 }
 
+// The kernel-extract skill, invoked the way e2e_workflow.js roleAgent does for kernel_extractor on AgentX.
+function skillAgent(phase, intro, inputs) {
+  const inall = { BACKEND, SERVING_TP, SERVING_GPU, MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS,
+    EFFECTIVE_CONFIG_DIGEST, ...inputs,
+    SKILL_ROOT: KERNEL_EXTRACT_DIR, SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
+    PARSE_PROFILE_STRICT_PHASES: '1', KERNEL_ENV_SKIP_ENUM_REAP: '1', CAPTURE_PERSIST_POLICY, CAPTURE_STORAGE_ENV };
+  return `You are the kernel_extractor. PHASE=${phase}.
+First Read ${KERNEL_EXTRACT_DIR}/SKILL.md and ${KERNEL_EXTRACT_DIR}/references/workflow-handoff.md.
+Use the complete extraction procedure and its shared and skill-specific tools. The handoff reference supplies only workflow inputs and output packaging.
+Do not load roles/kernel_extractor.md; it is the legacy procedure for other workloads.
+Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
+You are running inside the GEAK KernelFusion stage: EVAL_DIR is the KernelFusion eval dir.
+Every serving launch uses BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}.
+
+## Inputs
+${cfg(inall)}
+${KF_TASK ? `\n## Operator constraints\n${KF_TASK}\n` : ''}
+Return ONLY the structured JSON requested above.`;
+}
+
 function bounded(prompt, opts) {
   const p = agent(PROCESS_SAFETY + prompt, opts);
   if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return p;
@@ -181,6 +209,12 @@ const SETUP_SCHEMA = obj({ eval_dir: { type: 'string' }, baseline_throughput_tok
   server_env: { type: 'string' }, notes: { type: 'string' } }, ['eval_dir', 'baseline_throughput_tok_s']);
 const PROFILE_SCHEMA = obj({ profile_topN_json: { type: 'string' }, top_kernels: arrObj, notes: { type: 'string' } },
   ['profile_topN_json']);
+const SKILL_TRACE_SCHEMA = obj({ trace_dir: { type: 'string' }, workload_json: { type: 'string' },
+  sampling_points_json: { type: 'string' }, ranking_json: { type: 'string' }, points: arrObj, notes: { type: 'string' } },
+  ['trace_dir', 'workload_json', 'points']);
+const AGENTX_PREPARATION_SCHEMA = obj({ delivery_path: { type: 'string' },
+  prepared: obj({ head_candidates: arrObj, kernel_candidates: arrObj, failed_tasks: arrObj, deferred_tasks: arrObj },
+    ['head_candidates', 'kernel_candidates']) }, ['delivery_path', 'prepared']);
 const TOPK_SCHEMA = obj({
   topk_json: { type: 'string' }, report_path: { type: 'string' }, digest_md: { type: 'string' },
   candidates: arrObj, recommended: arrStr, notes: { type: 'string' },
@@ -218,16 +252,69 @@ if (needsServer) {
   }
   EVAL_DIR = setup.eval_dir;
   baseTput = setup.baseline_throughput_tok_s || 0;
+  if (!(baseTput > 0) && want('trace') && !TRACE_DIR_IN) {
+    // The trace step plans its sampling points from this baseline's serving log: without it there is
+    // nothing to sample from. One more attempt, then the stage stops (the e2e workflow still runs).
+    const again = await safeAgent(roleAgent('director', 'setup',
+      `The eval dir ${EVAL_DIR} exists but its baseline was not measured. Reuse the dir and measure the baseline ` +
+      '(step 5 of PHASE=setup) to completion.', {
+        LAUNCH_SCRIPT, MODEL_PATH, EXP_ROOT: KF_DIR.replace(/\/[^/]*$/, ''), EVAL_DIR_OVERRIDE: EVAL_DIR,
+        MODEL_NAME_HINT: MODEL_PATH.replace(/\/+$/, '').split('/').pop(), TASK: '', GPU_IDS, WORKLOAD,
+        INIT_FLAGS, INIT_ENV, INIT_BASE_OVERLAY: INIT_OVERLAY, MEASUREMENT_PURPOSE: 'parity',
+        REPLICAS: PARITY_REPLICAS, SKILL_DIR: WORKFLOW_DIR,
+      }), { phase: 'Setup', label: 'kf:director:setup (baseline)', schema: SETUP_SCHEMA });
+    baseTput = (again && again.baseline_throughput_tok_s) || 0;
+    if (!(baseTput > 0)) {
+      return { eval_dir: KF_DIR, kf_dir: KF_DIR, status: 'error', reason: 'baseline not measured (twice)',
+        accepted: [], final_overlay: INIT_OVERLAY };
+    }
+  }
   noiseBand = setup.noise_band_pct || NOISE_BAND_DEFAULT;
   log(`[kf] setup: baseline ${baseTput} tok/s, noise band ${noiseBand}%`);
 }
 
 // ---------------------------------------------------------------------------
-// Trace (GEAK profiler, unchanged) -- or the caller's traces.
+// Trace: on AgentX the kernel-extract skill's workload measurement and sampling capture (stages 1-2:
+// sampling points planned from the baseline log, one bounded probe per point); otherwise the GEAK
+// profiler. Or the caller's traces.
 // ---------------------------------------------------------------------------
 let TRACE_DIR = TRACE_DIR_IN;
 let profileTopN = '';
-if (want('trace') && !TRACE_DIR_IN) {
+let workloadJson = WORKLOAD_SUMMARY;
+let rankingJson = '';
+const skillInputs = () => ({
+  EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, TASK: '',
+  BASELINE_LOG: `${EVAL_DIR}/baseline/server.log`, BASELINE_BENCH_DIR: `${EVAL_DIR}/baseline`,
+  BASELINE_SUMMARY: `${EVAL_DIR}/baseline/bench_summary.json`, EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_kf`,
+  BASELINE_THROUGHPUT: baseTput, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV, CURRENT_OVERLAY: INIT_OVERLAY,
+  PREVIOUS_WORKLOAD_JSON: workloadJson, PREVIOUS_RANKING_JSON: rankingJson, SKILL_DIR: WORKFLOW_DIR,
+});
+if (want('trace') && !TRACE_DIR_IN && IS_AGENTX) {
+  phase('Trace');
+  const traceIntro = 'Run ONLY skill stage 1 and the workload-measurement and capture part of stage 2 for the ' +
+    'completed baseline in the inputs: observed_workload.py -> plan_sampling_points.py -> serving_probe.py once per ' +
+    'point (traces with record_shapes and Python stacks, steady state, verified) -> coverage_ledger.py, then write ' +
+    'kernel_workload.json with each point\'s weight. Do NOT select targets, declare tasks, extract source or author UTs: ' +
+    'a fusion analysis consumes these traces next. Return {trace_dir: the directory holding one sub-directory of ' +
+    'per-rank traces per sampling point, workload_json, sampling_points_json, ranking_json, points: [{point_id, phase, ' +
+    'trace_files, verified}], notes}.';
+  let tr = await safeAgent(skillAgent('trace', traceIntro, skillInputs()),
+    { phase: 'Trace', label: 'kf:kernel-extract trace', schema: SKILL_TRACE_SCHEMA });
+  const verified = (t) => t && t.trace_dir && (t.points || []).some((p) => p && p.verified !== false);
+  if (!verified(tr)) {
+    log('[kf] sampling capture returned no verified trace; retrying once.');
+    tr = await safeAgent(skillAgent('trace', 'A previous attempt returned no verified trace. Reuse what it saved, ' +
+      'recapture each failed point once, and wait for the captures to finish. ' + traceIntro, skillInputs()),
+      { phase: 'Trace', label: 'kf:kernel-extract trace (retry)', schema: SKILL_TRACE_SCHEMA });
+  }
+  if (!verified(tr)) {
+    return { eval_dir: KF_DIR, kf_dir: KF_DIR, status: 'error', reason: 'sampling capture produced no verified trace (twice)',
+      accepted: [], final_overlay: INIT_OVERLAY };
+  }
+  TRACE_DIR = tr.trace_dir;
+  workloadJson = WORKLOAD_SUMMARY || tr.workload_json;
+  rankingJson = tr.ranking_json || '';
+} else if (want('trace') && !TRACE_DIR_IN) {
   phase('Trace');
   let prof = await safeAgent(roleAgent('profiler', 'baseline',
     'Capture a warm serving trace and emit the standardized Top-N. Keep the raw per-rank trace files on disk.', {
@@ -312,7 +399,7 @@ Write ${OUT}/topk.json: {"candidates": [...], "recommended": [ids in the order t
 cannot be reached through one Python seam can still be ranked, but must not be recommended.
 
 ## Inputs
-${cfg({ EVAL_DIR, TRACE_DIR, WORKLOAD_SUMMARY: WORKLOAD_SUMMARY || '(none)', PROFILE_TOPN: profileTopN || '(none)',
+${cfg({ EVAL_DIR, TRACE_DIR, WORKLOAD_SUMMARY: workloadJson || '(none)', PROFILE_TOPN: profileTopN || '(none)',
     MODEL_PATH, BACKEND, SERVING_TP, SERVER_FLAGS: INIT_FLAGS, SERVER_ENV: INIT_ENV, LAUNCH_SCRIPT: LAUNCH_SCRIPT || '(none)',
     WORKLOAD, OVERLAY: INIT_OVERLAY || '(none)' })}
 
@@ -364,11 +451,44 @@ const slots = primaries.map((c) => {
 const jobs = slots.flatMap((s) => [s.primary, s.fallback].filter(Boolean));
 log(`[kf] authoring ${jobs.length} job(s): ${slots.map((s) => s.primary.id + (s.fallback ? `(fallback ${s.fallback.id})` : '')).join(', ')}`);
 
+const shortOf = (c) => String(c.id).replace(/[^A-Za-z0-9_]+/g, '_');
+
+// AgentX: the kernel-extract skill prepares every fusion UT in one invocation (PHASE=prepare), each
+// candidate declared as ONE joint task boundary, reusing the trace step's evidence. Same gate as
+// e2e_workflow.js preparedUtDefect: a UT without a passing smoke and a frozen baseline is unusable.
+let preparedById = new Map();
+if (IS_AGENTX && jobs.length && !DEADLINE_HIT) {
+  const scope = jobs.map((c) => ({ task: shortOf(c), fusion_level: c.level, region: c.region,
+    device_kernels: c.kernels || [], phases: c.phases || [], seam: c.seam || {},
+    inputs_outputs: c.inputs_outputs || '', m_range: c.m_range || '' }));
+  const prep = await safeAgent(skillAgent('prepare',
+    'Explicit user scope (overrides the default selection): build exactly one task per entry of FUSION_SCOPE, named ' +
+    'by its `task`. Each entry is a FUSION REGION: declare its device_kernels as one joint boundary (joint_ut.phases) ' +
+    'owned by one task, reached through the entry\'s seam (or the narrowest enclosing live callable; record why). The ' +
+    'candidate leg will rebind that callable to one fused implementation, so the oracle is taken at the region ' +
+    'boundary. Reuse the trace step\'s evidence (PREVIOUS_WORKLOAD_JSON / PREVIOUS_RANKING_JSON); do not launch a new ' +
+    'full replay. Complete source extraction, UT authoring and GPU validation for every entry, keep failures in the ' +
+    'delivery, pack with `agentx_kernel_preparation.mjs --emit-prepared` and return ONLY {delivery_path, prepared} ' +
+    '(prepared = that command\'s stdout VERBATIM). Do not optimize or integrate.',
+    { ...skillInputs(), FUSION_SCOPE: scope, SOURCE_DELIVERY_REQUIRED: true, REMAINING_MIN: 240 }),
+    { phase: 'Author', label: 'kf:kernel-extract prepare', schema: AGENTX_PREPARATION_SCHEMA });
+  const all = prep && prep.prepared ? [...(prep.prepared.head_candidates || []), ...(prep.prepared.kernel_candidates || [])] : [];
+  for (const k of all) {
+    const r = k && k.prepared_ut && k.prepared_ut.result;
+    if (!r || typeof r.task_dir !== 'string' || !r.task_dir.trim()) continue;
+    const ok = r.editable !== false && r.baseline_frozen === true &&
+      (k.prepared_ut.phase === 'extract' ? r.unittest_smoke : r.smoke) === 'pass';
+    const id = jobs.map(shortOf).find((t) => t === k.short_name || String(r.task_dir).replace(/\/+$/, '').endsWith(`/${t}`));
+    if (id) preparedById.set(id, { ...r, ok });
+  }
+  log(`[kf] kernel-extract prepared ${preparedById.size}/${jobs.length} fusion UT(s)`);
+}
+
 async function authorOne(c, i) {
   if (DEADLINE_HIT) return { c, skip: 'stage deadline' };
   const gpu = GPU_LIST[i % GPU_LIST.length];
-  const short = String(c.id).replace(/[^A-Za-z0-9_]+/g, '_');
-  const ext = await safeAgent(roleAgent('kernel_extractor', 'extract',
+  const short = shortOf(c);
+  const ext = IS_AGENTX ? (preparedById.get(short) || null) : await safeAgent(roleAgent('kernel_extractor', 'extract',
     'Build the immutable unittest task dir for a FUSION REGION, not a single kernel. The baseline leg is the ' +
     'live, unfused region reached through ONE Python seam (KERNEL.target_callable, a function whose body launches ' +
     'every kernel in KERNEL.device_kernels); candidate_bind rebinds that seam, so the candidate leg runs the fused ' +
@@ -385,7 +505,9 @@ async function authorOne(c, i) {
     }), { phase: 'Author', label: `kf:extract ${short}`, schema: EXTRACT_SCHEMA });
   // Same guard as e2e extractWithBaseline: without a frozen live baseline the unittest would time the
   // fused kernel against its own scaffold.
-  if (!ext || ext.editable === false || ext.unittest_smoke !== 'pass' || !ext.task_dir || ext.baseline_frozen === false) {
+  const extOk = IS_AGENTX ? ext && ext.ok
+    : ext && ext.editable !== false && ext.unittest_smoke === 'pass' && ext.task_dir && ext.baseline_frozen !== false;
+  if (!extOk) {
     return { c, skip: `extraction failed (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };
   }
   const lang = c.language || 'triton';

@@ -15,9 +15,9 @@ profiler)  prompt)  kernel     A/B, compounding
 | Step | What runs | Reused GEAK code |
 |---|---|---|
 | Setup | eval dir + baseline throughput | `roles/director.md` PHASE=setup, `bench_e2e.sh` |
-| `trace` | warm serving trace (skipped when `trace_dir` is given); on an AgentX replay the window opens in steady state (`adapters/clients/agentx.sh: adapter_profile_warmup_s`) | `roles/profiler.md` PHASE=baseline, `bench_e2e.sh PROFILE=1` |
+| `trace` | AgentX: the kernel-extract skill's workload measurement + sampling capture (points planned from the baseline log, one bounded probe each with Python stacks, `kernel_workload.json` weights); other workloads: one warm serving trace. Skipped when `trace_dir` is given | `knowledge/kernel_extraction_skills/kernel-extract` (stages 1-2), else `roles/profiler.md` |
 | `topk` | `kf_trace_digest.py` (deterministic), then the analyst agent applies **your prompt** → `analysis/topk.json` + the report the prompt asks for | `parse_profile.py` |
-| `author` | per recommended candidate **and its fallback** (the analyst's `fallback`, else the lowest-difficulty exclusive alternative of a difficulty ≥ 3 candidate): region unittest, then a fused kernel | `roles/kernel_extractor.md`, `kernel_workflow/kernel_lane.js` `mode=author` |
+| `author` | per recommended candidate **and its fallback** (the analyst's `fallback`, else the lowest-difficulty exclusive alternative of a difficulty ≥ 3 candidate): region UT, then a fused kernel | AgentX: kernel-extract skill `PHASE=prepare` (one joint-boundary task per region); else `roles/kernel_extractor.md`; then `kernel_workflow/kernel_lane.js` `mode=author` |
 | `apply` | per slot, serially: A/B the primary, else its fallback; `accepted`/`stack` overlays compound; then one combined confirmation of the whole stack vs the original baseline — only `validated_win` is handed to the main workflow | `roles/e2e_integrator.md` PHASE=integrate, `roles/director.md` PHASE=validate |
 
 ## Switch
