@@ -57,22 +57,33 @@ from collections import Counter
 #   rank, ts, running, token, accept_len, gen_tps, cuda_graph, queue
 # --------------------------------------------------------------------------- #
 
+# A TP1 engine without DP tags no rank: it is rank 0.
+_HEAD = r"^\[(?P<ts>[\d\-]+ [\d:]+(?:\.\d+)?)(?: (?:TP|DP)(?P<rank>\d+)[^\]]*)?\] "
+
 SGLANG_PREFILL_RE = re.compile(
-    r"^\[(?P<ts>[\d\-]+ [\d:]+(?:\.\d+)?) (?:TP|DP)(?P<rank>\d+)[^\]]*\] Prefill batch[,.] "
+    _HEAD + r"Prefill batch[,.] "
     r"#new-seq: (?P<new_seq>\d+), #new-token: (?P<new_token>\d+), "
     r"#cached-token: (?P<cached_token>\d+), "
     r"(?:token usage: (?P<usage>[\d.]+), )?"
     r"#running-req: (?P<running>\d+), #queue-req: (?P<queue>\d+)"
     r"(?:, #pending-token: (?P<pending>\d+))?"
+    r"(?:, #bootstrap-req: \d+)?"
+    r"(?:, #inflight-req: \d+)?"
+    r"(?:, #optimistic-req: \d+)?"
     r"(?:, cuda graph: (?P<graph>\w+))?"
 )
 
+# The pre-allocated/prealloc/transfer/retracted fields are a PD decode engine's.
 SGLANG_DECODE_RE = re.compile(
-    r"^\[(?P<ts>[\d\-]+ [\d:]+(?:\.\d+)?) (?:TP|DP)(?P<rank>\d+)[^\]]*\] Decode batch[,.] "
+    _HEAD + r"Decode batch[,.] "
     r"#running-req: (?P<running>\d+), #token: (?P<token>\d+), "
     r"(?:token usage: (?P<usage>[\d.]+), )?"
     r"(?:accept len: (?P<accept_len>[\d.]+), )?"
     r"(?:accept rate: (?P<accept_rate>[\d.]+), )?"
+    r"(?:pre-allocated usage: [\d.]+, )?"
+    r"(?:#prealloc-req: \d+, )?"
+    r"(?:#transfer-req: \d+, )?"
+    r"(?:#retracted-req: \d+, )?"
     r"(?:cuda graph: (?P<graph>\w+), )?"
     r"gen throughput \(token/s\): (?P<gen_tps>[\d.]+), #queue-req: (?P<queue>\d+)"
 )
@@ -96,7 +107,7 @@ def _sglang_prefill(line):
     m = SGLANG_PREFILL_RE.match(line)
     if not m:
         return None
-    return dict(kind="prefill", rank=int(m.group("rank")), ts=_ts(m.group("ts")),
+    return dict(kind="prefill", rank=int(m.group("rank") or 0), ts=_ts(m.group("ts")),
                 new_seq=int(m.group("new_seq")), new_token=int(m.group("new_token")),
                 cached_token=int(m.group("cached_token")),
                 running=int(m.group("running")), queue=int(m.group("queue")),
@@ -108,7 +119,61 @@ def _sglang_decode(line):
     if not m:
         return None
     acc = m.group("accept_len")
-    return dict(kind="decode", rank=int(m.group("rank")), ts=_ts(m.group("ts")),
+    return dict(kind="decode", rank=int(m.group("rank") or 0), ts=_ts(m.group("ts")),
+                running=int(m.group("running")), token=int(m.group("token")),
+                accept_len=float(acc) if acc else 1.0,
+                gen_tps=float(m.group("gen_tps")), queue=int(m.group("queue")),
+                cuda_graph=_b(m.group("graph")))
+
+
+# sglang hybrid-SWA scheduler (DeepSeek-V4, PD disaggregation): full/swa token pools,
+# and PD's bootstrap/prealloc/transfer queues between the fields above.
+SGLANG_SWA_PREFILL_RE = re.compile(
+    _HEAD + r"Prefill batch[,.] "
+    r"#new-seq: (?P<new_seq>\d+), #new-token: (?P<new_token>\d+), "
+    r"#cached-token: (?P<cached_token>\d+), "
+    r"full token usage: (?P<usage>[\d.]+), swa token usage: (?P<swa_usage>[\d.]+), "
+    r"#running-req: (?P<running>\d+), #queue-req: (?P<queue>\d+)"
+    r"(?:, #pending-token: (?P<pending>\d+))?"
+    r"(?:, #bootstrap-req: \d+)?"
+    r"(?:, #inflight-req: \d+)?"
+    r"(?:, #optimistic-req: \d+)?"
+    r"(?:, cuda graph: (?P<graph>\w+))?"
+)
+
+SGLANG_SWA_DECODE_RE = re.compile(
+    _HEAD + r"Decode batch[,.] "
+    r"#running-req: (?P<running>\d+), #full token: (?P<token>\d+), "
+    r"full token usage: (?P<usage>[\d.]+), "
+    r"#swa token: (?P<swa_token>\d+), swa token usage: (?P<swa_usage>[\d.]+), "
+    r"(?:accept len: (?P<accept_len>[\d.]+), )?"
+    r"(?:accept rate: (?P<accept_rate>[\d.]+), )?"
+    r"(?:pre-allocated usage: [\d.]+, )?"
+    r"(?:#prealloc-req: \d+, )?"
+    r"(?:#transfer-req: \d+, )?"
+    r"(?:#retracted-req: \d+, )?"
+    r"(?:cuda graph: (?P<graph>\w+), )?"
+    r"gen throughput \(token/s\): (?P<gen_tps>[\d.]+), #queue-req: (?P<queue>\d+)"
+)
+
+
+def _sglang_swa_prefill(line):
+    m = SGLANG_SWA_PREFILL_RE.match(line)
+    if not m:
+        return None
+    return dict(kind="prefill", rank=int(m.group("rank") or 0), ts=_ts(m.group("ts")),
+                new_seq=int(m.group("new_seq")), new_token=int(m.group("new_token")),
+                cached_token=int(m.group("cached_token")),
+                running=int(m.group("running")), queue=int(m.group("queue")),
+                cuda_graph=_b(m.group("graph")))
+
+
+def _sglang_swa_decode(line):
+    m = SGLANG_SWA_DECODE_RE.match(line)
+    if not m:
+        return None
+    acc = m.group("accept_len")
+    return dict(kind="decode", rank=int(m.group("rank") or 0), ts=_ts(m.group("ts")),
                 running=int(m.group("running")), token=int(m.group("token")),
                 accept_len=float(acc) if acc else 1.0,
                 gen_tps=float(m.group("gen_tps")), queue=int(m.group("queue")),
@@ -117,11 +182,25 @@ def _sglang_decode(line):
 
 LOG_DIALECTS = [
     ("sglang-scheduler", [_sglang_prefill, _sglang_decode]),
+    ("sglang-scheduler-swa", [_sglang_swa_prefill, _sglang_swa_decode]),
 ]
 
 # A line that is plausibly a scheduler batch line. Used only to tell "this log has
 # batch lines we failed to parse" (an error) from "this log has none" (a fact).
 BATCH_HINT_RE = re.compile(r"\](?:\s*)(?:Prefill|Decode) batch[,.]")
+
+
+def parse_line(line):
+    """One scheduler batch line -> normalized record, or None. serving_probe.py arms on this too."""
+    for _dn, parsers in LOG_DIALECTS:
+        for p in parsers:
+            try:
+                rec = p(line)
+            except ValueError:
+                rec = None
+            if rec:
+                return rec
+    return None
 
 
 def parse_log(paths, rank=0, window=None):
@@ -134,17 +213,7 @@ def parse_log(paths, rank=0, window=None):
                 line = raw.decode("utf-8", "replace").rstrip("\n")
                 if BATCH_HINT_RE.search(line):
                     hints += 1
-                rec = None
-                for _dn, parsers in LOG_DIALECTS:
-                    for p in parsers:
-                        try:
-                            rec = p(line)
-                        except ValueError:
-                            rec = None
-                        if rec:
-                            break
-                    if rec:
-                        break
+                rec = parse_line(line)
                 if rec is None:
                     if BATCH_HINT_RE.search(line) and len(unparsed) < 5:
                         unparsed[line[:200]] = 1

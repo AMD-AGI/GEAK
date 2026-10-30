@@ -59,17 +59,29 @@ For EACH direction, in the Architect's order:
    (and by `env`) as last-wins, so a duplicated key hands the outcome to the order you happened to
    write the string in, and the losing value vanishes with nothing in any log to say it did.
    The only exception is a genuinely repeatable flag such as `--lora-path`.
+
+   **PD (`engine` is `prefill`/`decode`).** `EXTRA_SERVER_ARGS` / `EXTRA_ENV` reach both engines.
+   A one-engine direction goes only into `GEAK_MN_PD_SWEEP_ARGS_<ROLE>` / `GEAK_MN_PD_SWEEP_ENV_<ROLE>`;
+   `engine: ""` stays shared. Change only the named engine per trial, pass the other engine's accepted
+   sweep through unchanged, and record `engine` on the trial.
 2. Launch + bench via the shared script:
    ```bash
    # SERVING config MUST match the run-wide invariant: TP=SERVING_TP GPU=SERVING_GPU (from your inputs).
+   # PD: omit an empty GEAK_MN_PD_SWEEP_* variable; never put a one-engine flag in EXTRA_SERVER_ARGS.
    BACKEND="<backend>" OUT_DIR="$EVAL_DIR/config/<dir_id>" GPU="<SERVING_GPU>" TP="<SERVING_TP>" MODEL="$MODEL_PATH" \
    ISL=<isl> OSL=<osl> CONC=<conc> PROFILE=0 \
    GEAK_REPEAT_MODE="$MEASUREMENT_MODE" MEASUREMENT_PURPOSE=search REPLICAS="${REPLICAS:-1}" \
-   OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" EXTRA_SERVER_ARGS="<current flags, merged with this flag>" EXTRA_ENV="<current env, merged with this env>" \
+   OVERLAY_PYTHONPATH="$CURRENT_OVERLAY" \
+   EXTRA_SERVER_ARGS="<shared flags>" EXTRA_ENV="<shared env>" \
+   GEAK_MN_PD_SWEEP_ARGS_PREFILL="<prefill flags>" GEAK_MN_PD_SWEEP_ARGS_DECODE="<decode flags>" \
+   GEAK_MN_PD_SWEEP_ENV_PREFILL="<prefill env>" GEAK_MN_PD_SWEEP_ENV_DECODE="<decode env>" \
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/cfg_<dir_id>.log"
    ```
 3. Read `bench_summary.json`. delta% = `(cand_median - current_median)/current_median*100`.
-4. Parity check if numerics could change. Verify the swap took (server log).
+4. Parity check if numerics could change. Verify the swap took (server log). **PD:** read the named
+   engine's log: the `log` of its entry in `mn_launch.json` `pd.engines`. `mn_launch.json`
+   `pd.effective_args_by_role` shows what each engine got; if a one-engine change reached both,
+   fix the strings and re-run the trial.
 5. Keep the change ONLY if delta% > noise band AND parity passes. Accepted changes COMPOUND into the
    running config for subsequent directions.
 6. (GEMM tuning is NOT a config axis — it lives in the head-kernel track now.)
@@ -124,12 +136,17 @@ Return JSON:
 ```json
 {
   "trials": [
-    {"id": "cfg0", "axis": "attention-backend", "change": "--attention-backend aiter",
+    {"id": "cfg0", "axis": "attention-backend", "engine": "prefill|decode|\"\"",
+     "change": "--attention-backend aiter",
      "throughput_tok_s": 0.0, "delta_pct": 0.0, "parity": "pass|fail|n/a",
      "swap_verified": true, "kept": true, "note": "..."}
   ],
-  "accepted_flags": "<final kept extra server flags>",
-  "accepted_env": "<final kept extra env KEY=VAL ...>",
+  "accepted_flags": "<shared flags, applied to both engines>",
+  "accepted_env": "<shared env KEY=VAL ..., applied to both engines>",
+  "accepted_flags_by_role": {"prefill": "<flags accepted for the prefill engine only>",
+                             "decode": "<flags accepted for the decode engine only>"},
+  "accepted_env_by_role": {"prefill": "<KEY=VAL accepted for prefill only>",
+                           "decode": "<KEY=VAL accepted for decode only>"},
   "best_throughput_tok_s": 0.0,
   "throughput_speedup_vs_baseline": 1.0,
   "summary": "what worked, what didn't, what to re-profile against",

@@ -138,6 +138,31 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    (use the backend playbook priors for plausible_speedup per class, keyed by `model_class`+`gfx` when
    present). Note the regime each serves (large-M shape = prefill, small-M/batch = decode). **Dedupe
    GEMMs by shape** — one bake-off per distinct (shape,dtype) covers all its launches.
+
+   **PD-disaggregated serving (the Top-N has a top-level `per_engine` block and an `engine` on every row).**
+   `pct_gpu_time` is the kernel's share of all the GPU time one request costs across both engines —
+   the same meaning as on one node — so rank the merged table as a single table, exactly like a
+   single-node one. `latency_split` and `kv_handoff` only explain it. Around it:
+   - **Keep the row's `engine` on the candidate** — the Kernel Extractor uses it to pick that
+     engine's shapes. (The candidate's `role` key names the seam kind, not the engine.)
+   - **Do not dedupe across engines.** The same kernel on both is two candidates (chunk-sized M vs
+     batch-sized M, different machines).
+   - Rank on `pct_gpu_time` and use it as the ceiling for `plausible_speedup`; explain with
+     `pct_gpu_time_in_engine` too.
+   - **Bottleneck:** quote `bottleneck_engine` and each `per_engine[].weight_pct`.
+   - **`kv_handoff` (when present):** take `verdict.handoff_bound` as given and quote its `reason`. When
+     true, TTFT is the handoff: order prefill heads after the handoff lever. A flag/env that moves more
+     requests per handoff goes first in `config_directions`; a change to the transfer code is a prefill
+     code overlay in `tuning_directions`. Name the log number it must move (decode `#transfer-req` in
+     the decode engine's log, prefill `#inflight-req` in the prefill engine's log; the merged table's
+     `kv_handoff.*.source` names both files).
+   - **Tag each `config_directions` entry with `engine`** (`prefill`: chunk / batched-token budget;
+     `decode`: running batch, decode graph shape). `""` only when the same value is right on both — the
+     Tuner applies that string to both machines.
+   - **Read config directions off each engine's own table** (`PROFILE_TOPN_BY_ROLE` or
+     `per_engine[].topN_json`); the merged 25 rows can drop the smaller engine entirely. Heads still come
+     from the merged table. Every profiled engine needs at least one direction; there is no re-ask, so
+     if an engine truly has none, say why in `regime_summary` (it is reported as a gap).
 1b. **TraceLens prior (ADVISORY — only if `TRACELENS_KERNEL_CANDIDATES_JSON` / `TRACELENS_REPORT_JSON`
    is a non-empty path that EXISTS).** Read its `hot_kernels[]`. Each entry pre-resolves things you would
    otherwise hand to the Extractor: `source_file`/`source_path` (the patched python source),
@@ -268,12 +293,14 @@ Return JSON:
   "regime_summary": "prefill-dominated|decode-dominated|mixed; why",
   "config_directions": [
     {"id": "cfg0", "axis": "attention-backend|quant|cuda-graph|torch-compile|kv-cache-dtype|...",
+     "engine": "<PD only: prefill|decode, or \"\" when the same value belongs on both engines>",
      "swaps": ["ranked option A", "option B"], "target_kernels": ["short_name"],
      "expected_pct_gpu": 0.0, "rationale": "playbook prior + which Top-N entry it targets"}
   ],
   "head_candidates": [
     {"id": "h0", "short_name": "...", "op_kind": "gemm|attn", "pct_gpu_time": 0.0,
      "shapes": "[[1024,5120],[5120,34816]]", "dtype": "bf16", "regime": "prefill|decode|both",
+     "engine": "<PD only: copy the Top-N row's `role` (prefill|decode); \"\" when the Top-N has none>",
      "entity_kind": "gpu_kernel",
      "device_kernel": "<exact GPU symbol copied from profile>",
      "target_callable": "<exact module:attr hint selected from seam_candidates, or ''>",
@@ -301,6 +328,7 @@ Return JSON:
   "kernel_candidates": [
     {"id": "k0", "short_name": "...", "classification": "...", "pct_gpu_time": 0.0,
      "regime": "prefill|decode|both", "candidate_backends": ["triton","hip","ck","asm"],
+     "engine": "<PD only: copy the Top-N row's `role` (prefill|decode); \"\" when the Top-N has none>",
      "amdahl_priority": 0.0, "extract_hint": "which callable to hook (module:attr) + why",
      "source_hint": "<TraceLens source_file/source_path if any, else ''>",
      "launcher_hint": "<TraceLens kernel_path/launcher_source_file if any, else ''>",
@@ -309,6 +337,14 @@ Return JSON:
      "headroom_class": "<underperforming|moderate|saturated|unknown|'' if no roofline prior>",
      "roofline_confidence": "<low|medium|high|'' if none>",
      "byte_reduction_levers": ["only when headroom_class=saturated; see step 1d"]}
+  ],
+  "tuning_directions": [
+    {"id": "t0", "short_name": "<what the Tuning Specialist sees in TUNING_TARGETS, e.g. kv_handoff_sender>",
+     "engine": "<PD only: prefill|decode>", "lever_kind": "code_overlay",
+     "target_callable": "<module:attr the overlay replaces>",
+     "mechanism": "why the current code is the bottleneck, with the log line that shows it",
+     "evidence_metric": "the log number that must move, e.g. decode #transfer-req mean",
+     "rationale": "what it can buy (e.g. the TTFT share it removes)"}
   ],
   "drop_list": [{"short_name": "...", "why": "below Amdahl threshold"}],
   "order_of_work": ["config fast path first", "then h0 (GEMM #1)", "then k0", "..."],

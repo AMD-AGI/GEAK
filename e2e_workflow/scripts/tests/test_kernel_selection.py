@@ -886,12 +886,12 @@ class TestCaptureStorageReclaim(unittest.TestCase):
             "process_id": process_id, "target": target,
         }
 
-    def _write_capture(self, root, pid, payload=b"ORACLE", rank=0):
+    def _write_capture(self, root, pid, payload=b"ORACLE", rank=0, sha=None):
         cap = os.path.join(root, f"capture.pid-{pid}.rank-{rank}")
         os.makedirs(cap)
         meta_path = os.path.join(cap, "meta.json")
         with open(meta_path, "w") as fh:
-            json.dump(self.meta(process_id=pid), fh)
+            json.dump(dict(self.meta(process_id=pid), **({"reference_io_sha256": sha} if sha else {})), fh)
         with open(os.path.join(cap, "reference_io.pt"), "wb") as fh:
             fh.write(payload)
         trace_path = os.path.join(root, f"selection.pid-{pid}.rank-{rank}.call-1.json")
@@ -938,6 +938,42 @@ class TestCaptureStorageReclaim(unittest.TestCase):
             self.assertEqual(remaining, [])
             self.assertFalse(os.path.exists(nested))
             self.assertGreater(verdict["capture_storage"]["bytes_reclaimed"], 0)
+
+    def test_a_capture_pairs_only_with_traces_from_its_own_host(self):
+        with tempfile.TemporaryDirectory() as root:
+            meta_path = os.path.join(root, "capture.pid-111.host-a.rank-0", "meta.json")
+            os.makedirs(os.path.dirname(meta_path))
+            with open(meta_path, "w") as fh:
+                json.dump(dict(self.meta(), host="a"), fh)
+            traces = {}
+            for host in ("a", "b"):
+                traces[host] = os.path.join(root, f"selection.pid-111.host-{host}.rank-0.call-1.json")
+                with open(traces[host], "w") as fh:
+                    json.dump({"traceEvents": trace()}, fh)
+
+            def run(*paths):
+                out = os.path.join(root, "v.json")
+                ks.main(["--target", TARGET, "--device-kernel", KERNEL, "--capture-meta", meta_path,
+                         "--torch-trace", *paths, "--no-reclaim-captures", "--out", out])
+                with open(out) as fh:
+                    return json.load(fh)
+
+            self.assertIn("capture_process_trace_missing", run(traces["b"])["failed"])
+            self.assertEqual(run(traces["a"], traces["b"])["process_verdicts"][0]["trace_files"], [traces["a"]])
+
+    def test_the_promoted_oracle_is_the_rank_that_saved_one(self):
+        with tempfile.TemporaryDirectory() as root:
+            meta_a, trace_a = self._write_capture(root, 111, b"", rank=1)
+            meta_b, trace_b = self._write_capture(root, 222, b"RANK0-ORACLE", rank=0, sha="ab" * 32)
+            out_path = os.path.join(root, "selection.json")
+            rc = ks.main(["--target", TARGET, "--device-kernel", KERNEL,
+                          "--capture-meta", meta_a, meta_b, "--torch-trace", trace_a, trace_b,
+                          "--task-dir", root, "--out", out_path])
+            self.assertEqual(rc, 0)
+            with open(out_path) as fh:
+                self.assertEqual(json.load(fh)["oracle_meta_file"], meta_b)
+            with open(os.path.join(root, "reference_io.pt"), "rb") as fh:
+                self.assertEqual(fh.read(), b"RANK0-ORACLE")
 
     def test_failed_selection_still_reclaims_heavy_captures(self):
         with tempfile.TemporaryDirectory() as root:

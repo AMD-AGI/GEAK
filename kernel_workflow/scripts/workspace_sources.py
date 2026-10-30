@@ -6,6 +6,7 @@
 External vendor/reference links remain shared. This is a source-link guard, not a
 compiler tracer: generated builders must also validate their actual input with
 ``check-input`` immediately before compilation (or ``bind`` for owned overlays).
+It also rejects a COMMANDMENT whose MODIFIABLE FILES leave the task directory.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -22,6 +24,11 @@ STATE = Path(".geak/workspace.json")
 INVALID = Path(".geak/invalid_measurements.jsonl")
 # These are deliberately frozen by Setup, not candidate implementations.
 FROZEN = {"reference_io.pt", "baseline_src", "baseline_ref", "baseline_overlay"}
+# EVAL_DIR/COMMANDMENT.md sits above every workspace: EVAL_DIR/workspace and
+# EVAL_DIR/round_<n>/<engineer>/workspace.
+COMMANDMENT = "COMMANDMENT.md"
+COMMANDMENT_DEPTH = 4
+ABS_PATH = re.compile(r"(?<![\w.~$>}/-])/[^\s`'\"),;]+")
 
 
 def within(path: Path, root: Path) -> bool:
@@ -104,7 +111,42 @@ def relocate(src: Path, dst: Path):
     check(dst)
 
 
+def modifiable_files(text: str):
+    """Paths listed under the COMMANDMENT's MODIFIABLE FILES item, up to the next item."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if "MODIFIABLE FILES" not in line:
+            continue
+        block = [line]
+        for nxt in lines[i + 1:]:
+            if nxt.startswith("#") or (nxt.strip() and not nxt.lstrip().startswith(("-", "*"))):
+                break
+            block.append(nxt)
+        return [p for ln in block for p in ABS_PATH.findall(ln)]
+    return []
+
+
+def check_commandment(workspace: Path):
+    """An installed package is never the candidate: the measuring node (multinode) and the
+    reference leg load their own copy of it, so an edit there is not what gets measured."""
+    for root in [workspace, *workspace.parents][:COMMANDMENT_DEPTH]:
+        path = root / COMMANDMENT
+        if path.is_file():
+            break
+    else:
+        return
+    outside = [p for p in modifiable_files(path.read_text(errors="replace"))
+               if not (within(lexical(Path(p)), root) or within(Path(p).resolve(), root))]
+    if outside:
+        raise ValueError(
+            f"{path} lists MODIFIABLE FILES outside the task directory {root}: "
+            f"{', '.join(outside)}. Copy the source into kernel_src/ and bind it with "
+            "meta.candidate_bind; never edit an installed package"
+        )
+
+
 def check(workspace: Path):
+    check_commandment(workspace)
     ancestors = [Path(p) for p in read_state(workspace)["ancestors"]]
     if not ancestors:
         return

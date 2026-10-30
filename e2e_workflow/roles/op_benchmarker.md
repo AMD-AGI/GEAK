@@ -206,6 +206,10 @@ Inputs: `EVAL_DIR`, `OP_TASK_DIR` (from the Kernel Extractor `extract_op`), `OP_
      --out "<OP_TASK_DIR>/opbench_result.json" \
      2>&1 | tee "$EVAL_DIR/logs/opbench_<short>.log"
    ```
+   On a multinode run (the shared block gives you an `mn.py exec` line) this machine sees no GPU and the
+   nodes have no `$SKILL_DIR`: copy `$SKILL_DIR/scripts/op_bench.py` and `harness_lib.py` into
+   `<OP_TASK_DIR>`, then run that copy on a node card, same flags:
+   `<that mn.py exec> --target master --gpu <GPU_ID> -- python3 "<OP_TASK_DIR>/op_bench.py" --task "<OP_TASK_DIR>" ...`
    Read `opbench_result.json`: per-backend {available, correct, ms, wall_ms, max_rel_err}, the winner, the
    `isolated_speedup` vs the default (hipblaslt) backend, `winner_editable`, `winner_kind`, and
    > **`ms` is CUDA-EVENT DEVICE time (GPU-timeline duration); `wall_ms` is host+device REFERENCE.** The

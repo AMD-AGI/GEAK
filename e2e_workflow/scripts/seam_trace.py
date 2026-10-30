@@ -5,6 +5,7 @@ import functools
 import importlib
 import inspect
 import os
+import socket
 import sys
 import threading
 import types
@@ -36,11 +37,16 @@ def _rank():
     return "unknown"
 
 
+def _host():
+    return socket.gethostname().split(".")[0]
+
+
 def _trace_path(trace_index):
     template = os.environ.get("GEAK_SELECTION_TRACE", "").strip()
     if not template:
         return ""
-    pid = os.getpid()
+    # Host after pid: ranks on two machines can share a pid, and both write to the shared mount.
+    pid = f"{os.getpid()}.host-{_host()}"
     if "{pid}" in template or "{rank}" in template:
         path = template.format(pid=pid, rank=_rank())
     else:

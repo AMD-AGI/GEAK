@@ -889,7 +889,7 @@ class TestPhaseAccounting(unittest.TestCase):
         p = _write_json(ev)
         try:
             agg, tot, lau, pm = parse_profile.parse_torch_trace(p)
-            self.assertEqual(pm, {})
+            self.assertEqual(list(pm), ["step_ledger_unavailable"])
             s = parse_profile.build_summary(agg, tot, lau, "torch-trace", 5)
             self.assertNotIn("serving", s)
             self.assertNotIn("phase", s["top_kernels"][0])

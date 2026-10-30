@@ -357,6 +357,40 @@ fi
 # back. The authored-kernel OVERLAY (OVERLAY_PYTHONPATH) is applied BY the launcher, since
 # an external harness usually cannot, so overlay and recipe-parity coexist. FRESH launches
 # only (REUSE_SERVER=0); nothing else in the measurement changes.
+# A multinode run (`mn.py active-pin`: GEAK_MN_STATE, else the pin a live workflow on this
+# machine owns) serves on its pinned nodes, launched from here: this machine serves nothing
+# itself. On a node (GEAK_MN_HOP: `mn.py exec` brought this bench there) only an isolated
+# one-card server (TP=1, one GPU) starts.
+_MN_PIN="${GEAK_MN_STATE:-}"
+if [ -z "$_MN_PIN" ] && [ -f /tmp/geak_mn/state_path ]; then
+  _mn_py="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("mn_py") or "")' \
+             /tmp/geak_mn/state_path 2>/dev/null || true)"
+  [ -f "$_mn_py" ] && _MN_PIN="$(python3 "$_mn_py" active-pin 2>/dev/null || true)"
+fi
+if [ -n "$_MN_PIN" ] && [ "${REUSE_SERVER:-0}" != "1" ]; then
+  if [ -n "${GEAK_MN_HOP:-}" ]; then
+    BENCH_LAUNCHER=${BENCH_LAUNCHER:-native}
+    if [ "$BENCH_LAUNCHER" = "multinode" ] || [ "${TP:-1}" != "1" ] || ! [[ "${GPU:-0}" =~ ^[0-9]+$ ]]; then
+      echo "!!! On a pinned node (pin $_MN_PIN) this bench may only start an isolated one-card server" \
+           "(TP=1, one GPU), not BENCH_LAUNCHER=$BENCH_LAUNCHER TP=${TP:-1} GPU=${GPU:-0}. Serving legs run" \
+           "from the driver." >&2
+      exit 3
+    fi
+  else
+    case "${BENCH_LAUNCHER:-auto}" in
+      auto|multinode)
+        BENCH_LAUNCHER=multinode GEAK_MN_STATE="$_MN_PIN"
+        export BENCH_LAUNCHER GEAK_MN_STATE ;;
+      *)
+        echo "!!! A multinode run drives its nodes from this machine (pin $_MN_PIN), which serves nothing" \
+             "itself: BENCH_LAUNCHER=$BENCH_LAUNCHER. Leave BENCH_LAUNCHER unset to serve on the pinned nodes;" \
+             "start an isolated one-card server on a node with" \
+             "\`python3 <mn.py> exec --env --gpu <target>:<id> -- bash $0\` (BENCH_LAUNCHER=native TP=1)." >&2
+        exit 3 ;;
+    esac
+  fi
+fi
+unset _mn_py
 BENCH_LAUNCHER=${BENCH_LAUNCHER:-native}
 if [ "$BENCH_LAUNCHER" != "native" ]; then
   LAUNCHER_ADAPTER="${LAUNCHER_ADAPTER:-$HERE/adapters/launchers/${BENCH_LAUNCHER}.sh}"
@@ -369,13 +403,33 @@ if [ "$BENCH_LAUNCHER" != "native" ]; then
   # them (e.g. fall back when the external recipe/script is unavailable).
   copy_function adapter_launch adapter_launch_native
   copy_function adapter_health adapter_health_native
+  # ...and the profile window, whose request a multi-host launcher delegates to.
+  copy_function adapter_profile_window adapter_profile_window_native
   # shellcheck disable=SC1090
   source "$LAUNCHER_ADAPTER"   # MUST redefine adapter_launch (server lifecycle)
   if ! declare -F adapter_launch >/dev/null; then
     echo "!!! Launcher adapter $LAUNCHER_ADAPTER must define adapter_launch()" >&2; exit 3
   fi
 fi
-
+# ---- sampling-point probes (PROFILE_PROBE_POINTS) ----
+# Refused before launch: a server started for probes that cannot run is a wasted boot.
+if [ -n "${PROFILE_PROBE_POINTS:-}" ]; then
+  _PROBE="${SKILL_ROOT:-}/scripts/serving_probe.py"
+  # PROFILE_PROBE_WITH_WINDOW=1 (fixed-length pd_disagg): the leg keeps its timed rounds and
+  # its normal window, then probes; otherwise the leg is probes only.
+  if [ "${PROFILE:-0}" != "1" ] || [ -z "${PROFILE_PROBE_IDS:-}" ] \
+     || { [ "${PROFILE_PROBE_WITH_WINDOW:-0}" != "1" ] && [ "${REPEATS:-}" != "0" ]; }; then
+    echo "!!! PROFILE_PROBE_POINTS needs PROFILE=1 PROFILE_PROBE_IDS=<id,...> and REPEATS=0" \
+         "(or PROFILE_PROBE_WITH_WINDOW=1)" >&2; exit 4
+  fi
+  if [ ! -f "$_PROBE" ] || [ ! -f "$PROFILE_PROBE_POINTS" ]; then
+    echo "!!! probe: need SKILL_ROOT (the kernel-extract skill) and the points file;" \
+         "got '$_PROBE', '$PROFILE_PROBE_POINTS'" >&2; exit 3
+  fi
+  if ! declare -F adapter_probe_args >/dev/null; then
+    echo "!!! probe: ${LAUNCHER_ADAPTER:-$ADAPTER} defines no adapter_probe_args" >&2; exit 3
+  fi
+fi
 # ---- model / server ----
 # MODEL is REQUIRED. No rig-specific default — a wrong-but-silent default benches the wrong target.
 MODEL=${MODEL:-}
@@ -607,9 +661,11 @@ PROFILE_WINDOW_TIMEOUT=${PROFILE_WINDOW_TIMEOUT:-180}      # max wait for the tr
 PROFILE_WINDOW_SEC=${PROFILE_WINDOW_SEC:-20}        # vllm time window (floor; auto-scaled below). Sole bound on <0.26
 PROFILE_WINDOW_SEC_MAX=${PROFILE_WINDOW_SEC_MAX:-30}      # cap for the auto-scaled window (bounds trace size)
 OUT_DIR=${OUT_DIR:-$(pwd)/e2e_bench_out}
+mkdir -p "$OUT_DIR"
+# Absolute: the bench clients run from / (see adapter_bench).
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 LOG=${LOG:-$OUT_DIR/server.log}
 
-mkdir -p "$OUT_DIR"
 PROFILE_DIR="$OUT_DIR/profile"
 # On ROCm 10.0 with torch 2.12 and vLLM 0.27 (gfx1201), vLLM's EngineCore inherits
 # ROCPROFILER_REGISTER_LIBRARY from its parent, and its torch profiler then records no GPU events.
@@ -670,6 +726,14 @@ fi
 # shellcheck disable=SC1090
 source "$TEARDOWN_LIB"
 trap server_teardown EXIT
+# Bash cannot see who sent a TERM; the process table at that instant is the only witness left.
+_on_term() {
+  echo "!!! bench received SIGTERM at $(date -u +%T); process table -> ${OUT_DIR:-.}/bench_sigterm_ps.txt"
+  { date -u +%FT%T; ps -eo pid,ppid,pgid,sid,etimes,stat,args 2>/dev/null | cut -c1-300; } \
+    > "${OUT_DIR:-.}/bench_sigterm_ps.txt" 2>&1
+  exit 143
+}
+trap _on_term TERM
 
 # ---- serving-GPU mutex ----
 # TP=N on an N-GPU box means SERVING_GPU = ALL gpus = a SINGLE serving slot.
@@ -717,7 +781,8 @@ if [ "$REUSE_SERVER" != "1" ]; then
     if grep -Eq 'watchdog timeout|Capturing cuda graph failed|\[FATAL\]|(^|[[:space:]])FATAL:' "$LOG" 2>/dev/null; then
       _reason="fatal_marker"; break
     fi
-    _tok=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
+    # vLLM prints this every 60 s while its workers are wedged; it is not progress.
+    _tok=$(grep -vc 'No available shared memory broadcast block' "$LOG" 2>/dev/null); _tok=${_tok:-0}
     if [ "$_tok" != "$_last_tok" ]; then
       _last_tok="$_tok"; _last_change=$SECONDS
     elif [ $((SECONDS-_last_change)) -ge "$STALL_WINDOW_SEC" ]; then
@@ -766,8 +831,9 @@ fi
 # free-VRAM floor the baseline leg cleared into MEM_HEADROOM_MIN_MB; a candidate below it fails parity.
 # Fail-OPEN on any parse error (missing rocm-smi / unexpected schema) so non-AMD or partial rigs are
 # unaffected — this only ever rejects when it can POSITIVELY prove the headroom regressed.
-if [ -n "$OVERLAY_PYTHONPATH" ] && [ -n "${MEM_HEADROOM_MIN_MB:-}" ]; then
-  _free_mb=$(rocm-smi --showmeminfo vram --json 2>/dev/null | python3 -c '
+# A multinode leg's cards are on the nodes, not here: rocm-smi on this machine says nothing about them.
+_min_free_vram_mb() {
+  rocm-smi --showmeminfo vram --json 2>/dev/null | python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -777,7 +843,10 @@ try:
     print(min(vals) if vals else "")
 except Exception:
     print("")
-' 2>/dev/null || echo "")
+' 2>/dev/null || echo ""
+}
+if [ -n "$OVERLAY_PYTHONPATH" ] && [ -n "${MEM_HEADROOM_MIN_MB:-}" ] && [ "$BENCH_LAUNCHER" != "multinode" ]; then
+  _free_mb=$(_min_free_vram_mb)
   if [ -n "$_free_mb" ] && [ "$_free_mb" -lt "$MEM_HEADROOM_MIN_MB" ] 2>/dev/null; then
     echo "!!! Overlay resident VRAM headroom ${_free_mb}MB < baseline floor ${MEM_HEADROOM_MIN_MB}MB"
     echo "    -> memory-parity FAIL; rejecting candidate before timed legs."
@@ -822,7 +891,9 @@ else
   else
     echo ">>> Warmup round ..."
   fi
-  if ! adapter_bench "$_warmup_prompts" "$CONC" 0 >/dev/null 2>&1; then
+  if ! adapter_bench "$_warmup_prompts" "$CONC" 0 >"$OUT_DIR/warmup.log" 2>&1; then
+    echo "!!! Warmup client failed; last lines of $OUT_DIR/warmup.log:" >&2
+    tail -n 20 "$OUT_DIR/warmup.log" >&2 2>/dev/null || true
     if [ "${BENCH_OUTER_WARMUP_FULL_ROUND:-0}" = "1" ]; then
       echo "!!! Full outer warmup failed; this measurement is invalid" \
            "(the timed rounds would not be warm)." >&2
@@ -862,7 +933,44 @@ fi
 # decoding, interleaved by the scheduler. A cold burst profiled from step 0 captures only the prefill
 # ramp (TTFT) and misses decode entirely (see knowledge/profile_parse.md). So we instead drive a
 # sustained, saturated load and profile a WINDOW once it has reached the mixed steady state.
-if [ "$PROFILE" = "1" ]; then
+# PROFILE_PROBE_POINTS instead hands each planned sampling point to the kernel-extract skill's own
+# serving_probe.py on this server; the launcher/backend only says where (adapter_probe_args).
+run_probes() {
+  mkdir -p "$PROFILE_DIR"
+  for _pid in ${PROFILE_PROBE_IDS//,/ }; do
+    _phase="$(python3 -c 'import json,sys;print(next(p["phase"] for p in json.load(open(sys.argv[1]))["points"] if p["point_id"]==sys.argv[2]))' \
+               "$PROFILE_PROBE_POINTS" "$_pid" 2>/dev/null)" || _phase=""
+    if [ -z "$_phase" ]; then
+      echo "!!! probe: no point $_pid in $PROFILE_PROBE_POINTS" >&2
+      continue
+    fi
+    mkdir -p "$PROFILE_DIR/$_pid"
+    mapfile -t _probe_args < <(adapter_probe_args "$_phase" "$PROFILE_DIR/$_pid")
+    if [ "${#_probe_args[@]}" -eq 0 ]; then
+      echo "!!! probe: adapter_probe_args gave no flags for $_pid; not probed" >&2
+      continue
+    fi
+    echo ">>> probe: $_pid ($_phase) ${_probe_args[*]}"
+    # The skill's rule: keep a failed point's evidence and recapture it once.
+    if ! python3 "$_PROBE" --points "$PROFILE_PROBE_POINTS" --point-id "$_pid" \
+           --out "$PROFILE_DIR/$_pid.journal.json" "${_probe_args[@]}"; then
+      echo "!!! probe: $_pid did not verify; kept as $_pid.try1, recapturing once" >&2
+      mv "$PROFILE_DIR/$_pid.journal.json" "$PROFILE_DIR/$_pid.try1.journal.json" 2>/dev/null
+      mv "$PROFILE_DIR/$_pid" "$PROFILE_DIR/$_pid.try1"
+      mkdir -p "$PROFILE_DIR/$_pid"
+      python3 "$_PROBE" --points "$PROFILE_PROBE_POINTS" --point-id "$_pid" \
+        --out "$PROFILE_DIR/$_pid.journal.json" "${_probe_args[@]}" \
+        || echo "!!! probe: $_pid did not verify twice; its journals are the evidence" >&2
+    fi
+    if declare -F adapter_probe_after >/dev/null; then
+      adapter_probe_after "$_phase" "$PROFILE_DIR/$_pid" || true
+    fi
+  done
+  echo ">>> Probe journals in $PROFILE_DIR/<point>.journal.json"
+}
+if [ "$PROFILE" = "1" ] && [ -n "${PROFILE_PROBE_POINTS:-}" ] && [ "${PROFILE_PROBE_WITH_WINDOW:-0}" != "1" ]; then
+  run_probes
+elif [ "$PROFILE" = "1" ]; then
   mkdir -p "$PROFILE_DIR"
   # fix #1: if the caller didn't pin TPOT_MS, derive it from the timed bench we JUST ran (RESULT_JSONL
   # holds one result object per repeat, each with median_tpot_ms). This lets the vLLM time-window auto-
@@ -949,6 +1057,9 @@ PY
       adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
   fi
   echo ">>> Trace(s) in $PROFILE_DIR"
+  if [ -n "${PROFILE_PROBE_POINTS:-}" ]; then
+    run_probes
+  fi
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----

@@ -82,7 +82,9 @@ Five properties of this path are worth knowing before you deviate from it:
 - `serving_probe.py` encodes the arming rules in *Trace integrity* below as code:
   confirm occupancy from the server's own counters before arming, arm **once**, never
   `profile_by_stage`, close in a `finally`, then parse the trace back and assert the
-  intended phase and shape are in it.
+  intended phase and shape are in it. A server without `--enable-metrics` takes
+  `--occupancy-log <its scheduler log>`; a multi-node server runs the same probe through
+  `bench_e2e.sh` (`PROFILE_PROBE_POINTS`), which passes the router, engine and log.
 - `coverage_ledger.py` **refuses to report mass coverage for a phase measured at one
   point**, because a UT at that point covers 100% of a denominator built from that same
   measurement. It reports instance coverage instead and says why. It reads

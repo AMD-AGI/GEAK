@@ -182,7 +182,11 @@ freeze an out-of-regime oracle nobody should trust.
    cp -r "$CURRENT_OVERLAY"/. "$TASK/baseline_overlay"/ 2>/dev/null || \
      python3 -c "import sys;sys.path.insert(0,'$SKILL_DIR/scripts');import overlay_setup as o;o._ensure_overlay('$TASK/baseline_overlay')"
 
-   BACKEND="<backend>" OUT_DIR="$TASK/_capture" GPU="$GPU_ID" MODEL="$MODEL_PATH" \
+   # BENCH_LAUNCHER=native is required for a one-card TP=1 capture. When your prompt names an `mn.py exec`
+   # command (a multinode run), run it on a pinned node: prefix with `<that mn.py exec> --target <node> --gpu "$GPU_ID" --`.
+   # (Not when CAPTURE_ON_ENGINE is in your inputs — use the serving-leg block below.)
+   BACKEND="<backend>" BENCH_LAUNCHER=native \
+   OUT_DIR="$TASK/_capture" GPU="$GPU_ID" TP=1 MODEL="$MODEL_PATH" \
    ISL=<WORKLOAD.isl> OSL=<WORKLOAD.osl> CONC=<WORKLOAD.conc> REPEATS=0 PROFILE=0 \
    OVERLAY_PYTHONPATH="$TASK/_capture_overlay" \
    EXTRA_ENV="CAPTURE_TARGET=<selected module:attr> CAPTURE_OUT=$TASK CAPTURE_MAX=5 GEAK_SELECTION_TRACE=$TASK/selection_trace.json CAPTURE_BYTE_BUDGET=${CAPTURE_BYTE_BUDGET:-8GiB} CAPTURE_CASE_BYTE_LIMIT=${CAPTURE_CASE_BYTE_LIMIT:-2GiB} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY:-share_large}" \
@@ -195,6 +199,49 @@ freeze an out-of-regime oracle nobody should trust.
      --task-dir "$TASK" \
      --out "$TASK/selection_validation.json"
    ```
+
+   **🔴 PD-disaggregated (`CAPTURE_ON_ENGINE` is in your inputs): capture on the REAL engine, in the
+   MEASURED lifecycle — never on an isolated one-box server.** A colocated one-box server batches
+   prefill differently and misses the warm rounds, so its M set is not the engine's. So:
+   - Build the capture overlay `--from` the engine's stack: `$CAPTURE_ENGINE_BASE_OVERLAY` when non-empty,
+     else `$CAPTURE_SHARED_OVERLAY` (the same seed an Integrator candidate for this engine uses).
+   - Run it as a SERVING leg: keep the `BENCH_LAUNCHER` / `GEAK_MN_STATE` part of your prompt's SERVING env
+     line (it is what puts the leg on the pinned machines), at
+     `TP="$CAPTURE_TP" GPU="$CAPTURE_GPU"`, with the hook on this engine only:
+     ```bash
+     BACKEND="<backend>" <BENCH_LAUNCHER=... GEAK_MN_STATE=... from the SERVING env line> \
+     OUT_DIR="$TASK/_capture" TP="$CAPTURE_TP" GPU="$CAPTURE_GPU" MODEL="$MODEL_PATH" \
+     ISL=<WORKLOAD.isl> OSL=<WORKLOAD.osl> CONC=<WORKLOAD.conc> PROFILE=0 \
+     GEAK_REPEAT_MODE=warm_server REPEATS=1 MEASUREMENT_PURPOSE=search \
+     OVERLAY_PYTHONPATH="$CAPTURE_SHARED_OVERLAY" \
+     <CAPTURE_ENGINE_OVERLAY_VAR>="$TASK/_capture_overlay" \
+     EXTRA_SERVER_ARGS="$CURRENT_FLAGS" \
+     EXTRA_ENV="$CURRENT_ENV CAPTURE_TARGET=... (same capture vars as above)" \
+       bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/capture_<short_name>.log"
+     ```
+     `CAPTURE_OUT=$TASK` must be on the shared filesystem (it is: `EVAL_DIR`); the engine's ranks write
+     their `capture.pid-*.rank-*` dirs there from whichever host serves it. The capture vars reach both
+     engines, but only this engine imports the hook overlay, so the other engine records nothing.
+   - Verify in `$CAPTURE_ENGINE_LOG` (the log `$TASK/_capture/mn_launch.json` records for this engine)
+     that the hook ran on this engine, then run
+     `kernel_selection.py` exactly as above.
+   - The M set of this op is then `meta.shape_counts` from THIS capture (cold round + warm rounds, with
+     their call counts). Record `"capture_engine": "<CAPTURE_ON_ENGINE>"` and
+     `"capture_lifecycle": "warm_server"` in `meta.json`. Do not replace the captured M with chunk/ISL
+     buckets; add those only when the capture saw them.
+   **🔴 `CAPTURE_ON_ENGINE=tp_span` (one server whose TP group spans the pinned machines): same
+   serving-leg capture, one engine.** The one-card TP=1 server is not the served model: its N/K are
+   unsharded, `--dp-size`/`--enable-dp-attention`/`--ep-size` are refused at TP=1, and a model bigger
+   than one card never boots. So never fall back to it here, not even "just for the shapes".
+   - Build the capture overlay `--from "$CAPTURE_ENGINE_BASE_OVERLAY"` (the current shared overlay).
+   - Run it with the command above, dropping the `<CAPTURE_ENGINE_OVERLAY_VAR>=` line and passing
+     `OVERLAY_PYTHONPATH="$TASK/_capture_overlay"` directly. Keep `EXTRA_SERVER_ARGS="$CURRENT_FLAGS"`
+     verbatim — the DP/EP flags in it are what make the captured shapes the served ones.
+   - Every rank on every machine imports the hook, so expect `capture.pid-*.rank-*` from all
+     `CAPTURE_TP` ranks: each holds that rank's `meta.json` and selection traces, and only rank 0
+     also holds `reference_io.pt` (every rank runs the same shapes). `kernel_selection.py` is run
+     exactly as above and promotes rank 0's oracle. Record
+     `"capture_engine": "tp_span"` and `"capture_lifecycle": "warm_server"` in `meta.json`.
    Repeat `--candidate-target` for every relevant candidate. `seam_trace` writes an atomic trace for
    each PID/rank/root call, and `capture_shapes` writes atomic process-local artifacts. The verifier
    merges all calls for each PID, isolates External ids between trace files, and requires every capture
@@ -671,11 +718,32 @@ needs an op task dir the **Op Benchmarker** can bake-off across backends. `edit=
 >   reduce, one dispatcher call), NOT per-GEMM stages timed in isolation — the fusion boundary, the
 >   intermediate-activation residency, and the reduce are part of the op being optimized/measured.
 
+> **🔴 PD-disaggregated serving (`SERVING_ENGINE` is in your inputs, value `prefill` or `decode`) — the
+> both-regimes rule INVERTS, and following the colocated rule here is wrong, not merely conservative.**
+> Colocated, one kernel serves prefill AND decode, so the unittest must span both or a head tuned on the
+> GPU-time-dominant prefill M regresses decode. Disaggregated, they are **different machines**: this
+> kernel runs on the `SERVING_ENGINE` engine and **never sees the other regime's shape**. So build the
+> case set for THAT engine only — the orchestrator already sets `REQUIRE_DECODE_BUCKET` and
+> `PREFILL_M_NOTE` accordingly, and `PROFILE_WORKLOAD_JSON` is already that engine's own model (the
+> Profiler parses each engine's rank-0 trace separately). Adding the other engine's M spends the search
+> on a shape this kernel never runs and can pick a config that loses on the one it does. Pass
+> `--served-regimes` to `attribute_weights.py` as that engine's regime (`prefill` → `prefill`, `decode`
+> → `decode`), and record `SERVING_ENGINE` in `meta.json`/`notes` so the A/B that follows is read as a
+> statement about that engine, not about the server.
+> **The engine's M set comes from a capture ON that engine, even for a synthesized GEMM.** `GEMM_SYNTH`
+> only means the operands may be synthesized; the shapes may not be derived from ISL/chunk. Run the
+> PD capture (`CAPTURE_ON_ENGINE`, PHASE=extract step 2) and take every `(M,N,K)` in its
+> `meta.shape_counts` as a case, weighted by its count. A prefill engine under the warm measured
+> lifecycle runs mostly few-token M (prefix-cache hits), which no config-derived bucket predicts. Put
+> the captured M list in `meta.prefill_m_buckets` / `decode_m_buckets`; if the capture failed, say so
+> in `notes`.
+
 Inputs: `EVAL_DIR`, `MODEL_PATH`, `GPU_ID`, `WORKLOAD`, `KERNEL` (Architect head candidate: short_name,
 op_kind=gemm|attn, the profiled `shapes`, dtype, regime, `target_callable` for attn, and OPTIONAL
 TraceLens `source_hint`/`launcher_hint`/`bound_type`), `GEMM_SYNTH` (bool, default true),
-`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, and OPTIONAL `PROFILE_WORKLOAD_JSON` (the profiler's
-per-(shape,dtype) weighted workload model — slice this kernel's cases into `workload_path`, see below).
+`CURRENT_FLAGS`/`CURRENT_ENV`, `SKILL_DIR`, OPTIONAL `PROFILE_WORKLOAD_JSON` (the profiler's
+per-(shape,dtype) weighted workload model — slice this kernel's cases into `workload_path`, see below),
+and OPTIONAL `SERVING_ENGINE` (`prefill`/`decode` under PD disaggregation — see the box above).
 
 > **TraceLens shape double-check (mandatory when the shapes came from TraceLens).** If `KERNEL.shapes`
 > originated from the upstream `analysis.md`/`kernel_candidates.json` prior, treat them ONLY as a
@@ -735,7 +803,8 @@ in `meta.json` (op_bench reads it to annotate the Amdahl ceiling on the isolated
 1. Parse the profiled `shapes` into `a_shape`, `b_shape`. Decide `transpose_b` from the math
    (sglang Linear = `F.linear(x,W)` → `transpose_b=true`; a raw `A@B` → false) and whether there is a
    fused `bias`/activation epilogue (from the kernel name / neighbor in the trace).
-2. If `GEMM_SYNTH` (default): do NOT hook the server. Write `meta.json` with
+2. If `GEMM_SYNTH` (default): do NOT hook the server for the oracle (under PD you still run the
+   `CAPTURE_ON_ENGINE` capture for the M set — see the PD box above). Write `meta.json` with
    `{op_kind:"gemm", dtype, a_shape, b_shape, transpose_b, bias, math_contract:"C = A·Bᵀ + bias",
    regime}`. The oracle is computed by `op_bench.py` from the default backend at load time (it falls
    back to synthesizing inputs when `reference_io.pt` is absent). This is cheap and needs no GPU server.
@@ -840,6 +909,25 @@ force real compact-operand compute:
    forwards; `engagement_hits==0` means the seam is dead on this arch/dtype — switch seam or skip the head,
    do NOT spend authoring budget. Only return `target_callable=""` if no Python seam genuinely exists (then
    an authored kernel can't be wired and a direct_light env winner still applies).
+7. **Declare how an authored kernel becomes the candidate** (whenever `target_callable` is non-empty).
+   The bake-off may hand this task to the kernel layer's author mode, which writes into an empty
+   `kernel_src/`. Without a bind there is no candidate leg, and the kernel layer falls back to editing
+   the installed library in place — which the measurement does not see under multinode (each machine
+   has its own install; only the shared disk is common) and which both legs load on a single node.
+   Add to `meta.json`:
+   ```json
+   "candidate_bind": {"kind": "rebind", "target": "<target_callable>", "impl_module": "candidate",
+                      "impl_attr": "<attr of target_callable>", "file": "kernel_src/candidate.py"}
+   ```
+   and keep the live implementation as read-only text for a re-tune to start from, resolved as the
+   current stack sees it (PHASE=extract step 3):
+   ```bash
+   SRC="$(PYTHONPATH="$TASK/baseline_overlay:$PYTHONPATH" \
+          python3 "$TASK/overlay_setup.py" check --module "<module of target_callable>" --path-only)"
+   mkdir -p "$TASK/baseline_ref" && cp "$SRC" "$TASK/baseline_ref/$(basename "$SRC").orig"
+   ```
+   Do not create `kernel_src/` (the kernel layer seeds it) and do not change `unittest.py`: the
+   bake-off still times backends through `baseline_callable`.
 
 > **Shapes must be the REAL ones the server issues — and they MUST span BOTH regimes.** A head GEMM
 > serves many M buckets: the **decode** regime at small M = the steady-state running batch (M ≈ `WORKLOAD.conc`,

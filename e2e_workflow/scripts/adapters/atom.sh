@@ -232,7 +232,9 @@ adapter_bench() {
   [ "${BENCH_TRUST_REMOTE_CODE:-0}" = "1" ] && extra+=(--trust-remote-code)
   [ -n "${REQUEST_RATE:-}" ] && extra+=(--request-rate "$REQUEST_RATE") || extra+=(--request-rate inf)
 
-  python3 -m atom.benchmarks.benchmark_serving \
+  # From /: `python -m` puts the cwd first on sys.path, so a task directory's unittest.py
+  # (or any stdlib-named file) would shadow the module the client imports.
+  (cd / && python3 -m atom.benchmarks.benchmark_serving \
     --backend vllm --base-url "$BASE_URL" --model "$MODEL" \
     --dataset-name random --random-input-len "$ISL" --random-output-len "$OSL" \
     --random-range-ratio "${RANDOM_RANGE_RATIO:-0}" \
@@ -241,7 +243,7 @@ adapter_bench() {
     --seed "$SEED" --ignore-eos \
     --percentile-metrics "ttft,tpot,itl,e2el" \
     --save-result --result-dir "$res_dir" --result-filename "$res_name" \
-    "${extra[@]}" || return $?
+    "${extra[@]}") || return $?
 
   local res_json="$res_dir/$res_name"
   [ -f "$res_json" ] || res_json="$(ls -t "$res_dir"/*.json 2>/dev/null | head -n1)"

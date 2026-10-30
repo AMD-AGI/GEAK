@@ -85,7 +85,8 @@ Inputs: `EVAL_DIR`, `MODEL_PATH`, `BACKEND`, `GPU_ID`, `WORKLOAD` (isl/osl/conc)
 `EXTRA_SERVER_ARGS`/`EXTRA_ENV` (the current accepted config), `SKILL_DIR`.
 OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing as "not provided"):
 `TRACELENS_ANALYSIS_MD`, `TRACELENS_KERNEL_CANDIDATES_JSON`, `TRACELENS_REPORT_JSON`,
-`TRACELENS_TRACE_FILE`.
+`TRACELENS_TRACE_FILE`, `TRACELENS_TRACE_FILES` (multi-node only: space-separated rank0 traces, one per
+engine pod; `analysis.md` is merged over all of them).
 
 ### Step 0 — TraceLens fast-path (PHASE=baseline / ROUND 0 ONLY; skip entirely for any reprofile)
 
@@ -116,6 +117,15 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
     --torch-trace "$TLT" \
     --annotate-out "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json"
   ```
+  **Multi-node (`TRACELENS_TRACE_FILES` non-empty) — run this instead of the block above:** the merged
+  `analysis.md` spans every engine, so annotate against ALL of them at once — one engine's trace alone marks the other engine's kernels
+  `unresolved`:
+  ```bash
+  TLARGS=(); for t in $TRACELENS_TRACE_FILES; do TLARGS+=(--torch-trace "$t"); done
+  python3 "$EVAL_DIR/parse_profile.py" \
+    --annotate "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json" "${TLARGS[@]}" \
+    --annotate-out "$EVAL_DIR/profile/round_${ROUND}/profile_topN.json"
+  ```
   If no trace is available, fall back to the normal collection below instead of guessing a row's
   entity kind. Annotation expands an outer dispatcher/custom-op row through torch-profiler External-id
   edges into its concrete device children. Preserve the resulting `device_kernel`, `profile_parent`,
@@ -134,6 +144,10 @@ An upstream orchestrator may already have profiled the SAME baseline workload wi
   [ -n "$TLT" ] && python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$TLT" \
     --top 25 --out "$EVAL_DIR/profile/round_${ROUND}/profile_topN_tracelens"
   ```
+  Multi-node (`TRACELENS_TRACE_FILES` non-empty): run this pass once per trace in the list
+  (`--out .../profile_topN_tracelens_<i>`, i = its position) and reconcile each kernel against the trace
+  it appears in. Do NOT write `profile_topN_by_role` / `profile_workload_by_role` from this prior: the
+  per-engine tables come from GEAK's own reprofile (Step 3's trace-gate + topn-merge).
   Then **reconcile**: the parser's per-launch `shapes`/`dtypes` are derived directly from the trace and
   are MORE RELIABLE than the `<br>` shapes in `analysis.md` — **prefer the parser shapes for any kernel
   that matches** (this is the mandatory shape double-check, since `analysis.md` shapes may be inaccurate). Keep
@@ -159,6 +173,22 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/profile_r${ROUND}.log"
    ```
    The torch trace lands as a `*.json.gz` (or `*.json`) under `OUT_DIR/profile/`.
+
+   **`SERVING_TOPOLOGY=pd_disagg` with `BACKEND=sglang`: the same leg also probes sampling points**,
+   which is where the two engines' weights come from (step 3). Plan them from the BASELINE leg's
+   engine logs, then add three variables to the command above:
+   ```bash
+   KX="$SKILL_DIR/knowledge/kernel_extraction_skills/kernel-extract"
+   BL_LOG() { python3 -c 'import json,sys;print(next(e["log"] for e in json.load(open(sys.argv[1]))["pd"]["engines"] if e["role"]==sys.argv[2]))' "$EVAL_DIR/baseline/mn_launch.json" "$1"; }
+   PTS="$EVAL_DIR/profile/round_${ROUND}/points"
+   IDS=$(python3 "$SKILL_DIR/scripts/multi_node/mn.py" pd-points --skill-root "$KX" --out-dir "$PTS" \
+           --engine-log prefill="$(BL_LOG prefill)" --engine-log decode="$(BL_LOG decode)" \
+         | sed -n 's/^PROFILE_PROBE_IDS=//p')
+   # add to the bench_e2e.sh env:
+   #   SKILL_ROOT="$KX" PROFILE_PROBE_POINTS="$PTS/sampling_points.json" PROFILE_PROBE_IDS="$IDS" PROFILE_PROBE_WITH_WINDOW=1
+   ```
+   If `pd-points` exits 2, run the leg without the three variables and say why in `notes`; step 3
+   then weighs on AgentX's analytic step counts, as one node does without a serving log.
 2. (Recommended refinement) Also capture a rocprofv3 kernel trace for authoritative HW durations.
    **Priority is UNCHANGED: the torch trace from step 1 is the PRIMARY routing source** (it ranks the
    top kernels by GPU time + carries op names/shapes); rocprofv3 refines the HW timings.
@@ -206,10 +236,13 @@ assert len(d.get("completed_ranks", [])) >= int(d.get("expected_ranks", 1)), d
 PY
      TRACE=$(find "$PDIR/rank_0" "$PDIR/dp0_tp0" -type f -name '*.trace.json.gz' \
        -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
-   else
-     TRACE=$(ls -t "$PDIR"/*.json.gz "$PDIR"/*.json 2>/dev/null | head -1)
-   fi
-   [ -n "$TRACE" ] || { echo "No complete torch trace found under $PDIR" >&2; exit 1; }
+    else
+      # Multi-node: every rank's trace is here; `mn.py trace-gate` names the one to parse.
+      TRACE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("parsed_trace") or "")' \
+        "$PDIR/ranks/mn_trace_report.json" 2>/dev/null)
+      [ -n "$TRACE" ] || TRACE=$(ls -t "$PDIR"/*.json.gz "$PDIR"/*.json 2>/dev/null | head -1)
+    fi
+    [ -n "$TRACE" ] || { echo "No complete torch trace found under $PDIR" >&2; exit 1; }
    # CAPTURE_SIZES: the server's cudagraph_capture_sizes (grep server.log "cudagraph_capture_sizes");
    # CHUNK: max_num_batched_tokens (grep server.log "Chunked prefill is enabled with ...").
    python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$TRACE" \
@@ -219,6 +252,70 @@ PY
      --top 25 --out "$EVAL_DIR/profile/round_${ROUND}/profile_topN" \
      --workload-out "$EVAL_DIR/profile/round_${ROUND}/profile_workload.json"
    ```
+   **PD-disaggregated serving (`$PDIR/ranks/mn_trace_roles.json` EXISTS) — parse EACH ENGINE, then
+   merge.** That file (from `mn.py trace-gate`) names one TP-0 trace per engine, each in its own
+   subdirectory; both engines number ranks from TP-0, so `ls -t | head -1` would pick one at random.
+   ```bash
+   ROLES="$PDIR/ranks/mn_trace_roles.json"
+   if [ -s "$ROLES" ]; then
+     RD="$EVAL_DIR/profile/round_${ROUND}"; MERGE=()
+     # Each engine's front-end log, as mn.py launch recorded it.
+     LOG_OF() { python3 -c 'import json,sys;print(next(e["log"] for e in json.load(open(sys.argv[1]))["pd"]["engines"] if e["role"]==sys.argv[2]))' "$RD/mn_launch.json" "$1"; }
+     for R in $(python3 -c 'import json,sys;print(" ".join(e["role"] for e in json.load(open(sys.argv[1]))["roles"] if e["trace"]))' "$ROLES"); do
+       T=$(python3 -c 'import json,sys;print(next(e["trace"] for e in json.load(open(sys.argv[1]))["roles"] if e["role"]==sys.argv[2]))' "$ROLES" "$R")
+       python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$T" \
+         --isl <isl> --osl <osl> --conc <conc> \
+         ${CHUNK:+--prefill-chunk "$CHUNK"} ${CAPTURE_SIZES:+--capture-sizes "$CAPTURE_SIZES"} \
+         --top 25 --out "$RD/profile_topN_$R" --workload-out "$RD/profile_workload_$R.json"
+       MERGE+=(--engine "$R=$RD/profile_topN_$R.json")
+     done
+     # Probed points (step 1): each point's TP-0 trace -> census -> one coverage ledger.
+     KX="$SKILL_DIR/knowledge/kernel_extraction_skills/kernel-extract"; PTS="$RD/points"; WEIGH=()
+     if [ -s "$PTS/sampling_points.json" ]; then
+       CENSUS=()
+       for ID in $(python3 -c 'import json,sys;print(" ".join(p["point_id"] for p in json.load(open(sys.argv[1]))["points"]))' "$PTS/sampling_points.json"); do
+         J="$PDIR/$ID.journal.json"
+         [ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$J" 2>/dev/null)" = ok ] || continue
+         T=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["roles"][0]["trace"])' "$PDIR/$ID/ranks/mn_trace_roles.json")
+         python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$T" --top 200 \
+           --isl <isl> --osl <osl> --conc <conc> --out "$PTS/census_$ID"
+         CENSUS+=(--census "$ID=$PTS/census_$ID.json")
+       done
+       python3 "$KX/scripts/coverage_ledger.py" --points "$PTS/sampling_points.json" "${CENSUS[@]}" \
+         --out "$PTS/coverage.json" && WEIGH=(--coverage "$PTS/coverage.json")
+     fi
+     python3 "$SKILL_DIR/scripts/multi_node/mn.py" topn-merge \
+       "${MERGE[@]}" --top 25 --out "$RD/profile_topN" "${WEIGH[@]}" --osl <osl> \
+       --bench-summary "$EVAL_DIR/baseline/bench_summary.json" \
+       --roles "$ROLES" \
+       --engine-log prefill="$(LOG_OF prefill)" --engine-log decode="$(LOG_OF decode)"
+   fi
+   ```
+   With probed points, each engine is weighed by its GPU-time mass over the baseline leg: every
+   point's per-step kernel time × the steps that engine's baseline log counts at that shape, summed,
+   × its ranks (`engine_weights.rule = gpu_time_mass`, the rule AgentX uses). As on one node, a point
+   that does not verify is recaptured once (`bench_e2e.sh` keeps the first try as `<id>.try1`); one
+   still not `ok` gets no census, and the merge weighs on with coverage_ledger's warning that its steps
+   contributed no mass (`engine_weights.warnings`, also in the .md). Copy every such warning into
+  `notes`: that engine's weight is low by those steps. Without probed points (vLLM, or `pd-points`
+  failed) each engine is weighed as one node is without a serving log: its window's mean GPU time per
+  step (`step_ledger`) × parse_profile's `serving.analytic_calls` for its phase (CONC×⌈ISL/chunk⌉
+  prefill steps, OSL decode steps) × its ranks (`engine_weights.rule = analytic_calls`). That count
+  assumes every decode step runs CONC requests; copy its warning into `notes`. It is only as right as
+  the `--isl/--osl/--conc` and `CHUNK` each engine was parsed with. If the merge exits 2 (a phase with
+  no probed mass at all, an engine without step annotations or `serving.analytic_calls`, no rank
+  counts), the profile FAILED — report the reason it printed; never merge the engines yourself.
+  The `--bench-summary` only adds a TTFT/TPOT `latency_split` for the reader; it never weighs.
+  Put the merged table's `bottleneck_engine`, each `per_engine[].weight_pct`, `engine_weights.rule`
+  (with `gpu_time_mass`: `inputs.mass_us`; with `analytic_calls`: `inputs.per_step_ms` and
+  `inputs.calls_per_wave`; every warning), and the `kv_handoff` numbers (decode `wait_share`,
+   prefill `computed_tokens_per_seq`) in `notes`. If the merge printed `no kv_handoff block`, say that
+   part is missing rather than estimating it.
+   Report the per-engine artifacts in `profile_topN_by_role` and `profile_workload_by_role` (the
+   Kernel Extractor builds each head against its own engine's workload). If one engine produced no
+   trace, say it is unprofiled (the merge exits 2 on one engine) — never infer its table from the other. `CHUNK`/`CAPTURE_SIZES` are per engine: read them from that engine's own server log
+   (`$(LOG_OF prefill)` / `$(LOG_OF decode)` above).
+
    Pass `--isl/--osl/--conc` (the SAME values as the bench). IF the trace carries `gpu_user_annotation`
    `execute_*` step spans, each top kernel is annotated with its MEASURED serving **phase**
    (`prefill`/`decode`/`both`), per-phase `base_latency_ms`, and a top-level `serving` block with the
@@ -270,6 +367,11 @@ Return JSON:
   "round": 0,
   "profile_topN_json": "<EVAL_DIR>/profile/round_0/profile_topN.json",
   "profile_topN_md": "<EVAL_DIR>/profile/round_0/profile_topN.md",
+  "profile_topN_by_role": {"prefill": "<...>/profile_topN_prefill.json",
+                           "decode": "<...>/profile_topN_decode.json"},
+  "profile_workload_by_role": {"prefill": "<...>/profile_workload_prefill.json",
+                               "decode": "<...>/profile_workload_decode.json"},
+
   "profile_roofline_json": "<EVAL_DIR>/profile/round_0/profile_roofline.json  (\"\" if no analysis skill ran)",
   "source": "torch-trace|merged|tracelens|tracelens+trace",
   "total_gpu_time_ms": 0.0,
