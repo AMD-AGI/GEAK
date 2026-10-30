@@ -12,6 +12,8 @@ either shipped by content here or a run artifact on the shared mount.
     mn.py digest       fingerprint an overlay tree (a rank refuses to start on another one)
     mn.py trace-gate   validate the per-rank trace set before parsing    (mn_traces.py)
     mn.py topn-merge   fold a pd_disagg run's per-engine Top-Ns into one (mn_traces.py)
+    mn.py pd-mass      rewrite an AgentX pd_disagg ranking on both engines' GPU-time mass (mn_traces.py)
+    mn.py pd-points    plan a fixed-length pd_disagg run's sampling points from its engine logs (mn_traces.py)
     mn.py probe        (internal) this node's probe
 
 GEAK does not manage the cluster. A rank's script is either GENERATED here (each
@@ -2184,7 +2186,7 @@ def cmd_digest(argv: list) -> int:
 
 
 def _offline(name: str):
-    """trace-gate / topn-merge live in mn_traces.py beside this file. Imported on use:
+    """trace-gate / topn-merge / pd-mass live in mn_traces.py beside this file. Imported on use:
     run_e2e loads mn.py by path, where this directory is not on sys.path."""
     def run(argv: list) -> int:
         import mn_traces
@@ -2203,6 +2205,8 @@ COMMANDS = {
     "digest": cmd_digest,
     "trace-gate": _offline("cmd_trace_gate"),
     "topn-merge": _offline("cmd_topn_merge"),
+    "pd-mass": _offline("cmd_pd_mass"),
+    "pd-points": _offline("cmd_pd_points"),
     "probe": cmd_probe,
 }
 TAGS = {"supervise": "mn-sup"}

@@ -124,20 +124,27 @@ async function run(body, overrides = {}, reply = selection()) {
   assert.equal(input.CAPTURE_BY_ENGINE, undefined, 'one host: no engine capture inputs');
   assert(!first.calls[0].intro.includes('MULTINODE'), 'one host: the prompt is unchanged');
 
-  // PD: each engine's capture inputs, sampling through serving legs, decode first on interactivity.
+  // PD: each engine's capture inputs, sampling through serving legs; the engine weights ranked the
+  // queue already, so it keeps the extraction's order, and an envelope without them is refused.
   const pdSelection = selection();
   pdSelection.kernel_candidates = [{ ...candidate('p'), engine: 'prefill' }, { ...candidate('d'), engine: 'decode' }];
+  pdSelection.engine_weights = { rule: 'gpu_time_mass', weights: { prefill: 0.6, decode: 0.4 },
+    inputs: { mass_us: { PREFILL: 60e6, DECODE: 40e6 }, ranks: { prefill: 8, decode: 8 } }, warnings: [] };
   const pdOverrides = { MN: { nodes: ['p0', 'd0'] }, SERVING_TOPOLOGY: 'pd_disagg' };
   const pdRun = await run(initial, { ...pdOverrides, AGENTX_METRIC_BASIS: 'p90_intvty_inferencex' }, pdSelection);
   assert.deepEqual(pdRun.calls[0].inputs.CAPTURE_BY_ENGINE,
     { prefill: { CAPTURE_ON_ENGINE: 'prefill' }, decode: { CAPTURE_ON_ENGINE: 'decode' } });
   assert(pdRun.calls[0].intro.includes('/wf/roles/_fragments/agentx_multinode.md'), 'multinode rules fragment');
   const mnFragment = fs.readFileSync(path.join(__dirname, '..', 'roles', '_fragments', 'agentx_multinode.md'), 'utf8');
-  for (const rule of ['PROFILE=1', 'serving_probe.py', 'run/requested_kernel.json', 'gpu_lock.sh'])
+  for (const rule of ['PROFILE=1', 'serving_probe.py', 'run/requested_kernel.json', 'gpu_lock.sh',
+    'pd-mass', '--roles', 'phase_mass_share_pct'])
     assert(mnFragment.includes(rule), rule);
-  assert.deepEqual(pdRun.kernelQueue.map(c => c.engine), ['decode', 'prefill']);
-  const pdOutput = await run(initial, pdOverrides, pdSelection);
-  assert.deepEqual(pdOutput.kernelQueue.map(c => c.engine), ['prefill', 'decode'], 'other bases keep the ranking');
+  assert.deepEqual(pdRun.kernelQueue.map(c => c.engine), ['prefill', 'decode'],
+    'no axis-name reordering on top of the engine weights');
+  const unweighed = selection();
+  unweighed.kernel_candidates = pdSelection.kernel_candidates;
+  await assert.rejects(run(initial, pdOverrides, unweighed),
+    /AgentX UT delivery unreadable: PD envelope carries no engine_weights/);
   const span = await run(initial, { MN: { nodes: ['a', 'b'] }, SERVING_TOPOLOGY: 'tp_span' });
   assert.deepEqual(span.calls[0].inputs.CAPTURE_BY_ENGINE, { tp_span: { CAPTURE_ON_ENGINE: 'tp_span' } });
   assert.equal(first.headQueue[0].pct_gpu_time, 7.25, 'routing uses attributable share, not window pct');

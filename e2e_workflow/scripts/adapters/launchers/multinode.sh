@@ -154,6 +154,48 @@ _mn_pd_window() {
   printf '%s' "$_windowed"
 }
 
+# A field of the pd record's replica-0 engine of a role (mn_launch.json).
+_mn_engine() {
+  python3 -c 'import json,sys;e=(json.load(open(sys.argv[1])).get("pd") or {}).get("engines") or [];print(next((x.get(sys.argv[3]) or "" for x in e if x.get("role")==sys.argv[2] and not x.get("replica")),""))' \
+    "${OUT_DIR:-.}/mn_launch.json" "$1" "$2" 2>/dev/null
+}
+
+# adapter_probe_args <phase> <point dir> — serving_probe.py's flags (bench_e2e.sh
+# PROFILE_PROBE_POINTS). Requests go to the client port (the LB on pd_disagg, which
+# proxies no profiler); the window opens on the engine that runs the point's phase.
+# Occupancy is always the decode engine's TP-0 log: no engine runs --enable-metrics.
+adapter_probe_args() {
+  local _url="$BASE_URL" _log="$LOG" _dir="$2" _ranks="$TP" _role
+  if [ "$_MN_TOPOLOGY" = "pd_disagg" ]; then
+    _role=decode; [ "$1" = "PREFILL" ] && _role=prefill
+    _url="$(printf '%s\n' "$_MN_PD_ENGINES" | sed -n "s/^$_role=//p" | head -n1)"
+    _log="$(_mn_engine decode log)"
+    _ranks="$(_mn_engine "$_role" tp)"
+    _dir="$2/$_role"
+  fi
+  if [ -z "$_url" ] || [ -z "$_log" ] || [ -z "$_ranks" ]; then
+    echo "!!! multinode: no ${_role:-master} engine url/log/tp for a $1 probe" \
+         "(${OUT_DIR:-.}/mn_launch.json)" >&2
+    return 1
+  fi
+  printf '%s\n' --base-url "$BASE_URL" --profile-url "$_url" --occupancy-log "$_log" \
+    --trace-dir "$_dir" --expect-traces "$_ranks" --record-shapes \
+    --with-stack "${SGLANG_PROFILE_WITH_STACK:-false}"
+}
+
+# adapter_probe_after <phase> <point dir> — the rank-set report of the window the probe
+# opened; pd_disagg also writes that engine's ranks/mn_trace_roles.json for pd-mass.
+adapter_probe_after() {
+  local _ranks="$TP" _role=""
+  if [ "$_MN_TOPOLOGY" = "pd_disagg" ]; then
+    _role=decode; [ "$1" = "PREFILL" ] && _role=prefill
+    _ranks="$(_mn_engine "$_role" tp)"
+  fi
+  python3 "$_MN_DIR/mn.py" trace-gate --profile-dir "$2" --expect-ranks "${_ranks:-$TP}" \
+    --nodes "$_MN_NNODES" \
+    ${_role:+--launch-json "${OUT_DIR:-.}/mn_launch.json" --role "$_role"}
+}
+
 # adapter_profile_window: the backend's version returns on ONE new trace; here
 # every rank's trace must finish flushing before the gate runs.
 adapter_profile_window() {

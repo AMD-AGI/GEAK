@@ -21,6 +21,16 @@ async function within(root, name) {
   return file;
 }
 
+// PD: the cross-engine denominator is `mn.py pd-mass --apply`'s (both engines' GPU-time
+// mass x ranks) -- never one the extraction agent chose, and never a graded axis.
+function pdEngineWeights(ranking) {
+  const weights = ranking.denominators || {};
+  if (weights.rule !== 'gpu_time_mass')
+    throw new Error('PD kernel_ranking.json denominators were not written by `mn.py pd-mass --apply`; ' +
+      'run it on the ranking before select_targets.py');
+  return weights;
+}
+
 // Selection is an internal artifact. Read the skill's completed UT deliveries
 // once, then expose only validated tasks to the ordinary optimization queues.
 // engines: a PD run's engine names; each task then names the one its kernel was traced on.
@@ -36,7 +46,9 @@ async function readPreparedDocument(root, delivery, deliveryPath, engines = []) 
   const workloadPath = await within(root, delivery.workload_json);
   const rankingPath = await within(root, delivery.ranking_json);
   const ranking = JSON.parse(await fs.readFile(rankingPath, 'utf8'));
+  const engineWeights = engines.length ? pdEngineWeights(ranking) : undefined;
   const output = { head_candidates: [], kernel_candidates: [], config_directions: [],
+    ...(engineWeights ? { engine_weights: engineWeights } : {}),
     profile_workload_json: workloadPath, kernel_ranking_json: rankingPath,
     kernel_extraction_delivery_json: deliveryPath,
     failed_tasks: Array.isArray(delivery.failed_tasks) ? delivery.failed_tasks.slice() : [],

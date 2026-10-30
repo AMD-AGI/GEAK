@@ -247,9 +247,17 @@ test('whole-op metadata routes attention aliases to head and preserves the consu
   await assert.rejects(f.pack(), /op_kind differs/);
 });
 
+const GPU_TIME_MASS = {rule: 'gpu_time_mass', weights: {prefill: 0.6, decode: 0.4},
+  inputs: {mass_us: {PREFILL: 60e6, DECODE: 40e6}, ranks: {prefill: 8, decode: 8}}, warnings: []};
+async function weighed(f, denominators) {
+  await f.writeEval('ranking.json', {denominators,
+    ranking: [{name: 'leaf_kernel', selection_pct_gpu_time: 7.5}]});
+}
+
 test('a PD delivery names each task\'s engine, and the engine reaches the candidate', async t => {
   const f = await delivered(t);
   const engines = ['prefill', 'decode'];
+  await weighed(f, GPU_TIME_MASS);
   await f.pack();
   const untagged = await readPreparedKernels(f.evalDir, 'delivery.json', {engines});
   assert.equal(untagged.kernel_candidates.length, 0);
@@ -260,6 +268,28 @@ test('a PD delivery names each task\'s engine, and the engine reaches the candid
   await f.pack();
   const tagged = await readPreparedKernels(f.evalDir, 'delivery.json', {engines});
   assert.equal(tagged.kernel_candidates[0].engine, 'decode');
+  assert.deepEqual(tagged.engine_weights, GPU_TIME_MASS);
+});
+
+test('a PD ranking must carry the GPU-time mass mn.py pd-mass wrote', async t => {
+  const f = await delivered(t);
+  const engines = ['prefill', 'decode'];
+  await f.write('run/requested_kernel.json', {...f.kernel, engine: 'decode'});
+  await f.pack();
+  await weighed(f, {basis: 'agent busy rate', prefill_engine: {deployment_weight_pct: 93.4}});
+  await assert.rejects(readPreparedKernels(f.evalDir, 'delivery.json', {engines}),
+    /not written by `mn.py pd-mass --apply`/);
+  for (const rule of ['decode_only', 'latency_split']) {
+    await weighed(f, {metric_basis: 'p90_intvty_inferencex', rule, weights: {prefill: 0, decode: 1}});
+    await assert.rejects(readPreparedKernels(f.evalDir, 'delivery.json', {engines}),
+      /not written by `mn.py pd-mass --apply`/, `a metric-weighted ${rule} ranking is refused`);
+  }
+  await weighed(f, GPU_TIME_MASS);
+  assert.deepEqual((await readPreparedKernels(f.evalDir, 'delivery.json', {engines})).engine_weights,
+    GPU_TIME_MASS, 'no baseline bench_summary is read: the mass does not depend on the metric');
+  const oneHost = await readPreparedKernels(f.evalDir, 'delivery.json');
+  assert.equal(oneHost.kernel_candidates.length, 1, 'one host or tp_span: no engines to weigh');
+  assert.equal(oneHost.engine_weights, undefined);
 });
 
 test('completed multi-rank UTs retain evidence but do not enter single-GPU optimization lanes', async t => {

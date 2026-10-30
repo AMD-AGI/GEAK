@@ -37,6 +37,11 @@ Four rules, each of which was learned by a window failing
    this probe parses the trace and asserts the intended phase and shape are actually in
    it, and reports what it found either way.
 
+A multi-node server (bench_e2e.sh PROFILE_PROBE_POINTS) runs these same rules; only
+where things are differs: requests go to the router (--base-url), the window opens on
+the point's engine (--profile-url), occupancy comes from that engine's log
+(--occupancy-log: no /metrics there), and every rank writes a trace (--expect-traces).
+
 Stdlib only.
 """
 import argparse
@@ -52,6 +57,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from observed_workload import parse_line  # noqa: E402
 
 
 def post(base, path, obj=None, timeout=1800):
@@ -85,6 +92,33 @@ def scrape_metrics(base, timeout=30):
     return out.get("num_running_reqs"), out.get("gen_throughput"), None
 
 
+class LogOccupancy:
+    """The same (num_running_reqs, gen_throughput) from the scheduler's own decode rows,
+    for a server without /metrics. Parsed by observed_workload's dialects, the parser the
+    replay weights come from. Only rows logged after this probe started count; a row is
+    logged every decode_log_interval forwards, so the latest one stands until the next."""
+
+    def __init__(self, path, rank=0):
+        self.path, self.rank = path, rank
+        self.offset = os.path.getsize(path)
+        self.last = (None, None)
+
+    def __call__(self):
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(self.offset)
+                chunk = fh.read()
+        except OSError as exc:
+            return None, None, str(exc)
+        complete = chunk[:chunk.rfind(b"\n") + 1]
+        self.offset += len(complete)
+        for line in complete.decode("utf-8", "replace").splitlines():
+            rec = parse_line(line)
+            if rec and rec["kind"] == "decode" and rec["rank"] == self.rank:
+                self.last = (rec["running"], rec["gen_tps"])
+        return self.last[0], self.last[1], None
+
+
 def rand_ids(n, seed):
     rnd = random.Random(seed)
     return [rnd.randint(1000, 150000) for _ in range(n)]
@@ -105,15 +139,16 @@ def generate(base, ids, max_new_tokens, journal, label, timeout=1800):
                         "wall_s": round(time.time() - t0, 2)})
 
 
-def wait_for_occupancy(base, want_bs, journal, timeout, poll=2.0, tolerance=0):
+def wait_for_occupancy(occupancy, want_bs, journal, timeout, poll=2.0, tolerance=0):
     """Block until the scheduler reports the intended batch, actively generating.
 
+    `occupancy()` -> (bs, tps, err): scrape_metrics or a LogOccupancy.
     Returns (ok, observed_bs, observed_tps). Never arms on a guess.
     """
     t0 = time.time()
     last = (None, None)
     while time.time() - t0 < timeout:
-        bs, tps, err = scrape_metrics(base)
+        bs, tps, err = occupancy()
         last = (bs, tps)
         if err is None and bs is not None:
             if abs(bs - want_bs) <= tolerance and (tps or 0) > 0:
@@ -130,10 +165,15 @@ def wait_for_occupancy(base, want_bs, journal, timeout, poll=2.0, tolerance=0):
     return False, last[0], last[1]
 
 
-def start_profile(base, out_dir, num_steps, journal, timeout):
+def start_profile(base, out_dir, num_steps, journal, timeout, record_shapes=False,
+                  with_stack=None):
     """Arm once. profile_by_stage is deliberately not offered -- see rule 2."""
     body = {"output_dir": out_dir, "num_steps": int(num_steps),
             "activities": ["CPU", "GPU"], "profile_by_stage": False}
+    if record_shapes:
+        body["record_shapes"] = True
+    if with_stack is not None:
+        body["with_stack"] = with_stack == "true"
     t0 = time.time()
     txt = post(base, "/start_profile", body, timeout=timeout)
     arm_s = round(time.time() - t0, 1)
@@ -159,12 +199,37 @@ def stop_profile(base, journal, timeout=1800):
         return False
 
 
-def traces_written(trace_dir, since_ts):
-    out = []
-    for p in glob.glob(os.path.join(trace_dir, "**", "*"), recursive=True):
-        if os.path.isfile(p) and os.path.getmtime(p) >= since_ts:
-            out.append({"path": p, "bytes": os.path.getsize(p)})
+def trace_files(trace_dir):
+    return {p for p in glob.glob(os.path.join(trace_dir, "**", "*"), recursive=True)
+            if os.path.isfile(p)}
+
+
+def traces_written(trace_dir, before):
+    """Files not present when the probe began. Not mtime: on a shared mount the writer's
+    clock is another machine's."""
+    out = [{"path": p, "bytes": os.path.getsize(p)} for p in trace_files(trace_dir) - before]
     return sorted(out, key=lambda d: -d["bytes"])
+
+
+def wait_for_traces(trace_dir, before, expect, journal, settle=30, quiet=180, timeout=1800,
+                    poll=5):
+    """Every rank exports its own file after /stop_profile returns. Done when `expect` new
+    files are non-empty and their byte total has not moved for `settle` s; no new bytes for
+    `quiet` s with files missing means a rank died, and the verdict describes what is there."""
+    t0, last, still = time.time(), -1, 0
+    while True:
+        written = traces_written(trace_dir, before)
+        full = sum(1 for w in written if w["bytes"] > 0)
+        total = sum(w["bytes"] for w in written)
+        still = still + poll if total == last else 0
+        last = total
+        waited = time.time() - t0
+        if (full >= expect and still >= settle) or still >= quiet or waited >= timeout:
+            journal.append({"event": "traces_settled" if full >= expect else "traces_INCOMPLETE",
+                            "expected": expect, "non_empty": full, "total_bytes": total,
+                            "waited_s": round(waited, 1)})
+            return full >= expect
+        time.sleep(poll)
 
 
 def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
@@ -221,6 +286,14 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
                          "real; it just stands for a different shape than planned, and "
                          "the ledger must say so."
                          % (want_phase, want_shape_key, want_shape, sorted(got)[:12]))
+    elif len(got) > 1:
+        # The census divides the window's total by its step count, so a stray step (a
+        # router's /health is a 1-token generate on sglang) would halve a 1-step point.
+        res["verified"] = "partial"
+        res["reason"] = ("%s at %s=%s present, but the window also holds %s steps at %s, "
+                         "and the census would average them in."
+                         % (want_phase, want_shape_key, want_shape, want_phase,
+                            sorted(s for s in got if s != want_shape)[:12]))
     else:
         res["verified"] = True
         res["reason"] = "%s at %s=%s present, %d kernel events" % (
@@ -230,16 +303,58 @@ def verify_trace(paths, want_phase, want_shape_key, want_shape, journal):
 
 
 # --------------------------------------------------------------------------- #
-def drive_prefill(base, point, args, journal):
-    """One request per intended sequence, each long enough to produce the token count."""
-    toks = int(point["new_tokens"])
-    nseq = int(point.get("running") or 1)
+# (pause, body, resume) per server: while paused both still admit and queue new requests.
+# sglang: scheduler.py's event loop receives before it checks _engine_paused. vllm: only
+# mode=keep queues (abort/wait reject), and the route exists only with VLLM_SERVER_DEV_MODE=1.
+PAUSE_APIS = (("/pause_generation", {"mode": "in_place"}, "/continue_generation"),
+              ("/pause?mode=keep", None, "/resume"))
+
+
+def pause_scheduler(engine, journal):
+    """The resume path of the first pause API the engine accepts, else None."""
+    for pause, body, resume in PAUSE_APIS:
+        try:
+            post(engine, pause, body, timeout=60)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (404, 405):
+                continue
+            journal.append({"event": "pause_failed", "path": pause, "error": str(exc)})
+            return None
+        except Exception as exc:
+            journal.append({"event": "pause_failed", "path": pause, "error": str(exc)})
+            return None
+        journal.append({"event": "scheduler_paused", "path": pause})
+        return resume
+    journal.append({"event": "pause_unavailable", "note": "no pause API on %s: the first "
+                    "request is scheduled alone and the point may verify partial" % engine})
+    return None
+
+
+def drive_prefill(base, point, args, journal, engine=None):
+    """`new_seq` requests whose prompts add up to the batch's `new_tokens`, in ONE step.
+
+    Sent concurrently, the first request reaches an idle scheduler alone and runs as its
+    own step (14 x 512 runs as 512 + 6656 on sglang and vllm alike). So the point's engine
+    is paused while they are sent and resumed once they are queued.
+    """
+    nseq = max(1, int(point.get("new_seq") or 1))
+    toks, extra = divmod(int(point["new_tokens"]), nseq)
+    resume = pause_scheduler(engine or base, journal) if nseq > 1 else None
     # max_new_tokens=1 keeps the request in prefill: we are measuring the context
     # forward, and a long generation would mix decode into the window.
     with ThreadPoolExecutor(max_workers=nseq) as ex:
-        for i in range(nseq):
-            ex.submit(generate, base, rand_ids(toks, args.seed + i), 1, journal,
-                      "prefill_seq%d" % i, args.request_timeout)
+        try:
+            for i in range(nseq):
+                n = max(1, toks + (i < extra))
+                ex.submit(generate, base, rand_ids(n, args.seed + i), 1, journal,
+                          "prefill_seq%d" % i, args.request_timeout)
+            if resume:
+                time.sleep(args.gather_s)
+        finally:
+            if resume:
+                post(engine or base, resume, timeout=60)
+                journal.append({"event": "scheduler_resumed", "path": resume,
+                                "gathered_s": args.gather_s})
 
 
 def drive_decode(base, point, args, journal):
@@ -254,12 +369,32 @@ def drive_decode(base, point, args, journal):
     return ex
 
 
-def main():
+def decode_requests_done(journal):
+    return sum(1 for e in journal if e.get("event") in ("request_done", "request_failed")
+               and str(e.get("label", "")).startswith("decode_req"))
+
+
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--points", required=True, help="plan_sampling_points.py output")
     ap.add_argument("--point-id", required=True)
     ap.add_argument("--base-url", default=os.environ.get("PROBE_BASE_URL",
                                                          "http://127.0.0.1:30000"))
+    ap.add_argument("--profile-url", default=None,
+                    help="where /start_profile and /stop_profile go, if not --base-url "
+                         "(PD: the engine of this point's phase; requests go to the router)")
+    ap.add_argument("--occupancy-log", default=None,
+                    help="read occupancy from this scheduler log instead of /metrics "
+                         "(the decode engine's log on a server without --enable-metrics)")
+    ap.add_argument("--expect-traces", type=int, default=0,
+                    help="after the window closes, wait for this many trace files (one per "
+                         "rank) to finish exporting before verifying")
+    ap.add_argument("--trace-settle", type=float, default=30)
+    ap.add_argument("--trace-quiet", type=float, default=180)
+    ap.add_argument("--record-shapes", action="store_true")
+    ap.add_argument("--with-stack", choices=("true", "false"), default=None,
+                    help="sent only when given; Python stacks can make the export block "
+                         "the scheduler")
     ap.add_argument("--trace-dir", required=True,
                     help="host-visible directory the server writes traces to "
                          "(SGLANG_TORCH_PROFILER_DIR)")
@@ -272,11 +407,19 @@ def main():
                          "shape hook installed")
     ap.add_argument("--steady-timeout", type=float, default=300)
     ap.add_argument("--window-timeout", type=float, default=900)
+    ap.add_argument("--gather-s", type=float, default=2.0,
+                    help="PREFILL: how long the paused engine queues the point's requests "
+                         "before it is resumed")
     ap.add_argument("--decode-tokens", type=int, default=512)
     ap.add_argument("--request-timeout", type=float, default=1800)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--out", required=True, help="journal JSON for this point")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
+    profile_url = args.profile_url or args.base_url
 
     plan = json.load(open(args.points))
     pts = [p for p in plan["points"] if p["point_id"] == args.point_id]
@@ -288,8 +431,10 @@ def main():
     phase = point["phase"]
 
     journal = [{"event": "begin", "point": point, "base_url": args.base_url,
+                "profile_url": profile_url, "occupancy": args.occupancy_log or "/metrics",
                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]
     t_start = time.time()
+    before = trace_files(args.trace_dir)
     server_dir = args.server_trace_dir or args.trace_dir
     num_steps = args.num_steps or (32 if phase == "DECODE" else 8)
     ok = False
@@ -297,25 +442,28 @@ def main():
     ex = None
 
     try:
+        occupancy = (LogOccupancy(args.occupancy_log) if args.occupancy_log
+                     else lambda: scrape_metrics(args.base_url))
         if phase == "DECODE":
             # Steady state FIRST (rule 1): put the batch on, confirm the scheduler has
             # admitted it and is generating, and only then pay for the arm.
             ex = drive_decode(args.base_url, point, args, journal)
             want = int(point["batch_size"])
             confirmed, obs_bs, _ = wait_for_occupancy(
-                args.base_url, want, journal, args.steady_timeout)
+                occupancy, want, journal, args.steady_timeout)
             if not confirmed:
                 raise RuntimeError(
                     "steady state not reached: wanted bs=%s, scheduler reported %s. Not "
                     "arming." % (want, obs_bs))
-            start_profile(args.base_url, server_dir, num_steps, journal, args.arm_timeout)
+            start_profile(profile_url, server_dir, num_steps, journal, args.arm_timeout,
+                          args.record_shapes, args.with_stack)
             # The scheduler closes the window itself once num_steps forwards have run;
             # the batch is already resident, so the steps are the intended shape.
             deadline = time.time() + args.window_timeout
             while time.time() < deadline:
                 time.sleep(5)
-                bs, tps, _ = scrape_metrics(args.base_url)
-                if bs == 0:
+                bs, tps, _ = occupancy()
+                if bs == 0 or decode_requests_done(journal) >= want:
                     journal.append({"event": "batch_drained", "note": "requests finished "
                                     "before the window closed; shorten --decode-tokens "
                                     "or lower --num-steps"})
@@ -324,19 +472,25 @@ def main():
             # Prefill is a single forward per request: arm first, then send, because
             # there is no resident state to confirm. The window is still bounded by
             # num_steps and still closed explicitly.
-            start_profile(args.base_url, server_dir, num_steps, journal, args.arm_timeout)
-            drive_prefill(args.base_url, point, args, journal)
+            start_profile(profile_url, server_dir, num_steps, journal, args.arm_timeout,
+                          args.record_shapes, args.with_stack)
+            drive_prefill(args.base_url, point, args, journal, profile_url)
         ok = True
     except Exception as exc:
         journal.append({"event": "probe_failed", "error": "%s: %s"
                         % (type(exc).__name__, exc)})
     finally:
         # Rule 3: always, even on the failure path.
-        stop_profile(args.base_url, journal)
+        stop_profile(profile_url, journal)
         if ex is not None:
             ex.shutdown(wait=False)
 
-    written = traces_written(args.trace_dir, t_start)
+    # A rank set missing a rank is not the server: the point fails whatever TP-0 shows.
+    complete = not (ok and args.expect_traces) or wait_for_traces(
+        args.trace_dir, before, args.expect_traces, journal,
+        args.trace_settle, args.trace_quiet)
+    ok = ok and complete
+    written = traces_written(args.trace_dir, before)
     journal.append({"event": "traces_written", "count": len(written),
                     "total_bytes": sum(w["bytes"] for w in written),
                     "files": written[:12]})

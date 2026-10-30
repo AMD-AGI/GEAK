@@ -1,7 +1,9 @@
 """Offline checks on a finished multi-node leg: no cluster, no ssh.
 
-    mn.py trace-gate   validate the per-rank trace set before parsing
-    mn.py topn-merge   fold a pd_disagg run's per-engine Top-Ns into one
+    mn.py trace-gate      validate the per-rank trace set before parsing
+    mn.py topn-merge      fold a pd_disagg run's per-engine Top-Ns into one
+    mn.py pd-mass         rewrite an AgentX pd_disagg ranking on both engines' GPU-time mass
+    mn.py pd-points       plan a fixed-length pd_disagg run's sampling points from its engine logs
 
 mn.py is the entry point for both; this module reads files and writes reports only.
 """
@@ -13,6 +15,7 @@ import gzip
 import json
 import os
 import re
+import subprocess
 import sys
 
 # mn imports this module lazily (its _offline), so importing mn back is no cycle.
@@ -77,14 +80,18 @@ def scan(path: str) -> dict:
     return info
 
 
+def _pd_record(launch_json: str) -> dict:
+    try:
+        with open(launch_json, encoding="utf-8") as handle:
+            return (json.load(handle) or {}).get("pd") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
 def pd_lanes(launch_json: str) -> list:
     """(role, node_rank, engine TP or 0, node ranks it spans) per profiled engine (replica 0 of
     each role: the only one the window opens), from the launch record."""
-    try:
-        with open(launch_json, encoding="utf-8") as handle:
-            pd = (json.load(handle) or {}).get("pd") or {}
-    except (OSError, ValueError, AttributeError):
-        return []
+    pd = _pd_record(launch_json)
     tps = pd.get("engine_tp_by_role") or {}
     out = []
     for i, e in enumerate(pd.get("engines") or []):
@@ -113,6 +120,9 @@ def cmd_trace_gate(argv: list) -> int:
                     help="where to write the report (default: <profile-dir>/ranks/)")
     ap.add_argument("--launch-json", default="",
                     help="mn_launch.json of a pd_disagg launch: gate each engine separately")
+    ap.add_argument("--role", default="",
+                    help="with --launch-json: gate only this engine (a sampling-point probe "
+                         "opens the window on one)")
     args = ap.parse_args(argv)
 
     if not args.profile_dir or not os.path.isdir(args.profile_dir):
@@ -123,6 +133,11 @@ def cmd_trace_gate(argv: list) -> int:
     # A LANE is one directory whose TP ranks form one world. An engine whose
     # directory is missing is kept: that is the failure worth reporting.
     pd_engines = pd_lanes(args.launch_json) if args.launch_json else []
+    if args.role:
+        pd_engines = [lane for lane in pd_engines if lane[0] == args.role]
+        if not pd_engines:
+            sys.stderr.write(f"!!! mn trace-gate: no {args.role} engine in {args.launch_json}\n")
+            return 2
     spans = {}
     if pd_engines:
         fallback = max(args.expect_ranks // max(len(pd_engines), 1), 1)
@@ -253,6 +268,7 @@ def cmd_trace_gate(argv: list) -> int:
     roles_path = ""
     if pd_engines:
         roles_path = os.path.join(args.profile_dir, "ranks", "mn_trace_roles.json")
+        engines = _pd_record(args.launch_json).get("engines") or []
         _write_json(roles_path, {
             "verdict": report["verdict"],
             "report": report_path,
@@ -260,6 +276,7 @@ def cmd_trace_gate(argv: list) -> int:
                 {"role": role, "node_index": node, "dir": directory,
                  "trace": selected.get(role, ""),
                  "ranks": len(by_lane[role]["found_ranks"]),
+                 "instances": sum(1 for e in engines if e.get("role") == role),
                  "kernel_events": by_lane[role]["kernel_events"]}
                 for role, directory, node, _exp in lanes
             ],
@@ -285,24 +302,33 @@ def cmd_trace_gate(argv: list) -> int:
 # TOPN MERGE  (mn.py topn-merge)
 # --------------------------------------------------------------------------
 # Fold the per-engine Top-Ns into the ONE profile_topN.json downstream routes on,
-# as a WEIGHTED UNION: a kernel at 30% of prefill, on an engine holding 40% of
-# the deployment's GPU time, is 12%. Rows carry their `engine`; a kernel on both engines
-# stays two rows. Weights are comparable because multinode.sh opens and closes
-# both windows together.
+# as a WEIGHTED UNION: a kernel at 30% of prefill, on an engine that costs 40% of
+# the leg's GPU time, is 12% -- what %gpu means on one node. Rows carry their
+# `engine`; a kernel on both engines stays two rows.
 #
-# The bench of the same leg gives the Amdahl weight on throughput:
-#     E2E = TTFT + (OSL - 1) * TPOT
-# and each phase's share of E2E names the bottleneck engine. kv_handoff reads the
-# engines' scheduler lines to split TTFT into compute vs KV-transfer wait.
+# The two profile windows differ in length and phase (decode closes at num_steps,
+# prefill at the timer), so their GPU times do not add. Each engine's weight is its
+# GPU time over the leg as single-node AgentX counts it: probed points' mass
+# (pd_mass below) or, with no points, a step's mean time in the window x the
+# analytic step count (pd_analytic). No graded axis enters: the weights do not
+# change with the metric.
 
-def latency_split(bench_summary: str, osl: int) -> dict:
-    """{prefill_ms, decode_ms, share} from one bench leg, or {} without TTFT/TPOT."""
-    if not bench_summary or osl < 1:
+PHASE_ENGINE = {"PREFILL": "prefill", "DECODE": "decode"}
+
+
+def latency_split(bench_summary: str, osl: float) -> dict:
+    """{prefill_ms, decode_ms, share} from one bench leg, or {} without TTFT/TPOT. Explanation only.
+    OSL is the summary's observed_osl, else `osl`."""
+    if not bench_summary:
         return {}
     try:
         with open(bench_summary, encoding="utf-8") as handle:
             doc = json.load(handle)
     except (OSError, ValueError):
+        return {}
+    served = doc.get("observed_osl")
+    osl = float(served) if isinstance(served, (int, float)) and served >= 1 else osl
+    if osl < 1:
         return {}
     ttft, tpot = doc.get("ttft_ms_median"), doc.get("tpot_ms_median")
     if not isinstance(ttft, (int, float)) or not isinstance(tpot, (int, float)):
@@ -319,6 +345,235 @@ def latency_split(bench_summary: str, osl: int) -> dict:
         "share": {"prefill": round(prefill_ms / total, 4),
                   "decode": round(decode_ms / total, 4)},
     }
+
+
+def role_ranks(roles_paths) -> dict:
+    """{prefill: ranks, decode: ranks} from trace-gate's mn_trace_roles.json (one, or one per
+    probed engine); ValueError if unknowable.
+    A trace times TP-0 only, so an engine's GPU time is TP-0's times its ranks."""
+    paths = [roles_paths] if isinstance(roles_paths, str) else list(roles_paths or [])
+    if not any(paths):
+        raise ValueError("no --roles (mn_trace_roles.json): the engines' rank counts are unknown")
+    ranks = {}
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                roles = (json.load(handle) or {}).get("roles") or []
+        except (OSError, ValueError, AttributeError) as exc:
+            raise ValueError(f"cannot read {path}: {exc}") from exc
+        for entry in roles:
+            role = entry.get("role")
+            if role in ranks or int(entry.get("instances") or 1) > 1:
+                raise ValueError(f"the {role} role has several instances (xPyD) or is in more "
+                                 "than one --roles; one engine per role is supported")
+            ranks[role] = int(entry.get("ranks") or 0)
+    missing = [r for r in PHASE_ENGINE.values() if ranks.get(r, 0) < 1]
+    if missing:
+        raise ValueError(f"{', '.join(paths)} gives no ranks for {missing}")
+    return {r: ranks[r] for r in PHASE_ENGINE.values()}
+
+
+def pd_analytic(docs: dict, ranks: dict) -> dict:
+    """Single-node AgentX's no-log fallback, per engine: the window's mean GPU time per step of
+    its phase x parse_profile's analytic_calls for that phase (CONC*ceil(ISL/chunk) prefill
+    steps, OSL decode steps, per wave) x its ranks. ValueError naming what is missing.
+    docs: {prefill, decode} -> that engine's parse_profile Top-N."""
+    per_step, calls, missing = {}, {}, []
+    for phase, engine in PHASE_ENGINE.items():
+        doc = docs[engine]
+        ph = phase.lower()
+        steps = (doc.get("serving") or {}).get(f"n_{ph}_steps") or 0
+        gpu_ms = (doc.get("step_ledger") or {}).get(f"{ph}_gpu_ms") or 0
+        n = ((doc.get("serving") or {}).get("analytic_calls") or {}).get(ph) or 0
+        if steps < 1 or gpu_ms <= 0:
+            missing.append(f"the {engine} engine's {ph} steps and their GPU time, which only step "
+                           "annotations give (" + (doc.get("step_ledger_unavailable") or "none in its window") + ")")
+        if n < 1:
+            missing.append(f"the {engine} engine's serving.analytic_calls.{ph} "
+                           "(parse_profile needs --isl/--osl/--conc)")
+        if steps >= 1 and gpu_ms > 0 and n >= 1:
+            per_step[phase], calls[phase] = gpu_ms / steps, n
+    if missing:
+        raise ValueError("; ".join(missing))
+    scaled = {engine: ranks[engine] * per_step[phase] * calls[phase] for phase, engine in PHASE_ENGINE.items()}
+    total = sum(scaled.values())
+    return {"rule": "analytic_calls",
+            "weights": {e: round(v / total, 6) for e, v in scaled.items()},
+            "inputs": {"per_step_ms": {p: round(v, 4) for p, v in per_step.items()},
+                       "calls_per_wave": calls, "ranks": ranks},
+            "warnings": ["no probed sampling points: the steps are AgentX's analytic count, which "
+                         "assumes every decode step runs CONC requests"]}
+
+
+# --------------------------------------------------------------------------
+# PD MASS  (mn.py pd-mass)
+# --------------------------------------------------------------------------
+# AgentX kernel extraction on pd_disagg. coverage_ledger.py's mass is already each
+# engine's GPU time over the whole replay (a point's per-step kernel time times
+# the steps it stands for), so the phases add once each is scaled by its engine's
+# rank count:
+#     S_k = 100 * sum_e R_e s_ke M_e / sum_e R_e M_e
+# Equal ranks reduce this to single-node AgentX's rule: both phases' mass summed.
+
+def pd_mass(coverage_paths: list, roles_path: str) -> dict:
+    """{rule: gpu_time_mass, weights, inputs, warnings}; ValueError if a phase has no mass."""
+    mass, warnings = {}, []
+    for path in coverage_paths:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                doc = json.load(handle) or {}
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"cannot read {path}: {exc}") from exc
+        for phase, entry in (doc.get("phases") or {}).items():
+            if phase in mass:
+                raise ValueError(f"phase {phase} is in more than one --coverage")
+            mass[phase] = float((entry or {}).get("total_mass_us") or 0.0)
+        warnings.extend(doc.get("warnings") or [])
+    empty = [p for p in PHASE_ENGINE if mass.get(p, 0.0) <= 0]
+    if empty:
+        raise ValueError(f"no {empty} mass (phases.<P>.total_mass_us) in {coverage_paths}")
+    ranks = role_ranks(roles_path)
+    scaled = {engine: ranks[engine] * mass[phase] for phase, engine in PHASE_ENGINE.items()}
+    total = sum(scaled.values())
+    return {"rule": "gpu_time_mass",
+            "weights": {e: round(v / total, 6) for e, v in scaled.items()},
+            "inputs": {"mass_us": {p: mass[p] for p in PHASE_ENGINE}, "ranks": ranks},
+            "warnings": warnings}
+
+
+def apply_pd_mass(ranking_path: str, mass: dict) -> dict:
+    """Rewrite a kernel-extract ranking's selection_pct_gpu_time as S_k; the agent's number is kept."""
+    with open(ranking_path, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    rows = doc.get("ranking") or []
+    sums = {}
+    for row in rows:
+        shares = row.get("share_of_phase_pct") or {}
+        unknown = sorted(set(shares) - set(PHASE_ENGINE))
+        if unknown:
+            raise ValueError(f"{row.get('id', row.get('name'))}: phase {unknown} names no pd_disagg engine "
+                             f"(expected {sorted(PHASE_ENGINE)})")
+        for phase, share in shares.items():
+            sums[phase] = sums.get(phase, 0.0) + float(share)
+    over = {p: round(s, 2) for p, s in sums.items() if s > 100.5}
+    if over:
+        raise ValueError(f"share_of_phase_pct sums to {over} (> 100.5): the shares are not the ledger's "
+                         "phase_mass_share_pct, whose denominator includes the collective wait and the tail")
+    weights = mass["weights"]
+    for row in rows:
+        row.setdefault("selection_pct_gpu_time_agent", row.get("selection_pct_gpu_time"))
+        row["selection_pct_gpu_time"] = round(sum(
+            float(share) * weights[PHASE_ENGINE[phase]]
+            for phase, share in (row.get("share_of_phase_pct") or {}).items()), 4)
+    doc["denominators"] = mass
+    _write_json(ranking_path, doc)
+    return doc
+
+
+def cmd_pd_mass(argv: list) -> int:
+    ap = argparse.ArgumentParser(prog="mn.py pd-mass")
+    ap.add_argument("--coverage", action="append", required=True,
+                    help="coverage_ledger.py's coverage.json (repeatable: one per engine's ledger)")
+    ap.add_argument("--roles", action="append", required=True,
+                    help="trace-gate's mn_trace_roles.json (repeatable: one per probed engine)")
+    ap.add_argument("--apply", required=True, metavar="RANKING", help="kernel_ranking.json to rewrite in place")
+    args = ap.parse_args(argv)
+    try:
+        mass = pd_mass(args.coverage, args.roles)
+        apply_pd_mass(args.apply, mass)
+    except ValueError as exc:
+        sys.stderr.write(f"!!! mn pd-mass: cannot mass the engines: {exc}\n")
+        return 2
+    w = mass["weights"]
+    print(f">>> mn pd-mass: engine GPU-time mass prefill {w['prefill'] * 100:.1f}% / "
+          f"decode {w['decode'] * 100:.1f}%; rewrote {args.apply}")
+    for warning in mass["warnings"]:
+        sys.stderr.write(f"!!! mn pd-mass: ledger warning: {warning}\n")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# PD POINTS  (mn.py pd-points)
+# --------------------------------------------------------------------------
+# Fixed-length pd_disagg prices its engines the way AgentX does: the kernel-extract
+# skill's planner picks sampling points from each engine's own baseline log (PREFILL
+# from the prefill engine, DECODE from the decode engine), bench_e2e's probe mode
+# measures them, and coverage_ledger's mass feeds topn-merge --coverage.
+
+ENGINE_PHASE = {engine: phase for phase, engine in PHASE_ENGINE.items()}
+# `ServerArgs(key=v, ...)` in older sglang, `server_args={'key': v, ...}` in newer ones.
+_SERVER_ARG = re.compile(r"\b(decode_log_interval|chunked_prefill_size|cuda_graph_bs(?:_decode)?|"
+                         r"cuda_graph_max_bs(?:_decode)?)'?\s*[=:]\s*(\[[\d, ]*\]|\d+)")
+
+
+def server_info(log: str) -> dict:
+    """The planner's dispatch inputs from the server-args line sglang logs at startup."""
+    with open(log, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if "ServerArgs(" in line or "server_args={" in line:
+                info = {k: json.loads(v) for k, v in _SERVER_ARG.findall(line)}
+                for key in ("cuda_graph_bs", "cuda_graph_max_bs"):
+                    if key not in info and f"{key}_decode" in info:
+                        info[key] = info[f"{key}_decode"]
+                return info
+    return {}
+
+
+def pd_points(engine_logs: dict, skill_root: str, per_phase: int, out_dir: str) -> dict:
+    """{points, uncovered_candidates, per_engine}: each engine's points of its own phase."""
+    scripts = os.path.join(skill_root, "scripts")
+    os.makedirs(out_dir, exist_ok=True)
+    merged = {"points": [], "uncovered_candidates": [], "per_engine": {}}
+    for engine, phase in ENGINE_PHASE.items():
+        log = engine_logs.get(engine)
+        if not log or not os.path.isfile(log):
+            raise ValueError(f"no --engine-log {engine}= (got {log!r})")
+        info = server_info(log)
+        if not info.get("decode_log_interval"):
+            raise ValueError(f"{log} has no sglang server-args line with decode_log_interval")
+        paths = {k: os.path.join(out_dir, f"{k}_{engine}.json") for k in ("server_info", "observed", "points")}
+        _write_json(paths["server_info"], info)
+        for cmd in ([sys.executable, os.path.join(scripts, "observed_workload.py"), "--log", log,
+                     "--server-info", paths["server_info"], "--out", paths["observed"]],
+                    [sys.executable, os.path.join(scripts, "plan_sampling_points.py"),
+                     "--observed", paths["observed"], "-n", str(2 * per_phase),
+                     "--phase-budget", f"PREFILL={per_phase},DECODE={per_phase}",
+                     "--server-info", paths["server_info"], "--out", paths["points"]]):
+            run = subprocess.run(cmd, capture_output=True, text=True)
+            if run.returncode:
+                raise ValueError(f"{os.path.basename(cmd[1])} on the {engine} log failed: "
+                                 f"{(run.stderr or run.stdout).strip()[-400:]}")
+        with open(paths["points"], encoding="utf-8") as handle:
+            plan = json.load(handle)
+        own = [dict(p, engine=engine) for p in plan.get("points") or [] if p.get("phase") == phase]
+        if not own:
+            raise ValueError(f"the {engine} log gives no {phase} sampling point")
+        merged["points"].extend(own)
+        merged["uncovered_candidates"].extend(
+            u for u in plan.get("uncovered_candidates") or [] if u.get("phase") == phase)
+        merged["per_engine"][engine] = {"log": log, "phase": phase, **paths}
+    return merged
+
+
+def cmd_pd_points(argv: list) -> int:
+    ap = argparse.ArgumentParser(prog="mn.py pd-points")
+    ap.add_argument("--engine-log", action="append", required=True, metavar="NAME=PATH",
+                    help="one engine's server log from the baseline leg (prefill=, decode=)")
+    ap.add_argument("--skill-root", required=True, help="the kernel-extract skill directory")
+    ap.add_argument("--points-per-phase", type=int, default=3)
+    ap.add_argument("--out-dir", required=True, help="writes sampling_points.json and its inputs here")
+    args = ap.parse_args(argv)
+    try:
+        merged = pd_points(dict(s.partition("=")[::2] for s in args.engine_log),
+                           args.skill_root, args.points_per_phase, args.out_dir)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"!!! mn pd-points: cannot plan the engines' points: {exc}\n")
+        return 2
+    out = os.path.join(args.out_dir, "sampling_points.json")
+    _write_json(out, merged)
+    print(f">>> mn pd-points: wrote {out}")
+    print("PROFILE_PROBE_IDS=" + ",".join(p["point_id"] for p in merged["points"]))
+    return 0
 
 
 _BATCH_FIELD = re.compile(r"#([a-z-]+): (\d+)")
@@ -419,24 +674,40 @@ def _kv_handoff_md(kv: dict) -> list:
 
 def _topn_md(doc: dict) -> str:
     rows = doc["top_kernels"]
+    w = doc["engine_weights"]
+    x = w["inputs"]
     lines = [f"# Profile Top-{len(rows)} — pd_disagg, per-engine weighted union\n",
              f"- source: `{doc['source']}`",
-             f"- total GPU time: **{doc['total_gpu_time_ms']:.2f} ms** over {doc['num_kernel_launches']} launches, {doc['num_distinct_kernels']} distinct kernels"]
+             f"- GPU time in the two profile windows: {doc['total_gpu_time_ms']:.2f} ms over {doc['num_kernel_launches']} launches, {doc['num_distinct_kernels']} distinct kernels (the windows differ in length; this sum weighs nothing)"]
+    if w["rule"] == "gpu_time_mass":
+        for eng in doc["per_engine"]:
+            lines.append(f"  - `{eng['engine']}`: **{eng['weight_pct']:.1f}%** ({eng['total_gpu_time_ms']:.2f} ms in its window) — own table: `{eng['topN_json']}`")
+        lines.append(
+            f"- engine weights `gpu_time_mass`: each engine's whole-leg GPU time from its probed sampling points "
+            f"(per-step kernel time × the steps its baseline log counts at that shape) × its ranks: "
+            f"prefill {x['mass_us']['PREFILL'] / 1000:.1f} ms × {x['ranks']['prefill']}, "
+            f"decode {x['mass_us']['DECODE'] / 1000:.1f} ms × {x['ranks']['decode']}")
+    else:
+        for eng in doc["per_engine"]:
+            lines.append(f"  - `{eng['engine']}`: **{eng['weight_pct']:.1f}%** ({eng['total_gpu_time_ms']:.2f} ms in its window) — own table: `{eng['topN_json']}`")
+        lines.append(
+            f"- engine weights `analytic_calls` (no probed points; AgentX's no-log fallback): a step's mean "
+            f"GPU time in the window × the analytic steps per wave × ranks: "
+            f"prefill {x['per_step_ms']['PREFILL']:.2f} ms × {x['calls_per_wave']['PREFILL']} × {x['ranks']['prefill']}, "
+            f"decode {x['per_step_ms']['DECODE']:.2f} ms × {x['calls_per_wave']['DECODE']} × {x['ranks']['decode']}")
+    for warning in w.get("warnings") or []:
+        lines.append(f"  - ledger warning: {warning}")
     split = doc.get("latency_split") or {}
-    for eng in doc["per_engine"]:
-        e2e = eng.get("e2e_share_pct")
-        lines.append(f"  - `{eng['engine']}`: {eng['total_gpu_time_ms']:.2f} ms ({eng['weight_pct']:.1f}% of the deployment's GPU time{f'; {e2e:.1f}% of E2E latency' if e2e is not None else ''}) — own table: `{eng['topN_json']}`")
     if split:
-        lines.append(f"- latency split from `{split['source']}`: TTFT {split['ttft_ms']:.1f} ms vs decode {split['decode_ms']:.1f} ms (TPOT {split['tpot_ms']:.2f} × {split['osl'] - 1}). %e2e = %gpu in engine × that engine's E2E share. TTFT includes queueing and the KV transfer, so prefill's share is an upper bound.")
+        lines.append(f"- latency split (explanation only, not a weight): TTFT {split['ttft_ms']:.1f} ms vs decode {split['decode_ms']:.1f} ms (TPOT {split['tpot_ms']:.2f} × {split['osl'] - 1:.1f}).")
     if doc.get("kv_handoff"):
         lines.extend(_kv_handoff_md(doc["kv_handoff"]))
-    lines.append("\n**%gpu is share of the DEPLOYMENT.** To rank within one engine read that engine's table.\n")
-    lines.append("| # | engine | kernel | class | backend | edit | calls | total ms | %gpu | %gpu in engine | %e2e | avg us |")
-    lines.append("|--|--------|--------|-------|---------|------|-------|----------|------|----------------|------|--------|")
+    lines.append("\n**%gpu is the kernel's share of the GPU time one request costs across both engines** (share in its engine × that engine's weight), the same meaning as a single-node %gpu.\n")
+    lines.append("| # | engine | kernel | class | backend | edit | calls | total ms | %gpu | %gpu in engine | avg us |")
+    lines.append("|--|--------|--------|-------|---------|------|-------|----------|------|----------------|--------|")
     for k in rows:
-        e2e = k.get("pct_e2e_est")
         lines.append(
-            f"| {k['rank']} | {k['engine']} | `{k['short_name']}` | {k['classification']} | {k['backend_guess']} | {'Y' if k['editable'] else 'N'} | {k['calls']} | {k['total_ms']:.3f} | {k['pct_gpu_time']:.1f} | {k['pct_gpu_time_in_engine']:.1f} | {'-' if e2e is None else f'{e2e:.1f}'} | {k['avg_us']:.1f} |")
+            f"| {k['rank']} | {k['engine']} | `{k['short_name']}` | {k['classification']} | {k['backend_guess']} | {'Y' if k['editable'] else 'N'} | {k['calls']} | {k['total_ms']:.3f} | {k['pct_gpu_time']:.1f} | {k['pct_gpu_time_in_engine']:.1f} | {k['avg_us']:.1f} |")
     lines.append("\n## Opt hints (top entries)\n")
     for k in rows[:12]:
         lines.append(f"- **{k['rank']}. [{k['engine']}] {k['short_name']}** ({k['pct_gpu_time']:.1f}% gpu): {k['opt_hint']}")
@@ -446,65 +717,61 @@ def _topn_md(doc: dict) -> str:
 def cmd_topn_merge(argv: list) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", action="append", default=[], metavar="NAME=PATH",
-                    help="one engine's profile_topN.json (repeatable)")
+                    help="one engine's profile_topN.json: prefill= and decode=")
     ap.add_argument("--out", default="", help="prefix; writes <out>.json and <out>.md")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--bench-summary", default="",
-                    help="bench_summary.json of the SAME leg the traces came from")
-    ap.add_argument("--osl", type=int, default=0)
+                    help="the baseline's bench_summary.json: its TTFT/TPOT for the latency split, "
+                         "which explains and never weighs")
+    ap.add_argument("--coverage", action="append", default=[],
+                    help="coverage_ledger.py's coverage.json of the probed points (repeatable): "
+                         "weigh the engines on their GPU-time mass; without it, on analytic step counts")
+    ap.add_argument("--osl", type=float, default=0, help="the bench's OSL, for the latency split")
+    ap.add_argument("--roles", default="", help="trace-gate's mn_trace_roles.json: each engine's ranks")
     ap.add_argument("--engine-log", action="append", default=[], metavar="NAME=PATH",
                     help="one engine's server log from the SAME leg (prefill=, decode=)")
     args = ap.parse_args(argv)
-    split = latency_split(args.bench_summary, args.osl)
     engine_logs = dict(spec.partition("=")[::2] for spec in args.engine_log)
     handoff = kv_handoff(engine_logs.get("prefill", ""), engine_logs.get("decode", ""))
     if engine_logs and not handoff:
         sys.stderr.write(f"!!! mn topn-merge: no Prefill/Decode batch lines in {sorted(engine_logs.values())}; no kv_handoff block\n")
-    if args.bench_summary and not split:
-        sys.stderr.write(f"!!! mn topn-merge: no TTFT/TPOT in {args.bench_summary} (osl={args.osl}); merging on GPU time only\n")
 
-    loaded = []
-    for spec in args.engine:
-        name, _, path = spec.partition("=")
-        if not path:
-            sys.stderr.write(f"!!! mn topn-merge: --engine wants NAME=PATH, got '{spec}'\n")
-            return 2
-        try:
+    loaded = {}
+    try:
+        for spec in args.engine:
+            name, _, path = spec.partition("=")
+            if not path or name not in PHASE_ENGINE.values() or name in loaded:
+                raise ValueError(f"--engine wants prefill=PATH and decode=PATH once each, got '{spec}'")
             with open(path, encoding="utf-8") as handle:
-                loaded.append((name, path, json.load(handle)))
-        except (OSError, ValueError) as exc:
-            # One engine profiled is still a usable result.
-            sys.stderr.write(f"!!! mn topn-merge: skipping {name} ({path}): {exc}\n")
-    if not loaded:
-        sys.stderr.write("!!! mn topn-merge: no engine Top-N could be read\n")
-        return 2
-
-    total_ms = sum(float(doc.get("total_gpu_time_ms") or 0.0) for _n, _p, doc in loaded)
-    if total_ms <= 0:
-        sys.stderr.write("!!! mn topn-merge: every engine reports zero GPU time\n")
+                loaded[name] = (path, json.load(handle))
+        absent = [e for e in PHASE_ENGINE.values() if e not in loaded]
+        if absent:
+            raise ValueError(f"no --engine for {absent}")
+        if args.coverage:
+            weights = pd_mass(args.coverage, args.roles)
+        else:
+            weights = pd_analytic({n: doc for n, (_p, doc) in loaded.items()}, role_ranks(args.roles))
+        weights["inputs"]["osl"] = args.osl
+        for warning in weights["warnings"]:
+            sys.stderr.write(f"!!! mn topn-merge: {warning}\n")
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"!!! mn topn-merge: cannot ledger the engines: {exc}\n")
         return 2
 
     rows, per_engine = [], []
-    for name, path, doc in loaded:
-        engine_ms = float(doc.get("total_gpu_time_ms") or 0.0)
-        weight = engine_ms / total_ms
-        e2e_share = (split.get("share") or {}).get(name) if split else None
+    for name, (path, doc) in loaded.items():
+        weight = weights["weights"][name]
         per_engine.append({
             "engine": name, "topN_json": path,
-            "total_gpu_time_ms": round(engine_ms, 4),
+            "total_gpu_time_ms": round(float(doc.get("total_gpu_time_ms") or 0.0), 4),
             "weight_pct": round(weight * 100.0, 2),
-            "e2e_share_pct": None if e2e_share is None else round(e2e_share * 100.0, 2),
             "num_kernel_launches": doc.get("num_kernel_launches", 0),
             "num_distinct_kernels": doc.get("num_distinct_kernels", 0),
         })
         for entry in doc.get("top_kernels") or []:
             in_engine = float(entry.get("pct_gpu_time") or 0.0)
-            rows.append({
-                **entry, "engine": name,
-                "pct_gpu_time_in_engine": in_engine,
-                "pct_gpu_time": round(in_engine * weight, 4),
-                "pct_e2e_est": None if e2e_share is None else round(in_engine * e2e_share, 4),
-            })
+            rows.append({**entry, "engine": name, "pct_gpu_time_in_engine": in_engine,
+                         "pct_gpu_time": round(in_engine * weight, 4)})
 
     rows.sort(key=lambda r: r["pct_gpu_time"], reverse=True)
     rows = rows[: args.top]
@@ -512,19 +779,19 @@ def cmd_topn_merge(argv: list) -> int:
         row["rank"] = i
 
     out = {
-        "source": "pd-merged:" + "+".join(n for n, _p, _d in loaded),
+        "source": "pd-merged:" + "+".join(loaded),
         "topology": "pd_disagg",
-        "total_gpu_time_ms": round(total_ms, 4),
-        "num_kernel_launches": sum(d.get("num_kernel_launches", 0) for _n, _p, d in loaded),
-        "num_distinct_kernels": sum(d.get("num_distinct_kernels", 0) for _n, _p, d in loaded),
+        "total_gpu_time_ms": round(sum(e["total_gpu_time_ms"] for e in per_engine), 4),
+        "num_kernel_launches": sum(d.get("num_kernel_launches", 0) for _p, d in loaded.values()),
+        "num_distinct_kernels": sum(d.get("num_distinct_kernels", 0) for _p, d in loaded.values()),
         "per_engine": per_engine,
         "top_kernels": rows,
+        "engine_weights": weights,
+        "bottleneck_engine": max(per_engine, key=lambda r: r["weight_pct"])["engine"],
     }
+    split = latency_split(args.bench_summary, weights["inputs"]["osl"])
     if split:
         out["latency_split"] = split
-        out["bottleneck_engine"] = max(
-            (r for r in per_engine if r["e2e_share_pct"] is not None),
-            key=lambda r: r["e2e_share_pct"], default={}).get("engine", "")
     if handoff:
         out["kv_handoff"] = handoff
     markdown = _topn_md(out)
@@ -535,8 +802,7 @@ def cmd_topn_merge(argv: list) -> int:
             handle.write(markdown)
         print(f">>> mn topn-merge: wrote {args.out}.json and {args.out}.md")
     for eng in per_engine:
-        e2e = eng["e2e_share_pct"]
-        print(f"    {eng['engine']:<10} {eng['total_gpu_time_ms']:10.2f} ms  {eng['weight_pct']:5.1f}% of deployment GPU time{f'  {e2e:5.1f}% of E2E latency' if e2e is not None else ''}")
+        print(f"    {eng['engine']:<10} {eng['weight_pct']:5.1f}%  ({weights['rule']})")
     if not args.out:
         print(markdown)
     return 0

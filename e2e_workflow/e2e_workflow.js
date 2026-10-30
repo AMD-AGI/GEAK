@@ -3847,15 +3847,14 @@ async function prepareAgentXKernels(round, throughput) {
     try {
       if (!reply?.delivery_path) throw new Error('completed skill did not return delivery_path');
       const prepared = await readAgentXPreparation(reply);
-      // Interactivity is decode's inter-token latency: under PD its kernels are tried first.
-      if (pd && AGENTX_METRIC_BASIS === 'p90_intvty_inferencex') {
-        for (const queue of ['head_candidates', 'kernel_candidates']) {
-          prepared[queue] = prepared[queue].slice()
-            .sort((a, b) => (b.engine === 'decode') - (a.engine === 'decode'));
-        }
-      }
+      const weights = prepared.engine_weights;
+      if (pd && !(weights && weights.weights))
+        throw new Error('PD envelope carries no engine_weights: run `mn.py pd-mass --apply` on ' +
+          'kernel_ranking.json, then pack with --engines');
       log(`Kernel extraction ready: ${prepared.head_candidates.length + prepared.kernel_candidates.length} validated UTs, ` +
         `${prepared.failed_tasks.length} failed, ${prepared.deferred_tasks.length} deferred.`);
+      if (pd) log(`Engine GPU-time mass: ` +
+        `prefill ${(weights.weights.prefill * 100).toFixed(1)}% / decode ${(weights.weights.decode * 100).toFixed(1)}%.`);
       return prepared;
     } catch (error) {
       if (attempt >= 1) throw new Error(`AgentX UT delivery unreadable: ${error.message}`);

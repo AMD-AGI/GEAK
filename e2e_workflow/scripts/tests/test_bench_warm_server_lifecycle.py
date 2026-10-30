@@ -298,5 +298,59 @@ class BenchWarmServerLifecycleTest(unittest.TestCase):
         self.assertIn("Unknown MEASUREMENT_PURPOSE", proc.stderr)
 
 
+@unittest.skipIf(BASH is None, "bash is required to exercise the shell dispatcher")
+class BenchProbeWithWindowTest(unittest.TestCase):
+    """PROFILE_PROBE_WITH_WINDOW=1: timed round, the normal window, then each point's probe."""
+    setUp = BenchWarmServerLifecycleTest.setUp
+    run_bench = BenchWarmServerLifecycleTest.run_bench
+    read_events = BenchWarmServerLifecycleTest.read_events
+
+    def probe_env(self):
+        with open(self.adapter, "a", encoding="utf-8") as fh:
+            fh.write(textwrap.dedent(r"""
+                adapter_profile_window() { printf '{"event":"window"}\n' >> "$EVENT_LOG"; }
+                adapter_probe_args() { printf '%s\n' --phase "$1"; }
+                """))
+        skill = os.path.join(self.tmp, "skill")
+        os.makedirs(os.path.join(skill, "scripts"))
+        with open(os.path.join(skill, "scripts", "serving_probe.py"), "w", encoding="utf-8") as fh:
+            fh.write(textwrap.dedent(r"""
+                import json, os, sys
+                a = sys.argv
+                pid = a[a.index("--point-id") + 1]
+                with open(os.environ["EVENT_LOG"], "a") as log:
+                    log.write(json.dumps({"event": "probe", "id": pid}) + "\n")
+                mark = os.environ["EVENT_LOG"] + "." + pid
+                if pid == os.environ.get("FAIL_ONCE") and not os.path.exists(mark):
+                    open(mark, "w").close()
+                    sys.exit(1)
+                """))
+        points = os.path.join(self.tmp, "points.json")
+        with open(points, "w", encoding="utf-8") as fh:
+            json.dump({"points": [{"point_id": "pr_512", "phase": "PREFILL"},
+                                  {"point_id": "de_16", "phase": "DECODE"}]}, fh)
+        return dict(PROFILE=1, SKILL_ROOT=skill, PROFILE_PROBE_POINTS=points,
+                    PROFILE_PROBE_IDS="pr_512,de_16", PROFILE_WARMUP_SEC=0)
+
+    def test_the_window_runs_before_the_probes_and_the_timed_round_stays(self):
+        _proc, summary, events = self.run_bench(repeats=1, PROFILE_PROBE_WITH_WINDOW=1, **self.probe_env())
+        kinds = [e["event"] for e in events]
+        self.assertEqual(kinds[-2:], ["probe", "probe"])
+        self.assertEqual([e["id"] for e in events if e["event"] == "probe"], ["pr_512", "de_16"])
+        first_probe = kinds.index("probe")
+        self.assertGreaterEqual(kinds[:first_probe].count("bench"), 2)   # warmup + timed
+        self.assertTrue(summary["all_throughput"])
+
+    def test_a_point_that_does_not_verify_is_recaptured_once(self):
+        _proc, _summary, events = self.run_bench(repeats=1, PROFILE_PROBE_WITH_WINDOW=1, FAIL_ONCE="pr_512",
+                                                 **self.probe_env())
+        self.assertEqual([e["id"] for e in events if e["event"] == "probe"], ["pr_512", "pr_512", "de_16"])
+
+    def test_timed_rounds_without_the_window_flag_are_refused(self):
+        proc, _summary, events = self.run_bench(repeats=1, expect_rc=4, **self.probe_env())
+        self.assertIn("PROFILE_PROBE_WITH_WINDOW=1", proc.stderr)
+        self.assertEqual(events, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

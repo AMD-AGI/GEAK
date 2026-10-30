@@ -140,17 +140,16 @@ OPTIONAL upstream TraceLens prior (may be empty strings — treat empty/missing 
    GEMMs by shape** — one bake-off per distinct (shape,dtype) covers all its launches.
 
    **PD-disaggregated serving (the Top-N has a top-level `per_engine` block and an `engine` on every row).**
-   `mn.py topn-merge` already rescaled each engine's rows by its share of total GPU time, so rank the
-   merged table as a single table. Around it:
+   `pct_gpu_time` is the kernel's share of all the GPU time one request costs across both engines —
+   the same meaning as on one node — so rank the merged table as a single table, exactly like a
+   single-node one. `latency_split` and `kv_handoff` only explain it. Around it:
    - **Keep the row's `engine` on the candidate** — the Kernel Extractor uses it to pick that
      engine's shapes. (The candidate's `role` key names the seam kind, not the engine.)
    - **Do not dedupe across engines.** The same kernel on both is two candidates (chunk-sized M vs
      batch-sized M, different machines).
-   - Rank on `pct_gpu_time`; explain with `pct_gpu_time_in_engine` too.
-   - **Bottleneck:** when `latency_split` is present, quote `bottleneck_engine` and each
-     `per_engine[].e2e_share_pct`; use a row's `pct_e2e_est` as the ceiling for `plausible_speedup` and
-     demote rows whose `pct_e2e_est` is far below `pct_gpu_time`. Prefill's share includes queueing and
-     KV transfer (upper bound). Without `latency_split`, say the bottleneck is unmeasured.
+   - Rank on `pct_gpu_time` and use it as the ceiling for `plausible_speedup`; explain with
+     `pct_gpu_time_in_engine` too.
+   - **Bottleneck:** quote `bottleneck_engine` and each `per_engine[].weight_pct`.
    - **`kv_handoff` (when present):** take `verdict.handoff_bound` as given and quote its `reason`. When
      true, TTFT is the handoff: order prefill heads after the handoff lever. A flag/env that moves more
      requests per handoff goes first in `config_directions`; a change to the transfer code is a prefill

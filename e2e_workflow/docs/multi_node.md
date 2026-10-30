@@ -27,8 +27,8 @@ The seam between the launcher and `mn.py` is the only one the runtime forces;
 | file | why it is separate |
 | --- | --- |
 | `adapters/launchers/multinode.sh` | `bench_e2e.sh` sources `adapters/launchers/$BENCH_LAUNCHER.sh` and calls the `adapter_*` functions it defines **in its own shell**. A launcher has to be a shell file at that path. |
-| `multi_node/mn.py` | the entry point: `check`, `launch`, `supervise`, `stop`, `leg-env`, `active-pin`, `exec`, `digest`, `trace-gate`, `topn-merge`. They are separate *processes* (`supervise` is the pid `bench_e2e.sh` kills) but not separate files. Everything that reaches a node over ssh is here. |
-| `multi_node/mn_traces.py` | what `trace-gate` and `topn-merge` run: reads a finished leg's traces, Top-Ns and logs and writes reports. No ssh, no pin. |
+| `multi_node/mn.py` | the entry point: `check`, `launch`, `supervise`, `stop`, `leg-env`, `active-pin`, `exec`, `digest`, `trace-gate`, `topn-merge`, `pd-mass`. They are separate *processes* (`supervise` is the pid `bench_e2e.sh` kills) but not separate files. Everything that reaches a node over ssh is here. |
+| `multi_node/mn_traces.py` | what `trace-gate`, `pd-points`, `topn-merge` and `pd-mass` run: reads a finished leg's traces, Top-Ns and logs and writes reports. A pd_disagg run weighs its two engines by GPU time, never by the graded metric and never by the GPU time of their profile windows: `pd-mass` (AgentX) and `topn-merge --coverage` (fixed-length, sglang: `pd-points` plans the points from each engine's baseline log) by each phase's mass from `coverage_ledger.py` × ranks (`--roles` once per probed engine); `topn-merge` without probed points by AgentX's no-log fallback — each window's mean GPU time per step × `parse_profile.py`'s `analytic_calls` × ranks. TTFT/TPOT only explain. No ssh, no pin. |
 
 `mn.py launch` builds each rank's script itself: the same
 exports `bench_e2e.sh` does on one box, then `. adapters/$BACKEND.sh` and
@@ -171,7 +171,13 @@ its GPU stack and runs on rank0 through `mn.py exec --target rank0 --env`, with 
 leg's shell variables and functions and a warning; check imports it on rank0 and dials
 the client port from there, and the result records `bench_client_host: rank0`.
 A profile round never reaches a client's `--profile`: the launcher starts a fresh load
-and opens its own window, which spans every rank. The result line lands in
+and opens its own window, which spans every rank. Sampling points (`PROFILE=1 REPEATS=0
+PROFILE_PROBE_POINTS=<points> PROFILE_PROBE_IDS=<ids> SKILL_ROOT=<kernel-extract>`) are not
+such a round: one boot, then the kernel-extract skill's `serving_probe.py` per point, on the
+driver like the client. `adapter_probe_args` says where: requests to the client port (the LB),
+the window on the engine of the point's phase, occupancy from the decode engine's TP-0 log
+(no engine serves `/metrics`), one trace expected per rank of that engine;
+`adapter_probe_after` runs `trace-gate --role` on that engine. The result line lands in
 `RESULT_JSONL` on the shared mount. The single-host memory-parity guard is skipped: the driver's `rocm-smi`
 cannot see the nodes' cards. The clients run from `/`: `python -m` puts the working directory first on
 `sys.path`, and a task directory's `unittest.py` would shadow the stdlib.

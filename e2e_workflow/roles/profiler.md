@@ -173,6 +173,22 @@ degrade to whatever is available, and if both analysis.md and trace are unusable
      bash "$EVAL_DIR/bench_e2e.sh" 2>&1 | tee "$EVAL_DIR/logs/profile_r${ROUND}.log"
    ```
    The torch trace lands as a `*.json.gz` (or `*.json`) under `OUT_DIR/profile/`.
+
+   **`SERVING_TOPOLOGY=pd_disagg` with `BACKEND=sglang`: the same leg also probes sampling points**,
+   which is where the two engines' weights come from (step 3). Plan them from the BASELINE leg's
+   engine logs, then add three variables to the command above:
+   ```bash
+   KX="$SKILL_DIR/knowledge/kernel_extraction_skills/kernel-extract"
+   BL_LOG() { python3 -c 'import json,sys;print(next(e["log"] for e in json.load(open(sys.argv[1]))["pd"]["engines"] if e["role"]==sys.argv[2]))' "$EVAL_DIR/baseline/mn_launch.json" "$1"; }
+   PTS="$EVAL_DIR/profile/round_${ROUND}/points"
+   IDS=$(python3 "$SKILL_DIR/scripts/multi_node/mn.py" pd-points --skill-root "$KX" --out-dir "$PTS" \
+           --engine-log prefill="$(BL_LOG prefill)" --engine-log decode="$(BL_LOG decode)" \
+         | sed -n 's/^PROFILE_PROBE_IDS=//p')
+   # add to the bench_e2e.sh env:
+   #   SKILL_ROOT="$KX" PROFILE_PROBE_POINTS="$PTS/sampling_points.json" PROFILE_PROBE_IDS="$IDS" PROFILE_PROBE_WITH_WINDOW=1
+   ```
+   If `pd-points` exits 2, run the leg without the three variables and say why in `notes`; step 3
+   then weighs on AgentX's analytic step counts, as one node does without a serving log.
 2. (Recommended refinement) Also capture a rocprofv3 kernel trace for authoritative HW durations.
    **Priority is UNCHANGED: the torch trace from step 1 is the PRIMARY routing source** (it ranks the
    top kernels by GPU time + carries op names/shapes); rocprofv3 refines the HW timings.
@@ -253,18 +269,51 @@ PY
          --top 25 --out "$RD/profile_topN_$R" --workload-out "$RD/profile_workload_$R.json"
        MERGE+=(--engine "$R=$RD/profile_topN_$R.json")
      done
+     # Probed points (step 1): each point's TP-0 trace -> census -> one coverage ledger.
+     KX="$SKILL_DIR/knowledge/kernel_extraction_skills/kernel-extract"; PTS="$RD/points"; WEIGH=()
+     if [ -s "$PTS/sampling_points.json" ]; then
+       CENSUS=()
+       for ID in $(python3 -c 'import json,sys;print(" ".join(p["point_id"] for p in json.load(open(sys.argv[1]))["points"]))' "$PTS/sampling_points.json"); do
+         J="$PDIR/$ID.journal.json"
+         [ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$J" 2>/dev/null)" = ok ] || continue
+         T=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["roles"][0]["trace"])' "$PDIR/$ID/ranks/mn_trace_roles.json")
+         python3 "$EVAL_DIR/parse_profile.py" --torch-trace "$T" --top 200 \
+           --isl <isl> --osl <osl> --conc <conc> --out "$PTS/census_$ID"
+         CENSUS+=(--census "$ID=$PTS/census_$ID.json")
+       done
+       python3 "$KX/scripts/coverage_ledger.py" --points "$PTS/sampling_points.json" "${CENSUS[@]}" \
+         --out "$PTS/coverage.json" && WEIGH=(--coverage "$PTS/coverage.json")
+     fi
      python3 "$SKILL_DIR/scripts/multi_node/mn.py" topn-merge \
-       "${MERGE[@]}" --top 25 --out "$RD/profile_topN" \
-       --bench-summary "$RD/bench_summary.json" --osl <osl> \
+       "${MERGE[@]}" --top 25 --out "$RD/profile_topN" "${WEIGH[@]}" --osl <osl> \
+       --bench-summary "$EVAL_DIR/baseline/bench_summary.json" \
+       --roles "$ROLES" \
        --engine-log prefill="$(LOG_OF prefill)" --engine-log decode="$(LOG_OF decode)"
    fi
    ```
-   Put the merged table's `bottleneck_engine`, each `per_engine[].e2e_share_pct` and the `kv_handoff`
-   numbers (decode `wait_share`, prefill `computed_tokens_per_seq`) in `notes`. If the merge printed
-   `no TTFT/TPOT` or `no kv_handoff block`, say that part is missing rather than estimating it.
+   With probed points, each engine is weighed by its GPU-time mass over the baseline leg: every
+   point's per-step kernel time × the steps that engine's baseline log counts at that shape, summed,
+   × its ranks (`engine_weights.rule = gpu_time_mass`, the rule AgentX uses). As on one node, a point
+   that does not verify is recaptured once (`bench_e2e.sh` keeps the first try as `<id>.try1`); one
+   still not `ok` gets no census, and the merge weighs on with coverage_ledger's warning that its steps
+   contributed no mass (`engine_weights.warnings`, also in the .md). Copy every such warning into
+  `notes`: that engine's weight is low by those steps. Without probed points (vLLM, or `pd-points`
+  failed) each engine is weighed as one node is without a serving log: its window's mean GPU time per
+  step (`step_ledger`) × parse_profile's `serving.analytic_calls` for its phase (CONC×⌈ISL/chunk⌉
+  prefill steps, OSL decode steps) × its ranks (`engine_weights.rule = analytic_calls`). That count
+  assumes every decode step runs CONC requests; copy its warning into `notes`. It is only as right as
+  the `--isl/--osl/--conc` and `CHUNK` each engine was parsed with. If the merge exits 2 (a phase with
+  no probed mass at all, an engine without step annotations or `serving.analytic_calls`, no rank
+  counts), the profile FAILED — report the reason it printed; never merge the engines yourself.
+  The `--bench-summary` only adds a TTFT/TPOT `latency_split` for the reader; it never weighs.
+  Put the merged table's `bottleneck_engine`, each `per_engine[].weight_pct`, `engine_weights.rule`
+  (with `gpu_time_mass`: `inputs.mass_us`; with `analytic_calls`: `inputs.per_step_ms` and
+  `inputs.calls_per_wave`; every warning), and the `kv_handoff` numbers (decode `wait_share`,
+   prefill `computed_tokens_per_seq`) in `notes`. If the merge printed `no kv_handoff block`, say that
+   part is missing rather than estimating it.
    Report the per-engine artifacts in `profile_topN_by_role` and `profile_workload_by_role` (the
    Kernel Extractor builds each head against its own engine's workload). If one engine produced no
-   trace, say it is unprofiled — never infer its table from the other. `CHUNK`/`CAPTURE_SIZES` are per engine: read them from that engine's own server log
+   trace, say it is unprofiled (the merge exits 2 on one engine) — never infer its table from the other. `CHUNK`/`CAPTURE_SIZES` are per engine: read them from that engine's own server log
    (`$(LOG_OF prefill)` / `$(LOG_OF decode)` above).
 
    Pass `--isl/--osl/--conc` (the SAME values as the bench). IF the trace carries `gpu_user_annotation`

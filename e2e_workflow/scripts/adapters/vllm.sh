@@ -73,9 +73,12 @@ adapter_launch() {
   fi
   # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
   # own session so teardown can prove the process group is ours. Empty when unset.
+  # A probe leg (PROFILE_PROBE_POINTS) needs /pause?mode=keep + /resume so a PREFILL point's
+  # sequences run as one step; vllm mounts them only in dev mode.
   # shellcheck disable=SC2086
   ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
+    ${PROFILE_PROBE_POINTS:+VLLM_SERVER_DEV_MODE=1} \
     HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
     "${_prof_env[@]}" \
     PYTHONPATH="${PROFILE_PYTHONPATH:+$PROFILE_PYTHONPATH:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \

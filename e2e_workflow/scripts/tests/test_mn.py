@@ -1524,6 +1524,127 @@ PY
 
 
 
+KX_SCRIPTS = os.path.join(os.path.dirname(SCRIPTS_DIR), "knowledge", "kernel_extraction_skills",
+                          "kernel-extract", "scripts")
+
+PROBE_DRIVER = """set -uo pipefail
+HERE="{scripts}"
+source "{adapter}"
+{facts}
+{fn} "$1" "$2"
+echo "FN_RC=$?"
+"""
+
+
+@unittest.skipIf(BASH is None or not mn.local_identity(), "bash and a Linux boot_id")
+class ProbeArgsTest(unittest.TestCase):
+    """adapter_probe_args feeds the kernel-extract skill's serving_probe.py: whatever it prints
+    must be flags that script's own parser accepts, naming this server's engines and logs."""
+
+    PD_FACTS = ('_MN_TOPOLOGY=pd_disagg\n'
+                "_MN_PD_ENGINES=$'prefill=http://10.0.0.1:30891\\ndecode=http://10.0.0.2:30892'")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_probe_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.state = os.path.join(self.tmp, "mn_state.json")
+        with open(self.state, "w", encoding="utf-8") as handle:
+            json.dump({
+                "nodes": [
+                    {"rank": 0, "node_id": mn.local_identity() or "n0", "ip": "10.10.0.32",
+                     "hostname": "h0", "cluster_if": "ens50f0", "ngpu": 8},
+                    {"rank": 1, "node_id": "n1", "ip": "10.10.0.166",
+                     "hostname": "h1", "cluster_if": "ens50f0", "ngpu": 8},
+                ],
+                "master_ip": "10.10.0.32", "serve_port": 30890, "dist_init_port": 30531,
+                "shared_fs": self.tmp, "mn_dir": MN,
+            }, handle)
+        self.point = os.path.join(self.tmp, "profile", "de_2")
+        os.makedirs(self.point)
+
+    def launch_json(self):
+        with open(os.path.join(self.tmp, "mn_launch.json"), "w", encoding="utf-8") as handle:
+            json.dump({"topology": "pd_disagg", "pd": {
+                "engine_tp_by_role": {"prefill": 8, "decode": 4},
+                "engines": [
+                    {"role": "prefill", "rank": 0, "tp": 8, "log": "/fs/server.log"},
+                    {"role": "decode", "rank": 1, "tp": 4, "log": "/fs/server.rank1.log"},
+                    {"role": "decode", "rank": 2, "tp": 4, "replica": 1, "log": "/fs/server.rank2.log"}]}},
+                handle)
+
+    def call(self, fn, phase, *, adapter=LAUNCHER, facts=""):
+        driver = os.path.join(self.tmp, "driver.sh")
+        with open(driver, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(PROBE_DRIVER.format(scripts=SCRIPTS_DIR.replace("\\", "/"),
+                                             adapter=adapter.replace("\\", "/"),
+                                             facts=facts, fn=fn))
+        env = dict(os.environ, GEAK_MN_STATE=self.state, OUT_DIR=self.tmp, TP="16",
+                   BASE_URL="http://10.10.0.32:30890", LOG="/fs/server.log", BACKEND="fake")
+        proc = subprocess.run([BASH, driver, phase, self.point], env=env, cwd=self.tmp,
+                              capture_output=True, text=True, timeout=120)
+        lines = proc.stdout.splitlines()
+        rc = next(int(l.split("=", 1)[1]) for l in lines if l.startswith("FN_RC="))
+        flags = [l for l in lines if not l.startswith((">>>", "FN_RC="))]
+        return rc, flags, proc
+
+    def parsed(self, flags):
+        sys.path.insert(0, KX_SCRIPTS)
+        try:
+            import serving_probe
+        finally:
+            sys.path.remove(KX_SCRIPTS)
+        return serving_probe.build_parser().parse_args(
+            ["--points", "p.json", "--point-id", "de_2", "--out", "j.json", *flags])
+
+    def test_pd_points_open_their_own_engine_and_read_the_decode_log(self):
+        self.launch_json()
+        for phase, url, ranks, sub in (("DECODE", "http://10.0.0.2:30892", 4, "decode"),
+                                       ("PREFILL", "http://10.0.0.1:30891", 8, "prefill")):
+            rc, flags, proc = self.call("adapter_probe_args", phase, facts=self.PD_FACTS)
+            self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+            args = self.parsed(flags)
+            self.assertEqual(args.base_url, "http://10.10.0.32:30890", phase)
+            self.assertEqual(args.profile_url, url, phase)
+            self.assertEqual(args.occupancy_log, "/fs/server.rank1.log", phase)
+            self.assertEqual(args.expect_traces, ranks, phase)
+            self.assertEqual(args.trace_dir, os.path.join(self.point, sub), phase)
+            self.assertEqual((args.record_shapes, args.with_stack), (True, "false"), phase)
+
+    def test_a_tp_span_point_uses_the_one_server_and_all_its_ranks(self):
+        rc, flags, proc = self.call("adapter_probe_args", "DECODE")
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        args = self.parsed(flags)
+        self.assertEqual((args.base_url, args.profile_url), ("http://10.10.0.32:30890",) * 2)
+        self.assertEqual((args.occupancy_log, args.expect_traces), ("/fs/server.log", 16))
+        self.assertEqual(args.trace_dir, self.point)
+
+    def test_a_pd_point_without_the_launch_record_prints_no_flags(self):
+        rc, flags, proc = self.call("adapter_probe_args", "DECODE", facts=self.PD_FACTS)
+        self.assertEqual(rc, 1)
+        self.assertEqual(flags, [])
+        self.assertIn("no decode engine url/log/tp", proc.stderr)
+
+    def test_the_single_host_sglang_adapter_speaks_the_same_flags(self):
+        rc, flags, proc = self.call("adapter_probe_args", "DECODE",
+                                    adapter=os.path.join(SCRIPTS_DIR, "adapters", "sglang.sh"))
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        args = self.parsed(flags)
+        self.assertEqual((args.base_url, args.profile_url), ("http://10.10.0.32:30890", None))
+        self.assertEqual((args.occupancy_log, args.expect_traces), ("/fs/server.log", 16))
+
+    def test_after_a_pd_point_the_gate_indexes_that_engine_alone(self):
+        self.launch_json()
+        os.makedirs(os.path.join(self.point, "decode"))
+        for rank in range(4):
+            write_trace(os.path.join(self.point, "decode"), rank, 0)
+        rc, _flags, proc = self.call("adapter_probe_after", "DECODE", facts=self.PD_FACTS)
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        with open(os.path.join(self.point, "ranks", "mn_trace_roles.json"), encoding="utf-8") as handle:
+            index = json.load(handle)
+        self.assertEqual(index["verdict"], "pass")
+        self.assertEqual([(r["role"], r["ranks"]) for r in index["roles"]], [("decode", 4)])
+
+
 GATE = os.path.join(SCRIPTS_DIR, "multi_node", "mn.py")
 
 
@@ -1798,7 +1919,23 @@ class PdTraceGateTest(unittest.TestCase):
         for entry in index["roles"]:
             self.assertTrue(os.path.isfile(entry["trace"]), entry)
             self.assertIn(f"{os.sep}{entry['role']}{os.sep}", entry["trace"])
-            self.assertEqual(entry["ranks"], 8)
+            self.assertEqual((entry["ranks"], entry["instances"]), (8, 1))
+
+    def test_the_roles_index_counts_each_roles_replicas(self):
+        self.engine("prefill")
+        self.engine("decode")
+        launch = pd_launch_json(self.tmp)
+        with open(launch, encoding="utf-8") as handle:
+            doc = json.load(handle)
+        doc["pd"]["engines"].append({"role": "decode", "rank": 2, "replica": 1})
+        with open(launch, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+        run_gate(self.profile, "--launch-json", launch)
+        with open(os.path.join(self.profile, "ranks", "mn_trace_roles.json"),
+                  encoding="utf-8") as handle:
+            index = json.load(handle)
+        self.assertEqual({r["role"]: r["instances"] for r in index["roles"]},
+                         {"prefill": 1, "decode": 2})
 
     def test_a_silent_engine_is_named_not_counted_as_a_missing_node(self):
         self.engine("decode")
@@ -1823,6 +1960,19 @@ class PdTraceGateTest(unittest.TestCase):
         self.assertTrue(any("prefill:5" in p for p in report["problems"]),
                         report["problems"])
 
+    def test_a_probe_gates_only_the_engine_it_opened(self):
+        self.engine("decode", ranks=range(4))
+        proc, report = self.gate("--role", "decode", tp_by_role={"prefill": 8, "decode": 4})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual([r["role"] for r in report["per_role"]], ["decode"])
+        with open(os.path.join(self.profile, "ranks", "mn_trace_roles.json"),
+                  encoding="utf-8") as handle:
+            index = json.load(handle)
+        self.assertEqual([(r["role"], r["ranks"]) for r in index["roles"]], [("decode", 4)])
+        proc, _ = self.gate("--role", "router")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("no router engine", proc.stderr)
+
     def test_the_shared_directory_collision_is_what_this_avoids(self):
         for rank in range(8):
             write_trace(self.profile, rank, 0)
@@ -1833,106 +1983,65 @@ class PdTraceGateTest(unittest.TestCase):
 
 
 class PdTopnMergeTest(unittest.TestCase):
+    # The hand-checked case, AgentX's analytic counts (ISL 500, OSL 101, CONC 30, one chunk):
+    # prefill 10 ms over 2 steps x 30 steps x 8 ranks = 1200, decode 90 ms over 9 steps x 101 x 8
+    # = 8080: prefill 12.93% / decode 87.07%.
+    PREFILL_LEDGER = {"token_source": "annotation", "prefill_tokens": 1000, "prefill_gpu_ms": 10.0}
+    DECODE_LEDGER = {"token_source": "annotation", "decode_gpu_ms": 90.0, "decode_active_ms": 100.0}
+    CALLS = {"prefill": 30, "decode": 101}
+    W_PREFILL = 1200.0 / 9280.0
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="mn_topn_")
         self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
 
-    def topn(self, role, total_ms, kernels):
-        path = os.path.join(self.tmp, f"profile_topN_{role}.json")
+    def topn(self, role, total_ms, kernels, ledger=None, tag="", steps=None, calls=None):
+        path = os.path.join(self.tmp, f"profile_topN_{role}{tag}.json")
+        doc = {
+            "source": "torch-trace", "total_gpu_time_ms": total_ms,
+            "num_kernel_launches": 100, "num_distinct_kernels": len(kernels),
+            "top_kernels": [
+                {"rank": i + 1, "short_name": name, "calls": 10,
+                 "total_ms": total_ms * pct / 100.0, "avg_us": 1.0,
+                 "pct_gpu_time": pct, "shapes": [], "dtypes": [],
+                 "classification": "library_gemm", "backend_guess": "hipblaslt",
+                 "editable": False, "opt_hint": "hint"}
+                for i, (name, pct) in enumerate(kernels)],
+        }
+        if ledger is None:
+            ledger = self.PREFILL_LEDGER if role == "prefill" else self.DECODE_LEDGER
+        if isinstance(ledger, str):
+            doc["step_ledger_unavailable"] = ledger
+        elif ledger:
+            doc["step_ledger"] = ledger
+        if steps is None:
+            steps = 2 if role == "prefill" else 9
+        doc["serving"] = {f"n_{role}_steps": steps,
+                          "analytic_calls": self.CALLS if calls is None else calls}
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({
-                "source": "torch-trace", "total_gpu_time_ms": total_ms,
-                "num_kernel_launches": 100, "num_distinct_kernels": len(kernels),
-                "top_kernels": [
-                    {"rank": i + 1, "short_name": name, "calls": 10,
-                     "total_ms": total_ms * pct / 100.0, "avg_us": 1.0,
-                     "pct_gpu_time": pct, "shapes": [], "dtypes": [],
-                     "classification": "library_gemm", "backend_guess": "hipblaslt",
-                     "editable": False, "opt_hint": "hint"}
-                    for i, (name, pct) in enumerate(kernels)],
-            }, handle)
+            json.dump(doc, handle)
         return f"{role}={path}"
 
-    def merge(self, *roles):
-        out = os.path.join(self.tmp, "profile_topN")
-        proc = run_mn(
-            ["topn-merge", "--out", out,
-             *[a for r in roles for a in ("--engine", r)]])
-        doc = {}
-        if os.path.isfile(out + ".json"):
-            with open(out + ".json", encoding="utf-8") as handle:
-                doc = json.load(handle)
-        return proc, doc
+    def engines(self):
+        return (self.topn("prefill", 100.0, [("gemm_p", 60.0)]),
+                self.topn("decode", 300.0, [("attn_d", 40.0)]))
 
-    def test_rows_are_weighted_by_each_engine_share_of_gpu_time(self):
-        proc, doc = self.merge(self.topn("prefill", 100.0, [("gemm_p", 60.0)]),
-                               self.topn("decode", 300.0, [("attn_d", 40.0)]))
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(doc["total_gpu_time_ms"], 400.0)
-        rows = {r["short_name"]: r for r in doc["top_kernels"]}
-        self.assertAlmostEqual(rows["gemm_p"]["pct_gpu_time"], 15.0, places=3)
-        self.assertAlmostEqual(rows["attn_d"]["pct_gpu_time"], 30.0, places=3)
-        self.assertEqual(doc["top_kernels"][0]["short_name"], "attn_d")
-        self.assertAlmostEqual(rows["gemm_p"]["pct_gpu_time_in_engine"], 60.0)
-
-    def test_every_row_carries_its_engine(self):
-        _proc, doc = self.merge(self.topn("prefill", 100.0, [("shared", 50.0)]),
-                                self.topn("decode", 100.0, [("shared", 50.0)]))
-        self.assertEqual(sorted(r["engine"] for r in doc["top_kernels"]),
-                         ["decode", "prefill"])
-
-    def test_one_unreadable_engine_still_yields_the_other(self):
-        proc, doc = self.merge(self.topn("decode", 100.0, [("attn_d", 40.0)]),
-                               f"prefill={os.path.join(self.tmp, 'nope.json')}")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual([r["engine"] for r in doc["per_engine"]], ["decode"])
-        self.assertAlmostEqual(doc["top_kernels"][0]["pct_gpu_time"], 40.0)
-        self.assertIn("skipping prefill", proc.stderr)
-
-    def bench(self, ttft_ms, tpot_ms):
-        path = os.path.join(self.tmp, "bench_summary.json")
+    def bench(self, ttft_ms=1000.0, tpot_ms=20.0, basis="aggregate_output_tok_s", osl=101, **extra):
+        fd, path = tempfile.mkstemp(prefix="bench_summary_", suffix=".json", dir=self.tmp)
+        os.close(fd)
+        doc = {"metric_basis": basis, "ttft_ms_median": ttft_ms, "tpot_ms_median": tpot_ms, **extra}
+        if osl is not None:
+            doc["observed_osl"] = osl
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"ttft_ms_median": ttft_ms, "tpot_ms_median": tpot_ms}, handle)
+            json.dump(doc, handle)
         return path
 
-    def merge_with_bench(self, bench, osl, *roles):
-        out = os.path.join(self.tmp, "profile_topN")
-        proc = run_mn(
-            ["topn-merge", "--out", out,
-             "--bench-summary", bench, "--osl", str(osl),
-             *[a for r in roles for a in ("--engine", r)]])
-        with open(out + ".json", encoding="utf-8") as handle:
-            return proc, json.load(handle)
-
-    def test_the_bench_latency_split_names_the_engine_throughput_waits_on(self):
-        proc, doc = self.merge_with_bench(
-            self.bench(200.0, 25.0), 33,
-            self.topn("prefill", 300.0, [("gemm_p", 50.0)]),
-            self.topn("decode", 100.0, [("attn_d", 50.0)]))
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(doc["bottleneck_engine"], "decode")
-        self.assertAlmostEqual(doc["latency_split"]["share"]["decode"], 0.8, places=4)
-        roles = {r["engine"]: r for r in doc["per_engine"]}
-        self.assertAlmostEqual(roles["prefill"]["e2e_share_pct"], 20.0)
-        rows = {r["short_name"]: r for r in doc["top_kernels"]}
-        self.assertEqual(doc["top_kernels"][0]["short_name"], "gemm_p")
-        self.assertAlmostEqual(rows["gemm_p"]["pct_e2e_est"], 10.0, places=3)
-        self.assertAlmostEqual(rows["attn_d"]["pct_e2e_est"], 40.0, places=3)
-
-    def test_a_bench_without_latencies_leaves_the_gpu_time_merge_alone(self):
-        path = os.path.join(self.tmp, "bench_summary.json")
+    def roles(self, prefill=8, decode=8, decode_instances=1):
+        path = os.path.join(self.tmp, f"mn_trace_roles_{prefill}_{decode}_{decode_instances}.json")
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"throughput_tok_s_median": 100.0}, handle)
-        proc, doc = self.merge_with_bench(
-            path, 33, self.topn("prefill", 100.0, [("gemm_p", 60.0)]),
-            self.topn("decode", 300.0, [("attn_d", 40.0)]))
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("no TTFT/TPOT", proc.stderr)
-        self.assertNotIn("latency_split", doc)
-        self.assertNotIn("bottleneck_engine", doc)
-        self.assertIsNone(doc["top_kernels"][0]["pct_e2e_est"])
-        self.assertAlmostEqual(doc["top_kernels"][0]["pct_gpu_time"], 30.0, places=3)
+            json.dump({"roles": [{"role": "prefill", "ranks": prefill, "instances": 1},
+                                 {"role": "decode", "ranks": decode, "instances": decode_instances}]}, handle)
+        return path
 
     def engine_log(self, name, lines):
         path = os.path.join(self.tmp, name)
@@ -1940,6 +2049,134 @@ class PdTopnMergeTest(unittest.TestCase):
             handle.write("[2026-09-23 12:47:59] server_args={'page_size': 1}\n")
             handle.write("".join(line + "\n" for line in lines))
         return path
+
+    def sglang_prefill_log(self, per_seq=500):
+        return self.engine_log("server.log", [
+            f"[2026-09-23 12:48:04 TP0] Prefill batch, #new-seq: 2, #new-token: {2 * per_seq}, "
+            "#cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, "
+            "#pending-token: 0, #bootstrap-req: 0, #inflight-req: 0, #optimistic-req: 0"])
+
+    def merge(self, *engines, bench=None, roles=None, logs=None):
+        out = os.path.join(self.tmp, "profile_topN")
+        for suffix in (".json", ".md"):
+            if os.path.exists(out + suffix):
+                os.remove(out + suffix)
+        if logs is None:
+            logs = {"prefill": self.sglang_prefill_log()}
+        argv = ["topn-merge", "--out", out, "--bench-summary", bench or self.bench(),
+                *[a for e in (engines or self.engines()) for a in ("--engine", e)],
+                *[a for name, path in logs.items() for a in ("--engine-log", f"{name}={path}")]]
+        if roles is not False:
+            argv += ["--roles", roles or self.roles()]
+        proc = run_mn(argv)
+        doc = {}
+        if os.path.isfile(out + ".json"):
+            with open(out + ".json", encoding="utf-8") as handle:
+                doc = json.load(handle)
+        return proc, doc
+
+    def test_without_points_rows_are_weighted_on_agentx_analytic_step_counts(self):
+        proc, doc = self.merge()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        w = doc["engine_weights"]
+        self.assertEqual(w["rule"], "analytic_calls")
+        self.assertAlmostEqual(w["weights"]["prefill"], self.W_PREFILL, places=5)
+        self.assertAlmostEqual(w["weights"]["decode"], 1 - self.W_PREFILL, places=5)
+        self.assertEqual(w["inputs"]["per_step_ms"], {"PREFILL": 5.0, "DECODE": 10.0})
+        self.assertEqual(w["inputs"]["calls_per_wave"], {"PREFILL": 30, "DECODE": 101})
+        self.assertIn("analytic count", w["warnings"][0])
+        self.assertIn("analytic count", proc.stderr)
+        rows = {r["short_name"]: r for r in doc["top_kernels"]}
+        self.assertAlmostEqual(rows["gemm_p"]["pct_gpu_time"], 60.0 * self.W_PREFILL, places=3)
+        self.assertAlmostEqual(rows["attn_d"]["pct_gpu_time"], 40.0 * (1 - self.W_PREFILL), places=3)
+        self.assertEqual(rows["gemm_p"]["pct_gpu_time_in_engine"], 60.0)
+        self.assertNotIn("pct_gpu_time_deployment", rows["gemm_p"])
+        per = {e["engine"]: e for e in doc["per_engine"]}
+        self.assertEqual(per["prefill"]["weight_pct"], 12.93)
+        self.assertNotIn("metric_weight_pct", per["prefill"])
+        self.assertEqual(doc["bottleneck_engine"], "decode")
+        with open(os.path.join(self.tmp, "profile_topN.md"), encoding="utf-8") as handle:
+            self.assertIn("engine weights `analytic_calls`", handle.read())
+
+    def test_the_graded_metric_does_not_move_the_table(self):
+        tables = []
+        for basis in ("p90_intvty_inferencex", "aggregate_output_tok_s", "e2e_norm_intvty_p50"):
+            proc, doc = self.merge(bench=self.bench(basis=basis))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            tables.append(doc["top_kernels"])
+        self.assertEqual(tables[0], tables[1])
+        self.assertEqual(tables[0], tables[2])
+
+    def test_the_profile_windows_length_does_not_move_the_weights(self):
+        _proc, base = self.merge()
+        long_prefill = self.topn("prefill", 1000.0, [("gemm_p", 60.0)],
+                                 ledger={"token_source": "annotation", "prefill_tokens": 10000,
+                                         "prefill_gpu_ms": 100.0}, tag="_x10", steps=20)
+        long_decode = self.topn("decode", 3000.0, [("attn_d", 40.0)],
+                                ledger={"token_source": "annotation", "decode_gpu_ms": 900.0,
+                                        "decode_active_ms": 1000.0}, tag="_x10", steps=90)
+        proc, doc = self.merge(long_prefill, long_decode)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(doc["engine_weights"]["weights"], base["engine_weights"]["weights"])
+        self.assertEqual([(r["short_name"], r["pct_gpu_time"]) for r in doc["top_kernels"]],
+                         [(r["short_name"], r["pct_gpu_time"]) for r in base["top_kernels"]])
+
+    def test_engine_tp_scales_its_gpu_time(self):
+        proc, doc = self.merge(roles=self.roles(prefill=4, decode=8))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertAlmostEqual(doc["engine_weights"]["weights"]["prefill"], 600.0 / 8680.0, places=5)
+
+    def test_the_bench_summary_does_not_weigh(self):
+        _proc, base = self.merge()
+        proc, doc = self.merge(bench=self.bench(ttft_ms=5000.0, tpot_ms=2.0))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(doc["engine_weights"]["weights"], base["engine_weights"]["weights"])
+
+    def test_every_row_carries_its_engine(self):
+        _proc, doc = self.merge(self.topn("prefill", 100.0, [("shared", 50.0)]),
+                                self.topn("decode", 100.0, [("shared", 50.0)]))
+        self.assertEqual(sorted(r["engine"] for r in doc["top_kernels"]), ["decode", "prefill"])
+
+    def assert_fails(self, why, proc, doc):
+        self.assertEqual(proc.returncode, 2, why)
+        self.assertIn("cannot ledger the engines", proc.stderr, why)
+        self.assertEqual(doc, {}, why)
+
+    def test_any_missing_input_fails_the_merge_without_a_fallback(self):
+        unavailable = "no step annotations, and aten::embedding carries no indices shape"
+        prefill, decode = self.engines()
+        cases = [
+            ("prefill without step_ledger", dict(engines=(
+                self.topn("prefill", 100.0, [("gemm_p", 60.0)], ledger=unavailable, tag="_n"), decode)),
+             unavailable),
+            ("decode counted from embedding", dict(engines=(prefill, self.topn(
+                "decode", 300.0, [("attn_d", 40.0)], tag="_e", steps=0,
+                ledger={"token_source": "embedding", "prefill_tokens": 64, "prefill_gpu_ms": 9.0}))),
+             "only step annotations give"),
+            ("no analytic counts", dict(engines=(prefill, self.topn(
+                "decode", 300.0, [("attn_d", 40.0)], tag="_c", calls={}))),
+             "serving.analytic_calls.decode"),
+            ("no --roles", dict(roles=False), "no --roles"),
+            ("xPyD", dict(roles=self.roles(decode_instances=2)), "several instances"),
+            ("one engine", dict(engines=(decode,)), "no --engine for ['prefill']"),
+            ("unreadable engine", dict(engines=(f"prefill={os.path.join(self.tmp, 'nope.json')}", decode)),
+             "nope.json"),
+        ]
+        for why, kwargs, needle in cases:
+            proc, doc = self.merge(*kwargs.pop("engines", ()), **kwargs)
+            self.assert_fails(why, proc, doc)
+            self.assertIn(needle, proc.stderr, why)
+
+    def test_the_latency_split_is_written_but_does_not_weigh(self):
+        proc, doc = self.merge(bench=self.bench(ttft_ms=200.0, tpot_ms=25.0, osl=33))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertAlmostEqual(doc["latency_split"]["share"]["decode"], 0.8, places=4)
+        self.assertNotAlmostEqual(doc["engine_weights"]["weights"]["decode"], 0.8, places=2)
+        with open(os.path.join(self.tmp, "profile_topN.md"), encoding="utf-8") as handle:
+            md = handle.read()
+        self.assertIn("explanation only, not a weight", md)
+        self.assertNotIn("GRADED", md)
+        self.assertNotIn("%deploy", md)
 
     def test_engine_logs_expose_ttft_that_is_kv_handoff_not_prefill_compute(self):
         pre = self.engine_log("server.log", [
@@ -1960,15 +2197,9 @@ class PdTopnMergeTest(unittest.TestCase):
             "token usage: 0.00, pre-allocated usage: 0.00, #prealloc-req: 0, "
             "#transfer-req: 13, #retracted-req: 0, cuda graph: True, "
             "gen throughput (token/s): 86.13, #queue-req: 0"])
-        out = os.path.join(self.tmp, "profile_topN")
-        proc = run_mn(
-            ["topn-merge", "--out", out,
-             "--engine", self.topn("prefill", 100.0, [("ar_p", 60.0)]),
-             "--engine", self.topn("decode", 100.0, [("gemm_d", 40.0)]),
-             "--engine-log", f"prefill={pre}", "--engine-log", f"decode={dec}"])
+        proc, doc = self.merge(logs={"prefill": pre, "decode": dec})
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        with open(out + ".json", encoding="utf-8") as handle:
-            kv = json.load(handle)["kv_handoff"]
+        kv = doc["kv_handoff"]
         self.assertEqual(kv["decode"]["transfer_req_mean"], 14.0)
         self.assertEqual(kv["decode"]["running_req_mean"], 2.0)
         self.assertAlmostEqual(kv["decode"]["wait_share"], 28 / 32, places=4)
@@ -1976,7 +2207,7 @@ class PdTopnMergeTest(unittest.TestCase):
         self.assertEqual(kv["prefill"]["single_seq_batch_share"], 0.5)
         self.assertEqual(kv["prefill"]["computed_tokens_per_seq"], 1.0)
         self.assertAlmostEqual(kv["prefill"]["prefix_cache_share"], 2044 / 2048, places=4)
-        with open(out + ".md", encoding="utf-8") as handle:
+        with open(os.path.join(self.tmp, "profile_topN.md"), encoding="utf-8") as handle:
             md = handle.read()
         self.assertIn("## KV handoff", md)
         self.assertIn("87.5% of decode-side in-flight requests are parked", md)
@@ -2017,17 +2248,259 @@ class PdTopnMergeTest(unittest.TestCase):
         self.assertEqual(mn_traces.handoff_verdict({"prefill": {"inflight_req_mean": 9.0}}), {})
 
     def test_logs_without_batch_lines_leave_no_handoff_block(self):
-        empty = self.engine_log("server.log", ["[x] loading weights"])
-        out = os.path.join(self.tmp, "profile_topN")
-        proc = run_mn(
-            ["topn-merge", "--out", out,
-             "--engine", self.topn("prefill", 100.0, [("ar_p", 60.0)]),
-             "--engine-log", f"prefill={empty}",
-             "--engine-log", f"decode={os.path.join(self.tmp, 'missing.log')}"])
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        empty = self.engine_log("empty.log", ["[x] loading weights"])
+        proc, doc = self.merge(bench=self.bench(observed_isl=1000), logs={
+            "prefill": empty, "decode": os.path.join(self.tmp, "missing.log")})
         self.assertIn("no kv_handoff block", proc.stderr)
-        with open(out + ".json", encoding="utf-8") as handle:
-            self.assertNotIn("kv_handoff", json.load(handle))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("kv_handoff", doc)
+
+    def coverage(self, planned=2, measured=(1, 1), mass_us=(60e6, 40e6), warnings=()):
+        plan = os.path.join(self.tmp, f"points_{planned}.json")
+        with open(plan, "w", encoding="utf-8") as handle:
+            json.dump({"points": [{"point_id": f"p{i}"} for i in range(planned)]}, handle)
+        path = os.path.join(self.tmp, f"coverage_{planned}_{measured}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"points_plan": plan, "warnings": list(warnings), "phases": {
+                phase: {"points_measured": n, "total_mass_us": m}
+                for phase, n, m in zip(("PREFILL", "DECODE"), measured, mass_us)}}, handle)
+        return path
+
+    def merge_mass(self, coverage, roles=None):
+        out = os.path.join(self.tmp, "profile_topN_mass")
+        proc = run_mn(["topn-merge", "--out", out, "--coverage", coverage, "--osl", "33",
+                       "--roles", roles or self.roles(),
+                       *[a for e in self.engines() for a in ("--engine", e)]])
+        doc = {}
+        if os.path.isfile(out + ".json"):
+            with open(out + ".json", encoding="utf-8") as handle:
+                doc = json.load(handle)
+        return proc, doc
+
+    def test_probed_mass_weighs_the_engines_without_ttft_or_tpot(self):
+        proc, doc = self.merge_mass(self.coverage())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        w = doc["engine_weights"]
+        self.assertEqual(w["rule"], "gpu_time_mass")
+        self.assertEqual(w["weights"], {"prefill": 0.6, "decode": 0.4})
+        rows = {r["short_name"]: r for r in doc["top_kernels"]}
+        self.assertAlmostEqual(rows["gemm_p"]["pct_gpu_time"], 36.0, places=4)
+        self.assertAlmostEqual(rows["attn_d"]["pct_gpu_time"], 16.0, places=4)
+        self.assertNotIn("latency_split", doc)
+        with open(os.path.join(self.tmp, "profile_topN_mass.md"), encoding="utf-8") as handle:
+            self.assertIn("engine weights `gpu_time_mass`", handle.read())
+        proc, doc = self.merge_mass(self.coverage(), roles=self.roles(prefill=4, decode=8))
+        self.assertAlmostEqual(doc["engine_weights"]["weights"]["prefill"], 240 / 560, places=5)
+
+    def test_an_unmeasured_point_weighs_on_and_says_so_as_on_one_node(self):
+        gap = "1 planned point(s) have no census and contributed NO mass: p2."
+        proc, doc = self.merge_mass(self.coverage(planned=3, warnings=[gap]))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(doc["engine_weights"]["warnings"], [gap])
+        self.assertIn(gap, proc.stderr)
+
+
+class PdPointsTest(unittest.TestCase):
+    SKILL = os.path.join(os.path.dirname(SCRIPTS_DIR), "knowledge", "kernel_extraction_skills",
+                         "kernel-extract")
+    ARGS = ("[2026-10-30 10:00:00] server_args=ServerArgs(model_path='m', chunked_prefill_size=8192, "
+            "cuda_graph_bs=[1, 2, 4, 8, 16], decode_log_interval=40, disaggregation_mode='{}')")
+    # Newer sglang logs a dict, and splits the graph sizes per phase.
+    ARGS_DICT = ("[2026-10-30 10:00:00] server_args={{'model_path': 'm', 'chunked_prefill_size': 8192, "
+                 "'cuda_graph_bs_decode': [1, 2, 4, 8, 16], 'cuda_graph_bs_prefill': None, "
+                 "'decode_log_interval': 40, 'disaggregation_mode': '{}'}}")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_points_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def log(self, name, header, lines):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("".join(line + "\n" for line in ([header] if header else []) + lines))
+        return path
+
+    def logs(self, args=True, header=None):
+        pre = [f"[2026-10-30 10:00:{i:02d}] Prefill batch, #new-seq: {k}, #new-token: {512 * k}, "
+               "#cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, "
+               "#pending-token: 0, #bootstrap-req: 0, #inflight-req: 1, #optimistic-req: 0, "
+               "cuda graph: False, input throughput (token/s): 12.3"
+               for i, k in enumerate([1, 1, 1, 2, 2, 4])]
+        dec = [f"[2026-10-30 10:01:{i:02d}] Decode batch, #running-req: {bs}, #token: {600 * bs}, "
+               "token usage: 0.00, pre-allocated usage: 0.00, #prealloc-req: 0, #transfer-req: 0, "
+               "#retracted-req: 0, cuda graph: True, gen throughput (token/s): 78.57, #queue-req: 0"
+               for i, bs in enumerate([16, 16, 16, 8, 3])]
+        header = header or self.ARGS
+        return (self.log("prefill.log", args and header.format("prefill"), pre),
+                self.log("decode.log", args and header.format("decode"), dec))
+
+    def plan(self, pre, dec):
+        out = os.path.join(self.tmp, "points")
+        proc = run_mn(["pd-points", "--skill-root", self.SKILL, "--out-dir", out, "--points-per-phase", "2",
+                       "--engine-log", f"prefill={pre}", "--engine-log", f"decode={dec}"])
+        path = os.path.join(out, "sampling_points.json")
+        doc = {}
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as handle:
+                doc = json.load(handle)
+        return proc, doc
+
+    def test_each_engine_gives_the_points_of_its_own_phase(self):
+        proc, doc = self.plan(*self.logs())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        by_engine = {}
+        for p in doc["points"]:
+            by_engine.setdefault(p["engine"], set()).add(p["phase"])
+        self.assertEqual(by_engine, {"prefill": {"PREFILL"}, "decode": {"DECODE"}})
+        prefill = {p["new_tokens"]: p["new_seq"] for p in doc["points"] if p["phase"] == "PREFILL"}
+        self.assertTrue(all(tokens == 512 * seqs for tokens, seqs in prefill.items()), prefill)
+        ids = [p["point_id"] for p in doc["points"]]
+        self.assertIn("PROFILE_PROBE_IDS=" + ",".join(ids), proc.stdout)
+
+    def test_the_dict_form_of_server_args_plans_the_same_points(self):
+        _proc, old = self.plan(*self.logs())
+        proc, new = self.plan(*self.logs(header=self.ARGS_DICT))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([p["point_id"] for p in new["points"]], [p["point_id"] for p in old["points"]])
+        with open(os.path.join(self.tmp, "points", "server_info_decode.json"), encoding="utf-8") as handle:
+            info = json.load(handle)
+        self.assertEqual(info["cuda_graph_bs"], [1, 2, 4, 8, 16])
+        self.assertEqual(info["decode_log_interval"], 40)
+
+    def test_a_log_without_server_args_is_exit_2(self):
+        pre, dec = self.logs(args=False)
+        proc, doc = self.plan(pre, dec)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("decode_log_interval", proc.stderr)
+        self.assertEqual(doc, {})
+
+
+class PdMassTest(unittest.TestCase):
+    # geak+agentx场景逻辑.md: M_P = 60 s, M_D = 40 s; A is 20% of prefill, B 5% of decode.
+    RANKING = {"denominators": {"basis": "agent busy rate"}, "ranking": [
+        {"id": "A", "name": "A", "share_of_phase_pct": {"PREFILL": 20.0}, "selection_pct_gpu_time": 12.0},
+        {"id": "B", "name": "B", "share_of_phase_pct": {"DECODE": 5.0}, "selection_pct_gpu_time": 2.0},
+        {"id": "both", "name": "both", "share_of_phase_pct": {"PREFILL": 10.0, "DECODE": 30.0},
+         "selection_pct_gpu_time": 18.0},
+        {"id": "P_rest", "name": "P_rest", "share_of_phase_pct": {"PREFILL": 70.0}, "selection_pct_gpu_time": 42.0},
+        {"id": "D_rest", "name": "D_rest", "share_of_phase_pct": {"DECODE": 65.0}, "selection_pct_gpu_time": 26.0}]}
+    SELECT = os.path.join(os.path.dirname(SCRIPTS_DIR), "knowledge", "kernel_extraction_skills",
+                          "kernel-extract", "scripts", "select_targets.py")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mn_mass_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def path(self, name, doc):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+        return path
+
+    def coverage(self, name="coverage.json", warnings=(), **mass_us):
+        mass_us = mass_us or {"PREFILL": 60e6, "DECODE": 40e6}
+        return self.path(name, {"phases": {p: {"total_mass_us": m} for p, m in mass_us.items()},
+                                "warnings": list(warnings)})
+
+    def roles(self, prefill=8, decode=8, decode_instances=1):
+        return self.path(f"mn_trace_roles_{prefill}_{decode}_{decode_instances}.json", {"roles": [
+            {"role": "prefill", "ranks": prefill, "instances": 1},
+            {"role": "decode", "ranks": decode, "instances": decode_instances}]})
+
+    def mass(self, coverage=None, roles=None, ranking=None):
+        ranking = ranking or self.path("kernel_ranking.json", self.RANKING)
+        argv = ["pd-mass", "--roles", roles or self.roles(), "--apply", ranking]
+        for c in (coverage or [self.coverage()]):
+            argv += ["--coverage", c]
+        proc = run_mn(argv)
+        with open(ranking, encoding="utf-8") as handle:
+            return proc, json.load(handle)
+
+    def rows(self, doc):
+        return {r["id"]: r["selection_pct_gpu_time"] for r in doc["ranking"]}
+
+    def test_the_hand_checked_case(self):
+        proc, doc = self.mass()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("prefill 60.0% / decode 40.0%", proc.stdout)
+        rows = self.rows(doc)
+        self.assertAlmostEqual(rows["A"], 12.0, places=4)
+        self.assertAlmostEqual(rows["B"], 2.0, places=4)
+        proc, doc = self.mass(roles=self.roles(prefill=4, decode=8))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rows = self.rows(doc)
+        self.assertAlmostEqual(rows["A"], 100 * 48 / 560, places=3)
+        self.assertAlmostEqual(rows["B"], 100 * 16 / 560, places=3)
+
+    def test_equal_ranks_is_single_node_agentx_both_phases_mass_summed(self):
+        _proc, doc = self.mass()
+        m_p, m_d = 60e6, 40e6
+        for row in self.RANKING["ranking"]:
+            shares = row["share_of_phase_pct"]
+            summed = 100 * (shares.get("PREFILL", 0) / 100 * m_p + shares.get("DECODE", 0) / 100 * m_d) / (m_p + m_d)
+            self.assertAlmostEqual(self.rows(doc)[row["id"]], summed, places=3, msg=row["id"])
+
+    def test_apply_keeps_the_agents_number_and_stamps_the_rule(self):
+        ranking = self.path("kernel_ranking.json", self.RANKING)
+        for _ in range(2):   # idempotent: a second --apply keeps the agent's original
+            proc, doc = self.mass(ranking=ranking, roles=self.roles(prefill=4))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        rows = {r["id"]: r for r in doc["ranking"]}
+        self.assertEqual(rows["A"]["selection_pct_gpu_time_agent"], 12.0)
+        self.assertEqual(doc["denominators"]["rule"], "gpu_time_mass")
+        self.assertEqual(doc["denominators"]["inputs"],
+                         {"mass_us": {"PREFILL": 60e6, "DECODE": 40e6}, "ranks": {"prefill": 4, "decode": 8}})
+        out = os.path.join(self.tmp, "selection_targets.json")
+        subprocess.run([sys.executable, self.SELECT, ranking, "--output", out], check=True)
+        with open(out, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["denominators"]["rule"], "gpu_time_mass")
+
+    def test_one_ledger_per_engine_adds_up(self):
+        proc, doc = self.mass(coverage=[self.coverage("p.json", PREFILL=60e6),
+                                        self.coverage("d.json", ["no census for d3"], DECODE=40e6)])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertAlmostEqual(self.rows(doc)["A"], 12.0, places=4)
+        self.assertEqual(doc["denominators"]["warnings"], ["no census for d3"])
+
+    def test_one_roles_file_per_probed_engine_adds_up(self):
+        prefill = self.path("roles_p.json", {"roles": [{"role": "prefill", "ranks": 4, "instances": 1}]})
+        decode = self.path("roles_d.json", {"roles": [{"role": "decode", "ranks": 8, "instances": 1}]})
+        ranking = self.path("kernel_ranking.json", self.RANKING)
+        proc = run_mn(["pd-mass", "--roles", prefill, "--roles", decode, "--apply", ranking,
+                       "--coverage", self.coverage()])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(ranking, encoding="utf-8") as handle:
+            self.assertAlmostEqual(self.rows(json.load(handle))["A"], 100 * 48 / 560, places=3)
+        proc = run_mn(["pd-mass", "--roles", decode, "--roles", decode, "--apply", ranking,
+                       "--coverage", self.coverage()])
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("more than one --roles", proc.stderr)
+
+    def test_what_it_cannot_mass_is_exit_2_and_the_ranking_is_untouched(self):
+        cases = [
+            ("no DECODE phase", dict(coverage=[self.coverage("p.json", PREFILL=60e6)]), "['DECODE']"),
+            ("zero mass", dict(coverage=[self.coverage("z.json", PREFILL=60e6, DECODE=0)]), "['DECODE']"),
+            ("one phase in two files", dict(coverage=[self.coverage("a.json"), self.coverage("b.json")]),
+             "more than one --coverage"),
+            ("no ranks", dict(roles=self.roles(decode=0)), "no ranks for ['decode']"),
+            ("xPyD", dict(roles=self.roles(decode_instances=2)), "several instances"),
+            ("unknown phase", dict(ranking=self.path("mixed.json", {"ranking": [
+                {"id": "k", "share_of_phase_pct": {"MIXED": 50.0}, "selection_pct_gpu_time": 50.0}]})),
+             "names no pd_disagg engine"),
+            ("shares over 100.5", dict(ranking=self.path("over.json", {"ranking": [
+                {"id": "k", "share_of_phase_pct": {"PREFILL": 60.0}, "selection_pct_gpu_time": 30.0},
+                {"id": "j", "share_of_phase_pct": {"PREFILL": 41.0}, "selection_pct_gpu_time": 20.0}]})),
+             "> 100.5"),
+        ]
+        for why, kwargs, needle in cases:
+            ranking = kwargs.get("ranking") or self.path("kernel_ranking.json", self.RANKING)
+            with open(ranking, encoding="utf-8") as handle:
+                before = json.load(handle)
+            proc, after = self.mass(**{**kwargs, "ranking": ranking})
+            self.assertEqual(proc.returncode, 2, why)
+            self.assertIn("cannot mass the engines", proc.stderr, why)
+            self.assertIn(needle, proc.stderr, why)
+            self.assertEqual(after, before, why)
 
 
 class PdRankOverlayTest(unittest.TestCase):
@@ -3441,21 +3914,31 @@ class TraceEdgeTest(unittest.TestCase):
         self.assertEqual(mn_traces.latency_split(self.path("z.json", {"ttft_ms_median": 0, "tpot_ms_median": 0}), 1), {})
 
     def test_topn_merge_refuses_what_it_cannot_merge(self):
-        self.assertEqual(run_mn(["topn-merge", "--engine", "prefill"]).returncode, 2)
+        bad = run_mn(["topn-merge", "--engine", "prefill"])
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("wants prefill=PATH and decode=PATH", bad.stderr)
         gone = run_mn(["topn-merge", "--engine", f"prefill={os.path.join(self.tmp, 'nope.json')}"])
         self.assertEqual(gone.returncode, 2)
-        self.assertIn("no engine Top-N could be read", gone.stderr)
+        self.assertIn("nope.json", gone.stderr)
         idle = self.path("idle.json", {"total_gpu_time_ms": 0, "top_kernels": []})
-        self.assertIn("zero GPU time", run_mn(["topn-merge", "--engine", f"decode={idle}"]).stderr)
+        self.assertIn("no --engine for ['prefill']", run_mn(["topn-merge", "--engine", f"decode={idle}"]).stderr)
 
     def test_topn_merge_without_out_prints_the_table(self):
-        topn = self.path("t.json", {"total_gpu_time_ms": 10.0, "num_kernel_launches": 3, "num_distinct_kernels": 1,
-                                    "top_kernels": [{"short_name": "gemm", "pct_gpu_time": 100.0, "classification": "gemm",
-                                                     "backend_guess": "hipblaslt", "editable": False, "calls": 3,
-                                                     "total_ms": 10.0, "avg_us": 3333.3, "opt_hint": "tune"}]})
-        proc = run_mn(["topn-merge", "--engine", f"decode={topn}"])
+        def topn(name, role, gpu_ms, steps, calls):
+            return self.path(name, {
+                "total_gpu_time_ms": gpu_ms, "num_kernel_launches": 3, "num_distinct_kernels": 1,
+                "step_ledger": {f"{role}_gpu_ms": gpu_ms},
+                "serving": {f"n_{role}_steps": steps, "analytic_calls": {role: calls}},
+                "top_kernels": [{"short_name": f"gemm_{role[0]}", "pct_gpu_time": 100.0, "classification": "gemm",
+                                 "backend_guess": "hipblaslt", "editable": False, "calls": 3,
+                                 "total_ms": gpu_ms, "avg_us": 3333.3, "opt_hint": "tune"}]})
+        roles = self.path("roles.json", {"roles": [{"role": "prefill", "ranks": 1, "instances": 1},
+                                                   {"role": "decode", "ranks": 1, "instances": 1}]})
+        proc = run_mn(["topn-merge", "--roles", roles,
+                       "--engine", f"prefill={topn('p.json', 'prefill', 10.0, 2, 1)}",
+                       "--engine", f"decode={topn('d.json', 'decode', 90.0, 9, 10)}"])
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("| 1 | decode | `gemm` |", proc.stdout)
+        self.assertIn("| 1 | decode | `gemm_d` |", proc.stdout)
 
 
 if __name__ == "__main__":

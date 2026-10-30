@@ -411,6 +411,25 @@ if [ "$BENCH_LAUNCHER" != "native" ]; then
     echo "!!! Launcher adapter $LAUNCHER_ADAPTER must define adapter_launch()" >&2; exit 3
   fi
 fi
+# ---- sampling-point probes (PROFILE_PROBE_POINTS) ----
+# Refused before launch: a server started for probes that cannot run is a wasted boot.
+if [ -n "${PROFILE_PROBE_POINTS:-}" ]; then
+  _PROBE="${SKILL_ROOT:-}/scripts/serving_probe.py"
+  # PROFILE_PROBE_WITH_WINDOW=1 (fixed-length pd_disagg): the leg keeps its timed rounds and
+  # its normal window, then probes; otherwise the leg is probes only.
+  if [ "${PROFILE:-0}" != "1" ] || [ -z "${PROFILE_PROBE_IDS:-}" ] \
+     || { [ "${PROFILE_PROBE_WITH_WINDOW:-0}" != "1" ] && [ "${REPEATS:-}" != "0" ]; }; then
+    echo "!!! PROFILE_PROBE_POINTS needs PROFILE=1 PROFILE_PROBE_IDS=<id,...> and REPEATS=0" \
+         "(or PROFILE_PROBE_WITH_WINDOW=1)" >&2; exit 4
+  fi
+  if [ ! -f "$_PROBE" ] || [ ! -f "$PROFILE_PROBE_POINTS" ]; then
+    echo "!!! probe: need SKILL_ROOT (the kernel-extract skill) and the points file;" \
+         "got '$_PROBE', '$PROFILE_PROBE_POINTS'" >&2; exit 3
+  fi
+  if ! declare -F adapter_probe_args >/dev/null; then
+    echo "!!! probe: ${LAUNCHER_ADAPTER:-$ADAPTER} defines no adapter_probe_args" >&2; exit 3
+  fi
+fi
 # ---- model / server ----
 # MODEL is REQUIRED. No rig-specific default — a wrong-but-silent default benches the wrong target.
 MODEL=${MODEL:-}
@@ -914,7 +933,44 @@ fi
 # decoding, interleaved by the scheduler. A cold burst profiled from step 0 captures only the prefill
 # ramp (TTFT) and misses decode entirely (see knowledge/profile_parse.md). So we instead drive a
 # sustained, saturated load and profile a WINDOW once it has reached the mixed steady state.
-if [ "$PROFILE" = "1" ]; then
+# PROFILE_PROBE_POINTS instead hands each planned sampling point to the kernel-extract skill's own
+# serving_probe.py on this server; the launcher/backend only says where (adapter_probe_args).
+run_probes() {
+  mkdir -p "$PROFILE_DIR"
+  for _pid in ${PROFILE_PROBE_IDS//,/ }; do
+    _phase="$(python3 -c 'import json,sys;print(next(p["phase"] for p in json.load(open(sys.argv[1]))["points"] if p["point_id"]==sys.argv[2]))' \
+               "$PROFILE_PROBE_POINTS" "$_pid" 2>/dev/null)" || _phase=""
+    if [ -z "$_phase" ]; then
+      echo "!!! probe: no point $_pid in $PROFILE_PROBE_POINTS" >&2
+      continue
+    fi
+    mkdir -p "$PROFILE_DIR/$_pid"
+    mapfile -t _probe_args < <(adapter_probe_args "$_phase" "$PROFILE_DIR/$_pid")
+    if [ "${#_probe_args[@]}" -eq 0 ]; then
+      echo "!!! probe: adapter_probe_args gave no flags for $_pid; not probed" >&2
+      continue
+    fi
+    echo ">>> probe: $_pid ($_phase) ${_probe_args[*]}"
+    # The skill's rule: keep a failed point's evidence and recapture it once.
+    if ! python3 "$_PROBE" --points "$PROFILE_PROBE_POINTS" --point-id "$_pid" \
+           --out "$PROFILE_DIR/$_pid.journal.json" "${_probe_args[@]}"; then
+      echo "!!! probe: $_pid did not verify; kept as $_pid.try1, recapturing once" >&2
+      mv "$PROFILE_DIR/$_pid.journal.json" "$PROFILE_DIR/$_pid.try1.journal.json" 2>/dev/null
+      mv "$PROFILE_DIR/$_pid" "$PROFILE_DIR/$_pid.try1"
+      mkdir -p "$PROFILE_DIR/$_pid"
+      python3 "$_PROBE" --points "$PROFILE_PROBE_POINTS" --point-id "$_pid" \
+        --out "$PROFILE_DIR/$_pid.journal.json" "${_probe_args[@]}" \
+        || echo "!!! probe: $_pid did not verify twice; its journals are the evidence" >&2
+    fi
+    if declare -F adapter_probe_after >/dev/null; then
+      adapter_probe_after "$_phase" "$PROFILE_DIR/$_pid" || true
+    fi
+  done
+  echo ">>> Probe journals in $PROFILE_DIR/<point>.journal.json"
+}
+if [ "$PROFILE" = "1" ] && [ -n "${PROFILE_PROBE_POINTS:-}" ] && [ "${PROFILE_PROBE_WITH_WINDOW:-0}" != "1" ]; then
+  run_probes
+elif [ "$PROFILE" = "1" ]; then
   mkdir -p "$PROFILE_DIR"
   # fix #1: if the caller didn't pin TPOT_MS, derive it from the timed bench we JUST ran (RESULT_JSONL
   # holds one result object per repeat, each with median_tpot_ms). This lets the vLLM time-window auto-
@@ -1001,6 +1057,9 @@ PY
       adapter_bench "$PROFILE_NUM_PROMPTS" "$CONC" 1 || echo "!!! profile run failed"
   fi
   echo ">>> Trace(s) in $PROFILE_DIR"
+  if [ -n "${PROFILE_PROBE_POINTS:-}" ]; then
+    run_probes
+  fi
 fi
 
 # ---- summarize (median throughput across repeats) — backend-independent ----

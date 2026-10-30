@@ -758,12 +758,15 @@ class TestParseTorchTrace(_TmpMixin, unittest.TestCase):
         _, _, _, meta = self._parse()
         self.assertEqual(meta, {"has_annotations": True, "n_prefill_steps": 1,
                                 "n_decode_steps": 1, "prefill_tokens": 512,
-                                "decode_batches": [4]})
+                                "decode_batches": [4],
+                                "step_ledger": {"token_source": "annotation",
+                                                "prefill_tokens": 512, "prefill_gpu_ms": 0.275,
+                                                "decode_gpu_ms": 0.1, "decode_active_ms": 0.05}})
 
     def test_trace_without_annotations_has_empty_phase_meta(self):
         events = [{"cat": "kernel", "name": "k_kernel", "ts": 1, "dur": 2.0}]
         agg, total, launches, meta = pp.parse_torch_trace(self._trace_file(events=events))
-        self.assertEqual(meta, {})
+        self.assertEqual(list(meta), ["step_ledger_unavailable"])
         self.assertEqual(agg["k_kernel"]["by_phase"], {})
         self.assertEqual((total, launches), (2.0, 1))
 
@@ -776,7 +779,7 @@ class TestParseTorchTrace(_TmpMixin, unittest.TestCase):
     def test_trace_without_trace_events_key_is_empty(self):
         agg, total, launches, meta = pp.parse_torch_trace(
             self._trace_file(raw=json.dumps({"schemaVersion": 1})))
-        self.assertEqual((agg, total, launches, meta), ({}, 0.0, 0, {}))
+        self.assertEqual((agg, total, launches, list(meta)), ({}, 0.0, 0, ["step_ledger_unavailable"]))
 
     def test_missing_file_raises(self):
         with self.assertRaises(FileNotFoundError):
@@ -816,6 +819,103 @@ class TestParseTorchTrace(_TmpMixin, unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # parse_rocprof_dir
 # --------------------------------------------------------------------------- #
+class TestStepLedger(_TmpMixin, unittest.TestCase):
+    """The unit costs mn.py topn-merge weighs pd_disagg engines by."""
+
+    def _ledger(self, events):
+        _agg, _total, _launches, meta = pp.parse_torch_trace(self._trace_file(events=events))
+        return meta.get("step_ledger"), meta.get("step_ledger_unavailable")
+
+    def test_annotated_steps_give_prefill_cost_and_decode_occupancy(self):
+        # D [0,100) P [100,150) D [150,190): decode is active 190 - 50 us; idle_kernel runs after it.
+        events = [
+            {"cat": "gpu_user_annotation", "name": "step[DECODE bs=4]", "ts": 0, "dur": 100},
+            {"cat": "gpu_user_annotation", "name": "step[EXTEND bs=1 toks=64]", "ts": 100, "dur": 50},
+            {"cat": "gpu_user_annotation", "name": "step[DECODE bs=4]", "ts": 150, "dur": 40},
+            {"cat": "kernel", "name": "dec_kernel", "ts": 10, "dur": 80.0},
+            {"cat": "kernel", "name": "pre_kernel", "ts": 110, "dur": 40.0},
+            {"cat": "kernel", "name": "dec_kernel", "ts": 160, "dur": 30.0},
+            {"cat": "kernel", "name": "idle_kernel", "ts": 195, "dur": 7.0},
+        ]
+        ledger, why = self._ledger(events)
+        self.assertIsNone(why)
+        self.assertEqual(ledger, {"token_source": "annotation", "prefill_tokens": 64,
+                                  "prefill_gpu_ms": 0.04, "decode_gpu_ms": 0.11,
+                                  "decode_active_ms": 0.14})
+
+    def test_an_idle_stretch_is_not_decode_time_but_work_between_steps_is(self):
+        # D steps every 10 us, then nothing for 972 us (no request in decode), then two more.
+        events = [{"cat": "gpu_user_annotation", "name": "step[DECODE bs=2]", "ts": t, "dur": 8}
+                  for t in (0, 10, 20, 1000, 1010)]
+        events += [{"cat": "kernel", "name": "dec_kernel", "ts": t + 1, "dur": 6.0} for t in (0, 10, 20, 1000, 1010)]
+        events += [{"cat": "kernel", "name": "sampler_kernel", "ts": 8, "dur": 2.0},
+                   {"cat": "kernel", "name": "stray_kernel", "ts": 500, "dur": 5.0}]
+        ledger, _why = self._ledger(events)
+        self.assertEqual(ledger, {"token_source": "annotation", "decode_gpu_ms": 0.032,
+                                  "decode_active_ms": 0.046})
+
+    def test_a_draft_extend_costs_prefill_time_but_adds_no_tokens(self):
+        events = [
+            {"cat": "gpu_user_annotation", "name": "step[EXTEND bs=1 toks=256]", "ts": 0, "dur": 50},
+            {"cat": "gpu_user_annotation", "name": "draft_extend", "ts": 50, "dur": 10},
+            {"cat": "gpu_user_annotation", "name": "step[EXTEND bs=1 toks=256]", "ts": 51, "dur": 8},
+            {"cat": "kernel", "name": "target_kernel", "ts": 5, "dur": 40.0},
+            {"cat": "kernel", "name": "draft_kernel", "ts": 52, "dur": 6.0},
+        ]
+        ledger, _why = self._ledger(events)
+        self.assertEqual(ledger, {"token_source": "annotation", "prefill_tokens": 256,
+                                  "prefill_gpu_ms": 0.046})
+
+    def test_a_prefill_only_engine_has_no_decode_numbers(self):
+        events = [
+            {"cat": "gpu_user_annotation", "name": "step[EXTEND bs=2 toks=1024]", "ts": 0, "dur": 50},
+            {"cat": "kernel", "name": "pre_kernel", "ts": 10, "dur": 30.0},
+        ]
+        ledger, _why = self._ledger(events)
+        self.assertEqual(ledger, {"token_source": "annotation", "prefill_tokens": 1024,
+                                  "prefill_gpu_ms": 0.03})
+
+    def test_without_annotations_embedding_indices_count_the_prefill_tokens(self):
+        events = [
+            {"cat": "cpu_op", "name": "aten::embedding",
+             "args": {"Input Dims": [[151936, 4096], [512], [], [], []]}},
+            {"cat": "cpu_op", "name": "aten::embedding",
+             "args": {"Input Dims": [[151936, 4096], [1, 300], [], [], []]}},
+            {"cat": "cpu_op", "name": "aten::embedding_backward", "args": {"Input Dims": [[9], [9]]}},
+            {"cat": "kernel", "name": "a_kernel", "ts": 10, "dur": 300.0},
+            {"cat": "gpu_memcpy", "name": "Memcpy HtoD", "ts": 5, "dur": 200.0},
+        ]
+        ledger, why = self._ledger(events)
+        self.assertIsNone(why)
+        self.assertEqual(ledger, {"token_source": "embedding", "prefill_tokens": 812,
+                                  "prefill_gpu_ms": 0.5})
+
+    def test_a_graph_fused_embedding_counts_nothing_and_says_why(self):
+        events = [
+            {"cat": "cpu_op", "name": "aten::embedding", "args": {"Input Dims": [[151936, 4096], [512]]}},
+            {"cat": "cpu_op", "name": "aten::embedding", "args": {"Input Dims": [[151936, 4096]]}},
+            {"cat": "kernel", "name": "triton_poi_fused__to_copy_embedding_0", "ts": 10, "dur": 3.0},
+        ]
+        ledger, why = self._ledger(events)
+        self.assertIsNone(ledger)
+        self.assertIn("graph-fused", why)
+        ledger, why = self._ledger([{"cat": "kernel", "name": "k_kernel", "ts": 1, "dur": 2.0}])
+        self.assertIsNone(ledger)
+        self.assertIn("no aten::embedding", why)
+
+    def test_the_ledger_reaches_the_json_and_leaves_the_markdown_unchanged(self):
+        agg, total, launches, meta = pp.parse_torch_trace(self._trace_file())
+        summ = pp.build_summary(agg, total, launches, "torch-trace", 5, phase_meta=meta,
+                                conc=4, isl=512, osl=8)
+        self.assertEqual(summ["step_ledger"], meta["step_ledger"])
+        bare = {k: v for k, v in summ.items() if k != "step_ledger"}
+        self.assertEqual(pp.to_markdown(summ), pp.to_markdown(bare))
+        unphased = pp.build_summary(agg, total, launches, "torch-trace", 5,
+                                    phase_meta={"step_ledger_unavailable": "why"})
+        self.assertEqual(unphased["step_ledger_unavailable"], "why")
+        self.assertNotIn("serving", unphased)
+
+
 class TestParseRocprofDir(_TmpMixin, unittest.TestCase):
     def test_kernel_stats_csv_is_read_as_the_authoritative_aggregate(self):
         agg, total_us, launches = pp.parse_rocprof_dir(self._rocprof_dir())
