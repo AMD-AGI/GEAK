@@ -127,7 +127,7 @@ def test_no_trace_once_then_recaptured():
 def test_agents_are_told_not_to_end_their_turn_on_a_running_job():
     out = run("accept")
     assert all("LONG MEASUREMENTS OUTLIVE YOUR TOOL CALL" in c["prompt"] and "setsid nohup" in c["prompt"]
-               for c in out["calls"])
+               and "ENDING YOUR TURN IS YOUR FINAL ANSWER" in c["prompt"] for c in out["calls"])
 
 
 def test_agentx_uses_the_kernel_extract_skill_for_trace_and_uts():
