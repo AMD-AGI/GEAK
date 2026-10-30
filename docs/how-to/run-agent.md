@@ -55,7 +55,11 @@ Output: `e2e_workflow/exp/e2e_<model>_<timestamp>/` — `final_report.md`, `arch
 ```
 use /absolute/path/to/GEAK/kernel_workflow to optimize /absolute/path/to/GEAK/examples/tasks/knn
 use /absolute/path/to/GEAK/kernel_workflow to optimize /path/to/silu, budget 8, focus on wrapper overhead
+use /absolute/path/to/GEAK/kernel_workflow to optimize /path/to/allreduce_task, gpu_ids 0-7
 ```
+
+A task whose test runs on several GPUs (torchrun, `mp.spawn`, collectives) is detected at Setup and
+every command then leases that many GPUs together; give it enough `gpu_ids`.
 
 Director → TechLead → specialist engineers, multi-round and budget-controlled, each patch independently
 verified. Output: `kernel_workflow/exp/team_<kernel>_<timestamp>/`.
