@@ -147,9 +147,13 @@ if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
   throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
 let RDNA4_ISOLATE = EXPECTED_GFX === 'gfx1201';
+// RDNA 3.5 APU (Strix Halo). RDNA4_ISOLATE keeps its exact meaning (R9700 / Navi 48);
+// the union is what every isolation consumer below reads.
+let RDNA35_ISOLATE = /^gfx115\d$/.test(EXPECTED_GFX);
+let CLIENT_RDNA_ISOLATE = RDNA4_ISOLATE || RDNA35_ISOLATE;
 let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
-if (RDNA4_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
+if (CLIENT_RDNA_ISOLATE) KERNEL_KNOWLEDGE_DIR = '';
 const KERNEL_PATH_ORIG = A.kernel_path;
 const KERNEL_NAME_HINT = String(KERNEL_PATH_ORIG).replace(/\/+$/, '').split('/').pop();
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
@@ -168,14 +172,14 @@ const BACKENDS = (Array.isArray(A.backends) ? A.backends
   : (typeof A.backends === 'string' ? A.backends.split(',') : []))
   .map(s => String(s == null ? '' : s).trim().toLowerCase()).filter(Boolean);
 // Expert-skills passthrough (advisory; OFF by default -> nothing injected).
-let USE_EXPERT_SKILLS = !RDNA4_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
+let USE_EXPERT_SKILLS = !CLIENT_RDNA_ISOLATE && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 const EXPERT_SKILL_ROLES = new Set(['op_benchmarker']);
 
 // Warm-start experience KB. Passed to each lane explicitly (the bakeoff lane invocation spreads
 // specific keys, not ...A) so every language lane reads/writes its own <kernel>__<lang>__<gfx> slug.
-let WARM_START = RDNA4_ISOLATE ? 'off'
+let WARM_START = CLIENT_RDNA_ISOLATE ? 'off'
   : (String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on');
 const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
@@ -423,8 +427,10 @@ const LANE_TARGET = EXPECTED_TARGET || DETECTED_TARGET;
 const LANE_DEVICE_NAME = EXPECTED_DEVICE_NAME || DETECTED_DEVICE_NAME;
 const LANE_PHYSICAL_CU_COUNT =
   EXPECTED_PHYSICAL_CU_COUNT || DETECTED_PHYSICAL_CU_COUNT;
-if (DETECTED_GFX === 'gfx1201') {
-  RDNA4_ISOLATE = true;
+if (DETECTED_GFX === 'gfx1201' || /^gfx115\d$/.test(DETECTED_GFX)) {
+  RDNA4_ISOLATE = DETECTED_GFX === 'gfx1201';
+  RDNA35_ISOLATE = !RDNA4_ISOLATE;
+  CLIENT_RDNA_ISOLATE = true;
   KERNEL_KNOWLEDGE_DIR = '';
   USE_EXPERT_SKILLS = false;
   WARM_START = 'off';
@@ -444,10 +450,12 @@ log(`Freeze done. op_kind=${oracle.op_kind}, task_dir=${oracle.task_dir}, live_b
 // engagement probes) are skipped.
 // ===========================================================================
 phase('Discover');
-const DISCOVER_INTRO = RDNA4_ISOLATE
+const ISOLATION_LABEL = RDNA35_ISOLATE
+  ? 'Strix Halo / gfx1151 ISOLATION' : 'R9700 / gfx1201 ISOLATION';
+const DISCOVER_INTRO = CLIENT_RDNA_ISOLATE
   ? (
   'STANDALONE kernel bake-off — there is NO live server (do not try to launch or capture from one).\n' +
-  'R9700 / gfx1201 ISOLATION: do NOT consult learned KB, expert skills, AITER CDNA win cards, or CK/AITER offline tune.\n' +
+  `${ISOLATION_LABEL}: do NOT consult learned KB, expert skills, AITER CDNA win cards, or CK/AITER offline tune.\n` +
   'Do NOT inject MFMA / FNUZ / Instinct guidance. Discover existing impls by measuring the frozen oracle only.\n' +
   '(1) Tier-A DISCOVER: bench candidate backends on the immutable oracle in OP_TASK_DIR (HIP/Triton/hipBLASLt).\n' +
   '(2) SKIP Tier-B AITER/CK env tune — those inputs are CDNA-calibrated.\n' +
@@ -704,8 +712,8 @@ if (winner && winner.speedup > 1.0) {
         'ratios not wall-clock; record the pitfalls hit).', {
           SCOPE: 'bakeoff', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR,
           PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
-          CURATION_ISOLATE: RDNA4_ISOLATE ? 'true' : 'false',
-          REQUIRED_PLATFORMS: RDNA4_ISOLATE ? ['gfx1201'] : [],
+          CURATION_ISOLATE: CLIENT_RDNA_ISOLATE ? 'true' : 'false',
+          REQUIRED_PLATFORMS: CLIENT_RDNA_ISOLATE ? [LANE_GFX] : [],
           WINNER: winner, CANDIDATES: laneRows,
           REPORT_PATH: rep ? rep.report_path : `${EVAL_DIR}/bakeoff_report.md`,
           OP_SPEC,

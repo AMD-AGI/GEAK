@@ -21,6 +21,21 @@ from typing import Any
 
 R9700_MARKETING_NAME = "AMD Radeon AI PRO R9700"
 INTEGRATED_MARKETING_NAMES = frozenset({"AMD Radeon Graphics"})
+# ISAs whose only product form is an APU that *is* the compute device, and which
+# ship the same generic nameplate as a 2-CU desktop iGPU. Keyed on ISA, never on
+# the marketing string: the string is a vendor roulette wheel, the ISA is not.
+# gfx1151 is RDNA 3.5 / Strix Halo; the pattern (not a frozenset of one literal)
+# also covers any future gfx115x sibling without needing a second edit here —
+# keep this in sync with the `/^gfx115\d$/` boundary used by e2e_workflow.js /
+# kernel_lane.js and the `gfx115\d` boundary used by roofline_tools.py and
+# ci/lib.sh's resolve_image() heredoc.
+_APU_ISA_RE = re.compile(r"^gfx115\d$")
+
+
+def _is_apu_isa(gfx: str) -> bool:
+    return bool(_APU_ISA_RE.match(gfx))
+
+
 _AGENT_RE = re.compile(r"^\s*Agent\s+\d+\s*$")
 _FIELD_RE = re.compile(r"^\s*([^:]+):\s*(.*?)\s*$")
 _GFX_RE = re.compile(r"^gfx[0-9a-f]+$", re.IGNORECASE)
@@ -94,11 +109,16 @@ def parse_rocminfo(text: str) -> dict[str, Any]:
     # not HIP_VISIBLE_DEVICES, so a direct probe may still contain that iGPU.
     # Keep this deliberately narrow: ignore only the generic integrated
     # nameplate and only when another GPU remains. An arbitrary unknown product
-    # must never disappear behind an exact R9700 (or an Instinct card).
+    # must never disappear behind an exact R9700 (or an Instinct card), and an
+    # APU ISA must never disappear either: on a Strix Halo the generic nameplate
+    # belongs to the compute device, so dropping it would hand an APU run the
+    # discrete card's policy, peaks and image. Keeping it makes such a host fail
+    # below as "mixed identities", which names both agents instead of guessing.
     discrete_agents = [
         agent
         for agent in gpu_agents
         if agent["marketing_name"] not in INTEGRATED_MARKETING_NAMES
+        or _is_apu_isa(agent["gfx"])
     ]
     if discrete_agents:
         gpu_agents = discrete_agents

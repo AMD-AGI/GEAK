@@ -61,6 +61,9 @@ cache hierarchy is 2 MiB L2 backed by a 32 MiB Infinity Cache tier in front of D
   unit, at a fraction of the bf16 rate. A measurement taken that way describes the emulation.
 - **Roofline denominators** are in
   `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md` (`gfx1151` section).
+- **Long form.** `perf_knowledge/hardware/rdna35_gfx1151/` holds the measured detail behind this
+  summary — arch, memory hierarchy, WMMA, peak tables, clocks/noise, ISA notes and the profiler
+  defects. Read it when a number here needs its provenance or its measurement conditions.
 - **Memory-utilization readings include the Infinity Cache.** The 32 MiB tier serves the working set
   before DRAM is reached, so a low DRAM-side reading can reflect cache residency. Compare against the
   working-set size before attributing it to bandwidth.

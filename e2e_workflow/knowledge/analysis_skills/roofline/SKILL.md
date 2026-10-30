@@ -91,7 +91,15 @@ see the disagreement rather than a single blended number that hides it.
    product constraint: the ISA-keyed tables still resolve. Client RDNA4
    numeric peaks exist only for product `r9700`. A bare gfx1201 (or any other
    gfx120x SKU) is a hard unknown: do not derive a numeric denominator, emit
-   unknown headroom, and do not rank on roofline. `gfx125x` is CDNA5, not RDNA4
+   unknown headroom, and do not rank on roofline. **`gfx1151` is the opposite
+   case and must not be grouped with it: that row IS tabulated** (the 40-CU
+   Radeon 8060S) and resolves with no `product` key, so achieved-vs-peak is
+   available on that part and is to be reported, not declared unavailable. The
+   same ISA also ships as 32-CU and 16-CU SKUs the table does not cover, but
+   that CU check lives in the lane, not here. Only an *absent* gfx115x row is a
+   hard unknown, and it still never derives: the "memory clock" on these APUs is
+   system DRAM shared with the CPU, so a derived bandwidth bounds nothing.
+   `gfx125x` is CDNA5, not RDNA4
    — it must not use that gate. Other unknown architectures may derive from
    device props with `peaks.confidence="low"` (§6 L1). Use `peak_flops_for()`
    canonical dtype keys; a missing dtype is unknown, never the table maximum.

@@ -33,6 +33,8 @@ override() {
     gfx950|mi355|mi350|mi350x) gfx="gfx950"; product="AMD Instinct MI355X"; cu="256" ;;
     gfx942|gfx90a|mi300|mi300x) gfx="gfx942"; product="AMD Instinct MI300X"; cu="304" ;;
     gfx1200) gfx="gfx1200"; product="AMD Radeon Graphics"; cu="56" ;;
+    # Strix Halo ships the generic integrated nameplate; 40 CU is the 8060S.
+    gfx1151|rdna35|strix-halo|strixhalo) gfx="gfx1151"; product="AMD Radeon Graphics"; cu="40" ;;
   esac
   cat > "$tmp/rocminfo" <<EOF
 #!/bin/sh
@@ -54,6 +56,21 @@ got="$(override gfx1201)" || fail "gfx1201 override"
 
 got="$(override RDNA4)" || fail "RDNA4 alias"
 [ "$got" = "gfx1201" ] || fail "RDNA4 must remain architecture-only (got $got)"
+
+# gfx1151 (RDNA 3.5, Strix Halo) is ISA-only: the ISA is shared by the 8060S,
+# 8050S and 8040S, so it never resolves to a product bucket.
+for alias in gfx1151 RDNA35 strix-halo strixhalo; do
+  got="$(override "$alias")" || fail "$alias override"
+  [ "$got" = "gfx1151" ] || fail "$alias must resolve to gfx1151 (got $got)"
+done
+
+# A job pinned to R9700 must reject a Strix Halo node rather than run RDNA4 policy on it.
+err=""
+if err="$(GEAK_EXPECTED_TARGET=r9700 GEAK_GPU_ARCH=gfx1151 detect_gpu_arch 2>&1)"; then
+  fail "expected R9700 with a gfx1151 override must fail closed"
+fi
+[[ "$err" == *"E_ARCH_EXPECTED_MISMATCH"* ]] \
+  || fail "R9700/gfx1151 override stderr missing E_ARCH_EXPECTED_MISMATCH (got: $err)"
 
 err=""
 if err="$(override r9700 2>&1)"; then
@@ -145,6 +162,24 @@ fi
 
 got="$(detect_from_rocminfo gfx942)" || fail "rocminfo gfx942"
 [ "$got" = "MI300" ] || fail "rocminfo gfx942 -> MI300 (got $got)"
+
+# A Strix Halo APU must report its own ISA. Before gfx1151 was added to the
+# detect_gpu_arch case it fell through to GEAK_GPU_ARCH_DEFAULT, i.e. an APU
+# silently claimed to be an MI355 and then ran CDNA runtime policy.
+got="$(detect_from_rocminfo gfx1151 '' 'AMD Radeon Graphics' 40)" || fail "rocminfo gfx1151"
+[ "$got" = "gfx1151" ] || fail "rocminfo gfx1151 -> gfx1151 (got $got)"
+[ "$got" != "$GEAK_GPU_ARCH_DEFAULT" ] \
+  || fail "gfx1151 resolved to the cluster default $GEAK_GPU_ARCH_DEFAULT instead of its own ISA"
+
+# The marketing nameplate is a vendor string; the ISA is the stable fact.
+got="$(detect_from_rocminfo gfx1151 '' 'AMD Radeon 8060S Graphics' 40)" \
+  || fail "rocminfo gfx1151 with an explicit nameplate"
+[ "$got" = "gfx1151" ] || fail "gfx1151 detection must not depend on the nameplate (got $got)"
+
+# The 8050S shares the ISA with a different CU count; detection stays ISA-only.
+got="$(detect_from_rocminfo gfx1151 '' 'AMD Radeon Graphics' 32)" \
+  || fail "rocminfo gfx1151 at a non-8060S CU count"
+[ "$got" = "gfx1151" ] || fail "gfx1151 must stay ISA-only across SKUs (got $got)"
 
 # Expected-target mismatch: a job pinned to R9700 must reject an MI300 node.
 err=""
@@ -244,6 +279,35 @@ fi
 [[ "$err" == *"mixed identities"* ]] \
   || fail "mixed-discrete stderr missing explicit identity failure (got: $err)"
 
+# A Strix Halo APU wears the same generic nameplate as a 2-CU desktop iGPU, but
+# it is the compute device. Preferring the discrete card would silently hand an
+# APU run gfx1201 policy, peaks and images, so this host must fail closed with
+# both agents named. ROCR_VISIBLE_DEVICES is the escape hatch.
+cat > "$tmp/rocminfo" <<'EOF'
+#!/bin/sh
+cat <<'ROCMINFO'
+*******
+Agent 1
+*******
+  Name:                    gfx1201
+  Marketing Name:          AMD Radeon AI PRO R9700
+  Compute Unit:            64
+*******
+Agent 2
+*******
+  Name:                    gfx1151
+  Marketing Name:          AMD Radeon Graphics
+  Compute Unit:            40
+ROCMINFO
+EOF
+chmod +x "$tmp/rocminfo"
+err=""
+if err="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH= detect_gpu_arch 2>&1)"; then
+  fail "an APU alongside a discrete card must fail identity, not be swallowed"
+fi
+[[ "$err" == *"mixed identities"* && "$err" == *"gfx1151"* && "$err" == *"gfx1201"* ]] \
+  || fail "APU/discrete failure must name both agents (got: $err)"
+
 # A generic gfx1201 product must not receive the R9700 vLLM image.
 install_rocminfo_stub gfx1201 'Another gfx1201 Product'
 err=""
@@ -252,6 +316,18 @@ if err="$(PATH="$tmp:/usr/bin:/bin" GEAK_GPU_ARCH=gfx1201 resolve_image vllm 2>&
 fi
 [[ "$err" == *"E_IMAGE_UNAVAILABLE"* && "$err" == *"gfx1201"* ]] \
   || fail "generic gfx1201 image failure was not explicit (got: $err)"
+
+# There is no published gfx1151 serving image. Like R9700 SGLang, resolve_image
+# must say so rather than hand a Strix Halo an MI tag that cannot run there.
+install_rocminfo_stub gfx1151 'AMD Radeon Graphics' 40
+for fw in vllm sglang; do
+  err=""
+  if err="$(PATH="$tmp:/usr/bin:/bin" GEAK_GPU_ARCH=gfx1151 resolve_image "$fw" 2>&1)"; then
+    fail "gfx1151 must not inherit an $fw image"
+  fi
+  [[ "$err" == *"E_IMAGE_UNAVAILABLE"* && "$err" == *"gfx1151"* ]] \
+    || fail "gfx1151 $fw image failure was not explicit (got: $err)"
+done
 
 # No R9700 SGLang image: resolve_image must fail rather than inherit an MI300 tag.
 # resolve_image calls die/exit, so run it in a subshell.

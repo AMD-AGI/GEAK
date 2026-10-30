@@ -507,6 +507,24 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     return obs_isl, obs_osl, "agentx_observed"
 
 
+_RDNA35_ISA_RE = re.compile(r"^gfx115\d$")
+
+
+def _is_vllm_only(gpu_identity: dict) -> bool:
+    """Architectures with no validated SGLang image.
+
+    R9700 is a product match (the ISA gfx1201 alone proves nothing); the RDNA 3.5
+    APUs are an ISA match, since gfx1151 has no product key at all. Mirrors
+    VLLM_ONLY/RDNA35_ISA (`/^gfx115\\d$/`) in e2e_workflow.js, which rejects any
+    other backend outright — same boundary, so a non-gfx115x string with that
+    prefix (or a multi-digit gfx115xx typo) can't silently diverge between the
+    two layers.
+    """
+    return gpu_identity.get("target") == "r9700" or bool(
+        _RDNA35_ISA_RE.match(str(gpu_identity.get("gfx", "")))
+    )
+
+
 def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     """Resolve policy identity before the workflow chooses backend or knowledge.
 
@@ -694,8 +712,11 @@ def map_args(
     ps_args = {
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
+        # vLLM-only architectures: R9700 and the RDNA 3.5 APUs. Neither has a
+        # validated SGLang image, and the workflow rejects a non-vllm backend on
+        # both, so defaulting to sglang here would only move the failure later.
         "backend": h.get("framework") or (
-            "vllm" if gpu_identity and gpu_identity["target"] == "r9700" else "sglang"
+            "vllm" if gpu_identity and _is_vllm_only(gpu_identity) else "sglang"
         ),
         "tp": tp,
         # Beside tp, and resolved the same way: see _resolve_ep.
