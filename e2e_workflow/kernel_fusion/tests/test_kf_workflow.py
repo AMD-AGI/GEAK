@@ -130,6 +130,31 @@ def test_agents_are_told_not_to_end_their_turn_on_a_running_job():
                for c in out["calls"])
 
 
+def test_agentx_uses_the_kernel_extract_skill_for_trace_and_uts():
+    out = run("agentx")
+    assert labels(out) == ["kf:director:setup", "kf:kernel-extract trace", "kf:analyst",
+                           "kf:kernel-extract prepare", "kf:integrate c1", "kf:director:validate"]
+    tr, an, prep = out["calls"][1]["prompt"], out["calls"][2]["prompt"], out["calls"][3]["prompt"]
+    for p in (tr, prep):     # main's standalone-extraction instruction, not the legacy role
+        assert "kernel_extraction_skills/kernel-extract/SKILL.md" in p and "Do not load roles/kernel_extractor.md" in p
+        assert "SKILL_ROOT: " in p and "BASELINE_LOG: /tmp/kf_mock/kf/baseline/server.log" in p
+    assert "serving_probe.py" in tr and "Do NOT select targets" in tr
+    assert f"TRACE_DIR: {KF}/kernel_extraction/round_kf/capture/traces" in an
+    assert f"WORKLOAD_SUMMARY: {KF}/kernel_workload.json" in an                  # the skill's weights
+    assert '"task":"c1"' in prep and '"task":"c1s"' in prep and '"task":"c2"' in prep and "joint_ut.phases" in prep
+    assert f"PREVIOUS_WORKLOAD_JSON: {KF}/kernel_workload.json" in prep
+    # c2's UT did not pass -> never authored; c1 / c1s authored on the prepared task dirs
+    assert sorted(w["kernel_path"] for w in out["workflows"]) == [f"{KF}/tasks/c1", f"{KF}/tasks/c1s"]
+    r = out["result"]
+    assert r["status"] == "accepted" and ("c2", "extract") in rejected(r)
+
+
+def test_agentx_without_a_verified_trace_stops_before_topk():
+    out = run("agentx_no_trace")
+    assert labels(out)[:3] == ["kf:director:setup", "kf:kernel-extract trace", "kf:kernel-extract trace (retry)"]
+    assert "kf:analyst" not in labels(out) and out["result"]["status"] == "error"
+
+
 def test_setup_failure_returns_cleanly():
     r = run("setup_fail")["result"]
     assert r["status"] == "error" and r["final_overlay"] == ""
