@@ -209,6 +209,8 @@ const SETUP_SCHEMA = obj({ eval_dir: { type: 'string' }, baseline_throughput_tok
   server_env: { type: 'string' }, notes: { type: 'string' } }, ['eval_dir', 'baseline_throughput_tok_s']);
 const PROFILE_SCHEMA = obj({ profile_topN_json: { type: 'string' }, top_kernels: arrObj, notes: { type: 'string' } },
   ['profile_topN_json']);
+const BASELINE_WAIT_SCHEMA = obj({ status: { type: 'string', enum: ['done', 'running', 'dead'] },
+  baseline_throughput_tok_s: { type: 'number' }, notes: { type: 'string' } }, ['status']);
 const SKILL_TRACE_SCHEMA = obj({ trace_dir: { type: 'string' }, workload_json: { type: 'string' },
   sampling_points_json: { type: 'string' }, ranking_json: { type: 'string' }, points: arrObj, notes: { type: 'string' } },
   ['trace_dir', 'workload_json', 'points']);
@@ -233,6 +235,24 @@ const INTEGRATE_SCHEMA = obj({ short_name: { type: 'string' }, e2e_throughput_to
   gate: { type: 'string', enum: ['accepted', 'stack', 'rejected', 'incomplete'] },
   accepted_overlay: { type: 'string' }, reason: { type: 'string' } }, ['gate', 'e2e_throughput_tok_s']);
 
+// A director that follows the detach rule may return while its baseline leg is still running, with no
+// number yet. Waiting is then a job of its own: an agent that starts nothing and only polls, re-issued
+// until the summary lands or the leg is gone.
+async function awaitBaseline(dir) {
+  for (let i = 1; i <= 6 && !DEADLINE_HIT; i++) {
+    const w = await safeAgent(`You wait for one measurement and start nothing. A baseline leg (bench_e2e.sh) was ` +
+      `launched detached under ${dir} (see ${dir}/logs, ${dir}/*.out and ${dir}/baseline). Poll in separate ` +
+      `foreground calls of at most ~9 minutes each (a loop of sleep + check), for up to ~100 minutes in total, until ` +
+      `${dir}/baseline/bench_summary.json exists or the leg is no longer alive (its pid / process group, and whether ` +
+      `the GPUs still hold weights). Return {status: "done" with baseline_throughput_tok_s = that summary's ` +
+      `throughput_tok_s_median, or "running" if it is still going when you stop, or "dead" if it exited without a ` +
+      `summary, notes}.`, { phase: 'Setup', label: `kf:baseline wait ${i}`, schema: BASELINE_WAIT_SCHEMA });
+    if (w && w.status === 'done' && w.baseline_throughput_tok_s > 0) return w.baseline_throughput_tok_s;
+    if (w && w.status === 'dead') return 0;
+  }
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Setup (GEAK director) -- needed whenever this stage touches a server or a GPU.
 // ---------------------------------------------------------------------------
@@ -252,6 +272,7 @@ if (needsServer) {
   }
   EVAL_DIR = setup.eval_dir;
   baseTput = setup.baseline_throughput_tok_s || 0;
+  if (!(baseTput > 0)) baseTput = await awaitBaseline(EVAL_DIR);
   if (!(baseTput > 0) && want('trace') && !TRACE_DIR_IN) {
     // The trace step plans its sampling points from this baseline's serving log: without it there is
     // nothing to sample from. One more attempt, then the stage stops (the e2e workflow still runs).
@@ -264,6 +285,7 @@ if (needsServer) {
         REPLICAS: PARITY_REPLICAS, SKILL_DIR: WORKFLOW_DIR,
       }), { phase: 'Setup', label: 'kf:director:setup (baseline)', schema: SETUP_SCHEMA });
     baseTput = (again && again.baseline_throughput_tok_s) || 0;
+    if (!(baseTput > 0)) baseTput = await awaitBaseline(EVAL_DIR);
     if (!(baseTput > 0)) {
       return { eval_dir: KF_DIR, kf_dir: KF_DIR, status: 'error', reason: 'baseline not measured (twice)',
         accepted: [], final_overlay: INIT_OVERLAY };

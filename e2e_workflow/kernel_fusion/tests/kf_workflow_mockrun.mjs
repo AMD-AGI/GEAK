@@ -34,7 +34,10 @@ const answers = {
   'kf:kernel-extract trace (retry)': () => ({ trace_dir: '', workload_json: '', points: [] }),
   'kf:kernel-extract prepare': () => ({ delivery_path: `${KF}/delivery.json`,
     prepared: { head_candidates: [], kernel_candidates: [prepared('c1'), prepared('c1s'), prepared('c2', false)] } }),
-  'kf:director:setup': () => (scenario === 'setup_fail' ? null : { eval_dir: KF, baseline_throughput_tok_s: 100, noise_band_pct: 0.5 }),
+  'kf:director:setup': () => (scenario === 'setup_fail' ? null
+    : { eval_dir: KF, baseline_throughput_tok_s: scenario === 'detached_baseline' ? 0 : 100, noise_band_pct: 0.5 }),
+  'kf:baseline wait 1': () => ({ status: 'running' }),
+  'kf:baseline wait 2': () => ({ status: 'done', baseline_throughput_tok_s: 286.9 }),
   'kf:profiler': () => (scenario === 'no_trace' || scenario === 'trace_retry'
     ? { profile_topN_json: '', top_kernels: [], notes: 'capture still running' }
     : { profile_topN_json: `${KF}/profile/round_0/profile_topN.json`, top_kernels: [{ name: 'k' }] }),
