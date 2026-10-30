@@ -3,7 +3,7 @@
 The same extraction skill, run through this pipeline and run by hand, produced different
 deliveries, and the slot called the narrower one `ok`. These tests are the shapes of both:
 the pipeline run that must now be rejected, and the hand-driven run that must now pass.
-Everything here is CPU-only JSON (PRINCIPLES R16) -- what is being tested is the
+Everything here is CPU-only JSON (PRINCIPLES R11) -- what is being tested is the
 judgement, not the extraction.
 """
 
