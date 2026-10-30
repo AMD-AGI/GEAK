@@ -1,0 +1,53 @@
+{
+  "schema_version": "geak-collector-v1",
+  "id": "memory_launch_ceiling",
+  "maturity": "contract_only_validated_microbenchmarks_required",
+  "tool": "validated HIP HBM-stream and empty-kernel launch microbenchmarks",
+  "purpose": "Measure sustained device-memory bandwidth and host-to-device launch/materialization floors on the target runtime",
+  "capability_probe": [
+    "HBM benchmark validates bytes read/written analytically and reports device events",
+    "launch benchmark reports empty-kernel batch slope after subtracting synchronization and timer overhead",
+    "both benchmarks record GPU clocks, runtime version, visible device and repetition variance"
+  ],
+  "command_templates": [
+    "{validated_hbm_benchmark} --bytes {bytes} --iterations {iterations} --json {hbm_output}",
+    "{validated_launch_benchmark} --batch-sizes {batch_sizes} --iterations {iterations} --json {launch_output}"
+  ],
+  "preconditions": [
+    "use allocations substantially larger than cache for the HBM ceiling",
+    "report copy and read-modify-write byte conventions separately",
+    "warm runtime/context/JIT before measurement",
+    "fit launch batch time versus dispatch count instead of timing one synchronized launch",
+    "repeat per visible device and retain rank/device variance",
+    "cross-check HBM traffic with supported hardware counters when available"
+  ],
+  "outputs": [
+    {
+      "artifact": "HBM raw per-device/per-repetition JSON",
+      "information": "bytes, duration, bandwidth convention, size and variance"
+    },
+    {
+      "artifact": "launch raw batch-sweep JSON",
+      "information": "batch size, enqueue/device/synchronization timing and fitted launch slope"
+    },
+    {
+      "artifact": "geak-collection-provenance-v1 JSON",
+      "information": "benchmark revision, command, runtime, clocks, scope, repetitions and raw paths"
+    }
+  ],
+  "helps_diagnose": [
+    "HBM utilization normalization",
+    "whether launch count can explain an observed floor",
+    "small-workload materialization sensitivity"
+  ],
+  "not_measured": [
+    "MegaMoE actual HBM bytes",
+    "XGMI traffic",
+    "kernel instruction stalls",
+    "fusion speedup"
+  ],
+  "provenance": {
+    "reference": "target-local measured-ceiling contract",
+    "notes": "No benchmark is marked ready until analytical byte and batched-launch tests are checked in; vendor theoretical peaks are sources, not measured ceilings."
+  }
+}

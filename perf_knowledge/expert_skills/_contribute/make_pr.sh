@@ -27,9 +27,14 @@ echo "==> reindex"
 python3 "$HERE/scaffold.py" --reindex
 
 STATUS="$(python3 - "$SKILL" <<'PY'
-import sys, re, yaml
-t=open(sys.argv[1]).read(); m=re.match(r"^---\n(.*?)\n---\n",t,re.S)
-print((yaml.safe_load(m.group(1)).get("validation") or {}).get("status","draft"))
+import os, sys, re, yaml
+path=sys.argv[1]; t=open(path).read(); m=re.match(r"^---\n(.*?)\n---\n",t,re.S)
+fm=yaml.safe_load(m.group(1)); rel=str(fm.get("validation_file") or "").strip()
+if rel:
+    validation=yaml.safe_load(open(os.path.join(os.path.dirname(path),rel))) or {}
+else:
+    validation=fm.get("validation") or {}
+print(validation.get("status","draft"))
 PY
 )"
 echo "    validation_status = $STATUS"
@@ -48,7 +53,7 @@ git push -u origin "$BRANCH" 2>&1 || { echo "push failed (check remote/auth)"; e
 
 if command -v gh >/dev/null 2>&1; then
   gh pr create --fill --title "expert_skills: add $ID" \
-    --body "Adds expert skill \`$ID\` (status: $STATUS). Validated via validate_skill.py; see the skill's validation.artifact." || true
+    --body "Adds expert skill \`$ID\` (status: $STATUS). Validated via validate_skill.py; see validation.yaml." || true
 else
   REMOTE="$(git remote get-url origin 2>/dev/null || echo '')"
   echo "gh not found. Push done on branch '$BRANCH'."

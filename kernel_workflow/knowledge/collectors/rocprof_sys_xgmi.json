@@ -1,0 +1,48 @@
+{
+  "schema_version": "geak-collector-v1",
+  "id": "rocprof_sys_xgmi",
+  "maturity": "ready_after_capability_probe",
+  "tool": "rocprof-sys + AMD SMI",
+  "purpose": "Sample accumulated per-link XGMI read/write data and link state during a repeated EP8 interval",
+  "capability_probe": [
+    "rocprof-sys-avail --all",
+    "rocprof-sys-avail -bd -r AMD_SMI_METRICS",
+    "amd-smi metric --usage",
+    "verify xgmi is supported rather than reported as N/A on every visible device"
+  ],
+  "command_template": "ROCPROFSYS_USE_AMD_SMI=true ROCPROFSYS_AMD_SMI_METRICS=xgmi rocprof-sys-sample --device --process-freq {sampling_hz} --output {output_dir} -- {repeated_ep8_command}",
+  "config_template": "ROCPROFSYS_USE_AMD_SMI = true\nROCPROFSYS_AMD_SMI_METRICS = xgmi\nROCPROFSYS_ROCM_DOMAINS = hip_runtime_api,memory_copy,hsa_api",
+  "preconditions": [
+    "repeat the identical graph long enough to span many samples because one MegaMoE replay is shorter than the sampling interval",
+    "record warmup and measured interval boundaries",
+    "capture idle-before and idle-after samples",
+    "pair sampled deltas with exact in-kernel software byte counters",
+    "record visible-to-physical GPU and XGMI-link mapping"
+  ],
+  "outputs": [
+    {
+      "artifact": "rocprof-sys output directory",
+      "information": "timestamped AMD-SMI XGMI link width, speed and accumulated read/write samples"
+    },
+    {
+      "artifact": "geak-collection-provenance-v1 JSON",
+      "information": "tool version, exact command/config, interval, repetitions, scope and raw paths"
+    }
+  ],
+  "helps_diagnose": [
+    "whether XGMI links were active",
+    "aggregate sampled transfer volume over a long controlled replay",
+    "effective link utilization after normalization by a measured ceiling",
+    "traffic differences across controlled variants"
+  ],
+  "not_measured": [
+    "exact bytes for one short dispatch",
+    "logical payload versus metadata bytes",
+    "instruction stalls",
+    "causal exposed communication time"
+  ],
+  "provenance": {
+    "reference": "https://rocm.docs.amd.com/projects/rocprofiler-systems/en/develop/how-to/xgmi-pcie-sampling.html",
+    "notes": "Sampling availability depends on hardware/topology; N/A is a failed capability probe, not a zero."
+  }
+}

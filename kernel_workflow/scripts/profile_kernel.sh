@@ -8,14 +8,15 @@
 # portable: it never greps for profiler-/version-specific section names ("System Speed-of-Light",
 # "Wavefront", …) or assumes a particular CSV layout, so it keeps working when the toolchain changes.
 #
-# Usage: bash profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>
+# Usage: bash profile_kernel.sh <gpu_spec> <benchmark_cmd> <output_dir>   (gpu_spec: any gpu_lock.sh form)
 #
 # Optional env overrides (all have sensible defaults; nothing kernel-specific is hard-coded):
 #   PROFILER_PRIORITY  space-separated profiler order to try (default is arch-aware:
 #                      gfx1201 -> rocprofv3 first; CDNA/other -> rocprof-compute first)
 #   WARMUP_RUNS        number of warmup runs before profiling (default: 3)
 #   RPC_PROFILE_ARGS   extra args passed to rocprof-compute/omniperf `profile` (default: "--no-roof")
-#   RPV3_TRACE_ARGS    args passed to rocprofv3 (default: "--kernel-trace --stats --output-format csv")
+#   RPV3_TRACE_ARGS    args passed to rocprofv3 (default: "--kernel-trace --stats --output-format csv",
+#                      plus "--disable-signal-handlers true" for multi-GPU specs)
 #   RPROF_ARGS         args passed to legacy rocprof (default: "--stats")
 #   METRIX_ARGS        args passed to metrix (default: ""; override per `metrix --help` for this toolchain)
 #
@@ -30,7 +31,7 @@
 
 set -euo pipefail
 
-GPU_ID="${1:?Usage: profile_kernel.sh <gpu_id> <benchmark_cmd> <output_dir>}"
+GPU_ID="${1:?Usage: profile_kernel.sh <gpu_spec> <benchmark_cmd> <output_dir>}"
 BENCHMARK_CMD="${2:?Missing benchmark command}"
 OUTPUT_DIR="${3:?Missing output directory}"
 
@@ -39,10 +40,22 @@ GPU_LOCK="$SCRIPT_DIR/gpu_lock.sh"
 source "$SCRIPT_DIR/profile_policy.sh"
 
 WARMUP_RUNS="${WARMUP_RUNS:-3}"
-DETECTED_ARCH="$(profile_detect_arch)"
+# Arch detection masks rocminfo to the requested GPUs, so it needs plain ids, not a group spec.
+case "$GPU_ID" in
+    group:*) _ARCH_IDS="${GPU_ID#group:}" ;;
+    pool:*:*) _ARCH_IDS="${GPU_ID#pool:*:}" ;;
+    *) _ARCH_IDS="$GPU_ID" ;;
+esac
+DETECTED_ARCH="$(GPU_ID="$_ARCH_IDS" profile_detect_arch)"
 PROFILER_PRIORITY="${PROFILER_PRIORITY:-$(profiler_priority_for_arch "$DETECTED_ARCH")}"
 RPC_PROFILE_ARGS="${RPC_PROFILE_ARGS:---no-roof}"
-RPV3_TRACE_ARGS="${RPV3_TRACE_ARGS:---kernel-trace --stats --output-format csv}"
+RPV3_TRACE_ARGS_DEFAULT="--kernel-trace --stats --output-format csv"
+# Multi-GPU jobs are multi-rank: rocprofv3's own SIGABRT handler can deadlock a launcher whose
+# teardown aborts, so leave signal handling to the application.
+case "$GPU_ID" in
+    group:*|pool:*:*) RPV3_TRACE_ARGS_DEFAULT="$RPV3_TRACE_ARGS_DEFAULT --disable-signal-handlers true" ;;
+esac
+RPV3_TRACE_ARGS="${RPV3_TRACE_ARGS:-$RPV3_TRACE_ARGS_DEFAULT}"
 RPROF_ARGS="${RPROF_ARGS:---stats}"
 METRIX_ARGS="${METRIX_ARGS:-}"
 

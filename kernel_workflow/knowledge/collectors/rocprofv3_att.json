@@ -1,0 +1,72 @@
+{
+  "schema_version": "geak-collector-v1",
+  "id": "rocprofv3_att",
+  "maturity": "ready_after_capability_probe",
+  "tool": "rocprofv3",
+  "purpose": "AMD Thread Trace instruction-level pipeline evidence",
+  "capability_probe": [
+    "rocprofv3 --help",
+    "verify --att, --att-target-cu, --att-simd-select, --att-perfcounters and kernel regex flags"
+  ],
+  "command_template": "rocprofv3 --att --att-gpu-index {gpu} --att-target-cu {cu} --att-simd-select 0xF --att-perfcounter-ctrl 1 --att-perfcounters \"SQ_INST_LEVEL_VMEM SQ_INST_LEVEL_LDS\" --kernel-include-regex \"{kernel_regex}\" -d {output_dir} -o {name} --output-format csv -- {single_dispatch_command}",
+  "preconditions": [
+    "warm JIT and tuned-config caches outside the trace",
+    "run exactly one steady-state target dispatch",
+    "use a kernel include regex to avoid tracing unrelated kernels",
+    "record GPU/CU/SIMD selection and rocprofv3 version",
+    "repeat representative CTA/wave roles when the kernel is persistent or specialized"
+  ],
+  "outputs": [
+    {
+      "artifact": "*.att",
+      "information": "raw AMD thread trace"
+    },
+    {
+      "artifact": "stats_*.csv (or version-specific stats_ui_output_*.csv)",
+      "information": "per-instruction Hitcount, Latency, Stall, Idle and Source"
+    },
+    {
+      "artifact": "ui_output_*/code.json",
+      "information": "decoded instruction/source mapping"
+    },
+    {
+      "artifact": "ui_output_*/wstates*.json",
+      "information": "wave-state timeline"
+    },
+    {
+      "artifact": "ui_output_*/se*_sm*_sl*_wv*.json",
+      "information": "selected shader-engine/SIMD/wave trace"
+    },
+    {
+      "artifact": "ui_output_*/occupancy.json",
+      "information": "occupancy context for the traced dispatch"
+    }
+  ],
+  "helps_diagnose": [
+    "MFMA starvation or low issue density",
+    "barrier idle time",
+    "waitcnt dependency latency",
+    "LDS read/write pressure",
+    "VMEM/global-memory latency",
+    "VALU promote/scale/conversion overhead",
+    "wave-role imbalance and long dependency chains"
+  ],
+  "not_measured": [
+    "whole-device E2E latency",
+    "all ranks or all CUs unless explicitly repeated",
+    "XGMI bytes or bandwidth",
+    "cross-GPU critical path",
+    "causal speedup without a controlled candidate"
+  ],
+  "metric_semantics": {
+    "Latency": "Stall + Issue on gfx9, or Stall + Execute on gfx10+",
+    "Stall": "hardware-pipe backpressure cycles already included in Latency",
+    "Idle": "gap caused by arbitration, register dependency, or instruction-cache miss",
+    "accounted_cycles": "Latency + Idle; never add Stall twice"
+  },
+  "parser": "kernel_workflow/scripts/multi_rank_analysis/instruction_analysis.py",
+  "provenance": {
+    "reference": "artifacts/archives/gemm_bottleneck_analysis.zip",
+    "notes": "Flags and output names came from a working gfx950 GEMM ATT collection; probe current rocprofv3 because CLI options are version-dependent."
+  }
+}
