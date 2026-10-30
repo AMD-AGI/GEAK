@@ -155,6 +155,14 @@ def test_agentx_without_a_verified_trace_stops_before_topk():
     assert "kf:analyst" not in labels(out) and out["result"]["status"] == "error"
 
 
+def test_a_baseline_left_running_detached_is_waited_for():
+    out = run("detached_baseline")
+    assert labels(out)[:4] == ["kf:director:setup", "kf:baseline wait 1", "kf:baseline wait 2", "kf:profiler"]
+    wait = out["calls"][1]["prompt"]
+    assert "start nothing" in wait and f"{KF}/baseline/bench_summary.json" in wait
+    assert out["result"]["baseline_throughput_tok_s"] == 286.9
+
+
 def test_setup_failure_returns_cleanly():
     r = run("setup_fail")["result"]
     assert r["status"] == "error" and r["final_overlay"] == ""
