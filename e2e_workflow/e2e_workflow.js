@@ -2040,6 +2040,8 @@ function roleAgent(role, phase, intro, inputs) {
   const inall = {
     BACKEND, SERVING_TP, SERVING_GPU,
     ...(SERVING_TOPOLOGY ? { SERVING_TOPOLOGY } : {}),
+    ...(MN_SPEC ? { MN_NODES: MN_SPEC.nodes.length, MN_STATE, MN_SHARED_FS: MN_SPEC.shared_fs, MN_GPU_EXEC,
+      ...(MN_SPEC.tp_by_role ? { MN_TP_BY_ROLE: MN_SPEC.tp_by_role } : {}) } : {}),
     MEASUREMENT_MODE, PARITY_REPLICAS, SEARCH_REPLICAS, VALIDATION_REPLICAS,
     EFFECTIVE_CONFIG_DIGEST,
     E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off',
@@ -2074,21 +2076,7 @@ exactly these in its env:
 NEVER change TP or the GPU set between the baseline, a candidate, and validation — a TP/GPU mismatch
 makes every delta meaningless. (If SERVING_TP=1, GPU=${SERVING_GPU} is a single id; if SERVING_TP>1 it
 is a comma-separated set. Use it VERBATIM, never re-derived from TP: multi-node, it names ONE host's ids.)
-${MN ? `This run serves ONE instance on ${MN_SPEC.nodes.length} machine(s) (${SERVING_TOPOLOGY}), pinned in ${MN_STATE}.
-bench_e2e.sh adds the BENCH_LAUNCHER / GEAK_MN_STATE above itself and refuses any other launcher here.
-Each machine's TP and cards come from the pin${MN_SPEC.tp_by_role ? ` (prefill TP ${MN_SPEC.tp_by_role.prefill}, decode TP ${MN_SPEC.tp_by_role.decode})` : ''}.
-You and every Bash command you run are on the driver: it sees NO GPU and the nodes have no GEAK code.
-Keep files on the shared fs (${MN_SPEC.shared_fs}, same path on the nodes), not /tmp: a node sees only that
-and its own image. gpu_lock.sh and profile_kernel.sh run on a node (the master for a bare id, that
-engine's machine for <engine>:<id>, e.g. decode:3). Anything else needing a GPU or a node (rocm-smi):
-    ${MN_GPU_EXEC} --target <master|rank<N>|prefill|decode|host> [--gpu <id>] -- <command>
-(or \`--script <file>\`). --gpu exports HIP_VISIBLE_DEVICES/GPU_ID and holds the card's lock.
-An isolated server is
-    ${MN_GPU_EXEC} --target <T> --gpu <id> -- env BACKEND=${BACKEND} BENCH_LAUNCHER=native GPU=<id> TP=1 ... bash <eval_dir>/bench_e2e.sh
-` : ''}${SERVING_TOPOLOGY === 'pd_disagg' ? `PD: pass each GEAK_MN_PD_* Input (one engine's accepted config) VERBATIM in the env of every
-SERVING bench_e2e.sh on the current config (a true-baseline leg omits them). EXTRA_SERVER_ARGS /
-EXTRA_ENV / OVERLAY_PYTHONPATH reach BOTH engines: never copy a GEAK_MN_PD_* value into them.
-` : ''}GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY for single-GPU isolated
+${MN ? `MULTINODE: also Read ${WORKFLOW_DIR}/roles/_fragments/multinode_driver.md and follow it.\n` : ''}GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY for single-GPU isolated
 work (op_bench bake-offs, shape-capture, the recursive kernel layer), where each task pins ONE id from
 the pool via GPU_ID. Do NOT use the serving TP/GPU set for that isolated work, and do NOT use a single
 optimization-pool id for a serving launch — keep the two separate.

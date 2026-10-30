@@ -125,8 +125,14 @@ eq(/BACKEND=\$\{BACKEND\} TP=\$\{SERVING_TP\} GPU=\$\{SERVING_GPU\}\$\{MN \? ` \
   'every role\'s SERVING env line appends the multinode env');
 eq(src.includes('CAPTURE_TP: ((MN_SPEC && MN_SPEC.tp_by_role) || {})[role] || SERVING_TP'), true,
   'a PD capture shard uses its own engine\'s TP');
-eq(src.includes('${MN_GPU_EXEC} --target <master|rank<N>|prefill|decode|host> [--gpu <id>] -- <command>'), true,
-  'every role is told how to reach a node explicitly');
+eq(src.includes("${MN ? `MULTINODE: also Read ${WORKFLOW_DIR}/roles/_fragments/multinode_driver.md and follow it.\\n` : ''}"), true,
+  'every role reads the multinode driver rules');
+eq(/MN_SPEC \? \{ MN_NODES: MN_SPEC\.nodes\.length, MN_STATE, MN_SHARED_FS: MN_SPEC\.shared_fs, MN_GPU_EXEC,/.test(src), true,
+  'every role gets the pin, the shared fs and the exec command as Inputs');
+const driverMd = fs.readFileSync(path.join(ROOT, 'e2e_workflow', 'roles', '_fragments', 'multinode_driver.md'), 'utf8');
+eq(['<MN_GPU_EXEC> --target <master|rank<N>|prefill|decode|host> [--gpu <id>] -- <command>', 'sees NO GPU',
+  'never copy a `GEAK_MN_PD_*` value into them'].every((s) => driverMd.includes(s)), true,
+  'the fragment tells every role how to reach a node and keeps the PD env rule');
 eq(/MN_CHECK_CMD|MN_CHECK_SCHEMA|GEAK_REMOTE_GPU|GEAK_MN_EXT_SHARED_FS/.test(src), false, 'no trace of the old check agent');
 
 verdictTests.then(() => {

@@ -133,9 +133,12 @@ console.log('D. per-engine variables + prompt');
 {
   const at = src.indexOf('function roleAgent(');
   const body = src.slice(at, src.indexOf('\n}\n', at));
-  eq([/\$\{SERVING_TOPOLOGY === 'pd_disagg' \? `PD: pass each GEAK_MN_PD_\* Input/.test(body),
-    /forced\)\.`;/.test(body)], [true, true],
-    'the PD rule is only in a pd_disagg prompt; the prompt tail is unchanged off PD');
+  const driver = fs.readFileSync(path.join(__dirname, '..', 'roles', '_fragments', 'multinode_driver.md'), 'utf8');
+  const pdRule = driver.slice(driver.indexOf('## PD (`SERVING_TOPOLOGY=pd_disagg`)'));
+  eq([body.includes("${MN ? `MULTINODE: also Read ${WORKFLOW_DIR}/roles/_fragments/multinode_driver.md"),
+    pdRule.includes('Pass each `GEAK_MN_PD_*` input') && pdRule.includes('never copy a `GEAK_MN_PD_*` value into them'),
+    /forced\)\.`;/.test(body)], [true, true, true],
+    'the PD rule is in the multinode fragment\'s pd_disagg section; the prompt tail is unchanged off PD');
 }
 
 // ------------------------------------------------------------------ E. per-engine state

@@ -36,7 +36,7 @@ const make = new Function('A', 'process', `
   const E2E_LEARNED_KB_ENABLED = false, cfg = o => JSON.stringify(o);
   const expertSkillsBlock = () => '', warmStartBlock = () => '';
   const correctnessEnvBlock = () => '', workloadIdentityBlock = () => '';
-  const SERVING_TOPOLOGY = '', MN = null, pdVars = () => ({}), pdFragmentBlock = () => '';
+  const SERVING_TOPOLOGY = '', MN = null, MN_SPEC = null, pdVars = () => ({}), pdFragmentBlock = () => '';
   ${settings}
   ${measurementSettings}
   ${captureSettings}
