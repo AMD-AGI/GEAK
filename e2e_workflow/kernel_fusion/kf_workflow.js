@@ -141,6 +141,13 @@ Then poll in SEPARATE short calls (\`sleep 300; tail -5 run_bench.out\`) until t
 you conclude a leg died, check whether it is still alive (\`ps -o pid,stat,etime -p <pid>\`) and whether
 the GPUs still hold weights — a reaped wrapper with a live leg underneath looks identical to a crash.
 
+## INSIDE THIS WORKFLOW, ENDING YOUR TURN IS YOUR FINAL ANSWER
+Ending your turn to wait for a background task or notification forces your structured result at once:
+you are finalized mid-job, and the server and captures you are waiting on are lost with you. Wait only in
+the foreground, in calls of at most ~9 minutes each (a loop of short sleeps + a check), re-issued until the
+job is done. Profiler traces with Python stacks of a large TP model take many minutes to flush: keep polling
+until every rank's file is complete, and only then tear the server down.
+
 `;
 
 function roleAgent(role, phase, intro, inputs) {
