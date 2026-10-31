@@ -31,14 +31,14 @@ def rejected(r):
     return [(x["id"], x["stage"]) for x in r["rejected"]]
 
 
-def test_accept_path_reuses_geak_roles_and_confirms_the_stack():
+def test_all_winners_go_in_together_on_one_ab():
     out = run("accept")
     r = out["result"]
     # c1 is recommended at difficulty 3, so its smaller exclusive alternative c1s is authored too;
-    # c3 is never touched (not recommended, no seam).
+    # c3 is never touched (not recommended, no seam). Every kernel is written before anything is applied,
+    # then ONE integrator A/B of the whole set -- no per-kernel A/B, no separate director validate.
     assert labels(out) == ["kf:director:setup", "kf:profiler", "kf:analyst",
-                           "kf:extract c1", "kf:extract c1s", "kf:extract c2",
-                           "kf:integrate c1", "kf:director:validate"]
+                           "kf:extract c1", "kf:extract c1s", "kf:extract c2", "kf:integrate kf_stack"]
     for c in out["calls"]:
         if c["label"] != "kf:analyst" and not c["label"].startswith("kf:author "):   # stock GEAK role files
             m = re.search(r"Read (\S+/roles/(\w+)\.md)", c["prompt"])
@@ -53,53 +53,51 @@ def test_accept_path_reuses_geak_roles_and_confirms_the_stack():
     assert "never edit TASK_DIR" in au and f"{KF}/kernels/c1/final_patch.diff" in au
     # deliverables: fused kernel module, graph-replay unit test, lazy overlay with an ENGAGED banner
     assert f"{KF}/kernels/c1/overlay/sitecustomize.py" in au and "[kf-c1] ENGAGED" in au and "graph replay" in au
+    assert "shapes the server actually runs" in au and "weighted by served share" in au
     by = {c["label"]: c["prompt"] for c in out["calls"]}
     assert sorted(l for l in labels(out, authors=True) if l.startswith("kf:author ")) == ["kf:author c1", "kf:author c1s", "kf:author c2"]
-    integ = by["kf:integrate c1"]
-    assert '"winner_kind":"authored"' in integ and '"code_patch":"diff c1"' in integ
-    assert "READY overlay" in integ and f'"overlay_dir":"{KF}/kernels/c1/overlay"' in integ and "[kf-c1] ENGAGED" in integ
-    validate = by["kf:director:validate"]
-    assert f"FINAL_OVERLAY: {KF}/overlay/cand_accepted" in validate and "MEASUREMENT_MODE: isolated_server" in validate
-    assert "REPLICAS: 2" in validate
-    assert r["status"] == "accepted" and r["final_overlay"] == f"{KF}/overlay/cand_accepted"
+    integ = by["kf:integrate kf_stack"]
+    assert "Apply ALL 2 fused kernels" in integ and "ONE e2e A/B" in integ and f"{KF}/overlay/cand_kf_stack" in integ
+    for k in ("c1", "c2"):
+        assert f'"overlay_dir":"{KF}/kernels/{k}/overlay"' in integ and f"[kf-{k}] ENGAGED" in integ
+    assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' not in integ        # the fallback is not needed
+    assert "MEASUREMENT_PURPOSE: validation" in integ and "MEASUREMENT_MODE: isolated_server" in integ and "REPLICAS: 2" in integ
     # synthetic acceptance stays on for throughput, off for every correctness check
-    for p in (integ, validate):    # e2e_workflow.js's correctness rule, fed by run_e2e's correctness_unset_env
-        assert "CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE" in p
-        assert "CORRECTNESS_UNSET_ENV: SGLANG_SIMULATE_ACC_LEN SGLANG_SIMULATE_ACC_METHOD" in p
-        assert "env -u SGLANG_SIMULATE_ACC_LEN -u SGLANG_SIMULATE_ACC_METHOD" in p
+    assert "CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE" in integ
+    assert "CORRECTNESS_UNSET_ENV: SGLANG_SIMULATE_ACC_LEN SGLANG_SIMULATE_ACC_METHOD" in integ
+    assert "env -u SGLANG_SIMULATE_ACC_LEN -u SGLANG_SIMULATE_ACC_METHOD" in integ
     assert "CURRENT_ENV: SGLANG_USE_AITER=1 SGLANG_SIMULATE_ACC_LEN=4.05" in integ
     # operator constraints reach every agent
     assert all("Do not read /answers." in c["prompt"] for c in out["calls"])
-    assert r["throughput_speedup"] == pytest.approx(1.025)          # the director's combined number
-    assert [a["id"] for a in r["accepted"]] == ["c1"]
-    assert rejected(r) == [("c2", "author")]
+    assert r["status"] == "accepted" and r["final_overlay"] == f"{KF}/overlay/cand_kf_stack"
+    assert r["throughput_speedup"] == pytest.approx(1.025)          # cand_med / ref_med of the one A/B
+    assert sorted(a["id"] for a in r["accepted"]) == ["c1", "c2"]
+    assert ("c1s", "apply") in rejected(r)
 
 
-def test_fallback_is_applied_when_the_primary_has_no_isolated_win():
+def test_fallback_goes_in_when_the_primary_has_no_isolated_win():
     out = run("fallback")
-    assert "kf:integrate c1" not in labels(out) and "kf:integrate c1s" in labels(out)
+    integ = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:integrate kf_stack")
+    assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' in integ and f'"overlay_dir":"{KF}/kernels/c1/overlay"' not in integ
     r = out["result"]
-    assert r["status"] == "accepted" and [(a["id"], a["slot"]) for a in r["accepted"]] == [("c1s", "c1")]
+    assert r["status"] == "accepted" and [a["id"] for a in r["accepted"]] == ["c1s"]
 
 
-def test_fallback_is_applied_when_the_primary_fails_the_ab():
-    out = run("reject")
-    assert labels(out)[-3:] == ["kf:integrate c1", "kf:integrate c1s", "kf:director:validate"]
-    r = out["result"]
-    assert [a["id"] for a in r["accepted"]] == ["c1s"] and ("c1", "apply") in rejected(r)
+def test_a_slower_combined_stack_is_not_handed_on():
+    r = run("reject")["result"]
+    assert r["status"] == "no_gain" and r["final_overlay"] == "" and not r["accepted"]
+    assert ("c1", "apply") in rejected(r)
 
 
 def test_incomplete_ab_is_finished_before_deciding():
     out = run("retry")
-    assert labels(out)[-3:] == ["kf:integrate c1", "kf:integrate c1 (finish 1)", "kf:director:validate"]
+    assert labels(out)[-2:] == ["kf:integrate kf_stack", "kf:integrate kf_stack (finish 1)"]
     assert out["result"]["status"] == "accepted"
 
 
-def test_stack_is_carried_but_needs_the_combined_confirmation():
+def test_a_stack_gate_that_is_not_faster_is_not_handed_on():
     r = run("stack")["result"]
-    assert [a["gate"] for a in r["accepted"]] == ["stack"]
-    assert r["validation"]["validation_status"] == "validated_no_win"
-    assert r["status"] == "no_gain" and r["final_overlay"] == "" and r["throughput_speedup"] == 1
+    assert r["validation"]["gate"] == "stack" and r["status"] == "no_gain" and r["final_overlay"] == ""
 
 
 def test_extraction_without_frozen_baseline_is_not_authored():
@@ -144,9 +142,9 @@ def test_agentx_uses_the_kernel_extract_skill_for_trace_and_uts():
     out = run("agentx")
     ls = labels(out)
     assert ls[:3] == ["kf:director:setup", "kf:kernel-extract trace", "kf:analyst"]
-    assert ls[-2:] == ["kf:integrate c1", "kf:director:validate"]
+    assert ls[-1:] == ["kf:integrate kf_stack"]
     # one prepare agent per region (parallel), a failed region retried once with its blocker
-    assert sorted(ls[3:-2]) == sorted(["kf:kernel-extract prepare c1", "kf:kernel-extract prepare c1s",
+    assert sorted(ls[3:-1]) == sorted(["kf:kernel-extract prepare c1", "kf:kernel-extract prepare c1s",
                                        "kf:kernel-extract prepare c1s (retry)", "kf:kernel-extract prepare c2",
                                        "kf:kernel-extract prepare c2 (retry)"])
     by = {c["label"]: c["prompt"] for c in out["calls"]}

@@ -19,7 +19,7 @@ const CANDS = [
     exclusive_with: ['c1'], seam: { target_callable: 'pkg.moe:compact' }, est_gain_pct_expected: 1.6 },
   { id: 'c3', rank: 5, level: 'L3', region: 'moe stage', kernels: ['a', 'b'], difficulty: 2, seam: {}, est_gain_pct_expected: 9 },
 ];
-const ISO = { c1: scenario === 'fallback' ? 0.97 : 1.4, c2: 0.95, c1s: 1.6 };
+const ISO = { c1: scenario === 'fallback' ? 0.97 : 1.4, c2: scenario === 'accept' ? 1.2 : 0.95, c1s: 1.6 };
 const won = (gate, d) => ({ gate, ab_complete: true, e2e_throughput_tok_s: 100 + d, ref_med: 100, cand_med: 100 + d,
   e2e_delta_pct: d, accepted_overlay: `${KF}/overlay/cand_${gate}` });
 
@@ -50,15 +50,13 @@ const answers = {
     : { profile_topN_json: `${KF}/profile/round_0/profile_topN.json`, top_kernels: [{ name: 'k' }] }),
   'kf:analyst': () => ({ topk_json: `${KF}/analysis/topk.json`, report_path: `${KF}/analysis/report.md`,
     candidates: CANDS, recommended: ['c1', 'c2'], report_md: '# report', model_notes_md: '# notes' }),
-  'kf:integrate c1': () => ({
-    accept: won('accepted', 3), reuse_topk: won('accepted', 3), agentx: won('accepted', 3), stack: won('stack', 0.2),
+  // ONE combined A/B of every winner
+  'kf:integrate kf_stack': () => ({
+    reject: { gate: 'rejected', e2e_throughput_tok_s: 99, ref_med: 100, cand_med: 99, e2e_delta_pct: -1, ab_complete: true, reason: 'slower' },
+    stack: { ...won('stack', -0.1), accepted_overlay: `${KF}/overlay/cand_kf_stack` },
     retry: { gate: 'incomplete', ab_complete: false, e2e_throughput_tok_s: 0, ref_med: 100 },
-  }[scenario] || { gate: 'rejected', e2e_throughput_tok_s: 99, reason: 'parity_regression' }),
-  'kf:integrate c1 (finish 1)': () => won('accepted', 2),
-  'kf:integrate c1s': () => won('accepted', 1.5),
-  'kf:director:validate': () => (scenario === 'stack'
-    ? { validation_status: 'validated_no_win', throughput_speedup: 1.001, output_parity: 'pass' }
-    : { validation_status: 'validated_win', throughput_speedup: 1.025, director_verified_throughput_tok_s: 102.5, output_parity: 'pass' }),
+  }[scenario] || { ...won('accepted', 2.5), accepted_overlay: `${KF}/overlay/cand_kf_stack` }),
+  'kf:integrate kf_stack (finish 1)': () => ({ ...won('accepted', 2), accepted_overlay: `${KF}/overlay/cand_kf_stack` }),
 };
 for (const id of Object.keys(ISO)) {
   answers[`kf:extract ${id}`] = () => ({ editable: true, task_dir: `${KF}/kernels/${id}_task`, unittest_smoke: 'pass', short_name: id,

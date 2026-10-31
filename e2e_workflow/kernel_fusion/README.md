@@ -19,7 +19,7 @@ profiler)  prompt)  skill;     A/B, compounding
 | `trace` | AgentX: the kernel-extract skill's workload measurement + sampling capture (points planned from the baseline log, one bounded probe each with Python stacks, `kernel_workload.json` weights); other workloads: one warm serving trace. Skipped when `trace_dir` is given | `knowledge/kernel_extraction_skills/kernel-extract` (stages 1-2), else `roles/profiler.md` |
 | `topk` | `kf_trace_digest.py` (deterministic), then the analyst agent applies **your prompt** → `analysis/topk.json` + the report the prompt asks for | `parse_profile.py` |
 | `author` | per recommended candidate **and its fallback** (the analyst's `fallback`, else the lowest-difficulty exclusive alternative of a difficulty ≥ 3 candidate): region UT, then a fused kernel | AgentX: kernel-extract skill `PHASE=prepare` (one joint-boundary task per region); else `roles/kernel_extractor.md`. The fused kernel itself: one agent per candidate, given the region and the UT, no GEAK kernel layer |
-| `apply` | per slot, serially: A/B the primary, else its fallback; `accepted`/`stack` overlays compound; then one combined confirmation of the whole stack vs the original baseline — only `validated_win` is handed to the main workflow | `roles/e2e_integrator.md` PHASE=integrate, `roles/director.md` PHASE=validate |
+| `apply` | once, after every kernel is written: the UT-passing fused kernels with an isolated win (per slot the primary, else its fallback) go in together as ONE combined overlay; one A/B of the whole stack vs the reference (correctness once, validation-length legs); only a measured e2e win is handed to the main workflow | `roles/e2e_integrator.md` PHASE=integrate |
 
 ## Switch
 
@@ -43,7 +43,7 @@ GEAK_KERNEL_FUSION=0|1                                     # env
 | `source_dirs` | `GEAK_KF_SOURCE_DIRS` | installed packages | framework/op-library source for the analyst when it is not importable where the stage runs |
 | `steps` | `GEAK_KF_STEPS` | `trace,topk,author,apply` | subset to run; `topk` alone with `trace_dir` needs no GPU |
 | `author_k` | `GEAK_KF_AUTHOR_K` | 3 | recommended candidates to implement |
-| `validation_mode` / `validation_replicas` | `GEAK_KF_VALIDATION_MODE` / `_REPLICAS` | `isolated_server` / 2 | the director's combined confirmation of the whole fused stack |
+| `validation_mode` / `validation_replicas` | `GEAK_KF_VALIDATION_MODE` / `_REPLICAS` | `isolated_server` / 2 | measurement mode / replicas of the combined A/B |
 | `task` | `GEAK_KF_TASK` | — | operator constraints appended to every agent prompt (e.g. directories it must not read) |
 | `budget_s` | `GEAK_KF_BUDGET_S` | min(12 h, ⅓ of the run) | stage wall clock; the main workflow gets the rest |
 | `kf_dir` | `GEAK_KF_DIR` | `<exp_root>/kf_<main eval dir suffix>` | stage output dir |
