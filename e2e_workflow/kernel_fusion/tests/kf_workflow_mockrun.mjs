@@ -32,8 +32,13 @@ const answers = {
     : { trace_dir: `${KF}/kernel_extraction/round_kf/capture/traces`, workload_json: `${KF}/kernel_workload.json`,
         ranking_json: `${KF}/kernel_ranking.json`, points: [{ point_id: 'de_1', phase: 'DECODE', verified: true }] }),
   'kf:kernel-extract trace (retry)': () => ({ trace_dir: '', workload_json: '', points: [] }),
-  'kf:kernel-extract prepare': () => ({ delivery_path: `${KF}/delivery.json`,
-    prepared: { head_candidates: [], kernel_candidates: [prepared('c1'), prepared('c1s'), prepared('c2', false)] } }),
+  // one prepare per region: c1 / c1s pass; c2 fails twice (the retry is told why)
+  'kf:kernel-extract prepare c1': () => ({ delivery_path: `${KF}/d_c1.json`, prepared: { head_candidates: [], kernel_candidates: [prepared('c1')] } }),
+  'kf:kernel-extract prepare c1s': () => ({ delivery_path: `${KF}/d_c1s.json`, prepared: { head_candidates: [], kernel_candidates: [] } }),
+  'kf:kernel-extract prepare c1s (retry)': () => ({ delivery_path: `${KF}/d_c1s.json`, prepared: { head_candidates: [], kernel_candidates: [prepared('c1s')] } }),
+  'kf:kernel-extract prepare c2': () => ({ delivery_path: `${KF}/d_c2.json`,
+    prepared: { head_candidates: [], kernel_candidates: [], failed_tasks: [{ task: 'c2', reason: 'operands not reconstructed' }] } }),
+  'kf:kernel-extract prepare c2 (retry)': () => ({ delivery_path: `${KF}/d_c2.json`, prepared: { head_candidates: [], kernel_candidates: [prepared('c2', false)] } }),
   'kf:director:setup': () => (scenario === 'setup_fail' ? null
     : { eval_dir: KF, baseline_throughput_tok_s: scenario === 'detached_baseline' ? 0 : 100, noise_band_pct: 0.5 }),
   'kf:baseline wait 1': () => ({ status: 'running' }),
