@@ -69,16 +69,19 @@ for (const id of Object.keys(ISO)) {
 
 async function agent(prompt, opts) {
   calls.push({ label: opts.label, phase: opts.phase, prompt });
+  if (opts.label.startsWith('kf:author ')) {
+    // the fused kernel is written by one author agent against the region UT
+    const kernel_path = prompt.match(/TASK_DIR=(\S+)/)[1];
+    workflows.push({ kernel_path, task: prompt });
+    const id = kernel_path.split('/').pop().replace(/_task$/, '');
+    return { final_patch: ISO[id] > 1 ? `diff ${id}` : '', isolated_speedup: ISO[id], correctness: 'pass', notes: '',
+      overlay_dir: `${KF}/kernels/${id}/overlay`, banner: `[kf-${id}] ENGAGED` };
+  }
   const f = answers[opts.label];
   if (!f) throw new Error(`unscripted agent ${opts.label}`);
   return f();
 }
-async function workflow(ref, a) {
-  workflows.push({ scriptPath: ref.scriptPath, ...a });
-  const id = a.kernel_path.split('/').pop().replace(/_task$/, '');
-  return { eval_dir: `${KF}/kernels/_exp/${id}`, final_patch: ISO[id] > 1 ? `diff ${id}` : '', final_geomean: ISO[id],
-    validation_status: ISO[id] > 1 ? 'validated' : 'no_gain' };
-}
+async function workflow() { throw new Error('KernelFusion must not start a nested GEAK workflow'); }
 const parallel = (ts) => Promise.all(ts.map((t) => Promise.resolve().then(t).catch(() => null)));
 const pipeline = null;
 const phase = () => {};

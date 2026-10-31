@@ -1,12 +1,12 @@
 export const meta = {
   name: 'kernel-fusion',
-  description: 'KernelFusion stage, run BEFORE the GEAK e2e workflow: capture a serving trace (GEAK profiler), pick the Top-K fusion patterns with a user-supplied analysis prompt, author each fused kernel with the GEAK kernel layer, and apply the winners back through the GEAK e2e integrator A/B. Returns the accepted fused overlay, which the e2e workflow then uses as its baseline.',
+  description: 'KernelFusion stage, run BEFORE the GEAK e2e workflow: capture a serving trace (GEAK profiler), pick the Top-K fusion patterns with a user-supplied analysis prompt, build a region UT and have an agent write each fused kernel against it, and apply the winners back through the GEAK e2e integrator A/B. Returns the accepted fused overlay, which the e2e workflow then uses as its baseline.',
   whenToUse: 'Started by interface/run_e2e.py before the e2e workflow unless switched off (handoff "kernel_fusion": false, GEAK_KERNEL_FUSION=0 or --no-kernel-fusion). Takes the same args as e2e_workflow.js plus kf_dir, kf_prompt and the optional kf_* knobs documented in kernel_fusion/README.md.',
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the KF eval dir + baseline throughput (roles/director.md PHASE=setup)' },
     { title: 'Trace', detail: 'AgentX: kernel-extract skill sampling capture (points from the baseline log, one probe each); else roles/profiler.md; or kf_trace_dir' },
     { title: 'TopK', detail: 'fusion analyst: kf_trace_digest.py + the user prompt -> ranked Top-K fusion candidates (topk.json)' },
-    { title: 'Author', detail: 'per recommended candidate + its fallback: region UT (AgentX: kernel-extract skill prepare; else roles/kernel_extractor.md), then kernel_lane.js mode=author' },
+    { title: 'Author', detail: 'per recommended candidate + its fallback: region UT (AgentX: kernel-extract skill prepare; else roles/kernel_extractor.md), then one author agent writes the fused kernel against that UT' },
     { title: 'ApplyBack', detail: 'per slot, serially: e2e_integrator A/B (primary, else its fallback), accepted/stack overlays compound; director validate confirms the whole stack' },
   ],
 };
@@ -21,9 +21,6 @@ if (!WORKFLOW_DIR) throw new Error('args.workflow_dir is required (the e2e_workf
 const KF_DIR = String(A.kf_dir || '').replace(/\/+$/, '');
 if (!KF_DIR) throw new Error('args.kf_dir is required (the KernelFusion eval dir)');
 const KF_HOME = `${WORKFLOW_DIR}/kernel_fusion`;
-const KERNEL_WF_DIR = String(A.kernel_workflow_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_workflow')).replace(/\/+$/, '');
-const KERNEL_WF_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 
 const MODEL_PATH = String(A.model_path || '');
 const LAUNCH_SCRIPT = String(A.launch_script || '');
@@ -87,7 +84,6 @@ const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy || 'structure_onl
 const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${A.capture_byte_budget || '8GiB'} ` +
   `CAPTURE_CASE_BYTE_LIMIT=${A.capture_case_byte_limit || '2GiB'} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY}`;
 const AUTHOR_K = parseInt(A.kf_author_k != null ? A.kf_author_k : 3, 10);
-const KERNEL_BUDGET = parseInt(A.kf_kernel_budget != null ? A.kf_kernel_budget : 4, 10);
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 7200000, 10);
 
 // Stop STARTING author/apply work once 85% of the stage budget is gone; in-flight work finishes and the
@@ -240,6 +236,10 @@ const EXTRACT_SCHEMA = obj({ short_name: { type: 'string' }, editable: { type: '
   target_callable: { type: 'string' }, unittest_smoke: { type: 'string' }, candidate_bind: { type: 'object', additionalProperties: true },
   baseline_frozen: { type: 'boolean' },
   notes: { type: 'string' } }, ['editable', 'task_dir', 'unittest_smoke']);
+const AUTHOR_SCHEMA = obj({ final_patch: { type: 'string' }, work_dir: { type: 'string' },
+  overlay_dir: { type: 'string' }, banner: { type: 'string' },
+  isolated_speedup: { type: 'number' }, correctness: { type: 'string' }, launches_after: { type: 'number' },
+  ut_command: { type: 'string' }, notes: { type: 'string' } }, ['final_patch', 'isolated_speedup', 'correctness']);
 const VALIDATE_SCHEMA = obj({ validation_status: { type: 'string' }, throughput_speedup: { type: 'number' },
   director_verified_throughput_tok_s: { type: 'number' }, output_parity: { type: 'string' }, notes: { type: 'string' } },
   ['validation_status']);
@@ -473,7 +473,7 @@ if (!topk || !(want('author') || want('apply'))) {
 // Author: one slot per recommended candidate. A slot also authors its FALLBACK -- the smaller-scope
 // pattern the prompt's ranking names for when the recommended one does not pan out (the analyst's
 // `fallback`, else the lowest-difficulty exclusive alternative of a difficulty>=3 candidate). Each
-// job: region unittest (GEAK kernel_extractor) -> fused kernel (kernel_lane.js mode=author).
+// job: region unittest (GEAK kernel-extract skill / kernel_extractor) -> fused kernel (one author agent).
 // ---------------------------------------------------------------------------
 phase('Author');
 const byId = new Map((topk.candidates || []).map((c) => [String(c.id), c]));
@@ -597,22 +597,50 @@ async function authorOne(c, i) {
     return { c, skip: `extraction failed (${ext ? ext.notes || ext.unittest_smoke : 'none'})` };
   }
   const lang = c.language || 'triton';
-  let kl;
-  try {
-    kl = await workflow({ scriptPath: KERNEL_WF_SCRIPT }, {
-      use_learned_kb: 'false', kernel_path: ext.task_dir, workflow_dir: KERNEL_WF_DIR,
-      mode: 'author', target_language: lang,
-      op_spec: { op_kind: 'fusion', fusion_level: c.level, kernels: c.kernels || [], m_range: c.m_range || '', cuda_graph_safe: true },
-      budget: KERNEL_BUDGET, gpu_ids: gpu, exp_root: `${EVAL_DIR}/kernels/_exp`, apply_to_original: 'false',
-      task: `Author ONE fused ${lang} kernel (fusion ${c.level}) that replaces this whole region: ${c.region}. ` +
-        `It currently launches ${c.launches_before || (c.kernels || []).length} kernels [${(c.kernels || []).join(' -> ')}]; ` +
-        `target ${c.launches_after || 1}. Design from the analysis: ${c.fused_design || '(none given)'}. ` +
-        `Correctness is the immutable oracle at the region boundary${c.bitwise_exact ? ' and must be bit-exact' : ''}. ` +
-        'The editable surface is the kernel_src copy of the seam callable and its kernels: replace the region inside ' +
-        'that host function with your fused launch(es) -- tuning one member kernel alone is not the goal. ' +
-        `Beat the live unfused region on the recorded serving shapes.` + GRAPH_REQ,
-    });
-  } catch (e) { kl = { validation_status: 'error', reason: String(e) }; }
+  // The fused kernel is written by one agent from a plain instruction (not the GEAK kernel layer): the region,
+  // the UT it must pass and the goal. It works on a copy of the task dir and hands back a diff for apply back.
+  const work = `${EVAL_DIR}/kernels/${short}`;
+  const au = await safeAgent(`You write ONE fused ${lang} kernel that replaces a whole kernel region of a live LLM serving stack.
+
+## The region
+${cfg({ id: c.id, level: c.level, region: c.region, kernels_in_order: c.kernels || [], phases: c.phases || [],
+    m_range: c.m_range || '', seam: c.seam || {}, inputs_outputs: c.inputs_outputs || '',
+    launches_before: c.launches_before || (c.kernels || []).length, launches_after: c.launches_after || 1,
+    suggested_design: c.fused_design || '', bitwise_exact_expected: !!c.bitwise_exact })}
+
+## The unit test
+TASK_DIR=${ext.task_dir} is a prepared, GPU-validated unit test of this region at its seam
+(${ext.target_callable || seamOf(c)}): kernel_src/ holds the editable copy of the seam callable and the kernels it
+launches, cases.py the recorded serving cases, unittest.py the correctness check against the frozen live baseline
+and the timing. Read its meta.json / README / run/ to see how to run it.
+
+## Do
+cp -a TASK_DIR to WORK_DIR=${work}/work and work only there (never edit TASK_DIR). Use GPU ${gpu} only. Design,
+iterate and measure as you see fit, and deliver three things:
+1. The fused kernel: a self-contained module under ${work}/kernel/ that replaces the region (fewer launches, usually
+   one), with the region's outputs unchanged${c.bitwise_exact ? ' (bit-exact)' : ''}.
+2. Its unit test: the fused version against the stock region on the recorded serving shapes (the prepared UT in
+   TASK_DIR, with kernel_src/ pointed at your kernel, or your own test calling the live stock functions), checking
+   every output of the region, and timing both sides with CUDA/HIP-graph replay (as the server runs decode).
+3. The overlay that puts it in the server: ${work}/overlay/sitecustomize.py (the dir goes first on the server's
+   PYTHONPATH). Patch the seam lazily -- after its module is first imported, never by importing it eagerly -- fall
+   back to the stock path whenever the inputs do not match what the kernel supports, and print
+   "[kf-${short}] ENGAGED" to stderr once, the first time the patched path actually runs. It must survive graph
+   capture.${GRAPH_REQ}
+
+## Return
+Write the diff of WORK_DIR against TASK_DIR (diff -ruN) plus the kernel and overlay files to
+${work}/final_patch.diff and return JSON {"final_patch": "${work}/final_patch.diff" or "" if nothing correct beat the
+baseline, "work_dir": "${work}/work", "overlay_dir": "${work}/overlay", "banner": "[kf-${short}] ENGAGED",
+"isolated_speedup": <stock region time / fused time, graph replay, weighted over the recorded cases>, "correctness":
+"pass" | "fail", "launches_after": <kernel launches of the fused region>, "ut_command": "<how you ran the test>",
+"notes": "<design and per-case measurements>"}.`
+    + (KF_TASK ? `\n\n## Operator constraints\n${KF_TASK}` : ''),
+    { phase: 'Author', label: `kf:author ${short}`, schema: AUTHOR_SCHEMA });
+  const kl = au ? { eval_dir: work, final_patch: au.correctness === 'pass' ? au.final_patch || '' : '',
+    overlay_dir: au.overlay_dir || '', banner: au.banner || '',
+    final_geomean: au.isolated_speedup || 0, validation_status: au.correctness, reason: au.notes || '' }
+    : { validation_status: 'error', reason: 'author agent returned nothing' };
   const iso = kl ? (kl.final_weighted != null ? kl.final_weighted : kl.final_geomean) : 0;
   return { c, ext, kl, lang, iso };
 }
@@ -645,12 +673,18 @@ async function integrateOne(r) {
       winner_kind: 'authored', winner_backend: r.lang, authored_language: r.lang,
       authored_kernel_eval_dir: r.kl.eval_dir || '', target_callable: r.ext.target_callable || seamOf(c),
       code_patch: r.kl.final_patch, final_patch: r.kl.final_patch, verified_isolated_speedup: r.iso,
+      overlay_dir: r.kl.overlay_dir || '', engaged_banner: r.kl.banner || '',
       pct_gpu_time: c.region_pct_device_time || 0, live_call_seam: seamOf(c),
       parity_note: c.bitwise_exact ? 'expected_exact' : 'expected_close' },
     CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV, CURRENT_THROUGHPUT: curTput,
       };
+  const ready = r.kl.overlay_dir ? ` KERNEL_RESULT.overlay_dir is a READY overlay for this fused kernel (its ` +
+    'sitecustomize.py patches the seam lazily and falls back to the stock path; the kernel module sits beside it): ' +
+    'build the CAND overlay as CURRENT_OVERLAY plus that directory\'s files instead of re-materializing the kernel ' +
+    'from the patch -- when both carry a sitecustomize.py, keep both by renaming them and writing one ' +
+    'sitecustomize.py that imports each -- and confirm KERNEL_RESULT.engaged_banner in the CAND server log.' : '';
   let integ = await safeAgent(roleAgent('e2e_integrator', 'integrate',
-    'Overlay this fused kernel back onto the live server and gate it on the e2e A/B.', inputs),
+    'Overlay this fused kernel back onto the live server and gate it on the e2e A/B.' + ready, inputs),
     { phase: 'ApplyBack', label: `kf:integrate ${c.id}`, schema: INTEGRATE_SCHEMA });
   for (let t = 1; t <= AB_FINISH_RETRIES && !(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false); t++) {
     integ = await safeAgent(roleAgent('e2e_integrator', 'integrate',

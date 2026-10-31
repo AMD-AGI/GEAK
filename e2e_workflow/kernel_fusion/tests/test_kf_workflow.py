@@ -22,8 +22,9 @@ def run(scenario):
     return json.loads(p.stdout.strip().splitlines()[-1])
 
 
-def labels(out):
-    return [c["label"] for c in out["calls"]]
+def labels(out, authors=False):
+    # author agents run in parallel with each other: compare them separately
+    return [c["label"] for c in out["calls"] if authors or not c["label"].startswith("kf:author ")]
 
 
 def rejected(r):
@@ -39,17 +40,25 @@ def test_accept_path_reuses_geak_roles_and_confirms_the_stack():
                            "kf:extract c1", "kf:extract c1s", "kf:extract c2",
                            "kf:integrate c1", "kf:director:validate"]
     for c in out["calls"]:
-        if c["label"] != "kf:analyst":   # every other agent is a stock GEAK role file that exists
+        if c["label"] != "kf:analyst" and not c["label"].startswith("kf:author "):   # stock GEAK role files
             m = re.search(r"Read (\S+/roles/(\w+)\.md)", c["prompt"])
             assert m and Path(m.group(1)).is_file(), c["label"]
     analyst = out["calls"][2]["prompt"]
     assert "Read every one of these files in full: /prompts/p.txt, /prompts/deploy.txt" in analyst and "kf_trace_digest.py" in analyst and "fallback (id" in analyst
     assert f"TRACE_DIR: {KF}/profile" in analyst
-    assert all(w["scriptPath"].endswith("kernel_workflow/kernel_lane.js") and w["mode"] == "author"
-               for w in out["workflows"]) and len(out["workflows"]) == 3
-    integ = out["calls"][6]["prompt"]
+    # the fused kernels are written by plain author agents, not the GEAK kernel layer
+    assert len(out["workflows"]) == 3 and all("kernel_lane" not in w["task"] for w in out["workflows"])
+    au = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:author c1")
+    assert f"TASK_DIR={KF}/kernels/c1_task" in au and f"WORK_DIR={KF}/kernels/c1/work" in au
+    assert "never edit TASK_DIR" in au and f"{KF}/kernels/c1/final_patch.diff" in au
+    # deliverables: fused kernel module, graph-replay unit test, lazy overlay with an ENGAGED banner
+    assert f"{KF}/kernels/c1/overlay/sitecustomize.py" in au and "[kf-c1] ENGAGED" in au and "graph replay" in au
+    by = {c["label"]: c["prompt"] for c in out["calls"]}
+    assert sorted(l for l in labels(out, authors=True) if l.startswith("kf:author ")) == ["kf:author c1", "kf:author c1s", "kf:author c2"]
+    integ = by["kf:integrate c1"]
     assert '"winner_kind":"authored"' in integ and '"code_patch":"diff c1"' in integ
-    validate = out["calls"][7]["prompt"]
+    assert "READY overlay" in integ and f'"overlay_dir":"{KF}/kernels/c1/overlay"' in integ and "[kf-c1] ENGAGED" in integ
+    validate = by["kf:director:validate"]
     assert f"FINAL_OVERLAY: {KF}/overlay/cand_accepted" in validate and "MEASUREMENT_MODE: isolated_server" in validate
     assert "REPLICAS: 2" in validate
     assert r["status"] == "accepted" and r["final_overlay"] == f"{KF}/overlay/cand_accepted"
@@ -199,7 +208,7 @@ def test_a_finished_topk_is_reused_and_uts_follow_the_fusion_contract():
     assert "cp" in out["calls"][1]["prompt"] and "/old/kf/analysis/topk.json" in out["calls"][1]["prompt"]
     ext = [c["prompt"] for c in out["calls"] if c["label"].startswith("kf:extract")]
     assert ext and all("FUSION UT CONTRACT" in p and "BASELINE leg only" in p for p in ext)
-    assert all("replace the region inside that host function" in w["task"] for w in out["workflows"])
+    assert all("replaces the region (fewer launches" in w["task"] for w in out["workflows"])
     assert out["result"]["status"] == "accepted"
 
 
