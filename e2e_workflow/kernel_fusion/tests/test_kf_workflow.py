@@ -191,3 +191,19 @@ def test_a_measured_baseline_is_reused_not_remeasured():
     setup = out["calls"][0]["prompt"]
     assert "already measured in /old/kf/baseline" in setup and "launch no server and no bench" in setup
     assert "already measured" not in run("accept")["calls"][0]["prompt"]
+
+
+def test_a_finished_topk_is_reused_and_uts_follow_the_fusion_contract():
+    out = run("reuse_topk")
+    assert "kf:analyst" not in labels(out) and labels(out)[1] == "kf:topk (given)"
+    assert "cp" in out["calls"][1]["prompt"] and "/old/kf/analysis/topk.json" in out["calls"][1]["prompt"]
+    ext = [c["prompt"] for c in out["calls"] if c["label"].startswith("kf:extract")]
+    assert ext and all("FUSION UT CONTRACT" in p and "BASELINE leg only" in p for p in ext)
+    assert all("replace the region inside that host function" in w["task"] for w in out["workflows"])
+    assert out["result"]["status"] == "accepted"
+
+
+def test_agentx_prepare_carries_the_fusion_ut_contract():
+    out = run("agentx")
+    preps = [c["prompt"] for c in out["calls"] if c["label"].startswith("kf:kernel-extract prepare")]
+    assert preps and all("FUSION UT CONTRACT" in p and "never the member kernels directly" in p for p in preps)
