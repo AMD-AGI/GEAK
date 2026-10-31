@@ -92,8 +92,6 @@ const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_m
 // stage returns whatever was accepted. Inert without time_budget_s.
 const TIME_BUDGET_MS = A.time_budget_s ? parseInt(A.time_budget_s, 10) * 1000 : null;
 let DEADLINE_HIT = false;
-const T0 = Date.now();
-const remainingS = () => (TIME_BUDGET_MS ? Math.max(0, (TIME_BUDGET_MS - (Date.now() - T0)) / 1000) : 6 * 3600);
 if (TIME_BUDGET_MS && typeof setTimeout === 'function') {
   setTimeout(() => { DEADLINE_HIT = true; log('[kf] 85% of the stage budget spent: no new author/apply work starts.'); },
     Math.floor(TIME_BUDGET_MS * 0.85));
@@ -512,8 +510,8 @@ async function prepareOne(c, i, previous) {
     : PREPARE_INTRO;
   const prep = await safeAgent(skillAgent('prepare', intro, { ...skillInputs(), GPU_ID: GPU_LIST[i % GPU_LIST.length],
     EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_kf_${t}`, TRACE_DIR, FUSION_SCOPE: scope,
-    SOURCE_DELIVERY_REQUIRED: true, // one agent call is capped at AGENT_TIMEOUT_MS
-    REMAINING_MIN: Math.floor(Math.min(AGENT_TIMEOUT_MS > 0 ? AGENT_TIMEOUT_MS / 60000 - 10 : 240, Math.max(60, remainingS() / 120))) }),
+    // one agent call is capped at AGENT_TIMEOUT_MS (workflow scripts have no clock)
+    SOURCE_DELIVERY_REQUIRED: true, REMAINING_MIN: AGENT_TIMEOUT_MS > 0 ? Math.floor(AGENT_TIMEOUT_MS / 60000) - 10 : 240 }),
     { phase: 'Author', label: `kf:kernel-extract prepare ${t}${previous ? ' (retry)' : ''}`, schema: AGENTX_PREPARATION_SCHEMA });
   const p = (prep && prep.prepared) || {};
   const all = [...(p.head_candidates || []), ...(p.kernel_candidates || [])];
