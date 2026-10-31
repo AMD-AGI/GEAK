@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Trace', detail: 'AgentX: kernel-extract skill sampling capture (points from the baseline log, one probe each); else roles/profiler.md; or kf_trace_dir' },
     { title: 'TopK', detail: 'fusion analyst: kf_trace_digest.py + the user prompt -> ranked Top-K fusion candidates (topk.json)' },
     { title: 'Author', detail: 'per recommended candidate + its fallback: region UT (AgentX: kernel-extract skill prepare; else roles/kernel_extractor.md), then one author agent writes the fused kernel against that UT' },
-    { title: 'ApplyBack', detail: 'all UT-passing fused kernels at once (per slot the primary, else its fallback): one combined overlay, one e2e_integrator A/B with validation-length legs' },
+    { title: 'ApplyBack', detail: 'all UT-passing fused kernels (per slot the primary, else its fallback): e2e correctness screen of each alone, then the passing ones as one combined overlay on one e2e_integrator A/B with validation-length legs' },
   ],
 };
 
@@ -68,6 +68,9 @@ const PROMPT = String(A.kf_prompt || `${KF_HOME}/default_prompt.md`);
 const PROMPTS = PROMPT.split(',').map((p) => p.trim()).filter(Boolean);   // several files drive one analysis
 const TRACE_DIR_IN = String(A.kf_trace_dir || '');          // existing traces: skip the capture
 const WORKLOAD_SUMMARY = String(A.kf_workload_summary || ''); // per-point weights, when the caller has them
+// Finished UT-prepare / author results of an earlier run of this stage, by agent label (kf_stage reads them
+// from that run's workflow journal): those agents are not re-run.
+const REUSED = (A.kf_reuse && typeof A.kf_reuse === 'object') ? A.kf_reuse : {};
 const TOPK_IN = String(A.kf_topk_json || '');                 // a finished analysis: reused, not re-run
 const BASELINE_DIR_IN = String(A.kf_baseline_dir || '');     // a measured baseline of this same stack: reused, not re-measured
 const SOURCE_DIRS = String(A.kf_source_dirs || '');           // framework source, when not importable here
@@ -204,6 +207,7 @@ function bounded(prompt, opts) {
 }
 
 async function safeAgent(prompt, opts, tries = 3) {
+  if (REUSED[opts.label]) { log(`[kf] ${opts.label}: reused`); return REUSED[opts.label]; }
   for (let i = 0; i < tries; i++) {
     try {
       const r = await bounded(prompt, opts);
@@ -236,6 +240,9 @@ const EXTRACT_SCHEMA = obj({ short_name: { type: 'string' }, editable: { type: '
   target_callable: { type: 'string' }, unittest_smoke: { type: 'string' }, candidate_bind: { type: 'object', additionalProperties: true },
   baseline_frozen: { type: 'boolean' },
   notes: { type: 'string' } }, ['editable', 'task_dir', 'unittest_smoke']);
+const SCREEN_SCHEMA = obj({ members: { type: 'array', items: obj({ short_name: { type: 'string' },
+  correctness: { type: 'string' }, engaged: { type: 'boolean' }, reason: { type: 'string' } }, ['short_name', 'correctness']) },
+  notes: { type: 'string' } }, ['members']);
 const AUTHOR_SCHEMA = obj({ final_patch: { type: 'string' }, work_dir: { type: 'string' },
   overlay_dir: { type: 'string' }, banner: { type: 'string' },
   isolated_speedup: { type: 'number' }, correctness: { type: 'string' }, launches_after: { type: 'number' },
@@ -670,18 +677,43 @@ for (const s of slots) {
     result.rejected.push({ id: s.fallback.id, stage: 'apply', reason: `not needed: primary ${s.primary.id} is in the stack`, isolated_speedup: fb.iso });
   }
 }
-if (!want('apply') || !winners.length || DEADLINE_HIT) {
-  for (const r of winners) result.rejected.push({ id: r.c.id, stage: 'apply', isolated_speedup: r.iso,
-    reason: !want('apply') ? 'apply step disabled' : 'stage deadline' });
-  result.status = 'no_gain';
-  return result;
-}
 const kernelResult = (r) => ({ short_name: r.ext.short_name || r.c.id, task_dir: r.ext.task_dir, op_kind: 'fusion',
   winner_kind: 'authored', winner_backend: r.lang, authored_language: r.lang, authored_kernel_eval_dir: r.kl.eval_dir || '',
   target_callable: r.ext.target_callable || seamOf(r.c), live_call_seam: seamOf(r.c),
   code_patch: r.kl.final_patch, final_patch: r.kl.final_patch, verified_isolated_speedup: r.iso,
   overlay_dir: r.kl.overlay_dir || '', engaged_banner: r.kl.banner || '', pct_gpu_time: r.c.region_pct_device_time || 0,
   parity_note: r.c.bitwise_exact ? 'expected_exact' : 'expected_close' });
+// Each fused kernel alone on the live server first, correctness only (cheap: no throughput legs), so one
+// broken kernel cannot sink the set and the A/B measures only kernels that serve correct output.
+if (want('apply') && winners.length > 1 && !DEADLINE_HIT) {
+  const sc = await safeAgent(roleAgent('e2e_integrator', 'integrate',
+    `CORRECTNESS SCREEN ONLY -- no throughput legs. For EACH entry of KERNEL_RESULTS on its own, build a CAND overlay ` +
+    `${EVAL_DIR}/overlay/screen_<short_name> = CURRENT_OVERLAY plus that entry's ready overlay_dir (its sitecustomize.py ` +
+    'patches one seam lazily), and run your output-correctness check of that CAND against the reference with the same ' +
+    'probes and the same correctness env (one reference measurement shared by all entries); confirm the entry\'s ' +
+    'engaged_banner in the CAND server log. Return {members: [{short_name, correctness: "pass"|"fail", engaged, reason}]}.',
+    { EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, SKILL_DIR: WORKFLOW_DIR, MEASUREMENT_PURPOSE: 'parity',
+      KERNEL_RESULTS: winners.map(kernelResult), CURRENT_OVERLAY: INIT_OVERLAY, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV }),
+    { phase: 'ApplyBack', label: 'kf:integrate screen', schema: SCREEN_SCHEMA });
+  const verdict = new Map(((sc && sc.members) || []).map((m) => [String(m.short_name), m]));
+  if (sc) {
+    for (const r of [...winners]) {
+      const m = verdict.get(String(r.ext.short_name || r.c.id)) || verdict.get(String(r.c.id));
+      if (!m || m.correctness !== 'pass') {
+        winners.splice(winners.indexOf(r), 1);
+        result.rejected.push({ id: r.c.id, stage: 'screen', isolated_speedup: r.iso,
+          reason: m ? `e2e correctness ${m.correctness}: ${m.reason || ''}`.slice(0, 600) : 'no screen verdict' });
+      }
+    }
+    log(`[kf] correctness screen: ${winners.map((r) => r.c.id).join(', ') || 'none'} pass`);
+  }
+}
+if (!want('apply') || !winners.length || DEADLINE_HIT) {
+  for (const r of winners) result.rejected.push({ id: r.c.id, stage: 'apply', isolated_speedup: r.iso,
+    reason: !want('apply') ? 'apply step disabled' : 'stage deadline' });
+  result.status = 'no_gain';
+  return result;
+}
 const stackName = 'kf_stack';
 const inputs = {
   EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: noiseBand,

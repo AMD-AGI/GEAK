@@ -19,7 +19,7 @@ const CANDS = [
     exclusive_with: ['c1'], seam: { target_callable: 'pkg.moe:compact' }, est_gain_pct_expected: 1.6 },
   { id: 'c3', rank: 5, level: 'L3', region: 'moe stage', kernels: ['a', 'b'], difficulty: 2, seam: {}, est_gain_pct_expected: 9 },
 ];
-const ISO = { c1: scenario === 'fallback' ? 0.97 : 1.4, c2: scenario === 'accept' ? 1.2 : 0.95, c1s: 1.6 };
+const ISO = { c1: scenario === 'fallback' ? 0.97 : 1.4, c2: (scenario === 'accept' || scenario === 'screen_fail' || scenario === 'reuse') ? 1.2 : 0.95, c1s: 1.6 };
 const won = (gate, d) => ({ gate, ab_complete: true, e2e_throughput_tok_s: 100 + d, ref_med: 100, cand_med: 100 + d,
   e2e_delta_pct: d, accepted_overlay: `${KF}/overlay/cand_${gate}` });
 
@@ -50,6 +50,9 @@ const answers = {
     : { profile_topN_json: `${KF}/profile/round_0/profile_topN.json`, top_kernels: [{ name: 'k' }] }),
   'kf:analyst': () => ({ topk_json: `${KF}/analysis/topk.json`, report_path: `${KF}/analysis/report.md`,
     candidates: CANDS, recommended: ['c1', 'c2'], report_md: '# report', model_notes_md: '# notes' }),
+  // each winner alone: correctness only
+  'kf:integrate screen': () => ({ members: [{ short_name: 'c1', correctness: 'pass' },
+    { short_name: 'c2', correctness: scenario === 'screen_fail' ? 'fail' : 'pass', reason: 'garbage output' }] }),
   // ONE combined A/B of every winner
   'kf:integrate kf_stack': () => ({
     reject: { gate: 'rejected', e2e_throughput_tok_s: 99, ref_med: 100, cand_med: 99, e2e_delta_pct: -1, ab_complete: true, reason: 'slower' },
@@ -90,6 +93,8 @@ const args = { workflow_dir: WF_DIR, kf_dir: KF, model_path: '/models/M', gpu_id
   initial_extra_env: 'SGLANG_USE_AITER=1 SGLANG_SIMULATE_ACC_LEN=4.05 SGLANG_SIMULATE_ACC_METHOD=match-expected HF_HUB_OFFLINE=1',
   correctness_unset_env: 'SGLANG_SIMULATE_ACC_LEN,SGLANG_SIMULATE_ACC_METHOD' };
 if (scenario === 'analysis_only') Object.assign(args, { kf_steps: 'topk', kf_trace_dir: '/traces/x' });
+if (scenario === 'reuse') args.kf_reuse = { 'kf:author c1': { final_patch: 'old c1', isolated_speedup: 1.3, correctness: 'pass',
+  overlay_dir: '/old/c1/overlay', banner: '[kf-c1] ENGAGED' } };
 if (scenario === 'reuse_topk') Object.assign(args, { kf_baseline_dir: '/old/kf/baseline', kf_trace_dir: '/traces/x',
   kf_topk_json: '/old/kf/analysis/topk.json', kf_topk: { candidates: CANDS, recommended: ['c1', 'c2'] } });
 if (scenario === 'reuse_baseline') Object.assign(args, { kf_baseline_dir: '/old/kf/baseline', kf_trace_dir: '/traces/x' });

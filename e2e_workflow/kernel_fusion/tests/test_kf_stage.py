@@ -183,3 +183,29 @@ def test_a_given_topk_is_passed_in_whole(tmp_path):
     t.write_text(json.dumps({"candidates": [], "recommended": ["a"]}))
     a = kf_stage.build_args({"topk_json": str(t)}, {"eval_dir": str(tmp_path / "e2e_x")}, 100)
     assert any("no candidates" in p for p in kf_stage.validate(a))
+
+
+def test_reuse_journal_hands_over_finished_prepare_and_author_results(tmp_path):
+    j = tmp_path / "journal.jsonl"
+    rows = [{"type": "started", "key": "k1", "label": "kf:author c1"},
+            {"type": "result", "key": "k1", "result": {"final_patch": "p", "isolated_speedup": 1.2}},
+            {"type": "started", "key": "k2", "label": "kf:kernel-extract prepare c1"},
+            {"type": "result", "key": "k2", "result": {"delivery_path": "d", "prepared": {}}},
+            {"type": "started", "key": "k3", "label": "kf:integrate kf_stack"},
+            {"type": "result", "key": "k3", "result": {"gate": "rejected"}},
+            {"type": "started", "key": "k4", "label": "kf:author c2"}]          # never finished
+    j.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+    a = kf_stage.build_args({"reuse_journal": str(j)}, {"eval_dir": str(tmp_path / "e2e_x")}, 100)
+    assert sorted(a["kf_reuse"]) == ["kf:author c1", "kf:kernel-extract prepare c1"]
+
+
+def test_reused_paths_follow_an_archived_eval_dir(tmp_path):
+    arch = tmp_path / "attempt1"
+    (arch / "exp" / "kf_x").mkdir(parents=True)
+    rows = [{"type": "started", "key": "s", "label": "kf:director:setup"},
+            {"type": "result", "key": "s", "result": {"eval_dir": "/gone/exp/kf_x"}},
+            {"type": "started", "key": "a", "label": "kf:author c1"},
+            {"type": "result", "key": "a", "result": {"overlay_dir": "/gone/exp/kf_x/kernels/c1/overlay"}}]
+    (arch / "journal.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+    r = kf_stage.reused_results(str(arch / "journal.jsonl"))
+    assert r["kf:author c1"]["overlay_dir"] == f"{arch}/exp/kf_x/kernels/c1/overlay"
