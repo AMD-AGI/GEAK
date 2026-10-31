@@ -148,6 +148,11 @@ the foreground, in calls of at most ~9 minutes each (a loop of short sleeps + a 
 job is done. Profiler traces with Python stacks of a large TP model take many minutes to flush: keep polling
 until every rank's file is complete, and only then tear the server down.
 
+## THE GEAK REPO IS READ-ONLY
+Never edit, add or delete anything under WORKFLOW_DIR's repository (scripts, skills, roles, tools). When a
+GEAK tool does not handle this model (an unparsed log format, a missing case), work around it with your own
+script under EVAL_DIR and say so in notes.
+
 `;
 
 function roleAgent(role, phase, intro, inputs) {
