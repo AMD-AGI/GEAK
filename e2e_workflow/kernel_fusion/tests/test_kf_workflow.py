@@ -38,7 +38,8 @@ def test_all_winners_go_in_together_on_one_ab():
     # c3 is never touched (not recommended, no seam). Every kernel is written before anything is applied,
     # then ONE integrator A/B of the whole set -- no per-kernel A/B, no separate director validate.
     assert labels(out) == ["kf:director:setup", "kf:profiler", "kf:analyst",
-                           "kf:extract c1", "kf:extract c1s", "kf:extract c2", "kf:integrate kf_stack"]
+                           "kf:extract c1", "kf:extract c1s", "kf:extract c2",
+                           "kf:integrate screen", "kf:integrate kf_stack"]
     for c in out["calls"]:
         if c["label"] != "kf:analyst" and not c["label"].startswith("kf:author "):   # stock GEAK role files
             m = re.search(r"Read (\S+/roles/(\w+)\.md)", c["prompt"])
@@ -215,3 +216,22 @@ def test_agentx_prepare_carries_the_fusion_ut_contract():
     out = run("agentx")
     preps = [c["prompt"] for c in out["calls"] if c["label"].startswith("kf:kernel-extract prepare")]
     assert preps and all("FUSION UT CONTRACT" in p and "never the member kernels directly" in p for p in preps)
+
+
+def test_each_kernel_is_screened_alone_and_a_broken_one_stays_out_of_the_stack():
+    out = run("screen_fail")
+    by = {c["label"]: c["prompt"] for c in out["calls"]}
+    sc = by["kf:integrate screen"]
+    assert "CORRECTNESS SCREEN ONLY" in sc and "no throughput legs" in sc and f"{KF}/overlay/screen_" in sc
+    assert "CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE" in sc
+    integ = by["kf:integrate kf_stack"]
+    assert "Apply ALL 1 fused kernels" in integ and f'"overlay_dir":"{KF}/kernels/c2/overlay"' not in integ
+    r = out["result"]
+    assert [a["id"] for a in r["accepted"]] == ["c1"] and ("c2", "screen") in rejected(r)
+
+
+def test_finished_author_results_of_an_earlier_run_are_reused():
+    out = run("reuse")
+    assert "kf:author c1" not in labels(out, authors=True) and "kf:author c2" in labels(out, authors=True)
+    integ = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:integrate kf_stack")
+    assert '"overlay_dir":"/old/c1/overlay"' in integ and '"code_patch":"old c1"' in integ

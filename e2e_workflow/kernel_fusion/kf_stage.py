@@ -33,6 +33,7 @@ _KNOBS = {
     "workload_summary": ("GEAK_KF_WORKLOAD_SUMMARY", "kf_workload_summary"),
     "baseline_dir": ("GEAK_KF_BASELINE_DIR", "kf_baseline_dir"),
     "topk_json": ("GEAK_KF_TOPK_JSON", "kf_topk_json"),
+    "reuse_journal": ("GEAK_KF_REUSE_JOURNAL", None),
     "source_dirs": ("GEAK_KF_SOURCE_DIRS", "kf_source_dirs"),
     "steps": ("GEAK_KF_STEPS", "kf_steps"),
     "author_k": ("GEAK_KF_AUTHOR_K", "kf_author_k"),
@@ -96,9 +97,42 @@ def build_args(cfg: dict, ps_args: dict, budget_s: int) -> dict:
         # asked to echo a large topk.json back may drop its candidates
         d = _read_json(Path(a["kf_topk_json"])) or {}
         a["kf_topk"] = {"candidates": d.get("candidates") or [], "recommended": d.get("recommended") or []}
+    if cfg.get("reuse_journal"):
+        a["kf_reuse"] = reused_results(cfg["reuse_journal"])
     a["kf_dir"] = str(kf_dir_for(cfg, ps_args))
     a["time_budget_s"] = int(budget_s)
     return a
+
+
+REUSABLE = ("kf:kernel-extract prepare ", "kf:author ")
+
+
+def reused_results(journal: str) -> dict:
+    """Finished UT-prepare / author agent results of an earlier run of this stage, by label, read from that run's
+    Workflow journal.jsonl ("started" rows carry the label, "result" rows the agent's return)."""
+    labels, out, old_dir = {}, {}, ""
+    try:
+        lines = Path(journal).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("type") == "started":
+            labels[row.get("key")] = row.get("label") or ""
+        elif row.get("type") == "result" and isinstance(row.get("result"), dict):
+            label = labels.get(row.get("key"), "")
+            if label == "kf:director:setup":
+                old_dir = str(row["result"].get("eval_dir") or "")
+            if label.startswith(REUSABLE):
+                out[label] = row["result"]
+    # that run's eval dir may have been archived beside its journal (<journal dir>/exp/<name>): repoint paths
+    moved = Path(journal).parent / "exp" / Path(old_dir).name if old_dir else None
+    if out and old_dir and not Path(old_dir).exists() and moved and moved.exists():
+        out = json.loads(json.dumps(out).replace(old_dir, str(moved)))
+    return out
 
 
 def validate(args: dict) -> list[str]:
