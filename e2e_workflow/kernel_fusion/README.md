@@ -37,6 +37,7 @@ GEAK_KERNEL_FUSION=0|1                                     # env
 | `prompt` | `GEAK_KF_PROMPT` | `default_prompt.md` | the TopK analysis prompt(s), comma-separated, all read (e.g. `agentx/prompt.txt,agentx/muse_agentx_con16.txt`) |
 | `trace_dir` | `GEAK_KF_TRACE_DIR` | — | existing traces (any depth; one dir per sampling point); skips the capture |
 | `workload_summary` | `GEAK_KF_WORKLOAD_SUMMARY` | — | per-point weights for the analysis |
+| `baseline_dir` | `GEAK_KF_BASELINE_DIR` | — | a measured baseline dir of this same stack (`bench_summary.json`, `server.log`); copied, not re-measured |
 | `source_dirs` | `GEAK_KF_SOURCE_DIRS` | installed packages | framework/op-library source for the analyst when it is not importable where the stage runs |
 | `steps` | `GEAK_KF_STEPS` | `trace,topk,author,apply` | subset to run; `topk` alone with `trace_dir` needs no GPU |
 | `author_k` | `GEAK_KF_AUTHOR_K` | 3 | recommended candidates to implement |
