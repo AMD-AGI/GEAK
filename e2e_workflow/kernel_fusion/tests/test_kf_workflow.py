@@ -63,6 +63,9 @@ def test_all_winners_go_in_together_on_one_ab():
         assert f'"overlay_dir":"{KF}/kernels/{k}/overlay"' in integ and f"[kf-{k}] ENGAGED" in integ
     assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' not in integ        # the fallback is not needed
     assert "MEASUREMENT_PURPOSE: validation" in integ and "MEASUREMENT_MODE: isolated_server" in integ and "REPLICAS: 2" in integ
+    # fused kernels are held to task accuracy (the integrator's ACCURACY_GATE), not byte-exact greedy parity
+    for p in (integ, by["kf:integrate screen"]):
+        assert "ACCURACY_GATE: gsm8k" in p and "GSM8K_EVAL_SCRIPT: " in p and "ACCURACY_TOL: 0.01" in p
     # synthetic acceptance stays on for throughput, off for every correctness check
     assert "CORRECTNESS PROBES RUN WITHOUT SIMULATED ACCEPTANCE" in integ
     assert "CORRECTNESS_UNSET_ENV: SGLANG_SIMULATE_ACC_LEN SGLANG_SIMULATE_ACC_METHOD" in integ
@@ -235,3 +238,9 @@ def test_finished_author_results_of_an_earlier_run_are_reused():
     assert "kf:author c1" not in labels(out, authors=True) and "kf:author c2" in labels(out, authors=True)
     integ = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:integrate kf_stack")
     assert '"overlay_dir":"/old/c1/overlay"' in integ and '"code_patch":"old c1"' in integ
+
+
+def test_a_correctness_reject_is_final_not_retried():
+    out = run("parity_reject")
+    assert "kf:integrate kf_stack (finish 1)" not in labels(out)
+    assert out["result"]["status"] == "no_gain"

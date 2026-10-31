@@ -56,6 +56,7 @@ const answers = {
   // ONE combined A/B of every winner
   'kf:integrate kf_stack': () => ({
     reject: { gate: 'rejected', e2e_throughput_tok_s: 99, ref_med: 100, cand_med: 99, e2e_delta_pct: -1, ab_complete: true, reason: 'slower' },
+    parity_reject: { gate: 'rejected', e2e_throughput_tok_s: 100, ref_med: 100, ab_complete: false, output_parity: 'fail', reason: 'parity' },
     stack: { ...won('stack', -0.1), accepted_overlay: `${KF}/overlay/cand_kf_stack` },
     retry: { gate: 'incomplete', ab_complete: false, e2e_throughput_tok_s: 0, ref_med: 100 },
   }[scenario] || { ...won('accepted', 2.5), accepted_overlay: `${KF}/overlay/cand_kf_stack` }),

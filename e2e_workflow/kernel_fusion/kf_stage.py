@@ -98,7 +98,11 @@ def build_args(cfg: dict, ps_args: dict, budget_s: int) -> dict:
         d = _read_json(Path(a["kf_topk_json"])) or {}
         a["kf_topk"] = slim_topk(d, int(a.get("kf_author_k") or 3))
     if cfg.get("reuse_journal"):
-        a["kf_reuse"] = {k: slim_result(v) for k, v in reused_results(cfg["reuse_journal"]).items()}
+        reuse: dict = {}
+        for j in str(cfg["reuse_journal"]).split(","):          # several runs: a later journal wins per label
+            if j.strip():
+                reuse.update(reused_results(j.strip()))
+        a["kf_reuse"] = {k: slim_result(v) for k, v in reuse.items()}
     a["kf_dir"] = str(kf_dir_for(cfg, ps_args))
     a["time_budget_s"] = int(budget_s)
     return a
@@ -127,6 +131,9 @@ def slim_topk(d: dict, author_k: int) -> dict:
 
 def slim_result(r: dict) -> dict:
     """A reused prepare / author result with only the fields the stage reads."""
+    if "members" in r:                                           # the correctness screen
+        return {"members": [{k: m.get(k) for k in ("short_name", "correctness", "engaged")} | {"reason": str(m.get("reason") or "")[:200]}
+                            for m in r.get("members") or [] if isinstance(m, dict)]}
     if "prepared" in r:
         p = r.get("prepared") or {}
         cands = [{"short_name": k.get("short_name"),
@@ -142,7 +149,7 @@ def slim_result(r: dict) -> dict:
     return out
 
 
-REUSABLE = ("kf:kernel-extract prepare ", "kf:author ")
+REUSABLE = ("kf:kernel-extract prepare ", "kf:author ", "kf:integrate screen")
 
 
 def reused_results(journal: str) -> dict:

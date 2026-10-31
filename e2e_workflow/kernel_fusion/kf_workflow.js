@@ -76,6 +76,14 @@ const BASELINE_DIR_IN = String(A.kf_baseline_dir || '');     // a measured basel
 const SOURCE_DIRS = String(A.kf_source_dirs || '');           // framework source, when not importable here
 const STEPS = new Set(String(A.kf_steps || 'trace,topk,author,apply').split(',').map((s) => s.trim()).filter(Boolean));
 const want = (s) => STEPS.has(s);
+// A fused kernel reorders floating-point work (a fused reduction, fp32 kept in registers), so like a quant kernel
+// it is held to TASK ACCURACY, not byte-exact greedy parity: the GEAK integrator's existing ACCURACY_GATE switch.
+const KF_ACCURACY_GATE = String(A.accuracy_gate || 'gsm8k').trim();
+const KF_ACCURACY_INPUTS = KF_ACCURACY_GATE !== 'none'
+  ? { ACCURACY_GATE: KF_ACCURACY_GATE, ACCURACY_LIMIT: parseInt(A.accuracy_limit != null ? A.accuracy_limit : 200, 10),
+      ACCURACY_TOL: parseFloat(A.accuracy_tol != null ? A.accuracy_tol : 0.01),
+      GSM8K_EVAL_SCRIPT: `${WORKFLOW_DIR}/scripts/gsm8k_eval.py` }
+  : {};
 const VALIDATION_MODE = String(A.kf_validation_mode || 'isolated_server');   // fresh servers: boot-to-boot noise
 const VALIDATION_REPLICAS = parseInt(A.kf_validation_replicas != null ? A.kf_validation_replicas : 2, 10);
 // AgentX trace replays use the kernel-extract skill for both trace capture and UT preparation, as
@@ -690,9 +698,11 @@ if (want('apply') && winners.length > 1 && !DEADLINE_HIT) {
     `CORRECTNESS SCREEN ONLY -- no throughput legs. For EACH entry of KERNEL_RESULTS on its own, build a CAND overlay ` +
     `${EVAL_DIR}/overlay/screen_<short_name> = CURRENT_OVERLAY plus that entry's ready overlay_dir (its sitecustomize.py ` +
     'patches one seam lazily), and run your output-correctness check of that CAND against the reference with the same ' +
-    'probes and the same correctness env (one reference measurement shared by all entries); confirm the entry\'s ' +
-    'engaged_banner in the CAND server log. Return {members: [{short_name, correctness: "pass"|"fail", engaged, reason}]}.',
+    'probes, the same correctness gate (the ACCURACY GATE of your role when ACCURACY_GATE is in your inputs) and the ' +
+    'same correctness env (one reference measurement shared by all entries); confirm the entry\'s engaged_banner in ' +
+    'the CAND server log. Return {members: [{short_name, correctness: "pass"|"fail", engaged, reason}]}.',
     { EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, SKILL_DIR: WORKFLOW_DIR, MEASUREMENT_PURPOSE: 'parity',
+      ...KF_ACCURACY_INPUTS,
       KERNEL_RESULTS: winners.map(kernelResult), CURRENT_OVERLAY: INIT_OVERLAY, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV }),
     { phase: 'ApplyBack', label: 'kf:integrate screen', schema: SCREEN_SCHEMA });
   const verdict = new Map(((sc && sc.members) || []).map((m) => [String(m.short_name), m]));
@@ -718,6 +728,7 @@ const stackName = 'kf_stack';
 const inputs = {
   EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: noiseBand,
   MEASUREMENT_MODE: VALIDATION_MODE, MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_REPLICAS, SKILL_DIR: WORKFLOW_DIR,
+  ...KF_ACCURACY_INPUTS,
   KERNEL_RESULT: { short_name: stackName, op_kind: 'fusion', winner_kind: 'authored',
     verified_isolated_speedup: Math.max(...winners.map((r) => r.iso)), parity_note: 'expected_close' },
   KERNEL_RESULTS: winners.map(kernelResult),
@@ -733,7 +744,8 @@ const intro = `Apply ALL ${winners.length} fused kernels in KERNEL_RESULTS at on
   'Return the gate for the whole set; accepted_overlay = the CAND overlay when it is accepted or stack.';
 let integ = await safeAgent(roleAgent('e2e_integrator', 'integrate', intro, inputs),
   { phase: 'ApplyBack', label: `kf:integrate ${stackName}`, schema: INTEGRATE_SCHEMA });
-for (let t = 1; t <= AB_FINISH_RETRIES && !(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false); t++) {
+// finish only an A/B that is genuinely unfinished; a correctness reject is final (it skips the timed legs on purpose)
+for (let t = 1; t <= AB_FINISH_RETRIES && (!integ || integ.gate === 'incomplete'); t++) {
   integ = await safeAgent(roleAgent('e2e_integrator', 'integrate',
     'FINISH this e2e A/B of the combined fused stack: reuse a reference leg already on disk if usable, run the ' +
     'missing leg, then return the gate. ' + intro, { ...inputs, RESUME_AB: true }),

@@ -227,3 +227,18 @@ def test_args_carry_only_what_the_stage_reads(tmp_path):
     assert slim["prepared"]["kernel_candidates"][0]["prepared_ut"]["result"]["task_dir"] == "/t" and len(json.dumps(slim)) < 600
     au = kf_stage.slim_result({"final_patch": "p", "overlay_dir": "o", "isolated_speedup": 1.2, "correctness": "pass", "notes": "n" * 900})
     assert au["overlay_dir"] == "o" and len(au["notes"]) == 300
+
+
+def test_several_reuse_journals_merge_and_the_screen_is_reused(tmp_path):
+    def journal(name, rows):
+        p = tmp_path / name
+        p.write_text("\n".join(json.dumps(r) for r in rows))
+        return str(p)
+    j1 = journal("a.jsonl", [{"type": "started", "key": "a", "label": "kf:author c1"},
+                             {"type": "result", "key": "a", "result": {"overlay_dir": "o1", "isolated_speedup": 1.1}}])
+    j2 = journal("b.jsonl", [{"type": "started", "key": "s", "label": "kf:integrate screen"},
+                             {"type": "result", "key": "s", "result": {"members": [{"short_name": "c1", "correctness": "pass", "reason": "r" * 900}]}}])
+    a = kf_stage.build_args({"reuse_journal": f"{j1},{j2}"}, {"eval_dir": str(tmp_path / "e2e_x")}, 100)
+    assert a["kf_reuse"]["kf:author c1"]["overlay_dir"] == "o1"
+    assert a["kf_reuse"]["kf:integrate screen"]["members"][0]["correctness"] == "pass"
+    assert len(a["kf_reuse"]["kf:integrate screen"]["members"][0]["reason"]) == 200
