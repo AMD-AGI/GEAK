@@ -91,6 +91,11 @@ def build_args(cfg: dict, ps_args: dict, budget_s: int) -> dict:
             # kf_prompt may name several files (comma-separated): all of them drive the analysis.
             a[path_key] = ",".join(str(Path(p.strip()).expanduser().resolve())
                                    for p in str(a[path_key]).split(",") if p.strip())
+    if a.get("kf_topk_json"):
+        # a finished analysis is passed in whole: the workflow script cannot read files, and an agent
+        # asked to echo a large topk.json back may drop its candidates
+        d = _read_json(Path(a["kf_topk_json"])) or {}
+        a["kf_topk"] = {"candidates": d.get("candidates") or [], "recommended": d.get("recommended") or []}
     a["kf_dir"] = str(kf_dir_for(cfg, ps_args))
     a["time_budget_s"] = int(budget_s)
     return a
@@ -103,6 +108,8 @@ def validate(args: dict) -> list[str]:
         for p in str(args.get(k) or "").split(","):
             if p and not Path(p).exists():
                 probs.append(f"{k} does not exist: {p}")
+    if args.get("kf_topk_json") and Path(args["kf_topk_json"]).exists() and not (args.get("kf_topk") or {}).get("candidates"):
+        probs.append(f"kf_topk_json has no candidates: {args['kf_topk_json']}")
     return probs
 
 

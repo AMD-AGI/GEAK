@@ -173,3 +173,13 @@ def test_run_e2e_dry_run_reports_the_switch(tmp_path):
     assert on["enabled"] and on["script"].endswith("kernel_fusion/kf_workflow.js")
     assert on["args"]["tp"] == 2 and on["args"]["kf_dir"].startswith(str(tmp_path / "kf_M_"))
     assert _dry_run(tmp_path, {"kernel_fusion": True}, env={"GEAK_KERNEL_FUSION": "0"})["kernel_fusion"] == {"enabled": False}
+
+
+def test_a_given_topk_is_passed_in_whole(tmp_path):
+    t = tmp_path / "topk.json"
+    t.write_text(json.dumps({"candidates": [{"id": "a"}], "recommended": ["a"]}))
+    a = kf_stage.build_args({"topk_json": str(t)}, {"eval_dir": str(tmp_path / "e2e_x")}, 100)
+    assert a["kf_topk"] == {"candidates": [{"id": "a"}], "recommended": ["a"]} and not kf_stage.validate(a)
+    t.write_text(json.dumps({"candidates": [], "recommended": ["a"]}))
+    a = kf_stage.build_args({"topk_json": str(t)}, {"eval_dir": str(tmp_path / "e2e_x")}, 100)
+    assert any("no candidates" in p for p in kf_stage.validate(a))

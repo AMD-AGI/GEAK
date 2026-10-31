@@ -393,12 +393,8 @@ if (want('topk')) {
       accepted: [], final_overlay: INIT_OVERLAY };
   }
   const OUT = `${EVAL_DIR}/analysis`;
-  topk = TOPK_IN ? await safeAgent(`You load a finished KernelFusion analysis; you do not analyse anything.
-Copy ${TOPK_IN} to ${OUT}/topk.json (mkdir -p ${OUT}; cp). Read it, and the REPORT.md / MODEL_NOTES.md next to it
-when they exist. Return JSON: {"topk_json": "${OUT}/topk.json", "candidates": <its candidates, verbatim>,
-"recommended": <its recommended ids, verbatim and in order>, "report_md": <REPORT.md content or "">,
-"model_notes_md": <MODEL_NOTES.md content or "">, "notes": "reused ${TOPK_IN}"}.`,
-    { phase: 'TopK', label: 'kf:topk (given)', schema: TOPK_SCHEMA })
+  topk = TOPK_IN ? { topk_json: TOPK_IN, candidates: (A.kf_topk || {}).candidates || [],
+    recommended: (A.kf_topk || {}).recommended || [], report_md: '', notes: `reused ${TOPK_IN}` }
   : await safeAgent(`You are the GEAK KernelFusion analyst. You choose which kernel-fusion patterns to implement.
 
 ## Your method is the user's prompt
