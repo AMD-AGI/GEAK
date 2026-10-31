@@ -209,3 +209,21 @@ def test_reused_paths_follow_an_archived_eval_dir(tmp_path):
     (arch / "journal.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
     r = kf_stage.reused_results(str(arch / "journal.jsonl"))
     assert r["kf:author c1"]["overlay_dir"] == f"{arch}/exp/kf_x/kernels/c1/overlay"
+
+
+def test_args_carry_only_what_the_stage_reads(tmp_path):
+    t = tmp_path / "topk.json"
+    cands = [{"id": f"c{i}", "evidence": "x" * 5000, "seam": {"target_callable": "m:f"}} for i in range(15)]
+    cands[0]["fallback"] = "c9"
+    t.write_text(json.dumps({"candidates": cands, "recommended": ["c0", "c1", "c2", "c3"]}))
+    a = kf_stage.build_args({"topk_json": str(t), "author_k": 2}, {"eval_dir": str(tmp_path / "e2e_x")}, 100)
+    assert a["kf_topk"]["recommended"] == ["c0", "c1"]
+    assert sorted(c["id"] for c in a["kf_topk"]["candidates"]) == ["c0", "c1", "c9"]
+    assert all("evidence" not in c for c in a["kf_topk"]["candidates"])
+    prep = {"delivery_path": "d", "prepared": {"kernel_candidates": [{"short_name": "c0", "extra": "y" * 9000,
+            "prepared_ut": {"phase": "extract", "result": {"task_dir": "/t", "baseline_frozen": True, "unittest_smoke": "pass",
+                                                           "editable": True, "log": "z" * 9000}}}]}}
+    slim = kf_stage.slim_result(prep)
+    assert slim["prepared"]["kernel_candidates"][0]["prepared_ut"]["result"]["task_dir"] == "/t" and len(json.dumps(slim)) < 600
+    au = kf_stage.slim_result({"final_patch": "p", "overlay_dir": "o", "isolated_speedup": 1.2, "correctness": "pass", "notes": "n" * 900})
+    assert au["overlay_dir"] == "o" and len(au["notes"]) == 300

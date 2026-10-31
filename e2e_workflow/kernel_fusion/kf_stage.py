@@ -96,12 +96,50 @@ def build_args(cfg: dict, ps_args: dict, budget_s: int) -> dict:
         # a finished analysis is passed in whole: the workflow script cannot read files, and an agent
         # asked to echo a large topk.json back may drop its candidates
         d = _read_json(Path(a["kf_topk_json"])) or {}
-        a["kf_topk"] = {"candidates": d.get("candidates") or [], "recommended": d.get("recommended") or []}
+        a["kf_topk"] = slim_topk(d, int(a.get("kf_author_k") or 3))
     if cfg.get("reuse_journal"):
-        a["kf_reuse"] = reused_results(cfg["reuse_journal"])
+        a["kf_reuse"] = {k: slim_result(v) for k, v in reused_results(cfg["reuse_journal"]).items()}
     a["kf_dir"] = str(kf_dir_for(cfg, ps_args))
     a["time_budget_s"] = int(budget_s)
     return a
+
+
+# The driver agent re-types the args into its Workflow call, and a large payload comes out truncated: pass
+# only what kf_workflow.js reads.
+CAND_KEYS = ("id", "rank", "level", "region", "kernels", "phases", "occurrences", "m_range", "seam", "inputs_outputs",
+             "launches_before", "launches_after", "region_pct_device_time", "est_gain_pct_expected", "difficulty",
+             "bitwise_exact", "exclusive_with", "language", "fallback", "fused_design")
+UT_KEYS = ("task_dir", "editable", "baseline_frozen", "unittest_smoke", "smoke", "target_callable", "short_name")
+AUTHOR_KEYS = ("final_patch", "work_dir", "overlay_dir", "banner", "isolated_speedup", "correctness", "launches_after")
+
+
+def slim_topk(d: dict, author_k: int) -> dict:
+    """The recommended candidates the stage implements, plus every candidate they name (fallback / exclusive)."""
+    cands = {str(c.get("id")): c for c in d.get("candidates") or [] if isinstance(c, dict)}
+    rec = [str(i) for i in d.get("recommended") or []][:max(author_k, 1)]
+    keep = set(rec)
+    for i in rec:
+        c = cands.get(i) or {}
+        keep.update(str(x) for x in [c.get("fallback"), *(c.get("exclusive_with") or [])] if x is not None)
+    return {"candidates": [{k: c[k] for k in CAND_KEYS if k in c} for i, c in cands.items() if i in keep],
+            "recommended": rec}
+
+
+def slim_result(r: dict) -> dict:
+    """A reused prepare / author result with only the fields the stage reads."""
+    if "prepared" in r:
+        p = r.get("prepared") or {}
+        cands = [{"short_name": k.get("short_name"),
+                  "prepared_ut": {"phase": (k.get("prepared_ut") or {}).get("phase"),
+                                  "result": {x: ((k.get("prepared_ut") or {}).get("result") or {}).get(x) for x in UT_KEYS}}}
+                 for k in [*(p.get("head_candidates") or []), *(p.get("kernel_candidates") or [])] if isinstance(k, dict)]
+        why = [{"reason": str(f.get("reason") or f.get("notes") or f.get("status") or "")[:300]}
+               for f in [*(p.get("failed_tasks") or []), *(p.get("deferred_tasks") or [])] if isinstance(f, dict)]
+        return {"delivery_path": r.get("delivery_path", ""),
+                "prepared": {"head_candidates": [], "kernel_candidates": cands, "failed_tasks": why}}
+    out = {k: r[k] for k in AUTHOR_KEYS if k in r}
+    out["notes"] = str(r.get("notes") or "")[:300]
+    return out
 
 
 REUSABLE = ("kf:kernel-extract prepare ", "kf:author ")
@@ -155,7 +193,8 @@ def build_prompt(G: dict, args: dict) -> str:
         + "Invoke the Workflow tool exactly once with:\n"
         f'  scriptPath: "{KF_SCRIPT}"\n'
         f"  args: {json.dumps(args)}\n"
-        "CRITICAL: pass `args` as a real JSON OBJECT (a mapping), NOT as a JSON-encoded string.\n"
+        "CRITICAL: pass `args` as a real JSON OBJECT (a mapping), NOT as a JSON-encoded string, and copy it EXACTLY: "
+        "every key and every element, nothing shortened or omitted (kf_topk / kf_reuse are data the stage consumes).\n"
         "This is the GEAK KernelFusion stage (Setup -> Trace -> TopK -> Author -> ApplyBack). When the tool "
         f'returns, write its full return value to "{ret}" with the Write tool if that file does not exist, '
         "then print EXACTLY ONE final line of compact JSON that is the Workflow tool's full return value. "
