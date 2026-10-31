@@ -132,17 +132,27 @@ def test_agents_are_told_not_to_end_their_turn_on_a_running_job():
 
 def test_agentx_uses_the_kernel_extract_skill_for_trace_and_uts():
     out = run("agentx")
-    assert labels(out) == ["kf:director:setup", "kf:kernel-extract trace", "kf:analyst",
-                           "kf:kernel-extract prepare", "kf:integrate c1", "kf:director:validate"]
-    tr, an, prep = out["calls"][1]["prompt"], out["calls"][2]["prompt"], out["calls"][3]["prompt"]
-    for p in (tr, prep):     # main's standalone-extraction instruction, not the legacy role
+    ls = labels(out)
+    assert ls[:3] == ["kf:director:setup", "kf:kernel-extract trace", "kf:analyst"]
+    assert ls[-2:] == ["kf:integrate c1", "kf:director:validate"]
+    # one prepare agent per region (parallel), a failed region retried once with its blocker
+    assert sorted(ls[3:-2]) == sorted(["kf:kernel-extract prepare c1", "kf:kernel-extract prepare c1s",
+                                       "kf:kernel-extract prepare c1s (retry)", "kf:kernel-extract prepare c2",
+                                       "kf:kernel-extract prepare c2 (retry)"])
+    by = {c["label"]: c["prompt"] for c in out["calls"]}
+    tr, an = by["kf:kernel-extract trace"], by["kf:analyst"]
+    for p in (tr, by["kf:kernel-extract prepare c1"]):     # main's standalone-extraction instruction, not the legacy role
         assert "kernel_extraction_skills/kernel-extract/SKILL.md" in p and "Do not load roles/kernel_extractor.md" in p
         assert "SKILL_ROOT: " in p and "BASELINE_LOG: /tmp/kf_mock/kf/baseline/server.log" in p
     assert "serving_probe.py" in tr and "Do NOT select targets" in tr
     assert f"TRACE_DIR: {KF}/kernel_extraction/round_kf/capture/traces" in an
     assert f"WORKLOAD_SUMMARY: {KF}/kernel_workload.json" in an                  # the skill's weights
-    assert '"task":"c1"' in prep and '"task":"c1s"' in prep and '"task":"c2"' in prep and "joint_ut.phases" in prep
-    assert f"PREVIOUS_WORKLOAD_JSON: {KF}/kernel_workload.json" in prep
+    for t in ("c1", "c1s", "c2"):
+        p = by[f"kf:kernel-extract prepare {t}"]
+        assert f'"task":"{t}"' in p and "joint_ut.phases" in p and "do not defer or stop early for budget" in p
+        assert f"EVIDENCE_DIR: {KF}/kernel_extraction/round_kf_{t}" in p and f"PREVIOUS_WORKLOAD_JSON: {KF}/kernel_workload.json" in p
+    assert '"task":"c1s"' not in by["kf:kernel-extract prepare c1"]
+    assert "operands not reconstructed" in by["kf:kernel-extract prepare c2 (retry)"]
     # c2's UT did not pass -> never authored; c1 / c1s authored on the prepared task dirs
     assert sorted(w["kernel_path"] for w in out["workflows"]) == [f"{KF}/tasks/c1", f"{KF}/tasks/c1s"]
     r = out["result"]

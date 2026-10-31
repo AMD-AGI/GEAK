@@ -92,6 +92,8 @@ const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_m
 // stage returns whatever was accepted. Inert without time_budget_s.
 const TIME_BUDGET_MS = A.time_budget_s ? parseInt(A.time_budget_s, 10) * 1000 : null;
 let DEADLINE_HIT = false;
+const T0 = Date.now();
+const remainingS = () => (TIME_BUDGET_MS ? Math.max(0, (TIME_BUDGET_MS - (Date.now() - T0)) / 1000) : 6 * 3600);
 if (TIME_BUDGET_MS && typeof setTimeout === 'function') {
   setTimeout(() => { DEADLINE_HIT = true; log('[kf] 85% of the stage budget spent: no new author/apply work starts.'); },
     Math.floor(TIME_BUDGET_MS * 0.85));
@@ -482,35 +484,58 @@ log(`[kf] authoring ${jobs.length} job(s): ${slots.map((s) => s.primary.id + (s.
 
 const shortOf = (c) => String(c.id).replace(/[^A-Za-z0-9_]+/g, '_');
 
-// AgentX: the kernel-extract skill prepares every fusion UT in one invocation (PHASE=prepare), each
-// candidate declared as ONE joint task boundary, reusing the trace step's evidence. Same gate as
-// e2e_workflow.js preparedUtDefect: a UT without a passing smoke and a frozen baseline is unusable.
+// AgentX: the kernel-extract skill prepares the fusion UTs (PHASE=prepare), ONE invocation PER REGION, in
+// parallel, each on its own GPU and evidence dir with the whole stage budget, reusing the trace step's
+// evidence. A region whose UT does not pass gets one more attempt that starts from the first one's notes.
+// Same gate as e2e_workflow.js preparedUtDefect: a UT without a passing smoke and a frozen baseline is unusable.
 let preparedById = new Map();
-if (IS_AGENTX && jobs.length && !DEADLINE_HIT) {
-  const scope = jobs.map((c) => ({ task: shortOf(c), fusion_level: c.level, region: c.region,
-    device_kernels: c.kernels || [], phases: c.phases || [], seam: c.seam || {},
-    inputs_outputs: c.inputs_outputs || '', m_range: c.m_range || '' }));
-  const prep = await safeAgent(skillAgent('prepare',
-    'Explicit user scope (overrides the default selection): build exactly one task per entry of FUSION_SCOPE, named ' +
-    'by its `task`. Each entry is a FUSION REGION: declare its device_kernels as one joint boundary (joint_ut.phases) ' +
-    'owned by one task, reached through the entry\'s seam (or the narrowest enclosing live callable; record why). The ' +
-    'candidate leg will rebind that callable to one fused implementation, so the oracle is taken at the region ' +
-    'boundary. Reuse the trace step\'s evidence (PREVIOUS_WORKLOAD_JSON / PREVIOUS_RANKING_JSON); do not launch a new ' +
-    'full replay. Complete source extraction, UT authoring and GPU validation for every entry, keep failures in the ' +
-    'delivery, pack with `agentx_kernel_preparation.mjs --emit-prepared` and return ONLY {delivery_path, prepared} ' +
-    '(prepared = that command\'s stdout VERBATIM). Do not optimize or integrate.',
-    { ...skillInputs(), FUSION_SCOPE: scope, SOURCE_DELIVERY_REQUIRED: true, REMAINING_MIN: 240 }),
-    { phase: 'Author', label: 'kf:kernel-extract prepare', schema: AGENTX_PREPARATION_SCHEMA });
-  const all = prep && prep.prepared ? [...(prep.prepared.head_candidates || []), ...(prep.prepared.kernel_candidates || [])] : [];
+const PREPARE_INTRO = 'Explicit user scope (overrides the default selection): build exactly ONE task for the single ' +
+  'entry of FUSION_SCOPE, named by its `task`. The entry is a FUSION REGION: declare its device_kernels as one joint ' +
+  'boundary (joint_ut.phases) owned by that task, reached through the entry\'s seam (or the narrowest enclosing live ' +
+  'callable; record why). The candidate leg will rebind that callable to one fused implementation, so the oracle is ' +
+  'taken at the region boundary. Reuse the trace step\'s evidence (PREVIOUS_WORKLOAD_JSON / PREVIOUS_RANKING_JSON and ' +
+  'the traces under TRACE_DIR); do not launch a new full replay. This region is your ONLY job and the time in ' +
+  'REMAINING_MIN is all yours: do not defer or stop early for budget. When an input is hard to reconstruct (quantized ' +
+  'checkpoint operands, split/partial buffers, library-op wrappers), build it the way the live path does -- load the ' +
+  'real tensors from MODEL_PATH, call the live producer, or bind below the wrapper -- and verify by running it. ' +
+  'Other regions are prepared in parallel on the other GPUs: use only GPU_ID for UT work and write only under ' +
+  'EVIDENCE_DIR and your task dir. Complete source extraction, UT authoring and GPU validation, keep a failure in ' +
+  'the delivery with its concrete blocker, pack with `agentx_kernel_preparation.mjs --emit-prepared` and return ONLY ' +
+  '{delivery_path, prepared} (prepared = that command\'s stdout VERBATIM). Do not optimize or integrate.';
+async function prepareOne(c, i, previous) {
+  const t = shortOf(c);
+  const scope = [{ task: t, fusion_level: c.level, region: c.region, device_kernels: c.kernels || [],
+    phases: c.phases || [], seam: c.seam || {}, inputs_outputs: c.inputs_outputs || '', m_range: c.m_range || '' }];
+  const intro = previous
+    ? `A previous attempt at this region did not produce a passing UT. Its outcome: ${previous}. Reuse what it saved ` +
+      'under EVIDENCE_DIR, fix that blocker (do not just restate it), and finish. ' + PREPARE_INTRO
+    : PREPARE_INTRO;
+  const prep = await safeAgent(skillAgent('prepare', intro, { ...skillInputs(), GPU_ID: GPU_LIST[i % GPU_LIST.length],
+    EVIDENCE_DIR: `${EVAL_DIR}/kernel_extraction/round_kf_${t}`, TRACE_DIR, FUSION_SCOPE: scope,
+    SOURCE_DELIVERY_REQUIRED: true, // one agent call is capped at AGENT_TIMEOUT_MS
+    REMAINING_MIN: Math.floor(Math.min(AGENT_TIMEOUT_MS > 0 ? AGENT_TIMEOUT_MS / 60000 - 10 : 240, Math.max(60, remainingS() / 120))) }),
+    { phase: 'Author', label: `kf:kernel-extract prepare ${t}${previous ? ' (retry)' : ''}`, schema: AGENTX_PREPARATION_SCHEMA });
+  const p = (prep && prep.prepared) || {};
+  const all = [...(p.head_candidates || []), ...(p.kernel_candidates || [])];
   for (const k of all) {
     const r = k && k.prepared_ut && k.prepared_ut.result;
     if (!r || typeof r.task_dir !== 'string' || !r.task_dir.trim()) continue;
     const ok = r.editable !== false && r.baseline_frozen === true &&
       (k.prepared_ut.phase === 'extract' ? r.unittest_smoke : r.smoke) === 'pass';
-    const id = jobs.map(shortOf).find((t) => t === k.short_name || String(r.task_dir).replace(/\/+$/, '').endsWith(`/${t}`));
-    if (id) preparedById.set(id, { ...r, ok });
+    if (ok || all.length === 1) return { ...r, ok };
   }
-  log(`[kf] kernel-extract prepared ${preparedById.size}/${jobs.length} fusion UT(s)`);
+  const why = [...(p.failed_tasks || []), ...(p.deferred_tasks || [])].map((f) => f && (f.reason || f.notes || f.status))
+    .filter(Boolean).join('; ');
+  return { ok: false, notes: why || (prep ? 'no task in the delivery' : 'no result') };
+}
+if (IS_AGENTX && jobs.length && !DEADLINE_HIT) {
+  const res = await parallel(jobs.map((c, i) => async () => {
+    let r = await prepareOne(c, i, null);
+    if (!(r && r.ok) && !DEADLINE_HIT) r = await prepareOne(c, i, String((r && r.notes) || 'no result').slice(0, 1500));
+    return [shortOf(c), r];
+  }));
+  for (const x of res) if (x) preparedById.set(x[0], x[1]);
+  log(`[kf] kernel-extract prepared ${[...preparedById.values()].filter((r) => r && r.ok).length}/${jobs.length} fusion UT(s)`);
 }
 
 async function authorOne(c, i) {
