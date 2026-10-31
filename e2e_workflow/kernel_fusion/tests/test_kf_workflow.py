@@ -176,3 +176,9 @@ def test_a_baseline_left_running_detached_is_waited_for():
 def test_setup_failure_returns_cleanly():
     r = run("setup_fail")["result"]
     assert r["status"] == "error" and r["final_overlay"] == ""
+
+
+def test_script_uses_no_sandbox_forbidden_construct():
+    # the native Workflow runtime rejects these (interface/runtime/engine/conformance.mjs A-forbidden)
+    src = (E2E_DIR / "kernel_fusion" / "kf_workflow.js").read_text()
+    assert not re.search(r"\bDate\.now\b|\bMath\.random\b|\bnew\s+Date\b|\bprocess\.|\brequire\s*\(|\bimport\s*\(", src)

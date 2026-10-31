@@ -117,7 +117,8 @@ def build_prompt(G: dict, args: dict) -> str:
         "This is the GEAK KernelFusion stage (Setup -> Trace -> TopK -> Author -> ApplyBack). When the tool "
         f'returns, write its full return value to "{ret}" with the Write tool if that file does not exist, '
         "then print EXACTLY ONE final line of compact JSON that is the Workflow tool's full return value. "
-        "Print nothing after the JSON line."
+        "Print nothing after the JSON line. If the Workflow tool fails, do NOT edit any file, fix the script or "
+        "launch it again: print the error and stop (the caller records it and continues)."
     )
 
 
