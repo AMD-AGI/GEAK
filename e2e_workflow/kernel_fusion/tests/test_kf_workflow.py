@@ -204,8 +204,9 @@ def test_a_measured_baseline_is_reused_not_remeasured():
 
 def test_a_finished_topk_is_reused_and_uts_follow_the_fusion_contract():
     out = run("reuse_topk")
-    assert "kf:analyst" not in labels(out) and labels(out)[1] == "kf:topk (given)"
-    assert "cp" in out["calls"][1]["prompt"] and "/old/kf/analysis/topk.json" in out["calls"][1]["prompt"]
+    # the given analysis arrives in args (kf_stage reads the file): no agent re-types it
+    assert "kf:analyst" not in labels(out) and labels(out)[1] == "kf:extract c1"
+    assert out["result"]["topk_json"] == "/old/kf/analysis/topk.json"
     ext = [c["prompt"] for c in out["calls"] if c["label"].startswith("kf:extract")]
     assert ext and all("FUSION UT CONTRACT" in p and "BASELINE leg only" in p for p in ext)
     assert all("replaces the region (fewer launches" in w["task"] for w in out["workflows"])
