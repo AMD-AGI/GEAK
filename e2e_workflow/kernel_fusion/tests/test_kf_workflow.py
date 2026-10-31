@@ -55,6 +55,7 @@ def test_all_winners_go_in_together_on_one_ab():
     # deliverables: fused kernel module, graph-replay unit test, lazy overlay with an ENGAGED banner
     assert f"{KF}/kernels/c1/overlay/sitecustomize.py" in au and "[kf-c1] ENGAGED" in au and "graph replay" in au
     assert "shapes the server actually runs" in au and "weighted by served share" in au
+    assert "import only the standard library" in au
     by = {c["label"]: c["prompt"] for c in out["calls"]}
     assert sorted(l for l in labels(out, authors=True) if l.startswith("kf:author ")) == ["kf:author c1", "kf:author c1s", "kf:author c2"]
     integ = by["kf:integrate kf_stack"]

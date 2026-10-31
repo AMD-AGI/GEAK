@@ -638,7 +638,10 @@ iterate and measure as you see fit, and deliver three things:
    and the region's phases / m_range), add every served shape with real weight that the UT lacks, and weight the
    speedup by each shape's served share. Report the per-shape times.
 3. The overlay that puts it in the server: ${work}/overlay/sitecustomize.py (the dir goes first on the server's
-   PYTHONPATH). Patch the seam lazily -- after its module is first imported, never by importing it eagerly -- fall
+   PYTHONPATH). sitecustomize runs in EVERY Python process the server spawns (each rank, tokenizer, detokenizer,
+   tools): at its top level import only the standard library -- torch / triton / the op libraries and your kernel
+   module are imported inside the hook, when it fires. Patch the seam lazily -- after its module is first imported,
+   never by importing it eagerly -- fall
    back to the stock path whenever the inputs do not match what the kernel supports, and print
    "[kf-${short}] ENGAGED" to stderr once, the first time the patched path actually runs. It must survive graph
    capture.${GRAPH_REQ}
