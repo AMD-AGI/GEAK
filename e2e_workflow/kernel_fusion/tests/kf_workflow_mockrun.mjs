@@ -48,10 +48,11 @@ const answers = {
     : { profile_topN_json: `${KF}/profile/round_0/profile_topN.json`, top_kernels: [{ name: 'k' }] }),
   'kf:profiler (retry)': () => (scenario === 'no_trace' ? null
     : { profile_topN_json: `${KF}/profile/round_0/profile_topN.json`, top_kernels: [{ name: 'k' }] }),
+  'kf:topk (given)': () => ({ topk_json: `${KF}/analysis/topk.json`, candidates: CANDS, recommended: ['c1', 'c2'], report_md: '' }),
   'kf:analyst': () => ({ topk_json: `${KF}/analysis/topk.json`, report_path: `${KF}/analysis/report.md`,
     candidates: CANDS, recommended: ['c1', 'c2'], report_md: '# report', model_notes_md: '# notes' }),
   'kf:integrate c1': () => ({
-    accept: won('accepted', 3), agentx: won('accepted', 3), stack: won('stack', 0.2),
+    accept: won('accepted', 3), reuse_topk: won('accepted', 3), agentx: won('accepted', 3), stack: won('stack', 0.2),
     retry: { gate: 'incomplete', ab_complete: false, e2e_throughput_tok_s: 0, ref_med: 100 },
   }[scenario] || { gate: 'rejected', e2e_throughput_tok_s: 99, reason: 'parity_regression' }),
   'kf:integrate c1 (finish 1)': () => won('accepted', 2),
@@ -89,6 +90,8 @@ const args = { workflow_dir: WF_DIR, kf_dir: KF, model_path: '/models/M', gpu_id
   initial_extra_env: 'SGLANG_USE_AITER=1 SGLANG_SIMULATE_ACC_LEN=4.05 SGLANG_SIMULATE_ACC_METHOD=match-expected HF_HUB_OFFLINE=1',
   correctness_unset_env: 'SGLANG_SIMULATE_ACC_LEN,SGLANG_SIMULATE_ACC_METHOD' };
 if (scenario === 'analysis_only') Object.assign(args, { kf_steps: 'topk', kf_trace_dir: '/traces/x' });
+if (scenario === 'reuse_topk') Object.assign(args, { kf_baseline_dir: '/old/kf/baseline', kf_trace_dir: '/traces/x',
+  kf_topk_json: '/old/kf/analysis/topk.json' });
 if (scenario === 'reuse_baseline') Object.assign(args, { kf_baseline_dir: '/old/kf/baseline', kf_trace_dir: '/traces/x' });
 
 const src = (await readFile(`${WF_DIR}/kernel_fusion/kf_workflow.js`, 'utf8'))

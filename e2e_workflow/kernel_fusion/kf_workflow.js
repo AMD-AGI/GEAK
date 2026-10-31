@@ -71,6 +71,7 @@ const PROMPT = String(A.kf_prompt || `${KF_HOME}/default_prompt.md`);
 const PROMPTS = PROMPT.split(',').map((p) => p.trim()).filter(Boolean);   // several files drive one analysis
 const TRACE_DIR_IN = String(A.kf_trace_dir || '');          // existing traces: skip the capture
 const WORKLOAD_SUMMARY = String(A.kf_workload_summary || ''); // per-point weights, when the caller has them
+const TOPK_IN = String(A.kf_topk_json || '');                 // a finished analysis: reused, not re-run
 const BASELINE_DIR_IN = String(A.kf_baseline_dir || '');     // a measured baseline of this same stack: reused, not re-measured
 const SOURCE_DIRS = String(A.kf_source_dirs || '');           // framework source, when not importable here
 const STEPS = new Set(String(A.kf_steps || 'trace,topk,author,apply').split(',').map((s) => s.trim()).filter(Boolean));
@@ -392,7 +393,13 @@ if (want('topk')) {
       accepted: [], final_overlay: INIT_OVERLAY };
   }
   const OUT = `${EVAL_DIR}/analysis`;
-  topk = await safeAgent(`You are the GEAK KernelFusion analyst. You choose which kernel-fusion patterns to implement.
+  topk = TOPK_IN ? await safeAgent(`You load a finished KernelFusion analysis; you do not analyse anything.
+Copy ${TOPK_IN} to ${OUT}/topk.json (mkdir -p ${OUT}; cp). Read it, and the REPORT.md / MODEL_NOTES.md next to it
+when they exist. Return JSON: {"topk_json": "${OUT}/topk.json", "candidates": <its candidates, verbatim>,
+"recommended": <its recommended ids, verbatim and in order>, "report_md": <REPORT.md content or "">,
+"model_notes_md": <MODEL_NOTES.md content or "">, "notes": "reused ${TOPK_IN}"}.`,
+    { phase: 'TopK', label: 'kf:topk (given)', schema: TOPK_SCHEMA })
+  : await safeAgent(`You are the GEAK KernelFusion analyst. You choose which kernel-fusion patterns to implement.
 
 ## Your method is the user's prompt
 Read every one of these files in full: ${PROMPTS.join(', ')}. Together they are the AUTHORITATIVE analysis
@@ -497,11 +504,28 @@ const shortOf = (c) => String(c.id).replace(/[^A-Za-z0-9_]+/g, '_');
 // evidence. A region whose UT does not pass gets one more attempt that starts from the first one's notes.
 // Same gate as e2e_workflow.js preparedUtDefect: a UT without a passing smoke and a frozen baseline is unusable.
 let preparedById = new Map();
+// A fusion UT must let the candidate REPLACE the region: the per-kernel UT contract (every member kernel
+// fires, the split is pinned, the timer launches the members directly) makes any fusion fail its gates.
+const FUSION_UT_CONTRACT = 'FUSION UT CONTRACT -- this task exists so that the next step can REPLACE the whole ' +
+  'region with fewer (usually one) kernel launches, so the UT must not pin the current kernel structure: ' +
+  '(1) kernel_src/ holds an editable copy of the seam callable (the host-side function whose body launches the ' +
+  'region) together with the kernels it launches; the case runner and the timer call that seam callable from ' +
+  'kernel_src with the recorded inputs -- never the member kernels directly -- so a candidate may change how many ' +
+  'kernels the region launches, their grid/split and their intermediates. ' +
+  '(2) Correctness compares only the region\'s outputs at the seam boundary (and any declared in-place mutation) ' +
+  'with the frozen live baseline; intermediates between member kernels are not checked. ' +
+  '(3) Execution/binding proof that every member kernel fires is required for the BASELINE leg only; for the ' +
+  'candidate leg require only that the kernel_src seam implementation ran, never that the original member ' +
+  'kernels still launch or keep their count/split. ' +
+  '(4) The negative control mutates the OUTPUT of the kernel_src seam implementation (e.g. perturb what the host ' +
+  'function returns or writes), so it still triggers after the members are fused away. ' +
+  '(5) Time one call of the whole seam per case (launch overhead included) -- the win of a fusion is fewer ' +
+  'launches and fewer HBM round-trips. Record "fusion_contract": true in meta.json. ';
 const PREPARE_INTRO = 'Explicit user scope (overrides the default selection): build exactly ONE task for the single ' +
   'entry of FUSION_SCOPE, named by its `task`. The entry is a FUSION REGION: declare its device_kernels as one joint ' +
   'boundary (joint_ut.phases) owned by that task, reached through the entry\'s seam (or the narrowest enclosing live ' +
   'callable; record why). The candidate leg will rebind that callable to one fused implementation, so the oracle is ' +
-  'taken at the region boundary. Reuse the trace step\'s evidence (PREVIOUS_WORKLOAD_JSON / PREVIOUS_RANKING_JSON and ' +
+  'taken at the region boundary. ' + FUSION_UT_CONTRACT + 'Reuse the trace step\'s evidence (PREVIOUS_WORKLOAD_JSON / PREVIOUS_RANKING_JSON and ' +
   'the traces under TRACE_DIR); do not launch a new full replay. This region is your ONLY job and the time in ' +
   'REMAINING_MIN is all yours: do not defer or stop early for budget. When an input is hard to reconstruct (quantized ' +
   'checkpoint operands, split/partial buffers, library-op wrappers), build it the way the live path does -- load the ' +
@@ -556,7 +580,7 @@ async function authorOne(c, i) {
     'every kernel in KERNEL.device_kernels); candidate_bind rebinds that seam, so the candidate leg runs the fused ' +
     'implementation from kernel_src/. Record I/O at the seam boundary (KERNEL.inputs_outputs) for the oracle. If ' +
     'the given seam does not cover the region, use the narrowest enclosing callable that does and say so in notes; ' +
-    'if none exists return editable:false with notes "no_rebind_seam".', {
+    'if none exists return editable:false with notes "no_rebind_seam". ' + FUSION_UT_CONTRACT, {
       EVAL_DIR, MODEL_PATH, GPU_ID: gpu, WORKLOAD, SKILL_DIR: WORKFLOW_DIR,
       KERNEL: { short_name: short, classification: 'fusion', fusion_level: c.level, region: c.region,
         device_kernel: (c.kernels || [])[0] || '', device_kernels: c.kernels || [],
@@ -584,6 +608,8 @@ async function authorOne(c, i) {
         `It currently launches ${c.launches_before || (c.kernels || []).length} kernels [${(c.kernels || []).join(' -> ')}]; ` +
         `target ${c.launches_after || 1}. Design from the analysis: ${c.fused_design || '(none given)'}. ` +
         `Correctness is the immutable oracle at the region boundary${c.bitwise_exact ? ' and must be bit-exact' : ''}. ` +
+        'The editable surface is the kernel_src copy of the seam callable and its kernels: replace the region inside ' +
+        'that host function with your fused launch(es) -- tuning one member kernel alone is not the goal. ' +
         `Beat the live unfused region on the recorded serving shapes.` + GRAPH_REQ,
     });
   } catch (e) { kl = { validation_status: 'error', reason: String(e) }; }
