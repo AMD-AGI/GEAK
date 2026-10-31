@@ -245,3 +245,15 @@ def test_a_correctness_reject_is_final_not_retried():
     out = run("parity_reject")
     assert "kf:integrate kf_stack (finish 1)" not in labels(out)
     assert out["result"]["status"] == "no_gain"
+
+
+def test_a_primary_that_fails_the_screen_is_replaced_by_its_screened_fallback():
+    out = run("screen_fallback")
+    assert labels(out)[-3:] == ["kf:integrate screen", "kf:integrate screen (fallbacks)", "kf:integrate kf_stack"]
+    fb = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:integrate screen (fallbacks)")
+    assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' in fb and f'"overlay_dir":"{KF}/kernels/c2/overlay"' not in fb
+    integ = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:integrate kf_stack")
+    assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' in integ and f'"overlay_dir":"{KF}/kernels/c1/overlay"' not in integ
+    r = out["result"]
+    assert sorted(a["id"] for a in r["accepted"]) == ["c1s", "c2"] and ("c1", "screen") in rejected(r)
+    assert ("c1s", "apply") not in rejected(r)
