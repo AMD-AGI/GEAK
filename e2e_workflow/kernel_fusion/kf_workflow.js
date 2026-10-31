@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Trace', detail: 'AgentX: kernel-extract skill sampling capture (points from the baseline log, one probe each); else roles/profiler.md; or kf_trace_dir' },
     { title: 'TopK', detail: 'fusion analyst: kf_trace_digest.py + the user prompt -> ranked Top-K fusion candidates (topk.json)' },
     { title: 'Author', detail: 'per recommended candidate + its fallback: region UT (AgentX: kernel-extract skill prepare; else roles/kernel_extractor.md), then one author agent writes the fused kernel against that UT' },
-    { title: 'ApplyBack', detail: 'per slot, serially: e2e_integrator A/B (primary, else its fallback), accepted/stack overlays compound; director validate confirms the whole stack' },
+    { title: 'ApplyBack', detail: 'all UT-passing fused kernels at once (per slot the primary, else its fallback): one combined overlay, one e2e_integrator A/B with validation-length legs' },
   ],
 };
 
@@ -618,6 +618,10 @@ iterate and measure as you see fit, and deliver three things:
 2. Its unit test: the fused version against the stock region on the recorded serving shapes (the prepared UT in
    TASK_DIR, with kernel_src/ pointed at your kernel, or your own test calling the live stock functions), checking
    every output of the region, and timing both sides with CUDA/HIP-graph replay (as the server runs decode).
+   Time it on the shapes the server actually runs: the prepared UT's cases and weights may not match serving, so
+   check them against the served distribution (WORKLOAD_SUMMARY=${workloadJson || '(none: derive it from the baseline server log)'}
+   and the region's phases / m_range), add every served shape with real weight that the UT lacks, and weight the
+   speedup by each shape's served share. Report the per-shape times.
 3. The overlay that puts it in the server: ${work}/overlay/sitecustomize.py (the dir goes first on the server's
    PYTHONPATH). Patch the seam lazily -- after its module is first imported, never by importing it eagerly -- fall
    back to the stock path whenever the inputs do not match what the kernel supports, and print
@@ -628,7 +632,7 @@ iterate and measure as you see fit, and deliver three things:
 Write the diff of WORK_DIR against TASK_DIR (diff -ruN) plus the kernel and overlay files to
 ${work}/final_patch.diff and return JSON {"final_patch": "${work}/final_patch.diff" or "" if nothing correct beat the
 baseline, "work_dir": "${work}/work", "overlay_dir": "${work}/overlay", "banner": "[kf-${short}] ENGAGED",
-"isolated_speedup": <stock region time / fused time, graph replay, weighted over the recorded cases>, "correctness":
+"isolated_speedup": <stock region time / fused time, graph replay, weighted by served share>, "correctness":
 "pass" | "fail", "launches_after": <kernel launches of the fused region>, "ut_command": "<how you ran the test>",
 "notes": "<design and per-case measurements>"}.`
     + (KF_TASK ? `\n\n## Operator constraints\n${KF_TASK}` : ''),
@@ -652,89 +656,77 @@ for (const r of authored) {
 }
 
 // ---------------------------------------------------------------------------
-// ApplyBack: per slot, serially, GEAK e2e_integrator A/B on the compounding overlay -- the primary
-// first, its fallback if the primary has no isolated win or does not pass. 'accepted' and 'stack'
-// (engaged, parity ok, not slower) both carry forward, exactly as in the e2e workflow; the GEAK
-// director's validate then measures the WHOLE stack against the original baseline, and only a
-// validated_win is handed to the main workflow.
+// ApplyBack: every fused kernel that passed its UT with an isolated win goes in at once -- per slot the
+// primary, else its fallback -- as ONE combined overlay, and the GEAK e2e_integrator runs ONE e2e A/B
+// (correctness once, then reference vs the whole fused stack, validation-length legs). Only a measured
+// e2e win is handed to the main workflow.
 // ---------------------------------------------------------------------------
 phase('ApplyBack');
-let curOverlay = INIT_OVERLAY, curTput = baseTput;
-async function integrateOne(r) {
-  const c = r.c;
-  const inputs = {
-    EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: noiseBand,
-    MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS, SKILL_DIR: WORKFLOW_DIR,
-    KERNEL_RESULT: { short_name: r.ext.short_name || c.id, task_dir: r.ext.task_dir, op_kind: 'fusion',
-      winner_kind: 'authored', winner_backend: r.lang, authored_language: r.lang,
-      authored_kernel_eval_dir: r.kl.eval_dir || '', target_callable: r.ext.target_callable || seamOf(c),
-      code_patch: r.kl.final_patch, final_patch: r.kl.final_patch, verified_isolated_speedup: r.iso,
-      overlay_dir: r.kl.overlay_dir || '', engaged_banner: r.kl.banner || '',
-      pct_gpu_time: c.region_pct_device_time || 0, live_call_seam: seamOf(c),
-      parity_note: c.bitwise_exact ? 'expected_exact' : 'expected_close' },
-    CURRENT_OVERLAY: curOverlay, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV, CURRENT_THROUGHPUT: curTput,
-      };
-  const ready = r.kl.overlay_dir ? ` KERNEL_RESULT.overlay_dir is a READY overlay for this fused kernel (its ` +
-    'sitecustomize.py patches the seam lazily and falls back to the stock path; the kernel module sits beside it): ' +
-    'build the CAND overlay as CURRENT_OVERLAY plus that directory\'s files instead of re-materializing the kernel ' +
-    'from the patch -- when both carry a sitecustomize.py, keep both by renaming them and writing one ' +
-    'sitecustomize.py that imports each -- and confirm KERNEL_RESULT.engaged_banner in the CAND server log.' : '';
-  let integ = await safeAgent(roleAgent('e2e_integrator', 'integrate',
-    'Overlay this fused kernel back onto the live server and gate it on the e2e A/B.' + ready, inputs),
-    { phase: 'ApplyBack', label: `kf:integrate ${c.id}`, schema: INTEGRATE_SCHEMA });
-  for (let t = 1; t <= AB_FINISH_RETRIES && !(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false); t++) {
-    integ = await safeAgent(roleAgent('e2e_integrator', 'integrate',
-      'FINISH this e2e A/B: reuse a reference leg already on disk if usable, run the missing leg, then return the gate.',
-      { ...inputs, RESUME_AB: true }), { phase: 'ApplyBack', label: `kf:integrate ${c.id} (finish ${t})`, schema: INTEGRATE_SCHEMA });
-  }
-  return integ;
-}
+const winners = slots.map((s) => [s.primary, s.fallback].filter(Boolean)
+  .map((c) => authoredById.get(String(c.id))).find(usable)).filter(Boolean);
 for (const s of slots) {
-  if (!want('apply')) break;
-  for (const c of [s.primary, s.fallback].filter(Boolean)) {
-    const r = authoredById.get(String(c.id));
-    if (!usable(r)) continue;
-    if (DEADLINE_HIT) { result.rejected.push({ id: c.id, stage: 'apply', reason: 'stage deadline', isolated_speedup: r.iso }); continue; }
-    const integ = await integrateOne(r);
-    const rec = { id: c.id, level: c.level, slot: s.primary.id, isolated_speedup: r.iso,
-      gate: integ ? integ.gate : 'incomplete', e2e_delta_pct: integ ? integ.e2e_delta_pct : null,
-      ref_med: integ ? integ.ref_med : null, cand_med: integ ? integ.cand_med : null,
-      parity: integ ? integ.output_parity : '', reason: integ ? integ.reason || '' : 'no integrator result' };
-    if (integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.ab_complete !== false && integ.accepted_overlay) {
-      curOverlay = integ.accepted_overlay;
-      curTput = integ.e2e_throughput_tok_s || curTput;
-      result.accepted.push({ ...rec, overlay: curOverlay });
-      log(`[kf] ${c.id}: carried (${rec.gate}, ${rec.e2e_delta_pct}%)`);
-      break;                                   // slot filled; its fallback is not needed
-    }
-    result.rejected.push({ ...rec, stage: 'apply' });
-    log(`[kf] ${c.id}: not applied (${rec.gate}: ${rec.reason})`);
+  const fb = s.fallback && authoredById.get(String(s.fallback.id));
+  if (fb && usable(fb) && !winners.includes(fb)) {
+    result.rejected.push({ id: s.fallback.id, stage: 'apply', reason: `not needed: primary ${s.primary.id} is in the stack`, isolated_speedup: fb.iso });
   }
 }
-if (!want('apply')) {
-  for (const r of authored) if (usable(r)) result.rejected.push({ id: r.c.id, stage: 'apply', reason: 'apply step disabled', isolated_speedup: r.iso });
+if (!want('apply') || !winners.length || DEADLINE_HIT) {
+  for (const r of winners) result.rejected.push({ id: r.c.id, stage: 'apply', isolated_speedup: r.iso,
+    reason: !want('apply') ? 'apply step disabled' : 'stage deadline' });
+  result.status = 'no_gain';
+  return result;
 }
-
-// Combined confirmation: the stack vs the TRUE baseline, fresh servers, GEAK director validate.
-if (result.accepted.length) {
-  phase('ApplyBack');
-  const v = await safeAgent(roleAgent('director', 'validate',
-    'Independently re-measure the KernelFusion stack against the true baseline + output parity and arbitrate. ' +
-    'This stage has no architect/final report: skip report reconciliation (step 7), and APPLY_TO_ORIGINAL=false.', {
-      EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: baseTput, NOISE_BAND_PCT: noiseBand,
-      BASELINE_OVERLAY: INIT_OVERLAY, FINAL_OVERLAY: curOverlay, FINAL_FLAGS: { flags: INIT_FLAGS, env: INIT_ENV },
-      CLAIMED_THROUGHPUT: curTput, WORKLOAD, APPLY_TO_ORIGINAL: 'false',
-      MEASUREMENT_MODE: VALIDATION_MODE, MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_REPLICAS,
-      SKILL_DIR: WORKFLOW_DIR,     }), { phase: 'ApplyBack', label: 'kf:director:validate', schema: VALIDATE_SCHEMA });
-  result.validation = v || { validation_status: 'error', notes: 'validate returned nothing' };
-  if (v && v.validation_status === 'validated_win' && v.throughput_speedup > 1) {
-    result.final_overlay = curOverlay;
-    result.final_throughput_tok_s = v.director_verified_throughput_tok_s || curTput;
-    result.throughput_speedup = v.throughput_speedup;
-    result.status = 'accepted';
-    return result;
-  }
-  log(`[kf] combined stack not confirmed (${result.validation.validation_status}, x${result.validation.throughput_speedup || '?'}); main workflow keeps the original stack.`);
+const kernelResult = (r) => ({ short_name: r.ext.short_name || r.c.id, task_dir: r.ext.task_dir, op_kind: 'fusion',
+  winner_kind: 'authored', winner_backend: r.lang, authored_language: r.lang, authored_kernel_eval_dir: r.kl.eval_dir || '',
+  target_callable: r.ext.target_callable || seamOf(r.c), live_call_seam: seamOf(r.c),
+  code_patch: r.kl.final_patch, final_patch: r.kl.final_patch, verified_isolated_speedup: r.iso,
+  overlay_dir: r.kl.overlay_dir || '', engaged_banner: r.kl.banner || '', pct_gpu_time: r.c.region_pct_device_time || 0,
+  parity_note: r.c.bitwise_exact ? 'expected_exact' : 'expected_close' });
+const stackName = 'kf_stack';
+const inputs = {
+  EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, NOISE_BAND_PCT: noiseBand,
+  MEASUREMENT_MODE: VALIDATION_MODE, MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_REPLICAS, SKILL_DIR: WORKFLOW_DIR,
+  KERNEL_RESULT: { short_name: stackName, op_kind: 'fusion', winner_kind: 'authored',
+    verified_isolated_speedup: Math.max(...winners.map((r) => r.iso)), parity_note: 'expected_close' },
+  KERNEL_RESULTS: winners.map(kernelResult),
+  CURRENT_OVERLAY: INIT_OVERLAY, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV, CURRENT_THROUGHPUT: baseTput,
+};
+const intro = `Apply ALL ${winners.length} fused kernels in KERNEL_RESULTS at once and gate the whole set on ONE e2e A/B ` +
+  '(KERNEL_RESULT names the set). Each entry\'s overlay_dir is a READY overlay (its sitecustomize.py patches one ' +
+  'seam lazily and falls back to the stock path; the kernel module sits beside it). Build ONE CAND overlay ' +
+  `${EVAL_DIR}/overlay/cand_${stackName} = CURRENT_OVERLAY plus every entry's files -- rename each ` +
+  'sitecustomize.py and write one sitecustomize.py that imports all of them -- do not re-materialize kernels from ' +
+  'patches. Run the correctness checks once on that stack, then ONE reference-vs-CAND throughput A/B, and confirm ' +
+  'EVERY entry\'s engaged_banner in the CAND server log (a kernel that never engages is reported in reason). ' +
+  'Return the gate for the whole set; accepted_overlay = the CAND overlay when it is accepted or stack.';
+let integ = await safeAgent(roleAgent('e2e_integrator', 'integrate', intro, inputs),
+  { phase: 'ApplyBack', label: `kf:integrate ${stackName}`, schema: INTEGRATE_SCHEMA });
+for (let t = 1; t <= AB_FINISH_RETRIES && !(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false); t++) {
+  integ = await safeAgent(roleAgent('e2e_integrator', 'integrate',
+    'FINISH this e2e A/B of the combined fused stack: reuse a reference leg already on disk if usable, run the ' +
+    'missing leg, then return the gate. ' + intro, { ...inputs, RESUME_AB: true }),
+    { phase: 'ApplyBack', label: `kf:integrate ${stackName} (finish ${t})`, schema: INTEGRATE_SCHEMA });
 }
+const ab = { members: winners.map((r) => r.c.id), gate: integ ? integ.gate : 'incomplete',
+  e2e_delta_pct: integ ? integ.e2e_delta_pct : null, ref_med: integ ? integ.ref_med : null,
+  cand_med: integ ? integ.cand_med : null, parity: integ ? integ.output_parity : '',
+  reason: integ ? integ.reason || '' : 'no integrator result' };
+result.validation = ab;
+const won = integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.ab_complete !== false &&
+  integ.accepted_overlay && integ.ref_med > 0 && integ.cand_med > integ.ref_med;
+for (const r of winners) {
+  const rec = { id: r.c.id, level: r.c.level, isolated_speedup: r.iso, gate: ab.gate, e2e_delta_pct: ab.e2e_delta_pct };
+  if (won) result.accepted.push({ ...rec, overlay: integ.accepted_overlay });
+  else result.rejected.push({ ...rec, stage: 'apply', reason: `combined A/B: ${ab.gate} ${ab.e2e_delta_pct}% ${ab.reason}`.slice(0, 600) });
+}
+if (won) {
+  result.final_overlay = integ.accepted_overlay;
+  result.final_throughput_tok_s = baseTput * integ.cand_med / integ.ref_med;
+  result.throughput_speedup = integ.cand_med / integ.ref_med;
+  result.status = 'accepted';
+  log(`[kf] combined stack ${ab.members.join('+')}: ${ab.gate}, ${ab.e2e_delta_pct}%`);
+  return result;
+}
+log(`[kf] combined stack ${ab.members.join('+')} not accepted (${ab.gate}, ${ab.e2e_delta_pct}%); main workflow keeps the original stack.`);
 result.status = 'no_gain';
 return result;
