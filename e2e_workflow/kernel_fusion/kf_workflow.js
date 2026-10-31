@@ -696,7 +696,7 @@ const kernelResult = (r) => ({ short_name: r.ext.short_name || r.c.id, task_dir:
   parity_note: r.c.bitwise_exact ? 'expected_exact' : 'expected_close' });
 // Each fused kernel alone on the live server first, correctness only (cheap: no throughput legs), so one
 // broken kernel cannot sink the set and the A/B measures only kernels that serve correct output.
-if (want('apply') && winners.length > 1 && !DEADLINE_HIT) {
+async function screen(list, label) {
   const sc = await safeAgent(roleAgent('e2e_integrator', 'integrate',
     `CORRECTNESS SCREEN ONLY -- no throughput legs. For EACH entry of KERNEL_RESULTS on its own, build a CAND overlay ` +
     `${EVAL_DIR}/overlay/screen_<short_name> = CURRENT_OVERLAY plus that entry's ready overlay_dir (its sitecustomize.py ` +
@@ -706,17 +706,32 @@ if (want('apply') && winners.length > 1 && !DEADLINE_HIT) {
     'the CAND server log. Return {members: [{short_name, correctness: "pass"|"fail", engaged, reason}]}.',
     { EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, SKILL_DIR: WORKFLOW_DIR, MEASUREMENT_PURPOSE: 'parity',
       ...KF_ACCURACY_INPUTS,
-      KERNEL_RESULTS: winners.map(kernelResult), CURRENT_OVERLAY: INIT_OVERLAY, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV }),
-    { phase: 'ApplyBack', label: 'kf:integrate screen', schema: SCREEN_SCHEMA });
-  const verdict = new Map(((sc && sc.members) || []).map((m) => [String(m.short_name), m]));
-  if (sc) {
-    for (const r of [...winners]) {
-      const m = verdict.get(String(r.ext.short_name || r.c.id)) || verdict.get(String(r.c.id));
-      if (!m || m.correctness !== 'pass') {
-        winners.splice(winners.indexOf(r), 1);
-        result.rejected.push({ id: r.c.id, stage: 'screen', isolated_speedup: r.iso,
-          reason: m ? `e2e correctness ${m.correctness}: ${m.reason || ''}`.slice(0, 600) : 'no screen verdict' });
-      }
+      KERNEL_RESULTS: list.map(kernelResult), CURRENT_OVERLAY: INIT_OVERLAY, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV }),
+    { phase: 'ApplyBack', label, schema: SCREEN_SCHEMA });
+  if (!sc) return null;
+  const verdict = new Map((sc.members || []).map((m) => [String(m.short_name), m]));
+  const failed = [];
+  for (const r of list) {
+    const m = verdict.get(String(r.ext.short_name || r.c.id)) || verdict.get(String(r.c.id));
+    if (!m || m.correctness !== 'pass') {
+      failed.push(r);
+      result.rejected.push({ id: r.c.id, stage: 'screen', isolated_speedup: r.iso,
+        reason: m ? `e2e correctness ${m.correctness}: ${m.reason || ''}`.slice(0, 600) : 'no screen verdict' });
+    }
+  }
+  return failed;
+}
+if (want('apply') && winners.length > 1 && !DEADLINE_HIT) {
+  const failed = await screen(winners, 'kf:integrate screen');
+  if (failed) {
+    for (const r of failed) winners.splice(winners.indexOf(r), 1);
+    // a slot whose primary failed the screen falls back to its smaller-scope alternative, screened the same way
+    const fbs = slots.filter((s) => failed.some((r) => r.c === s.primary) && s.fallback)
+      .map((s) => authoredById.get(String(s.fallback.id))).filter((r) => usable(r));
+    if (fbs.length && !DEADLINE_HIT) {
+      result.rejected = result.rejected.filter((x) => !(fbs.some((r) => r.c.id === x.id) && x.stage === 'apply'));
+      const fbFailed = await screen(fbs, 'kf:integrate screen (fallbacks)');
+      if (fbFailed) for (const r of fbs) if (!fbFailed.includes(r)) winners.push(r);
     }
     log(`[kf] correctness screen: ${winners.map((r) => r.c.id).join(', ') || 'none'} pass`);
   }

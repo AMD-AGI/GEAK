@@ -19,7 +19,7 @@ const CANDS = [
     exclusive_with: ['c1'], seam: { target_callable: 'pkg.moe:compact' }, est_gain_pct_expected: 1.6 },
   { id: 'c3', rank: 5, level: 'L3', region: 'moe stage', kernels: ['a', 'b'], difficulty: 2, seam: {}, est_gain_pct_expected: 9 },
 ];
-const ISO = { c1: scenario === 'fallback' ? 0.97 : 1.4, c2: (scenario === 'accept' || scenario === 'screen_fail' || scenario === 'reuse') ? 1.2 : 0.95, c1s: 1.6 };
+const ISO = { c1: scenario === 'fallback' ? 0.97 : 1.4, c2: (scenario === 'accept' || scenario === 'screen_fail' || scenario === 'reuse' || scenario === 'screen_fallback') ? 1.2 : 0.95, c1s: 1.6 };
 const won = (gate, d) => ({ gate, ab_complete: true, e2e_throughput_tok_s: 100 + d, ref_med: 100, cand_med: 100 + d,
   e2e_delta_pct: d, accepted_overlay: `${KF}/overlay/cand_${gate}` });
 
@@ -51,8 +51,9 @@ const answers = {
   'kf:analyst': () => ({ topk_json: `${KF}/analysis/topk.json`, report_path: `${KF}/analysis/report.md`,
     candidates: CANDS, recommended: ['c1', 'c2'], report_md: '# report', model_notes_md: '# notes' }),
   // each winner alone: correctness only
-  'kf:integrate screen': () => ({ members: [{ short_name: 'c1', correctness: 'pass' },
+  'kf:integrate screen': () => ({ members: [{ short_name: 'c1', correctness: scenario === 'screen_fallback' ? 'fail' : 'pass' },
     { short_name: 'c2', correctness: scenario === 'screen_fail' ? 'fail' : 'pass', reason: 'garbage output' }] }),
+  'kf:integrate screen (fallbacks)': () => ({ members: [{ short_name: 'c1s', correctness: 'pass' }] }),
   // ONE combined A/B of every winner
   'kf:integrate kf_stack': () => ({
     reject: { gate: 'rejected', e2e_throughput_tok_s: 99, ref_med: 100, cand_med: 99, e2e_delta_pct: -1, ab_complete: true, reason: 'slower' },
