@@ -7,9 +7,10 @@ baseline is measured on the fused stack). Switched off, nothing changes.
 
 ```
 trace ──► topk ──► author ──► apply
-(GEAK     (user    (GEAK      (GEAK e2e_integrator
-profiler)  prompt)  kernel     A/B, compounding
-                    layer)     overlay)
+(GEAK     (user    (UT: GEAK  (GEAK e2e_integrator
+profiler)  prompt)  skill;     A/B, compounding
+                    kernel:    overlay)
+                    agent)
 ```
 
 | Step | What runs | Reused GEAK code |
@@ -17,7 +18,7 @@ profiler)  prompt)  kernel     A/B, compounding
 | Setup | eval dir + baseline throughput | `roles/director.md` PHASE=setup, `bench_e2e.sh` |
 | `trace` | AgentX: the kernel-extract skill's workload measurement + sampling capture (points planned from the baseline log, one bounded probe each with Python stacks, `kernel_workload.json` weights); other workloads: one warm serving trace. Skipped when `trace_dir` is given | `knowledge/kernel_extraction_skills/kernel-extract` (stages 1-2), else `roles/profiler.md` |
 | `topk` | `kf_trace_digest.py` (deterministic), then the analyst agent applies **your prompt** → `analysis/topk.json` + the report the prompt asks for | `parse_profile.py` |
-| `author` | per recommended candidate **and its fallback** (the analyst's `fallback`, else the lowest-difficulty exclusive alternative of a difficulty ≥ 3 candidate): region UT, then a fused kernel | AgentX: kernel-extract skill `PHASE=prepare` (one joint-boundary task per region); else `roles/kernel_extractor.md`; then `kernel_workflow/kernel_lane.js` `mode=author` |
+| `author` | per recommended candidate **and its fallback** (the analyst's `fallback`, else the lowest-difficulty exclusive alternative of a difficulty ≥ 3 candidate): region UT, then a fused kernel | AgentX: kernel-extract skill `PHASE=prepare` (one joint-boundary task per region); else `roles/kernel_extractor.md`. The fused kernel itself: one agent per candidate, given the region and the UT, no GEAK kernel layer |
 | `apply` | per slot, serially: A/B the primary, else its fallback; `accepted`/`stack` overlays compound; then one combined confirmation of the whole stack vs the original baseline — only `validated_win` is handed to the main workflow | `roles/e2e_integrator.md` PHASE=integrate, `roles/director.md` PHASE=validate |
 
 ## Switch
@@ -42,7 +43,6 @@ GEAK_KERNEL_FUSION=0|1                                     # env
 | `source_dirs` | `GEAK_KF_SOURCE_DIRS` | installed packages | framework/op-library source for the analyst when it is not importable where the stage runs |
 | `steps` | `GEAK_KF_STEPS` | `trace,topk,author,apply` | subset to run; `topk` alone with `trace_dir` needs no GPU |
 | `author_k` | `GEAK_KF_AUTHOR_K` | 3 | recommended candidates to implement |
-| `kernel_budget` | `GEAK_KF_KERNEL_BUDGET` | 4 | kernel-layer rounds per candidate |
 | `validation_mode` / `validation_replicas` | `GEAK_KF_VALIDATION_MODE` / `_REPLICAS` | `isolated_server` / 2 | the director's combined confirmation of the whole fused stack |
 | `task` | `GEAK_KF_TASK` | — | operator constraints appended to every agent prompt (e.g. directories it must not read) |
 | `budget_s` | `GEAK_KF_BUDGET_S` | min(12 h, ⅓ of the run) | stage wall clock; the main workflow gets the rest |

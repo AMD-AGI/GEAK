@@ -36,7 +36,6 @@ _KNOBS = {
     "source_dirs": ("GEAK_KF_SOURCE_DIRS", "kf_source_dirs"),
     "steps": ("GEAK_KF_STEPS", "kf_steps"),
     "author_k": ("GEAK_KF_AUTHOR_K", "kf_author_k"),
-    "kernel_budget": ("GEAK_KF_KERNEL_BUDGET", "kf_kernel_budget"),
     "validation_mode": ("GEAK_KF_VALIDATION_MODE", "kf_validation_mode"),
     "validation_replicas": ("GEAK_KF_VALIDATION_REPLICAS", "kf_validation_replicas"),
     "task": ("GEAK_KF_TASK", "kf_task"),
