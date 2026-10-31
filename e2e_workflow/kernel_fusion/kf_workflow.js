@@ -71,6 +71,7 @@ const PROMPT = String(A.kf_prompt || `${KF_HOME}/default_prompt.md`);
 const PROMPTS = PROMPT.split(',').map((p) => p.trim()).filter(Boolean);   // several files drive one analysis
 const TRACE_DIR_IN = String(A.kf_trace_dir || '');          // existing traces: skip the capture
 const WORKLOAD_SUMMARY = String(A.kf_workload_summary || ''); // per-point weights, when the caller has them
+const BASELINE_DIR_IN = String(A.kf_baseline_dir || '');     // a measured baseline of this same stack: reused, not re-measured
 const SOURCE_DIRS = String(A.kf_source_dirs || '');           // framework source, when not importable here
 const STEPS = new Set(String(A.kf_steps || 'trace,topk,author,apply').split(',').map((s) => s.trim()).filter(Boolean));
 const want = (s) => STEPS.has(s);
@@ -273,7 +274,11 @@ let EVAL_DIR = KF_DIR, baseTput = 0, noiseBand = NOISE_BAND_DEFAULT;
 if (needsServer) {
   phase('Setup');
   const setup = await safeAgent(roleAgent('director', 'setup',
-    'Build the isolated KernelFusion eval dir (use EVAL_DIR_OVERRIDE exactly) and record the baseline throughput.', {
+    'Build the isolated KernelFusion eval dir (use EVAL_DIR_OVERRIDE exactly) and record the baseline throughput.' +
+    (BASELINE_DIR_IN ? ` The baseline of this exact stack (same flags, env, overlay, workload) was already measured in ` +
+      `${BASELINE_DIR_IN}: do every setup step EXCEPT the baseline measurement -- launch no server and no bench; copy ` +
+      `that dir to EVAL_DIR/baseline (cp -a) and return its bench_summary.json throughput_tok_s_median as ` +
+      'baseline_throughput_tok_s.' : ''), {
       LAUNCH_SCRIPT, MODEL_PATH, EXP_ROOT: KF_DIR.replace(/\/[^/]*$/, ''), EVAL_DIR_OVERRIDE: KF_DIR,
       MODEL_NAME_HINT: MODEL_PATH.replace(/\/+$/, '').split('/').pop(), TASK: '', GPU_IDS, WORKLOAD,
       INIT_FLAGS, INIT_ENV, INIT_BASE_OVERLAY: INIT_OVERLAY, MEASUREMENT_PURPOSE: 'parity',

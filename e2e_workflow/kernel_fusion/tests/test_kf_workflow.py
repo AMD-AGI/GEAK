@@ -183,3 +183,11 @@ def test_script_uses_no_sandbox_forbidden_construct():
     # the native Workflow runtime rejects these (interface/runtime/engine/conformance.mjs A-forbidden)
     src = (E2E_DIR / "kernel_fusion" / "kf_workflow.js").read_text()
     assert not re.search(r"\bDate\.now\b|\bMath\.random\b|\bnew\s+Date\b|\bprocess\.|\brequire\s*\(|\bimport\s*\(", src)
+
+
+def test_a_measured_baseline_is_reused_not_remeasured():
+    out = run("reuse_baseline")
+    assert labels(out)[:2] == ["kf:director:setup", "kf:analyst"]            # given traces: no capture either
+    setup = out["calls"][0]["prompt"]
+    assert "already measured in /old/kf/baseline" in setup and "launch no server and no bench" in setup
+    assert "already measured" not in run("accept")["calls"][0]["prompt"]

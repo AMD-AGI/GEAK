@@ -31,6 +31,7 @@ _KNOBS = {
     "prompt": ("GEAK_KF_PROMPT", "kf_prompt"),
     "trace_dir": ("GEAK_KF_TRACE_DIR", "kf_trace_dir"),
     "workload_summary": ("GEAK_KF_WORKLOAD_SUMMARY", "kf_workload_summary"),
+    "baseline_dir": ("GEAK_KF_BASELINE_DIR", "kf_baseline_dir"),
     "source_dirs": ("GEAK_KF_SOURCE_DIRS", "kf_source_dirs"),
     "steps": ("GEAK_KF_STEPS", "kf_steps"),
     "author_k": ("GEAK_KF_AUTHOR_K", "kf_author_k"),
@@ -85,7 +86,7 @@ def build_args(cfg: dict, ps_args: dict, budget_s: int) -> dict:
     for key, (_env, arg) in _KNOBS.items():
         if arg and cfg.get(key) not in (None, ""):
             a[arg] = cfg[key]
-    for path_key in ("kf_prompt", "kf_trace_dir", "kf_workload_summary"):
+    for path_key in ("kf_prompt", "kf_trace_dir", "kf_workload_summary", "kf_baseline_dir"):
         if a.get(path_key):
             # kf_prompt may name several files (comma-separated): all of them drive the analysis.
             a[path_key] = ",".join(str(Path(p.strip()).expanduser().resolve())
@@ -98,7 +99,7 @@ def build_args(cfg: dict, ps_args: dict, budget_s: int) -> dict:
 def validate(args: dict) -> list[str]:
     """Problems that make the stage pointless to start (the analysis has nothing to work from)."""
     probs = []
-    for k in ("kf_prompt", "kf_trace_dir", "kf_workload_summary"):
+    for k in ("kf_prompt", "kf_trace_dir", "kf_workload_summary", "kf_baseline_dir"):
         for p in str(args.get(k) or "").split(","):
             if p and not Path(p).exists():
                 probs.append(f"{k} does not exist: {p}")

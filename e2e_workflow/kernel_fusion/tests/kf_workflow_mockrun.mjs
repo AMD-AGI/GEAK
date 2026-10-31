@@ -89,6 +89,7 @@ const args = { workflow_dir: WF_DIR, kf_dir: KF, model_path: '/models/M', gpu_id
   initial_extra_env: 'SGLANG_USE_AITER=1 SGLANG_SIMULATE_ACC_LEN=4.05 SGLANG_SIMULATE_ACC_METHOD=match-expected HF_HUB_OFFLINE=1',
   correctness_unset_env: 'SGLANG_SIMULATE_ACC_LEN,SGLANG_SIMULATE_ACC_METHOD' };
 if (scenario === 'analysis_only') Object.assign(args, { kf_steps: 'topk', kf_trace_dir: '/traces/x' });
+if (scenario === 'reuse_baseline') Object.assign(args, { kf_baseline_dir: '/old/kf/baseline', kf_trace_dir: '/traces/x' });
 
 const src = (await readFile(`${WF_DIR}/kernel_fusion/kf_workflow.js`, 'utf8'))
   .replace(/^[ \t]*export\s+(?=(const|let|var|function|class|async|default)\b)/gm, '');
