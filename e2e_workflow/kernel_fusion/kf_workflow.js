@@ -206,11 +206,16 @@ ${KF_TASK ? `\n## Operator constraints\n${KF_TASK}\n` : ''}
 Return ONLY the structured JSON requested above.`;
 }
 
+// The guard only stops WAITING: the agent keeps running, and safeAgent then starts a second one on the same
+// job. Steps that own long serving legs (the screen, the combined A/B) therefore get APPLY_TIMEOUT_MS.
+const APPLY_TIMEOUT_MS = parseInt(A.kf_apply_timeout_ms != null ? A.kf_apply_timeout_ms : 6 * 3600 * 1000, 10);
 function bounded(prompt, opts) {
-  const p = agent(PROCESS_SAFETY + prompt, opts);
-  if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) return p;
+  const { timeoutMs, ...agentOpts } = opts;
+  const limit = timeoutMs != null ? timeoutMs : AGENT_TIMEOUT_MS;
+  const p = agent(PROCESS_SAFETY + prompt, agentOpts);
+  if (typeof setTimeout !== 'function' || !(limit > 0)) return p;
   let to;
-  const guard = new Promise((resolve) => { to = setTimeout(() => resolve(null), AGENT_TIMEOUT_MS); });
+  const guard = new Promise((resolve) => { to = setTimeout(() => resolve(null), limit); });
   return Promise.race([p.then((r) => { clearTimeout(to); return r; }, (e) => { clearTimeout(to); throw e; }), guard]);
 }
 
@@ -715,7 +720,7 @@ async function screen(list, label) {
     { EVAL_DIR, MODEL_PATH, GPU_ID: SERVING_GPU, WORKLOAD, SKILL_DIR: WORKFLOW_DIR, MEASUREMENT_PURPOSE: 'parity',
       ...KF_ACCURACY_INPUTS,
       KERNEL_RESULTS: list.map(kernelResult), CURRENT_OVERLAY: INIT_OVERLAY, CURRENT_FLAGS: INIT_FLAGS, CURRENT_ENV: INIT_ENV }),
-    { phase: 'ApplyBack', label, schema: SCREEN_SCHEMA });
+    { phase: 'ApplyBack', label, schema: SCREEN_SCHEMA, timeoutMs: APPLY_TIMEOUT_MS });
   if (!sc) return null;
   const verdict = new Map((sc.members || []).map((m) => [String(m.short_name), m]));
   const failed = [];
@@ -768,13 +773,13 @@ const intro = `Apply ALL ${winners.length} fused kernels in KERNEL_RESULTS at on
   'EVERY entry\'s engaged_banner in the CAND server log (a kernel that never engages is reported in reason). ' +
   'Return the gate for the whole set; accepted_overlay = the CAND overlay when it is accepted or stack.';
 let integ = await safeAgent(roleAgent('e2e_integrator', 'integrate', intro, inputs),
-  { phase: 'ApplyBack', label: `kf:integrate ${stackName}`, schema: INTEGRATE_SCHEMA });
+  { phase: 'ApplyBack', label: `kf:integrate ${stackName}`, schema: INTEGRATE_SCHEMA, timeoutMs: APPLY_TIMEOUT_MS });
 // finish only an A/B that is genuinely unfinished; a correctness reject is final (it skips the timed legs on purpose)
 for (let t = 1; t <= AB_FINISH_RETRIES && (!integ || integ.gate === 'incomplete'); t++) {
   integ = await safeAgent(roleAgent('e2e_integrator', 'integrate',
     'FINISH this e2e A/B of the combined fused stack: reuse a reference leg already on disk if usable, run the ' +
     'missing leg, then return the gate. ' + intro, { ...inputs, RESUME_AB: true }),
-    { phase: 'ApplyBack', label: `kf:integrate ${stackName} (finish ${t})`, schema: INTEGRATE_SCHEMA });
+    { phase: 'ApplyBack', label: `kf:integrate ${stackName} (finish ${t})`, schema: INTEGRATE_SCHEMA, timeoutMs: APPLY_TIMEOUT_MS });
 }
 const ab = { members: winners.map((r) => r.c.id), gate: integ ? integ.gate : 'incomplete',
   e2e_delta_pct: integ ? integ.e2e_delta_pct : null, ref_med: integ ? integ.ref_med : null,
