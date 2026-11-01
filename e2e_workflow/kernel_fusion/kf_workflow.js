@@ -680,12 +680,20 @@ for (const r of authored) {
 // e2e win is handed to the main workflow.
 // ---------------------------------------------------------------------------
 phase('ApplyBack');
-const winners = slots.map((s) => [s.primary, s.fallback].filter(Boolean)
-  .map((c) => authoredById.get(String(c.id))).find(usable)).filter(Boolean);
-for (const s of slots) {
-  const fb = s.fallback && authoredById.get(String(s.fallback.id));
-  if (fb && usable(fb) && !winners.includes(fb)) {
-    result.rejected.push({ id: s.fallback.id, stage: 'apply', reason: `not needed: primary ${s.primary.id} is in the stack`, isolated_speedup: fb.iso });
+// Per slot, the usable kernel that saves the most device time goes in: region share x (1 - 1/isolated
+// speedup). The primary is not preferred just for being the primary -- a wider region that barely beats
+// stock loses to a narrower fallback with a real win. The other one stays as the slot's backup.
+const saving = (r) => (Number(r.c.region_pct_device_time) || 1) * (1 - 1 / r.iso);
+const slotPick = slots.map((s) => {
+  const ok = [s.primary, s.fallback].filter(Boolean).map((c) => authoredById.get(String(c.id))).filter(usable)
+    .sort((a, b) => saving(b) - saving(a));
+  return { slot: s, pick: ok[0] || null, backup: ok[1] || null };
+});
+const winners = slotPick.map((x) => x.pick).filter(Boolean);
+for (const x of slotPick) {
+  if (x.backup) {
+    result.rejected.push({ id: x.backup.c.id, stage: 'apply', isolated_speedup: x.backup.iso,
+      reason: `not needed: ${x.pick.c.id} saves more device time in this slot` });
   }
 }
 const kernelResult = (r) => ({ short_name: r.ext.short_name || r.c.id, task_dir: r.ext.task_dir, op_kind: 'fusion',
@@ -725,9 +733,8 @@ if (want('apply') && winners.length > 1 && !DEADLINE_HIT) {
   const failed = await screen(winners, 'kf:integrate screen');
   if (failed) {
     for (const r of failed) winners.splice(winners.indexOf(r), 1);
-    // a slot whose primary failed the screen falls back to its smaller-scope alternative, screened the same way
-    const fbs = slots.filter((s) => failed.some((r) => r.c === s.primary) && s.fallback)
-      .map((s) => authoredById.get(String(s.fallback.id))).filter((r) => usable(r));
+    // a slot whose pick failed the screen falls back to its backup, screened the same way
+    const fbs = slotPick.filter((x) => failed.includes(x.pick) && x.backup).map((x) => x.backup);
     if (fbs.length && !DEADLINE_HIT) {
       result.rejected = result.rejected.filter((x) => !(fbs.some((r) => r.c.id === x.id) && x.stage === 'apply'));
       const fbFailed = await screen(fbs, 'kf:integrate screen (fallbacks)');
