@@ -257,3 +257,12 @@ def test_a_primary_that_fails_the_screen_is_replaced_by_its_screened_fallback():
     r = out["result"]
     assert sorted(a["id"] for a in r["accepted"]) == ["c1s", "c2"] and ("c1", "screen") in rejected(r)
     assert ("c1s", "apply") not in rejected(r)
+
+
+def test_the_kernel_saving_more_device_time_wins_the_slot_not_the_primary():
+    # c1 (4% of device time) barely beats stock (1.005x); its fallback c1s has a real 1.6x win
+    out = run("pick_fallback")
+    sc = next(c["prompt"] for c in out["calls"] if c["label"] == "kf:integrate screen")
+    assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' in sc and f'"overlay_dir":"{KF}/kernels/c1/overlay"' not in sc
+    r = out["result"]
+    assert sorted(a["id"] for a in r["accepted"]) == ["c1s", "c2"] and ("c1", "apply") in rejected(r)
