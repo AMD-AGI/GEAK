@@ -266,3 +266,11 @@ def test_the_kernel_saving_more_device_time_wins_the_slot_not_the_primary():
     assert f'"overlay_dir":"{KF}/kernels/c1s/overlay"' in sc and f'"overlay_dir":"{KF}/kernels/c1/overlay"' not in sc
     r = out["result"]
     assert sorted(a["id"] for a in r["accepted"]) == ["c1s", "c2"] and ("c1", "apply") in rejected(r)
+
+
+def test_apply_steps_outlast_the_default_agent_timeout():
+    # the combined A/B owns hours of serving legs: a 2 h guard would start a second agent on the same job
+    src = (E2E_DIR / "kernel_fusion" / "kf_workflow.js").read_text()
+    for label in ("label, schema: SCREEN_SCHEMA", "label: `kf:integrate ${stackName}`, schema: INTEGRATE_SCHEMA"):
+        assert re.search(re.escape(label) + r", timeoutMs: APPLY_TIMEOUT_MS", src), label
+    assert re.search(r"APPLY_TIMEOUT_MS = .*6 \* 3600 \* 1000", src)

@@ -71,6 +71,7 @@ for (const id of Object.keys(ISO)) {
 }
 
 async function agent(prompt, opts) {
+  if ('timeoutMs' in opts) throw new Error('timeoutMs must not reach the agent() call');
   calls.push({ label: opts.label, phase: opts.phase, prompt });
   if (opts.label.startsWith('kf:author ')) {
     // the fused kernel is written by one author agent against the region UT
