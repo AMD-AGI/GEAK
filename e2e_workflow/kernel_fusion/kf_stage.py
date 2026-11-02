@@ -44,6 +44,7 @@ _KNOBS = {
     "author_k": ("GEAK_KF_AUTHOR_K", "kf_author_k"),
     "validation_mode": ("GEAK_KF_VALIDATION_MODE", "kf_validation_mode"),
     "validation_replicas": ("GEAK_KF_VALIDATION_REPLICAS", "kf_validation_replicas"),
+    "baseline_mode": ("GEAK_KF_BASELINE_MODE", "kf_baseline_mode"),
     "task": ("GEAK_KF_TASK", "kf_task"),
     "budget_s": ("GEAK_KF_BUDGET_S", None),
     "kf_dir": ("GEAK_KF_DIR", "kf_dir"),
@@ -118,7 +119,7 @@ def build_args(cfg: dict, ps_args: dict, budget_s: int) -> dict:
         # a finished analysis is passed in whole: the workflow script cannot read files, and an agent
         # asked to echo a large topk.json back may drop its candidates
         d = _read_json(Path(a["kf_topk_json"])) or {}
-        a["kf_topk"] = slim_topk(d, int(a.get("kf_author_k") or 3))
+        a["kf_topk"] = slim_topk(d, int(a.get("kf_author_k") or 0))
     if cfg.get("reuse_journal"):
         reuse: dict = {}
         for j in str(cfg["reuse_journal"]).split(","):          # several runs: a later journal wins per label
@@ -140,9 +141,13 @@ AUTHOR_KEYS = ("final_patch", "work_dir", "overlay_dir", "banner", "isolated_spe
 
 
 def slim_topk(d: dict, author_k: int) -> dict:
-    """The recommended candidates the stage implements, plus every candidate they name (fallback / exclusive)."""
+    """Every candidate (the triage agent judges them all); with an author_k cap, only the first author_k
+    recommended ones plus every candidate they name (fallback / exclusive)."""
     cands = {str(c.get("id")): c for c in d.get("candidates") or [] if isinstance(c, dict)}
-    rec = [str(i) for i in d.get("recommended") or []][:max(author_k, 1)]
+    rec = [str(i) for i in d.get("recommended") or []]
+    if author_k <= 0:
+        return {"candidates": [{k: c[k] for k in CAND_KEYS if k in c} for c in cands.values()], "recommended": rec}
+    rec = rec[:author_k]
     keep = set(rec)
     for i in rec:
         c = cands.get(i) or {}
