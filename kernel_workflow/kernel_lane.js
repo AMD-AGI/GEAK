@@ -912,6 +912,7 @@ async function __routePick(p, o) {
     return { skip: true, scope };
   }
   if (ROUTE_EIKOS_ON) return __routeEikosPick(p, o, scope);
+  if (ROUTE_P1_ON) return __p1Pick(p, o, scope);   // eikos v2 E1: gated, OFF by default (route_decider=p1 only)
   let st = __routeLadder[scope];
   if (!st || st.pending) {                   // classify once; RE-classify only after a failed cycle
     const d = await __routeClassify(p, o, scope, st);
@@ -926,6 +927,7 @@ async function __routePick(p, o) {
   }
   __routeAudit.push({ event: 'dispatch', scope, label: (o && o.label) || '', phase: (o && o.phase) || '',
                       model: ROUTE_LANES[lane], capped });
+  __p1Shadow('sonnet', scope, (o && o.label) || '', ROUTE_LANES[lane]);   // eikos v2 E1 shadow: never changes the pick above
   return { model: ROUTE_LANES[lane], scope };
 }
 // Deterministic outcome of one cycle for a worker scope. ok=false queues a re-classification before the
@@ -933,9 +935,11 @@ async function __routePick(p, o) {
 // `kind` names the failure: work_product, non_improvement, invalid_measurement or no_result. The Sonnet
 // decider counts every failure as before and only records the kind; the Eikos decider treats them apart.
 function __routeOutcome(scope, ok, evidence, kind, source, label, dispatchId) {
+  if (ROUTE_P1_ON) return __p1OutcomeLive(scope, ok, evidence, kind || 'work_product', source, label, dispatchId);  // gated; OFF by default
   const st = __routeLadder[scope];
   if (!st) return;
   if (st.decider === 'eikos') return __routeEikosOutcome(st, scope, ok, evidence, kind || 'work_product', source, label, dispatchId);
+  __p1Observe(scope, ROUTE_LANES[st.lane], ok, kind || 'work_product');   // eikos v2 E1 shadow: updates ONLY __p1Ladder
   if (ok) { st.fails = 0; return; }
   st.fails++;
   st.pending = true;
@@ -952,6 +956,8 @@ function __routeReport() {
            session_output_tokens_at_start: ROUTE_SPENT_AT_START,
            ladder: __routeLadder, audit: __routeAudit,
            config_errors: __routeConfigErrors,   // arguments the lane could not use, and what it used instead
+           // eikos v2 (E1): P1 measured-signal router. Shadow summary even when OFF; `live` is true only under route_decider=p1.
+           p1: { reducer: P1_REDUCER_VERSION, live: ROUTE_P1_ON, shadow: __p1ShadowSummary() },
            // route_decider=eikos only: its settings, all reported as unvalidated experimental values.
            eikos: ROUTE_EIKOS_ON ? { question: ROUTE_EIKOS_QUESTION_VERSION, policy: ROUTE_EIKOS_POLICY_VERSION,
              reducer: ROUTE_REDUCER_VERSION, tau: ROUTE_EIKOS_TAU, tau_status: 'unvalidated_experimental',
@@ -975,12 +981,17 @@ function __routeReport() {
 // occurrence is one frozen card (`seq`); replaying it reuses it, and a new attempt after a completed one
 // is a new occurrence. Only a host-verified work-product failure counts against a lane.
 const ROUTE_EIKOS_ON = ROUTE_DECIDER === 'eikos';
+// eikos v2 (E1): P1 is the DETERMINISTIC measured-signal host router (no model, no d3). OFF by default:
+// route_decider stays 'sonnet'/'eikos' and P1 only runs in SHADOW (a 'p1_shadow' audit beside the live
+// pick). Selecting route_decider=p1 (a later E1 canary; separate go) flips the gated __p1Pick live. With
+// it unselected (ROUTE_P1_ON=false) the default path is byte-identical to today.
+const ROUTE_P1_ON = ROUTE_DECIDER === 'p1';
 const ROUTE_EIKOS_QUESTION = 'lane_sufficiency';
 const ROUTE_EIKOS_QUESTION_VERSION = 'lane_sufficiency.v3';
 const ROUTE_EIKOS_POLICY_VERSION = 'lane_sufficiency.policy.v1';
 const ROUTE_REDUCER_VERSION = 'lane_reduce.v2';
 const __routeConfigErrors = [];
-if (['sonnet', 'eikos', 'jev'].indexOf(ROUTE_DECIDER) < 0) {
+if (['sonnet', 'eikos', 'jev', 'p1'].indexOf(ROUTE_DECIDER) < 0) {
   __routeConfigErrors.push(`route_decider=${JSON.stringify(ROUTE_DECIDER)} is unknown; the Sonnet decider is used`);
 }
 // The existing knobs keep their reviewed parsing; a value it would coerce is recorded, not hidden.
@@ -1338,6 +1349,7 @@ function __routeEikosPick(p, o, scope) {
                           live_model: red.model, episode_model: __redShadow.model,
                           differ: red.model !== __redShadow.model,
                           effective_rank: now.effective_rank, lo_live: red.lower_rank, lo_episode: __redShadow.lower_rank });
+      __p1Shadow('eikos', scope, label, red.model);   // eikos v2 E1 shadow: P1's measured-signal pick beside the live eikos pick; never changes `red`
       const interventions = [];
       if (res.host_changed) interventions.push('decision reused from a different host input; reduced on the current one');
       if (JSON.stringify(now) !== JSON.stringify(host)) interventions.push('host input changed during the consultation; reduced on the current one');
@@ -1408,6 +1420,7 @@ function __routeEikosOutcome(st, scope, ok, evidence, kind, source, label, dispa
     return;
   }
   d.outcome = ok ? 'ok' : kind;
+  __p1Observe(scope, d.model, ok, kind);   // eikos v2 E1 shadow: updates ONLY __p1Ladder (never the eikos state below)
   if (ok) return;
   const ev = String(evidence == null ? '' : evidence).slice(0, 300);
   st.history = st.history.concat([{ lane: d.model, outcome: kind, evidence: ev, source: String(source || 'host').slice(0, 80) }]).slice(-6);
@@ -1422,6 +1435,184 @@ function __routeEikosOutcome(st, scope, ok, evidence, kind, source, label, dispa
     kind, evidence: ev, source: source || 'host', late: !current, fails_on_lane: st.fails_by_lane[d.model] || 0,
     scope_floor_rank: st.floor_rank, reconsult_next_attempt: current && (kind === 'work_product' || kind === 'non_improvement') });
 }
+
+// <<P1-ROUTER-START>>  (eikos v2 — E1: the P1 deterministic measured-signal host router)
+// P1 reduces over MEASURED host signals ONLY — class/operator/scope floors, per-lane work_product failure
+// counts and the corrected episode identity (effective_rank is a measured fact, NEVER a floor). It makes
+// NO model call and NO d3 consultation. A scope climbs toward Opus ONLY when an objective, worker-
+// attributable work_product failure has raised its EARNED floor; a non_improvement feeds a SEPARATE
+// stagnation counter and never climbs; invalid_measurement / no_result (infra) move nothing. P1 never
+// reaches for a dearer lane speculatively — with no estimate it always takes the cheapest feasible lane at
+// or above the earned floor.
+//
+// FIRST LANDING = SHADOW ONLY. P1 keeps its OWN state (__p1Ladder, new keys) and its OWN reducer
+// (__p1Reduce); it never mutates any legacy task_key / effective_rank / quota / persisted decision, never
+// touches the eikos cards or history, and makes no synchronous model call. At each live pick __p1Shadow
+// records {live_pick, p1_pick, differ, signals} as a 'p1_shadow' audit event WITHOUT changing the live
+// pick. The gated __p1Pick / __p1OutcomeLive live path is reached only under route_decider=p1 (ROUTE_P1_ON),
+// a later E1 canary that needs separate go.
+const P1_REDUCER_VERSION = 'p1_measured.v1';
+const __p1Ladder = {};   // scope -> P1's OWN measured-signal state, kept apart from __routeLadder
+// A fresh P1 scope. floor_rank starts at the class floor and is the ONLY thing a work_product failure
+// raises; effective_rank is the highest lane that actually ran (measured), reported but never a floor;
+// stagnation counts non_improvement outcomes apart from any lane escalation.
+function __p1NewState(cls) {
+  return { scope_class: cls, fails_by_lane: {}, floor_rank: ROUTE_CLASS_FLOOR[cls], effective_rank: -1,
+           stagnation: 0, occurrences: 0 };
+}
+// The MEASURED reduction inputs for a scope, read from __p1Ladder. No estimates, no model, no d3. The
+// top-lane quota is READ from the live counter so P1 honours the same budget, but shadow never consumes it.
+function __p1HostInput(scope, cls) {
+  const st = __p1Ladder[scope];
+  const fails = st ? st.fails_by_lane : {};
+  return { reducer_version: P1_REDUCER_VERSION, scope_class: cls,
+           policy_rank: ROUTE_LANES.slice(), price_order: ROUTE_PRICE_ORDER.slice(),
+           class_floor_rank: ROUTE_CLASS_FLOOR[cls], operator_floor_rank: __routeOpFloorRank(scope),
+           scope_floor_rank: st ? st.floor_rank : ROUTE_CLASS_FLOOR[cls],
+           effective_rank: st ? st.effective_rank : -1,            // measured only; NOT a floor
+           stagnation: st ? st.stagnation : 0,
+           excluded: ROUTE_LANES.filter((m) => (fails[m] || 0) >= ROUTE_CLASS_MAX_FAILS[cls]),
+           top_quota_left: ROUTE_MAX_TOP_DISPATCHES == null ? null : Math.max(0, ROUTE_MAX_TOP_DISPATCHES - __routeTopUsed),
+           available: ROUTE_LANES.slice() };
+}
+// Pure: the P1 signal->lane decision tree. x is __p1HostInput(). The floor is the MAX of the class,
+// operator and EARNED scope floors — effective_rank is deliberately NOT a floor (corrected episode
+// identity). Excluded and unavailable lanes and a used-up top-lane quota are removed; with nothing left the
+// worker is deferred. Otherwise P1 takes the CHEAPEST feasible lane at or above the earned floor — with no
+// estimate and no speculation. No I/O, no clock, no shared state. The legacy __routeReduce is UNCHANGED;
+// this is a separate, simpler reducer (same floor/feasibility shape, minus the estimate/tau selection).
+function __p1Reduce(x) {
+  const top = x.policy_rank[x.policy_rank.length - 1];
+  const lo = Math.max(x.class_floor_rank, x.operator_floor_rank, x.scope_floor_rank);  // effective_rank NOT a floor
+  const allowed = x.policy_rank.filter((m, r) => r >= lo && x.excluded.indexOf(m) < 0);
+  const filtered = [];
+  const feasible = x.price_order.filter((m) => allowed.indexOf(m) >= 0).filter((m) => {
+    const why = x.available.indexOf(m) < 0 ? 'unavailable'
+      : (m === top && x.top_quota_left != null && !(x.top_quota_left > 0)) ? 'top-lane quota used' : null;   // null quota: no cap
+    if (why) filtered.push({ model: m, why });
+    return !why;
+  });
+  const base = { reducer_version: x.reducer_version, lower_rank: lo, allowed, feasible, filtered,
+                 excluded: x.excluded, effective_rank: x.effective_rank, stagnation: x.stagnation,
+                 scope_floor_rank: x.scope_floor_rank };
+  if (!feasible.length) {
+    return Object.assign(base, { model: null, reason: `no feasible lane at policy rank >= ${lo}: the worker is deferred` });
+  }
+  return Object.assign(base, { model: feasible[0],
+    reason: `cheapest feasible lane at or above the earned floor ${lo} (deterministic; no model/d3 consult)` });
+}
+// Update P1's OWN measured state from a dispatch outcome. `liveModel` is the lane that actually ran (the
+// live decider's pick in shadow mode, or P1's own pick when it is live). Only a work_product failure earns
+// the next lane up (mirrors the legacy earned floor); a non_improvement bumps the stagnation counter apart;
+// invalid_measurement / no_result (infra) move nothing. Writes ONLY __p1Ladder — never any legacy state.
+function __p1Observe(scope, liveModel, ok, kind) {
+  const st = __p1Ladder[scope];
+  if (!st) return;                                   // only scopes P1 has shadowed/decided
+  if (liveModel != null && __routeRank(liveModel) >= 0) {
+    st.effective_rank = Math.max(st.effective_rank, __routeRank(liveModel));   // measured fact, not a floor
+  }
+  if (ok) { st.stagnation = 0; return; }
+  if (kind === 'work_product' && liveModel != null && __routeRank(liveModel) >= 0) {
+    st.fails_by_lane[liveModel] = (st.fails_by_lane[liveModel] || 0) + 1;
+    if (st.fails_by_lane[liveModel] >= ROUTE_CLASS_MAX_FAILS[st.scope_class]) {
+      st.floor_rank = Math.max(st.floor_rank, __routeRank(liveModel) + 1);   // earn the next lane up
+    }
+  } else if (kind === 'non_improvement') {
+    st.stagnation += 1;                              // SEPARATE stagnation counter; never climbs the ladder
+  }
+  // invalid_measurement / no_result: not worker-attributable — neither excludes a lane nor stagnates.
+}
+// Shadow emission (observability only). Ensures P1's scope state exists, computes P1's would-be pick on the
+// CURRENT measured signals and records {live_pick, p1_pick, differ, signals} as a 'p1_shadow' audit event
+// WITHOUT changing the live pick. Returns the P1 reduction.
+function __p1Shadow(decider, scope, label, liveModel) {
+  if (!__p1Ladder[scope]) __p1Ladder[scope] = __p1NewState(__routeScopeClass(scope));
+  const st = __p1Ladder[scope];
+  const cls = st.scope_class;
+  const x = __p1HostInput(scope, cls);
+  const red = __p1Reduce(x);
+  const lp = liveModel == null ? null : liveModel;
+  __routeAudit.push({ event: 'p1_shadow', decider, scope, label: label || '', scope_class: cls,
+    live_pick: lp, p1_pick: red.model, differ: lp !== red.model,
+    signals: { class_floor_rank: x.class_floor_rank, operator_floor_rank: x.operator_floor_rank,
+               scope_floor_rank: x.scope_floor_rank, lower_rank: red.lower_rank, effective_rank: x.effective_rank,
+               fails_by_lane: Object.assign({}, st.fails_by_lane), stagnation: x.stagnation,
+               excluded: red.excluded, top_quota_left: x.top_quota_left, allowed: red.allowed, feasible: red.feasible },
+    p1_reason: red.reason });
+  return red;
+}
+// GATED LIVE path (route_decider=p1). NOT the default and NOT reached unless explicitly selected; a later
+// E1 canary flips it on (separate go). Reuses the shadow state and the pure P1 reducer, issues a host
+// dispatch id, and honours the kill switch and the top-lane quota exactly like the other deciders.
+function __p1Pick(p, o, scope) {
+  return __routeSerial(scope, async () => {
+    const label = String((o && o.label) || '');
+    const cls = __routeScopeClass(scope);
+    if (!__p1Ladder[scope]) __p1Ladder[scope] = __p1NewState(cls);
+    const st = __p1Ladder[scope];
+    st.occurrences++;
+    const x = __p1HostInput(scope, cls);
+    const red = __p1Reduce(x);
+    st.model = red.model; st.lane = red.model ? __routeRank(red.model) : -1; st.why = red.reason;
+    __routeAudit.push({ event: 'decide', decider: 'p1', scope, label, scope_class: cls, seq: st.occurrences,
+      decided: red.model, lower_rank: red.lower_rank, allowed: red.allowed, feasible: red.feasible,
+      scope_floor_rank: x.scope_floor_rank, effective_rank: x.effective_rank, stagnation: x.stagnation,
+      excluded: red.excluded, reduce: red, why: red.reason });
+    if (!red.model) {
+      __routeAudit.push({ event: 'skip', decider: 'p1', scope, label, seq: st.occurrences, why: 'deferred: no feasible lane' });
+      return { skip: true, deferred: true, scope, reason: 'no feasible lane (deferred)' };
+    }
+    if (__routeOverBudget()) {
+      __routeAudit.push({ event: 'skip', decider: 'p1', scope, label, seq: st.occurrences, why: 'kill switch tripped before the worker' });
+      return { skip: true, scope, reason: 'output-token cap reached' };
+    }
+    if (red.model === ROUTE_MODEL_BRAIN) __routeTopUsed++;        // consume a top-lane unit, like the other deciders
+    const id = `d${++__routeDispatchSeq}`;
+    st.effective_rank = Math.max(st.effective_rank, __routeRank(red.model));
+    const rec = { id, label, scope, seq: st.occurrences, model: red.model, outcome: null, decider: 'p1' };
+    __routeDispatchById[id] = rec;
+    (__routeDispatches[label] = __routeDispatches[label] || []).push(rec);
+    __routeAudit.push({ event: 'dispatch', decider: 'p1', scope, label, dispatch_id: id, seq: st.occurrences,
+                        phase: (o && o.phase) || '', model: red.model, capped: false });
+    return { model: red.model, scope, dispatch_id: id };
+  });
+}
+// GATED LIVE outcome handler (route_decider=p1). Binds by the host-issued dispatch id like the eikos path,
+// then updates P1's measured state via __p1Observe. Reached only when ROUTE_P1_ON.
+function __p1OutcomeLive(scope, ok, evidence, kind, source, label, dispatchId) {
+  const d = dispatchId != null ? __routeDispatchById[dispatchId] : null;
+  const why = dispatchId == null ? 'no dispatch id' : !d ? 'unknown dispatch id'
+    : (d.label !== String(label || '') || d.scope !== scope) ? 'dispatch id issued for another label or scope'
+    : d.outcome != null ? `duplicate: outcome already recorded (${d.outcome})` : '';
+  if (why) {
+    __routeAudit.push({ event: 'outcome_ignored', decider: 'p1', scope, label: label || '',
+                        dispatch_id: dispatchId == null ? null : dispatchId, ok, kind, why });
+    return;
+  }
+  d.outcome = ok ? 'ok' : (kind || 'work_product');
+  __p1Observe(scope, d.model, ok, kind || 'work_product');
+  if (ok) return;
+  const ev = String(evidence == null ? '' : evidence).slice(0, 300);
+  const st = __p1Ladder[scope];
+  __routeAudit.push({ event: 'fail', decider: 'p1', scope, label: label || '', dispatch_id: d.id, seq: d.seq,
+    model: d.model, kind: kind || 'work_product', evidence: ev, source: source || 'host',
+    fails_on_lane: st ? (st.fails_by_lane[d.model] || 0) : 0, scope_floor_rank: st ? st.floor_rank : null,
+    stagnation: st ? st.stagnation : null });
+}
+// Report summary: how often P1 would have differed from the live pick, and the direction of each difference.
+function __p1ShadowSummary() {
+  const ev = __routeAudit.filter((e) => e.event === 'p1_shadow');
+  const differ = ev.filter((e) => e.differ === true);
+  const byDir = {};
+  differ.forEach((e) => {
+    const k = `${e.live_pick || 'defer'}->${e.p1_pick || 'defer'}`;
+    byDir[k] = (byDir[k] || 0) + 1;
+  });
+  const cheaperOrEqual = differ.filter((e) => e.p1_pick && e.live_pick &&
+    __routeRank(e.p1_pick) <= __routeRank(e.live_pick)).length;
+  return { shadow_events: ev.length, differ: differ.length, p1_cheaper_or_equal: cheaperOrEqual, transitions: byDir };
+}
+// <<P1-ROUTER-END>>
 // <<ROUTING-INLINE-END>>
 
 // `route`, when given, is a host-owned object the caller keeps with its pipeline context: agentT writes
