@@ -271,6 +271,26 @@ def _note_session_id(msg: object) -> None:
         _LAST_SDK_SESSION["session_id"] = sid.strip()
 
 
+BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+
+
+def _foreground_wait_env() -> dict[str, str]:
+    """Turn Claude Code background tasks off unless the operator chose a value.
+
+    Role agents wait out hour-long serving legs in foreground Bash calls. With
+    background tasks on, Claude Code 2.1.310+ refuses a call that starts with
+    ``sleep N`` (N >= 25) and steers the agent to Monitor/``run_in_background``,
+    whose notification arrives after a workflow agent's turn has ended, and a
+    turn ending is that agent's return.
+
+    Returns:
+        ``{BACKGROUND_TASKS_ENV: "1"}``, or ``{}`` when it is already set.
+    """
+    if BACKGROUND_TASKS_ENV in os.environ:
+        return {}
+    return {BACKGROUND_TASKS_ENV: "1"}
+
+
 def _sdk_child_env() -> dict[str, str]:
     """Build the environment overlay for the Claude Code child process.
 
@@ -296,6 +316,7 @@ def _sdk_child_env() -> dict[str, str]:
     run_mark = os.environ.get(RUN_MARK_ENV, "")
     if run_mark:
         env[RUN_MARK_ENV] = run_mark
+    env.update(_foreground_wait_env())
     return env
 
 
@@ -2538,8 +2559,8 @@ def _invoke_via_runtime(
     # the wrapper a margin so a graceful finalize is never killed prematurely.
     wrap_timeout = (timeout_s + 900) if timeout_s else None
     proc = subprocess.run(
-        cmd, cwd=str(E2E_DIR), env=dict(os.environ), capture_output=True,
-        text=True, timeout=wrap_timeout,
+        cmd, cwd=str(E2E_DIR), env=dict(os.environ, **_foreground_wait_env()),
+        capture_output=True, text=True, timeout=wrap_timeout,
     )
     if proc.returncode != 0:
         raise RuntimeError(
