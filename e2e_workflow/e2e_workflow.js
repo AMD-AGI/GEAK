@@ -1948,6 +1948,30 @@ measurement duration. Consequences you must respect:
 `;
 }
 
+// The final reserve (AGENTX_FINAL_PHASE_MS) holds ONE search-window leg for Finalize and the canonical
+// legs of Validate; a canonical leg in Finalize as well runs past it. A search leg replays a different
+// slice of the corpus than Validate's legs, so a claim measured on one is no yardstick for theirs. A
+// claim equal to the baseline is the baseline's own canonical number. Both return '' unless the caller
+// declared a trace replay, so a fixed-ISL/OSL run gets byte-identical prompts.
+function agentxFinalizeNote() {
+  if (!IS_AGENTX) return '';
+  return ` On this trace replay the final bench of step 2 is ONE leg on the ${AGENTX.geak_loop_duration_s}s ` +
+    `search window. Do NOT also bench the bundle on the ${AGENTX.duration_s}s canonical window: Validate ` +
+    'measures the stock and the final stack there right after this phase, and the final reserve holds time ' +
+    "for those legs only. Return the search leg's median as final_throughput_tok_s and say in note that it " +
+    'is a search-window number. Omit throughput_speedup: BASELINE_THROUGHPUT was measured on the canonical ' +
+    'window, so the ratio of the two is not a speedup.';
+}
+function agentxClaimNote(claimed, baseline) {
+  if (!IS_AGENTX || !(claimed > 0) || claimed === baseline) return '';
+  return ` On this trace replay CLAIMED_THROUGHPUT comes from ${AGENTX.geak_loop_duration_s}s search legs, ` +
+    `which replay a different, shorter slice of the corpus than your ${AGENTX.duration_s}s legs, so it is ` +
+    'not comparable with your numbers. In step 4 drop both claim conditions (validated_win\'s "within the ' +
+    'noise band of the claim" and flagged\'s "lower than the claim by more than the band") and arbitrate on ' +
+    'your same-session A/B, the baseline and parity. Still report claimed_throughput_tok_s, and say in ' +
+    'arbitration_note that it is a search-window number.';
+}
+
 function correctnessEnvBlock(role) {
   if (!CORRECTNESS_UNSET_ENV.length || !CORRECTNESS_PROBE_ROLES.has(role)) return '';
   const unset = CORRECTNESS_UNSET_ENV.map((v) => `-u ${v}`).join(' ');
@@ -6806,7 +6830,7 @@ if (want('final')) {
   phase('Finalize');
   await finalPhaseFence('finalize', 'Finalize');
   finalize = await safeAgent(
-    roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.', {
+    roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.' + agentxFinalizeNote(), {
       EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv,
       ACCEPTED_KERNELS: allAccepted, BASELINE_THROUGHPUT: BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
       ...TUNING_FINALIZE_INPUTS,
@@ -6868,7 +6892,8 @@ if (want('final')) {
   phase('Validate');
   await finalPhaseFence('validate', 'Validate');
   validation = await safeAgent(
-    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.', {
+    roleAgent('director', 'validate', 'Independently re-measure throughput + parity; arbitrate; then reconcile the report with the validated numbers.' +
+      agentxClaimNote(finalTput, BASELINE_TPUT), {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       BASELINE_OVERLAY: INIT_BASE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,

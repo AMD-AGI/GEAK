@@ -190,6 +190,48 @@ console.log('\n# a trace replay reserves what its own final phase costs');
     `the reserve resolves AgentX and its windows exactly as the declaration does (${JSON.stringify(disagree)})`);
 }
 
+console.log("\n# a trace replay's Finalize benches only the leg the reserve holds for it");
+// Told nothing, the integrator of a 9h GLM-5.2 run also benched the bundle on the canonical window
+// (+1h08m, past the reserve) so its claim could be held against Validate's canonical legs. The Director
+// is told instead that a search-window claim is not comparable with its own legs.
+{
+  const nStart = src.indexOf('function agentxFinalizeNote()');
+  const nEnd = src.indexOf('function correctnessEnvBlock(', nStart);
+  ok(nStart !== -1 && nEnd > nStart, 'the final-phase notes are located');
+  const dStart = src.indexOf('const WORKLOAD_SPEC =');
+  const dEnd = src.indexOf('\n', src.indexOf('const AGENTX = IS_AGENTX'));
+  const notes = (A) => {
+    const d = new Function('A', `${src.slice(dStart, dEnd)}\nreturn { IS_AGENTX, AGENTX };`)(A);
+    return new Function('IS_AGENTX', 'AGENTX',
+      `${src.slice(nStart, nEnd)}\nreturn { agentxFinalizeNote, agentxClaimNote };`)(d.IS_AGENTX, d.AGENTX);
+  };
+  const ax = notes({ workload_kind: 'agentx_trace_replay' });
+  const fin = ax.agentxFinalizeNote();
+  ok(/ONE leg on the 900s search window/.test(fin) && /Do NOT also bench the bundle on the 3600s canonical window/.test(fin),
+    'Finalize benches one 900s search leg and never the 3600s canonical window');
+  ok(/Omit throughput_speedup/.test(fin), 'and leaves out a speedup taken against the canonical baseline');
+  const claim = ax.agentxClaimNote(104.48, 113.325);
+  ok(/comes from 900s search legs/.test(claim) && /than your 3600s legs/.test(claim) && /drop both claim conditions/.test(claim),
+    'Validate is told a search-window claim is not comparable with its canonical legs');
+  const director = fs.readFileSync(path.join(ROOT, 'e2e_workflow', 'roles', 'director.md'), 'utf8');
+  ok(director.includes('within the noise band of the claim') && director.includes('lower than the claim by more than the band'),
+    'the two claim conditions it drops are the ones roles/director.md step 4 states');
+  ok(ax.agentxClaimNote(113.325, 113.325) === '' && ax.agentxClaimNote(0, 113.325) === ''
+    && ax.agentxClaimNote(undefined, 113.325) === '',
+  'a claim that is the canonical baseline itself, or no claim, keeps the usual checks');
+  const declaredWindows = notes({ workload_spec: { kind: 'agentx_trace_replay', duration_s: 1800, geak_loop_duration_s: 600 } });
+  ok(/ONE leg on the 600s search window/.test(declaredWindows.agentxFinalizeNote())
+    && /than your 1800s legs/.test(declaredWindows.agentxClaimNote(90, 100)), 'both follow the windows the run declares');
+  const fixed = notes({});
+  ok(fixed.agentxFinalizeNote() === '' && fixed.agentxClaimNote(150, 100) === '',
+    'a fixed-ISL/OSL run gets byte-identical Finalize and Validate prompts');
+  const finalBlock = src.slice(src.indexOf("if (want('final')) {"));
+  ok(finalBlock.includes("roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.' + agentxFinalizeNote(),"),
+    'the Finalize prompt carries its note');
+  ok(/roleAgent\('director', 'validate', '[^']*' \+\s*agentxClaimNote\(finalTput, BASELINE_TPUT\)/.test(finalBlock),
+    'and the Validate prompt carries the note on the claim it is handed');
+}
+
 console.log('\n# the reserve boundary is armed and gates the Finalize-gate');
 ok(/let TIME_FINAL_DEADLINE_HIT = false;/.test(src), 'TIME_FINAL_DEADLINE_HIT exists');
 ok(/TIME_FINAL_DEADLINE_HIT = true;/.test(src) && /}, TIME_BUDGET_EFFECTIVE_MS\);/.test(src),
