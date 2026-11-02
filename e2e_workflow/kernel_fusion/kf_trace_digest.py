@@ -254,10 +254,10 @@ def to_md(groups: dict[str, dict], live: dict | None = None) -> str:
     if live:
         files = sorted({f for v in live.values() for f in v})
         L += ["## Live model code (from the eager steps' Python stacks)",
-              "The server runs THESE classes and files. Graph-replayed steps (no launch frames) run the same module "
-              "classes, so map their kernels to these files -- a model may also ship other implementations of the "
-              "same layers (generic vs platform-specific modules) that this server never loads. A fusion seam must "
-              "be a callable in one of these files.", "",
+              ("The server runs THESE classes and files. Graph-replayed steps (no launch frames) run the same module "
+               "classes, so map their kernels to these files -- a model may also ship other implementations of the "
+               "same layers (generic vs platform-specific modules) that this server never loads. A fusion seam must "
+               "be a callable in one of these files."), "",
               "| nn.Module class | forward in |", "|---|---|"]
         L += [f"| `{c}` | " + ", ".join(f"`{f}`" for f in sorted(v, key=lambda f: -v[f])) + " |"
               for c, v in sorted(live.items())]
@@ -267,16 +267,16 @@ def to_md(groups: dict[str, dict], live: dict | None = None) -> str:
               f"{d['num_kernels']} kernels, {d['num_steps']} step windows", ""]
         for kind, s in d["step_kinds"].items():
             lp = s["layer_period"]
-            L += [f"### {kind}: {s['steps']} steps, busy {s['busy_us_per_step']} us/step "
-                  f"(span {s['span_us_per_step']} us, idle {100 * s['idle_frac']:.1f}%), "
-                  f"{s['kernels_per_step']} kernels/step",
-                  f"- kernels < {s['short_kernel_share']['threshold_us']} us: "
-                  f"{100 * s['short_kernel_share']['count_frac']:.1f}% of launches, "
-                  f"{100 * s['short_kernel_share']['time_frac']:.1f}% of device time; "
-                  f"graph-replayed: {s['graph_replayed']}"
-                  + (" (launch frames unavailable: map kernels to source by name)" if s["graph_replayed"] else ""),
-                  f"- repeating block: {lp['period']} kernels x {lp['repeats']} (match {lp['match']}); "
-                  f"sequence: `{s['seq_file']}`", "",
+            L += [(f"### {kind}: {s['steps']} steps, busy {s['busy_us_per_step']} us/step "
+                   f"(span {s['span_us_per_step']} us, idle {100 * s['idle_frac']:.1f}%), "
+                   f"{s['kernels_per_step']} kernels/step"),
+                  (f"- kernels < {s['short_kernel_share']['threshold_us']} us: "
+                   f"{100 * s['short_kernel_share']['count_frac']:.1f}% of launches, "
+                   f"{100 * s['short_kernel_share']['time_frac']:.1f}% of device time; "
+                   f"graph-replayed: {s['graph_replayed']}"
+                   + (" (launch frames unavailable: map kernels to source by name)" if s["graph_replayed"] else "")),
+                  (f"- repeating block: {lp['period']} kernels x {lp['repeats']} (match {lp['match']}); "
+                   f"sequence: `{s['seq_file']}`"), "",
                   "| kernel | calls/step | us/step | avg us | % step |", "|---|---|---|---|---|"]
             L += [f"| `{r['kernel']}` | {r['calls_per_step']} | {r['us_per_step']} | {r['avg_us']} | {r['pct_step']} |"
                   for r in s["top_kernels"]]
@@ -321,9 +321,9 @@ def main(argv: list[str] | None = None) -> int:
             s["seq_file"] = os.path.join(a.out, f"seq_{safe}_{kind}.tsv")
             with open(s["seq_file"], "w") as f:
                 f.write("idx\tkernel\tdur_us\tgap_us\tstream\tlaunch\tcpu_op\tframe\n")
-                for i, r in enumerate(s.pop("_seq")):
-                    f.write(f"{i}\t{r['kernel']}\t{r['dur_us']}\t{r['gap_us']}\t{r['stream']}\t"
-                            f"{r['launch']}\t{r['cpu_op']}\t{r['frame']}\n")
+                f.writelines(f"{i}\t{r['kernel']}\t{r['dur_us']}\t{r['gap_us']}\t{r['stream']}\t"
+                             f"{r['launch']}\t{r['cpu_op']}\t{r['frame']}\n"
+                             for i, r in enumerate(s.pop("_seq")))
         for c, v in d.pop("_live").items():
             for f, n in v.items():
                 live[c][f] += n

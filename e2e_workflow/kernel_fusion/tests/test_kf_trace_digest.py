@@ -9,7 +9,7 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-import kf_trace_digest as D  # noqa: E402
+import kf_trace_digest as D
 
 MUSE_POINTS = Path("/home/yixiongh/geak/muse/kf_reuse/eval/fusion_capture/sampling/points")
 

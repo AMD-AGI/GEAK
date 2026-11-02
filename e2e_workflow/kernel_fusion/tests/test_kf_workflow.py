@@ -17,7 +17,7 @@ KF = "/tmp/kf_mock/kf"
 
 def run(scenario):
     p = subprocess.run([NODE, str(HERE / "kf_workflow_mockrun.mjs"), scenario, str(E2E_DIR)],
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, timeout=60, check=False)
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout.strip().splitlines()[-1])
 

@@ -3,12 +3,11 @@
 It used to return 2 s after the first new trace file appeared; with one ~10 MB .gz per rank the
 caller then tore the server down mid-write and every trace was truncated.
 """
-import gzip
 import os
 import subprocess
+import tempfile
 import textwrap
 import unittest
-import tempfile
 
 ADAPTER = os.path.join(os.path.dirname(__file__), "..", "adapters", "sglang.sh")
 
@@ -29,7 +28,7 @@ class ProfileFlushTest(unittest.TestCase):
             adapter_profile_window; echo "rc=$?"
             for f in {d}/*.gz; do gzip -t "$f" && echo "whole $(basename $f)"; done
         """)
-        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60).stdout
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60, check=False).stdout
 
     def test_waits_for_slow_multi_rank_writes(self):
         # Two ranks, each written in 8 chunks 0.7 s apart; rank 1 starts 3 s late, so the last write
