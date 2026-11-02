@@ -496,7 +496,11 @@ if (!topk || !(want('author') || want('apply'))) {
 // unittest (GEAK kernel-extract skill / kernel_extractor) -> fused kernel (one author agent).
 // ---------------------------------------------------------------------------
 phase('Author');
-const byId = new Map((topk.candidates || []).map((c) => [String(c.id), c]));
+// The analyst's structured result may give a seam as the bare "pkg.mod:fn" (topk.json on disk keeps the object):
+// normalise it once here, or every pattern the triage picks is dropped for having no seam.
+topk.candidates = (topk.candidates || []).map((c) =>
+  (c && typeof c.seam === 'string' ? { ...c, seam: { target_callable: c.seam } } : c));
+const byId = new Map(topk.candidates.map((c) => [String(c.id), c]));
 const seamOf = (c) => (c && c.seam && c.seam.target_callable) || '';
 const triage = await safeAgent(`You decide which fusion patterns of a Top-K analysis go on to the next step: writing a
 fused kernel and a region unit test for each. Judge each candidate yourself from the analysis (its numbers, the
@@ -522,6 +526,13 @@ for (const x of (triage && triage.skipped) || []) {
   if (x && byId.has(String(x.id))) result.rejected.push({ id: String(x.id), stage: 'triage', reason: String(x.reason || '').slice(0, 600) });
 }
 log(`[kf] triage: authoring ${jobs.length} pattern(s): ${jobs.map((c) => c.id).join(', ')}`);
+// Picks that all vanish here are a broken hand-off, not a measured "no gain": say so.
+const picked = ((triage && triage.selected) || []).length;
+if (picked && !jobs.length) {
+  result.status = 'error';
+  result.reason = `triage selected ${picked} pattern(s) but none has a usable seam.target_callable`;
+  return result;
+}
 
 const shortOf = (c) => String(c.id).replace(/[^A-Za-z0-9_]+/g, '_');
 

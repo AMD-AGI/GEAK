@@ -51,11 +51,15 @@ const answers = {
     : { profile_topN_json: `${KF}/profile/round_0/profile_topN.json`, top_kernels: [{ name: 'k' }] }),
   'kf:profiler (retry)': () => (scenario === 'no_trace' ? null
     : { profile_topN_json: `${KF}/profile/round_0/profile_topN.json`, top_kernels: [{ name: 'k' }] }),
+  // string_seam: the analyst's structured result gives seam as the bare "pkg.mod:fn" (topk.json on disk keeps the dict)
   'kf:analyst': () => ({ topk_json: `${KF}/analysis/topk.json`, report_path: `${KF}/analysis/report.md`,
-    candidates: CANDS, recommended: ['c1', 'c2'], report_md: '# report', model_notes_md: '# notes' }),
+    candidates: scenario.includes('string_seam')
+      ? CANDS.map((c) => (c.seam && c.seam.target_callable ? { ...c, seam: c.seam.target_callable } : c)) : CANDS,
+    recommended: ['c1', 'c2'], report_md: '# report', model_notes_md: '# notes' }),
   // which patterns get a kernel + UT: the agent's call (c3 has no seam, the script drops it)
-  'kf:triage': () => (scenario === 'triage_none' ? null : { selected: [{ id: 'c1' }, { id: 'c1s' }, { id: 'c2' }, { id: 'c3' }],
-    skipped: [] }),
+  'kf:triage': () => (scenario === 'triage_none' ? null
+    : scenario === 'no_seam' ? { selected: [{ id: 'c3' }], skipped: [] }
+    : { selected: [{ id: 'c1' }, { id: 'c1s' }, { id: 'c2' }, { id: 'c3' }], skipped: [] }),
   'kf:select': (prompt) => {
     const ut = JSON.parse(prompt.split('## UT results\n')[1].split('\n')[0]);
     const ids = SELECT || ut.filter((u) => u.isolated_speedup > 1).map((u) => u.id);
