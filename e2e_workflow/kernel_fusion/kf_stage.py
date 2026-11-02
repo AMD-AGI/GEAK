@@ -325,7 +325,7 @@ def run_stage(h: dict, ps_args: dict, timeout_s: int, G: dict, flags=frozenset()
         kf_dir.mkdir(parents=True, exist_ok=True)
         try:
             wf = _invoke(G, args, budget)
-        except BaseException as e:  # noqa: BLE001 -- the stage must never take the main run down
+        except BaseException as e:  # the stage must never take the main run down
             if isinstance(e, TimeoutError) and str(e).startswith("signal "):
                 raise               # run_e2e's SIGTERM handler: flush and exit, do not start the main run
             if isinstance(e, (KeyboardInterrupt, SystemExit)):

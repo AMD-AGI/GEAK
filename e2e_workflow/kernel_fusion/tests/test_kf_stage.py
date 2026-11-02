@@ -9,7 +9,7 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-import kf_stage  # noqa: E402
+import kf_stage
 
 GEAK_ROOT = HERE.parents[2]
 RUN_E2E = GEAK_ROOT / "interface" / "run_e2e.py"
@@ -161,7 +161,7 @@ def _dry_run(tmp_path, extra_handoff, flags=(), env=None):
     e = {k: v for k, v in os.environ.items() if not k.startswith(("GEAK_KF_", "GEAK_KERNEL_FUSION"))}
     e.update(env or {})
     p = subprocess.run([sys.executable, str(RUN_E2E), str(hp), str(tmp_path / "r.json"), "--dry-run", *flags],
-                       capture_output=True, text=True, env=e, timeout=120)
+                       capture_output=True, text=True, env=e, timeout=120, check=False)
     assert p.returncode == 0, p.stderr
     return json.loads(p.stdout)
 

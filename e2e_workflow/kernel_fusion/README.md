@@ -46,6 +46,7 @@ GEAK_KERNEL_FUSION=0|1                                     # env
 | `steps` | `GEAK_KF_STEPS` | `trace,topk,author,apply` | subset to run; `topk` alone with `trace_dir` needs no GPU |
 | `author_k` | `GEAK_KF_AUTHOR_K` | 0 (no cap) | optional cap on the patterns the triage agent sends to authoring |
 | `baseline_mode` | `GEAK_KF_BASELINE_MODE` | `isolated_server` | lifecycle of the stage's baseline: one fresh server, one timed round, no discarded warmup round |
+| `implementable_levels` | `GEAK_KF_IMPLEMENTABLE_LEVELS` | `L1,L2` | fusion levels the analysis may recommend (it still ranks all levels) |
 | `validation_mode` / `validation_replicas` | `GEAK_KF_VALIDATION_MODE` / `_REPLICAS` | `isolated_server` / 1 | measurement mode / replicas of the combined A/B (one A/B) |
 | `task` | `GEAK_KF_TASK` | — | operator constraints appended to every agent prompt (e.g. directories it must not read) |
 | `budget_s` | `GEAK_KF_BUDGET_S` | min(12 h, ⅓ of the run) | stage wall clock; the main workflow gets the rest |
