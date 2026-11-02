@@ -64,7 +64,7 @@ const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pc
 const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_retries : 2, 10);
 
 // KernelFusion knobs.
-const PROMPT = String(A.kf_prompt || `${KF_HOME}/default_prompt.md`);
+const PROMPT = String(A.kf_prompt || `${KF_HOME}/fusion_strategy.md`);
 const PROMPTS = PROMPT.split(',').map((p) => p.trim()).filter(Boolean);   // several files drive one analysis
 const TRACE_DIR_IN = String(A.kf_trace_dir || '');          // existing traces: skip the capture
 const WORKLOAD_SUMMARY = String(A.kf_workload_summary || ''); // per-point weights, when the caller has them

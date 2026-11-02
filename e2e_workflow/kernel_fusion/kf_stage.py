@@ -27,7 +27,12 @@ DEFAULT_BUDGET_S = 12 * 3600
 SCHEMA = "geak.kernel_fusion/1"
 
 # handoff key / env var -> kf_workflow.js arg
+# The fusion strategy every analysis follows (fusion levels, selection principles, analysis steps, output
+# contract). Run-specific prompts (deployment, workload, extra constraints) are read alongside it.
+FUSION_STRATEGY = KF_HOME / "fusion_strategy.md"
+
 _KNOBS = {
+    "strategy": ("GEAK_KF_STRATEGY", None),
     "prompt": ("GEAK_KF_PROMPT", "kf_prompt"),
     "trace_dir": ("GEAK_KF_TRACE_DIR", "kf_trace_dir"),
     "workload_summary": ("GEAK_KF_WORKLOAD_SUMMARY", "kf_workload_summary"),
@@ -82,11 +87,28 @@ def kf_dir_for(cfg: dict, ps_args: dict) -> Path:
     return main.with_name("kf_" + main.name.removeprefix("e2e_"))
 
 
+def prompt_files(cfg: dict) -> list[str]:
+    """The fusion strategy first (``strategy``: another file, or off with false/""), then the run's own
+    prompts (``prompt``, comma-separated), each file once."""
+    strategy = cfg.get("strategy", True)
+    files = [] if strategy in (False, "", "0", "false", "off") else [
+        str(FUSION_STRATEGY if strategy in (True, None, "1", "true", "on") else strategy)]
+    files += [p for p in str(cfg.get("prompt") or "").split(",") if p.strip()]
+    out, seen = [], set()
+    for f in files:
+        r = str(Path(f.strip()).expanduser().resolve())
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
 def build_args(cfg: dict, ps_args: dict, budget_s: int) -> dict:
     a = {k: v for k, v in ps_args.items() if k not in _MAIN_ONLY}
     for key, (_env, arg) in _KNOBS.items():
         if arg and cfg.get(key) not in (None, ""):
             a[arg] = cfg[key]
+    a["kf_prompt"] = ",".join(prompt_files(cfg))
     for path_key in ("kf_prompt", "kf_trace_dir", "kf_workload_summary", "kf_baseline_dir", "kf_topk_json"):
         if a.get(path_key):
             # kf_prompt may name several files (comma-separated): all of them drive the analysis.

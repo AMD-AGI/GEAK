@@ -47,7 +47,7 @@ def test_several_prompt_files(tmp_path):
     a, b = tmp_path / "prompt.txt", tmp_path / "deploy.txt"
     a.write_text("x"); b.write_text("y")
     args = kf_stage.build_args({"prompt": f"{a}, {b}"}, ps_args(tmp_path), 60)
-    assert args["kf_prompt"] == f"{a},{b}" and kf_stage.validate(args) == []
+    assert args["kf_prompt"] == f"{kf_stage.FUSION_STRATEGY},{a},{b}" and kf_stage.validate(args) == []
     args["kf_prompt"] += ",/no/such.txt"
     assert kf_stage.validate(args) == ["kf_prompt does not exist: /no/such.txt"]
 
@@ -58,7 +58,7 @@ def test_build_args_drops_main_only_keys_and_maps_knobs(tmp_path):
     a = kf_stage.build_args({"prompt": str(prompt), "steps": "topk", "author_k": 2}, ps_args(tmp_path), 3600)
     for k in ("eval_dir", "phases", "state", "tracelens", "apply_to_original"):
         assert k not in a
-    assert a["tp"] == 8 and a["kf_prompt"] == str(prompt) and a["kf_steps"] == "topk" and a["kf_author_k"] == 2
+    assert a["tp"] == 8 and a["kf_prompt"] == f"{kf_stage.FUSION_STRATEGY},{prompt}" and a["kf_steps"] == "topk" and a["kf_author_k"] == 2
     assert a["time_budget_s"] == 3600
     assert a["kf_dir"] == str(tmp_path / "kf_M_20261030T0_ab12Z")
     assert kf_stage.validate(a) == []
@@ -242,3 +242,16 @@ def test_several_reuse_journals_merge_and_the_screen_is_reused(tmp_path):
     assert a["kf_reuse"]["kf:author c1"]["overlay_dir"] == "o1"
     assert a["kf_reuse"]["kf:integrate screen"]["members"][0]["correctness"] == "pass"
     assert len(a["kf_reuse"]["kf:integrate screen"]["members"][0]["reason"]) == 200
+
+
+def test_the_fusion_strategy_is_read_first_and_can_be_replaced_or_dropped(tmp_path):
+    deploy = tmp_path / "deploy.txt"
+    deploy.write_text("x")
+    assert kf_stage.FUSION_STRATEGY.is_file()
+    assert kf_stage.build_args({}, ps_args(tmp_path), 60)["kf_prompt"] == str(kf_stage.FUSION_STRATEGY)
+    a = kf_stage.build_args({"prompt": f"{deploy},{kf_stage.FUSION_STRATEGY}"}, ps_args(tmp_path), 60)
+    assert a["kf_prompt"] == f"{kf_stage.FUSION_STRATEGY},{deploy}"                    # each file once, strategy first
+    own = tmp_path / "my_strategy.md"
+    own.write_text("x")
+    assert kf_stage.build_args({"strategy": str(own), "prompt": str(deploy)}, ps_args(tmp_path), 60)["kf_prompt"] == f"{own},{deploy}"
+    assert kf_stage.build_args({"strategy": False, "prompt": str(deploy)}, ps_args(tmp_path), 60)["kf_prompt"] == str(deploy)
