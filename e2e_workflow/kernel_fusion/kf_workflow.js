@@ -64,7 +64,9 @@ const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pc
 const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_retries : 2, 10);
 
 // KernelFusion knobs.
-const PROMPT = String(A.kf_prompt || `${KF_HOME}/fusion_strategy.md`);
+const PROMPT = String(A.kf_prompt || `${WORKFLOW_DIR}/knowledge/kernel_fusion_skills/fusion-analysis/SKILL.md`);
+// The fusion levels the author/apply steps implement; the analysis may recommend only these (the skill ranks all).
+const IMPLEMENTABLE_LEVELS = String(A.kf_implementable_levels || 'L1,L2');
 const PROMPTS = PROMPT.split(',').map((p) => p.trim()).filter(Boolean);   // several files drive one analysis
 const TRACE_DIR_IN = String(A.kf_trace_dir || '');          // existing traces: skip the capture
 const WORKLOAD_SUMMARY = String(A.kf_workload_summary || ''); // per-point weights, when the caller has them
@@ -443,7 +445,8 @@ if (want('topk')) {
   : await safeAgent(`You are the GEAK KernelFusion analyst. You choose which kernel-fusion patterns to implement.
 
 ## Your method is the user's prompt
-Read every one of these files in full: ${PROMPTS.join(', ')}. Together they are the AUTHORITATIVE analysis
+Read every one of these files in full, and the reference files a SKILL.md among them links: ${PROMPTS.join(', ')}.
+Together they are the AUTHORITATIVE analysis
 method, ranking rules, report content, deployment and workload description for this task: follow them step
 by step. They are NOT authoritative on output files or formats: where a file names output paths, an out/ layout
 or a machine-readable candidate format (field names, a per-candidate "recommended" flag, a seam written as
@@ -496,7 +499,7 @@ cannot be reached through one Python seam can still be ranked, but must not be r
 ## Inputs
 ${cfg({ EVAL_DIR, TRACE_DIR, WORKLOAD_SUMMARY: workloadJson || '(none)', PROFILE_TOPN: profileTopN || '(none)',
     MODEL_PATH, BACKEND, SERVING_TP, SERVER_FLAGS: INIT_FLAGS, SERVER_ENV: INIT_ENV, LAUNCH_SCRIPT: LAUNCH_SCRIPT || '(none)',
-    WORKLOAD, OVERLAY: INIT_OVERLAY || '(none)' })}
+    WORKLOAD, OVERLAY: INIT_OVERLAY || '(none)', IMPLEMENTABLE_LEVELS })}
 
 ${KF_TASK ? `## Operator constraints\n${KF_TASK}\n\n` : ''}Return JSON: {"topk_json": "${OUT}/topk.json", "report_path": "${OUT}/REPORT.md", "report_md": "<full report>",
 "model_notes_md": "<model notes>", "digest_md": "${OUT}/digest/digest.md", "candidates": <topk.json candidates>,

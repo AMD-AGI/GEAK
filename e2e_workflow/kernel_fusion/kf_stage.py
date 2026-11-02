@@ -27,9 +27,9 @@ DEFAULT_BUDGET_S = 12 * 3600
 SCHEMA = "geak.kernel_fusion/1"
 
 # handoff key / env var -> kf_workflow.js arg
-# The fusion strategy every analysis follows (fusion levels, selection principles, analysis steps, output
-# contract). Run-specific prompts (deployment, workload, extra constraints) are read alongside it.
-FUSION_STRATEGY = KF_HOME / "fusion_strategy.md"
+# The fusion-analysis skill every analysis follows (fusion levels, requirements, procedure, estimation, report
+# contents). Run-specific prompts (deployment, workload, extra constraints) are read alongside it.
+FUSION_STRATEGY = KF_HOME.parent / "knowledge" / "kernel_fusion_skills" / "fusion-analysis" / "SKILL.md"
 
 _KNOBS = {
     "strategy": ("GEAK_KF_STRATEGY", None),
@@ -45,6 +45,7 @@ _KNOBS = {
     "validation_mode": ("GEAK_KF_VALIDATION_MODE", "kf_validation_mode"),
     "validation_replicas": ("GEAK_KF_VALIDATION_REPLICAS", "kf_validation_replicas"),
     "baseline_mode": ("GEAK_KF_BASELINE_MODE", "kf_baseline_mode"),
+    "implementable_levels": ("GEAK_KF_IMPLEMENTABLE_LEVELS", "kf_implementable_levels"),
     "task": ("GEAK_KF_TASK", "kf_task"),
     "budget_s": ("GEAK_KF_BUDGET_S", None),
     "kf_dir": ("GEAK_KF_DIR", "kf_dir"),

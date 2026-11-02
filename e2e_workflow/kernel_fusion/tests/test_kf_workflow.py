@@ -50,7 +50,7 @@ def test_all_winners_go_in_together_on_one_ab():
             m = re.search(r"Read (\S+/roles/(\w+)\.md)", c["prompt"])
             assert m and Path(m.group(1)).is_file(), c["label"]
     analyst = out["calls"][2]["prompt"]
-    assert "Read every one of these files in full: /prompts/p.txt, /prompts/deploy.txt" in analyst and "kf_trace_digest.py" in analyst and "fallback (id" in analyst
+    assert "links: /prompts/p.txt, /prompts/deploy.txt" in analyst and "kf_trace_digest.py" in analyst and "fallback (id" in analyst
     assert f"TRACE_DIR: {KF}/profile" in analyst
     assert "Live model code" in analyst and "this server never loads" in analyst      # seams on the live implementation
     # the fused kernels are written by plain author agents, not the GEAK kernel layer
@@ -314,8 +314,12 @@ def test_the_workflow_owns_the_output_format_and_the_schema_types_the_seam():
     cand = an["schema"]["properties"]["candidates"]["items"]
     assert cand["properties"]["seam"]["type"] == "object" and cand["properties"]["id"]["type"] == "string"
     assert cand["required"] == ["id"] and "seam" not in cand["required"]          # L3/L4 may have no seam
-    strategy = (E2E_DIR / "kernel_fusion" / "fusion_strategy.md").read_text()
-    assert "out/" not in strategy and "fusion_candidates" not in strategy and "recommended=true" not in strategy
+    skill = E2E_DIR / "knowledge" / "kernel_fusion_skills" / "fusion-analysis"
+    text = "".join(p.read_text() for p in [skill / "SKILL.md", *sorted((skill / "references").glob("*.md"))])
+    assert "out/" not in text and "fusion_candidates" not in text and "recommended=true" not in text
+    assert "IMPLEMENTABLE_LEVELS: L1,L2" in p                                     # capability injected, not prose
+    assert "knowledge/kernel_fusion_skills/fusion-analysis/SKILL.md" in (E2E_DIR / "kernel_fusion" / "kf_workflow.js").read_text()
+    assert "reference files a SKILL.md among them links" in p
 
 
 def test_a_combined_ab_starts_only_while_the_hard_limit_leaves_room_for_it():
