@@ -456,7 +456,9 @@ Write ${OUT}/topk.json: {"candidates": [...], "recommended": [ids in the order t
   id (short, [A-Za-z0-9_]), rank, level ("L1".."L4"), region (one line), kernels (device kernel names, in order),
   phases (step kinds it runs in), occurrences {per_layer, per_step, layers}, m_range,
   seam {target_callable: "pkg.module:Class.method or pkg.module:function" -- ONE Python callable whose body
-        covers the whole region, so the region can be rebound to a fused implementation; source_file; lines},
+        covers the whole region, so the region can be rebound to a fused implementation -- the one the LIVE server
+        runs: a model can have several implementations of the same layer (generic vs platform-specific modules),
+        so confirm the module from the trace's launch frames, not from a name match; source_file; lines},
   inputs_outputs (tensors that cross the region boundary, with shapes/dtypes), launches_before, launches_after,
   region_pct_device_time (weighted), est_gain_pct_upper, est_gain_pct_expected (weighted e2e %),
   difficulty (1-5), bitwise_exact (bool), exclusive_with [ids], language ("triton" unless you have a reason),
@@ -507,7 +509,8 @@ fused kernel and a region unit test for each. Judge each candidate yourself from
 report's reasoning, the trace digest, the source) -- there is no limit on how many you pick and no minimum gain;
 pick what you judge worth the effort and say why, and say why for each one you leave out.
 The one hard line: a candidate is authored by rebinding ONE Python callable that covers its whole region
-(seam.target_callable); one without such a seam cannot be authored. Mutually exclusive candidates (exclusive_with)
+(seam.target_callable) and is the one the live server actually runs (check the trace's launch frames: a model can
+have several implementations of the same layer); one without such a seam cannot be authored. Mutually exclusive candidates (exclusive_with)
 may both be picked: which of them goes into the server is decided after their unit tests.
 Read ${topk.topk_json || '(the candidates below)'}${topk.report_md ? ' and the report below' : ''}; read anything else you need.
 
