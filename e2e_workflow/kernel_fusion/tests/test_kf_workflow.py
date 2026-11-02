@@ -275,3 +275,29 @@ def test_apply_steps_outlast_the_default_agent_timeout():
     for label in ("label, schema: SCREEN_SCHEMA", "label, schema: INTEGRATE_SCHEMA"):
         assert re.search(re.escape(label) + r", timeoutMs: APPLY_TIMEOUT_MS", src), label
     assert re.search(r"APPLY_TIMEOUT_MS = .*6 \* 3600 \* 1000", src)
+
+
+def test_a_seam_given_as_a_string_still_reaches_extraction_and_authoring():
+    # c32 2026-11-02: the analyst returned seam as "pkg.mod:fn"; seamOf() only read seam.target_callable, so every
+    # pattern the triage picked was dropped and the stage ended no_gain without writing a single kernel.
+    out = run("string_seam")
+    assert labels(out)[3:7] == ["kf:triage", "kf:extract c1", "kf:extract c1s", "kf:extract c2"]
+    ext = {c["label"]: c["prompt"] for c in out["calls"] if c["label"].startswith("kf:extract")}
+    assert "pkg.moe:MoE.forward" in ext["kf:extract c1"] and "pkg.linear:apply" in ext["kf:extract c2"]
+    assert sorted(l for l in labels(out, authors=True) if l.startswith("kf:author ")) == \
+        ["kf:author c1", "kf:author c1s", "kf:author c2"]
+    assert out["result"]["status"] == "accepted"
+
+
+def test_agentx_a_seam_given_as_a_string_still_reaches_the_ut_prepare():
+    out = run("agentx_string_seam")
+    preps = sorted(l for l in labels(out) if l.startswith("kf:kernel-extract prepare"))
+    assert preps[:3] == ["kf:kernel-extract prepare c1", "kf:kernel-extract prepare c1s", "kf:kernel-extract prepare c1s (retry)"]
+    assert any(l.startswith("kf:author ") for l in labels(out, authors=True))
+
+
+def test_triage_picks_without_a_usable_seam_end_the_stage_as_an_error_not_no_gain():
+    out = run("no_seam")
+    r = out["result"]
+    assert r["status"] == "error" and "seam" in r["reason"]
+    assert not [l for l in labels(out, authors=True) if l.startswith(("kf:extract", "kf:author ", "kf:integrate"))]
