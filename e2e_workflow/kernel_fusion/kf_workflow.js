@@ -61,6 +61,9 @@ const MEASUREMENT_MODE = String(A.measurement_mode || 'warm_server');
 const PARITY_REPLICAS = parseInt(A.parity_replicas != null ? A.parity_replicas : 1, 10);
 const SEARCH_REPLICAS = parseInt(A.search_replicas != null ? A.search_replicas : 1, 10);
 const NOISE_BAND_DEFAULT = parseFloat(A.noise_band_pct != null ? A.noise_band_pct : 0.5);
+// The combined A/B hands the fused overlay on only when its gain clears the noise band: the larger of the measured
+// band (setup) and this floor. With one replica per side a gain inside it is indistinguishable from noise.
+const KF_MIN_GAIN_PCT = parseFloat(A.kf_min_gain_pct != null ? A.kf_min_gain_pct : 0.5);
 const AB_FINISH_RETRIES = parseInt(A.ab_finish_retries != null ? A.ab_finish_retries : 2, 10);
 
 // KernelFusion knobs.
@@ -867,8 +870,14 @@ const ab = { members: winners.map((r) => r.c.id), gate: integ ? integ.gate : 'in
   cand_med: integ ? integ.cand_med : null, parity: integ ? integ.output_parity : '',
   reason: integ ? integ.reason || '' : 'no integrator result' };
 result.validation = ab;
+const gainBand = Math.max(Number(noiseBand) || 0, KF_MIN_GAIN_PCT);
+const gainPct = integ && integ.ref_med > 0 && integ.cand_med > 0 ? 100 * (integ.cand_med / integ.ref_med - 1) : null;
 const won = integ && (integ.gate === 'accepted' || integ.gate === 'stack') && integ.ab_complete !== false &&
-  integ.accepted_overlay && integ.ref_med > 0 && integ.cand_med > integ.ref_med;
+  integ.accepted_overlay && gainPct != null && gainPct > gainBand;
+ab.noise_band_pct = gainBand;
+if (integ && !won && gainPct != null && gainPct > 0 && (integ.gate === 'accepted' || integ.gate === 'stack')) {
+  ab.reason = `gain ${gainPct.toFixed(2)}% is within the noise band ${gainBand}%; ${ab.reason}`;
+}
 for (const r of winners) {
   const rec = { id: r.c.id, level: r.c.level, isolated_speedup: r.iso, gate: ab.gate, e2e_delta_pct: ab.e2e_delta_pct };
   if (won) result.accepted.push({ ...rec, overlay: integ.accepted_overlay });

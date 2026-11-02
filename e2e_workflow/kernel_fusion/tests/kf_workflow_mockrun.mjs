@@ -75,6 +75,7 @@ const answers = {
     parity_reject: { gate: 'rejected', e2e_throughput_tok_s: 100, ref_med: 100, ab_complete: false, output_parity: 'fail', reason: 'parity' },
     stack_fail: { gate: 'rejected', e2e_throughput_tok_s: 0, ref_med: 100, ab_complete: false, reason: 'correctness: gsm8k 0.80 < 0.93' },
     stack: { ...won('stack', -0.1), accepted_overlay: `${KF}/overlay/cand_kf_stack` },
+    small_gain: { ...won('stack', 0.22), accepted_overlay: `${KF}/overlay/cand_kf_stack` },
     retry: { gate: 'incomplete', ab_complete: false, e2e_throughput_tok_s: 0, ref_med: 100 },
   }[scenario] || { ...won('accepted', 2.5), accepted_overlay: `${KF}/overlay/cand_kf_stack` }),
   'kf:integrate kf_stack (finish 1)': () => ({ ...won('accepted', 2), accepted_overlay: `${KF}/overlay/cand_kf_stack` }),
