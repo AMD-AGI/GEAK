@@ -7,8 +7,8 @@ baseline is measured on the fused stack). Switched off, nothing changes.
 
 ```
 trace ──► topk ──► author ──► apply
-(GEAK     (user    (UT: GEAK  (GEAK e2e_integrator
-profiler)  prompt)  skill;     A/B, compounding
+(GEAK     (fusion  (UT: GEAK  (GEAK e2e_integrator
+profiler)  strategy skill;     A/B, compounding
                     kernel:    overlay)
                     agent)
 ```
@@ -17,7 +17,7 @@ profiler)  prompt)  skill;     A/B, compounding
 |---|---|---|
 | Setup | eval dir + baseline throughput | `roles/director.md` PHASE=setup, `bench_e2e.sh` |
 | `trace` | AgentX: the kernel-extract skill's workload measurement + sampling capture (points planned from the baseline log, one bounded probe each with Python stacks, `kernel_workload.json` weights); other workloads: one warm serving trace. Skipped when `trace_dir` is given | `knowledge/kernel_extraction_skills/kernel-extract` (stages 1-2), else `roles/profiler.md` |
-| `topk` | `kf_trace_digest.py` (deterministic), then the analyst agent applies **your prompt** → `analysis/topk.json` + the report the prompt asks for | `parse_profile.py` |
+| `topk` | `kf_trace_digest.py` (deterministic), then the analyst agent follows **`fusion_strategy.md`** plus the run's prompt(s) → `analysis/topk.json` + the report the strategy asks for | `parse_profile.py` |
 | `author` | per recommended candidate **and its fallback** (the analyst's `fallback`, else the lowest-difficulty exclusive alternative of a difficulty ≥ 3 candidate): region UT, then a fused kernel | AgentX: kernel-extract skill `PHASE=prepare` (one joint-boundary task per region); else `roles/kernel_extractor.md`. The fused kernel itself: one agent per candidate, given the region and the UT, no GEAK kernel layer |
 | `apply` | once, after every kernel is written: the UT-passing fused kernels with an isolated win (per slot the primary, else its fallback) each go on the live server alone for an e2e correctness screen (no throughput legs); the passing ones go in together as ONE combined overlay on one A/B vs the reference (validation-length legs); only a measured e2e win is handed to the main workflow | `roles/e2e_integrator.md` PHASE=integrate |
 
@@ -30,12 +30,13 @@ run_e2e.py handoff.json result.json                        # on (default)
 run_e2e.py handoff.json result.json --no-kernel-fusion     # off for this run
 GEAK_KERNEL_FUSION=0|1                                     # env
 "kernel_fusion": false                                     # handoff, or an object that configures it:
-"kernel_fusion": {"prompt": "/path/prompt.txt,/path/deploy.txt", "trace_dir": "...", ...}
+"kernel_fusion": {"prompt": "/path/deploy.txt", "trace_dir": "...", ...}
 ```
 
 | key (handoff) | env | default | meaning |
 |---|---|---|---|
-| `prompt` | `GEAK_KF_PROMPT` | `default_prompt.md` | the TopK analysis prompt(s), comma-separated, all read (e.g. `agentx/prompt.txt,agentx/muse_agentx_con16.txt`) |
+| `strategy` | `GEAK_KF_STRATEGY` | `fusion_strategy.md` | the fusion strategy the analysis follows (fusion levels L1–L4, selection principles, analysis steps, boundary ledger, output contract); another file replaces it, `false` drops it |
+| `prompt` | `GEAK_KF_PROMPT` | — | the run's own prompt(s), comma-separated, read after the strategy (e.g. the deployment / workload description `muse_agentx_con16.txt`) |
 | `trace_dir` | `GEAK_KF_TRACE_DIR` | — | existing traces (any depth; one dir per sampling point); skips the capture |
 | `workload_summary` | `GEAK_KF_WORKLOAD_SUMMARY` | — | per-point weights for the analysis |
 | `topk_json` | `GEAK_KF_TOPK_JSON` | — | a finished `topk.json` (REPORT.md / MODEL_NOTES.md beside it are carried over); the analysis is not re-run |
